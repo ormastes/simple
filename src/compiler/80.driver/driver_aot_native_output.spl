@@ -1437,6 +1437,34 @@ pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: Pars
         parsed.aop_advices.len() == 0 and parsed.di_bindings.len() == 0 and
         parsed.arch_rules.len() == 0 and parsed.mock_decls.len() == 0)
 
+# A source closure can contain comment-only and plain struct-only modules.
+# Their type declarations are available during checking, but they emit no
+# native object. Keep this proof narrower than MIR emptiness: a lost body or
+# initialized field must still fail code generation rather than disappear.
+fn driver_native_module_is_declaration_only_v1(mir: MirModule, parsed_module: ParserModule?) -> bool:
+    if mir.functions.keys().len() > 0 or mir.statics.keys().len() > 0 or mir.constants.keys().len() > 0:
+        return false
+    if parsed_module == nil:
+        return false
+    val parsed = parsed_module
+    if parsed.functions.keys().len() > 0 or parsed.function_headers.keys().len() > 0 or
+            parsed.classes.len() > 0 or parsed.actors.len() > 0 or
+            parsed.enums.len() > 0 or parsed.bitfields.len() > 0 or
+            parsed.traits.len() > 0 or parsed.impls.len() > 0 or
+            parsed.type_aliases.len() > 0 or parsed.constants.len() > 0 or
+            parsed.static_asserts.len() > 0 or parsed.aop_advices.len() > 0 or
+            parsed.di_bindings.len() > 0 or parsed.arch_rules.len() > 0 or
+            parsed.mock_decls.len() > 0 or parsed.domain_blocks.len() > 0:
+        return false
+    for struct_name in parsed.structs.keys():
+        val parsed_struct = parsed.structs[struct_name]
+        if parsed_struct.attributes.len() > 0:
+            return false
+        for field in parsed_struct.fields:
+            if field.has_default:
+                return false
+    true
+
 fn driver_native_build_filter_scoped_outputs(cached_outputs: [text], cache_scope_root: text) -> ([text], bool):
     var scoped_outputs: [text] = []
     var all_in_scope = true
@@ -1961,7 +1989,9 @@ impl CompilerDriver:
             progress_cache_scanned = progress_cache_scanned + 1
             # ParserImport/export facades contribute symbols through their imported
             # implementation modules and have no object code of their own.
-            if ctx.modules.has(name) and driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name]):
+            if ctx.modules.has(name) and
+                    (driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name]) or
+                    driver_native_module_is_declaration_only_v1(ctx.mir_modules[name], ctx.modules[name])):
                 val objectless_reason = driver_cold_hir_record_objectless_v1(
                     ctx, name)
                 if objectless_reason != "":
