@@ -670,6 +670,177 @@ impl MirLowering:
             return nil
         Some(noted)
 
+    fn generic_field_param_name(owner: text, field_idx: i64) -> text:
+        """Name of the type parameter field `field_idx` of `owner` is declared
+        as (`a: A`), "" for every other field."""
+        if not self.struct_field_type_param.has(owner):
+            return ""
+        val markers = self.struct_field_type_param[owner]
+        if field_idx < 0 or field_idx >= markers.len():
+            return ""
+        val name: text = markers[field_idx]
+        name
+
+    fn generic_field_is_over_param(owner: text, field_idx: i64) -> bool:
+        """True for a field whose declared type holds a type parameter inside
+        a container (`items: [T]`, `first: T?`)."""
+        if not self.struct_field_over_type_param.has(owner):
+            return false
+        val flags = self.struct_field_over_type_param[owner]
+        if field_idx < 0 or field_idx >= flags.len():
+            return false
+        val flag: bool = flags[field_idx]
+        flag
+
+    fn instance_field_stamp(expr_value: HirExpr) -> HirType?:
+        """The type of a generic-struct field read at its INSTANCE, when the
+        expression carries one that is fully instantiated (no type parameter,
+        nothing unknown). 40.mono writes it; a stamp that still mentions a
+        parameter is the declaration and answers nothing."""
+        if not expr_value.has_type_:
+            return nil
+        val stamped = expr_value.type_
+        if stamped == nil:
+            return nil
+        val st: HirType = stamped
+        match st.kind:
+            case HirTypeKind.Error: return nil
+            case HirTypeKind.Any: return nil
+            case HirTypeKind.Infer(_, _): return nil
+            case _: ()
+        if self.hir_type_mentions_type_param(st, self.symbols):
+            return nil
+        stamped
+
+    me instance_field_mir_type(field_hir: HirType) -> (MirType, text):
+        """MIR type of a generic-struct field at its instance type, and the
+        struct name the value holds ("" when it is not a struct)."""
+        var mt = self.lower_type(field_hir)
+        var nested = ""
+        match field_hir.kind:
+            case HirTypeKind.Str:
+                mt = MirType(kind: MirTypeKind.Opaque("str"))
+            case HirTypeKind.Array(elem, _):
+                mt = MirType(kind: MirTypeKind.Array(self.lower_type(elem), 0))
+            case HirTypeKind.Named(arg_sym, _):
+                val arg_symbol = self.symbols.get_symbol_raw(arg_sym.id)
+                if arg_symbol != nil:
+                    nested = arg_symbol.name
+            case _:
+                ()
+        (mt, nested)
+
+    me mark_instance_field_local(result: LocalId, field_hir: HirType):
+        """Runtime-shape marks for a field local typed by its instance: the
+        same ones a declared `[E]` / `E?` / Dict field gets from its
+        declaration."""
+        match field_hir.kind:
+            case HirTypeKind.Array(elem, _):
+                self.mark_instance_array_local(result, elem)
+            case HirTypeKind.Slice(selem):
+                self.mark_instance_array_local(result, selem)
+            case HirTypeKind.Optional(_):
+                self.option_value_locals[result.id] = true
+                self.mark_runtime_value_local(result.id)
+            case HirTypeKind.Dict(_, _):
+                self.runtime_dict_locals[result.id] = true
+                self.mark_runtime_value_local(result.id)
+            case _:
+                ()
+
+    me mark_instance_array_local(result: LocalId, elem: HirType):
+        # Element identity: a struct/class name, the array sentinel when the
+        # element is itself an array, nothing for a scalar/text element (its
+        # MIR element type already says what it is).
+        var element_name = ""
+        match elem.kind:
+            case HirTypeKind.Named(elem_sym, _):
+                val elem_symbol = self.symbols.get_symbol_raw(elem_sym.id)
+                if elem_symbol != nil:
+                    element_name = elem_symbol.name
+                    if elem_symbol.kind == SymbolKind.Class:
+                        element_name = mir_class_identity(elem_symbol)
+            case HirTypeKind.Array(_, _):
+                element_name = "__runtime_array__"
+            case HirTypeKind.Slice(_):
+                element_name = "__runtime_array__"
+            case _:
+                ()
+        self.runtime_array_locals[result.id] = true
+        self.mark_runtime_value_local(result.id)
+        if element_name != "":
+            self.array_element_struct_syms[result.id] = element_name
+
+    me generic_instance_field_type(owner: text, base_local: LocalId, field_idx: i64) -> (bool, MirType, text):
+        """MIR type (and nested struct name, "" if none) of field `field_idx`
+        of a GENERIC struct `owner` read off `base_local`, when that field is
+        declared as a bare type parameter (BUG-IT-6). Resolved from the
+        construct site's recorded argument types first, else from the base
+        local's own HIR type arguments. `(false, i64, "")` when the field is
+        not a type-param field or nothing records the instance."""
+        if not self.struct_field_type_param.has(owner):
+            return (false, MirType.i64(), "")
+        val markers = self.struct_field_type_param[owner]
+        if field_idx < 0 or field_idx >= markers.len():
+            return (false, MirType.i64(), "")
+        val tp_name: text = markers[field_idx]
+        if tp_name == "":
+            return (false, MirType.i64(), "")
+        if self.generic_instance_field_types.has(base_local.id):
+            val inst_types = self.generic_instance_field_types[base_local.id]
+            if field_idx < inst_types.len():
+                var nested = ""
+                if self.generic_instance_field_struct_names.has(base_local.id):
+                    val inst_names = self.generic_instance_field_struct_names[base_local.id]
+                    if field_idx < inst_names.len():
+                        nested = inst_names[field_idx]
+                return (true, inst_types[field_idx], nested)
+        val arg_hir = self.generic_instance_field_hir_arg(owner, base_local, field_idx)
+        if arg_hir != nil:
+            val arg_t: HirType = arg_hir
+            var mt = self.lower_type(arg_t)
+            var nested = ""
+            match arg_t.kind:
+                case HirTypeKind.Str:
+                    mt = MirType(kind: MirTypeKind.Opaque("str"))
+                case HirTypeKind.Named(arg_sym, _):
+                    val arg_symbol = self.symbols.get_symbol_raw(arg_sym.id)
+                    if arg_symbol != nil:
+                        nested = arg_symbol.name
+                case _:
+                    ()
+            return (true, mt, nested)
+        (false, MirType.i64(), "")
+
+    me generic_instance_field_hir_arg(owner: text, base_local: LocalId, field_idx: i64) -> HirType?:
+        """The HIR type argument that instantiates type-param field
+        `field_idx` of `owner`, taken from the base local's HIR type
+        (`Pair<text, i64>`); nil when the base carries no type arguments."""
+        if not self.struct_field_type_param.has(owner) or not self.struct_type_param_names.has(owner):
+            return nil
+        val markers = self.struct_field_type_param[owner]
+        if field_idx < 0 or field_idx >= markers.len():
+            return nil
+        val tp_name: text = markers[field_idx]
+        if tp_name == "":
+            return nil
+        val base_hir = self.find_local_hir_type(base_local.id)
+        if base_hir == nil:
+            return nil
+        val base_t: HirType = base_hir
+        match base_t.kind:
+            case HirTypeKind.Named(_, args):
+                val tps = self.struct_type_param_names[owner]
+                var i = 0
+                while i < tps.len():
+                    if tps[i] == tp_name and i < args.len():
+                        val arg_t: HirType = args[i]
+                        return arg_t
+                    i = i + 1
+                nil
+            case _:
+                nil
+
     me declared_field_type_in_current_table(owner: text, field_idx: i64, declared: HirType) -> HirType:
         """Rebind a declared field type's `Named` symbol into `self.symbols`.
 
@@ -4307,9 +4478,54 @@ impl MirLowering:
                             val field_reprs = self.struct_field_repr_name[psn]
                             if field_idx >= 0 and field_idx < field_reprs.len() and field_reprs[field_idx] == "str":
                                 field_type = MirType(kind: MirTypeKind.Opaque("str"))
+                    # Generic struct, field typed by a type parameter -- bare
+                    # (`a: A`, BUG-IT-6) or inside a container (`items: [T]`).
+                    # The declaration spells the PARAMETER; the INSTANCE decides
+                    # the type. In order: the type 40.mono stamped on this read
+                    # (it types the base on every path it can -- parameter,
+                    # typed let, call result, nested field, constructor); the
+                    # construct site when this base was built in this function;
+                    # the HIR type arguments of the base local. A bare-parameter
+                    # field none of them can type keeps the lowering of the
+                    # template -- a value of a struct named after the parameter
+                    # -- so an operator on it is still refused ("operator
+                    # overload for struct T") instead of adding two pointers.
+                    var generic_field_nested_name = ""
+                    var generic_field_resolved = false
+                    var generic_field_hir: HirType? = nil
+                    var generic_field_unknown_param = ""
+                    val generic_owner: text = projected_struct_name ?? ""
+                    if generic_owner != "":
+                        val bare_param = self.generic_field_param_name(generic_owner, field_idx)
+                        if bare_param != "" or self.generic_field_is_over_param(generic_owner, field_idx):
+                            val stamped = self.instance_field_stamp(expr_value)
+                            if stamped != nil:
+                                val stamped_t: HirType = stamped
+                                val (st_type, st_nested) = self.instance_field_mir_type(stamped_t)
+                                generic_field_resolved = true
+                                generic_field_hir = stamped
+                                field_type = st_type
+                                generic_field_nested_name = st_nested
+                            elif bare_param != "":
+                                val (gf_resolved, gf_type, gf_nested) = self.generic_instance_field_type(generic_owner, base_local, field_idx)
+                                if gf_resolved:
+                                    generic_field_resolved = true
+                                    field_type = gf_type
+                                    generic_field_nested_name = gf_nested
+                                    generic_field_hir = self.generic_instance_field_hir_arg(generic_owner, base_local, field_idx)
+                                else:
+                                    generic_field_unknown_param = bare_param
                     var field_builder = self.builder
                     val field_result = field_builder.emit_get_field(mir_operand_copy(base_local), field_idx, field_type)
                     self.builder = field_builder
+                    if generic_field_resolved:
+                        if generic_field_nested_name != "":
+                            self.struct_value_syms[field_result.id] = generic_field_nested_name
+                        if generic_field_hir != nil:
+                            val gf_hir_t: HirType = generic_field_hir
+                            self.remember_local_hir_type(field_result.id, gf_hir_t, 0, 0)
+                            self.mark_instance_field_local(field_result, gf_hir_t)
+                        return field_result
                     # Keep chained aggregate and array-field identity on the
                     # projected local for later field/index/method lowering.
                     # (The field_elem_type_override computed above already
@@ -4319,6 +4535,8 @@ impl MirLowering:
                     # element type directly; no separate local_hir_types
                     # registration is needed here.)
                     self.remember_field_projection_provenance(base, base_local, field_idx, field_result)
+                    if generic_field_unknown_param != "":
+                        self.struct_value_syms[field_result.id] = generic_field_unknown_param
                     if val field_owner = projected_struct_name:
                         if self.struct_field_hir_type.contains(field_owner):
                             val field_types = self.struct_field_hir_type[field_owner]

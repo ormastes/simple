@@ -165,6 +165,29 @@ struct MirLowering:
     # struct_value_syms (see lower_expr's Field arm) so a further `.field`
     # on that result can resolve correctly.
     struct_field_type_name: Dict<text, [text]>
+    # Generic structs (BUG-IT-6, stage2 micro_g). Struct NAME -> ordered
+    # field markers: the TYPE PARAMETER name when a field is declared as a
+    # bare type parameter (`struct Pair<A, B>: a: A`), "" otherwise. Such a
+    # field has no declared representation of its own; reading it used to
+    # lower the field as a struct named `A` (and `p.a + p.b` died with
+    # "operator overload for struct A").
+    struct_field_type_param: Dict<text, [text]>
+    # Struct NAME -> its declared type-parameter names in order, so a base
+    # whose HIR type is `Pair<text, i64>` (a parameter or annotated let)
+    # maps a type-param field to the instantiation's argument.
+    struct_type_param_names: Dict<text, [text]>
+    # Construct-result LOCAL id -> per-field MIR type actually stored by
+    # that `Pair(a: "a", b: 7)` (and the nested struct name each field
+    # holds), so a type-param field read off that instance gets the
+    # INSTANCE's type, not the template's. Copied along with
+    # struct_value_syms when a struct value is copied into a new binding.
+    # Struct NAME -> per-field flag: the declared type holds a type parameter
+    # INSIDE a container (`items: [T]`, `first: T?`, `by: Dict<text, T>`).
+    # Such a field is typed by the instance too, but has a shape of its own,
+    # so it is not a `struct_field_type_param` entry.
+    struct_field_over_type_param: Dict<text, [bool]>
+    generic_instance_field_types: Dict<i64, [MirType]>
+    generic_instance_field_struct_names: Dict<i64, [text]>
     # Struct NAME -> ordered field representation markers. `"str"` marks a
     # declared `text` field whose projected MIR local must remain
     # Opaque("str"); leaving it as the generic i64 fallback breaks native
@@ -674,6 +697,40 @@ impl MirLowering:
             if authoritative_slot >= 0 and authoritative_slot < self.local_symbol_values.len():
                 return self.local_symbol_values[authoritative_slot]
         LocalId(id: -1)
+
+    fn hir_type_mentions_type_param(ty: HirType, symbols: SymbolTable) -> bool:
+        """True when a type parameter occurs anywhere in `ty`, under either
+        spelling (`TypeParam`, or `Named` of a symbol `symbols` declares as a
+        type parameter)."""
+        if ty == nil:
+            return false
+        match ty.kind:
+            case HirTypeKind.TypeParam(_, _): true
+            case HirTypeKind.Named(sym, args):
+                val info = symbols.get_symbol_raw(sym.id)
+                if info != nil and info.kind == SymbolKind.TypeParam:
+                    return true
+                self.any_hir_type_mentions_type_param(args, symbols)
+            case HirTypeKind.Array(elem, _): self.hir_type_mentions_type_param(elem, symbols)
+            case HirTypeKind.Slice(elem): self.hir_type_mentions_type_param(elem, symbols)
+            case HirTypeKind.Optional(inner): self.hir_type_mentions_type_param(inner, symbols)
+            case HirTypeKind.Dict(k, v):
+                self.hir_type_mentions_type_param(k, symbols) or self.hir_type_mentions_type_param(v, symbols)
+            case HirTypeKind.Result(ok, err):
+                self.hir_type_mentions_type_param(ok, symbols) or self.hir_type_mentions_type_param(err, symbols)
+            case HirTypeKind.Tuple(elems): self.any_hir_type_mentions_type_param(elems, symbols)
+            case HirTypeKind.Function(params, ret, _):
+                self.any_hir_type_mentions_type_param(params, symbols) or self.hir_type_mentions_type_param(ret, symbols)
+            case _: false
+
+    fn any_hir_type_mentions_type_param(types: [HirType], symbols: SymbolTable) -> bool:
+        if types == nil:
+            return false
+        for raw in types:
+            val t: HirType = raw
+            if self.hir_type_mentions_type_param(t, symbols):
+                return true
+        false
 
     me remember_local_hir_type(local_id: i64, type_: HirType, isolation_state: i64, resource_state: i64):
         val normalized_state = if isolation_state == 1:
