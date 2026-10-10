@@ -13,7 +13,7 @@ use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.statements.*
 use compiler.core.types.{named_type_register, named_type_apply, named_type_update,
     named_type_fields, named_type_field_type_tags, option_generic_type_register,
-    TYPE_NAMED_BASE, TYPE_OPTION_GENERIC_BASE, TYPE_I64, TYPE_TEXT}
+    function_type_register, TYPE_NAMED_BASE, TYPE_OPTION_GENERIC_BASE, TYPE_I64, TYPE_TEXT}
 use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
 
 fn expect_map_annotation(source: text):
@@ -43,7 +43,7 @@ fn expect_map_annotation(source: text):
         case _: expect("declaration lost").to_equal("val or var")
 
 describe "attributed collection parsed type transport":
-    it "rejects a corrupt v3 cache with an indirect Option cycle before conversion":
+    it "rejects a corrupt pool cache with an indirect Option cycle before conversion":
         step("Construct AdaptiveSet<Option<Self>> using a forged forward named argument")
         parser_init("")
         val owner = named_type_register("AdaptiveSet", [], [])
@@ -54,6 +54,58 @@ describe "attributed collection parsed type transport":
         val corrupted = flat_pools_dump_all()
         parser_init("val unrelated = 1")
         expect(flat_pools_restore_all(corrupted)).to_equal(false)
+
+    it "roundtrips a callable nested in a named type argument":
+        step("Restore the callable parameter and return tags before converting the named type")
+        parser_init("val selected: CallableBox<fn(i64) -> text> = make_box()")
+        val parsed = parse_statement()
+        expect(parser_has_errors()).to_equal(false)
+        val snapshot = flat_pools_dump_all()
+        parser_init("val unrelated = 1")
+        expect(flat_pools_restore_all(snapshot)).to_equal(true)
+        val statement = convert_flat_stmt(parsed)
+        match statement.kind:
+            case StmtKind.Val(_, type_, _):
+                expect(type_.?).to_equal(true)
+                match type_.kind:
+                    case TypeKind.Named(name, args):
+                        expect(name).to_equal("CallableBox")
+                        expect(args.len()).to_equal(1)
+                        match args[0].kind:
+                            case TypeKind.Function(parameters, returned):
+                                expect(parameters.len()).to_equal(1)
+                                match parameters[0].kind:
+                                    case TypeKind.Named(param_name, _): expect(param_name).to_equal("i64")
+                                    case _: expect("callable parameter lost").to_equal("i64")
+                                match returned.kind:
+                                    case TypeKind.Named(return_name, _): expect(return_name).to_equal("text")
+                                    case _: expect("callable return lost").to_equal("text")
+                            case _: expect("callable argument lost").to_equal("Function")
+                    case _: expect("named argument lost").to_equal("Named")
+            case _: expect("declaration lost").to_equal("val")
+
+    it "rejects forward named references hidden in callable parameters and returns":
+        step("Reject a self-reference hidden in a callable return tag")
+        parser_init("")
+        val return_owner = named_type_register("FunctionGraphReturn", [], [])
+        val return_future = TYPE_NAMED_BASE + return_owner + 1
+        val return_function = function_type_register([TYPE_I64], return_future)
+        val return_application = named_type_apply("FunctionGraphReturn", [return_function])
+        expect(return_application).to_equal(return_future)
+        val bad_return = flat_pools_dump_all()
+        parser_init("val unrelated = 1")
+        expect(flat_pools_restore_all(bad_return)).to_equal(false)
+
+        step("Reject a self-reference hidden in a callable parameter tag")
+        parser_init("")
+        val param_owner = named_type_register("FunctionGraphParameter", [], [])
+        val param_future = TYPE_NAMED_BASE + param_owner + 1
+        val param_function = function_type_register([param_future], TYPE_I64)
+        val param_application = named_type_apply("FunctionGraphParameter", [param_function])
+        expect(param_application).to_equal(param_future)
+        val bad_parameter = flat_pools_dump_all()
+        parser_init("val unrelated = 1")
+        expect(flat_pools_restore_all(bad_parameter)).to_equal(false)
 
     it "shares canonical layout updates without modifying unrelated types":
         step("Instantiate two key types and update their canonical owner once")
@@ -95,6 +147,7 @@ describe "attributed collection parsed type transport":
         val statement = convert_flat_stmt(parsed)
         match statement.kind:
             case StmtKind.Val(_, type_, _):
+                expect(type_.?).to_equal(true)
                 match type_.kind:
                     case TypeKind.Named(name, args):
                         expect(name).to_equal("AdaptiveMap")
