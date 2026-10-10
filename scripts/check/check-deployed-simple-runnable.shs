@@ -1,0 +1,224 @@
+#!/bin/sh
+# check-deployed-simple-runnable.shs — fail-closed staleness guard for the
+# DEPLOYED `bin/simple` entrypoint: it must be able to RUN a program that
+# imports the CURRENT stdlib.
+#
+# Why (BUG-IT-1, 2026-10-10): on Windows `bin/simple.exe` is a git-TRACKED
+# binary, so every fresh worktree gets whatever bytes were last committed.
+# The stdlib is read as SOURCE on every run, so the moment the stdlib uses a
+# construct the committed binary's parser predates, nothing runs. That is
+# exactly what happened on release/1.0: block-form `@when(os=...):` landed in
+# src/lib (41d45e22c87, 2026-10-02, reached from std.io_runtime) while the
+# tracked binary dated from 2026-09-29, and every `run`/`test`/`lint` died in
+# ~1s with `expected Fn, found Colon`. `--version` still answered cleanly,
+# which is why it looked healthy, and no guard executed the deployed binary on
+# a std-importing program, so it sat broken for 8 days.
+#
+# What it does: resolves the deployed entrypoint (`<root>/bin/simple`, else
+# `<root>/bin/simple.exe`; `--bin PATH` or SIMPLE_DEPLOYED_BIN overrides),
+# writes a three-line program that imports std.io_runtime and prints a token,
+# runs `<bin> run <probe>` from <root>, and requires BOTH exit 0 AND the token
+# on stdout. The exit status is read directly into a variable, never through a
+# pipe. A silent exit 0 without the token is a FAIL, not a pass.
+#
+# Verdict (always the last stdout line):
+#   PASS  — <n> invocation(s) executed, ...            exit 0   (n > 0)
+#   FAIL  — <n> invocation(s) executed, ...            exit 1
+#   ERROR — nothing was checked (<reason>)             exit 2
+# No entrypoint to execute is ERROR, never a pass.
+#
+# Usage: sh scripts/check/check-deployed-simple-runnable.shs
+#            [--root DIR] [--bin PATH] [--timeout SECS] [--selftest]
+# `--selftest` runs only the fixtures; they also run (fatal) before every scan.
+
+set -u
+
+ROOT=""
+BIN="${SIMPLE_DEPLOYED_BIN:-}"
+TIMEOUT_SECS=120
+SELFTEST_ONLY=0
+TOKEN="deployed-simple-probe-ok"
+
+# A value-taking flag given last has no $2: `shift 2` then fails without
+# shifting and the loop never ends (measured under Git Bash: 1 GB of
+# `shift count out of range` on stderr). Refuse it before shifting.
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --root|--bin|--timeout)
+      if [ "$#" -lt 2 ]; then
+        echo "ERROR — nothing was checked ($1 requires a value)"
+        exit 2
+      fi
+      case "$1" in
+        --root) ROOT=$2 ;;
+        --bin) BIN=$2 ;;
+        --timeout) TIMEOUT_SECS=$2 ;;
+      esac
+      shift 2 ;;
+    --selftest) SELFTEST_ONLY=1; shift ;;
+    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+    *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+  esac
+done
+
+case "$TIMEOUT_SECS" in
+  ''|*[!0-9]*|0) echo "ERROR — nothing was checked (--timeout must be a positive integer of seconds, got '$TIMEOUT_SECS')"; exit 2 ;;
+esac
+
+if [ -z "$ROOT" ]; then
+  script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd) || { echo "ERROR — nothing was checked (cannot resolve script dir)"; exit 2; }
+  ROOT=$(CDPATH= cd "$script_dir/../.." && pwd) || { echo "ERROR — nothing was checked (cannot resolve repo root)"; exit 2; }
+fi
+
+WORK=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+
+# probe_entry ROOT BIN -> sets EV_EXECUTED, EV_RC, EV_STATE (ok|fail|missing),
+# EV_BIN, EV_DETAIL. Never prints a verdict.
+probe_entry() {
+  _root=$1
+  _bin=$2
+  EV_EXECUTED=0; EV_RC=0; EV_STATE=missing; EV_BIN=""; EV_DETAIL=""
+  if [ -z "$_bin" ]; then
+    if [ -f "$_root/bin/simple" ]; then
+      _bin="$_root/bin/simple"
+    elif [ -f "$_root/bin/simple.exe" ]; then
+      _bin="$_root/bin/simple.exe"
+    else
+      EV_DETAIL="no bin/simple or bin/simple.exe under $_root"
+      return 0
+    fi
+  fi
+  EV_BIN=$_bin
+  if [ ! -f "$_bin" ]; then
+    EV_DETAIL="entrypoint does not exist: $_bin"
+    return 0
+  fi
+  _dir=$(mktemp -d "$WORK/probe.XXXXXX") || { EV_DETAIL="mktemp failed"; return 0; }
+  _probe="$_dir/deployed_probe.spl"
+  printf 'use std.io_runtime.{host_os}\n\nprint "%s os={host_os()}"\n' "$TOKEN" > "$_probe"
+  # Absolute so a relative --bin survives the cd; mixed (C:/...) on Windows so
+  # the native binary receives a path it can open.
+  case "$_bin" in /*|?:/*|?:\\*) : ;; *) _bin="$(pwd)/$_bin" ;; esac
+  if command -v cygpath >/dev/null 2>&1; then
+    _probe=$(cygpath -m "$_probe")
+  fi
+  EV_EXECUTED=1
+  if command -v timeout >/dev/null 2>&1; then
+    (cd "$_root" && timeout "$TIMEOUT_SECS" "$_bin" run "$_probe") > "$_dir/out" 2> "$_dir/err"
+    EV_RC=$?
+  else
+    (cd "$_root" && "$_bin" run "$_probe") > "$_dir/out" 2> "$_dir/err"
+    EV_RC=$?
+  fi
+  if [ "$EV_RC" -eq 0 ] && grep -q "$TOKEN" "$_dir/out"; then
+    EV_STATE=ok
+    return 0
+  fi
+  EV_STATE=fail
+  EV_DETAIL=$(cat "$_dir/err" "$_dir/out" 2>/dev/null | grep -i -m1 -E 'error|panic|unexpected|not found' | cut -c1-240)
+  if [ -z "$EV_DETAIL" ]; then
+    if [ "$EV_RC" -eq 0 ]; then
+      EV_DETAIL="exit 0 but the probe token was never printed"
+    else
+      EV_DETAIL="no diagnostic output"
+    fi
+  fi
+  return 0
+}
+
+selftest_fail() {
+  echo "selftest: $1" >&2
+  echo "ERROR — nothing was checked (selftest failed: $1)"
+  exit 2
+}
+
+make_fake() {
+  # make_fake DIR BODY -> DIR/bin/simple, an executable sh script.
+  mkdir -p "$1/bin" || return 1
+  printf '#!/bin/sh\n%s\n' "$2" > "$1/bin/simple" || return 1
+  chmod +x "$1/bin/simple"
+}
+
+run_selftest() {
+  st="$WORK/selftest"
+  mkdir -p "$st" || selftest_fail "cannot create fixture dir"
+
+  # 1. a working entrypoint must be OK.
+  make_fake "$st/good" "echo \"$TOKEN os=fixture\"; exit 0" || selftest_fail "fixture good"
+  probe_entry "$st/good" ""
+  [ "$EV_EXECUTED" -eq 1 ] && [ "$EV_STATE" = ok ] || selftest_fail "working entrypoint not accepted (state=$EV_STATE)"
+
+  # 2. incident replay: parse error on the stdlib, exit 1, must FAIL and carry the diagnostic.
+  make_fake "$st/stale" 'echo "error: compile failed: parse: in src/lib/x.spl: Unexpected token: expected Fn, found Colon" >&2; exit 1' || selftest_fail "fixture stale"
+  probe_entry "$st/stale" ""
+  [ "$EV_EXECUTED" -eq 1 ] && [ "$EV_STATE" = fail ] || selftest_fail "stale-parser entrypoint not rejected (state=$EV_STATE)"
+  case "$EV_DETAIL" in *"expected Fn, found Colon"*) : ;; *) selftest_fail "stale-parser diagnostic lost: $EV_DETAIL" ;; esac
+
+  # 3. a silent exit 0 that never ran the program must FAIL.
+  make_fake "$st/silent" 'exit 0' || selftest_fail "fixture silent"
+  probe_entry "$st/silent" ""
+  [ "$EV_STATE" = fail ] || selftest_fail "silent exit 0 accepted as a pass"
+
+  # 4. a crash (rc >= 128) must FAIL even if the token was printed first.
+  make_fake "$st/crash" "echo \"$TOKEN\"; exit 139" || selftest_fail "fixture crash"
+  probe_entry "$st/crash" ""
+  [ "$EV_STATE" = fail ] && [ "$EV_RC" -eq 139 ] || selftest_fail "crashing entrypoint accepted (state=$EV_STATE rc=$EV_RC)"
+
+  # 5. no entrypoint at all executes nothing, so the caller must ERROR.
+  mkdir -p "$st/empty/bin" || selftest_fail "fixture empty"
+  probe_entry "$st/empty" ""
+  [ "$EV_EXECUTED" -eq 0 ] && [ "$EV_STATE" = missing ] || selftest_fail "missing entrypoint did not report 0 executed"
+
+  # 6. an explicit --bin that does not exist executes nothing either.
+  probe_entry "$st/good" "$st/good/bin/no-such-binary"
+  [ "$EV_EXECUTED" -eq 0 ] && [ "$EV_STATE" = missing ] || selftest_fail "nonexistent --bin did not report 0 executed"
+
+  # 7. a value-less trailing flag must ERROR (exit 2) and terminate, not loop;
+  # 8. a non-numeric --timeout must ERROR as a usage error, not as a selftest failure.
+  for _flag in --bin --root --timeout; do
+    _out=$(timeout 20 sh "$0" "$_flag" 2>/dev/null); _rc=$?
+    [ "$_rc" -eq 2 ] || selftest_fail "value-less $_flag exited $_rc, expected 2"
+    case "$_out" in "ERROR — nothing was checked ($_flag requires a value)") : ;; *) selftest_fail "value-less $_flag verdict: $_out" ;; esac
+  done
+  _out=$(timeout 20 sh "$0" --timeout abc 2>/dev/null); _rc=$?
+  [ "$_rc" -eq 2 ] || selftest_fail "--timeout abc exited $_rc, expected 2"
+  case "$_out" in *"--timeout must be a positive integer"*) : ;; *) selftest_fail "--timeout abc verdict: $_out" ;; esac
+}
+
+run_selftest
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+  echo "PASS — 8 selftest fixture(s) executed, all classified correctly"
+  exit 0
+fi
+
+[ -d "$ROOT/src/lib" ] || { echo "ERROR — nothing was checked ($ROOT has no src/lib; not a Simple checkout)"; exit 2; }
+
+probe_entry "$ROOT" "$BIN"
+
+if [ "$EV_EXECUTED" -eq 0 ]; then
+  echo "check-deployed-simple-runnable: no deployed entrypoint to execute." >&2
+  echo "  Deploy one with the sanctioned bootstrap (scripts/bootstrap/bootstrap-from-scratch.sh;" >&2
+  echo "  on Windows scripts/bootstrap/bootstrap-windows.sh --msvc) and scripts/setup/setup.shs," >&2
+  echo "  or point SIMPLE_BINARY at a seed built from THIS tree:" >&2
+  echo "    (cd src/compiler_rust && cargo build --locked --profile bootstrap -p simple-driver)" >&2
+  echo "ERROR — nothing was checked ($EV_DETAIL)"
+  exit 2
+fi
+
+ident=$(sha256sum "$EV_BIN" 2>/dev/null | cut -c1-12)
+[ -n "$ident" ] || ident=unknown
+
+if [ "$EV_STATE" = ok ]; then
+  echo "PASS — 1 invocation(s) executed, $EV_BIN (sha256 $ident) runs a std-importing program against $ROOT/src/lib"
+  exit 0
+fi
+
+echo "check-deployed-simple-runnable: $EV_BIN cannot run the current stdlib (rc=$EV_RC)." >&2
+echo "  The stdlib is read as SOURCE on every run, so a deployed binary older than" >&2
+echo "  src/lib cannot run anything. Do NOT keep using it. Either redeploy" >&2
+echo "  (sanctioned bootstrap + scripts/setup/setup.shs), or export SIMPLE_BINARY to a" >&2
+echo "  seed built from THIS tree:" >&2
+echo "    (cd src/compiler_rust && cargo build --locked --profile bootstrap -p simple-driver)" >&2
+echo "FAIL — 1 invocation(s) executed, $EV_BIN (sha256 $ident) cannot run a std-importing program (rc=$EV_RC): $EV_DETAIL"
+exit 1
