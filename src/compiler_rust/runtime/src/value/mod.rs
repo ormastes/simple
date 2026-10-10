@@ -355,6 +355,7 @@ pub use sffi::{rt_clear_stdin, rt_has_mock_stdin, rt_read_stdin_char, rt_read_st
 // Re-export print SFFI functions
 pub use sffi::{
     rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_print_str, rt_print_value, rt_println_str,
+    rt_debug_exit_success, rt_perf_dump_sdn, rt_print_err,
     rt_println_value, rt_raw_i64_to_string, rt_raw_u64_to_string, rt_stderr_flush, rt_stderr_write, rt_stdout_flush,
     rt_stdout_write, rt_value_format_string, rt_value_to_string, rt_opt_bool_to_string, rt_opt_f64_to_string,
     rt_opt_i64_to_string,

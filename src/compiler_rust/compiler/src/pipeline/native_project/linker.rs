@@ -2650,6 +2650,30 @@ int main(int argc, char** argv) {
             Ok(())
         } else {
             let diagnostics = link_failure_output(&output_result.stdout, &output_result.stderr);
+            // Diagnosability (2026-10-11): the bootstrap links with
+            // SIMPLE_NO_STUB_FALLBACK=1, so the parity-stub retry above is off
+            // and an undefined symbol is (correctly) fatal. lld-link prints it
+            // AFTER hundreds of /FORCE:MULTIPLE duplicate warnings, so name the
+            // undefined set first and say why only this lane sees it. See
+            // doc/08_tracking/bug/stage2_link_undefined_diag_externs_2026-10-11.md.
+            #[cfg(target_os = "windows")]
+            let diagnostics = {
+                let undefined = super::stubs::lld_link_undefined_symbols(&diagnostics);
+                if is_msvc && strict_no_stub_fallback && !undefined.is_empty() {
+                    format!(
+                        "{} undefined symbol(s) with SIMPLE_NO_STUB_FALLBACK=1: {}\n\
+note: on Windows the module archive is /WHOLEARCHIVE'd and lld-link resolves before /OPT:REF, so an \
+extern declared by ANY module in the closure must be defined even if nothing calls it (ELF/Mach-O drop \
+the dead section first). Define the symbol in the runtime lane this link uses, or keep the declaring \
+module out of the closure.\n{}",
+                        undefined.len(),
+                        undefined.join(", "),
+                        diagnostics
+                    )
+                } else {
+                    diagnostics
+                }
+            };
             if selected_runtime
                 .as_ref()
                 .is_some_and(|(_, is_native_all)| !is_native_all)

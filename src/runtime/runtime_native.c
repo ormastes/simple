@@ -6500,6 +6500,37 @@ void rt_eprintln_value(int64_t value) {
     fflush(stderr);
 }
 
+/* ---- sffi/diag.spl externs (std.nogc_sync_mut.sffi.diag) -----------------
+ * These three are wrapped by src/lib/nogc_sync_mut/sffi/diag.spl. Until
+ * 2026-10-11 they had no native definition in either runtime lane, which is a
+ * hard link error on Windows-MSVC as soon as diag.spl is in a closure
+ * (libspl_objects.a is /WHOLEARCHIVE'd and lld-link resolves before /OPT:REF).
+ * See doc/08_tracking/bug/stage2_link_undefined_diag_externs_2026-10-11.md.
+ * Rust twins: src/compiler_rust/runtime/src/value/sffi/io_print.rs. */
+
+/* extern fn rt_print_err(msg: text): msg to stderr, no trailing newline. */
+void rt_print_err(int64_t msg) {
+    rt_eprint_value(msg);
+}
+
+/* extern fn rt_debug_exit_success(): "run finished OK, terminate now".
+ * Baremetal x86 writes 0 to the QEMU isa-debug-exit port; a hosted process
+ * has no such port, so the equivalent is a flushed, clean exit(0). */
+void rt_debug_exit_success(void) {
+    fflush(stdout);
+    fflush(stderr);
+    exit(0);
+}
+
+/* extern fn rt_perf_dump_sdn() -> text: SDN dump of rt_perf_region_* stats.
+ * No native lane has a perf-region recorder (only the seed interpreter does),
+ * so no region can have been recorded: return the empty table, byte-identical
+ * to the interpreter's output for an empty table. */
+int64_t rt_perf_dump_sdn(void) {
+    static const char empty[] = "perf_regions:\n  []\n";
+    return rt_string_new((const uint8_t*)empty, (uint64_t)(sizeof(empty) - 1));
+}
+
 SPL_WEAK bool rt_math_is_nan(double value) {
     return isnan(value);
 }
