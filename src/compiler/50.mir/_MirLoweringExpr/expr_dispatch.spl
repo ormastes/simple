@@ -2766,14 +2766,66 @@ impl MirLowering:
         -1
 
 
+    me lower_text_float_cast(operand: LocalId, target: HirType) -> LocalId:
+        # Text conversion parses a value; it never converts a pointer address.
+        # Keep malformed input distinct from the successfully parsed 0.0.
+        val tagged = self.ensure_tagged_str(operand)
+        var builder = self.builder
+        val parser = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_string_to_float"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false, params_known: true)))
+        ))
+        val parsed = builder.emit_call_value(parser, [mir_operand_copy(tagged)], MirType.i64())
+        val nil_tag = builder.emit_const_int(3)
+        val valid = builder.emit_binop(MirBinOp.Ne, mir_operand_copy(parsed), mir_operand_copy(nil_tag), MirType.bool())
+        val success = builder.new_block(Some("text_float_parsed"))
+        val failure = builder.new_block(Some("text_float_invalid"))
+        builder.terminate_if(mir_operand_copy(valid), success, failure)
+        builder.switch_to_block(failure)
+        val message_text = "cannot parse text as floating-point value"
+        val message = builder.emit_const_str(message_text)
+        val length = builder.emit_const_int(message_text.len())
+        val pointer_type = MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.I8), false))
+        val panic_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_panic"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [pointer_type, MirType.i64()], return_type: MirType.unit(), is_variadic: false, params_known: true)))
+        ))
+        builder.emit_call(panic_fn, [mir_operand_copy(message), mir_operand_copy(length)], MirType.unit())
+        builder.terminate_unreachable()
+        builder.switch_to_block(success)
+        val unbox = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_value_as_float"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.f64(), is_variadic: false, params_known: true)))
+        ))
+        val value = builder.emit_call_value(unbox, [mir_operand_copy(parsed)], MirType.f64())
+        self.builder = builder
+        var result = value
+        if target.kind == HirTypeKind.Float(32):
+            var cast_builder = self.builder
+            result = cast_builder.emit_cast(mir_operand_copy(value), MirType(kind: MirTypeKind.F32))
+            self.builder = cast_builder
+        self.remember_local_hir_type(result.id, target, 2, 0)
+        result
+
     me lower_cast_expr(operand: HirExpr, target: HirType, span: Span) -> LocalId:
         """Lower casts, extracting a runtime enum's resolved discriminant."""
         val operand_local = self.lower_expr(operand)
         val mir_target = self.lower_type(target)
         var target_is_integer = false
+        var target_is_float = false
         match target.kind:
             case HirTypeKind.Int(_, _): target_is_integer = true
+            case HirTypeKind.Float(_): target_is_float = true
             case _: ()
+        if target_is_float:
+            if self.local_is_str(operand_local) or self.local_hir_type_is_str(operand_local):
+                return self.lower_text_float_cast(operand_local, target)
+            if val source_type = self.builder.local_type(operand_local):
+                match source_type.kind:
+                    case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_) | MirTypeKind.Struct(_) | MirTypeKind.Array(_, _) | MirTypeKind.Slice(_) | MirTypeKind.Dict(_, _) | MirTypeKind.Tuple(_):
+                        self.error_fatal("floating-point conversion requires a numeric value or text; pointer/aggregate conversion is unsupported", Some(span))
+                        return operand_local
+                    case _: ()
         var operand_is_enum = false
         # Flat/bootstrap HIR frequently leaves expression .type_ unset. Enum
         # constructors register their result in local_hir_type_values, and let
