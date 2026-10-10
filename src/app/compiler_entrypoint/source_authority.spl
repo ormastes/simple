@@ -22,6 +22,8 @@ struct CompilerSourceAuthorityV1:
     snapshot: ScvCompileSnapshotV1
     source_inventory_digest: text
     inventory_generation: i64
+    # Only a bounded warm-drift retry sets this; graph admission consumes it.
+    recovered_cold: bool
 
 # Return precisely the generation admitted by the inherited snapshot, not
 # CURRENT. Receiving selection owners still check their request and every row.
@@ -46,7 +48,7 @@ fn compiler_source_authority_invalid_v1(reason: text) -> CompilerSourceAuthority
         valid: false, reason: reason, revision_id: "", commit_id: "", tree_id: "",
         inventory_digest: "", inventory_count: 0, snapshot_root: "",
         provenance_path: "", receipt_path: "", source_drifted: false)
-    CompilerSourceAuthorityV1(false, reason, snapshot, "", -1)
+    CompilerSourceAuthorityV1(false, reason, snapshot, "", -1, false)
 
 fn compiler_source_authority_clear_v1() -> bool:
     var cleared = true
@@ -98,7 +100,7 @@ fn compiler_source_authority_validate_v1(
     val reason = compiler_source_authority_binding_reason_v1(
         snapshot, expected_digest, expected_generation, actual, manifest)
     if reason != "ok": return compiler_source_authority_invalid_v1(reason)
-    CompilerSourceAuthorityV1(true, "ok", snapshot, expected_digest, expected_generation)
+    CompilerSourceAuthorityV1(true, "ok", snapshot, expected_digest, expected_generation, false)
 
 fn compiler_source_authority_acquire_v1(
     root: text, cache_root: text, source_roots: [text], cold_init: bool
@@ -118,7 +120,11 @@ fn compiler_source_authority_acquire_v1(
         # snapshot read detects the stale row before admitting any bytes. Rebuild
         # the complete inventory once; the cold call never retries itself.
         if not cold_init and snapshot.reason.starts_with("snapshot-index-drift:"):
-            return compiler_source_authority_acquire_v1(root, cache_root, source_roots, true)
+            val recovered = compiler_source_authority_acquire_v1(
+                root, cache_root, source_roots, true)
+            if not recovered.valid: return recovered
+            return CompilerSourceAuthorityV1(true, "ok", recovered.snapshot,
+                recovered.source_inventory_digest, recovered.inventory_generation, true)
         return compiler_source_authority_invalid_v1(snapshot.reason)
     compiler_source_authority_validate_v1(root, cache_root, snapshot,
         refresh.inventory_digest, refresh.inventory_generation, false)

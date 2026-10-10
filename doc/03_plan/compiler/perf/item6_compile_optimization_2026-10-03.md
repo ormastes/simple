@@ -162,3 +162,7 @@ The second V2 generation's readback fails at entry field 11 because a one-charac
 ### 2026-10-11 native readback repair verified
 
 A bounded byte decimal parser replaces native substring `to_i64()` in frame, list, and generation count decoding. The focused no-stub 50-module native CAS probe now passes second-generation publish/read/pin and stale-CAS rejection; malformed one-digit frame cases also pass. See the package-index native publication bug note for receipts. Item 6 remains in progress until warm SCV recovery, full entrypoint graph publication, and matched time/RSS qualification pass.
+
+### 2026-10-11 warm recovery graph handoff candidate
+
+The bounded source-inventory recovery now carries its successful cold-retry signal into entrypoint graph admission. A stale complete graph is preserved at CURRENT while admission sets the existing rebuild-pending marker, and the driver consumes that marker through SOSIX to select cold graph construction. The revert fixture checks that explicit cold and ordinary warm requests do not claim recovery. This source change is unverified at runtime; full graph-preserving recovery, an event-maintained warm route, production cutover, and matched time/RSS gates remain open. See [the recovery bug](../../../08_tracking/bug/scv_warm_inventory_misses_revert_to_head_2026-10-10.md).
