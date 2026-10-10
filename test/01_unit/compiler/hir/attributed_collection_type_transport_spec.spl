@@ -1,7 +1,7 @@
 # @tag: unit, compiler, hir, collection
 # @req REQ-PSC-002 REQ-PSC-005
 use std.spec.{describe, it, expect, step}
-use compiler.core.parser.{parser_init, parser_has_errors, parser_initialization_generation_v1}
+use compiler.core.parser.{parser_init, parser_has_errors, parser_initialization_generation_v1, parser_note_use_import}
 use compiler.core.parser_stmts.{parse_statement}
 use compiler.frontend.flat_ast_bridge.{convert_flat_stmt, flat_pools_dump_all, flat_pools_restore_all}
 use compiler.frontend.parser_types_expr.{TypeKind, StmtKind}
@@ -200,3 +200,34 @@ describe "attributed collection parsed type transport":
                             case _: expect("receiver type lost").to_equal("Named")
                     case _: expect("initializer changed").to_equal("MethodCall")
             case _: expect("declaration changed").to_equal("Let")
+
+
+describe "parser import state cache transport":
+    it "restores whether List denotes an imported type before parsing resumes":
+        step("Snapshot identical tokens with and without an imported List owner")
+        val source = "val selected: List<i64> = make_list()"
+        parser_init(source)
+        val builtin_snapshot = flat_pools_dump_all()
+        parser_note_use_import("collections", ["List"], false)
+        val imported_snapshot = flat_pools_dump_all()
+        expect(imported_snapshot == builtin_snapshot).to_equal(false)
+        step("Restore the imported owner across a parser reset and parse its annotation")
+        parser_init(source)
+        expect(flat_pools_restore_all(imported_snapshot)).to_equal(true)
+        val parsed = parse_statement()
+        expect(parser_has_errors()).to_equal(false)
+        val statement = convert_flat_stmt(parsed)
+        match statement.kind:
+            case StmtKind.Val(_, type_, _):
+                expect(type_.?).to_equal(true)
+                match type_.kind:
+                    case TypeKind.Named(name, args):
+                        expect(name).to_equal("List")
+                        expect(args.len()).to_equal(1)
+                    case _: expect("imported List owner lost").to_equal("List")
+            case _: expect("declaration lost").to_equal("val")
+        step("Restoring the unimported snapshot clears the prior file's import flag")
+        parser_init(source)
+        parser_note_use_import("collections", ["List"], false)
+        expect(flat_pools_restore_all(builtin_snapshot)).to_equal(true)
+        expect(flat_pools_dump_all()).to_equal(builtin_snapshot)

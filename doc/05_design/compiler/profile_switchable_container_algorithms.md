@@ -102,3 +102,22 @@ Native build warm reuse now includes the collection profile file's SHA-256 diges
 The native profile compile helper also hashes the entry source before deriving its profile identity, checks that hash after identity derivation, and checks it again after compilation. A changed source fails the profiled build instead of publishing an artifact under feedback admitted for earlier source bytes. This remains a detection check for the live source path; an immutable source snapshot is needed to exclude its A→B→A race.
 
 The native profile cache scope's digest is now passed into the compile helper. The helper reads the profile body once and requires that body's SHA-256 to equal the scope digest before parsing feedback, so the embedded constants and cache key refer to the same profile bytes. The remaining source-input checks still use the live entry path; a source snapshot is required to remove its A→B→A race.
+
+### Filter selectivity shared-capture update (2026-10-10)
+
+`adaptive_set_filter_observed` publishes its completed raw evaluated/accepted
+pair to the existing process capture owner after predicate success and result
+materialization. The owner aggregates raw counts under its capture lock, rejects
+invalid pairs and overflow, omits `0/0`, and emits one millionths-scaled
+`filter_selectivity` sample per observed site at finish. Per-call ratios are not
+averaged. An optional capture rejection marks the capture session failed; the
+completed filter result and returned observation remain unchanged.
+
+The owner enforces the existing 100,000-row `.sprof` budget incrementally:
+one collection record plus four base metrics per site, two additional rows for
+observed hash probes, and one for observed filter selectivity. The 14,285-site
+bound remains. The bounded core-C selfcheck passed, including an exact 100,000
+row serialization and rejection of the next event. The Simple wrapper scenario
+is authored but unrun. This implementation covers only the explicit observed
+filter API; generic loop trips, join output, allocation bytes, and early-exit
+position remain unmeasured.

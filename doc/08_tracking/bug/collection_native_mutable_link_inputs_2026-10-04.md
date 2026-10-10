@@ -28,3 +28,21 @@ path is available. Current receipts do not prove complete source provenance.
 Until these gaps and runtime validation are closed, the sidecar is diagnostic
 evidence only and cannot satisfy profile-to-native semantic acceptance or justify
 pushing the compiler implementation as stable.
+
+
+## Retained linker inputs implemented (2026-10-10)
+
+Binding now checks the object bytes against the existing admitted capsule
+receipt instead of accepting a newly observed digest. Each requested collection
+build copies those bytes into a fresh private directory, verifies their digest,
+and passes the retained paths to every standalone linker mode. Cache metadata
+keeps its original paths. Publication checks the retained inputs and cleans them
+up afterward. Source cache replacement cannot change the retained bytes.
+
+The focused spec now covers a mismatched admitted digest, source replacement
+and restoration after retention, and rejection of a replaced retained input.
+These Simple cases and actual linker/publication fault injection are NOT RUN;
+this remains an unqualified implementation, not a native acceptance PASS.
+Path-based linking assumes private build-owned paths are not modified by a
+hostile same-user process during linking; no descriptor-pinning guarantee is
+claimed. Grouped receipt support and complete source provenance remain open.

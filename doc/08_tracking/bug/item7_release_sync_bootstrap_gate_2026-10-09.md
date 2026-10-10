@@ -106,3 +106,35 @@ staged delta). Runtime tests,
 SPipe generation, full compiler/lib/MCP checks and bootstrap qualification
 remain unverified. The previously documented mutable-link-input receipt gap
 and remaining item 7 implementation requirements still prevent stable landing.
+
+
+## Implementation continuation and independently landed performance fix
+
+On the user's renewed completion request, implemented retained native linker
+inputs, completed filter-selectivity publication through the shared process
+capture ABI, and serialized the List import parser flag in the combined v4
+cache. New source-level regression scenarios are authored but UNRUN. The
+core-C capture selfcheck compiled and passed under Ubuntu WSL, including weighted
+selectivity, absent versus measured zero, invalid pairs/overflow, and the exact
+100000-row boundary. The two Rust edits register the existing runtime ABI name
+and signature only; no Rust seed was used to run source tests.
+
+Three new bounded Phase 2 attempts in a committed miniature fixture reached
+MIR and native object compilation, but failed linking on runtime packaging
+prerequisites. No attempt ran the resulting program. The frozen producer
+requires its matching historical runtime tree, not the current feature runtime.
+The exact runtime and public ABI-header closure is now staged in a committed
+miniature repo; execution stopped at the three-attempt limit. Detailed commands,
+input hashes and results: `C:/dev/simple-item7-phase2-diag-20261010/attempt-report.md`.
+No admitted full CLI is available, so new compiler/library source acceptance,
+SPipe generation, core/MCP smoke checks and bootstrap qualification remain open.
+
+A separately verified guard performance fix landed on `release/1.0` through
+PR #2861, merge `3e00bc4161ceec524222f51006584821ffe410b3`:
+https://github.com/ormastes/simple/pull/2861 . Eight adversarial fixtures passed;
+a same-source WSL comparison improved 23.964s to 10.511s with identical output
+and exit status. Its performance note explicitly retains the original baseline
+codec findings. This scoped PASS does not qualify item7. General typed/profile
+lowering, joins, the other missing applicable P6 observations, grouped receipts
+and full source provenance remain incomplete. No full-feature release push or
+merge has been made.

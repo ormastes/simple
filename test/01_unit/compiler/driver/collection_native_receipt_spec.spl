@@ -10,6 +10,7 @@ use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_orchestration.*
 use compiler.common.cache.reverse_reference_facts.{reverse_reference_owner_begin_v1, reverse_reference_owner_end_v1}
 use std.nogc_sync_mut.io_runtime.{file_hash_sha256_or_empty}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 
 extern fn rt_getpid() -> i64
 extern fn rt_time_monotonic_ns() -> i64
@@ -85,6 +86,14 @@ describe "native collection artifact receipt":
         val capsule = batch.find("receipt")
         expect(capsule.ok).to_equal(true)
         expect(file_write_exact(capsule.object_path, "object-fixture")).to_equal(true)
+        val object_digest = sha256_text("object-fixture")
+        val object_size = "object-fixture".len()
+        val capsule_receipt = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{object_size}\n{object_digest}\n"
+        val mismatched_digest = sha256_text("different-object")
+        val mismatched_capsule_receipt = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{object_size}\n{mismatched_digest}\n"
+        expect(file_write_exact(capsule.object_path + ".capsule-receipt", mismatched_capsule_receipt)).to_equal(true)
+        expect(collection_native_bind_capsule_v1(capsule).is_err()).to_equal(true)
+        expect(file_write_exact(capsule.object_path + ".capsule-receipt", capsule_receipt)).to_equal(true)
         val binding = collection_native_bind_capsule_v1(capsule).unwrap()
         val request = sha256_text("request")
         var altered = collection_native_unframe_v1(binding).unwrap()
@@ -101,7 +110,18 @@ describe "native collection artifact receipt":
         expect(empty_body[3]).to_equal("no-reported-plans")
         expect(collection_native_decode_v1(empty_receipt, request, sha256_text("artifact-fixture")).unwrap()).to_equal([empty_binding])
         expect(file_write_exact(output, "artifact-fixture")).to_equal(true)
-        expect(collection_native_publish_v1(output, request, [binding], [capsule.object_path])).to_equal("")
+        val retained_dir = output + "-retained"
+        expect(rt_dir_create_all(retained_dir)).to_equal(true)
+        val retained = collection_native_retain_link_inputs_v1([binding], retained_dir).unwrap()
+        expect(retained.len()).to_equal(1)
+        expect(collection_native_link_inputs_valid_v1([binding], retained)).to_equal(true)
+        # Mutating the shared cache/build path after admission cannot change the
+        # bytes selected for the linker. Publication authenticates the same
+        # private retained path the driver passes to every native link mode.
+        expect(file_write_exact(capsule.object_path, "changed-object")).to_equal(true)
+        expect(collection_native_link_inputs_valid_v1([binding], retained)).to_equal(true)
+        expect(file_write_exact(capsule.object_path, "object-fixture")).to_equal(true)
+        expect(collection_native_publish_v1(output, request, [binding], retained)).to_equal("")
         expect(collection_native_validate_v1(output, request)).to_equal("")
         expect(collection_native_copy_v1(output, output, request)).to_equal("")
         expect(collection_native_validate_v1(output, request)).to_equal("")
@@ -112,10 +132,14 @@ describe "native collection artifact receipt":
         expect(collection_native_validate_v1(delivery, request)).to_equal("")
         expect(file_write_exact(output, "changed-artifact")).to_equal(true)
         expect(collection_native_validate_v1(output, request)).to_equal("artifact-digest-mismatch")
-        expect(file_write_exact(capsule.object_path, "changed-object")).to_equal(true)
-        expect(collection_native_publish_v1(output, request, [binding], [capsule.object_path])).to_equal("link-input-object-changed")
+        expect(file_write_exact(retained[0], "tampered-retained")).to_equal(true)
+        expect(collection_native_link_inputs_valid_v1([binding], retained)).to_equal(false)
+        expect(collection_native_publish_v1(output, request, [binding], retained)).to_equal("link-input-object-changed")
+        expect(file_write_exact(retained[0], "object-fixture")).to_equal(true)
         expect(collection_native_clear_v1(output)).to_equal("")
         expect(collection_native_clear_v1(delivery)).to_equal("")
         expect(rt_file_delete(output)).to_equal(true)
         expect(rt_file_delete(delivery)).to_equal(true)
         expect(rt_file_delete(capsule.object_path)).to_equal(true)
+        expect(rt_file_delete(capsule.object_path + ".capsule-receipt")).to_equal(true)
+        expect(dir_remove(retained_dir, true)).to_equal(true)

@@ -2362,6 +2362,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("spl_collection_capture_note_lookup", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_collection_capture_note_materialization", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_collection_capture_note_hash_probe", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_collection_capture_note_filter", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_collection_capture_finish", &[], &[I64]),
     RuntimeFuncSpec::new("spl_collection_capture_abort", &[], &[I64]),
     // GPU registry raw ABI. path returns a borrowed C pointer represented as

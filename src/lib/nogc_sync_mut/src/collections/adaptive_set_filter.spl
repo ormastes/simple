@@ -1,7 +1,8 @@
-# Caller-owned filter completion data. This module does not publish .sprof or
-# extend the process capture channel. Publication still requires one shared,
-# synchronized owner and source/target admission by its caller.
+# Completed filter counts are sent to the shared process capture owner only
+# after successful evaluation and result materialization. This module does not
+# serialize or write .sprof data.
 use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveTextSet, AdaptiveSetAttribute}
+use std.nogc_sync_mut.sffi.collection_capture.{collection_capture_note_filter}
 
 struct AdaptiveSetFilterObservation:
     site_id: text
@@ -23,7 +24,8 @@ fn adaptive_set_filter_observed(
     rolled back. Empty input has no defined selectivity and returns nil data.
     Identity is copied from the source, not synthesized or newly admitted here.
     The result has no AST site until a compiler/caller supplies its own identity.
-    Keep raw counts for aggregation; averaging per-call ratios loses weighting.
+    Keep raw counts for process-owner aggregation; averaging per-call ratios
+    loses weighting.
     """
     if source.site_id == "" or source.target_profile_id == "":
         return Err("observed filter requires source site and target identities")
@@ -58,6 +60,10 @@ fn adaptive_set_filter_observed(
             accepted = accepted + 1
     var observation: AdaptiveSetFilterObservation? = nil
     if evaluated > 0:
+        # Capture failure poisons the shared session, whose finish reports the
+        # error. Optional profiling must not change this completed operation.
+        collection_capture_note_filter(
+            source.site_id, source.target_profile_id, evaluated, accepted)
         observation = Some(AdaptiveSetFilterObservation(
             site_id: source.site_id,
             target_profile_id: source.target_profile_id,
