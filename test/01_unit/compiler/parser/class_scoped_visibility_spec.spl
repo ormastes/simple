@@ -1,0 +1,63 @@
+# AUTHORED_UNEXECUTED: actual native WEB parser failure regression.
+use compiler.core.parser.{parse_module, parser_has_errors, parser_get_errors}
+use compiler.core.ast.{decl_count, decl_get_name, decl_get_visibility_text, decl_get_fields}
+
+fn find_class_visibility_decl(name: text) -> i64:
+    for index in 0..decl_count():
+        if decl_get_name(index) == name:
+            return index
+    -1
+
+describe "class scoped visibility parser":
+    it "retains package scope on fn me and static methods":
+        parse_module("class Scoped:\n    pub(package) fn ordinary() -> i64:\n        1\n    pub(package) me run() -> i64:\n        2\n    pub(package) static fn create() -> i64:\n        3\n", "class_scoped_visibility_spec.spl")
+        expect(parser_get_errors().len()).to_equal(0)
+        for name in ["Scoped__ordinary", "Scoped__run", "Scoped__create"]:
+            val index = find_class_visibility_decl(name)
+            expect(index).to_be_greater_than(-1)
+            if index >= 0:
+                expect(decl_get_visibility_text(index)).to_equal("package")
+            else:
+                assert(false)
+
+    it "consumes scoped field prefixes without losing adjacent field names":
+        parse_module("class Fields:\n    pub(package) key: i64\n    plain: text\n    pub val public_key: i64\n", "class_scoped_field_syntax_spec.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val index = find_class_visibility_decl("Fields")
+        expect(index).to_be_greater_than(-1)
+        if index >= 0:
+            expect(decl_get_fields(index)).to_equal(["key", "plain", "public_key"])
+        else:
+            assert(false)
+
+    it "preserves top level scoped declarations and ordinary public methods":
+        parse_module("pub(package) fn scoped() -> i64:\n    1\nclass Public:\n    pub me run() -> i64:\n        2\n", "class_visibility_neighbors.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val scoped = find_class_visibility_decl("scoped")
+        val public_method = find_class_visibility_decl("Public__run")
+        expect(scoped).to_be_greater_than(-1)
+        expect(public_method).to_be_greater_than(-1)
+        if scoped >= 0 and public_method >= 0:
+            expect(decl_get_visibility_text(scoped)).to_equal("package")
+            expect(decl_get_visibility_text(public_method)).to_equal("public")
+        else:
+            assert(false)
+
+    it "rejects missing delimiter and nonidentifier scope modifiers":
+        parse_module("class Broken:\n    pub(package fn run() -> i64:\n        1\n", "missing_scope_delimiter.spl")
+        expect(parser_get_errors().len()).to_be_greater_than(0)
+        parse_module("class Broken:\n    pub(17) key: i64\n", "nonidentifier_scope_modifier.spl")
+        expect(parser_get_errors().len()).to_be_greater_than(0)
+
+    it "preserves ordinary private and public class member grammar":
+        parse_module("class Plain:\n    private_field: i64\n    pub public_field: text\n    me hidden() -> i64:\n        1\n    pub fn shown() -> i64:\n        2\n", "prior_class_visibility_grammar.spl")
+        expect(parser_get_errors().len()).to_equal(0)
+        val hidden = find_class_visibility_decl("Plain__hidden")
+        val shown = find_class_visibility_decl("Plain__shown")
+        expect(hidden).to_be_greater_than(-1)
+        expect(shown).to_be_greater_than(-1)
+        if hidden >= 0 and shown >= 0:
+            expect(decl_get_visibility_text(hidden)).to_equal("private")
+            expect(decl_get_visibility_text(shown)).to_equal("public")
+        else:
+            assert(false)
