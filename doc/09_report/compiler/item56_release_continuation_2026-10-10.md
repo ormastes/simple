@@ -46,3 +46,9 @@ The kernel closure checker changed from 3 K0-to-P, 0 K1-to-P, 11 kernel-to-app/O
 ### Stage 2 evidence for loader cleanup
 
 The no-stub Stage 2 rebuild from commit `7452acac2da` compiled 1,222 source units with zero failed, then passed parent sanity and pure-Simple provenance. Its source snapshot is `99e33cc5fef1f8b5119a26fb0b8dbca2fa7bf5a260e0a80edda47c4f0360361e`; the resulting bootstrap executable SHA-256 remains `c535be7321e80a4857413fa1c690008b3172b157e87eac8a860edd98c6772082`. The unchanged executable hash means this does not prove the edited hot-reload branch executed. The outer compiler-test matrix again stopped before tests at the missing explicit MC/DC-off delegation waiver. Log: `build/mini_builds/item5_loader_state_stage2_20261010/build.log`; admission receipts remain under `.simple/storage/build/bootstrap/stage2/aarch64-unknown-linux-gnu/`. Full loader runtime, optional-provider, and time/RSS qualification remain open.
+
+## 2026-10-10 native text conversion isolation
+
+A six-module LLVM/core-C native probe isolated the Item 6 empty SHA result before hashing: `"producer".len() == 8` and its first byte is 112, but `text_to_utf8_bytes("producer").len() == 0`. Both byte SHA paths produce the correct nonempty digest. A guarded fallback in the sanctioned `std.common.text_bytes` facade copies `byte_at` into one sized byte array only on this invalid runtime result. The post-fix native probe exits 0 and prints `PASS sha256_text_native_probe` for ASCII, UTF-8, alias conversion, pure/fast byte hashes, and text hash. See [the runtime ABI bug](../../08_tracking/bug/native_text_to_bytes_empty_2026-10-10.md).
+
+This proves the narrow conversion and hash path. It does not prove the full CAS publisher, its persistence invariants, a full compile cohort, or the fallback's time/RSS cost. The underlying native ABI defect remains open.

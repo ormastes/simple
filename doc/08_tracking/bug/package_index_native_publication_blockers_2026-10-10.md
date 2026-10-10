@@ -14,3 +14,7 @@ In the isolated release worktree at commit `ddb1507c8eb`, the pure-Simple Stage 
 ## Next action
 
 Isolate `sha256_text` on nonempty literals and runtime-built text under the same native backend, fix the owner of the empty-input result, then rerun the CAS fixture. Add a minimal default-field native regression before removing the explicit constructor arguments. Run production cold/warm cohorts only after publication and readback pass. No further probe retry was made after the third verify/fix cycle in this session.
+
+## 2026-10-10 follow-up
+
+A separate six-module native probe isolated the empty-input digest to `text_to_utf8_bytes` returning zero bytes for nonempty text. The sanctioned facade now falls back to `byte_at` only on that invalid result, and its focused native SHA probe passes. This does not revalidate the full CAS fixture; the publisher and runtime ABI owner remain open. See [native text conversion](native_text_to_bytes_empty_2026-10-10.md).

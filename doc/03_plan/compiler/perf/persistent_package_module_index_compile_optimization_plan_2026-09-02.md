@@ -467,3 +467,7 @@ The marker bridge's focused native evidence and limits are in
 ## 2026-10-10 native publication continuation
 
 A guarded declaration-only native path now allows the 50-module Item 6 CAS entry closure to compile and link 40 objects without synthetic stubs. The fixture still exits 1 during first V1 publication. Explicitly filling trailing generation fields resolves a native default-field validation failure, then exposes a nonempty-text SHA-256 result equal to the empty-input digest. The publisher correctly refuses to publish. This is tracked in [the native publication bug](../../../08_tracking/bug/package_index_native_publication_blockers_2026-10-10.md) and [the continuation report](../../../09_report/compiler/item56_release_continuation_2026-10-10.md). The focused probe hit the three-cycle cap. Persistent index production cutover, native cohorts, and Item 5 closure/size gates remain open.
+
+## 2026-10-10 native text conversion repair
+
+The focused six-module LLVM/core-C probe found nonempty text converting to an empty byte array before `sha256_text`; pure and accelerated byte SHA paths were correct. The common text-byte facade now has a guarded sized-array fallback, and that probe passes. The full CAS publisher was not rerun after this fix under the bounded verification cap, and no production time/RSS cohort is available. See [the runtime bug](../../../08_tracking/bug/native_text_to_bytes_empty_2026-10-10.md) and [the continuation report](../../../09_report/compiler/item56_release_continuation_2026-10-10.md).
