@@ -950,6 +950,23 @@ pub fn read_structured_test_expectations(evidence_path: text) -> i64:
 pub fn vacuous_result_error(executed: i64) -> text:
     "VACUOUS: {executed} example(s) executed, 0 expectations evaluated"
 
+val VACUOUS_SPEC_BASELINE_PATH: text = "scripts/check/vacuous_spec_zero_assertion_baseline.txt"
+
+# Known zero-assertion specs that strict mode must not fail until each is
+# fixed and removed from the baseline (one repo-relative path per line,
+# `#` comments allowed). Same file the single runner consults.
+pub fn vacuous_spec_baselined(path: text) -> bool:
+    if not file_exists(VACUOUS_SPEC_BASELINE_PATH):
+        return false
+    val wanted = path.replace("\\", "/")
+    for line in read_file_content(VACUOUS_SPEC_BASELINE_PATH).split("\n"):
+        val entry = line.trim()
+        if entry == "" or entry.starts_with("#"):
+            continue
+        if entry == wanted or wanted.ends_with("/" + entry):
+            return true
+    false
+
 fn make_result_from_structured_evidence(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64, evidence_path: text) -> TestFileResult:
     if evidence_path == "" or env_get("SIMPLE_TEST_ASSERT_RAN") != "1":
         return make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs)
@@ -1002,10 +1019,15 @@ fn make_result_from_structured_evidence(file_path: text, stdout: text, stderr: t
     if valid == 0 or passed + evidence_failed == 0:
         return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "--assert-ran: no BDD examples executed", timed_out: false, cached: false)
     # Zero-expectation gate: examples ran and none failed, but the child's own
-    # tally says no expect()/assert was ever evaluated. Reported as VACUOUS
-    # (a failure class), never as a pass. An unknown tally (-1) is left alone.
+    # tally says no expect()/assert was ever evaluated. WARN-FIRST: the
+    # vacuity line is printed; the result becomes VACUOUS (a failure class)
+    # only under SIMPLE_TEST_VACUOUS_STRICT=1 and outside the baseline file.
+    # An unknown tally (-1) is left alone.
     if evidence_failed == 0 and read_structured_test_expectations(evidence_path) == 0:
-        return TestFileResult(path: file_path, passed: passed, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: vacuous_result_error(passed), timed_out: false, cached: false)
+        print "SPEC FILE VACUITY: {file_path} outcome=VACUOUS executed={passed} expectations=0"
+        if env_get("SIMPLE_TEST_VACUOUS_STRICT") == "1" and not vacuous_spec_baselined(file_path):
+            return TestFileResult(path: file_path, passed: passed, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: vacuous_result_error(passed), timed_out: false, cached: false)
+        print "warning: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated (advisory; SIMPLE_TEST_VACUOUS_STRICT=1 fails it)"
     val error = if evidence_failed > 0: "test-runner: spec failed" else: ""
     test_runner_result_with_mcdc_evidence(
         TestFileResult(path: file_path, passed: passed, failed: evidence_failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error, timed_out: false, cached: false),
@@ -1187,7 +1209,7 @@ export find_simple_new_binary, find_runtime_lib_dir, find_simple_binary
 export extract_error_message, parse_test_output, parse_test_omission_evidence
 export extract_number_before, extract_number_after_colon
 export build_child_args, make_result_from_output, read_structured_test_evidence, make_result_from_structured_evidence
-export read_structured_test_expectations, vacuous_result_error
+export read_structured_test_expectations, vacuous_result_error, vacuous_spec_baselined
 export hosted_lane_child_error, apply_hosted_lane_child_error
 export coverage_wrapper_suffix, build_coverage_wrapper
 export extract_coverage_sdn, strip_coverage_blocks

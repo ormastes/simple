@@ -753,6 +753,27 @@ fn read_test_result_expectations(evidence_path: text) -> i64:
 fn vacuous_verdict_line(path: text, executed: i64) -> text:
     "SPEC FILE VACUITY: {path} outcome=VACUOUS executed={executed} expectations=0"
 
+# The documented switch from warn-first to fail: SIMPLE_TEST_VACUOUS_STRICT=1.
+fn vacuous_strict_enabled() -> bool:
+    env_get("SIMPLE_TEST_VACUOUS_STRICT") == "1"
+
+val VACUOUS_BASELINE_PATH: text = "scripts/check/vacuous_spec_zero_assertion_baseline.txt"
+
+# True when `path` (slash-normalised) is listed in the baseline file: a
+# known zero-assertion spec that strict mode must not fail until fixed.
+fn vacuous_baselined(path: text) -> bool:
+    if not file_exists(VACUOUS_BASELINE_PATH):
+        return false
+    val wanted = path.replace("\\", "/")
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(VACUOUS_BASELINE_PATH)
+    for line in content.split("\n"):
+        val entry = line.trim()
+        if entry == "" or entry.starts_with("#"):
+            continue
+        if entry == wanted or wanted.ends_with("/" + entry):
+            return true
+    false
+
 # --- SIMPLE_COVERAGE measured line coverage (2026-08-02) -------------------
 # The seed interpreter already records executed statement lines in a global
 # collector when SIMPLE_COVERAGE=1 (driver real_main -> init_coverage_from_env,
@@ -1560,10 +1581,19 @@ fn main() -> i64:
     # engines that do not run std.spec's counters, or no evidence path) is
     # never treated as zero. Feature-gated SKIP files have passed == 0 and
     # are untouched.
+    # WARN-FIRST: the line is always printed; the verdict flips to a failure
+    # only under SIMPLE_TEST_VACUOUS_STRICT=1, and even then a file listed in
+    # scripts/check/vacuous_spec_zero_assertion_baseline.txt is exempt until
+    # it is fixed and removed from that file. Live only on this runner: the
+    # Rust seed evaluates describe/it/expect as intrinsics and writes no
+    # sidecar, so under the seed the tally is unknown and nothing fires.
     if failed == 0 and passed > 0 and evidence_expectations == 0 and unverified_error == "":
-        failed = 1
-        print "error: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated"
         print vacuous_verdict_line(run.path, passed)
+        if vacuous_strict_enabled() and not vacuous_baselined(run.path):
+            failed = 1
+            print "error: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated"
+        else:
+            print "warning: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated (advisory; SIMPLE_TEST_VACUOUS_STRICT=1 fails it)"
     if source_is_in_development(rt_file_read_text(run.path)):
         print in_development_explicit_line(run.path)
     print_summary(run.path, passed, failed, real_skipped, real_pending, duration_ms, if failed == 0: unverified_error else: "")

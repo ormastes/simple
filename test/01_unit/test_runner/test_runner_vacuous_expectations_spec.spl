@@ -5,21 +5,29 @@
 
 """
 Purpose: a spec FILE whose examples ran and exited clean but evaluated ZERO
-expectations is VACUOUS -- a failure class -- never a pass. std.spec writes
-the tally to a sidecar next to the v1 evidence file; the runner reads it
-fail-closed: absent or malformed is UNKNOWN (-1), and only an explicit 0 turns
-a clean result into VACUOUS. The zero-EXAMPLE gates that already existed
-(NOT_RUN, --assert-ran) are untouched by this.
+expectations is VACUOUS -- never a silent pass. std.spec writes the tally to a
+sidecar next to the v1 evidence file; the runner reads it fail-closed: absent
+or malformed is UNKNOWN (-1), and only an explicit 0 marks a clean result
+VACUOUS. Rollout is WARN-FIRST: the `SPEC FILE VACUITY:` line always prints;
+the verdict becomes the VACUOUS failure class only under
+SIMPLE_TEST_VACUOUS_STRICT=1 and for paths NOT listed in
+scripts/check/vacuous_spec_zero_assertion_baseline.txt. The zero-EXAMPLE gates
+that already existed (NOT_RUN, --assert-ran) are untouched. The gate is live
+only on the pure-Simple runner: the Rust seed evaluates describe/it/expect as
+intrinsics and writes no sidecar.
 """
 
 use std.spec
 use std.spec.step
 use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_exists}
+use std.nogc_sync_mut.spec.{get_expectation_count, note_expectation}
 use std.test_runner.test_executor_parsing.{
-    read_structured_test_expectations, vacuous_result_error, _tp_get_temp_dir
+    read_structured_test_expectations, vacuous_result_error, vacuous_spec_baselined, _tp_get_temp_dir
 }
 use std.test_runner.test_runner_output.{test_file_outcome_class, test_file_outcome_tag}
 use std.test_runner.test_runner_types.{TestFileResult, test_file_result_outcome_class}
+
+extern fn rt_file_read_text(path: text) -> text?
 
 fn evidence_path(tag: text) -> text:
     _tp_get_temp_dir() + "/vacuous_expectations_" + tag + ".evidence"
@@ -65,6 +73,54 @@ describe "zero-expectation (VACUOUS) gate":
         expect(test_file_outcome_class(result)).to_equal("VACUOUS")
         expect(test_file_outcome_tag(result)).to_equal("VACU")
         expect(result.is_ok()).to_equal(false)
+
+    it "counts assert_*/check helpers as evaluated expectations, so an assert_equal-only spec is NOT vacuous":
+        # Review blocker: these helpers used to touch the counter only on
+        # FAILURE, which would have made 1,159 assert_*-only spec files read
+        # as vacuous. Each passing call must count exactly once.
+        val before = get_expectation_count()
+        assert_equal(1, 1)
+        assert_true(true)
+        assert_false(false)
+        assert_nil(nil)
+        assert_not_nil(0)
+        assert_eq("a", "a")
+        assert_ne("a", "b")
+        assert_not_equal(1, 2)
+        assert_contains("abc", "b")
+        check(true)
+        check_msg(true, "unused")
+        val after_helpers = get_expectation_count()
+        note_expectation()
+        # note_expectation is plain Simple code on every engine: always +1.
+        expect(get_expectation_count() - after_helpers).to_equal(1)
+        # The 11 helpers above are Simple code on the pure-Simple runner (the
+        # engine the gate is live on) but INTRINSICS under the Rust seed
+        # (interpreter_call/bdd.rs: "assert_equal" | "assert_eq" | ...), which
+        # never reach spec.spl. Measured: delta 0 under the seed. So the
+        # dynamic count is asserted only where the helpers actually executed
+        # as Simple code; the source pin below holds on both engines.
+        if after_helpers > before:
+            expect(after_helpers - before).to_equal(11)
+
+    it "pins that every assertion helper counts on ENTRY, not only on failure (source contract)":
+        val source = rt_file_read_text("src/lib/nogc_sync_mut/spec.spl") ?? ""
+        expect(source.len() > 0).to_equal(true)
+        for helper in ["fail_test", "fail", "check", "check_msg", "assert_eq", "assert_ne", "assert_true", "assert_false", "assert_nil", "assert_not_nil", "assert_equal", "assert_not_equal", "assert_contains"]:
+            val head = source.index_of("pub fn " + helper + "(") ?? -1
+            expect(head >= 0).to_equal(true)
+            val body = source.substring(head, head + 200)
+            val first_nl = body.index_of("\n") ?? -1
+            val first_line = body.substring(first_nl + 1, body.len()).trim()
+            expect(first_line.starts_with("note_expectation()")).to_equal(true)
+        # expect()/expect_not() count through _stable_expect_helper.
+        expect(source).to_contain("fn _stable_expect_helper(value, negated: bool, implicit_error: bool) -> i64:\n    _expectations_evaluated = _expectations_evaluated + 1")
+
+    it "exempts only baselined paths from strict mode":
+        expect(vacuous_spec_baselined("test/01_unit/compiler/backend/avx2_cmp_emit_spec.spl")).to_equal(true)
+        expect(vacuous_spec_baselined("C:/x/repo/test/01_unit/compiler/backend/avx2_cmp_emit_spec.spl")).to_equal(true)
+        expect(vacuous_spec_baselined("test/01_unit/test_runner/test_runner_vacuous_expectations_spec.spl")).to_equal(false)
+        expect(vacuous_spec_baselined("")).to_equal(false)
 
     it "leaves a clean, asserting result OK and a feature-gated skip SKIP":
         val ok = TestFileResult(
