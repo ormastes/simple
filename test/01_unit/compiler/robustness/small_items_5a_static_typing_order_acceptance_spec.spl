@@ -1,0 +1,253 @@
+"""
+Purpose: Acceptance spec for robustness item 5a (CURRENT_BUG_PREVENTION.md
+section 5, "module statics typed by visit order"). A module-level static's
+storage type must not depend on the order its declarations are written, the
+order one module's constants are visited, or the order a consumer visits the
+provider's constants. The fix (two-pass const-then-static typing) landed
+without any spec that permutes the order; this file is that detection.
+Audience: compiler engineers maintaining _MirLowering module statics,
+provider globals and the HIR ABI interface digest.
+Method: one declaration set, several source orders and two name orders.
+Compare (a) the owner's MIR static storage table, (b) the exported HIR ABI
+interface digest (abi_interface.spl), (c) an importer's declared storage when
+the provider's constants are visited forwards and backwards. A control case
+changes one initializer's type and must make every comparison differ, so a
+comparison that ignores types cannot pass.
+Guide: doc/07_guide/compiler/robustness/small_items.md
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{SymbolTable, HirModule}
+use compiler.hir.hir_definitions.{HirConst}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.abi_interface.{hir_abi_interface_digest_v1}
+use compiler.mir.mir.*
+use compiler.mir.mir_types.{mir_type_probe_text}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_globals.*
+
+# SETTLED: initializers whose HIR type is settled at declaration (literal,
+# call, array literal, struct constructor) -- importable across modules.
+# DERIVED: unfolded initializers whose storage type the owner recovers from
+# the operands' registered initializers. That recovery is the step that was
+# visit-order dependent before the two-pass const/static split.
+val TYPE_BLOCKS = ["struct Pair:\n    value: i64", "fn make() -> text:\n    \"x\""]
+val SETTLED = ["pub val executed = 5", "pub val failed = 2", "pub val total = 1.5", "pub val scale = 2.0", "pub val prefix = \"a\"", "pub val suffix = \"b\"", "pub val made = make()", "pub val xs = [\"a\", \"b\"]", "pub val pair = Pair(value: 0)"]
+val DERIVED = ["pub val passed = executed - failed", "pub val ratio = total * scale", "pub val label = prefix + suffix", "pub val ok = executed > failed"]
+val SETTLED_NAMES = ["executed", "total", "prefix", "made", "xs", "pair"]
+val DERIVED_NAMES = ["passed", "ratio", "label", "ok"]
+
+fn join_lines(lines: [text]) -> text:
+    var out = ""
+    for line in lines:
+        out = out + line + "\n"
+    out
+
+fn reversed(lines: [text]) -> [text]:
+    var out: [text] = []
+    var i = lines.len() - 1
+    while i >= 0:
+        out = out.push(lines[i])
+        i = i - 1
+    out
+
+fn rotated(lines: [text], by: i64) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < lines.len():
+        out = out.push(lines[(i + by) % lines.len()])
+        i = i + 1
+    out
+
+fn source_orders(with_derived: bool) -> [text]:
+    """The same declarations in five source orders."""
+    var vals = SETTLED
+    var uses_first = reversed(SETTLED)
+    if with_derived:
+        vals = SETTLED + DERIVED
+        uses_first = DERIVED + SETTLED
+    [
+        join_lines(TYPE_BLOCKS + vals),
+        join_lines(TYPE_BLOCKS + uses_first),
+        join_lines(reversed(vals) + TYPE_BLOCKS),
+        join_lines(rotated(vals, 3) + reversed(TYPE_BLOCKS)),
+        join_lines(rotated(reversed(vals), 5) + TYPE_BLOCKS)
+    ]
+
+fn renamed_source(derived_prefix: text) -> text:
+    """Same shapes; derived statics named to sort before (aa_) or after (zz_) their operands.
+
+    module.constants.values() is not in source order, so permuting names is
+    what actually permutes the visit order of one module's constants."""
+    join_lines([
+        "pub val mm_left = 5", "pub val mm_right = 2", "pub val mm_fa = 1.5", "pub val mm_fb = 2.0",
+        "pub val mm_sa = \"a\"", "pub val mm_sb = \"b\"",
+        "pub val " + derived_prefix + "diff = mm_left - mm_right",
+        "pub val " + derived_prefix + "prod = mm_fa * mm_fb",
+        "pub val " + derived_prefix + "cat = mm_sa + mm_sb",
+        "pub val " + derived_prefix + "gt = mm_left > mm_right"
+    ])
+
+fn lower_hir(src: text) -> HirModule:
+    val filename = "ordermod.spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    hir_lowering.lower_module(module)
+
+fn sorted_join(rows: [text]) -> text:
+    var sorted = rows
+    var i = 1
+    while i < sorted.len():
+        var j = i
+        while j > 0 and sorted[j] < sorted[j - 1]:
+            val tmp = sorted[j]
+            sorted[j] = sorted[j - 1]
+            sorted[j - 1] = tmp
+            j = j - 1
+        i = i + 1
+    var out = ";"
+    for row in sorted:
+        out = out + row + ";"
+    out
+
+fn owner_static_table(src: text) -> text:
+    """Sorted ;name=storage; rows of the owner's MIR statics, plus the error count."""
+    val hir = lower_hir(src)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var rows: [text] = []
+    for declaration in mir.statics.values():
+        rows = rows.push(declaration.name + "=" + mir_type_probe_text(declaration.type_))
+    sorted_join(rows) + "errors=" + lowering.errors.len().to_text()
+
+fn storage_of(table: text, name: text) -> text:
+    """Storage text of the static whose mangled name ends in __<name>; absent if none."""
+    for row in table.split(";"):
+        val eq = row.index_of("=")
+        if eq > 0 and row[0:eq].ends_with("__" + name):
+            return row[eq + 1:row.len()]
+    "absent"
+
+fn abi_outcome(src: text) -> text:
+    match hir_abi_interface_digest_v1(lower_hir(src)):
+        case Ok(digest): "ok:" + digest
+        case Err(reason): "refused:" + reason
+
+fn importer_storage_table(src: text, names: [text], backwards: bool) -> text:
+    """Importer-side ;name=storage; rows for names, provider constants visited in the given order."""
+    val hir = lower_hir(src)
+    var constants: [HirConst] = []
+    for constant in hir.constants.values():
+        constants = constants.push(constant)
+    if backwards:
+        var flipped: [HirConst] = []
+        var i = constants.len() - 1
+        while i >= 0:
+            flipped = flipped.push(constants[i])
+            i = i - 1
+        constants = flipped
+    var lowering = MirLowering.new(SymbolTable.new())
+    var demanded: Dict<text, [i64]> = {}
+    var id_names: Dict<i64, text> = {}
+    var next_id = 900
+    for name in names:
+        demanded[mir_global_declaration_key("ordermod", name)] = [next_id]
+        id_names[next_id] = name
+        next_id = next_id + 1
+    val _found = lowering.register_provider_global_bindings("ordermod", hir.symbols, constants, demanded, {})
+    var rows: [text] = []
+    for declaration in lowering.builder.module.statics.values():
+        if id_names.contains_key(declaration.symbol.id):
+            rows = rows.push("imp__" + id_names[declaration.symbol.id] + "=" + mir_type_probe_text(declaration.type_))
+    sorted_join(rows) + "errors=" + lowering.errors.len().to_text()
+
+describe "5a module statics are typed independently of visit order":
+    it "AC1 owner settles every static, derived ones included, with no error":
+        val table = owner_static_table(source_orders(true)[0])
+        expect(table).to_contain("errors=0")
+        for name in SETTLED_NAMES + DERIVED_NAMES:
+            expect(storage_of(table, name) == "absent").to_equal(false)
+        # Distinct scalar kinds prove the table is typed, not one fallback slot.
+        expect(storage_of(table, "ratio") == storage_of(table, "passed")).to_equal(false)
+        expect(storage_of(table, "ok") == storage_of(table, "passed")).to_equal(false)
+
+    it "AC2 owner static storage is identical for every declaration order":
+        val orders = source_orders(true)
+        val reference = owner_static_table(orders[0])
+        var index = 1
+        while index < orders.len():
+            expect(owner_static_table(orders[index])).to_equal(reference)
+            index = index + 1
+
+    it "AC3 owner storage is identical whether a derived static is visited before or after its operands":
+        val early = owner_static_table(renamed_source("aa_"))
+        val late = owner_static_table(renamed_source("zz_"))
+        expect(early).to_contain("errors=0")
+        expect(late).to_contain("errors=0")
+        for role in ["diff", "prod", "cat", "gt"]:
+            val early_storage = storage_of(early, "aa_" + role)
+            expect(early_storage == "absent").to_equal(false)
+            expect(storage_of(late, "zz_" + role)).to_equal(early_storage)
+        expect(storage_of(early, "aa_prod") == storage_of(early, "aa_diff")).to_equal(false)
+
+    it "AC4 exported ABI interface digest is identical for every declaration order":
+        val settled_orders = source_orders(false)
+        val reference = abi_outcome(settled_orders[0])
+        expect(reference.starts_with("ok:")).to_equal(true)
+        for src in settled_orders:
+            expect(abi_outcome(src)).to_equal(reference)
+        # With derived statics the digest may refuse (unresolved inference),
+        # but it must refuse or accept identically in every order.
+        val derived_orders = source_orders(true)
+        val derived_reference = abi_outcome(derived_orders[0])
+        for src in derived_orders:
+            expect(abi_outcome(src)).to_equal(derived_reference)
+
+    it "AC5 importer storage is identical whichever way the provider constants are visited":
+        val orders = source_orders(true)
+        val reference = importer_storage_table(orders[0], SETTLED_NAMES, false)
+        expect(reference).to_contain("errors=0")
+        for name in SETTLED_NAMES:
+            expect(storage_of(reference, name) == "absent").to_equal(false)
+        for src in orders:
+            expect(importer_storage_table(src, SETTLED_NAMES, false)).to_equal(reference)
+            expect(importer_storage_table(src, SETTLED_NAMES, true)).to_equal(reference)
+        # Scalars only: owner and importer describe an aggregate's storage
+        # differently (owner Array(Opaque(str),2), importer Array(Tuple,0)),
+        # which is a cross-module identity question (plan class 1), not an
+        # ordering one.
+        val owner = owner_static_table(orders[1])
+        for name in ["executed", "total"]:
+            expect(storage_of(reference, name)).to_equal(storage_of(owner, name))
+
+    it "AC6 importer never types a derived static in one visit order and refuses it in another":
+        val orders = source_orders(true)
+        val reference = importer_storage_table(orders[0], DERIVED_NAMES, false)
+        for src in orders:
+            expect(importer_storage_table(src, DERIVED_NAMES, false)).to_equal(reference)
+            expect(importer_storage_table(src, DERIVED_NAMES, true)).to_equal(reference)
+        # Whatever the importer does declare must match the owner: a name is
+        # either refused with an error or stored exactly as the owner stores it.
+        val owner = owner_static_table(orders[0])
+        for name in DERIVED_NAMES:
+            val imported = storage_of(reference, name)
+            if imported != "absent":
+                expect(imported).to_equal(storage_of(owner, name))
+            else:
+                expect(reference.contains("errors=0")).to_equal(false)
+
+    it "AC7 must-fail control: a real type change is visible in every comparison":
+        val base = source_orders(false)[0]
+        val changed = base.replace("pub val total = 1.5", "pub val total = 1")
+        expect(changed == base).to_equal(false)
+        expect(owner_static_table(changed) == owner_static_table(base)).to_equal(false)
+        expect(abi_outcome(changed).starts_with("ok:")).to_equal(true)
+        expect(abi_outcome(changed) == abi_outcome(base)).to_equal(false)
+        expect(importer_storage_table(changed, SETTLED_NAMES, false) == importer_storage_table(base, SETTLED_NAMES, false)).to_equal(false)
+        # A derived static follows its operands: int operands give an int result.
+        val derived_base = owner_static_table(renamed_source("aa_"))
+        val derived_changed = owner_static_table(renamed_source("aa_").replace("mm_fa = 1.5", "mm_fa = 1").replace("mm_fb = 2.0", "mm_fb = 2"))
+        expect(storage_of(derived_changed, "aa_prod") == storage_of(derived_base, "aa_prod")).to_equal(false)
