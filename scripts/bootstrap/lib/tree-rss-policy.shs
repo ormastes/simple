@@ -29,6 +29,18 @@
 # but is REFUSED (never clamped) above the hard ceiling, with the reason in
 # bootstrap_tree_rss_refusal.
 #
+# Result attribution: bootstrap_tree_rss_source says which layer chose the
+# numbers (explicit-env | env-knobs | host-config | default) and
+# bootstrap_tree_rss_bound which rule produced the final value (explicit |
+# budget | floor | host-fraction | hard-ceiling). Callers pass both to the
+# watchdog (--cap-source / --cap-bound) so the receipt records them.
+#
+# Test hook: BOOTSTRAP_TREE_RSS_MEMINFO_PATH substitutes host RAM, which can
+# raise the ceiling. It is honoured only with BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1
+# AND SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor; set any other way it is a
+# refusal, never ignored. bootstrap_tree_rss_host_total_source records
+# proc-meminfo | sysctl | fixture | unknown.
+#
 # Source it, or run:  tree-rss-policy.shs --resolve JOBS [REPO_ROOT]
 #                     tree-rss-policy.shs --selftest
 
@@ -48,25 +60,57 @@ bootstrap_tree_rss_is_uint() {
   case "$1" in *[1-9]*) return 0 ;; *) return 1 ;; esac
 }
 
-# Host physical RAM in KiB, or empty. BOOTSTRAP_TREE_RSS_MEMINFO_PATH is the
-# fixture hook; when it is set no other probe is consulted.
-bootstrap_tree_rss_host_total_kib() {
-  btr_meminfo=${BOOTSTRAP_TREE_RSS_MEMINFO_PATH:-/proc/meminfo}
-  btr_total=
-  if [ -r "$btr_meminfo" ]; then
-    btr_total=$(awk '/^MemTotal:/ { print $2; exit }' "$btr_meminfo" 2>/dev/null) || btr_total=
+# Canonical decimal for a small count: strips leading zeros so 08/09 cannot
+# crash $(( )) and 040 cannot be read as octal 32. Prints nothing for junk
+# (non-digits, empty, more than $2 significant digits).
+bootstrap_tree_rss_canonical_uint() {
+  case "$1" in ''|*[!0-9]*) return 0 ;; esac
+  btr_cu=$1
+  while :; do
+    case "$btr_cu" in 0?*) btr_cu=${btr_cu#0} ;; *) break ;; esac
+  done
+  [ "${#btr_cu}" -le "$2" ] || return 0
+  printf '%s\n' "$btr_cu"
+}
+
+# MemTotal (KiB) of one meminfo-format file, or empty.
+bootstrap_tree_rss_meminfo_total() {
+  btr_mt=
+  [ ! -r "$1" ] || btr_mt=$(awk '/^MemTotal:/ { print $2; exit }' "$1" 2>/dev/null) || btr_mt=
+  bootstrap_tree_rss_is_uint "$btr_mt" 15 || btr_mt=
+  printf '%s\n' "$btr_mt"
+}
+
+# Sets bootstrap_tree_rss_host_total_kib (may be empty) and
+# bootstrap_tree_rss_host_total_source. Returns 1 with a refusal when the
+# test fixture hook is present without its switch or while the cap is enforced.
+bootstrap_tree_rss_probe_host() {
+  bootstrap_tree_rss_host_total_kib=
+  if [ -n "${BOOTSTRAP_TREE_RSS_MEMINFO_PATH+x}" ]; then
+    bootstrap_tree_rss_host_total_source=fixture
+    [ "${BOOTSTRAP_TREE_RSS_TEST_FIXTURE:-}" = 1 ] || {
+      bootstrap_tree_rss_refusal='tree RSS policy: BOOTSTRAP_TREE_RSS_MEMINFO_PATH is a test-only host memory fixture and requires BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1'
+      return 1
+    }
+    [ "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" = monitor ] || {
+      bootstrap_tree_rss_refusal='tree RSS policy: a host memory fixture is refused while the RSS cap is enforced (SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor is required)'
+      return 1
+    }
+    bootstrap_tree_rss_host_total_kib=$(bootstrap_tree_rss_meminfo_total "$BOOTSTRAP_TREE_RSS_MEMINFO_PATH")
+    return 0
   fi
-  if [ -z "$btr_total" ] && [ -z "${BOOTSTRAP_TREE_RSS_MEMINFO_PATH:-}" ]; then
-    for btr_sysctl in hw.memsize hw.physmem; do
-      btr_bytes=$(sysctl -n "$btr_sysctl" 2>/dev/null) || btr_bytes=
-      if bootstrap_tree_rss_is_uint "$btr_bytes" 18; then
-        btr_total=$((btr_bytes / 1024))
-        break
-      fi
-    done
-  fi
-  bootstrap_tree_rss_is_uint "$btr_total" 15 || btr_total=
-  printf '%s\n' "$btr_total"
+  bootstrap_tree_rss_host_total_kib=$(bootstrap_tree_rss_meminfo_total /proc/meminfo)
+  bootstrap_tree_rss_host_total_source=proc-meminfo
+  [ -z "$bootstrap_tree_rss_host_total_kib" ] || return 0
+  for btr_sysctl in hw.memsize hw.physmem; do
+    btr_bytes=$(sysctl -n "$btr_sysctl" 2>/dev/null) || btr_bytes=
+    if bootstrap_tree_rss_is_uint "$btr_bytes" 18; then
+      bootstrap_tree_rss_host_total_kib=$((btr_bytes / 1024))
+      bootstrap_tree_rss_host_total_source=sysctl
+      return 0
+    fi
+  done
+  bootstrap_tree_rss_host_total_source=unknown
 }
 
 # bootstrap_tree_rss_ceiling_kib JOBS HOST_TOTAL_KIB -> hard ceiling. JOBS 0
@@ -98,7 +142,17 @@ bootstrap_tree_rss_knob() {
   fi
   if [ -z "$btr_k_value" ] && [ -n "$btr_k_root" ] &&
      [ -f "$btr_k_root/scripts/setup/host-env.shs" ]; then
-    btr_k_value=$(sh "$btr_k_root/scripts/setup/host-env.shs" --get "$btr_k_key" 2>/dev/null) || btr_k_value=
+    # host-env.shs warns on stderr and falls through to a lower layer when a
+    # config FILE value is invalid. For a memory budget that fall-through is
+    # exactly the silent substitution this function refuses, so read the
+    # warning instead of discarding it.
+    btr_k_out=$(sh "$btr_k_root/scripts/setup/host-env.shs" --get "$btr_k_key" 2>&1) || btr_k_out=
+    btr_k_warning=$(printf '%s\n' "$btr_k_out" | grep "^host-config: warning: ignoring invalid $btr_k_key=" | head -n 1) || btr_k_warning=
+    [ -z "$btr_k_warning" ] || {
+      bootstrap_tree_rss_refusal="tree RSS policy: invalid $btr_k_key in host config (${btr_k_warning#host-config: warning: })"
+      return 1
+    }
+    btr_k_value=$(printf '%s\n' "$btr_k_out" | grep -v '^host-config: warning:' | tail -n 1) || btr_k_value=
     btr_k_source=host-config
   fi
   if [ -z "$btr_k_value" ]; then
@@ -109,21 +163,27 @@ bootstrap_tree_rss_knob() {
     bootstrap_tree_rss_refusal="tree RSS policy: invalid $btr_k_key=$btr_k_value (source: $btr_k_source)"
     return 1
   }
+  # Weakest-to-strongest attribution across the three knobs.
+  case "$btr_k_source:$bootstrap_tree_rss_source" in
+    env:*|host-env:*) bootstrap_tree_rss_source=env-knobs ;;
+    host-config:default) bootstrap_tree_rss_source=host-config ;;
+  esac
 }
 
 # bootstrap_tree_rss_resolve JOBS [REPO_ROOT]
-# Sets bootstrap_tree_rss_{cap_kib,ceiling_kib,host_total_kib,source,summary}.
+# Sets bootstrap_tree_rss_{cap_kib,ceiling_kib,host_total_kib,
+# host_total_source,source,bound,summary}.
 # Returns 1 with bootstrap_tree_rss_refusal set when the request is refused.
 bootstrap_tree_rss_resolve() {
   btr_jobs=${1:-0}
   btr_root=${2:-}
   bootstrap_tree_rss_refusal=
-  case "$btr_jobs" in ''|*[!0-9]*) btr_jobs=bad ;; esac
-  [ "$btr_jobs" != bad ] && [ "${#btr_jobs}" -le 3 ] && [ "$btr_jobs" -le 128 ] || {
-    bootstrap_tree_rss_refusal="tree RSS policy: worker count must be 0..128, got ${1:-}"
+  btr_jobs=$(bootstrap_tree_rss_canonical_uint "$btr_jobs" 3)
+  [ -n "$btr_jobs" ] && [ "$btr_jobs" -le 128 ] || {
+    bootstrap_tree_rss_refusal="tree RSS policy: worker count must be a decimal 0..128, got '${1:-}'"
     return 1
   }
-  bootstrap_tree_rss_host_total_kib=$(bootstrap_tree_rss_host_total_kib)
+  bootstrap_tree_rss_probe_host || return 1
   bootstrap_tree_rss_ceiling_kib=$(bootstrap_tree_rss_ceiling_kib "$btr_jobs" "$bootstrap_tree_rss_host_total_kib")
   btr_explicit=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-}
   if [ -n "$btr_explicit" ]; then
@@ -132,12 +192,14 @@ bootstrap_tree_rss_resolve() {
       return 1
     }
     [ "$btr_explicit" -le "$bootstrap_tree_rss_ceiling_kib" ] || {
-      bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$btr_explicit KiB exceeds the hard ceiling $bootstrap_tree_rss_ceiling_kib KiB for $btr_jobs worker(s) (host RAM ${bootstrap_tree_rss_host_total_kib:-unknown} KiB; ceiling = max($BOOTSTRAP_TREE_RSS_STATIC_CEILING_KIB, min($BOOTSTRAP_TREE_RSS_RESERVE_KIB + jobs*$BOOTSTRAP_TREE_RSS_PER_JOB_CEILING_KIB, 3/4 host RAM)))"
+      bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$btr_explicit KiB exceeds the hard ceiling $bootstrap_tree_rss_ceiling_kib KiB for $btr_jobs worker(s) (host RAM ${bootstrap_tree_rss_host_total_kib:-unknown} KiB via ${bootstrap_tree_rss_host_total_source}; ceiling = max($BOOTSTRAP_TREE_RSS_STATIC_CEILING_KIB, min($BOOTSTRAP_TREE_RSS_RESERVE_KIB + jobs*$BOOTSTRAP_TREE_RSS_PER_JOB_CEILING_KIB, 3/4 host RAM)))"
       return 1
     }
     bootstrap_tree_rss_cap_kib=$btr_explicit
     bootstrap_tree_rss_source=explicit-env
+    bootstrap_tree_rss_bound=explicit
   else
+    bootstrap_tree_rss_source=default
     bootstrap_tree_rss_knob BASE_MIB tree_rss_base_mib "$BOOTSTRAP_TREE_RSS_BASE_MIB_DEFAULT" 7 "$btr_root" || return 1
     btr_base=$btr_k_value
     bootstrap_tree_rss_knob PER_JOB_MIB tree_rss_per_job_mib "$BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT" 6 "$btr_root" || return 1
@@ -149,26 +211,26 @@ bootstrap_tree_rss_resolve() {
       return 1
     }
     btr_cap=$(((btr_base + btr_jobs * btr_per_job) * 1024))
-    bootstrap_tree_rss_source=per-job-budget
+    bootstrap_tree_rss_bound=budget
     if [ "$btr_jobs" -eq 0 ] || [ "$btr_cap" -lt "$BOOTSTRAP_TREE_RSS_FLOOR_KIB" ]; then
       btr_cap=$BOOTSTRAP_TREE_RSS_FLOOR_KIB
-      bootstrap_tree_rss_source=floor
+      bootstrap_tree_rss_bound=floor
     fi
     if [ -n "$bootstrap_tree_rss_host_total_kib" ]; then
       btr_host_cap=$((bootstrap_tree_rss_host_total_kib / 100 * btr_pct))
       if [ "$btr_cap" -gt "$btr_host_cap" ] && [ "$btr_cap" -gt "$BOOTSTRAP_TREE_RSS_FLOOR_KIB" ]; then
         btr_cap=$btr_host_cap
         [ "$btr_cap" -ge "$BOOTSTRAP_TREE_RSS_FLOOR_KIB" ] || btr_cap=$BOOTSTRAP_TREE_RSS_FLOOR_KIB
-        bootstrap_tree_rss_source=host-fraction
+        bootstrap_tree_rss_bound=host-fraction
       fi
     fi
     if [ "$btr_cap" -gt "$bootstrap_tree_rss_ceiling_kib" ]; then
       btr_cap=$bootstrap_tree_rss_ceiling_kib
-      bootstrap_tree_rss_source=hard-ceiling
+      bootstrap_tree_rss_bound=hard-ceiling
     fi
     bootstrap_tree_rss_cap_kib=$btr_cap
   fi
-  bootstrap_tree_rss_summary="cap ${bootstrap_tree_rss_cap_kib} KiB (source: ${bootstrap_tree_rss_source}, workers: ${btr_jobs}, hard ceiling: ${bootstrap_tree_rss_ceiling_kib} KiB, host RAM: ${bootstrap_tree_rss_host_total_kib:-unknown} KiB)"
+  bootstrap_tree_rss_summary="cap ${bootstrap_tree_rss_cap_kib} KiB (source: ${bootstrap_tree_rss_source}, bound: ${bootstrap_tree_rss_bound}, workers: ${btr_jobs}, hard ceiling: ${bootstrap_tree_rss_ceiling_kib} KiB, host RAM: ${bootstrap_tree_rss_host_total_kib:-unknown} KiB via ${bootstrap_tree_rss_host_total_source})"
 }
 
 # Worker count of a compiler command line: the value of the last --threads /
@@ -179,14 +241,15 @@ bootstrap_tree_rss_command_jobs() {
   for btr_cj_arg in "$@"; do
     if [ "$btr_cj_next" = 1 ]; then
       btr_cj_next=0
-      case "$btr_cj_arg" in ''|*[!0-9]*) ;; *) [ "${#btr_cj_arg}" -gt 3 ] || btr_cj=$btr_cj_arg ;; esac
+      btr_cj_value=$(bootstrap_tree_rss_canonical_uint "$btr_cj_arg" 3)
+      [ -z "$btr_cj_value" ] || btr_cj=$btr_cj_value
       continue
     fi
     case "$btr_cj_arg" in
       --threads|--jobs) btr_cj_next=1 ;;
       --threads=*|--jobs=*)
-        btr_cj_value=${btr_cj_arg#*=}
-        case "$btr_cj_value" in ''|*[!0-9]*) ;; *) [ "${#btr_cj_value}" -gt 3 ] || btr_cj=$btr_cj_value ;; esac ;;
+        btr_cj_value=$(bootstrap_tree_rss_canonical_uint "${btr_cj_arg#*=}" 3)
+        [ -z "$btr_cj_value" ] || btr_cj=$btr_cj_value ;;
     esac
   done
   printf '%s\n' "$btr_cj"
@@ -199,7 +262,13 @@ bootstrap_tree_rss__selftest() {
   printf 'MemTotal:       134094232 kB\n' >"$btr_st_dir/big"
   printf 'MemTotal:        16000000 kB\n' >"$btr_st_dir/small"
   : >"$btr_st_dir/none"
-  # expect LABEL MEMINFO JOBS EXPLICIT_CAP WANT   (WANT = cap:ceiling:source or REFUSED)
+  printf 'host_config:\n  schema: simple-host-config-v1\n  tree_rss_per_job_mib: 200\n' >"$btr_st_dir/good.sdn"
+  printf 'host_config:\n  schema: simple-host-config-v1\n  tree_rss_per_job_mib: many\n' >"$btr_st_dir/bad.sdn"
+  printf 'host_config:\n  schema: simple-host-config-v1\n  tree_rss_host_pct: 90\n' >"$btr_st_dir/pct.sdn"
+  btr_st_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P) || btr_st_root=
+  # expect LABEL MEMINFO JOBS EXPLICIT_CAP WANT [SETUP]
+  #   WANT = cap:ceiling:bound:source, or REFUSED (a refusal WITH a reason)
+  #   MEMINFO `real` uses the live host and no fixture
   btr_st_expect() {
     btr_st_n=$((btr_st_n + 1))
     btr_st_got=$(
@@ -207,10 +276,17 @@ bootstrap_tree_rss__selftest() {
       unset SIMPLE_HOST_TREE_RSS_BASE_MIB SIMPLE_HOST_TREE_RSS_PER_JOB_MIB SIMPLE_HOST_TREE_RSS_HOST_PCT
       unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
       [ -z "$4" ] || SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$4
+      unset BOOTSTRAP_TREE_RSS_MEMINFO_PATH BOOTSTRAP_TREE_RSS_TEST_FIXTURE SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE
+      SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+      btr_st_use_root=
+      if [ "$2" != real ]; then
+        BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/$2"
+        BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1
+      fi
       [ -z "${6:-}" ] || eval "$6"
-      BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/$2"
-      if bootstrap_tree_rss_resolve "$3" ""; then
-        printf '%s:%s:%s' "$bootstrap_tree_rss_cap_kib" "$bootstrap_tree_rss_ceiling_kib" "$bootstrap_tree_rss_source"
+      [ -z "${SIMPLE_HOST_CONFIG:-}" ] || export SIMPLE_HOST_CONFIG
+      if bootstrap_tree_rss_resolve "$3" "$btr_st_use_root"; then
+        printf '%s:%s:%s:%s' "$bootstrap_tree_rss_cap_kib" "$bootstrap_tree_rss_ceiling_kib" "$bootstrap_tree_rss_bound" "$bootstrap_tree_rss_source"
       else
         [ -n "$bootstrap_tree_rss_refusal" ] && printf REFUSED || printf SILENT-REFUSAL
       fi
@@ -221,35 +297,61 @@ bootstrap_tree_rss__selftest() {
     fi
   }
   # Historical behaviour is unchanged while no worker count is declared.
-  btr_st_expect undeclared-keeps-floor big 0 '' 5859375:6835937:floor
-  btr_st_expect few-jobs-keep-floor big 19 '' 5859375:8126464:floor
+  btr_st_expect undeclared-keeps-floor big 0 '' 5859375:6835937:floor:default
+  btr_st_expect few-jobs-keep-floor big 19 '' 5859375:8126464:floor:default
   # The incident: 80 jobs needs more than the old 6 GB / 7 GB pair.
-  btr_st_expect eighty-jobs-scale big 80 '' 11010048:24117248:per-job-budget
-  btr_st_expect forty-jobs-scale big 40 '' 7077888:13631488:per-job-budget
+  btr_st_expect eighty-jobs-scale big 80 '' 11010048:24117248:budget:default
+  btr_st_expect forty-jobs-scale big 40 '' 7077888:13631488:budget:default
   # Monotone in the worker count.
-  btr_st_expect hard-max-jobs big 128 '' 15728640:36700160:per-job-budget
+  btr_st_expect hard-max-jobs big 128 '' 15728640:36700160:budget:default
   # Host fraction: a 16 GB host never hands half its RAM plus to one tree.
-  btr_st_expect small-host-fraction small 80 '' 8000000:12000000:host-fraction
+  btr_st_expect small-host-fraction small 80 '' 8000000:12000000:host-fraction:default
   # Unknown host RAM is no evidence: nothing widens, cap stays under 7 GB.
-  btr_st_expect unknown-host-fails-closed none 80 '' 6835937:6835937:hard-ceiling
+  btr_st_expect unknown-host-fails-closed none 80 '' 6835937:6835937:hard-ceiling:default
   # Explicit cap: honoured under the ceiling, refused (not clamped) above it.
-  btr_st_expect explicit-under-ceiling big 80 20000000 20000000:24117248:explicit-env
+  btr_st_expect explicit-under-ceiling big 80 20000000 20000000:24117248:explicit:explicit-env
   btr_st_expect explicit-32gib-refused big 80 33554432 REFUSED
   btr_st_expect explicit-over-static-refused big 0 7000000 REFUSED
   btr_st_expect explicit-garbage-refused big 80 lots REFUSED
   # Knob overrides, and their fail-closed validation.
-  btr_st_expect knob-per-job big 80 '' 19529728:24117248:per-job-budget SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=200
-  btr_st_expect knob-host-env big 80 '' 13107200:24117248:per-job-budget SIMPLE_HOST_TREE_RSS_BASE_MIB=5120
-  btr_st_expect knob-runaway-hits-ceiling big 80 '' 24117248:24117248:hard-ceiling 'SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=4096 SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=75'
+  btr_st_expect knob-per-job big 80 '' 19529728:24117248:budget:env-knobs SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=200
+  btr_st_expect knob-host-env big 80 '' 13107200:24117248:budget:env-knobs SIMPLE_HOST_TREE_RSS_BASE_MIB=5120
+  btr_st_expect knob-runaway-hits-ceiling big 80 '' 24117248:24117248:hard-ceiling:env-knobs 'SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=4096 SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=75'
   btr_st_expect knob-pct-over-max-refused big 80 '' REFUSED SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=90
   btr_st_expect knob-garbage-refused big 80 '' REFUSED SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=many
   btr_st_expect jobs-out-of-range-refused big 129 '' REFUSED
+  # Leading zeros: 08/09 used to crash $(( )) and 040 was read as octal 32.
+  btr_st_expect jobs-leading-zero-08 big 08 '' 5859375:6835937:floor:default
+  btr_st_expect jobs-leading-zero-040 big 040 '' 7077888:13631488:budget:default
+  btr_st_expect jobs-leading-zero-0080 big 0080 '' 11010048:24117248:budget:default
+  btr_st_expect jobs-junk-refused big 8x '' REFUSED
+  btr_st_expect jobs-negative-refused big -8 '' REFUSED
+  # The host memory fixture can raise the ceiling, so it is a gated test hook:
+  # refused without its switch, refused while the cap is enforced.
+  btr_st_expect fixture-without-switch-refused big 80 '' REFUSED 'unset BOOTSTRAP_TREE_RSS_TEST_FIXTURE'
+  btr_st_expect fixture-in-enforce-refused big 80 '' REFUSED 'SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce'
+  btr_st_expect fixture-in-default-mode-refused big 80 '' REFUSED 'unset SIMPLE_BOOTSTRAP_RSS_CAP_MODE'
+  # Host config file layer: a valid value is attributed, an invalid one is a
+  # refusal (host-env.shs alone would warn and fall through to the default).
+  if [ -n "$btr_st_root" ] && [ -f "$btr_st_root/scripts/setup/host-env.shs" ]; then
+    btr_st_expect config-file-knob big 80 '' 19529728:24117248:budget:host-config \
+      'SIMPLE_HOST_CONFIG=$btr_st_dir/good.sdn; btr_st_use_root=$btr_st_root'
+    btr_st_expect config-file-garbage-refused big 80 '' REFUSED \
+      'SIMPLE_HOST_CONFIG=$btr_st_dir/bad.sdn; btr_st_use_root=$btr_st_root'
+    btr_st_expect config-file-pct-over-max-refused big 80 '' REFUSED \
+      'SIMPLE_HOST_CONFIG=$btr_st_dir/pct.sdn; btr_st_use_root=$btr_st_root'
+  else
+    echo 'selftest FAIL: host-env.shs not found; config-file fixtures did not run' >&2
+    btr_st_fail=1
+  fi
   # Worker count is read from the command the cap will actually govern.
   btr_st_n=$((btr_st_n + 1))
   [ "$(bootstrap_tree_rss_command_jobs simple native-build --threads 80 -o x)" = 80 ] &&
     [ "$(bootstrap_tree_rss_command_jobs simple native-build --threads=40)" = 40 ] &&
     [ "$(bootstrap_tree_rss_command_jobs simple native-build -o x)" = 0 ] &&
-    [ "$(bootstrap_tree_rss_command_jobs simple --threads many)" = 0 ] || {
+    [ "$(bootstrap_tree_rss_command_jobs simple --threads many)" = 0 ] &&
+    [ "$(bootstrap_tree_rss_command_jobs simple --threads 08)" = 8 ] &&
+    [ "$(bootstrap_tree_rss_command_jobs simple --threads=040)" = 40 ] || {
     echo 'selftest FAIL: command worker count' >&2
     btr_st_fail=1
   }
@@ -268,9 +370,10 @@ case "${0##*/}" in
       --resolve)
         [ "$#" -ge 2 ] || { echo "usage: $0 --resolve JOBS [REPO_ROOT]" >&2; exit 2; }
         if bootstrap_tree_rss_resolve "$2" "${3:-}"; then
-          printf 'cap_kib=%s\nceiling_kib=%s\nhost_total_kib=%s\nsource=%s\n' \
+          printf 'cap_kib=%s\nceiling_kib=%s\nhost_total_kib=%s\nhost_total_source=%s\nsource=%s\nbound=%s\n' \
             "$bootstrap_tree_rss_cap_kib" "$bootstrap_tree_rss_ceiling_kib" \
-            "$bootstrap_tree_rss_host_total_kib" "$bootstrap_tree_rss_source"
+            "$bootstrap_tree_rss_host_total_kib" "$bootstrap_tree_rss_host_total_source" \
+            "$bootstrap_tree_rss_source" "$bootstrap_tree_rss_bound"
         else
           echo "error: $bootstrap_tree_rss_refusal" >&2
           exit 1

@@ -461,12 +461,14 @@ static int parse_supervise(int argc, wchar_t **argv, options *o) {
         else if (!wcscmp(a, L"--max-rss-kib")) {
             /* Policy (the job-scaled ceiling) belongs to the watchdog that
                launches this helper. The mechanism only refuses a cap that
-               could never fire: one at or above host physical memory. */
+               could never fire: one at or above host physical memory, so
+               the largest accepted value is one KiB below it. */
             MEMORYSTATUSEX mem;
             mem.dwLength = sizeof mem;
             if (!GlobalMemoryStatusEx(&mem)) { reject("cannot read host physical memory"); return 0; }
-            if (!parse_u32(v, mem.ullTotalPhys / 1024, &o->max_rss_kib) || !o->max_rss_kib) {
-                fprintf(stderr, "bootstrap-session: --max-rss-kib must be between 1 and host physical memory (%llu KiB)\n",
+            if (mem.ullTotalPhys / 1024 < 2 ||
+                !parse_u32(v, mem.ullTotalPhys / 1024 - 1, &o->max_rss_kib) || !o->max_rss_kib) {
+                fprintf(stderr, "bootstrap-session: --max-rss-kib must be at least 1 and below host physical memory (%llu KiB)\n",
                         (unsigned long long)(mem.ullTotalPhys / 1024));
                 return 0;
             }

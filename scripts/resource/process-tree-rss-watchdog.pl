@@ -27,7 +27,7 @@ my %opt = ( 'max-rss-kib' => 5859375, 'interval-ms' => 100,
 my %explicit;
 while (@ARGV && $ARGV[0] ne '--') {
     my $arg = shift @ARGV;
-    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode|budget-scope|aggregate-workers|compiler-jobs)=(.+)$/
+    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode|budget-scope|aggregate-workers|compiler-jobs|cap-source|cap-bound)=(.+)$/
         or die "rss-guard: invalid option\n";
     my ($key, $value) = ($1, $2);
     $explicit{$key}++ and die "rss-guard: duplicate $key\n";
@@ -74,19 +74,51 @@ my $compiler_jobs = 0;
 my $jobs_reserve_kib = 3145728;
 my $jobs_per_job_ceiling_kib = 262144;
 my $host_total_kib = 0;
+# Where host_total_kib came from: undeclared (no worker count, never read),
+# proc-meminfo, sysctl, unknown (unreadable: the ceiling does not move) or
+# fixture. The receipt records it so a widened ceiling is always attributable.
+my $host_total_source = 'undeclared';
+# Recorded verbatim so a receipt says which policy layer chose the cap.
+for my $key (qw(cap-source cap-bound)) {
+    $opt{$key} //= 'unspecified';
+    $opt{$key} =~ /\A[a-z][a-z-]{0,31}\z/ or die "rss-guard: invalid $key\n";
+}
+sub read_meminfo_total {
+    my ($path) = @_;
+    open(my $fh, '<', $path) or return 0;
+    while (my $line = <$fh>) {
+        return $1 if $line =~ /\AMemTotal:\s+([1-9][0-9]{0,17})\s+kB\s*\z/;
+    }
+    return 0;
+}
+# SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH substitutes host RAM and can therefore
+# raise the hard ceiling. It is a TEST hook only: it needs the explicit
+# SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE=1 switch, it is refused outright while
+# the cap is enforced (a fake host must never size a real limit), and the
+# receipt says host_total_source=fixture. A stray variable is a refusal, not
+# something to ignore: silently falling back would hide a poisoned environment.
 sub host_total_kib {
     my $fixture = $ENV{SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH};
-    if (open(my $fh, '<', $fixture // '/proc/meminfo')) {
-        while (my $line = <$fh>) {
-            return $1 if $line =~ /\AMemTotal:\s+([1-9][0-9]{0,17})\s+kB\s*\z/;
-        }
-        close($fh);
+    if (defined $fixture) {
+        $host_total_source = 'fixture';
+        ($ENV{SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE} // '') eq '1'
+            or refuse_policy('SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH is a test-only host memory fixture' .
+                ' and requires SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE=1');
+        $opt{'rss-cap-mode'} eq 'monitor'
+            or refuse_policy('a host memory fixture is refused while the RSS cap is enforced' .
+                ' (use --rss-cap-mode=monitor in tests)');
+        return read_meminfo_total($fixture);
     }
-    return 0 if defined $fixture;
+    my $total = read_meminfo_total('/proc/meminfo');
+    if ($total) { $host_total_source = 'proc-meminfo'; return $total }
     for my $name (qw(hw.memsize hw.physmem)) {
         my $bytes = `sysctl -n $name 2>/dev/null` // '';
-        return int($1 / 1024) if $bytes =~ /\A([1-9][0-9]{0,18})\s*\z/;
+        if ($bytes =~ /\A([1-9][0-9]{0,18})\s*\z/) {
+            $host_total_source = 'sysctl';
+            return int($1 / 1024);
+        }
     }
+    $host_total_source = 'unknown';
     return 0;
 }
 # A policy refusal happens before any workload exists. Publish the reason to
@@ -96,7 +128,9 @@ sub refuse_policy {
     if (defined $opt{receipt} && open(my $fh, '>', "$opt{receipt}.tmp.$$")) {
         print {$fh} "status=policy-refused\nexit_status=125\nmax_rss_kib=$opt{'max-rss-kib'}\n" .
             "budget_scope=$opt{'budget-scope'}\nbudget_ceiling_kib=$budget_ceiling_kib\n" .
-            "compiler_jobs=$compiler_jobs\nhost_total_kib=$host_total_kib\nrefusal_reason=$reason\n";
+            "compiler_jobs=$compiler_jobs\nhost_total_kib=$host_total_kib\n" .
+            "host_total_source=$host_total_source\n" .
+            "cap_source=$opt{'cap-source'}\ncap_bound=$opt{'cap-bound'}\nrefusal_reason=$reason\n";
         close($fh) && rename("$opt{receipt}.tmp.$$", $opt{receipt});
     }
     print STDERR "rss-guard: $reason\n";
@@ -117,7 +151,8 @@ if ($explicit{'compiler-jobs'}) {
 }
 $opt{'max-rss-kib'} > 0 && $opt{'max-rss-kib'} <= $budget_ceiling_kib
     or refuse_policy("cap $opt{'max-rss-kib'} KiB must be between 1 and $budget_ceiling_kib KiB" .
-        " for $opt{'budget-scope'} (compiler_jobs=$compiler_jobs host_total_kib=$host_total_kib)");
+        " for $opt{'budget-scope'} (compiler_jobs=$compiler_jobs host_total_kib=$host_total_kib" .
+        " host_total_source=$host_total_source)");
 $opt{'interval-ms'} > 0 && $opt{'interval-ms'} <= 100
     or die "rss-guard: sample interval must be between 1 and 100 ms\n";
 # An ENFORCED cap is also the children's shard-admission hint
@@ -1064,6 +1099,8 @@ sub receipt {
         "budget_scope=$opt{'budget-scope'}\nbudget_ceiling_kib=$budget_ceiling_kib\n" .
         "aggregate_workers=" . ($opt{'aggregate-workers'} // 0) . "\n" .
         "compiler_jobs=$compiler_jobs\nhost_total_kib=$host_total_kib\n" .
+        "host_total_source=$host_total_source\n" .
+        "cap_source=$opt{'cap-source'}\ncap_bound=$opt{'cap-bound'}\n" .
         "interval_ms=$opt{'interval-ms'}\nsample_gap_max_ms=$sample_gap_max_ms\n" .
         "observation_budget_ms=$observation_budget_ms\n" .
         "sample_duration_max_ms=$sample_duration_max_ms\nsample_overruns=$sample_overruns\n" .

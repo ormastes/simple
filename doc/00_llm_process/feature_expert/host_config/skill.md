@@ -58,5 +58,9 @@ os, LLVM root/version, gpu) out of scripts and tracked files.
   ceiling (`3 GiB + jobs * 256 MiB`, at most 3/4 of host RAM) lives in
   `scripts/resource/process-tree-rss-watchdog.pl --compiler-jobs` and is not
   a config key. An invalid knob or an over-ceiling explicit cap is refused
-  with a reason, never clamped. Gate:
+  with a reason, never clamped; that includes an invalid value in a config
+  FILE, which `host-env.shs --get` alone would warn about and skip.
+  `tree_rss_host_pct` is range-checked 1..75 in both readers. The host-memory
+  fixture hooks (`*_MEMINFO_PATH`) need `*_TEST_FIXTURE=1` and monitor mode;
+  the receipt records `host_total_source`, `cap_source`, `cap_bound`. Gate:
   `scripts/bootstrap/tests/tree-rss-cap-policy-test.shs`.

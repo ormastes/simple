@@ -2462,6 +2462,8 @@ bootstrap_native_build_main() {
     --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
     --max-rss-kib="${bootstrap_tree_rss_cap_kib}" \
     --compiler-jobs="${selfhost_jobs}" \
+    --cap-source="${bootstrap_tree_rss_source}" \
+    --cap-bound="${bootstrap_tree_rss_bound}" \
     --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
     --receipt="${log_dir}/stage4-native-build.log.rss.env" -- \
   env RUST_LOG="${RUST_LOG:-error}" \

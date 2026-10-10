@@ -9,9 +9,16 @@
 # .../stage2-native-build.log` and `VERDICT ABORTED stage=stage2 exit=2` as the
 # only visible symptoms. This test runs the real policy, the real watchdog and
 # the real transcribed runner.
+#
+# Review finding (same day): the host-memory fixture hooks were honoured in
+# production, so a fake MemTotal raised the hard ceiling of an ENFORCED cap
+# (36,000,000 KiB admitted at 128 jobs) and the receipt showed only the fake
+# number. Section 2b replays that and pins the three-part fix: explicit
+# test-only switch, refusal while enforcing, host_total_source in the receipt.
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 watchdog="$root/scripts/resource/process-tree-rss-watchdog.pl"
+policy="$root/scripts/bootstrap/lib/tree-rss-policy.shs"
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/tree-rss-cap-policy.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT INT TERM
 TMPDIR=$scratch
@@ -21,35 +28,50 @@ unset SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB SIMPLE_BOOTSTRAP_SESSION_ID \
     SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_PROCESS_TREE_RSS_CAP_KIB \
     SIMPLE_BOOTSTRAP_TREE_RSS_BASE_MIB SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB \
     SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_BASE_MIB \
-    SIMPLE_HOST_TREE_RSS_PER_JOB_MIB SIMPLE_HOST_TREE_RSS_HOST_PCT || :
+    SIMPLE_HOST_TREE_RSS_PER_JOB_MIB SIMPLE_HOST_TREE_RSS_HOST_PCT \
+    SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE \
+    BOOTSTRAP_TREE_RSS_MEMINFO_PATH BOOTSTRAP_TREE_RSS_TEST_FIXTURE || :
 checks=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { checks=$((checks + 1)); }
 
 printf 'MemTotal:       134094232 kB\n' >"$scratch/meminfo.big"
+printf 'MemTotal:       999000000 kB\n' >"$scratch/meminfo.fake"
 : >"$scratch/meminfo.none"
 
 # 1. The policy's own fixtures.
-sh "$root/scripts/bootstrap/lib/tree-rss-policy.shs" --selftest >"$scratch/selftest.out" ||
+sh "$policy" --selftest >"$scratch/selftest.out" 2>&1 ||
     fail "policy selftest: $(cat "$scratch/selftest.out")"
 ok
 
-# 2. Watchdog: the hard ceiling is job-scaled, bounded by host RAM, and a
-#    refusal is published to the receipt as well as stderr.
-guard() { # MEMINFO RECEIPT ARGS...
-    guard_meminfo=$1 guard_receipt=$2
-    shift 2
+# 2. Watchdog. guard RECEIPT [ENV=VALUE ...] -- WATCHDOG-ARGS...
+#    The workload exits 7, so 7 means "admitted and executed".
+guard() {
+    guard_receipt=$1
+    shift
+    guard_env=
+    while [ "$1" != -- ]; do guard_env="$guard_env $1"; shift; done
+    shift
     guard_status=0
-    SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH="$scratch/$guard_meminfo" \
-        perl "$watchdog" --receipt="$scratch/$guard_receipt" "$@" -- /bin/sh -c 'exit 7' \
-        >"$scratch/$guard_receipt.out" 2>&1 || guard_status=$?
+    # shellcheck disable=SC2086
+    env $guard_env perl "$watchdog" --receipt="$scratch/$guard_receipt" "$@" -- \
+        /bin/sh -c 'exit 7' >"$scratch/$guard_receipt.out" 2>&1 || guard_status=$?
 }
 field() { sed -n "s/^$2=//p" "$scratch/$1"; }
+fixture() { # NAME -> the two variables a TEST needs to substitute host memory
+    printf 'SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH=%s SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE=1' "$scratch/$1"
+}
 
-guard meminfo.big over.env --compiler-jobs=80 --max-rss-kib=33554432
+# 2a. Job-scaled ceiling and refusal reporting (monitor mode: fixtures are
+#     refused while enforcing, and the ceiling check is mode-independent).
+guard over.env $(fixture meminfo.big) -- --rss-cap-mode=monitor \
+    --compiler-jobs=80 --max-rss-kib=33554432 --cap-source=explicit-env --cap-bound=explicit
 [ "$guard_status" -eq 125 ] || fail "32 GiB cap for 80 jobs: exit $guard_status, want 125"
 [ "$(field over.env status)" = policy-refused ] || fail 'refusal receipt has no status=policy-refused'
 [ "$(field over.env budget_ceiling_kib)" = 24117248 ] || fail "80-job ceiling: $(field over.env budget_ceiling_kib)"
+[ "$(field over.env host_total_source)" = fixture ] || fail 'refusal receipt does not attribute host memory'
+[ "$(field over.env cap_source)" = explicit-env ] && [ "$(field over.env cap_bound)" = explicit ] ||
+    fail 'refusal receipt does not record the cap source'
 case "$(field over.env refusal_reason)" in
     'cap 33554432 KiB must be between 1 and 24117248 KiB'*) ;;
     *) fail "refusal reason missing from receipt: $(field over.env refusal_reason)" ;;
@@ -58,55 +80,130 @@ grep -Fq 'rss-guard: cap 33554432 KiB must be between 1 and 24117248 KiB' "$scra
     fail 'refusal reason missing from stderr'
 ok
 
-guard meminfo.none unknown.env --compiler-jobs=80 --max-rss-kib=11010048
+guard unknown.env $(fixture meminfo.none) -- --rss-cap-mode=monitor \
+    --compiler-jobs=80 --max-rss-kib=11010048
 [ "$guard_status" -eq 125 ] && [ "$(field unknown.env budget_ceiling_kib)" = 6835937 ] ||
-    fail "unknown host RAM must not widen the ceiling (exit $guard_status)"
+    fail "unreadable host RAM must not widen the ceiling (exit $guard_status)"
 ok
 
-guard meminfo.big undeclared.env --max-rss-kib=7000000
-[ "$guard_status" -eq 125 ] && [ "$(field undeclared.env budget_ceiling_kib)" = 6835937 ] ||
+guard undeclared.env -- --max-rss-kib=7000000
+[ "$guard_status" -eq 125 ] && [ "$(field undeclared.env budget_ceiling_kib)" = 6835937 ] &&
+    [ "$(field undeclared.env host_total_source)" = undeclared ] ||
     fail "an undeclared worker count must keep the fixed ceiling (exit $guard_status)"
 ok
 
-guard meminfo.big scope.env --budget-scope=aggregate-tests --aggregate-workers=2 \
+guard scope.env -- --budget-scope=aggregate-tests --aggregate-workers=2 \
     --compiler-jobs=80 --max-rss-kib=7000000
 [ "$guard_status" -ne 0 ] && [ "$guard_status" -ne 7 ] &&
     grep -Fq 'compiler job count requires compiler scope' "$scratch/scope.env.out" ||
     fail 'compiler-jobs must be refused outside compiler scope'
 ok
 
-guard meminfo.big range.env --compiler-jobs=129 --max-rss-kib=5859375
+guard range.env -- --compiler-jobs=129 --max-rss-kib=5859375
 [ "$guard_status" -ne 0 ] && [ "$guard_status" -ne 7 ] ||
     fail 'compiler-jobs above 128 was accepted'
 ok
 
-# The incident's real requirement: an 80-job cap above the old 7 GB ceiling
-# is admitted end to end (on Windows this also crosses the Job Object helper,
-# which used to carry its own fixed 6835937 KiB bound).
-guard meminfo.big admit.env --compiler-jobs=80 --max-rss-kib=11010048
+guard badsource.env -- --max-rss-kib=5859375 --cap-source='Explicit Env'
+[ "$guard_status" -ne 0 ] && [ "$guard_status" -ne 7 ] ||
+    fail 'a malformed --cap-source was accepted'
+ok
+
+# An 80-job cap above the old 7 GB ceiling is admitted end to end (on Windows
+# this also crosses the Job Object helper, which carried its own fixed bound).
+guard admit.env $(fixture meminfo.big) -- --rss-cap-mode=monitor \
+    --compiler-jobs=80 --max-rss-kib=11010048 --cap-source=default --cap-bound=budget
 [ "$guard_status" -eq 7 ] || fail "80-job cap not admitted: exit $guard_status: $(tail -3 "$scratch/admit.env.out")"
 [ "$(field admit.env status)" = complete ] && [ "$(field admit.env compiler_jobs)" = 80 ] &&
-    [ "$(field admit.env rss_limit_kib)" = 11010048 ] || fail 'admitted 80-job receipt is wrong'
+    [ "$(field admit.env max_rss_kib)" = 11010048 ] &&
+    [ "$(field admit.env host_total_source)" = fixture ] &&
+    [ "$(field admit.env cap_source)" = default ] && [ "$(field admit.env cap_bound)" = budget ] ||
+    fail 'admitted 80-job receipt is wrong'
+ok
+
+# 2b. The fixture hook must not be able to size an ENFORCED cap.
+#     (i) the review's exact replay: fake MemTotal, 128 jobs, 36,000,000 KiB.
+guard exploit.env "SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH=$scratch/meminfo.fake" -- \
+    --compiler-jobs=128 --max-rss-kib=36000000
+[ "$guard_status" -eq 125 ] || fail "fixture without its switch: exit $guard_status, want 125"
+[ "$(field exploit.env host_total_source)" = fixture ] &&
+    [ "$(field exploit.env budget_ceiling_kib)" = 6835937 ] ||
+    fail 'unswitched fixture moved the ceiling or was not attributed'
+case "$(field exploit.env refusal_reason)" in
+    *'requires SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE=1'*) ;;
+    *) fail "unswitched fixture refusal has no reason: $(field exploit.env refusal_reason)" ;;
+esac
+ok
+#     (ii) with the switch it is still refused while the cap is enforced,
+#          both by default and when enforce is spelled out.
+for mode in '' --rss-cap-mode=enforce; do
+    guard enforce.env $(fixture meminfo.fake) -- $mode --compiler-jobs=128 --max-rss-kib=36000000
+    [ "$guard_status" -eq 125 ] || fail "fixture under enforce ($mode): exit $guard_status, want 125"
+    [ "$(field enforce.env budget_ceiling_kib)" = 6835937 ] ||
+        fail 'fixture under enforce moved the ceiling'
+    case "$(field enforce.env refusal_reason)" in
+        *'refused while the RSS cap is enforced'*) ;;
+        *) fail "fixture-under-enforce refusal has no reason: $(field enforce.env refusal_reason)" ;;
+    esac
+done
+ok
+#     (iii) the switch alone, with no fixture path, changes nothing: host
+#           memory comes from the real host and is attributed as such.
+guard switchonly.env SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE=1 -- --compiler-jobs=1 --max-rss-kib=5859375
+[ "$guard_status" -eq 7 ] || fail "switch without a fixture path: exit $guard_status"
+case "$(field switchonly.env host_total_source)" in
+    proc-meminfo|sysctl|unknown) ;;
+    *) fail "real host memory is misattributed: $(field switchonly.env host_total_source)" ;;
+esac
+ok
+#     (iv) enforce mode on the REAL host: admitted exactly when the real
+#          ceiling allows it, and the receipt names the real source.
+real=$(sh "$policy" --resolve 80 "") || fail 'policy cannot resolve on this host'
+real_ceiling=$(printf '%s\n' "$real" | sed -n 's/^ceiling_kib=//p')
+real_cap=$(printf '%s\n' "$real" | sed -n 's/^cap_kib=//p')
+guard realhost.env -- --compiler-jobs=80 --max-rss-kib="$real_cap"
+[ "$guard_status" -eq 7 ] || fail "policy cap $real_cap KiB refused by the watchdog on the real host: exit $guard_status"
+[ "$(field realhost.env budget_ceiling_kib)" = "$real_ceiling" ] ||
+    fail "policy ceiling $real_ceiling and watchdog ceiling $(field realhost.env budget_ceiling_kib) disagree"
+[ "$(field realhost.env rss_limit_kib)" = "$real_cap" ] &&
+    [ "$(field realhost.env host_total_source)" != fixture ] ||
+    fail 'enforced real-host receipt is wrong'
 ok
 
 # 3. Transcribed runner: an over-ceiling explicit cap is refused BEFORE
 #    execution with the reason in <log>.refusal and on stderr (it was silent).
 . "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
-runner_status=0
-(
-    BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$scratch/meminfo.big"
-    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=33554432
-    export BOOTSTRAP_TREE_RSS_MEMINFO_PATH SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
-    bootstrap_stage3_run_transcribed "$scratch/transcript" "$root" "$scratch/build.log" \
-        "$scratch" "$scratch" "$PATH" -- /bin/sh -c 'echo executed' native-build --threads 80
-) >"$scratch/runner.out" 2>"$scratch/runner.err" || runner_status=$?
+runner() { # LOG [ENV=VALUE ...]   -> runner_status, <LOG>.out/.err
+    runner_log=$1
+    shift
+    runner_status=0
+    (
+        for runner_assignment in "$@"; do export "$runner_assignment"; done
+        bootstrap_stage3_run_transcribed "$scratch/transcript" "$root" "$scratch/$runner_log" \
+            "$scratch" "$scratch" "$PATH" -- /bin/sh -c 'echo executed' native-build --threads 80
+    ) >"$scratch/$runner_log.out" 2>"$scratch/$runner_log.err" || runner_status=$?
+}
+runner build.log "BOOTSTRAP_TREE_RSS_MEMINFO_PATH=$scratch/meminfo.big" BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1 \
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=33554432
 [ "$runner_status" -ne 0 ] || fail 'over-ceiling cap was not refused by the transcribed runner'
 [ ! -e "$scratch/build.log" ] || fail 'refused run still produced a build log'
-! grep -q executed "$scratch/runner.out" || fail 'refused run executed its command'
+! grep -q executed "$scratch/build.log.out" || fail 'refused run executed its command'
 grep -Fq 'SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=33554432 KiB exceeds the hard ceiling 24117248 KiB for 80 worker(s)' \
     "$scratch/build.log.refusal" || fail "refusal file lacks the reason: $(cat "$scratch/build.log.refusal" 2>/dev/null)"
-grep -Fq 'exceeds the hard ceiling 24117248 KiB' "$scratch/runner.err" ||
+grep -Fq 'exceeds the hard ceiling 24117248 KiB' "$scratch/build.log.err" ||
     fail 'refusal reason missing from runner stderr'
+ok
+# The runner's fixture hook is gated the same way: with enforcement on (the
+# default) a fake host is a refusal with a reason, whether or not switched.
+runner fixture.log "BOOTSTRAP_TREE_RSS_MEMINFO_PATH=$scratch/meminfo.fake" BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1
+[ "$runner_status" -ne 0 ] && [ ! -e "$scratch/fixture.log" ] &&
+    ! grep -q executed "$scratch/fixture.log.out" &&
+    grep -Fq 'refused while the RSS cap is enforced' "$scratch/fixture.log.refusal" ||
+    fail 'runner admitted a host memory fixture under enforcement'
+runner unswitched.log "BOOTSTRAP_TREE_RSS_MEMINFO_PATH=$scratch/meminfo.fake" SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+[ "$runner_status" -ne 0 ] && ! grep -q executed "$scratch/unswitched.log.out" &&
+    grep -Fq 'requires BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1' "$scratch/unswitched.log.refusal" ||
+    fail 'runner admitted an unswitched host memory fixture'
 ok
 
 # 4. The cache report must survive the missing log a refusal leaves behind;

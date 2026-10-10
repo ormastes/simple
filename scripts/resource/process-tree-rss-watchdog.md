@@ -33,15 +33,29 @@ hw.memsize` / `hw.physmem`; when it cannot be read the ceiling does not move.
 The constants are not configurable. The tunable budget that selects the actual
 cap beneath this ceiling is `scripts/bootstrap/lib/tree-rss-policy.shs`
 (`--selftest`, `--resolve JOBS`), driven by host config `tree_rss_base_mib`,
-`tree_rss_per_job_mib` and `tree_rss_host_pct`. The receipt records
-`compiler_jobs` and `host_total_kib`.
+`tree_rss_per_job_mib` and `tree_rss_host_pct` (1..75). The receipt records
+`compiler_jobs`, `host_total_kib`, `host_total_source` (`undeclared`,
+`proc-meminfo`, `sysctl`, `unknown` or `fixture`) and, from the caller's
+`--cap-source` / `--cap-bound`, `cap_source` (`explicit-env`, `env-knobs`,
+`host-config`, `default`) and `cap_bound` (`explicit`, `budget`, `floor`,
+`host-fraction`, `hard-ceiling`).
+
+Host memory decides how far the ceiling may rise, so substituting it is a
+**test-only** hook. `SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH` (watchdog) and
+`BOOTSTRAP_TREE_RSS_MEMINFO_PATH` (shell policy) are honoured only together
+with `SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE=1` / `BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1`
+and only in `monitor` mode. Set without the switch, or while the cap is
+enforced, the fixture is a policy refusal with a reason - never ignored, and
+never able to size a real limit. A fixture run is visible afterwards as
+`host_total_source=fixture`.
 
 A cap outside `1..ceiling` is a **policy refusal**: exit 125, reason on stderr,
 and a receipt with `status=policy-refused` and `refusal_reason=...`, so a
 file-reading stage diagnosis can report why nothing ran. On Windows the Job
 Object helper no longer carries its own fixed 6,835,937 KiB bound (which
 rejected every valid aggregate or job-scaled cap as `invalid --supervise
-options`); it refuses only a cap at or above host physical memory, and says so.
+options`); it refuses only a cap at or above host physical memory (the largest
+accepted value is one KiB below it), and says so.
 
 ## Explicit parallel-test aggregate budget
 
