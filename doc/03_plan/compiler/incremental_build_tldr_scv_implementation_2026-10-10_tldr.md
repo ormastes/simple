@@ -1,24 +1,29 @@
 # Incremental compiler implementation plan — TLDR
 
-All 28 selected requirements and WP0–WP11 remain in scope. Implementation,
-native qualification and the full bootstrap/test objective are incomplete.
+All 28 selected requirements and WP0–WP11 remain in scope. Full native
+bootstrap, compiler test products and measured compiler speedup are incomplete.
 
-- Keep canonical `.tld` headers and exact content/generation/provider admission.
-- Preserve full bootstrap authority on a complete captured source projection.
-- Reuse the existing SCV durable owner, compiler gateway and task scheduler.
-- The index has nine distinct observed structural passes; the topology timeout
-  remains unknown and eleven batch cases are unrun. No native/perf claim.
-- Fifteen SourceEdit semantic cases passed once. Preserve the original
-  controller attribution failure and its retained-only reconciliation.
-- Fix the reviewed cold codec parameter-loss blocker before enabling reuse.
-  Connected IDE/SCV, complete projection and native publication tests remain unrun.
-- Continue independent supported Phase 1 tests, then six real Phase 2 test
-  binaries and Phase 3 tests, alongside remaining Phase 3/4 module/product builds.
-  Qualified Phase 2 test binaries: 0/6. Full Phase 3/4 and speedup are unverified.
-- Request 40 build jobs, record actual admission, reuse valid caches, and retry
-  only changed failures. Do not replay green or closed three-cycle lanes.
-- Source/perf fixes land only after their applicable gates; this is a plan update.
+- Keep canonical `.tld` headers and content/generation/provider authority.
+- Reviewed warm outbox and finite TypeInfo source changes are applied locally;
+  five warm and eight TypeInfo source cases passed. Neither is native-qualified.
+- Windows seed fsync repair passed one actual targeted Rust unit; the frozen
+  seed has not been redeployed and failed SCV cases are not yet resolved.
+- Source evidence includes nine member, eleven batch, fifteen primitive edit,
+  fourteen IDE/SCV and eight raw Git identity passes. Preserve earlier failed
+  gates and unknown topology results; these do not prove complete authority.
+- Buffer batch: five passed, ten failed. Selected Git capture: eight failed at
+  the retained-path provider. Eight new captured-index controls remain unrun.
+- First priorities: actual TLDR semantic/MIR consumer and compile measurements,
+  then six Phase 2 native compiler/interpreter/loader test products: **0/6** qualified.
+- Connect bounded captured-index/working batches and error-distinguishing
+  directory discovery before enabling complete bootstrap projection.
+- Run independent supported Phase 1 tests, Phase 3 vertical stages and Phase 4
+  tools/link sanity tasks where exact compiler admission and resources permit.
+  Request 40 jobs, record actual admission, use valid caches, retry changed failures.
+- No repeated green runs or fourth cycle for closed features. Source/perf
+  publication requires its applicable gates; this PR updates documentation only.
 
-The supplied SIMD/GPU/Sosix design remains unavailable and is not substituted.
-See [implementation plan](incremental_build_tldr_scv_implementation_2026-10-10.md)
+The exact SIMD/GPU/Sosix design is unavailable: coverage and conflicts remain
+NOT_ASSESSED until it is supplied. See the
+[implementation plan](incremental_build_tldr_scv_implementation_2026-10-10.md)
 and [acceptance matrix](../sys_test/incremental_build_tldr_scv_acceptance_2026-10-10.md).
