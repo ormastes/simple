@@ -25,6 +25,12 @@ bootstrap_stage3_resolve_rust_toolchain() {
 }
 export SIMPLE_MANAGED_NATIVE_TOOLS=1 SIMPLE_LLVM_BIN="$fixture/selected"
 unset LLVM_SYS_231_PREFIX SIMPLE_LLVM_WIN_ROOT_23 LLVM_CONFIG LD AR RANLIB
+unset SIMPLE_MANAGED_CROSS_ARCHIVE_INSPECTOR
+# Installed inspector must not change the legacy default inventory.
+bootstrap_stage3_tool_authority_snapshot "$fixture/default" "$fixture/bin" "$root"
+[ "$(grep -c '^managed-tool=' "$fixture/default")" -eq 8 ]
+! grep -q '^managed-tool=llvm-readobj|' "$fixture/default"
+export SIMPLE_MANAGED_CROSS_ARCHIVE_INSPECTOR=1
 bootstrap_stage3_tool_authority_snapshot "$fixture/present" "$fixture/bin" "$root"
 expected=$(bootstrap_stage3_hash_file "$fixture/selected/llvm-readobj")
 grep -Fqx "managed-tool=llvm-readobj|path=$fixture/selected/llvm-readobj|sha256=$expected" "$fixture/present"
@@ -42,7 +48,19 @@ if bootstrap_stage3_tool_authority_snapshot "$fixture/broken" "$fixture/bin" "$r
 fi
 [ ! -e "$fixture/broken" ]
 rm "$fixture/selected/llvm-readobj"
-bootstrap_stage3_tool_authority_snapshot "$fixture/absent" "$fixture/bin" "$root"
-[ "$(grep -c '^managed-tool=' "$fixture/absent")" -eq 8 ]
-! grep -q '^managed-tool=llvm-readobj|' "$fixture/absent"
-echo 'PASS: selected inspector identity, byte mutation, broken probe rejection, legacy eight-role compatibility'
+if bootstrap_stage3_tool_authority_snapshot "$fixture/missing" "$fixture/bin" "$root"; then
+    echo 'FAIL: requested missing inspector admitted' >&2; exit 1
+fi
+[ ! -e "$fixture/missing" ]
+export SIMPLE_MANAGED_CROSS_ARCHIVE_INSPECTOR=invalid
+if bootstrap_stage3_tool_authority_snapshot "$fixture/invalid" "$fixture/bin" "$root"; then
+    echo 'FAIL: invalid inspector option admitted' >&2; exit 1
+fi
+[ ! -e "$fixture/invalid" ]
+export SIMPLE_MANAGED_CROSS_ARCHIVE_INSPECTOR=1
+unset SIMPLE_MANAGED_NATIVE_TOOLS
+if bootstrap_stage3_tool_authority_snapshot "$fixture/unmanaged" "$fixture/bin" "$root"; then
+    echo 'FAIL: inspector request without managed mode admitted' >&2; exit 1
+fi
+[ ! -e "$fixture/unmanaged" ]
+echo 'PASS: cases=7 legacy installed default8, requested identity9, changed hash, broken/missing/invalid/unmanaged rejection'
