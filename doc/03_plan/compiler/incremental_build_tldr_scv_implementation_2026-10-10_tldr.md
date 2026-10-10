@@ -85,3 +85,19 @@ Current acceptance update (supersedes earlier follow-up status):
   single producer/crash recovery, source closure and measured cold/warm latency/RSS.
 - Forty-job independent lanes follow usable native Hello; Phase 2 remains 0/6.
   Seed repair cap reached. Exact SIMD/GPU/Sosix input still missing/NOT_ASSESSED.
+
+
+Reviewed successor checkpoint — 2026-10-11 (supersedes older status):
+
+- Selected-input frontend/cache migration: independently source-reviewed;
+  thirteen controls UNRUN, current shared-baseline rebase required.
+- Canonical Parser: four actual successor controls PASS; module-cache/discovery
+  and pure parity unqualified. Preserve older sixteen passes without replay.
+- Repaired projection prepared: 11,614 files / 101,826,390 bytes; full seed
+  remains at the three-cycle cap, extra cached attempt needs explicit exception.
+- Phase 2 remains 0/6. Forty-job independent lanes follow usable inputs; retain
+  caches, go through independent failures and retry changed failed work only.
+- Remaining gates: shared source authority and parse reuse, single producer and
+  crash recovery, safe edit hooks, source-bound formal evidence, measured cold/warm
+  latency/RSS and modern SSpec regression coverage. No 0.1-second claim.
+- Exact SIMD/GPU/Sosix 2026-10-10 document unavailable; conflicts NOT_ASSESSED.

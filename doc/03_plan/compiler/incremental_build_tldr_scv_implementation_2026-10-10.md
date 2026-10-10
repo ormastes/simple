@@ -484,3 +484,114 @@ NOT_ASSESSED. Obtain that input before recommending a conflicting architecture.
 Existing canonical owners and validated interfaces are preferred over duplicate
 implementations. No complete bootstrap, hooks, formal proof or measured
 0.1-second compilation is claimed.
+
+
+## Reviewed successor plan — 2026-10-11
+
+This checkpoint supersedes earlier implementation status where it conflicts.
+The selected requirements and WP0–WP11 remain unchanged. This documentation
+handoff does not admit the private production patches or qualify a compiler.
+
+| Area | Completed evidence | Remaining work / acceptance |
+|---|---|---|
+| Frontend selected-input initialization | Astra-authored, independently source-reviewed three-owner candidate removes duplicate ambient preprocessing from already-selected frontend input; raw parser APIs and cleanup order retained | Thirteen real-owner controls authored, all UNRUN. Rebase minimally onto current shared owners, whose baselines differ; execute before activation or performance-code publication |
+| Cache migration and hash work | Candidate versions private/shared AST identities so old frames from the two-pass pipeline cannot be reused; folds revision into existing identity work and guards shared hashing when caching is disabled | Prove old-frame rejection, fresh parse, new-frame reuse, target/source changes, disabled-cache work and borrowed lifetime with actual runtime evidence |
+| Canonical conditional parser | Four new actual Parser controls PASS on the canonical successor, repair cycle 2/3 | Whole module-cache control, discovery integration and pure-Simple parity remain UNRUN. Older sixteen passes are preserved history, not successor qualification |
+| Conditional global handling | Lexer-owned checkpoint/skip design and private implementation under review | Repair continuation/masked-boundary handling; preserve pending tokens, raw spans and target mask; use explicit optional root items rather than synthetic nodes or parse-then-drop. Resolve malformed inactive-string policy before activation |
+| Bootstrap source projection | Repaired projection prepared: 11,614 files, 101,826,390 bytes; all old projected files preserved and two missing headers added. Eleven host criteria passed across bounded repair cycles; one canonical C translation unit plus seven headers compiled | Full seed build remains at its three-cycle limit with no final compiler artifact. An additional cached rebuild requires the pending explicit exception, then exact source/tool/recipe admission and native Hello |
+| Phase 2 products | Qualified compiler/interpreter/loader executables for LLVM and Cranelift: 0/6 | Build six real products, enumerate their case counts, sanity-run one case as each becomes ready, then execute all eligible cases and retain failures/skips |
+| Performance / hooks / proof | Source candidates and earlier component evidence exist | No measured 0.1-second isolated compile, full hook implementation, or complete source-bound formal proof is admitted by this checkpoint |
+
+### Implementation order and parallel ownership
+
+1. **Primary scheduler and merge owner:** maintain the existing plan and failure
+   ledger; admit only exact reviewed source/tool inputs. Preserve other sessions'
+   dirty files, index and running processes. Land documentation separately from
+   unverified performance code.
+2. **Astra frontend owner; independent Astra reviewer:** minimally rebase the
+   selected-input candidate onto current owners. Execute its thirteen controls
+   with a compatible provider, without rerunning unchanged green criteria. Keep
+   raw standalone parsing and selected frontend parsing distinct at call sites.
+   Current domain stripping and checked reference advisory preserve the selection
+   contract; a future transforming advisory provider needs an explicit captured-
+   context reselection contract and tests before use.
+3. **Astra conditional owner; independent reviewer:** finish lexer checkpoint
+   integration using the canonical predicate evaluator and target configuration.
+   Test nested continuation, masked boundaries, comments/literals, CRLF/Unicode,
+   unsupported inactive initializers and cache/discovery identity. Audit pure-
+   Simple counterparts whenever a seed defect is repaired. Do not silently choose
+   whether malformed inactive strings should error or retain legacy EOF skipping.
+4. **Astra platform owner; primary admission:** retain the prepared projection
+   and existing owned cache. If the extra seed attempt is authorized, use the
+   same failure ledger and fresh receipts; do not copy another donor or restart
+   the bootstrap from scratch. Capture a final artifact and native Hello before
+   scheduling dependent product builds with it.
+5. **Executable lanes, when their compiler inputs are usable:** run Phase 1
+   eligible tests; Phase 2 six-product build/sanity/test; Phase 3 vertical
+   module-to-object attempts; Phase 4 tools with Phase 2; and small-to-large
+   linking/sanity independently. Request forty jobs per build/test lane and log
+   actual active work, CPU, RSS and waits. Resource bounds and dependencies govern
+   simultaneous admission; requested jobs are not proof of active concurrency.
+   Retain valid caches, try independent work to the end, and retry changed failed
+   items rather than successful items. Do not manufacture downstream success
+   when a prerequisite has no usable artifact.
+
+### Completion gates for the retained design
+
+- **Source/SCV authority:** record source roots and TLDR identity in the captured
+  generation. A modified source or missing captured TLDR is invalid; newer TLDR
+  timestamps and commit membership alone cannot establish validity. Reuse the
+  existing source-change interfaces rather than introducing a second authority.
+- **Parse and artifact reuse:** standalone, BuildRunner and TestRunner use one
+  source-admission interface. Reuse TLDR-generation ASTs for eligible compilation;
+  prove no duplicate parse/build, one producer, bounded waits, failure delivery,
+  crash recovery and target/aspect/config invalidation. Compatible AST sharing
+  across hosts requires explicit format/version and semantic-identity admission.
+- **Edit hooks:** inventory actual SPipe and IDE hooks before marking completion;
+  test crash-safe recovery, missed edits and bounded CLI overhead. Hooks are hints
+  to source authority, not a replacement for content validation.
+- **Measured speed and safety:** benchmark the same small isolated source before
+  and after, excluding background imported-source builds from the reported unit.
+  Report snapshot/startup, compile, link, cold/warm latency and peak RSS separately.
+  The 0.1-second target remains a measured acceptance target, not a promise inferred
+  from cache hits or fewer hashes. Performance fixes must retain semantic and memory
+  controls; memory fixes must retain performance controls.
+- **Formal evidence:** bind the real BuildRunner/compiler source owners and
+  weighted cold/warm work to the model; verify single-producer and invalidation
+  invariants. Abstract model success alone does not prove concrete runtime latency.
+- **Modern SSpec:** trace real owner assertions to the retained requirements,
+  include reproduction and similar-regression cases, and generate mirrored manuals.
+  Unsupported seed cases require explicit environment skips. Temporary commented
+  cases must remain visible failures/debt, never qualifying passes. Workarounds
+  require a bug ID, tag, introducing commit and removal condition tied to an applied,
+  verified fix.
+
+### Design compatibility and outstanding input
+
+The 2026-10-08 incremental-build design is available; its implementation remains
+partial under the gates above. Prefer existing canonical parser/source-admission
+owners and reuse their ASTs instead of adding a competing lightweight parser.
+Keep host/GPU/Sosix policy separate from cache source authority and target identity.
+
+The exact requested `simple_simd_gpu_sosix_variation_final_2026-10-10.md` was not
+found in the checked Downloads location. Its full coverage and conflicts remain
+NOT_ASSESSED. Do not invent its requirements or claim full implementation. When
+available, compare it requirement-by-requirement with the current design, document
+conflicts and recommend the option that preserves canonical interfaces, target
+semantics and measured safety before implementing conflicting changes.
+
+### Evidence locators
+
+Local diagnostic packets are evidence locators, not fresh-clone deliverables:
+
+- Selected-input final source/diagnostic packet:
+  `build/native_probe/phase3-enum-nil-arm-fix-20261010/tldr-local-file-validity/consumer-bridge/warm-candidate/selected-input-init-cut5/`;
+  manifest `61979dc43389084f43620d7d11ca291ae7700bef52ae140b2f01997e988097f0`.
+- Four canonical Parser passes:
+  `build/native_probe/phase3-enum-nil-arm-fix-20261010/tldr-local-file-validity/formal/conditional-canonical-parser-component-cut2/attempt2/RESULT.json`;
+  receipt `2ba0d5e47d5356f6feb11fca6f2d57eaf9746bde4df3db60d2ebdc3e27be0281`.
+- Prepared projection:
+  `build/minimal-native-producer-successor-20261011/source/`;
+  physical manifest `5425587a47e37e512e8546210a53846020bf80304579d4a9be5012f605d63b02`.
+- Landed source-projection report:
+  `doc/08_tracking/bug/bootstrap_source_projection_missing_transitive_header_2026-10-11.md`.
