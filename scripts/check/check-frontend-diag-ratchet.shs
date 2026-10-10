@@ -19,9 +19,15 @@
 # modules the 2026-10-10 baseline was measured on; one `simple check` per
 # module is ~10 s on the seed). `--all` widens to every src/compiler/**.spl.
 #
-# MEASUREMENT: `$SIMPLE_BIN check <file>` per file, rule ids grepped from
-# stdout+stderr. A checker that CRASHES (rc >= 128, or 124 from timeout) is
-# ERROR, never a lower count — absence of a scan is absence of evidence.
+# MEASUREMENT: `$SIMPLE_BIN src/app/check/main.spl <file>` per file (the check
+# WORKER entry, run directly), rule ids grepped from stdout+stderr. NOT
+# `$SIMPLE_BIN check <file>`: the check entry (src/app/cli/check_entry.spl)
+# truncates worker stdout at 12 000 characters, which silently undercounts
+# noisy modules (measured 2026-10-11 on isel_riscv64.spl: 28 W-HIR-INFER-001
+# through the entry, 34 from the worker). Output carrying the entry's
+# truncation marker is ERROR. A checker that CRASHES (rc >= 128, or 124 from
+# timeout) is ERROR, never a lower count — absence of a scan is absence of
+# evidence.
 # Single-file lowering cannot resolve imports, so W-HIR-INFER-001 undercounts
 # here; the driver typecheck pass is the full-closure measurement.
 #
@@ -30,7 +36,7 @@
 #   FAIL  — ...                                                 exit 1
 #   ERROR — nothing was checked (<reason>)                      exit 2
 #
-# --selftest runs 4 fixtures against a fake checker and is fatal; it also
+# --selftest runs 5 fixtures against a fake checker and is fatal; it also
 # runs before every real scan.
 set -u
 
@@ -74,10 +80,13 @@ scan() {
   : > "$_tmp/findings"
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    "$_simple" check "$f" > "$_tmp/one" 2>&1
+    "$_simple" "$_root/src/app/check/main.spl" "$f" > "$_tmp/one" 2>&1
     _rc=$?
     if [ "$_rc" -ge 128 ] || [ "$_rc" -eq 124 ]; then
       rm -rf "$_tmp"; echo "ERROR — nothing was checked (checker crashed rc=$_rc on $f)"; return 2
+    fi
+    if grep -q 'truncated by check entry' "$_tmp/one"; then
+      rm -rf "$_tmp"; echo "ERROR — nothing was checked (checker output truncated on $f; a truncated scan is not a count)"; return 2
     fi
     grep -o "$RULE_RE" "$_tmp/one" | tr -d '[]' >> "$_tmp/findings" || :
   done < "$_tmp/files"
@@ -118,10 +127,14 @@ selftest() {
   # fake checker: a.spl -> one MEXH007 + one W-HIR-INFER-002 ; b.spl -> one MEXH007 ; CRASH_FILE -> segv
   cat > "$_st/bin/fake" <<'EOF'
 #!/bin/sh
+# Invoked through the truncating `check` entry instead of the worker entry:
+# behave like that entry does on a noisy module.
+[ "$1" = "check" ] && { echo "[stdout truncated by check entry]"; exit 0; }
 case "$2" in
   *a.spl) echo "x.spl:1:1: warning: [MEXH007] in \`a\`: m"; echo "x.spl:2:1: warning: [W-HIR-INFER-002] in \`a\`: m" ;;
   *b.spl) echo "x.spl:1:1: warning: [MEXH007] in \`b\`: m" ;;
   *crash.spl) exit 139 ;;
+  *cut.spl) echo "x.spl:1:1: warning: [MEXH007] in \`c\`: m"; echo "[stdout truncated by check entry]" ;;
 esac
 exit 0
 EOF
@@ -142,8 +155,13 @@ EOF
   printf 'src/compiler/crash.spl\n' >> "$_st/root/scripts/check/frontend_diag_scope.txt"
   _r=$(scan "$_st/root" "$_st/bin/fake" "$_counts"); _rc=$?
   case "$_rc:$_r" in 2:ERROR*crashed*) ;; *) echo "ERROR — selftest 4 expected ERROR on crash, got rc=$_rc: $_r"; exit 2 ;; esac
+  # 5. truncated checker output -> ERROR, never the count that survived the cut
+  printf 'fn d() -> i64: 0\n' > "$_st/root/src/compiler/cut.spl"
+  printf 'src/compiler/a.spl\nsrc/compiler/cut.spl\n' > "$_st/root/scripts/check/frontend_diag_scope.txt"
+  _r=$(scan "$_st/root" "$_st/bin/fake" "$_counts"); _rc=$?
+  case "$_rc:$_r" in 2:ERROR*truncated*) ;; *) echo "ERROR — selftest 5 expected ERROR on truncated output, got rc=$_rc: $_r"; exit 2 ;; esac
   rm -rf "$_st"
-  echo "selftest: 4 fixture(s) passed"
+  echo "selftest: 5 fixture(s) passed"
 }
 
 selftest
