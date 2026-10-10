@@ -2,6 +2,12 @@
 
 ## Bootstrap failure collection
 
+For one-thread crash diagnosis, host CUDA policy, RAM cache-parent staging and
+owned-process finality, use [native staging and terminal evidence](../07_guide/tooling/bootstrap_native_staging.md).
+A compile last-line/exit/object-size observation is not an SSpec verdict. Preserve
+actual test counts, stopped bug records, campaign Phase 3 priority and the full
+CLI command-owner gate; authored fixtures remain unexecuted until observed.
+
 For cache-preserving failed-file retries, independent MIR/object collection,
 tagged workarounds and complete-object manual linking, use
 [cached object continuation](../07_guide/tooling/bootstrap_failure_collection.md#cached-object-continuation-and-early-linking).

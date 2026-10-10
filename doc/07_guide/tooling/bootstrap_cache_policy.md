@@ -201,3 +201,11 @@ exists while earlier admission continues. Freeze producer bytes, isolate
 writable caches/outputs, and budget CPU and memory across Windows/Linux lanes.
 Diagnostic scheduling does not change receipt-bound cache admission or permit
 promotion before the required verification succeeds.
+
+## Lexical cache parent and native staging
+
+The [native staging guide](bootstrap_native_staging.md#choose-staging-from-the-actual-producer-path)
+describes a scoped Linux/WSL producer whose object directory follows the lexical
+cache parent, not TMPDIR alone. A reviewed RAM-parent alias may retain the same
+physical cache; it must preserve all normal fingerprints and single-writer
+authority. Storage indirection is not forced cache admission.
