@@ -1,0 +1,154 @@
+"""
+Bounded executable verification of production artifact-service transitions and
+the proposed cold/warm weighted work accounting. This is not a universal Lean
+proof, compiler refinement, runner-death proof, or measured latency result.
+
+The finite source model checks 192 completion inputs and every four-event trace
+over two claimers, two completers and cancellation (625 traces). The cost model
+checks 512 positive bounded configurations. Phase 1 execution remains diagnostic.
+"""
+use std.spec.*
+use lib.compiler_artifact_service.profile.{artifact_service_profile_v1}
+use lib.compiler_artifact_service.protocol.{ArtifactResultV1}
+use lib.compiler_artifact_service.service.{ArtifactServiceV1, ArtifactRequestV1, ArtifactLeaseV1, ArtifactRequestStateV1, artifact_service_enqueue_v1, artifact_service_claim_v1, artifact_service_complete_v1, artifact_service_cancel_v1}
+
+fn bounded_queued_service() -> ArtifactServiceV1:
+    val profile = artifact_service_profile_v1("bounded-build", "compiler-c48", ["parse"], 0, true)
+    artifact_service_enqueue_v1(ArtifactServiceV1(profile, []),
+        ArtifactRequestV1("action-a", "compiler-c48", "snapshot-a", 1, 1024))
+
+fn bounded_completion_inputs() -> i64:
+    val queued = bounded_queued_service()
+    val leased = artifact_service_claim_v1(queued, "owner-a", "lease-a", 7, 2048, -1)
+    var checked: i64 = 0
+    for owner_index in 0..3:
+        for lease_index in 0..2:
+            for generation_index in 0..2:
+                for action_index in 0..2:
+                    for snapshot_index in 0..2:
+                        for success_index in 0..2:
+                            for cancel_index in 0..2:
+                                val owner = if owner_index == 0: "owner-a" else: if owner_index == 1: "owner-old" else: "owner-b"
+                                val lease_id = if lease_index == 0: "lease-a" else: "lease-old"
+                                val generation = if generation_index == 0: 7 else: 6
+                                val action = if action_index == 0: "action-a" else: "action-b"
+                                val snapshot = if snapshot_index == 0: "snapshot-a" else: "snapshot-b"
+                                val success = success_index == 1
+                                val cancelled = cancel_index == 1
+                                val input_lease = ArtifactLeaseV1(lease_id, "action-a", owner, generation, false)
+                                val result = ArtifactResultV1(action, "compiler-c48", snapshot,
+                                    if success: "artifact-a" else: "", [], success, cancelled,
+                                    if success or cancelled: "" else: "compile-failed")
+                                val actual = artifact_service_complete_v1(leased, input_lease, result)
+                                val authorized = owner_index == 0 and lease_index == 0 and generation_index == 0 and action_index == 0
+                                val can_publish = authorized and snapshot_index == 0 and success and not cancelled
+                                val published = actual.entries[0].state == ArtifactRequestStateV1.completed
+                                if published != can_publish: return -1
+                                if not can_publish and actual.entries[0].cas_artifact_digest != "": return -2
+                                if not authorized and actual.entries[0].state != ArtifactRequestStateV1.leased: return -3
+                                checked = checked + 1
+    checked
+
+fn bounded_service_traces() -> i64:
+    val initial = bounded_queued_service()
+    var checked: i64 = 0
+    # Five possible events to depth four: enumerate the complete finite set.
+    for encoded in 0..625:
+        var service = initial
+        var remaining = encoded
+        var build_starts: i64 = 0
+        var publications: i64 = 0
+        for index in 0..4:
+            val event = remaining % 5
+            remaining = remaining / 5
+            val before = service.entries[0].state
+            if event == 0 or event == 1:
+                val owner = if event == 0: "owner-a" else: "owner-b"
+                val lease = if event == 0: "lease-a" else: "lease-b"
+                service = artifact_service_claim_v1(service, owner, lease, 7, 2048, -1)
+            elif event == 2 or event == 3:
+                val owner = if event == 2: "owner-a" else: "owner-b"
+                val lease = if event == 2: "lease-a" else: "lease-b"
+                val result = ArtifactResultV1("action-a", "compiler-c48", "snapshot-a", "artifact-a", [], true, false, "")
+                service = artifact_service_complete_v1(service,
+                    ArtifactLeaseV1(lease, "action-a", owner, 7, false), result)
+            else:
+                service = artifact_service_cancel_v1(service, "action-a")
+            val after = service.entries[0].state
+            if before == ArtifactRequestStateV1.queued and after == ArtifactRequestStateV1.leased:
+                build_starts = build_starts + 1
+            if before != ArtifactRequestStateV1.completed and after == ArtifactRequestStateV1.completed:
+                publications = publications + 1
+            if build_starts > 1 or publications > 1: return -10
+            if publications > build_starts: return -11
+            if before == ArtifactRequestStateV1.completed and after != ArtifactRequestStateV1.completed: return -12
+            if service.entries.len() != 1: return -13
+        checked = checked + 1
+    checked
+
+fn bounded_dead_owner_claim_fixedpoint() -> i64:
+    var service = artifact_service_claim_v1(bounded_queued_service(), "dead-owner", "dead-lease", 7, 2048, -1)
+    for generation in 8..24:
+        service = artifact_service_claim_v1(service, "retry-owner", "retry-lease", generation, 2048, -1)
+        if service.entries[0].state != ArtifactRequestStateV1.leased: return -20
+        if service.entries[0].lease.unwrap().owner_id != "dead-owner": return -21
+        if service.entries[0].lease.unwrap().generation != 7: return -22
+    16
+
+# Counts in order: capture entries, enumeration entries, hash bytes, read bytes,
+# TLDR decode bytes, parse bytes, HIR nodes, MIR nodes, object work, link work,
+# startup work, scheduler steps, receipt entries. Weights are symbolic work
+# units, NOT milliseconds. Invalid or oversized domains fail closed.
+fn bounded_weighted_cost(counts: [i64], weights: [i64]) -> i64:
+    if counts.len() != 13 or weights.len() != 13: return -1
+    var result: i64 = 0
+    for index in 0..13:
+        if counts[index] < 0 or counts[index] > 1000000: return -2
+        if weights[index] < 0 or weights[index] > 1000000: return -3
+        result = result + counts[index] * weights[index]
+    result
+
+fn bounded_weighted_cold_warm() -> i64:
+    var checked: i64 = 0
+    for weight in 1..9:
+        val weights = [weight, weight + 1, weight + 2, weight + 3,
+            weight + 4, weight + 5, weight + 6, weight + 7, weight + 8,
+            weight + 9, weight + 10, weight + 11, weight + 12]
+        for entries in 1..17:
+            val bytes = entries * 32
+            for targets in 1..5:
+                val cold = [entries, entries, bytes, bytes, 0, bytes, entries,
+                    entries, targets, 1, 1, targets, entries]
+                val duplicate_parse = [entries, entries, bytes, bytes, 0, bytes * 2, entries,
+                    entries, targets, 1, 1, targets, entries]
+                val per_target_scan = [entries, entries * targets, bytes, bytes, 0, bytes, entries,
+                    entries, targets, 1, 1, targets, entries]
+                # An admitted immutable no-change generation: cache decode is
+                # charged, while no new source parse/enumeration is prescribed.
+                val warm = [0, 0, 0, 0, entries * 8, 0, 0, 0, 0, 0, 1, targets, 0]
+                val cold_cost = bounded_weighted_cost(cold, weights)
+                val warm_cost = bounded_weighted_cost(warm, weights)
+                if cold_cost < bytes * weights[3]: return -30
+                if bounded_weighted_cost(duplicate_parse, weights) - cold_cost != bytes * weights[5]: return -31
+                if bounded_weighted_cost(per_target_scan, weights) - cold_cost != entries * (targets - 1) * weights[1]: return -32
+                if warm_cost != entries * 8 * weights[4] + weights[10] + targets * weights[11]: return -33
+                checked = checked + 1
+    checked
+
+describe "REQ-FORMAL-BOUNDED: build-cache finite state and work model":
+    it "should check every completion in the declared 192-case source domain":
+        step("Enumerate action, owner, lease, generation, snapshot and result states")
+        expect(bounded_completion_inputs()).to_equal(192)
+
+    it "should permit at most one start and publication on every four-event production trace":
+        step("Enumerate all 625 claim, completion and cancellation traces")
+        expect(bounded_service_traces()).to_equal(625)
+
+    it "should expose the missing reclaim transition rather than promise unconditional progress":
+        step("Retry a leased action after the owner stops completing")
+        expect(bounded_dead_owner_claim_fixedpoint()).to_equal(16)
+
+    it "should separate cold byte cost, duplicate parse cost and warm decode cost":
+        step("Check 512 bounded weighted cold and warm configurations")
+        expect(bounded_weighted_cold_warm()).to_equal(512)
+        expect(bounded_weighted_cost([], [])).to_equal(-1)

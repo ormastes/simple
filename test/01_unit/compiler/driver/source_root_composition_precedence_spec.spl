@@ -1,0 +1,94 @@
+use std.spec
+use std.spec.step
+use compiler.driver.driver_source_loading.{_driver_resolve_source_root_entry_import_v1}
+use compiler.common.source_root_resolution.{SourceRootResolutionV1, source_root_resolution_with_fallback_v1}
+
+fn resolved_path(result: SourceRootResolutionV1) -> text:
+    match result:
+        case SourceRootResolutionV1.Found(path): path
+        case SourceRootResolutionV1.Missing: "MISSING"
+        case SourceRootResolutionV1.Ambiguous(_): "AMBIGUOUS"
+
+fn forbidden_checkout_fallback(module_path: text, entry_dir: text) -> text:
+    assert(false)
+    ""
+
+fn default_checkout_fallback(module_path: text, entry_dir: text) -> text:
+    "checkout/default.spl"
+
+describe "source root composition precedence":
+    it "selects the disabled CUDA source before the default static module":
+        step("resolve the selected logical module against ordered explicit roots")
+        val path = _driver_resolve_source_root_entry_import_v1(
+            "plugins.backend_registry.selected_cuda_backend",
+            ["src/compositions/cuda_disabled", "src/plugins"])
+        expect(resolved_path(path)).to_equal("src/compositions/cuda_disabled/plugins/backend_registry/selected_cuda_backend.spl")
+
+    it "preserves K1 composition precedence over its fail-closed facade":
+        step("resolve the same K1 overlay contract used by bootstrap")
+        val path = _driver_resolve_source_root_entry_import_v1(
+            "compiler.driver.bootstrap_k1_selected",
+            ["src/compositions/kernel_llvm", "src/compiler"])
+        expect(resolved_path(path)).to_equal("src/compositions/kernel_llvm/compiler/driver/bootstrap_k1_selected.spl")
+
+    it "resolves normal numbered roots and honors the first selected overlay":
+        step("retain ordinary source resolution and deterministic root order")
+        expect(resolved_path(_driver_resolve_source_root_entry_import_v1(
+            "compiler.common.cuda_backend_policy", ["src/compiler"]))).to_equal(
+            "src/compiler/00.common/cuda_backend_policy.spl")
+        expect(resolved_path(_driver_resolve_source_root_entry_import_v1(
+            "plugins.backend_registry.selected_cuda_backend",
+            ["src/compositions/cuda_dynamic", "src/compositions/cuda_disabled"]))).to_equal(
+            "src/compositions/cuda_dynamic/plugins/backend_registry/selected_cuda_backend.spl")
+
+    it "does not reinterpret relative imports as composition-owned modules":
+        step("leave relative resolution with the importing file")
+        expect(resolved_path(_driver_resolve_source_root_entry_import_v1(
+            ".selected_cuda_backend", ["src/compositions/cuda_disabled"]))).to_equal("MISSING")
+
+    it "keeps ambiguous numbered module directories unresolved":
+        step("refuse competing numbered owners rather than picking directory order")
+        expect(resolved_path(_driver_resolve_source_root_entry_import_v1("ambiguous.owner",
+            ["test/fixtures/compiler/composition_roots"]))).to_equal("AMBIGUOUS")
+
+    it "resolves named-import suffixes within the selected root":
+        step("retain overlay ownership when a use names a terminal function")
+        expect(resolved_path(_driver_resolve_source_root_entry_import_v1(
+            "plugins.backend_registry.selected_cuda_backend.selected_cuda_backend_mode_v1",
+            ["src/compositions/cuda_disabled/", "src/plugins"]))).to_equal(
+            "src/compositions/cuda_disabled/plugins/backend_registry/selected_cuda_backend.spl")
+
+    it "rejects an ambiguous CUDA overlay before a valid default root":
+        step("keep ambiguity distinct from missing while probing later roots")
+        val selected = _driver_resolve_source_root_entry_import_v1(
+            "plugins.backend_registry.selected_cuda_backend",
+            ["test/fixtures/compiler/ambiguous_composition_overlay", "src/plugins"])
+        expect(resolved_path(selected)).to_equal("AMBIGUOUS")
+        step("run the pipeline fallback owner without invoking checkout resolution")
+        val pipeline_result = source_root_resolution_with_fallback_v1(selected,
+            "plugins.backend_registry.selected_cuda_backend", "src/app/cli", forbidden_checkout_fallback)
+        expect(resolved_path(pipeline_result)).to_equal("AMBIGUOUS")
+
+    it "rejects an ambiguous K1 overlay before a valid default root":
+        step("apply the same authority rejection to K1 composition")
+        val selected = _driver_resolve_source_root_entry_import_v1(
+            "compiler.driver.bootstrap_k1_selected",
+            ["test/fixtures/compiler/ambiguous_composition_overlay", "src/compiler"])
+        expect(resolved_path(selected)).to_equal("AMBIGUOUS")
+        expect(resolved_path(source_root_resolution_with_fallback_v1(selected,
+            "compiler.driver.bootstrap_k1_selected", "src/app/cli", forbidden_checkout_fallback))).to_equal("AMBIGUOUS")
+
+    it "allows checkout fallback only for a missing selected module":
+        step("preserve the normal no-overlay fallback path")
+        val missing = _driver_resolve_source_root_entry_import_v1("missing.module", [])
+        val selected = source_root_resolution_with_fallback_v1(missing,
+            "missing.module", "src/app/cli", default_checkout_fallback)
+        expect(resolved_path(selected)).to_equal("checkout/default.spl")
+
+    it "preserves exact directories ahead of numbered alternatives":
+        step("resolve an exact module without consulting its ambiguous numbered siblings")
+        val selected = _driver_resolve_source_root_entry_import_v1(
+            "compiler.driver.bootstrap_k1_selected",
+            ["test/fixtures/compiler/exact_composition_overlay"])
+        expect(resolved_path(selected)).to_equal(
+            "test/fixtures/compiler/exact_composition_overlay/compiler/driver/bootstrap_k1_selected.spl")

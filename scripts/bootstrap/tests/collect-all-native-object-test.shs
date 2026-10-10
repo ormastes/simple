@@ -1,0 +1,65 @@
+#!/bin/sh
+# Real compiler diagnostic gate; not manager authority or compiler qualification.
+set -eu
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+compiler=${1:?pass an explicitly selected pure-Simple bootstrap compiler}
+[ -x "$compiler" ] && [ ! -L "$compiler" ] || exit 2
+cd "$repo_root"
+evidence=$(mktemp -d "$repo_root/build/native_probe/collect-all-native.XXXXXX")
+printf 'evidence=%s\nproducer_sha256=%s\n' "$evidence" "$(sha256sum "$compiler" | cut -d ' ' -f 1)"
+# A tiny isolated checkout makes cold SCV admission bounded and prevents the
+# containing repository's unrelated files from dominating this regression.
+checkout="$evidence/checkout"
+mkdir -p "$checkout/test/fixtures/bootstrap_builder/collect_all" "$checkout/src/app/bootstrap_builder"
+cp "$repo_root/src/app/bootstrap_builder/compiler_admission_diagnostic.spl" "$checkout/src/app/bootstrap_builder/"
+cp "$repo_root/test/fixtures/bootstrap_builder/collect_all/"*.spl "$checkout/test/fixtures/bootstrap_builder/collect_all/"
+git init -q "$checkout"
+git -C "$checkout" add src test
+git -C "$checkout" -c user.name='Bootstrap fixture' -c user.email='fixture@invalid' commit -qm fixture
+cd "$checkout"
+module_inventory="$evidence/inventory"
+printf '%s\n' test/fixtures/bootstrap_builder/collect_all/broken.spl \
+  test/fixtures/bootstrap_builder/collect_all/good.spl >"$module_inventory"
+statuses="$evidence/outcomes.tsv"
+: >"$statuses"
+. "$repo_root/scripts/bootstrap/lib/managed-task-schedule.shs"
+build_binary() (
+  id=$1 entry=$2 output=$3 phase=$4 backend=$5
+  [ "$6" = object ] || exit 2
+  job="$evidence/$phase/$id"
+  mkdir -p "$job/bin" "$job/cache"
+  code=0
+  cold=0
+  [ -f "$checkout/build/scv/source-inventory/CURRENT" ] || cold=1
+  timeout 45s env SIMPLE_SCV_INVENTORY_COLD_INIT="$cold" SIMPLE_NO_STUB_FALLBACK=1 "$compiler" native-build \
+    --source "$entry" --entry "$entry" --entry-closure --target "$target" \
+    --backend "$backend" --threads 1 --emit-object --cache-dir "$job/cache" \
+    --output "$job/$output" >"$job/compiler.log" 2>&1 || code=$?
+  if grep -Eq '^(error: )?SCV-E-ADMISSION:([[:space:]]|$)' "$job/compiler.log"; then exit 2; fi
+  case "$code" in
+    0) ;;
+    1) grep -q '^error: parse error in ' "$job/compiler.log" || exit 2; exit 1 ;;
+    *) exit 2 ;;
+  esac
+  perl -I "$repo_root/scripts/bootstrap/lib" -MBootstrapNativeImage=verify_native_object \
+    -e 'verify_native_object(@ARGV)' "$job/$output" "$target" || exit 1
+)
+for phase in phase3 phase4; do
+  case "$phase" in phase3) target=x86_64-unknown-linux-gnu ;; phase4) target=aarch64-unknown-linux-gnu ;; esac
+  managed_failed=0
+  managed_attempt_objects "$phase" llvm
+  [ "$managed_failed" -eq 1 ]
+  awk -F '\t' -v phase="$phase" '
+    $1==phase "_llvm_diagnostic-module-1" && $2=="FAILED" {failed++}
+    $1==phase "_llvm_diagnostic-module-2" && $2=="SUCCEEDED" {good++}
+    END {exit !(failed==1 && good==1)}' "$statuses"
+  [ ! -e "$evidence/$phase/diagnostic-module-1/bin/module.o" ]
+done
+# Target mismatch and a malformed target must not be accepted as object proof.
+if perl -I "$repo_root/scripts/bootstrap/lib" -MBootstrapNativeImage=verify_native_object \
+    -e 'verify_native_object(@ARGV)' "$evidence/phase4/diagnostic-module-2/bin/module.o" \
+    x86_64-unknown-linux-gnu >"$evidence/wrong-target.log" 2>&1; then exit 1; fi
+if perl -I "$repo_root/scripts/bootstrap/lib" -MBootstrapNativeImage=verify_native_object \
+    -e 'verify_native_object(undef, $ARGV[0])' unknown-unknown-unknown \
+    >"$evidence/invalid-target.log" 2>&1; then exit 1; fi
+printf '%s\n' 'PASS: both phases retain first failure and emit the later target ELF object; no phase success'
