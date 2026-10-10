@@ -482,8 +482,8 @@ impl CompilerDriver:
                     var lowered_entry: MirModule = MirModule(name: name_direct, functions: {}, statics: {}, constants: {}, types: {})
                     if ice_message == "":
                         direct_lowering.symbols = direct_hir.symbols
-                        # Per-module transient scope. The lowering arena for one
                         val devirt_before: i64 = direct_lowering.devirtualized_calls
+                        # Per-module transient scope. The lowering arena for one
                         # module is dead once its MirModule exists; without this
                         # every intermediate stays registered for the life of the
                         # process (the compiler's own immortal heap). See
@@ -501,6 +501,10 @@ impl CompilerDriver:
                         else:
                             lowered_entry = scoped_entry.unwrap()
                             lowered_entry.name = name_direct
+                            # The module was lowered and left in order: close its
+                            # breadcrumb BEFORE the E-MONO-038 check, so that
+                            # orderly `return false` never leaves a `start` open
+                            # for the parent to read as a dead worker.
                             ice_boundary_module_done(name_direct, "mir_lower")
                             # Verifier-side twin of driver_trait_devirtualization_allowed_v1:
                             # a module bound for a package archive must carry NO
@@ -606,7 +610,6 @@ impl CompilerDriver:
                 val typed_hir_module: HirModule = hir_module
                 val name = typed_hir_module.name
                 # Per-module transient scope -- same mechanism and escape-set
-                val fallback_devirt_before: i64 = lowering.devirtualized_calls
                 # proof as the --entry-closure loop above
                 # (lower_module_transient_scoped, module_lowering.spl:1213).
                 # `lower_module_transient_scoped` itself checks
@@ -621,6 +624,7 @@ impl CompilerDriver:
                     if not _driver_mir_ice_continue(self.ctx, name, typed_hir_module.path, ice_gate, ice_message_arena_aborted(ice_gate)):
                         return false
                     continue
+                val fallback_devirt_before: i64 = lowering.devirtualized_calls
                 val scoped_fallback = lowering.lower_module_transient_scoped(hir_module, self.ctx.hir_modules.values())
                 if scoped_fallback.is_err():
                     # Arena already aborted: record and return, never continue.
@@ -628,6 +632,8 @@ impl CompilerDriver:
                     val _ice_stop = _driver_mir_ice_continue(self.ctx, name, typed_hir_module.path,
                         "MIR lowering transient scope failed for {name}: {scoped_fallback.unwrap_err()}", true)
                     return false
+                # Closed BEFORE the E-MONO-038 check below, so that orderly
+                # `return false` leaves no open `start` breadcrumb.
                 ice_boundary_module_done(name, "mir_lower")
                 var mir_module: MirModule = scoped_fallback.unwrap()
                 mir_module.name = name

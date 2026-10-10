@@ -14,7 +14,7 @@ Two tiers, kept apart on purpose:
 # @cover src/compiler/80.driver/driver_ice_boundary.spl
 # @cover src/compiler/80.driver/driver_pipeline_lowering.spl
 use std.spec.*
-use std.io_runtime.{env_set, env_get_opt, file_exists, file_read_nullable, file_read, dir_exists}
+use std.io_runtime.{env_set, env_get_opt, file_exists, file_read_nullable, file_read, dir_exists, dir_list, dir_create_all, file_append_text, time_now_unix_micros}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_pipeline_lowering.*
 use compiler.driver.driver_ice_boundary.*
@@ -111,6 +111,11 @@ describe "per-module ICE boundary":
 
         val summary = ice_boundary_finalize()
         expect(summary).to_start_with("1 module(s) failed with ICE: mod.bad (mir_lower, caught)")
+        # The merged receipt is the owner's to write; a worker's call writes nothing.
+        expect(ice_boundary_merge_receipt(false)).to_equal("")
+        expect(file_exists(ice_receipt_path())).to_equal(false)
+        expect(ice_boundary_merge_receipt(true)).to_start_with("1 module(s) failed with ICE: mod.bad")
+        expect(ice_spec_receipt()).to_contain("ice_v1\tkind=caught\tphase=mir_lower\tmodule=mod.bad")
         expect(ice_spec_receipt()).to_contain("ice_summary_v1\tfailed=1\tcaught=1\tattributed=0\tmodules=mod.bad")
 
     it "the build result is a failure whose message is the N-modules-failed summary":
@@ -405,6 +410,93 @@ describe "dead-worker attribution":
         expect(parsed[0].source_path).to_equal("a\\b.spl")
         expect(parsed[0].backend).to_equal("cranelift")
 
+describe "orderly failures, concurrent writers and old run directories":
+    it "an E-MONO-038-style orderly return after a successful lowering leaves no open start":
+        # Release's post-mono check (E-MONO-038) returns false AFTER a module
+        # lowered successfully. The breadcrumb must already be closed there, or
+        # the parent would read the open `start` as a dead worker.
+        val lowering = file_read("src/compiler/80.driver/driver_pipeline_lowering.spl")
+        val direct_done = lowering.index_of("ice_boundary_module_done(name_direct, \"mir_lower\")")
+        val direct_check = lowering.index_of("name_direct, direct_lowering.devirtualized_calls - devirt_before")
+        val fallback_done = lowering.index_of("ice_boundary_module_done(name, \"mir_lower\")")
+        val fallback_check = lowering.index_of("name, lowering.devirtualized_calls - fallback_devirt_before")
+        expect(direct_done > 0).to_equal(true)
+        expect(direct_check > direct_done).to_equal(true)
+        expect(fallback_done > direct_check).to_equal(true)
+        expect(fallback_check > fallback_done).to_equal(true)
+        # What that order buys, on the real store: start, done, then an
+        # orderly non-zero exit -> nothing in flight, nothing attributed.
+        ice_spec_env("mono038", "", "", "")
+        expect(ice_boundary_module_start("mod.devirt", "d.spl", "mir_lower", "")).to_equal("")
+        ice_boundary_module_done("mod.devirt", "mir_lower")
+        expect(ice_boundary_dead_worker_modules().len()).to_equal(0)
+        expect(ice_boundary_attribute_dead_worker(1).len()).to_equal(0)
+        expect(ice_records_read().len()).to_equal(0)
+        # The wrong order (return before done) is exactly a false dead worker.
+        expect(ice_boundary_module_start("mod.devirt2", "d2.spl", "mir_lower", "")).to_equal("")
+        expect(ice_boundary_dead_worker_modules().len()).to_equal(1)
+        ice_boundary_module_done("mod.devirt2", "mir_lower")
+
+    it "two processes record into separate files and the owner merges them":
+        # This process and a real child process each fail one module in the
+        # same run directory. Neither appends to a file the other writes.
+        ice_spec_env("parts", "", "mod.bad", "")
+        val own_line = ice_boundary_fail("mod.parent_side", "p.spl", "codegen", "llvm", "parent-side failure")
+        expect(own_line).to_contain("ICE[codegen] module mod.parent_side (caught)")
+        val (child_out, child_err, child_code) = process_run_timeout_live(resolve_simple_binary(),
+            ["run", "test/fixtures/ice_boundary/ice_worker_fixture.spl"], 300000)
+        env_set("SIMPLE_ICE_INJECT_MODULE", "")
+        expect(child_code == 0).to_equal(false)
+        expect(child_out).to_contain("compiled mod.gamma")
+        var part_files = 0
+        for entry in dir_list(ice_boundary_dir()):
+            if entry.ends_with(".part"):
+                part_files = part_files + 1
+        expect(part_files).to_equal(2)
+        expect(ice_records_read().len()).to_equal(2)
+        expect(ice_boundary_merge_receipt(true)).to_start_with("2 module(s) failed with ICE: ")
+        expect(ice_spec_receipt()).to_contain("module=mod.parent_side")
+        expect(ice_spec_receipt()).to_contain("module=mod.bad")
+        expect(ice_spec_receipt()).to_contain("ice_summary_v1\tfailed=2\tcaught=2\tattributed=0")
+        # Merging again rewrites the file from the parts; rows are not doubled.
+        expect(ice_boundary_merge_receipt(true)).to_start_with("2 module(s) failed with ICE: ")
+        expect(ice_record_parse_lines(ice_spec_receipt()).len()).to_equal(2)
+
+    it "a claim prunes run directories of long-dead owners, and only those":
+        val day = 86400
+        expect(ice_owner_marker_stale("4242\n1000\n", 1000 + day + 1, false)).to_equal(true)
+        expect(ice_owner_marker_stale("4242\n1000\n", 1000 + day + 1, true)).to_equal(false)
+        expect(ice_owner_marker_stale("4242\n1000\n", 1000 + day - 1, false)).to_equal(false)
+        expect(ice_owner_marker_stale("garbage", 1000 + day + 1, false)).to_equal(false)
+        expect(ice_owner_marker_stale("", 1000 + day + 1, false)).to_equal(false)
+
+        val root = "build/test_ice_boundary/prune_root"
+        val now_seconds = time_now_unix_micros() / 1000000
+        # old: owner pid not running, created long ago, holds a kept receipt
+        dir_create_all(root + "/999999991_old")
+        file_append_text(root + "/999999991_old/ice_owner", "999999991\n1000\n")
+        file_append_text(root + "/999999991_old/ice_receipt.tsv", "ice_v1\tkind=caught\n")
+        file_append_text(root + "/999999991_old/ice_receipt.999999991.part", "ice_v1\tkind=caught\n")
+        # fresh: same dead pid, but created just now
+        dir_create_all(root + "/999999992_fresh")
+        file_append_text(root + "/999999992_fresh/ice_owner", "999999992\n{now_seconds}\n")
+        # foreign: no owner marker -- not ours to judge
+        dir_create_all(root + "/foreign")
+        file_append_text(root + "/foreign/keep.txt", "x\n")
+
+        ice_spec_env("prune", "", "", "")
+        env_set("SIMPLE_ICE_ROOT", root)
+        env_set("SIMPLE_ICE_DIR", "")
+        expect(ice_boundary_claim_run("out/prune.exe")).to_equal(true)
+        expect(dir_exists(root + "/999999991_old")).to_equal(false)
+        expect(dir_exists(root + "/999999992_fresh")).to_equal(true)
+        expect(file_exists(root + "/foreign/keep.txt")).to_equal(true)
+        # the new owner left its own marker, and a second prune removes nothing
+        expect(file_exists(ice_boundary_dir() + "/ice_owner")).to_equal(true)
+        expect(ice_boundary_prune_dead_runs(root)).to_equal(0)
+        ice_boundary_release_run(true)
+        env_set("SIMPLE_ICE_ROOT", "")
+
 describe "ICE boundary wiring":
     it "wraps per-module codegen and the parent worker launch":
         val codegen = file_read("src/compiler/80.driver/driver_aot_native_output.spl")
@@ -416,5 +508,6 @@ describe "ICE boundary wiring":
         expect(parent).to_contain("native_build_relaunch_past_ice_crashes(")
         expect(parent).to_contain("ice_boundary_claim_run(requested_output)")
         expect(parent).to_contain("ice_boundary_release_run(ice_owned)")
+        expect(parent).to_contain("ice_boundary_merge_receipt(ice_owned)")
         val aot = file_read("src/compiler/80.driver/driver_aot_pipeline.spl")
         expect(aot).to_contain("val ice_summary = ice_boundary_finalize()")

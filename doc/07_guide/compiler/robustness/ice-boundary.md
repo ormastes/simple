@@ -43,7 +43,12 @@ The boundary works only inside a run directory, named by `SIMPLE_ICE_DIR`.
 - The native-build parent (`run_native_build_worker`) is the only owner. It
   creates `build/ice/<pid>_<hash of output path>/`, exports it to its worker,
   empties it before each worker launch and removes it after a clean build.
-- A worker only appends. It never resets or deletes.
+- A worker only appends, and only to files named after its own pid. It never
+  resets or deletes.
+- At claim time the owner also prunes old run directories under the same root:
+  only those with an `ice_owner` marker older than a day whose owner pid is not
+  running, at most 64 entries examined per claim. Directories without a marker
+  are never touched.
 - A process that was handed no directory does no boundary work: JIT, plain
   `compile`, and the in-process single-file native-build route behave exactly
   as before.
@@ -57,9 +62,16 @@ the `build/ice` root.
 - `ice_breadcrumbs.<pid>.log` — one file per writing process. `start` is
   appended before each module and `done` after it. A `start` with no `done`
   after the worker has exited is a module it died in.
-- `ice_receipt.tsv` — written only when a module failed. One tab-separated
-  row per failed module, then one summary row. A directory with a receipt is
-  kept as evidence.
+- `ice_receipt.<pid>.part` — the rows one process recorded. Several processes
+  in one build (for example grouped children) never share an append target.
+- `ice_receipt.tsv` — written by the owner after the workers have exited, only
+  when a module failed: every part's rows, then one summary row. A directory
+  with a receipt is kept as evidence until a later claim prunes it.
+- `ice_owner` — owner pid and creation time, used for pruning.
+
+An orderly failure that is not an ICE (for example release's `E-MONO-038`
+check after a successful lowering) closes the module's breadcrumb first, so it
+is never reported as a dead worker.
 
 ```
 ice_v1	kind=caught	phase=mir_lower	module=mod.bad	path=src/mod/bad.spl	function=	backend=	message=...

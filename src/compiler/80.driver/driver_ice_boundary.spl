@@ -28,14 +28,15 @@
 #
 # The store is files, not CompileContext fields: a record must survive the
 # death of the process that wrote it, and the parent has to read what a child
-# wrote. Breadcrumbs are one file per writing pid, so concurrent writers never
-# share an append target; the receipt has one writer at a time (the worker,
-# then the parent after the worker has exited).
+# wrote. Every process appends only to files named after its own pid
+# (`ice_breadcrumbs.<pid>.log`, `ice_receipt.<pid>.part`), so concurrent
+# writers -- e.g. grouped child processes -- never share an append target. The
+# owner merges the parts into `ice_receipt.tsv` once the workers have exited.
 #
 # Deliberately dependency-light (same rule as driver_pass_receipt.spl): only
 # std.io_runtime, so calling it from a lowering loop adds no module graph.
 
-use std.io_runtime.{env_get_opt, env_set, file_append_text, file_delete, file_exists, file_read_nullable, dir_create_all, dir_list, dir_remove, hash_text, getpid, exit}
+use std.io_runtime.{env_get_opt, env_set, file_append_text, file_delete, file_exists, file_read_nullable, dir_create_all, dir_list, dir_remove, hash_text, getpid, exit, process_is_running, time_now_unix_micros}
 
 fn ice_attributed_prefix() -> text:
     "worker died inside this module"
@@ -94,23 +95,45 @@ fn ice_boundary_keep_going() -> bool:
 # ---------------------------------------------------------------------------
 
 fn ice_receipt_path() -> text:
+    """The merged receipt, written by the owner (`ice_boundary_merge_receipt`)."""
     ice_boundary_dir() + "/ice_receipt.tsv"
+
+fn _ice_receipt_part_path() -> text:
+    # This process's own receipt rows.
+    ice_boundary_dir() + "/ice_receipt.{getpid()}.part"
 
 fn ice_breadcrumb_path() -> text:
     """This process's own breadcrumb file."""
     ice_boundary_dir() + "/ice_breadcrumbs.{getpid()}.log"
 
-fn _ice_breadcrumb_files() -> [text]:
-    # Every writer's breadcrumb file in this run directory.
+fn _ice_files_in(dir: text, name_prefix: text, name_suffix: text) -> [text]:
+    # Every writer's file of one kind in a run directory.
     var paths: [text] = []
-    val dir = ice_boundary_dir()
     for entry in dir_list(dir):
-        if entry.contains("ice_breadcrumbs.") and entry.ends_with(".log"):
+        if entry.contains(name_prefix) and entry.ends_with(name_suffix):
             if entry.contains("/") or entry.contains("\\"):
                 paths = paths.push(entry)
             else:
                 paths = paths.push(dir + "/" + entry)
     paths
+
+fn _ice_breadcrumb_files() -> [text]:
+    _ice_files_in(ice_boundary_dir(), "ice_breadcrumbs.", ".log")
+
+fn _ice_receipt_parts() -> [text]:
+    _ice_files_in(ice_boundary_dir(), "ice_receipt.", ".part")
+
+fn _ice_remove_run_dir(dir: text):
+    # Delete only the files this module writes, then the directory if empty.
+    for crumb_file in _ice_files_in(dir, "ice_breadcrumbs.", ".log"):
+        file_delete(crumb_file)
+    for part_file in _ice_files_in(dir, "ice_receipt.", ".part"):
+        file_delete(part_file)
+    if file_exists(dir + "/ice_receipt.tsv"):
+        file_delete(dir + "/ice_receipt.tsv")
+    if file_exists(dir + "/ice_owner"):
+        file_delete(dir + "/ice_owner")
+    dir_remove(dir, false)
 
 fn _ice_field(value: text) -> text:
     # One record per line, tab-separated: a value may hold neither.
@@ -134,8 +157,42 @@ fn ice_boundary_begin_run():
     dir_create_all(ice_boundary_dir())
     for crumb_file in _ice_breadcrumb_files():
         file_delete(crumb_file)
+    for part_file in _ice_receipt_parts():
+        file_delete(part_file)
     if file_exists(ice_receipt_path()):
         file_delete(ice_receipt_path())
+
+fn ice_owner_marker_stale(marker_text: text, now_seconds: i64, owner_running: bool) -> bool:
+    """A run directory may be pruned only when its owner marker
+    (`<pid>\n<created unix seconds>\n`) is older than a day AND that pid is
+    not running. Anything unreadable is kept."""
+    val lines = marker_text.split("\n")
+    if lines.len() < 2:
+        return false
+    val created = lines[1].trim().to_i64() ?? 0
+    if created <= 0 or owner_running:
+        return false
+    now_seconds - created > 86400
+
+fn ice_boundary_prune_dead_runs(root: text) -> i64:
+    """OWNER ONLY, at claim time. Remove run directories that failed builds
+    left behind as evidence once their owner is long gone. Bounded: at most
+    64 entries are examined per claim. Returns how many were removed."""
+    var removed = 0
+    var examined = 0
+    val now_seconds = time_now_unix_micros() / 1000000
+    for entry in dir_list(root):
+        if examined < 64:
+            examined = examined + 1
+            val run_dir = if entry.contains("/") or entry.contains("\\"): entry else: root + "/" + entry
+            val marker = run_dir + "/ice_owner"
+            if file_exists(marker):
+                val marker_text = file_read_nullable(marker) ?? ""
+                val owner_pid = marker_text.split("\n")[0].trim().to_i64() ?? 0
+                if owner_pid > 0 and ice_owner_marker_stale(marker_text, now_seconds, process_is_running(owner_pid)):
+                    _ice_remove_run_dir(run_dir)
+                    removed = removed + 1
+    removed
 
 fn ice_boundary_claim_run(output_path: text) -> bool:
     """Become the owner of a fresh run directory keyed by this pid and the
@@ -146,21 +203,22 @@ fn ice_boundary_claim_run(output_path: text) -> bool:
         return false
     val root_value = env_get_opt("SIMPLE_ICE_ROOT") ?? ""
     val root = if root_value == "": "build/ice" else: root_value
+    val _pruned = ice_boundary_prune_dead_runs(root)
     val key = "{getpid()}_{hash_text(output_path)}".replace("-", "n")
     env_set("SIMPLE_ICE_DIR", root + "/" + key)
     ice_boundary_begin_run()
+    _ice_append(ice_boundary_dir() + "/ice_owner", "{getpid()}\n{time_now_unix_micros() / 1000000}")
     true
 
 fn ice_boundary_release_run(owned: bool):
     """OWNER ONLY (`owned` is what `ice_boundary_claim_run` returned; a
     non-owner call does nothing). A run with no ICE leaves nothing behind;
-    a run with a receipt keeps its directory as evidence."""
+    a run with a receipt keeps its directory as evidence until a later
+    claim prunes it (`ice_boundary_prune_dead_runs`)."""
     if not owned or ice_boundary_dir() == "":
         return
-    if not file_exists(ice_receipt_path()):
-        for crumb_file in _ice_breadcrumb_files():
-            file_delete(crumb_file)
-        dir_remove(ice_boundary_dir(), false)
+    if not file_exists(ice_receipt_path()) and _ice_receipt_parts().len() == 0:
+        _ice_remove_run_dir(ice_boundary_dir())
     env_set("SIMPLE_ICE_DIR", "")
 
 # ---------------------------------------------------------------------------
@@ -238,9 +296,14 @@ fn ice_record_parse_lines(receipt_text: text) -> [IceRecord]:
     records
 
 fn ice_records_read() -> [IceRecord]:
-    if not ice_boundary_enabled() or not file_exists(ice_receipt_path()):
-        return []
-    ice_record_parse_lines(file_read_nullable(ice_receipt_path()) ?? "")
+    # Every writer's rows in this run directory, merged on read.
+    var records: [IceRecord] = []
+    if not ice_boundary_enabled():
+        return records
+    for part_file in _ice_receipt_parts():
+        for record in ice_record_parse_lines(file_read_nullable(part_file) ?? ""):
+            records = records.push(record)
+    records
 
 fn ice_boundary_fail(module_name: text, source_path: text, phase: text, backend: text, message: text) -> text:
     """Record one failed module in the receipt and close its breadcrumb.
@@ -249,7 +312,7 @@ fn ice_boundary_fail(module_name: text, source_path: text, phase: text, backend:
     if not ice_boundary_enabled():
         return message
     val kind = if message.starts_with(ice_attributed_prefix()): "attributed" else: "caught"
-    _ice_append(ice_receipt_path(), ice_record_line(IceRecord(
+    _ice_append(_ice_receipt_part_path(), ice_record_line(IceRecord(
         kind: kind, phase: phase, module_name: module_name,
         source_path: source_path, function_name: "", backend: backend,
         message: message)))
@@ -268,13 +331,28 @@ fn ice_summary_text(records: [IceRecord]) -> text:
     "{records.len()} module(s) failed with ICE: {names}"
 
 fn ice_boundary_finalize() -> text:
-    """End of a phase: "" with no ICE. Otherwise append the summary row to the
-    receipt and return the summary. Never deletes: cleanup is the owner's."""
+    """End of a phase: "" with no ICE, else the summary of every row recorded
+    so far in this run directory. Writes nothing and deletes nothing: the
+    merged receipt and the cleanup are the owner's."""
     if not ice_boundary_enabled():
         return ""
     val records = ice_records_read()
     if records.len() == 0:
         return ""
+    ice_summary_text(records) + " (receipt: {ice_receipt_path()})"
+
+fn ice_boundary_merge_receipt(owned: bool) -> text:
+    """OWNER ONLY, after the workers have exited. Merge every writer's rows
+    into `ice_receipt.tsv` followed by one summary row, and return the
+    summary. "" (and no file) when nothing failed or the caller is not the
+    owner. Rewritten from the parts each time, so it is safe to call again."""
+    if not owned or not ice_boundary_enabled():
+        return ""
+    val records = ice_records_read()
+    if records.len() == 0:
+        return ""
+    if file_exists(ice_receipt_path()):
+        file_delete(ice_receipt_path())
     var caught = 0
     var modules = ""
     for record in records:
@@ -283,6 +361,7 @@ fn ice_boundary_finalize() -> text:
         if modules != "":
             modules = modules + ","
         modules = modules + record.module_name
+        _ice_append(ice_receipt_path(), ice_record_line(record))
     _ice_append(ice_receipt_path(),
         "ice_summary_v1\tfailed={records.len()}\tcaught={caught}\tattributed={records.len() - caught}\tmodules={_ice_field(modules)}")
     ice_summary_text(records) + " (receipt: {ice_receipt_path()})"
@@ -383,6 +462,7 @@ export IceRecord, IceBreadcrumb
 export ice_boundary_mode_from, ice_boundary_mode, ice_boundary_enabled, ice_boundary_keep_going
 export ice_boundary_dir, ice_receipt_path, ice_breadcrumb_path
 export ice_boundary_begin_run, ice_boundary_claim_run, ice_boundary_release_run
+export ice_boundary_merge_receipt, ice_boundary_prune_dead_runs, ice_owner_marker_stale
 export ice_boundary_module_start, ice_boundary_module_done, ice_boundary_fail, ice_message_arena_aborted
 export ice_record_line, ice_record_parse_lines, ice_records_read, ice_summary_text, ice_boundary_finalize
 export ice_breadcrumbs_open, ice_boundary_dead_worker_modules
