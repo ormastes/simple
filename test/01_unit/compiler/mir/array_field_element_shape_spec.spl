@@ -1,0 +1,40 @@
+# Execution pending the coordinated rebuilt pure-Simple toolchain.
+# REQ-MIR-ARRAY-FIELD-SHAPE: preserve scalar/nested element representation.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn array_field_shapes(source: text) -> [text]:
+    val parsed = parse_full_frontend(source, "array_field.spl", "array_field", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("array_field.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    expect(lowering.errors.len()).to_equal(0)
+    var shapes: [text] = []
+    for fields in lowering.struct_field_array_element_type_name.values():
+        for shape in fields:
+            shapes.push(shape)
+    expect(shapes.len()).to_be_greater_than(0)
+    shapes
+
+describe "array field metadata describes its element, not its container":
+    it "keeps u16 elements scalar":
+        val shapes = array_field_shapes("class Flags:\n    values: [u16]\n")
+        for shape in shapes:
+            expect(shape).to_equal("")
+
+    it "keeps text elements scalar":
+        val shapes = array_field_shapes("class Names:\n    values: [text]\n")
+        for shape in shapes:
+            expect(shape).to_equal("")
+
+    it "preserves the nested array handle marker":
+        val shapes = array_field_shapes("class Rows:\n    values: [[u16]]\n")
+        for shape in shapes:
+            expect(shape).to_equal("__runtime_array__")
