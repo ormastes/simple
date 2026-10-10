@@ -9,8 +9,11 @@
 use compiler.hir.hir_types.{SymbolId}
 
 # An i64 slot must not be tested with `== nil`: staged-native codegen compares
-# the raw integer with nil's immediate (3), so key 3 sorted as nil. The rendered
-# text is the engine-independent discriminator, as in HirCodecWriter.put_i64.
+# the raw integer with nil's immediate (3), so key 3 sorted as nil. For an
+# ELEMENT of a `[i64]` the rendered text is the discriminator: the element
+# type cannot become `i64?` without changing the array representation, so this
+# helper (used only by `_hc_i64_index_before_v1`) keeps it. The scalar-argument
+# comparator `hc_i64_key_before_v1` takes `i64?` instead.
 # doc/08_tracking/bug/hir_codec_put_i64_three_encoded_as_nil_native_2026-10-10.md
 fn _hc_i64_is_nil_v1(value: i64) -> bool:
     "{value}" == "nil"
@@ -53,14 +56,15 @@ fn _hc_utf8_bytes_before_v1(bytes: [[u8]], present: [bool],
         offset = offset + 1
     left.len() < right.len()
 
-pub fn hc_i64_key_before_v1(left: i64, right: i64) -> bool:
-    val left_nil = _hc_i64_is_nil_v1(left)
-    val right_nil = _hc_i64_is_nil_v1(right)
-    if left_nil:
-        return not right_nil
-    if right_nil:
+pub fn hc_i64_key_before_v1(left: i64?, right: i64?) -> bool:
+    # `i64?`, not `i64`: a nil key is a real, distinct value here (it must
+    # sort before every integer) and a non-optional scalar slot cannot hold
+    # one natively -- see native_scalar_nil_compare_payload_bits_2026-10-10.
+    if left == nil:
+        return right != nil
+    if right == nil:
         return false
-    left < right
+    (left ?? 0) < (right ?? 0)
 
 pub fn hc_symbol_id_key_before_v1(left: SymbolId, right: SymbolId) -> bool:
     if left == nil:
