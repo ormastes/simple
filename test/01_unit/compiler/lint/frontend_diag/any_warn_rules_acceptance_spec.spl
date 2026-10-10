@@ -1,0 +1,351 @@
+# @req REQ-SSPEC-UNIT
+"""
+# Any rules as opt-in warn-level lints (robustness item 7b)
+
+Plan: CURRENT_BUG_PREVENTION.md section 7 / table B row 8 ("Any in the
+compiler's own code, silent Any fallback"). Part 7a (written `Any` is distinct
+from the parser fallback) landed as PR #2829; this is 7b.
+
+- R1 `W-ANY-DECL-001` (`written_any_decl`): a WRITTEN `Any`/`any` in a
+  declaration of a file under `src/compiler/**` (param, return, field, local),
+  with the concrete type suggested when the initialiser/returns show one.
+- R2 `W-HIR-INFER-003` (`any_fallback_use`): a binding whose type fell back by
+  inference, used as an arithmetic or comparison operand, a typed argument or
+  a typed return. Reported at the use. Extends W-HIR-INFER-001/002 (receiver,
+  `for`, index, field uses) without duplicating them.
+- R3 `W-ANY-USE-001/002` (`any_receiver_use`): `for` over an `any` value and a
+  method call on an `any` receiver (both known stage-2 failures).
+
+All three families are `allow` in EVERY profile (opt-in: `SIMPLE_ANY_RULES=warn`
+or an explicit simple.sdn family level; `critical` does not imply them).
+Off means no output AND no walk (`AnyRulesRun.walked == false`; lint starts no
+checker process when its mask is empty).
+"""
+
+# @tag: unit, compiler, lint, hir, any
+
+use std.spec.*
+use compiler.core.ast.{ast_reset}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.semantics.lint.written_any_scan.{WrittenAnySite, scan_written_any, written_any_site_key}
+use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnostics, HirFrontendFinding}
+use compiler.tools.lint.any_rules.{AnyRuleFinding, AnyRulesRun, AnyRulesRelay, any_rules_for_hir, any_rule_path_is_compiler_source, any_rules_mask, any_rules_mask_from_env, any_rules_lint_mask, any_rules_report_lines, any_rules_parse_check_output, any_rules_max_shown, any_rules_env_level, any_rules_report_path}
+use std.io_runtime.{env_get, env_set_process, getpid}
+use compiler.tools.lint._LintMain.config_and_model.{build_default_levels, canonical_lint_rule_profile_descriptors, map_lint_code_to_config_name}
+
+val compiler_path = "src/compiler/99.fixture/any_fixture.spl"
+val app_path = "src/app/fixture/any_fixture.spl"
+
+val decl_src = "struct Holder:\n    payload: Any\n    count: i64\n\nfn pick(a: Any, n: i64) -> Any:\n    val tmp: Any = 3\n    tmp\n\nfn label() -> Any:\n    \"x\"\n"
+
+val clean_src = "enum Kind:\n    Any\n    One\n\nstruct Holder:\n    anything: i64\n    many: text\n\n# a: Any in a comment is not a declaration\nfn pick(company: i64, n: i64) -> i64:\n    val note = \"x: Any -> Any\"\n    val k = Kind.Any\n    company + n\n"
+
+val unsafe_src = "fn pick(n: i64) -> i64:\n    unsafe:\n        val erased: Any = n\n    n\n"
+
+val fallback_src = "fn src() -> Any:\n    3\n\nfn typed(n: i64) -> i64:\n    n\n\nfn f(k: i64) -> i64:\n    val z = src()\n    val w = z + 1\n    if z == 2:\n        return typed(z)\n    z\n"
+
+val alias_src = "fn g(b: Any) -> i64:\n    val c = b\n    c + 1\n"
+
+val fallback_ok_src = "fn src() -> Any:\n    3\n\nfn loose(x: Any) -> Any:\n    x\n\nfn f(k: i64) -> Any:\n    val a: i64 = src()\n    val b = a + 1\n    val q = 3\n    val r = q + k\n    val z = src()\n    if z == nil:\n        return loose(z)\n    z\n"
+
+val receiver_src = "fn h(items: Any, n: i64) -> i64:\n    for it in items:\n        pass\n    items.len()\n"
+
+val receiver_alias_src = "fn h(items: Any) -> i64:\n    val c = items\n    for q in c:\n        pass\n    0\n"
+
+val receiver_ok_src = "fn h(items: [i64], n: i64) -> i64:\n    for it in items:\n        pass\n    items.len()\n"
+
+val receiver_unsafe_src = "fn h(items: Any) -> i64:\n    unsafe:\n        for it in items:\n            pass\n    0\n"
+
+val owned_by_infer_001_src = "fn src() -> Any:\n    3\n\nfn f() -> i64:\n    val z = src()\n    for it in z:\n        pass\n    z.len()\n"
+
+fn lower(path: text, src: text) -> HirModule:
+    ast_reset()
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_module(parse_and_build_module(src, path))
+
+fn run_mask(path: text, src: text, mask: text) -> AnyRulesRun:
+    any_rules_for_hir(path, src, lower(path, src), mask)
+
+fn run_all(path: text, src: text) -> AnyRulesRun:
+    run_mask(path, src, "dfr")
+
+fn with_code(run: AnyRulesRun, code: text) -> [AnyRuleFinding]:
+    var out: [AnyRuleFinding] = []
+    for f in run.findings:
+        if f.code == code:
+            out = out.push(f)
+    out
+
+fn messages(found: [AnyRuleFinding]) -> text:
+    var joined = ""
+    for f in found:
+        joined = joined + "|" + f.message
+    joined
+
+fn lines_of(found: [AnyRuleFinding]) -> text:
+    var joined = ""
+    for f in found:
+        joined = joined + "{f.line},"
+    joined
+
+describe "R1 W-ANY-DECL-001: written Any in a compiler declaration":
+    it "flags a param, a return, a field and a local, each at its own line":
+        val found = with_code(run_all(compiler_path, decl_src), "W-ANY-DECL-001")
+        expect(found.len()).to_equal(5)
+        val all = messages(found)
+        expect(all).to_contain("field `Holder.payload`")
+        expect(all).to_contain("parameter `a` of `pick`")
+        expect(all).to_contain("return type of `pick`")
+        expect(all).to_contain("local `tmp` in `pick`")
+        expect(all).to_contain("return type of `label`")
+        expect(lines_of(found)).to_equal("2,5,5,6,9,")
+
+    it "suggests the concrete type the checker knows (local initialiser, uniform return)":
+        val found = with_code(run_all(compiler_path, decl_src), "W-ANY-DECL-001")
+        var local_msg = ""
+        var label_msg = ""
+        var param_msg = ""
+        for f in found:
+            if f.message.contains("local `tmp`"):
+                local_msg = f.message
+            if f.message.contains("return type of `label`"):
+                label_msg = f.message
+            if f.message.contains("parameter `a`"):
+                param_msg = f.message
+        expect(local_msg).to_contain("write `i64`")
+        expect(label_msg).to_contain("write `text`")
+        expect(param_msg).to_contain("use a concrete type")
+
+    it "reports nothing (any rule) and walks nothing outside src/compiler":
+        expect(any_rule_path_is_compiler_source(compiler_path)).to_equal(true)
+        expect(any_rule_path_is_compiler_source("C:\\dev\\repo\\src\\compiler\\20.hir\\x.spl")).to_equal(true)
+        expect(any_rule_path_is_compiler_source(app_path)).to_equal(false)
+        val outside = run_all(app_path, decl_src + receiver_src + fallback_src)
+        expect(outside.findings.len()).to_equal(0)
+        expect(outside.walked).to_equal(false)
+
+    it "does not flag `Any` that is not a written declaration type":
+        # enum variant, `Kind.Any`, identifiers containing `any`, a comment, a string
+        expect(with_code(run_all(compiler_path, clean_src), "W-ANY-DECL-001").len()).to_equal(0)
+
+    it "does not flag a declaration inside an `unsafe:` block (the #2829 carve-out)":
+        expect(with_code(run_all(compiler_path, unsafe_src), "W-ANY-DECL-001").len()).to_equal(0)
+
+    it "scanner sees nested, lowercase and multi-line-header spellings and skips expressions":
+        val sites = scan_written_any("fn wide(\n    first: [Any],\n    second: Dict<text, any>\n) -> Option<Any>:\n    val r = wide(first, any)\n    val m = first as Any\n    r\n")
+        var keys = ""
+        for s in sites:
+            keys = keys + written_any_site_key(s) + ":{s.line}:{s.slot},"
+        expect(keys).to_equal("wide/first:2:param,wide/second:3:param,wide/->:4:return,")
+
+describe "R2 W-HIR-INFER-003: fallback-typed value used where a concrete type is needed":
+    it "flags arithmetic, comparison, a typed argument and a typed return, at the use":
+        val found = with_code(run_all(compiler_path, fallback_src), "W-HIR-INFER-003")
+        expect(found.len()).to_equal(4)
+        expect(lines_of(found)).to_equal("9,10,11,12,")
+        val all = messages(found)
+        expect(all).to_contain("`z` is used as an arithmetic operand")
+        expect(all).to_contain("`z` is used as a comparison operand")
+        expect(all).to_contain("an argument for parameter `n` of `typed`")
+        expect(all).to_contain("the return value of `f`")
+        expect(all).to_contain("callee `src` returns `Any`")
+        expect(all).to_contain("annotate `z` at its declaration")
+
+    it "flags an unannotated alias of an Any value":
+        val found = with_code(run_all(compiler_path, alias_src), "W-HIR-INFER-003")
+        expect(found.len()).to_equal(1)
+        expect(messages(found)).to_contain("it is initialised from `b`")
+
+    it "does not flag annotated bindings, typed values, `== nil`, or untyped sinks":
+        expect(with_code(run_all(compiler_path, fallback_ok_src), "W-HIR-INFER-003").len()).to_equal(0)
+
+    it "leaves receiver and `for` uses to W-HIR-INFER-001 (no second finding)":
+        val run = run_all(compiler_path, owned_by_infer_001_src)
+        expect(with_code(run, "W-HIR-INFER-003").len()).to_equal(0)
+        expect(with_code(run, "W-ANY-USE-001").len()).to_equal(0)
+        expect(with_code(run, "W-ANY-USE-002").len()).to_equal(0)
+        val hir = lower(app_path, owned_by_infer_001_src)
+        var infer_001 = 0
+        for f in run_hir_frontend_diagnostics(hir):
+            if f.code == "W-HIR-INFER-001":
+                infer_001 = infer_001 + 1
+        expect(infer_001).to_equal(1)
+
+describe "R3 W-ANY-USE-001/002: `for` over and method call on an any value":
+    it "flags `for` over an Any parameter and a method call on it, specifically":
+        val run = run_all(compiler_path, receiver_src)
+        val loops = with_code(run, "W-ANY-USE-001")
+        val calls = with_code(run, "W-ANY-USE-002")
+        expect(loops.len()).to_equal(1)
+        expect(calls.len()).to_equal(1)
+        expect(loops[0].line).to_equal(2)
+        expect(loops[0].message).to_contain("`for` iterates over `items`, an `any` value")
+        expect(loops[0].message).to_contain("known stage-2 failure")
+        expect(calls[0].line).to_equal(4)
+        expect(calls[0].message).to_contain("method `.len()` is called on `items`")
+
+    it "flags `for` over an unannotated alias of an Any value":
+        val loops = with_code(run_all(compiler_path, receiver_alias_src), "W-ANY-USE-001")
+        expect(loops.len()).to_equal(1)
+        expect(loops[0].line).to_equal(3)
+
+    it "does not flag a concretely typed iterable/receiver":
+        val run = run_all(compiler_path, receiver_ok_src)
+        expect(run.findings.len()).to_equal(0)
+
+    it "does not flag a use inside an `unsafe:` block":
+        val run = run_all(compiler_path, receiver_unsafe_src)
+        expect(with_code(run, "W-ANY-USE-001").len()).to_equal(0)
+
+describe "opt-in switch":
+    it "registers three families that no profile turns on":
+        val levels = build_default_levels()
+        expect(levels["written_any_decl"]).to_equal("allow")
+        expect(levels["any_fallback_use"]).to_equal("allow")
+        expect(levels["any_receiver_use"]).to_equal("allow")
+        var seen = 0
+        for d in canonical_lint_rule_profile_descriptors():
+            if d.name == "written_any_decl" or d.name == "any_fallback_use" or d.name == "any_receiver_use":
+                seen = seen + 1
+                expect(d.moderate_level).to_equal("allow")
+                expect(d.strict_level).to_equal("allow")
+                expect(d.robust_level).to_equal("allow")
+                expect(d.critical_level).to_equal("allow")
+        expect(seen).to_equal(3)
+        expect(map_lint_code_to_config_name("W-ANY-DECL-001")).to_equal("written_any_decl")
+        expect(map_lint_code_to_config_name("W-HIR-INFER-003")).to_equal("any_fallback_use")
+        expect(map_lint_code_to_config_name("W-ANY-USE-001")).to_equal("any_receiver_use")
+        expect(map_lint_code_to_config_name("W-ANY-USE-002")).to_equal("any_receiver_use")
+
+    it "profile off = zero output and no walk":
+        val off = run_mask(compiler_path, decl_src, "")
+        expect(off.findings.len()).to_equal(0)
+        expect(off.walked).to_equal(false)
+        # R1 alone: wrong tree, or nothing written -> still no walk
+        val wrong_tree = run_mask(app_path, decl_src, "d")
+        expect(wrong_tree.findings.len()).to_equal(0)
+        expect(wrong_tree.walked).to_equal(false)
+        val nothing_written = run_mask(compiler_path, receiver_ok_src, "d")
+        expect(nothing_written.findings.len()).to_equal(0)
+        expect(nothing_written.walked).to_equal(false)
+        # and on is observably different
+        expect(run_all(compiler_path, decl_src).walked).to_equal(true)
+
+    it "lint starts no checker when every family is off (empty mask)":
+        expect(any_rules_mask(false, false, false)).to_equal("")
+        expect(any_rules_lint_mask(compiler_path, decl_src, false, false, false)).to_equal("")
+        # R1 on: outside src/compiler, or nothing written -> still no checker
+        expect(any_rules_lint_mask(app_path, decl_src, true, false, false)).to_equal("")
+        expect(any_rules_lint_mask(compiler_path, receiver_ok_src, true, false, false)).to_equal("")
+        expect(any_rules_lint_mask(compiler_path, decl_src, true, false, false)).to_equal("d")
+        expect(any_rules_lint_mask(app_path, receiver_src, true, true, true)).to_equal("")
+        expect(any_rules_lint_mask(compiler_path, decl_src, true, true, true)).to_equal("dfr")
+
+    it "SIMPLE_ANY_RULES=off is a kill switch for both lint and check":
+        val before = env_get("SIMPLE_ANY_RULES")
+        env_set_process("SIMPLE_ANY_RULES", "off")
+        val lint_mask = any_rules_lint_mask(compiler_path, decl_src, true, true, true)
+        val check_mask = any_rules_mask_from_env()
+        env_set_process("SIMPLE_ANY_RULES", "fr")
+        val partial_mask = any_rules_mask_from_env()
+        env_set_process("SIMPLE_ANY_RULES", before)
+        expect(lint_mask).to_equal("")
+        expect(check_mask).to_equal("")
+        expect(partial_mask).to_equal("fr")
+
+    it "default lint of a critical-profile compiler file starts no checker and reports nothing":
+        # Regression (review 2026-10-11): `critical` used to imply the families,
+        # which made every plain compiler-file lint start a `check` child.
+        # The lint gate feeds `any_rules_lint_mask` the per-family `keep` bits;
+        # under critical with no opt-in they are all false -> empty mask ->
+        # no process, hence no W-ANY-* and no W-ANY-NOTRUN either.
+        val before = env_get("SIMPLE_ANY_RULES")
+        env_set_process("SIMPLE_ANY_RULES", "")
+        var critical_on = 0
+        for d in canonical_lint_rule_profile_descriptors():
+            if d.name == "written_any_decl" or d.name == "any_fallback_use" or d.name == "any_receiver_use":
+                if d.critical_level != "allow" or d.robust_level != "allow":
+                    critical_on = critical_on + 1
+        val default_mask = any_rules_lint_mask("src/compiler/10.frontend/core/collection_feedback.spl", decl_src + receiver_src, false, false, false)
+        val default_level = any_rules_env_level()
+        val default_check = any_rules_mask_from_env()
+        env_set_process("SIMPLE_ANY_RULES", "warn")
+        val opted_mask = any_rules_lint_mask(compiler_path, decl_src, false, false, false)
+        val opted_level = any_rules_env_level()
+        val opted_check = any_rules_mask_from_env()
+        val opted_outside = any_rules_lint_mask(app_path, decl_src, false, false, false)
+        env_set_process("SIMPLE_ANY_RULES", "deny")
+        val deny_level = any_rules_env_level()
+        env_set_process("SIMPLE_ANY_RULES", "random")
+        val junk_check = any_rules_mask_from_env()
+        env_set_process("SIMPLE_ANY_RULES", before)
+        expect(critical_on).to_equal(0)
+        expect(default_mask).to_equal("")
+        expect(default_level).to_equal("")
+        expect(default_check).to_equal("")
+        expect(opted_mask).to_equal("dfr")
+        expect(opted_level).to_equal("warn")
+        expect(opted_check).to_equal("dfr")
+        expect(opted_outside).to_equal("")
+        expect(deny_level).to_equal("deny")
+        expect(junk_check).to_equal("")
+
+    it "concurrent lints of one file get different report paths (pid in the name)":
+        expect(any_rules_report_path(compiler_path)).to_contain("-{getpid()}-")
+
+    it "each family switches independently":
+        val only_receiver = run_mask(compiler_path, receiver_src, "r")
+        expect(only_receiver.findings.len()).to_equal(2)
+        val only_decl = run_mask(compiler_path, receiver_src, "d")
+        expect(only_decl.findings.len()).to_equal(1)
+        expect(only_decl.findings[0].code).to_equal("W-ANY-DECL-001")
+        val only_fallback = run_mask(compiler_path, fallback_src, "f")
+        expect(only_fallback.findings.len()).to_equal(4)
+
+    it "lint reads back exactly what check reported, and a truncated report is not checked":
+        val run = run_all(compiler_path, decl_src + receiver_src)
+        val win_path = "C:\\repo\\src\\compiler\\x.spl"
+        val noise = "noise line\n" + win_path + ":3:4: warning: [MEXH007] in `f`: not an Any rule\n"
+        val report = any_rules_report_lines(win_path, "dfr", run.findings)
+        expect(report.len()).to_equal(run.findings.len() + 1)
+        # everything but the last line (the sentinel): a truncated report
+        var truncated = noise
+        var n = 0
+        while n < report.len() - 1:
+            truncated = truncated + report[n] + "\n"
+            n = n + 1
+        val unchecked = any_rules_parse_check_output(truncated)
+        expect(unchecked.checked).to_equal(false)
+        expect(unchecked.findings.len()).to_equal(run.findings.len())
+        val relay = any_rules_parse_check_output(noise + report.join("\n") + "\n")
+        expect(relay.checked).to_equal(true)
+        expect(relay.findings.len()).to_equal(run.findings.len())
+        var i = 0
+        while i < run.findings.len():
+            expect(relay.findings[i].code).to_equal(run.findings[i].code)
+            expect(relay.findings[i].line).to_equal(run.findings[i].line)
+            expect(relay.findings[i].col).to_equal(run.findings[i].col)
+            expect(relay.findings[i].message).to_equal(run.findings[i].message)
+            i = i + 1
+
+    it "the default frontend walk (check / driver pass) never emits an Any-rule code":
+        val hir = lower(app_path, fallback_src + receiver_src)
+        var any_codes = 0
+        for f in run_hir_frontend_diagnostics(hir):
+            if f.code == "W-HIR-INFER-003" or f.code == "W-ANY-USE-001" or f.code == "W-ANY-USE-002":
+                any_codes = any_codes + 1
+        expect(any_codes).to_equal(0)
+
+    it "printed output is capped per file and the sentinel still carries the full count":
+        var many: [AnyRuleFinding] = []
+        var k = 0
+        while k < any_rules_max_shown() + 7:
+            many = many.push(AnyRuleFinding(code: "W-ANY-USE-002", line: k + 1, col: 1, message: "m"))
+            k = k + 1
+        val printed = any_rules_report_lines(compiler_path, "r", many)
+        expect(printed.len()).to_equal(any_rules_max_shown() + 2)
+        expect(printed[any_rules_max_shown()]).to_contain("7 more finding(s) not shown")
+        expect(printed[any_rules_max_shown() + 1]).to_contain("findings=57")

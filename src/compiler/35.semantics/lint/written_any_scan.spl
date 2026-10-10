@@ -1,0 +1,309 @@
+# Written-`Any` declaration scanner (robustness item 7b, rule R1).
+#
+# Finds every explicitly WRITTEN `Any` / `any` in a declaration slot of one
+# source text: a parameter, a return type, a struct/class field, or a
+# `val`/`var` local. It is a text scan on purpose:
+#
+#   * HIR cannot tell a written `Any` from the flat parser's fallback: after
+#     PR #2829 both lower to `HirTypeKind.Any` (`Named("Any")` vs
+#     `Named("__any")` only differ inside `lower_named_kind`), and an
+#     imported type name that single-file lowering cannot resolve looks the
+#     same again. Only the source says which one the author typed.
+#   * HIR type spans are zero on this lane (measured: every `tspan` of a
+#     written `Any` parameter reads 0:0), so only the text has line:col.
+#
+# The scan is declaration-only. `Any` in an expression (`x as Any`,
+# `HirTypeKind.Any`, `case Any:`, a named call argument) is not a
+# declaration and is never returned. A declaration inside an `unsafe:` /
+# `danger:` block is skipped, matching the carve-out of E-ANY-COMPILE-001
+# (hir_lowering/types.spl `written_any_unsafe_depth`).
+#
+# Cost: lines that contain neither spelling are only trimmed and indent-
+# counted; the per-character work runs on fn-header lines and on lines that
+# mention `Any`/`any`. A source with neither spelling returns immediately.
+#
+# Known limits (documented in doc/07_guide/compiler/robustness/any-warn-rules.md):
+# enum variant payloads, lambda parameters and `for` binders are not
+# declaration slots here; two methods with the same name in one file share
+# an owner key.
+
+pub struct WrittenAnySite:
+    line: i64
+    col: i64
+    # "param" | "return" | "field" | "local"
+    slot: text
+    # declared name; "->" for a return type
+    name: text
+    # enclosing fn (param/return/local, "<module>" for a top-level val/var)
+    # or enclosing type (field)
+    owner: text
+    # "Any" | "any" as written
+    spelled: text
+
+pub fn written_any_site_key(site: WrittenAnySite) -> text:
+    """Key shared with the HIR pass (suggestions, written-vs-fallback split)."""
+    if site.slot == "field":
+        return site.owner + "." + site.name
+    site.owner + "/" + site.name
+
+fn _wa_is_ident_char(ch: text) -> bool:
+    if ch == "_":
+        return true
+    val is_lower = ch >= "a" and ch <= "z"
+    val is_upper = ch >= "A" and ch <= "Z"
+    val is_digit = ch >= "0" and ch <= "9"
+    is_lower or is_upper or is_digit
+
+fn _wa_indent(line: text) -> i64:
+    var i = 0
+    val n = line.len()
+    while i < n:
+        if line.substring(i, i + 1) == " ":
+            i = i + 1
+        else:
+            break
+    i
+
+fn _wa_ident_at(s: text, start: i64) -> text:
+    var i = start
+    var out = ""
+    val n = s.len()
+    while i < n:
+        val ch = s.substring(i, i + 1)
+        if _wa_is_ident_char(ch):
+            out = out + ch
+            i = i + 1
+        else:
+            break
+    out
+
+# Same length as `line`: string/char literal contents and a trailing `#`
+# comment become spaces, so columns stay valid and `Any` inside a string or a
+# comment can never be a hit.
+fn _wa_clean(line: text) -> text:
+    var out = ""
+    var i = 0
+    val n = line.len()
+    var quote = ""
+    while i < n:
+        val ch = line.substring(i, i + 1)
+        if quote != "":
+            if ch == "\\" and i + 1 < n:
+                out = out + "  "
+                i = i + 2
+                continue
+            if ch == quote:
+                quote = ""
+            out = out + " "
+        elif ch == "\"" or ch == "'":
+            quote = ch
+            out = out + " "
+        elif ch == "#":
+            break
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+fn _wa_count(s: text, needle: text) -> i64:
+    s.split(needle).len() - 1
+
+fn _wa_strip_modifiers(trimmed: text) -> text:
+    var t = trimmed
+    var changed = true
+    while changed:
+        changed = false
+        for prefix in ["pub ", "static ", "extern ", "async ", "export ", "override ", "shared ", "inline "]:
+            if t.starts_with(prefix):
+                t = t.substring(prefix.len(), t.len()).trim()
+                changed = true
+    t
+
+fn _wa_fn_name(trimmed: text) -> text:
+    val t = _wa_strip_modifiers(trimmed)
+    if t.starts_with("fn ") or t.starts_with("me "):
+        return _wa_ident_at(t.substring(3, t.len()).trim(), 0)
+    ""
+
+fn _wa_type_name(trimmed: text) -> text:
+    val t = _wa_strip_modifiers(trimmed)
+    for keyword in ["struct ", "class ", "enum ", "trait ", "impl ", "mixin ", "actor "]:
+        if t.starts_with(keyword):
+            return _wa_ident_at(t.substring(keyword.len(), t.len()).trim(), 0)
+    ""
+
+fn _wa_local_decl_name(trimmed: text) -> text:
+    val t = _wa_strip_modifiers(trimmed)
+    if t.starts_with("val ") or t.starts_with("var "):
+        return _wa_ident_at(t.substring(4, t.len()).trim(), 0)
+    ""
+
+fn _wa_opens_unsafe(trimmed: text) -> bool:
+    (trimmed.starts_with("unsafe:") or trimmed.starts_with("unsafe(") or
+        trimmed.starts_with("danger:") or trimmed.starts_with("danger("))
+
+# Walk left from a type-position hit to the annotation it belongs to.
+# Returns the index of the owning `:` (>= 0), -2 for a `->` return arrow, or
+# -1 when the hit is not inside a type annotation (an expression).
+fn _wa_annotation_anchor(clean: text, hit: i64) -> i64:
+    var j = hit - 1
+    while j >= 0:
+        val ch = clean.substring(j, j + 1)
+        if ch == ":":
+            return j
+        if ch == ">" and j > 0 and clean.substring(j - 1, j) == "-":
+            return -2
+        val type_char = (_wa_is_ident_char(ch) or ch == " " or ch == "[" or ch == "]" or
+            ch == "<" or ch == ">" or ch == "," or ch == "?" or ch == "(" or ch == ")" or ch == ".")
+        if not type_char:
+            return -1
+        j = j - 1
+    -1
+
+# Index of the `-` of the `->` that owns a return-type hit.
+fn _wa_arrow_index(clean: text, hit: i64) -> i64:
+    var j = hit - 1
+    while j > 0:
+        if clean.substring(j, j + 1) == ">" and clean.substring(j - 1, j) == "-":
+            return j - 1
+        j = j - 1
+    -1
+
+fn _wa_name_before(clean: text, colon: i64) -> text:
+    var j = colon - 1
+    while j >= 0 and clean.substring(j, j + 1) == " ":
+        j = j - 1
+    var name = ""
+    while j >= 0:
+        val ch = clean.substring(j, j + 1)
+        if _wa_is_ident_char(ch):
+            name = ch + name
+            j = j - 1
+        else:
+            break
+    name
+
+fn _wa_paren_depth_at(clean: text, base: i64, upto: i64) -> i64:
+    val head = clean.substring(0, upto)
+    base + _wa_count(head, "(") - _wa_count(head, ")")
+
+pub fn scan_written_any(source: text) -> [WrittenAnySite]:
+    var sites: [WrittenAnySite] = []
+    if not source.contains("Any") and not source.contains("any"):
+        return sites
+    val lines = source.split("\n")
+    var in_doc = false
+    var type_owner = ""
+    var type_indent = -1
+    var fn_owner = ""
+    var fn_indent = -1
+    var in_header = false
+    var header_depth = 0
+    var unsafe_indent = -1
+    var idx = 0
+    while idx < lines.len():
+        val raw = lines[idx]
+        idx = idx + 1
+        val trimmed = raw.trim()
+        if trimmed.contains("\"\"\""):
+            if _wa_count(trimmed, "\"\"\"") % 2 == 1:
+                in_doc = not in_doc
+            continue
+        if in_doc or trimmed == "" or trimmed.starts_with("#"):
+            continue
+        val indent = _wa_indent(raw)
+        var is_header_line = in_header
+        if not in_header:
+            if unsafe_indent >= 0 and indent <= unsafe_indent:
+                unsafe_indent = -1
+            if fn_indent >= 0 and indent <= fn_indent:
+                fn_owner = ""
+                fn_indent = -1
+            if type_indent >= 0 and indent <= type_indent:
+                type_owner = ""
+                type_indent = -1
+            val fname = _wa_fn_name(trimmed)
+            if fname != "":
+                fn_owner = fname
+                fn_indent = indent
+                in_header = true
+                header_depth = 0
+                is_header_line = true
+            else:
+                val tname = _wa_type_name(trimmed)
+                if tname != "":
+                    type_owner = tname
+                    type_indent = indent
+                elif _wa_opens_unsafe(trimmed):
+                    if unsafe_indent < 0 and trimmed.ends_with(":"):
+                        unsafe_indent = indent
+                    continue
+        val interesting = raw.contains("Any") or raw.contains("any")
+        if not is_header_line and not interesting:
+            continue
+        val clean = _wa_clean(raw)
+        val depth_before = header_depth
+        if is_header_line:
+            header_depth = header_depth + _wa_count(clean, "(") - _wa_count(clean, ")")
+            if header_depth <= 0:
+                in_header = false
+        if not interesting:
+            continue
+        if unsafe_indent >= 0 and indent > unsafe_indent:
+            continue
+        val n = clean.len()
+        var i = 0
+        while i + 3 <= n:
+            val word = clean.substring(i, i + 3)
+            if word != "Any" and word != "any":
+                i = i + 1
+                continue
+            val hit = i
+            i = i + 3
+            if hit > 0:
+                val before = clean.substring(hit - 1, hit)
+                if _wa_is_ident_char(before) or before == ".":
+                    continue
+            if hit + 3 < n and _wa_is_ident_char(clean.substring(hit + 3, hit + 4)):
+                continue
+            val anchor = _wa_annotation_anchor(clean, hit)
+            if anchor == -1:
+                continue
+            if anchor == -2:
+                if not is_header_line or fn_owner == "":
+                    continue
+                val arrow = _wa_arrow_index(clean, hit)
+                if arrow < 0 or _wa_paren_depth_at(clean, depth_before, arrow) != 0:
+                    continue
+                sites = sites.push(WrittenAnySite(
+                    line: idx, col: hit + 1, slot: "return", name: "->",
+                    owner: fn_owner, spelled: word))
+                continue
+            val name = _wa_name_before(clean, anchor)
+            if name == "":
+                continue
+            if is_header_line:
+                if _wa_paren_depth_at(clean, depth_before, anchor) > 0 and name != "self":
+                    sites = sites.push(WrittenAnySite(
+                        line: idx, col: hit + 1, slot: "param", name: name,
+                        owner: fn_owner, spelled: word))
+                continue
+            val decl = _wa_local_decl_name(trimmed)
+            if decl != "":
+                if decl == name:
+                    if fn_owner == "" and type_owner != "":
+                        sites = sites.push(WrittenAnySite(
+                            line: idx, col: hit + 1, slot: "field", name: name,
+                            owner: type_owner, spelled: word))
+                    else:
+                        val owner = if fn_owner != "": fn_owner else: "<module>"
+                        sites = sites.push(WrittenAnySite(
+                            line: idx, col: hit + 1, slot: "local", name: name,
+                            owner: owner, spelled: word))
+                continue
+            if type_owner != "" and fn_owner == "":
+                if _wa_ident_at(_wa_strip_modifiers(trimmed), 0) == name:
+                    sites = sites.push(WrittenAnySite(
+                        line: idx, col: hit + 1, slot: "field", name: name,
+                        owner: type_owner, spelled: word))
+    sites
