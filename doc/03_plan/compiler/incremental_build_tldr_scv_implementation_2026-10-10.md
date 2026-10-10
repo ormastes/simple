@@ -390,3 +390,97 @@ temporary workaround requires a bug record, explicit tag, introducing commit,
 and removal condition tied to an applied and verified fix. Keep unrelated dirty
 files and the shared index unchanged. Full Phase 3/4 success and measured
 compile/link/startup improvements remain unverified.
+
+
+## Implementation checkpoint and next acceptance gates — 2026-10-11
+
+This checkpoint supersedes conflicting status statements above, without
+changing the selected 28 requirements or WP0–WP11. It is a plan update only.
+Source changes applied locally, private reviewed candidates, executed component
+controls and qualified products are separate states.
+
+| Work package / owner | Current evidence | Remaining gate |
+|---|---|---|
+| Target-selected native linker | Eight real Rust linker-command/default-library controls PASS; seven source files applied locally | Full rebuilt compiler and native Hello with pinned runtime/SDK inputs; focused command controls do not qualify executable generation |
+| Conditional parsing and target cache | Sixteen actual-owner controls PASS on an older source cut, now superseded | Reuse canonical release conditional evaluator rather than adding a competing evaluator; four existing-owner successor changes and five new controls are UNRUN. Complete legacy loader/discovery callers and pure-Simple parity before activation |
+| Bootstrap source projection | Cached build failed at an omitted backend-plugin ABI header; 249 fresh and 29 rebuilt artifact events, zero final compiler artifacts | Recipe-selected recursive quoted C-header closure, including compact includes, missing headers, cycles and root escapes; freeze the complete source/tool manifest before any authorized rebuild |
+| Header compile control | One canonical failed translation unit with its eight captured headers compiles successfully using clang-cl | Component-only result; does not establish complete source projection, runtime build, linking or compiler publication |
+| Pure-Simple receipt digest work | Narrow frontend candidate avoids discarded ordinary-parse receipt hashes and reuses a verified digest only when final parser bytes equal the captured raw source | Eight authored real frontend semantic/work controls UNRUN; execute baseline/candidate evidence, then measure eligible pure-Simple latency/RSS before applying or pushing performance code |
+| Product acceptance | Phase 2 qualified products remain 0/6 | Build, enumerate and run compiler/interpreter/loader test executables for LLVM and Cranelift; report exact case counts, failures and unsupported skips |
+
+### Ordered parallel implementation plan
+
+1. **Source projection — Astra platform owner, primary review.** Select C
+   translation units from the exact Windows feature/build recipe; do not include
+   unrelated browser sources or silently omit dependencies of selected units.
+   Resolve quoted headers recursively from frozen source, reject missing or
+   escaping references, and bind recipe changes to manifest invalidation. Reuse
+   the failed attempt's valid owned cache; preserve the admitted donor junction.
+2. **TLDR and frontend work — Astra performance owner, primary review.** Keep
+   source-content/SCV authority and target/config validation intact. Compare
+   the same semantic cases before/after the receipt optimization and count
+   actual receipt-site work separately from semantic PASS. Verify changed
+   source, conditional transformations, advisory transformations and lifetime
+   safety. A source diagnostic is not a measured self-hosted speed improvement.
+3. **Conditional integration — Astra compiler owner, independent review.**
+   Retain canonical predicate semantics; pass captured raw source and explicit
+   target configuration through parser and loader/cache interfaces. Preserve
+   raw CRLF/Unicode spans and lexer-owned indentation. Diagnose malformed
+   predicates in inactive branches. Do not activate a parser-only patch while
+   downstream text-strip consumers discard its projection or identity.
+4. **Bootstrap and executable lanes — primary scheduler.** After a usable
+   compiler passes native Hello, schedule independent Phase 2 test products,
+   Phase 3 vertical module/object attempts and Phase 4 tool/link attempts with
+   Phase 2. Request forty jobs per lane subject to measured resource limits;
+   log actual concurrency. Keep valid caches, proceed through independent
+   failures, retry changed failed work only and sanity-test each produced tool.
+
+### Acceptance scenarios to implement and execute
+
+Use modern executable SSpec flows with real owner calls and assertions, traced
+to the existing requirements; generate mirrored manuals with zero stubs.
+
+- **Source authority:** modify source after TLDR generation, then make the TLDR
+  timestamp newer; reject stale source identity and expose the syntax error.
+  A timestamp or commit membership alone must not validate changed content.
+- **Parse reuse:** generate a TLDR from captured source, then compile that source
+  through standalone, BuildRunner and TestRunner interfaces; prove one eligible
+  parse and correct invalidation on source/target/config changes.
+- **Concurrent ownership:** competing workers request the same dependency;
+  prove one producer, bounded waiting, correct failure notification and safe
+  recovery after producer death without stale publication or dangling memory.
+- **Performance:** measure small isolated SPL compilation, startup/snapshot,
+  cold and warm service paths separately. Target 0.1 seconds for the selected
+  isolated fixture, with measured RSS and unchanged semantics; do not infer it
+  from hash counts or cache hits. Formal refinement must bind real code owners
+  and weighted cold/warm work, not merely an abstract model.
+- **Source projection:** compile a recipe-selected unit whose header is outside
+  the initial source roots; verify recursive and compact includes, missing and
+  escaping headers, cycles, recipe invalidation and captured-source consistency.
+
+The bootstrap seed feature has consumed its three allowed repair cycles. A
+further full rebuild requires the pending explicit user exception; independent
+new component criteria may proceed without replaying passed checks. Preserve
+all failed receipts. Workarounds still require a bug ID, tag, introducing commit
+and removal condition bound to an applied, verified fix.
+
+### Evidence and input boundaries
+
+- Linker controls and local application:
+  `build/phase2-six-products-80030-20261010/independent-next-step-review/producer-admission-repair/native-linker-dialect-tests-cut4/`
+  and `native-linker-local-application-cut1/` under the same repair directory.
+- Failed seed build: `build/minimal-native-producer-20261011/RESULT.json`;
+  canonical C control: `build/backend-plugin-component-20261011/RESULT.json`.
+- Canonical conditional successor:
+  `build/native_probe/phase3-enum-nil-arm-fix-20261010/tldr-local-file-validity/formal/conditional-blocks-cut3/MANIFEST.json`.
+- Frontend digest candidate:
+  `build/native_probe/phase3-enum-nil-arm-fix-20261010/tldr-local-file-validity/consumer-bridge/warm-candidate/receipt-digest-demand-cut1/MANIFEST.json`.
+
+Local build packets are diagnostic locators, not fresh-clone deliverables. The
+2026-10-08 incremental-build design remains available in Downloads and retained
+research. The exact requested SIMD/GPU/Sosix 2026-10-10 document remains missing
+from the checked Downloads/research locations: its coverage and conflicts stay
+NOT_ASSESSED. Obtain that input before recommending a conflicting architecture.
+Existing canonical owners and validated interfaces are preferred over duplicate
+implementations. No complete bootstrap, hooks, formal proof or measured
+0.1-second compilation is claimed.
