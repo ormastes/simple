@@ -1233,6 +1233,45 @@ impl MirLowering:
                 # recovered "unresolved type"). Registering such a type must
                 # not abort the whole bootstrap compile — degrade to the
                 # tagged any/i64 slot the runtime already uses for `any`.
+                #
+                # 1a (MIR half, CURRENT_BUG_PREVENTION.md): the erasure is no
+                # longer silent. It is recorded as a lowering ADVISORY naming
+                # owner + span (`self.advisory` -> `self.mir_advisories`, NOT
+                # `self.errors`: bootstrap_type_registration, backend/compiler,
+                # jit_interpreter and simpleos focused_pipeline all abort on
+                # `errors.len() > 0`, and array/dict literal lowering compares
+                # `errors.len()` around element lowering). It is a real error
+                # only under SIMPLE_MIR_VERIFY_LEVELS="E-MIR-TYPE-Error=error".
+                val type_error_level = self.mir_advisory_level("E-MIR-TYPE-Error")
+                if type_error_level == "off":
+                    return MirType.i64()
+                val error_fn = if self.mir_tag_probe_active_function != "":
+                    self.mir_tag_probe_active_function
+                else:
+                    "<module-level>"
+                val error_span: Span? = if type_.span.file != "" or type_.span.line > 0:
+                    Some(type_.span)
+                else:
+                    nil
+                if type_error_level == "error":
+                    # Promoted: every occurrence is a real error. No rate
+                    # limit and no summary line -- a "suppressed" note must
+                    # never itself become an error.
+                    self.advisory("E-MIR-TYPE-Error", "unresolved HIR type (HirTypeKind.Error) reached lower_type in fn {error_fn} (module {self.current_module_id}) and was erased to i64", error_span)
+                    return MirType.i64()
+                # Rate limit (advisory level only): at most 3 reports per
+                # module + function, then one summary line, so an unresolved
+                # import does not produce hundreds of identical diagnostics
+                # (measured 240/file). Keyed by module AND function, and the
+                # table is cleared at each module boundary (`lower_module`),
+                # so a same-named function in a later module is reported.
+                val report_key = "{self.current_module_id}::{error_fn}"
+                val prior_reports = self.mir_type_error_reports[report_key] ?? 0
+                self.mir_type_error_reports[report_key] = prior_reports + 1
+                if prior_reports < 3:
+                    self.advisory("E-MIR-TYPE-Error", "unresolved HIR type (HirTypeKind.Error) reached lower_type in fn {error_fn} (module {self.current_module_id}) and was erased to i64", error_span)
+                elif prior_reports == 3:
+                    self.advisory("E-MIR-TYPE-Error", "further unresolved HIR types in fn {error_fn} (module {self.current_module_id}) suppressed after 3 reports", error_span)
                 MirType.i64()
             case HirTypeKind.Isolated(inner):
                 # `iso T` ERASES to T's MIR representation. Isolation is an

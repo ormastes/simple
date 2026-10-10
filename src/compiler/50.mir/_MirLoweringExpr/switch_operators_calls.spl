@@ -2771,6 +2771,10 @@ impl MirLowering:
         # payload then misclassified EVERY arm as deep and broke plain
         # Some(v)/None matches. Verified empirically on this exact code.
         var enum_deep_flags: [i64] = []
+        # 3a guard-count invariant (CURRENT_BUG_PREVENTION.md): every guarded
+        # arm this match dispatches must lower to exactly one guard branch.
+        # Counted at the two `terminate_if(guard…)` sites; compared at exit.
+        var mv_guards_lowered = 0
         var enum_arm_srcidx: [i64] = []
         # Parallel to enum_discs: the arm's own variant NAME, so the
         # single-payload bind below can look up "{enum_name}::{variant}" in
@@ -3525,6 +3529,7 @@ impl MirLowering:
                 b_guard.terminate_if(mir_operand_copy(guard_local), guard_pass, next_block)
                 b_guard.switch_to_block(guard_pass)
                 self.builder = b_guard
+                mv_guards_lowered = mv_guards_lowered + 1
             val arm_result = self.lower_block_expected(body_arm.body, expected_type)
             var b_arm2 = self.builder
             # Guard: if the arm body already terminated (e.g. `return r`), emit
@@ -3594,6 +3599,7 @@ impl MirLowering:
             b_gd.terminate_if(mir_operand_copy(gd_guard), gd_pass, gd_fail)
             b_gd.switch_to_block(gd_pass)
             self.builder = b_gd
+            mv_guards_lowered = mv_guards_lowered + 1
             val gd_result = self.lower_block_expected(gd_arm.body, expected_type)
             var b_gd2 = self.builder
             if not b_gd2.current_block_has_explicit_terminator():
@@ -3911,6 +3917,20 @@ impl MirLowering:
                     self.mark_runtime_value_local(result.id)
                 case _:
                     ()
+        # 3a: guarded arms dispatched by this match == guard branches lowered.
+        # A mismatch means a guard expression was dropped (wrong code), which
+        # is exactly the 8759c630e05 class. Reported as a lowering ADVISORY
+        # with the match's span (`self.mir_advisories`, never `self.errors`);
+        # fatal only under SIMPLE_MIR_VERIFY_LEVELS="E-MIR-MATCH-GUARD=error".
+        var mv_guards_expected = guarded_default_srcidx.len()
+        for mv_src in enum_arm_srcidx:
+            val mv_arm: HirMatchArm = arms[mv_src]
+            if mv_arm.has_guard:
+                mv_guards_expected = mv_guards_expected + 1
+        if mv_guards_expected != mv_guards_lowered:
+            # Warn-first (review of 0df5354dfca): not yet proven zero-hit on
+            # the phase-3/4 closure. Promote to error_fatal after that run.
+            self.advisory("E-MIR-MATCH-GUARD", "enum match dispatches {mv_guards_expected} guarded arm(s) but lowered {mv_guards_lowered} guard branch(es); a guard was dropped", Some(scrutinee.span))
         result
 
     me lower_try_expr(base: HirExpr) -> LocalId:
