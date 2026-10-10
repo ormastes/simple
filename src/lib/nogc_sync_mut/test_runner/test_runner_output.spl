@@ -66,11 +66,16 @@ fn test_file_outcome_tag(result: TestFileResult) -> text:
         case "TERMINATED": "TERM"
         case "TIMEOUT": "TOUT"
         case "NOT_RUN": "NRUN"
+        case "SKIP": "SKIP"
         case "OK": "PASS"
         case _: "FAIL"
 
 fn print_result_default(result: TestFileResult):
     val tag = test_file_outcome_tag(result)
+    if tag == "SKIP":
+        # Feature-gated: its one per-file line is the `FEATURE SKIP` line the
+        # runner printed when it decided not to run it. Never a PASS line.
+        return
     if tag == "CRASH" or tag == "TERM" or tag == "NRUN":
         print "  {tag}  {result.path} ({result.duration_ms}ms)"
         if result.error != "":
@@ -108,6 +113,10 @@ fn print_result_default(result: TestFileResult):
 
 fn print_result_doc(result: TestFileResult):
     val name = path_basename(result.path)
+    if test_file_outcome_class(result) == "SKIP":
+        # Feature-gated: the `FEATURE SKIP` line is its only output. Never
+        # "0 examples, 0 failures", which reads as a vacuous pass.
+        return
     if result.timed_out:
         print "  {name}"
         print "    TIMEOUT ({result.duration_ms}ms)"
@@ -135,6 +144,7 @@ fn test_file_result_json(result: TestFileResult) -> text:
         "\"skipped\":" + "{result.skipped}," +
         "\"pending\":" + "{result.pending}," +
         "\"duration_ms\":" + "{result.duration_ms}," +
+        "\"feature_gated\":\"" + escape_json(result.feature_gated) + "\"," +
         "\"error\":" + error_json + "}"
     )
 
@@ -281,7 +291,8 @@ fn aggregate_failed_count(result: TestRunResult) -> i64:
     before, which is what the positive control in the acceptance spec pins."""
     var uncounted_bad = 0
     for f in result.files:
-        if test_file_outcome_class(f) != "OK" and f.failed == 0:
+        val cls = test_file_outcome_class(f)
+        if cls != "OK" and cls != "SKIP" and f.failed == 0:
             uncounted_bad = uncounted_bad + 1
     # Executors that report timeouts without producing per-file results at all:
     # with no files to classify the loop above sees nothing, so fall back to the
@@ -364,8 +375,10 @@ fn print_summary(result: TestRunResult, format: text):
     var timed_out = 0
     var not_run = 0
     var errored = 0
+    var gated = 0
     for f in result.files:
         match test_file_outcome_class(f):
+            case "SKIP": gated = gated + 1
             case "CRASHED": crashed = crashed + 1
             case "TERMINATED": terminated = terminated + 1
             case "TIMEOUT": timed_out = timed_out + 1
@@ -435,6 +448,9 @@ fn print_summary(result: TestRunResult, format: text):
         print "Some tests failed."
     elif unverified > 0:
         print "INCONCLUSIVE: {unverified} unit(s) were terminated or timed out and never produced a verdict."
+    elif gated == result.files.len() and result.is_ok():
+        # Every selected file was feature-gated: nothing ran, so nothing passed.
+        print "No tests ran: {gated} file(s) feature-gated (build feature off)."
     elif result.is_ok():
         print "All tests passed!"
     else:

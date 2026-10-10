@@ -266,9 +266,32 @@ impl MirLowering:
                 nil
             case _: nil
 
+fn hir_const_is_unit_typed(const_: HirConst) -> bool:
+    """A module binding whose settled HIR type is Unit (`_expr_N = main()`)
+    has no value to store; it gets no static on any backend."""
+    match const_.type_.kind:
+        case HirTypeKind.Unit: true
+        case _: false
+
+fn mir_type_is_unit(type_: MirType) -> bool:
+    match type_.kind:
+        case MirTypeKind.Unit: true
+        case _: false
+
 fn runtime_module_initializer_supported(const_: HirConst) -> bool:
     match const_.value.kind:
         case IntLit(_, _) | FloatLit(_, _) | FloatLexeme(_, _) | BoolLit(_): false
+        # A signed or bit-inverted numeric literal (`val NEG = -1`,
+        # `val HALF = -2.5`) folds to a compile-time constant exactly like the
+        # bare literal above (`lower_const_expr`'s Unary arm). Now that HIR
+        # settles its type (`unannotated_const_type`), the type-driven
+        # fallback below would admit it for a redundant runtime re-store;
+        # keep it on the static path with the literal it wraps.
+        case Unary(_, un_operand):
+            val un_operand_t: HirExpr = un_operand
+            match un_operand_t.kind:
+                case IntLit(_, _) | FloatLit(_, _) | FloatLexeme(_, _): false
+                case _: runtime_module_initializer_type_fallback(const_)
         # `var G: T? = nil` neither folds (no MirConstValue for nil) nor was
         # admitted here, so lower_static emitted no static and every later
         # `G = x` died with "assignment target has no local binding".
@@ -322,10 +345,17 @@ fn runtime_module_initializer_supported(const_: HirConst) -> bool:
         # static with the type of that lowered value, so admitting DictLit
         # needs no new lowering machinery, exactly like ArrayLit.
         case DictLit(_, _, _): true
-        case _:
-            match const_.type_.kind:
-                case Int(_, _) | Float(_) | Bool | Str: true
-                case _: false
+        # Third container kind of the same defect: `var S: (i64, i64, f64) =
+        # (0, 0, 100.0)` (std.nogc_sync_mut.io.windows_resource_owner) got no
+        # static, so `S = (a, b, c)` aborted with "assignment target has no
+        # local binding". Same generic runtime-initializer path as above.
+        case TupleLit(_): true
+        case _: runtime_module_initializer_type_fallback(const_)
+
+fn runtime_module_initializer_type_fallback(const_: HirConst) -> bool:
+    match const_.type_.kind:
+        case Int(_, _) | Float(_) | Bool | Str: true
+        case _: false
 
 fn runtime_module_initializers_in_declaration_order(consts: [HirConst]) -> [HirConst]:
     var dynamic: [HirConst] = []
@@ -428,6 +458,7 @@ impl MirLowering:
             struct_field_type_name: {},
             struct_field_repr_name: {},
             struct_field_hir_type: {},
+            struct_bare_layout_owner: {},
             struct_field_array_element_type_name: {},
             struct_field_array_elem_type: {},
             struct_value_syms: {},
@@ -436,6 +467,10 @@ impl MirLowering:
             struct_method_return_names: {},
             struct_method_return_is_array: {},
             struct_method_return_is_optional: {},
+            trait_impl_owners: {},
+            trait_impl_methods: {},
+            trait_impl_closure_complete: false,
+            trait_impl_provider_modules: [],
             enum_payload_struct_names: {},
             enum_single_payload_types: {},
             enum_variant_payload_types: {},
@@ -446,6 +481,7 @@ impl MirLowering:
             runtime_array_locals: {},
             runtime_dict_locals: {},
             runtime_elem_value_type: {},
+            inferred_array_elem_state: {},
             array_element_struct_syms: {},
             runtime_value_local_ids: [],
             tagged_text_locals: {},
@@ -1228,10 +1264,13 @@ impl MirLowering:
             # bool/text decode fix (native_class_array_field_mutation_segfault
             # / native_bool_array_element_interpolation_special_garbage,
             # 2026-07-17) -- no separate inline loop needed here.
+            val bare_layout_was_free = not self.struct_field_order.has(struct_def.name)
             self.register_composite_field_metadata(struct_def.name, struct_def.fields, module.symbols, false)
             val struct_symbol = module.symbols.get_symbol_raw(struct_def.symbol.id)
             if struct_symbol != nil:
                 val struct_key = self.composite_layout_key(struct_symbol)
+                if bare_layout_was_free:
+                    self.struct_bare_layout_owner[struct_def.name] = struct_key
                 if struct_key != struct_def.name:
                     self.register_composite_field_metadata(struct_key, struct_def.fields, module.symbols, false)
                 val struct_attr = if struct_def.has_layout_attr: struct_def.layout_attr else: layoutattr_default_()
@@ -1549,6 +1588,7 @@ impl MirLowering:
             val struct_symbol = module.symbols.get_symbol_raw(struct_def.symbol.id)
             if struct_symbol != nil:
                 val struct_key = self.composite_layout_key(struct_symbol)
+                self.struct_bare_layout_owner[struct_def.name] = struct_key
                 if struct_key != struct_def.name:
                     self.register_composite_field_metadata(struct_key, struct_def.fields, module.symbols, true)
             local_meta_i = local_meta_i + 1
@@ -1560,6 +1600,7 @@ impl MirLowering:
             val class_symbol = module.symbols.get_symbol_raw(class_def.symbol.id)
             if class_symbol != nil:
                 val class_key = self.composite_layout_key(class_symbol)
+                self.struct_bare_layout_owner[class_def.name] = class_key
                 if class_key != class_def.name:
                     self.register_composite_field_metadata(class_key, class_def.fields, module.symbols, true)
                 val canonical_class_key = mir_class_identity(class_symbol)
@@ -1574,12 +1615,26 @@ impl MirLowering:
         self.struct_method_return_names = {}
         self.struct_method_return_is_array = {}
         self.struct_method_return_is_optional = {}
+        self.trait_impl_owners = {}
+        self.trait_impl_methods = {}
         # Provider arrays belong to the driver and are borrowed for this pass;
         # retain only relocated field/default metadata in the MIR owner roots.
+        var consumer_composite_names: Dict<text, bool> = {}
+        for local_struct_value in local_struct_values:
+            consumer_composite_names[local_struct_value.name] = true
+        for local_class_value in local_class_values:
+            consumer_composite_names[local_class_value.name] = true
         for provider_module in providers:
+            if provider_module.name != module.name:
+                for provider_struct in provider_module.structs.values():
+                    val provider_struct_def: HirStruct = provider_struct
+                    self.register_provider_struct(provider_struct_def, provider_module.symbols,
+                        consumer_composite_names.has(provider_struct_def.name))
             # Struct-only providers also own receiver methods (for example
             # CoreLexer); their absence of classes/enums must not hide them.
-            if provider_module.name != module.name and (provider_module.classes.len() > 0 or provider_module.enums.len() > 0 or provider_module.structs.len() > 0):
+            # So do impl-only providers: `impl Imported:` extension modules
+            # (app.test_daemon.qemu_broker_snapshot) declare no type at all.
+            if provider_module.name != module.name and (provider_module.classes.len() > 0 or provider_module.enums.len() > 0 or provider_module.structs.len() > 0 or provider_module.impls.len() > 0):
                 var provider_links: Dict<i64, text> = {}
                 for provider_func in provider_module.functions.values():
                     provider_links[provider_func.symbol.id] = mir_provider_function_name(provider_module.name, provider_module.symbols, provider_func)
@@ -1587,6 +1642,9 @@ impl MirLowering:
                     self.register_provider_class(provider_class, provider_module.symbols, provider_links, false)
                 for provider_func in provider_module.functions.values():
                     self.register_provider_method(provider_func, provider_module.symbols, provider_links)
+        # Before the ambient-bootstrap early return below: the stage3
+        # bootstrap-fixed lane lowers through that branch too.
+        self.register_trait_receiver_impls(module, providers)
         self.global_symbol_ids = {}
         self.imported_global_initializers = {}
         # These mirrors contain module-local SymbolIds just like the owner
@@ -1667,6 +1725,15 @@ impl MirLowering:
             var bs_ci = 0
             while bs_ci < bs_const_vals.len():
                 self.lower_const(bs_const_vals[bs_ci])
+                bs_ci = bs_ci + 1
+            # Statics are typed in a second pass: an unfolded initializer such as
+            # `val passed = executed - failed` recovers its scalar type from the
+            # operands' registered initializers (`global_const_exprs`), and
+            # `module.constants.values()` is not in source order, so typing a
+            # static in the same step as its own registration made the result
+            # depend on whether its operands happened to be visited first.
+            bs_ci = 0
+            while bs_ci < bs_const_vals.len():
                 self.lower_static(bs_const_vals[bs_ci])
                 bs_ci = bs_ci + 1
             bootstrap_mir_functions_reset()
@@ -1839,7 +1906,9 @@ impl MirLowering:
                     if impl_type_key != impl_type_name:
                         self.struct_method_syms["{impl_type_key}::{impl_method_name}"] = impl_method_id
                     if canonical_impl_type_key != "" and canonical_impl_type_key != impl_type_name:
-                        self.struct_method_syms["{canonical_impl_type_key}::{impl_method_name}"] = impl_method_id
+                        # Owner-identity row: a local extension colliding with
+                        # an imported owner's method is reported as ambiguous.
+                        self.register_owner_method("{canonical_impl_type_key}::{impl_method_name}", impl_method_id, module.name)
                     val impl_method_is_static = static_method_symbol_ids.has(self.symbol_id_value(impl_method_id))
                     if impl_method_is_static:
                         self.struct_method_syms["static::{impl_method_key}"] = impl_method_id
@@ -1971,6 +2040,10 @@ impl MirLowering:
         var coni = 0
         while coni < const_vals.len():
             self.lower_const(const_vals[coni])
+            coni = coni + 1
+        # Second pass for statics; see the bootstrap-path loop above.
+        coni = 0
+        while coni < const_vals.len():
             self.lower_static(const_vals[coni])
             coni = coni + 1
 
@@ -2078,6 +2151,11 @@ impl MirLowering:
         """Lower a module-level HIR binding that needs storage into a MIR
         static. Literal immutable bindings remain compile-time constants;
         non-folded bindings receive runtime initialization."""
+        # Unit has no storage; the runtime initializer evaluates such an
+        # initializer for its side effects only (see
+        # lower_runtime_module_initializers_named).
+        if hir_const_is_unit_typed(const_):
+            return
         val folded = self.lower_const_expr(const_.value)
         if folded.?:
             if not const_.is_mutable and const_.visibility.is_private():
@@ -2271,6 +2349,13 @@ impl MirLowering:
             match const_.value.kind:
                 case DictLit(_, _, _): value_type = MirType.i64()
                 case _: ()
+            # A Unit-valued initializer (a top-level `main()` statement,
+            # lowered as `_expr_N`) runs for its side effects only: the call
+            # was just emitted above. Unit has no storage -- LLVM would emit
+            # `global void` (rejected by llc) and Cranelift has no Unit
+            # static -- so no static and no StoreGlobal.
+            if mir_type_is_unit(value_type) or hir_const_is_unit_typed(const_):
+                continue
             var value_builder = self.builder
             var value_module = value_builder.module
             var statics = value_module.statics

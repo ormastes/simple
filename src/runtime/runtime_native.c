@@ -17232,11 +17232,44 @@ int64_t rt_string_lines(int64_t string) {
     return parts;
 }
 
-/* collections.rs:4239 -- Some(int) on a fully-numeric string, None otherwise. */
+/* Strict optional integer parse for text.parse_int/parse_i64, matching the
+ * Rust runtime (collections.rs rt_string_parse_int: `s.trim().parse::<i64>()`)
+ * and the Simple twin (simple_core/core_string.spl rt_string_parse_int): a
+ * tagged integer on success, NIL on failure. The previous body returned an
+ * Option enum handle wrapping the LENIENT strtoll value, so "12x" parsed as
+ * Some(12) and the result ABI differed from both other lanes. */
 int64_t rt_string_parse_int(int64_t string) {
-    int64_t len = rt_string_len(string);
-    if (len <= 0) return rt_option_none();
-    return rt_option_some(rt_string_to_int(string));
+    RtCoreString* s = rt_core_as_string(string);
+    if (!s) return rt_core_nil();
+    uint64_t begin = 0;
+    uint64_t finish = s->len;
+    while (begin < finish && (s->data[begin] == ' ' || s->data[begin] == '\t' ||
+                              s->data[begin] == '\n' || s->data[begin] == '\r' ||
+                              s->data[begin] == '\f' || s->data[begin] == '\v')) begin++;
+    while (finish > begin && (s->data[finish - 1] == ' ' || s->data[finish - 1] == '\t' ||
+                              s->data[finish - 1] == '\n' || s->data[finish - 1] == '\r' ||
+                              s->data[finish - 1] == '\f' || s->data[finish - 1] == '\v')) finish--;
+    if (begin >= finish) return rt_core_nil();
+    int negative = 0;
+    if (s->data[begin] == '+' || s->data[begin] == '-') {
+        negative = s->data[begin] == '-';
+        begin++;
+    }
+    if (begin >= finish) return rt_core_nil();
+    uint64_t limit = negative ? 9223372036854775808ULL : 9223372036854775807ULL;
+    uint64_t magnitude = 0;
+    for (uint64_t i = begin; i < finish; i++) {
+        uint8_t byte = (uint8_t)s->data[i];
+        if (byte < '0' || byte > '9') return rt_core_nil();
+        uint64_t digit = (uint64_t)(byte - '0');
+        if (magnitude > (limit - digit) / 10ULL) return rt_core_nil();
+        magnitude = magnitude * 10ULL + digit;
+    }
+    if (negative) {
+        if (magnitude == 9223372036854775808ULL) return rt_value_int(INT64_MIN);
+        return rt_value_int(-(int64_t)magnitude);
+    }
+    return rt_value_int((int64_t)magnitude);
 }
 
 /* ---- unique / shared / handle (6): real semantics, objects.rs ----------

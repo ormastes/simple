@@ -55,6 +55,7 @@ use compiler.frontend.core.lexer.{lex_cur_suffix_get}
 use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice, lex_token_start_get, lex_token_end_get, lex_cur_no_interp_get}
 use compiler.frontend.core.lexer.{lex_enable_forced_indentation, lex_disable_forced_indentation, lex_pop_indent}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
+use compiler.core.types.{flat_span_new}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_skip_newlines}
 use compiler.core.parser.{parser_guarded_int_text}
 use compiler.frontend.core._ParserPrimary.unsigned_integer_literals.{parser_unsigned_integer_suffix, parse_unsigned_int_literal_text}
@@ -186,6 +187,19 @@ fn parse_fn_lambda_after_kw() -> i64:
         fn_lam_stmts.push(fn_body_e)
         lex_disable_forced_indentation()
     expr_lambda(fn_param_names, fn_lam_stmts, 0)
+
+fn unsuffixed_decimal_needs_u64_word(int_text: text) -> bool:
+    if int_text.len() >= 2 and int_text.byte_at(0) == 48:
+        val prefix = int_text.byte_at(1)
+        if prefix == 120 or prefix == 88 or prefix == 98 or prefix == 66 or prefix == 111 or prefix == 79:
+            return false
+    var digits = 0
+    var i = 0
+    while i < int_text.len():
+        if int_text.byte_at(i) != 95:
+            digits = digits + 1
+        i = i + 1
+    digits >= 19
 
 # Integer literal token text -> value, supporting _ separators and
 # 0x/0b/0o prefixes. Shared by plain (kind 1) and suffixed (kind 7) ints
@@ -407,6 +421,13 @@ fn parse_primary_expr() -> i64:
     if par_kind_get() == 1:
         val int_text = par_text_get()
         parser_advance()
+        # Seed parity (lexer/numbers.rs parse_integer_digits): an unsuffixed
+        # decimal literal is admitted up to u64::MAX and carried as its exact
+        # 64-bit word (18446744073709551615 -> -1); only > u64::MAX errors.
+        # 19+ digits route through the overflow-free u64 limb parser, which
+        # yields the identical word for every value that also fits i64.
+        if unsuffixed_decimal_needs_u64_word(int_text):
+            return expr_int_lit(parse_unsigned_int_literal_text(int_text, "u64"), 0)
         return expr_int_lit(parse_int_literal_text(int_text), 0)
 
     if par_kind_get() == 2:
@@ -512,6 +533,16 @@ fn parse_primary_expr() -> i64:
             eprint("[parser-primary] ident:start name={id_name}")
         val custom_block_adjacent = parser_is_canonical_custom_block_kind(id_name) and
             lex_source_char_at(lex_token_end_get()) == "{"
+        # Capture the identifier's own token span BEFORE advancing. The node
+        # used to be allocated with span id 0, which is not "no span" but the
+        # FIRST span registered for the file (a module-level `extern fn` /
+        # `val` decl), so every MIR diagnostic keyed on a receiver -- e.g.
+        # "unresolved method call: to_int" -- was reported at that unrelated
+        # declaration (test_runner_main.spl:71 for a call on line 785).
+        val id_start = lex_token_start_get()
+        val id_end = lex_token_end_get()
+        val id_line = par_line_get()
+        val id_col = par_col_get()
         parser_advance()
         if custom_block_adjacent:
             if par_kind_get() != TOK_LBRACE:
@@ -521,7 +552,7 @@ fn parse_primary_expr() -> i64:
             return expr_custom_block(id_name, raw_payload, 0)
         if parser_primary_trace_line_enabled():
             eprint("[parser-primary] ident:advanced name={id_name}")
-        return expr_ident(id_name, 0)
+        return expr_ident(id_name, flat_span_new(id_start, id_end, id_line, id_col))
 
     # The core lexer deliberately maps textual `xor` onto TOK_CARET so infix
     # `a xor b` and `a ^ b` share one operator. In primary/callee position the
@@ -531,8 +562,12 @@ fn parse_primary_expr() -> i64:
         return expr_ident("xor", 0)
 
     if par_kind_get() == 38:
+        val self_start = lex_token_start_get()
+        val self_end = lex_token_end_get()
+        val self_line = par_line_get()
+        val self_col = par_col_get()
         parser_advance()
-        return expr_ident("self", 0)
+        return expr_ident("self", flat_span_new(self_start, self_end, self_line, self_col))
 
     if par_kind_get() == 54:
         parser_advance()

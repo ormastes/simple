@@ -2,6 +2,9 @@
 # source inventory. Git commands are read-only; all writes stay under build/scv.
 
 use app.io.mod.{dir_create, file_exists, file_read, process_run_bounded}
+use app.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.stderr_ops.{stderr_write}
+use app.compiler_entrypoint.inventory_trace.{CompilerInventoryTraceV1, inventory_trace_create_v1}
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory.{CompileSourceEventV1, compile_source_inventory_apply_observed_events_v1, compile_source_inventory_digest_valid_v1, compile_source_inventory_git_event_v1, compile_source_inventory_path_valid_v1, compile_source_inventory_read_at_pointer_v1, compile_source_inventory_read_pointer_content_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_cache_root_valid_v1,
@@ -131,14 +134,19 @@ fn compiler_inventory_cursor_read_v1(
         return compiler_inventory_cursor_invalid_v1()
     compiler_inventory_cursor_decode_v1(file_read(path))
 
-fn compiler_inventory_git_lines_v1(
-    root: text, args: [text]
-) -> text?:
+fn compiler_inventory_git_lines_v1(root: text, args: [text]) -> text?:
+    _compiler_inventory_git_lines_traced_v1(root, args, nil, 0)
+
+fn _compiler_inventory_git_lines_traced_v1(root: text, args: [text],
+        trace: CompilerInventoryTraceV1?, query_kind: i64) -> text?:
     val (stdout, _stderr, status) = process_run_bounded(
         # 10s was too short: cold-init `ls-files` over ~60k files takes ~23s on
         # Windows and timed out, failing every refresh with git-event-refresh-failed.
         "git", ["-C", root, "--no-optional-locks"] + args, 300000, 16 * 1024 * 1024)
-    if status != 0: nil else: Some(stdout)
+    if trace != nil: trace!.captured_query(query_kind, status, stdout)
+    if status != 0:
+        return nil
+    Some(stdout)
 
 fn compiler_inventory_git_head_v1(root: text) -> text:
     val output = compiler_inventory_git_lines_v1(root, ["rev-parse", "HEAD"])
@@ -309,8 +317,14 @@ fn compiler_inventory_parse_porcelain_v1(
         changed, digests.src_digest, digests.test_digest, digests.paths))
 
 fn compiler_inventory_git_events_v1(
+    root: text, previous_head: text, head: text, source_roots: [text], cold_init: bool
+) -> CompilerInventoryGitEventsV1?:
+    _compiler_inventory_git_events_traced_v1(root, previous_head, head, source_roots, cold_init, nil)
+
+fn _compiler_inventory_git_events_traced_v1(
     root: text, previous_head: text, head: text,
-    source_roots: [text], cold_init: bool
+    source_roots: [text], cold_init: bool,
+    trace: CompilerInventoryTraceV1?
 ) -> CompilerInventoryGitEventsV1?:
     # Reuse the refresh owner's captured HEAD for both diffs. A second
     # rev-parse costs a process on every warm request and can bind events from
@@ -321,9 +335,9 @@ fn compiler_inventory_git_events_v1(
         # enumeration. Derive both the cold inventory and its untracked
         # membership cursor from that same output; separate ls-files calls
         # could observe different directory memberships during refresh.
-        val listed = compiler_inventory_git_lines_v1(
+        val listed = _compiler_inventory_git_lines_traced_v1(
             root, ["-c", "core.quotePath=false", "ls-files", "-t",
-                "--cached", "--others", "--exclude-standard", "--"] + source_roots)
+                "--cached", "--others", "--exclude-standard", "--"] + source_roots, trace, 1)
         if listed == nil:
             return nil
         var untracked_paths: [text] = []
@@ -354,9 +368,9 @@ fn compiler_inventory_git_events_v1(
     if head == "" or previous_head == "":
         return nil
     if head != previous_head:
-        val committed = compiler_inventory_git_lines_v1(
+        val committed = _compiler_inventory_git_lines_traced_v1(
             root, ["-c", "core.quotePath=false", "diff", "--name-status",
-                "--no-renames", previous_head, head, "--"] + source_roots)
+                "--no-renames", previous_head, head, "--"] + source_roots, trace, 2)
         if committed == nil:
             return nil
         val next = compiler_inventory_parse_name_status_v1(root, committed!, events)
@@ -366,9 +380,9 @@ fn compiler_inventory_git_events_v1(
     # One porcelain listing replaces the separate tracked diff and untracked
     # ls-files processes on every warm request. The captured HEAD above still
     # binds the committed-diff range and the cursor for this refresh.
-    val working = compiler_inventory_git_lines_v1(
+    val working = _compiler_inventory_git_lines_traced_v1(
         root, ["-c", "core.quotePath=false", "status", "--porcelain=v1",
-            "--untracked-files=all", "--no-renames", "--"] + source_roots)
+            "--untracked-files=all", "--no-renames", "--"] + source_roots, trace, 3)
     if working == nil:
         return nil
     compiler_inventory_parse_porcelain_v1(
@@ -597,13 +611,17 @@ fn compiler_inventory_untracked_deletions_v1(
     Some(deletions)
 
 fn _compiler_inventory_refresh_locked_v1(
-    root: text, cache_root: text, source_roots: [text], cold_init: bool
+    root: text, cache_root: text, source_roots: [text], cold_init: bool,
+    trace: CompilerInventoryTraceV1?
 ) -> CompilerInventoryRefreshV1:
     # A cold refresh replaces the inventory, so source_roots must cover the
     # full intended inventory scope. The CLI admission owner supplies the
     # union of src and test before calling this function.
     val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
     val cursor = compiler_inventory_cursor_read_v1(cache_root, pointer_content)
+    if trace != nil:
+        trace!.captured_pointer(pointer_content, cursor.inventory_digest,
+            cursor.inventory_generation, cursor.untracked_membership_digest)
     if not cursor.valid and not cold_init:
         # Fail closed without event authority, but name the one-time opt-in
         # so a fresh checkout is not left with an opaque reason.
@@ -632,11 +650,14 @@ fn _compiler_inventory_refresh_locked_v1(
     val head = compiler_inventory_git_head_v1(root)
     if head == "":
         return compiler_inventory_invalid_v1("git-event-source-unavailable")
-    val observed = match compiler_inventory_git_events_v1(
+    val observed = match _compiler_inventory_git_events_traced_v1(
             root, if cursor.valid: cursor.git_head else: head, head,
-            source_roots, cold_init):
+            source_roots, cold_init, trace):
         case Some(batch): batch
         case _: return compiler_inventory_invalid_v1("git-event-refresh-failed")
+    if trace != nil:
+        trace!.observed(observed.events.len(), observed.untracked_paths.len(),
+            observed.untracked_src_digest, observed.untracked_test_digest)
     # A cold init that listed NO compilable source is never a legitimate state
     # for this repository, and publishing it is not survivable: the empty
     # inventory becomes authoritative at generation 0, and every later publish
@@ -665,6 +686,7 @@ fn _compiler_inventory_refresh_locked_v1(
     else:
         ""
     var next_membership_paths = observed.untracked_paths
+    var diagnostic_deleted = 0
     if membership_changed:
         val previous = compiler_inventory_membership_read_v1(
             cache_root, cursor.untracked_membership_digest)
@@ -675,6 +697,7 @@ fn _compiler_inventory_refresh_locked_v1(
             root, previous!, observed.untracked_paths, source_roots)
         if deleted == nil:
             return compiler_inventory_invalid_v1("untracked-membership-reconcile-failed")
+        if trace != nil: diagnostic_deleted = deleted!.len()
         for event in deleted!:
             git_events.push(event)
         next_membership_paths = compiler_inventory_membership_merge_v1(
@@ -750,6 +773,7 @@ fn _compiler_inventory_refresh_locked_v1(
                 cache_root, pointer_content, cursor.inventory_digest)
             if reason != "":
                 return compiler_inventory_invalid_v1("observed-event-apply:" + reason)
+            if trace != nil: trace!.prepared(0, -1, membership_digest)
             return CompilerInventoryRefreshV1(
                 true, "ok", cursor.inventory_digest, cursor.inventory_generation)
     # Publish only after all journal checks pass. The immutable blob must
@@ -763,6 +787,9 @@ fn _compiler_inventory_refresh_locked_v1(
         membership_newly_written = published.newly_written
     if membership_digest == "":
         return compiler_inventory_invalid_v1("untracked-membership-publish-failed")
+    if trace != nil:
+        val diagnostic_paths = if cold_init or membership_changed: next_membership_paths.len() else: -1
+        trace!.prepared(diagnostic_deleted, diagnostic_paths, membership_digest)
     val inventory = compile_source_inventory_apply_observed_events_v1(
         root, cache_root, git_events, filesystem_events!, head, rows,
         filesystem_digest, sha256_text(pointer_content), cold_init,
@@ -783,6 +810,7 @@ fn _compiler_inventory_refresh_locked_v1(
                     "untracked-membership-cleanup-failed:" + inventory.reason)
         return compiler_inventory_invalid_v1(
             "observed-event-apply:" + inventory.reason)
+    if trace != nil: trace!.published(inventory.digest, inventory.inventory!.generation)
     # This refresh lock covers every production membership-record reader.
     # Retire the previous immutable blob only after CURRENT admits the new
     # digest; a failed publication must leave the old cursor usable.
@@ -794,8 +822,9 @@ fn _compiler_inventory_refresh_locked_v1(
     CompilerInventoryRefreshV1(
         true, "ok", inventory.digest, inventory.inventory!.generation)
 
-fn compiler_inventory_refresh_v1(
-    root: text, cache_root: text, source_roots: [text], cold_init: bool
+fn _compiler_inventory_refresh_owned_v1(
+    root: text, cache_root: text, source_roots: [text], cold_init: bool,
+    trace: CompilerInventoryTraceV1?
 ) -> CompilerInventoryRefreshV1:
     # Inventory publication and event-cursor publication form one compiler
     # refresh. Keep both reads and writes under the same refresh lock.
@@ -807,12 +836,37 @@ fn compiler_inventory_refresh_v1(
     val refresh_lock = file_lock("{event_root}/refresh.lock", 300)
     if refresh_lock < 0:
         return compiler_inventory_invalid_v1("compile-event-refresh-lock-unavailable")
+    if trace != nil: trace!.lock_released = false
     val result = _compiler_inventory_refresh_locked_v1(
-        root, cache_root, source_roots, cold_init)
+        root, cache_root, source_roots, cold_init, trace)
     if not file_unlock(refresh_lock):
         return compiler_inventory_invalid_v1("compile-event-refresh-unlock-failed")
+    if trace != nil: trace!.lock_released = true
     result
 
+# Explicit token seam is diagnostic-only. Tokens never enter an admission key.
+fn compiler_inventory_refresh_traced_v1(
+    root: text, cache_root: text, source_roots: [text], cold_init: bool, token: text
+) -> CompilerInventoryRefreshV1:
+    val trace = inventory_trace_create_v1(token)
+    if trace != nil: trace!.begin(root, source_roots, cold_init)
+    val result = _compiler_inventory_refresh_owned_v1(
+        root, cache_root, source_roots, cold_init, trace)
+    if trace != nil:
+        if trace!.lock_released:
+            trace!.finish(result.valid, result.reason, result.inventory_digest, result.inventory_generation)
+            trace!.emit()
+    elif token != "" and result.reason != "compile-event-refresh-unlock-failed":
+        stderr_write("inventory-trace-rejected-v1 reason=invalid-attempt-token\n")
+    result
+
+fn compiler_inventory_refresh_v1(
+    root: text, cache_root: text, source_roots: [text], cold_init: bool
+) -> CompilerInventoryRefreshV1:
+    compiler_inventory_refresh_traced_v1(root, cache_root, source_roots, cold_init,
+        env_get("SIMPLE_INVENTORY_TRACE_ATTEMPT") ?? "")
+
+export compiler_inventory_refresh_traced_v1
 export CompilerInventoryRefreshV1
 export compiler_inventory_refresh_v1
 export compiler_inventory_parse_name_status_v1

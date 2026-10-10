@@ -40,6 +40,17 @@ use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_
 use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
+fn unannotated_dict_global_type(value: Expr, span: Span) -> HirType?:
+    """`var D = {}` publishes the same dynamic `Dict<any, any>` a bare `Dict`
+    annotation lowers to (hir_lowering/types.spl). Without a published type
+    MIR's global read (try_lower_global_read) could not tell the i64 storage
+    handle is a dict, so `D.has(k)` died as "unresolved method call: has"
+    (std.nogc_sync_mut.log `SCOPE_LEVELS`)."""
+    match value.kind:
+        case ExprKind.DictLit(_):
+            Some(HirType(kind: HirTypeKind.Dict(HirType(kind: HirTypeKind.Any, span: span), HirType(kind: HirTypeKind.Any, span: span)), span: span))
+        case _: nil
+
 impl HirLowering:
     me bootstrap_flat_error_expr(kind_label: text, index: i64, span: Span) -> HirExpr:
         # Mirror flat_bridge_report_unhandled_node's fail-closed policy: record
@@ -63,6 +74,35 @@ impl HirLowering:
                 return HirBlock(stmts: body.stmts, has: true, value: self.lower_bootstrap_flat_expr(tail_idx), span: span)
             return body
         HirBlock(stmts: [], has: true, value: self.lower_bootstrap_flat_expr(expr_idx), span: span)
+
+    me define_own_module_type(name: text, kind: SymbolKind, span: Span, visibility: Visibility, mod_name: text?) -> SymbolId:
+        """Declare one of THIS module's own type names; it shadows any
+        same-named type another module already bound in this scope.
+
+        Directory-package siblings are prebound (resolve_package_sibling_symbols)
+        before this declare pass, and `define` is first-write-wins for type
+        symbols. Without the shadowing below, a module declaring `enum Status`
+        next to a sibling that also declares `Status` got the SIBLING's symbol
+        back: its own enum was never allocated and its own `status: Status`
+        fields bound to the foreign type.
+        doc/08_tracking/bug/hir_package_sibling_shadows_own_type_2026-10-10.md"""
+        val defined = self.symbols.define(name, kind, nil, span, visibility, false, mod_name)
+        if self.module_filename == "":
+            return defined
+        val own_owner = hir_symbol_owner_module(self.module_filename)
+        val defined_owner = hir_symbol_owner_module(self.symbols.symbol_defining_module_scalar_raw(defined.id))
+        if defined_owner != own_owner:
+            # First-write-wins handed back a foreign declaration: drop that
+            # unqualified binding and allocate this module's own symbol.
+            self.symbols.unbind_local_type(name)
+            return self.symbols.define(name, kind, nil, span, visibility, false, mod_name)
+        # Own declaration allocated (e.g. a canonical class), but the
+        # unqualified spelling may still point at the foreign one.
+        val bound_raw = self.symbols.local_type_binding_raw(name)
+        if bound_raw >= 0 and bound_raw != defined.id:
+            if hir_symbol_owner_module(self.symbols.symbol_defining_module_scalar_raw(bound_raw)) != own_owner:
+                self.symbols.rebind_local_type(name, defined)
+        defined
 
     me declare_module_symbols(module: ParserModule):
         # Closure builds need this pass even under SIMPLE_BOOTSTRAP=1 (see the
@@ -94,7 +134,10 @@ impl HirLowering:
         var idx = 0
         while idx < cls_keys.len():
             val name = cls_keys[idx]
-            self.symbols.define(name, SymbolKind.Class, nil, decl_span, decl_visibility, false, mod_name)
+            val class_symbol = self.define_own_module_type(name, SymbolKind.Class, decl_span, decl_visibility, mod_name)
+            val class_decl: ParserClass = module_classes[name]
+            if class_decl.type_params.len() == 0:
+                self.nongeneric_record_owners[class_symbol.id] = true
             idx = idx + 1
 
         val module_structs = module.structs
@@ -103,7 +146,10 @@ impl HirLowering:
         idx = 0
         while idx < str_keys.len():
             val name = str_keys[idx]
-            self.symbols.define(name, SymbolKind.Struct, nil, decl_span, decl_visibility, false, mod_name)
+            val struct_symbol = self.define_own_module_type(name, SymbolKind.Struct, decl_span, decl_visibility, mod_name)
+            val struct_decl: ParserStruct = module_structs[name]
+            if struct_decl.type_params.len() == 0:
+                self.nongeneric_record_owners[struct_symbol.id] = true
             idx = idx + 1
 
         val module_enums = module.enums
@@ -112,7 +158,7 @@ impl HirLowering:
         idx = 0
         while idx < enum_keys.len():
             val name = enum_keys[idx]
-            val enum_symbol = self.symbols.define(name, SymbolKind.Enum, nil, decl_span, decl_visibility, false, mod_name)
+            val enum_symbol = self.define_own_module_type(name, SymbolKind.Enum, decl_span, decl_visibility, mod_name)
             # Local enum fields restore HIR identity through the same qualified
             # index as imported fields. Publish only this exact declaration:
             # define retains an existing lexical binding on a name collision.
@@ -129,7 +175,9 @@ impl HirLowering:
         idx = 0
         while idx < bf_keys.len():
             val name = bf_keys[idx]
-            self.symbols.define(name, SymbolKind.Struct, nil, decl_span, decl_visibility, false, mod_name)
+            val bitfield_symbol = self.define_own_module_type(name, SymbolKind.Struct, decl_span, decl_visibility, mod_name)
+            # A bitfield declaration has no type parameters.
+            self.nongeneric_record_owners[bitfield_symbol.id] = true
             idx = idx + 1
 
         val module_traits = module.traits
@@ -138,7 +186,7 @@ impl HirLowering:
         idx = 0
         while idx < trait_keys.len():
             val name = trait_keys[idx]
-            self.symbols.define(name, SymbolKind.Trait, nil, decl_span, decl_visibility, false, mod_name)
+            self.define_own_module_type(name, SymbolKind.Trait, decl_span, decl_visibility, mod_name)
             idx = idx + 1
 
         # TAL2 (2026-08-01): a module's OWN `type X = Y` aliases were never entered
@@ -207,6 +255,8 @@ impl HirLowering:
             var constant_type: HirType? = nil
             if constant.has_type_:
                 constant_type = Some(self.lower_type(constant.type_))
+            else:
+                constant_type = unannotated_dict_global_type(constant.value, decl_span)
             self.symbols.define(name, SymbolKind.Const, constant_type, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1
 

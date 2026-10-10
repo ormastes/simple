@@ -62,6 +62,7 @@ use compiler.core.types.{reference_type_register}
 use compiler.core.types.{pointer_type_register}
 use compiler.core.types.{atomic_type_register}
 use compiler.core.types.{weak_type_register}
+use compiler.core.types.{function_type_register, TYPE_FUNCTION_BASE, TYPE_FUNCTION_LIMIT}
 use std.string_core.{char_code}
 
 # Import from split modules
@@ -94,6 +95,11 @@ var par_errors: [text] = []
 var par_warnings: [text] = []
 var par_struct_names: [text] = []
 var par_had_error: bool = false
+# True once this file has a `use` that may bring a `List` type into scope
+# (explicit `List` item or alias, `use m.List`, or any wildcard). The
+# `List<T>` -> `[T]` seed-parity rewrite is only sound without one:
+# common.core.collections exports a real `pub class List<T>`.
+var par_list_type_import_seen: bool = false
 var par_diagnostics_suppressed: bool = false
 var par_diagnostic_emit_count: i64 = 0
 var par_kind_slot: [i64] = [0]
@@ -256,6 +262,19 @@ fn parser_diagnostic_emit_count_get() -> i64:
 
 # ===== Parser Init =====
 
+fn parser_note_use_import(module_path: text, imported_names: [text], wildcard: bool):
+    """Record whether a parsed `use` may bring a `List` type into scope."""
+    if wildcard:
+        par_list_type_import_seen = true
+        return
+    if imported_names.len() == 0:
+        if module_path == "List" or module_path.ends_with(".List"):
+            par_list_type_import_seen = true
+        return
+    for imported in imported_names:
+        if imported == "List" or imported.ends_with(":List"):
+            par_list_type_import_seen = true
+
 fn parser_init(source: text):
     parser_init_with_path(source, "")
 
@@ -287,6 +306,7 @@ fn parser_init_with_path(source: text, path: text):
         par_col_slot = [0]
     par_col_slot[0] = 0
     par_had_error = false
+    par_list_type_import_seen = false
     par_diagnostics_suppressed = false
     # First-error text belongs to this module, including ordinary driver
     # parses. A preceding failed file must not supply this file's diagnostic.
@@ -599,6 +619,17 @@ fn parser_absorb_optional_suffix(base: i64) -> i64:
 fn parser_parse_type() -> i64:
     parser_parse_type_impl(true)
 
+fn parser_function_type_tag(param_tags: [i64], ret_tag: i64) -> i64:
+    """Intern one `fn(params...) -> ret` annotation. The registry block holds
+    TYPE_FUNCTION_LIMIT - TYPE_FUNCTION_BASE distinct shapes per module;
+    exhausting it is a parse error. TYPE_FN is returned only as a recovery
+    placeholder so parsing can continue; the module fails to compile."""
+    val tag = function_type_register(param_tags, ret_tag)
+    if tag >= 0:
+        return tag
+    parser_error("function type registry exhausted (" + int_to_str(TYPE_FUNCTION_LIMIT - TYPE_FUNCTION_BASE) + " distinct `fn(..) -> R` shapes per module)")
+    TYPE_FN
+
 fn parser_parse_cast_type() -> i64:
     parser_parse_type_impl(false)
 
@@ -611,6 +642,27 @@ fn parser_parse_tuple_element_type() -> i64:
         parser_advance()
         return parser_parse_type()
     candidate
+
+fn parser_array_tag_for_elem(elem_type: i64) -> i64:
+    """Array type tag for an element tag: `[T]` and `List<T>` share it."""
+    if elem_type == TYPE_TEXT:
+        return TYPE_ARRAY_TEXT
+    if elem_type == TYPE_BOOL:
+        return TYPE_ARRAY_BOOL
+    if elem_type == TYPE_I64 or elem_type == TYPE_VOID:
+        # TYPE_VOID here means parser_parse_type_impl's ident branch could
+        # not resolve the element name at all (e.g. bare `Any`, which has
+        # no dedicated primitive check and no matching named type) --
+        # keep this pre-existing fallback byte-identical to before.
+        return TYPE_ARRAY_I64
+    # Nested arrays use the same recursive specialization registry as
+    # named and fixed-width elements. Collapsing [[T]] to [Any] here
+    # loses the declared receiver type before HIR/MIR can project it.
+    # The registry already participates in flat-pool cache transport.
+    val arr_generic_tag = array_generic_type_register(elem_type)
+    if arr_generic_tag < 0:
+        return TYPE_ARRAY_I64
+    arr_generic_tag
 
 fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
     # dyn Trait -- dynamic dispatch type (parsed as named type)
@@ -735,22 +787,36 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
     # fn" + phantom "untyped function returns a value" on ANNOTATED fns.
     # The bootstrap tag registry has no first-class fn-type, so consume the
     # full shape and answer TYPE_FN (callables are dynamically dispatched).
+    # The shape is interned as a TYPE_FUNCTION_BASE tag so the flat bridge
+    # can rebuild `TypeKind.Function(params, ret)` and HIR keeps the real
+    # callable signature (a generic visitor's `f: fn(Node, C) -> C` must
+    # bind `C` at its nested calls). Only when the block is exhausted does
+    # the bare TYPE_FN tag remain.
     if kind == 20:
         parser_advance()
+        var fnty_params: [i64] = []
+        var fnty_has_shape = false
         if par_kind_get() == 140:
+            fnty_has_shape = true
             parser_advance()
             for _fnty_i in 0..20:
                 if par_kind_get() == 141:
                     break
-                val _fnty_param = parser_parse_type()
+                fnty_params.push(parser_parse_type())
                 if par_kind_get() == 160:
                     parser_advance()
             if par_kind_get() == 141:
                 parser_advance()
+        var fnty_ret = TYPE_VOID
         if par_kind_get() == 167:
+            fnty_has_shape = true
             parser_advance()
-            val _fnty_ret = parser_parse_type()
-        return TYPE_FN
+            fnty_ret = parser_parse_type()
+        # A bare `fn` annotation (no parameter list, no arrow) means "any
+        # callable", not `fn() -> void`: keep it on the shapeless TYPE_FN tag.
+        if not fnty_has_shape:
+            return TYPE_FN
+        return parser_function_type_tag(fnty_params, fnty_ret)
     if kind == 199:
         parser_advance()
         # Parse the trait name
@@ -858,6 +924,20 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             val gid = named_type_find(type_name)
             if gid >= 0:
                 return parser_absorb_optional_suffix(TYPE_NAMED_BASE + gid)
+            # SEED-PARITY: `List<T>` is the array type `[T]` (the seed's
+            # type_resolver.rs maps "List" with one argument to
+            # HirType::Array). It fell through to TYPE_ANY here, so every
+            # `samples: List<f64>` parameter reached MIR as an erased I64 and
+            # `for s in samples` died as "#143 for-in over non-array
+            # iterables" -- 75 of the 93 for-in errors in the 2026-10-09
+            # stage2 test-runner build. A `List` declared in THIS file still
+            # wins via the named_type_find check above. An imported `List`
+            # class (common.core.collections exports `pub class List<T>`)
+            # must keep its name for HIR, so any `use` that may bring one into
+            # scope -- explicit item/alias or a wildcard -- disables the
+            # rewrite for the file (par_list_type_import_seen).
+            if type_name == "List" and not has_extra_type and not par_list_type_import_seen:
+                return parser_absorb_optional_suffix(parser_array_tag_for_elem(inner_type))
             # A written generic base can be declared in another module and
             # therefore absent from this file's named-type registry. Preserve
             # the annotation as ANY; TYPE_VOID means no return was written.
@@ -1000,47 +1080,28 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                     break
                 parser_advance()
         parser_expect(145)
-        var arr_type = TYPE_ARRAY_I64
-        if elem_type == TYPE_TEXT:
-            arr_type = TYPE_ARRAY_TEXT
-        elif elem_type == TYPE_BOOL:
-            arr_type = TYPE_ARRAY_BOOL
-        elif elem_type == TYPE_I64 or elem_type == TYPE_VOID:
-            # TYPE_VOID here means parser_parse_type_impl's ident branch could
-            # not resolve the element name at all (e.g. bare `Any`, which has
-            # no dedicated primitive check and no matching named type) --
-            # keep this pre-existing fallback byte-identical to before.
-            arr_type = TYPE_ARRAY_I64
-        else:
-            # Nested arrays use the same recursive specialization registry as
-            # named and fixed-width elements. Collapsing [[T]] to [Any] here
-            # loses the declared receiver type before HIR/MIR can project it.
-            # The registry already participates in flat-pool cache transport.
-            val arr_generic_tag = array_generic_type_register(elem_type)
-            if arr_generic_tag < 0:
-                arr_type = TYPE_ARRAY_I64
-            else:
-                arr_type = arr_generic_tag
         # absorb optional suffix: [T]? -> Option
-        return parser_absorb_optional_suffix(arr_type)
-    # Function type: fn(T, T) -> T
+        return parser_absorb_optional_suffix(parser_array_tag_for_elem(elem_type))
+    # Function type: fn(T, T) -> T (interned like the keyword branch above)
     if par_kind_get() == 20:
         parser_advance()
         parser_expect(140)
+        var fnty2_params: [i64] = []
         if par_kind_get() != 141:
-            parser_parse_type()
+            fnty2_params.push(parser_parse_type())
             while true:
                 if par_kind_get() != 160:
                     break
                 parser_advance()
                 if par_kind_get() == 141:
                     break
-                parser_parse_type()
+                fnty2_params.push(parser_parse_type())
         parser_expect(141)
+        var fnty2_ret = TYPE_VOID
         if par_kind_get() == 167:
             parser_advance()
-            parser_parse_type()
-        return parser_absorb_optional_suffix(TYPE_FN)
+            fnty2_ret = parser_parse_type()
+        return parser_absorb_optional_suffix(parser_function_type_tag(fnty2_params, fnty2_ret))
     # Tuple type: (T, T)
     if par_kind_get() == 140:
         parser_advance()
@@ -1072,8 +1133,8 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
         # the `-> i64` tokens for the param parser to choke on.
         if par_kind_get() == 167:
             parser_advance()
-            parser_parse_type()
-            return parser_absorb_optional_suffix(TYPE_FN)
+            val paren_fn_ret = parser_parse_type()
+            return parser_absorb_optional_suffix(parser_function_type_tag(tuple_elem_tags, paren_fn_ret))
         # Unit `()` is the empty tuple and must retain an explicit type tag;
         # TYPE_ANY makes `-> ()` indistinguishable from a dynamic return.
         if tuple_elem_tags.len() == 0:
@@ -1236,6 +1297,7 @@ fn parser_tok_restore(nums: [i64], saved_text: text):
 # Parser state (needed by split modules and external consumers)
 export par_errors, par_warnings, par_struct_names
 export parser_init, parser_init_with_path, parser_advance, parser_check, parser_match_tok, parser_expect
+export parser_note_use_import
 export parser_has_errors, parser_get_errors, parser_error_count, parser_set_had_error
 export parser_first_error_get
 export parser_initialization_generation_v1, parser_promote_transient_owners

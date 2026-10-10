@@ -1156,6 +1156,9 @@ bootstrap_progress_event() {
 }
 bootstrap_last_milestone=init
 bootstrap_verdict_written=0
+# Set by a failure path that knows WHY it failed; the EXIT trap then names it
+# in the VERDICT line instead of repeating the milestone. [a-z0-9-] only.
+bootstrap_abort_reason=
 bootstrap_verdict() {
   bootstrap_verdict_written=1
   line="VERDICT — $1"
@@ -1212,7 +1215,7 @@ bootstrap_cleanup() {
   trap - EXIT HUP INT QUIT TERM
   set +e
   if [ "${bootstrap_verdict_written}" -eq 0 ]; then
-    bootstrap_verdict "ABORTED: stage=${bootstrap_last_milestone} exit=${bootstrap_status} signal=${bootstrap_abnormal_signal:-none} reason=${bootstrap_last_milestone}"
+    bootstrap_verdict "ABORTED: stage=${bootstrap_last_milestone} exit=${bootstrap_status} signal=${bootstrap_abnormal_signal:-none} reason=${bootstrap_abort_reason:-${bootstrap_last_milestone}}"
   fi
   resume_stage4_release_continuation_lock
   if [ "${bootstrap_deploy_tx_active:-0}" -eq 1 ]; then
@@ -1648,6 +1651,19 @@ bootstrap_startup_jobs_apply_policy "${jobs_memory_policy}" "${cli_jobs}" || exi
 
 echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus}, source: ${job_source}, requested: ${jobs_requested}, resolved: ${jobs_resolved}, policy: ${jobs_memory_policy}, reason: ${jobs_memory_reason}, available KiB: ${jobs_available_kib}, worker MiB: ${jobs_worker_mem_mib}; RSS limits independent)"
 echo "Bootstrap execution profile: ${execution_profile} (self-host jobs: ${selfhost_jobs})"
+# Resolve the process-tree RSS cap for this worker count NOW. An over-ceiling
+# SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB used to survive the seed build and
+# the whole preflight (625 s measured) and then fail Stage 2 with no reason at
+# all. The Stage 2/3 runner re-resolves from the command's own --threads; this
+# is the same policy asked early, so a refusal costs seconds and says why.
+. "${bootstrap_entry_dir}/lib/tree-rss-policy.shs"
+if bootstrap_tree_rss_resolve "${jobs}" "${bootstrap_early_repo_root}"; then
+  echo "Process-tree RSS policy: ${bootstrap_tree_rss_summary}"
+else
+  echo "error: ${bootstrap_tree_rss_refusal}" >&2
+  bootstrap_abort_reason=tree-rss-cap-refused
+  exit 2
+fi
 {
   echo schema=simple-bootstrap-selected-jobs-v1
   echo host_cpus="${host_cpus}"
@@ -2057,6 +2073,12 @@ bootstrap_stage_sanity() (
   sanity_win_temp=${TEMP:-${TMP:-}}
   sanity_cc=${CC:-}
   sanity_cxx=${CXX:-}
+  # Lane-private runtime object cache (runtime_compiler.spl). The scrub below
+  # removes LOCALAPPDATA as well, so without this the candidate compiles all
+  # runtime C serially on every hello-world build (38.7s of a 63.5s stage2
+  # hello-world, measured 2026-10-10). The caller names the directory; entries
+  # are keyed by compiler digest, preprocessed TU and flags, so reuse is exact.
+  sanity_rt_obj_cache_dir=${SIMPLE_RT_OBJ_CACHE_DIR:-}
   # Darwin native-action admission fails closed without these two
   # (darwin-deployment-or-sdk-missing); the scrub below would drop them.
   sanity_sdkroot=${SDKROOT:-}
@@ -2170,6 +2192,10 @@ bootstrap_stage_sanity() (
     TEMP=${sanity_win_temp}
     TMP=${sanity_win_temp}
     export TEMP TMP
+  fi
+  if [ -n "${sanity_rt_obj_cache_dir}" ]; then
+    SIMPLE_RT_OBJ_CACHE_DIR=${sanity_rt_obj_cache_dir}
+    export SIMPLE_RT_OBJ_CACHE_DIR
   fi
   if [ -n "${sanity_cc}" ]; then
     CC=${sanity_cc}
@@ -2424,10 +2450,20 @@ bootstrap_native_build_main() {
   if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
     bootstrap_native_session_mode=inherit
   fi
+  # Same job-scaled cap policy as Stage 2/3, for this stage's worker count.
+  bootstrap_tree_rss_resolve "${selfhost_jobs}" "${repo_root}" || {
+    echo "error: ${bootstrap_tree_rss_refusal}" >&2
+    bootstrap_abort_reason=tree-rss-cap-refused
+    return 2
+  }
+  echo "  process-tree RSS policy: ${bootstrap_tree_rss_summary}" >&2
   perl "${repo_root}/scripts/resource/process-tree-rss-watchdog.pl" \
     --session-mode="${bootstrap_native_session_mode}" \
     --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
-    --max-rss-kib="${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}" \
+    --max-rss-kib="${bootstrap_tree_rss_cap_kib}" \
+    --compiler-jobs="${selfhost_jobs}" \
+    --cap-source="${bootstrap_tree_rss_source}" \
+    --cap-bound="${bootstrap_tree_rss_bound}" \
     --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
     --receipt="${log_dir}/stage4-native-build.log.rss.env" -- \
   env RUST_LOG="${RUST_LOG:-error}" \
@@ -3275,14 +3311,18 @@ bootstrap_step_mark cargo-build-or-skip
 # preflight must run after that seed is rebuilt/published and before any
 # pure-Simple compiler stage starts. The cleanup traps and output lock are
 # already active here, making every refusal release ownership correctly.
+bootstrap_preflight_bindings=
 if [ "${full_bootstrap}" -eq 1 ]; then
   bootstrap_progress_mark bootstrap-preflight ""
   bootstrap_preflight_receipt="${output_dir}/bootstrap-preflight.env"
+  bootstrap_preflight_bindings="${output_dir}/bootstrap-preflight-bindings"
   rm -f "${bootstrap_preflight_receipt}"
+  rm -rf "${bootstrap_preflight_bindings}"
   bootstrap_preflight_config="platform=${PLATFORM};backend=${backend};mode=${bootstrap_mode};lane=full-bootstrap"
   sh "${repo_root}/scripts/check/check-bootstrap-preflight.shs" \
     --seed="${seed_bin}" --config="${bootstrap_preflight_config}" \
-    --receipt="${bootstrap_preflight_receipt}" || {
+    --receipt="${bootstrap_preflight_receipt}" \
+    --bindings-out="${bootstrap_preflight_bindings}" || {
     echo "error: authoritative bootstrap preflight failed; no pure-Simple stage was started" >&2
     exit 1
   }
@@ -3649,15 +3689,50 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     }
   }
   bootstrap_step_mark tool-authority-before
-  bootstrap_stage3_git_state "${repo_root}" "${stage3_git_before}" || {
-    echo "error: could not bind Stage 3 git HEAD/dirty state" >&2
-    exit 1
+  # Reuse the preflight's agreeing capture as the "before" snapshots instead
+  # of re-walking ~110k files. That capture is two independent walks that
+  # compared byte-identical (start + write capture), the same guarantee
+  # bootstrap_stage3_source_snapshot gives, taken by the same functions over
+  # the same root. It is admitted only when it hash-equals the passing
+  # receipt written in this run; the before/after equality checks after
+  # Stage 3 then cover a strictly wider window. Anything else recomputes.
+  bootstrap_preflight_reuse_capture() {
+    [ -n "${bootstrap_preflight_bindings}" ] &&
+      [ -f "${bootstrap_preflight_receipt:-}" ] &&
+      [ ! -L "${bootstrap_preflight_receipt}" ] &&
+      [ -f "${bootstrap_preflight_bindings}/$1" ] &&
+      [ ! -L "${bootstrap_preflight_bindings}/$1" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value status "${bootstrap_preflight_receipt}")" = pass ] ||
+      return 1
+    bpr_expected=$(bootstrap_stage3_manifest_value "$2" \
+      "${bootstrap_preflight_receipt}") || return 1
+    [ -n "${bpr_expected}" ] || return 1
+    cp "${bootstrap_preflight_bindings}/$1" "$3.reuse.$$" || return 1
+    [ "$(bootstrap_stage3_hash_file "$3.reuse.$$")" = "${bpr_expected}" ] &&
+      mv -f "$3.reuse.$$" "$3" || {
+      rm -f "$3.reuse.$$"
+      return 1
+    }
   }
+  if bootstrap_preflight_reuse_capture git-state.env git_state_sha256 \
+      "${stage3_git_before}"; then
+    echo "  git-state-before: reused preflight capture"
+  else
+    bootstrap_stage3_git_state "${repo_root}" "${stage3_git_before}" || {
+      echo "error: could not bind Stage 3 git HEAD/dirty state" >&2
+      exit 1
+    }
+  fi
   bootstrap_step_mark git-state-before
-  bootstrap_stage3_source_snapshot "${stage3_source_before}" "${repo_root}" || {
-    echo "error: could not snapshot Stage 3 source authority" >&2
-    exit 1
-  }
+  if bootstrap_preflight_reuse_capture source-inputs.txt source_snapshot_sha256 \
+      "${stage3_source_before}"; then
+    echo "  source-inputs-before: reused preflight capture"
+  else
+    bootstrap_stage3_source_snapshot "${stage3_source_before}" "${repo_root}" || {
+      echo "error: could not snapshot Stage 3 source authority" >&2
+      exit 1
+    }
+  fi
   bootstrap_step_mark source-inputs-before
 
   # Stage 2: the admitted parent compiles bootstrap_main.spl.
@@ -4059,13 +4134,26 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     echo "error: frozen runtime authority changed during Stage 2" >&2
     exit 1
   }
+  if [ "${stage2_status}" -ne 0 ]; then
+    if [ -s "${stage2_refusal_log}" ]; then
+      bootstrap_abort_reason=stage2-pre-exec-refusal
+      echo "  stage2 pre-exec refusal (nothing was executed):" >&2
+      sed 's/^/    /' "${stage2_refusal_log}" >&2
+    elif grep -q '^status=policy-refused$' "${stage2_native_log}.rss.env" 2>/dev/null; then
+      bootstrap_abort_reason=stage2-rss-policy-refused
+      sed -n 's/^refusal_reason=/  stage2 RSS watchdog refusal: /p' "${stage2_native_log}.rss.env" >&2
+    elif grep -q '^status=rss-cap-exceeded$' "${stage2_native_log}.rss.env" 2>/dev/null; then
+      bootstrap_abort_reason=stage2-rss-cap-exceeded
+    fi
+  fi
   echo "  stage2-native-build log: ${log_dir}/stage2-native-build.log"
   bootstrap_cache_report_log "${log_dir}/stage2-native-build.log"
   bootstrap_prune_stale_seed_scope_dirs \
     "${stage2_status}" "${stage2_native_log}" "${stage2_cache_absolute}"
   if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then
     echo "  Stage 2: running bootstrap compiler sanity"
-    if ! bootstrap_stage_sanity "${stage2_bin}" \
+    if ! SIMPLE_RT_OBJ_CACHE_DIR="${stage2_cache_absolute}/rt-obj" \
+      bootstrap_stage_sanity "${stage2_bin}" \
       "$(absolute_path "${stage2_sanity_evidence}")" \
       "${stage2_home_absolute}" "${stage2_tmp_absolute}" \
       "${stage_build_path}"; then
@@ -4987,7 +5075,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     ;;
   esac
   if [ "${stage3_status}" -eq 0 ] && [ -x "${output_dir}/stage3/${PLATFORM}/simple${exe_suffix}" ]; then
-    if bootstrap_stage_sanity "${stage3_bin}" \
+    if SIMPLE_RT_OBJ_CACHE_DIR="${stage3_cache_absolute}/rt-obj" \
+      bootstrap_stage_sanity "${stage3_bin}" \
       "$(absolute_path "${stage3_sanity_evidence}")" \
       "${stage3_home_absolute}" "${stage3_tmp_absolute}" \
       "${stage_build_path}"; then
@@ -5462,10 +5551,14 @@ if [ "${build_mcp}" -eq 1 ]; then
     prepare_native_cache "stage5${mcp_stage}" "${stage_for_build}" "${mcp_name}"
     rm -f "${full_dir}/${mcp_name}${exe_suffix}"
     set +e
+    # SIMPLE_PACKAGE_INDEX_COLD_INIT=1 as in Stage 3: whole-closure lowering,
+    # never a demand/package-index route, so trait-object calls (e.g.
+    # virtual_source_consumer_v1.spl) devirtualize instead of failing closed.
     env RUST_LOG="${RUST_LOG:-error}" \
       SIMPLE_NO_DEPRECATED_WARNINGS=1 \
       LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
       SIMPLE_NO_STUB_FALLBACK=1 \
+      SIMPLE_PACKAGE_INDEX_COLD_INIT=1 \
       SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
       SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
       "${stage_for_build}" native-build \

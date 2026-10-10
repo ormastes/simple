@@ -1446,6 +1446,32 @@ pub extern "C" fn rt_file_write_text_at(path: i64, offset: i64, data: i64) -> i6
     })
 }
 
+/* fs.spl:122 `extern fn rt_file_mode(path: text) -> i64` -- the file's
+ * permission bits, or -1 when they cannot be read. -1 (not 0) is the
+ * contract both consumers test (credential/store.spl:835 `if mode < 0`,
+ * dual_fs/__init__.spl:143 "unknown" sentinel), matching the C runtime
+ * implementation (runtime_native.c rt_file_mode). On Windows st_mode
+ * carries only the read/write bits; masking is identical, there is simply
+ * less to report. */
+#[no_mangle]
+pub extern "C" fn rt_file_mode(path: i64) -> i64 {
+    let Some(path) = tagged_text_to_str(path) else {
+        return -1;
+    };
+    let Ok(metadata) = std::fs::metadata(Path::new(path)) else {
+        return -1;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        (metadata.permissions().mode() & 0o7777) as i64
+    }
+    #[cfg(not(unix))]
+    {
+        (metadata.file_attributes() as i64) & 0o7777
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_file_write_text_at_cached(offset: i64, data: i64) -> i64 {
     let Some(data_bytes) = tagged_text_to_bytes(data) else {

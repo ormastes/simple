@@ -1,0 +1,96 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Enum-match guards are evaluated; or-arms that bind fail closed
+
+lower_enum_match_flat never read `arm.guard`: `case D.A if c:` (and the
+split or-arm `case D.A | D.B if c:`) fired whenever the discriminant matched,
+regardless of `c` -- wrong code. The guard is now lowered after the payload
+bindings, in the arm block: true enters the body, false branches to the SAME
+`ematch_next` block a failed discriminant compare uses, so matching continues
+with the next arm and finally the default. These specs pin that control-flow
+shape on the lowered MIR (the guard's If: then -> guard-pass block, else ->
+next-arm block) for both the plain and the split form.
+
+Guarded catch-alls and binding or-alternatives are covered by
+enum_match_or_binding_lowering_spec.spl.
+"""
+
+# @tag: unit, compiler, mir, enum
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+val enum_src = "enum D:\n    A\n    B\n    C\n\nenum S:\n    P(v: i64)\n    Q(v: i64)\n    R\n\n"
+
+fn lower_src(body: text) -> (MirModule, [text]):
+    val src = enum_src + body
+    val parsed = parse_full_frontend(src, "testdata/fixture_enum_guard.spl", "fixture_enum_guard", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("testdata/fixture_enum_guard.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in lowering.errors:
+        messages = messages.push(e.message)
+    (mir, messages)
+
+fn find_function(mir: MirModule, name: text) -> MirFunction?:
+    for function in mir.functions.values():
+        if function.name == name or function.name.ends_with("." + name):
+            return Some(function)
+    nil
+
+fn block_label(function: MirFunction, id: i64) -> text:
+    for block in function.blocks:
+        if block.id.id == id:
+            return block.label ?? ""
+    ""
+
+fn joined(messages: [text]) -> text:
+    var out = ""
+    for m in messages:
+        out = out + m + "\n"
+    out
+
+# Count guard branches whose then-edge enters a guard-pass block and whose
+# else-edge falls to the next-arm block.
+fn guard_branches_to_next_arm(function: MirFunction) -> i64:
+    var n = 0
+    for block in function.blocks:
+        match block.terminator:
+            case MirTerminator.If(_, then_, else_):
+                val then_label = block_label(function, then_.id)
+                val else_label = block_label(function, else_.id)
+                if then_label.contains("ematch_guard_pass") and else_label.contains("ematch_next"):
+                    n = n + 1
+            case _:
+                pass
+    n
+
+fn guard_count(body: text, fn_name: text) -> i64:
+    val (mir, messages) = lower_src(body)
+    print "mir errors: [{joined(messages)}]"
+    val f = find_function(mir, fn_name)
+    if not f.?:
+        return -1
+    guard_branches_to_next_arm(f.unwrap())
+
+describe "enum match guards":
+    it "plain guarded arm: guard false falls to the next arm":
+        val n = guard_count("fn pick(d: D, c: bool) -> i64:\n    match d:\n        case D.A if c:\n            1\n        case D.A:\n            2\n        case _:\n            0\n", "pick")
+        expect(n).to_equal(1)
+
+    it "split or-arm: every alternative evaluates the guard":
+        val n = guard_count("fn pick2(d: D, c: bool) -> i64:\n    match d:\n        case D.A | D.B if c:\n            1\n        case D.C:\n            2\n        case _:\n            0\n", "pick2")
+        expect(n).to_equal(2)
+
+    it "guard sees the payload binding":
+        val n = guard_count("fn pos(s: S) -> i64:\n    match s:\n        case S.P(v) if v > 0:\n            v\n        case _:\n            0\n", "pos")
+        expect(n).to_equal(1)

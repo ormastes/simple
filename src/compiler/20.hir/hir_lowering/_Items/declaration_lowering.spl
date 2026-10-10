@@ -347,6 +347,14 @@ impl HirLowering:
         # Lower return type — use explicit check instead of .map() ?? default
         # to avoid crash with null coalescing on Option.map result
         var return_type = HirType(kind: HirTypeKind.Unit, span: fn_.span)
+        # Set when an UNANNOTATED function is typed from its own `return <value>`
+        # (bootstrap arm, or the up-front symbol-type inference
+        # below). Its body must then be lowered in value
+        # position like an annotated one: the unit lowering keeps a trailing
+        # tail value (`orphans_stopped` after an early `return 0`) as a plain
+        # statement, MIR then sees no tail result and fails closed with
+        # E-SFFI-016 "missing return in non-unit function".
+        var untyped_value_return = false
         # Gate on has_return_type, not `return_type.?`: return_type is a
         # non-optional Type whose placeholder for an omitted annotation is a
         # bare `Infer` node, so `.?` is always true and we would lower that
@@ -393,24 +401,9 @@ impl HirLowering:
             val return_scan = self.scan_ast_block_for_returns(fn_.body, fn_.params)
             if return_scan.found_value_return:
                 return_type = bootstrap_builtin_return_type(fn_.name, fn_.span)
+                untyped_value_return = true
         if bootstrap_diag:
             eprint("[hir-lower] lower_function:return_type {fn_.name}")
-
-        # Lower body. A function WITHOUT an explicit return type returns Unit, so
-        # its body is not in value position — use `lower_hir_block_unit`, which
-        # keeps a trailing expression-statement (`fn main(): print(...)`) IN
-        # `stmts` and never extracts a trailing value. This sidesteps the seed's
-        # ANY-erased `case Expr(expr)` mis-extraction that stored a garbage
-        # HirExpr as `block.value` (iteration 14), which made the interpreter's
-        # trailing-value eval silently no-op (or SIGSEGV on a typed rebind). A
-        # value IS needed only when the function returns a real type, so the
-        # value-extracting path is kept for `has_return_type`.
-        val body = if fn_.has_return_type:
-            self.lower_hir_block(fn_.body)
-        else:
-            self.lower_hir_block_unit(fn_.body)
-        if bootstrap_diag:
-            eprint("[hir-lower] lower_function:body {fn_.name}")
 
         # Untyped-return inference (native --entry path). A function with NO
         # declared return type defaults to Unit above -- but if its body has
@@ -446,8 +439,27 @@ impl HirLowering:
                 match present_fn_sym_type.kind:
                     case HirTypeKind.Function(_, ret, _):
                         return_type = ret
+                        match ret.kind:
+                            case HirTypeKind.Unit: pass
+                            case _: untyped_value_return = true
                     case _:
                         pass
+
+        # Lower body. A function WITHOUT an explicit return type returns Unit, so
+        # its body is not in value position — use `lower_hir_block_unit`, which
+        # keeps a trailing expression-statement (`fn main(): print(...)`) IN
+        # `stmts` and never extracts a trailing value. This sidesteps the seed's
+        # ANY-erased `case Expr(expr)` mis-extraction that stored a garbage
+        # HirExpr as `block.value` (iteration 14), which made the interpreter's
+        # trailing-value eval silently no-op (or SIGSEGV on a typed rebind). A
+        # value IS needed only when the function returns a real type, so the
+        # value-extracting path is kept for `has_return_type`.
+        val body = if fn_.has_return_type or untyped_value_return:
+            self.lower_hir_block(fn_.body)
+        else:
+            self.lower_hir_block_unit(fn_.body)
+        if bootstrap_diag:
+            eprint("[hir-lower] lower_function:body {fn_.name}")
 
         # Contract predicates are lowered after return inference but while the
         # function parameter scope is still active. Outcome bindings receive

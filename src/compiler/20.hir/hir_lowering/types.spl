@@ -226,6 +226,11 @@ class HirLowering:
     # Nullary pattern names indexed by the consumer's enum symbol identity.
     enum_unit_pattern_names: {text: bool}
     generic_enum_constructor_owners: {i64: bool}
+    # Local struct/class/bitfield symbol ids declared WITHOUT type
+    # parameters (declare_module_symbols). An unannotated module global built
+    # by a constructor call settles to the record type only for these; a
+    # generic or imported record stays Infer so MIR fails closed.
+    nongeneric_record_owners: {i64: bool}
     # True while registering IMPORTED/sibling symbols: signature diagnostics
     # (untyped returns, unlowerable param types) belong to the DEFINING
     # module's own lowering pass, not the importer's — errors here are
@@ -426,6 +431,16 @@ class HirLowering:
     # Registrations skipped by the memo. Observable mechanism counter: a spec
     # pins that repeating one (module, name, local, enum) query registers once.
     registered_import_skip_count: i64
+    # Bare names bound only TRANSITIVELY (a composite FIELD dependency the
+    # importer never named), parallel rows: owner module, "" = ambiguous
+    # (two conflicting transitive owners; the bare binding was dropped), "!" =
+    # superseded by an explicit import; ids = the transitive symbol bound.
+    # Scalar arrays, not a Dict, for the BOOT-20 class-field Dict caveat
+    # above. Reset per importer.
+    transitive_bare_names: [text]
+    transitive_bare_owners: [text]
+    transitive_bare_ids: [i64]
+    registering_field_dependency: bool
     # Per-importer callable-dependency tail memo. It is cleared by begin_module
     # because the tail writes into that importer's symbol table.
     dep_tail_memo: {text: bool}
@@ -671,6 +686,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         enum_variant_names: empty_enum_variant_names,
         enum_unit_pattern_names: empty_enum_unit_pattern_names,
         generic_enum_constructor_owners: {},
+        nongeneric_record_owners: {},
         registering_import_symbols: false,
         registering_lexical_import: false,
         fn_tuple_returns: empty_fn_tuple_returns,
@@ -725,6 +741,10 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         registered_import_memo_hash_next: [],
         registered_import_memo_hash_mask: 0,
         registered_import_skip_count: 0,
+        transitive_bare_names: [],
+        transitive_bare_owners: [],
+        registering_field_dependency: false,
+        transitive_bare_ids: [],
         dep_tail_memo: empty_dep_tail_memo,
         dep_tail_memo_owner: "",
         dep_tail_memo_keys: [],

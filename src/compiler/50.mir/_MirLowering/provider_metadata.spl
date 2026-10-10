@@ -41,6 +41,28 @@ fn mir_provider_declares_value_method_owner(provider: SymbolTable, module_name: 
             case _: ()
     false
 
+fn mir_provider_extension_owner_key(module_name: text, source_name: text) -> text:
+    # `impl Imported:` in module E extends a type declared in module D. HIR
+    # owner-qualifies such a method with D's declaration (`D.Imported::m`,
+    # defining module E), so the E-prefixed callable identity names no class:
+    # the method was dropped and `x.m()` on a D-typed receiver died as
+    # `unresolved method call`. Key it by the declaration's own identity --
+    # the key D's methods and every receiver's struct_value_syms use. Only an
+    # owner qualified by a DIFFERENT module qualifies; anything else is "".
+    val sep = source_name.rfind("::")
+    if sep <= 0:
+        return ""
+    # HIR spells a generic owner without its argument list (`impl Box<T>:`
+    # -> `D.Box::m`), so the owner already matches mir_class_identity.
+    val owner_name = source_name.substring(0, sep)
+    val type_sep = owner_name.rfind(".")
+    if type_sep <= 0:
+        return ""
+    val owner_module = _hir_symbol_owner_module(owner_name.substring(0, type_sep))
+    if owner_module == "" or owner_module == _hir_symbol_owner_module(module_name):
+        return ""
+    "{owner_module}.{owner_name.substring(type_sep + 1)}"
+
 fn mir_provider_function_name(owner: text, symbols: SymbolTable, func: HirFunction, is_entry_module: bool = false) -> text:
     # Linkage attributes are an ABI boundary, including runtime push helpers.
     if func.is_extern or func.has_export_attr or func.func_attr.is_global or func.func_attr.is_entry or (is_entry_module and func.name == "main"):
@@ -135,6 +157,40 @@ impl MirLowering:
         if owner == "": owner = self.current_module_id
         self.callable_link_names.has(mir_provider_callable_key(owner, info.name))
 
+    fn extension_owner_is_known(owner_key: text) -> bool:
+        """An extension owner must name a type this closure declares: a
+        registered class, an enum, or a struct/class layout from the
+        all-module prescan (order-independent of the provider loop)."""
+        if self.class_type_names.has(owner_key):
+            return true
+        if self.enum_variant_index_q.has(owner_key) or self.enum_variant_index.has(owner_key):
+            return true
+        val type_sep = owner_key.rfind(".")
+        if type_sep <= 0:
+            return false
+        val owner_module = mir_layout_canonical_module_name(owner_key.substring(0, type_sep))
+        self.composite_layout_digests.has("{owner_module}::{owner_key.substring(type_sep + 1)}")
+
+    me register_owner_method(key: text, method: SymbolId, owner_module: text):
+        """Publish one `{owner}::{method}` dispatch row. A second module's impl
+        block declaring the same method on the same owner (two extension
+        modules, or an extension shadowing the declaring module's method) is
+        ambiguous: it is recorded in struct_method_ambiguous, which the
+        unresolved-receiver dispatch reports, instead of silently letting the
+        last-registered module win."""
+        if self.struct_method_syms.has(key):
+            val prior = self.struct_method_syms[key]
+            if prior.id != method.id:
+                var prior_owner = ""
+                if val prior_symbol = self.symbols.get_symbol_raw(prior.id):
+                    prior_owner = prior_symbol.defining_module ?? ""
+                # An unknown owner on either side is never evidence of a
+                # second declaring module.
+                if prior_owner != "" and owner_module != "":
+                    if _hir_symbol_owner_module(prior_owner) != _hir_symbol_owner_module(owner_module):
+                        self.struct_method_ambiguous[key] = true
+        self.struct_method_syms[key] = method
+
     me register_provider_method(func: HirFunction, provider: SymbolTable, links: Dict<i64, text>):
         if not func.is_method and not func.is_static:
             return
@@ -150,17 +206,20 @@ impl MirLowering:
         if parts.len() < 2:
             return
         val method_name = parts[parts.len() - 1]
-        val class_key = identity.substring(0, identity.len() - method_name.len() - 1)
+        var class_key = identity.substring(0, identity.len() - method_name.len() - 1)
         if not self.class_type_names.has(class_key):
             if not mir_provider_declares_value_method_owner(provider, source.defining_module ?? "", parts[parts.len() - 2], class_key):
-                return
+                val extension_owner = mir_provider_extension_owner_key(source.defining_module ?? "", source.name)
+                if extension_owner == "" or not self.extension_owner_is_known(extension_owner):
+                    return
+                class_key = extension_owner
         val method = self.relocate_provider_callable(func.symbol, provider, links)
         if method.id < 0:
             return
         val key = "{class_key}::{method_name}"
-        self.struct_method_syms[key] = method
+        self.register_owner_method(key, method, source.defining_module ?? "")
         if func.is_static:
-            self.struct_method_syms["static::{key}"] = method
+            self.register_owner_method("static::{key}", method, source.defining_module ?? "")
         val ret = self.relocate_provider_type(func.return_type, provider)
         match ret.kind:
             case Named(id, _):
@@ -219,10 +278,10 @@ impl MirLowering:
         val kind: HirTypeKind = type_.kind
         var result = type_
         result.kind = match kind:
-            case Named(id, args):
+            case Named(id, type_args):
                 val target = self.relocate_provider_type_symbol(id, provider)
                 if target.id < 0: HirTypeKind.Error
-                else: HirTypeKind.Named(target, self.relocate_provider_types(args, provider))
+                else: HirTypeKind.Named(target, self.relocate_provider_types(type_args, provider))
             case Tuple(items): HirTypeKind.Tuple(self.relocate_provider_types(items, provider))
             case Array(elem, size): HirTypeKind.Array(self.relocate_provider_type(elem, provider), size)
             case Slice(elem): HirTypeKind.Slice(self.relocate_provider_type(elem, provider))
@@ -445,3 +504,186 @@ impl MirLowering:
             val method = self.relocate_provider_callable(method_id, provider, links)
             if method.id >= 0:
                 self.struct_method_syms["{canonical}::{method_name}"] = method
+
+    me register_provider_struct(struct_def: HirStruct, provider: SymbolTable, consumer_owns_name: bool):
+        # prescan_module_struct_names registers every module's struct field
+        # metadata before any module is lowered, so an imported struct's
+        # struct_field_hir_type holds Named ids from the PROVIDER table. Read
+        # through the consumer table those ids name unrelated symbols (an
+        # imported `evidence_quality: ResourceEvidenceQuality` field resolved
+        # to the consumer's `Signal`), which defeated enum equality and fell
+        # into the struct operator-overload error. Relocate the field types
+        # into the active consumer table, exactly as register_provider_class
+        # does for classes.
+        if not provider.symbols.has(struct_def.symbol.id):
+            return
+        val source = provider.get_symbol_raw(struct_def.symbol.id)
+        if source == nil:
+            return
+        var fields: [HirField] = []
+        var field_names: [text] = []
+        for field in struct_def.fields:
+            # Annotated copies: nested struct transports lose their declared
+            # value type on the stage-native lane (module_build.spl pattern).
+            var relocated: HirField = field
+            val field_type: HirType = field.type_
+            relocated.type_ = self.relocate_provider_type(field_type, provider)
+            fields = fields.push(relocated)
+            field_names = field_names.push(field.name)
+        val key = self.composite_layout_key(source)
+        if key != struct_def.name:
+            self.register_composite_field_metadata(key, fields, self.symbols, true)
+        # The bare-name entry is shared by every same-named struct: replace it
+        # only when the consumer does not declare that name itself and the
+        # recorded bare-layout owner is this provider's declaration -- a
+        # matching field list alone would let the LAST same-named provider win.
+        if consumer_owns_name or not self.struct_field_order.has(struct_def.name):
+            return
+        if not self.struct_bare_layout_owner.has(struct_def.name):
+            return
+        if self.struct_bare_layout_owner[struct_def.name] != key:
+            return
+        val registered_names = self.struct_field_order[struct_def.name]
+        if registered_names.len() != field_names.len():
+            return
+        var i = 0
+        while i < field_names.len():
+            if registered_names[i] != field_names[i]:
+                return
+            i = i + 1
+        self.register_composite_field_metadata(struct_def.name, fields, self.symbols, true)
+
+# Trait-typed receiver dispatch (bug
+# stage2_trait_typed_receiver_method_unresolved_2026-10-10). A declaration's
+# own table may leave defining_module nil; the owning module then supplies the
+# owner, so a trait reads the same identity from its defining module and from
+# every importer.
+fn mir_trait_dispatch_identity(symbol: HirSymbol, fallback_module: text) -> text:
+    var owner = _hir_symbol_owner_module(symbol.defining_module ?? "")
+    if owner == "":
+        owner = _hir_symbol_owner_module(fallback_module)
+    "{owner}.{symbol.name}"
+
+impl MirLowering:
+    me register_trait_receiver_impls(module: HirModule, providers: [HirModule]):
+        """Record every `impl Trait for Type` visible to this lowering.
+
+        Stage2 objects carry no runtime type identity (no vtable word), so a
+        trait-typed receiver can only be dispatched when the build closure
+        holds exactly one implementing type. Providers are the driver's whole
+        closure (driver_pipeline_lowering.spl), so the count is closure-wide."""
+        self.register_trait_impls_of(module.name, module.symbols, module.impls, {}, true)
+        val trait_providers = if providers.len() > 0: providers else: self.trait_impl_provider_modules
+        for provider_module in trait_providers:
+            if provider_module.name != module.name and provider_module.impls.len() > 0:
+                var provider_links: Dict<i64, text> = {}
+                for provider_func in provider_module.functions.values():
+                    provider_links[provider_func.symbol.id] = mir_provider_function_name(provider_module.name, provider_module.symbols, provider_func)
+                self.register_trait_impls_of(provider_module.name, provider_module.symbols, provider_module.impls, provider_links, false)
+
+    me register_trait_impls_of(module_name: text, symbols: SymbolTable, impls: [HirImpl], links: Dict<i64, text>, is_local: bool):
+        var ii = 0
+        while ii < impls.len():
+            val impl_def: HirImpl = impls[ii]
+            val impl_index = ii
+            ii = ii + 1
+            # Do not trust has_trait_: the HIR impl lowering
+            # (trait_impl_lowering.spl HirImpl(...)) passes the optional
+            # `trait_` but never sets the flag. Presence of `trait_` naming a
+            # Trait symbol is the authority (an inherent impl has nil).
+            val impl_trait: HirType? = impl_def.trait_
+            var trait_key = ""
+            if impl_trait != nil:
+                val trait_kind: HirTypeKind = (impl_trait ?? impl_def.type_).kind
+                match trait_kind:
+                    case Named(trait_sym, _):
+                        if symbols.symbols.has(trait_sym.id):
+                            val trait_symbol = symbols.get_symbol_raw(trait_sym.id)
+                            if trait_symbol != nil and trait_symbol.kind == SymbolKind.Trait:
+                                trait_key = mir_trait_dispatch_identity(trait_symbol, module_name)
+                    case _: ()
+            if trait_key != "":
+                # A generic or unnamed implementing type still counts as an
+                # implementor; the "generic:" prefix makes the call site reject
+                # devirtualization instead of guessing an instantiation.
+                var owner_key = "generic:{module_name}#impl{impl_index}"
+                val type_kind: HirTypeKind = impl_def.type_.kind
+                match type_kind:
+                    case Named(type_sym, type_args):
+                        if impl_def.type_params.len() == 0 and type_args.len() == 0 and symbols.symbols.has(type_sym.id):
+                            val type_symbol = symbols.get_symbol_raw(type_sym.id)
+                            if type_symbol != nil:
+                                owner_key = mir_trait_dispatch_identity(type_symbol, module_name)
+                    case _: ()
+                var owners = self.trait_impl_owners.get(trait_key) ?? []
+                if not owners.contains(owner_key):
+                    owners = owners.push(owner_key)
+                    self.trait_impl_owners[trait_key] = owners
+                for method_name in impl_def.methods.keys():
+                    val method_id: SymbolId = impl_def.methods[method_name]
+                    val target = if is_local: method_id else: self.relocate_provider_callable(method_id, symbols, links)
+                    if target.id >= 0:
+                        self.trait_impl_methods["{trait_key}::{owner_key}::{method_name}"] = target
+
+    me trait_receiver_identity(receiver: HirExpr) -> text:
+        """Canonical trait identity when the receiver's STATIC type is a
+        trait (a trait-object value), else "". Sources, in order: the
+        expression's inferred type, a typed local/param binding, and a field
+        access's resolved field symbol."""
+        var candidates: [HirType] = []
+        if receiver.has_type_:
+            candidates = candidates.push(receiver.type_)
+        val declared = self.receiver_declared_type(receiver)
+        if declared != nil:
+            candidates = candidates.push(declared ?? receiver.type_)
+        val receiver_kind: HirExprKind = receiver.kind
+        match receiver_kind:
+            case Field(base, field_name, resolved):
+                if resolved != nil:
+                    val field_id = resolved ?? SymbolId(id: -1)
+                    if field_id.id >= 0 and self.symbols.symbols.has(field_id.id):
+                        val field_symbol = self.symbols.get_symbol_raw(field_id.id)
+                        if field_symbol != nil and field_symbol.type_ != nil:
+                            candidates = candidates.push(field_symbol.type_ ?? receiver.type_)
+                val field_type = self.declared_field_hir_type(base, field_name)
+                if field_type != nil:
+                    candidates = candidates.push(field_type ?? receiver.type_)
+            case _: ()
+        for candidate in candidates:
+            var trait_id: i64 = -1
+            val candidate_kind: HirTypeKind = candidate.kind
+            match candidate_kind:
+                case Named(named_sym, _): trait_id = named_sym.id
+                case DynTrait(dyn_sym): trait_id = dyn_sym.id
+                case _: ()
+            if trait_id >= 0 and self.symbols.symbols.has(trait_id):
+                val trait_symbol = self.symbols.get_symbol_raw(trait_id)
+                if trait_symbol != nil and trait_symbol.kind == SymbolKind.Trait:
+                    return mir_trait_dispatch_identity(trait_symbol, self.current_module_id)
+        ""
+
+    me declared_field_hir_type(base: HirExpr, field_name: text) -> HirType?:
+        """Declared HirType of `base.field_name` when `base` is a typed binding
+        of a struct/class registered in this lowering (active-table ids)."""
+        val base_type = self.receiver_declared_type(base)
+        if base_type == nil:
+            return nil
+        val base_kind: HirTypeKind = (base_type ?? base.type_).kind
+        match base_kind:
+            case Named(owner_sym, _):
+                if not self.symbols.symbols.has(owner_sym.id):
+                    return nil
+                val owner_symbol = self.symbols.get_symbol_raw(owner_sym.id)
+                if owner_symbol == nil:
+                    return nil
+                for owner_key in [owner_symbol.name, mir_class_identity(owner_symbol)]:
+                    if self.struct_field_order.has(owner_key) and self.struct_field_hir_type.has(owner_key):
+                        val names = self.struct_field_order[owner_key]
+                        val types = self.struct_field_hir_type[owner_key]
+                        var fi = 0
+                        while fi < names.len() and fi < types.len():
+                            if names[fi] == field_name:
+                                return Some(types[fi])
+                            fi = fi + 1
+            case _: ()
+        nil

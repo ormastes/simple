@@ -66,7 +66,7 @@ use compiler.core.ast.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, 
 use compiler.frontend.core.lexer.{lex_cur_suffix_get, lex_token_start_get}
 use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_commit, lex_snapshot_rollback}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
-use compiler.core.types.{flat_span_new}
+use compiler.core.types.{flat_span_new, span_is_valid, span_start, span_line, span_col}
 use compiler.core.parser.{parser_tok_save, parser_tok_restore}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_skip_newlines}
 use compiler.core.parser.{parser_has_errors}
@@ -1034,6 +1034,17 @@ fn pe_is_typed_empty_array_ctor(base: i64, argc: i64) -> bool:
         return false
     pe_is_array_element_type_expr(pe_tc_elems[0])
 
+fn parser_postfix_span_from(base: i64) -> i64:
+    """Span for a postfix node (`base.field`, `base[i]`): from the base's own
+    start to the current token. Field-access and index nodes used to be
+    allocated with span id 0, which is the FIRST span registered for the
+    file, not "no span" -- so a MIR diagnostic keyed on such a receiver was
+    reported at an unrelated module-level declaration."""
+    val base_span = expr_get_span(base)
+    if not span_is_valid(base_span):
+        return 0
+    flat_span_new(span_start(base_span), lex_token_start_get(), span_line(base_span), span_col(base_span))
+
 fn parse_postfix_on(base_expr: i64) -> i64:
     # Continue postfix parsing from an already-parsed base expression
     # Disambiguate Ident<TypeArgs>.method() vs Ident < expr (binary less-than).
@@ -1136,7 +1147,7 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                 val ppo_call_span = flat_span_new(ppo_call_start, lex_token_start_get(), ppo_call_line, ppo_call_col)
                 base = expr_method_call_named(base, field_name, call_args, call_arg_names, ppo_call_span)
             else:
-                base = expr_field_access(base, field_name, 0)
+                base = expr_field_access(base, field_name, parser_postfix_span_from(base))
         elif (kind == 142 and
               (expr_get_tag(base) == 6 or expr_get_tag(base) == 11)):
             # Struct literal: Ident { field: value, ... } (numeric tags 6/11 =
@@ -1171,7 +1182,7 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                 else:
                     if not validate_bracket_expr(index_expr, "index expression"): return base
                     parser_expect(145)
-                    base = expr_index(base, index_expr, 0)
+                    base = expr_index(base, index_expr, parser_postfix_span_from(base))
         elif kind == 140:
             val ppo_call_start = lex_token_start_get()
             val ppo_call_line = par_line_get()
@@ -1206,7 +1217,7 @@ fn parse_postfix_on(base_expr: i64) -> i64:
             parser_advance()
             val field_name = par_text_get()
             parser_expect(6)
-            base = expr_field_access(base, field_name, 0)
+            base = expr_field_access(base, field_name, parser_postfix_span_from(base))
         elif kind == 130:
             # Try/unwrap operator: expr? — propagate Err / None
             parser_advance()
@@ -1362,7 +1373,7 @@ fn parse_postfix() -> i64:
                 val pp_call_span = flat_span_new(pp_call_start, lex_token_start_get(), pp_call_line, pp_call_col)
                 base = expr_method_call_named(base, field_name, call_args, call_arg_names, pp_call_span)
             else:
-                base = expr_field_access(base, field_name, 0)
+                base = expr_field_access(base, field_name, parser_postfix_span_from(base))
         elif (kind == 142 and
               (expr_get_tag(base) == 6 or expr_get_tag(base) == 11)):
             # Struct literal: Ident { field: value, ... } (numeric tags 6/11 =
@@ -1400,7 +1411,7 @@ fn parse_postfix() -> i64:
                 else:
                     if not validate_bracket_expr(index_expr, "index expression"): return base
                     parser_expect(145)
-                    base = expr_index(base, index_expr, 0)
+                    base = expr_index(base, index_expr, parser_postfix_span_from(base))
         elif kind == 140:
             # Function call: f(args)
             if parser_expr_trace_line_enabled():
@@ -1441,7 +1452,7 @@ fn parse_postfix() -> i64:
             parser_advance()
             val field_name = par_text_get()
             parser_expect(6)
-            base = expr_field_access(base, field_name, 0)
+            base = expr_field_access(base, field_name, parser_postfix_span_from(base))
         elif kind == 130:
             # Try/unwrap operator: expr? — propagate Err / None
             parser_advance()

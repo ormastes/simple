@@ -41,6 +41,7 @@ use compiler.core.types.{is_reference_tag, reference_tag_to_id, reference_type_g
 use compiler.core.types.{is_pointer_tag, pointer_tag_to_id, pointer_type_get_inner, pointer_type_is_mutable}
 use compiler.core.types.{is_atomic_tag, atomic_tag_to_id, atomic_type_get_inner}
 use compiler.core.types.{is_weak_tag, weak_tag_to_id, weak_type_get_inner}
+use compiler.core.types.{is_function_tag, function_tag_to_id, function_type_known, function_type_get_params, function_type_get_ret}
 use compiler.frontend.resource_registry.{resource_is_declared, resource_meta_thread_safe, resource_registry_note_ownership}
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
@@ -504,6 +505,31 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
             union_members = union_members.push(convert_flat_type(member_tag))
         if union_members.len() > 0:
             return Type(kind: TypeKind.Union(union_members), span: make_span())
+    if is_function_tag(type_expr_idx):
+        # `fn(params...) -> ret` interned by parser_parse_type_impl: rebuild
+        # the real callable signature instead of the shapeless Named("fn").
+        val function_id = function_tag_to_id(type_expr_idx)
+        if not function_type_known(function_id):
+            # A tag with no registry entry can only come from a stale or torn
+            # parse-cache restore; an empty `fn() -> Any` here would be a
+            # silent miscompile, so refuse the annotation instead.
+            parser_error("flat AST bridge: function type tag " + int_to_str(type_expr_idx) + " has no registry entry (stale or torn flat type pools)")
+            return Type(kind: TypeKind.Infer, span: make_span())
+        var function_params: [Type] = []
+        for param_tag in function_type_get_params(function_id):
+            function_params = function_params.push(convert_flat_type(param_tag))
+        # The parser records an omitted `-> ret` (`fn()`, `fn(text)`) as
+        # TYPE_VOID (tag 0). convert_flat_type maps every tag <= 0 to Infer
+        # ("no annotation"), which inside a callable signature is wrong: the
+        # return is known to be unit. Infer here reached MIR lower_type as
+        # `[infer-arm]` for every `fn()`-typed param, local, or static
+        # (std signal_stubs `[(i64, fn())]`, text_advanced `f: fn(text)`).
+        val function_ret_tag = function_type_get_ret(function_id)
+        val function_ret = if function_ret_tag == 0:
+            Type(kind: TypeKind.Tuple([]), span: make_span())
+        else:
+            convert_flat_type(function_ret_tag)
+        return Type(kind: TypeKind.Function(function_params, function_ret), span: make_span())
     if is_union_base_or_above(type_expr_idx):
         return Type(kind: TypeKind.Named(type_tag_name(type_expr_idx), []), span: make_span())
     # type_expr_idx falls in the tag-space hole (34..TYPE_UNION_BASE-1) here, so

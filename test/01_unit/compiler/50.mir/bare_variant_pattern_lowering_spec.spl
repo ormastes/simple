@@ -1,0 +1,121 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# A bare variant name in a pattern is a variant, not a binding
+
+`case Native | Host:` names two unit variants of the subject's enum. The seed
+decides binding-vs-variant for a bare identifier by the SUBJECT's enum
+(`subject_enum_has_variant`), including inside every or-alternative. Stage2
+had the same rule (`enum_unit_pattern_names`, keyed by the owning enum) but:
+
+- the table was always EMPTY: it only registered `VariantKind.Unit`, while the
+  flat-AST bridge builds every payload-less variant as `VariantKind.Tuple([])`
+  (local and imported enums alike), so every bare arm lowered as a binding
+  (MIR B5b "multiple wildcard/binding default arms", and
+  "or-pattern alternatives must bind the same variables: [Native] vs [Host]");
+- or-alternatives were lowered without the subject type at all.
+
+A name that is not a variant of the subject's enum still binds.
+
+Imported enums share the registration path (`imported_enums` carries the same
+parser variants); this single-file probe cannot resolve imports, so the
+real-module probes use modules whose enums are local.
+"""
+
+# @tag: unit, compiler, mir, hir, enum
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+extern fn rt_file_read_text(path: text) -> text
+
+val bare_enum_src = "enum D:\n    A\n    B\n    C\n\n"
+
+fn bare_lower_full(src: text, file: text) -> (MirModule, [text]):
+    val parsed = parse_full_frontend(src, file, "fixture_bare_variant", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push(e.message)
+    for e in lowering.errors:
+        messages = messages.push(e.message)
+    (mir, messages)
+
+fn bare_lower_src(body: text) -> (MirModule, [text]):
+    bare_lower_full(bare_enum_src + body, "testdata/fixture_bare_variant.spl")
+
+fn bare_find_function(mir: MirModule, name: text) -> MirFunction?:
+    for function in mir.functions.values():
+        if function.name == name or function.name.ends_with("." + name):
+            return Some(function)
+    nil
+
+fn bare_joined(messages: [text]) -> text:
+    var out = ""
+    for m in messages:
+        out = out + m + "\n"
+    out
+
+fn bare_label_count(function: MirFunction, needle: text) -> i64:
+    var n = 0
+    for block in function.blocks:
+        val label = block.label ?? ""
+        if label.contains(needle):
+            n = n + 1
+    n
+
+describe "bare variant patterns":
+    it "lowers a bare or-arm of the subject's enum as variant tests":
+        val (mir, messages) = bare_lower_src("fn ab(d: D) -> i64:\n    match d:\n        case A | B:\n            1\n        case C:\n            2\n")
+        val all = bare_joined(messages)
+        print "errors: [{all}]"
+        expect(all.contains("must bind the same variables")).to_equal(false)
+        expect(all.contains("B5b")).to_equal(false)
+        val f = bare_find_function(mir, "ab")
+        assert_true(f.?)
+        expect(bare_label_count(f.unwrap(), "ematch_arm")).to_equal(3)
+
+    it "does not count bare single variant arms as catch-all defaults":
+        val (mir, messages) = bare_lower_src("fn each(d: D) -> i64:\n    match d:\n        case A:\n            1\n        case B:\n            2\n        case C:\n            3\n")
+        val all = bare_joined(messages)
+        print "errors: [{all}]"
+        expect(all.contains("B5b")).to_equal(false)
+        expect(all.contains("unreachable match arm")).to_equal(false)
+        val f = bare_find_function(mir, "each")
+        assert_true(f.?)
+        expect(bare_label_count(f.unwrap(), "ematch_arm")).to_equal(3)
+
+    it "keeps a non-variant bare name as a genuine binding":
+        val (mir, messages) = bare_lower_src("fn other(d: D) -> i64:\n    match d:\n        case A:\n            1\n        case rest:\n            if rest == D.B: 2 else: 3\n")
+        val all = bare_joined(messages)
+        print "errors: [{all}]"
+        expect(all.contains("unresolved")).to_equal(false)
+        expect(all.contains("B5b")).to_equal(false)
+        val f = bare_find_function(mir, "other")
+        assert_true(f.?)
+        expect(bare_label_count(f.unwrap(), "ematch_arm")).to_equal(1)
+
+    it "lowers bare single arms of a local enum (real atomic ordering_to_i32)":
+        val path = "src/lib/nogc_sync_mut/atomic.spl"
+        val (mir, messages) = bare_lower_full(rt_file_read_text(path), path)
+        val all = bare_joined(messages)
+        print "real-site errors: [{all}]"
+        expect(all.contains("must bind the same variables")).to_equal(false)
+        expect(all.contains("B5b")).to_equal(false)
+
+    it "lowers bare single arms of a local enum (real test_runner_types)":
+        val path = "src/lib/nogc_sync_mut/test_runner/test_runner_types.spl"
+        val (mir, messages) = bare_lower_full(rt_file_read_text(path), path)
+        val all = bare_joined(messages)
+        print "real-site errors: [{all}]"
+        expect(all.contains("B5b")).to_equal(false)
+        expect(all.contains("must bind the same variables")).to_equal(false)

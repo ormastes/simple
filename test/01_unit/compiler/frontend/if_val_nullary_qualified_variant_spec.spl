@@ -1,0 +1,76 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# `if val Enum.Variant = x:` with a nullary qualified variant parses
+
+Stage2 rejected `if val JsValue.Undefined = stored:`
+(src/lib/nogc_sync_mut/js/engine/interpreter_native.spl) with
+"expected identifier or constructor pattern after if val/var": a nullary
+qualified variant parses as EXPR_FIELD_ACCESS, which only the `case` pattern
+path accepted. The seed accepts it. It now lowers to the same
+`match x: case Enum.Variant: ... case _: ...` as a constructor pattern, for
+`if val`/`elif val` statements, `if val` expressions and `while val`.
+"""
+
+# @tag: unit, compiler, frontend, parser
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.core.parser.{parser_get_errors}
+use compiler.frontend.parser_types_expr.*
+
+val enum_src = "enum V:\n    Undefined\n    Null\n    Str(v: text)\n\n"
+
+fn parse_errors_for(body: text) -> text:
+    val parsed = parse_full_frontend(enum_src + body, "testdata/if_val_nullary.spl", "if_val_nullary", Logger(level: 0))
+    var out = ""
+    for e in parser_get_errors():
+        out = out + e + "\n"
+    out
+
+describe "if val with a nullary qualified enum variant":
+    it "accepts the statement form":
+        val errs = parse_errors_for("fn f(x: V) -> i64:\n    if val V.Undefined = x:\n        return 1\n    elif val V.Null = x:\n        return 2\n    0\n")
+        expect(errs).to_equal("")
+
+    it "accepts the expression form":
+        val errs = parse_errors_for("fn f(x: V) -> i64:\n    val r = if val V.Undefined = x:\n        1\n    else:\n        0\n    r\n")
+        expect(errs).to_equal("")
+
+    it "accepts while val":
+        val errs = parse_errors_for("fn f(x: V) -> i64:\n    while val V.Null = x:\n        return 1\n    0\n")
+        expect(errs).to_equal("")
+
+fn pattern_label(p: Pattern) -> text:
+    match p.kind:
+        case PatternKind.Enum(enum_name, variant, payload):
+            if payload.?:
+                return "Enum({enum_name}.{variant}, payload)"
+            "Enum({enum_name}.{variant})"
+        case PatternKind.Wildcard: "Wildcard"
+        case PatternKind.Binding(name, _): "Binding({name})"
+        case _: "other"
+
+fn first_stmt_desugar_label(body: text) -> text:
+    val parsed = parse_full_frontend(enum_src + body, "testdata/if_val_nullary_shape.spl", "if_val_nullary_shape", Logger(level: 0))
+    val f = parsed.functions["f"]
+    var label = "missing"
+    if f.?:
+        val fn_ = f!
+        if fn_.body.stmts.len() > 0:
+            match fn_.body.stmts[0].kind:
+                case StmtKind.Expr(e):
+                    match e.kind:
+                        case ExprKind.MatchCase(_, arms):
+                            label = "Match"
+                            for arm in arms:
+                                label = label + " " + pattern_label(arm.pattern)
+                        case _: label = "other-expr"
+                case _: label = "other-stmt"
+    label
+
+describe "if val nullary qualified variant desugaring":
+    it "lowers to match x: case V.Undefined: ... case _: ...":
+        val label = first_stmt_desugar_label("fn f(x: V) -> i64:\n    if val V.Undefined = x:\n        return 1\n    0\n")
+        print "desugar: {label}"
+        expect(label).to_equal("Match Enum(V.Undefined) Wildcard")

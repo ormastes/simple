@@ -101,6 +101,18 @@ var span_pool_line: [i64] = []
 var span_pool_col: [i64] = []
 
 fn flat_span_new(start: i64, end_pos: i64, line: i64, col: i64) -> i64:
+    # Pool index 0 is reserved as the "no span" sentinel (line 0 / col 0).
+    # AST nodes are allocated with span id 0 when the parser carries no
+    # location for them; without the reservation that id resolved to the
+    # first REAL span registered for the file, so every unlocated node was
+    # reported at an unrelated module-level declaration (an `extern fn` or a
+    # `val` const) instead of as a missing span. Lazy so it also covers the
+    # first file parsed before any reset_all_pools().
+    if span_pool_start.len() == 0:
+        span_pool_start.push(0)
+        span_pool_end.push(0)
+        span_pool_line.push(0)
+        span_pool_col.push(0)
     val idx = span_pool_start.len()
     span_pool_start.push(start)
     span_pool_end.push(end_pos)
@@ -121,7 +133,10 @@ fn span_col(span_id: i64) -> i64:
     span_pool_col[span_id]
 
 fn span_is_valid(span_id: i64) -> bool:
-    span_id >= 0 and span_id < span_pool_start.len()
+    # Index 0 is the reserved "no span" sentinel (see flat_span_new), so it
+    # is never a valid location: accepting it made parser_postfix_span_from
+    # build line-0 spans for receivers whose base carried no location.
+    span_id > 0 and span_id < span_pool_start.len()
 
 fn span_dummy() -> i64:
     flat_span_new(0, 0, 0, 0)
@@ -342,7 +357,15 @@ val TYPE_POINTER_LIMIT: i64 = 9000
 val TYPE_ATOMIC_BASE: i64 = 9000
 val TYPE_ATOMIC_LIMIT: i64 = 9500
 val TYPE_WEAK_BASE: i64 = 9500
-val TYPE_WEAK_LIMIT: i64 = 10000
+val TYPE_WEAK_LIMIT: i64 = 9750
+# `fn(T, ...) -> R` annotations. The parser used to consume the shape and
+# answer the bare TYPE_FN tag, so HIR saw `Named("fn")` -> `Any` for every
+# callable parameter: a generic visitor's `f: fn(Node, C) -> C` could then
+# never bind `C` at a nested call and monomorphization refused the whole
+# body (E-MONO-032 x81 on hir_visitor.spl, phase 3, 2026-10-09). The range
+# is carved out of the weak-reference block (250 entries each).
+val TYPE_FUNCTION_BASE: i64 = 9750
+val TYPE_FUNCTION_LIMIT: i64 = 10000
 val TYPE_NAMED_BASE: i64 = 10000
 
 # Helper predicates for encoded type tags
@@ -430,6 +453,12 @@ fn is_weak_tag(tag: i64) -> bool:
 fn weak_tag_to_id(tag: i64) -> i64:
     tag - TYPE_WEAK_BASE
 
+fn is_function_tag(tag: i64) -> bool:
+    tag >= TYPE_FUNCTION_BASE and tag < TYPE_FUNCTION_LIMIT
+
+fn function_tag_to_id(tag: i64) -> i64:
+    tag - TYPE_FUNCTION_BASE
+
 # Stage-3 imported-module-`val` misread (blocker #7, cd81ef3d85df): a caller in
 # ANOTHER module that writes `tag == TYPE_ANY` reads TYPE_ANY as an IMPORTED
 # module-level `val`, and under the stage-3/4 self-hosted build that read comes
@@ -478,7 +507,7 @@ fn fixed_type_tag_name(tag: i64) -> text:
         return "dict"
     if tag == TYPE_STRUCT:
         return "struct"
-    if tag == TYPE_FN:
+    if tag == TYPE_FN or is_function_tag(tag):
         return "fn"
     if tag == TYPE_ANY:
         return "any"
@@ -576,7 +605,7 @@ fn type_tag_name(tag: i64) -> text:
         return "dict"
     if tag == TYPE_STRUCT:
         return "struct"
-    if tag == TYPE_FN:
+    if tag == TYPE_FN or is_function_tag(tag):
         return "fn"
     if tag == TYPE_ANY:
         return "any"
@@ -630,6 +659,8 @@ fn type_tag_name(tag: i64) -> text:
     if is_result_tag(tag):
         val rid = result_tag_to_id(tag)
         return "Result<" + type_tag_name(result_type_get_ok(rid)) + "," + type_tag_name(result_type_get_err(rid)) + ">"
+    if is_function_tag(tag):
+        return "fn"
     "unknown"
 
 fn type_tag_to_c(tag: i64) -> text:
@@ -669,7 +700,7 @@ fn type_tag_to_c(tag: i64) -> text:
         return "SplDict*"
     if tag == TYPE_STRUCT:
         return "void*"
-    if tag == TYPE_FN:
+    if tag == TYPE_FN or is_function_tag(tag):
         return "void*"
     if tag == TYPE_ANY:
         return "SplValue"
@@ -1429,6 +1460,50 @@ fn weak_type_get_inner(weak_id: i64) -> i64:
         return weak_inner_tags[weak_id]
     TYPE_ANY
 
+
+var function_param_tags: [[i64]] = []
+var function_ret_tags: [i64] = []
+
+fn function_type_register(param_tags: [i64], ret_tag: i64) -> i64:
+    """Intern one `fn(params...) -> ret` shape; -1 when the block is full."""
+    var existing = 0
+    while existing < function_ret_tags.len():
+        if function_ret_tags[existing] == ret_tag and function_param_tags_equal(function_param_tags[existing], param_tags):
+            return TYPE_FUNCTION_BASE + existing
+        existing = existing + 1
+    val idx = function_ret_tags.len()
+    if idx >= TYPE_FUNCTION_LIMIT - TYPE_FUNCTION_BASE:
+        return -1
+    function_param_tags.push(param_tags)
+    function_ret_tags.push(ret_tag)
+    TYPE_FUNCTION_BASE + idx
+
+fn function_param_tags_equal(a: [i64], b: [i64]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn function_type_known(function_id: i64) -> bool:
+    """A function tag whose registry entry is missing (a parse cache written
+    before the pool was serialized, or a torn restore) must never be read
+    as an empty `fn() -> Any`: callers check this and fail closed."""
+    function_id >= 0 and function_id < function_ret_tags.len() and function_id < function_param_tags.len()
+
+fn function_type_get_params(function_id: i64) -> [i64]:
+    if function_type_known(function_id):
+        return function_param_tags[function_id]
+    panic("function type id " + int_to_str(function_id) + " has no registry entry (" + int_to_str(function_ret_tags.len()) + " registered); the flat type pools are torn or stale")
+
+fn function_type_get_ret(function_id: i64) -> i64:
+    if function_type_known(function_id):
+        return function_ret_tags[function_id]
+    panic("function type id " + int_to_str(function_id) + " has no registry entry (" + int_to_str(function_ret_tags.len()) + " registered); the flat type pools are torn or stale")
+
 extern fn rt_transient_heap_promote(value: Any) -> bool
 extern fn rt_array_free(array: [Any])
 
@@ -1512,6 +1587,8 @@ fn reset_all_pools():
     pointer_mutable_flags = []
     atomic_inner_tags = []
     weak_inner_tags = []
+    function_param_tags = []
+    function_ret_tags = []
 
 export TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT
 export TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32
@@ -1542,6 +1619,8 @@ export TYPE_ATOMIC_BASE, is_atomic_tag, atomic_tag_to_id
 export atomic_type_register, atomic_type_get_inner
 export TYPE_WEAK_BASE, is_weak_tag, weak_tag_to_id
 export weak_type_register, weak_type_get_inner
+export TYPE_FUNCTION_BASE, TYPE_FUNCTION_LIMIT, is_function_tag, function_tag_to_id
+export function_type_register, function_type_known, function_type_get_params, function_type_get_ret
 # Needed by the structural occurs_check in type_inference.spl (2026-08-17).
 export TYPE_TUPLE_BASE, is_tuple_type_tag, tuple_type_tag_to_id
 export tuple_type_register, tuple_type_get_elems
@@ -1581,6 +1660,8 @@ pub fn flat_type_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_text_list(fn_sig_param_names))
     parts = parts.push(flat_pool_enc_i64_list(fn_sig_param_types))
     parts = parts.push(flat_pool_enc_i64(fn_sig_ret_types))
+    parts = parts.push(flat_pool_enc_i64_list(function_param_tags))
+    parts = parts.push(flat_pool_enc_i64(function_ret_tags))
     parts = parts.push(flat_pool_enc_text(generic_param_contexts))
     parts = parts.push(flat_pool_enc_i64(generic_param_ids))
     parts = parts.push(flat_pool_enc_text(generic_param_names))
@@ -1636,6 +1717,8 @@ pub fn flat_type_pools_restore(r: FlatPoolReader) -> bool:
     fn_sig_param_names = flat_pool_dec_text_list(r)
     fn_sig_param_types = flat_pool_dec_i64_list(r)
     fn_sig_ret_types = flat_pool_dec_i64(r)
+    function_param_tags = flat_pool_dec_i64_list(r)
+    function_ret_tags = flat_pool_dec_i64(r)
     generic_param_contexts = flat_pool_dec_text(r)
     generic_param_ids = flat_pool_dec_i64(r)
     generic_param_names = flat_pool_dec_text(r)
@@ -1673,6 +1756,10 @@ pub fn flat_type_pools_restore(r: FlatPoolReader) -> bool:
     union_type_members = flat_pool_dec_i64_list(r)
     weak_inner_tags = flat_pool_dec_i64(r)
     current_scope_depth = r.next_i64()
+    # The interned fn-type pools are parallel arrays; a length mismatch is a
+    # torn blob and must be refused, not half-restored.
+    if function_param_tags.len() != function_ret_tags.len():
+        return false
     r.ok
 
 export flat_type_pools_dump, flat_type_pools_restore

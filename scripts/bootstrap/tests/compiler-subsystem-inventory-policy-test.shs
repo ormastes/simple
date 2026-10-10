@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+owner="$script_root/compiler-subsystem-test-inventory.shs"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-inventory-policy.XXXXXX")
+case "$scratch" in "${TMPDIR:-/tmp}"/simple-inventory-policy.*) ;; *) exit 2 ;; esac
+# Preserve the private tiny fixture for failure inspection; no recursive cleanup.
+mkdir -p "$scratch/test/01_unit/compiler" "$scratch/test/02_integration" "$scratch/test/03_system"
+git -C "$scratch" init -q
+printf '# legitimate source owner\n' > "$scratch/test/01_unit/compiler/real_spec.spl"
+printf '# legitimate hidden owner\n' > "$scratch/test/01_unit/compiler/.hidden_spec.spl"
+printf 'malformed generated wrapper\n' > "$scratch/test/01_unit/compiler/.sspec_wrapped_entry_tracked_spec.spl"
+printf 'generated matchers\n' > "$scratch/test/01_unit/compiler/.spipe_matchers_tracked_spec.spl"
+printf 'tracked generated SPipe wrapper\n' > "$scratch/test/01_unit/compiler/.spipe_wrapped_entry_tracked_spec.spl"
+printf '# legitimate similar authored name\n' > "$scratch/test/01_unit/compiler/spipe_wrapped_entry_authored_spec.spl"
+git -C "$scratch" add test
+git -C "$scratch" -c user.name=Diagnostic -c user.email=diagnostic@example.invalid commit -qm fixture
+printf 'untracked generated wrapper\n' > "$scratch/test/01_unit/compiler/.sspec_wrapped_entry_untracked_spec.spl"
+printf 'untracked generated matchers\n' > "$scratch/test/01_unit/compiler/.spipe_matchers_untracked_spec.spl"
+printf 'untracked generated SPipe wrapper\n' > "$scratch/test/01_unit/compiler/.spipe_wrapped_entry_untracked_spec.spl"
+sh "$owner" "$scratch" > "$scratch/inventory.tsv" 2> "$scratch/inventory.err"
+[ "$(wc -l < "$scratch/inventory.tsv")" -eq 4 ]
+grep -q '/.hidden_spec.spl' "$scratch/inventory.tsv"
+grep -q '/real_spec.spl' "$scratch/inventory.tsv"
+grep -q '/spipe_wrapped_entry_authored_spec.spl' "$scratch/inventory.tsv"
+if grep -E '/\.sspec_wrapped|/\.spipe_wrapped|/\.spipe_matchers' "$scratch/inventory.tsv"; then exit 1; fi
+rm "$scratch/test/01_unit/compiler/real_spec.spl"
+if sh "$owner" "$scratch" > "$scratch/missing.tsv" 2> "$scratch/missing.err"; then exit 1; fi
+grep -q 'tracked eligible test owner not materialized' "$scratch/missing.err"
+printf '# untracked legitimate owner\n' > "$scratch/test/01_unit/compiler/untracked_spec.spl"
+if sh "$owner" "$scratch" > "$scratch/untracked.tsv" 2> "$scratch/untracked.err"; then exit 1; fi
+grep -q 'untracked eligible test owner' "$scratch/untracked.err"
+printf 'INVENTORY_POLICY_PASS tracked/untracked wrappers excluded; hidden retained; missing/untracked real rejected\n'
