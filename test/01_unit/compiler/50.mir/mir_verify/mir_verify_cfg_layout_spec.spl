@@ -177,6 +177,38 @@ describe "MIR verify: rule 5b/5c — local definitions and dropped conditions":
         expect(report.fatal_count()).to_equal(0)
         expect(mir_verify_rule_lifecycle("MIRV-005e")).to_equal("warning")
 
+    it "MIRV-005e widening: a local whose address is taken by Ref counts as defined":
+        val f = mk_fn(814, "fixture.ref_defined", [], i64_t(),
+            [tmp(0, i64_t()), tmp(1, ty(MirTypeKind.Ref(i64_t(), true)))],
+            [block(0, [inst(MirInstKind.Ref(LocalId(id: 1), MirBorrowKind.Mutable, MirPlace(local: LocalId(id: 0), projection: [])), 2)],
+                   MirTerminator.Ret(Some(copy(0))))])
+        expect(has_rule(mir_verify_module(mk_module([f])), "MIRV-005e")).to_equal(false)
+
+    it "MIRV-005e widening: a GetElementPtr base counts as defined":
+        val f = mk_fn(815, "fixture.gep_defined", [], i64_t(),
+            [tmp(0, i64_t()), tmp(1, ty(MirTypeKind.Ptr(i64_t(), true)))],
+            [block(0, [inst(MirInstKind.GetElementPtr(LocalId(id: 1), copy(0), [const_i64(0)]), 2)],
+                   MirTerminator.Ret(Some(copy(0))))])
+        expect(has_rule(mir_verify_module(mk_module([f])), "MIRV-005e")).to_equal(false)
+
+    it "MIRV-005e widening: a Store target counts as defined":
+        val f = mk_fn(816, "fixture.store_defined", [], i64_t(), [tmp(0, i64_t())],
+            [block(0, [inst(MirInstKind.Store(copy(0), const_i64(7)), 2)],
+                   MirTerminator.Ret(Some(copy(0))))])
+        expect(has_rule(mir_verify_module(mk_module([f])), "MIRV-005e")).to_equal(false)
+
+    it "MIRV-005e widening: an Intrinsic argument (out-parameter) counts as defined":
+        val f = mk_fn(817, "fixture.intrinsic_defined", [], i64_t(), [tmp(0, i64_t())],
+            [block(0, [inst(MirInstKind.Intrinsic(nil, "fixture_fill", [copy(0)]), 2)],
+                   MirTerminator.Ret(Some(copy(0))))])
+        expect(has_rule(mir_verify_module(mk_module([f])), "MIRV-005e")).to_equal(false)
+
+    it "MIRV-005e widening is not a blanket pass: a plain Copy read of an undefined temp still reports":
+        val f = mk_fn(818, "fixture.copy_undefined", [], i64_t(), [tmp(0, i64_t()), tmp(1, i64_t())],
+            [block(0, [inst(MirInstKind.Copy(LocalId(id: 1), LocalId(id: 0)), 2)],
+                   MirTerminator.Ret(Some(copy(1))))])
+        expect(has_rule(mir_verify_module(mk_module([f])), "MIRV-005e")).to_equal(true)
+
     it "arguments and the return slot count as defined; a defined-later temp is fine":
         val f = mk_fn(812, "fixture.args_defined", [i64_t()], i64_t(),
             [arg(0, i64_t()), tmp(1, i64_t()),
