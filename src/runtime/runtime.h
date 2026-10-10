@@ -907,6 +907,9 @@ int64_t  rt_f64_to_bits(double value);
 /* IEEE-754 minNum/maxNum (fmin/fmax), matching Rust f64::min / f64::max. */
 double   rt_math_min(double a, double b);
 double   rt_math_max(double a, double b);
+/* Rust f64::round (half away from zero = C round) and f64::abs. */
+double   rt_math_round(double x);
+double   rt_math_abs(double x);
 int64_t  rt_utf8_count_codepoints(int64_t bytes_value);
 int8_t   rt_utf8_validate(int64_t bytes_value);
 int64_t  rt_utf8_find_invalid(int64_t bytes_value);
