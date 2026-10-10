@@ -142,3 +142,7 @@ remains **BLOCKED / IN PROGRESS**, with no performance or qualification PASS.
 ## 2026-10-10 current-source continuation
 
 The production source-closure callback crash is repaired at the driver call site, and a rebuilt pure-Simple Stage 2 candidate passed naming sanity. The outer compiler-test gate stopped before tests for a missing explicit MC/DC waiver record. Three bounded native action-key probe attempts then failed on Cranelift imported globals, a reduced source inventory, and LLVM invalid IR; the semantic v2 key has no execution PASS. See [the continuation report](../../../09_report/compiler/item56_release_continuation_2026-10-10.md). Stages E–H and the selected time/RSS gates remain open.
+
+### 2026-10-10 bounded native publication result
+
+The repaired transition pointer now admits the first V1 generation in the no-stub LLVM/core-C CAS fixture. The same executable stops at its later second-generation action-digest validation (exit 11); the fixture does not publish/read/pin that generation. See `doc/08_tracking/bug/package_index_native_publication_blockers_2026-10-10.md`. Item 6 remains in progress; full entrypoint and paired time/RSS gates are unrun. The three-cycle cap prevents another retry in this session.

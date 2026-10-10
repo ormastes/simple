@@ -1,6 +1,6 @@
 # Native package index publication blockers (2026-10-10)
 
-Status: OPEN. Item 6 native fixture builds but does not publish its first V1 generation.
+Status: OPEN. The first V1 generation now publishes; the native fixture stops at second-generation action-digest validation.
 
 ## Reproduction
 
@@ -18,3 +18,9 @@ Isolate `sha256_text` on nonempty literals and runtime-built text under the same
 ## 2026-10-10 follow-up
 
 A separate six-module native probe isolated the empty-input digest to `text_to_utf8_bytes` returning zero bytes for nonempty text. The sanctioned facade now falls back to `byte_at` only on that invalid result, and its focused native SHA probe passes. This does not revalidate the full CAS fixture; the publisher and runtime ABI owner remain open. See [native text conversion](native_text_to_bytes_empty_2026-10-10.md).
+
+## 2026-10-10 transition pointer follow-up
+
+With the guarded text-to-bytes repair, the same no-stub LLVM/core-C fixture generated a correctly named index but failed before publishing CURRENT. A focused 43-module native probe returned `atomic=false exclusive=true` for `file_atomic_write` and `file_create_exclusive` in the same directory. The transition pointer was the failing atomic-write caller. `_transition_point_v1` now stages through the existing exclusive-create facade and renames over TRANSITION under CURRENT.lock, verifying a stale staged file or already-published pointer before accepting it. The next full native fixture created both TRANSITION=none and CURRENT on its first publish.
+
+Build receipt: `build/mini_builds/item6_cas_after_transition_20261010/` (build exit 0, 50 HIR modules, 40 linked objects; run exit 11). The fixture returns 11 when a second-generation graph fails `package_module_index_validate_v1` after assigning its semantic v2 action digest. It does not reach second publish, load, or CAS pin. The exact validation reason is not emitted by this fixture, so it remains unisolated. This was the third bounded verify/fix cycle for this defect; no further retry was made. The lower-level atomic-write failure is tracked separately in [native atomic write](native_file_atomic_write_false_2026-10-10.md).

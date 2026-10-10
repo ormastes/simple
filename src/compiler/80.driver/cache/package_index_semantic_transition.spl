@@ -4,7 +4,7 @@
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io_runtime.{file_delete}
 use std.nogc_sync_mut.io.file_ops.{
-    file_atomic_write, file_create_exclusive,
+    file_create_exclusive, file_rename,
     file_read_regular_no_follow_bounded
 }
 
@@ -28,9 +28,19 @@ fn _transition_digest_valid_v1(value: text) -> bool:
     true
 
 fn _transition_point_v1(dir: text, receipt_digest: text) -> bool:
-    val previous = file_read_regular_no_follow_bounded("{dir}/TRANSITION", 64)
-    if not file_atomic_write("{dir}/TRANSITION", receipt_digest):
-        return false
+    val pointer = "{dir}/TRANSITION"
+    val previous = file_read_regular_no_follow_bounded(pointer, 64)
+    # The publisher holds CURRENT.lock. Reuse a verified staged pointer after
+    # interruption, then rename it over the public pointer atomically.
+    val staged = "{pointer}.tmp.{receipt_digest}"
+    if not file_create_exclusive(staged, receipt_digest):
+        val existing = file_read_regular_no_follow_bounded(staged, 64)
+        if existing.is_err() or existing.unwrap() != receipt_digest:
+            return false
+    if not file_rename(staged, pointer):
+        val published = file_read_regular_no_follow_bounded(pointer, 64)
+        if published.is_err() or published.unwrap() != receipt_digest:
+            return false
     # Receipt readers fail conservative if retirement wins their read race.
     # Never delete an index generation or the currently referenced receipt.
     if previous.is_ok():
