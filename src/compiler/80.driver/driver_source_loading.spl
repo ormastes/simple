@@ -1393,6 +1393,33 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
         return mapped
     ""
 
+pub fn _driver_resolve_source_root_entry_import_v1(module_path: text, source_roots: [text]) -> text:
+    # Match native-build's ordered explicit-root contract before probing the
+    # checkout. A composition overlay is authoritative for the module it owns;
+    # re-resolving that name in src/ silently restores an excluded provider.
+    # Relative imports remain owned by their importing file, not overlays.
+    if module_path.starts_with("."): return ""
+    var probe = module_path
+    while probe != "":
+        val segments = probe.split(".")
+        for source_root in source_roots:
+            if source_root.ends_with(".spl"): continue
+            var root = source_root
+            while root.len() > 1 and root.ends_with("/"):
+                root = root.substring(0, root.len() - 1)
+            val root_parts = root.split("/")
+            if root_parts.len() == 0: continue
+            val root_name = root_parts[root_parts.len() - 1]
+            if segments.len() > 1 and (segments[0] == root_name or
+                    (root_name == "lib" and segments[0] == "std")):
+                val stripped = segments.slice(1, segments.len()).join("/")
+                val selected = _driver_try_numbered_entry_import_rel(root, stripped)
+                if selected != "": return selected
+            val selected = _driver_try_numbered_entry_import_rel(root, probe.replace(".", "/"))
+            if selected != "": return selected
+        probe = _driver_entry_import_parent(probe)
+    ""
+
 pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
     """File path backing a Simple import path, or "" when none exists.
     Exact modules are preferred. Dotted terminal names are then removed one at

@@ -1608,6 +1608,48 @@ case "${SIMPLE_PLUGIN_MANIFEST_POLICY:-unselected}" in
 esac
 export SIMPLE_PLUGIN_MANIFEST_POLICY
 plugin_policy_source_root=$(absolute_path "${repo_root}/src/plugins")
+# CUDA is a compiler composition choice, not a host-device probe. Generate an
+# immutable selected source root from the canonical compiler manifest, so a
+# disabled build never imports the PTX implementation. Each manifest identity
+# has a separate source/cache identity, including enabled and placement changes.
+compiler_backend_manifest="${repo_root}/src/compiler/simple.sdn"
+compiler_cuda_setting() {
+  awk -v key="$1" '
+    /^compiler_backends:[[:space:]]*$/ { section=1; next }
+    /^[^[:space:]#]/ { section=0; cuda=0 }
+    section && /^  cuda:[[:space:]]*$/ { cuda=1; next }
+    section && /^  [^[:space:]#]/ { cuda=0 }
+    section && cuda && $1 == key ":" { count++; value=$2 }
+    END { if (count != 1 || value == "") exit 1; print value }
+  ' "${compiler_backend_manifest}"
+}
+cuda_enabled=$(compiler_cuda_setting enabled) || {
+  echo 'error: simple.sdn requires one compiler_backends.cuda.enabled value' >&2; exit 1;
+}
+cuda_placement=$(compiler_cuda_setting placement) || {
+  echo 'error: simple.sdn requires one compiler_backends.cuda.placement value' >&2; exit 1;
+}
+case "${cuda_enabled}:${cuda_placement}" in
+  true:static) cuda_mode=static ;;
+  true:dynamic) cuda_mode=dynamic ;;
+  false:static|false:dynamic) cuda_mode=disabled ;;
+  *) echo 'error: CUDA enabled must be true|false and placement static|dynamic' >&2; exit 1 ;;
+esac
+case "${cuda_mode}" in
+  static) cuda_composition_template="${repo_root}/src/plugins/backend_registry/selected_cuda_backend.spl" ;;
+  *) cuda_composition_template="${repo_root}/src/compositions/cuda_${cuda_mode}/plugins/backend_registry/selected_cuda_backend.spl" ;;
+esac
+cuda_manifest_sha256=$(bootstrap_stage3_hash_file "${compiler_backend_manifest}") || exit 1
+cuda_template_sha256=$(bootstrap_stage3_hash_file "${cuda_composition_template}") || exit 1
+cuda_composition_root="${output_dir}/compositions/cuda-${cuda_manifest_sha256}-${cuda_template_sha256}"
+cuda_composition_file="${cuda_composition_root}/plugins/backend_registry/selected_cuda_backend.spl"
+mkdir -p "${cuda_composition_root}/plugins/backend_registry"
+if [ ! -f "${cuda_composition_file}" ]; then
+  cp "${cuda_composition_template}" "${cuda_composition_file}"
+fi
+[ "$(bootstrap_stage3_hash_file "${cuda_composition_file}")" = "${cuda_template_sha256}" ] || {
+  echo 'error: selected CUDA composition content differs from its identity' >&2; exit 1;
+}
 case "${SIMPLE_KERNEL_K1_POLICY:-unselected}" in
   llvm-cranelift)
     k1_composition_root="${repo_root}/src/compositions/kernel_llvm_cranelift"
@@ -2432,7 +2474,7 @@ bootstrap_native_build_main() {
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" --source examples/10_tooling \
+    --source "${cuda_composition_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" --source examples/10_tooling \
     --entry-closure \
     --timeout "${NATIVE_FILE_TIMEOUT_SECONDS}" \
     $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory)
@@ -3894,7 +3936,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ${stage2_cold_init_env:+"${stage2_cold_init_env}"} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
-      ${k1_composition_source_args} --source src/compiler --source src/app --source src/lib \
+      ${k1_composition_source_args} --source "${cuda_composition_root}" --source src/compiler --source src/app --source src/lib \
       --entry-closure --threads "${jobs}" \
       ${native_verbose_arg} \
       ${stage2_timeout_args} \
@@ -3975,7 +4017,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ${stage3_diagnostic_env} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
-      ${k1_composition_source_args} \
+      ${k1_composition_source_args} --source "${cuda_composition_root}" \
       --source src/compiler --source src/app --source src/lib \
       --entry-closure --threads "${selfhost_jobs}" \
       --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
@@ -4096,7 +4138,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    ${k1_composition_source_args} --source src/compiler --source src/app --source src/lib \
+    ${k1_composition_source_args} --source "${cuda_composition_root}" --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${jobs}" \
     ${native_verbose_arg} \
@@ -4984,7 +5026,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    ${k1_composition_source_args} \
+    ${k1_composition_source_args} --source "${cuda_composition_root}" \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${selfhost_jobs}" \
@@ -5520,7 +5562,7 @@ run_logged stage4b-ui-backend env RUST_LOG="${RUST_LOG:-error}" \
   SIMPLE_BINARY="$(absolute_path "${full_bin}")" \
   "${full_bin}" native-build \
     --backend "${backend}" \
-  --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
+  --source "${cuda_composition_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
   --entry-closure --threads "${jobs}" --cache-dir "${native_cache_dir}" \
   --mode "${bootstrap_mode}" --entry src/app/ui/main.spl \
   --runtime-path "${stage_runtime_absolute}" \
@@ -5563,7 +5605,7 @@ if [ "${build_mcp}" -eq 1 ]; then
       SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
       "${stage_for_build}" native-build \
       --backend "${backend}" \
-      --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
+      --source "${cuda_composition_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
       --entry-closure \
       --threads "${jobs}" \
       --cache-dir "${native_cache_dir}" \

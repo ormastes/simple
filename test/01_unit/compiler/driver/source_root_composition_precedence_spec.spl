@@ -1,0 +1,45 @@
+use std.spec
+use std.spec.step
+use compiler.driver.driver_source_loading.{_driver_resolve_source_root_entry_import_v1}
+
+describe "source root composition precedence":
+    it "selects the disabled CUDA source before the default static module":
+        step("resolve the selected logical module against ordered explicit roots")
+        val path = _driver_resolve_source_root_entry_import_v1(
+            "plugins.backend_registry.selected_cuda_backend",
+            ["src/compositions/cuda_disabled", "src/plugins"])
+        expect(path).to_equal("src/compositions/cuda_disabled/plugins/backend_registry/selected_cuda_backend.spl")
+
+    it "preserves K1 composition precedence over its fail-closed facade":
+        step("resolve the same K1 overlay contract used by bootstrap")
+        val path = _driver_resolve_source_root_entry_import_v1(
+            "compiler.driver.bootstrap_k1_selected",
+            ["src/compositions/kernel_llvm", "src/compiler"])
+        expect(path).to_equal("src/compositions/kernel_llvm/compiler/driver/bootstrap_k1_selected.spl")
+
+    it "resolves normal numbered roots and honors the first selected overlay":
+        step("retain ordinary source resolution and deterministic root order")
+        expect(_driver_resolve_source_root_entry_import_v1(
+            "compiler.common.cuda_backend_policy", ["src/compiler"])).to_equal(
+            "src/compiler/00.common/cuda_backend_policy.spl")
+        expect(_driver_resolve_source_root_entry_import_v1(
+            "plugins.backend_registry.selected_cuda_backend",
+            ["src/compositions/cuda_dynamic", "src/compositions/cuda_disabled"])).to_equal(
+            "src/compositions/cuda_dynamic/plugins/backend_registry/selected_cuda_backend.spl")
+
+    it "does not reinterpret relative imports as composition-owned modules":
+        step("leave relative resolution with the importing file")
+        expect(_driver_resolve_source_root_entry_import_v1(
+            ".selected_cuda_backend", ["src/compositions/cuda_disabled"])).to_equal("")
+
+    it "keeps ambiguous numbered module directories unresolved":
+        step("refuse competing numbered owners rather than picking directory order")
+        expect(_driver_resolve_source_root_entry_import_v1("ambiguous.owner",
+            ["test/fixtures/compiler/composition_roots"])).to_equal("")
+
+    it "resolves named-import suffixes within the selected root":
+        step("retain overlay ownership when a use names a terminal function")
+        expect(_driver_resolve_source_root_entry_import_v1(
+            "plugins.backend_registry.selected_cuda_backend.selected_cuda_backend_mode_v1",
+            ["src/compositions/cuda_disabled/", "src/plugins"])).to_equal(
+            "src/compositions/cuda_disabled/plugins/backend_registry/selected_cuda_backend.spl")
