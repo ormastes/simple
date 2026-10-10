@@ -26,3 +26,9 @@ Both direct environment access audit modes passed after the compiler change. Thi
 ## Full-CLI verification availability
 
 The required core runtime smoke was attempted once with the Stage 2 candidate. It exited 1 at its first `-c` case: `error: unknown command '-c'`. The candidate help lists only `compile` and `native-build`; it is a bootstrap compiler, so this result is a tool-scope mismatch, not a language runtime failure. Full compiler/lib/MCP/LSP checks and MCP native smoke need a deployed full CLI and servers. GitHub authentication was absent when checked, so the branch remains local only.
+
+## 2026-10-10 declaration-only and native publication follow-up
+
+Commit `ddb1507c8eb` adds a guarded objectless native path for empty and plain struct-only source units. The rebuilt pure-Simple Stage 2 binary (SHA-256 `c535be7321e80a4857413fa1c690008b3172b157e87eac8a860edd98c6772082`) compiled 1,222 units and passed parent sanity/provenance. The outer bootstrap again stopped before compiler tests because delegated MC/DC-off rows have no explicit waiver.
+
+The focused LLVM CAS fixture now builds and links 40 objects; the earlier `MIR module has no functions or static data` failure is cleared. Its executable initially rejected omitted trailing constructor defaults (`legacy-variant-unexpected`). Explicit fields made validation `ok`, but initial publication still exits 1 because native `sha256_text` returns the empty-input digest for nonempty strings and the 260-byte index. The publisher leaves `CURRENT` absent. See [the bug](../../08_tracking/bug/package_index_native_publication_blockers_2026-10-10.md). Three focused verify/fix cycles are exhausted for this session; no CAS PASS, production performance cohort, or release PASS is claimed. Direct-env working/staged audits passed, and `doc/06_spec` has zero `*_spec.spl` files.

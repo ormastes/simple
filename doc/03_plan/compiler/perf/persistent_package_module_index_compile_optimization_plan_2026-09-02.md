@@ -463,3 +463,7 @@ Neither route produced a current-source compiler. The 12 remaining canonical
 self-hosted build and qualification gates above.
 The marker bridge's focused native evidence and limits are in
 `doc/09_report/compiler/target6_index_compat_marker_publication_2026-09-28.md`.
+
+## 2026-10-10 native publication continuation
+
+A guarded declaration-only native path now allows the 50-module Item 6 CAS entry closure to compile and link 40 objects without synthetic stubs. The fixture still exits 1 during first V1 publication. Explicitly filling trailing generation fields resolves a native default-field validation failure, then exposes a nonempty-text SHA-256 result equal to the empty-input digest. The publisher correctly refuses to publish. This is tracked in [the native publication bug](../../../08_tracking/bug/package_index_native_publication_blockers_2026-10-10.md) and [the continuation report](../../../09_report/compiler/item56_release_continuation_2026-10-10.md). The focused probe hit the three-cycle cap. Persistent index production cutover, native cohorts, and Item 5 closure/size gates remain open.
