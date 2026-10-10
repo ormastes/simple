@@ -391,3 +391,11 @@ the same way (bug `stage2_imported_fn_foreign_struct_return_type_erased_2026-10-
 - Still bare-keyed, not changed here: Optional/Result struct payload shapes
   (`bootstrap_fn_ret_opt_shape_*` / `ok_shape`) and
   `optional_payload_struct_name`'s Struct arm.
+- **Match guard-count invariant (3a, advisory `E-MIR-MATCH-GUARD`).** `lower_match_case`
+  ([expr_dispatch.spl](../../../../src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl))
+  is a checking wrapper around `lower_match_case_unchecked`: guarded arms
+  received == guard branches emitted. Rule: **any site that emits a guard
+  `terminate_if` increments `self.match_guards_lowered`; any site that
+  legitimately skips or multiplies a guarded arm adjusts
+  `self.match_guards_expected` with a comment.** Guide:
+  `doc/07_guide/compiler/robustness/match-guard-invariant.md`.
