@@ -320,8 +320,8 @@ describe "admitted per-module semantic route":
             legacy.entries = entries
             expect(package_module_index_publish_v1(root, legacy)).to_equal(true)
             val dir = "{root}/package-module-index-v1"
-            val pointer = file_read("{dir}/TRANSITION")
-            expect(file_delete("{dir}/{pointer}.transition")).to_equal(true)
+            expect(package_index_transition_read_v1(
+                dir, package_module_index_digest_v1(legacy)).is_err()).to_equal(true)
             val invalidation = package_index_route_admitted_invalidation_v1(
                 root, legacy, hint)
             expect(invalidation.valid).to_equal(true)
@@ -334,8 +334,8 @@ describe "admitted per-module semantic route":
         val current = semantic_graph("current", false, false)
         expect(package_module_index_publish_v1(root, current)).to_equal(true)
         val dir = "{root}/package-module-index-v1"
-        val pointer = file_read("{dir}/TRANSITION")
-        expect(file_delete("{dir}/{pointer}.transition")).to_equal(true)
+        expect(package_index_transition_read_v1(
+            dir, package_module_index_digest_v1(current)).is_err()).to_equal(true)
         val invalidation = package_index_route_admitted_invalidation_v1(
             root, current, ["unknown"])
         expect(invalidation.valid).to_equal(false)
@@ -385,4 +385,53 @@ describe "admitted per-module semantic route":
         expect(route.archive_admissions[0].load.receipt!.receipt_digest).to_equal(
             retained.receipt!.receipt_digest)
         expect(route.archive_admissions[0].archive_path).to_equal(retained.archive_path)
+        dir_remove(root, true)
+
+    it "migrates an empty-hint V2 production route despite a reusable archive":
+        step("Route legacy entries through full migration before archive reuse")
+        val root = semantic_root("v2-empty-route")
+        expect(dir_create_all("{root}/snapshot/src")).to_equal(true)
+        val snapshot = path_absolute("{root}/snapshot")
+        var legacy = semantic_graph("legacy", false, false)
+        legacy.schema_version = 2
+        var entries: [PackageModuleIndexEntryV1] = []
+        for entry in legacy.entries:
+            var unwitnessed = entry
+            unwitnessed.generated_source_digest = ""
+            unwitnessed.action_digest = package_module_index_entry_action_digest_v1(
+                legacy, unwitnessed)
+            entries.push(unwitnessed)
+        legacy.entries = entries
+        expect(package_module_index_publish_v1(root, legacy)).to_equal(true)
+        for name in ["a", "b", "c", "d"]:
+            file_write("{snapshot}/src/{name}.spl", semantic_source(name, false))
+        val authority = PackageArchiveAuthorityV1(legacy.producer_digest,
+            legacy.root_generation, legacy.variant_digest, legacy.scv_revision_id,
+            legacy.scv_tree_id, legacy.inventory_digest)
+        val interface_digest = sha256_text("d-interface")
+        val action_digest = sha256_text("d-action")
+        expect(package_archive_publish_scc_v1(root, "scc-d", authority,
+            [PackageArchivePublishInputV1(legacy.entries[3],
+                [legacy.entries[2].smf_metadata_digest],
+                "symbol|d|function|i64|{interface_digest}",
+                "action|d-entry|compile|d|{action_digest}", true)])).to_equal(true)
+        val cached_entry = package_archive_aggregate_entry_v1(
+            [legacy.entries[3]])!
+        val cached = package_archive_load_v1(root, cached_entry, authority,
+            [legacy.entries[2].smf_metadata_digest])
+        expect(cached.valid).to_equal(true)
+
+        val previous_cache = env_get("SIMPLE_CACHE") ?? ""
+        env_set("SIMPLE_CACHE", root)
+        val route = package_index_route_admitted_current_v1("", snapshot,
+            legacy.scv_revision_id, legacy.scv_tree_id, legacy.inventory_digest,
+            legacy.producer_digest, legacy.root_generation, legacy.variant_digest, [])
+        env_set("SIMPLE_CACHE", previous_cache)
+        expect(route.valid).to_equal(true)
+        expect(route.dirty_modules.len()).to_equal(4)
+        var dirty_names: [text] = []
+        for dirty in route.dirty_modules:
+            dirty_names.push(dirty.module_id)
+        expect(dirty_names).to_equal(["a", "b", "c", "d"])
+        expect(route.archive_admissions.len()).to_equal(0)
         dir_remove(root, true)
