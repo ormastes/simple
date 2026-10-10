@@ -1,0 +1,79 @@
+"""
+Purpose: a module that declares only types (structs/enums/traits) lowers to a
+MIR module with no functions and no statics. The native driver must classify
+it as OBJECTLESS -- the same typed outcome an import/export facade records --
+instead of sending it to codegen, where it failed the whole build with
+`AOT compile error: MIR module has no functions or static data`
+(std.nogc_sync_mut.io.process_completion,
+compiler.common.cache_contract.virtual_source_store_v1). The classification is
+backend-independent for the native object lanes (LLVM, Cranelift). A module that
+owns code or data must never be classified objectless.
+Audience: compiler engineers maintaining the native-build module driver.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.driver.driver_aot_output.{driver_native_module_is_export_facade}
+
+val STRUCT_ONLY_SRC = "struct ProcessCompletionV1:\n    pid: i64\n    exit_code: i64\n    tree_reaped: bool\n    stdout_digest: text\n\nexport ProcessCompletionV1\n"
+val CONTRACT_SRC = "pub enum VisibilityV1:\n    Public\n    Private\n\npub struct StatV1:\n    size: i64\n    kind: VisibilityV1\n\npub trait StoreV1:\n    fn stat(path: text) -> StatV1\n"
+val STRUCT_AND_FN_SRC = "struct P:\n    x: i64\n\nfn make() -> P:\n    P(x: 1)\n"
+val STRUCT_AND_IMPL_SRC = "struct P:\n    x: i64\n\nimpl P:\n    fn get() -> i64:\n        self.x\n"
+
+fn mir_of(parsed: ParserModule, name: text) -> MirModule:
+    var hl = HirLowering.with_filename(name + ".spl")
+    val hir = hl.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.lower_module(hir)
+
+fn objectless(src: text, name: text) -> bool:
+    val parsed = parse_full_frontend(src, name + ".spl", name, Logger(level: 0))
+    driver_native_module_is_export_facade(mir_of(parsed, name), parsed)
+
+describe "type-only modules are objectless in a native build":
+    it "lowers a struct-only module to MIR with no functions and no statics":
+        val parsed = parse_full_frontend(STRUCT_ONLY_SRC, "completion.spl", "completion", Logger(level: 0))
+        val mir = mir_of(parsed, "completion")
+        expect(mir.functions.keys().len()).to_equal(0)
+        expect(mir.statics.keys().len()).to_equal(0)
+
+    it "classifies a struct-only module as objectless":
+        expect(objectless(STRUCT_ONLY_SRC, "completion")).to_be(true)
+
+    it "classifies an enum + struct + trait contract module as objectless":
+        expect(objectless(CONTRACT_SRC, "contract")).to_be(true)
+
+    it "never classifies a module that defines a function as objectless":
+        expect(objectless(STRUCT_AND_FN_SRC, "with_fn")).to_be(false)
+
+    it "never classifies a module with an impl as objectless":
+        expect(objectless(STRUCT_AND_IMPL_SRC, "with_impl")).to_be(false)
+
+val GENERIC_STRUCT_SRC = "pub struct LookupV1<T>:\n    found: bool\n    value: T\n"
+val BITFIELD_SRC = "bitfield Flags(u32):\n    enabled: bool\n    priority: u4\n"
+val TRAIT_DEFAULT_SRC = "pub trait Named:\n    fn name() -> text\n    fn label() -> text:\n        \"label\"\n"
+
+fn mir_is_empty(src: text, name: text) -> bool:
+    val parsed = parse_full_frontend(src, name + ".spl", name, Logger(level: 0))
+    val mir = mir_of(parsed, name)
+    mir.functions.keys().len() == 0 and mir.statics.keys().len() == 0 and mir.constants.keys().len() == 0
+
+describe "objectless classification never drops emitted code":
+    it "classifies a generic struct module as objectless":
+        expect(mir_is_empty(GENERIC_STRUCT_SRC, "generic_struct")).to_be(true)
+        expect(objectless(GENERIC_STRUCT_SRC, "generic_struct")).to_be(true)
+
+    it "classifies a bitfield module as objectless":
+        expect(mir_is_empty(BITFIELD_SRC, "bits")).to_be(true)
+        expect(objectless(BITFIELD_SRC, "bits")).to_be(true)
+
+    it "classifies a trait with default bodies as objectless only when its MIR is empty":
+        expect(objectless(TRAIT_DEFAULT_SRC, "trait_default")).to_equal(mir_is_empty(TRAIT_DEFAULT_SRC, "trait_default"))
