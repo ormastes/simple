@@ -108,11 +108,23 @@ impl HirLowering:
         if not owner.is_valid():
             return
         self.generic_enum_constructor_owners[owner.id] = enum_.type_params.len() > 0
-        for variant in enum_.variants:
+        for untyped_variant in enum_.variants:
+            # The flat-AST bridge builds EVERY payload-less variant as
+            # `VariantKind.Tuple([])` (module_assembly.spl), never
+            # `VariantKind.Unit`, so a Unit-only test registered nothing and
+            # every bare variant arm (`case Pass:`, `case Native | Host:`)
+            # lowered as a binding. Typed rebind + qualified arms as in
+            # lower_variant (seed mis-decodes the untyped/bare forms).
+            val variant: Variant = untyped_variant
+            var is_unit = false
             match variant.kind:
                 case VariantKind.Unit:
-                    self.enum_unit_pattern_names["{owner.id}:{variant.name}"] = true
+                    is_unit = true
+                case VariantKind.Tuple(payload_types):
+                    is_unit = payload_types.len() == 0
                 case _: ()
+            if is_unit:
+                self.enum_unit_pattern_names["{owner.id}:{variant.name}"] = true
 
     me lower_match_pattern(p: Pattern, subject_type: HirType?) -> HirPattern:
         # A bare name is a variant only when the subject's enum owns it.
@@ -126,6 +138,18 @@ impl HirLowering:
                                 if self.enum_unit_pattern_names.contains_key("{owner.id}:{name}"):
                                     return HirPattern(kind: HirPatternKind.Enum(type_, name, nil), has_type_: true, type_: type_, span: p.span)
                             case _: ()
+            case PatternKind.Or(alternatives):
+                # Every alternative matches the same subject, so a bare name
+                # in `case Native | Host:` is resolved against the subject's
+                # enum exactly like a top-level bare arm (seed:
+                # collect_pattern_bindings recurses with the same expected
+                # type). Lowering the alternatives without the subject type
+                # turned imported-enum variants into bindings and failed
+                # unify_or_pattern_bindings with "[Native] vs [Host]".
+                var hir_alts: [HirPattern] = []
+                for alt in alternatives:
+                    hir_alts = hir_alts.push(self.lower_match_pattern(alt, subject_type))
+                return HirPattern(kind: HirPatternKind.Or(self.unify_or_pattern_bindings(hir_alts, p.span)), type_: nil, span: p.span)
             case _: ()
         self.lower_pattern(p)
 
