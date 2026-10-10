@@ -1,0 +1,88 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Shell exit-status hygiene scan — acceptance (robustness item 15a, scripts)
+
+A script that reads `tail`'s status after a pipe, `echo`'s after a report
+line, or never looks at a `timeout` status reports a failed or killed compiler
+as green. `scripts/check/lib/shs-pipe-exit-hygiene.shs` reports the three
+unambiguous shapes; `check-range-shs-hygiene-push.shs` prints new findings in
+touched scripts as an advisory stderr NOTE that never changes its verdict.
+
+The full fixture set (8 must-flag, 27 must-not-flag, tree census, the gate
+staying advisory) is `sh scripts/check/lib/shs-pipe-exit-hygiene.shs --selftest`.
+
+Guide: doc/07_guide/compiler/robustness/shs-exit-hygiene.md
+"""
+
+# @tag: unit, compiler, robustness, scripts
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file, file_write, file_delete, process_run, dir_create_all}
+
+val SPEC_DIR = "build/tmp/shs_exit_hygiene_acceptance"
+
+fn scan_fixture(name: text, body: text) -> text:
+    """Rules the scanner reports for one script body, space-joined in report
+    order ("" = clean)."""
+    dir_create_all(SPEC_DIR)
+    val path = SPEC_DIR + "/" + name + ".sh"
+    file_write(path, body)
+    val script = ". scripts/check/lib/shs-pipe-exit-hygiene.shs && shs_hygiene_scan " + name + " " + path
+    val (stdout, _stderr, code) = process_run("sh", ["-c", script])
+    file_delete(path)
+    if code != 0:
+        return "SCANNER-DID-NOT-RUN"
+    var rules = ""
+    for row in stdout.split("\n"):
+        val cols = row.split("\t")
+        if cols.len() >= 3:
+            rules = if rules == "": cols[2] else: rules + " " + cols[2]
+    rules
+
+describe "shell exit-status hygiene scan":
+    it "reports a display pipeline whose status is read as the command's":
+        expect(scan_fixture("pipe_next", "build 2>&1 | tail -5\nrc=$?\n")).to_equal("PIPE-STATUS")
+        expect(scan_fixture("pipe_same_line", "build 2>&1 | tee log; rc=$?\n")).to_equal("PIPE-STATUS")
+        expect(scan_fixture("pipe_test", "build | head -40\nif [ $? -ne 0 ]; then exit 1; fi\n")).to_equal("PIPE-STATUS")
+
+    it "reports a dropped timeout status announced as a pass":
+        expect(scan_fixture("timeout_bare", "timeout 30 ./verify\necho PASS verify\n")).to_equal("TIMEOUT-UNCHECKED")
+
+    it "reports a status read after an intervening command":
+        expect(scan_fixture("stale_echo", "cc x.c\necho compiled\nrc=$?\n")).to_equal("STALE-RC")
+        expect(scan_fixture("stale_local", "f() (\n    local out=$(run_it)\n    rc=$?\n)\n")).to_equal("STALE-RC")
+
+    it "accepts the direct forms":
+        expect(scan_fixture("ok_direct", "build > log 2>&1; rc=$?\ntail -5 log\nexit $rc\n")).to_equal("")
+        expect(scan_fixture("ok_or", "build || rc=$?\nwait $pid; rc=$?\necho rc=$rc\n")).to_equal("")
+        expect(scan_fixture("ok_timeout", "timeout 30 ./verify; rc=$?\n[ $rc -eq 0 ] || exit $rc\necho PASS verify\n")).to_equal("")
+        expect(scan_fixture("ok_marker", "build | tee log   # exit-hygiene-ok: log capture only\nrc=$?\n")).to_equal("")
+
+    it "does not flag a pipeline whose filter status is the intended one":
+        expect(scan_fixture("ok_sort_mv", "grep -v vendor $LIST | sort -u > $LIST.2 && mv $LIST.2 $LIST\n")).to_equal("")
+        expect(scan_fixture("ok_grep_rc", "git diff --name-only | grep -q spl\nhas_source=$?\n")).to_equal("")
+        expect(scan_fixture("ok_grep_named_rc", "pgrep -f simple | grep -v $$ ; alive_rc=$?\n")).to_equal("")
+        expect(scan_fixture("ok_assign_default", "HB=$(grep HEARTBEAT $LOG | tail -n 1) || HB=none\n")).to_equal("")
+        expect(scan_fixture("ok_wc_tr", "n=$(wc -c <$f | tr -d ' ') || return 1\n")).to_equal("")
+        expect(scan_fixture("ok_du_tail", "du -ch $D | tail -1 || echo none\n")).to_equal("")
+
+    it "does not flag pipefail, condition-status and deliberate-discard forms":
+        expect(scan_fixture("ok_pipefail", "set -euo pipefail\nbuild 2>&1 | tail -5\nrc=$?\n")).to_equal("")
+        expect(scan_fixture("ok_subshell_pipefail", "(set -o pipefail; build 2>&1 | tee log)\nrc=$?\n")).to_equal("")
+        expect(scan_fixture("ok_shopt", "shopt -so pipefail\nbuild | tee log\nrc=$?\n")).to_equal("")
+        expect(scan_fixture("ok_else_rc", "if run_gate; then echo ok; else rc=$?; echo failed $rc; fi\n")).to_equal("")
+        expect(scan_fixture("ok_qemu", "timeout 60 qemu -serial file:$LOG || true\necho qemu done, looking for PASS marker\n")).to_equal("")
+        expect(scan_fixture("ok_set_e", "set -eu\ntimeout 30 ./verify\necho PASS verify\n")).to_equal("")
+        expect(scan_fixture("ok_case", "case $1 in\n  head | tail ) shift && mode=$1 ;;\nesac\n")).to_equal("")
+
+    it "is advisory in the required range gate":
+        val gate = read_file("scripts/check/check-range-shs-hygiene-push.shs")
+        # the scan is called, reports on stderr only, and is off during the selftest
+        expect(gate).to_contain("advisory_hygiene \"$_root\" \"$_base_oid\" \"$_tip_oid\" \"$_work/status.txt\" \"$_work\"")
+        expect(gate).to_contain("NOTE (advisory, verdict unaffected)")
+        val parts = gate.split("selftest || ")
+        expect(parts.len()).to_equal(2)
+        expect(parts[0].ends_with("HYG_ADVISORY=0\n")).to_equal(true)
+        # the verdict line and the pre-scan fixture count are the pre-existing ones
+        expect(gate).to_contain("echo \"PASS — $_n file(s) in $_range examined, $_parsed .shs parsed, $_new new guard(s) wired\"")
+        expect(gate).to_contain("echo \"selftest: 16 fixtures passed\"")
