@@ -1,0 +1,53 @@
+# Caret essential leaf provider spec
+
+AUTHORED_UNEXECUTED. No generated completeness or runtime qualification claim.
+
+Three scenarios: exact UTF8 alias read; partial/all-live/all-dead snapshot reconciliation; terminal no-op, leak and empty-team teardown contracts.
+
+```simple
+# AUTHORED_UNEXECUTED: requires a hash-pinned repaired producer and real runner.
+use std.spec.{describe, it, expect}
+use std.nogc_async_mut.sosix.host_facade.{sosix_file_read}
+use app.llm_caret.agent_runtime.{AgentProcess, summarize_agent_team}
+use app.llm_caret.multi_caret_manager.{multi_caret_manager_of,
+    reconcile_multi_caret_manager, settle_multi_caret_manager}
+
+fn leaf_proc(name: text, status: text, pid: i64) -> AgentProcess:
+    AgentProcess(agent_id: name, status: status, reason: "fixture", pid: pid)
+
+describe "Caret essential leaf provider contracts":
+    it "reads exact UTF8 content through the SoSix file alias":
+        expect(sosix_file_read("test/fixtures/compiler/caret_essential_leaf_probe/content.txt")).to_equal("alphaé")
+        expect(sosix_file_read("test/fixtures/compiler/caret_essential_leaf_probe/absent-file")).to_equal("")
+
+    it "reconciles partial, all-live and all-dead snapshots without processes":
+        val original = summarize_agent_team("m", [leaf_proc("a", "running", 41)])
+        val manager = multi_caret_manager_of("m", "running", "fixture", 2, original)
+        val partial = summarize_agent_team("m", [leaf_proc("a", "running", 41), leaf_proc("b", "exited", 0)])
+        val degraded = reconcile_multi_caret_manager(manager, partial)
+        expect(degraded.status).to_equal("degraded")
+        expect(degraded.team.processes.len()).to_equal(2)
+        expect(degraded.team.processes[0].pid).to_equal(41)
+        expect(reconcile_multi_caret_manager(degraded, original).status).to_equal("running")
+        val dead = summarize_agent_team("m", [leaf_proc("a", "exited", 0)])
+        expect(reconcile_multi_caret_manager(manager, dead).status).to_equal("exited")
+
+    it "keeps terminal managers stable and reports teardown leaks":
+        val original = summarize_agent_team("m", [leaf_proc("a", "running", 41)])
+        val manager = multi_caret_manager_of("m", "running", "fixture", 2, original)
+        val leaked = summarize_agent_team("m", [leaf_proc("a", "error", 41)])
+        val failed = settle_multi_caret_manager(manager, leaked)
+        expect(failed.status).to_equal("stop_failed")
+        expect(failed.reason).to_equal("stop_incomplete:1")
+        expect(failed.team.processes[0].pid).to_equal(41)
+        val dead = summarize_agent_team("m", [leaf_proc("a", "stopped", 0)])
+        val stopped = settle_multi_caret_manager(manager, dead)
+        expect(stopped.status).to_equal("stopped")
+        expect(settle_multi_caret_manager(stopped, leaked).status).to_equal("stopped")
+        expect(reconcile_multi_caret_manager(stopped, original).status).to_equal("stopped")
+        val empty = summarize_agent_team("m", [])
+        val idle = multi_caret_manager_of("m", "not_started", "fixture", 2, empty)
+        expect(settle_multi_caret_manager(idle, empty).reason).to_equal("no_processes")
+```
+
+Native fixture: exact stdout `alphaé|β|`, exit0; no terminal initialization.

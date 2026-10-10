@@ -1,0 +1,77 @@
+"""Explicit re-export syntax must not manufacture comment-origin symbols."""
+use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file_text}
+use compiler.frontend._FlatAstBridge.module_assembly.{parse_and_build_module_scoped}
+use compiler.core.parser.{parser_has_errors}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.module_surface_declarations.{
+    ModuleSurfaceParserOwner, module_surface_from_owner
+}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfaceBuilder}
+use compiler.hir.hir_lowering._Items.module_lowering.{hir_export_origin_surface_index}
+
+fn comment_origin_surface(body: text) -> ModuleSurface:
+    val name = "compiler.loader.runtime.__init__"
+    val path = "src/compiler/99.loader/runtime/__init__.spl"
+    # Direct production parser bridge: no disk-keyed frontend cache restore.
+    val parsed = parse_and_build_module_scoped(body, path, false)
+    expect(parser_has_errors()).to_equal(false)
+    val owner = ModuleSurfaceParserOwner.new(parsed)
+    module_surface_from_owner(owner,
+        SourceFile(path: path, content: body, module_name: name), 0).unwrap()
+
+describe "explicit export use does not inherit generated comment origins":
+    it "does not synthesize the middle name or import syntax from a multi-item re-export":
+        val body = "# Re-exported from generation_sweeper.spl\nexport use compiler.loader.loader.generation_sweeper.\{SweeperConfig, SweeperStats, GenerationSweeper\}\n"
+        val surface = comment_origin_surface(body)
+        expect(surface.export_origin_index.names.len()).to_equal(0)
+        expect(surface.exports.len()).to_be_greater_than(0)
+
+    it "clears the hint before multiline explicit syntax and a later bare export":
+        val body = "# Re-exported from generation_sweeper.spl\nexport use compiler.loader.loader.generation_sweeper.\{\n    SweeperConfig,\n    SweeperStats,\n    GenerationSweeper\n\}\n# A later declaration has no generator owner marker.\nexport later_value\n"
+        val surface = comment_origin_surface(body)
+        expect(surface.export_origin_index.names.len()).to_equal(0)
+        expect(surface.exports.len()).to_be_greater_than(0)
+
+    it "consumes a single-line explicit export marker before a later bare export":
+        val body = "# Re-exported from wrong.spl\nexport use compiler.loader.loader.smf_cache.\{SmfCache\}\n# Ordinary comment between export declarations.\nexport later_value\n"
+        val surface = comment_origin_surface(body)
+        expect(surface.export_origin_index.names.len()).to_equal(0)
+
+    it "recognizes token-equivalent spacing without treating export uses as a keyword":
+        val spaced = comment_origin_surface("# Re-exported from wrong.spl\nexport  use owner.\{First, Middle, Last\}\n")
+        expect(spaced.export_origin_index.names.len()).to_equal(0)
+        val tabbed = comment_origin_surface("# Re-exported from wrong.spl\nexport use\towner.\{First, Middle, Last\}\n")
+        expect(tabbed.export_origin_index.names.len()).to_equal(0)
+        val plain = comment_origin_surface("# Re-exported from sibling.spl\nexport uses\n")
+        expect(plain.export_origins["uses"].source_name).to_equal("uses")
+
+    it "does not manufacture a generated hint for a parsed explicit alias":
+        val surface = comment_origin_surface("# Re-exported from wrong.spl\nexport use owner.\{original_value as public_value\}\n")
+        expect(surface.export_origin_index.names.len()).to_equal(0)
+        expect(surface.exports.len()).to_be_greater_than(0)
+
+    it "preserves legacy bare hints through an intervening ordinary comment":
+        val body = "# Re-exported from sibling.spl\n# Public compatibility names.\nexport first_value, second_value\n# This later bare export has no owner marker.\nexport later_value\n"
+        val surface = comment_origin_surface(body)
+        expect(surface.export_origins["first_value"].owner_module).to_equal("compiler.loader.runtime.sibling")
+        expect(surface.export_origins["second_value"].owner_module).to_equal("compiler.loader.runtime.sibling")
+        expect(surface.export_origins["second_value"].source_name).to_equal("second_value")
+        expect(surface.export_origin_index.names.len()).to_equal(2)
+
+    it "keeps a wrong generated origin unavailable to canonical HIR owner lookup":
+        val surface = comment_origin_surface("# Re-exported from missing.spl\nexport missing_value\n")
+        var builder = ModuleSurfaceBuilder.new()
+        expect(builder.add_surface_canonical_identity(surface,
+            "compiler.loader.runtime.__init__",
+            "src/compiler/99.loader/runtime/__init__.spl").is_ok()).to_equal(true)
+        val registry = builder.finish().unwrap()
+        val origin = surface.export_origins["missing_value"]
+        expect(hir_export_origin_surface_index(registry, origin.owner_module)).to_equal(-1)
+
+    it "parses the actual curated facade without the four phantom owners":
+        val body = read_file_text("src/compiler/99.loader/runtime/__init__.spl")
+        expect(body.len()).to_be_greater_than(0)
+        val surface = comment_origin_surface(body)
+        expect(surface.export_origin_index.names.len()).to_equal(0)
+        expect(surface.exports.len()).to_be_greater_than(0)
