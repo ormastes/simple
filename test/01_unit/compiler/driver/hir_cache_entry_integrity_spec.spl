@@ -1,0 +1,114 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# Plan ids: IR-05 (stale/corrupt cached IR rejected on admission), RB-19A,
+# BUG-02; task 8a of CURRENT_BUG_PREVENTION.md (payload checksum + write-time
+# round-trip self-check + counted, named rejections).
+
+"""
+Purpose: the HIR cache must be fail-closed and self-describing. Before this,
+an entry was trusted on its header alone, and every rejected load was an
+anonymous miss -- which is how `[hir-cache] hits=0 misses=1163` sat in the
+bootstrap logs for weeks while the codec wrote 3/true as nil.
+
+These examples drive the PURE entry functions (encode/parse/self-check) with
+a real lowered module, so they run without a compiler scope or a cache dir.
+"""
+
+use std.spec
+use std.spec.step
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
+use compiler.driver.driver_hir_cache.{
+    HIR_CACHE_ENTRY_VERSION, HIR_CACHE_CHECKSUM_PREFIX, HIR_CACHE_REJECT_REASONS,
+    hir_cache_entry_parse, hir_cache_entry_encode, hir_cache_body_checksum,
+    hir_cache_selfcheck_blob, hir_cache_first_difference, hir_cache_summary
+}
+use test.helpers.lowering_harness.{expect_lowered_hir_functions}
+
+val HEADER: text = HIR_CACHE_ENTRY_VERSION + " spl-hircodec-test scope-test"
+
+# Literals 3 and true on purpose: the exact values the codec once wrote as nil.
+val SRC: text = "fn three() -> i64:\n    3\n\nfn yes() -> bool:\n    true\n\nfn pick(flag: bool) -> i64:\n    if flag and yes():\n        three()\n    else:\n        0\n"
+
+fn lower(src: text) -> HirModule:
+    val parsed = parse_full_frontend(src, "integrity.spl", "integrity", Logger(level: 0))
+    var hl = HirLowering.with_filename("integrity.spl")
+    hl.lower_module(parsed)
+
+describe "HIR cache entry integrity (8a / IR-05)":
+    it "round-trips warnings and blob through encode -> parse with a verified checksum":
+        step("Lower a real module and encode it as a cache entry")
+        val hm = lower(SRC)
+        expect_lowered_hir_functions(hm, 3)
+        val blob = hir_module_encode(hm)
+        expect(blob != "").to_equal(true)
+        val entry = hir_cache_entry_encode(HEADER, ["w\tone", "w two\nline"], blob)
+        step("Verify: the second line is the checksum of everything after it")
+        val lines = entry.split("\n")
+        expect(lines[0]).to_equal(HEADER)
+        expect(lines[1].starts_with(HIR_CACHE_CHECKSUM_PREFIX)).to_equal(true)
+        expect(lines[1].len()).to_equal(HIR_CACHE_CHECKSUM_PREFIX.len() + 64)
+        val parsed = hir_cache_entry_parse(entry, HEADER)
+        expect(parsed.reason).to_equal("")
+        expect(parsed.warnings).to_equal(["w\tone", "w two\nline"])
+        expect(parsed.blob).to_equal(blob)
+        expect(hir_module_decode(parsed.blob) != nil).to_equal(true)
+
+    it "rejects a foreign header as `header`, never decoding the body":
+        val blob = hir_module_encode(lower(SRC))
+        val entry = hir_cache_entry_encode("spl-hircache-v2 other scope", [], blob)
+        val parsed = hir_cache_entry_parse(entry, HEADER)
+        expect(parsed.reason).to_equal("header")
+        expect(parsed.blob).to_equal("")
+        expect(parsed.warnings.len()).to_equal(0)
+        expect(hir_cache_entry_parse("", HEADER).reason).to_equal("header")
+
+    it "rejects a truncated or bit-flipped body as `checksum` before any framing or decode":
+        val blob = hir_module_encode(lower(SRC))
+        val entry = hir_cache_entry_encode(HEADER, ["warn"], blob)
+        step("Truncation: a disk-full window cut the entry short")
+        val truncated = entry.substring(0, entry.len() - 7)
+        expect(hir_cache_entry_parse(truncated, HEADER).reason).to_equal("checksum")
+        step("Flip: one byte inside the codec blob")
+        val cut = entry.len() - 3
+        val flipped = entry.substring(0, cut) + "~" + entry.substring(cut + 1, entry.len())
+        expect(hir_cache_entry_parse(flipped, HEADER).reason).to_equal("checksum")
+        step("Missing or malformed checksum line")
+        expect(hir_cache_entry_parse(HEADER + "\nW\n0\n" + blob, HEADER).reason).to_equal("checksum")
+        expect(hir_cache_entry_parse(HEADER + "\nC abc\nW\n0\n" + blob, HEADER).reason).to_equal("checksum")
+
+    it "rejects bad warning framing under a VALID checksum as `framing`":
+        val body = "W\n5\nonly-one\n" + "blob"
+        val entry = HEADER + "\n" + HIR_CACHE_CHECKSUM_PREFIX + hir_cache_body_checksum(body) + "\n" + body
+        expect(hir_cache_entry_parse(entry, HEADER).reason).to_equal("framing")
+        val empty_blob = "W\n0\n"
+        val entry2 = HEADER + "\n" + HIR_CACHE_CHECKSUM_PREFIX + hir_cache_body_checksum(empty_blob) + "\n" + empty_blob
+        expect(hir_cache_entry_parse(entry2, HEADER).reason).to_equal("framing")
+
+    it "names every rejection class the summary prints":
+        expect(HIR_CACHE_REJECT_REASONS).to_equal(["absent", "header", "checksum", "framing", "decode", "selfcheck"])
+        val summary = hir_cache_summary()
+        # No compiler scope under the spec runner: the cache is disabled, and
+        # the summary must still say so rather than print nothing.
+        expect(summary.starts_with("[hir-cache] ")).to_equal(true)
+        expect(summary.contains("disabled reason=") or summary.contains(" rejected=absent:")).to_equal(true)
+
+    it "write-time self-check accepts a stable blob and names the first differing field of an unstable one":
+        val blob = hir_module_encode(lower(SRC))
+        expect(hir_cache_selfcheck_blob(blob)).to_equal("")
+        step("A blob the decoder refuses is reported as reason=decode")
+        expect(hir_cache_selfcheck_blob("not a hir blob").starts_with("reason=decode")).to_equal(true)
+        step("First difference: line and tab-separated field are 1-based and name both tokens")
+        val diff = hir_cache_first_difference("a\tb\tc\nd\t3\tf\n", "a\tb\tc\nd\tnil\tf\n")
+        expect(diff).to_equal("line=2 field=2 expected=3 got=nil")
+        val missing = hir_cache_first_difference("a\tb\n", "a\n")
+        expect(missing).to_equal("line=1 field=2 expected=b got=<missing>")
+        # A trailing newline yields an empty final line on the shorter side,
+        # so an appended line reads as "expected empty, got b" on line 2.
+        val longer = hir_cache_first_difference("a\n", "a\nb\n")
+        expect(longer).to_equal("line=2 field=1 expected= got=b")
