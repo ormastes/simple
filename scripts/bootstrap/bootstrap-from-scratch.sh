@@ -1753,14 +1753,14 @@ ${cache_admission_payload}"
           "SIMPLE_NATIVE_BUILD_TARGET=${PLATFORM}" "SIMPLE_NATIVE_BUILD_THREADS=${selfhost_jobs}" \
           "SIMPLE_NATIVE_BUILD_CACHE_DIR=${native_cache_dir}" "SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}" \
           SIMPLE_FRONTEND_CACHE=1 "SIMPLE_FRONTEND_CACHE_DIR=${native_cache_dir}/frontend" \
-          SIMPLE_HIR_CACHE=1 "SIMPLE_HIR_CACHE_DIR=${native_cache_dir}/hir" \
+          SIMPLE_HIR_CACHE=1 SIMPLE_HIR_CACHE_SELFCHECK=1 "SIMPLE_HIR_CACHE_DIR=${native_cache_dir}/hir" \
           SIMPLE_PACKAGE_INDEX_COLD_INIT=1 SIMPLE_NO_STUB_FALLBACK=1) || return 1
       elif [ "$1" = stage4b-ui-backend ]; then
         cache_environment_payload=$(bootstrap_cache_native_environment "${repo_root}" \
           "SIMPLE_BINARY=$(absolute_path "${cache_producer}")" \
           "SIMPLE_CACHE_SCOPE=$1" "SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}" \
           SIMPLE_FRONTEND_CACHE=1 "SIMPLE_FRONTEND_CACHE_DIR=${native_cache_dir}/frontend" \
-          SIMPLE_HIR_CACHE=1 "SIMPLE_HIR_CACHE_DIR=${native_cache_dir}/hir") || return 1
+          SIMPLE_HIR_CACHE=1 SIMPLE_HIR_CACHE_SELFCHECK=1 "SIMPLE_HIR_CACHE_DIR=${native_cache_dir}/hir") || return 1
         cache_environment_payload="${cache_environment_payload}
 SIMPLE_STUB_MISSING_RT=1"
       else
@@ -1768,7 +1768,7 @@ SIMPLE_STUB_MISSING_RT=1"
           "SIMPLE_BINARY=$(absolute_path "${cache_producer}")" \
           "SIMPLE_CACHE_SCOPE=$1" "SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}" \
           SIMPLE_FRONTEND_CACHE=1 "SIMPLE_FRONTEND_CACHE_DIR=${native_cache_dir}/frontend" \
-          SIMPLE_HIR_CACHE=1 "SIMPLE_HIR_CACHE_DIR=${native_cache_dir}/hir" \
+          SIMPLE_HIR_CACHE=1 SIMPLE_HIR_CACHE_SELFCHECK=1 "SIMPLE_HIR_CACHE_DIR=${native_cache_dir}/hir" \
           SIMPLE_NO_STUB_FALLBACK=1) || return 1
       fi
       cache_options_payload="${cache_options_payload}
@@ -3918,6 +3918,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_FRONTEND_CACHE=1" \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
       "SIMPLE_HIR_CACHE=1" \
+      "SIMPLE_HIR_CACHE_SELFCHECK=1" \
       "SIMPLE_HIR_CACHE_DIR=${stage2_cache_absolute}/hir" \
       ${bootstrap_stage2_darwin_env:+"CC=${CC:-}"} \
       ${bootstrap_stage2_darwin_env:+"CXX=${CXX:-}"} \
@@ -3989,6 +3990,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_FRONTEND_CACHE=1" \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage3_cache_absolute}/frontend" \
       "SIMPLE_HIR_CACHE=1" \
+      "SIMPLE_HIR_CACHE_SELFCHECK=1" \
       "SIMPLE_HIR_CACHE_DIR=${stage3_cache_absolute}/hir" \
       "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ=${stage2_compatibility_manifest_absolute}" \
       "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
@@ -4068,6 +4070,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       SIMPLE_FRONTEND_CACHE=1 \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
       SIMPLE_HIR_CACHE=1 \
+    SIMPLE_HIR_CACHE_SELFCHECK=1 \
       "SIMPLE_HIR_CACHE_DIR=${stage2_cache_absolute}/hir" \
       ${bootstrap_stage2_darwin_env:+"CC=${CC:-}"} \
       ${bootstrap_stage2_darwin_env:+"CXX=${CXX:-}"} \
@@ -4995,6 +4998,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_FRONTEND_CACHE=1 \
     SIMPLE_FRONTEND_CACHE_DIR="${stage3_cache_absolute}/frontend" \
     SIMPLE_HIR_CACHE=1 \
+    SIMPLE_HIR_CACHE_SELFCHECK=1 \
     SIMPLE_HIR_CACHE_DIR="${stage3_cache_absolute}/hir" \
     SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ="${stage2_compatibility_manifest_absolute}" \
     SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT="${stage3_cache_absolute}" \
