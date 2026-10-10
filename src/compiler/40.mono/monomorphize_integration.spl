@@ -1024,6 +1024,20 @@ impl MonomorphizationPass:
             case HirExprKind.NogradBlock(body):
                 val nb: HirBlock = body
                 self.collect_lets_block(nb)
+            case HirExprKind.StringLit(_, interps):
+                if interps.?:
+                    for item in interps:
+                        val it: HirInterpolation = item
+                        self.collect_lets_expr(it.expr)
+            case HirExprKind.TryCatch(body, clauses, finally_):
+                val tcb: HirBlock = body
+                self.collect_lets_block(tcb)
+                for clause in clauses:
+                    val cc: HirCatchClause = clause
+                    if cc.has_pattern:
+                        self.collect_pattern_bindings(cc.pattern)
+                    self.collect_lets_block(cc.body)
+                self.collect_lets_block_opt(finally_)
             case _:
                 pass
 
@@ -1567,6 +1581,37 @@ impl MonomorphizationPass:
             case HirExprKind.UnsafeBlock(body):
                 val ubb: HirBlock = body
                 out.kind = HirExprKind.UnsafeBlock(self.rewrite_block(ubb))
+
+            # A string literal is a leaf only when it has no interpolation.
+            # `"x={pick(a, b)}"` holds a full call expression per segment;
+            # skipping it left the template name in the object file while
+            # the counters said 0 unresolved (stage2 micro_h: `[mono]
+            # call_sites=0`, then `undefined symbol: pick_second` at link).
+            case HirExprKind.StringLit(value, interps):
+                # Flat value-or-nil, exactly as HIR lowering builds it
+                # (expression_core.spl `if interps.?: ... else: nil`); an
+                # Option-returning helper re-wraps the list as `Some([..])`,
+                # which the generated walker cannot iterate.
+                if interps.?:
+                    var new_interps: [HirInterpolation] = []
+                    for item in interps:
+                        val it: HirInterpolation = item
+                        var ni = it
+                        ni.expr = self.rewrite_expr(it.expr)
+                        new_interps = new_interps.push(ni)
+                    out.kind = HirExprKind.StringLit(value, new_interps)
+            case HirExprKind.TypeTest(value, type_name):
+                val ttv: HirExpr = value
+                out.kind = HirExprKind.TypeTest(self.rewrite_expr(ttv), type_name)
+            case HirExprKind.TryCatch(body, clauses, finally_):
+                val tcb: HirBlock = body
+                var new_clauses: [HirCatchClause] = []
+                for clause in clauses:
+                    val cc: HirCatchClause = clause
+                    var ncc = cc
+                    ncc.body = self.rewrite_block(cc.body)
+                    new_clauses = new_clauses.push(ncc)
+                out.kind = HirExprKind.TryCatch(self.rewrite_block(tcb), new_clauses, self.rewrite_block_opt(finally_))
 
             # Leaves / opaque: literals, symbol references, Continue,
             # CustomBlock, inline asm (operands are substituted by
