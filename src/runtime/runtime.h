@@ -986,6 +986,9 @@ void     rt_println_value(int64_t value);
 void     serial_println(int64_t value);
 void     rt_eprint_value(int64_t value);
 void     rt_eprintln_value(int64_t value);
+void     rt_print_err(int64_t msg);        /* stderr, no newline (sffi/diag.spl) */
+void     rt_debug_exit_success(void);      /* hosted: flush + exit(0) */
+int64_t  rt_perf_dump_sdn(void);           /* text; empty table in native lanes */
 
 /* ===== Output ===== */
 
