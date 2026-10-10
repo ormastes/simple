@@ -504,3 +504,16 @@ against 2.0 baseline. The exact fixture, build provenance, samples, and
 isolated binary sizes are in [the focused report](../../../09_report/compiler/target6_canon_seq_join_perf_2026-10-11.md).
 This is cache-key encoding evidence only; full entrypoint cutover and matched
 native compilation cohorts remain open.
+
+### 2026-10-11 V3 compiled-output bridge candidate
+
+The compiled-output bridge now permits a V3 entry-scoped receipt set while
+retaining full `.spl` inventory coverage for V2. It requires the entry source
+in the typed receipts; the existing graph builder checks every import edge and
+that every V3 entry is reachable from the scope entry before publication.
+Focused unit cases cover a two-source inventory with a one-source scoped
+receipt, missing scope, missing imported module, and unchanged V2 full
+coverage. These cases are authored but unexecuted. One bounded admitted Stage 2
+compile parsed all 531 reached modules, reached HIR 356/531, and timed out at
+240 seconds without a terminal source diagnostic. Ordinary CLI artifact
+emission/publication and native performance proof remain open.

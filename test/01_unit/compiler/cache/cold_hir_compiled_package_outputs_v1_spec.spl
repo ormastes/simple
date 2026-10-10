@@ -105,6 +105,63 @@ describe "cold HIR compiled package output bridge":
         expect(outputs[0].manifest_digest).to_equal(
             PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1)
 
+        # A V3 entry-scoped graph may cover fewer sources than the frozen
+        # inventory, but every published module must still bind that inventory.
+        val extra_digest = sha256_text("source-b")
+        val extra = CompileSourceInventoryEntryV1(
+            "src/b.spl", extra_digest, extra_digest, extra_digest,
+            extra_digest, extra_digest, 8)
+        val scoped_inventory = CompileSourceInventoryV1(1, 1, [source, extra])
+        val scoped_digest = compile_source_inventory_digest_v1(scoped_inventory)
+        var scoped_authority = authority
+        scoped_authority.inventory_digest = scoped_digest
+        scoped_authority.scope_entry_source_identity = "src/a.spl"
+        var scoped_seed = seed
+        scoped_seed.inventory_digest = scoped_digest
+        val scoped_typed = ColdHirTypedReceiptV1(
+            scoped_seed, abi, interface_content)
+        val scoped_witness = sha256_text("simple-cold-hir-source-witness-v1|" +
+            "{scoped_digest}|revision|commit|tree|9:src/a.spl|" +
+            "{source_digest}|{source_content.len()}")
+        val scoped_action_key = sha256_text("simple-cold-hir-semantic-action-v1|" +
+            "{abi_digest}|{scoped_witness}|{mir_file.digest}")
+        val scoped_action = cold_compiled_test_file(root, "scoped-action",
+            "action|{scoped_action_key}|compile-semantic|a|{mir_file.digest}")
+        val empty_generated = cold_compiled_test_file(root, "scoped-generated", "")
+        var scoped_artifact = artifact
+        scoped_artifact.action_file = scoped_action
+        scoped_artifact.generated_source_file = empty_generated
+        scoped_artifact.generated_declaration = nil
+        scoped_artifact.generated_receipt = nil
+        val scoped = cold_hir_package_outputs_from_driver_v1(
+            [scoped_typed], [objectless], scoped_inventory,
+            scoped_authority, [scoped_artifact])
+        expect(scoped.is_ok()).to_equal(true)
+        val scoped_outputs = scoped.unwrap()
+        expect(scoped_outputs[0].source_witness_digest).to_equal(scoped_witness)
+        var missing_import_seed = scoped_seed
+        missing_import_seed.direct_imports = ["b"]
+        val missing_import_typed = ColdHirTypedReceiptV1(
+            missing_import_seed, abi, interface_content)
+        val missing_import = cold_hir_package_outputs_from_driver_v1(
+            [missing_import_typed], [objectless], scoped_inventory,
+            scoped_authority, [scoped_artifact])
+        expect(missing_import.unwrap_err()).to_start_with(
+            "cold-compiled-index-cold-output-import-missing:")
+
+        var missing_scope = scoped_authority
+        missing_scope.scope_entry_source_identity = "src/b.spl"
+        expect(cold_hir_package_outputs_from_driver_v1(
+            [scoped_typed], [objectless], scoped_inventory,
+            missing_scope, [scoped_artifact]).unwrap_err()).to_equal(
+                "cold-compiled-scope-entry-missing")
+        var full_authority = scoped_authority
+        full_authority.scope_entry_source_identity = ""
+        expect(cold_hir_package_outputs_from_driver_v1(
+            [scoped_typed], [objectless], scoped_inventory,
+            full_authority, [scoped_artifact]).unwrap_err()).to_equal(
+                "cold-compiled-inventory-incomplete")
+
         val incomplete = cold_hir_package_outputs_from_driver_v1(
             [typed], [], inventory, authority, [artifact])
         expect(incomplete.unwrap_err()).to_equal("cold-compiled-inventory-incomplete")

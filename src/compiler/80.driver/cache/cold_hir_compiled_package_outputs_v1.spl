@@ -206,7 +206,7 @@ fn cold_hir_package_outputs_from_driver_v1(
     authority: PackageModuleIndexBuildAuthorityV1,
     compiled_package_artifacts: [ColdHirCompiledPackageArtifactV1]
 ) -> Result<[ColdHirPackageOutputV1], text>:
-    if authority.scope_entry_source_identity != "" or receipts.len() == 0 or
+    if receipts.len() == 0 or
             receipts.len() != object_artifacts.len() or
             receipts.len() != compiled_package_artifacts.len() or
             compile_source_inventory_digest_v1(inventory) !=
@@ -223,7 +223,9 @@ fn cold_hir_package_outputs_from_driver_v1(
         if source.source_identity.ends_with(".spl"):
             source_count = source_count + 1
         source_index = source_index + 1
-    if source_count != receipts.len():
+    # V2 covers every frozen .spl source. V3 carries a closed entry graph;
+    # the graph builder below verifies all import edges and reachability.
+    if authority.scope_entry_source_identity == "" and source_count != receipts.len():
         return Err("cold-compiled-inventory-incomplete")
     var receipt_by_module: Dict<text, i64> = {}
     var source_seen: Dict<text, bool> = {}
@@ -243,6 +245,9 @@ fn cold_hir_package_outputs_from_driver_v1(
         receipt_by_module[seed.module_identity] = index
         source_seen[seed.source_identity] = true
         index = index + 1
+    if authority.scope_entry_source_identity != "" and
+            not source_seen.has(authority.scope_entry_source_identity):
+        return Err("cold-compiled-scope-entry-missing")
     var object_by_module: Dict<text, i64> = {}
     index = 0
     while index < object_artifacts.len():
