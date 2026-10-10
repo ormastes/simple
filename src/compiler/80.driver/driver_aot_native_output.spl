@@ -1407,7 +1407,19 @@ pub fn driver_native_sources_fingerprint(sources: [SourceFile]) -> text:
     "{_sffi_hash_text(manifest)}n{sources.len()}"
 
 pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: ParserModule?) -> bool:
-    if mir.functions.keys().len() > 0 or mir.statics.keys().len() > 0 or mir.constants.keys().len() > 0 or mir.types.keys().len() > 0:
+    # Objectless = nothing for a backend to emit. Besides import/export
+    # facades this covers TYPE-ONLY modules (structs/enums/bitfields/traits/
+    # type aliases, e.g. std.nogc_sync_mut.io.process_completion or
+    # compiler.common.cache_contract.virtual_source_store_v1): their MIR
+    # carries only `types`, which the native object backends (LLVM,
+    # Cranelift) never turn into object code (emitters that do read mir.types,
+    # e.g. VHDL, are not reached from this predicate: its only callers are
+    # the native object driver paths in this file), so
+    # sending them to codegen failed the build with "MIR module has no
+    # functions or static data". They own no `__module_init_*` either (that
+    # symbol exists only for dynamic statics), so link bookkeeping is the
+    # same typed objectless outcome a facade records.
+    if mir.functions.keys().len() > 0 or mir.statics.keys().len() > 0 or mir.constants.keys().len() > 0:
         return false
     if parsed_module == nil:
         return false
@@ -1428,10 +1440,12 @@ pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: Pars
     # Export record in the flat bridge (only bare `export a, b` emits one),
     # e.g. std.nogc_async_mut.env.types — accept import-only and trait-only
     # modules too; neither has standalone code by the decl checks below.
-    ((parsed.exports.len() > 0 or parsed.imports.len() > 0 or parsed.traits.len() > 0) and parsed.domain_blocks.len() == 0 and
+    val declares_only_types = parsed.structs.len() > 0 or parsed.enums.len() > 0 or
+        parsed.bitfields.len() > 0 or parsed.type_aliases.len() > 0
+    ((parsed.exports.len() > 0 or parsed.imports.len() > 0 or parsed.traits.len() > 0 or declares_only_types) and
+        parsed.domain_blocks.len() == 0 and
         only_extern_functions and parsed.classes.len() == 0 and parsed.actors.len() == 0 and
-        parsed.structs.len() == 0 and parsed.enums.len() == 0 and parsed.bitfields.len() == 0 and
-        parsed.impls.len() == 0 and parsed.type_aliases.len() == 0 and
+        parsed.impls.len() == 0 and
         parsed.constants.len() == 0 and parsed.static_asserts.len() == 0 and
         parsed.aop_advices.len() == 0 and parsed.di_bindings.len() == 0 and
         parsed.arch_rules.len() == 0 and parsed.mock_decls.len() == 0)
