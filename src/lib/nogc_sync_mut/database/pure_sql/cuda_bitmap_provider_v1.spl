@@ -1,0 +1,282 @@
+# Explicit PureDatabase reducer backed by the admitted CUDA bitmap provider.
+# Importing this adapter is opt-in; the ordinary database module does not load
+# a GPU provider or depend on CUDA.
+
+use nogc_sync_mut.database.pure_sql.database.{
+    PureDatabaseBitmapReducerV1, PureDatabaseBitmapReduceOwnedV1,
+    PureDatabaseBitmapReducerCloseOwnedV1
+}
+use std.nogc_sync_mut.gpu.provider.{
+    GPU_PROVIDER_BACKEND_CUDA, GPU_PROVIDER_STATUS_OK,
+    GpuProviderSession, GpuProviderResource, GpuProviderCompletion,
+    GpuProviderReceipt, gpu_provider_info, gpu_provider_open,
+    gpu_provider_resource_alloc, gpu_provider_submit_raw,
+    gpu_provider_wait, gpu_provider_readback_raw, gpu_provider_unload
+}
+use std.nogc_sync_mut.ptr.raw.{
+    raw_alloc, raw_free, raw_read_i32, rt_write_u32s_to_raw
+}
+
+val PURE_DATABASE_CUDA_BITMAP_IMPLEMENTATION_V1: text = "cuda-bitmap-and-ptx-format1-v1"
+val PURE_DATABASE_CUDA_BITMAP_ABI_V1: text = "simple-gpu-provider-abi-v1/format-1"
+val PURE_DATABASE_CUDA_MAX_WORDS_V1: i64 = 16384
+val PURE_DATABASE_CUDA_TIMEOUT_NS_V1: i64 = 5000000000
+val PURE_DATABASE_CUDA_RESOURCE_USAGE_V1: i64 = 1
+
+fn _pure_database_cuda_scalar_and_v1(lhs: [u32], rhs: [u32],
+        word_count: i64) -> [u32]:
+    if word_count < 0 or word_count > PURE_DATABASE_CUDA_MAX_WORDS_V1:
+        return []
+    var words: [u32] = [0u32; word_count]
+    var i = 0
+    while i < word_count:
+        val left = if i < lhs.len(): lhs[i as i32] else: 0u32
+        val right = if i < rhs.len(): rhs[i as i32] else: 0u32
+        words[i as i32] = left & right
+        i = i + 1
+    words
+
+fn _pure_database_cuda_fnv_checksum_v1(words: [u32]) -> i64:
+    var hash: i64 = -3750763034362895579
+    var wi = 0
+    while wi < words.len():
+        val word = words[wi as i32]
+        var bi = 0
+        while bi < 4:
+            val byte = ((word >> ((bi * 8) as u32)) & 255u32) as i64
+            val mixed = hash xor byte
+            hash = (((mixed as u64) * 1099511628211u64) as i64)
+            bi = bi + 1
+        wi = wi + 1
+    hash
+
+class PureDatabaseCudaBitmapReducerOpenOwnedV1:
+    reducer: PureDatabaseBitmapReducerV1
+    status: i32
+    reason: text
+
+class PureDatabaseCudaBitmapReducerV1 with PureDatabaseBitmapReducerV1:
+    session: GpuProviderSession
+    attempts: i64
+    pending_resource: GpuProviderResource
+    pending_completion: GpuProviderCompletion
+
+    fn provider_identity() -> text:
+        gpu_provider_info(GPU_PROVIDER_BACKEND_CUDA).provider_identity.to_text()
+
+    fn implementation_identity() -> text:
+        PURE_DATABASE_CUDA_BITMAP_IMPLEMENTATION_V1
+
+    fn interface_identity() -> text:
+        "simple-gpu-provider-abi-v1"
+
+    fn abi_digest() -> text:
+        PURE_DATABASE_CUDA_BITMAP_ABI_V1
+
+    fn capability_bits() -> u64:
+        gpu_provider_info(GPU_PROVIDER_BACKEND_CUDA).capability_bits as u64
+
+    fn and_call_count() -> i64:
+        # This owner count records calls entering the GPU submission path. A
+        # successful result is separately proven by the receipt and readback.
+        self.attempts
+
+    fn reduce_and_owned_v1(lhs: [u32], rhs: [u32],
+        row_count: i64) -> PureDatabaseBitmapReduceOwnedV1:
+        val word_count = if row_count <= 0 or row_count > PURE_DATABASE_CUDA_MAX_WORDS_V1 * 32:
+            0 else: (row_count + 31) / 32
+        if not self.session.is_open() or word_count <= 0 or
+                word_count > PURE_DATABASE_CUDA_MAX_WORDS_V1 or
+                lhs.len() != word_count or rhs.len() != word_count or
+                self.pending_resource.is_live() or self.pending_completion.is_live():
+            val next = PureDatabaseCudaBitmapReducerV1(
+                session: self.session, attempts: self.attempts,
+                pending_resource: self.pending_resource,
+                pending_completion: self.pending_completion)
+            return PureDatabaseBitmapReduceOwnedV1(
+                reducer: next, words: _pure_database_cuda_scalar_and_v1(lhs, rhs, word_count), status: -1,
+                attempted: false, provider_used: false,
+                reason: "cuda-bitmap-input-or-owner-invalid")
+
+        val output_bytes = word_count * 4
+        val payload_word_count = 2 + word_count * 2
+        val payload_bytes = payload_word_count * 4
+        var payload: [u32] = [0u32; payload_word_count]
+        payload[0] = word_count as u32
+        payload[1] = 0u32
+        var i = 0
+        while i < word_count:
+            val left_index = (2 + i) as i32
+            val right_index = (2 + word_count + i) as i32
+            payload[left_index] = lhs[i as i32]
+            payload[right_index] = rhs[i as i32]
+            i = i + 1
+
+        val payload_ptr = raw_alloc(payload_bytes)
+        if payload_ptr <= 0:
+            val next = PureDatabaseCudaBitmapReducerV1(
+                session: self.session, attempts: self.attempts,
+                pending_resource: self.pending_resource,
+                pending_completion: self.pending_completion)
+            return PureDatabaseBitmapReduceOwnedV1(
+                reducer: next, words: _pure_database_cuda_scalar_and_v1(lhs, rhs, word_count), status: -1,
+                attempted: false, provider_used: false,
+                reason: "cuda-bitmap-payload-allocation-failed")
+
+        val payload_written = rt_write_u32s_to_raw(payload_ptr, payload)
+        if payload_written != payload_word_count:
+            raw_free(payload_ptr, payload_bytes)
+            val next = PureDatabaseCudaBitmapReducerV1(
+                session: self.session, attempts: self.attempts,
+                pending_resource: self.pending_resource,
+                pending_completion: self.pending_completion)
+            return PureDatabaseBitmapReduceOwnedV1(
+                reducer: next, words: _pure_database_cuda_scalar_and_v1(lhs, rhs, word_count), status: -1,
+                attempted: false, provider_used: false,
+                reason: "cuda-bitmap-payload-copy-failed")
+
+        var resource = gpu_provider_resource_alloc(self.session,
+            output_bytes, 0, PURE_DATABASE_CUDA_RESOURCE_USAGE_V1)
+        var completion = GpuProviderCompletion(
+            backend: GPU_PROVIDER_BACKEND_CUDA,
+            session: self.session.handle, handle: 0, correlation_id: 0)
+        var attempts = self.attempts
+        var output_words: [u32] = []
+        var status: i32 = -1
+        var reason = "cuda-bitmap-resource-allocation-failed"
+        var success = false
+        var receipt = GpuProviderReceipt(
+            valid: false, status: -1, correlation_id: 0,
+            provider_identity: 0, device_identity: -1, resource: 0,
+            checksum: 0, device_elapsed_ns: 0)
+        if resource.is_live():
+            val correlation = attempts + 1
+            attempts = correlation
+            completion = gpu_provider_submit_raw(self.session, resource,
+                1, payload_ptr, payload_bytes, correlation)
+            if completion.is_live():
+                reason = "cuda-bitmap-wait-failed"
+                receipt = gpu_provider_wait(self.session, completion,
+                    PURE_DATABASE_CUDA_TIMEOUT_NS_V1)
+                if receipt.valid and receipt.status == GPU_PROVIDER_STATUS_OK and
+                        receipt.correlation_id == correlation and
+                        receipt.provider_identity == gpu_provider_info(
+                            GPU_PROVIDER_BACKEND_CUDA).provider_identity and
+                        receipt.device_identity == 0 and
+                        receipt.resource == resource.handle and
+                        receipt.device_elapsed_ns > 0:
+                    val output_ptr = raw_alloc(output_bytes)
+                    if output_ptr > 0:
+                        val readback = gpu_provider_readback_raw(
+                            self.session, resource, output_ptr, output_bytes)
+                        if readback.valid and readback.length == output_bytes:
+                            var readback_words: [u32] = [0u32; word_count]
+                            var wi = 0
+                            while wi < word_count:
+                                readback_words[wi as i32] =
+                                    raw_read_i32(output_ptr, wi * 4) as u32
+                                wi = wi + 1
+                            if _pure_database_cuda_fnv_checksum_v1(readback_words) == receipt.checksum:
+                                output_words = readback_words
+                                success = true
+                                status = 0
+                                reason = "cuda-device-receipt-checksum-and-readback-validated"
+                            else:
+                                reason = "cuda-bitmap-readback-checksum-mismatch"
+                        else:
+                            reason = "cuda-bitmap-readback-invalid"
+                        raw_free(output_ptr, output_bytes)
+                    else:
+                        reason = "cuda-bitmap-readback-allocation-failed"
+                else:
+                    reason = "cuda-bitmap-device-receipt-invalid"
+        raw_free(payload_ptr, payload_bytes)
+
+        var completion_released = true
+        if completion.is_live():
+            completion_released = completion.release()
+        var resource_released = true
+        if resource.is_live():
+            resource_released = resource.release()
+        if not completion_released or not resource_released:
+            success = false
+            status = -1
+            reason = "cuda-bitmap-native-retirement-incomplete"
+        if not success:
+            output_words = _pure_database_cuda_scalar_and_v1(lhs, rhs, word_count)
+        val next = PureDatabaseCudaBitmapReducerV1(
+            session: self.session, attempts: attempts,
+            pending_resource: if resource_released:
+                GpuProviderResource(backend: GPU_PROVIDER_BACKEND_CUDA,
+                    session: self.session.handle, handle: 0, size_bytes: 0)
+                else: resource,
+            pending_completion: if completion_released:
+                GpuProviderCompletion(backend: GPU_PROVIDER_BACKEND_CUDA,
+                    session: self.session.handle, handle: 0, correlation_id: 0)
+                else: completion)
+        PureDatabaseBitmapReduceOwnedV1(
+            reducer: next, words: output_words, status: status,
+            attempted: attempts > self.attempts, provider_used: success,
+            reason: reason)
+
+    fn close_owned_v1() -> PureDatabaseBitmapReducerCloseOwnedV1:
+        var resource = self.pending_resource
+        var completion = self.pending_completion
+        var retired = true
+        if completion.is_live():
+            retired = completion.release()
+        if resource.is_live():
+            val resource_released = resource.release()
+            retired = retired and resource_released
+        var session = self.session
+        if retired and session.is_open():
+            retired = session.close()
+        if retired:
+            retired = gpu_provider_unload(GPU_PROVIDER_BACKEND_CUDA)
+        val next = PureDatabaseCudaBitmapReducerV1(
+            session: session, attempts: self.attempts,
+            pending_resource: if resource.is_live(): resource else:
+                GpuProviderResource(backend: GPU_PROVIDER_BACKEND_CUDA,
+                    session: session.handle, handle: 0, size_bytes: 0),
+            pending_completion: if completion.is_live(): completion else:
+                GpuProviderCompletion(backend: GPU_PROVIDER_BACKEND_CUDA,
+                    session: session.handle, handle: 0, correlation_id: 0))
+        PureDatabaseBitmapReducerCloseOwnedV1(
+            reducer: next, status: if retired: 0 else: -1,
+            reason: if retired: "cuda-session-retired" else: "cuda-session-retirement-incomplete")
+
+fn pure_database_cuda_bitmap_reducer_open_owned_v1(
+        expected_provider_identity: text, expected_provider_path: text)
+        -> PureDatabaseCudaBitmapReducerOpenOwnedV1:
+    val info = gpu_provider_info(GPU_PROVIDER_BACKEND_CUDA)
+    if not info.loaded or info.abi_version != 1 or
+            info.capability_bits != 3 or info.provider_identity <= 0 or
+            info.provider_identity.to_text() != expected_provider_identity or
+            info.provider_path != expected_provider_path:
+        if info.loaded:
+            val _ = gpu_provider_unload(GPU_PROVIDER_BACKEND_CUDA)
+        val empty = PureDatabaseCudaBitmapReducerV1(
+            session: GpuProviderSession(backend: GPU_PROVIDER_BACKEND_CUDA, handle: 0),
+            attempts: 0,
+            pending_resource: GpuProviderResource(backend: GPU_PROVIDER_BACKEND_CUDA,
+                session: 0, handle: 0, size_bytes: 0),
+            pending_completion: GpuProviderCompletion(backend: GPU_PROVIDER_BACKEND_CUDA,
+                session: 0, handle: 0, correlation_id: 0))
+        return PureDatabaseCudaBitmapReducerOpenOwnedV1(
+            reducer: empty, status: -1,
+            reason: "cuda-provider-identity-path-or-capability-mismatch")
+    val session = gpu_provider_open(GPU_PROVIDER_BACKEND_CUDA, 0)
+    val reducer = PureDatabaseCudaBitmapReducerV1(
+        session: session, attempts: 0,
+        pending_resource: GpuProviderResource(backend: GPU_PROVIDER_BACKEND_CUDA,
+            session: session.handle, handle: 0, size_bytes: 0),
+        pending_completion: GpuProviderCompletion(backend: GPU_PROVIDER_BACKEND_CUDA,
+            session: session.handle, handle: 0, correlation_id: 0))
+    PureDatabaseCudaBitmapReducerOpenOwnedV1(
+        reducer: reducer, status: if session.is_open(): 0 else: -1,
+        reason: if session.is_open(): "cuda-provider-session-opened" else: "cuda-provider-session-open-failed")
+
+export PURE_DATABASE_CUDA_BITMAP_IMPLEMENTATION_V1
+export PURE_DATABASE_CUDA_BITMAP_ABI_V1
+export PureDatabaseCudaBitmapReducerOpenOwnedV1, PureDatabaseCudaBitmapReducerV1
+export pure_database_cuda_bitmap_reducer_open_owned_v1

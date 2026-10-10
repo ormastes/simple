@@ -17,7 +17,7 @@ use compiler.di.{DiContainer, di_is_system_test_locked}
 extern fn rt_env_set(key: text, value: text)
 
 fn make_di() -> DiContainer:
-    DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+    DiContainer(profile: "dev", locked: false)
 
 # ============================================================================
 # System Test 1: BackendPort + CompilerServices (Features 1 + 2)
@@ -83,67 +83,20 @@ describe "DI Composition System: Features 1+2 - BackendPort in CompilerServices"
 
 describe "DI Composition System: Features 5+9 - Extensions with Lock":
 
-    it "extensions container registers plugins before lock":
+    it "lock-unlock cycle toggles the explicit lock":
+        rt_env_set("SIMPLE_SYSTEM_TEST", "0")
         val ext = make_di()
-        ext.bind_instance("Profiler", "profiler-v1")
-        ext.bind_instance("Formatter", "fmt-v1")
-        expect(ext.has("Profiler")).to_equal(true)
-        expect(ext.has("Formatter")).to_equal(true)
-
-    it "lock prevents new plugin registration":
-        val ext = make_di()
-        ext.bind_instance("Profiler", "profiler-v1")
+        expect(ext.is_locked()).to_equal(false)
         ext.lock()
-        ext.bind_instance("Injected", "should-not-register")
-        expect(ext.has("Profiler")).to_equal(true)
-        expect(ext.has("Injected")).to_equal(false)
-
-    it "pre-lock plugins remain accessible after lock":
-        val ext = make_di()
-        ext.bind_instance("Core", "core-plugin")
-        ext.bind_instance("Logger", "log-plugin")
-        ext.lock()
-        expect(ext.resolve("Core")).to_equal("core-plugin")
-        expect(ext.resolve("Logger")).to_equal("log-plugin")
-
-    it "unlock allows new plugins after lock-unlock cycle":
-        val ext = make_di()
-        ext.bind_instance("V1", "first")
-        ext.lock()
-        ext.bind_instance("V2", "blocked")
+        expect(ext.is_locked()).to_equal(true)
         ext.unlock()
-        ext.bind_instance("V2", "allowed")
-        expect(ext.has("V1")).to_equal(true)
-        expect(ext.has("V2")).to_equal(true)
-        expect(ext.resolve("V2")).to_equal("allowed")
-
-    it "resolve_or works regardless of lock state":
-        val ext = make_di()
-        ext.bind_instance("Known", "known-value")
-        val pre_lock = ext.resolve_or("Known", "default")
-        expect(pre_lock).to_equal("known-value")
-        ext.lock()
-        val post_lock = ext.resolve_or("Known", "default")
-        expect(post_lock).to_equal("known-value")
-        val missing = ext.resolve_or("Unknown", "fallback")
-        expect(missing).to_equal("fallback")
+        expect(ext.is_locked()).to_equal(false)
 
 # ============================================================================
 # System Test 3: All 4 features working together
 # ============================================================================
 
 describe "DI Composition System: Features 1+2+5+9 - Full integration":
-
-    it "services pipeline and extension container are independent":
-        val svc = create_default_services()
-        val ext = make_di()
-
-        ext.bind_instance("ExtraPlugin", "extra-v1")
-
-        val backend_name = svc.backend.name
-        expect(backend_name).to_equal("noop-backend")
-        expect(ext.has("ExtraPlugin")).to_equal(true)
-        expect(ext.resolve_or("Backend", nil)).to_be_nil()
 
     it "locking extensions does not affect CompilerServices":
         val svc = create_default_services()
@@ -158,35 +111,12 @@ describe "DI Composition System: Features 1+2+5+9 - Full integration":
     it "pipeline ports remain callable while extensions are locked":
         val svc = create_default_services()
         val ext = make_di()
-        ext.bind_instance("Plugin", "v1")
         ext.lock()
 
         val df = svc.desugarer.desugar_fn
         val result = df("source code")
         expect(result).to_equal("source code")
-        expect(ext.resolve("Plugin")).to_equal("v1")
-
-    it "extensions and pipeline together in realistic scenario":
-        val svc = create_default_services()
-        val ext = make_di()
-
-        ext.bind_instance("Telemetry", "otel-v2")
-        ext.bind_instance("FeatureFlag", true)
-
-        val src = "fn greet(): print 1"
-        val lf = svc.lexer.tokenize_fn
-        val tokens = lf(src)
-        expect(tokens.len()).to_equal(0)
-
-        val df = svc.desugarer.desugar_fn
-        val desugared = df(src)
-        expect(desugared).to_equal(src)
-
-        val telemetry = ext.resolve("Telemetry")
-        expect(telemetry).to_equal("otel-v2")
-
-        val flag = ext.resolve("FeatureFlag")
-        expect(flag).to_equal(true)
+        expect(ext.is_locked()).to_equal(true)
 
     it "di_is_system_test_locked works independently of extension lock":
         rt_env_set("SIMPLE_SYSTEM_TEST", "0")
@@ -204,18 +134,12 @@ describe "DI Composition System: Features 1+2+5+9 - Full integration":
 
         val ext2 = make_di()
 
-        ext1.bind_instance("Blocked", "blocked")
-        expect(ext1.has("Blocked")).to_equal(false)
-
-        ext2.bind_instance("Allowed", "allowed")
-        expect(ext2.has("Allowed")).to_equal(true)
+        expect(ext1.is_locked()).to_equal(true)
+        expect(ext2.is_locked()).to_equal(false)
 
     it "complete DI composition: typed ports + extensions + lock":
         val svc = create_default_services()
         val ext = make_di()
-
-        ext.bind_instance("Logger", "structured-logger")
-        ext.bind_instance("MetricsCollector", "prometheus-v2")
 
         val backend = svc.backend
         val jit_f = backend.supports_jit_fn
@@ -225,12 +149,7 @@ describe "DI Composition System: Features 1+2+5+9 - Full integration":
         expect(triple_f()).to_equal("noop")
 
         ext.lock()
-
-        expect(ext.resolve("Logger")).to_equal("structured-logger")
-        expect(ext.resolve("MetricsCollector")).to_equal("prometheus-v2")
-
-        ext.bind_instance("PostLockPlugin", "rejected")
-        expect(ext.has("PostLockPlugin")).to_equal(false)
+        expect(ext.is_locked()).to_equal(true)
 
         val lf = svc.module_loader.load_fn
         val content = lf("/src/main.spl")

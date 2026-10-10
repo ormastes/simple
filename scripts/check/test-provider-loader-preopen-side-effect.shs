@@ -1,0 +1,96 @@
+#!/bin/sh
+# Builds distinct constructor-observed providers, then runs one standalone
+# Simple case per process. APP_BIN must be produced by native-build beforehand.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root"
+app_bin=${APP_BIN:-}
+cc=${CC:-cc}
+watchdog=$root/scripts/resource/process-tree-rss-watchdog.pl
+source=test/fixtures/os/smf/provider_preopen_constructor.c
+attempt_id=${PROVIDER_PREOPEN_ATTEMPT_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}
+case "$attempt_id" in
+    ''|*[!A-Za-z0-9_-]*) echo 'attempt id must contain only letters, digits, _ or -' >&2; exit 2 ;;
+esac
+fixture_root="build/providers/item5-preopen/$attempt_id"
+logs="build/review/provider-loader-preopen/$attempt_id"
+cases='path digest capability host-abi interface control'
+[ -n "$app_bin" ] || { echo 'APP_BIN must name the standalone native-build output' >&2; exit 1; }
+case "$app_bin" in
+    /*) ;;
+    *) app_bin="$root/$app_bin" ;;
+esac
+[ -x "$app_bin" ] || { echo "missing native-built case runner: $app_bin" >&2; exit 1; }
+[ -x "$(command -v "$cc")" ] || { echo "missing C compiler: $cc" >&2; exit 1; }
+[ -r "$source" ] && [ -r "$watchdog" ] || { echo 'provider fixture or watchdog is missing' >&2; exit 1; }
+[ ! -e "$fixture_root" ] && [ ! -e "$logs" ] || {
+    echo "attempt output already exists; choose a new attempt id: $attempt_id" >&2
+    exit 2
+}
+mkdir -p "$fixture_root/providers" "$logs"
+
+field() {
+    awk -F= -v key="$2" '$1==key { n++; value=substr($0,index($0,"=")+1) } END { if (n != 1) exit 1; print value }' "$1"
+}
+run_bounded() {
+    receipt=$1
+    log=$2
+    shift 2
+    if (ulimit -f 8192; env -u LD_AUDIT -u LD_PRELOAD -u LD_LIBRARY_PATH \
+            -u SIMPLE_VECTOR_TEST_RECEIPT_OWNER perl "$watchdog" \
+            --max-rss-kib=1048576 --rss-cap-mode=enforce --timeout-seconds=60 \
+            --receipt="$receipt" -- "$@") >"$log" 2>&1; then
+        command_exit=0
+    else
+        command_exit=$?
+    fi
+    status=$(field "$receipt" status) || { echo "missing watchdog receipt: $receipt" >&2; return 1; }
+    exit_status=$(field "$receipt" exit_status) || return 1
+    quiet=$(field "$receipt" quiescent) || return 1
+    enforced=$(field "$receipt" rss_cap_enforced) || return 1
+    peak=$(field "$receipt" peak_rss_kib) || return 1
+    case "$peak" in ''|*[!0-9]*) echo "invalid RSS in receipt: $receipt" >&2; return 1 ;; esac
+    [ "$command_exit" -eq 0 ] && [ "$status" = complete ] && \
+        [ "$exit_status" = 0 ] && [ "$quiet" = 1 ] && \
+        [ "$enforced" = 1 ] && [ "$peak" -lt 1048576 ] || {
+        echo "bounded command failed: $receipt" >&2
+        return 1
+    }
+}
+
+for case_name in $cases; do
+    so="$fixture_root/providers/$case_name.so"
+    marker="$fixture_root/providers/$case_name.marker"
+    run_bounded "$logs/$case_name-build.rss.env" "$logs/$case_name-build.log" \
+        "$cc" -shared -fPIC -std=c11 -O2 -Wall -Wextra -Werror \
+        -D"SIMPLE_PROVIDER_MARKER_PATH=\"$marker\"" \
+        "$source" -o "$so"
+    [ -s "$so" ] || { echo "provider fixture missing after compile: $so" >&2; exit 1; }
+done
+
+for case_name in $cases; do
+    run_bounded "$logs/$case_name-run.rss.env" "$logs/$case_name-run.log" \
+        "$app_bin" "$case_name" "$fixture_root"
+    awk -v expected="PROVIDER_PREOPEN_CASE_PASS case=$case_name" \
+        '$0 == expected { matches++ } END { exit matches == 1 ? 0 : 1 }' \
+        "$logs/$case_name-run.log" || {
+        echo "pre-open case omitted its success marker: $case_name" >&2
+        exit 1
+    }
+    if [ "$case_name" = control ]; then
+        [ -e "$fixture_root/providers/control.marker" ] || {
+            echo 'admitted control did not execute its constructor' >&2
+            exit 1
+        }
+        printf 'constructor-ran\n' | cmp - "$fixture_root/providers/control.marker" || {
+            echo 'admitted control constructor marker contents differ' >&2
+            exit 1
+        }
+    else
+        [ ! -e "$fixture_root/providers/$case_name.marker" ] || {
+            echo "refused provider constructor executed: $case_name" >&2
+            exit 1
+        }
+    fi
+done
+echo "PROVIDER_PREOPEN_NATIVE_SIDE_EFFECT_PASS cases=6 fresh_processes=6 attempt=$attempt_id refusal_markers=absent control_marker=present"

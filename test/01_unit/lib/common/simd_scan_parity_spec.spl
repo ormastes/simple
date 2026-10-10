@@ -9,9 +9,60 @@ use std.spec.step
 use std.spec.{describe, it, assert_equal}
 use std.common.string_core.{text_to_bytes}
 use std.common.simd_scan.{
-    simd_find_byte, scalar_find_byte, _fixedvec_find_byte,
-    simd_bytes_equal, scalar_bytes_equal, _fixedvec_bytes_equal
+    simd_find_byte, scalar_find_byte,
+    simd_bytes_equal, scalar_bytes_equal
 }
+use std.simd.fixed.{fixedvec_from_array, fixedvec_splat}
+
+val FIXEDVEC_TEST_LANES: i64 = 16
+
+fn fixedvec_bytes_equal_test_v1(lhs: [u8], lhs_start: i64,
+        rhs: [u8], rhs_start: i64, len: i64) -> bool:
+    if not _span_valid(lhs.len(), lhs_start, len): return false
+    if not _span_valid(rhs.len(), rhs_start, len): return false
+    var i = 0
+    while i + FIXEDVEC_TEST_LANES <= len:
+        var left_lanes: [u8] = []
+        var right_lanes: [u8] = []
+        var lane = 0
+        while lane < FIXEDVEC_TEST_LANES:
+            left_lanes.push(lhs[lhs_start + i + lane])
+            right_lanes.push(rhs[rhs_start + i + lane])
+            lane = lane + 1
+        if not fixedvec_from_array(left_lanes).cmp_eq(
+                fixedvec_from_array(right_lanes)).all():
+            return false
+        i = i + FIXEDVEC_TEST_LANES
+    while i < len:
+        if lhs[lhs_start + i] != rhs[rhs_start + i]: return false
+        i = i + 1
+    true
+
+fn fixedvec_find_byte_test_v1(bytes: [u8], start: i64, needle: u8) -> i64:
+    if not _span_valid(bytes.len(), start, 0): return -1
+    val needle_vec = fixedvec_splat(needle, FIXEDVEC_TEST_LANES as i32)
+    var i = start
+    while i + FIXEDVEC_TEST_LANES <= bytes.len():
+        var lanes: [u8] = []
+        var lane = 0
+        while lane < FIXEDVEC_TEST_LANES:
+            lanes.push(bytes[i + lane])
+            lane = lane + 1
+        val mask = fixedvec_from_array(lanes).cmp_eq(needle_vec)
+        if mask.any():
+            var match_lane = 0
+            while match_lane < FIXEDVEC_TEST_LANES:
+                if mask.lane_active(match_lane as i32):
+                    return i + match_lane
+                match_lane = match_lane + 1
+        i = i + FIXEDVEC_TEST_LANES
+    while i < bytes.len():
+        if bytes[i] == needle: return i
+        i = i + 1
+    -1
+
+fn _span_valid(size: i64, start: i64, len: i64) -> bool:
+    start >= 0 and len >= 0 and start <= size and len <= size - start
 
 val NEEDLE: u8 = 13u8
 val FILLER: u8 = 65u8
@@ -84,15 +135,15 @@ describe "simd_scan public kernels match the scalar oracle":
         assert_equal(simd_find_byte(a, 99, NEEDLE), -1)
 
 describe "FixedVec kernels are NOT lane-consistent — do not dispatch to them":
-    it "pins _fixedvec_bytes_equal, which never splats and is correct in both lanes":
+    it "pins fixedvec_bytes_equal_test_v1, which never splats and is correct in both lanes":
         step("both operands come from fixedvec_from_array, which compares correctly")
         val a = buf_with_needle(64, -1)
         val same = buf_with_needle(64, -1)
-        assert_equal(_fixedvec_bytes_equal(a, 0, same, 0, 64), true)
+        assert_equal(fixedvec_bytes_equal_test_v1(a, 0, same, 0, 64), true)
         val diff = buf_with_needle(64, 5)
-        assert_equal(_fixedvec_bytes_equal(a, 0, diff, 0, 64), false)
+        assert_equal(fixedvec_bytes_equal_test_v1(a, 0, diff, 0, 64), false)
 
-    it "does not assert _fixedvec_find_byte, whose result depends on the lane":
+    it "does not assert the FixedVec find kernel, whose result depends on the lane":
         step("it returns 5 under the spec runner and -1 under a plain `run` main; see doc/08_tracking/bug/fixedvec_splat_boxing_mismatch_breaks_simd_scan_2026-09-13.md")
         step("asserting either value here would encode a lane artifact, so only the scalar oracle is pinned")
         val b = buf_with_needle(64, 5)

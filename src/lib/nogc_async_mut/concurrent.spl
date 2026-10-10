@@ -23,12 +23,12 @@ class MpscQueue:
     _channel: Channel
     _size: AtomicI64
 
-    fn push(value: Any):
+    fn push<T>(value: T):
         self._channel.send(value)
         self._size.fetch_add(1, MemoryOrdering.SeqCst)
 
-    fn pop() -> Any:
-        val result = self._channel.try_recv()
+    fn pop<T>() -> T?:
+        val result: T? = self._channel.try_recv()
         if result != nil:
             self._size.fetch_sub(1, MemoryOrdering.SeqCst)
         result
@@ -61,7 +61,7 @@ class MpmcQueue:
     _capacity: i64
     _size: AtomicI64
 
-    fn push(value: Any) -> bool:
+    fn push<T>(value: T) -> bool:
         val current = self._size.load(MemoryOrdering.SeqCst)
         if current >= self._capacity:
             return false
@@ -69,8 +69,8 @@ class MpmcQueue:
         self._size.fetch_add(1, MemoryOrdering.SeqCst)
         true
 
-    fn pop() -> Any:
-        val result = self._channel.try_recv()
+    fn pop<T>() -> T?:
+        val result: T? = self._channel.try_recv()
         if result != nil:
             self._size.fetch_sub(1, MemoryOrdering.SeqCst)
         result
@@ -102,14 +102,14 @@ fn mpmc_queue_with_capacity(capacity: i64) -> MpmcQueue:
 # ConcurrentMap - Pure Simple Compatibility Map
 # ============================================================================
 
-struct ConcurrentMapEntry:
+struct ConcurrentMapEntry<V>:
     key: text
-    value: Any
+    value: V
 
-class ConcurrentMap:
-    entries_: [ConcurrentMapEntry]
+class ConcurrentMap<V>:
+    entries_: [ConcurrentMapEntry<V>]
 
-    me insert(key: text, value: Any) -> bool:
+    me insert(key: text, value: V) -> bool:
         for i in 0..self.entries_.len():
             if self.entries_[i].key == key:
                 self.entries_[i] = ConcurrentMapEntry(key: key, value: value)
@@ -117,13 +117,13 @@ class ConcurrentMap:
         self.entries_.append(ConcurrentMapEntry(key: key, value: value))
         true
 
-    fn get(key: text) -> Any?:
+    fn get(key: text) -> V?:
         for entry in self.entries_:
             if entry.key == key:
                 return entry.value
         nil
 
-    me remove(key: text) -> Any:
+    me remove(key: text) -> V?:
         for i in 0..self.entries_.len():
             if self.entries_[i].key == key:
                 val value = self.entries_[i].value
@@ -146,18 +146,18 @@ class ConcurrentMap:
     fn is_empty() -> bool:
         self.entries_.len() == 0
 
-fn _concurrent_map_entries_remove(items: [ConcurrentMapEntry], idx: i64) -> [ConcurrentMapEntry]:
-    var result: [ConcurrentMapEntry] = []
+fn _concurrent_map_entries_remove<V>(items: [ConcurrentMapEntry<V>], idx: i64) -> [ConcurrentMapEntry<V>]:
+    var result: [ConcurrentMapEntry<V>] = []
     for i in 0..items.len():
         if i != idx:
             result.append(items[i])
     result
 
-fn concurrent_map_new() -> ConcurrentMap:
+fn concurrent_map_new<V>() -> ConcurrentMap<V>:
     ConcurrentMap(entries_: [])
 
 # Provided for API compat; sharding is not used by the pure Simple storage.
-fn concurrent_map_with_shards(num_shards: i64) -> ConcurrentMap:
+fn concurrent_map_with_shards<V>(num_shards: i64) -> ConcurrentMap<V>:
     ConcurrentMap(entries_: [])
 
 # ============================================================================

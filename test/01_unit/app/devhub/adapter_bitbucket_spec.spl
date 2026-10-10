@@ -63,7 +63,7 @@ use app.devhub.adapter_bitbucket.{
     bb_resolve_gateway_url,
     _bb_gateway_argv
 }
-use std.common.json.{json_parse, json_object, json_string, json_boolean}
+use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_parse_or_null, json_value_object_from}
 use std.nogc_sync_mut.src.testing.mock.builder.{MockFunction}
 use std.nogc_sync_mut.spec.{prevent}
 
@@ -252,7 +252,7 @@ describe "bb_build_create_pr_body":
         # @capture(protocol_json): adapter contract evidence
         step("Verify: minimum body has title and source branch")
         val body = bb_build_create_pr_body("My PR", "feat-x", "", [])
-        val parsed = json_parse(body)
+        val parsed = json_value_parse_opt(body)
         expect(parsed != nil).to_equal(true)
         expect(body).to_contain("\"title\": \"My PR\"")
         expect(body).to_contain("\"source\":")
@@ -292,7 +292,7 @@ describe "bb_build_create_pr_body":
         # @capture(protocol_json): adapter contract evidence
         step("Verify: produces parseable JSON")
         val body = bb_build_create_pr_body("Add foo", "feat/foo", "develop", [_mk_uuid_literal("abc-uuid")])
-        val parsed = json_parse(body)
+        val parsed = json_value_parse_opt(body)
         expect(parsed != nil).to_equal(true)
 
 
@@ -342,7 +342,7 @@ describe "bb_build_comment_body":
         # @capture(protocol_json): adapter contract evidence
         step("Verify: produces parseable JSON")
         val body = bb_build_comment_body("ok", "", -1, -1)
-        expect(json_parse(body) != nil).to_equal(true)
+        expect(json_value_parse_opt(body) != nil).to_equal(true)
 
 
 # ============================================================================
@@ -502,8 +502,8 @@ describe "bb_eval_ready_to_merge":
         # @req REQ-DEVHUB-BB-042
         # @capture(protocol_json): adapter contract evidence
         step("Verify: ready when OPEN + 1 approval + all SUCCESSFUL")
-        val pr = json_parse(FIXTURE_PR_APPROVED_OPEN)
-        val st = json_parse(FIXTURE_STATUSES_OK)
+        val pr = json_value_parse_or_null(FIXTURE_PR_APPROVED_OPEN)
+        val st = json_value_parse_or_null(FIXTURE_STATUSES_OK)
         val (ready, reason) = bb_eval_ready_to_merge(pr, st)
         expect(ready).to_equal(true)
         expect(reason).to_contain("ready")
@@ -512,8 +512,8 @@ describe "bb_eval_ready_to_merge":
         # @req REQ-DEVHUB-BB-043
         # @capture(protocol_json): adapter contract evidence
         step("Verify: not ready when no approvals")
-        val pr = json_parse(FIXTURE_PR_PENDING)
-        val st = json_parse(FIXTURE_STATUSES_OK)
+        val pr = json_value_parse_or_null(FIXTURE_PR_PENDING)
+        val st = json_value_parse_or_null(FIXTURE_STATUSES_OK)
         val (ready, reason) = bb_eval_ready_to_merge(pr, st)
         expect(ready).to_equal(false)
         expect(reason).to_contain("no approved reviewers")
@@ -522,8 +522,8 @@ describe "bb_eval_ready_to_merge":
         # @req REQ-DEVHUB-BB-044
         # @capture(protocol_json): adapter contract evidence
         step("Verify: not ready when PR not OPEN")
-        val pr = json_parse(FIXTURE_PR_CLOSED)
-        val st = json_parse(FIXTURE_STATUSES_OK)
+        val pr = json_value_parse_or_null(FIXTURE_PR_CLOSED)
+        val st = json_value_parse_or_null(FIXTURE_STATUSES_OK)
         val (ready, reason) = bb_eval_ready_to_merge(pr, st)
         expect(ready).to_equal(false)
         expect(reason).to_contain("expected OPEN")
@@ -532,8 +532,8 @@ describe "bb_eval_ready_to_merge":
         # @req REQ-DEVHUB-BB-045
         # @capture(protocol_json): adapter contract evidence
         step("Verify: not ready when a status FAILED")
-        val pr = json_parse(FIXTURE_PR_APPROVED_OPEN)
-        val st = json_parse(FIXTURE_STATUSES_FAIL)
+        val pr = json_value_parse_or_null(FIXTURE_PR_APPROVED_OPEN)
+        val st = json_value_parse_or_null(FIXTURE_STATUSES_FAIL)
         val (ready, reason) = bb_eval_ready_to_merge(pr, st)
         expect(ready).to_equal(false)
         expect(reason).to_contain("FAILED")
@@ -542,8 +542,8 @@ describe "bb_eval_ready_to_merge":
         # @req REQ-DEVHUB-BB-046
         # @capture(protocol_json): adapter contract evidence
         step("Verify: not ready when no statuses found")
-        val pr = json_parse(FIXTURE_PR_APPROVED_OPEN)
-        val st = json_parse(FIXTURE_STATUSES_EMPTY)
+        val pr = json_value_parse_or_null(FIXTURE_PR_APPROVED_OPEN)
+        val st = json_value_parse_or_null(FIXTURE_STATUSES_EMPTY)
         val (ready, reason) = bb_eval_ready_to_merge(pr, st)
         expect(ready).to_equal(false)
         expect(reason).to_contain("no commit statuses")
@@ -552,8 +552,8 @@ describe "bb_eval_ready_to_merge":
         # @req REQ-DEVHUB-BB-047
         # @capture(protocol_json): adapter contract evidence
         step("Verify: not ready when participants missing")
-        val pr = json_parse("{\"state\": \"OPEN\"}")
-        val st = json_parse(FIXTURE_STATUSES_OK)
+        val pr = json_value_parse_or_null("{\"state\": \"OPEN\"}")
+        val st = json_value_parse_or_null(FIXTURE_STATUSES_OK)
         val (ready, reason) = bb_eval_ready_to_merge(pr, st)
         expect(ready).to_equal(false)
         expect(reason).to_contain("no participants")
@@ -566,7 +566,7 @@ describe "bb_eval_ready_to_merge":
 val FIXTURE_REPO_PRIVATE_MINIMAL = "{\"slug\": \"secret\", \"name\": \"Secret\", \"is_private\": true}"
 
 
-fn _mk_repo_json_with_nested() -> any:
+fn _mk_repo_json_with_nested() -> JsonValue:
     """Build a full repo JSON node with nested mainbranch/links objects via
     the json_object/json_string builders rather than json_parse(<string>).
 
@@ -578,22 +578,19 @@ fn _mk_repo_json_with_nested() -> any:
     builder API here still avoids that lexer landmine in fixtures and tests
     bb_parse_repo's own field-extraction logic directly.
     """
-    var mainbranch: {text: any} = {}
-    mainbranch["name"] = json_string("main")
-    var html: {text: any} = {}
-    html["href"] = json_string("https://bitbucket.org/acme/widgets")
-    var links: {text: any} = {}
-    links["html"] = json_object(html)
-    var repo_obj: {text: any} = {}
-    repo_obj["slug"] = json_string("widgets")
-    repo_obj["name"] = json_string("Widgets")
-    repo_obj["full_name"] = json_string("acme/widgets")
-    repo_obj["description"] = json_string("Widget factory")
-    repo_obj["is_private"] = json_boolean(false)
-    repo_obj["updated_on"] = json_string("2026-07-01T12:00:00.000000+00:00")
-    repo_obj["mainbranch"] = json_object(mainbranch)
-    repo_obj["links"] = json_object(links)
-    json_object(repo_obj)
+    val mainbranch = json_value_object_from([("name", JsonValue.Str("main"))])
+    val html = json_value_object_from([("href", JsonValue.Str("https://bitbucket.org/acme/widgets"))])
+    val links = json_value_object_from([("html", html)])
+    json_value_object_from([
+        ("slug", JsonValue.Str("widgets")),
+        ("name", JsonValue.Str("Widgets")),
+        ("full_name", JsonValue.Str("acme/widgets")),
+        ("description", JsonValue.Str("Widget factory")),
+        ("is_private", JsonValue.Bool(false)),
+        ("updated_on", JsonValue.Str("2026-07-01T12:00:00.000000+00:00")),
+        ("mainbranch", mainbranch),
+        ("links", links)
+    ])
 
 
 # @manual_section: bb-parse-repo
@@ -616,14 +613,14 @@ describe "bb_parse_repo":
         # @req REQ-DEVHUB-BB-049
         # @capture(protocol_json): adapter contract evidence
         step("Verify: is_private true is preserved")
-        val repo = bb_parse_repo(json_parse(FIXTURE_REPO_PRIVATE_MINIMAL))
+        val repo = bb_parse_repo(json_value_parse_or_null(FIXTURE_REPO_PRIVATE_MINIMAL))
         expect(repo.is_private).to_equal(true)
 
     it "missing optional fields (description/mainbranch/links) default to empty":
         # @req REQ-DEVHUB-BB-050
         # @capture(protocol_json): adapter contract evidence
         step("Verify: missing optional fields (description/mainbranch/links) default to empty")
-        val repo = bb_parse_repo(json_parse(FIXTURE_REPO_PRIVATE_MINIMAL))
+        val repo = bb_parse_repo(json_value_parse_or_null(FIXTURE_REPO_PRIVATE_MINIMAL))
         expect(repo.description).to_equal("")
         expect(repo.main_branch).to_equal("")
         expect(repo.web_url).to_equal("")
@@ -632,7 +629,7 @@ describe "bb_parse_repo":
         # @req REQ-DEVHUB-BB-051
         # @capture(protocol_json): adapter contract evidence
         step("Verify: nil input returns an empty repo, not a crash")
-        val repo = bb_parse_repo(nil)
+        val repo = bb_parse_repo(JsonValue.Null)
         expect(repo.slug).to_equal("")
         expect(repo.is_private).to_equal(false)
 
@@ -651,14 +648,14 @@ describe "bb_parse_pr updated_on":
         # @req REQ-DEVHUB-BB-052
         # @capture(protocol_json): adapter contract evidence
         step("Verify: captures updated_on from the PR JSON")
-        val pr = bb_parse_pr(json_parse(FIXTURE_PR_WITH_UPDATED))
+        val pr = bb_parse_pr(json_value_parse_or_null(FIXTURE_PR_WITH_UPDATED))
         expect(pr.updated_on).to_equal("2026-07-10T09:30:00.000000+00:00")
 
     it "missing updated_on defaults to empty":
         # @req REQ-DEVHUB-BB-053
         # @capture(protocol_json): adapter contract evidence
         step("Verify: missing updated_on defaults to empty")
-        val pr = bb_parse_pr(json_parse("{\"id\": 1, \"title\": \"T\", \"state\": \"OPEN\"}"))
+        val pr = bb_parse_pr(json_value_parse_or_null("{\"id\": 1, \"title\": \"T\", \"state\": \"OPEN\"}"))
         expect(pr.updated_on).to_equal("")
 
 
@@ -720,52 +717,52 @@ describe "bb_list_repos / bb_repo_view / bb_list_prs auth guard":
 # The adapter's real fetch_page (_bb_fetch_list_page) does an HTTP GET, so it
 # is deliberately NOT exercised here (same restraint as the rest of this
 # file). Instead these fixture fns implement the exact fetch_page signature
-# (fn(BbClient, text) -> (bool, [any], text, text)) with canned in-memory
+# (fn(BbClient, text) -> (bool, [JsonValue], text, text)) with canned in-memory
 # pages, keyed by a synthetic "next" url string ("p1", "p2", ...) -- no
 # network, no mocking, just plain data. This is the "pure helper boundary"
 # _bb_collect_pages is designed around: the loop itself never touches HTTP.
 
-fn _fx_fetch_2pages(client: BbClient, url: text) -> (bool, [any], text, text):
+fn _fx_fetch_2pages(client: BbClient, url: text) -> (bool, [JsonValue], text, text):
     """Fixture: page 1 has 2 values + next="p2"; page 2 has 1 value + no next."""
     if url == "p1":
-        return (true, [json_string("a"), json_string("b")], "p2", "")
+        return (true, [JsonValue.Str("a"), JsonValue.Str("b")], "p2", "")
     if url == "p2":
-        return (true, [json_string("c")], "", "")
+        return (true, [JsonValue.Str("c")], "", "")
     (false, [], "", "unexpected fixture url: " + url)
 
 
-fn _fx_fetch_fails_on_page2(client: BbClient, url: text) -> (bool, [any], text, text):
+fn _fx_fetch_fails_on_page2(client: BbClient, url: text) -> (bool, [JsonValue], text, text):
     """Fixture: page 1 succeeds with a next link; page 2 fails."""
     if url == "p1":
-        return (true, [json_string("a")], "p2", "")
+        return (true, [JsonValue.Str("a")], "p2", "")
     (false, [], "", "boom")
 
 
-fn _fx_fetch_infinite(client: BbClient, url: text) -> (bool, [any], text, text):
+fn _fx_fetch_infinite(client: BbClient, url: text) -> (bool, [JsonValue], text, text):
     """Fixture: an unbounded `next` chain (p1 -> p2 -> ... -> p11 -> ...)
     that never runs out on its own -- used to prove the hard BB_MAX_PAGES
     cap stops a runaway pagination loop instead of looping forever."""
     if url == "p1":
-        return (true, [json_string("i1")], "p2", "")
+        return (true, [JsonValue.Str("i1")], "p2", "")
     if url == "p2":
-        return (true, [json_string("i2")], "p3", "")
+        return (true, [JsonValue.Str("i2")], "p3", "")
     if url == "p3":
-        return (true, [json_string("i3")], "p4", "")
+        return (true, [JsonValue.Str("i3")], "p4", "")
     if url == "p4":
-        return (true, [json_string("i4")], "p5", "")
+        return (true, [JsonValue.Str("i4")], "p5", "")
     if url == "p5":
-        return (true, [json_string("i5")], "p6", "")
+        return (true, [JsonValue.Str("i5")], "p6", "")
     if url == "p6":
-        return (true, [json_string("i6")], "p7", "")
+        return (true, [JsonValue.Str("i6")], "p7", "")
     if url == "p7":
-        return (true, [json_string("i7")], "p8", "")
+        return (true, [JsonValue.Str("i7")], "p8", "")
     if url == "p8":
-        return (true, [json_string("i8")], "p9", "")
+        return (true, [JsonValue.Str("i8")], "p9", "")
     if url == "p9":
-        return (true, [json_string("i9")], "p10", "")
+        return (true, [JsonValue.Str("i9")], "p10", "")
     if url == "p10":
-        return (true, [json_string("i10")], "p11", "")
-    (true, [json_string("overflow")], "pnext", "")
+        return (true, [JsonValue.Str("i10")], "p11", "")
+    (true, [JsonValue.Str("overflow")], "pnext", "")
 
 
 # @manual_section: bb-collect-pages-pagination-loop-fixture-driven-no-network
@@ -847,7 +844,7 @@ describe "_bb_combine_values_json (--json envelope _capped signal)":
         val envelope = _bb_combine_values_json(values, capped)
         val has_capped = envelope.contains("\"_capped\"")
         expect(has_capped).to_equal(false)
-        val parsed = json_parse(envelope)
+        val parsed = json_value_parse_opt(envelope)
         expect(parsed != nil).to_equal(true)
 
     it "adds \"_capped\": true when the BB_MAX_PAGES cap is hit (>10 pages served)":
@@ -859,7 +856,7 @@ describe "_bb_combine_values_json (--json envelope _capped signal)":
         expect(capped).to_equal(true)
         val envelope = _bb_combine_values_json(values, capped)
         expect(envelope).to_contain("\"_capped\": true")
-        val parsed = json_parse(envelope)
+        val parsed = json_value_parse_opt(envelope)
         expect(parsed != nil).to_equal(true)
 
 
@@ -916,7 +913,7 @@ describe "bb Server / Data Center URLs and auth":
         expect(create).to_contain("\"toRef\"")
         expect(create).to_contain("\"key\": \"KEY\"")
         expect(create).to_contain("\"name\": \"jdoe\"")
-        expect(json_parse(create) != nil).to_equal(true)
+        expect(json_value_parse_opt(create) != nil).to_equal(true)
         expect(bb_build_dc_comment_body("hi", "", -1)).to_equal("{\"text\": \"hi\"}")
         expect(bb_build_dc_merge_body("squash")).to_equal("{\"strategyId\": \"squash\"}")
         expect(bb_build_dc_merge_body("merge_commit")).to_equal("{\"strategyId\": \"no-ff\"}")

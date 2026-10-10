@@ -19,7 +19,7 @@
 # Mapping tables and rationale:
 #   doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md §3
 
-use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize}
+use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_field, json_value_has, json_value_at, json_value_len, json_value_serialize}
 
 
 # ============================================================================
@@ -27,14 +27,9 @@ use std.json.{json_parse, json_object_get, json_array_get, json_array_length, js
 # this module stays free of adapter dependencies and thus trivially testable)
 # ============================================================================
 
-fn _js(obj: any, key: text) -> text:
+fn _js(obj: JsonValue, key: text) -> text:
     """String field off a JSON object; "" when missing."""
-    if obj == nil:
-        return ""
-    val value = json_object_get(obj, key)
-    if value == nil:
-        return ""
-    val s = json_serialize(value)
+    val s = json_value_serialize(json_value_field(obj, key))
     if s.starts_with("\"") and s.ends_with("\""):
         return s[1:s.len() - 1]
     if s == "null":
@@ -42,7 +37,7 @@ fn _js(obj: any, key: text) -> text:
     s
 
 
-fn _jnested(obj: any, path: [text]) -> text:
+fn _jnested(obj: JsonValue, path: [text]) -> text:
     """String field at a nested path, e.g. ["source", "branch", "name"].
 
     Bitbucket nests almost everything gh keeps flat (`source.branch.name` vs
@@ -53,12 +48,7 @@ fn _jnested(obj: any, path: [text]) -> text:
     var current = obj
     var i: i64 = 0
     while i < path.len() - 1:
-        if current == nil:
-            return ""
-        val next = json_object_get(current, path[i])
-        if next == nil:
-            return ""
-        current = next
+        current = json_value_field(current, path[i])
         i = i + 1
     _js(current, path[path.len() - 1])
 
@@ -143,7 +133,7 @@ fn bb_state_to_gh(state: text) -> text:
 # Outbound: Bitbucket JSON -> gh JSON
 # ============================================================================
 
-fn bb_pr_object_to_gh(obj: any) -> text:
+fn bb_pr_object_to_gh(obj: JsonValue) -> text:
     """One Bitbucket PR object -> one gh-shaped PR JSON object (as text).
 
     `isDraft` is emitted as a literal false rather than omitted: Bitbucket
@@ -175,19 +165,18 @@ fn bb_pr_to_gh_json(raw: text) -> text:
     and `pr list` respectively. Unparseable input is returned verbatim rather
     than swallowed — a caller debugging an API error needs to see the body.
     """
-    val parsed = json_parse(raw)
-    if parsed == nil:
+    val parsed_opt = json_value_parse_opt(raw)
+    if parsed_opt == nil:
         return raw
-    val values = json_object_get(parsed, "values")
-    if values == nil:
+    val parsed = parsed_opt.unwrap()
+    if not json_value_has(parsed, "values"):
         return bb_pr_object_to_gh(parsed)
+    val values = json_value_field(parsed, "values")
     var out: [text] = []
     var i: i64 = 0
-    val n = json_array_length(values)
+    val n = json_value_len(values)
     while i < n:
-        val item = json_array_get(values, i)
-        if item != nil:
-            out = out + [bb_pr_object_to_gh(item)]
+        out = out + [bb_pr_object_to_gh(json_value_at(values, i))]
         i = i + 1
     "[" + out.join(", ") + "]"
 

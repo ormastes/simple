@@ -29,7 +29,7 @@ extern fn rt_enum_payload(value: HirStmtKind) -> HirExpr?
 # Raw element read for [mir-let-slot-probe] below. `rt_array_get` is a registered
 # runtime symbol (native_project/config.rs:193) and is NOT otherwise declared in this
 # file, so this introduces no conflicting signature for an already-declared C symbol.
-extern fn rt_array_get(arr: Any, idx: i64) -> i64
+extern fn rt_array_get(arr: HirExpr?, idx: i64) -> i64
 # Cached probe gate (-1 unknown, 0 off, 1 on), same shape as function_lowering.spl's.
 var mir_let_slot_probe_state: i64 = -1
 
@@ -3491,6 +3491,20 @@ impl MirLowering:
                         case _:
                             element_type = self.lower_type(elem_t)
                     element_type_from_hir = true
+                    # A declared `[Record]` collection that is not an array
+                    # literal or typed param (e.g. a method result,
+                    # `for child in self.children()`) never populated
+                    # array_element_struct_syms, so the loop variable carried
+                    # no record owner and `child.method()` died as
+                    # "unresolved method call". Publish the declared element
+                    # owner exactly as the typed-param path does.
+                    if not self.array_element_struct_syms.has(collection_local.id):
+                        match elem_t.kind:
+                            case HirTypeKind.Named(for_elem_symbol, _):
+                                if val for_elem_info = self.symbols.get_symbol_raw(for_elem_symbol.id):
+                                    if for_elem_info.kind == SymbolKind.Struct or for_elem_info.kind == SymbolKind.Class:
+                                        self.array_element_struct_syms[collection_local.id] = for_elem_info.name
+                            case _: ()
                 case HirTypeKind.Str:
                     collection_hir_is_text = true
                 case _: ()

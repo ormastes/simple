@@ -8,7 +8,7 @@
 # Subcommands: issue {list,view,create,edit,comment,close}, pr {list,view,create,merge,review,checkout},
 # repo {view,clone}.
 
-use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize, json_get_type}
+use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_parse_or_null, json_value_field, json_value_has, json_value_at, json_value_len, json_value_serialize, json_value_type}
 use app.devhub.adapter_github.{gh_run, gh_available, gh_actionable_error}
 use app.devhub.flags.{_extract_flag, _has_flag, _remove_flags}
 use app.devhub.output.{print_error, print_table_dynamic, colorize_state, format_json_output, wants_json, relative_time, set_no_pager}
@@ -193,7 +193,7 @@ fn _print_self_review_steps(pr_number: text, repository: text):
         print line
 
 
-fn _github_pr_repository(pr_obj: any) -> text:
+fn _github_pr_repository(pr_obj: JsonValue) -> text:
     """Extract the target owner/name from gh's canonical PR URL; unknown hosts fail closed."""
     val url = _gh_field(pr_obj, "url")
     val parts = url.split("/")
@@ -250,7 +250,7 @@ fn _github_pr_review(args: [text]) -> i64:
     view_args = view_args + repo_args + ["--json", "number,author,url"]
     val (author_ok, author_stdout, author_stderr) = gh_run(view_args)
     val (actor_ok, actor_stdout, _actor_stderr) = gh_run(["api", "user", "--jq", ".login"])
-    val pr_obj = if author_ok: json_parse(author_stdout) else: nil
+    val pr_obj = if author_ok: json_value_parse_or_null(author_stdout) else: JsonValue.Null
     val pr_number = _gh_field(pr_obj, "number")
     val author = _gh_login(pr_obj, "author")
     val repository = _github_pr_repository(pr_obj)
@@ -302,33 +302,30 @@ fn _github_list(entity: text, args: [text]) -> i64:
     0
 
 
-fn _gh_field(obj: any, key: text) -> text:
+fn _gh_field(obj: JsonValue, key: text) -> text:
     """Safely extract a string or number field from a gh --json object."""
-    if obj == nil:
+    if not json_value_has(obj, key):
         return ""
-    val v = json_object_get(obj, key)
-    if v == nil:
-        return ""
-    val s = json_serialize(v)
+    val s = json_value_serialize(json_value_field(obj, key))
     if s.starts_with("\"") and s.ends_with("\""):
         return s[1:s.len() - 1]
     s
 
 
-fn _gh_login(obj: any, key: text) -> text:
+fn _gh_login(obj: JsonValue, key: text) -> text:
     """Extract `<key>.login` (gh's shape for author/assignee objects)."""
-    val nested = json_object_get(obj, key)
-    if nested == nil:
+    if not json_value_has(obj, key):
         return ""
-    _gh_field(nested, "login")
+    _gh_field(json_value_field(obj, key), "login")
 
 
 fn _print_gh_table(entity: text, raw_json: text):
-    val parsed = json_parse(raw_json)
-    if parsed == nil or json_get_type(parsed) != "array":
+    val parsed_opt = json_value_parse_opt(raw_json)
+    if parsed_opt == nil or json_value_type(parsed_opt.unwrap()) != "array":
         print raw_json
         return
-    val n = json_array_length(parsed)
+    val parsed = parsed_opt.unwrap()
+    val n = json_value_len(parsed)
     if n == 0:
         val label = if entity == "pr": "pull requests" else: "issues"
         print "No {label} found. Try --state all or check `gh auth status`."
@@ -336,7 +333,7 @@ fn _print_gh_table(entity: text, raw_json: text):
     var rows: [[text]] = []
     var i = 0
     while i < n:
-        val item = json_array_get(parsed, i)
+        val item = json_value_at(parsed, i)
         val number = "#{_gh_field(item, "number")}"
         val title = _gh_field(item, "title")
         val state = colorize_state(_gh_field(item, "state"))

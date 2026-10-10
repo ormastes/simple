@@ -30,13 +30,10 @@ use std.io_runtime.{env_get_opt}
 # std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
 # cannot resolve it — declare the runtime extern directly.
 @unsafe(reason: "raw tagged HIR type discriminant ABI", capabilities: [ffi])
-extern fn rt_enum_discriminant(value: Any) -> i64
-# Formation probe: true only for a well-formed heap object. Screens a ZEROED
-# slot (raw 0), which `== nil` cannot -- the nil sentinel here is raw 3.
-extern fn rt_heap_ref_wellformed(value: Any) -> bool
+extern fn rt_enum_discriminant<T>(value: T) -> i64
 
 @always_inline
-fn _sffi_method_hir_type_discriminant(value: Any) -> i64:
+fn _sffi_method_hir_type_discriminant<T>(value: T) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(value)
 
@@ -1484,6 +1481,13 @@ impl MirLowering:
         if element_owner != nil and element_owner != "":
             self.array_element_struct_syms[result.id] = element_owner ?? ""
         result
+
+    me receiver_declared_or_result_type(receiver: HirExpr, receiver_local: LocalId) -> HirType?:
+        """Declared type of a variable receiver, else the remembered HIR type
+        of the lowered receiver local (a call result's declared return)."""
+        if val declared = self.receiver_declared_type(receiver):
+            return Some(declared)
+        self.find_local_hir_type(receiver_local.id)
 
     me declared_record_receiver_owner(receiver: HirExpr) -> i64:
         # Only a bound runtime value can use instance recovery. A type-valued
@@ -3595,7 +3599,10 @@ impl MirLowering:
                 # Their declared owner is still authoritative for instance
                 # methods when flat HIR leaves MethodResolution unresolved.
                 if unresolved_struct_name == nil or unresolved_struct_name == "":
-                    if val declared_receiver = self.receiver_declared_type(receiver):
+                    # A non-variable receiver (`parse_layout_kind(name).to_wire()`)
+                    # has no declared binding; its call result's remembered
+                    # HIR return type is the same authority.
+                    if val declared_receiver = self.receiver_declared_or_result_type(receiver, unresolved_receiver_local):
                         match declared_receiver.kind:
                             case Named(declared_owner_id, _):
                                 if val declared_owner = self.symbols.get_symbol_raw(declared_owner_id.id):
@@ -3614,10 +3621,7 @@ impl MirLowering:
                 # owner from that type; the owner-qualified lookups below then
                 # resolve the method exactly as for a typed parameter.
                 if unresolved_struct_name == nil or unresolved_struct_name == "":
-                    var typed_receiver: HirType? = self.receiver_declared_type(receiver)
-                    if typed_receiver == nil:
-                        typed_receiver = self.find_local_hir_type(unresolved_receiver_local.id)
-                    if val typed_receiver_found = typed_receiver:
+                    if val typed_receiver_found = self.receiver_declared_or_result_type(receiver, unresolved_receiver_local):
                         match typed_receiver_found.kind:
                             case Named(typed_owner_id, _):
                                 if val typed_owner = self.symbols.get_symbol_raw(typed_owner_id.id):
@@ -3644,7 +3648,7 @@ impl MirLowering:
                     elif self.struct_method_syms.contains(unresolved_method_key):
                         Some(self.struct_method_syms[unresolved_method_key])
                     else:
-                        match self.receiver_declared_type(receiver):
+                        match self.receiver_declared_or_result_type(receiver, unresolved_receiver_local):
                             case Some(found_receiver_type):
                                 match found_receiver_type.kind:
                                     case Named(receiver_type_symbol, _):

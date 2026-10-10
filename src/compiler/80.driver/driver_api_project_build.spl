@@ -9,7 +9,6 @@ use compiler.driver.driver_api_types (_combine_driver_api_process_error)
 use std.file_system.{file_write_text}
 use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native)
 use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
-use lazy compiler.mir.mir_instructions (MirModule)
 # HOISTED (2026-08-21): `HeaderGenerator` and `get_shared_lib_flags` were
 # FUNCTION-LOCAL `use` lines inside `generate_headers` / `aot_shared_library`.
 # The parser DISCARDS function-local `use` outright
@@ -54,17 +53,17 @@ pub fn generate_headers(path: text, output_dir: text, lib_name: text, emit_c: bo
     var options = driver_core_compile_options_default()
     options.input_files = [path]
     options.mode = CompileMode.Aot
-    val result = _project_build_compile(options)
+    val driver = compiler_driver_create(options)
+    val result = compiler_driver_run_compile(driver)
 
     match result:
-        case CompileResult.Success(mir_module_any):
-            if mir_module_any.?:
-                val mir_module = mir_module_any as MirModule
+        case CompileResult.Success(_):
+            var generated = false
+            for mir_module in driver.ctx.mir_modules.values():
                 val header_generator = HeaderGenerator.create(mir_module)
-
                 if not header_generator.has_exports():
-                    print "[header-gen] Warning: no @export(\"C\") items found"
-                    return result
+                    continue
+                generated = true
 
                 dir_create(output_dir, true)
 
@@ -80,6 +79,8 @@ pub fn generate_headers(path: text, output_dir: text, lib_name: text, emit_c: bo
                     file_write_text(cpp_path, cpp_header)
                     print "[header-gen] Generated C++ header: {cpp_path}"
 
+            if not generated:
+                print "[header-gen] Warning: no @export(\"C\") items found"
             result
         case _:
             result

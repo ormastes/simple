@@ -37,14 +37,14 @@ use compiler.mir.mir_rt_hal_boundary.{inject_rt_hal_worker_complete}
 use std.io_runtime.{env_get_opt}
 
 @unsafe(reason: "raw tagged-value discriminant ABI", capabilities: [ffi])
-extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_enum_discriminant<T>(value: T) -> i64
 
 @always_inline
 fn _sffi_env_get(key: text) -> text?:
     env_get_opt(key)
 
 @always_inline
-fn _sffi_enum_discriminant(value: Any) -> i64:
+fn _sffi_enum_discriminant<T>(value: T) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(value)
 
@@ -5600,8 +5600,18 @@ impl MirLowering:
                     if constructor_info.kind == SymbolKind.Class:
                         constructor_name = candidate
                         if not self.class_type_names.has(candidate) or not self.struct_field_order.has(candidate):
-                            self.error_fatal("missing class provider metadata for {candidate}", nil)
-                            return nil
+                            # Fail closed with a DEFINED placeholder. `return nil`
+                            # from this non-optional `-> LocalId` method aborted
+                            # the seed-run compiler ("nil is forbidden by the
+                            # non-optional return contract of 'lower_call'") and
+                            # is an undefined local on the native lane; the
+                            # fatal diagnostic above is what stops the build.
+                            self.error_fatal("missing class provider metadata for {candidate}", Some(callee.span))
+                            var b_missing_class = self.builder
+                            val missing_class_local = b_missing_class.new_temp(MirType.i64())
+                            b_missing_class.emit_const(missing_class_local, MirConstValue.Int(0), MirType.i64())
+                            self.builder = b_missing_class
+                            return missing_class_local
             if self.struct_field_order.has(constructor_name):
                 return self.lower_struct_construct(direct_symbol, constructor_name, args)
 

@@ -12,162 +12,163 @@ impl MirLowering:
     me promote_transient_owner() -> bool:
         """Retain the lowering's field roots while its module scope is paused.
 
-        One managed inventory handles nil/scalar fields without asking the
-        runtime to promote a non-heap root, and performs one graph walk/arena
-        scan. Free only the temporary inventory; its retained children remain
-        owned by the lowering. Mirror the HIR module-surface promotion boundary.
+        Each field is wrapped in a one-element temporary array, so a nil,
+        scalar, or older-scope field is skipped as an array element instead of
+        being refused as a root. Free only the temporary array; its retained
+        child remains owned by the lowering. Mirror the HIR module-surface
+        promotion boundary.
         """
-        var roots: [Any] = []
+        var ok = true
         # MirLowering: every declared field, including optional/scalar carriers.
-        roots.push(self.builder)
-        roots.push(self.symbols)
-        roots.push(self.local_map)
-        roots.push(self.local_symbol_ids)
-        roots.push(self.local_symbol_values)
-        roots.push(self.local_symbol_index_slots)
-        roots.push(self.local_hir_type_ids)
-        roots.push(self.local_hir_type_values)
-        roots.push(self.local_hir_type_isolation_states)
-        roots.push(self.local_hir_type_resource_states)
-        roots.push(self.fn_return_types)
-        roots.push(self.current_function_symbols)
-        roots.push(self.current_function_names)
-        roots.push(self.callable_link_names)
-        roots.push(self.loop_stack)
-        roots.push(self.finally_stack)
-        roots.push(self.unsafe_depth)
-        roots.push(self.errors)
-        roots.push(self.current_module_id)
-        roots.push(self.composite_layout_digests)
-        roots.push(self.composite_layout_owner_counts)
-        roots.push(self.external_layout_traces)
-        roots.push(self.type_transport_receipts)
-        roots.push(self.type_transport_owner)
-        roots.push(self.type_transport_context)
-        roots.push(self.type_transport_param_index)
-        roots.push(self.type_transport_caller_disc)
-        roots.push(self.mir_tag_probe_active_function)
-        roots.push(self.mir_tag_probe_pending_site)
-        roots.push(self.mir_tag_probe_pending_caller_disc)
-        roots.push(self.mcdc_mode)
-        roots.push(self.mcdc_owner_bytes)
-        roots.push(self.mcdc_global_bytes)
-        roots.push(self.mcdc_include_csv)
-        roots.push(self.mcdc_exclude_csv)
-        roots.push(self.mcdc_next_runtime_id)
-        roots.push(self.mcdc_active_decision_id)
-        roots.push(self.mcdc_active_decision_semantic)
-        roots.push(self.mcdc_next_condition_ordinal)
-        roots.push(self.mcdc_active_dynamic_token)
-        roots.push(self.mcdc_active_tokens)
-        roots.push(self.field_map)
-        roots.push(self.bitfield_map)
-        roots.push(self.bitfield_value_syms)
-        roots.push(self.struct_field_order)
-        roots.push(self.struct_field_order_conflict_warned)
-        roots.push(self.struct_field_has_default)
-        roots.push(self.struct_field_default_expr)
-        roots.push(self.class_type_names)
-        roots.push(self.struct_field_type_ownership_key)
-        roots.push(self.struct_field_type_name)
-        roots.push(self.struct_field_repr_name)
-        roots.push(self.struct_field_hir_type)
-        roots.push(self.struct_bare_layout_owner)
-        roots.push(self.struct_identity_layout_key)
-        roots.push(self.struct_field_array_element_type_name)
-        roots.push(self.struct_field_array_elem_type)
-        roots.push(self.struct_value_syms)
-        roots.push(self.struct_method_syms)
-        roots.push(self.struct_method_ambiguous)
-        roots.push(self.struct_method_return_names)
-        roots.push(self.struct_method_return_is_array)
-        roots.push(self.struct_method_return_is_optional)
-        roots.push(self.trait_impl_owners)
-        roots.push(self.trait_impl_methods)
-        roots.push(self.trait_impl_closure_complete)
-        roots.push(self.trait_impl_provider_modules)
-        roots.push(self.enum_payload_struct_names)
-        roots.push(self.enum_single_payload_types)
-        roots.push(self.enum_variant_payload_types)
-        roots.push(self.enum_variant_payload_names)
-        roots.push(self.enum_variant_payload_kind)
-        roots.push(self.generic_enum_constructor_owners)
-        roots.push(self.enum_tuple_text_slots)
-        roots.push(self.runtime_array_locals)
-        roots.push(self.runtime_dict_locals)
-        roots.push(self.runtime_elem_value_type)
-        roots.push(self.inferred_array_elem_state)
-        roots.push(self.array_element_struct_syms)
-        roots.push(self.runtime_value_local_ids)
-        roots.push(self.tagged_text_locals)
-        roots.push(self.option_value_locals)
-        roots.push(self.nil_locals)
-        roots.push(self.enum_variant_index)
-        roots.push(self.enum_variant_discriminants)
-        roots.push(self.enum_variant_owners)
-        roots.push(self.enum_bare_name_collisions)
-        roots.push(self.enum_variant_index_q)
-        roots.push(self.enum_variant_discriminants_q)
-        roots.push(self.enum_runtime_id_index_q)
-        roots.push(self.enum_runtime_to_bare)
-        roots.push(self.enum_bare_ambiguous)
-        roots.push(self.enum_runtime_id_index)
-        roots.push(self.enum_runtime_id_names)
-        roots.push(self.lambda_bindings)
-        roots.push(self.lambda_capture_snapshot)
-        roots.push(self.current_has_vhdl_metadata)
-        roots.push(self.current_gpu_kernel_target)
-        roots.push(self.current_fn_returns_bool)
-        roots.push(self.canonical_type_symbols)
-        roots.push(self.next_canonical_type_symbol)
-        roots.push(self.global_symbol_ids)
-        roots.push(self.global_statics_by_id)
-        roots.push(self.global_constants_by_id)
-        roots.push(self.global_const_exprs)
-        roots.push(self.array_global_mutation_warned)
-        roots.push(self.target_context)
-        roots.push(self.allow_ambient_bootstrap_policy)
-        roots.push(self.resource_owned_locals)
-        roots.push(self.consumed_resource_locals)
+        ok = promote_and_release_transient_owner_roots([self.builder]) and ok
+        ok = promote_and_release_transient_owner_roots([self.symbols]) and ok
+        ok = promote_and_release_transient_owner_roots([self.local_map]) and ok
+        ok = promote_and_release_transient_owner_roots([self.local_symbol_ids]) and ok
+        ok = promote_and_release_transient_owner_roots([self.local_symbol_values]) and ok
+        ok = promote_and_release_transient_owner_roots([self.local_symbol_index_slots]) and ok
+        ok = promote_and_release_transient_owner_roots([self.local_hir_type_ids]) and ok
+        ok = promote_and_release_transient_owner_roots([self.local_hir_type_values]) and ok
+        ok = promote_and_release_transient_owner_roots([self.local_hir_type_isolation_states]) and ok
+        ok = promote_and_release_transient_owner_roots([self.local_hir_type_resource_states]) and ok
+        ok = promote_and_release_transient_owner_roots([self.fn_return_types]) and ok
+        ok = promote_and_release_transient_owner_roots([self.current_function_symbols]) and ok
+        ok = promote_and_release_transient_owner_roots([self.current_function_names]) and ok
+        ok = promote_and_release_transient_owner_roots([self.callable_link_names]) and ok
+        ok = promote_and_release_transient_owner_roots([self.loop_stack]) and ok
+        ok = promote_and_release_transient_owner_roots([self.finally_stack]) and ok
+        ok = promote_and_release_transient_owner_roots([self.unsafe_depth]) and ok
+        ok = promote_and_release_transient_owner_roots([self.errors]) and ok
+        ok = promote_and_release_transient_owner_roots([self.current_module_id]) and ok
+        ok = promote_and_release_transient_owner_roots([self.composite_layout_digests]) and ok
+        ok = promote_and_release_transient_owner_roots([self.composite_layout_owner_counts]) and ok
+        ok = promote_and_release_transient_owner_roots([self.external_layout_traces]) and ok
+        ok = promote_and_release_transient_owner_roots([self.type_transport_receipts]) and ok
+        ok = promote_and_release_transient_owner_roots([self.type_transport_owner]) and ok
+        ok = promote_and_release_transient_owner_roots([self.type_transport_context]) and ok
+        ok = promote_and_release_transient_owner_roots([self.type_transport_param_index]) and ok
+        ok = promote_and_release_transient_owner_roots([self.type_transport_caller_disc]) and ok
+        ok = promote_and_release_transient_owner_roots([self.mir_tag_probe_active_function]) and ok
+        ok = promote_and_release_transient_owner_roots([self.mir_tag_probe_pending_site]) and ok
+        ok = promote_and_release_transient_owner_roots([self.mir_tag_probe_pending_caller_disc]) and ok
+        ok = promote_and_release_transient_owner_roots([self.mcdc_mode]) and ok
+        ok = promote_and_release_transient_owner_roots([self.mcdc_owner_bytes]) and ok
+        ok = promote_and_release_transient_owner_roots([self.mcdc_global_bytes]) and ok
+        ok = promote_and_release_transient_owner_roots([self.mcdc_include_csv]) and ok
+        ok = promote_and_release_transient_owner_roots([self.mcdc_exclude_csv]) and ok
+        ok = promote_and_release_transient_owner_roots([self.mcdc_next_runtime_id]) and ok
+        ok = promote_and_release_transient_owner_roots([self.mcdc_active_decision_id]) and ok
+        ok = promote_and_release_transient_owner_roots([self.mcdc_active_decision_semantic]) and ok
+        ok = promote_and_release_transient_owner_roots([self.mcdc_next_condition_ordinal]) and ok
+        ok = promote_and_release_transient_owner_roots([self.mcdc_active_dynamic_token]) and ok
+        ok = promote_and_release_transient_owner_roots([self.mcdc_active_tokens]) and ok
+        ok = promote_and_release_transient_owner_roots([self.field_map]) and ok
+        ok = promote_and_release_transient_owner_roots([self.bitfield_map]) and ok
+        ok = promote_and_release_transient_owner_roots([self.bitfield_value_syms]) and ok
+        ok = promote_and_release_transient_owner_roots([self.struct_field_order]) and ok
+        ok = promote_and_release_transient_owner_roots([self.struct_field_order_conflict_warned]) and ok
+        ok = promote_and_release_transient_owner_roots([self.struct_field_has_default]) and ok
+        ok = promote_and_release_transient_owner_roots([self.struct_field_default_expr]) and ok
+        ok = promote_and_release_transient_owner_roots([self.class_type_names]) and ok
+        ok = promote_and_release_transient_owner_roots([self.struct_field_type_ownership_key]) and ok
+        ok = promote_and_release_transient_owner_roots([self.struct_field_type_name]) and ok
+        ok = promote_and_release_transient_owner_roots([self.struct_field_repr_name]) and ok
+        ok = promote_and_release_transient_owner_roots([self.struct_field_hir_type]) and ok
+        ok = promote_and_release_transient_owner_roots([self.struct_bare_layout_owner]) and ok
+        ok = promote_and_release_transient_owner_roots([self.struct_identity_layout_key]) and ok
+        ok = promote_and_release_transient_owner_roots([self.struct_field_array_element_type_name]) and ok
+        ok = promote_and_release_transient_owner_roots([self.struct_field_array_elem_type]) and ok
+        ok = promote_and_release_transient_owner_roots([self.struct_value_syms]) and ok
+        ok = promote_and_release_transient_owner_roots([self.struct_method_syms]) and ok
+        ok = promote_and_release_transient_owner_roots([self.struct_method_ambiguous]) and ok
+        ok = promote_and_release_transient_owner_roots([self.struct_method_return_names]) and ok
+        ok = promote_and_release_transient_owner_roots([self.struct_method_return_is_array]) and ok
+        ok = promote_and_release_transient_owner_roots([self.struct_method_return_is_optional]) and ok
+        ok = promote_and_release_transient_owner_roots([self.trait_impl_owners]) and ok
+        ok = promote_and_release_transient_owner_roots([self.trait_impl_methods]) and ok
+        ok = promote_and_release_transient_owner_roots([self.trait_impl_closure_complete]) and ok
+        ok = promote_and_release_transient_owner_roots([self.trait_impl_provider_modules]) and ok
+        ok = promote_and_release_transient_owner_roots([self.enum_payload_struct_names]) and ok
+        ok = promote_and_release_transient_owner_roots([self.enum_single_payload_types]) and ok
+        ok = promote_and_release_transient_owner_roots([self.enum_variant_payload_types]) and ok
+        ok = promote_and_release_transient_owner_roots([self.enum_variant_payload_names]) and ok
+        ok = promote_and_release_transient_owner_roots([self.enum_variant_payload_kind]) and ok
+        ok = promote_and_release_transient_owner_roots([self.generic_enum_constructor_owners]) and ok
+        ok = promote_and_release_transient_owner_roots([self.enum_tuple_text_slots]) and ok
+        ok = promote_and_release_transient_owner_roots([self.runtime_array_locals]) and ok
+        ok = promote_and_release_transient_owner_roots([self.runtime_dict_locals]) and ok
+        ok = promote_and_release_transient_owner_roots([self.runtime_elem_value_type]) and ok
+        ok = promote_and_release_transient_owner_roots([self.inferred_array_elem_state]) and ok
+        ok = promote_and_release_transient_owner_roots([self.array_element_struct_syms]) and ok
+        ok = promote_and_release_transient_owner_roots([self.runtime_value_local_ids]) and ok
+        ok = promote_and_release_transient_owner_roots([self.tagged_text_locals]) and ok
+        ok = promote_and_release_transient_owner_roots([self.option_value_locals]) and ok
+        ok = promote_and_release_transient_owner_roots([self.nil_locals]) and ok
+        ok = promote_and_release_transient_owner_roots([self.enum_variant_index]) and ok
+        ok = promote_and_release_transient_owner_roots([self.enum_variant_discriminants]) and ok
+        ok = promote_and_release_transient_owner_roots([self.enum_variant_owners]) and ok
+        ok = promote_and_release_transient_owner_roots([self.enum_bare_name_collisions]) and ok
+        ok = promote_and_release_transient_owner_roots([self.enum_variant_index_q]) and ok
+        ok = promote_and_release_transient_owner_roots([self.enum_variant_discriminants_q]) and ok
+        ok = promote_and_release_transient_owner_roots([self.enum_runtime_id_index_q]) and ok
+        ok = promote_and_release_transient_owner_roots([self.enum_runtime_to_bare]) and ok
+        ok = promote_and_release_transient_owner_roots([self.enum_bare_ambiguous]) and ok
+        ok = promote_and_release_transient_owner_roots([self.enum_runtime_id_index]) and ok
+        ok = promote_and_release_transient_owner_roots([self.enum_runtime_id_names]) and ok
+        ok = promote_and_release_transient_owner_roots([self.lambda_bindings]) and ok
+        ok = promote_and_release_transient_owner_roots([self.lambda_capture_snapshot]) and ok
+        ok = promote_and_release_transient_owner_roots([self.current_has_vhdl_metadata]) and ok
+        ok = promote_and_release_transient_owner_roots([self.current_gpu_kernel_target]) and ok
+        ok = promote_and_release_transient_owner_roots([self.current_fn_returns_bool]) and ok
+        ok = promote_and_release_transient_owner_roots([self.canonical_type_symbols]) and ok
+        ok = promote_and_release_transient_owner_roots([self.next_canonical_type_symbol]) and ok
+        ok = promote_and_release_transient_owner_roots([self.global_symbol_ids]) and ok
+        ok = promote_and_release_transient_owner_roots([self.global_statics_by_id]) and ok
+        ok = promote_and_release_transient_owner_roots([self.global_constants_by_id]) and ok
+        ok = promote_and_release_transient_owner_roots([self.global_const_exprs]) and ok
+        ok = promote_and_release_transient_owner_roots([self.array_global_mutation_warned]) and ok
+        ok = promote_and_release_transient_owner_roots([self.target_context]) and ok
+        ok = promote_and_release_transient_owner_roots([self.allow_ambient_bootstrap_policy]) and ok
+        ok = promote_and_release_transient_owner_roots([self.resource_owned_locals]) and ok
+        ok = promote_and_release_transient_owner_roots([self.consumed_resource_locals]) and ok
         # MirBuilder: every declared field, including optional/scalar carriers.
-        roots.push(self.builder.module)
-        roots.push(self.builder.current_function)
-        roots.push(self.builder.current_block)
-        roots.push(self.builder.next_local_id)
-        roots.push(self.builder.next_block_id)
-        roots.push(self.builder.locals)
-        roots.push(self.builder.blocks)
-        roots.push(self.builder.instructions)
-        roots.push(self.builder.current_span)
-        roots.push(self.builder.unwind_target)
-        roots.push(self.builder.unwind_payload)
-        roots.push(self.builder.unwind_type_tag)
+        ok = promote_and_release_transient_owner_roots([self.builder.module]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.current_function]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.current_block]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.next_local_id]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.next_block_id]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.locals]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.blocks]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.instructions]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.current_span]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.unwind_target]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.unwind_payload]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.unwind_type_tag]) and ok
         # MirModule: every declared field, including optional/scalar carriers.
-        roots.push(self.builder.module.name)
-        roots.push(self.builder.module.functions)
-        roots.push(self.builder.module.statics)
-        roots.push(self.builder.module.constants)
-        roots.push(self.builder.module.types)
-        roots.push(self.builder.module.external_layout_traces)
+        ok = promote_and_release_transient_owner_roots([self.builder.module.name]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.module.functions]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.module.statics]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.module.constants]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.module.types]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.module.external_layout_traces]) and ok
         # SymbolTable: every declared field, including optional/scalar carriers.
-        roots.push(self.symbols.symbols)
-        roots.push(self.symbols.scopes)
-        roots.push(self.symbols.current_scope)
-        roots.push(self.symbols.next_symbol_id)
-        roots.push(self.symbols.next_scope_id)
-        roots.push(self.symbols.gpu_function_targets)
-        roots.push(self.symbols.gpu_function_backend_orders)
-        roots.push(self.symbols.qualified_functions)
-        roots.push(self.symbols.qualified_types)
-        roots.push(self.symbols.exact_symbols)
-        roots.push(self.symbols.module_callables)
-        roots.push(self.symbols.root_scope_symbols)
-        roots.push(self.symbols.structural_union_symbols)
-        roots.push(self.symbols.structural_union_owners)
+        ok = promote_and_release_transient_owner_roots([self.symbols.symbols]) and ok
+        ok = promote_and_release_transient_owner_roots([self.symbols.scopes]) and ok
+        ok = promote_and_release_transient_owner_roots([self.symbols.current_scope]) and ok
+        ok = promote_and_release_transient_owner_roots([self.symbols.next_symbol_id]) and ok
+        ok = promote_and_release_transient_owner_roots([self.symbols.next_scope_id]) and ok
+        ok = promote_and_release_transient_owner_roots([self.symbols.gpu_function_targets]) and ok
+        ok = promote_and_release_transient_owner_roots([self.symbols.gpu_function_backend_orders]) and ok
+        ok = promote_and_release_transient_owner_roots([self.symbols.qualified_functions]) and ok
+        ok = promote_and_release_transient_owner_roots([self.symbols.qualified_types]) and ok
+        ok = promote_and_release_transient_owner_roots([self.symbols.exact_symbols]) and ok
+        ok = promote_and_release_transient_owner_roots([self.symbols.module_callables]) and ok
+        ok = promote_and_release_transient_owner_roots([self.symbols.root_scope_symbols]) and ok
+        ok = promote_and_release_transient_owner_roots([self.symbols.structural_union_symbols]) and ok
+        ok = promote_and_release_transient_owner_roots([self.symbols.structural_union_owners]) and ok
         # MirTargetContext: every declared field, including optional/scalar carriers.
-        roots.push(self.target_context.arch)
-        roots.push(self.target_context.os)
-        roots.push(self.target_context.abi)
-        roots.push(self.target_context.backend)
-        roots.push(self.target_context.version)
-        promote_and_release_transient_owner_roots(roots)
+        ok = promote_and_release_transient_owner_roots([self.target_context.arch]) and ok
+        ok = promote_and_release_transient_owner_roots([self.target_context.os]) and ok
+        ok = promote_and_release_transient_owner_roots([self.target_context.abi]) and ok
+        ok = promote_and_release_transient_owner_roots([self.target_context.backend]) and ok
+        ok = promote_and_release_transient_owner_roots([self.target_context.version]) and ok
+        ok
