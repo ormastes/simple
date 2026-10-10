@@ -1,0 +1,32 @@
+use std.spec.{describe, it, expect, step}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{HirTypeKind}
+use compiler.hir.hir_definitions.{HirExprKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+describe "explicit direct call type arguments":
+    it "retains a return-only integer generic in HIR":
+        step("Parse and lower an explicit generic without argument inference")
+        val source = "fn absent<T>() -> T?:\n    nil\n\nfn probe() -> i64?:\n    absent<i64>()\n"
+        val parsed = parse_full_frontend(source, "explicit_call_types.spl", "explicit_call_types", Logger(level: 0))
+        var lowering = HirLowering.with_filename("explicit_call_types.spl")
+        val hir = lowering.lower_module(parsed)
+        var found = false
+        for function_ in hir.functions.values():
+            if function_.name == "probe":
+                found = true
+                expect(function_.body.has).to_equal(true)
+                match function_.body.value.kind:
+                    case HirExprKind.Call(_, values, types):
+                        expect(values.len()).to_equal(0)
+                        expect(types.len()).to_equal(1)
+                        match types[0].kind:
+                            case HirTypeKind.Int(bits, signed):
+                                expect(bits).to_equal(64)
+                                expect(signed).to_equal(true)
+                            case _: assert(false)
+                    case _: assert(false)
+        expect(found).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
