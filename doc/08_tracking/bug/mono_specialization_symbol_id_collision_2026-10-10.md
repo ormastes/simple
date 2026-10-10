@@ -1,7 +1,24 @@
 # Mono specialization symbol id collides with a non-function symbol
 
-Status: open. Found while proving the fn-typed parameter ABI (commit
-"keep fn-type annotation shapes so generic visitors monomorphize").
+Status: fixed 2026-10-10. Found while proving the fn-typed parameter ABI
+(commit "keep fn-type annotation shapes so generic visitors monomorphize").
+
+## Resolution
+
+Specialization ids now start at `MONO_SYMBOL_BASE` (2^50) in
+`src/compiler/40.mono/monomorphize_integration.spl` instead of one past the
+largest FUNCTION id of the declaring modules. No per-module `SymbolTable`
+reaches that range, so a specialization id can no longer alias a type
+parameter, a parameter/local or an imported callee -- in the declaring module
+or in the CALLER, whose table the id is also read through. The second case is
+how it was pinned: a call rewritten to `Box__get$i64` carried a small fresh id
+that the consumer's table resolved to an unrelated symbol, so MIR lowered it
+as an indirect closure call (or as the unspecialized template).
+`test/01_unit/compiler/50.mir/stage2_generic_class_receiver_spec.spl` asserts
+the emitted callee is the specialization by name.
+
+`generic_walker_fn_param_abi_spec.spl` still locates the walker by arity; it
+was not re-pointed at the name as part of this fix.
 
 ## Symptom
 

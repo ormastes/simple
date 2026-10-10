@@ -23,6 +23,7 @@ use compiler.monomorphize.engine.*
 use compiler.monomorphize.types.ConcreteType
 use compiler.monomorphize.type_subst.*
 use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
 use std.io_runtime.{env_get}
 
 fn mono_arg_value(a: HirCallArg) -> HirExpr:
@@ -143,6 +144,18 @@ class MonomorphizationPass:
     # Templates with >= 1 call site left unrewritten; never pruned, so the
     # dangling call and the template both stay visible to the verifier.
     unresolved_templates: Dict<text, bool>
+    # Instance methods of a generic impl (`impl Box<T>:`), keyed
+    # "<owner module>.<Class>::<method>" (the class's ownership identity) ->
+    # the template's key in `generic_functions`. Such a method is a template
+    # over the IMPL's type parameters, so a call on a receiver typed
+    # `Box<i64>` is specialized by the receiver's type arguments.
+    generic_methods: Dict<text, text>
+    # Same key -> why a generic impl's method cannot be specialized by the
+    # receiver's arguments alone. A call on a concrete instantiation is then
+    # a loud E-MONO-034, never a silent bind to the unspecialized template.
+    generic_method_rejected: Dict<text, text>
+    # Module name -> its SymbolTable, to read a receiver type's identity.
+    module_symbols: Dict<text, SymbolTable>
     # Statistics
     stats: MonoStats
     # Declared module constants/statics, keyed by module + actual SymbolId.
@@ -192,6 +205,9 @@ impl MonomorphizationPass:
             env: {},
             diagnostics: [],
             unresolved_templates: {},
+            generic_methods: {},
+            generic_method_rejected: {},
+            module_symbols: {},
             stats: MonoStats(
                 generic_functions_found: 0,
                 generic_structs_found: 0,
@@ -403,6 +419,99 @@ impl MonomorphizationPass:
                 self.generic_classes[c.name] = c
                 self.monomorphizer.register_generic_class(c.name, c)
                 self.stats.generic_classes_found = self.stats.generic_classes_found + 1
+
+        self.module_symbols[module_name] = module.symbols
+        self.collect_generic_impl_methods(module, module_name)
+
+    me collect_generic_impl_methods(module: HirModule, module_name: text):
+        """Register each instance method of a generic inherent impl
+        (`impl Box<T>:`, possibly in an extension module) as a function
+        template over the impl's type parameters, receiver first (`self` is
+        params[0]).
+
+        HIR flags these methods `is_generic_template` and MIR never emits a
+        template, so without a specialization a call on a `Box<i64>` receiver
+        has no callable target. Only the shape the receiver's arguments can
+        bind positionally is accepted -- an inherent impl whose target is
+        exactly its own parameters in order, and a method with no type
+        parameters of its own; every other method is recorded as rejected."""
+        var by_id: Dict<i64, HirFunction> = {}
+        for raw_fn in module.functions.values():
+            val f: HirFunction = raw_fn
+            val fs: SymbolId = f.symbol
+            by_id[fs.id] = f
+        for raw_impl in module.impls:
+            val gi: HirImpl = raw_impl
+            val impl_tps: [HirTypeParam] = gi.type_params
+            if impl_tps.len() == 0:
+                continue
+            var owner_identity = ""
+            var owner_name = ""
+            var target_reason = ""
+            match gi.type_.kind:
+                case HirTypeKind.Named(owner_sym, target_args):
+                    owner_identity = mono_type_identity(module.symbols, owner_sym, module_name)
+                    if val owner_info = module.symbols.get_symbol_raw(owner_sym.id):
+                        owner_name = owner_info.name
+                    if not mono_impl_target_is_canonical(target_args, impl_tps):
+                        target_reason = "its impl target does not name the impl's type parameters in order"
+                case _: ()
+            if owner_identity == "" or owner_name == "":
+                continue
+            if gi.has_trait_:
+                target_reason = "it is declared by a trait impl"
+            for method_name in gi.methods.keys():
+                val msym: SymbolId = gi.methods[method_name]
+                if not by_id.has(msym.id):
+                    continue
+                val template: HirFunction = by_id[msym.id]
+                if template.is_static or not template.is_method or template.params.len() == 0:
+                    continue
+                val method_key = "{owner_identity}::{method_name}"
+                val gname = "{owner_name}__{method_name}"
+                var reason = target_reason
+                # Every symbol spelling of a parameter is canonicalized, but a
+                # NAME binds once: the receiver's type arguments bind the
+                # impl's parameters, in order.
+                var all_tps: [HirTypeParam] = []
+                var bound_tps: [HirTypeParam] = []
+                var bound_names: [text] = []
+                for itp in impl_tps:
+                    val impl_tp: HirTypeParam = itp
+                    all_tps = all_tps.push(impl_tp)
+                    if not bound_names.contains(impl_tp.name):
+                        bound_names = bound_names.push(impl_tp.name)
+                        bound_tps = bound_tps.push(impl_tp)
+                val impl_bound_count = bound_tps.len()
+                for otp in template.type_params:
+                    val own_tp: HirTypeParam = otp
+                    all_tps = all_tps.push(own_tp)
+                    if not bound_names.contains(own_tp.name):
+                        bound_names = bound_names.push(own_tp.name)
+                        bound_tps = bound_tps.push(own_tp)
+                if reason == "" and bound_tps.len() != impl_bound_count:
+                    reason = "it declares type parameters of its own"
+                if reason == "" and (self.generic_functions.has(gname) or self.generic_methods.has(method_key)):
+                    reason = "another module declares a method under the same template key `{gname}`"
+                    # The earlier registration is equally unusable.
+                    for prior_key in self.generic_methods.keys():
+                        val pk: text = prior_key
+                        if self.generic_methods[pk] == gname:
+                            self.generic_method_rejected[pk] = reason
+                if reason != "":
+                    self.generic_method_rejected[method_key] = reason
+                    continue
+                var as_fn = template
+                as_fn.type_params = all_tps
+                as_fn.is_method = false
+                as_fn.name = gname
+                var canonical_fn = canonicalize_template(as_fn)
+                canonical_fn.type_params = bound_tps
+                as_fn.type_params = bound_tps
+                self.generic_functions[gname] = canonical_fn
+                self.template_module[gname] = module_name
+                self.monomorphizer.register_generic_function(gname, as_fn)
+                self.generic_methods[method_key] = gname
 
     # ========================================================================
     # Step 2: Worklist fixed point
@@ -794,6 +903,17 @@ impl MonomorphizationPass:
             case HirExprKind.Field(_, _, _):
                 val (ft, _fmod) = self.infer_field_chain(expr)
                 ft
+            case HirExprKind.ExistsCheck(exists_base):
+                # `opt.?` (also what `if val b = opt:` binds): still the
+                # optional itself, present-or-nil.
+                val eb: HirExpr = exists_base
+                val ebt = self.infer_expr_type(eb)
+                if ebt == nil:
+                    return nil
+                val ebtt: HirType = ebt
+                match ebtt.kind:
+                    case HirTypeKind.Optional(_): ebtt
+                    case _: nil
             case HirExprKind.Cast(_, target):
                 val ct: HirType = target
                 ct
@@ -1380,6 +1500,110 @@ impl MonomorphizationPass:
         new_type_args = []
         HirExprKind.Call(new_callee, new_args, new_type_args)
 
+    me receiver_instance_type(receiver: HirExpr) -> (HirType?, text):
+        """Receiver type from its DECLARATION -- a param/let binding or a
+        field chain -- with the module whose table minted its SymbolIds, then
+        the general local inference. HIR may stamp a receiver expression with
+        its bare class (`Box`, no arguments), which would hide the `Box<i64>`
+        the declaration carries. `if val b = opt:` aliases the optional
+        binding, so an `Optional<Box<i64>>` receiver is its payload."""
+        var found: HirType? = nil
+        var found_module = self.current_module
+        match receiver.kind:
+            case HirExprKind.Var(sym_id):
+                found = self.env_type(sym_id)
+            case HirExprKind.NamedVar(sym_id, _):
+                found = self.env_type(sym_id)
+            case HirExprKind.Field(_, _, _):
+                val (ft, fmod) = self.infer_field_chain(receiver)
+                found = ft
+                found_module = fmod
+            case _: ()
+        if found == nil:
+            found = self.infer_expr_type(receiver)
+            found_module = self.current_module
+        if found == nil:
+            return (nil, found_module)
+        val ft2: HirType = found
+        match ft2.kind:
+            case HirTypeKind.Optional(inner):
+                val payload: HirType = inner
+                (payload, found_module)
+            case _:
+                (ft2, found_module)
+
+    me generic_method_template(receiver: HirExpr, method: text) -> text:
+        """Template key of `method` when the receiver's type is a concrete
+        instantiation (`Box<i64>`) of a class whose generic impl declares it,
+        else "". The class is matched by ownership identity, so a same-named
+        class from another module never borrows the template. A method that
+        cannot be specialized this way is reported (E-MONO-034) here: the
+        receiver's class is known, so MIR would otherwise bind the call to the
+        unspecialized template, which is never emitted."""
+        val (rt, rmod) = self.receiver_instance_type(receiver)
+        if rt == nil:
+            return ""
+        val rtt: HirType = rt
+        match rtt.kind:
+            case HirTypeKind.Named(owner_sym, owner_args):
+                if owner_args.len() == 0:
+                    return ""
+                if not self.module_symbols.has(rmod):
+                    return ""
+                val identity = mono_type_identity(self.module_symbols[rmod], owner_sym, rmod)
+                val key = "{identity}::{method}"
+                var reason = ""
+                if self.generic_method_rejected.has(key):
+                    reason = self.generic_method_rejected[key]
+                elif not self.generic_methods.has(key):
+                    return ""
+                else:
+                    val known: text = self.generic_methods[key]
+                    val template: HirFunction = self.generic_functions[known]
+                    if template.type_params.len() == owner_args.len():
+                        return known
+                    reason = "the receiver has {owner_args.len()} type arguments and the impl declares {template.type_params.len()} type parameters"
+                self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
+                self.diagnostics = self.diagnostics.push(
+                    "E-MONO-034: method `{method}` of generic `{identity}` cannot be specialized for this receiver: {reason}; call site not monomorphized")
+                ""
+            case _:
+                ""
+
+    me rewrite_generic_method_call(gname: text, receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution) -> HirExprKind:
+        """`recv.m(a)` on a `Box<i64>` receiver -> a direct call of the
+        `Box<i64>` specialization with the receiver first (UFCS; the
+        template's params[0] is `self`). Falls back to the unchanged method
+        call when the specialization is refused."""
+        val new_receiver = self.rewrite_expr(receiver)
+        val new_args = self.rewrite_call_args(args)
+        var targs: [HirType] = []
+        val (rt, _rmod) = self.receiver_instance_type(receiver)
+        if rt != nil:
+            val rtt: HirType = rt
+            match rtt.kind:
+                case HirTypeKind.Named(_, owner_args):
+                    targs = owner_args
+                case _: ()
+        self.stats.call_sites_found = self.stats.call_sites_found + 1
+        val target = self.request_specialization(gname, targs)
+        if target < 0:
+            self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
+            self.unresolved_templates[gname] = true
+            return HirExprKind.MethodCall(new_receiver, method, new_args, resolution)
+        val spec_name: text = self.mangled_name(gname, targs)
+        val template_mod: text = self.template_module[gname]
+        # MIR resolves a fresh mono callee by its baked display name; a
+        # specialization placed in another module is spelled `<module>.<fn>`
+        # exactly like HIR's qualified imported-function references.
+        val callee_name = if template_mod == self.current_module: spec_name else: "{template_mod}.{spec_name}"
+        var call_args: [HirCallArg] = [HirCallArg(has_name: false, name: "", value: new_receiver, span: receiver.span)]
+        for a in new_args:
+            call_args = call_args.push(a)
+        val callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId.new(target), callee_name),
+                             has_type_: false, type_: nil, span: receiver.span)
+        HirExprKind.Call(callee, call_args, [])
+
     me rewrite_expr_with_context(expr: HirExpr, expected: HirType?) -> HirExpr:
         # Context is used only for this call, never inherited by its arguments.
         if expr == nil:
@@ -1480,7 +1704,11 @@ impl MonomorphizationPass:
                         else:
                             out.kind = HirExprKind.MethodCall(self.rewrite_expr(rc), method, self.rewrite_call_args(args), resolution)
                     case _:
-                        out.kind = HirExprKind.MethodCall(self.rewrite_expr(rc), method, self.rewrite_call_args(args), resolution)
+                        val generic_method = self.generic_method_template(rc, method)
+                        if generic_method != "":
+                            out.kind = self.rewrite_generic_method_call(generic_method, rc, method, args, resolution)
+                        else:
+                            out.kind = HirExprKind.MethodCall(self.rewrite_expr(rc), method, self.rewrite_call_args(args), resolution)
             case HirExprKind.StaticCall(ty, method, args, resolution):
                 match resolution:
                     case MethodResolution.StaticMethod(_, method_id):
@@ -2134,3 +2362,44 @@ fn mono_requalify(callee: HirExpr, spec_name: text) -> text:
             n.substring(0, n.len() - last.len()) + spec_name
         case _:
             spec_name
+
+fn mono_type_identity(symbols: SymbolTable, sym: SymbolId, module_name: text) -> text:
+    """Ownership identity `<owner module>.<Name>` of a type symbol, read in
+    the table that minted `sym` (the same spelling MIR's mir_class_identity
+    uses). "" when the table has no such symbol."""
+    if val info = symbols.get_symbol_raw(sym.id):
+        var owner = info.defining_module ?? ""
+        if owner == "":
+            owner = module_name
+        return "{hir_symbol_owner_module(owner)}.{info.name}"
+    ""
+
+fn mono_impl_target_is_canonical(target_args: [HirType], impl_tps: [HirTypeParam]) -> bool:
+    """True when an impl's target is exactly its own type parameters in
+    order (`impl<A, B> Pair<A, B>`), so a receiver's type arguments bind them
+    positionally. `impl Box<Option<T>>` and `impl<A, B> Pair<B, A>` are not.
+
+    The parser leaves a positional target ARGLESS and records every other
+    generic inherent target with an argument list
+    (parser_decls_use.spl `impl_target_binds_positionally`), so an empty list
+    is the positional case; a non-empty one must still spell the parameters."""
+    if target_args.len() == 0:
+        return true
+    if target_args.len() != impl_tps.len():
+        return false
+    var i = 0
+    while i < target_args.len():
+        val arg: HirType = target_args[i]
+        val tp: HirTypeParam = impl_tps[i]
+        var matches = false
+        match arg.kind:
+            case HirTypeKind.TypeParam(arg_name, _):
+                matches = arg_name == tp.name
+            case HirTypeKind.Named(arg_sym, arg_args):
+                val tp_sym: SymbolId = tp.symbol
+                matches = arg_args.len() == 0 and arg_sym.id == tp_sym.id
+            case _: ()
+        if not matches:
+            return false
+        i = i + 1
+    true

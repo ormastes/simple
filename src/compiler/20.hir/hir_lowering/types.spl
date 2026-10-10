@@ -1129,6 +1129,23 @@ impl HirLowering:
 
         HirType(kind: kind, span: lt.span)
 
+    me lower_resolved_named_kind(symbol_id: SymbolId, hir_args: [HirType], span: Span) -> HirTypeKind:
+        """Named type whose base resolved to `symbol_id`.
+
+        The parser keeps `Name<args>` for ANY name a file imports by an
+        explicit `use` item -- it cannot know the kind of an imported name.
+        Only an imported class or struct (or an alias, expanded below) is an
+        instantiation whose identity and arguments carry on; an imported
+        trait or enum applied to arguments keeps the erased `Any` it had
+        before that parser rule existed."""
+        if hir_args.len() > 0 and self.type_alias_position(symbol_id) < 0:
+            if val named_info = self.symbols.get_symbol_raw(symbol_id.id):
+                val named_owner = named_info.defining_module ?? ""
+                if named_owner != "" and named_owner != self.module_filename:
+                    if named_info.kind == SymbolKind.Trait or named_info.kind == SymbolKind.Enum:
+                        return HirTypeKind.Any
+        self.lower_named_symbol_kind(symbol_id, hir_args, span)
+
     me lower_named_kind(name: text, hir_args: [HirType], span: Span) -> HirTypeKind:
         # Only the current alias's formal parameters substitute into its body.
         # Arguments are lowered in the caller before entering this frame.
@@ -1322,7 +1339,7 @@ impl HirLowering:
                 if symbol_id.is_valid():
                     if custom_primitive_is_name(name):
                         custom_primitive_bind_symbol(name, symbol_id.id)
-                    self.lower_named_symbol_kind(symbol_id, hir_args, span)
+                    self.lower_resolved_named_kind(symbol_id, hir_args, span)
                 # SEED-PARITY (2026-08-01): the three rules below all sit AFTER
                 # the symbol lookup, exactly where the seed puts them
                 # (type_resolver.rs:141 single-letter, :178 tuple, :182 bare

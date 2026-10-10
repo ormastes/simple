@@ -1311,6 +1311,57 @@ fn array_generic_type_get_elem(arr_id: i64) -> i64:
         return array_generic_elem_tags[arr_id]
     TYPE_ANY
 
+# ===== Imported Generic Instance Registry =====
+# `b: Box<i64>` where `Box` is IMPORTED is absent from this file's named-type
+# registry, so the generic branch collapsed it to TYPE_ANY: the value carried
+# no class identity and no type arguments, MIR could not resolve `b.get()`,
+# and 40.mono had nothing to specialize. Each distinct instance gets its own
+# named-type entry (keyed by base name + argument tags, so it never aliases
+# the base's own entry) and the base name and argument tags are recorded here
+# for the AST bridge, which rebuilds `Named(base, args)`.
+
+var named_generic_instance_ids: [i64] = []
+var named_generic_instance_bases: [text] = []
+var named_generic_instance_args: [[i64]] = []
+
+fn named_generic_instance_register(base: text, args: [i64]) -> i64:
+    var key = base + "<"
+    var ai = 0
+    while ai < args.len():
+        if ai > 0:
+            key = key + ","
+        key = key + "{args[ai]}"
+        ai = ai + 1
+    key = key + ">"
+    val gid = named_type_register(key, [], [])
+    var existing = 0
+    while existing < named_generic_instance_ids.len():
+        if named_generic_instance_ids[existing] == gid:
+            return TYPE_NAMED_BASE + gid
+        existing = existing + 1
+    named_generic_instance_ids.push(gid)
+    named_generic_instance_bases.push(base)
+    named_generic_instance_args.push(args)
+    TYPE_NAMED_BASE + gid
+
+fn named_generic_instance_index(tag: i64) -> i64:
+    """Registry index of an imported generic instance tag, else -1."""
+    if tag < TYPE_NAMED_BASE:
+        return -1
+    val gid = tag - TYPE_NAMED_BASE
+    var i = 0
+    while i < named_generic_instance_ids.len():
+        if named_generic_instance_ids[i] == gid:
+            return i
+        i = i + 1
+    -1
+
+fn named_generic_instance_base(index: i64) -> text:
+    named_generic_instance_bases[index]
+
+fn named_generic_instance_arg_tags(index: i64) -> [i64]:
+    named_generic_instance_args[index]
+
 # ===== Isolated Capability Type Registry =====
 # Tracks `iso T` inner types (LANE ISO2, doc/08_tracking/bug/
 # iso_mut_capability_prefix_not_parsed_2026-07-29.md) -- see
@@ -1585,6 +1636,9 @@ fn reset_all_pools():
     array_generic_elem_tags = []
     option_generic_inner_tags = []
     isolated_inner_tags = []
+    named_generic_instance_ids = []
+    named_generic_instance_bases = []
+    named_generic_instance_args = []
     exclusive_inner_tags = []
     reference_inner_tags = []
     reference_mutable_flags = []
@@ -1610,6 +1664,8 @@ export TYPE_RESULT_BASE, is_result_tag, result_tag_to_id
 export result_type_register, result_type_get_ok, result_type_get_err
 export TYPE_ARRAY_GENERIC_BASE, is_array_generic_tag, array_generic_tag_to_id
 export array_generic_type_register, array_generic_type_get_elem
+export named_generic_instance_register, named_generic_instance_index
+export named_generic_instance_base, named_generic_instance_arg_tags
 export TYPE_OPTION_GENERIC_BASE, is_option_generic_tag, option_generic_tag_to_id
 export option_generic_type_register, option_generic_type_get_inner
 export TYPE_ISOLATED_BASE, is_isolated_tag, isolated_tag_to_id
@@ -1636,7 +1692,7 @@ export scope_push, scope_pop, scope_depth
 
 # --- flat-AST pool codec: flat_type ------------------------------
 #
-# Dump/restore for this file's 49 pools, in a FIXED SORTED ORDER that
+# Dump/restore for this file's 52 pools, in a FIXED SORTED ORDER that
 # dump and restore share. Order is the whole contract: the blob carries no
 # pool names, so a reordering on one side silently pairs each pool with its
 # neighbour's data. Sorting by name keeps the two sides in step.
@@ -1672,6 +1728,9 @@ pub fn flat_type_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_text(generic_param_names))
     parts = parts.push(flat_pool_enc_i64_list(intersection_type_members))
     parts = parts.push(flat_pool_enc_i64(isolated_inner_tags))
+    parts = parts.push(flat_pool_enc_i64_list(named_generic_instance_args))
+    parts = parts.push(flat_pool_enc_text(named_generic_instance_bases))
+    parts = parts.push(flat_pool_enc_i64(named_generic_instance_ids))
     parts = parts.push(flat_pool_enc_text_list(named_type_field_names))
     parts = parts.push(flat_pool_enc_i64_list(named_type_field_types))
     parts = parts.push(flat_pool_enc_text(named_type_names))
@@ -1729,6 +1788,9 @@ pub fn flat_type_pools_restore(r: FlatPoolReader) -> bool:
     generic_param_names = flat_pool_dec_text(r)
     intersection_type_members = flat_pool_dec_i64_list(r)
     isolated_inner_tags = flat_pool_dec_i64(r)
+    named_generic_instance_args = flat_pool_dec_i64_list(r)
+    named_generic_instance_bases = flat_pool_dec_text(r)
+    named_generic_instance_ids = flat_pool_dec_i64(r)
     named_type_field_names = flat_pool_dec_text_list(r)
     named_type_field_types = flat_pool_dec_i64_list(r)
     named_type_names = flat_pool_dec_text(r)
@@ -1763,6 +1825,8 @@ pub fn flat_type_pools_restore(r: FlatPoolReader) -> bool:
     current_scope_depth = r.next_i64()
     # The interned fn-type pools are parallel arrays; a length mismatch is a
     # torn blob and must be refused, not half-restored.
+    if named_generic_instance_ids.len() != named_generic_instance_bases.len() or named_generic_instance_ids.len() != named_generic_instance_args.len():
+        return false
     if function_param_tags.len() != function_ret_tags.len():
         return false
     r.ok
