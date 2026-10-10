@@ -7,6 +7,7 @@ use compiler.mir._MirLowering.native_trait_registration.*
 use compiler.mir._MirLowering.native_trait_dispatch.*
 use compiler.mir._MirLowering.native_trait_conversion.*
 use compiler.mir._MirLowering.native_trait_calls.*
+use compiler.mir._MirLoweringExpr.builtin_method_extras.*
 # MIR Lowering - Expression Lowering
 #
 # Expression lowering from HIR to MIR:
@@ -694,6 +695,11 @@ impl MirLowering:
         narrowed
 
     me lower_result_unwrap(receiver: HirExpr, payload_type: HirType, default_expr: HirExpr?, unwrap_err: bool) -> LocalId:
+        self.lower_result_unwrap_core(receiver, payload_type, default_expr, unwrap_err, 0, false)
+
+    me lower_result_unwrap_core(receiver: HirExpr, payload_type: HirType, default_expr: HirExpr?, unwrap_err: bool, prelowered: LocalId, has_prelowered: bool) -> LocalId:
+        # `has_prelowered`: the receiver was already evaluated (a chained
+        # `r.map(f).unwrap_or(d)`); reuse that local, never lower it twice.
         var result_type = MirType.i64()
         var is_text = false
         var supported = false
@@ -747,7 +753,7 @@ impl MirLowering:
             self.builder = b_bad
             return bad
 
-        val receiver_local = self.lower_expr(receiver)
+        val receiver_local = if has_prelowered: prelowered else: self.lower_expr(receiver)
         var b_disc = self.builder
         val disc_op = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_enum_discriminant"),
@@ -1675,6 +1681,48 @@ impl MirLowering:
             option_method_receiver = self.method_receiver_is_option(receiver, prelowered_method_receiver)
         if mir_mc_trace_state == 1:
             eprint("[mir-method-call] option-probe method={method}\n")
+
+        # Result combinators (BUG-IT-10): map / map_err / ok, and unwrap /
+        # unwrap_or / unwrap_err on a receiver whose Result type is known only
+        # from its lowered local (`r.map(f).unwrap_or(d)` -- a chained call
+        # carries no static expression type on this pipeline). Type-directed:
+        # only a receiver PROVEN to be a Result is taken; a chained map/map_err
+        # receiver is lowered once and reused by every later arm.
+        val result_combinator_shape =
+            (method == "map" and args.len() == 1) or
+            (method == "map_err" and args.len() == 1) or
+            (method == "ok" and args.len() == 0) or
+            (method == "unwrap" and args.len() == 0 and result_ok_type == nil) or
+            (method == "unwrap_or" and args.len() == 1 and result_ok_type == nil) or
+            (method == "unwrap_err" and args.len() == 0 and result_err_type == nil)
+        # is_ok / is_err on a STATICALLY typed Result stay with
+        # try_lower_result_predicate below; only the chained form
+        # (`r.map(f).is_ok()`), which that helper cannot type, is taken here.
+        val result_chained_predicate_shape = (method == "is_ok" or method == "is_err") and args.len() == 0
+        if (result_combinator_shape or result_chained_predicate_shape) and resolution_is_unresolved and not option_method_receiver:
+            var combinator_type: HirType? = nil
+            var combinator_static_result = false
+            if val combinator_static_type = self.enum_match_expr_type(receiver):
+                match combinator_static_type.kind:
+                    case HirTypeKind.Result(_, _):
+                        combinator_static_result = true
+                        if not result_chained_predicate_shape:
+                            combinator_type = Some(combinator_static_type)
+                    case _: ()
+            if combinator_type == nil and not combinator_static_result and not has_prelowered_method_receiver:
+                match receiver.kind:
+                    case MethodCall(_, chained_method, _, _):
+                        if chained_method == "map" or chained_method == "map_err":
+                            prelowered_method_receiver = self.lower_expr(receiver)
+                            has_prelowered_method_receiver = true
+                    case _: ()
+            if combinator_type == nil and not combinator_static_result and has_prelowered_method_receiver:
+                if val combinator_local_type = self.find_local_hir_type(prelowered_method_receiver.id):
+                    match combinator_local_type.kind:
+                        case HirTypeKind.Result(_, _): combinator_type = Some(combinator_local_type)
+                        case _: ()
+            if val combinator_result_type = combinator_type:
+                return self.lower_result_combinator(receiver, method, args, combinator_result_type, prelowered_method_receiver, has_prelowered_method_receiver)
 
         # Flat/native HIR can leave custom predicate methods unresolved. Probe
         # their owner before the text fallbacks below so a struct method named
@@ -3986,6 +4034,15 @@ impl MirLowering:
                 # same-named method on some other Unresolved-typed receiver
                 # (which this codebase does not currently have, but might grow)
                 # can't be misdispatched as an array op.
+                # BUG-IT-9 / BUG-IT-10: array reversed/sorted/index_of/enumerate/
+                # find/reduce and numeric abs/min/max/floor/ceil/round. Both
+                # helpers are type-directed and return nil for any receiver they
+                # cannot PROVE, which keeps the loud unresolved failure below.
+                if val array_extra = self.try_lower_array_builtin_extra(receiver, unresolved_receiver_local, method, args):
+                    return array_extra
+                if val numeric_extra = self.try_lower_numeric_builtin(receiver, unresolved_receiver_local, method, args, predicate_has_custom_owner):
+                    return numeric_extra
+
                 if self.local_is_runtime_array(unresolved_receiver_local):
                     if mir_mc_trace_state == 1:
                         eprint("[mir-method-call] unresolved-array method={method}\n")

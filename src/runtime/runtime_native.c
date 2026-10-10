@@ -7247,6 +7247,17 @@ double rt_math_ceil(double x) {
     return ceil(x);
 }
 
+/* Mirror the Rust runtime (value/sffi/math.rs): f64::round rounds half AWAY
+ * from zero, which is C round() -- NOT nearbyint/rint -- and f64::abs is
+ * fabs. Both were Rust-only, so `f.round()` / `f.abs()` could not link here. */
+double rt_math_round(double x) {
+    return round(x);
+}
+
+double rt_math_abs(double x) {
+    return fabs(x);
+}
+
 double rt_math_log(double x) {
     return log(x);
 }
@@ -17062,23 +17073,28 @@ int64_t rt_array_first(int64_t array) {
     return rt_array_get(a, 0);
 }
 
-/* collections.rs:5349 -- [[i, elem], ...]: one 2-element array per entry. */
+/* collections.rs:5963 -- [(i, elem), ...]: one 2-TUPLE per entry, with the
+ * index as a TAGGED int. This used to build a plain 2-element array holding
+ * the RAW index, which matched neither the Rust runtime (rt_tuple_new +
+ * RuntimeValue::from_int) nor rt_dict_entries above: a consumer decoding the
+ * pair as `(i64, T)` read index >> 3. Same tuple shape as rt_dict_entries so
+ * `for (i, x) in xs.enumerate()` and `for (k, v) in dict` share one decoder. */
 int64_t rt_array_enumerate(int64_t array) {
-    SplArray* a = (SplArray*)(intptr_t)array;
+    SplArray* a = rt_core_as_array(array) ? (SplArray*)(uintptr_t)array : NULL;
     SplArray* out;
     int64_t n, i;
-    if (a == NULL) return 0;
+    if (a == NULL) return rt_core_nil();
     n = rt_array_len(a);
     out = rt_array_new(n > 0 ? n : 1);
-    if (out == NULL) return 0;
+    if (out == NULL) return rt_core_nil();
     for (i = 0; i < n; i++) {
-        SplArray* pair = rt_array_new(2);
-        if (pair == NULL) break;
-        rt_array_push(pair, i);
-        rt_array_push(pair, rt_array_get(a, i));
-        rt_array_push(out, (int64_t)(intptr_t)pair);
+        int64_t pair = rt_tuple_new(2);
+        if (pair == rt_core_nil()) return rt_core_nil();
+        rt_tuple_set(pair, 0, rt_value_int(i));
+        rt_tuple_set(pair, 1, rt_array_get(a, i));
+        rt_array_push(out, pair);
     }
-    return (int64_t)(intptr_t)out;
+    return (int64_t)(uintptr_t)out;
 }
 
 /* collections.rs:5793 -- sum of the numeric elements: int 0 for an empty
