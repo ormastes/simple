@@ -138,6 +138,9 @@ esac
   || die "module role files differ from compiled authority"
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository root unavailable"
+# Reject invalid target/schema before starting any independent source task.
+perl -I "$repo_root/scripts/bootstrap/lib" -MBootstrapNativeImage=verify_native_object \
+  -e 'verify_native_object(undef, $ARGV[0])' "$target" || die "unsupported diagnostic target"
 prepare="$repo_root/scripts/bootstrap/prepare-phase4-native-groups.shs"
 shared_parse_root_check="$repo_root/scripts/bootstrap/lib/shared-parse-cas-root.shs"
 shared_parse_source_check="$repo_root/scripts/bootstrap/lib/shared-parse-source-authority.shs"
@@ -243,6 +246,12 @@ verify_image_set() {
 # the compiler argv are relative. Output publication is hash checked by run.
 build_binary() {
   id=$1 entry=$2 output=$3 task_phase=$4 backend=$5
+  output_kind=${6:-binary}
+  case "$output_kind" in
+    binary) set -- ;;
+    object) set -- --emit-object ;;
+    *) die "unsupported build output kind" ;;
+  esac
   task_id="$id-$backend"
   job_root="$root/$task_phase/binaries/$backend/$id"
   mkdir -p "$job_root/bin" "$job_root/cache" "$job_root/state" || die "job directories unavailable"
@@ -257,9 +266,10 @@ build_binary() {
       --memory-policy "$memory_policy" \
       --manifest "$job_root/manifest.sdn" -- \
       native-build --target "$target" --backend "$backend" \
-      --source src/compiler --source src/app --source src/lib \
+      --source src/compositions/kernel_llvm_cranelift --source src/compiler --source src/app --source src/lib \
+      --source src/os --source src/plugins --source src/package_ownership --source src/compositions \
       --entry-closure --entry "$entry" --threads "$threads" --mode dynload \
-      --cache-dir "cache/$task_id" --output "$output" \
+      --cache-dir "cache/$task_id" "$@" --output "$output" \
       || die "$id manifest blocked"
   fi
   require_current_manifest "$job_root/manifest.sdn"
@@ -269,6 +279,7 @@ build_binary() {
   sh "$shared_parse_source_check" "$source_authority" "$source_authority_digest" \
     || die "shared parse source authority changed before $id manager spawn"
   SIMPLE_BUILD_PRESPAWN_REQUIRED_MEMORY_BYTES="$((memory_bytes + reserve_bytes))" \
+  SIMPLE_NO_STUB_FALLBACK=1 \
   SIMPLE_SHARED_PARSE_CAS_ROOT="$shared_parse_cas_root" \
   SIMPLE_SHARED_PARSE_SOURCE_ROOT="$source_root" \
   SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH="$source_authority" \
@@ -288,6 +299,11 @@ build_binary() {
     --output-root "$job_root" || die "$id receipt/output verification failed"
   regular "$job_root/$output" && regular "$job_root/state/receipts/$task_id.sdn" \
     || die "$id has no published output and terminal receipt"
+  if [ "$output_kind" = object ]; then
+    perl -I "$repo_root/scripts/bootstrap/lib" -MBootstrapNativeImage=verify_native_object \
+      -e 'verify_native_object(@ARGV)' "$job_root/$output" "$target" >"$job_root/object-validation.log" 2>&1 \
+      || { echo "$id: emitted object does not match $target; see $job_root/object-validation.log" >&2; return 1; }
+  fi
   printf '%s=%s\n' "${task_phase}_${backend}_${id}" "$(hash_file "$job_root/$output")" >>"$hashes"
   printf '%s=%s\n' "${task_phase}_${backend}_${id}_manager_receipt_sha256" \
     "$(hash_file "$job_root/state/receipts/$task_id.sdn")" >>"$hashes"
@@ -398,6 +414,7 @@ build_index() {
   sh "$shared_parse_source_check" "$source_authority" "$source_authority_digest" \
     || die "shared parse source authority changed before $task_phase/$backend index spawn"
   SIMPLE_BUILD_PRESPAWN_REQUIRED_MEMORY_BYTES="$((memory_bytes + reserve_bytes))" \
+  SIMPLE_NO_STUB_FALLBACK=1 \
   SIMPLE_SHARED_PARSE_CAS_ROOT="$shared_parse_cas_root" \
   SIMPLE_SHARED_PARSE_SOURCE_ROOT="$source_root" \
   SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH="$source_authority" \
@@ -548,7 +565,9 @@ dispatch_selected() {
 }
 if dispatch_selected; then :; else
   schedule_status=$?
-  echo "phase3-phase4-grouped: managed children incomplete; schedule=$schedule_status outcomes=$statuses" >&2
+  awk -F '\t' '$2=="FAILED" || $2=="BLOCKED" || $2=="ABORTED" {print}' \
+    "$statuses" >"$statuses.failures" || die "failure summary publication failed"
+  echo "phase3-phase4-grouped: managed children incomplete; schedule=$schedule_status failures=$statuses.failures outcomes=$statuses" >&2
   exit "$schedule_status"
 fi
 verify_shared_source

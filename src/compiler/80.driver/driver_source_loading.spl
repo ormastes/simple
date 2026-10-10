@@ -9,6 +9,8 @@ use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
 use std.io_runtime.{file_read_nullable, dir_exists}
 use compiler.common.driver_core_types.{SourceFile, source_file_coverage_identity}
 use compiler.common.module_path_naming.{module_logical_name_from_path}
+use compiler.common.source_root_resolution.{SourceRootResolutionV1,
+    source_root_numbered_candidate_v1, source_root_numbered_match_v1}
 use compiler.types.type_infer.*
 use compiler.types.dim_constraints_types.{DimError}
 use compiler.borrow.borrow_check.*
@@ -928,77 +930,71 @@ pub fn _driver_entry_sibling_module_paths(content: text) -> [text]:
             result = result.push(sibling)
     result
 
-fn _driver_numbered_child_dir(parent: text, segment: text) -> text:
-    if parent == "":
-        return ""
+fn _driver_numbered_child_dir(parent: text, segment: text) -> SourceRootResolutionV1:
+    if parent == "": return SourceRootResolutionV1.Missing
     var parent_exists = false
     unsafe(capabilities: [ffi]):
         parent_exists = _driver_resolver_path_exists_v1(parent)
-    if not parent_exists:
-        return ""
-    var matched = ""
+    if not parent_exists: return SourceRootResolutionV1.Missing
+    var matched = SourceRootResolutionV1.Missing
     unsafe(capabilities: [ffi]):
         for entry in rt_dir_list(parent):
-            var prefix_len = 0
-            val entry_len = entry.len()
-            while prefix_len < entry_len and prefix_len < 3:
-                val code = entry.char_code_at(prefix_len)
-                if code < 48 or code > 57:
-                    break
-                prefix_len = prefix_len + 1
-            if prefix_len >= 1 and prefix_len <= 3 and prefix_len < entry_len and entry.char_at(prefix_len) == "." and entry.substring(prefix_len + 1) == segment:
+            if source_root_numbered_candidate_v1(entry, segment):
                 val candidate = parent + "/" + entry
                 if dir_exists(candidate):
-                    # Directory enumeration order is not module identity.
-                    # Reject ambiguous 00.name / 10.name siblings rather than
-                    # admitting whichever the filesystem happened to return.
-                    if matched != "":
-                        return ""
-                    matched = candidate
+                    matched = source_root_numbered_match_v1(matched, candidate, parent + "/" + segment)
+                    match matched:
+                        case SourceRootResolutionV1.Ambiguous(_): return matched
+                        case SourceRootResolutionV1.Found(_): ()
+                        case SourceRootResolutionV1.Missing: ()
     matched
 
-fn _driver_try_numbered_entry_import_rel(root: text, rel: text) -> text:
+fn _driver_try_numbered_entry_import_rel_checked_v1(root: text, rel: text) -> SourceRootResolutionV1:
     val parts = rel.split("/")
-    if parts.len() == 0:
-        return ""
+    if parts.len() == 0: return SourceRootResolutionV1.Missing
     var current = root
     var i = 0
     while i + 1 < parts.len():
         val direct = if current == "": parts[i] else: current + "/" + parts[i]
-        val direct_exists = dir_exists(direct)
-        if direct_exists:
+        if dir_exists(direct):
             current = direct
         else:
-            val numbered = _driver_numbered_child_dir(current, parts[i])
-            if numbered == "":
-                return ""
-            current = numbered
+            match _driver_numbered_child_dir(current, parts[i]):
+                case SourceRootResolutionV1.Found(path): current = path
+                case SourceRootResolutionV1.Missing: return SourceRootResolutionV1.Missing
+                case SourceRootResolutionV1.Ambiguous(reason): return SourceRootResolutionV1.Ambiguous(reason)
         i = i + 1
     val base = if current == "": parts[parts.len() - 1] else: current + "/" + parts[parts.len() - 1]
     val spl_path = base + ".spl"
     var spl_exists = false
     unsafe(capabilities: [ffi]):
         spl_exists = _driver_resolver_path_exists_v1(spl_path)
-    if spl_exists:
-        return spl_path
+    if spl_exists: return SourceRootResolutionV1.Found(spl_path)
     var module_dir = base
     if not dir_exists(module_dir):
-        module_dir = _driver_numbered_child_dir(current, parts[parts.len() - 1])
-    if module_dir == "":
-        return ""
+        match _driver_numbered_child_dir(current, parts[parts.len() - 1]):
+            case SourceRootResolutionV1.Found(path): module_dir = path
+            case SourceRootResolutionV1.Missing: return SourceRootResolutionV1.Missing
+            case SourceRootResolutionV1.Ambiguous(reason): return SourceRootResolutionV1.Ambiguous(reason)
     val mod_path = module_dir + "/mod.spl"
     var mod_exists = false
     unsafe(capabilities: [ffi]):
         mod_exists = _driver_resolver_path_exists_v1(mod_path)
-    if mod_exists:
-        return mod_path
+    if mod_exists: return SourceRootResolutionV1.Found(mod_path)
     val init_path = module_dir + "/__init__.spl"
     var init_exists = false
     unsafe(capabilities: [ffi]):
         init_exists = _driver_resolver_path_exists_v1(init_path)
-    if init_exists:
-        return init_path
-    ""
+    if init_exists: return SourceRootResolutionV1.Found(init_path)
+    SourceRootResolutionV1.Missing
+
+fn _driver_try_numbered_entry_import_rel(root: text, rel: text) -> text:
+    # Legacy path probes retain their text result. Selected source roots use
+    # the checked result directly and must never collapse ambiguity to missing.
+    match _driver_try_numbered_entry_import_rel_checked_v1(root, rel):
+        case SourceRootResolutionV1.Found(path): path
+        case SourceRootResolutionV1.Missing: ""
+        case SourceRootResolutionV1.Ambiguous(_): ""
 
 fn _driver_entry_import_checkout_prefix(entry_dir: text) -> text:
     if driver_admitted_epoch_active_v1():
@@ -1392,6 +1388,39 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
     if mapped != "":
         return mapped
     ""
+
+pub fn _driver_resolve_source_root_entry_import_v1(module_path: text, source_roots: [text]) -> SourceRootResolutionV1:
+    # Match native-build's ordered explicit-root contract before probing the
+    # checkout. A composition overlay is authoritative for the module it owns;
+    # re-resolving that name in src/ silently restores an excluded provider.
+    # Relative imports remain owned by their importing file, not overlays.
+    if module_path.starts_with("."): return SourceRootResolutionV1.Missing
+    var probe = module_path
+    while probe != "":
+        val segments = probe.split(".")
+        for source_root in source_roots:
+            if source_root.ends_with(".spl"): continue
+            var root = source_root
+            while root.len() > 1 and root.ends_with("/"):
+                root = root.substring(0, root.len() - 1)
+            val root_parts = root.split("/")
+            if root_parts.len() == 0: continue
+            val root_name = root_parts[root_parts.len() - 1]
+            if segments.len() > 1 and (segments[0] == root_name or
+                    (root_name == "lib" and segments[0] == "std")):
+                val stripped = segments.slice(1, segments.len()).join("/")
+                val selected = _driver_try_numbered_entry_import_rel_checked_v1(root, stripped)
+                match selected:
+                    case SourceRootResolutionV1.Found(_): return selected
+                    case SourceRootResolutionV1.Ambiguous(_): return selected
+                    case SourceRootResolutionV1.Missing: ()
+            val selected = _driver_try_numbered_entry_import_rel_checked_v1(root, probe.replace(".", "/"))
+            match selected:
+                case SourceRootResolutionV1.Found(_): return selected
+                case SourceRootResolutionV1.Ambiguous(_): return selected
+                case SourceRootResolutionV1.Missing: ()
+        probe = _driver_entry_import_parent(probe)
+    SourceRootResolutionV1.Missing
 
 pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
     """File path backing a Simple import path, or "" when none exists.

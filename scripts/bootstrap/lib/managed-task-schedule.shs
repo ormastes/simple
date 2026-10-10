@@ -48,8 +48,30 @@ managed_attempt_binary() {
   fi
 }
 
+# Independent units re-enter the explicit target native-build route. Neither
+# a failed index nor partial group output becomes input to these object tasks.
+managed_attempt_objects() {
+  object_phase=$1 object_backend=$2
+  [ -f "$module_inventory" ] && [ ! -L "$module_inventory" ] &&
+    [ -s "$module_inventory" ] || return 2
+  awk 'length($0)==0 || index($0,"\r") || $0 !~ /\.spl$/ ||
+    $0 ~ /^\// || $0 ~ /[:\\]/ || $0 ~ /(^|\/)\.\.?(\/|$)/ {bad=1}
+    END {exit bad}' "$module_inventory" || return 2
+  object_number=0
+  while IFS= read -r object_entry || [ -n "$object_entry" ]; do
+    object_number=$((object_number + 1))
+    object_key="${object_phase}_${object_backend}_diagnostic-module-$object_number"
+    printf '%s\tENTRY\t%s\n' "$object_key" "$object_entry" >>"$statuses" || return 2
+    if managed_attempt "$object_key" build_binary "diagnostic-module-$object_number" \
+        "$object_entry" bin/module.o "$object_phase" "$object_backend" object; then :; else
+      object_result=$?
+      [ "$object_result" -eq 1 ] || return 2
+    fi
+  done <"$module_inventory"
+}
+
 managed_attempt_modules() {
-  managed_phase=$1 managed_backend=$2
+  managed_phase=$1 managed_backend=$2 managed_index_config=$3
   if managed_attempt "${managed_phase}_${managed_backend}_index" build_index "$1" "$2" "$3"; then
     # Preparation is authority admission, never an ordinary compiler failure.
     managed_stop_check
@@ -61,14 +83,15 @@ managed_attempt_modules() {
       managed_result=$?
       [ "$managed_result" -eq 1 ] || return 2
     fi
+    managed_attempt_objects "$managed_phase" "$managed_backend" || return 2
   else
     managed_result=$?
     [ "$managed_result" -eq 1 ] || return 2
     printf '%s\tBLOCKED\t1\n' "${managed_phase}_${managed_backend}_group" >>"$statuses" || return 2
-    # Independent source tasks consume no failed index. Their own authority
-    # admission may still refuse; their success never repairs the group status.
+    managed_attempt_objects "$managed_phase" "$managed_backend" || return 2
+    # SMF evidence remains independent of the failed native group and objects.
     if managed_attempt "${managed_phase}_${managed_backend}_diagnostic_smf" \
-        run_index_independent_diagnostics "$managed_phase" "$managed_backend" "$3"; then :; else
+        run_index_independent_diagnostics "$managed_phase" "$managed_backend" "$managed_index_config"; then :; else
       managed_result=$?
       [ "$managed_result" -eq 1 ] || return 2
     fi
