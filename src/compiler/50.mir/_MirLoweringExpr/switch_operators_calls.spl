@@ -5683,6 +5683,23 @@ impl MirLowering:
                 if val int_local = int_res:
                     return int_local
                 return int_arg_local
+            # `len(x)` free-function form (2026-10-11): the seed accepts it
+            # natively and the HIR interpreter dispatches it by name, but the
+            # MIR lane had no intercept, so every UI/TUI module using the
+            # free form failed to build. Re-dispatch as a MethodCall on the
+            # argument -- NOT a raw rt_len call -- so the call reuses the
+            # method arm's full receiver-provenanced lowering (runtime array
+            # handle, tagged text, dict) instead of guessing from a bare
+            # name. MethodResolution.Unresolved lets the arm run its normal
+            # recovery (rt_len / rt_string_len / rt_dict_len discrimination).
+            if direct_name == "len" and args.len() == 1:
+                val len_receiver = args[0].value
+                val len_method_expr = HirExpr(
+                    kind: HirExprKind.MethodCall(len_receiver, "len", [], MethodResolution.Unresolved),
+                    has_type_: false,
+                    type_: HirType(kind: HirTypeKind.Int(64, true), span: len_receiver.span),
+                    span: len_receiver.span)
+                return self.lower_method_call(len_method_expr, "len", [], MethodResolution.Unresolved, "", -1)
             if is_gpu_intrinsic(direct_name):
                 return self.lower_gpu_intrinsic_call(direct_name, args)
             # A class constructor's source spelling can collide across
