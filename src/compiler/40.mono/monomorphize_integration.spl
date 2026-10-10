@@ -241,6 +241,14 @@ impl MonomorphizationPass:
                     continue
                 val spec: HirFunction = self.specialized_functions[m]
                 funcs[spec.symbol] = spec
+                # MIR uses the owning table to resolve callable identity. A
+                # specialization must have a row just like a parsed function.
+                out.symbols.register_preserved_symbol(HirSymbol(
+                    id: spec.symbol, name: spec.name, kind: SymbolKind.Function,
+                    type_: nil, scope: ScopeId(id: 0), span: spec.span,
+                    visibility: Visibility.Private, is_public: false,
+                    is_mutable: false, defining_module: name,
+                    builtin_method_tag: BUILTIN_METHOD_NONE))
             out.functions = funcs
             result[name] = out
 
@@ -261,6 +269,12 @@ impl MonomorphizationPass:
 
         BUG-001 fix: Use keys()-based iteration instead of tuple destructuring.
         """
+        # Locals, parameters and type parameters share the same ID namespace
+        # as functions. Reserving only function IDs aliases fresh callees to
+        # those rows (and can turn a nil local into an indirect call).
+        for raw_id in module.symbols.symbols.keys():
+            if raw_id >= self.next_symbol:
+                self.next_symbol = raw_id + 1
         # Collect generic functions
         # Typed rebinds (`val func: HirFunction = ...`): Dict values are
         # ANY-erased by the seed; field reads (func.type_params) on the
