@@ -306,6 +306,41 @@ impl HmInferContext:
         """Fallback for check mode: synthesize and then subsume against expected."""
         match self.synthesize_expr(expr):
             case Ok(inferred):
+                # nil flowing INTO a non-optional scalar slot (call argument,
+                # annotated binding, assignment, struct field -- every Check-
+                # mode site funnels here). Mirror of the return-contract rule
+                # in infer_return: a non-optional `i64`/`bool`/`f64`/`char`
+                # cannot hold a nil natively (nil and the integer 3 share the
+                # word 3), so MIR lowering folds `v == nil` on such a slot to
+                # false; the only way for nil to remain a real, distinct
+                # value is the declaration becoming `T?`. Flagged: a nil
+                # literal, and any expression whose synthesized type is
+                # Optional. NOT flagged (would need flow typing): an
+                # untyped/Any value that happens to be nil at runtime. The
+                # driver's typecheck pass is Advisory by default
+                # (driver_hir_pipeline_passes.spl, SIMPLE_TYPECHECK_PROFILE),
+                # so this is warn-first and promotes with that profile.
+                # doc/08_tracking/bug/native_scalar_nil_compare_payload_bits_2026-10-10.md
+                val expected_resolved = self.resolve(expected)
+                val expected_is_scalar = match expected_resolved.kind:
+                    case Int(_, _) | Float(_) | Bool | Char: true
+                    case _: false
+                if expected_is_scalar:
+                    val inferred_resolved = self.resolve(inferred)
+                    val is_nil_literal = match expr.kind:
+                        case NilLit: true
+                        case _: false
+                    val inferred_is_optional = match inferred_resolved.kind:
+                        case Optional(_): true
+                        case _: false
+                    if is_nil_literal or inferred_is_optional:
+                        val what = if is_nil_literal: "nil" else: "optional value of type '{inferred_resolved.kind}'"
+                        self.error(TypeInferError.Other(
+                            "{what} cannot flow into the non-optional scalar type '{expected_resolved.kind}' (a non-optional scalar never compares equal to nil); declare the parameter/binding/field as '{expected_resolved.kind}?' to keep nil as a distinct value",
+                            expr.span))
+                        # Yield the declared type so the enclosing check stays
+                        # silent after this diagnostic (same as infer_return).
+                        return Ok(())
                 self.subsume(inferred, expected)
             case Err(e): Err(e)
 

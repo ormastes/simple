@@ -1,0 +1,169 @@
+"""
+Representation rule for scalar optionals (`i64?`, `i32?`, `u8?`, `bool?`,
+`f64?`, `char?`), pinned at the MIR level
+(doc/08_tracking/bug/native_scalar_nil_compare_payload_bits_2026-10-10.md):
+
+  An Optional-typed value is ALWAYS the canonical enum-id-1 handle
+  (`rt_enum_new(1, Some=0 | None=1, payload)`) or the bare nil sentinel that
+  every presence predicate reads as None. A raw payload word never stands
+  for an Optional, so Some(3), Some(true) and Some(0) are distinct from nil.
+
+Producers (`ensure_option_handle`) fix the discriminant statically only for a
+nil literal (None) or a provably non-optional scalar source (Some); a `T?`
+param or any already-Optional local passes through unwrapped (no double
+boxing); every other source is classified at runtime (`rt_enum_id` == 1 ->
+unchanged, sentinel -> None, else Some). Consumers test presence through
+rt_is_none / rt_is_some / rt_enum_discriminant and read payloads through
+rt_unwrap_or_self / rt_enum_payload -- never by comparing payload bits with
+the sentinel.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn lower_module_json(src: text) -> Dict<text, text>:
+    val module = parse_full_frontend(src, "opt_repr.spl", "opt_repr.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("opt_repr.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var out: Dict<text, text> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+fn count_of(hay: text, needle: text) -> i64:
+    var n = 0
+    var i = 0
+    while i + needle.len() <= hay.len():
+        if hay.substring(i, i + needle.len()) == needle:
+            n = n + 1
+            i = i + needle.len()
+        else:
+            i = i + 1
+    n
+
+# A payload-bits presence test is a BinOp Eq/Ne whose right operand is the
+# sentinel const 3; a handle-aware lowering never emits one on an Optional.
+fn sentinel_compares(mir_json: text) -> i64:
+    count_of(mir_json, "\"op\":\"Eq\"") + count_of(mir_json, "\"op\":\"Ne\"")
+
+val SCALARS = ["i64", "i32", "u8", "bool", "f64", "char"]
+
+describe "scalar optional representation: producers box, no double boxing", tag: ["only-compiled"]:
+    it "boxes a non-optional scalar source statically as Some at return, binding, call-arg and field store":
+        var src = "struct H:\n    o: i64?\n\n"
+        for ty in SCALARS:
+            src = src + "fn ret_{ty}(v: {ty}) -> {ty}?:\n    v\n\n"
+            src = src + "fn bind_{ty}(v: {ty}) -> bool:\n    val o: {ty}? = v\n    o == nil\n\n"
+        src = src + "fn take(o: i64?) -> bool:\n    o == nil\n\nfn arg_i64(v: i64) -> bool:\n    take(v)\n\n"
+        src = src + "fn field_i64(v: i64) -> bool:\n    val h = H(o: v)\n    h.o == nil\n"
+        val fns = lower_module_json(src)
+        for ty in SCALARS:
+            val r = fns["ret_{ty}"] ?? ""
+            expect(r.len() > 0).to_equal(true)
+            expect(r).to_contain("rt_enum_new")
+            # provenance is a declared scalar param: static Some, no runtime probe
+            expect(r.contains("rt_enum_id")).to_equal(false)
+            val b = fns["bind_{ty}"] ?? ""
+            expect(b).to_contain("rt_enum_new")
+            expect(b).to_contain("rt_is_none")
+            expect(sentinel_compares(b)).to_equal(0)
+        val a = fns["arg_i64"] ?? ""
+        expect(a).to_contain("rt_enum_new")
+        val f = fns["field_i64"] ?? ""
+        expect(f).to_contain("rt_enum_new")
+        expect(f).to_contain("rt_is_none")
+
+    it "passes a `T?` parameter through return, call-arg and binding without wrapping it again":
+        var src = "fn take(o: i64?) -> bool:\n    o == nil\n\n"
+        for ty in SCALARS:
+            src = src + "fn id_{ty}(v: {ty}?) -> {ty}?:\n    v\n\n"
+        src = src + "fn fwd(v: i64?) -> bool:\n    take(v)\n\nfn rebind(v: bool?) -> bool:\n    val o: bool? = v\n    o == nil\n"
+        val fns = lower_module_json(src)
+        for ty in SCALARS:
+            val j = fns["id_{ty}"] ?? ""
+            expect(j.len() > 0).to_equal(true)
+            expect(j.contains("rt_enum_new")).to_equal(false)
+            expect(j.contains("rt_enum_id")).to_equal(false)
+        val fwd = fns["fwd"] ?? ""
+        expect(fwd.contains("rt_enum_new")).to_equal(false)
+        val rb = fns["rebind"] ?? ""
+        expect(rb.contains("rt_enum_new")).to_equal(false)
+        expect(rb).to_contain("rt_is_none")
+
+    it "materializes a nil literal as the None handle at every producer":
+        val src = (
+            "fn none_i64() -> i64?:\n    nil\n\n" +
+            "fn none_bool() -> bool?:\n    nil\n\n" +
+            "fn take(o: f64?) -> bool:\n    o == nil\n\n" +
+            "fn arg_nil() -> bool:\n    take(nil)\n\n" +
+            "fn bind_nil() -> bool:\n    val o: i64? = nil\n    o == nil\n"
+        )
+        val fns = lower_module_json(src)
+        for name in ["none_i64", "none_bool", "arg_nil", "bind_nil"]:
+            val j = fns[name] ?? ""
+            expect(j.len() > 0).to_equal(true)
+            expect(j).to_contain("rt_enum_new")
+            expect(j.contains("rt_enum_id")).to_equal(false)
+
+    it "classifies a word of unknown provenance at runtime instead of guessing Some":
+        val src = (
+            "extern fn ext_lookup(k: i64) -> i64\n\n" +
+            "fn from_extern() -> i64?:\n    ext_lookup(1)\n\n" +
+            "fn from_dict(d: Dict<text, i64>) -> i64?:\n    d[\"k\"]\n\n" +
+            "fn from_untyped(v) -> i64?:\n    v\n"
+        )
+        val fns = lower_module_json(src)
+        for name in ["from_extern", "from_dict", "from_untyped"]:
+            val j = fns[name] ?? ""
+            expect(j.len() > 0).to_equal(true)
+            # rt_enum_id probe + sentinel test select the discriminant at runtime
+            expect(j).to_contain("rt_enum_id")
+            expect(j).to_contain("rt_enum_new")
+            expect(j).to_contain("option_norm_raw")
+
+describe "scalar optional representation: consumers never compare payload bits", tag: ["only-compiled"]:
+    it "tests presence through the handle predicates for every scalar optional and unwrap form":
+        var src = ""
+        for ty in SCALARS:
+            src = src + "fn eq_{ty}(v: {ty}?) -> bool:\n    v == nil\n\n"
+            src = src + "fn ne_{ty}(v: {ty}?) -> bool:\n    nil != v\n\n"
+            src = src + "fn ifval_{ty}(v: {ty}?) -> bool:\n    if val x = v:\n        true\n    else:\n        false\n\n"
+            src = src + "fn exists_{ty}(v: {ty}?) -> bool:\n    if v.?:\n        true\n    else:\n        false\n\n"
+            src = src + "fn uw_{ty}(v: {ty}?) -> {ty}:\n    v.unwrap()\n\n"
+        src = src + "fn co_i64(v: i64?) -> i64:\n    v ?? 99\n\nfn co_bool(v: bool?) -> bool:\n    v ?? false\n\nfn co_f64(v: f64?) -> f64:\n    v ?? 1.5\n\n"
+        src = src + "fn try_i64(v: i64?) -> i64?:\n    val x = v?\n    x + 1\n\n"
+        src = src + "fn m_i64(v: i64?) -> i64:\n    match v:\n        case Some(x): x\n        case nil: -1\n"
+        val fns = lower_module_json(src)
+        for ty in SCALARS:
+            val eq = fns["eq_{ty}"] ?? ""
+            expect(eq.len() > 0).to_equal(true)
+            expect(eq).to_contain("rt_is_none")
+            expect(sentinel_compares(eq)).to_equal(0)
+            val ne = fns["ne_{ty}"] ?? ""
+            expect(ne).to_contain("rt_is_some")
+            expect(sentinel_compares(ne)).to_equal(0)
+            val iv = fns["ifval_{ty}"] ?? ""
+            expect(iv).to_contain("rt_is_some")
+            val ex = fns["exists_{ty}"] ?? ""
+            expect(ex).to_contain("rt_is_some")
+            val uw = fns["uw_{ty}"] ?? ""
+            expect(uw).to_contain("rt_is_some")
+        for name in ["co_i64", "co_bool", "co_f64"]:
+            val j = fns[name] ?? ""
+            expect(j).to_contain("rt_is_some")
+            expect(j).to_contain("rt_unwrap_or_self")
+        val tr = fns["try_i64"] ?? ""
+        expect(tr).to_contain("rt_enum_discriminant")
+        val m = fns["m_i64"] ?? ""
+        expect(m.len() > 0).to_equal(true)
+        expect(m.contains("rt_enum_check_variant") or m.contains("rt_is_none") or m.contains("rt_enum_discriminant")).to_equal(true)
