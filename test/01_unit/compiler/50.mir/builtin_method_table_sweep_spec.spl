@@ -1,0 +1,139 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering sweep: builtin methods on text / array / dict / Option / Result
+
+A stage2 "unresolved method call" at MIR is a hole in the builtin method table
+(BUG-IT-6 in intensive-tests/BUGS.md is the generic-field variant of exactly
+that message). This sweep calls the builtins an ordinary application module
+leans on — one receiver family per example, several methods per family — and
+requires that none of them produces an `unresolved method` / `no matching`
+diagnostic, with the exact offending method named in the failure output.
+"""
+
+# @tag: unit, compiler, mir, builtins, breadth
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn sweep_messages(src: text) -> [text]:
+    val file = "testdata/fixture_builtin_sweep.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_builtin_sweep", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val _mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push("hir: " + e.message)
+    for e in lowering.errors:
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        messages = messages.push("mir: " + e.message)
+    messages
+
+fn sweep_expect_clean(src: text):
+    val messages = sweep_messages(src)
+    var unresolved = 0
+    for m in messages:
+        print "diagnostic: {m}"
+        if m.contains("unresolved method") or m.contains("no matching") or m.contains("unknown method"):
+            unresolved = unresolved + 1
+    expect(unresolved).to_equal(0)
+    expect(messages.len()).to_equal(0)
+
+val text_src = "fn t(s: text, other: text) -> i64:\n" +
+    "    var n = s.len()\n" +
+    "    if s.starts_with(\"a\") or s.ends_with(\"z\") or s.contains(other):\n" +
+    "        n = n + 1\n" +
+    "    val parts = s.split(\",\")\n" +
+    "    val back = parts.join(\"-\")\n" +
+    "    val cleaned = s.trim().upper().lower().replace(\"a\", \"b\")\n" +
+    "    val piece = s.substring(0, 1)\n" +
+    "    val idx = s.index_of(other)\n" +
+    "    val rep = s.repeat(2)\n" +
+    "    val ch = s.char_at(0)\n" +
+    "    n + back.len() + cleaned.len() + piece.len() + idx + rep.len() + ch.len() + str(n).len()\n"
+
+val array_src = "fn a(xs: [i64], ys: [text]) -> i64:\n" +
+    "    var v = xs\n" +
+    "    v.push(4)\n" +
+    "    val last = v.pop() ?? 0\n" +
+    "    val has = v.contains(1)\n" +
+    "    val first = v.first() ?? 0\n" +
+    "    val tail = v.last() ?? 0\n" +
+    "    val sl = v[0:1]\n" +
+    "    val rev = v.reversed()\n" +
+    "    val srt = v.sorted()\n" +
+    "    val doubled = v.map(\\x: x * 2)\n" +
+    "    val pos = v.filter(\\x: x > 0)\n" +
+    "    val total = v.reduce(0, \\acc, x: acc + x)\n" +
+    "    val found = v.find(\\x: x == 2) ?? -1\n" +
+    "    val idx = v.index_of(2)\n" +
+    "    val joined = ys.join(\",\")\n" +
+    "    val cnt = if has: 1 else: 0\n" +
+    "    last + first + tail + sl.len() + rev.len() + srt.len() + doubled.len() + pos.len() + total + found + idx + joined.len() + cnt + v.is_empty().to_i64()\n"
+
+val dict_src = "fn d(m: Dict<text, i64>) -> i64:\n" +
+    "    var w = m\n" +
+    "    w[\"k\"] = 1\n" +
+    "    val got = w.get(\"k\") ?? 0\n" +
+    "    val has = w.contains_key(\"k\")\n" +
+    "    val ks = w.keys()\n" +
+    "    val vs = w.values()\n" +
+    "    val removed = w.remove(\"k\")\n" +
+    "    val n = w.len()\n" +
+    "    val cnt = if has and removed: 1 else: 0\n" +
+    "    got + ks.len() + vs.len() + n + cnt\n"
+
+val option_src = "fn o(x: i64?, y: text?) -> i64:\n" +
+    "    val a = x.unwrap_or(0)\n" +
+    "    val b = x.map(\\v: v + 1) ?? 0\n" +
+    "    val c = if x.is_some() and not y.is_none(): 1 else: 0\n" +
+    "    val d = y.unwrap_or(\"\").len()\n" +
+    "    val e = x.?\n" +
+    "    val f = if e: x.unwrap() else: 0\n" +
+    "    a + b + c + d + f\n"
+
+val result_src = "fn r(v: Result<i64, text>) -> i64:\n" +
+    "    val a = v.unwrap_or(0)\n" +
+    "    val b = if v.is_ok(): 1 else: 0\n" +
+    "    val c = if v.is_err(): 1 else: 0\n" +
+    "    val d = v.map(\\x: x * 2).unwrap_or(0)\n" +
+    "    val e = v.map_err(\\m: m.len()).unwrap_or(0)\n" +
+    "    val f = v.ok() ?? 0\n" +
+    "    a + b + c + d + e + f\n"
+
+val numeric_src = "fn n(x: i64, f: f64) -> i64:\n" +
+    "    val a = x.abs()\n" +
+    "    val b = x.min(3)\n" +
+    "    val c = x.max(3)\n" +
+    "    val d = f.floor().to_i64()\n" +
+    "    val e = (x.to_f64() * 1.5).round().to_i64()\n" +
+    "    val g = x.to_text().len()\n" +
+    "    val h = \"42\".to_i64() ?? 0\n" +
+    "    a + b + c + d + e + g + h\n"
+
+describe "builtin method table sweep":
+    it "text: len/starts_with/ends_with/contains/split/join/trim/upper/lower/replace/substring/index_of/repeat/char_at":
+        sweep_expect_clean(text_src)
+
+    it "array: push/pop/contains/first/last/slice/reversed/sorted/map/filter/reduce/find/index_of/join/is_empty":
+        sweep_expect_clean(array_src)
+
+    it "dict: index-set/get/contains_key/keys/values/remove/len":
+        sweep_expect_clean(dict_src)
+
+    it "option: unwrap_or/map/is_some/is_none/.?/unwrap":
+        sweep_expect_clean(option_src)
+
+    it "result: unwrap_or/is_ok/is_err/map/map_err/ok":
+        sweep_expect_clean(result_src)
+
+    it "numeric: abs/min/max/floor/round/to_f64/to_i64/to_text/text.to_i64":
+        sweep_expect_clean(numeric_src)

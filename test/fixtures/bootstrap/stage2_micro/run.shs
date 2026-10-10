@@ -1,0 +1,74 @@
+#!/bin/sh
+# Stage2 end-to-end micro-program ladder: native-build each fixture with a STAGE2 compiler,
+# run the executable, and compare stdout with the `# Expected stdout:` line in its main.spl.
+#
+#   STAGE2=<path to stage2 simple(.exe)> RUNTIME=<stage2-runtime-authority dir> \
+#     sh test/fixtures/bootstrap/stage2_micro/run.shs [name ...]
+#
+# Optional: TARGET (default x86_64-pc-windows-msvc), THREADS (4), CACHE (build/stage2_micro_cache),
+# OUT (build/stage2_micro_out), BOOT (1 => SIMPLE_BOOTSTRAP=1; empty => unset), TMO seconds (3600).
+# Toolchain env (CC / SIMPLE_WINDOWS_ABI / SIMPLE_LINKER_FLAVOR) is the caller's job.
+#
+# Each fixture dir holds main.spl (entry) and optionally sibling modules; the sibling import path
+# is `test.fixtures.bootstrap.stage2_micro.<name>.<module>` (repo-relative path, only a leading `src/` is stripped).
+# Baseline 2026-10-10 (stage2 49cbd00527…, release/1.0 @ b68c0c65708) is recorded per fixture in
+# its header and in C:/dev/simple-bootstrap-storage/intensive-tests/BUGS.md.
+#
+# Verdict: last stdout line `PASS — <n> fixture(s) built, ran and matched` (exit 0),
+# `FAIL — <k> of <n> mismatched/failed: <names>` (exit 1), `ERROR — nothing was checked` (exit 2).
+set -u
+here=$(cd "$(dirname "$0")" && pwd)
+repo=$(cd "$here/../../../.." && pwd)
+cd "$repo" || exit 2
+: "${STAGE2:?set STAGE2 to the stage2 compiler path}"
+: "${RUNTIME:?set RUNTIME to the stage2-runtime-authority directory}"
+TARGET=${TARGET:-x86_64-pc-windows-msvc}
+THREADS=${THREADS:-4}
+CACHE=${CACHE:-build/stage2_micro_cache}
+OUT=${OUT:-build/stage2_micro_out}
+TMO=${TMO:-3600}
+if [ "${BOOT-1}" = "" ]; then unset SIMPLE_BOOTSTRAP; else export SIMPLE_BOOTSTRAP=${BOOT-1}; fi
+export SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_NATIVE_FILE_TIMEOUT=0 SIMPLE_NO_DEPRECATED_WARNINGS=1
+export SIMPLE_CACHE_SCOPE=${SIMPLE_CACHE_SCOPE:-stage2-micro}
+mkdir -p "$OUT"
+if [ $# -gt 0 ]; then names="$*"; else names=$(ls -d "$here"/*/ | sed 's|/$||; s|.*/||' | sort); fi
+checked=0; bad=0; badnames=""
+for name in $names; do
+  entry="test/fixtures/bootstrap/stage2_micro/$name/main.spl"
+  [ -f "$entry" ] || { echo "$name: missing $entry"; bad=$((bad+1)); badnames="$badnames $name"; continue; }
+  expected=$(sed -n '/^# Expected stdout:/{n;s/^#   //;p;q;}' "$entry")
+  mkdir -p "$OUT/$name"
+  exe="$OUT/$name/$name.exe"
+  # The driver publishes by renaming its staging output over $exe and refuses when a previous
+  # run's executable is still there ("produced staging output but could not publish it").
+  rm -f "$exe" "$OUT/$name/run.out"
+  t0=$(date +%s)
+  timeout "$TMO" "$STAGE2" native-build --target "$TARGET" --backend llvm --runtime-bundle core-c-bootstrap \
+    --source src/compiler --source src/app --source src/lib --source test/fixtures/bootstrap/stage2_micro \
+    --entry-closure --threads "$THREADS" --cache-dir "$CACHE/$name" --mode dynload --entry "$entry" \
+    --runtime-path "$RUNTIME" --verbose -o "$exe" > "$OUT/$name/build.log" 2>&1
+  brc=$?
+  wall=$(( $(date +%s) - t0 ))
+  checked=$((checked+1))
+  if [ $brc -ne 0 ] || [ ! -f "$exe" ]; then
+    reason=$(grep -a -oE 'undefined symbol: [^ ]+|worker error: .{0,160}' "$OUT/$name/build.log" | head -1)
+    echo "$name: BUILD FAIL rc=$brc ${wall}s ${reason:-see $OUT/$name/build.log}"
+    bad=$((bad+1)); badnames="$badnames $name"; continue
+  fi
+  # Exit status is read on the line after the invocation, never through a pipe: a pipeline's
+  # `$?` is the last command's status and hid a SEGV (rc=139) as rc=0 on the first run of this script.
+  (cd "$OUT/$name" && timeout 60 "./$name.exe" > run.out 2>&1)
+  rrc=$?
+  actual=$(tr -d '\r' < "$OUT/$name/run.out" | head -1)
+  if [ "$actual" = "$expected" ] && [ $rrc -eq 0 ]; then
+    echo "$name: PASS build ${wall}s run rc=$rrc"
+  else
+    echo "$name: MISMATCH build ${wall}s run rc=$rrc"
+    echo "  expected: $expected"
+    echo "  actual:   $actual"
+    bad=$((bad+1)); badnames="$badnames $name"
+  fi
+done
+if [ $checked -eq 0 ]; then echo "ERROR — nothing was checked"; exit 2; fi
+if [ $bad -eq 0 ]; then echo "PASS — $checked fixture(s) built, ran and matched"; exit 0; fi
+echo "FAIL — $bad of $checked mismatched/failed:$badnames"; exit 1

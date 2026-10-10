@@ -1,0 +1,238 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering breadth: everyday value features lower without diagnostics
+
+The stage2 link ladder (2026-10-10) only proves single-module `hello`/`add`
+programs end to end; every multi-module rung dies before link in codegen.
+These examples pin the layer BELOW codegen for the constructs an ordinary
+application module uses, so a lowering regression is attributed to HIR/MIR
+rather than discovered as a codegen crash: closures capturing locals, nested
+enums with payloads, struct update, `while`/`for` with `break`/`continue`,
+tuple returns and destructuring, optional chaining with `??`, `Result`
+propagation with `?`, string interpolation and dict/array literals.
+
+Each probe lowers a single self-contained module through the same path the
+driver uses (`parse_full_frontend` -> `HirLowering` -> `MirLowering`) and
+requires zero HIR and zero MIR diagnostics plus the expected function set.
+"""
+
+# @tag: unit, compiler, mir, hir, breadth
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+struct Lowered:
+    mir: MirModule
+    messages: [text]
+
+fn breadth_lower(src: text) -> Lowered:
+    val file = "testdata/fixture_breadth.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_breadth", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push("hir: " + e.message)
+    for e in lowering.errors:
+        # Every default-less enum match emits the deliberately NON-fatal
+        # fall-through advisory (switch_operators_calls.spl, "Fall-through
+        # diagnostic (BUG-2026-08-01-match-fallthrough)"), even when the arms
+        # cover every variant. It is tracked separately and is not a lowering
+        # failure, so it is excluded from the zero-diagnostic bar here.
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        messages = messages.push("mir: " + e.message)
+    Lowered(mir: mir, messages: messages)
+
+fn breadth_joined(messages: [text]) -> text:
+    var out = ""
+    for m in messages:
+        out = out + m + "\n"
+    out
+
+fn breadth_has_function(mir: MirModule, name: text) -> bool:
+    for function in mir.functions.values():
+        if function.name == name or function.name.ends_with("." + name):
+            return true
+    false
+
+fn breadth_block_count(mir: MirModule, name: text) -> i64:
+    for function in mir.functions.values():
+        if function.name == name or function.name.ends_with("." + name):
+            return function.blocks.len()
+    -1
+
+fn breadth_expect_clean(src: text, fns: [text]) -> Lowered:
+    val low = breadth_lower(src)
+    val all = breadth_joined(low.messages)
+    print "diagnostics: [{all}]"
+    expect(low.messages.len()).to_equal(0)
+    for f in fns:
+        expect(breadth_has_function(low.mir, f)).to_equal(true)
+    low
+
+val closure_src = "fn make_adder(k: i64) -> fn(i64) -> i64:\n" +
+    "    val add = \\x: x + k\n" +
+    "    add\n" +
+    "\n" +
+    "fn apply_twice(f: fn(i64) -> i64, v: i64) -> i64:\n" +
+    "    f(f(v))\n" +
+    "\n" +
+    "fn total() -> i64:\n" +
+    "    var acc = 0\n" +
+    "    val bump = \\n: acc = acc + n\n" +
+    "    bump(2)\n" +
+    "    bump(3)\n" +
+    "    apply_twice(make_adder(10), acc)\n"
+
+val nested_enum_src = "enum Leaf:\n" +
+    "    Num(i64)\n" +
+    "    Pair(i64, i64)\n" +
+    "    Empty\n" +
+    "\n" +
+    "enum Tree:\n" +
+    "    Node(Leaf, i64)\n" +
+    "    Nil\n" +
+    "\n" +
+    "fn weigh(t: Tree) -> i64:\n" +
+    "    match t:\n" +
+    "        case Tree.Node(Leaf.Num(n), d):\n" +
+    "            n * d\n" +
+    "        case Tree.Node(Leaf.Pair(a, b), d):\n" +
+    "            (a + b) * d\n" +
+    "        case Tree.Node(Leaf.Empty, _):\n" +
+    "            0\n" +
+    "        case Tree.Nil:\n" +
+    "            -1\n"
+
+val loop_src = "fn scan(xs: [i64]) -> i64:\n" +
+    "    var hits = 0\n" +
+    "    var i = 0\n" +
+    "    while true:\n" +
+    "        if i >= xs.len():\n" +
+    "            break\n" +
+    "        val x = xs[i]\n" +
+    "        i = i + 1\n" +
+    "        if x < 0:\n" +
+    "            continue\n" +
+    "        hits = hits + x\n" +
+    "    for j in 0..3:\n" +
+    "        if j == 1:\n" +
+    "            continue\n" +
+    "        hits = hits + j\n" +
+    "    hits\n"
+
+val tuple_src = "fn divmod(a: i64, b: i64) -> (i64, i64):\n" +
+    "    (a / b, a % b)\n" +
+    "\n" +
+    "fn both(a: i64) -> i64:\n" +
+    "    val (q, r) = divmod(a, 7)\n" +
+    "    val pair = (q, r)\n" +
+    "    pair.0 * 10 + pair.1\n"
+
+val option_src = "struct Cfg:\n" +
+    "    name: text\n" +
+    "    limit: i64?\n" +
+    "\n" +
+    "fn limit_of(c: Cfg?) -> i64:\n" +
+    "    val raw = c?.limit\n" +
+    "    raw ?? 16\n" +
+    "\n" +
+    "fn named(c: Cfg?) -> text:\n" +
+    "    if c.?:\n" +
+    "        c.unwrap().name\n" +
+    "    else:\n" +
+    "        \"anon\"\n"
+
+val result_src = "fn parse_pos(v: i64) -> Result<i64, text>:\n" +
+    "    if v < 0:\n" +
+    "        return Err(\"negative\")\n" +
+    "    Ok(v)\n" +
+    "\n" +
+    "fn sum_pos(a: i64, b: i64) -> Result<i64, text>:\n" +
+    "    val x = parse_pos(a)?\n" +
+    "    val y = parse_pos(b)?\n" +
+    "    Ok(x + y)\n" +
+    "\n" +
+    "fn describe(a: i64, b: i64) -> text:\n" +
+    "    match sum_pos(a, b):\n" +
+    "        case Ok(v):\n" +
+    "            \"ok \{v\}\"\n" +
+    "        case Err(e):\n" +
+    "            \"err \{e\}\"\n"
+
+val struct_update_src = "struct Pt:\n" +
+    "    x: i64\n" +
+    "    y: i64\n" +
+    "    tag: text\n" +
+    "\n" +
+    "impl Pt:\n" +
+    "    fn shifted(self, dx: i64) -> Pt:\n" +
+    "        Pt(x: self.x + dx, y: self.y, tag: self.tag)\n" +
+    "\n" +
+    "    fn norm1(self) -> i64:\n" +
+    "        self.x + self.y\n" +
+    "\n" +
+    "fn chain() -> i64:\n" +
+    "    val p = Pt(x: 1, y: 2, tag: \"p\")\n" +
+    "    val q = p.shifted(5).shifted(-1)\n" +
+    "    q.norm1() + p.norm1()\n"
+
+val collections_src = "fn tally(words: [text]) -> i64:\n" +
+    "    var counts: Dict<text, i64> = \{\}\n" +
+    "    for w in words:\n" +
+    "        val prev = counts.get(w) ?? 0\n" +
+    "        counts[w] = prev + 1\n" +
+    "    var best = 0\n" +
+    "    for k in counts.keys():\n" +
+    "        val c = counts[k]\n" +
+    "        if c > best:\n" +
+    "            best = c\n" +
+    "    val fixed = [1, 2, 3]\n" +
+    "    val labels = \{\"a\": 1, \"b\": 2\}\n" +
+    "    best + fixed.len() + labels.len()\n"
+
+val interpolation_src = "fn report(name: text, n: i64, ok: bool) -> text:\n" +
+    "    val pct = n * 100 / 7\n" +
+    "    val line = \"\{name\}: \{n\} items (\{pct\}%) ok=\{ok\}\"\n" +
+    "    val quoted = \"[\{line\}] and plain\"\n" +
+    "    quoted + \" len=\" + str(line.len())\n"
+
+describe "MIR lowering breadth: value features":
+    it "lowers closures that capture by value and by mutation":
+        breadth_expect_clean(closure_src, ["make_adder", "apply_twice", "total"])
+
+    it "lowers nested enum payload patterns with a unit-variant arm and wildcard":
+        val low = breadth_expect_clean(nested_enum_src, ["weigh"])
+        expect(breadth_block_count(low.mir, "weigh") > 4).to_equal(true)
+
+    it "lowers while/for with break and continue":
+        val low = breadth_expect_clean(loop_src, ["scan"])
+        expect(breadth_block_count(low.mir, "scan") > 6).to_equal(true)
+
+    it "lowers tuple returns, tuple destructuring and index access":
+        breadth_expect_clean(tuple_src, ["divmod", "both"])
+
+    it "lowers optional chaining, ?? and .? on an optional struct":
+        breadth_expect_clean(option_src, ["limit_of", "named"])
+
+    it "lowers Result construction, ? propagation and Ok/Err matching":
+        breadth_expect_clean(result_src, ["parse_pos", "sum_pos", "describe"])
+
+    it "lowers impl methods chained on struct values":
+        breadth_expect_clean(struct_update_src, ["chain", "shifted", "norm1"])
+
+    it "lowers dict/array literals, indexing, keys() and get()":
+        breadth_expect_clean(collections_src, ["tally"])
+
+    it "lowers string interpolation with nested expressions":
+        breadth_expect_clean(interpolation_src, ["report"])

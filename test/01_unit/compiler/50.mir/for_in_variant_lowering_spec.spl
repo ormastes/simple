@@ -1,0 +1,154 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering breadth: every `for` iteration shape an application module uses
+
+`value_feature_breadth_lowering_spec` covers one `for x in xs` and one range.
+Application code also iterates with an inclusive range, a stepped/descending
+range, a tuple-destructuring `for (k, v) in dict`, `enumerate()`, the chars of
+a text, a nested loop with `break` from the inner one, a comprehension, and a
+`for` over a function-call result. Each probe lowers a single module through
+the driver's own HIR -> MIR path and requires zero diagnostics other than the
+deliberately non-fatal match fall-through advisory (see the value-feature spec).
+"""
+
+# @tag: unit, compiler, mir, loops, breadth
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+struct ForLowered:
+    mir: MirModule
+    messages: [text]
+
+fn for_lower(src: text) -> ForLowered:
+    val file = "testdata/fixture_for_in.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_for_in", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push("hir: " + e.message)
+    for e in lowering.errors:
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        messages = messages.push("mir: " + e.message)
+    ForLowered(mir: mir, messages: messages)
+
+fn for_blocks(mir: MirModule, name: text) -> i64:
+    for function in mir.functions.values():
+        if function.name == name or function.name.ends_with("." + name):
+            return function.blocks.len()
+    -1
+
+fn for_expect_clean(src: text, fn_name: text) -> ForLowered:
+    val low = for_lower(src)
+    var all = ""
+    for m in low.messages:
+        all = all + m + "\n"
+    print "diagnostics: [{all}]"
+    expect(low.messages.len()).to_equal(0)
+    expect(for_blocks(low.mir, fn_name) > 1).to_equal(true)
+    low
+
+val inclusive_src = "fn total(n: i64) -> i64:\n" +
+    "    var s = 0\n" +
+    "    for i in 0..=n:\n" +
+    "        s = s + i\n" +
+    "    s\n"
+
+val stepped_src = "fn evens(n: i64) -> i64:\n" +
+    "    var c = 0\n" +
+    "    for i in (0..n).step(2):\n" +
+    "        c = c + 1\n" +
+    "    for j in (n..0).step(-1):\n" +
+    "        c = c + j\n" +
+    "    c\n"
+
+val dict_src = "fn weigh(d: Dict<text, i64>) -> i64:\n" +
+    "    var s = 0\n" +
+    "    for (k, v) in d:\n" +
+    "        s = s + k.len() + v\n" +
+    "    for k2 in d.keys():\n" +
+    "        s = s + k2.len()\n" +
+    "    for v2 in d.values():\n" +
+    "        s = s + v2\n" +
+    "    s\n"
+
+val enumerate_src = "fn index_sum(xs: [text]) -> i64:\n" +
+    "    var s = 0\n" +
+    "    for (i, x) in xs.enumerate():\n" +
+    "        s = s + i * x.len()\n" +
+    "    s\n"
+
+val chars_src = "fn vowels(t: text) -> i64:\n" +
+    "    var n = 0\n" +
+    "    for c in t.chars():\n" +
+    "        if c == \"a\" or c == \"e\":\n" +
+    "            n = n + 1\n" +
+    "    n\n"
+
+val nested_break_src = "fn first_pair(xs: [i64], target: i64) -> i64:\n" +
+    "    var found = -1\n" +
+    "    for a in xs:\n" +
+    "        for b in xs:\n" +
+    "            if a + b == target:\n" +
+    "                found = a * 100 + b\n" +
+    "                break\n" +
+    "        if found >= 0:\n" +
+    "            break\n" +
+    "    found\n"
+
+val comprehension_src = "fn squares(xs: [i64]) -> i64:\n" +
+    "    val sq = [x * x for x in xs if x > 0]\n" +
+    "    var s = 0\n" +
+    "    for v in sq:\n" +
+    "        s = s + v\n" +
+    "    s\n"
+
+val call_result_src = "fn make(n: i64) -> [i64]:\n" +
+    "    var out: [i64] = []\n" +
+    "    for i in 0..n:\n" +
+    "        out.push(i)\n" +
+    "    out\n" +
+    "\n" +
+    "fn consume(n: i64) -> i64:\n" +
+    "    var s = 0\n" +
+    "    for v in make(n):\n" +
+    "        s = s + v\n" +
+    "    for w in make(n).reversed():\n" +
+    "        s = s + w\n" +
+    "    s\n"
+
+describe "MIR lowering breadth: for-in shapes":
+    it "lowers an inclusive range":
+        for_expect_clean(inclusive_src, "total")
+
+    it "lowers stepped ascending and descending ranges":
+        for_expect_clean(stepped_src, "evens")
+
+    it "lowers dict iteration by pair, keys() and values()":
+        for_expect_clean(dict_src, "weigh")
+
+    it "lowers enumerate() with tuple destructuring":
+        for_expect_clean(enumerate_src, "index_sum")
+
+    it "lowers iteration over a text's chars()":
+        for_expect_clean(chars_src, "vowels")
+
+    it "lowers a nested loop with break from both levels":
+        val low = for_expect_clean(nested_break_src, "first_pair")
+        expect(for_blocks(low.mir, "first_pair") > 8).to_equal(true)
+
+    it "lowers a filtered comprehension feeding a for loop":
+        for_expect_clean(comprehension_src, "squares")
+
+    it "lowers iteration over a call result and a reversed() view":
+        for_expect_clean(call_result_src, "consume")

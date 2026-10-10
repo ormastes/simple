@@ -1,0 +1,181 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+# HIR cross-module breadth: the import shapes an application closure uses
+
+A stage2 entry closure is dozens of modules joined by `use` lines of a handful
+of shapes. The link ladder (2026-10-10) only exercises single-module programs
+end to end, so these examples pin HIR lowering of the common multi-module
+shapes against a three-module surface built the way the driver builds it
+(`module_surfaces_from_modules` + `hirlowering_for_module`):
+
+- a struct and its `impl` methods consumed from another module;
+- an enum with payload variants matched from another module;
+- a free function imported under an alias (`use lib.{f as g}`);
+- a re-export (`export`) forwarded through an intermediate module;
+- a nested-package path (`use pkg.sub.{...}`) alongside a flat sibling.
+
+Every example requires zero HIR diagnostics in the consumer AND in each
+provider, so an error raised while lowering a provider is attributed there.
+"""
+
+# @tag: unit, compiler, hir, imports, breadth
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule}
+
+struct Surface:
+    errors: [text]
+    function_count: i64
+
+fn lower_closure(names: [text], sources: [text]) -> Surface:
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var files: [SourceFile] = []
+    var i = 0
+    while i < names.len():
+        val path = names[i].replace(".", "/") + ".spl"
+        modules[names[i]] = parse_full_frontend(sources[i], path, names[i], log)
+        files.push(SourceFile(path: path, content: sources[i], module_name: names[i]))
+        i = i + 1
+    val surfaces_result = module_surfaces_from_modules(modules, files)
+    if surfaces_result.is_err():
+        return Surface(errors: ["surface build failed: " + surfaces_result.unwrap_err()], function_count: 0)
+    val surfaces = surfaces_result.unwrap()
+    var errors: [text] = []
+    var functions = 0
+    for name in names:
+        var lowering = hirlowering_for_module(name, surfaces)
+        val hir: HirModule = lowering.lower_module(modules[name])
+        functions = functions + hir.functions.len()
+        for e in lowering.errors:
+            errors.push(name + ": " + e.message)
+    Surface(errors: errors, function_count: functions)
+
+fn joined(errors: [text]) -> text:
+    var out = ""
+    for e in errors:
+        out = out + e + "\n"
+    out
+
+fn expect_clean(names: [text], sources: [text]) -> Surface:
+    val s = lower_closure(names, sources)
+    print "diagnostics: [{joined(s.errors)}]"
+    expect(s.errors.len()).to_equal(0)
+    s
+
+val geom_src = "pub struct Vec2:\n" +
+    "    x: i64\n" +
+    "    y: i64\n" +
+    "\n" +
+    "impl Vec2:\n" +
+    "    fn dot(self, o: Vec2) -> i64:\n" +
+    "        self.x * o.x + self.y * o.y\n" +
+    "\n" +
+    "    fn scaled(self, k: i64) -> Vec2:\n" +
+    "        Vec2(x: self.x * k, y: self.y * k)\n"
+
+val geom_consumer = "use lib.geom.\{Vec2\}\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    val a = Vec2(x: 1, y: 2)\n" +
+    "    val b = a.scaled(3)\n" +
+    "    a.dot(b)\n"
+
+val token_src = "pub enum Token:\n" +
+    "    Num(i64)\n" +
+    "    Word(text)\n" +
+    "    End\n" +
+    "\n" +
+    "pub fn classify(t: Token) -> i64:\n" +
+    "    match t:\n" +
+    "        case Token.Num(_): 1\n" +
+    "        case Token.Word(_): 2\n" +
+    "        case Token.End: 3\n"
+
+val token_consumer = "use lib.token.\{Token, classify\}\n" +
+    "\n" +
+    "fn weight(t: Token) -> i64:\n" +
+    "    match t:\n" +
+    "        case Token.Num(n):\n" +
+    "            n + classify(t)\n" +
+    "        case Token.Word(w):\n" +
+    "            w.len() + classify(t)\n" +
+    "        case Token.End:\n" +
+    "            classify(Token.End)\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    weight(Token.Num(4)) + weight(Token.Word(\"ab\")) + weight(Token.End)\n"
+
+val alias_src = "pub fn twice(n: i64) -> i64:\n" +
+    "    n * 2\n" +
+    "\n" +
+    "pub fn thrice(n: i64) -> i64:\n" +
+    "    n * 3\n"
+
+val alias_consumer = "use lib.alias.\{twice as dbl, thrice\}\n" +
+    "\n" +
+    "fn twice(n: i64) -> i64:\n" +
+    "    n + n + 1\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    dbl(2) + thrice(2) + twice(2)\n"
+
+val leaf_src = "pub struct Leaf:\n" +
+    "    v: i64\n" +
+    "\n" +
+    "pub fn leaf_of(v: i64) -> Leaf:\n" +
+    "    Leaf(v: v)\n"
+
+val hub_src = "use lib.leaf.\{Leaf, leaf_of\}\n" +
+    "\n" +
+    "export Leaf, leaf_of\n" +
+    "\n" +
+    "pub fn hub_sum(a: Leaf, b: Leaf) -> i64:\n" +
+    "    a.v + b.v\n"
+
+val hub_consumer = "use lib.hub.\{Leaf, leaf_of, hub_sum\}\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    val l: Leaf = leaf_of(5)\n" +
+    "    hub_sum(l, leaf_of(6))\n"
+
+val pkg_sub_src = "pub fn deep(n: i64) -> i64:\n" +
+    "    n - 1\n"
+
+val pkg_flat_src = "pub fn flat(n: i64) -> i64:\n" +
+    "    n + 1\n"
+
+val pkg_consumer = "use pkg.sub.deep_mod.\{deep\}\n" +
+    "use pkg.flat_mod.\{flat\}\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    deep(flat(10))\n"
+
+describe "HIR cross-module breadth":
+    it "consumes a struct and its impl methods from a provider module":
+        val s = expect_clean(["lib.geom", "app.main"], [geom_src, geom_consumer])
+        expect(s.function_count).to_equal(3)
+
+    it "matches a provider enum's payload and unit variants in the consumer":
+        val s = expect_clean(["lib.token", "app.main"], [token_src, token_consumer])
+        expect(s.function_count).to_equal(3)
+
+    it "binds an aliased import without shadowing a same-named local function":
+        val s = expect_clean(["lib.alias", "app.main"], [alias_src, alias_consumer])
+        expect(s.function_count).to_equal(4)
+
+    it "follows a re-export through an intermediate hub module":
+        val s = expect_clean(["lib.leaf", "lib.hub", "app.main"], [leaf_src, hub_src, hub_consumer])
+        expect(s.function_count).to_equal(3)
+
+    it "resolves a nested package path next to a flat sibling import":
+        val s = expect_clean(["pkg.sub.deep_mod", "pkg.flat_mod", "app.main"], [pkg_sub_src, pkg_flat_src, pkg_consumer])
+        expect(s.function_count).to_equal(3)

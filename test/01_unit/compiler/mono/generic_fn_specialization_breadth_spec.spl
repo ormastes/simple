@@ -1,0 +1,181 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+# 40.mono breadth: free generic functions at several instantiation shapes
+
+`free_generic_fn_two_module_native_spec` pins ONE shape (a two-arg generic
+called at `i64` and a struct). An application closure also instantiates
+generics at `text`, with two independent type parameters, through a nested
+generic call (`wrap(wrap(x))`), and at the same type from two call sites,
+which must share ONE specialization. These examples pin the pass statistics
+and the surviving function set for each shape, single-module, through the
+same surface/lowering path the native driver uses.
+"""
+
+# @tag: unit, compiler, mono, generics, breadth
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.SourceFile
+use compiler.frontend.parser_types.{Module}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.hirlowering_for_module
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
+
+struct Lowered:
+    modules: Dict<text, HirModule>
+    errors: [text]
+
+fn lower_one(src: text) -> Lowered:
+    val log = Logger(level: 0)
+    val name = "gen_main"
+    val parsed_module = parse_full_frontend(src, name + ".spl", name, log)
+    var parsed: Dict<text, Module> = {}
+    parsed[name] = parsed_module
+    val surfaces_result = module_surfaces_from_modules(parsed, [
+        SourceFile(path: name + ".spl", content: src, module_name: name)])
+    if surfaces_result.is_err():
+        return Lowered(modules: {}, errors: ["surface build failed: " + surfaces_result.unwrap_err()])
+    var hl = hirlowering_for_module(name, surfaces_result.unwrap())
+    var hir: Dict<text, HirModule> = {}
+    hir[name] = hl.lower_module(parsed_module)
+    var errors: [text] = []
+    for e in hl.errors:
+        errors.push(e.message)
+    Lowered(modules: hir, errors: errors)
+
+fn function_names(m: HirModule) -> [text]:
+    var out: [text] = []
+    for sym in m.functions.keys():
+        val f: HirFunction = m.functions[sym]
+        out.push(f.name)
+    out
+
+val first_or_decl = "fn first_or<C>(xs: [C], fallback: C) -> C:\n" +
+    "    if xs.len() > 0:\n" +
+    "        return xs[0]\n" +
+    "    fallback\n" +
+    "\n"
+
+val text_src = first_or_decl +
+    "fn main() -> i64:\n" +
+    "    val t = first_or([\"a\", \"b\"], \"z\")\n" +
+    "    val n = first_or([7], 9)\n" +
+    "    t.len() + n\n"
+
+# `[]` carries no element evidence, but `fallback: C` pins C = i64 on its own.
+# Before the `infer_expr_type` fix (release/1.0 @ b68c0c65708) HIR's placeholder
+# element default (i32) was taken as evidence, bound C := i32, and the real i64
+# witness was rejected: E-MONO-032, specs=1, unresolved=1, template kept.
+val empty_array_src = first_or_decl +
+    "fn main() -> i64:\n" +
+    "    first_or([], 9)\n"
+
+val two_param_src = "struct Pair<A, B>:\n" +
+    "    a: A\n" +
+    "    b: B\n" +
+    "\n" +
+    "fn swap_sum<A, B>(a: A, b: B, f: fn(A, B) -> i64) -> i64:\n" +
+    "    f(a, b)\n" +
+    "\n" +
+    "fn add_it(a: i64, b: text) -> i64:\n" +
+    "    a + b.len()\n" +
+    "\n" +
+    "fn add_other(a: text, b: i64) -> i64:\n" +
+    "    a.len() * b\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    swap_sum(1, \"ab\", add_it) + swap_sum(\"abc\", 2, add_other)\n"
+
+val nested_src = "struct W:\n" +
+    "    n: i64\n" +
+    "\n" +
+    "fn wrap<C>(v: C) -> C:\n" +
+    "    v\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    val a = wrap(wrap(3))\n" +
+    "    val w = wrap(W(n: 4))\n" +
+    "    a + w.n\n"
+
+val shared_src = "fn ident<C>(v: C) -> C:\n" +
+    "    v\n" +
+    "\n" +
+    "fn left() -> i64:\n" +
+    "    ident(1)\n" +
+    "\n" +
+    "fn right() -> i64:\n" +
+    "    ident(2) + ident(3)\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    left() + right()\n"
+
+describe "40.mono breadth: free generic specialization shapes":
+    it "specializes an array-typed generic at text and i64":
+        val low = lower_one(text_src)
+        expect(low.errors.len()).to_equal(0)
+        val (mono, stats, diags) = run_monomorphization_with_diagnostics(low.modules)
+        expect(diags.len()).to_equal(0)
+        expect(stats.generic_functions_found).to_equal(1)
+        expect(stats.call_sites_found).to_equal(2)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(2)
+        val fns = function_names(mono["gen_main"])
+        expect(fns.contains("first_or$str")).to_equal(true)
+        expect(fns.contains("first_or$i64")).to_equal(true)
+        expect(fns.contains("first_or")).to_equal(false)
+
+    it "infers C from a later concrete argument when an empty array literal carries none":
+        val low = lower_one(empty_array_src)
+        expect(low.errors.len()).to_equal(0)
+        val (mono, stats, diags) = run_monomorphization_with_diagnostics(low.modules)
+        for d in diags:
+            print "diag: {d}"
+        expect(diags.len()).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(1)
+        val fns = function_names(mono["gen_main"])
+        expect(fns.contains("first_or$i64")).to_equal(true)
+        expect(fns.contains("first_or")).to_equal(false)
+
+    it "specializes two independent type parameters per call site":
+        val low = lower_one(two_param_src)
+        expect(low.errors.len()).to_equal(0)
+        val (mono, stats, diags) = run_monomorphization_with_diagnostics(low.modules)
+        expect(diags.len()).to_equal(0)
+        expect(stats.generic_functions_found).to_equal(1)
+        expect(stats.generic_structs_found).to_equal(1)
+        expect(stats.call_sites_found).to_equal(2)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(2)
+        val fns = function_names(mono["gen_main"])
+        expect(fns.contains("swap_sum")).to_equal(false)
+
+    it "resolves a nested generic call and a struct instantiation":
+        val low = lower_one(nested_src)
+        expect(low.errors.len()).to_equal(0)
+        val (mono, stats, diags) = run_monomorphization_with_diagnostics(low.modules)
+        expect(diags.len()).to_equal(0)
+        expect(stats.call_sites_found).to_equal(3)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(2)
+        val fns = function_names(mono["gen_main"])
+        expect(fns.contains("wrap$i64")).to_equal(true)
+        expect(fns.contains("wrap$W")).to_equal(true)
+
+    it "shares one specialization across call sites at the same type":
+        val low = lower_one(shared_src)
+        expect(low.errors.len()).to_equal(0)
+        val (mono, stats, diags) = run_monomorphization_with_diagnostics(low.modules)
+        expect(diags.len()).to_equal(0)
+        expect(stats.call_sites_found).to_equal(3)
+        expect(stats.specializations_created).to_equal(1)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        val fns = function_names(mono["gen_main"])
+        expect(fns.contains("ident$i64")).to_equal(true)
+        expect(fns.contains("ident")).to_equal(false)
+        expect(fns.len()).to_equal(4)

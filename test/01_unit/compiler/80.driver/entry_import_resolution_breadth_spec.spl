@@ -1,0 +1,57 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Driver resolver breadth: every import shape a stage2 closure contains
+
+`std_fs_file_vs_package_resolution_spec` pins one ambiguity (`fs.spl` vs
+`fs/__init__.spl`). A stage2 entry closure also contains these shapes, each
+resolved by a different branch of `_driver_resolve_entry_import`:
+
+- a flat std module (`std.spec`, `std.io_runtime`) -- family search;
+- a family-qualified std module (`std.nogc_sync_mut.io.process_ops`);
+- a compiler-layer module whose directory carries a numeric layer prefix
+  (`compiler.hir.hir_lowering.types` -> `src/compiler/20.hir/...`);
+- a compiler module under a `_Private` implementation directory;
+- an app module (`app.cli.bootstrap_main`).
+
+Each probe requires the resolved path to exist, to carry the expected
+suffix, and to be non-empty, from an importer inside `src/app`.
+"""
+
+# @tag: unit, compiler, driver, resolver, breadth
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file, file_exists}
+use compiler.driver.driver_source_loading.{_driver_resolve_entry_import}
+
+fn resolved(module: text) -> text:
+    _driver_resolve_entry_import(module, "src/app/log").replace("\\", "/")
+
+fn check(module: text, suffix: text):
+    val path = resolved(module)
+    print "{module} -> {path}"
+    expect(path.ends_with(suffix)).to_equal(true)
+    expect(file_exists(path)).to_equal(true)
+    expect(read_file(path).len() > 0).to_equal(true)
+
+describe "entry import resolution breadth":
+    it "resolves flat std modules through the family search":
+        check("std.spec", "/spec.spl")
+        check("std.io_runtime", "/io_runtime.spl")
+
+    it "resolves a family-qualified std module":
+        check("std.nogc_sync_mut.io.process_ops", "/nogc_sync_mut/io/process_ops.spl")
+
+    it "resolves compiler modules across numeric layer-prefixed directories":
+        check("compiler.hir.hir_lowering.types", "/20.hir/hir_lowering/types.spl")
+        check("compiler.mir.mir", "/50.mir/mir.spl")
+        check("compiler.mono.monomorphize_integration", "/40.mono/monomorphize_integration.spl")
+        check("compiler.driver.driver_source_loading", "/80.driver/driver_source_loading.spl")
+
+    it "resolves an app module from an app importer":
+        check("app.cli.bootstrap_main", "src/app/cli/bootstrap_main.spl")
+
+    it "returns distinct paths for distinct modules":
+        val a = resolved("compiler.mir.mir")
+        val b = resolved("compiler.hir.hir_types")
+        expect(a == b).to_equal(false)
+        expect(b.ends_with("/20.hir/hir_types.spl")).to_equal(true)
