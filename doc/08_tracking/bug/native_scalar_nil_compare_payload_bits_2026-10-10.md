@@ -112,34 +112,36 @@ Tuple to PTR. NOT fixed here; re-measure on a stage 2 built from this source
    result operands keep `rt_is_none`/`rt_is_some`/`rt_native_eq`.
 2. `equality_compare_type` (core_codegen.spl): Eq/Ne with an i1 left and a
    wider integer right compares at the integer's width (zext).
-3. Retyped nil-aware scalar declarations to optionals: `HirCodecWriter.put_i64
-   (v: i64?)` / `put_bool(v: bool?)`, `hc_i64_key_before_v1(left: i64?,
-   right: i64?)`, `StateVariant.suspension_point_id: i64?`.
+3. Retyped the nil-aware scalar declaration `StateVariant.suspension_point_id`
+   to `i64?`.
 
-   **Codec mechanism after the rebase.** PR #2882 had fixed the same three
-   functions on release with a rendered-text discriminator (`"{v}" ==
-   "nil"` on a non-optional `i64` / `bool` parameter). The rebase keeps ONE
-   mechanism per function: `put_i64`, `put_bool` and `hc_i64_key_before_v1`
-   take the typed form above (`T?` + `== nil` + `?? default`) and the
-   rendered-text lines are removed from them; `_hc_i64_index_before_v1`
-   keeps `_hc_i64_is_nil_v1` (rendered text), because it reads ELEMENTS of a
-   `[i64]`, which cannot become `i64?` without changing the array
-   representation. Why the typed form: (a) it is the representation rule of
-   fix 5 -- a nil that must be told apart from 3 has to travel as an
-   Optional; (b) measured under the interpreter on the rebased tree, the
-   rendered-text writers fail this series' `hir_codec_nil_scalar_optional_spec`
-   (2 of 4): `put_i64(<nil i64?>)` writes the line `Option::None`, and
-   `put_bool(nil)` writes `0` (a `bool` parameter coerces nil to false), while
-   the typed writers pass it 4/4 AND release's own
-   `hir_codec_scalar_nil_collision_spec` 11/11; (c) natively a non-optional
-   parameter is never boxed (lowering probe: `put(nil)` / `put(3)` / `put(o:
-   i64?)` into `put(v: i64)` emit no `rt_enum_new` / `rt_enum_id`), so with
-   the rendered-text form a nil is the raw word 3 and renders `3`, and an
-   Optional argument would reach the writer as its handle. The series' fold
-   itself does not touch the rendered-text form (`"{v}" == "nil"` stays a
-   text compare). Cost accepted and to be measured on the rebuild: every
-   scalar put now boxes its argument into an Option handle on the cache-store
-   path (one `rt_enum_new` per line written).
+   **Codec mechanism after the rebase.** The HIR codec writers are NOT
+   retyped. `put_i64(v: i64)`, `put_bool(v: bool)`, `hc_i64_key_before_v1(left:
+   i64, right: i64)` and `_hc_i64_index_before_v1` keep release's
+   rendered-text discriminator (`"{v}" == "nil"`, PR #2882) as their ONE
+   mechanism; both codec files are byte-identical to release except
+   `hc_read_f64` (audit below). An earlier revision of this series retyped the
+   first three to `i64?` / `bool?` with `v == nil`, and the first rebase kept
+   that form. Review blocked it, correctly: the typed form assumed "a plain
+   scalar argument arrives as `Some(v)`", which holds for FREE-function calls
+   only. Method-call arguments are passed raw
+   (`method_call_optional_param_arg_not_boxed_2026-10-11.md`), all 1,301
+   `put_i64` and 121 `put_bool` sites in `generated/hir_codec.spl` are method
+   calls, and `v == nil` on the `i64?` parameter lowers to `rt_is_none(v)`,
+   which is true for the raw word 3 -- so `w.put_i64(3)` would have written
+   `N` again in any compiler built by this lowering (the #2882 bug). The
+   interpreted specs could not see it (`hir_codec_nil_scalar_optional_spec`
+   passed 4/4 with the typed form). Interaction of the kept form with this
+   series: the writers contain no `== nil` on a scalar, so the fold has
+   nothing to fold there (lowering probe: `"{v}" == "nil"` stays a text
+   compare); a non-optional parameter is never boxed and the checker rule is a
+   diagnostic only, so a nil reaching such a parameter is the raw sentinel
+   word exactly as before the series -- it renders `nil` under the interpreter
+   and, as the codec record states, is indistinguishable from the integer 3
+   natively. The writers must only be given plain scalars: under the
+   interpreter a nil `i64?` argument renders `Option::None` and `put_bool(nil)`
+   writes `0`; no production caller does either (the generated codec writes a
+   presence line, then the unwrapped payload).
 4. Checker rule (`_subsume_fallback`, inference_expr.spl): a nil literal or
    an Optional-typed value flowing into a non-optional scalar parameter /
    annotated binding is diagnosed ("... cannot flow into the non-optional
@@ -183,8 +185,7 @@ unmodified base (measured by checking out the original files) -- pre-existing.
 ## W-nil-compare: sites that relied on a typed scalar carrying nil
 
 Direct scalar-typed param/local `== nil` in `src/compiler`: 5 sites, all HIR
-codec; PR #2882 replaced them with the rendered-text test and this series
-retypes the three scalar-argument ones (fix 3).
+codec, all removed by PR #2882 (rendered-text test, fix 3).
 
 **The "38 call sites / 2088 functions" figures first recorded here were
 wrong** and are superseded by the audit below: that scan keyed on the callee
@@ -299,10 +300,10 @@ and src/app (two independent scans). Nothing relies on it.
 | `src/compiler/20.hir/portable_body_graph.spl:151` | `edge.caller_symbol_id == nil or edge.callee_symbol_id == nil` | `PortableBodyDependencyEdgeV1.*_symbol_id: i64` | tests removed (2): subsumed by the membership test at line 139 -- `node_set[node] = true` is only reached for nodes that passed `node == nil or node < 0` (line 137), so `not node_set.has(edge.*_symbol_id)` already rejects a nil id; the `< 0` and membership checks stay |
 | `20.hir/hir_lowering/_Items/declaration_lowering.spl:839`, `trait_impl_lowering.spl:56` | `if f.bits.?:` | `BitfieldField.bits: i64` (0 with `has_bits` false) | unchanged: `.?` on a scalar folds to the VALUE, and the seed's `.?` on an int also yields the value (`0.?` -> 0, falsy), so both engines take the same branch |
 
-Known consequence, not fixed: a desugared field that holds nil and is passed
-to an `i64?` parameter (`w.put_i64(node.fixed_address)` in the generated HIR
-codec) is boxed as `Some(<raw word 3>)` by the representation rule, so the
-native compiler writes `3` where the seed writes `N`. Readers gate on
+Known consequence, not fixed and not new: a desugared field that holds nil
+and is written by the generated HIR codec (`w.put_i64(node.fixed_address)`)
+is the raw word 3 natively, so the native compiler writes `3` where the seed
+writes `N` (already stated in the codec record). Readers gate on
 `has_fixed_address` and the round trip is stable, but the cache bytes differ
 between the two engines for those fields; storing 0 instead of nil at the 15
 sites (as `_FlatAstBridge/module_assembly.spl` already does) would remove it.
@@ -496,10 +497,10 @@ SIMPLE_LINKER_FLAVOR=msvc CC=clang-cl.exe` and `tools/` present in the checkout.
 - LLVM width class: Eq/Ne with i8/i16/i32 left vs i64 right still truncates
   the right operand; Lt/Le/Gt/Ge always use the left width; compares `sext`
   narrow ints even when unsigned.
-- HIR codec: per-put Option boxing of `put_i64` / `put_bool` arguments
-  (fix 3) -- measure cache-store time and re-check `[hir-cache] hits` on BOTH
-  backends on the rebuild; if the cranelift Optional lead above reproduces
-  for parameters, the writers are the first place it will show.
+- Method-call arguments are not coerced to Option handles for `T?`
+  parameters (`method_call_optional_param_arg_not_boxed_2026-10-11.md`); the
+  representation rule of fix 5 holds for free-function calls only until that
+  is fixed. The HIR codec writers stay on the rendered-text form regardless.
 - Checker: Assign and struct-literal field flows of nil into a scalar slot;
   the seed's own checker rule.
 
@@ -509,8 +510,7 @@ SIMPLE_LINKER_FLAVOR=msvc CC=clang-cl.exe` and `tools/` present in the checkout.
 - `native_tagged_nil_prints_as_integer_3_in_i64_sink_2026-08-18.md`
 - `pure_simple_option_i64_ifval_always_some_eqnil_always_false_2026-08-08.md`
 - `option_none_promoted_to_some_by_static_nil_provenance_2026-09-14.md`
-- `hir_codec_put_i64_three_encoded_as_nil_native_2026-10-10.md` (PR #2882; its
-  "Fix" section describes the rendered-text writers this series replaced)
+- `hir_codec_put_i64_three_encoded_as_nil_native_2026-10-10.md` (PR #2882; the mechanism the codec keeps)
 - `optional_nil_arm_stale_producer_2026-10-10.md` (PR #2844, `src/lib/common/
   binary_io.spl` -- explicit `None` arms for an older retained producer; no
   overlap with this series)
