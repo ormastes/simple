@@ -12,7 +12,11 @@ and the surviving function set for each shape, single-module, through the
 same surface/lowering path the native driver uses.
 """
 
-# @tag: unit, compiler, mono, generics, breadth
+# @tag:unit
+# @tag:compiler
+# @tag:mono
+# @tag:generics
+# @tag:breadth
 
 use std.spec
 use compiler.common.config.Logger
@@ -74,6 +78,15 @@ val text_src = first_or_decl +
 val empty_array_src = first_or_decl +
     "fn main() -> i64:\n" +
     "    first_or([], 9)\n"
+
+# The fail-closed half of the same fix: when `[]` is the ONLY witness there is
+# nothing to bind C to, so the call must stay unresolved with a diagnostic --
+# never a guessed `only$i32` from the placeholder element default.
+val only_empty_src = "fn only<C>(xs: [C]) -> i64:\n" +
+    "    xs.len()\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    only([])\n"
 
 val two_param_src = "struct Pair<A, B>:\n" +
     "    a: A\n" +
@@ -141,6 +154,20 @@ describe "40.mono breadth: free generic specialization shapes":
         val fns = function_names(mono["gen_main"])
         expect(fns.contains("first_or$i64")).to_equal(true)
         expect(fns.contains("first_or")).to_equal(false)
+
+    it "fails closed when an empty array literal is the only witness (no guessed only$i32)":
+        val low = lower_one(only_empty_src)
+        expect(low.errors.len()).to_equal(0)
+        val (mono, stats, diags) = run_monomorphization_with_diagnostics(low.modules)
+        for d in diags:
+            print "diag: {d}"
+        expect(diags.len() >= 1).to_equal(true)
+        expect(stats.unresolved_generic_calls).to_equal(1)
+        expect(stats.specializations_created).to_equal(0)
+        val fns = function_names(mono["gen_main"])
+        expect(fns.contains("only$i32")).to_equal(false)
+        expect(fns.contains("only$i64")).to_equal(false)
+        expect(fns.contains("only")).to_equal(true)
 
     it "specializes two independent type parameters per call site":
         val low = lower_one(two_param_src)

@@ -1,42 +1,44 @@
 #!/bin/sh
 # Stage2 end-to-end micro-program ladder: native-build each fixture with a STAGE2 compiler,
-# run the executable, and compare stdout with the `# Expected stdout:` line in its main.spl.
+# run the executable, and compare its WHOLE stdout with the `# Expected stdout:` block in main.spl
+# (every following `#   ` line, in order).
 #
 #   STAGE2=<path to stage2 simple(.exe)> RUNTIME=<stage2-runtime-authority dir> \
 #     sh test/fixtures/bootstrap/stage2_micro/run.shs [name ...]
+#   sh test/fixtures/bootstrap/stage2_micro/run.shs --selftest      # no STAGE2 needed
 #
 # Optional: TARGET (default x86_64-pc-windows-msvc), THREADS (4), CACHE (build/stage2_micro_cache),
 # OUT (build/stage2_micro_out), BOOT (1 => SIMPLE_BOOTSTRAP=1; empty => unset), TMO seconds (3600).
 # Toolchain env (CC / SIMPLE_WINDOWS_ABI / SIMPLE_LINKER_FLAVOR) is the caller's job.
 #
 # Each fixture dir holds main.spl (entry) and optionally sibling modules; the sibling import path
-# is `test.fixtures.bootstrap.stage2_micro.<name>.<module>` (repo-relative path, only a leading `src/` is stripped).
+# is `test.fixtures.bootstrap.stage2_micro.<name>.<module>` (module name = repo-relative path with
+# only a leading `src/` stripped) because this directory is passed as an extra --source root.
 # Baseline 2026-10-10 (stage2 49cbd00527…, release/1.0 @ b68c0c65708) is recorded per fixture in
-# its header and in C:/dev/simple-bootstrap-storage/intensive-tests/BUGS.md.
+# its header and in doc/08_tracking/bug/stage2_*_2026-10-10.md.
 #
-# Verdict: last stdout line `PASS — <n> fixture(s) built, ran and matched` (exit 0),
+# Verdict, always the last stdout line: `PASS — <n> fixture(s) built, ran and matched` (exit 0),
 # `FAIL — <k> of <n> mismatched/failed: <names>` (exit 1), `ERROR — nothing was checked` (exit 2).
+# A requested name with no main.spl is CHECKED and FAILS (it is a wrong request, not an empty one).
+# The selftest runs a fake STAGE2 through the same code path: pass, mismatch (second line), build
+# failure, and a missing fixture.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../../../.." && pwd)
-cd "$repo" || exit 2
-: "${STAGE2:?set STAGE2 to the stage2 compiler path}"
-: "${RUNTIME:?set RUNTIME to the stage2-runtime-authority directory}"
-TARGET=${TARGET:-x86_64-pc-windows-msvc}
-THREADS=${THREADS:-4}
-CACHE=${CACHE:-build/stage2_micro_cache}
-OUT=${OUT:-build/stage2_micro_out}
-TMO=${TMO:-3600}
-if [ "${BOOT-1}" = "" ]; then unset SIMPLE_BOOTSTRAP; else export SIMPLE_BOOTSTRAP=${BOOT-1}; fi
-export SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_NATIVE_FILE_TIMEOUT=0 SIMPLE_NO_DEPRECATED_WARNINGS=1
-export SIMPLE_CACHE_SCOPE=${SIMPLE_CACHE_SCOPE:-stage2-micro}
-mkdir -p "$OUT"
-if [ $# -gt 0 ]; then names="$*"; else names=$(ls -d "$here"/*/ | sed 's|/$||; s|.*/||' | sort); fi
-checked=0; bad=0; badnames=""
-for name in $names; do
-  entry="test/fixtures/bootstrap/stage2_micro/$name/main.spl"
-  [ -f "$entry" ] || { echo "$name: missing $entry"; bad=$((bad+1)); badnames="$badnames $name"; continue; }
-  expected=$(sed -n '/^# Expected stdout:/{n;s/^#   //;p;q;}' "$entry")
+
+expected_stdout() {  # $1 = main.spl ; prints the `#   ` block after `# Expected stdout:`
+  awk 'f && /^#   / { sub(/^#   /, ""); print; next } f { exit } /^# Expected stdout:$/ { f = 1 }' "$1"
+}
+
+# run_fixture <name> <fixture_dir> <entry (repo-relative or absolute)>
+# sets: verdict_line ; returns 0 on PASS, 1 otherwise
+run_fixture() {
+  name=$1; fdir=$2; entry=$3
+  if [ ! -f "$fdir/main.spl" ]; then
+    verdict_line="$name: MISSING $fdir/main.spl"
+    return 1
+  fi
+  expected=$(expected_stdout "$fdir/main.spl")
   mkdir -p "$OUT/$name"
   exe="$OUT/$name/$name.exe"
   # The driver publishes by renaming its staging output over $exe and refuses when a previous
@@ -49,26 +51,95 @@ for name in $names; do
     --runtime-path "$RUNTIME" --verbose -o "$exe" > "$OUT/$name/build.log" 2>&1
   brc=$?
   wall=$(( $(date +%s) - t0 ))
-  checked=$((checked+1))
   if [ $brc -ne 0 ] || [ ! -f "$exe" ]; then
     reason=$(grep -a -oE 'undefined symbol: [^ ]+|worker error: .{0,160}' "$OUT/$name/build.log" | head -1)
-    echo "$name: BUILD FAIL rc=$brc ${wall}s ${reason:-see $OUT/$name/build.log}"
-    bad=$((bad+1)); badnames="$badnames $name"; continue
+    verdict_line="$name: BUILD FAIL rc=$brc ${wall}s ${reason:-see $OUT/$name/build.log}"
+    return 1
   fi
   # Exit status is read on the line after the invocation, never through a pipe: a pipeline's
   # `$?` is the last command's status and hid a SEGV (rc=139) as rc=0 on the first run of this script.
   (cd "$OUT/$name" && timeout 60 "./$name.exe" > run.out 2>&1)
   rrc=$?
-  actual=$(tr -d '\r' < "$OUT/$name/run.out" | head -1)
+  actual=$(tr -d '\r' < "$OUT/$name/run.out")
   if [ "$actual" = "$expected" ] && [ $rrc -eq 0 ]; then
-    echo "$name: PASS build ${wall}s run rc=$rrc"
-  else
-    echo "$name: MISMATCH build ${wall}s run rc=$rrc"
-    echo "  expected: $expected"
-    echo "  actual:   $actual"
-    bad=$((bad+1)); badnames="$badnames $name"
+    verdict_line="$name: PASS build ${wall}s run rc=$rrc"
+    return 0
   fi
-done
-if [ $checked -eq 0 ]; then echo "ERROR — nothing was checked"; exit 2; fi
-if [ $bad -eq 0 ]; then echo "PASS — $checked fixture(s) built, ran and matched"; exit 0; fi
-echo "FAIL — $bad of $checked mismatched/failed:$badnames"; exit 1
+  verdict_line="$name: MISMATCH build ${wall}s run rc=$rrc
+  expected: $(printf '%s' "$expected" | tr '\n' '|')
+  actual:   $(printf '%s' "$actual" | tr '\n' '|')"
+  return 1
+}
+
+# run_set <fixtures_root> <names...> ; prints per-fixture lines + verdict, returns 0/1/2
+run_set() {
+  root=$1; shift
+  checked=0; bad=0; badnames=""
+  for name in "$@"; do
+    checked=$((checked+1))
+    if run_fixture "$name" "$root/$name" "$root/$name/main.spl"; then
+      echo "$verdict_line"
+    else
+      echo "$verdict_line"; bad=$((bad+1)); badnames="$badnames $name"
+    fi
+  done
+  if [ $checked -eq 0 ]; then echo "ERROR — nothing was checked"; return 2; fi
+  if [ $bad -eq 0 ]; then echo "PASS — $checked fixture(s) built, ran and matched"; return 0; fi
+  echo "FAIL — $bad of $checked mismatched/failed:$badnames"; return 1
+}
+
+selftest() {
+  st=$(mktemp -d 2>/dev/null || mktemp -d -t stage2micro)
+  fx="$st/fx"; mkdir -p "$fx/ok" "$fx/second_line" "$fx/broken"
+  # Fake STAGE2: for fixture "broken" exit 1; otherwise emit an "exe" (sh script) that prints the
+  # fixture's PROGRAM lines (lines starting with `#>` in main.spl) -- so expected vs actual is real.
+  cat > "$st/fake_stage2" <<'EOF'
+#!/bin/sh
+entry=""; out=""
+while [ $# -gt 0 ]; do case "$1" in --entry) entry=$2; shift;; -o) out=$2; shift;; esac; shift; done
+case "$entry" in *broken*) echo "worker error: fake failure" >&2; exit 1;; esac
+{ echo '#!/bin/sh'; sed -n 's/^#>//p' "$entry" | sed 's/^/echo "/; s/$/"/'; } > "$out"
+chmod +x "$out"
+EOF
+  chmod +x "$st/fake_stage2"
+  printf '# Expected stdout:\n#   alpha\n#   beta 2\n#>alpha\n#>beta 2\n' > "$fx/ok/main.spl"
+  printf '# Expected stdout:\n#   alpha\n#   beta 2\n#>alpha\n#>beta 3\n' > "$fx/second_line/main.spl"
+  printf '# Expected stdout:\n#   never\n' > "$fx/broken/main.spl"
+  STAGE2="$st/fake_stage2"; RUNTIME="$st"; OUT="$st/out"; CACHE="$st/cache"; TMO=60
+  fails=0
+  out1=$(run_set "$fx" ok); rc1=$?
+  case "$out1" in *"ok: PASS"*"PASS — 1 fixture(s)"*) ;; *) echo "selftest: pass case wrong: $out1"; fails=$((fails+1));; esac
+  [ $rc1 -eq 0 ] || { echo "selftest: pass case rc=$rc1"; fails=$((fails+1)); }
+  out2=$(run_set "$fx" second_line); rc2=$?
+  case "$out2" in *"second_line: MISMATCH"*"FAIL — 1 of 1"*) ;; *) echo "selftest: second-line mismatch not detected: $out2"; fails=$((fails+1));; esac
+  [ $rc2 -eq 1 ] || { echo "selftest: mismatch case rc=$rc2"; fails=$((fails+1)); }
+  out3=$(run_set "$fx" broken); rc3=$?
+  case "$out3" in *"broken: BUILD FAIL rc=1"*"FAIL — 1 of 1"*) ;; *) echo "selftest: build failure not detected: $out3"; fails=$((fails+1));; esac
+  out4=$(run_set "$fx" ok nonexistent); rc4=$?
+  case "$out4" in *"nonexistent: MISSING"*"FAIL — 1 of 2"*) ;; *) echo "selftest: missing fixture must be checked+FAIL: $out4"; fails=$((fails+1));; esac
+  [ $rc4 -eq 1 ] || { echo "selftest: missing case rc=$rc4"; fails=$((fails+1)); }
+  out5=$(run_set "$fx"); rc5=$?
+  [ $rc5 -eq 2 ] || { echo "selftest: empty set must be ERROR (rc 2), got $rc5: $out5"; fails=$((fails+1)); }
+  rm -rf "$st"
+  if [ $fails -ne 0 ]; then echo "run.shs: selftest FAILED ($fails)"; exit 2; fi
+  echo "run.shs: selftest OK (5 cases)"
+}
+
+TARGET=${TARGET:-x86_64-pc-windows-msvc}
+THREADS=${THREADS:-4}
+CACHE=${CACHE:-build/stage2_micro_cache}
+OUT=${OUT:-build/stage2_micro_out}
+TMO=${TMO:-3600}
+
+if [ "${1-}" = "--selftest" ]; then selftest; exit 0; fi
+
+cd "$repo" || exit 2
+: "${STAGE2:?set STAGE2 to the stage2 compiler path}"
+: "${RUNTIME:?set RUNTIME to the stage2-runtime-authority directory}"
+if [ "${BOOT-1}" = "" ]; then unset SIMPLE_BOOTSTRAP; else export SIMPLE_BOOTSTRAP=${BOOT-1}; fi
+export SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_NATIVE_FILE_TIMEOUT=0 SIMPLE_NO_DEPRECATED_WARNINGS=1
+export SIMPLE_CACHE_SCOPE=${SIMPLE_CACHE_SCOPE:-stage2-micro}
+mkdir -p "$OUT"
+if [ $# -gt 0 ]; then set -- "$@"; else set -- $(ls -d "$here"/*/ | sed 's|/$||; s|.*/||' | sort); fi
+run_set "test/fixtures/bootstrap/stage2_micro" "$@"
+exit $?
