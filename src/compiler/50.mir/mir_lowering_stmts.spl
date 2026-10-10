@@ -3526,12 +3526,31 @@ impl MirLowering:
                 case HirTypeKind.Dict(dict_key_t, dict_value_t):
                     dict_entry_hir = Some(HirType(kind: HirTypeKind.Tuple([dict_key_t, dict_value_t]), span: collection_hir_type.span))
                 case HirTypeKind.Array(elem_t, _) | HirTypeKind.Slice(elem_t):
+                    # `[Any]` / `[Infer]` / `[Error]` name NO element type. An
+                    # untyped array literal (`val words = ["alpha", "beta"]`)
+                    # carries `[Any]` as its local HIR type while its MIR type
+                    # is the authoritative `Array(str)`. Letting `[Any]` win
+                    # typed the loop variable I64 (`lower_type(Any)`), so `w`
+                    # was not text and every text builtin on it
+                    # (`w.substring(0, 1)`, stage2 micro_c) died as
+                    # `unresolved method call`. Only a REAL declared element
+                    # type overrides the array's own MIR element type below --
+                    # the same `Infer | Error | Any` rule the index-read path
+                    # (`words[0]`, expr_dispatch.spl) already applies. For a
+                    # genuinely erased `[Any]` array both sources say I64.
+                    var elem_t_is_placeholder = false
                     match elem_t.kind:
-                        case HirTypeKind.Str:
-                            element_type = self.bootstrap_text_type()
-                        case _:
-                            element_type = self.lower_type(elem_t)
-                    element_type_from_hir = true
+                        case HirTypeKind.Error: elem_t_is_placeholder = true
+                        case HirTypeKind.Infer(_, _): elem_t_is_placeholder = true
+                        case HirTypeKind.Any: elem_t_is_placeholder = true
+                        case _: ()
+                    if not elem_t_is_placeholder:
+                        match elem_t.kind:
+                            case HirTypeKind.Str:
+                                element_type = self.bootstrap_text_type()
+                            case _:
+                                element_type = self.lower_type(elem_t)
+                        element_type_from_hir = true
                     # A declared `[Record]` collection that is not an array
                     # literal or typed param (e.g. a method result,
                     # `for child in self.children()`) never populated
