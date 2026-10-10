@@ -38,7 +38,6 @@ use .smf_cache_manager.{
     SmfCacheManager, smfcachemanager_with_new_cache, smfcachemanager_force_clear
 }
 use .smf_cache.{validated_smf_load}
-use os.smf.smf_generation.{GenerationState, CandidateMapping, SymbolSwap, LifecycleManager}
 
 export use .module_loader_services.{
     moduleloader_ensure_compiler_ctx, moduleloader_ensure_obj_taker,
@@ -514,11 +513,6 @@ fn moduleloader_replace_live(self: LazyModuleLoader, path: text) -> LoadResult:
         val next_version = old_module.version + 1
         val candidate_prefix = "{path}#gen{next_version}:"
 
-        # Phase-2 wiring: track this replacement as a generation candidate.
-        val gen_candidate = GenerationState.candidate(path, next_version)
-        var gen_lm = LifecycleManager.new_manager().register_candidate(path, next_version)
-        var candidate_map = CandidateMapping.create(candidate_prefix)
-
         val provider = moduleloader_ensure_provider(self)
         # Hot reload is an explicit freshness boundary. Discard provider-owned
         # source/object derivatives, then share one fresh byte result between
@@ -581,16 +575,8 @@ fn moduleloader_replace_live(self: LazyModuleLoader, path: text) -> LoadResult:
             moduleloader_unmap_internal_symbols(self, internal_symbols)
             return LoadResult.Error(message: reloc_result.unwrap_err())
 
-        # Phase-2: mark relocation done, validate imports, then check readiness.
-        candidate_map = candidate_map.complete_relocation().validate_imports()
-        if not candidate_map.is_ready():
-            self.modules[path] = old_module
-            moduleloader_unmap_internal_symbols(self, internal_symbols)
-            return LoadResult.Error(message: "Candidate not ready after relocation for {path}")
-
-        # Promote candidate generation state.
-        val gen_active = gen_candidate.promote()
-        gen_lm = gen_lm.promote_candidate()
+        # Relocation and import resolution succeeded. Publish the candidate
+        # through the canonical resource lifecycle below.
 
         # Publish candidate symbols before retiring old executable records so
         # lookups never observe a missing symbol during successful replacement.
@@ -624,12 +610,11 @@ fn moduleloader_replace_live(self: LazyModuleLoader, path: text) -> LoadResult:
                 self.global_symbol_addresses = _kept_self_global_symbol_addresses
             _ = jit.exec_mapper.unmap_symbol(old_sym)
 
-        # Phase-2: retire the old generation in the lifecycle manager.
-        gen_lm = gen_lm.retire(path)
-        val _old_gen_retired = GenerationState.loaded(path, old_module.version).retire()
-
         if self.config.verbose:
-            print "[loader] Replaced {path} with generation {next_version} (gen_active={gen_active.to_text()})"
+            # Preserve the prior diagnostic spelling without constructing an
+            # unused OS-owned generation object.
+            val generation_label = "{path} gen={next_version} state=active"
+            print "[loader] Replaced {path} with generation {next_version} (gen_active={generation_label})"
 
         LoadResult.Success(module: candidate)
 

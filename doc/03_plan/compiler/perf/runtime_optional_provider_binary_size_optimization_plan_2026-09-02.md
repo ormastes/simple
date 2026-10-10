@@ -327,3 +327,7 @@ The five bootstrap admission programs are now classified as P-static fixtures in
 ## 2026-10-10 VHDL partition alignment
 
 The first manifest projection now classifies `src/compiler/70.backend/backend/_VhdlProcess/**` as P_STATIC, matching the already-existing kernel-plugin-fabric projection. The closure checker reports zero K1-to-P imports after this correction (previously seven). It still rejects three K0-to-P and eleven kernel-to-app/OS imports. This is ownership accounting, not provider demand loading or binary-size qualification. See [the continuation report](../../../09_report/compiler/item56_release_continuation_2026-10-10.md).
+
+## 2026-10-10 loader dependency cut
+
+The canonical loader no longer imports `os.smf.smf_generation` for local-only hot-reload state. The real relocation success and resource lifecycle retain publication authority; the prior temporary readiness state had no independent failure path. Kernel closure now has ten app/OS import violations, three K0-to-P violations, and zero K1-to-P violations. Compiler bootstrap and runtime acceptance still require qualification before this contributes to an Item 5 pass. See [the continuation report](../../../09_report/compiler/item56_release_continuation_2026-10-10.md).
