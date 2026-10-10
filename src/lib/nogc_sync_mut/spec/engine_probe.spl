@@ -99,6 +99,10 @@ pub fn is_known_engine(engine: text) -> bool:
     """An unrecognised SIMPLE_EXECUTION_MODE silently means JIT — reject it."""
     engine == "jit" or engine == "interpret" or engine == "interpreter"
 
+# The Windows self-exe answer costs one PowerShell spawn; a pid's image path
+# cannot change, so ask once per process.
+var _self_exe_windows_cache = ""
+
 pub fn simple_binary() -> text:
     """Resolve the compiler binary to spawn probes with.
 
@@ -125,9 +129,12 @@ pub fn simple_binary() -> text:
     # still runs on the invoking build instead of the tracked bin/simple.exe,
     # which can be older than the source tree (BUG-IT-1, 2026-10-10).
     if host_os() == "windows":
+        if _self_exe_windows_cache != "":
+            return _self_exe_windows_cache
         val (win_out, _win_err, win_code) = process_run_bounded("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "(Get-Process -Id {getpid()}).Path"], 20000, 65536)
         val win_path = win_out.trim()
         if win_code == 0 and win_path != "" and not win_path.ends_with(".spl") and file_exists(win_path):
+            _self_exe_windows_cache = win_path
             return win_path
     if file_exists("bin/simple"):
         return "bin/simple"

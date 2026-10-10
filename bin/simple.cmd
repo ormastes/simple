@@ -7,6 +7,13 @@ for %%I in ("%SCRIPT_DIR%..") do set "REPO_ROOT=%%~fI"
 rem An explicit SIMPLE_BINARY always wins: the operator named the compiler to use,
 rem and no locally discovered binary (which may be older than the source tree,
 rem BUG-IT-1 2026-10-10) may shadow it.
+rem Never when it names this wrapper itself: that would recurse until cmd dies.
+set "SELF_REFERENCE="
+if defined SIMPLE_BINARY for %%S in ("%SIMPLE_BINARY%") do if /I "%%~fS"=="%~f0" set "SELF_REFERENCE=1"
+if defined SELF_REFERENCE (
+    echo error: SIMPLE_BINARY points at this wrapper ^(%~f0^); set it to a simple.exe 1>&2
+    exit /b 1
+)
 if defined SIMPLE_BINARY if exist "%SIMPLE_BINARY%" (
     "%SIMPLE_BINARY%" %*
     goto :done

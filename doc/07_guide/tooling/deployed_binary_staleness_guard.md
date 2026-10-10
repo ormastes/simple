@@ -231,9 +231,11 @@ sh scripts/check/check-deployed-simple-runnable.shs --bin <seed>  # a candidate,
 | `FAIL — 1 invocation(s) executed, ... (rc=N): <first diagnostic>` | 1 | stale or broken; do not use it |
 | `ERROR — nothing was checked (...)` | 2 | no entrypoint to execute — never a pass |
 
-`--selftest` (6 fixtures, fatal, runs before every scan): working entrypoint,
+`--selftest` (8 fixtures, fatal, runs before every scan): working entrypoint,
 the incident's parse-error shape, a silent exit 0 without the token, a crash
-after printing the token, no entrypoint, and a nonexistent `--bin`.
+after printing the token, no entrypoint, a nonexistent `--bin`, a value-less
+trailing `--bin`/`--root`/`--timeout` (must ERROR and terminate — it used to
+loop forever), and a non-numeric `--timeout`.
 
 Wiring: advisory push-tier row `push-deployed-simple-runnable` in
 `config/check/must_check_gates.sdn` (it needs a deployed executable, so it
@@ -254,3 +256,14 @@ Run cargo from `src/compiler_rust`, not the repo root with `--manifest-path`:
 the vendored-sources config lives in `src/compiler_rust/.cargo/config.toml` and
 cargo discovers it from the working directory. From the root the build fails
 with `inkwell does not have that feature`.
+
+### Provenance of the tracked Windows binary
+
+The tracked `bin/simple.exe` (sha256 `3d9d2b8da230…`, 17,154,048 bytes, commit
+`3fc45dacdf4`) is a Rust seed built from the seed sources at `0c0b130f737`
+(bootstrap profile, no `llvm` feature). It **predates** two later seed-source
+commits on release/1.0 — `480f7570cab` (native-all GPU provider registry wired
+to the canonical C owner) and `785fb573223` (borrowed GPU path pointer in a
+generated extern declaration) — and was deliberately not rebuilt for them. It
+runs the current stdlib (the guard above PASSes); refresh it when a change in
+`src/compiler_rust` or `src/runtime` is needed by the interpreter path.

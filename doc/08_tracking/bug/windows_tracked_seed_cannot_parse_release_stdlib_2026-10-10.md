@@ -61,7 +61,9 @@ the Rust-seed banner), which is why it looked healthy.
   (`bin/FILE.md` lists it; `setup.shs` calls it "a tracked artifact owned by the
   Windows bootstrap lane"; the full-bootstrap deploy publishes over it). Done
   in a separate commit with a 17 MB bootstrap-profile seed built from
-  `0c0b130f737`. Cost: one binary blob per refresh, and it goes stale again the
+  `0c0b130f737`. That seed predates the later seed-source commits
+  `480f7570cab` and `785fb573223` (GPU provider registry / runtime symbols)
+  and was not rebuilt for them. Cost: one binary blob per refresh, and it goes stale again the
   next time the stdlib adopts syntax the seed lacks — the guard above is what
   now reports that.
 - **(b) untrack it** — remove the blob, ignore `bin/simple.exe`, and have
