@@ -1015,7 +1015,34 @@ run_conflict_tree_union() {
     # 64-commit bound. Those commits are already published on main and were
     # gated when they landed; exclude them (2026-09-28).
     _main_ref=$(published_main_ref) && set -- "$@" "$_main_ref"
+    # A release PR can likewise fast-forward by merging its published base.
+    # Exclude only versioned release tips advertised by the actual push
+    # destination, never an arbitrary work ref or a forged tracking ref.
+    _release_tips=$(published_release_tips) || _release_tips=""
+    for _release_tip in $_release_tips; do
+        set -- "$@" "$_release_tip"
+    done
     run_push_gate push-conflict-tree true "$ROOT/scripts/check/check-no-conflict-tree-push.shs" "$@"
+}
+
+# Query once, with a bounded wait, and retain only locally available commits.
+# Failure keeps the original range: it never authorizes a smaller scan.
+published_release_tips() {
+    _pr_remote=${MUST_CHECK_PUSH_REMOTE:-}
+    case "$_pr_remote" in ''|*[!A-Za-z0-9._/-]*) return 1 ;; esac
+    _pr_destination=${MUST_CHECK_PUSH_DESTINATION:-}
+    case "$_pr_destination" in ''|-*) return 1 ;; esac
+    _pr_lines=$("$TIMEOUT_BIN" -k 1s "${REMOTE_QUERY_TIMEOUT_S}s" \
+        git -C "$ROOT" ls-remote --exit-code "$_pr_destination" 'refs/heads/release/*' 2>/dev/null) || return 1
+    printf '%s\n' "$_pr_lines" | while read -r _pr_sha _pr_ref; do
+        case "$_pr_ref" in refs/heads/release/*) ;; *) continue ;; esac
+        _pr_version=${_pr_ref#refs/heads/release/}
+        case "$_pr_version" in *.*) ;; *) continue ;; esac
+        case "$_pr_version" in ''|.*|*.|*..*|*[!0-9.]*) continue ;; esac
+        case "$_pr_sha" in ''|*[!0-9a-f]*) continue ;; esac
+        git -C "$ROOT" rev-parse --verify --quiet "$_pr_sha^{commit}" >/dev/null || continue
+        printf '%s\n' "$_pr_sha"
+    done
 }
 
 # Prints refs/remotes/<push remote>/main when it resolves to a commit, so the
@@ -1173,6 +1200,84 @@ elif command -v timeout >/dev/null 2>&1 && _is_gnu_timeout timeout; then
 else
     echo "push-must-check: ERROR — nothing was checked (GNU timeout(1) not found or not identifiable via --version: install GNU coreutils so 'timeout' or 'gtimeout' resolves to it. On Windows this means Git Bash's own coreutils 'timeout' must precede C:\\Windows\\System32 on PATH — that System32 'timeout.exe' is an unrelated countdown command and is never accepted here. On stock macOS: 'brew install coreutils' provides 'gtimeout')"
     exit 2
+fi
+
+# A separate union fixture checks the real 64-commit gate using a local bare
+# remote. No production hooks, refs or gate limits are changed by the fixture.
+if [ "${1:-}" = --self-test-release-union ]; then
+    _ru_dir=$(mktemp -d) || exit 2
+    _ru_source=$ROOT
+    git init -q --bare "$_ru_dir/remote.git" || exit 2
+    git init -q -b main "$_ru_dir/repo" || exit 2
+    ROOT=$_ru_dir/repo
+    git -C "$ROOT" config user.email test@example.com
+    git -C "$ROOT" config user.name Test
+    git -C "$ROOT" remote add origin "$_ru_dir/remote.git"
+    mkdir -p "$ROOT/scripts/check"
+    cp "$_ru_source/scripts/check/check-no-conflict-tree-push.shs" "$ROOT/scripts/check/" || exit 2
+    cd "$ROOT" || exit 2
+    _ru_tree=$(git mktree </dev/null) || exit 2
+    _ru_main=$(printf 'base\n' | git commit-tree "$_ru_tree") || exit 2
+    git update-ref refs/heads/main "$_ru_main" || exit 2
+    git push -q origin main || exit 2
+    _ru_release=$_ru_main
+    _ru_i=0
+    while [ "$_ru_i" -lt 65 ]; do
+        _ru_release=$(printf 'release-%s\n' "$_ru_i" | git commit-tree "$_ru_tree" -p "$_ru_release") || exit 2
+        _ru_i=$((_ru_i + 1))
+    done
+    git update-ref refs/heads/release/1.0 "$_ru_release" || exit 2
+    git push -q origin release/1.0 || exit 2
+    _ru_old=$(printf 'old PR\n' | git commit-tree "$_ru_tree" -p "$_ru_main") || exit 2
+    _ru_own=$(printf 'unpublished PR work\n' | git commit-tree "$_ru_tree" -p "$_ru_old") || exit 2
+    _ru_tip=$(printf 'merge published release\n' | git commit-tree "$_ru_tree" -p "$_ru_own" -p "$_ru_release") || exit 2
+    MUST_CHECK_PUSH_REMOTE=origin
+    MUST_CHECK_PUSH_DESTINATION=$_ru_dir/remote.git
+    [ "$(git rev-list --count "$_ru_old..$_ru_tip")" -eq 67 ] || die "release fixture lacks published history"
+    [ "$(published_release_tips)" = "$_ru_release" ] || die "published release was not verified"
+    _ru_remaining=$(git rev-list "$_ru_tip" --not "$_ru_old" "$_ru_main" "$_ru_release") || exit 2
+    [ "$_ru_remaining" = "$(printf '%s\n%s' "$_ru_tip" "$_ru_own")" ] || die "release exclusion lost unpublished work"
+    ru_check() (
+        printf 'refs/heads/work/fixture %s refs/heads/work/fixture %s\n' "$1" "$_ru_old" > "$_ru_dir/refs"
+        MUST_CHECK_BUDGET_SPENT_MS=0
+        MUST_CHECK_BUDGET_OVERRUN=""
+        run_conflict_tree_union "$_ru_dir/refs"
+    )
+    ru_check "$_ru_tip" || die "published release merge exceeded history bound"
+    echo 'push-must-check: 65 published release commits excluded; own commit and merge retained: PASS'
+
+    _ru_big=$_ru_tip
+    _ru_i=0
+    while [ "$_ru_i" -lt 63 ]; do
+        _ru_big=$(printf 'unpublished-%s\n' "$_ru_i" | git commit-tree "$_ru_tree" -p "$_ru_big") || exit 2
+        _ru_i=$((_ru_i + 1))
+    done
+    # Even publication on a work branch cannot exclude these 65 new commits
+    # from this existing-ref update. Only the protected release base is trusted.
+    git update-ref refs/heads/work/untrusted "$_ru_big" || exit 2
+    git push -q origin work/untrusted || exit 2
+    [ "$(git rev-list --count "$_ru_big" --not "$_ru_old" "$_ru_main" "$_ru_release")" -eq 65 ] || die "large fixture lacks 65 new commits"
+    if ru_check "$_ru_big" >"$_ru_dir/big.log" 2>&1; then die "65 unpublished commits escaped the bound"; fi
+    grep -q 'bounded limit of 64 commits' "$_ru_dir/big.log" || die "large range failed for an unexpected reason"
+    echo 'push-must-check: 65 new commits remain blocked despite an unrelated work ref: PASS'
+
+    _ru_conflict_tree=$(printf '040000 tree %s\t.jjconflict-side-0\n' "$_ru_tree" | git mktree) || exit 2
+    _ru_conflict=$(printf 'conflicted own commit\n' | git commit-tree "$_ru_conflict_tree" -p "$_ru_tip") || exit 2
+    if ru_check "$_ru_conflict" >"$_ru_dir/conflict.log" 2>&1; then die "own conflict tree was admitted"; fi
+    grep -q 'conflict commit' "$_ru_dir/conflict.log" || die "conflict fixture failed for an unexpected reason"
+    echo 'push-must-check: own conflict tree after the release merge is rejected: PASS'
+
+    git init -q --bare "$_ru_dir/push.git" || exit 2
+    MUST_CHECK_PUSH_DESTINATION=$_ru_dir/push.git
+    if ru_check "$_ru_tip" >"$_ru_dir/endpoint.log" 2>&1; then die "fetch-only release authorized another push destination"; fi
+    echo 'push-must-check: fetch-only release cannot authorize a different push destination: PASS'
+    MUST_CHECK_PUSH_DESTINATION=$_ru_dir/remote.git
+    git push -q origin :refs/heads/release/1.0 || exit 2
+    git update-ref refs/remotes/origin/release/1.0 "$_ru_release" || exit 2
+    if ru_check "$_ru_tip" >"$_ru_dir/stale.log" 2>&1; then die "stale tracking ref authorized unpublished release history"; fi
+    echo 'push-must-check: stale release tracking ref cannot authorize history exclusion: PASS'
+    echo "push-must-check: retained release union fixture $_ru_dir"
+    exit 0
 fi
 
 # Focused tiny-repository proof for the new-ref base choice. It never pushes

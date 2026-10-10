@@ -1,0 +1,29 @@
+# UNEXECUTED: native and SSpec qualification are separate requirements.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir.*
+
+fn text_ord_mir(source: text) -> text:
+    val parsed = parse_full_frontend(source, "ord_spec.spl", "ord_spec.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("ord_spec.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    expect(mir_lowering.errors.len()).to_equal(0)
+    serialize_mir_module(mir)
+
+describe "text ord retains Unicode runtime and custom ownership":
+    it "lowers text literal and text foreach ord through the reserved codepoint primitive":
+        val source = "fn codes(value: text) -> i64:\n    var total = \"é\".ord()\n    for ch in value:\n        total = total + ch.ord()\n    return total\n"
+        val mir = text_ord_mir(source)
+        expect(mir.split("__simple_rt_string_char_code_at").len() - 1).to_equal(2)
+        expect(mir.contains("__simple_rt_string_byte_at")).to_be(false)
+
+    it "preserves a declared custom ord method":
+        val source = "class CustomOrd:\n    marker: i64\n    fn ord() -> i64:\n        return self.marker\n\nfn custom(value: CustomOrd) -> i64:\n    return value.ord()\n"
+        val mir = text_ord_mir(source)
+        expect(mir).to_contain("CustomOrd")
+        expect(mir.contains("__simple_rt_string_char_code_at")).to_be(false)

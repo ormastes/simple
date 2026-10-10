@@ -1,0 +1,173 @@
+# UNEXECUTED: actual native baseline is recorded in the matching bug receipt.
+# These tests inspect semantic owners and lowered pattern kinds, not merely
+# successful diagnostics. No parser or name allowlist supplies the enum owner.
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types_expr.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_lowering.expressions.*
+use compiler.hir.hir_lowering._Expressions.expression_components.*
+
+fn binding_owner_context() -> HirLowering:
+    var lowering = HirLowering.with_filename("binding_owner_consumer")
+    val parsed = parse_full_frontend("pub enum Remote:\n    A\n    B\n", "provider", "provider", Logger(level: 0))
+    val owner = lowering.symbols.define("Alias", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, nil)
+    lowering.register_enum_unit_patterns(parsed.enums["Remote"], "Alias")
+    val type_ = HirType(kind: HirTypeKind.Named(owner, []), span: Span.empty())
+    lowering.symbols.define("input", SymbolKind.Variable, type_, Span.empty(), Visibility.Private, false, nil)
+    lowering
+
+fn binding_owner_ident(name: text) -> Expr:
+    Expr(kind: ExprKind.Ident(name), span: Span.empty())
+
+fn binding_owner_match(name: text, other: text) -> Expr:
+    val span = Span.empty()
+    val pattern = Pattern(kind: PatternKind.Or([
+        Pattern(kind: PatternKind.Binding("A", false), span: span),
+        Pattern(kind: PatternKind.Binding(other, false), span: span)
+    ]), span: span)
+    val arm = MatchArm(pattern: pattern, has_guard: false,
+        guard: Expr(kind: ExprKind.NilLit, span: span),
+        body: Block(stmts: [Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.IntLit(1), span: span)), span: span)], span: span), span: span)
+    Expr(kind: ExprKind.MatchCase(binding_owner_ident(name), [arm]), span: span)
+
+fn binding_owner_expect_match(expr: HirExpr, owner: i64):
+    match expr.kind:
+        case HirExprKind.MatchCase(_, arms):
+            expect(arms.len()).to_equal(1)
+            match arms[0].pattern.kind:
+                case HirPatternKind.Or(alternatives):
+                    expect(alternatives.len()).to_equal(2)
+                    var names: [text] = []
+                    for alternative in alternatives:
+                        expect(alternative.has_type_).to_be(true)
+                        match alternative.kind:
+                            case HirPatternKind.Enum(type_, name, _):
+                                match type_.kind:
+                                    case HirTypeKind.Named(actual, _): expect(actual.id).to_equal(owner)
+                                    case _: assert(false)
+                                names = names.push(name)
+                            case _: assert(false)
+                    expect(names).to_equal(["A", "B"])
+                case _: assert(false)
+        case _: assert(false)
+
+describe "statement bindings preserve proven match subject ownership":
+    it "retains a declared input enum owner in unannotated val and var aliases":
+        step("Lower actual immutable and mutable local declarations, then inspect their OR variants")
+        for mutable in [false, true]:
+            var lowering = binding_owner_context()
+            val expected = lowering.symbols.lookup_or_invalid("Alias")
+            val span = Span.empty()
+            val kind = if mutable:
+                StmtKind.Var("copy", nil, binding_owner_ident("input"))
+            else:
+                StmtKind.Val("copy", nil, binding_owner_ident("input"))
+            val declaration = lowering.lower_hir_stmt(Stmt(kind: kind, span: span))
+            match declaration.kind:
+                case HirStmtKind.Let(symbol, annotation, _):
+                    expect(annotation).to_be_nil()
+                    expect(lowering.symbols.get_symbol_named_type_raw(symbol.id)).to_equal(expected.id)
+                case _: assert(false)
+            val matched = lowering.lower_hir_expr(binding_owner_match("copy", "B"))
+            expect(lowering.errors.len()).to_equal(0)
+            binding_owner_expect_match(matched, expected.id)
+
+    it "treats the flat bridge Infer placeholder as an absent val or var annotation":
+        step("Keep a present AST Infer node from blocking initializer owner recovery")
+        for mutable in [false, true]:
+            var lowering = binding_owner_context()
+            val expected = lowering.symbols.lookup_or_invalid("Alias")
+            val span = Span.empty()
+            val placeholder = Type(kind: TypeKind.Infer, span: span)
+            val kind = if mutable:
+                StmtKind.Var("copy", placeholder, binding_owner_ident("input"))
+            else:
+                StmtKind.Val("copy", placeholder, binding_owner_ident("input"))
+            val declaration = lowering.lower_hir_stmt(Stmt(kind: kind, span: span))
+            match declaration.kind:
+                case HirStmtKind.Let(symbol, annotation, _):
+                    expect(annotation).to_be_nil()
+                    expect(lowering.symbols.get_symbol_named_type_raw(symbol.id)).to_equal(expected.id)
+                case _: assert(false)
+            val matched = lowering.lower_hir_expr(binding_owner_match("copy", "B"))
+            expect(lowering.errors.len()).to_equal(0)
+            binding_owner_expect_match(matched, expected.id)
+
+    it "preserves explicit enum and Any annotations instead of inferring through them":
+        step("Distinguish Named annotations from the AST Infer absence sentinel")
+        for type_name in ["Alias", "Any"]:
+            var lowering = binding_owner_context()
+            val owner = lowering.symbols.lookup_or_invalid("Alias")
+            val span = Span.empty()
+            val explicit_type = Type(kind: TypeKind.Named(type_name, []), span: span)
+            val declaration = lowering.lower_hir_stmt(Stmt(kind: StmtKind.Val("copy", explicit_type, binding_owner_ident("input")), span: span))
+            expect(lowering.errors.len()).to_equal(0)
+            match declaration.kind:
+                case HirStmtKind.Let(symbol, annotation, _):
+                    val actual = annotation ?? HirType(kind: HirTypeKind.Error, span: span)
+                    if type_name == "Any":
+                        match actual.kind:
+                            case HirTypeKind.Any: ()
+                            case _: assert(false)
+                        expect(lowering.symbols.get_symbol_named_type_raw(symbol.id)).to_equal(-1)
+                    else:
+                        match actual.kind:
+                            case HirTypeKind.Named(named, _): expect(named.id).to_equal(owner.id)
+                            case _: assert(false)
+                        expect(lowering.symbols.get_symbol_named_type_raw(symbol.id)).to_equal(owner.id)
+                case _: assert(false)
+
+    it "binds ordinary array and slice loop elements before lowering their match bodies":
+        step("Read the element owner from a typed iterable symbol, with an inferred iterable alias")
+        for slice in [false, true]:
+            var lowering = binding_owner_context()
+            val owner = lowering.symbols.lookup_or_invalid("Alias")
+            val span = Span.empty()
+            val element = HirType(kind: HirTypeKind.Named(owner, []), span: span)
+            val container_kind = if slice: HirTypeKind.Slice(element) else: HirTypeKind.Array(element, nil)
+            val container = HirType(kind: container_kind, span: span)
+            lowering.symbols.define("rows", SymbolKind.Variable, container, span, Visibility.Private, false, nil)
+            lowering.lower_hir_stmt(Stmt(kind: StmtKind.Val("copies", nil, binding_owner_ident("rows")), span: span))
+            val body = Block(stmts: [Stmt(kind: StmtKind.Val("picked", nil, binding_owner_match("item", "B")), span: span)], span: span)
+            val lowered = lowering.lower_hir_stmt(Stmt(kind: StmtKind.For("item", binding_owner_ident("copies"), body), span: span))
+            expect(lowering.errors.len()).to_equal(0)
+            match lowered.kind:
+                case HirStmtKind.Expr(expr):
+                    match expr.kind:
+                        case HirExprKind.For(symbol, _, loop_body, _):
+                            expect(lowering.symbols.get_symbol_named_type_raw(symbol.id)).to_equal(owner.id)
+                            expect(loop_body.stmts.len()).to_equal(1)
+                            match loop_body.stmts[0].kind:
+                                case HirStmtKind.Let(_, _, init): binding_owner_expect_match(init, owner.id)
+                                case _: assert(false)
+                        case _: assert(false)
+                case _: assert(false)
+
+    it "does not interpret a placeholder type when has_type is false":
+        step("Require the authoritative expression presence bit for a non-symbol initializer")
+        var lowering = binding_owner_context()
+        val owner = lowering.symbols.lookup_or_invalid("Alias")
+        val placeholder = HirType(kind: HirTypeKind.Named(owner, []), span: Span.empty())
+        val source = HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: placeholder, span: Span.empty())
+        val recovered = lowering.binding_source_type(source)
+        match recovered.kind:
+            case HirTypeKind.Error: ()
+            case _: assert(false)
+
+    it "retains strict binding mismatch errors for names outside the subject owner":
+        step("Propagating an enum owner must not admit an unrelated bare binding")
+        var lowering = binding_owner_context()
+        lowering.lower_hir_stmt(Stmt(kind: StmtKind.Val("copy", nil, binding_owner_ident("input")), span: Span.empty()))
+        lowering.lower_hir_expr(binding_owner_match("copy", "Unrelated"))
+        var found = false
+        for diagnostic in lowering.diagnostic_messages:
+            if diagnostic.contains("or-pattern alternatives must bind the same variables"):
+                found = true
+        expect(found).to_be(true)

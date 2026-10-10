@@ -1,0 +1,76 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+
+"""The native HIR array literal type is evidence-based, not first-element based.
+
+The owner method is exercised with real HirExpr/HirType values at its semantic
+boundary. These cases ensure a typed first element cannot override unknown or
+heterogeneous siblings, and that those inputs never inherit an arbitrary owner.
+The end-to-end native foreach behavior is covered separately by
+or_variant_subject_field_type_system_spec.spl.
+"""
+
+# @tag:system,compiler,hir,array,type-inference
+
+use std.spec.*
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering._Expressions.expression_core.*
+
+fn named_type(owner: i64) -> HirType:
+    HirType(kind: HirTypeKind.Named(SymbolId(id: owner), []), span: Span.empty())
+
+fn typed_expr(type_: HirType) -> HirExpr:
+    HirExpr(kind: HirExprKind.Error, has_type_: true, type_: type_, span: Span.empty())
+
+fn placeholder_expr(type_: HirType) -> HirExpr:
+    HirExpr(kind: HirExprKind.Error, has_type_: false, type_: type_, span: Span.empty())
+
+fn is_error(type_: HirType) -> bool:
+    match type_.kind:
+        case HirTypeKind.Error: true
+        case _: false
+
+fn named_owner(type_: HirType) -> i64:
+    match type_.kind:
+        case HirTypeKind.Named(owner, _): owner.id
+        case _: -1
+
+describe "homogeneous typed array element inference":
+    it "preserves one owner only when all concrete elements agree":
+        step("same named owner is retained")
+        var lowering = HirLowering.new()
+        val result = lowering.homogeneous_typed_array_element_type(
+            [typed_expr(named_type(17)), typed_expr(named_type(17))],
+            Span.empty())
+        expect(named_owner(result)).to_equal(17)
+
+    it "leaves empty and unknown-presence inputs untyped":
+        step("empty and false-presence inputs carry no type evidence")
+        var lowering = HirLowering.new()
+        expect(is_error(lowering.homogeneous_typed_array_element_type([], Span.empty()))).to_equal(true)
+        expect(is_error(lowering.homogeneous_typed_array_element_type(
+            [placeholder_expr(named_type(17)), typed_expr(named_type(17))], Span.empty()))).to_equal(true)
+        expect(is_error(lowering.homogeneous_typed_array_element_type(
+            [typed_expr(named_type(17)), placeholder_expr(named_type(17))], Span.empty()))).to_equal(true)
+
+    it "leaves heterogeneous named owners untyped":
+        step("distinct enum owners do not inherit the first element")
+        var lowering = HirLowering.new()
+        expect(is_error(lowering.homogeneous_typed_array_element_type(
+            [typed_expr(named_type(17)), typed_expr(named_type(23))], Span.empty()))).to_equal(true)
+
+    it "leaves non-concrete type constructors untyped":
+        step("Any, Error, Infer, and Never are not concrete element evidence")
+        var lowering = HirLowering.new()
+        expect(is_error(lowering.homogeneous_typed_array_element_type(
+            [typed_expr(HirType(kind: HirTypeKind.Any, span: Span.empty()))], Span.empty()))).to_equal(true)
+        expect(is_error(lowering.homogeneous_typed_array_element_type(
+            [typed_expr(HirType(kind: HirTypeKind.Error, span: Span.empty()))], Span.empty()))).to_equal(true)
+        expect(is_error(lowering.homogeneous_typed_array_element_type(
+            [typed_expr(HirType(kind: HirTypeKind.Infer(0, 0), span: Span.empty()))], Span.empty()))).to_equal(true)
+        expect(is_error(lowering.homogeneous_typed_array_element_type(
+            [typed_expr(HirType(kind: HirTypeKind.Never, span: Span.empty()))], Span.empty()))).to_equal(true)

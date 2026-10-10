@@ -1847,12 +1847,14 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
         # + `if x != nil:` is the IF_VAL provenance marker recorded by
         # `stmt_if_val_decl`. The interpreter reads that marker directly
         # (eval_stmts.spl `eval_option_binding_value`); everything downstream of
-        # this bridge consumes `StmtKind`, which has no marker field, so the
+        # this bridge historically consumed only `StmtKind`, so the
         # provenance died here and the NATIVE lane bound the Option HANDLE
         # instead of its payload -- `p.tag` read the enum header, and the
         # garbage propagated onward as a `T?`.
         #
-        # Carry the provenance forward as SEMANTICS rather than as a new flag:
+        # Carry value-or-nil evaluation as SEMANTICS. Stmt also retains the
+        # marker for HIR binding type selection; ordinary `val x = opt.?`
+        # must keep its Optional type rather than acquire the payload type:
         # `ExistsCheck` ("`.?` -- value if present, nil if absent") is exactly
         # `eval_option_binding_value`'s contract and is already lowered on every
         # lane, so the desugared `x != nil` test stays correct for a boxed
@@ -1868,7 +1870,7 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
                     Expr(kind: ExprKind.ExistsCheck(init_expr), span: span)
         else:
             init_expr
-        return Stmt(kind: StmtKind.Val(name, type_, bound_expr), span: span)
+        return Stmt(kind: StmtKind.Val(name, type_, bound_expr), span: span, bind_optional_payload: stmt_is_if_val_decl(idx))
     elif tag == STMT_VAR_DECL:
         val name = stmt_get_name(idx)
         val type_idx = stmt_get_type(idx)

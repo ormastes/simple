@@ -18,7 +18,7 @@ use compiler.hir.hir_types.*
 # with a synthesized span (span_file empty, line 0) and hard-errors.
 use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_definitions.*
-use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_definitions.{HirFunction, HirConst}
 use compiler.monomorphize.engine.*
 use compiler.monomorphize.types.ConcreteType
 use compiler.monomorphize.type_subst.*
@@ -119,6 +119,9 @@ class MonomorphizationPass:
     unresolved_templates: Dict<text, bool>
     # Statistics
     stats: MonoStats
+    # Declared module constants/statics, keyed by module + actual SymbolId.
+    # Raw IDs repeat in other modules; source names are not type authority.
+    declared_global_types: Dict<text, HirType> = {}
 
 struct MonoStats:
     generic_functions_found: i64
@@ -170,7 +173,8 @@ impl MonomorphizationPass:
                 call_sites_found: 0,
                 specializations_created: 0,
                 unresolved_generic_calls: 0
-            )
+            ),
+            declared_global_types: {}
         )
 
     # ========================================================================
@@ -192,12 +196,14 @@ impl MonomorphizationPass:
         tuple destructuring, which silently produces zero iterations in compiled
         (bootstrap gen2) mode, causing hir_modules to become empty.
         """
+        self.declared_global_types = {}
         val mod_keys = modules.keys()
 
         # Step 1: Collect generic definitions
         for name in mod_keys:
             val module: HirModule = modules[name]
             self.module_paths[name] = module.path
+            self.collect_declared_globals(module, name)
             self.collect_generics(module, name)
 
         if self.stats.generic_functions_found == 0 and self.stats.generic_structs_found == 0 and self.stats.generic_classes_found == 0:
@@ -341,6 +347,40 @@ impl MonomorphizationPass:
     # ========================================================================
     # Step 2: Worklist fixed point
     # ========================================================================
+
+    me collect_declared_globals(module: HirModule, module_name: text):
+        # HirConst also represents mutable module-level pools. Its symbol is
+        # the declaration identity; bootstrap constants' dictionary keys can
+        # instead be declaration indices, so never substitute the map key.
+        for key in module.constants.keys():
+            val declaration: HirConst = module.constants[key]
+            if declaration.symbol.is_valid() and hir_type_is_concrete(declaration.type_):
+                self.declared_global_types[mono_sym_key(module_name, declaration.symbol.id)] = declaration.type_
+        # Imported constants are registered as consumer-scope Const symbols,
+        # with their projected declaration type and provider in
+        # defining_module; they are not copied into module.constants. Index
+        # that exact alias identity under the consumer module so expressions
+        # referencing the import resolve without a global name/leaf fallback.
+        val symbol_ids = module.symbols.symbols.keys()
+        for raw_id in symbol_ids:
+            val symbol: HirSymbol = module.symbols.symbols[raw_id]
+            if symbol.kind != SymbolKind.Const or symbol.type_ == nil:
+                continue
+            if not symbol.defining_module.?:
+                continue
+            val defining_module: text = symbol.defining_module ?? ""
+            if defining_module == "" or defining_module == module.name or defining_module == module_name:
+                continue
+            val imported_type: HirType = symbol.type_ ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
+            if symbol.id.is_valid() and hir_type_is_concrete(imported_type):
+                self.declared_global_types[mono_sym_key(module_name, symbol.id.id)] = imported_type
+
+    me declared_global_type(symbol: SymbolId) -> HirType?:
+        val key = mono_sym_key(self.current_module, symbol.id)
+        if self.declared_global_types.has(key):
+            val declared: HirType = self.declared_global_types[key]
+            if hir_type_is_concrete(declared): return declared
+        nil
 
     me rewrite_function(func: HirFunction) -> HirFunction:
         """Rewrite every generic call site in one function body.
@@ -681,11 +721,15 @@ impl MonomorphizationPass:
                 val vt = self.env_type(sym_id)
                 if vt != nil:
                     return vt
+                val declared = self.declared_global_type(sym_id)
+                if declared != nil: return declared
                 self.fn_sig_of(sym_id)
             case HirExprKind.NamedVar(sym_id, _):
                 val nt = self.env_type(sym_id)
                 if nt != nil:
                     return nt
+                val declared = self.declared_global_type(sym_id)
+                if declared != nil: return declared
                 self.fn_sig_of(sym_id)
             case HirExprKind.Field(_, _, _):
                 val (ft, _fmod) = self.infer_field_chain(expr)

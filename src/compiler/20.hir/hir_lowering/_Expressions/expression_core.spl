@@ -8,6 +8,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.common.assurance.unsafe_capabilities.{unknown_unsafe_capability_names, valid_unsafe_capability_names_help}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_disc, is_tuple_positional_field, parse_tuple_field_index, primitive_cast_type_kind, _hir_expr_symbol_or_invalid}
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.hir.hir_lowering._Expressions.type_test_operand.{binary_is_type_operand}
 use compiler.hir.hir_lowering._Expressions.declared_enum_constructor.*
 
@@ -122,6 +123,116 @@ impl HirLowering:
                         return MethodResolution.StaticMethod(owner, declared_method)
             case _: ()
         MethodResolution.Unresolved
+
+    fn named_owner_for_hir_type(type_: HirType) -> i64:
+        match type_.kind:
+            case HirTypeKind.Named(owner, _): owner.id
+            case _: -1
+
+    fn named_element_owner_for_hir_type(type_: HirType) -> i64:
+        match type_.kind:
+            case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
+                self.named_owner_for_hir_type(element)
+            case _: -1
+
+    me homogeneous_typed_array_element_type(elements: [HirExpr], span: Span) -> HirType:
+        # An empty literal or any untyped/mixed element provides no
+        # authoritative element type. Only propagate a type when every
+        # lowered element carries the same concrete HIR type.
+        if elements.is_empty(): return HirType(kind: HirTypeKind.Error, span: span)
+        val first = elements[0]
+        if not first.has_type_: return HirType(kind: HirTypeKind.Error, span: span)
+        match first.type_.kind:
+            case HirTypeKind.Error | HirTypeKind.Infer(_, _) | HirTypeKind.Any | HirTypeKind.Never:
+                return HirType(kind: HirTypeKind.Error, span: span)
+            case _: ()
+        for element in elements:
+            if not element.has_type_: return HirType(kind: HirTypeKind.Error, span: span)
+            if not hir_types_equal(first.type_, element.type_): return HirType(kind: HirTypeKind.Error, span: span)
+        first.type_
+
+    me field_owner_for_hir_expr(base: HirExpr) -> i64:
+        # Preserve the explicit HIR type when one is already attached (for
+        # nested fields and typed index expressions). Otherwise recover only
+        # from declared symbol/call signatures or collection element types;
+        # this never guesses from a constructor's leaf name.
+        if base.has_type_:
+            val typed_owner = self.named_owner_for_hir_type(base.type_)
+            if typed_owner >= 0:
+                return typed_owner
+
+        match base.kind:
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                if val declared_type = self.symbols.get_symbol_type_raw(symbol.id):
+                    return self.named_owner_for_hir_type(declared_type)
+            case HirExprKind.Call(callee, _, _):
+                val callee_symbol = _hir_expr_symbol_or_invalid(callee.kind)
+                if callee_symbol.is_valid():
+                    if val signature = self.symbols.get_symbol_type_raw(callee_symbol.id):
+                        match signature.kind:
+                            case HirTypeKind.Function(_, returned, _):
+                                return self.named_owner_for_hir_type(returned)
+                            case _: ()
+            case HirExprKind.Index(index_base, _):
+                if index_base.has_type_:
+                    val element_owner = self.named_element_owner_for_hir_type(index_base.type_)
+                    if element_owner >= 0:
+                        return element_owner
+                val index_base_symbol = _hir_expr_symbol_or_invalid(index_base.kind)
+                if index_base_symbol.is_valid():
+                    if val declared_array_type = self.symbols.get_symbol_type_raw(index_base_symbol.id):
+                        return self.named_element_owner_for_hir_type(declared_array_type)
+            case _: ()
+        -1
+
+    me declared_exists_check_type(source: HirExpr) -> HirType:
+        # if-val becomes ExistsCheck before HIR. Recover only a declared
+        # optional type, never an owner inferred from the binding's spelling.
+        var source_type = HirType(kind: HirTypeKind.Error, span: source.span)
+        if source.has_type_:
+            source_type = source.type_ ?? source_type
+        else:
+            val source_symbol = _hir_expr_symbol_or_invalid(source.kind)
+            if source_symbol.is_valid():
+                source_type = self.symbols.get_symbol_type_raw(source_symbol.id) ?? source_type
+            var callable = SymbolId(id: -1)
+            match source.kind:
+                case HirExprKind.Call(callee, _, _):
+                    callable = _hir_expr_symbol_or_invalid(callee.kind)
+                case HirExprKind.MethodCall(receiver, method_name, _, resolution):
+                    match resolution:
+                        case MethodResolution.StaticMethod(_, method_id):
+                            callable = method_id
+                        case MethodResolution.Unresolved:
+                            val receiver_owner = self.field_owner_for_hir_expr(receiver)
+                            if receiver_owner >= 0:
+                                callable = self.symbols.lookup_method_in_type_raw(receiver_owner, method_name) ?? callable
+                        case _: ()
+                case _: ()
+            if callable.is_valid():
+                if val signature = self.symbols.get_symbol_type_raw(callable.id):
+                    match signature.kind:
+                        case HirTypeKind.Function(_, returned, _): source_type = returned
+                        case _: ()
+        match source_type.kind:
+            case HirTypeKind.Optional(_): return source_type
+            case _: ()
+        HirType(kind: HirTypeKind.Error, span: source.span)
+
+    me field_type_for_hir_base(base: HirExpr, field_name: text) -> HirType:
+        # Keep the existing symbol/local-constructor and qualified owner-table
+        # lookup as the first authority. Expression-derived owners extend that
+        # same canonical table lookup for chained/call/index receivers.
+        val base_symbol = _hir_expr_symbol_or_invalid(base.kind)
+        if base_symbol.is_valid():
+            val direct = self.field_type_for_base_raw(base_symbol.id, field_name)
+            match direct.kind:
+                case HirTypeKind.Error: ()
+                case _: return direct
+        val owner_id = self.field_owner_for_hir_expr(base)
+        if owner_id >= 0:
+            return self.field_type_for_owner_raw(owner_id, field_name)
+        HirType(kind: HirTypeKind.Error, span: base.span)
 
     me lower_hir_expr(e: Expr) -> HirExpr:
         if e == nil:
@@ -463,6 +574,10 @@ impl HirLowering:
                     val fld_base_t: Expr = base
                     val fld_name_t: text = field
                     val fld_lowered_base = self.lower_hir_expr(fld_base_t)
+                    val fld_enum_owner = _hir_expr_symbol_or_invalid(fld_lowered_base.kind)
+                    if fld_enum_owner.is_valid():
+                        if val unit_enum_value = self.declared_enum_unit_value_expr(fld_enum_owner.id, fld_name_t, e.span):
+                            return unit_enum_value
                     # Module imports are namespaces, not runtime values. A
                     # qualified imported function must lower to its defining
                     # function symbol before MIR call lowering.
@@ -527,29 +642,26 @@ impl HirLowering:
                     # the field's MirType to i64 -- silently wrong for a
                     # non-i64 field (observed: an array-typed struct field
                     # read as raw i64 -> garbage GEP instead of the runtime
-                    # array accessor). Only resolves the narrow, static
-                    # `val/var x = StructName(...)` local shape; anything else
-                    # falls through to the pre-existing nil/i64-default
-                    # behavior unchanged.
-                    val fld_base_sym = _hir_expr_symbol_or_invalid(fld_lowered_base.kind)
-                    if fld_base_sym.is_valid():
-                        val fld_field_type = self.field_type_for_base_raw(fld_base_sym.id, fld_name_t)
-                        match fld_field_type.kind:
-                            case HirTypeKind.Error: ()
-                            case _:
-                                # The field table owns the semantic kind, but
-                                # its diagnostic Span is a rich aggregate that
-                                # may have crossed HIR safepoints. Re-root the
-                                # type with this live expression's span before
-                                # constructing another aggregate.
-                                val live_field_type = HirType(
-                                    kind: fld_field_type.kind,
-                                    span: e.span)
-                                return HirExpr(
-                                    kind: HirExprKind.Field(fld_lowered_base, fld_name_t, nil),
-                                    has_type_: true,
-                                    type_: live_field_type,
-                                    span: e.span)
+                    # array accessor). It resolves the existing symbol-table
+                    # shape or an owner proven by HIR/call/index type metadata;
+                    # unresolved bases retain the pre-existing fallback.
+                    val fld_field_type = self.field_type_for_hir_base(fld_lowered_base, fld_name_t)
+                    match fld_field_type.kind:
+                        case HirTypeKind.Error: ()
+                        case _:
+                            # The field table owns the semantic kind, but
+                            # its diagnostic Span is a rich aggregate that
+                            # may have crossed HIR safepoints. Re-root the
+                            # type with this live expression's span before
+                            # constructing another aggregate.
+                            val live_field_type = HirType(
+                                kind: fld_field_type.kind,
+                                span: e.span)
+                            return HirExpr(
+                                kind: HirExprKind.Field(fld_lowered_base, fld_name_t, nil),
+                                has_type_: true,
+                                type_: live_field_type,
+                                span: e.span)
                     return HirExpr(kind: HirExprKind.Field(fld_lowered_base, fld_name_t, nil), has_type_: false, type_: nil, span: e.span)
                 case _:
                     pass
@@ -590,6 +702,19 @@ impl HirLowering:
 
             case ExprKind.ArrayLit(elements):
                 val hir_elements = self.lower_expr_list(elements)
+                if not hir_elements.is_empty():
+                    val homogeneous_element_type = self.homogeneous_typed_array_element_type(hir_elements, e.span)
+                    match homogeneous_element_type.kind:
+                        case HirTypeKind.Error: ()
+                        case _:
+                            val homogeneous_array_type = HirType(
+                                kind: HirTypeKind.Array(homogeneous_element_type, nil),
+                                span: e.span)
+                            return HirExpr(
+                                kind: HirExprKind.ArrayLit(hir_elements, Some(homogeneous_element_type)),
+                                has_type_: true,
+                                type_: homogeneous_array_type,
+                                span: e.span)
                 # For empty arrays, use configured default element type
                 val elem_type = if hir_elements.is_empty():
                     if self.is_strict_empty_collections():
@@ -598,7 +723,7 @@ impl HirLowering:
                     else:
                         Some(self.get_empty_array_default())
                 else:
-                    nil  # Type will be inferred from elements
+                    nil
                 HirExprKind.ArrayLit(hir_elements, elem_type)
 
             case ExprKind.ArrayRepeat(value, count):
@@ -734,7 +859,14 @@ impl HirLowering:
                 HirExprKind.NullCoalesce(self.lower_hir_expr(left), self.lower_hir_expr(right))
 
             case ExprKind.ExistsCheck(base):
-                HirExprKind.ExistsCheck(self.lower_hir_expr(base))
+                val checked = self.lower_hir_expr(base)
+                val optional_type = self.declared_exists_check_type(checked)
+                match optional_type.kind:
+                    case HirTypeKind.Error: ()
+                    case _:
+                        return HirExpr(kind: HirExprKind.ExistsCheck(checked),
+                            has_type_: true, type_: optional_type, span: e.span)
+                HirExprKind.ExistsCheck(checked)
 
             case ExprKind.ForceUnwrap(base):
                 HirExprKind.Unwrap(self.lower_hir_expr(base))

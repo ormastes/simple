@@ -1,0 +1,25 @@
+# MCP API tools SoSix boundary
+
+AUTHORED_UNEXECUTED. These assertions require the built pure-Simple test owner; no seed test fallback. They exercise a real source read, native directory enumeration, and an actual API request. No platform execution is claimed.
+
+```simple
+# Real filesystem boundary assertions; AUTHORED_UNEXECUTED.
+use std.spec.{describe, it, expect}
+use std.nogc_async_mut.sosix.host_facade.{sosix_file_read, sosix_file_exists, sosix_dir_exists, sosix_dir_list}
+use app.mcp.api_tools.{handle_simple_api}
+
+describe "MCP API tools SoSix filesystem boundary":
+    it "reads the real API source through the host facade":
+        expect(sosix_file_exists("src/app/mcp/api_tools.spl")).to_equal(true)
+        expect(sosix_file_read("src/app/mcp/api_tools.spl")).to_contain("fn handle_simple_api(")
+    it "lists native directory entries and distinguishes files from directories":
+        expect(sosix_dir_exists("src/app/mcp")).to_equal(true)
+        expect(sosix_dir_exists("src/app/mcp/api_tools.spl")).to_equal(false)
+        expect(sosix_dir_list("src/app/mcp")).to_contain("api_tools.spl")
+        expect(sosix_file_exists("src/app/mcp/__sosix_missing_probe__.spl")).to_equal(false)
+    it "resolves a real MCP API request without application runtime externs":
+        val response = handle_simple_api("boundary-probe", "{\"arguments\":{\"path\":\"src/app/mcp/api_tools.spl\",\"query\":\"handle_simple_api\",\"visibility\":\"all\"}}")
+        expect(response).to_contain("handle_simple_api")
+        expect(response.contains("Cannot resolve path:")).to_equal(false)
+        expect(response.contains("Cannot read file:")).to_equal(false)
+```
