@@ -92,9 +92,13 @@ QEMU_ROOT_SSH_TIMEOUT="${QEMU_ROOT_SSH_TIMEOUT:-120}"
 QEMU_REMOTE_TIMEOUT="${QEMU_REMOTE_TIMEOUT:-300}"
 QEMU_PACKAGE_TIMEOUT="${QEMU_PACKAGE_TIMEOUT:-1800}"
 QEMU_TRANSFER_TIMEOUT="${QEMU_TRANSFER_TIMEOUT:-1800}"
-QEMU_BOOTSTRAP_TIMEOUT="${QEMU_BOOTSTRAP_TIMEOUT:-7200}"
+# Full bootstrap under TCG needs well over two hours for the Rust seed alone
+# (measured 64 min) plus native-all and the Simple stages; the former 7200s
+# default killed the session mid-native-all on 2026-10-10. 4h covers TCG with
+# margin; KVM hosts finish far sooner and never approach the bound.
+QEMU_BOOTSTRAP_TIMEOUT="${QEMU_BOOTSTRAP_TIMEOUT:-14400}"
 QEMU_SMOKE_TIMEOUT="${QEMU_SMOKE_TIMEOUT:-600}"
-QEMU_FULL_TIMEOUT="${QEMU_FULL_TIMEOUT:-7200}"
+QEMU_FULL_TIMEOUT="${QEMU_FULL_TIMEOUT:-14400}"
 FREEBSD_VERSION="14.4"
 case "$QEMU_ARCH" in
     arm64)
@@ -1055,8 +1059,17 @@ copy_guest_bootstrap_logs() {
     host_log_dir="$PROVENANCE_DIR"
     rm -rf "$host_log_dir"
     mkdir -p "$host_log_dir"
+    # The in-guest bootstrap writes logs under its storage root
+    # (.simple/storage/build/bootstrap/logs) when SIMPLE_USER_STORAGE_ROOT is
+    # unset; the legacy build/bootstrap/logs path no longer receives them.
+    # Probe the storage-root layout first (observed 2026-10-10: retrieval
+    # failed against the legacy path after an otherwise healthy run).
+    guest_logs_src="${VM_HOME}/simple/.simple/storage/build/bootstrap/logs/"
+    if ! $VM_SSH "test -d '${guest_logs_src}'" 2>/dev/null; then
+        guest_logs_src="${VM_HOME}/simple/build/bootstrap/logs/"
+    fi
     if run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az -e "$RSYNC_SSH" \
-        "${VM_USER}@localhost:${VM_HOME}/simple/build/bootstrap/logs/" \
+        "${VM_USER}@localhost:${guest_logs_src}" \
         "${host_log_dir}/"; then
         guest_log_count=$(find "$host_log_dir" -type f -name '*.log' -size +0c | wc -l | tr -d ' ')
         [ "$guest_log_count" -gt 0 ] ||
