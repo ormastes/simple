@@ -185,6 +185,40 @@ impl HirLowering:
             case _: ()
         -1
 
+    me declared_exists_check_type(source: HirExpr) -> HirType:
+        # if-val becomes ExistsCheck before HIR. Recover only a declared
+        # optional type, never an owner inferred from the binding's spelling.
+        var source_type = HirType(kind: HirTypeKind.Error, span: source.span)
+        if source.has_type_:
+            source_type = source.type_ ?? source_type
+        else:
+            val source_symbol = _hir_expr_symbol_or_invalid(source.kind)
+            if source_symbol.is_valid():
+                source_type = self.symbols.get_symbol_type_raw(source_symbol.id) ?? source_type
+            var callable = SymbolId(id: -1)
+            match source.kind:
+                case HirExprKind.Call(callee, _, _):
+                    callable = _hir_expr_symbol_or_invalid(callee.kind)
+                case HirExprKind.MethodCall(receiver, method_name, _, resolution):
+                    match resolution:
+                        case MethodResolution.StaticMethod(_, method_id):
+                            callable = method_id
+                        case MethodResolution.Unresolved:
+                            val receiver_owner = self.field_owner_for_hir_expr(receiver)
+                            if receiver_owner >= 0:
+                                callable = self.symbols.lookup_method_in_type_raw(receiver_owner, method_name) ?? callable
+                        case _: ()
+                case _: ()
+            if callable.is_valid():
+                if val signature = self.symbols.get_symbol_type_raw(callable.id):
+                    match signature.kind:
+                        case HirTypeKind.Function(_, returned, _): source_type = returned
+                        case _: ()
+        match source_type.kind:
+            case HirTypeKind.Optional(_): return source_type
+            case _: ()
+        HirType(kind: HirTypeKind.Error, span: source.span)
+
     me field_type_for_hir_base(base: HirExpr, field_name: text) -> HirType:
         # Keep the existing symbol/local-constructor and qualified owner-table
         # lookup as the first authority. Expression-derived owners extend that
@@ -825,7 +859,14 @@ impl HirLowering:
                 HirExprKind.NullCoalesce(self.lower_hir_expr(left), self.lower_hir_expr(right))
 
             case ExprKind.ExistsCheck(base):
-                HirExprKind.ExistsCheck(self.lower_hir_expr(base))
+                val checked = self.lower_hir_expr(base)
+                val optional_type = self.declared_exists_check_type(checked)
+                match optional_type.kind:
+                    case HirTypeKind.Error: ()
+                    case _:
+                        return HirExpr(kind: HirExprKind.ExistsCheck(checked),
+                            has_type_: true, type_: optional_type, span: e.span)
+                HirExprKind.ExistsCheck(checked)
 
             case ExprKind.ForceUnwrap(base):
                 HirExprKind.Unwrap(self.lower_hir_expr(base))
