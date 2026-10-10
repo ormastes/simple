@@ -1156,6 +1156,9 @@ bootstrap_progress_event() {
 }
 bootstrap_last_milestone=init
 bootstrap_verdict_written=0
+# Set by a failure path that knows WHY it failed; the EXIT trap then names it
+# in the VERDICT line instead of repeating the milestone. [a-z0-9-] only.
+bootstrap_abort_reason=
 bootstrap_verdict() {
   bootstrap_verdict_written=1
   line="VERDICT — $1"
@@ -1212,7 +1215,7 @@ bootstrap_cleanup() {
   trap - EXIT HUP INT QUIT TERM
   set +e
   if [ "${bootstrap_verdict_written}" -eq 0 ]; then
-    bootstrap_verdict "ABORTED: stage=${bootstrap_last_milestone} exit=${bootstrap_status} signal=${bootstrap_abnormal_signal:-none} reason=${bootstrap_last_milestone}"
+    bootstrap_verdict "ABORTED: stage=${bootstrap_last_milestone} exit=${bootstrap_status} signal=${bootstrap_abnormal_signal:-none} reason=${bootstrap_abort_reason:-${bootstrap_last_milestone}}"
   fi
   resume_stage4_release_continuation_lock
   if [ "${bootstrap_deploy_tx_active:-0}" -eq 1 ]; then
@@ -1648,6 +1651,19 @@ bootstrap_startup_jobs_apply_policy "${jobs_memory_policy}" "${cli_jobs}" || exi
 
 echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus}, source: ${job_source}, requested: ${jobs_requested}, resolved: ${jobs_resolved}, policy: ${jobs_memory_policy}, reason: ${jobs_memory_reason}, available KiB: ${jobs_available_kib}, worker MiB: ${jobs_worker_mem_mib}; RSS limits independent)"
 echo "Bootstrap execution profile: ${execution_profile} (self-host jobs: ${selfhost_jobs})"
+# Resolve the process-tree RSS cap for this worker count NOW. An over-ceiling
+# SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB used to survive the seed build and
+# the whole preflight (625 s measured) and then fail Stage 2 with no reason at
+# all. The Stage 2/3 runner re-resolves from the command's own --threads; this
+# is the same policy asked early, so a refusal costs seconds and says why.
+. "${bootstrap_entry_dir}/lib/tree-rss-policy.shs"
+if bootstrap_tree_rss_resolve "${jobs}" "${bootstrap_early_repo_root}"; then
+  echo "Process-tree RSS policy: ${bootstrap_tree_rss_summary}"
+else
+  echo "error: ${bootstrap_tree_rss_refusal}" >&2
+  bootstrap_abort_reason=tree-rss-cap-refused
+  exit 2
+fi
 {
   echo schema=simple-bootstrap-selected-jobs-v1
   echo host_cpus="${host_cpus}"
@@ -2434,10 +2450,18 @@ bootstrap_native_build_main() {
   if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
     bootstrap_native_session_mode=inherit
   fi
+  # Same job-scaled cap policy as Stage 2/3, for this stage's worker count.
+  bootstrap_tree_rss_resolve "${selfhost_jobs}" "${repo_root}" || {
+    echo "error: ${bootstrap_tree_rss_refusal}" >&2
+    bootstrap_abort_reason=tree-rss-cap-refused
+    return 2
+  }
+  echo "  process-tree RSS policy: ${bootstrap_tree_rss_summary}" >&2
   perl "${repo_root}/scripts/resource/process-tree-rss-watchdog.pl" \
     --session-mode="${bootstrap_native_session_mode}" \
     --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
-    --max-rss-kib="${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}" \
+    --max-rss-kib="${bootstrap_tree_rss_cap_kib}" \
+    --compiler-jobs="${selfhost_jobs}" \
     --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
     --receipt="${log_dir}/stage4-native-build.log.rss.env" -- \
   env RUST_LOG="${RUST_LOG:-error}" \
@@ -4108,6 +4132,18 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     echo "error: frozen runtime authority changed during Stage 2" >&2
     exit 1
   }
+  if [ "${stage2_status}" -ne 0 ]; then
+    if [ -s "${stage2_refusal_log}" ]; then
+      bootstrap_abort_reason=stage2-pre-exec-refusal
+      echo "  stage2 pre-exec refusal (nothing was executed):" >&2
+      sed 's/^/    /' "${stage2_refusal_log}" >&2
+    elif grep -q '^status=policy-refused$' "${stage2_native_log}.rss.env" 2>/dev/null; then
+      bootstrap_abort_reason=stage2-rss-policy-refused
+      sed -n 's/^refusal_reason=/  stage2 RSS watchdog refusal: /p' "${stage2_native_log}.rss.env" >&2
+    elif grep -q '^status=rss-cap-exceeded$' "${stage2_native_log}.rss.env" 2>/dev/null; then
+      bootstrap_abort_reason=stage2-rss-cap-exceeded
+    fi
+  fi
   echo "  stage2-native-build log: ${log_dir}/stage2-native-build.log"
   bootstrap_cache_report_log "${log_dir}/stage2-native-build.log"
   bootstrap_prune_stale_seed_scope_dirs \

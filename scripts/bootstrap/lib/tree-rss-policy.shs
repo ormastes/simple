@@ -1,0 +1,280 @@
+#!/bin/sh
+# Process-tree RSS cap policy for a parallel compiler build.
+#
+# Why this exists: the cap was a fixed 5859375 KiB (6 GB) with a fixed
+# 6835937 KiB (7 GB) hard ceiling, regardless of worker count. The tree's real
+# peak grows with --threads because every worker holds one in-flight module.
+# Measured on the seed->stage2 native build (Windows Job Object; sum of member
+# working sets / peak job commit):
+#     19 jobs  2.85 GiB / 3.21 GiB
+#     40 jobs  4.03-4.41 GiB / 4.61-4.77 GiB
+#     80 jobs  killed at the 5.59 GiB cap (exit 88) while still growing
+# i.e. about 1.4-1.8 GiB of fixed cost plus 57-76 MiB per worker. Commit is above
+# the working-set sum, so the reading is real memory, not double counting.
+#
+# Budget (tunable, host config `tree_rss_*`, see config/host/host_config.sdn):
+#     cap = max(BOOTSTRAP_TREE_RSS_FLOOR_KIB,
+#               (base_mib + jobs * per_job_mib) * 1024)
+#     cap = min(cap, host_total_kib * host_pct / 100)   when host RAM is known
+#     cap = min(cap, hard ceiling)
+# Hard ceiling (NOT tunable; process-tree-rss-watchdog.pl recomputes the same
+# value from --compiler-jobs and refuses anything above it):
+#     ceiling = max(6835937, min(3145728 + jobs * 262144, host_total_kib * 3/4))
+# With no worker count, or with host RAM unreadable, the ceiling stays at the
+# historical 6835937 KiB: the policy widens only on positive evidence.
+#
+# Precedence per knob: SIMPLE_BOOTSTRAP_TREE_RSS_<KNOB> > SIMPLE_HOST_TREE_RSS_
+# <KNOB> / host config (scripts/setup/host-env.shs --get) > built-in default.
+# An explicit SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB replaces the formula
+# but is REFUSED (never clamped) above the hard ceiling, with the reason in
+# bootstrap_tree_rss_refusal.
+#
+# Source it, or run:  tree-rss-policy.shs --resolve JOBS [REPO_ROOT]
+#                     tree-rss-policy.shs --selftest
+
+BOOTSTRAP_TREE_RSS_FLOOR_KIB=5859375
+BOOTSTRAP_TREE_RSS_STATIC_CEILING_KIB=6835937
+BOOTSTRAP_TREE_RSS_RESERVE_KIB=3145728
+BOOTSTRAP_TREE_RSS_PER_JOB_CEILING_KIB=262144
+BOOTSTRAP_TREE_RSS_BASE_MIB_DEFAULT=3072
+BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96
+BOOTSTRAP_TREE_RSS_HOST_PCT_DEFAULT=50
+BOOTSTRAP_TREE_RSS_HOST_PCT_MAX=75
+
+# Decimal, non-zero, at most $2 digits (bounded so $(( )) cannot overflow).
+bootstrap_tree_rss_is_uint() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#1}" -le "$2" ] || return 1
+  case "$1" in *[1-9]*) return 0 ;; *) return 1 ;; esac
+}
+
+# Host physical RAM in KiB, or empty. BOOTSTRAP_TREE_RSS_MEMINFO_PATH is the
+# fixture hook; when it is set no other probe is consulted.
+bootstrap_tree_rss_host_total_kib() {
+  btr_meminfo=${BOOTSTRAP_TREE_RSS_MEMINFO_PATH:-/proc/meminfo}
+  btr_total=
+  if [ -r "$btr_meminfo" ]; then
+    btr_total=$(awk '/^MemTotal:/ { print $2; exit }' "$btr_meminfo" 2>/dev/null) || btr_total=
+  fi
+  if [ -z "$btr_total" ] && [ -z "${BOOTSTRAP_TREE_RSS_MEMINFO_PATH:-}" ]; then
+    for btr_sysctl in hw.memsize hw.physmem; do
+      btr_bytes=$(sysctl -n "$btr_sysctl" 2>/dev/null) || btr_bytes=
+      if bootstrap_tree_rss_is_uint "$btr_bytes" 18; then
+        btr_total=$((btr_bytes / 1024))
+        break
+      fi
+    done
+  fi
+  bootstrap_tree_rss_is_uint "$btr_total" 15 || btr_total=
+  printf '%s\n' "$btr_total"
+}
+
+# bootstrap_tree_rss_ceiling_kib JOBS HOST_TOTAL_KIB -> hard ceiling. JOBS 0
+# (undeclared) or an empty HOST_TOTAL_KIB yields the static ceiling.
+bootstrap_tree_rss_ceiling_kib() {
+  btr_c_jobs=$1
+  btr_c_host=$2
+  btr_c=$BOOTSTRAP_TREE_RSS_STATIC_CEILING_KIB
+  if bootstrap_tree_rss_is_uint "$btr_c_jobs" 3 && [ "$btr_c_jobs" -le 128 ] &&
+     bootstrap_tree_rss_is_uint "$btr_c_host" 15; then
+    btr_c_scaled=$((BOOTSTRAP_TREE_RSS_RESERVE_KIB + btr_c_jobs * BOOTSTRAP_TREE_RSS_PER_JOB_CEILING_KIB))
+    btr_c_host_max=$((btr_c_host / 4 * 3))
+    [ "$btr_c_scaled" -le "$btr_c_host_max" ] || btr_c_scaled=$btr_c_host_max
+    [ "$btr_c_scaled" -le "$btr_c" ] || btr_c=$btr_c_scaled
+  fi
+  printf '%s\n' "$btr_c"
+}
+
+# One knob: specific env > SIMPLE_HOST_* env > host config file > default.
+# An invalid value at any layer is a refusal, not a silent fallback: a typo in
+# a memory budget must not quietly become a different budget.
+bootstrap_tree_rss_knob() {
+  btr_k_name=$1 btr_k_key=$2 btr_k_default=$3 btr_k_digits=$4 btr_k_root=$5
+  eval "btr_k_value=\${SIMPLE_BOOTSTRAP_TREE_RSS_${btr_k_name}:-}"
+  btr_k_source=env
+  if [ -z "$btr_k_value" ]; then
+    eval "btr_k_value=\${SIMPLE_HOST_TREE_RSS_${btr_k_name}:-}"
+    btr_k_source=host-env
+  fi
+  if [ -z "$btr_k_value" ] && [ -n "$btr_k_root" ] &&
+     [ -f "$btr_k_root/scripts/setup/host-env.shs" ]; then
+    btr_k_value=$(sh "$btr_k_root/scripts/setup/host-env.shs" --get "$btr_k_key" 2>/dev/null) || btr_k_value=
+    btr_k_source=host-config
+  fi
+  if [ -z "$btr_k_value" ]; then
+    btr_k_value=$btr_k_default
+    btr_k_source=default
+  fi
+  bootstrap_tree_rss_is_uint "$btr_k_value" "$btr_k_digits" || {
+    bootstrap_tree_rss_refusal="tree RSS policy: invalid $btr_k_key=$btr_k_value (source: $btr_k_source)"
+    return 1
+  }
+}
+
+# bootstrap_tree_rss_resolve JOBS [REPO_ROOT]
+# Sets bootstrap_tree_rss_{cap_kib,ceiling_kib,host_total_kib,source,summary}.
+# Returns 1 with bootstrap_tree_rss_refusal set when the request is refused.
+bootstrap_tree_rss_resolve() {
+  btr_jobs=${1:-0}
+  btr_root=${2:-}
+  bootstrap_tree_rss_refusal=
+  case "$btr_jobs" in ''|*[!0-9]*) btr_jobs=bad ;; esac
+  [ "$btr_jobs" != bad ] && [ "${#btr_jobs}" -le 3 ] && [ "$btr_jobs" -le 128 ] || {
+    bootstrap_tree_rss_refusal="tree RSS policy: worker count must be 0..128, got ${1:-}"
+    return 1
+  }
+  bootstrap_tree_rss_host_total_kib=$(bootstrap_tree_rss_host_total_kib)
+  bootstrap_tree_rss_ceiling_kib=$(bootstrap_tree_rss_ceiling_kib "$btr_jobs" "$bootstrap_tree_rss_host_total_kib")
+  btr_explicit=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-}
+  if [ -n "$btr_explicit" ]; then
+    bootstrap_tree_rss_is_uint "$btr_explicit" 15 || {
+      bootstrap_tree_rss_refusal="tree RSS policy: invalid SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$btr_explicit"
+      return 1
+    }
+    [ "$btr_explicit" -le "$bootstrap_tree_rss_ceiling_kib" ] || {
+      bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$btr_explicit KiB exceeds the hard ceiling $bootstrap_tree_rss_ceiling_kib KiB for $btr_jobs worker(s) (host RAM ${bootstrap_tree_rss_host_total_kib:-unknown} KiB; ceiling = max($BOOTSTRAP_TREE_RSS_STATIC_CEILING_KIB, min($BOOTSTRAP_TREE_RSS_RESERVE_KIB + jobs*$BOOTSTRAP_TREE_RSS_PER_JOB_CEILING_KIB, 3/4 host RAM)))"
+      return 1
+    }
+    bootstrap_tree_rss_cap_kib=$btr_explicit
+    bootstrap_tree_rss_source=explicit-env
+  else
+    bootstrap_tree_rss_knob BASE_MIB tree_rss_base_mib "$BOOTSTRAP_TREE_RSS_BASE_MIB_DEFAULT" 7 "$btr_root" || return 1
+    btr_base=$btr_k_value
+    bootstrap_tree_rss_knob PER_JOB_MIB tree_rss_per_job_mib "$BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT" 6 "$btr_root" || return 1
+    btr_per_job=$btr_k_value
+    bootstrap_tree_rss_knob HOST_PCT tree_rss_host_pct "$BOOTSTRAP_TREE_RSS_HOST_PCT_DEFAULT" 2 "$btr_root" || return 1
+    btr_pct=$btr_k_value
+    [ "$btr_pct" -le "$BOOTSTRAP_TREE_RSS_HOST_PCT_MAX" ] || {
+      bootstrap_tree_rss_refusal="tree RSS policy: tree_rss_host_pct=$btr_pct exceeds $BOOTSTRAP_TREE_RSS_HOST_PCT_MAX"
+      return 1
+    }
+    btr_cap=$(((btr_base + btr_jobs * btr_per_job) * 1024))
+    bootstrap_tree_rss_source=per-job-budget
+    if [ "$btr_jobs" -eq 0 ] || [ "$btr_cap" -lt "$BOOTSTRAP_TREE_RSS_FLOOR_KIB" ]; then
+      btr_cap=$BOOTSTRAP_TREE_RSS_FLOOR_KIB
+      bootstrap_tree_rss_source=floor
+    fi
+    if [ -n "$bootstrap_tree_rss_host_total_kib" ]; then
+      btr_host_cap=$((bootstrap_tree_rss_host_total_kib / 100 * btr_pct))
+      if [ "$btr_cap" -gt "$btr_host_cap" ] && [ "$btr_cap" -gt "$BOOTSTRAP_TREE_RSS_FLOOR_KIB" ]; then
+        btr_cap=$btr_host_cap
+        [ "$btr_cap" -ge "$BOOTSTRAP_TREE_RSS_FLOOR_KIB" ] || btr_cap=$BOOTSTRAP_TREE_RSS_FLOOR_KIB
+        bootstrap_tree_rss_source=host-fraction
+      fi
+    fi
+    if [ "$btr_cap" -gt "$bootstrap_tree_rss_ceiling_kib" ]; then
+      btr_cap=$bootstrap_tree_rss_ceiling_kib
+      bootstrap_tree_rss_source=hard-ceiling
+    fi
+    bootstrap_tree_rss_cap_kib=$btr_cap
+  fi
+  bootstrap_tree_rss_summary="cap ${bootstrap_tree_rss_cap_kib} KiB (source: ${bootstrap_tree_rss_source}, workers: ${btr_jobs}, hard ceiling: ${bootstrap_tree_rss_ceiling_kib} KiB, host RAM: ${bootstrap_tree_rss_host_total_kib:-unknown} KiB)"
+}
+
+# Worker count of a compiler command line: the value of the last --threads /
+# --jobs (separate or `=` form). Prints 0 when the command declares none.
+bootstrap_tree_rss_command_jobs() {
+  btr_cj=0
+  btr_cj_next=0
+  for btr_cj_arg in "$@"; do
+    if [ "$btr_cj_next" = 1 ]; then
+      btr_cj_next=0
+      case "$btr_cj_arg" in ''|*[!0-9]*) ;; *) [ "${#btr_cj_arg}" -gt 3 ] || btr_cj=$btr_cj_arg ;; esac
+      continue
+    fi
+    case "$btr_cj_arg" in
+      --threads|--jobs) btr_cj_next=1 ;;
+      --threads=*|--jobs=*)
+        btr_cj_value=${btr_cj_arg#*=}
+        case "$btr_cj_value" in ''|*[!0-9]*) ;; *) [ "${#btr_cj_value}" -gt 3 ] || btr_cj=$btr_cj_value ;; esac ;;
+    esac
+  done
+  printf '%s\n' "$btr_cj"
+}
+
+bootstrap_tree_rss__selftest() {
+  btr_st_dir=$(mktemp -d "${TMPDIR:-/tmp}/tree-rss-policy.XXXXXX") || return 2
+  btr_st_fail=0
+  btr_st_n=0
+  printf 'MemTotal:       134094232 kB\n' >"$btr_st_dir/big"
+  printf 'MemTotal:        16000000 kB\n' >"$btr_st_dir/small"
+  : >"$btr_st_dir/none"
+  # expect LABEL MEMINFO JOBS EXPLICIT_CAP WANT   (WANT = cap:ceiling:source or REFUSED)
+  btr_st_expect() {
+    btr_st_n=$((btr_st_n + 1))
+    btr_st_got=$(
+      unset SIMPLE_BOOTSTRAP_TREE_RSS_BASE_MIB SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT
+      unset SIMPLE_HOST_TREE_RSS_BASE_MIB SIMPLE_HOST_TREE_RSS_PER_JOB_MIB SIMPLE_HOST_TREE_RSS_HOST_PCT
+      unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+      [ -z "$4" ] || SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$4
+      [ -z "${6:-}" ] || eval "$6"
+      BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/$2"
+      if bootstrap_tree_rss_resolve "$3" ""; then
+        printf '%s:%s:%s' "$bootstrap_tree_rss_cap_kib" "$bootstrap_tree_rss_ceiling_kib" "$bootstrap_tree_rss_source"
+      else
+        [ -n "$bootstrap_tree_rss_refusal" ] && printf REFUSED || printf SILENT-REFUSAL
+      fi
+    )
+    if [ "$btr_st_got" != "$5" ]; then
+      echo "selftest FAIL: $1: want $5 got $btr_st_got" >&2
+      btr_st_fail=1
+    fi
+  }
+  # Historical behaviour is unchanged while no worker count is declared.
+  btr_st_expect undeclared-keeps-floor big 0 '' 5859375:6835937:floor
+  btr_st_expect few-jobs-keep-floor big 19 '' 5859375:8126464:floor
+  # The incident: 80 jobs needs more than the old 6 GB / 7 GB pair.
+  btr_st_expect eighty-jobs-scale big 80 '' 11010048:24117248:per-job-budget
+  btr_st_expect forty-jobs-scale big 40 '' 7077888:13631488:per-job-budget
+  # Monotone in the worker count.
+  btr_st_expect hard-max-jobs big 128 '' 15728640:36700160:per-job-budget
+  # Host fraction: a 16 GB host never hands half its RAM plus to one tree.
+  btr_st_expect small-host-fraction small 80 '' 8000000:12000000:host-fraction
+  # Unknown host RAM is no evidence: nothing widens, cap stays under 7 GB.
+  btr_st_expect unknown-host-fails-closed none 80 '' 6835937:6835937:hard-ceiling
+  # Explicit cap: honoured under the ceiling, refused (not clamped) above it.
+  btr_st_expect explicit-under-ceiling big 80 20000000 20000000:24117248:explicit-env
+  btr_st_expect explicit-32gib-refused big 80 33554432 REFUSED
+  btr_st_expect explicit-over-static-refused big 0 7000000 REFUSED
+  btr_st_expect explicit-garbage-refused big 80 lots REFUSED
+  # Knob overrides, and their fail-closed validation.
+  btr_st_expect knob-per-job big 80 '' 19529728:24117248:per-job-budget SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=200
+  btr_st_expect knob-host-env big 80 '' 13107200:24117248:per-job-budget SIMPLE_HOST_TREE_RSS_BASE_MIB=5120
+  btr_st_expect knob-runaway-hits-ceiling big 80 '' 24117248:24117248:hard-ceiling 'SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=4096 SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=75'
+  btr_st_expect knob-pct-over-max-refused big 80 '' REFUSED SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=90
+  btr_st_expect knob-garbage-refused big 80 '' REFUSED SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=many
+  btr_st_expect jobs-out-of-range-refused big 129 '' REFUSED
+  # Worker count is read from the command the cap will actually govern.
+  btr_st_n=$((btr_st_n + 1))
+  [ "$(bootstrap_tree_rss_command_jobs simple native-build --threads 80 -o x)" = 80 ] &&
+    [ "$(bootstrap_tree_rss_command_jobs simple native-build --threads=40)" = 40 ] &&
+    [ "$(bootstrap_tree_rss_command_jobs simple native-build -o x)" = 0 ] &&
+    [ "$(bootstrap_tree_rss_command_jobs simple --threads many)" = 0 ] || {
+    echo 'selftest FAIL: command worker count' >&2
+    btr_st_fail=1
+  }
+  rm -rf "$btr_st_dir"
+  if [ "$btr_st_fail" -ne 0 ]; then
+    echo "FAIL — tree RSS policy selftest ($btr_st_n fixture(s))"
+    return 1
+  fi
+  echo "PASS — $btr_st_n fixture(s) checked, tree RSS policy scales with workers and fails closed"
+}
+
+case "${0##*/}" in
+  tree-rss-policy.shs)
+    case "${1:-}" in
+      --selftest) bootstrap_tree_rss__selftest; exit $? ;;
+      --resolve)
+        [ "$#" -ge 2 ] || { echo "usage: $0 --resolve JOBS [REPO_ROOT]" >&2; exit 2; }
+        if bootstrap_tree_rss_resolve "$2" "${3:-}"; then
+          printf 'cap_kib=%s\nceiling_kib=%s\nhost_total_kib=%s\nsource=%s\n' \
+            "$bootstrap_tree_rss_cap_kib" "$bootstrap_tree_rss_ceiling_kib" \
+            "$bootstrap_tree_rss_host_total_kib" "$bootstrap_tree_rss_source"
+        else
+          echo "error: $bootstrap_tree_rss_refusal" >&2
+          exit 1
+        fi ;;
+      *) echo "usage: $0 --selftest | --resolve JOBS [REPO_ROOT]" >&2; exit 2 ;;
+    esac ;;
+esac

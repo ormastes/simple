@@ -28,6 +28,9 @@ which uses the same env-over-user order.
 | `max_build_jobs` | `16` | bootstrap worker ceiling (`bootstrap-build-jobs-policy.shs`); `SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS` still wins |
 | `max_threads` | `32` | detected logical CPUs (informational) |
 | `worker_mem_mib` | `3300` | bootstrap memory clamp; `SIMPLE_BOOTSTRAP_WORKER_MEM_MIB` still wins |
+| `tree_rss_base_mib` | `3072` | process-tree RSS cap reserve (`scripts/bootstrap/lib/tree-rss-policy.shs`); `SIMPLE_BOOTSTRAP_TREE_RSS_BASE_MIB` still wins |
+| `tree_rss_per_job_mib` | `96` | process-tree RSS cap budget per native-build worker; `SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB` still wins |
+| `tree_rss_host_pct` | `50` | process-tree RSS cap ceiling as % of host physical RAM (1..75); `SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT` still wins |
 | `cpu_family` | `x86_64` / `aarch64` / `riscv64` | `CpuFeatureSet.from_host_config` |
 | `cpu_features` | `sse2,sse4.2,avx,avx2,fma,bmi2` / `neon,sve` / `rvv` | `CpuFeatureSet.from_host_config` |
 | `os` | `windows` / `linux` / `macos` / `freebsd` / `simpleos` | informational |

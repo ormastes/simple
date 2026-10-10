@@ -27,7 +27,7 @@ my %opt = ( 'max-rss-kib' => 5859375, 'interval-ms' => 100,
 my %explicit;
 while (@ARGV && $ARGV[0] ne '--') {
     my $arg = shift @ARGV;
-    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode|budget-scope|aggregate-workers)=(.+)$/
+    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode|budget-scope|aggregate-workers|compiler-jobs)=(.+)$/
         or die "rss-guard: invalid option\n";
     my ($key, $value) = ($1, $2);
     $explicit{$key}++ and die "rss-guard: duplicate $key\n";
@@ -59,8 +59,65 @@ if ($opt{'budget-scope'} eq 'aggregate-tests') {
 } elsif ($explicit{'aggregate-workers'}) {
     die "rss-guard: aggregate worker count requires aggregate-tests scope\n";
 }
+# A parallel compiler tree holds one in-flight module per worker, so its real
+# peak grows with --threads. Measured on the seed->stage2 build (Windows Job
+# Object, sum of member working sets / job commit): 19 jobs 2.85/3.21 GiB,
+# 40 jobs 4.03-4.41/4.61-4.77 GiB, 80 jobs >5.67 GiB (killed at the old cap).
+# Job commit >= working-set sum, so this is not a sampling artifact. The fixed
+# ceiling therefore applies only while the owner declares no worker count.
+# A declared count raises the HARD ceiling to reserve + jobs * per-job
+# ceiling, never above 3/4 of host physical RAM, and not at all when host RAM
+# cannot be read. These constants are deliberately not configurable: the
+# tunable budget lives in scripts/bootstrap/lib/tree-rss-policy.shs (host
+# config tree_rss_*) and must fit under this ceiling.
+my $compiler_jobs = 0;
+my $jobs_reserve_kib = 3145728;
+my $jobs_per_job_ceiling_kib = 262144;
+my $host_total_kib = 0;
+sub host_total_kib {
+    my $fixture = $ENV{SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH};
+    if (open(my $fh, '<', $fixture // '/proc/meminfo')) {
+        while (my $line = <$fh>) {
+            return $1 if $line =~ /\AMemTotal:\s+([1-9][0-9]{0,17})\s+kB\s*\z/;
+        }
+        close($fh);
+    }
+    return 0 if defined $fixture;
+    for my $name (qw(hw.memsize hw.physmem)) {
+        my $bytes = `sysctl -n $name 2>/dev/null` // '';
+        return int($1 / 1024) if $bytes =~ /\A([1-9][0-9]{0,18})\s*\z/;
+    }
+    return 0;
+}
+# A policy refusal happens before any workload exists. Publish the reason to
+# the receipt as well as stderr so a file-reading stage diagnosis can say why.
+sub refuse_policy {
+    my ($reason) = @_;
+    if (defined $opt{receipt} && open(my $fh, '>', "$opt{receipt}.tmp.$$")) {
+        print {$fh} "status=policy-refused\nexit_status=125\nmax_rss_kib=$opt{'max-rss-kib'}\n" .
+            "budget_scope=$opt{'budget-scope'}\nbudget_ceiling_kib=$budget_ceiling_kib\n" .
+            "compiler_jobs=$compiler_jobs\nhost_total_kib=$host_total_kib\nrefusal_reason=$reason\n";
+        close($fh) && rename("$opt{receipt}.tmp.$$", $opt{receipt});
+    }
+    print STDERR "rss-guard: $reason\n";
+    exit 125;
+}
+if ($explicit{'compiler-jobs'}) {
+    $opt{'budget-scope'} eq 'compiler'
+        or die "rss-guard: compiler job count requires compiler scope\n";
+    $opt{'compiler-jobs'} =~ /\A[0-9]{1,3}\z/
+        && $opt{'compiler-jobs'} >= 1 && $opt{'compiler-jobs'} <= 128
+        or die "rss-guard: compiler jobs must be between 1 and 128\n";
+    $compiler_jobs = $opt{'compiler-jobs'} + 0;
+    $host_total_kib = host_total_kib();
+    my $scaled = $jobs_reserve_kib + $compiler_jobs * $jobs_per_job_ceiling_kib;
+    my $host_max = int($host_total_kib / 4) * 3;
+    $scaled = $host_max if $scaled > $host_max;
+    $budget_ceiling_kib = $scaled if $scaled > $budget_ceiling_kib;
+}
 $opt{'max-rss-kib'} > 0 && $opt{'max-rss-kib'} <= $budget_ceiling_kib
-    or die "rss-guard: cap must be between 1 and $budget_ceiling_kib KiB for $opt{'budget-scope'}\n";
+    or refuse_policy("cap $opt{'max-rss-kib'} KiB must be between 1 and $budget_ceiling_kib KiB" .
+        " for $opt{'budget-scope'} (compiler_jobs=$compiler_jobs host_total_kib=$host_total_kib)");
 $opt{'interval-ms'} > 0 && $opt{'interval-ms'} <= 100
     or die "rss-guard: sample interval must be between 1 and 100 ms\n";
 # An ENFORCED cap is also the children's shard-admission hint
@@ -1006,6 +1063,7 @@ sub receipt {
         "max_rss_kib=$opt{'max-rss-kib'}\npeak_rss_kib=$peak\nsamples=$samples\n" .
         "budget_scope=$opt{'budget-scope'}\nbudget_ceiling_kib=$budget_ceiling_kib\n" .
         "aggregate_workers=" . ($opt{'aggregate-workers'} // 0) . "\n" .
+        "compiler_jobs=$compiler_jobs\nhost_total_kib=$host_total_kib\n" .
         "interval_ms=$opt{'interval-ms'}\nsample_gap_max_ms=$sample_gap_max_ms\n" .
         "observation_budget_ms=$observation_budget_ms\n" .
         "sample_duration_max_ms=$sample_duration_max_ms\nsample_overruns=$sample_overruns\n" .

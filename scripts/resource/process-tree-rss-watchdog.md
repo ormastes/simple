@@ -8,6 +8,41 @@ default is decimal 6 GB (5,859,375 KiB); the compiler-scope ceiling is
 The ordinary compilation acceptance target remains **less than 1,000,000,000
 bytes** (at most 976,562 whole KiB), assessed separately from this emergency guard.
 
+## Job-scaled compiler ceiling (`--compiler-jobs`)
+
+A parallel compiler tree holds one in-flight module per worker, so its real
+peak grows with `--threads`. Measured on the seed->Stage 2 native build
+(Windows Job Object; sum of member working sets / peak job commit):
+
+| workers | working-set sum | job commit |
+|--------:|----------------:|-----------:|
+| 19 | 2,984,068 KiB | 3,361,016 KiB |
+| 40 | 4,222,672 - 4,620,996 KiB | 4,836,920 - 5,002,608 KiB |
+| 80 | > 5,946,000 KiB (killed at the 5,859,375 KiB cap, exit 88) | - |
+
+Commit exceeds the working-set sum, so the reading is real memory rather than
+shared pages counted once per process: roughly 1.4-1.8 GiB fixed plus 57-76 MiB
+per worker. A fixed 7 GB ceiling therefore cannot admit an 80-worker build.
+
+With `--compiler-jobs=N` (1..128, compiler scope only) the hard ceiling is
+
+    max(6,835,937, min(3,145,728 + N * 262,144, 3/4 of host physical RAM)) KiB
+
+Host RAM comes from `/proc/meminfo` `MemTotal` (Linux, MSYS) or `sysctl
+hw.memsize` / `hw.physmem`; when it cannot be read the ceiling does not move.
+The constants are not configurable. The tunable budget that selects the actual
+cap beneath this ceiling is `scripts/bootstrap/lib/tree-rss-policy.shs`
+(`--selftest`, `--resolve JOBS`), driven by host config `tree_rss_base_mib`,
+`tree_rss_per_job_mib` and `tree_rss_host_pct`. The receipt records
+`compiler_jobs` and `host_total_kib`.
+
+A cap outside `1..ceiling` is a **policy refusal**: exit 125, reason on stderr,
+and a receipt with `status=policy-refused` and `refusal_reason=...`, so a
+file-reading stage diagnosis can report why nothing ran. On Windows the Job
+Object helper no longer carries its own fixed 6,835,937 KiB bound (which
+rejected every valid aggregate or job-scaled cap as `invalid --supervise
+options`); it refuses only a cap at or above host physical memory, and says so.
+
 ## Explicit parallel-test aggregate budget
 
 A parallel test coordinator and its workers need a distinct aggregate allowance:

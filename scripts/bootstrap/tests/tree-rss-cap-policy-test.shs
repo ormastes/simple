@@ -1,0 +1,134 @@
+#!/bin/sh
+# The process-tree RSS cap must scale with the worker count and every refusal
+# must say why, in a file the stage diagnosis reads.
+#
+# Incident (2026-10-10, 80-thread Windows host, 134 GB RAM): `--jobs=80` was
+# killed by the fixed 5859375 KiB cap (peak 5946000 KiB, exit 88); raising
+# SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB to 32 GiB was then refused by a
+# bare `return 1`, after 625 s, with `awk: fatal: cannot open file
+# .../stage2-native-build.log` and `VERDICT ABORTED stage=stage2 exit=2` as the
+# only visible symptoms. This test runs the real policy, the real watchdog and
+# the real transcribed runner.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+watchdog="$root/scripts/resource/process-tree-rss-watchdog.pl"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/tree-rss-cap-policy.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT INT TERM
+TMPDIR=$scratch
+export TMPDIR
+unset SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB SIMPLE_BOOTSTRAP_SESSION_ID \
+    SIMPLE_BOOTSTRAP_SESSION_EXEC SIMPLE_BOOTSTRAP_RSS_CAP_MODE \
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_PROCESS_TREE_RSS_CAP_KIB \
+    SIMPLE_BOOTSTRAP_TREE_RSS_BASE_MIB SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB \
+    SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_BASE_MIB \
+    SIMPLE_HOST_TREE_RSS_PER_JOB_MIB SIMPLE_HOST_TREE_RSS_HOST_PCT || :
+checks=0
+fail() { echo "FAIL: $*" >&2; exit 1; }
+ok() { checks=$((checks + 1)); }
+
+printf 'MemTotal:       134094232 kB\n' >"$scratch/meminfo.big"
+: >"$scratch/meminfo.none"
+
+# 1. The policy's own fixtures.
+sh "$root/scripts/bootstrap/lib/tree-rss-policy.shs" --selftest >"$scratch/selftest.out" ||
+    fail "policy selftest: $(cat "$scratch/selftest.out")"
+ok
+
+# 2. Watchdog: the hard ceiling is job-scaled, bounded by host RAM, and a
+#    refusal is published to the receipt as well as stderr.
+guard() { # MEMINFO RECEIPT ARGS...
+    guard_meminfo=$1 guard_receipt=$2
+    shift 2
+    guard_status=0
+    SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH="$scratch/$guard_meminfo" \
+        perl "$watchdog" --receipt="$scratch/$guard_receipt" "$@" -- /bin/sh -c 'exit 7' \
+        >"$scratch/$guard_receipt.out" 2>&1 || guard_status=$?
+}
+field() { sed -n "s/^$2=//p" "$scratch/$1"; }
+
+guard meminfo.big over.env --compiler-jobs=80 --max-rss-kib=33554432
+[ "$guard_status" -eq 125 ] || fail "32 GiB cap for 80 jobs: exit $guard_status, want 125"
+[ "$(field over.env status)" = policy-refused ] || fail 'refusal receipt has no status=policy-refused'
+[ "$(field over.env budget_ceiling_kib)" = 24117248 ] || fail "80-job ceiling: $(field over.env budget_ceiling_kib)"
+case "$(field over.env refusal_reason)" in
+    'cap 33554432 KiB must be between 1 and 24117248 KiB'*) ;;
+    *) fail "refusal reason missing from receipt: $(field over.env refusal_reason)" ;;
+esac
+grep -Fq 'rss-guard: cap 33554432 KiB must be between 1 and 24117248 KiB' "$scratch/over.env.out" ||
+    fail 'refusal reason missing from stderr'
+ok
+
+guard meminfo.none unknown.env --compiler-jobs=80 --max-rss-kib=11010048
+[ "$guard_status" -eq 125 ] && [ "$(field unknown.env budget_ceiling_kib)" = 6835937 ] ||
+    fail "unknown host RAM must not widen the ceiling (exit $guard_status)"
+ok
+
+guard meminfo.big undeclared.env --max-rss-kib=7000000
+[ "$guard_status" -eq 125 ] && [ "$(field undeclared.env budget_ceiling_kib)" = 6835937 ] ||
+    fail "an undeclared worker count must keep the fixed ceiling (exit $guard_status)"
+ok
+
+guard meminfo.big scope.env --budget-scope=aggregate-tests --aggregate-workers=2 \
+    --compiler-jobs=80 --max-rss-kib=7000000
+[ "$guard_status" -ne 0 ] && [ "$guard_status" -ne 7 ] &&
+    grep -Fq 'compiler job count requires compiler scope' "$scratch/scope.env.out" ||
+    fail 'compiler-jobs must be refused outside compiler scope'
+ok
+
+guard meminfo.big range.env --compiler-jobs=129 --max-rss-kib=5859375
+[ "$guard_status" -ne 0 ] && [ "$guard_status" -ne 7 ] ||
+    fail 'compiler-jobs above 128 was accepted'
+ok
+
+# The incident's real requirement: an 80-job cap above the old 7 GB ceiling
+# is admitted end to end (on Windows this also crosses the Job Object helper,
+# which used to carry its own fixed 6835937 KiB bound).
+guard meminfo.big admit.env --compiler-jobs=80 --max-rss-kib=11010048
+[ "$guard_status" -eq 7 ] || fail "80-job cap not admitted: exit $guard_status: $(tail -3 "$scratch/admit.env.out")"
+[ "$(field admit.env status)" = complete ] && [ "$(field admit.env compiler_jobs)" = 80 ] &&
+    [ "$(field admit.env rss_limit_kib)" = 11010048 ] || fail 'admitted 80-job receipt is wrong'
+ok
+
+# 3. Transcribed runner: an over-ceiling explicit cap is refused BEFORE
+#    execution with the reason in <log>.refusal and on stderr (it was silent).
+. "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+runner_status=0
+(
+    BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$scratch/meminfo.big"
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=33554432
+    export BOOTSTRAP_TREE_RSS_MEMINFO_PATH SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+    bootstrap_stage3_run_transcribed "$scratch/transcript" "$root" "$scratch/build.log" \
+        "$scratch" "$scratch" "$PATH" -- /bin/sh -c 'echo executed' native-build --threads 80
+) >"$scratch/runner.out" 2>"$scratch/runner.err" || runner_status=$?
+[ "$runner_status" -ne 0 ] || fail 'over-ceiling cap was not refused by the transcribed runner'
+[ ! -e "$scratch/build.log" ] || fail 'refused run still produced a build log'
+! grep -q executed "$scratch/runner.out" || fail 'refused run executed its command'
+grep -Fq 'SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=33554432 KiB exceeds the hard ceiling 24117248 KiB for 80 worker(s)' \
+    "$scratch/build.log.refusal" || fail "refusal file lacks the reason: $(cat "$scratch/build.log.refusal" 2>/dev/null)"
+grep -Fq 'exceeds the hard ceiling 24117248 KiB' "$scratch/runner.err" ||
+    fail 'refusal reason missing from runner stderr'
+ok
+
+# 4. The cache report must survive the missing log a refusal leaves behind;
+#    under `set -e` its awk failure was what turned the refusal into exit 2.
+. "$root/scripts/bootstrap/bootstrap-cache-lineage.shs"
+report=$(bootstrap_cache_report_log "$scratch/build.log" 2>&1) ||
+    fail 'cache report fails on a missing build log'
+[ -z "$report" ] || fail "cache report on a missing log printed: $report"
+printf '[native-build] compiled=3 reused=5 failed=0 x\n' >"$scratch/real.log"
+[ "$(bootstrap_cache_report_log "$scratch/real.log")" = 'Cache: reused 5 modules; rebuilt 3.' ] ||
+    fail 'cache report no longer reads real receipts'
+ok
+
+# 5. The bootstrap entry resolves the policy before any build work and names
+#    a recorded reason in the VERDICT line.
+entry="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+grep -Fq 'reason=${bootstrap_abort_reason:-${bootstrap_last_milestone}}"' "$entry" ||
+    fail 'VERDICT line does not carry the recorded abort reason'
+grep -Fq 'bootstrap_abort_reason=tree-rss-cap-refused' "$entry" &&
+    grep -Fq 'bootstrap_abort_reason=stage2-pre-exec-refusal' "$entry" &&
+    grep -Fq 'bootstrap_abort_reason=stage2-rss-cap-exceeded' "$entry" ||
+    fail 'bootstrap entry does not record RSS refusal reasons'
+ok
+
+echo "PASS — $checks tree RSS cap policy case(s) checked"
