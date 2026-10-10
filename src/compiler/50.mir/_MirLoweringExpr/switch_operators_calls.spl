@@ -111,6 +111,60 @@ fn int_list_contains(xs: [i64], v: i64) -> bool:
         i = i + 1
     false
 
+fn hir_type_is_plain_scalar(type_: HirType) -> bool:
+    match type_.kind:
+        case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char: true
+        case _: false
+
+fn hir_block_is_static_scalar(block: HirBlock, depth: i64) -> bool:
+    if not block.has:
+        return false
+    hir_expr_is_static_scalar(block.value, depth + 1)
+
+fn hir_expr_is_static_scalar(expr: HirExpr, depth: i64) -> bool:
+    """True when `expr` is a NON-optional scalar by construction, so its
+    value can never be nil whatever its bits: a numeric / bool / char
+    literal, an arithmetic, bitwise, shift or comparison result, a numeric
+    negation or bit complement, a cast to a scalar type, and an if / block /
+    `a ?? d` all of whose results are one of those. Purely structural (no
+    type annotation needed, they are absent on the flat path). Depth-bounded
+    so the per-expression probe in lower_expr stays O(1).
+
+    Deliberately NOT here: variables, fields and call results (decided from
+    their declared type by local_is_provably_scalar_payload), `and` / `or`
+    (may yield an operand), Dict / array reads, method calls and extern
+    results (may carry the raw nil word at runtime)."""
+    if expr == nil or depth > 4:
+        return false
+    match expr.kind:
+        case IntLit(_, _) | FloatLit(_, _) | BoolLit(_) | CharLit(_) | FloatLexeme(_, _): true
+        case Binary(op, _, _):
+            match op:
+                case HirBinOp.And | HirBinOp.Or: false
+                case _: true
+        case Unary(op, _):
+            match op:
+                case HirUnaryOp.Neg | HirUnaryOp.Not | HirUnaryOp.BitNot: true
+                case _: false
+        case Cast(_, target): hir_type_is_plain_scalar(target)
+        case NullCoalesce(_, right): hir_expr_is_static_scalar(right, depth + 1)
+        case Block(block): hir_block_is_static_scalar(block, depth)
+        case If(_, then_, else_):
+            if val else_block = else_:
+                hir_block_is_static_scalar(then_, depth) and hir_block_is_static_scalar(else_block, depth)
+            else:
+                false
+        case IfChain(arms, else_):
+            if val chain_else = else_:
+                var all_static = hir_block_is_static_scalar(chain_else, depth)
+                for arm in arms:
+                    if all_static and not hir_block_is_static_scalar(arm.then_, depth):
+                        all_static = false
+                all_static
+            else:
+                false
+        case _: false
+
 fn option_payload_is_boxed(option_type: HirType) -> bool:
     """True when `Optional(inner)`'s payload word is a heap handle, so the raw
     nil sentinel (3) can never be a legal payload and None-ness is decidable
@@ -762,6 +816,12 @@ impl MirLowering:
         # An extern's declared scalar return may be the raw nil word.
         if self.extern_result_locals.has(local.id):
             return false
+        # A literal / arithmetic / comparison / cast result: a scalar by
+        # construction (see static_scalar_locals). Its i64 slot carries no
+        # registered HIR type, so without this the integer 3 fell through to
+        # the runtime sentinel test below and was boxed as None.
+        if self.static_scalar_locals.has(local.id):
+            return true
         match self.find_local_hir_type(local.id):
             case Some(found):
                 if found != nil and found != 0:
@@ -780,6 +840,91 @@ impl MirLowering:
                 case MirTypeKind.F32 | MirTypeKind.F64 | MirTypeKind.Bool | MirTypeKind.Char: true
                 case _: false
         scalar_slot
+
+    me option_scalar_payload_of(local: LocalId) -> LocalId:
+        """Payload-typed USE of a scalar Optional local (`i64?`, `bool?`,
+        `f64?`, `char?`): return a local holding the unwrapped payload; any
+        other local is returned unchanged.
+
+        An Optional value is always the Option handle, so after `if v != nil:`
+        a use of `v` as its payload type -- `v + 1`, `g(v)` into an `i64`
+        parameter, `return v` from `-> i64`, `val x: i64 = v` -- must unwrap
+        first; reading the local directly computed on the HANDLE word. The
+        interpreter has no boxing and yields the payload there.
+        rt_unwrap_or_self is the unwrap `??` and `if val` already use: Some(x)
+        -> x, any non-handle word -> itself (so a raw word that reached an
+        Optional local through a path that does not box yet is left intact).
+        doc/08_tracking/bug/optional_scalar_runtime_classified_three_becomes_none_2026-10-11.md"""
+        var inner_type: HirType? = nil
+        match self.find_local_hir_type(local.id):
+            case Some(found):
+                if found != nil and found != 0:
+                    match found.kind:
+                        case HirTypeKind.Optional(optional_inner):
+                            if hir_type_is_plain_scalar(optional_inner):
+                                inner_type = Some(optional_inner)
+                        case _: ()
+            case nil: ()
+        val payload_type = inner_type ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
+        if not hir_type_is_plain_scalar(payload_type):
+            return local
+        var b = self.builder
+        val unwrap_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_unwrap_or_self"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val unwrapped = b.emit_call(unwrap_fn, [mir_operand_copy(local)], MirType.i64())
+        var payload_local = unwrapped ?? local
+        if unwrapped != nil:
+            # The handle stores the payload as an i64 word (ensure_option_handle
+            # bitcasts floats and widens narrow scalars on the way in).
+            val payload_mir_type = self.lower_type(payload_type)
+            match payload_type.kind:
+                case HirTypeKind.Float(_):
+                    payload_local = b.emit_bitcast(mir_operand_copy(payload_local), payload_mir_type)
+                case _:
+                    if payload_mir_type.kind != MirTypeKind.I64:
+                        payload_local = b.emit_cast(mir_operand_copy(payload_local), payload_mir_type)
+        self.builder = b
+        if unwrapped != nil:
+            self.remember_local_hir_type(payload_local.id, payload_type, 0, 0)
+            self.static_scalar_locals[payload_local.id] = true
+        payload_local
+
+    me local_is_declared_scalar_optional(local: LocalId) -> bool:
+        match self.find_local_hir_type(local.id):
+            case Some(found):
+                if found != nil and found != 0:
+                    match found.kind:
+                        case HirTypeKind.Optional(optional_inner):
+                            return hir_type_is_plain_scalar(optional_inner)
+                        case _: ()
+            case nil: ()
+        false
+
+    me lower_scalar_optional_eq_plain(optional_local: LocalId, plain_local: LocalId, negate: bool) -> LocalId:
+        """`o == x` / `o != x` with `o` a scalar Optional local and `x` a
+        provably plain scalar: present AND payload equal (negated for `!=`).
+        A raw Eq compared the Option HANDLE word with `x` and was always
+        false; unwrapping alone would make None equal to the integer 3."""
+        var b = self.builder
+        val is_some_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_is_some"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false)))
+        ))
+        val present_res = b.emit_call(is_some_fn, [mir_operand_copy(optional_local)], MirType.bool())
+        self.builder = b
+        val present = present_res ?? optional_local
+        val payload = self.option_scalar_payload_of(optional_local)
+        var b_eq = self.builder
+        val same = b_eq.emit_binop(MirBinOp.Eq, mir_operand_copy(payload), mir_operand_copy(plain_local), MirType.bool())
+        var result = b_eq.emit_binop(MirBinOp.BitAnd, mir_operand_copy(present), mir_operand_copy(same), MirType.bool())
+        if negate:
+            val false_local = b_eq.new_temp(MirType.bool())
+            b_eq.emit_const(false_local, MirConstValue.Bool(false), MirType.bool())
+            result = b_eq.emit_binop(MirBinOp.Eq, mir_operand_copy(result), mir_operand_copy(false_local), MirType.bool())
+        self.builder = b_eq
+        result
 
     me normalize_option_handle(local: LocalId, option_type: HirType) -> LocalId:
         """Runtime classification of a word of unknown provenance into the
@@ -6183,6 +6328,11 @@ impl MirLowering:
             if current_arg_index < call_param_types.len():
                 val declared_param_type = call_param_types[current_arg_index]
                 arg_local = self.coerce_native_trait_object(arg_local, arg_value, declared_param_type)
+                # A scalar Optional passed where the plain scalar is declared
+                # (`g(v)` after `if v != nil:`) hands over the payload, not
+                # the Option handle.
+                if hir_type_is_plain_scalar(declared_param_type):
+                    arg_local = self.option_scalar_payload_of(arg_local)
                 # Internal Simple text parameters accept the complete text
                 # value. Unwrapping a tagged handle here discards its length.
                 # Keep the existing pointer bridge at extern/unknown owners;

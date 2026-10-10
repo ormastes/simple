@@ -945,6 +945,10 @@ impl MirLowering:
                                 # same flat optional. Never read `.kind` until
                                 # the payload itself is proven non-nil.
                                 if declared_type != nil:
+                                    # `val x: i64 = v` with `v: i64?` binds the
+                                    # payload, not the Option handle.
+                                    if hir_type_is_plain_scalar(declared_type):
+                                        init_local = self.option_scalar_payload_of(init_local)
                                     match declared_type.kind:
                                         case HirTypeKind.Optional(_):
                                             init_local = self.ensure_option_handle(init_local, declared_type)
@@ -1280,6 +1284,8 @@ impl MirLowering:
                                     self.nil_locals[local.id] = true
                                 if self.extern_result_locals.contains(init_local.id):
                                     self.extern_result_locals[local.id] = true
+                                if self.static_scalar_locals.contains(init_local.id):
+                                    self.static_scalar_locals[local.id] = true
                                 val found_init_hir_type = self.find_local_hir_type(init_local.id)
                                 if env_get_opt("SIMPLE_ANYQ_PROBE") == Some("1"):
                                     match found_init_hir_type:
@@ -1581,6 +1587,8 @@ impl MirLowering:
                                     self.nil_locals[local.id] = true
                                 if has_init and self.extern_result_locals.contains(init_local.id):
                                     self.extern_result_locals[local.id] = true
+                                if has_init and self.static_scalar_locals.contains(init_local.id):
+                                    self.static_scalar_locals[local.id] = true
                                 if has_init:
                                     val found_init_hir_type = self.find_local_hir_type(init_local.id)
                                     if found_init_hir_type.?:
@@ -1822,6 +1830,10 @@ impl MirLowering:
                     self.extern_result_locals[local.id] = true
                 else:
                     self.extern_result_locals = marker_map_without(self.extern_result_locals, local.id)
+                if self.static_scalar_locals.contains(assigned_value.id):
+                    self.static_scalar_locals[local.id] = true
+                else:
+                    self.static_scalar_locals = marker_map_without(self.static_scalar_locals, local.id)
                 val found_assigned_hir_type = self.find_local_hir_type(assigned_value.id)
                 match found_assigned_hir_type:
                     case Some(assigned_hir_type):
@@ -2189,6 +2201,10 @@ impl MirLowering:
                     case _: false
                 if scalar_payload:
                     arg_local = self.ensure_option_handle(arg_local, declared_param_type)
+            case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
+                # The reverse direction: a scalar Optional passed where the
+                # plain scalar is declared hands over its payload.
+                arg_local = self.option_scalar_payload_of(arg_local)
             case _: ()
         arg_local
 
