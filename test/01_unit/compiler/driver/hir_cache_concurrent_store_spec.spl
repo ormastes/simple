@@ -1,0 +1,86 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# Plan ids: IR-05 (a partial or stale entry is never admitted), task 8a.
+
+"""
+Purpose: two writers storing the SAME key into one cache directory must leave
+exactly one valid entry and no partial file, and a half-written temp left by a
+writer that died must never be admitted as the entry.
+
+N HIR shard workers write one directory concurrently (driver_hir_cache.spl,
+"STORE is atomic"), so the atomicity contract is pid-unique temp + rename.
+This spec exercises it in one process: a second store of the same key with
+different content must replace the entry atomically (one `.hir`, zero
+`.tmp`, loads intact), and a stale `<key>.hir.<otherpid>.tmp` planted beside
+the entry -- the shape a crashed sibling leaves -- is neither admitted nor
+able to corrupt the entry.
+"""
+
+use std.spec
+use std.spec.step
+use app.io.env_ops.{env_get, env_set}
+use test.fixtures.compiler.completeness95.hir_cases_v1.{fixture_hir_module_v1}
+use compiler.driver.driver_hir_cache.{
+    hir_cache_store, hir_cache_load, hir_cache_path, hir_cache_enabled,
+    hir_cache_stores, hir_cache_store_failures, hir_cache_last_warnings
+}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_file_list_dir(path: text) -> [text]
+extern fn rt_getpid() -> i64
+
+fn entries_named(dir: text, key: text) -> (i64, i64):
+    var finals = 0
+    var temps = 0
+    for name in rt_file_list_dir(dir):
+        if name == key + ".hir":
+            finals = finals + 1
+        elif name.starts_with(key + ".hir.") and name.ends_with(".tmp"):
+            temps = temps + 1
+    (finals, temps)
+
+describe "HIR cache concurrent store (same key, two writers)":
+    it "leaves one valid entry and no partial file when the same key is stored twice, even beside a dead writer's temp":
+        val dir = "build/hir_cache_concurrent_store_{rt_getpid()}"
+        expect(rt_dir_create_all(dir)).to_equal(true)
+        val saved_scope = env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
+        val saved_dir = env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
+        expect(env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "concurrent-store-spec")).to_be(true)
+        expect(env_set("SIMPLE_HIR_CACHE_DIR", dir)).to_be(true)
+        expect(hir_cache_enabled()).to_equal(true)
+        val key = "same-key"
+        val before_stores = hir_cache_stores()
+        val before_failures = hir_cache_store_failures()
+
+        step("Writer A stores the key with one warning")
+        expect(hir_cache_store(key, fixture_hir_module_v1(false), ["from-writer-a"])).to_equal(true)
+        step("A dead sibling left a half-written temp for the same key")
+        val stale_tmp = hir_cache_path(key) + ".424242.tmp"
+        expect(rt_file_write_text(stale_tmp, "spl-hircache-v3 partial\nC 0000\nW\n0\ntruncated")).to_equal(true)
+        step("Writer B stores the same key with different content")
+        expect(hir_cache_store(key, fixture_hir_module_v1(false), ["from-writer-b"])).to_equal(true)
+        expect(hir_cache_stores()).to_equal(before_stores + 2)
+        expect(hir_cache_store_failures()).to_equal(before_failures)
+
+        step("Verify: exactly one final entry, only the foreign stale temp remains, none of ours")
+        val (finals, temps) = entries_named(dir, key)
+        expect(finals).to_equal(1)
+        expect(temps).to_equal(1)
+        expect(rt_file_exists(hir_cache_path(key) + ".{rt_getpid()}.tmp")).to_equal(false)
+        step("Verify: the entry is the LAST writer's, intact, and the stale temp was never admitted")
+        val loaded = hir_cache_load(key)
+        expect(loaded != nil).to_equal(true)
+        expect(hir_cache_last_warnings()).to_equal(["from-writer-b"])
+        val raw = rt_file_read_text(hir_cache_path(key)) ?? ""
+        expect(raw.contains("truncated")).to_equal(false)
+
+        val _tmp = rt_file_delete(stale_tmp)
+        val _entry = rt_file_delete(hir_cache_path(key))
+        val _rmdir = rt_dir_remove_all(dir)
+        val _scope = env_set("SIMPLE_FRONTEND_CACHE_SCOPE", saved_scope)
+        val _dir = env_set("SIMPLE_HIR_CACHE_DIR", saved_dir)

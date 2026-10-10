@@ -5782,10 +5782,32 @@ int64_t rt_reverse(int64_t receiver) {
      * value directly, exactly as rt_array_len_safe does. */
     SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
     if (arr) {
-        int64_t n = rt_array_len(arr);
-        SplArray* out = rt_array_new(n > 0 ? n : 0);
-        if (!out) return rt_core_nil();
-        for (int64_t i = n - 1; i >= 0; i--) rt_array_push(out, rt_array_get(arr, i));
+        /* Copy, then reverse the copy's slots in place. rt_array_copy keeps the
+         * storage layout (BYTES = 1-byte raw slots, U64_PACKED = raw u64 slots,
+         * otherwise tagged words). The previous get+push loop moved a packed
+         * array's RAW slots into a generic array, where every consumer then
+         * read them as tagged values -- `[u8].reversed()` came back as garbage
+         * and lost its byte layout. */
+        SplArray* out = rt_array_copy(arr);
+        RtCoreArray* copy = rt_core_array_ptr(out);
+        if (!copy || out == arr) return rt_core_nil();
+        if (copy->len > 1 && copy->data) {
+            if (copy->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+                uint8_t* bytes = (uint8_t*)copy->data;
+                for (int64_t i = 0, j = copy->len - 1; i < j; i++, j--) {
+                    uint8_t tmp = bytes[i];
+                    bytes[i] = bytes[j];
+                    bytes[j] = tmp;
+                }
+            } else {
+                int64_t* slots = (int64_t*)copy->data;
+                for (int64_t i = 0, j = copy->len - 1; i < j; i++, j--) {
+                    int64_t tmp = slots[i];
+                    slots[i] = slots[j];
+                    slots[j] = tmp;
+                }
+            }
+        }
         return (int64_t)(uintptr_t)out;
     }
     RtCoreString* s = rt_core_as_string(receiver);
@@ -7245,6 +7267,17 @@ double rt_math_floor(double x) {
 
 double rt_math_ceil(double x) {
     return ceil(x);
+}
+
+/* Mirror the Rust runtime (value/sffi/math.rs): f64::round rounds half AWAY
+ * from zero, which is C round() -- NOT nearbyint/rint -- and f64::abs is
+ * fabs. Both were Rust-only, so `f.round()` / `f.abs()` could not link here. */
+double rt_math_round(double x) {
+    return round(x);
+}
+
+double rt_math_abs(double x) {
+    return fabs(x);
 }
 
 double rt_math_log(double x) {
@@ -9755,7 +9788,33 @@ int64_t rt_array_any(SplArray* array, int64_t closure_value) {
  * had a runtime_sffi spec and a Rust definition but no definition here at all,
  * so `arr.index_of(v)` was an unresolved symbol on the C lane. */
 int64_t rt_array_index_of(SplArray* array, int64_t value) {
-    if (!rt_core_array_ptr(array)) return -1;
+    RtCoreArray* packed = rt_core_array_ptr(array);
+    if (!packed) return -1;
+    if (packed->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) {
+        /* Packed arrays store RAW slots, while the needle arrives as a tagged
+         * int or a heap u64 box. Comparing a raw slot with rt_native_eq would
+         * read the byte as a tagged word and never match (or match the wrong
+         * element). Decode the needle once and compare numerically; a needle
+         * that is not a non-negative integer cannot be an element. */
+        uint64_t want;
+        RtCoreUInt* boxed = rt_core_as_heap_uint(value);
+        if (boxed) {
+            want = boxed->value;
+        } else if (rt_core_is_int(value)) {
+            int64_t signed_want = rt_core_as_int(value);
+            if (signed_want < 0) return -1;
+            want = (uint64_t)signed_want;
+        } else {
+            return -1;
+        }
+        int is_bytes = (packed->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+        for (int64_t i = 0; i < packed->len; i++) {
+            uint64_t slot = is_bytes ? (uint64_t)((uint8_t*)packed->data)[i]
+                                     : ((uint64_t*)packed->data)[i];
+            if (slot == want) return i;
+        }
+        return -1;
+    }
     for (int64_t i = 0; i < rt_array_len(array); i++) {
         if (rt_native_eq(rt_array_get(array, i), value)) return i;
     }
@@ -17062,23 +17121,28 @@ int64_t rt_array_first(int64_t array) {
     return rt_array_get(a, 0);
 }
 
-/* collections.rs:5349 -- [[i, elem], ...]: one 2-element array per entry. */
+/* collections.rs:5963 -- [(i, elem), ...]: one 2-TUPLE per entry, with the
+ * index as a TAGGED int. This used to build a plain 2-element array holding
+ * the RAW index, which matched neither the Rust runtime (rt_tuple_new +
+ * RuntimeValue::from_int) nor rt_dict_entries above: a consumer decoding the
+ * pair as `(i64, T)` read index >> 3. Same tuple shape as rt_dict_entries so
+ * `for (i, x) in xs.enumerate()` and `for (k, v) in dict` share one decoder. */
 int64_t rt_array_enumerate(int64_t array) {
-    SplArray* a = (SplArray*)(intptr_t)array;
+    SplArray* a = rt_core_as_array(array) ? (SplArray*)(uintptr_t)array : NULL;
     SplArray* out;
     int64_t n, i;
-    if (a == NULL) return 0;
+    if (a == NULL) return rt_core_nil();
     n = rt_array_len(a);
     out = rt_array_new(n > 0 ? n : 1);
-    if (out == NULL) return 0;
+    if (out == NULL) return rt_core_nil();
     for (i = 0; i < n; i++) {
-        SplArray* pair = rt_array_new(2);
-        if (pair == NULL) break;
-        rt_array_push(pair, i);
-        rt_array_push(pair, rt_array_get(a, i));
-        rt_array_push(out, (int64_t)(intptr_t)pair);
+        int64_t pair = rt_tuple_new(2);
+        if (pair == rt_core_nil()) return rt_core_nil();
+        rt_tuple_set(pair, 0, rt_value_int(i));
+        rt_tuple_set(pair, 1, rt_array_get(a, i));
+        rt_array_push(out, pair);
     }
-    return (int64_t)(intptr_t)out;
+    return (int64_t)(uintptr_t)out;
 }
 
 /* collections.rs:5793 -- sum of the numeric elements: int 0 for an empty
