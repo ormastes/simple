@@ -37,6 +37,11 @@ var test_passed = 0
 var test_failed = 0
 var test_pending = 0
 var test_skipped = 0
+# Expectations EVALUATED (every expect()/expect_not()/check*/assert_*/fail*
+# call, passing or failing). A file whose examples ran but evaluated zero
+# expectations verified nothing; the runner classifies it VACUOUS, not PASS
+# (plan ids BUG-02, T12; task 15a). Written as the 4th evidence line.
+var _expectations_evaluated: i64 = 0
 var test_errors = []
 var indent_level = 0
 
@@ -318,6 +323,12 @@ fn _write_test_result_evidence(passed: i64, failed: i64):
     val path = env_get("SIMPLE_TEST_RESULT_FILE") ?? ""
     if path != "":
         val _ = file_write(path, "simple-bdd-v1\n{passed}\n{failed}\n")
+        # Expectation tally in a SIDECAR, not a 4th line: four readers (the
+        # single runner, the executor, the task adapter, the in-process probe)
+        # pin the v1 file byte-for-byte, and the Rust seed runner reads it too.
+        # A reader that never looks for the sidecar is unchanged; one that does
+        # treats a missing sidecar as "unknown", never as vacuous.
+        val _ = file_write(path + ".expectations", "simple-bdd-expectations-v1\n{_expectations_evaluated}\n")
 
 # ================================================================
 # Test Suite Structure
@@ -1174,6 +1185,7 @@ var _expect_helper_slots: [ExpectHelper] = []
 var _expect_provisional_len: i64 = -1
 
 fn _stable_expect_helper(value, negated: bool, implicit_error: bool) -> i64:
+    _expectations_evaluated = _expectations_evaluated + 1
     if _expect_helper_slots.len() == 0:
         _expect_helper_slots = [ExpectHelper(value: value, negated: negated, implicit_error: implicit_error)]
     var helper = _expect_helper_slots[0]
@@ -1529,6 +1541,11 @@ pub class ExpectHelper:
 
 # Assertion Helpers
 pub fn fail_assertion(message: text):
+    # A recorded failure is an evaluated expectation too (check/assert_*/fail
+    # route here); a bare expect(...) pushes a provisional one that its matcher
+    # retracts, so it is counted ONCE, by _stable_expect_helper.
+    if _expect_provisional_len < 0:
+        _expectations_evaluated = _expectations_evaluated + 1
     if _aggregate_active() and _aggregate_in_test.len() == 0:
         _aggregate_errors.push("assertion outside a case")
     current_test_errors.push(message)
@@ -1619,6 +1636,9 @@ pub fn get_test_count() -> i64:
 
 pub fn get_executed_test_count() -> i64:
     test_passed + test_failed
+
+pub fn get_expectation_count() -> i64:
+    _expectations_evaluated
 
 # ================================================================
 # Import New Skip/Ignore System

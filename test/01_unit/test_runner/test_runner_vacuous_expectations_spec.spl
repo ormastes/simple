@@ -1,0 +1,78 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-TEST_RUNNER
+# Plan ids: BUG-02 (zero cases is non-passing evidence), T12 (no false green),
+# RB-25 truthful verdicts; task 15a of CURRENT_BUG_PREVENTION.md.
+
+"""
+Purpose: a spec FILE whose examples ran and exited clean but evaluated ZERO
+expectations is VACUOUS -- a failure class -- never a pass. std.spec writes
+the tally to a sidecar next to the v1 evidence file; the runner reads it
+fail-closed: absent or malformed is UNKNOWN (-1), and only an explicit 0 turns
+a clean result into VACUOUS. The zero-EXAMPLE gates that already existed
+(NOT_RUN, --assert-ran) are untouched by this.
+"""
+
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_exists}
+use std.test_runner.test_executor_parsing.{
+    read_structured_test_expectations, vacuous_result_error, _tp_get_temp_dir
+}
+use std.test_runner.test_runner_output.{test_file_outcome_class, test_file_outcome_tag}
+use std.test_runner.test_runner_types.{TestFileResult, test_file_result_outcome_class}
+
+fn evidence_path(tag: text) -> text:
+    _tp_get_temp_dir() + "/vacuous_expectations_" + tag + ".evidence"
+
+fn with_sidecar(tag: text, content: text) -> text:
+    val path = evidence_path(tag)
+    expect(file_write(path + ".expectations", content)).to_equal(true)
+    path
+
+fn cleanup(path: text):
+    if file_exists(path + ".expectations"):
+        val _ = file_delete(path + ".expectations")
+
+describe "zero-expectation (VACUOUS) gate":
+    it "reads an explicit tally from the sidecar and treats everything else as unknown":
+        step("absent sidecar -> -1 (unknown), never 0")
+        expect(read_structured_test_expectations("")).to_equal(-1)
+        expect(read_structured_test_expectations(evidence_path("absent"))).to_equal(-1)
+        step("well-formed tallies")
+        val zero = with_sidecar("zero", "simple-bdd-expectations-v1\n0\n")
+        expect(read_structured_test_expectations(zero)).to_equal(0)
+        val many = with_sidecar("many", "simple-bdd-expectations-v1\n42\n")
+        expect(read_structured_test_expectations(many)).to_equal(42)
+        step("malformed tallies are unknown, not zero")
+        val bad_header = with_sidecar("hdr", "simple-bdd-v1\n0\n")
+        expect(read_structured_test_expectations(bad_header)).to_equal(-1)
+        val bad_number = with_sidecar("num", "simple-bdd-expectations-v1\n-3\n")
+        expect(read_structured_test_expectations(bad_number)).to_equal(-1)
+        val trailing = with_sidecar("trail", "simple-bdd-expectations-v1\n7\nextra\n")
+        expect(read_structured_test_expectations(trailing)).to_equal(-1)
+        val padded = with_sidecar("pad", "simple-bdd-expectations-v1\n07\n")
+        expect(read_structured_test_expectations(padded)).to_equal(-1)
+        for p in [zero, many, bad_header, bad_number, trailing, padded]:
+            cleanup(p)
+
+    it "classifies a VACUOUS file result as a failure with its own tag":
+        val result = TestFileResult(
+            path: "lowering_spec.spl", passed: 4, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 1, setup_ms: 0, error: vacuous_result_error(4),
+            timed_out: false, cached: false)
+        expect(vacuous_result_error(4)).to_equal("VACUOUS: 4 example(s) executed, 0 expectations evaluated")
+        expect(test_file_result_outcome_class(result)).to_equal("VACUOUS")
+        expect(test_file_outcome_class(result)).to_equal("VACUOUS")
+        expect(test_file_outcome_tag(result)).to_equal("VACU")
+        expect(result.is_ok()).to_equal(false)
+
+    it "leaves a clean, asserting result OK and a feature-gated skip SKIP":
+        val ok = TestFileResult(
+            path: "ok_spec.spl", passed: 4, failed: 0, skipped: 0, pending: 0,
+            duration_ms: 1, setup_ms: 0, error: "", timed_out: false, cached: false)
+        expect(test_file_outcome_tag(ok)).to_equal("PASS")
+        var gated = TestFileResult(
+            path: "gated_spec.spl", passed: 0, failed: 0, skipped: 3, pending: 0,
+            duration_ms: 1, setup_ms: 0, error: "", timed_out: false, cached: false)
+        gated.feature_gated = "hwir"
+        expect(test_file_outcome_tag(gated)).to_equal("SKIP")

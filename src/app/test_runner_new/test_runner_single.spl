@@ -729,6 +729,30 @@ fn read_test_result_evidence(path: text) -> (i64, i64, i64):
         return (0, 0, 0)
     (passed, failed, 1)
 
+# Expectation tally sidecar written by std.spec next to the v1 evidence file
+# (`<evidence>.expectations`, "simple-bdd-expectations-v1\n<n>\n"). Returns
+# -1 for absent/unreadable/malformed -- UNKNOWN, which must never be read as
+# zero: only a tally that says 0 makes a file VACUOUS (BUG-02 / T12).
+fn read_test_result_expectations(evidence_path: text) -> i64:
+    if evidence_path == "":
+        return -1
+    val path = evidence_path + ".expectations"
+    if not file_exists(path):
+        return -1
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(path)
+    val parts = content.split("\n")
+    if parts.len() < 2 or parts[0] != "simple-bdd-expectations-v1":
+        return -1
+    val n_text = parts[1].trim()
+    val n = n_text.to_i64() ?? -1
+    if n < 0 or n.to_text() != n_text or content != "simple-bdd-expectations-v1\n{n_text}\n":
+        return -1
+    n
+
+# One line, grep-stable, emitted beside the verdict for a VACUOUS file.
+fn vacuous_verdict_line(path: text, executed: i64) -> text:
+    "SPEC FILE VACUITY: {path} outcome=VACUOUS executed={executed} expectations=0"
+
 # --- SIMPLE_COVERAGE measured line coverage (2026-08-02) -------------------
 # The seed interpreter already records executed statement lines in a global
 # collector when SIMPLE_COVERAGE=1 (driver real_main -> init_coverage_from_env,
@@ -1300,8 +1324,11 @@ fn main() -> i64:
         print "error: test-runner: cannot restore structured result environment"
         return 1
     val (evidence_passed, evidence_failed, has_evidence) = read_test_result_evidence(evidence_path)
+    val evidence_expectations = read_test_result_expectations(evidence_path)
     if evidence_path != "" and file_exists(evidence_path):
         val _ = file_delete(evidence_path)
+    if evidence_path != "" and file_exists(evidence_path + ".expectations"):
+        val _ = file_delete(evidence_path + ".expectations")
     if exec_path != run.path and file_exists(exec_path):
         val _ = file_delete(exec_path)
     val child_stdout = stdout
@@ -1524,6 +1551,19 @@ fn main() -> i64:
     # same file is neutralised (but counted) in a sweep. Neutralisation
     # itself lives in test_runner_main.in_development_adjust; duplicating it
     # here would make an explicit run unable to show its own failure.
+    # Zero-EXPECTATION gate (BUG-02 / T12; task 15a). The zero-EXAMPLE gates
+    # above catch a file that ran nothing; this catches a file whose examples
+    # ran, exited clean, and never evaluated a single expect()/assert -- the
+    # shape of a lowering spec whose module came back empty, where every
+    # `to_contain` on "" was skipped by an early return. Gated on a tally the
+    # child actually wrote (sidecar present and == 0); an unknown tally (-1:
+    # engines that do not run std.spec's counters, or no evidence path) is
+    # never treated as zero. Feature-gated SKIP files have passed == 0 and
+    # are untouched.
+    if failed == 0 and passed > 0 and evidence_expectations == 0 and unverified_error == "":
+        failed = 1
+        print "error: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated"
+        print vacuous_verdict_line(run.path, passed)
     if source_is_in_development(rt_file_read_text(run.path)):
         print in_development_explicit_line(run.path)
     print_summary(run.path, passed, failed, real_skipped, real_pending, duration_ms, if failed == 0: unverified_error else: "")
