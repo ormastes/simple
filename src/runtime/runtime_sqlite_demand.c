@@ -82,8 +82,11 @@ static int sqlite_load(void) {
     if (!path || !path[0] || !expected || strlen(expected) != 64) return 0;
     /* The runtime snapshot copies a regular, no-follow file into a sealed
      * memfd. Hash and map that same immutable object. */
-    fd = (int)spl_dynlib_snapshot_linux(rt_string_new(
-        (const uint8_t *)path, (uint64_t)strlen(path)));
+    int64_t path_value = rt_string_new(
+        (const uint8_t *)path, (uint64_t)strlen(path));
+    fd = (int)spl_dynlib_snapshot_linux(path_value);
+    /* Snapshot borrows the path; release the temporary tagged string. */
+    (void)rt_string_free(path_value);
     if (fd < 0 || snprintf(snapshot_path, sizeof(snapshot_path),
             "/proc/self/fd/%d", fd) <= 0 ||
             !rt_sha256_file_raw_v1(snapshot_path, digest) ||
