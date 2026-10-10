@@ -9,3 +9,5 @@ Fresh-producer acceptance: actual Hello object/link/run first; compile direct_re
 `mismatch/main.spl` must reject the genuine payload binding mismatch `[x] vs [y]` (either order), with no emitted object. The same new producer must perform both checks. Structural SSpec additionally checks lowered owner IDs, unrelated-owner/mutable rejection, local shadow and unchanged symbol bindings; it remains UNEXECUTED until a real supported test runner is available.
 
 Baseline/trace evidence: /mnt/c/Temp/simple-real-hir-owner-trace-evidence-20261010/first-loss.json
+
+`object_record/main.spl` is a separate object-only variant: its typed entry parameter is forwarded to real_hir_owner_probe. Require the emitted object symbol and disassembly to retain that function's subject read/variant test (or inlined equivalent in main); a constant-return body fails this criterion. Never link/run this entry as ordinary native main: no real HirExpr argument is supplied by the platform. The original direct_record row alone supports only HIR acceptance unless retained body evidence is collected.
