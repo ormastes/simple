@@ -1,13 +1,32 @@
 # Stage-2 compiler SIGSEGV in provider-relocation chain during test_runner native-build (aarch64 Linux, 2026-10-11)
 
 - **Filed:** 2026-10-11 (beta-release qualification lane)
-- **Status:** OPEN (P0 — blocks the strict bootstrap Stage-2 compiler-test matrix
-  and therefore the Stage 3→4 receipt chain on aarch64 Linux)
+- **Status:** FIXED by PR #2943 (fix/compiler: guard nil dict-literal key_type
+  in provider relocation)
 - **Host:** aarch64-linux (20-core, 121 GB), backend=cranelift, mode one-binary,
   `--runtime-bundle core-c-bootstrap`, stage-2-admitted compiler
-- **Root-cause class:** stage-native codegen miscompile (the "stage-native lane
-  loses the declared value type at indexed/nested struct access" family, same as
-  module_build #2693 / 7370e13e86d). NOT a logic bug in provider relocation.
+- **Root-cause class (CORRECTED 2026-10-11 by the backend fix lane):** NOT a
+  codegen miscompile. The original "stage-native lane loses the declared value
+  type at indexed/nested struct access" hypothesis (and the annotation
+  experiments built on it) is refuted by backend fix lane evidence:
+  1. The crash reproduces with `--backend=llvm` as well as `--backend=cranelift`
+     (identical backtrace, 4/4 each) — backend-independent.
+  2. A seed-built (Rust-seed one-binary) compiler built from the same source
+     crashes at the identical instruction (`relocate_provider_type+0x354`,
+     `ldr x20, [x26]` with x26=0) with the identical backtrace on a minimal
+     2-module repro — not stage-native-specific.
+  3. The faulting argument is the runtime nil sentinel word 3 (see
+     `ensure_option_handle`, switch_operators_calls.spl), passed as `type_`.
+  Actual defect: `relocate_provider_default`'s `DictLit` arm called
+  `relocate_provider_type(key_type, ...)` unguarded. Dict-literal class field
+  defaults lower with nil key/value types by design (expression_core.spl
+  `HirExprKind.DictLit(entries, nil, nil)`), and no pass fills them before
+  provider relocation; the arm already guarded `value_type` but not
+  `key_type`. The a880d960302 "moved crash" (cfg_platform HIR-shard
+  'rejected invalid array handle' / 'unresolved name: false') is a separate
+  nondeterministic HIR-shard-worker flake seen on unmodified trees with
+  unrelated compilers under host contention, not a relocated instance of this
+  defect.
 
 ## Symptom
 
@@ -86,14 +105,29 @@ the spawned `native_build_worker` child).
 - /var/crash/ 2026-10-03 `compiler.snapshot ... stage2-compiler-tests ...
   .crash` files from an earlier session — same failure family predates this lane.
 
-## Required real fix (follow-up lane — compiler backend)
+## Resolution (backend fix lane, 2026-10-11)
 
-The defect is in the stage-native (cranelift dynload) MIR lowering of
-struct/array value copies: somewhere in this call chain a value's declared type
-is lost and an enum discriminant word is materialized where a boxed value
-pointer belongs. Find the actual miscompiled function/instruction pattern in
-the backend (compare LLVM-backend output for the same function as ground
-truth), fix the lowering once there, then remove the source-level annotation
-workarounds accumulated in provider_metadata.spl (7370e13e86d et al.) as
-follow-up cleanups. Until then, the strict-bootstrap test matrix stays red on
-aarch64 cranelift.
+Fixed by guarding `key_type` in the `DictLit` arm of
+`relocate_provider_default` (provider_metadata.spl), mirroring the existing
+`value_type` guard: nil key_type is carried through to the reconstructed
+`HirExprKind.DictLit` instead of being dereferenced by
+`relocate_provider_type`. Minimal repro before the fix (SIGSEGV on both
+stage-natively-built and seed-built compilers, both backends):
+
+```
+# model.spl
+class HasDefault:
+    field table: {text: i64} = {"a": 1, "b": 2}
+# main.spl
+use model.{HasDefault}
+fn main():
+    val h = HasDefault()
+    print "ok {h.label}"
+```
+
+`native-build main.spl --backend=cranelift` from the repo root. After the fix
+the same sources build and run. The source-level annotation workarounds in
+provider_metadata.spl (7370e13e86d et al.) are harmless but no longer required
+for this crash; removing them is a follow-up cleanup, NOT part of this fix.
+The strict-bootstrap stage-2 compiler-test matrix gate for this defect is the
+`test_runner_build` task; it passes with the fixed compiler (PR #2943).
