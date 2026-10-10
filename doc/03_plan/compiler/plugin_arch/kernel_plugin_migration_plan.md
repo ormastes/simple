@@ -201,7 +201,10 @@ hidden full-scan fallback are planned in
 `doc/03_plan/compiler/perf/persistent_package_module_index_compile_optimization_plan_2026-09-02.md`.
 
 The 2026-10-11 VHDL product owner relocation moved the artifact renderer and
-Gen2 product runners from K0 into the VHDL plugin. The current structural
-audit has one K0-to-P import, zero K1-to-P, three kernel-to-app/OS imports,
-and zero unclassified compiler files. The remaining AOT VHDL extension and
-all executable size/startup gates remain open.
+Gen2 product runners from K0 into the VHDL plugin. A compiler-owned VHDL
+output port now receives the selected plugin runner from the full composition
+or the dedicated VHDL entry. The source closure audit reports zero K0-to-P
+and K1-to-P imports, three kernel-to-app/OS imports, and zero unclassified
+compiler files; the Phase 5 dispatch checker passes. The port still needs
+admitted native runtime proof, and demand-load plus size/startup gates remain
+open.

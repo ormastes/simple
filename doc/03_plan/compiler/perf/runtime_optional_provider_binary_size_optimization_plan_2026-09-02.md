@@ -371,3 +371,16 @@ for all 556 reached files, then timed out at HIR 36/556 without a moved-module
 diagnostic. The Phase 5 source checker now accepts the current typed table
 selector and exposes the remaining direct VHDL plugin import from
 `driver_aot_pipeline.spl`; its structural gate remains RED.
+
+## 2026-10-11 VHDL output port cut
+
+The compiler AOT driver now calls a compiler-owned typed VHDL output port.
+The full static composition and dedicated VHDL entry install the plugin
+runner; the plugin retains its existing provenance, assurance, AOP, and
+artifact-writing logic. The closure checker reports zero K0-to-P and K1-to-P
+imports, three kernel-to-app/OS imports, zero unclassified files; the Phase 5
+source checker passes. A bounded self-hosted Stage 2 compile of the focused
+port spec parsed and built surfaces for all 525 reached files, then timed out
+at HIR 75/525 without a port diagnostic. The focused spec has not executed.
+This is structural evidence only: admitted native port dispatch, optional
+demand loading, and matched size/startup/RSS remain open.
