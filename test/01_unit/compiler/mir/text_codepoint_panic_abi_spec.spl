@@ -1,0 +1,84 @@
+# Authored regression; execution pending a newly qualified pure-Simple runner.
+# REQ-MIR-CODEPOINT-PANIC-ABI: invalid text casts pass raw bytes plus length.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir.*
+
+fn codepoint_argument_is_constant(function: MirFunction, operand: MirOperand, message: text, is_length: bool) -> bool:
+    val source_id = match operand.kind:
+        case MirOperandKind.Copy(local): local.id
+        case _: -1
+    if source_id < 0: return false
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Const(dest, value, type_):
+                    if dest.id == source_id:
+                        if is_length:
+                            match value:
+                                case MirConstValue.Int(length):
+                                    return length == message.len() and type_.kind == MirTypeKind.I64
+                                case _: return false
+                        match value:
+                            case MirConstValue.Str(actual):
+                                match type_.kind:
+                                    case MirTypeKind.Ptr(element, _):
+                                        return actual == message and element.kind == MirTypeKind.I8
+                                    case _: return false
+                            case _: return false
+                case _: ()
+    false
+
+fn check_codepoint_panic_abi(target: text):
+    val source = "fn convert(value: text) -> {target}:\n    value as {target}\n"
+    val parsed = parse_full_frontend(source, "codepoint.spl", "codepoint", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("codepoint.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    expect(lowering.errors.len()).to_equal(0)
+    var panic_calls = 0
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, args):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), type_):
+                                if name == "rt_panic":
+                                    panic_calls = panic_calls + 1
+                                    expect(args.len()).to_equal(2)
+                                    val message = "type mismatch: cannot cast str to {target}"
+                                    expect(codepoint_argument_is_constant(function, args[0], message, false)).to_equal(true)
+                                    expect(codepoint_argument_is_constant(function, args[1], message, true)).to_equal(true)
+                                    val correct_signature = match type_.kind:
+                                        case MirTypeKind.FuncPtr(signature):
+                                            if signature.params.len() != 2:
+                                                false
+                                            else:
+                                                val raw_pointer = match signature.params[0].kind:
+                                                    case MirTypeKind.Ptr(element, _): element.kind == MirTypeKind.I8
+                                                    case _: false
+                                                signature.params_known and raw_pointer and signature.params[1].kind == MirTypeKind.I64 and not signature.is_variadic
+                                        case _: false
+                                    expect(correct_signature).to_equal(true)
+                                    val aborts = match block.terminator:
+                                        case MirTerminator.Abort(_): true
+                                        case _: false
+                                    expect(aborts).to_equal(true)
+                            case _: ()
+                    case _: ()
+    expect(panic_calls).to_equal(1)
+
+describe "invalid code-point casts preserve the runtime panic ABI":
+    it "passes the integer-target diagnostic as raw bytes and length":
+        check_codepoint_panic_abi("i64")
+
+    it "passes the floating-target diagnostic as raw bytes and length":
+        check_codepoint_panic_abi("f64")
