@@ -216,6 +216,9 @@ use compiler.driver.driver_build.build_outcome.{BuildOutcomeKind, BuildUnitOutco
     build_outcome_retained_diagnostic_count}
 use compiler.driver.driver_log_helpers.{log_build_progress}
 use compiler.driver.driver_pass_receipt.{LaneReceipt, lane_receipt_enabled, record_lane_receipt}
+use compiler.driver.driver_ice_boundary.{
+    ice_boundary_module_start, ice_boundary_module_done, ice_boundary_fail,
+    ice_boundary_finalize}
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 use compiler.driver.cache.native_build_environment_identity.{native_build_environment_fingerprint_v1}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, process_run}
@@ -2599,6 +2602,12 @@ impl CompilerDriver:
         # linker/native_binary/stubs.rs:209-221, where fabricated zero-returning
         # stubs masked missing symbols.
         val outcome_verdict = driver_native_report_module_outcomes_v1(module_outcomes)
+        # ICE boundary: close the receipt and name every module that failed inside
+        # the per-module codegen boundary; drops the breadcrumbs on a clean build.
+        val ice_summary = ice_boundary_finalize()
+        if ice_summary != "":
+            print "error: {ice_summary}"
+            _sffi_stdout_flush()
         if outcome_verdict != "":
             return CompileResult.CodegenError(outcome_verdict)
 
@@ -3087,6 +3096,12 @@ fn _compile_frozen_module_capsule(
     # `Err("")` even though the object-path driver had read the llc diagnostic.
     if group_member_id != "":
         log_phase("native_group:codegen:start member={group_member_id} backend={backend_name}")
+    # ICE boundary: the `start` breadcrumb is what lets the parent name this
+    # module if the process dies inside its codegen (driver_ice_boundary.spl).
+    val ice_gate = ice_boundary_module_start(name, capsule.cache_source, "codegen", backend_name)
+    if ice_gate != "":
+        return _aot_compile_failure(name,
+            ice_boundary_fail(name, capsule.cache_source, "codegen", backend_name, ice_gate))
     match _compile_selected_module(backend_name, is_release, opt_level,
         capsule.output_base,
         name, capsule.mir_module, capsule.storage_snapshot,
@@ -3094,8 +3109,10 @@ fn _compile_frozen_module_capsule(
         case Err(error):
             if group_member_id != "":
                 log_phase("native_group:codegen:error member={group_member_id} backend={backend_name}")
+            val _ice_line = ice_boundary_fail(name, capsule.cache_source, "codegen", backend_name, error)
             return Err(error)
         case Ok(object_path):
+            ice_boundary_module_done(name, "codegen")
             if group_member_id != "":
                 log_phase("native_group:codegen:done member={group_member_id} backend={backend_name}")
             if not capsule.identity_valid():

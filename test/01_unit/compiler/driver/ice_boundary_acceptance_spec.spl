@@ -1,0 +1,287 @@
+"""Per-module ICE boundary in the native-build driver (robustness item 10a).
+
+Drives the real `CompilerDriver.lower_to_mir()` loop over three modules and a
+test-only fault knob (`SIMPLE_ICE_INJECT_MODULE`). Before the boundary the
+loop returned at the first module that failed to lower, so the modules after
+it were never attempted and nothing named the failed one in a receipt.
+
+Two tiers, kept apart on purpose:
+- caught: a failure the compiler returns as a value. Recorded, siblings go on.
+- attributed: the process died inside a module. Only the breadcrumb survives;
+  the parent names the module from it.
+"""
+# @req REQ-ROBUST-10A
+# @cover src/compiler/80.driver/driver_ice_boundary.spl
+# @cover src/compiler/80.driver/driver_pipeline_lowering.spl
+use std.spec.*
+use std.io_runtime.{env_set, file_exists, file_read_nullable, file_read}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_pipeline_lowering.*
+use compiler.driver.driver_ice_boundary.*
+use compiler.common.driver_compile_options.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, CompileResult}
+use compiler.driver.driver_aot_pipeline.*
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use app.cli.native_build_main.{native_build_relaunch_past_ice_crashes, resolve_simple_binary}
+use app.io.process_ops.{process_run_timeout_live}
+
+fn ice_spec_source(fn_name: text) -> text:
+    "fn " + fn_name + "() -> i64:\n    41\n"
+
+fn ice_spec_lower(driver: CompilerDriver) -> bool:
+    # The --entry-closure route: every source is a real module lowered here.
+    driver.lower_to_mir_for_explicit_target(driver_mir_target_context(driver.ctx.options))
+
+fn ice_spec_env(case_name: text, boundary: text, inject: text, skip_list: text):
+    env_set("SIMPLE_ICE_DIR", "build/test_ice_boundary/" + case_name)
+    env_set("SIMPLE_ICE_BOUNDARY", boundary)
+    env_set("SIMPLE_ICE_INJECT_MODULE", inject)
+    env_set("SIMPLE_ICE_INJECT_KIND", "")
+    env_set("SIMPLE_ICE_SKIP_MODULES", skip_list)
+    env_set("SIMPLE_COMPILE_FAIL_FAST", "")
+    env_set("SIMPLE_ICE_CRASH_RETRIES", "")
+
+fn ice_spec_driver() -> CompilerDriver:
+    # Three real one-function modules in a fixed order: the bad one is in the
+    # middle, so `mod.gamma` is only ever lowered if the loop survives `mod.bad`.
+    val names = ["mod.alpha", "mod.bad", "mod.gamma"]
+    val log = Logger(level: 0)
+    var asts: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    for name in names:
+        val source = ice_spec_source(name.replace(".", "_") + "_value")
+        val path = "fixture/" + name + ".spl"
+        asts[name] = parse_full_frontend(source, path, name, log)
+        sources = sources.push(SourceFile(path: path, content: source, module_name: name))
+    val surfaces = module_surfaces_from_modules(asts, sources).unwrap()
+    var driver = CompilerDriver.create(driver_core_compile_options_default())
+    driver.ctx.sources = sources
+    for name in names:
+        var hir_lowering = hirlowering_for_module(name, surfaces)
+        driver.ctx.hir_modules[name] = hir_lowering.lower_module(asts[name])
+    driver
+
+fn ice_spec_fn_count(driver: CompilerDriver, name: text) -> i64:
+    # -1: the module never reached the MIR table at all.
+    if not driver.ctx.mir_modules.has(name):
+        return -1
+    driver.ctx.mir_modules[name].functions.keys().len()
+
+fn ice_spec_errors(driver: CompilerDriver) -> text:
+    var joined = ""
+    for err in driver.ctx.errors:
+        joined = joined + err + "\n"
+    joined
+
+fn ice_spec_receipt() -> text:
+    if not file_exists(ice_receipt_path()):
+        return ""
+    file_read_nullable(ice_receipt_path()) ?? ""
+
+describe "per-module ICE boundary":
+    it "reports the failed module by name, still lowers its siblings, fails the phase and writes the receipt":
+        ice_spec_env("caught", "", "mod.bad", "")
+        var driver = ice_spec_driver()
+        val ok = ice_spec_lower(driver)
+
+        # the build fails ...
+        expect(ok).to_equal(false)
+        # ... names the module ...
+        expect(ice_spec_errors(driver)).to_contain("ICE[mir_lower] module mod.bad (caught)")
+        # ... and the module AFTER the bad one was still lowered.
+        expect(ice_spec_fn_count(driver, "mod.alpha")).to_equal(1)
+        expect(ice_spec_fn_count(driver, "mod.gamma")).to_equal(1)
+        expect(ice_spec_fn_count(driver, "mod.bad")).to_equal(0)
+
+        val records = ice_records_read()
+        expect(records.len()).to_equal(1)
+        expect(records[0].module_name).to_equal("mod.bad")
+        expect(records[0].phase).to_equal("mir_lower")
+        expect(records[0].kind).to_equal("caught")
+        expect(records[0].source_path).to_equal("fixture/mod.bad.spl")
+
+        val summary = ice_boundary_finalize()
+        expect(summary).to_start_with("1 module(s) failed with ICE: mod.bad (mir_lower, caught)")
+        expect(ice_spec_receipt()).to_contain("ice_summary_v1\tfailed=1\tcaught=1\tattributed=0\tmodules=mod.bad")
+
+    it "the build result is a failure whose message is the N-modules-failed summary":
+        ice_spec_env("aot", "", "mod.bad", "")
+        var driver = ice_spec_driver()
+        driver.ctx.options.cli_mode_text = "aot"
+        var message = "<not a CodegenError>"
+        match driver.aot_compile():
+            case CompileResult.CodegenError(text_value): message = text_value
+            case _: message = "<not a CodegenError>"
+        expect(message).to_start_with("1 module(s) failed with ICE: mod.bad (mir_lower, caught)")
+        expect(message).to_contain("ice_receipt.tsv")
+        expect(ice_spec_fn_count(driver, "mod.gamma")).to_equal(1)
+
+    it "leaves a clean build untouched: no error, no receipt, no leftover breadcrumbs":
+        ice_spec_env("clean", "", "", "")
+        var driver = ice_spec_driver()
+        expect(ice_spec_lower(driver)).to_equal(true)
+        expect(ice_spec_fn_count(driver, "mod.bad")).to_equal(1)
+        expect(driver.ctx.errors.len()).to_equal(0)
+        expect(ice_records_read().len()).to_equal(0)
+        expect(ice_boundary_dead_worker_modules().len()).to_equal(0)
+        expect(ice_boundary_finalize()).to_equal("")
+        expect(file_exists(ice_receipt_path())).to_equal(false)
+        expect(file_exists(ice_breadcrumb_path())).to_equal(false)
+
+    it "records every failed module when more than one fails":
+        ice_spec_env("two", "", "mod.alpha,mod.gamma", "")
+        var driver = ice_spec_driver()
+        expect(ice_spec_lower(driver)).to_equal(false)
+        expect(ice_spec_fn_count(driver, "mod.bad")).to_equal(1)
+        expect(ice_records_read().len()).to_equal(2)
+        expect(ice_boundary_finalize()).to_start_with("2 module(s) failed with ICE: mod.alpha (mir_lower, caught), mod.gamma (mir_lower, caught)")
+
+    it "fail-fast switch stops at the first failed module but still names it":
+        ice_spec_env("failfast", "fail-fast", "mod.bad", "")
+        var driver = ice_spec_driver()
+        expect(ice_spec_lower(driver)).to_equal(false)
+        expect(ice_spec_fn_count(driver, "mod.alpha")).to_equal(1)
+        expect(ice_spec_fn_count(driver, "mod.gamma")).to_equal(-1)
+        expect(ice_records_read().len()).to_equal(1)
+        expect(ice_records_read()[0].module_name).to_equal("mod.bad")
+
+    it "the existing SIMPLE_COMPILE_FAIL_FAST switch also restores fail-fast":
+        ice_spec_env("failfast_env", "", "mod.bad", "")
+        env_set("SIMPLE_COMPILE_FAIL_FAST", "1")
+        var driver = ice_spec_driver()
+        expect(ice_spec_lower(driver)).to_equal(false)
+        expect(ice_spec_fn_count(driver, "mod.gamma")).to_equal(-1)
+        env_set("SIMPLE_COMPILE_FAIL_FAST", "")
+
+    it "off switch does no boundary work: no breadcrumbs, no receipt, fault knob inert":
+        ice_spec_env("off", "off", "mod.bad", "")
+        var driver = ice_spec_driver()
+        expect(ice_spec_lower(driver)).to_equal(true)
+        expect(file_exists(ice_breadcrumb_path())).to_equal(false)
+        expect(file_exists(ice_receipt_path())).to_equal(false)
+        expect(ice_boundary_mode_from("0", "")).to_equal("off")
+        expect(ice_boundary_mode_from("", "")).to_equal("on")
+        expect(ice_boundary_mode_from("", "1")).to_equal("fail-fast")
+        expect(ice_crash_retry_budget()).to_equal(0)
+
+describe "dead-worker attribution":
+    it "names the module a worker entered and never left, and nothing else":
+        val crumbs = "start\tmir_lower\tmod.alpha\tfixture/a.spl\t\ndone\tmir_lower\tmod.alpha\nstart\tcodegen\tmod.bad\tfixture/bad.spl\tllvm\n"
+        val open_crumbs = ice_breadcrumbs_open(crumbs)
+        expect(open_crumbs.len()).to_equal(1)
+        expect(open_crumbs[0].module_name).to_equal("mod.bad")
+        expect(open_crumbs[0].phase).to_equal("codegen")
+        expect(open_crumbs[0].backend).to_equal("llvm")
+        # An orderly worker closes every module: nothing to attribute.
+        expect(ice_breadcrumbs_open(crumbs + "done\tcodegen\tmod.bad\n").len()).to_equal(0)
+        expect(ice_breadcrumbs_open("").len()).to_equal(0)
+
+    it "records a module left open on disk as an attributed ICE with the exit status":
+        ice_spec_env("dead", "", "", "")
+        ice_boundary_begin_run()
+        expect(ice_boundary_module_start("mod.alpha", "fixture/a.spl", "codegen", "llvm")).to_equal("")
+        ice_boundary_module_done("mod.alpha", "codegen")
+        expect(ice_boundary_module_start("mod.bad", "fixture/bad.spl", "codegen", "llvm")).to_equal("")
+        # ... the worker dies here: no `done` for mod.bad.
+        val lines = ice_boundary_attribute_dead_worker(-1073741819)
+        expect(lines.len()).to_equal(1)
+        expect(lines[0]).to_contain("ICE[codegen] module mod.bad (attributed)")
+        expect(lines[0]).to_contain("-1073741819")
+        val records = ice_records_read()
+        expect(records.len()).to_equal(1)
+        expect(records[0].kind).to_equal("attributed")
+        expect(records[0].backend).to_equal("llvm")
+        # Attribution closes the breadcrumb, so it is not reported twice.
+        expect(ice_boundary_attribute_dead_worker(-1073741819).len()).to_equal(0)
+
+    it "a retry steps over the module the worker died in and still compiles the rest":
+        val dead = ice_breadcrumbs_open("start\tmir_lower\tmod.bad\tfixture/bad.spl\t\n")
+        val skip_list = ice_skip_list_extend("", dead)
+        expect(skip_list).to_equal("mir_lower:mod.bad")
+        expect(ice_skip_list_extend(skip_list, dead)).to_equal("mir_lower:mod.bad")
+
+        ice_spec_env("retry", "", "", skip_list)
+        expect(ice_crash_retry_budget()).to_equal(2)
+        var driver = ice_spec_driver()
+        expect(ice_spec_lower(driver)).to_equal(false)
+        expect(ice_spec_fn_count(driver, "mod.gamma")).to_equal(1)
+        expect(ice_spec_errors(driver)).to_contain("ICE[mir_lower] module mod.bad (attributed)")
+        expect(ice_records_read()[0].kind).to_equal("attributed")
+        env_set("SIMPLE_ICE_SKIP_MODULES", "")
+
+    it "a real worker death is named by the parent, and the re-launch still reaches the remaining modules":
+        # The fixture worker really dies (exit 134) inside mod.bad on its first
+        # launch: nothing in that process reports the module. The parent reads
+        # the open breadcrumb, puts the module on the skip list and re-launches.
+        ice_spec_env("death", "", "mod.bad", "")
+        env_set("SIMPLE_ICE_INJECT_KIND", "abort")
+        ice_boundary_begin_run()
+        val worker_bin = resolve_simple_binary()
+        val worker_args = ["run", "test/fixtures/ice_boundary/ice_worker_fixture.spl"]
+        val (first_out, first_err, first_code) = process_run_timeout_live(worker_bin, worker_args, 300000)
+        expect(first_code == 0).to_equal(false)
+        expect(first_out).to_contain("compiled mod.alpha")
+        expect(first_out.contains("compiled mod.gamma")).to_equal(false)
+        expect(first_out.contains("mod.bad")).to_equal(false)
+        val (worker_out, worker_err, worker_code) = native_build_relaunch_past_ice_crashes(
+            worker_bin, worker_args, 300000, 2, first_out, first_err, first_code)
+        env_set("SIMPLE_ICE_INJECT_KIND", "")
+        env_set("SIMPLE_ICE_INJECT_MODULE", "")
+        # the run still fails ...
+        expect(worker_code == 0).to_equal(false)
+        # ... the module after the dead one was compiled by the re-launch ...
+        expect(worker_out).to_contain("compiled mod.gamma")
+        expect(worker_out).to_contain("1 module(s) failed with ICE: mod.bad (codegen, attributed)")
+        # ... and the receipt names the module the first worker died in.
+        val records = ice_records_read()
+        expect(records.len()).to_equal(1)
+        expect(records[0].module_name).to_equal("mod.bad")
+        expect(records[0].kind).to_equal("attributed")
+        expect(ice_boundary_dead_worker_modules().len()).to_equal(0)
+        env_set("SIMPLE_ICE_SKIP_MODULES", "")
+
+    it "with no retry budget the dead worker is still attributed, once":
+        ice_spec_env("death_once", "", "mod.bad", "")
+        env_set("SIMPLE_ICE_INJECT_KIND", "abort")
+        ice_boundary_begin_run()
+        val (first_out, first_err, first_code) = process_run_timeout_live(resolve_simple_binary(),
+            ["run", "test/fixtures/ice_boundary/ice_worker_fixture.spl"], 300000)
+        val (once_out, once_err, once_code) = native_build_relaunch_past_ice_crashes(
+            resolve_simple_binary(), [], 300000, 0, first_out, first_err, first_code)
+        env_set("SIMPLE_ICE_INJECT_KIND", "")
+        env_set("SIMPLE_ICE_INJECT_MODULE", "")
+        expect(once_code == 0).to_equal(false)
+        expect(once_out.contains("compiled mod.gamma")).to_equal(false)
+        val dead = ice_boundary_dead_worker_modules()
+        expect(dead.len()).to_equal(1)
+        expect(dead[0].module_name).to_equal("mod.bad")
+        expect(ice_boundary_attribute_dead_worker(134)[0]).to_contain("ICE[codegen] module mod.bad (attributed)")
+
+    it "round-trips a message holding tabs and newlines through the receipt":
+        val record = IceRecord(kind: "caught", phase: "codegen", module_name: "mod.x",
+            source_path: "a\\b.spl", function_name: "", backend: "cranelift",
+            message: "line one\n\tline two")
+        val parsed = ice_record_parse_lines(ice_record_line(record) + "\nnot a record\n")
+        expect(parsed.len()).to_equal(1)
+        expect(parsed[0].message).to_equal("line one\n\tline two")
+        expect(parsed[0].source_path).to_equal("a\\b.spl")
+        expect(parsed[0].backend).to_equal("cranelift")
+
+describe "ICE boundary wiring":
+    it "wraps per-module codegen and the parent worker launch":
+        val codegen = file_read("src/compiler/80.driver/driver_aot_native_output.spl")
+        expect(codegen).to_contain("ice_boundary_module_start(name, capsule.cache_source, \"codegen\", backend_name)")
+        expect(codegen).to_contain("ice_boundary_fail(name, capsule.cache_source, \"codegen\", backend_name, error)")
+        expect(codegen).to_contain("ice_boundary_module_done(name, \"codegen\")")
+        val parent = file_read("src/app/cli/native_build_main.spl")
+        expect(parent).to_contain("ice_boundary_attribute_dead_worker(code as i64)")
+        expect(parent).to_contain("native_build_relaunch_past_ice_crashes(")
+        val aot = file_read("src/compiler/80.driver/driver_aot_pipeline.spl")
+        expect(aot).to_contain("val ice_summary = ice_boundary_finalize()")

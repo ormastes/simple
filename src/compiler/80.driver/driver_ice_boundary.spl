@@ -1,0 +1,305 @@
+# Per-module internal-compiler-error (ICE) boundary for native-build.
+#
+# WHY THIS EXISTS. A failure inside one module's MIR lowering or object codegen
+# used to end the whole build: the lowering loop returned at the first failed
+# module, and a hard crash of the worker process was reported only as an
+# anonymous exit status. One bad module therefore hid every other problem and
+# cost a full re-run per defect.
+#
+# WHAT IS CAUGHT vs ONLY ATTRIBUTED. Simple has no try/catch and a panic or an
+# access violation ends the process, so there are two honest tiers:
+#   caught      a failure the compiler returns as a value (`Result` Err from
+#               module lowering or codegen, a missing HIR module). It is
+#               recorded here, the module is marked failed, and the phase goes
+#               on to the remaining modules.
+#   attributed  a hard death (panic, access violation, SIGSEGV, kill). Nothing
+#               in-process survives it. A `start` breadcrumb is appended before
+#               each module and a `done` after it, so the parent process can
+#               name the module the dead worker was inside.
+#
+# The store is two append-only files, not CompileContext fields: a record must
+# survive the death of the process that wrote it, and the parent coordinator
+# has to read what a child wrote.
+#
+# Deliberately dependency-light (same rule as driver_pass_receipt.spl): only
+# std.io_runtime, so calling it from a lowering loop adds no module graph.
+
+use std.io_runtime.{env_get_opt, file_append_text, file_delete, file_exists, file_read_nullable, dir_create_all, exit}
+
+fn ice_attributed_prefix() -> text:
+    "worker died inside this module"
+
+struct IceRecord:
+    """One failed module. `function` is "" when the failing site did not name
+    one; `backend` is "" for phases that have none (MIR lowering)."""
+    kind: text
+    phase: text
+    module_name: text
+    source_path: text
+    function_name: text
+    backend: text
+    message: text
+
+struct IceBreadcrumb:
+    """A module a worker entered and has not left."""
+    phase: text
+    module_name: text
+    source_path: text
+    backend: text
+
+# ---------------------------------------------------------------------------
+# Switch
+# ---------------------------------------------------------------------------
+
+fn ice_boundary_mode_from(boundary_value: text, fail_fast_value: text) -> text:
+    """`on` (default): record and continue. `fail-fast`: record, then stop at
+    the first failed module. `off`: do no boundary work at all."""
+    if boundary_value == "off" or boundary_value == "0":
+        return "off"
+    if boundary_value == "fail-fast" or fail_fast_value == "1":
+        return "fail-fast"
+    "on"
+
+fn ice_boundary_mode() -> text:
+    ice_boundary_mode_from(env_get_opt("SIMPLE_ICE_BOUNDARY") ?? "",
+        env_get_opt("SIMPLE_COMPILE_FAIL_FAST") ?? "")
+
+fn ice_boundary_enabled() -> bool:
+    ice_boundary_mode() != "off"
+
+fn ice_boundary_keep_going() -> bool:
+    ice_boundary_mode() == "on"
+
+# ---------------------------------------------------------------------------
+# Store
+# ---------------------------------------------------------------------------
+
+fn ice_boundary_dir() -> text:
+    val dir = env_get_opt("SIMPLE_ICE_DIR") ?? ""
+    if dir == "":
+        "build/ice"
+    else:
+        dir
+
+fn ice_receipt_path() -> text:
+    ice_boundary_dir() + "/ice_receipt.tsv"
+
+fn ice_breadcrumb_path() -> text:
+    ice_boundary_dir() + "/ice_breadcrumbs.log"
+
+fn _ice_field(value: text) -> text:
+    # One record per line, tab-separated: a value may hold neither.
+    value.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n").replace("\r", "")
+
+fn _ice_unfield(value: text) -> text:
+    value.replace("\\n", "\n").replace("\\t", "\t").replace("\\\\", "\\")
+
+fn _ice_append(path: text, line: text) -> bool:
+    if not file_exists(path):
+        dir_create_all(ice_boundary_dir())
+    file_append_text(path, line + "\n")
+
+fn ice_boundary_begin_run():
+    """Drop a previous run's breadcrumbs and receipt so a stale `start` cannot
+    be attributed to this run. Creates nothing."""
+    if not ice_boundary_enabled():
+        return
+    if file_exists(ice_breadcrumb_path()):
+        file_delete(ice_breadcrumb_path())
+    if file_exists(ice_receipt_path()):
+        file_delete(ice_receipt_path())
+
+# ---------------------------------------------------------------------------
+# Test-only fault injection and crash skip list
+# ---------------------------------------------------------------------------
+
+fn _ice_list_has(list_text: text, phase: text, module_name: text) -> bool:
+    # Entries are `module` (any phase) or `phase:module`, comma-separated.
+    if list_text == "":
+        return false
+    for raw in list_text.split(","):
+        val entry = raw.trim()
+        if entry == module_name or entry == phase + ":" + module_name:
+            return true
+    false
+
+fn ice_boundary_module_start(module_name: text, source_path: text, phase: text, backend: text) -> text:
+    """Append the `start` breadcrumb for one module. Returns "" to proceed, or
+    the failure message when this module must not be compiled: it is on the
+    crash skip list (`SIMPLE_ICE_SKIP_MODULES`, set by the parent after a
+    worker died inside it) or a test asked for a deliberate failure
+    (`SIMPLE_ICE_INJECT_MODULE`, kind `err` or `abort`)."""
+    if not ice_boundary_enabled():
+        return ""
+    _ice_append(ice_breadcrumb_path(),
+        "start\t{phase}\t{_ice_field(module_name)}\t{_ice_field(source_path)}\t{_ice_field(backend)}")
+    if _ice_list_has(env_get_opt("SIMPLE_ICE_SKIP_MODULES") ?? "", phase, module_name):
+        return ice_attributed_prefix() + " in an earlier attempt; skipped on retry"
+    if _ice_list_has(env_get_opt("SIMPLE_ICE_INJECT_MODULE") ?? "", phase, module_name):
+        if (env_get_opt("SIMPLE_ICE_INJECT_KIND") ?? "") == "abort":
+            # Stand-in for a hard crash: die with the breadcrumb still open.
+            exit(134)
+        return "injected {phase} failure (SIMPLE_ICE_INJECT_MODULE)"
+    ""
+
+fn ice_boundary_module_done(module_name: text, phase: text):
+    if not ice_boundary_enabled():
+        return
+    _ice_append(ice_breadcrumb_path(), "done\t{phase}\t{_ice_field(module_name)}")
+
+# ---------------------------------------------------------------------------
+# Records
+# ---------------------------------------------------------------------------
+
+fn ice_record_line(record: IceRecord) -> text:
+    "ice_v1\tkind={record.kind}\tphase={record.phase}\tmodule={_ice_field(record.module_name)}\tpath={_ice_field(record.source_path)}\tfunction={_ice_field(record.function_name)}\tbackend={_ice_field(record.backend)}\tmessage={_ice_field(record.message)}"
+
+fn _ice_line_value(fields: [text], key: text) -> text:
+    val prefix = key + "="
+    for field in fields:
+        if field.starts_with(prefix):
+            return _ice_unfield(field.substring(prefix.len()))
+    ""
+
+fn ice_record_parse_lines(receipt_text: text) -> [IceRecord]:
+    var records: [IceRecord] = []
+    for line in receipt_text.split("\n"):
+        if line.starts_with("ice_v1\t"):
+            val fields = line.split("\t")
+            records = records.push(IceRecord(
+                kind: _ice_line_value(fields, "kind"),
+                phase: _ice_line_value(fields, "phase"),
+                module_name: _ice_line_value(fields, "module"),
+                source_path: _ice_line_value(fields, "path"),
+                function_name: _ice_line_value(fields, "function"),
+                backend: _ice_line_value(fields, "backend"),
+                message: _ice_line_value(fields, "message")))
+    records
+
+fn ice_records_read() -> [IceRecord]:
+    if not file_exists(ice_receipt_path()):
+        return []
+    ice_record_parse_lines(file_read_nullable(ice_receipt_path()) ?? "")
+
+fn ice_boundary_fail(module_name: text, source_path: text, phase: text, backend: text, message: text) -> text:
+    """Record one failed module in the receipt and close its breadcrumb.
+    Returns the one-line diagnostic for the build's error list."""
+    val kind = if message.starts_with(ice_attributed_prefix()): "attributed" else: "caught"
+    val diagnostic = "ICE[{phase}] module {module_name} ({kind}): {message}"
+    if not ice_boundary_enabled():
+        return diagnostic
+    _ice_append(ice_receipt_path(), ice_record_line(IceRecord(
+        kind: kind, phase: phase, module_name: module_name,
+        source_path: source_path, function_name: "", backend: backend,
+        message: message)))
+    ice_boundary_module_done(module_name, phase)
+    diagnostic
+
+fn ice_summary_text(records: [IceRecord]) -> text:
+    """`N module(s) failed with ICE: a (mir_lower, caught), ...` or ""."""
+    if records.len() == 0:
+        return ""
+    var names = ""
+    for record in records:
+        if names != "":
+            names = names + ", "
+        names = names + "{record.module_name} ({record.phase}, {record.kind})"
+    "{records.len()} module(s) failed with ICE: {names}"
+
+fn ice_boundary_finalize() -> text:
+    """End of a phase: with no ICE, remove the breadcrumbs and return "".
+    Otherwise append the summary row to the receipt and return the summary."""
+    if not ice_boundary_enabled():
+        return ""
+    val records = ice_records_read()
+    if records.len() == 0:
+        if file_exists(ice_breadcrumb_path()):
+            file_delete(ice_breadcrumb_path())
+        return ""
+    var caught = 0
+    var modules = ""
+    for record in records:
+        if record.kind == "caught":
+            caught = caught + 1
+        if modules != "":
+            modules = modules + ","
+        modules = modules + record.module_name
+    _ice_append(ice_receipt_path(),
+        "ice_summary_v1\tfailed={records.len()}\tcaught={caught}\tattributed={records.len() - caught}\tmodules={_ice_field(modules)}")
+    ice_summary_text(records) + " (receipt: {ice_receipt_path()})"
+
+# ---------------------------------------------------------------------------
+# Dead-worker attribution (parent side)
+# ---------------------------------------------------------------------------
+
+fn ice_breadcrumbs_open(breadcrumb_text: text) -> [IceBreadcrumb]:
+    """Modules entered and never left, in order. The open set is rebuilt
+    rather than edited in place; it holds at most the modules in flight."""
+    var open_crumbs: [IceBreadcrumb] = []
+    for line in breadcrumb_text.split("\n"):
+        val fields = line.split("\t")
+        if fields.len() >= 5 and fields[0] == "start":
+            open_crumbs = open_crumbs.push(IceBreadcrumb(
+                phase: fields[1], module_name: _ice_unfield(fields[2]),
+                source_path: _ice_unfield(fields[3]),
+                backend: _ice_unfield(fields[4])))
+        elif fields.len() >= 3 and fields[0] == "done":
+            val done_module = _ice_unfield(fields[2])
+            var still_open: [IceBreadcrumb] = []
+            var closed_one = false
+            for crumb in open_crumbs:
+                if not closed_one and crumb.phase == fields[1] and crumb.module_name == done_module:
+                    closed_one = true
+                else:
+                    still_open = still_open.push(crumb)
+            open_crumbs = still_open
+    open_crumbs
+
+fn ice_boundary_dead_worker_modules() -> [IceBreadcrumb]:
+    """Modules a worker entered and never left. Non-empty after a worker exit
+    means it died inside them: every orderly path writes `done`."""
+    if not ice_boundary_enabled() or not file_exists(ice_breadcrumb_path()):
+        return []
+    ice_breadcrumbs_open(file_read_nullable(ice_breadcrumb_path()) ?? "")
+
+fn ice_boundary_attribute_dead_worker(exit_code: i64) -> [text]:
+    """Parent side, after the worker exited non-zero. Records each module the
+    worker died inside as an attributed ICE and returns one diagnostic line
+    per module. Empty when the worker left every module it entered."""
+    var lines: [text] = []
+    for crumb in ice_boundary_dead_worker_modules():
+        lines = lines.push(ice_boundary_fail(crumb.module_name,
+            crumb.source_path, crumb.phase, crumb.backend,
+            "{ice_attributed_prefix()} (worker exit status {exit_code})"))
+    lines
+
+fn ice_skip_list_extend(current: text, dead: [IceBreadcrumb]) -> text:
+    """`SIMPLE_ICE_SKIP_MODULES` value for a retry that steps over `dead`."""
+    var list_text = current
+    for crumb in dead:
+        if not _ice_list_has(list_text, crumb.phase, crumb.module_name):
+            if list_text != "":
+                list_text = list_text + ","
+            list_text = list_text + crumb.phase + ":" + crumb.module_name
+    list_text
+
+fn ice_crash_retry_budget() -> i64:
+    """How many times the parent re-launches the worker past a module it died
+    in. 0 under fail-fast/off; `SIMPLE_ICE_CRASH_RETRIES` overrides (default 2)."""
+    if not ice_boundary_keep_going():
+        return 0
+    val raw = env_get_opt("SIMPLE_ICE_CRASH_RETRIES") ?? ""
+    if raw == "":
+        return 2
+    val parsed = raw.to_i64() ?? 0
+    if parsed < 0:
+        return 0
+    parsed
+
+export IceRecord, IceBreadcrumb
+export ice_boundary_mode_from, ice_boundary_mode, ice_boundary_enabled, ice_boundary_keep_going
+export ice_boundary_dir, ice_receipt_path, ice_breadcrumb_path, ice_boundary_begin_run
+export ice_boundary_module_start, ice_boundary_module_done, ice_boundary_fail
+export ice_record_line, ice_record_parse_lines, ice_records_read, ice_summary_text, ice_boundary_finalize
+export ice_breadcrumbs_open, ice_boundary_dead_worker_modules
+export ice_boundary_attribute_dead_worker, ice_skip_list_extend, ice_crash_retry_budget
