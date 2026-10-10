@@ -52,3 +52,7 @@ The imported enum-payload owner alias repair cleared all 42 former HIR type fail
 ### 2026-10-11 gate-only lock follow-up
 
 The six dynlib gate-only generic calls use the concrete mutex gate helper. A focused native build reports zero unresolved generic calls and reaches link after replacing an unsupported indexed array removal with shift-and-pop. Missing mutex link symbols still block runtime execution. The full JIT, demand-load closure, and measured size/startup/RSS gates remain open; see the Item 5 HIR/mono bug note.
+
+### 2026-10-11 module initializer generic repair
+
+The monomorphizer now rewrites generic calls in module constant initializers; an isolated native global-initializer executable passes. The dynlib closure advances to specialized mutex link names but still fails link, and the Stage 2 compiler test matrix did not run without an MC/DC delegation waiver. Full Item 5 native JIT and matched size/startup/RSS acceptance remain open; see the Item 5 HIR/mono bug note.

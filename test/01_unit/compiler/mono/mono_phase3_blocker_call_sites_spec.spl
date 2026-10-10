@@ -32,6 +32,21 @@ use compiler.hir.hir_definitions.*
 use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
 
 describe "mono phase-3 blocker call sites":
+    it "specializes a generic call in a module-level initializer":
+        # @req REQ-SSPEC-COMPILER
+        step("rewrites the module initializer before native link names are emitted")
+        val src = "fn identity<T>(value: T) -> T:\n    value\n\nvar gate: i64 = identity(41)\n\nfn read_gate() -> i64:\n    gate\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_global_call.spl", "mono_global_call", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_global_call.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (_out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(diags.len()).to_equal(0)
+        expect(stats.call_sites_found).to_equal(1)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(1)
+
     it "binds a return-only type parameter from the caller's declared Result (cas_batch_error_v1 shape)":
         # @req REQ-SSPEC-COMPILER
         step("binds a return-only type parameter from the caller's declared Result")
