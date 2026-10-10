@@ -283,6 +283,13 @@ reachable-source validation. Action identities bind that scope as before.
 Existing V1-V3 bytes remain decodable with an unknown generated witness; that
 unknown value must never establish semantic reuse, even between two otherwise
 compatible legacy generations. Migration therefore conservatively invalidates.
+The typed bootstrap index-build request selects `index_schema=V4` explicitly.
+Requests selecting V2 or V3 are rejected rather than silently producing a
+different schema. Legacy immutable indexes remain readable for migration.
+Grouped warm-route wire V2 carries the index schema and generated witnesses;
+legacy wire V1 remains decodable for inspection. Actual grouped warm execution
+and retries require the new complete graph, so old archive routes cannot bypass
+conservative migration through a second entrypoint.
 
 New builder-produced entries copy the valid generated digest from their admitted
 TLDR header. Encoding and decoding require the field for schema 4. A missing
