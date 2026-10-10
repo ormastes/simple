@@ -62,12 +62,13 @@ sh scripts/check/check-seed-stage2-differential.shs --stage2 <p> diff_match_guar
 
 Options: `--runtime <dir>` (default `<stage2 dir>/stage2-runtime-authority`), `--backends
 llvm,cranelift`, `--jobs <n>` (parallel stage-2 builds, default 2), `--threads`, `--timeout`,
-`--work`, `--baseline`, `--corpus`. `BOOT=` (empty) unsets `SIMPLE_BOOTSTRAP`; `KEEP_WORK=1` keeps
+`--work`, `--baseline`, `--corpus`. With no case names the `diff_*` cases run; `micro_*` in the same
+directory belong to `run.shs` and run here only when named (they are not baselined). `BOOT=` (empty) unsets `SIMPLE_BOOTSTRAP`; `KEEP_WORK=1` keeps
 per-build caches and executables. Each stage-2 build uses its own cache directory, deleted after
 the build — a shared cache would let one case's objects answer for another.
 
 Cost: the seed lane is seconds per case; one stage-2 native-build is 1.5–4 minutes, so the full
-corpus (28 cases × 2 backends) is about 1.5–2 hours at `--jobs 2` on the Windows host.
+corpus (28 cases × 2 backends) is about 2 hours at `--jobs 2` on the Windows host.
 
 ## Level switch
 
@@ -134,7 +135,7 @@ where the seed disagrees, the `seed` lane says so.
 ## Why it is not wired
 
 A manifest row needs a fixed command. This gate needs an explicitly chosen stage-2 binary with
-its runtime authority and a native linker toolchain, and about two hours of stage-2 builds; no
+its runtime authority and a native linker toolchain, and about 2 hours of stage-2 builds; no
 hook and no hosted runner has an admitted stage-2. It is therefore listed in
 `scripts/check/guard_wiring_optout.txt` with that reason. Promotion path: once a bootstrap lane
 publishes a stage-2, add a `bootstrap`-tier `push_blocking: false` row that passes that lane's
@@ -159,3 +160,14 @@ stage-2 to `--stage2`, and promote to blocking when the baseline is empty.
 with the fake compilers in `test/fixtures/bootstrap/seed_stage2_differential_selfcheck/`:
 agreement, stdout divergence, stage-2 refusal, exit-code divergence, both-refuse, baselined
 divergence, stale baseline, NOTRUN, missing compilers, empty corpus, and corpus/baseline shape.
+
+Where no `timeout`/`gtimeout` exists (stock macOS) a watchdog enforces the limits: TERM, then KILL
+after `SSD_TERM_GRACE` seconds (default 5), applied to the command and everything it started —
+through its own process group when `setsid` execs in place, otherwise through `ps` snapshots of
+its descendants. A run the watchdog ended is NOTRUN whatever exit status the command returned; a
+TERM from outside stays the command's own 143. If neither mechanism exists the driver says so on
+stderr (`NOTE: ... may survive`) instead of leaving orphans silently. The `tree` mode cannot see
+a descendant that detached from the tree before the timeout.
+
+The refusal reason in the table is the first recognisable diagnostic in the build log and can be
+a secondary note; `build.log` under `--work` is the authority.

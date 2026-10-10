@@ -31,7 +31,8 @@
 #     --runtime <dir>      stage-2 runtime authority (default <stage2 dir>/stage2-runtime-authority if present)
 #     --target <triple>    passed to native-build (default: not passed)
 #     --backends <list>    comma list of llvm,cranelift (default both)
-#     --corpus <dir>       default test/fixtures/bootstrap/stage2_micro
+#     --corpus <dir>       default test/fixtures/bootstrap/stage2_micro. With no case names the diff_* cases
+#                          run; micro_* there belong to run.shs and run here only when named.
 #     --baseline <file>    default scripts/check/seed_stage2_differential_baseline.txt
 #     --work <dir>         build/output dir (default build/seed_stage2_differential)
 #     --jobs <n>           parallel stage-2 builds (default 2)   --threads <n> per build (default 4)
@@ -63,11 +64,82 @@ case_kind() {  # $1 = main.spl ; prints run | reject | none
     else echo none; fi
 }
 
-with_timeout() {  # $1 = seconds, rest = command. Falls back to no limit where no timeout tool exists.
+# Process ids of $1 and all its descendants (one line), from a ps snapshot.
+wt_tree() {
+    ps -A -o pid= -o ppid= 2>/dev/null | awk -v root="$1" '{ pp[$1] = $2 }
+        END { seen[root] = 1; list = root; grew = 1
+              while (grew) { grew = 0; for (p in pp) if (!(p in seen) && (pp[p] in seen)) { seen[p] = 1; list = list " " p; grew = 1 } }
+              print list }'
+}
+
+# wt_signal <TERM|KILL|0> : signal everything the watched command started. Uses WT_MODE WT_PID WT_PIDS.
+wt_signal() {
+    case "$WT_MODE" in
+        group) kill "-$1" -- "-$WT_PID" 2>/dev/null ;;
+        tree)  _wsr=1; for _wp in $WT_PIDS; do kill "-$1" "$_wp" 2>/dev/null && _wsr=0; done; return $_wsr ;;
+        *)     kill "-$1" "$WT_PID" 2>/dev/null ;;
+    esac
+}
+
+# setsid is usable only if it execs in place: then `$!` is the new group's id and the exit status
+# is the command's. Where it forks instead (MSYS), `$!` names a process that is already gone.
+wt_setsid_ok() {
+    [ "${SSD_NO_SETSID:-0}" != 1 ] && command -v setsid >/dev/null 2>&1 || return 1
+    _wso=$(mktemp 2>/dev/null || mktemp -t seedstage2wt) || return 1
+    setsid sh -c 'echo $$; exit 7' > "$_wso" 2>/dev/null &
+    _wsp=$!
+    wait "$_wsp"
+    _wsrc=$?
+    _wsid=$(cat "$_wso"); rm -f "$_wso"
+    [ "$_wsrc" -eq 7 ] && [ "$_wsid" = "$_wsp" ]
+}
+
+# with_timeout <seconds> <command...> : returns 124 when WE ended the command, like timeout(1);
+# otherwise the command's own status (an external SIGTERM stays 143, it is not a timeout).
+# Without timeout/gtimeout (stock macOS) a watchdog ends the command AND what it started:
+#   group  setsid execs in place: the command runs in its own process group and the group is signalled
+#   tree   otherwise: the descendants found by ps snapshots (at TERM and again at KILL) are signalled
+#   child  neither: only the direct child can be signalled; said once on stderr, never silent
+# TERM first, KILL after SSD_TERM_GRACE seconds (default 5). The watchdog writes a flag file before
+# it signals, so "we timed it out" does not depend on the exit status the command chose to return.
+with_timeout() {
     _wt_s=$1; shift
-    if command -v timeout >/dev/null 2>&1; then timeout "$_wt_s" "$@"
-    elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$_wt_s" "$@"
-    else "$@"; fi
+    if [ "${SSD_NO_TIMEOUT_TOOL:-0}" != 1 ] && command -v timeout >/dev/null 2>&1; then timeout "$_wt_s" "$@"; return $?; fi
+    if [ "${SSD_NO_TIMEOUT_TOOL:-0}" != 1 ] && command -v gtimeout >/dev/null 2>&1; then gtimeout "$_wt_s" "$@"; return $?; fi
+    if wt_setsid_ok; then WT_MODE=group
+    elif [ "${SSD_NO_PS_TREE:-0}" != 1 ] && ps -A -o pid= -o ppid= >/dev/null 2>&1; then WT_MODE=tree
+    else
+        WT_MODE=child
+        echo "NOTE: no timeout tool, no exec-in-place setsid and no 'ps -A -o pid= -o ppid=': a timed-out command's own children cannot be signalled and may survive" >&2
+    fi
+    _wt_flag=$(mktemp 2>/dev/null || mktemp -t seedstage2wt) || return 125
+    rm -f "$_wt_flag"
+    if [ "$WT_MODE" = group ]; then setsid "$@" &
+    else "$@" &
+    fi
+    WT_PID=$!
+    ( _wt_sl=""; trap '[ -z "$_wt_sl" ] || kill "$_wt_sl" 2>/dev/null; exit 0' TERM
+      sleep "$_wt_s" & _wt_sl=$!
+      wait "$_wt_sl" || exit 0
+      WT_PIDS=""; [ "$WT_MODE" != tree ] || WT_PIDS=$(wt_tree "$WT_PID")
+      : > "$_wt_flag"
+      wt_signal TERM
+      _wt_g=0
+      while [ "$_wt_g" -lt "${SSD_TERM_GRACE:-5}" ] && wt_signal 0; do sleep 1; _wt_g=$((_wt_g + 1)); done
+      [ "$WT_MODE" != tree ] || WT_PIDS="$WT_PIDS $(wt_tree "$WT_PID")"
+      wt_signal KILL
+      exit 0 ) &
+    _wt_dog=$!
+    wait "$WT_PID"
+    _wt_rc=$?
+    if [ -f "$_wt_flag" ]; then
+        wait "$_wt_dog" 2>/dev/null     # let TERM -> KILL finish: nothing may outlive the return
+        rm -f "$_wt_flag"
+        return 124
+    fi
+    kill -TERM "$_wt_dog" 2>/dev/null; wait "$_wt_dog" 2>/dev/null
+    if [ -f "$_wt_flag" ]; then rm -f "$_wt_flag"; return 124; fi
+    return "$_wt_rc"
 }
 
 baseline_class() {  # $1 = case, $2 = lane ; prints DIFF | NOTRUN | ""
@@ -104,7 +176,7 @@ stage2_job() {
     [ "${KEEP_WORK:-0}" = 1 ] || rm -rf "$_jd/cache"
     if [ "$_brc" -eq 124 ]; then echo "notrun build-timeout-${TMO}s" > "$_jd/status"; return 0; fi
     if [ "$_brc" -ne 0 ] || [ ! -f "$_exe" ]; then
-        if grep -a -i -q -E "(unknown|unsupported|unavailable) backend|backend[^\n]{0,60}(not available|not supported|not compiled|unavailable)" "$_jd/build.log"; then
+        if grep -a -i -q -E "(unknown|unsupported|unavailable) backend|backend.{0,60}(not available|not supported|not compiled|unavailable)" "$_jd/build.log"; then
             echo "notrun backend-unavailable" > "$_jd/status"; return 0
         fi
         echo "reject $_brc $_wall" > "$_jd/status"; return 0
@@ -119,6 +191,7 @@ stage2_job() {
 
 build_reason() {  # $1 = build.log ; one short line saying why stage-2 refused (most specific first)
     for _pat in "E-[A-Z]+-[A-Za-z0-9]+[^\"]{0,110}" "undefined symbol: [^ ]+" "MIR lowering error: .{0,110}" \
+                "backend object-path status [0-9]+" \
                 "unresolved [a-z ]{0,30}: ?[^ ]{0,60}" "worker error: .{0,110}" "error: .{0,110}"; do
         # Long tokens are host paths / mangled module names: keep their tail so rows are host-neutral.
         _why=$(grep -a -o -E "$_pat" "$1" 2>/dev/null | head -1 | tr -d '\r' | tr '\t' ' ' |
@@ -298,7 +371,7 @@ selftest() {
     BACKENDS="llvm cranelift"; BACKENDS_LABEL="llvm,cranelift"; GENERATE=0; FULL_RUN=0
     WORK="$_tmp/work"; mkdir -p "$WORK"
     # `nosuchcase` has no directory: it must be checked and come out NOTRUN, not be skipped.
-    execute_cases agree diverge s2rejects bothrefuse exitcode timedout oraclebad nobackend seedaccepts nosuchcase
+    execute_cases agree diverge s2rejects bothrefuse exitcode timedout oraclebad nobackend notavailable seedaccepts nosuchcase
     _fails=0
     st_eval() {  # $1 = label, $2 = expected rc, $3 = glob the LAST line must match, $4 = baseline text, rest = cases
         _label=$1; _xrc=$2; _glob=$3; _btxt=$4; shift 4
@@ -366,18 +439,71 @@ diverge llvm DIFF "*) ;; *) echo "selftest FAIL [generate]: baseline row not wri
     _o=$(sh "$0" --no-selftest --stage2 "$_tmp/absent_stage2" --seed "$_tmp/fake_seed" --corpus "$_fx" --work "$_tmp/m1" 2>/dev/null)
     _orc=$?
     case "$_orc:${_o##*
-}" in 2:"ERROR — nothing was checked (stage-2 compiler"*) ;; *) echo "selftest FAIL [missing stage2]: rc=$_orc $_o"; _fails=$((_fails + 1));; esac
+}" in 2:*"nothing was checked (stage-2 compiler"*) ;; *) echo "selftest FAIL [missing stage2]: rc=$_orc $_o"; _fails=$((_fails + 1));; esac
     _o=$(sh "$0" --no-selftest --stage2 "$_tmp/fake_stage2" --seed "$_tmp/absent_seed" --corpus "$_fx" --work "$_tmp/m2" 2>/dev/null)
     _orc=$?
     case "$_orc:${_o##*
-}" in 2:"ERROR — nothing was checked (seed compiler"*) ;; *) echo "selftest FAIL [missing seed]: rc=$_orc $_o"; _fails=$((_fails + 1));; esac
+}" in 2:*"nothing was checked (seed compiler"*) ;; *) echo "selftest FAIL [missing seed]: rc=$_orc $_o"; _fails=$((_fails + 1));; esac
     _o=$(sh "$0" --no-selftest --seed "$_tmp/fake_seed" --corpus "$_fx" --work "$_tmp/m3" 2>/dev/null)
     _orc=$?
     case "$_orc:${_o##*
-}" in 2:"ERROR — nothing was checked (no --stage2"*) ;; *) echo "selftest FAIL [no --stage2]: rc=$_orc $_o"; _fails=$((_fails + 1));; esac
+}" in 2:*"nothing was checked (no --stage2"*) ;; *) echo "selftest FAIL [no --stage2]: rc=$_orc $_o"; _fails=$((_fails + 1));; esac
+    # 22 the other wording, "backend <b> not available": also NOTRUN, not a DIFF
+    st_eval notavailable 1 'FAIL — 2 comparison(s)*unbaselined NOTRUN: notavailable:cranelift;' - notavailable
+    # 23 a value option given last has no value -> ERROR with a verdict line, never a shell abort
+    _o=$(sh "$0" --no-selftest --seed "$_tmp/fake_seed" --stage2 2>/dev/null)
+    _orc=$?
+    case "$_orc:${_o##*
+}" in 2:*"nothing was checked (option --stage2 needs a value)") ;; *) echo "selftest FAIL [valueless option]: rc=$_orc $_o"; _fails=$((_fails + 1));; esac
+    # 24.. no timeout tool: the watchdog fallback, in every mode this host can run (see with_timeout)
+    _wmodes=""; _wn=0
+    if wt_setsid_ok; then _wmodes="group"; fi
+    if ps -A -o pid= -o ppid= >/dev/null 2>&1; then _wmodes="$_wmodes tree"; fi
+    _wmodes="$_wmodes child"
+    wd_check() {  # $1 = label, $2 = expected rc, $3 = actual rc
+        _wn=$((_wn + 1))
+        [ "$3" -eq "$2" ] || { echo "selftest FAIL [watchdog $_wm: $1]: want rc=$2, got rc=$3"; _fails=$((_fails + 1)); }
+    }
+    wd_gone() {  # $1 = label, $2 = pid file : the process must not outlive with_timeout's return
+        _wn=$((_wn + 1))
+        _wpid=$(cat "$2" 2>/dev/null)
+        if [ -z "$_wpid" ]; then echo "selftest FAIL [watchdog $_wm: $1]: fixture wrote no pid"; _fails=$((_fails + 1))
+        elif kill -0 "$_wpid" 2>/dev/null; then
+            echo "selftest FAIL [watchdog $_wm: $1]: pid $_wpid is still running"; _fails=$((_fails + 1)); kill -KILL "$_wpid" 2>/dev/null
+        fi
+    }
+    SSD_NO_TIMEOUT_TOOL=1; SSD_TERM_GRACE=2
+    for _wm in $_wmodes; do
+        SSD_NO_SETSID=0; SSD_NO_PS_TREE=0
+        case "$_wm" in tree) SSD_NO_SETSID=1 ;; child) SSD_NO_SETSID=1; SSD_NO_PS_TREE=1 ;; esac
+        with_timeout 1 sleep 20 2> "$_tmp/wd.err"
+        wd_check "expiry is 124" 124 $?
+        with_timeout 30 sh -c 'exit 7' 2>/dev/null
+        wd_check "own exit status passes through" 7 $?
+        # A TERM from outside is the command's own 143, not our timeout.
+        with_timeout 30 sh -c 'kill -TERM $$; sleep 5' 2>/dev/null
+        wd_check "external TERM is not a timeout" 143 $?
+        # The command traps TERM and exits 1: the watchdog fired, so it is a timeout, not a refusal.
+        with_timeout 1 sh -c 'trap "exit 1" TERM; sleep 9 & wait' 2>/dev/null
+        wd_check "TERM-trapping command is a timeout" 124 $?
+        if [ "$_wm" = child ]; then
+            _wn=$((_wn + 1))
+            grep -q "may survive" "$_tmp/wd.err" || { echo "selftest FAIL [watchdog child]: the no-group limitation was not stated"; _fails=$((_fails + 1)); }
+            continue
+        fi
+        rm -f "$_tmp/wd.pid"
+        with_timeout 1 sh -c "sleep 41 & echo \$! > '$_tmp/wd.pid'; wait" 2>/dev/null
+        wd_check "grandchild case is 124" 124 $?
+        wd_gone "no orphaned grandchild" "$_tmp/wd.pid"
+        rm -f "$_tmp/wd.pid"
+        with_timeout 1 sh -c "trap '' TERM; echo \$\$ > '$_tmp/wd.pid'; sleep 41; exit 0" 2>/dev/null
+        wd_check "TERM-ignoring command is 124" 124 $?
+        wd_gone "KILL escalation" "$_tmp/wd.pid"
+    done
+    SSD_NO_TIMEOUT_TOOL=0; SSD_NO_SETSID=0; SSD_NO_PS_TREE=0
     rm -rf "$_tmp"
     if [ "$_fails" -ne 0 ]; then echo "check-seed-stage2-differential: selftest FAILED ($_fails)"; return 1; fi
-    echo "check-seed-stage2-differential: selftest OK (21 fixtures)"
+    echo "check-seed-stage2-differential: selftest OK (23 gate fixtures, $_wn watchdog fixtures in mode(s):$_wmodes)"
     return 0
 }
 
@@ -386,22 +512,25 @@ SEED=${SIMPLE_SEED:-}
 STAGE2=""; RUNTIME=""; TARGET=${TARGET:-}; BACKEND_LIST="llvm,cranelift"
 CORPUS=""; BASELINE=""; WORK=""; JOBS=2; THREADS=4; TMO=3600; SEED_TMO=${SEED_TMO:-300}
 GENERATE=0; MODE=run; RUN_SELFTEST=1
+need_value() {  # $1 = remaining arg count, $2 = option ; a value option given last has no value
+    [ "$1" -ge 2 ] || { echo "ERROR — nothing was checked (option $2 needs a value)"; exit 2; }
+}
 while [ $# -gt 0 ]; do
     case "$1" in
         --selftest) MODE=selftest ;;
         --no-selftest) RUN_SELFTEST=0 ;;   # skips only the selftest (acceptance spec, selftest child runs)
         --generate-baseline) GENERATE=1 ;;
-        --stage2) STAGE2=${2-}; shift ;;
-        --seed) SEED=${2-}; shift ;;
-        --runtime) RUNTIME=${2-}; shift ;;
-        --target) TARGET=${2-}; shift ;;
-        --backends) BACKEND_LIST=${2-}; shift ;;
-        --corpus) CORPUS=${2-}; shift ;;
-        --baseline) BASELINE=${2-}; shift ;;
-        --work) WORK=${2-}; shift ;;
-        --jobs) JOBS=${2-}; shift ;;
-        --threads) THREADS=${2-}; shift ;;
-        --timeout) TMO=${2-}; shift ;;
+        --stage2) need_value $# "$1"; STAGE2=$2; shift ;;
+        --seed) need_value $# "$1"; SEED=$2; shift ;;
+        --runtime) need_value $# "$1"; RUNTIME=$2; shift ;;
+        --target) need_value $# "$1"; TARGET=$2; shift ;;
+        --backends) need_value $# "$1"; BACKEND_LIST=$2; shift ;;
+        --corpus) need_value $# "$1"; CORPUS=$2; shift ;;
+        --baseline) need_value $# "$1"; BASELINE=$2; shift ;;
+        --work) need_value $# "$1"; WORK=$2; shift ;;
+        --jobs) need_value $# "$1"; JOBS=$2; shift ;;
+        --threads) need_value $# "$1"; THREADS=$2; shift ;;
+        --timeout) need_value $# "$1"; TMO=$2; shift ;;
         --) shift; break ;;
         -*) echo "ERROR — nothing was checked (unknown option $1)"; exit 2 ;;
         *) break ;;
@@ -464,7 +593,7 @@ else
     FULL_RUN=1
     [ "$BACKEND_LIST" = "llvm,cranelift" ] || FULL_RUN=0
     set --
-    for _d in "$CORPUS"/*/; do
+    for _d in "$CORPUS"/diff_*/; do
         [ -f "${_d}main.spl" ] || continue
         _name=${_d%/}; _name=${_name##*/}
         set -- "$@" "$_name"
