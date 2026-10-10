@@ -21,9 +21,14 @@ miss on the first v2 publication, then can be replaced.
 
 The existing native CAS probe now asserts legacy validation, v2 stability
 when only SCV generation fields change, and v2 sensitivity to source and
-variant changes. It also publishes a v2 generation. The probe has not run on
-this source yet: the historical admitted Stage 2 cannot parse the current
-stdlib, and the current-source Stage 2 bootstrap is still in sanity checks.
-No full cold/warm transition, application behavior, or paired time/RSS result
-is claimed. The event-to-module hint gap in the root-generation report also
+variant changes. It also publishes a v2 generation. The probe has not run on this source. The historical admitted Stage 2
+first stopped while discovering `windows_redirected_process.spl:8:20`
+(`expected Fn, found Colon`). A separate sparse test projection excluded
+the unneeded conditional platform files, but code generation then stopped in
+`process_ops.spl` at undeclared `WINDOWS_REDIRECTED_TOKEN_BASE`. The
+current-source Stage 2 binary was built by a separate bootstrap session but
+was not admitted: planner execution ended with
+`bootstrap-policy-error: receipt-write-failed`. No further probe retry was
+made after those bounded attempts. No full cold/warm transition, application
+behavior, or paired time/RSS result is claimed. The event-to-module hint gap in the root-generation report also
 remains open.
