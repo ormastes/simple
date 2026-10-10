@@ -1,22 +1,30 @@
 # float(text) reached LLVM as a pointer-to-number cast
 
-Status: integrated-candidate native fixtures PASS; isolated release-head and broader gates pending.
+Status: rebased onto the reconciled release/1.0 cast lowering; the parse
+path itself is superseded, the strict-parse guard and the invalid-source
+diagnostic are this lane's remaining delta. Native fixtures and broader
+gates pending on the rebased head.
 
-The exhaustive module matrix rejected `type_check_eval_comparison_predicate`
-in `src/compiler/10.frontend/core/type_checker.spl` with an unsupported LLVM
-conversion from `ptr` to `double`. Its source performs `float(compare_str)`.
-`float`/`f64` accepts text in the language builtin implementation; treating
-that text pointer's address as a number would silently change its meaning.
+Release reconciliation: `lower_cast_expr` no longer exists as the single
+cast entry point. Commit `ceac0fc96a5` split `x as T` (Cast) from `T(x)`
+(ConvertCall) and routed a proven text operand through
+`lower_text_parse_to_numeric` (`rt_string_to_float` + `rt_value_as_float`),
+which removed the original `ptr`-to-`double` LLVM failure this bug tracked.
+That reconciled path unboxed the parse result WITHOUT checking the nil tag,
+so malformed text silently became 0.0 -- the seed's `f64()`/`float()`
+conversion is strict and errors on a failed parse. This lane's rebased
+repair keeps the reconciled dispatch and adds the missing pieces:
 
-Pure-Simple `MirLowering.lower_cast_expr` previously emitted a numeric MIR
-Cast for all non-enum conversions. The repair recognizes a proven text local,
-normalizes its tagged-string ABI once, calls the canonical
-`rt_string_to_float` parser, and checks nil tag `3`. Success unboxes the
-floating-point value through `rt_value_as_float`; failure calls `rt_panic`
-with its complete pointer/length ABI and terminates as unreachable. A valid
-zero is distinct from parse failure. Numeric casts keep their existing path.
-Known pointer/aggregate sources get a fatal MIR semantic diagnostic, not
-pointer-address arithmetic or unchecked LLVM conversion.
+- `lower_text_parse_to_numeric` (float branch) now checks the nil tag (3)
+  before unboxing and branches to a non-returning `rt_panic`
+  (pointer/length ABI) on failure, so a valid 0.0 stays distinct from a
+  failed parse.
+- `lower_cast_or_convert` rejects a positively-typed pointer/aggregate
+  source for a float target with a fatal MIR diagnostic, instead of
+  leaking a ptr-to-double cast to the backends.
+
+Numeric casts keep their existing path; enum discriminant extraction is
+untouched.
 
 The LLVM unsupported-cast checks remain intact. Draft PR 2838 changes MIR
 Bitcast lowering in `aggregate_intrinsics.spl`; it does not repair this

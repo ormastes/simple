@@ -71,3 +71,15 @@ Raw commands, JSON receipts, complete build/runtime logs and artifact hashes are
 - Full compiler/lib/MCP/LSP checks, core and MCP smoke, and whole-suite tests.
 - Canonical producer admission and release verification; no merge or admission is claimed.
 - Original exhaustive failing-module matrix rerun is not part of these scoped fixtures.
+
+## Rebase reconciliation note (2026-10-11)
+
+These receipts were produced against the original patch. The branch was
+subsequently rebased onto current `release/1.0`, where `ceac0fc96a5` had
+already split Cast from ConvertCall and routed text through
+`lower_text_parse_to_numeric`. The rebased lane keeps that reconciled parse
+path and adds only the nil-tag strict-parse guard (panic on malformed text
+instead of a silent 0.0) and the MIR-level pointer/aggregate source
+diagnostic; see the [bug record](../bug/llvm_float_text_cast_2026-10-11.md).
+The ARM/RISC-V artifact hashes above therefore describe the pre-rebase
+implementation and do not re-qualify the rebased head.
