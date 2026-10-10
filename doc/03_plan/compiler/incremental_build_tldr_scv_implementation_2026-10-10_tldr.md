@@ -69,3 +69,19 @@ Current acceptance update (supersedes earlier follow-up status):
   caches, continue independent failures and retry only changed failed work.
 - Still **0/6** qualified Phase 2 products; full Phase 3/4, hooks, formal proof
   and 0.1-second SPL compile remain unverified. Exact SIMD/GPU/Sosix design missing.
+
+
+2026-10-11 checkpoint (supersedes conflicting earlier status):
+
+- Linker: 8 real-owner controls PASS; seven local source files applied, native
+  compiler/Hello still unqualified.
+- Conditional parsing: 16 older-cut controls PASS; canonical successor has five
+  UNRUN controls and loader/pure parity gates. Reuse canonical owners.
+- Cached seed build failed on an omitted transitive header; one exact C compile
+  control PASS. Complete recipe-bound source closure before any authorized retry.
+- Pure-Simple receipt-hash optimization is authored, eight controls UNRUN;
+  no measured speed claim or performance-code publication.
+- Next acceptance: source authority despite newer TLDR timestamps, parse reuse,
+  single producer/crash recovery, source closure and measured cold/warm latency/RSS.
+- Forty-job independent lanes follow usable native Hello; Phase 2 remains 0/6.
+  Seed repair cap reached. Exact SIMD/GPU/Sosix input still missing/NOT_ASSESSED.
