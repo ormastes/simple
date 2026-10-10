@@ -1,0 +1,90 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# AUTHORED_UNEXECUTED: this spec has not run on the real Simple test runner.
+"""
+# Qualified enum variants in OR patterns
+
+Exercises the exact owner-qualified enum alternatives now used by the CUDA and
+VHDL source workarounds. The VHDL positive uses actual `MirInstKind.Const | Nop`
+and executes the payload-free Nop branch. The negative source keeps a real
+payload variant and changes its binding name across alternatives, which must
+remain a binding-set error rather than becoming a blanket OR-pattern pass.
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.mir.mir_instruction_support.{MirBinOp}
+use compiler.backend.backend.common.type_mapper.{PrimitiveType}
+use compiler.mir.mir_instructions.{MirInstKind}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+fn comparison_operator(op: MirBinOp) -> bool:
+    match op:
+        case MirBinOp.Eq | MirBinOp.Ne | MirBinOp.Lt | MirBinOp.Le | MirBinOp.Gt | MirBinOp.Ge:
+            true
+        case _:
+            false
+
+fn comparison_type(ty: PrimitiveType) -> bool:
+    match ty:
+        case PrimitiveType.I32 | PrimitiveType.I64 | PrimitiveType.U32 | PrimitiveType.U64 | PrimitiveType.F32 | PrimitiveType.F64:
+            true
+        case _:
+            false
+
+fn const_or_nop(kind: MirInstKind) -> bool:
+    match kind:
+        case MirInstKind.Const(_, _, _) | MirInstKind.Nop:
+            true
+        case _:
+            false
+
+fn lower_probe(source: text) -> HirLowering:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(source, "probe/main.spl", "probe.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["probe.main"] = ast
+    val sources = [SourceFile(path: "probe/main.spl", content: source, module_name: "probe.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("probe.main", surfaces)
+    val _hir = lowering.lower_module(ast)
+    lowering
+
+fn has_payload_binding_error(lowering: HirLowering) -> bool:
+    for error in lowering.errors:
+        if error.message.contains("or-pattern alternatives must bind the same variables"):
+            return true
+    false
+
+val payload_mismatch_source = "enum Probe:\n    Copy(src: i64, dst: i64)\n    Other\n\nfn bad(value: Probe) -> i64:\n    match value:\n        case Probe.Copy(x, _) | Probe.Copy(y, _): return 1\n        case Probe.Other: return 0\n"
+
+describe "qualified enum OR-pattern owners":
+    it "matches the actual MIR comparison operation alternatives":
+        expect(comparison_operator(MirBinOp.Eq)).to_equal(true)
+        expect(comparison_operator(MirBinOp.Ne)).to_equal(true)
+        expect(comparison_operator(MirBinOp.Lt)).to_equal(true)
+        expect(comparison_operator(MirBinOp.Le)).to_equal(true)
+        expect(comparison_operator(MirBinOp.Gt)).to_equal(true)
+        expect(comparison_operator(MirBinOp.Ge)).to_equal(true)
+        expect(comparison_operator(MirBinOp.Add)).to_equal(false)
+
+    it "matches the actual CUDA comparison primitive alternatives":
+        expect(comparison_type(PrimitiveType.I32)).to_equal(true)
+        expect(comparison_type(PrimitiveType.I64)).to_equal(true)
+        expect(comparison_type(PrimitiveType.U32)).to_equal(true)
+        expect(comparison_type(PrimitiveType.U64)).to_equal(true)
+        expect(comparison_type(PrimitiveType.F32)).to_equal(true)
+        expect(comparison_type(PrimitiveType.F64)).to_equal(true)
+        expect(comparison_type(PrimitiveType.Bool)).to_equal(false)
+
+    it "matches the payload-free actual MIR Nop alternative":
+        expect(const_or_nop(MirInstKind.Nop)).to_equal(true)
+
+    it "still rejects genuinely different payload binding names":
+        val lowering = lower_probe(payload_mismatch_source)
+        expect(has_payload_binding_error(lowering)).to_equal(true)

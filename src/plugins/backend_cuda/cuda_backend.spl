@@ -1,9 +1,12 @@
 # CUDA Backend - NVIDIA CUDA/PTX Code Generation
+# @workaround bug=cuda_unary_mir_type_or_owner_2026_10_10 preserve declared owners across every enum OR arm
 #
 # Compiles MIR to CUDA PTX assembly code.
 # PTX can be JIT-compiled by NVIDIA driver or assembled offline.
 
 use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_support.{MirBinOp, MirOperandKind}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, CompileError, BackendCompileOptions, compileoptions_default_options, compileerror_backend_error}
 use compiler.backend.spec_const_registry.{spec_const_resolve}
@@ -16,7 +19,7 @@ use compiler.hir.hir_types.{MemorySpace, SymbolId}
 use compiler.backend.backend.common.type_mapper.{PrimitiveType}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
-use compiler.mir.mir_types.{MirType}
+use compiler.mir.mir_types.{MirType, MirTypeKind, LocalKind, MirConstValue}
 use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
 
 # ============================================================================
@@ -40,7 +43,7 @@ fn cuda_mapper_can_size(ty: MirType) -> bool:
     Ref/FuncPtr — callers must fall back for those.
     """
     match ty.kind:
-        case I64 | U64 | F64 | I32 | U32 | F32 | I16 | U16 | I8 | U8 | Bool | Unit | Ptr(_, _): true
+        case MirTypeKind.I64 | MirTypeKind.U64 | MirTypeKind.F64 | MirTypeKind.I32 | MirTypeKind.U32 | MirTypeKind.F32 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.Bool | MirTypeKind.Unit | MirTypeKind.Ptr(_, _): true
         case Array(elem, _): cuda_mapper_can_size(elem)
         case Tuple(elements):
             for e in elements:
@@ -225,7 +228,7 @@ class CudaBackend:
                             match local.kind:
                                 case Arg(index): builder.emit_param_load(reg, prim_ty, index)
                                 case _: ()
-                case Var | Temp | Return:
+                case LocalKind.Var | LocalKind.Temp | LocalKind.Return:
                     self.emit_local_decl(builder, local)
 
         # Compile each basic block
@@ -235,7 +238,7 @@ class CudaBackend:
                 case Arg(_):
                     if is_kernel:
                         match local.type_.kind:
-                            case Ptr(_, _) | Ref(_, _):
+                            case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _):
                                 self.pointer_spaces[local.id.id] = MemorySpace.Global
                             case _:
                                 ()
@@ -269,7 +272,7 @@ class CudaBackend:
         for block in func.blocks:
             for inst in block.instructions:
                 match inst.kind:
-                    case GpuSharedAlloc(_, _, _) | Alloc(_, _):
+                    case MirInstKind.GpuSharedAlloc(_, _, _) | MirInstKind.Alloc(_, _):
                         return true
                     case _:
                         ()
@@ -299,7 +302,7 @@ class CudaBackend:
             case F64: builder.emit_reg_decl(reg, PrimitiveType.F64)
             case F32: builder.emit_reg_decl(reg, PrimitiveType.F32)
             case Bool: builder.emit_pred_decl(reg)
-            case Ptr(_, _) | Ref(_, _) | FuncPtr(_): builder.emit_reg_decl(reg, PrimitiveType.U64)
+            case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_): builder.emit_reg_decl(reg, PrimitiveType.U64)
             case _: ()
 
     me compile_instruction(builder: PtxBuilder, inst: MirInst, func: MirFunction) -> Result<(), CompileError>:
@@ -308,7 +311,7 @@ class CudaBackend:
             case Const(dest, value, ty):
                 self.pointer_spaces.remove(dest.id)
                 match value:
-                    case Int(_) | Float(_) | Bool(_): ()
+                    case MirConstValue.Int(_) | MirConstValue.Float(_) | MirConstValue.Bool(_): ()
                     case _:
                         return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA backend does not support constant: {value}"))
                 self.compile_const(builder, dest, value, ty)
@@ -324,19 +327,20 @@ class CudaBackend:
             case BinOp(dest, op, left, right):
                 self.pointer_spaces.remove(dest.id)
                 match op:
-                    case Add | Sub | Mul | Div | Eq | Ne | Lt | Le | Gt | Ge: ()
+                    case MirBinOp.Add | MirBinOp.Sub | MirBinOp.Mul | MirBinOp.Div | MirBinOp.Eq | MirBinOp.Ne | MirBinOp.Lt | MirBinOp.Le | MirBinOp.Gt | MirBinOp.Ge: ()
                     case _:
                         return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA backend does not support binary operation: {op}"))
                 val dest_ty = self.local_primitive_type(func, dest)?
                 val op_ty = match op:
-                    case Eq | Ne | Lt | Le | Gt | Ge:
+                    # @workaround bug=plugin_bare_unit_or_owner_workaround_2026_10_10 reason=Phase3 producer treats bare nested MIR enum variants as bindings in or-patterns
+                    case MirBinOp.Eq | MirBinOp.Ne | MirBinOp.Lt | MirBinOp.Le | MirBinOp.Gt | MirBinOp.Ge:
                         if dest_ty != PrimitiveType.Bool:
                             return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA comparison destination must be Bool"))
                         val left_ty = self.operand_primitive_type(func, left)?
                         if self.operand_primitive_type(func, right)? != left_ty:
                             return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA comparison operand types must match"))
                         match left_ty:
-                            case I32 | I64 | U32 | U64 | F32 | F64: ()
+                            case PrimitiveType.I32 | PrimitiveType.I64 | PrimitiveType.U32 | PrimitiveType.U64 | PrimitiveType.F32 | PrimitiveType.F64: ()
                             case _:
                                 return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA comparison operands must be I32, I64, U32, U64, F32, or F64"))
                         left_ty
@@ -353,7 +357,8 @@ class CudaBackend:
                 match op:
                     case Neg:
                         match dest_mir_ty.kind:
-                            case I16 | I32 | I64 | U16 | U32 | U64 | F32 | F64: ()
+                            # @workaround bug=cuda_unary_mir_type_or_owner_2026_10_10 retain declared enum owner
+                            case MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64 | MirTypeKind.F32 | MirTypeKind.F64: ()
                             case _:
                                 return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA negation requires a 16-bit, 32-bit, or 64-bit integer or F32/F64 operand"))
                     case Not:
@@ -361,7 +366,8 @@ class CudaBackend:
                             return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA logical Not requires a Bool operand"))
                     case BitNot:
                         match dest_mir_ty.kind:
-                            case I16 | I32 | I64 | U16 | U32 | U64: ()
+                            # @workaround bug=cuda_unary_mir_type_or_owner_2026_10_10 retain declared enum owner
+                            case MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: ()
                             case _:
                                 return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA BitNot requires a 16-bit, 32-bit, or 64-bit integer operand"))
                     case _:
@@ -494,16 +500,16 @@ class CudaBackend:
                 if dest_mir_ty.kind != target.kind:
                     return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA bitcast destination type must match target type"))
                 val dest_width = match dest_mir_ty.kind:
-                    case I32 | U32 | F32: 32
-                    case I64 | U64 | F64: 64
-                    case Ptr(_, _) | Ref(_, _) | FuncPtr(_): 64
+                    case MirTypeKind.I32 | MirTypeKind.U32 | MirTypeKind.F32: 32
+                    case MirTypeKind.I64 | MirTypeKind.U64 | MirTypeKind.F64: 64
+                    case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_): 64
                     case _:
                         return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA bitcast requires a 32-bit or 64-bit scalar or pointer target"))
                 val source_mir_ty = self.operand_mir_type(func, operand)?
                 val source_width = match source_mir_ty.kind:
-                    case I32 | U32 | F32: 32
-                    case I64 | U64 | F64: 64
-                    case Ptr(_, _) | Ref(_, _) | FuncPtr(_): 64
+                    case MirTypeKind.I32 | MirTypeKind.U32 | MirTypeKind.F32: 32
+                    case MirTypeKind.I64 | MirTypeKind.U64 | MirTypeKind.F64: 64
+                    case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_): 64
                     case _:
                         return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA bitcast requires a 32-bit or 64-bit scalar or pointer source"))
                 if source_width != dest_width:
@@ -571,7 +577,7 @@ class CudaBackend:
                 case U32:
                     builder.emit_compute_global_id(dest_reg, dim)
                     return Ok(())
-                case I64 | U64:
+                case PrimitiveType.I64 | PrimitiveType.U64:
                     self.compile_wide_global_index(builder, dest_reg, dim, dest_ty)
                     return Ok(())
                 case _:
@@ -581,7 +587,7 @@ class CudaBackend:
         match dest_ty:
             case U32:
                 ()
-            case I64 | U64:
+            case PrimitiveType.I64 | PrimitiveType.U64:
                 value_reg = builder.alloc_reg(PrimitiveType.U32)
                 builder.emit_reg_decl(value_reg, PrimitiveType.U32)
             case _:
@@ -760,13 +766,13 @@ class CudaBackend:
 
     fn pointer_memory_space(ptr: MirOperand, pointer_spaces: Dict<i64, MemorySpace>) -> Result<MemorySpace, CompileError>:
         match ptr.kind:
-            case Copy(local) | Move(local):
+            case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
                 if pointer_spaces.has(local.id):
                     return Ok(pointer_spaces[local.id])
             case _:
                 ()
         val local_id = match ptr.kind:
-            case Copy(local) | Move(local): local.id
+            case MirOperandKind.Copy(local) | MirOperandKind.Move(local): local.id
             case _: -1
         Err(compileerror_backend_error(
             BackendKind.Cuda,
@@ -776,7 +782,7 @@ class CudaBackend:
     me pointer_pointee_primitive_type(func: MirFunction, ptr: MirOperand) -> Result<PrimitiveType, CompileError>:
         val ptr_type = self.operand_mir_type(func, ptr)?
         match ptr_type.kind:
-            case Ptr(pointee, _) | Ref(pointee, _):
+            case MirTypeKind.Ptr(pointee, _) | MirTypeKind.Ref(pointee, _):
                 Ok(self.mir_type_to_primitive(pointee))
             case _:
                 Err(compileerror_backend_error(BackendKind.Cuda, "CUDA memory operation requires a pointer operand"))
@@ -804,7 +810,7 @@ class CudaBackend:
 
     fn integer_atomic_type_supported(ty: PrimitiveType) -> bool:
         match ty:
-            case I32 | U32 | I64 | U64:
+            case PrimitiveType.I32 | PrimitiveType.U32 | PrimitiveType.I64 | PrimitiveType.U64:
                 true
             case _:
                 false
@@ -817,7 +823,7 @@ class CudaBackend:
 
     me propagate_pointer_space(dest: LocalId, source: MirOperand):
         val source_id = match source.kind:
-            case Copy(local) | Move(local):
+            case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
                 local.id
             case _:
                 -1
@@ -1005,7 +1011,7 @@ class CudaBackend:
         val index_mir_type = self.operand_mir_type(func, args[0])?
         val length_mir_type = self.operand_mir_type(func, args[1])?
         match index_mir_type.kind:
-            case I64 | I32 | I16 | I8 | U64 | U32 | U16 | U8:
+            case MirTypeKind.I64 | MirTypeKind.I32 | MirTypeKind.I16 | MirTypeKind.I8 | MirTypeKind.U64 | MirTypeKind.U32 | MirTypeKind.U16 | MirTypeKind.U8:
                 ()
             case _:
                 return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA bounds_check index must be an integer"))
@@ -1387,12 +1393,12 @@ class CudaBackend:
             case F64: PrimitiveType.F64
             case F32: PrimitiveType.F32
             case Bool: PrimitiveType.Bool
-            case Ptr(_, _) | Ref(_, _) | FuncPtr(_): PrimitiveType.U64
+            case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_): PrimitiveType.U64
             case _: PrimitiveType.I64
 
     fn cuda_type_supported(ty: MirType) -> bool:
         match ty.kind:
-            case I64 | I32 | I16 | I8 | U64 | U32 | U16 | U8 | F64 | F32 | Bool | Unit | Ptr(_, _) | Ref(_, _) | FuncPtr(_): true
+            case MirTypeKind.I64 | MirTypeKind.I32 | MirTypeKind.I16 | MirTypeKind.I8 | MirTypeKind.U64 | MirTypeKind.U32 | MirTypeKind.U16 | MirTypeKind.U8 | MirTypeKind.F64 | MirTypeKind.F32 | MirTypeKind.Bool | MirTypeKind.Unit | MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_): true
             case _: false
 
     me local_primitive_type(func: MirFunction, id: LocalId) -> Result<PrimitiveType, CompileError>:
@@ -1403,13 +1409,13 @@ class CudaBackend:
 
     me operand_primitive_type(func: MirFunction, operand: MirOperand) -> Result<PrimitiveType, CompileError>:
         match operand.kind:
-            case Copy(id) | Move(id): self.local_primitive_type(func, id)
+            case MirOperandKind.Copy(id) | MirOperandKind.Move(id): self.local_primitive_type(func, id)
             case Const(_, ty): Ok(self.mir_type_to_primitive(ty))
 
     me operand_mir_type(func: MirFunction, operand: MirOperand) -> Result<MirType, CompileError>:
         """Resolve the full MIR type of an operand (local type or const type)."""
         match operand.kind:
-            case Copy(id) | Move(id):
+            case MirOperandKind.Copy(id) | MirOperandKind.Move(id):
                 for local in func.locals:
                     if local.id == id:
                         return Ok(local.type_)
@@ -1433,7 +1439,7 @@ class CudaBackend:
         keep emitting the loud WARN fallback for them.
         """
         match ty.kind:
-            case Struct(symbol) | Enum(symbol): self.type_defs.contains_key(symbol)
+            case MirTypeKind.Struct(symbol) | MirTypeKind.Enum(symbol): self.type_defs.contains_key(symbol)
             case Array(elem, _): self.cuda_can_size(elem)
             case Tuple(elements):
                 for e in elements:
