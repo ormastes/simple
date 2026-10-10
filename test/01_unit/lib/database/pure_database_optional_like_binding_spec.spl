@@ -1,0 +1,66 @@
+# @req REQ-OPTIONAL-LIKE-BINDING-001
+# Exercises production helpers through public SQL; no private-helper imports.
+# Native/compiled execution is required; authored assertions are not a PASS.
+use std.spec.*
+use std.database.pure_sql.{PureDatabase}
+
+fn like_binding_database() -> PureDatabase:
+    var db = PureDatabase.memory().unwrap()
+    expect(db.exec_sql("CREATE TABLE like_binding (id INTEGER, name TEXT)").is_ok()).to_equal(true)
+    expect(db.exec_sql("INSERT INTO like_binding VALUES (1, 'alpha'), (2, 'alphabet'), (3, 'alXbeta'), (4, 'beta'), (5, '한글하나'), (6, '한글둘'), (7, 'éclair'), (8, 'écume'), (9, ''), (10, 'aXbeta'), (11, 'axbZZ'), (12, 'aYb')").is_ok()).to_equal(true)
+    db
+
+fn main() -> ():
+    describe("PureDatabase explicit Optional LIKE bindings", fn() -> ():
+        it("preserves an absent WHERE and empty pattern defaults", fn() -> ():
+            var db = like_binding_database()
+            val all_rows = db.query("SELECT * FROM like_binding", []).unwrap()
+            expect(all_rows.len()).to_equal(12)
+            val empty_rows = db.query("SELECT * FROM like_binding WHERE name LIKE ''", []).unwrap()
+            expect(empty_rows.len()).to_equal(1)
+            expect(empty_rows[0].values[0].as_int().unwrap()).to_equal(9)
+        )
+        it("removes SQL quotes and retains the percent prefix result count", fn() -> ():
+            var db = like_binding_database()
+            val rows = db.query("SELECT * FROM like_binding WHERE name LIKE 'al%'", []).unwrap()
+            expect(rows.len()).to_equal(3)
+            expect(rows[0].values[0].as_int().unwrap()).to_equal(1)
+            expect(rows[1].values[0].as_int().unwrap()).to_equal(2)
+            expect(rows[2].values[0].as_int().unwrap()).to_equal(3)
+        )
+        it("keeps underscore matching in the full matcher rather than the prefix shortcut", fn() -> ():
+            var db = like_binding_database()
+            val rows = db.query("SELECT * FROM like_binding WHERE name LIKE 'a_b%'", []).unwrap()
+            expect(rows.len()).to_equal(3)
+            expect(rows[0].values[0].as_int().unwrap()).to_equal(10)
+            expect(rows[1].values[0].as_int().unwrap()).to_equal(11)
+            expect(rows[2].values[0].as_int().unwrap()).to_equal(12)
+        )
+        it("keeps a leading wildcard and the full pattern", fn() -> ():
+            var db = like_binding_database()
+            val rows = db.query("SELECT * FROM like_binding WHERE name LIKE '%beta'", []).unwrap()
+            expect(rows.len()).to_equal(3)
+            expect(rows[0].values[0].as_int().unwrap()).to_equal(3)
+            expect(rows[1].values[0].as_int().unwrap()).to_equal(4)
+            expect(rows[2].values[0].as_int().unwrap()).to_equal(10)
+            val any_rows = db.query("SELECT * FROM like_binding WHERE name LIKE '%'", []).unwrap()
+            expect(any_rows.len()).to_equal(12)
+        )
+        it("keeps a literal pattern without wildcard", fn() -> ():
+            var db = like_binding_database()
+            val rows = db.query("SELECT * FROM like_binding WHERE name LIKE 'beta'", []).unwrap()
+            expect(rows.len()).to_equal(1)
+            expect(rows[0].values[0].as_int().unwrap()).to_equal(4)
+        )
+        it("preserves multibyte literal prefixes at byte-slice boundaries", fn() -> ():
+            var db = like_binding_database()
+            val korean = db.query("SELECT * FROM like_binding WHERE name LIKE '한글%'", []).unwrap()
+            expect(korean.len()).to_equal(2)
+            expect(korean[0].values[0].as_int().unwrap()).to_equal(5)
+            expect(korean[1].values[0].as_int().unwrap()).to_equal(6)
+            val accent = db.query("SELECT * FROM like_binding WHERE name LIKE 'é%'", []).unwrap()
+            expect(accent.len()).to_equal(2)
+            expect(accent[0].values[0].as_int().unwrap()).to_equal(7)
+            expect(accent[1].values[0].as_int().unwrap()).to_equal(8)
+        )
+    )

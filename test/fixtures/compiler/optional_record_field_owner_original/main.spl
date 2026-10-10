@@ -1,0 +1,96 @@
+# Original production helper bodies retained byte-for-byte.
+# OPEN compiler reproduction; not a passing workaround fixture.
+use nogc_sync_mut.db.dbfs_engine.sql_parser.{SqlExpr, SqlExprKind}
+
+fn _like_prefix_str(where_expr: SqlExpr?) -> text:
+    """Extract the literal prefix before the first % wildcard.
+    Only returns a non-empty prefix if it contains no _ wildcards,
+    since _ matches any single character in LIKE and cannot be
+    safely reduced to starts_with."""
+    if not where_expr.?:
+        return ""
+    val expr = where_expr
+    if not expr.right.?:
+        return ""
+    val pattern = expr.right.value
+    # Remove surrounding quotes if present
+    var pat = pattern
+    if pat.starts_with("'") and pat.ends_with("'"):
+        pat = pat.slice(1, pat.len() - 1)
+    # Find first % and take everything before it as the prefix
+    # Reject if any _ wildcard appears before the %
+    var i: i64 = 0
+    while i < pat.len():
+        # byte-consistent scan: i is used as a byte offset in slice(0, i), and %/_
+        # are ASCII, so read the byte-char via slice(i, i+1) (char_at is CHAR-indexed
+        # and would desync from the byte slice on multibyte prefixes).
+        val ch = pat.slice(i, i + 1)
+        if ch == "%":
+            return pat.slice(0, i)
+        if ch == "_":
+            return ""
+        i = i + 1
+    ""
+
+fn _like_any_prefix(where_expr: SqlExpr?) -> text:
+    """Extract the literal prefix before the first wildcard (% or _).
+    Used as a starts_with pre-filter before running full _like_match.
+    Returns "" if no literal prefix exists (pattern starts with wildcard)."""
+    if not where_expr.?:
+        return ""
+    val expr = where_expr
+    if not expr.right.?:
+        return ""
+    val pattern = expr.right.value
+    var pat = pattern
+    if pat.starts_with("'") and pat.ends_with("'"):
+        pat = pat.slice(1, pat.len() - 1)
+    var i: i64 = 0
+    while i < pat.len():
+        # byte-consistent scan (see _like_starts_with_prefix): slice(i, i+1) keeps i
+        # a byte offset so slice(0, i) stays aligned on multibyte prefixes.
+        val ch = pat.slice(i, i + 1)
+        if ch == "%" or ch == "_":
+            return pat.slice(0, i)
+        i = i + 1
+    ""
+
+fn _extract_like_pattern(where_expr: SqlExpr?) -> text:
+    if not where_expr.?:
+        return ""
+    val expr = where_expr
+    if not expr.right.?:
+        return ""
+    val pattern = expr.right.value
+    var pat = pattern
+    if pat.starts_with("'") and pat.ends_with("'"):
+        pat = pat.slice(1, pat.len() - 1)
+    pat
+
+fn original_where(pattern: text) -> SqlExpr?:
+    val rhs = SqlExpr(kind: SqlExprKind.Literal, value: pattern, left: nil, right: nil, args: [])
+    Some(SqlExpr(kind: SqlExprKind.BinaryOp, value: "LIKE", left: nil, right: Some(rhs), args: []))
+
+fn main() -> i64:
+    val missing = Some(SqlExpr(kind: SqlExprKind.BinaryOp, value: "LIKE", left: nil, right: nil, args: []))
+    if _like_prefix_str(nil) != "" or _like_any_prefix(nil) != "" or _extract_like_pattern(nil) != "":
+        return 1
+    if _like_prefix_str(missing) != "" or _like_any_prefix(missing) != "" or _extract_like_pattern(missing) != "":
+        return 2
+    if _like_prefix_str(original_where("'ab%'")) != "ab":
+        return 3
+    if _like_prefix_str(original_where("'a_b%'")) != "":
+        return 4
+    if _like_any_prefix(original_where("'a_b%'")) != "a":
+        return 5
+    if _extract_like_pattern(original_where("'a_b%'")) != "a_b%":
+        return 6
+    if _like_prefix_str(original_where("'한글%'")) != "한글":
+        return 7
+    if _like_any_prefix(original_where("'é_%'")) != "é":
+        return 8
+    if _like_prefix_str(original_where("plain")) != "" or _like_any_prefix(original_where("plain")) != "":
+        return 9
+    if _extract_like_pattern(original_where("plain")) != "plain":
+        return 10
+    return 0
