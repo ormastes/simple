@@ -67,12 +67,18 @@ pub fn launch_multi_caret_manager(manager_id: text,
             capacity, rolled_back)
     _manager(manager_id, "running", "all_processes_started", capacity, launched)
 
-pub fn poll_multi_caret_manager(manager: MultiCaretManager) -> MultiCaretManager:
+# @workaround bug=caret_essential_leaf_provider_gaps_2026_10_10
+# Pure snapshot adapters share the process-owner state rules with pane teams.
+pub fn multi_caret_manager_of(manager_id: text, status: text, reason: text,
+        capacity: i64, team: AgentTeamProcess) -> MultiCaretManager:
+    _manager(manager_id, status, reason, capacity, team)
+
+pub fn reconcile_multi_caret_manager(manager: MultiCaretManager,
+        polled: AgentTeamProcess) -> MultiCaretManager:
     # A degraded manager still owns live children and must remain observable.
     # Only terminal/admission states are stable no-ops.
     if manager.status != "running" and manager.status != "degraded":
         return manager
-    val polled = agent_team_status(manager.team)
     var status = "running"
     if polled.status == "partial":
         # Some children are alive: "exited" would hide the survivors from a
@@ -83,19 +89,29 @@ pub fn poll_multi_caret_manager(manager: MultiCaretManager) -> MultiCaretManager
     _manager(manager.manager_id, status, "processes_polled", manager.capacity,
         polled)
 
-pub fn stop_multi_caret_manager(manager: MultiCaretManager) -> MultiCaretManager:
+pub fn poll_multi_caret_manager(manager: MultiCaretManager) -> MultiCaretManager:
+    if manager.status != "running" and manager.status != "degraded":
+        return manager
+    reconcile_multi_caret_manager(manager, agent_team_status(manager.team))
+
+pub fn settle_multi_caret_manager(manager: MultiCaretManager,
+        stopped: AgentTeamProcess) -> MultiCaretManager:
     if manager.status == "stopped":
         return manager
     if manager.team.processes.len() == 0:
         return _manager(manager.manager_id, "stopped", "no_processes",
             manager.capacity, manager.team)
-    val stopped = stop_agent_team(manager.team)
     val leaked = _leaked_processes(stopped)
     if leaked > 0:
         return _manager(manager.manager_id, "stop_failed",
             "stop_incomplete:" + leaked.to_text(), manager.capacity, stopped)
     _manager(manager.manager_id, "stopped", "processes_stopped",
         manager.capacity, stopped)
+
+pub fn stop_multi_caret_manager(manager: MultiCaretManager) -> MultiCaretManager:
+    if manager.status == "stopped" or manager.team.processes.len() == 0:
+        return settle_multi_caret_manager(manager, manager.team)
+    settle_multi_caret_manager(manager, stop_agent_team(manager.team))
 
 struct ManagedAgent:
     agent_id: text
@@ -133,3 +149,5 @@ export MultiCaretManager, ManagedAgent
 export launch_multi_caret_manager, poll_multi_caret_manager,
     stop_multi_caret_manager, list_multi_caret_agents,
     render_multi_caret_agents
+
+export multi_caret_manager_of, reconcile_multi_caret_manager, settle_multi_caret_manager
