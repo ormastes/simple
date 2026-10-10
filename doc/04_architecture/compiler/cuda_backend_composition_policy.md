@@ -110,3 +110,10 @@ The pipeline matches this enum directly. It does not pass checkout resolution
 as a callback: that extra abstraction caused null function-pointer dispatch in
 the integrated native compiler. Native verification must include the normal
 missing-module path as well as selected and ambiguous overlays.
+
+Actual native qualification shows this contract is not yet carried across the
+outer scanner and worker boundary: the worker currently derives roots from
+input files, and already-loaded names can skip selected authority checks.
+Disabled and ambiguous CUDA requests still admit the default implementation.
+The intended contract above is not an end-to-end completion claim; see
+`doc/08_tracking/bug/source_root_worker_authority_gap_2026-10-11.md`.

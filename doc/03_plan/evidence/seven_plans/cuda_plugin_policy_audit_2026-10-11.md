@@ -144,3 +144,21 @@ relative resolution are unchanged. The four obsolete callback-API probe cases
 were removed; the eight numbered/enum assertions, including failing case 7,
 remain. Filesystem specs retain both ambiguous overlays with valid defaults.
 This source correction requires a new producer; it has no native PASS yet.
+
+## Final integrated scoped cycle
+
+Producer `e9e8762c79e47d1c0db418d2a8ff5d5eda7b1ef8744ccff32227ae7463926491`
+clears the loader callback crash: actual relative-import Missing fallback
+builds and runs successfully, printing `SOURCE_ROOT_MISSING_FALLBACK_PASS`.
+The tri-state owner also builds, but runtime assertion 7 still fails with a
+numeric ambiguity payload. No repeated passing check or private compiler
+construction was performed.
+
+Actual ambiguous-overlay and disabled-selection closures both admit the
+default selected module plus all four CUDA implementation files. Their later
+120/180-second timeouts do not obscure the already-observed source-admission
+failures. No native CUDA exclusion or symbol PASS is claimed. See
+`doc/08_tracking/bug/source_root_worker_authority_gap_2026-10-11.md` for exact
+root order, fixtures, logs, self-caused rejected snapshot attempt and the
+outer-scanner/worker-authority/loaded-name diagnosis. The callback repair is
+qualified narrowly; CUDA composition remains **FAIL** end to end.
