@@ -57,7 +57,7 @@ admission receipts. No ready compiled SSpec runner was found in those two trees.
 
 An isolated diagnostic with the archived pure-Simple compiler, bounded to 60
 seconds, exited 1: `error: unknown command 'check'`. Its log and process receipt
-are retained in `build/native_probe/item6-completion/root-check.*`. No seed was
+were recorded in `build/native_probe/item6-completion/root-check.*`. No seed was
 substituted and no admission claim was made from that diagnostic.
 
 A second isolated diagnostic invoked the same compiler with `native-build` on
@@ -123,3 +123,33 @@ that gap without treating it as generator execution. The domain research records
 the separate declaration, action execution, frozen byte admission and semantic
 projection requirements. Full runtime qualification and the original 44-scenario
 contract remain open.
+
+Artifact retention correction: after updating the sparse source checkout, the
+ignored `build/native_probe/item6-completion/` directory was no longer present.
+The diagnostic results and hashes above remain recorded historical evidence,
+but the original local logs, receipts and cache are not currently available for
+replay. Do not claim those files are retained or treat the recorded timeout as
+current-source verification. Future diagnostic artifacts must live in an owned
+directory outside paths subject to sparse-checkout pruning.
+
+## Schema migration implementation candidate
+
+Schema 4 now carries the TLDR generated-source digest through full/scoped
+index encoding, action identity, semantic invalidation and grouped worker route
+serialization. Legacy index bytes remain readable without inventing a witness;
+legacy worker routes are inspectable but cannot execute archive reuse. Bootstrap
+configuration explicitly requests V4. Publication, preparation, SCC inventory
+and runtime/std membership consumers preserve their complete-graph checks.
+Primary review found and corrected the missed SCC consumer gate.
+
+Regression specs cover generated-only reverse invalidation, stable-witness
+private edits, legacy migration, worker-route preservation/rejection and typed
+bootstrap configuration. These are authored tests, not executed acceptance.
+Independent declaration selection and actual generated producer execution are
+still unfinished; schema projection does not supply either authority.
+
+Remote concurrency observation: PR 2860 acquired merge commit
+`07ca2ab702e57043ddc89a500cf689813a4d5a66` and was marked ready by another
+actor while the local schema work was unpushed. Its body still records blocked
+verification. This session preserves that remote history and does not interpret
+ready status or structural CI as runtime admission.

@@ -251,10 +251,13 @@ therefore rejects nonempty generated facets before any index publication;
 artifact-supplied declarations and receipts remain consistency evidence only.
 
 Generated support also requires preserving `generated_source_digest` beyond
-TLDR construction. The current compact index projection omits it, and semantic
-transition comparison consequently has no direct generated witness. Introduce
-an explicit schema migration with conservative admission for older generations,
-then compare that witness for exact owner/reverse-consumer invalidation. Real
+TLDR construction. The schema-4 implementation candidate persists it in full
+and entry-scoped graphs and binds it into module action identity. Semantic
+transition comparison uses it for owner/reverse-consumer invalidation. Legacy
+graphs remain readable, but unknown generated witnesses force conservative
+invalidation; grouped worker routes require migration before archive reuse. The
+bootstrap request explicitly selects V4, and full-inventory consumers still
+reject entry-scoped graphs. These changes await runtime qualification. Real
 producer execution, independently selected declaration authority, and this
 projection are separate required steps; none substitutes for another. See
 `doc/01_research/domain/compiler/perf/generated_package_authority.md` for the
