@@ -364,7 +364,7 @@ class ParallelBuilder:
     stats: BuildStats
     # Owner-thread completion hook. Compile callbacks never receive shared
     # cache authority; the orchestrator invokes this after each successful unit.
-    owner_collect_fn: any
+    owner_collect_fn: Option<fn(text, text) -> text>
     # Process-spawn dispatcher for build()'s "parallel" branch. nil (the
     # default) preserves today's exact in-process, one-at-a-time behaviour --
     # every existing caller of build(compile_fn) that never calls
@@ -373,8 +373,8 @@ class ParallelBuilder:
     # collect_fn) instead of the serial `while chunk_idx < chunk_end:
     # compile_fn(...)` loop, so units genuinely run in concurrent OS
     # processes. See doc/08_tracking/bug/native_build_step5_serial_threads_ignored_2026-09-04.md.
-    spawn_dispatch_fn: any
-    spawn_collect_fn: any
+    spawn_dispatch_fn: Option<fn(text) -> i64>
+    spawn_collect_fn: Option<fn(i64, text) -> Result<text, text>>
 
 impl ParallelBuilder:
     static fn create(config: ParallelBuildConfig) -> ParallelBuilder:
@@ -382,8 +382,8 @@ impl ParallelBuilder:
                         stats: BuildStats.empty(), owner_collect_fn: nil,
                         spawn_dispatch_fn: nil, spawn_collect_fn: nil)
 
-    me set_owner_collect(collect_fn: any):
-        self.owner_collect_fn = collect_fn
+    me set_owner_collect(collect_fn: fn(text, text) -> text):
+        self.owner_collect_fn = Some(collect_fn)
 
     # Configure real process-based dispatch for the "parallel" branch of
     # build(). spawn_fn/collect_fn have exactly build_parallel()'s own
@@ -391,9 +391,9 @@ impl ParallelBuilder:
     # collect_fn(exit_code, path) -> Result<text, text>. Deterministic and
     # below-threshold builds are NOT affected -- they keep the sequential
     # path unconditionally, per build()'s own gating.
-    me set_spawn_dispatch(spawn_fn: any, collect_fn: any):
-        self.spawn_dispatch_fn = spawn_fn
-        self.spawn_collect_fn = collect_fn
+    me set_spawn_dispatch(spawn_fn: fn(text) -> i64, collect_fn: fn(i64, text) -> Result<text, text>):
+        self.spawn_dispatch_fn = Some(spawn_fn)
+        self.spawn_collect_fn = Some(collect_fn)
 
     fn wait_for_finished_process(live_pid: [i64]) -> (i64, i64):
         """Wait for any in-flight process to finish using bounded polling.
@@ -435,7 +435,7 @@ impl ParallelBuilder:
     me add_unit(path: text, dependencies: [i64]) -> i64:
         self.graph.add_unit(path, dependencies)
 
-    me build(compile_fn: any) -> BuildResult:
+    me build(compile_fn: fn(text) -> Result<text, text>) -> BuildResult:
         """Execute the build using the provided compile function.
 
         In deterministic mode, processes units in topological order.
@@ -491,7 +491,7 @@ impl ParallelBuilder:
                 match result:
                     case Ok(output):
                         var collect_error: text = ""
-                        if self.owner_collect_fn != nil:
+                        if val owner_collect = self.owner_collect_fn:
                             # Bind the closure-valued field to a local before
                             # calling it. Invoking the field directly on the
                             # receiver is resolved as a METHOD call on
@@ -500,7 +500,6 @@ impl ParallelBuilder:
                             # `owner_collect_fn` not found on class
                             # `ParallelBuilder`". See
                             # doc/08_tracking/bug/native_build_closure_field_call_resolved_as_method_2026-08-17.md
-                            val owner_collect = self.owner_collect_fn
                             collect_error = owner_collect(build_unit.path, output)
                         if collect_error != "":
                             self.graph.mark_failed(id, collect_error)
@@ -536,10 +535,9 @@ impl ParallelBuilder:
             # capsules, which cannot cross a process boundary -- see the
             # comment in build() above) falls through to the exact same
             # serial loop as before.
-            if self.spawn_dispatch_fn != nil:
-                val dispatch_spawn = self.spawn_dispatch_fn
-                val dispatch_collect = self.spawn_collect_fn
-                return self.build_parallel(dispatch_spawn, dispatch_collect)
+            if val dispatch_spawn = self.spawn_dispatch_fn:
+                if val dispatch_collect = self.spawn_collect_fn:
+                    return self.build_parallel(dispatch_spawn, dispatch_collect)
 
             # "Batch-concurrent" here means the ready set is CHUNKED by
             # max_workers -- it does NOT mean the chunk runs concurrently. The
@@ -593,10 +591,9 @@ impl ParallelBuilder:
                         match result:
                             case Ok(output):
                                 var collect_error: text = ""
-                                if self.owner_collect_fn != nil:
+                                if val owner_collect = self.owner_collect_fn:
                                     # Same closure-field-call defect as above;
                                     # bind to a local before invoking.
-                                    val owner_collect = self.owner_collect_fn
                                     collect_error = owner_collect(build_unit.path, output)
                                 if collect_error != "":
                                     self.graph.mark_failed(build_unit.id, collect_error)
@@ -629,7 +626,7 @@ impl ParallelBuilder:
         BuildResult(success: not self.graph.has_failures(),
                     stats: self.stats, errors: errors, outputs: outputs)
 
-    me build_parallel(spawn_fn: any, collect_fn: any) -> BuildResult:
+    me build_parallel(spawn_fn: fn(text) -> i64, collect_fn: fn(i64, text) -> Result<text, text>) -> BuildResult:
         """Execute the build using process-based parallelism.
 
         spawn_fn(path: text) -> i64:
@@ -810,7 +807,7 @@ impl ParallelBuilder:
     # Unstable mode: one child process per unit, supervised
     # ========================================================================
 
-    me build_supervised(spawn_fn: any, artifact_fn: any) -> BuildOutcomeSet:
+    me build_supervised(spawn_fn: fn(text) -> i64, artifact_fn: fn(text) -> text) -> BuildOutcomeSet:
         """Compile every unit in its OWN CHILD PROCESS and classify each fate.
 
         spawn_fn(path: text) -> i64

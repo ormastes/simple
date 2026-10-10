@@ -5,8 +5,16 @@
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_array_scope_end() -> bool
-extern fn rt_transient_heap_promote(value: Any) -> bool
-extern fn rt_array_free(array: [Any])
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+extern fn rt_array_free<T>(array: [T])
+
+# Promote one field through a one-element managed array, then release only the
+# array. A managed array accepts scalar and optional fields, whereas promoting
+# nil or an integer directly fails.
+fn promote_and_release_roots<T>(roots: [T]) -> bool:
+    val promoted = rt_transient_heap_promote(roots)
+    rt_array_free(roots)
+    promoted
 
 struct InventoryBuffer:
     items: [text]
@@ -29,16 +37,14 @@ impl InventoryOwner:
         rt_transient_heap_promote(self)
 
     me promote_inventory() -> bool:
-        var roots: [Any] = []
-        roots.push(self.buffer)
-        roots.push(self.names)
-        roots.push(self.current_module)
-        roots.push(self.optional_name)
-        roots.push(self.count)
-        roots.push(self.buffer.items)
-        val promoted = rt_transient_heap_promote(roots)
-        rt_array_free(roots)
-        promoted
+        var ok = true
+        ok = promote_and_release_roots([self.buffer]) and ok
+        ok = promote_and_release_roots([self.names]) and ok
+        ok = promote_and_release_roots([self.current_module]) and ok
+        ok = promote_and_release_roots([self.optional_name]) and ok
+        ok = promote_and_release_roots([self.count]) and ok
+        ok = promote_and_release_roots([self.buffer.items]) and ok
+        ok
 
 fn check_inventory_scopes() -> i64:
     var owner = InventoryOwner(

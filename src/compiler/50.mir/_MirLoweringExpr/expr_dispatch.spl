@@ -33,19 +33,19 @@ use std.io_runtime.{env_get_opt}
 # std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
 # cannot resolve it — declare the runtime extern directly.
 @unsafe(reason: "raw tagged-enum discriminant projection ABI", capabilities: [ffi])
-extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_enum_discriminant<T>(value: T) -> i64
 @unsafe(reason: "raw tagged-enum borrowed payload projection ABI", capabilities: [ffi])
-extern fn rt_enum_payload(value: Any) -> i64
+extern fn rt_enum_payload<T>(value: T) -> i64
 @unsafe(reason: "raw tagged-tuple indexed borrowed value projection ABI", capabilities: [ffi])
-extern fn rt_tuple_get(tuple: i64, index: i64) -> Any
+extern fn rt_tuple_get<T>(tuple: i64, index: i64) -> T?
 
 @always_inline
-fn _sffi_enum_discriminant(value: Any) -> i64:
+fn _sffi_enum_discriminant<T>(value: T) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(value)
 
 @always_inline
-fn _sffi_enum_payload(value: Any) -> i64:
+fn _sffi_enum_payload<T>(value: T) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_payload(value)
 
@@ -55,9 +55,9 @@ fn _sffi_enum_payload(value: Any) -> i64:
 # `-> Any` form made every such read a hard `nil is forbidden by the
 # non-optional return contract` semantic error, so ANY `if` without an
 # `else` failed native-build in the pure-Simple MIR lowerer.
-fn _sffi_tuple_get(tuple: i64, index: i64) -> Any?:
+fn _sffi_tuple_get<T>(tuple: i64, index: i64) -> T?:
     unsafe(capabilities: [ffi]):
-        rt_tuple_get(tuple, index)
+        rt_tuple_get<T>(tuple, index)
 
 # Unset and explicitly-empty environment values are both disabled through the
 # canonical nullable owner.
@@ -2341,8 +2341,8 @@ impl MirLowering:
 
     me lower_index_expr_from_hir(expr_value: HirExpr) -> LocalId:
         val payload = _sffi_enum_payload(expr_value.kind)
-        val base: HirExpr = _sffi_tuple_get(payload, 0)
-        val index: HirExpr = _sffi_tuple_get(payload, 1)
+        val base: HirExpr = _sffi_tuple_get<HirExpr>(payload, 0)
+        val index: HirExpr = _sffi_tuple_get<HirExpr>(payload, 1)
         if base == nil or index == nil:
             self.error_fatal("empty HIR Index payload", Some(expr_value.span))
             return self.builder.emit_const_int(0)
@@ -3907,9 +3907,9 @@ impl MirLowering:
         val binary_disc = _sffi_enum_discriminant(HirExprKind.Binary(HirBinOp.Add, nil_expr, nil_expr))
         if expr_disc == binary_disc:
             val binary_payload = _sffi_enum_payload(expr_value.kind)
-            val binary_op: HirBinOp = _sffi_tuple_get(binary_payload, 0)
-            val binary_left: HirExpr = _sffi_tuple_get(binary_payload, 1)
-            val binary_right: HirExpr = _sffi_tuple_get(binary_payload, 2)
+            val binary_op: HirBinOp = _sffi_tuple_get<HirBinOp>(binary_payload, 0)
+            val binary_left: HirExpr = _sffi_tuple_get<HirExpr>(binary_payload, 1)
+            val binary_right: HirExpr = _sffi_tuple_get<HirExpr>(binary_payload, 2)
             if binary_left == nil or binary_right == nil or _sffi_enum_discriminant(binary_op) < 0:
                 self.error_fatal("empty HIR Binary payload", Some(expr_value.span))
                 return self.builder.emit_const_int(0)
@@ -3924,9 +3924,9 @@ impl MirLowering:
         val if_disc = _sffi_enum_discriminant(HirExprKind.If(nil_expr, HirBlock(stmts: [], has: false, value: nil, span: nil_span), nil))
         if expr_disc == if_disc:
             val if_payload = _sffi_enum_payload(expr_value.kind)
-            val if_cond: HirExpr = _sffi_tuple_get(if_payload, 0)
-            val if_then: HirBlock = _sffi_tuple_get(if_payload, 1)
-            val if_else: HirBlock? = _sffi_tuple_get(if_payload, 2)
+            val if_cond: HirExpr = _sffi_tuple_get<HirExpr>(if_payload, 0)
+            val if_then: HirBlock = _sffi_tuple_get<HirBlock>(if_payload, 1)
+            val if_else: HirBlock? = _sffi_tuple_get<HirBlock>(if_payload, 2)
             if if_cond == nil or if_then == nil:
                 self.error_fatal("empty HIR If payload", Some(expr_value.span))
                 var b_bad_if = self.builder
@@ -3941,8 +3941,8 @@ impl MirLowering:
         val if_chain_disc = _sffi_enum_discriminant(HirExprKind.IfChain([], nil))
         if expr_disc == if_chain_disc:
             val if_chain_payload = _sffi_enum_payload(expr_value.kind)
-            val if_chain_arms: [HirIfArm] = _sffi_tuple_get(if_chain_payload, 0)
-            val if_chain_else: HirBlock? = _sffi_tuple_get(if_chain_payload, 1)
+            val if_chain_arms: [HirIfArm] = _sffi_tuple_get<[HirIfArm]>(if_chain_payload, 0)
+            val if_chain_else: HirBlock? = _sffi_tuple_get<HirBlock>(if_chain_payload, 1)
             if if_chain_arms == nil or if_chain_arms.len() == 0:
                 self.error_fatal("empty HIR IfChain payload", Some(expr_value.span))
                 var b_bad_if_chain = self.builder
@@ -4131,8 +4131,8 @@ impl MirLowering:
             # decode CORRECTION, not a guard: a genuinely absent payload still
             # reports through error_fatal rather than being silently defaulted.
             val cast_payload = _sffi_enum_payload(expr_value.kind)
-            val cast_operand: HirExpr = _sffi_tuple_get(cast_payload, 0)
-            val cast_target: HirType = _sffi_tuple_get(cast_payload, 1)
+            val cast_operand: HirExpr = _sffi_tuple_get<HirExpr>(cast_payload, 0)
+            val cast_target: HirType = _sffi_tuple_get<HirType>(cast_payload, 1)
             if cast_operand == nil or cast_target == nil:
                 self.error_fatal("empty HIR Cast payload", Some(expr_value.span))
                 return self.builder.emit_const_int(0)
@@ -4224,8 +4224,8 @@ impl MirLowering:
         val namedvar_pre_disc = _sffi_enum_discriminant(HirExprKind.NamedVar(SymbolId(id: -1), ""))
         if expr_disc == namedvar_pre_disc:
             val named_var_payload = _sffi_enum_payload(expr_value.kind)
-            val named_var_symbol: SymbolId = _sffi_tuple_get(named_var_payload, 0)
-            val named_var_name: text = _sffi_tuple_get(named_var_payload, 1)
+            val named_var_symbol: SymbolId = _sffi_tuple_get<SymbolId>(named_var_payload, 0)
+            val named_var_name: text = _sffi_tuple_get<text>(named_var_payload, 1)
             if named_var_symbol == nil or named_var_name == nil:
                 self.error_fatal("empty HIR NamedVar payload", Some(expr_value.span))
                 var b_bad_named_var = self.builder

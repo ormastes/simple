@@ -129,11 +129,12 @@ impl CompilerDriver:
             "AOT SMF: compiling to {output} (backend: {effective_backend})")
         log_build_progress("smf_package", "modules", 0, ctx.mir_modules.len(), output, 0, 1, 0, 0, "running")
 
-        val smf_result = self.collect_smf_bytes()
-        if not smf_result.is_success():
-            log_build_progress("smf_package", "modules", 0, ctx.mir_modules.len(), output, 1, 1, 1, 0, "failure")
-            return smf_result
-        val smf_bytes = smf_result.get_value()
+        var smf_bytes: [u8] = []
+        match self.collect_smf_bytes():
+            case Ok(collected): smf_bytes = collected
+            case Err(failure):
+                log_build_progress("smf_package", "modules", 0, ctx.mir_modules.len(), output, 1, 1, 1, 0, "failure")
+                return failure
 
         match link_to_smf(smf_bytes, output, ctx.options.verbose):
             case Ok(_):
@@ -159,10 +160,10 @@ impl CompilerDriver:
             log,
             "AOT self-contained: compiling to {output} (backend: {effective_backend})")
 
-        val smf_result = self.collect_smf_bytes()
-        if not smf_result.is_success():
-            return smf_result
-        val smf_bytes = smf_result.get_value()
+        var smf_bytes: [u8] = []
+        match self.collect_smf_bytes():
+            case Ok(collected): smf_bytes = collected
+            case Err(failure): return failure
 
         var config = SelfContainedConfig.default()
         config.verbose = ctx.options.verbose
@@ -175,7 +176,7 @@ impl CompilerDriver:
             case Err(e):
                 CompileResult.CodegenError("Self-contained build failed: {e}")
 
-    me collect_smf_bytes() -> CompileResult:
+    me collect_smf_bytes() -> Result<[u8], CompileResult>:
         val ctx: CompileContext = self.ctx
         val log = ctx.logger
         val backend_name = ctx.options.backend
@@ -187,8 +188,8 @@ impl CompilerDriver:
         # a module with functions but no object, or no code in total are
         # compile errors, never a successful empty artifact.
         if ctx.mir_modules.keys().len() == 0:
-            return CompileResult.CodegenError(
-                "SMF compile produced no MIR modules; nothing to package")
+            return Err(CompileResult.CodegenError(
+                "SMF compile produced no MIR modules; nothing to package"))
         for name in ctx.mir_modules.keys():
             smf_log_trace(log, "compiling module for SMF: {name}")
             val compiled = compile_module_with_backend(
@@ -199,23 +200,23 @@ impl CompilerDriver:
             )
             match compiled:
                 case Err(err):
-                    return CompileResult.CodegenError(
-                        "AOT compile error in {name}: {err.to_text()}")
+                    return Err(CompileResult.CodegenError(
+                        "AOT compile error in {name}: {err.to_text()}"))
                 case Ok(module):
                     var module_bytes: [u8] = []
                     if val obj_bytes = module.object_code:
                         module_bytes = obj_bytes
                     if module_bytes.len() == 0 and ctx.mir_modules[name].functions.len() > 0:
-                        return CompileResult.CodegenError(
-                            "AOT compile error in {name}: backend returned no object code for {ctx.mir_modules[name].functions.len()} function(s)")
+                        return Err(CompileResult.CodegenError(
+                            "AOT compile error in {name}: backend returned no object code for {ctx.mir_modules[name].functions.len()} function(s)"))
                     all_object_bytes = all_object_bytes.concat(module_bytes)
                 case _:
-                    return CompileResult.CodegenError(
-                        "AOT compile error in {name}: backend result not Ok")
+                    return Err(CompileResult.CodegenError(
+                        "AOT compile error in {name}: backend result not Ok"))
 
         if all_object_bytes.len() == 0:
-            return CompileResult.CodegenError(
-                "SMF compile produced no object code across {ctx.mir_modules.keys().len()} module(s)")
+            return Err(CompileResult.CodegenError(
+                "SMF compile produced no object code across {ctx.mir_modules.keys().len()} module(s)"))
         # extract_code_from_object only understands ELF and passes anything
         # else through as raw code, so a COFF or Mach-O object would be
         # loaded and entered at its file header.
@@ -225,8 +226,8 @@ impl CompilerDriver:
             val coff = (b0 == 0x64 and b1 == 0x86) or (b0 == 0x64 and b1 == 0xAA)
             val macho = b0 == 0xCF and b1 == 0xFA and (all_object_bytes[2] as i64) == 0xED and (all_object_bytes[3] as i64) == 0xFE
             if coff or macho:
-                return CompileResult.CodegenError(
-                    "SMF packaging needs ELF object code, but the backend produced a {if coff: "COFF" else: "Mach-O"} object for this host target")
+                return Err(CompileResult.CodegenError(
+                    "SMF packaging needs ELF object code, but the backend produced a {if coff: "COFF" else: "Mach-O"} object for this host target"))
 
         val deps = smf_collect_dependency_hashes(ctx)
         val entry_source_hash = if ctx.source_content_hashes_owner.len() > 0:
@@ -258,7 +259,7 @@ impl CompilerDriver:
             opts.driver_manifest_bytes = manifest_bytes
             opts.launch_metadata_bytes = launch_metadata_bytes
             generate_smf_with_options(all_object_bytes, opts)
-        CompileResult.Success(smf_bytes)
+        Ok(smf_bytes)
 
 fn smf_collect_driver_manifest_bytes(modules: Dict<text, MirModule>) -> [u8]:
     var payload: [u8] = []

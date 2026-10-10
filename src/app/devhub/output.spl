@@ -5,7 +5,7 @@
 
 use std.nogc_sync_mut.env.{env_get, env_has}
 use app.ui.render.ansi.{ansi_red, ansi_green, ansi_yellow, ansi_bold, ansi_reset, ansi_dim}
-use std.json.{json_parse, json_serialize, json_pretty, json_object_get, json_object_keys, json_object_has, json_object, json_string, json_array, json_array_get, json_array_length, json_get_type}
+use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_serialize, json_value_pretty, json_value_field, json_value_has, json_value_object_from, json_value_at, json_value_len, json_value_type}
 use app.devhub.flags.{_extract_flag, _has_flag}
 use std.tui.terminal.{terminal_get_size, terminal_stdout_is_tty}
 use std.io_runtime.{time_now_unix_micros}
@@ -234,9 +234,9 @@ fn format_json_output(data: text, args: [text]) -> text:
         return _apply_jq(data, jq_expr)
 
     # Default: pretty-print the JSON
-    val parsed = json_parse(data)
+    val parsed = json_value_parse_opt(data)
     if parsed != nil:
-        return json_pretty(parsed)
+        return json_value_pretty(parsed.unwrap())
     data
 
 
@@ -247,52 +247,54 @@ fn wants_json(args: [text]) -> bool:
 
 fn _filter_json_fields(data: text, fields: text) -> text:
     """Filter JSON to only include specified fields."""
-    val parsed = json_parse(data)
-    if parsed == nil:
+    val parsed_opt = json_value_parse_opt(data)
+    if parsed_opt == nil:
         return data
+    val parsed = parsed_opt.unwrap()
 
     val field_list = fields.split(",")
-    val data_type = json_get_type(parsed)
+    val data_type = json_value_type(parsed)
 
     if data_type == "array":
         # Filter each item in array
         var items: [text] = []
         var i = 0
-        val arr_len = json_array_length(parsed)
+        val arr_len = json_value_len(parsed)
         while i < arr_len:
-            val item = json_array_get(parsed, i)
+            val item = json_value_at(parsed, i)
             val filtered = _filter_object_fields(item, field_list)
-            items = items + [json_serialize(filtered)]
+            items = items + [json_value_serialize(filtered)]
             i = i + 1
         return "[" + items.join(", ") + "]"
     else if data_type == "object":
         val filtered = _filter_object_fields(parsed, field_list)
-        return json_pretty(filtered)
+        return json_value_pretty(filtered)
 
     data
 
 
-fn _filter_object_fields(obj: any, fields: [text]) -> any:
+fn _filter_object_fields(obj: JsonValue, fields: [text]) -> JsonValue:
     """Keep only specified fields from a JSON object."""
-    var pairs: [(text, any)] = []
+    var pairs: [(text, JsonValue)] = []
     for field in fields:
         val trimmed = field.trim()
-        if json_object_has(obj, trimmed):
-            val value = json_object_get(obj, trimmed)
+        if json_value_has(obj, trimmed):
+            val value = json_value_field(obj, trimmed)
             pairs = pairs + [(trimmed, value)]
-    json_object(pairs)
+    json_value_object_from(pairs)
 
 
 fn _apply_jq(data: text, expr: text) -> text:
     """Simple jq-like path query. Supports .field, .[].field, .[N]."""
-    val parsed = json_parse(data)
-    if parsed == nil:
+    val parsed_opt = json_value_parse_opt(data)
+    if parsed_opt == nil:
         return data
+    val parsed = parsed_opt.unwrap()
 
     # Simple path navigation
     val path = expr.trim()
     if path == ".":
-        return json_pretty(parsed)
+        return json_value_pretty(parsed)
 
     # Strip leading dot
     val clean_path = if path.starts_with("."): path[1:] else: path
@@ -300,23 +302,23 @@ fn _apply_jq(data: text, expr: text) -> text:
     # Handle .[].field pattern (array iteration)
     if clean_path.starts_with("[]."):
         val field = clean_path[3:]
-        val arr_len = json_array_length(parsed)
+        val arr_len = json_value_len(parsed)
         var results: [text] = []
         var i = 0
         while i < arr_len:
-            val item = json_array_get(parsed, i)
-            val value = json_object_get(item, field)
-            results = results + [json_serialize(value)]
+            val item = json_value_at(parsed, i)
+            val value = json_value_field(item, field)
+            results = results + [json_value_serialize(value)]
             i = i + 1
         return results.join("\n")
 
     # Simple field access
-    val value = json_object_get(parsed, clean_path)
-    if value != nil:
-        val vtype = json_get_type(value)
+    if json_value_has(parsed, clean_path):
+        val value = json_value_field(parsed, clean_path)
+        val vtype = json_value_type(value)
         if vtype == "string":
-            return json_serialize(value)
-        return json_pretty(value)
+            return json_value_serialize(value)
+        return json_value_pretty(value)
 
     ""
 

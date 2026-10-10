@@ -1,5 +1,6 @@
 use compiler.backend.linker.macho.tbd_types.{MachOTbdLimitsV1, MachOTbdInstallNameV1, MachOTbdLibraryV1, MachOTbdSymbolV1}
 use compiler.backend.linker.macho.tbd_values.{tbd_object, tbd_array, tbd_text, tbd_keys, tbd_required, tbd_names, tbd_version, tbd_integer, tbd_scope, tbd_declared_target}
+use std.common.json.value.{JsonValue, json_value_has, json_value_field}
 
 fn tbd_append_names(previous: [text], additions: [text]) -> [text]:
     var output = previous
@@ -11,7 +12,7 @@ class TbdSchemaState:
     limits: MachOTbdLimitsV1
     var symbol_count: i64
 
-    me symbols(fields: {text: any}, role: text, segment: text, yaml: bool, selected: bool) -> Result<[MachOTbdSymbolV1], text>:
+    me symbols(fields: JsonValue, role: text, segment: text, yaml: bool, selected: bool) -> Result<[MachOTbdSymbolV1], text>:
         val categories = if yaml: ["symbols", "weak-symbols", "thread-local-symbols", "objc-classes", "objc-eh-types", "objc-ivars"] else:
             ["global", "weak", "thread_local", "objc_class", "objc_eh_type", "objc_ivar"]
         var allowed = categories
@@ -20,8 +21,8 @@ class TbdSchemaState:
         var symbols: [MachOTbdSymbolV1] = []
         for index in 0..categories.len():
             val category = categories[index]
-            if not fields.has(category): continue
-            val names = tbd_names(fields[category], self.limits)?
+            if not json_value_has(fields, category): continue
+            val names = tbd_names(json_value_field(fields, category), self.limits)?
             if names.len() > self.limits.max_symbols - self.symbol_count: return Err("TBD symbol quota exceeded")
             self.symbol_count = self.symbol_count + names.len()
             var encoding = "global"
@@ -35,7 +36,7 @@ class TbdSchemaState:
                         thread_local: index == 2))
         Ok(symbols)
 
-    me library(value: any, yaml: bool, wanted: text) -> Result<MachOTbdLibraryV1, text>:
+    me library(value: JsonValue, yaml: bool, wanted: text) -> Result<MachOTbdLibraryV1, text>:
         val fields = tbd_object(value)?
         if yaml:
             tbd_keys(fields, ["tbd-version", "targets", "install-name", "current-version", "compatibility-version", "flags",
@@ -57,7 +58,7 @@ class TbdSchemaState:
                 if targets.contains(target): return Err("TBD duplicate target info")
                 targets = targets.push(target)
                 var deployment: i64 = 0
-                if info.has("min_deployment"): deployment = tbd_version(info["min_deployment"], self.limits)?
+                if json_value_has(info, "min_deployment"): deployment = tbd_version(json_value_field(info, "min_deployment"), self.limits)?
                 if target == wanted: minimum = Some(deployment)
         if targets.len() == 0: return Err("TBD empty declared targets")
         for target in targets: tbd_declared_target(target)?
@@ -101,13 +102,13 @@ class TbdSchemaState:
             ["current_versions", "compatibility_versions", "swift_abi"]
         for index in 0..scalar_keys.len():
             val key = scalar_keys[index]
-            if not fields.has(key): continue
-            var values: [any] = []
+            if not json_value_has(fields, key): continue
+            var values: [JsonValue] = []
             if yaml:
                 val field = if index == 2: "abi" else: "version"
-                values = [("object", {field: fields[key]})]
+                values = [JsonValue.Object(keys: [field], values: [json_value_field(fields, key)])]
             else:
-                values = tbd_array(fields[key])?
+                values = tbd_array(json_value_field(fields, key))?
             var covered: {text: bool} = {}
             for item in values:
                 val info = tbd_object(item)?
@@ -127,10 +128,10 @@ class TbdSchemaState:
                     else: swift = Some(number)
         for target in targets:
             if compatibles[target] > currents[target]: return Err("TBD compatibility version exceeds current version")
-        if fields.has("flags"):
-            var groups: [any] = []
-            if yaml: groups = [("object", {"attributes": fields["flags"]})]
-            else: groups = tbd_array(fields["flags"])?
+        if json_value_has(fields, "flags"):
+            var groups: [JsonValue] = []
+            if yaml: groups = [JsonValue.Object(keys: ["attributes"], values: [json_value_field(fields, "flags")])]
+            else: groups = tbd_array(json_value_field(fields, "flags"))?
             for item in groups:
                 val info = tbd_object(item)?
                 tbd_keys(info, ["targets", "attributes"])?
@@ -144,9 +145,9 @@ class TbdSchemaState:
             ["allowable_clients", "parent_umbrellas", "reexported_libraries", "rpaths"]
         for index in 0..group_keys.len():
             val key = group_keys[index]
-            if not fields.has(key): continue
+            if not json_value_has(fields, key): continue
             var umbrellas: {text: bool} = {}
-            for item in tbd_array(fields[key])?:
+            for item in tbd_array(json_value_field(fields, key))?:
                 val info = tbd_object(item)?
                 val field = if index == 0: "clients" else: (if index == 1: "umbrella" else: (if index == 2: (if yaml: "libraries" else: "names") else: "paths"))
                 tbd_keys(info, ["targets", field])?
@@ -167,9 +168,9 @@ class TbdSchemaState:
         val symbol_keys = if yaml: ["exports", "re-exports", "undefineds"] else: ["exported_symbols", "reexported_symbols", "undefined_symbols"]
         for index in 0..symbol_keys.len():
             val key = symbol_keys[index]
-            if not fields.has(key): continue
+            if not json_value_has(fields, key): continue
             val role = if index == 0: "export" else: (if index == 1: "reexport" else: "undefined")
-            for item in tbd_array(fields[key])?:
+            for item in tbd_array(json_value_field(fields, key))?:
                 val info = tbd_object(item)?
                 val scope = tbd_scope(info, targets, yaml, self.limits)?
                 if yaml:
@@ -178,8 +179,8 @@ class TbdSchemaState:
                 else:
                     tbd_keys(info, ["targets", "text", "data"])?
                     for segment in ["text", "data"]:
-                        if info.has(segment):
-                            val additions = self.symbols(tbd_object(info[segment])?, role, segment, false, scope.contains(wanted))?
+                        if json_value_has(info, segment):
+                            val additions = self.symbols(tbd_object(json_value_field(info, segment))?, role, segment, false, scope.contains(wanted))?
                             for symbol in additions: symbols = symbols.push(symbol)
         Ok(MachOTbdLibraryV1(declared_targets: targets, selected: selected, install_names: install_names,
             install_name: install_name, current_version: current, compatibility_version: compatible, minimum_os: minimum,

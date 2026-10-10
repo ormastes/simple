@@ -61,6 +61,8 @@ use std.spec
 
 use compiler.compiler_services.{create_default_services, CompilerServices}
 use compiler.backend_port.{BackendPort}
+use compiler.backend.backend_types.{BackendResult, BackendError}
+use compiler.hir.hir_types.{HirModule}
 
 # ============================================================================
 # Phase 1 - Struct shape
@@ -195,7 +197,7 @@ describe "BackendPort Feature: Phase 2 - Factory creation":
             # @capture(bit_table): BackendPort(supports_jit_fn: custom_jit).supports_jit_fn()
             step("Construct a real BackendPort with a custom supports_jit_fn")
             fn custom_jit() -> bool: true
-            fn custom_run(m): nil
+            fn custom_run(m: HirModule) -> Result<BackendResult, BackendError>: Ok(BackendResult.Unit)
             fn custom_triple_stub() -> text: "custom"
             val backend = BackendPort(name: "custom-backend", run_fn: custom_run, supports_jit_fn: custom_jit, target_triple_fn: custom_triple_stub)
             val f = backend.supports_jit_fn
@@ -208,7 +210,7 @@ describe "BackendPort Feature: Phase 2 - Factory creation":
             step("Construct a real BackendPort with a custom target_triple_fn")
             fn custom_triple() -> text: "x86_64-unknown-linux-gnu"
             fn custom_jit_stub() -> bool: false
-            fn custom_run_stub(m): nil
+            fn custom_run_stub(m: HirModule) -> Result<BackendResult, BackendError>: Ok(BackendResult.Unit)
             val backend = BackendPort(name: "custom-backend", run_fn: custom_run_stub, supports_jit_fn: custom_jit_stub, target_triple_fn: custom_triple)
             val f = backend.target_triple_fn
             val result = f()
@@ -222,7 +224,7 @@ describe "BackendPort Feature: Phase 2 - Factory creation":
             val noop_triple = services.backend.target_triple_fn()
             fn custom_triple() -> text: "x86_64-unknown-linux-gnu"
             fn custom_jit_stub() -> bool: false
-            fn custom_run_stub(m): nil
+            fn custom_run_stub(m: HirModule) -> Result<BackendResult, BackendError>: Ok(BackendResult.Unit)
             val custom_backend = BackendPort(name: "custom-backend", run_fn: custom_run_stub, supports_jit_fn: custom_jit_stub, target_triple_fn: custom_triple)
             val custom_triple_result = custom_backend.target_triple_fn()
             expect(noop_triple).to_equal("noop")
@@ -300,14 +302,16 @@ describe "BackendPort Feature: Phase 3 - Integration with CompilerServices":
             step("Construct a real BackendPort with alternate wasm32 wiring")
             fn alt_jit() -> bool: true
             fn alt_triple() -> text: "wasm32"
-            fn alt_run(m): nil
+            fn alt_run(m: HirModule) -> Result<BackendResult, BackendError>: Ok(BackendResult.Unit)
             val backend = BackendPort(name: "wasm-backend", run_fn: alt_run, supports_jit_fn: alt_jit, target_triple_fn: alt_triple)
             val f_run = backend.run_fn
             val f_jit = backend.supports_jit_fn
             val f_triple = backend.target_triple_fn
 
             expect(backend.name).to_equal("wasm-backend")
-            expect(f_run(nil)).to_be_nil()
+            match f_run(nil).unwrap():
+                case BackendResult.Unit: expect(true).to_equal(true)
+                case _: expect("unit").to_equal("unexpected-result")
             expect(f_jit()).to_equal(true)
             expect(f_triple()).to_equal("wasm32")
 
@@ -394,7 +398,7 @@ describe "BackendPort Feature: Phase 4 - Type safety":
             val services = create_default_services()
             val noop_name = services.backend.name
             fn stub_jit() -> bool: false
-            fn stub_run(m): nil
+            fn stub_run(m: HirModule) -> Result<BackendResult, BackendError>: Ok(BackendResult.Unit)
             fn stub_triple() -> text: "x86_64"
             val custom_backend = BackendPort(name: "interpreter-backend", run_fn: stub_run, supports_jit_fn: stub_jit, target_triple_fn: stub_triple)
             expect(noop_name).to_equal("noop-backend")
@@ -407,7 +411,7 @@ describe "BackendPort Feature: Phase 4 - Type safety":
             val services = create_default_services()
             val noop_name = services.backend.name
             fn stub_jit() -> bool: true
-            fn stub_run(m): nil
+            fn stub_run(m: HirModule) -> Result<BackendResult, BackendError>: Ok(BackendResult.Unit)
             fn stub_triple() -> text: "wasm32"
             val wasm_backend = BackendPort(name: "wasm-backend", run_fn: stub_run, supports_jit_fn: stub_jit, target_triple_fn: stub_triple)
             expect(noop_name).to_equal("noop-backend")
@@ -422,7 +426,7 @@ describe "BackendPort Feature: Phase 4 - Type safety":
             val noop_triple = f()
             fn x86_triple() -> text: "x86_64-unknown-linux-gnu"
             fn x86_jit_stub() -> bool: false
-            fn x86_run_stub(m): nil
+            fn x86_run_stub(m: HirModule) -> Result<BackendResult, BackendError>: Ok(BackendResult.Unit)
             val x86_backend = BackendPort(name: "x86-backend", run_fn: x86_run_stub, supports_jit_fn: x86_jit_stub, target_triple_fn: x86_triple)
             expect(noop_triple).to_equal("noop")
             expect(x86_backend.target_triple_fn()).to_equal("x86_64-unknown-linux-gnu")

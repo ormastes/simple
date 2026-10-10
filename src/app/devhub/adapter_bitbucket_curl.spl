@@ -22,10 +22,7 @@ use std.nogc_sync_mut.io.process_ops.{process_run}
 use app.devhub.atlassian_site.{AtlassianSite, ATLASSIAN_AUTH_BEARER, atlassian_normalize_auth, atlassian_auth_header, atlassian_strip_slash, bitbucket_api_root, bitbucket_pr_collection_url, bitbucket_resolve_deployment, bitbucket_server_base}
 use app.devhub.request_headers.{gateway_request_headers}
 use app.devhub.redaction.{redact_devhub_diagnostic}
-use common.json.parser.{json_parse}
-use common.json.object_ops.{json_object_get}
-use common.json.array_ops.{json_array_get, json_array_length}
-use common.json.serializer.{json_serialize}
+use std.common.json.value.{JsonValue, json_value_parse_or_null, json_value_field, json_value_has, json_value_is_null, json_value_items, json_value_serialize}
 
 
 # ============================================================================
@@ -402,25 +399,19 @@ fn _bbc_gateway_argv(client: BbCurlClient, argv: [text]) -> Result<[text], text>
 # JSON parsing helpers (local copies — pure adapter's `_bb_*` are private).
 # ============================================================================
 
-fn _bbc_str(obj: any, key: text) -> text:
-    if obj == nil:
+fn _bbc_str(obj: JsonValue, key: text) -> text:
+    if not json_value_has(obj, key):
         return ""
-    val v = json_object_get(obj, key)
-    if v == nil:
-        return ""
-    val s = json_serialize(v)
+    val s = json_value_serialize(json_value_field(obj, key))
     if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
         return s[1:s.len() - 1]
     s
 
 
-fn _bbc_int(obj: any, key: text) -> i64:
-    if obj == nil:
+fn _bbc_int(obj: JsonValue, key: text) -> i64:
+    if not json_value_has(obj, key):
         return 0
-    val v = json_object_get(obj, key)
-    if v == nil:
-        return 0
-    val s = json_serialize(v)
+    val s = json_value_serialize(json_value_field(obj, key))
     var n: i64 = 0
     for ch in s:
         if ch >= "0" and ch <= "9":
@@ -428,68 +419,67 @@ fn _bbc_int(obj: any, key: text) -> i64:
     n
 
 
-fn _bbc_parse_pr(obj: any) -> BbcPr:
+fn _bbc_parse_pr(obj: JsonValue) -> BbcPr:
     val empty = BbcPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "")
-    if obj == nil:
+    if json_value_is_null(obj):
         return empty
     val id = _bbc_int(obj, "id")
     val title = _bbc_str(obj, "title")
     val state = _bbc_str(obj, "state")
     var source_branch = ""
-    val source = json_object_get(obj, "source")
-    if source != nil:
-        val br = json_object_get(source, "branch")
-        if br != nil:
+    val source = json_value_field(obj, "source")
+    if not json_value_is_null(source):
+        val br = json_value_field(source, "branch")
+        if not json_value_is_null(br):
             source_branch = _bbc_str(br, "name")
     var dest_branch = ""
-    val dest = json_object_get(obj, "destination")
-    if dest != nil:
-        val br = json_object_get(dest, "branch")
-        if br != nil:
+    val dest = json_value_field(obj, "destination")
+    if not json_value_is_null(dest):
+        val br = json_value_field(dest, "branch")
+        if not json_value_is_null(br):
             dest_branch = _bbc_str(br, "name")
     var author = ""
-    val author_obj = json_object_get(obj, "author")
-    if author_obj != nil:
+    val author_obj = json_value_field(obj, "author")
+    if not json_value_is_null(author_obj):
         author = _bbc_str(author_obj, "display_name")
     var web_url = ""
-    val links = json_object_get(obj, "links")
-    if links != nil:
-        val html = json_object_get(links, "html")
-        if html != nil:
+    val links = json_value_field(obj, "links")
+    if not json_value_is_null(links):
+        val html = json_value_field(links, "html")
+        if not json_value_is_null(html):
             web_url = _bbc_str(html, "href")
     var merge_commit = ""
-    val mc = json_object_get(obj, "merge_commit")
-    if mc != nil:
+    val mc = json_value_field(obj, "merge_commit")
+    if not json_value_is_null(mc):
         merge_commit = _bbc_str(mc, "hash")
     BbcPr(id: id, title: title, state: state, source_branch: source_branch, dest_branch: dest_branch, author: author, web_url: web_url, merge_commit: merge_commit)
 
 
-fn _bbc_parse_comment(obj: any) -> BbcComment:
+fn _bbc_parse_comment(obj: JsonValue) -> BbcComment:
     val empty = BbcComment(id: 0, author: "", content: "", inline_path: "", inline_to: -1)
-    if obj == nil:
+    if json_value_is_null(obj):
         return empty
     val id = _bbc_int(obj, "id")
     var author = ""
-    val user = json_object_get(obj, "user")
-    if user != nil:
+    val user = json_value_field(obj, "user")
+    if not json_value_is_null(user):
         author = _bbc_str(user, "display_name")
     var content = ""
-    val content_obj = json_object_get(obj, "content")
-    if content_obj != nil:
+    val content_obj = json_value_field(obj, "content")
+    if not json_value_is_null(content_obj):
         content = _bbc_str(content_obj, "raw")
     var inline_path = ""
     var inline_to: i64 = -1
-    val inline = json_object_get(obj, "inline")
-    if inline != nil:
+    val inline = json_value_field(obj, "inline")
+    if not json_value_is_null(inline):
         inline_path = _bbc_str(inline, "path")
-        val to_val = json_object_get(inline, "to")
-        if to_val != nil:
+        if json_value_has(inline, "to"):
             inline_to = _bbc_int(inline, "to")
     BbcComment(id: id, author: author, content: content, inline_path: inline_path, inline_to: inline_to)
 
 
-fn _bbc_parse_status(obj: any) -> BbcStatus:
-    if obj == nil:
+fn _bbc_parse_status(obj: JsonValue) -> BbcStatus:
+    if json_value_is_null(obj):
         return BbcStatus(key: "", state: "", name: "", url: "")
     BbcStatus(
         key: _bbc_str(obj, "key"),
@@ -499,19 +489,8 @@ fn _bbc_parse_status(obj: any) -> BbcStatus:
     )
 
 
-fn _bbc_values(parsed: any) -> [any]:
-    if parsed == nil:
-        return []
-    val values = json_object_get(parsed, "values")
-    if values == nil:
-        return []
-    val n = json_array_length(values)
-    var out: [any] = []
-    var i: i64 = 0
-    while i < n:
-        out = out + [json_array_get(values, i)]
-        i = i + 1
-    out
+fn _bbc_values(parsed: JsonValue) -> [JsonValue]:
+    json_value_items(json_value_field(parsed, "values"))
 
 
 # ============================================================================
@@ -529,8 +508,8 @@ fn bbc_create_pr(client: BbCurlClient, title: text, source_branch: text, dest_br
     val (status, resp_body, stderr) = _run_curl(client, argv)
     if status != 200 and status != 201:
         return (false, empty, _bbc_status_label(status, if resp_body != "": resp_body else: stderr, BB_OP_GENERAL))
-    val parsed = json_parse(resp_body)
-    if parsed == nil:
+    val parsed = json_value_parse_or_null(resp_body)
+    if json_value_is_null(parsed):
         return (false, empty, "invalid JSON response")
     (true, _bbc_parse_pr(parsed), resp_body)
 
@@ -545,8 +524,8 @@ fn bbc_get_pr(client: BbCurlClient, pr_id: i64) -> (bool, BbcPr, text):
     val (status, resp_body, stderr) = _run_curl(client, argv)
     if status != 200:
         return (false, empty, _bbc_status_label(status, if resp_body != "": resp_body else: stderr, BB_OP_GENERAL))
-    val parsed = json_parse(resp_body)
-    if parsed == nil:
+    val parsed = json_value_parse_or_null(resp_body)
+    if json_value_is_null(parsed):
         return (false, empty, "invalid JSON response")
     (true, _bbc_parse_pr(parsed), resp_body)
 
@@ -560,8 +539,8 @@ fn bbc_list_pr_comments(client: BbCurlClient, pr_id: i64) -> (bool, [BbcComment]
     val (status, resp_body, stderr) = _run_curl(client, argv)
     if status != 200:
         return (false, [], _bbc_status_label(status, if resp_body != "": resp_body else: stderr, BB_OP_GENERAL))
-    val parsed = json_parse(resp_body)
-    if parsed == nil:
+    val parsed = json_value_parse_or_null(resp_body)
+    if json_value_is_null(parsed):
         return (false, [], "invalid JSON response")
     val raw = _bbc_values(parsed)
     var out: [BbcComment] = []
@@ -585,8 +564,8 @@ fn bbc_post_pr_comment(client: BbCurlClient, pr_id: i64, content: text, inline_p
     val (status, resp_body, stderr) = _run_curl(client, argv)
     if status != 200 and status != 201:
         return (false, empty, _bbc_status_label(status, if resp_body != "": resp_body else: stderr, BB_OP_GENERAL))
-    val parsed = json_parse(resp_body)
-    if parsed == nil:
+    val parsed = json_value_parse_or_null(resp_body)
+    if json_value_is_null(parsed):
         return (false, empty, "invalid JSON response")
     (true, _bbc_parse_comment(parsed), resp_body)
 
@@ -628,8 +607,8 @@ fn bbc_merge_pr(client: BbCurlClient, pr_id: i64, strategy: text, close_source_b
     val (status, resp_body, stderr) = _run_curl(client, argv)
     if status != 200 and status != 202:
         return (false, empty, _bbc_status_label(status, if resp_body != "": resp_body else: stderr, BB_OP_MERGE))
-    val parsed = json_parse(resp_body)
-    if parsed == nil:
+    val parsed = json_value_parse_or_null(resp_body)
+    if json_value_is_null(parsed):
         return (false, empty, "invalid JSON response")
     (true, _bbc_parse_pr(parsed), resp_body)
 
@@ -643,8 +622,8 @@ fn bbc_get_pr_statuses(client: BbCurlClient, pr_id: i64) -> (bool, [BbcStatus], 
     val (status, resp_body, stderr) = _run_curl(client, argv)
     if status != 200:
         return (false, [], _bbc_status_label(status, if resp_body != "": resp_body else: stderr, BB_OP_GENERAL))
-    val parsed = json_parse(resp_body)
-    if parsed == nil:
+    val parsed = json_value_parse_or_null(resp_body)
+    if json_value_is_null(parsed):
         return (false, [], "invalid JSON response")
     val raw = _bbc_values(parsed)
     var out: [BbcStatus] = []
@@ -653,7 +632,7 @@ fn bbc_get_pr_statuses(client: BbCurlClient, pr_id: i64) -> (bool, [BbcStatus], 
     (true, out, resp_body)
 
 
-fn bb_eval_ready_to_merge(pr_parsed: any, statuses_parsed: any) -> (bool, text):
+fn bb_eval_ready_to_merge(pr_parsed: JsonValue, statuses_parsed: JsonValue) -> (bool, text):
     """Pure helper mirroring adapter_bitbucket.spl's evaluator.
 
     Ready iff:
@@ -661,24 +640,23 @@ fn bb_eval_ready_to_merge(pr_parsed: any, statuses_parsed: any) -> (bool, text):
       2. participants[role=REVIEWER, approved=true].count >= 1
       3. all statuses[*].state == "SUCCESSFUL"
     """
-    if pr_parsed == nil:
+    if json_value_is_null(pr_parsed):
         return (false, "missing PR data")
     val state = _bbc_str(pr_parsed, "state")
     if state != "OPEN":
         return (false, "PR state is " + state + ", expected OPEN")
-    val participants = json_object_get(pr_parsed, "participants")
-    if participants == nil:
+    if not json_value_has(pr_parsed, "participants"):
         return (false, "no participants in PR")
-    val pn = json_array_length(participants)
+    val participants = json_value_items(json_value_field(pr_parsed, "participants"))
+    val pn = participants.len()
     var approved_reviewers: i64 = 0
     var i: i64 = 0
     while i < pn:
-        val p = json_array_get(participants, i)
+        val p = participants[i]
         val role = _bbc_str(p, "role")
         if role == "REVIEWER":
-            val approved_obj = json_object_get(p, "approved")
-            if approved_obj != nil:
-                val s = json_serialize(approved_obj)
+            if json_value_has(p, "approved"):
+                val s = json_value_serialize(json_value_field(p, "approved"))
                 if s == "true":
                     approved_reviewers = approved_reviewers + 1
         i = i + 1
@@ -708,15 +686,15 @@ fn bbc_check_ready_to_merge(client: BbCurlClient, pr_id: i64) -> (bool, text):
     val (pr_status, pr_body, pr_stderr) = _run_curl(client, pr_argv)
     if pr_status != 200:
         return (false, "GET PR failed: " + _bbc_status_label(pr_status, if pr_body != "": pr_body else: pr_stderr, BB_OP_GENERAL))
-    val pr_parsed = json_parse(pr_body)
-    if pr_parsed == nil:
+    val pr_parsed = json_value_parse_or_null(pr_body)
+    if json_value_is_null(pr_parsed):
         return (false, "invalid PR JSON")
     val st_url = bbc_pr_sub_url(client, pr_id, "statuses")
     val st_argv = _argv_curl_get(st_url, client.auth_header())
     val (st_status, st_body, st_stderr) = _run_curl(client, st_argv)
     if st_status != 200:
         return (false, "GET statuses failed: " + _bbc_status_label(st_status, if st_body != "": st_body else: st_stderr, BB_OP_GENERAL))
-    val st_parsed = json_parse(st_body)
-    if st_parsed == nil:
+    val st_parsed = json_value_parse_or_null(st_body)
+    if json_value_is_null(st_parsed):
         return (false, "invalid statuses JSON")
     bb_eval_ready_to_merge(pr_parsed, st_parsed)
