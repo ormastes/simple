@@ -1,0 +1,36 @@
+# Run with a real loadable host library path. No fake positive handles and no
+# duplicate native close: both are unsafe inputs to the platform loader.
+use std.sys.{get_args}
+use os.posix.host_dynlib_sffi.{host_dynlib_open}
+use os.posix.dynlib.{
+    DynLibKind, ElfLibState, SmfLibState, dynlib_close_checked
+}
+use os.posix.errno.{EBADF}
+
+fn main() -> i32:
+    val args = get_args()
+    assert(args.len() == 2)
+    match dynlib_close_checked(DynLibKind.Invalid):
+        Ok(_): return 1
+        Err(status): assert(status == -1)
+    val invalid_host = DynLibKind.Elf(ElfLibState(handle: 0, base: 0, path: ""))
+    match dynlib_close_checked(invalid_host):
+        Ok(_): return 2
+        Err(status): assert(status == -1)
+    # Fresh-process registry has never issued this handle. The real registry
+    # rejects it with EBADF; unlike an invented host pointer this is safe.
+    val missing_kernel = DynLibKind.Smf(SmfLibState(
+        handle: 9223372036854775807, path: "absent.smf", stub_entry: 0))
+    match dynlib_close_checked(missing_kernel):
+        Ok(_): return 3
+        Err(status): assert(status == 0 - EBADF as i64)
+    # Use the host owner directly so this also checks FreeLibrary normalization
+    # on Windows without claiming the unsupported PE format facade is enabled.
+    val handle = host_dynlib_open(args[1], 2)
+    assert(handle > 0)
+    val loaded = DynLibKind.Elf(ElfLibState(handle: handle, base: 0, path: args[1]))
+    match dynlib_close_checked(loaded):
+        Err(_): return 4
+        Ok(status): assert(status == 0)
+    println("DYNLIB_CLOSE_CHECKED_PASS cases=4 assertions=6")
+    0
