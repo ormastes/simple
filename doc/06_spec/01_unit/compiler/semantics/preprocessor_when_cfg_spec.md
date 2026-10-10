@@ -555,3 +555,44 @@ test/01_unit/compiler/semantics/preprocessor_when_cfg_spec.spl:39:1: warning SSD
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->
+
+
+## Unicode EOF regression verification status — 2026-10-10
+
+Status: **UNEXECUTED** for the four scenarios added in test commit
+`33c4185ab`. This appended review note does not regenerate or change the
+existing scorecard, and is not a verification PASS.
+
+The scenarios call `preprocess_conditionals` and compare its entire returned
+text against explicit expected text:
+
+- ASCII with `@cfg(true)`: preserve the declaration and final LF; replace only
+  the directive line with an empty line.
+- Multibyte comment and string payload with `@cfg(true)`: preserve the em dash,
+  accented character, Korean text, emoji, final closing quote, and final LF.
+- Multibyte comment without a trailing LF: preserve the final closing quote
+  and do not add a newline.
+- Inactive multibyte declaration followed by an enabled sibling: blank source
+  lines 2–5 (false directive, excluded declaration, excluded body, true
+  directive), retain the comment on line 1 and enabled declaration on line 6,
+  and preserve its complete Unicode return value and final LF. The expected
+  text therefore has five newline separators between the comment and the
+  enabled declaration, representing four empty lines.
+
+Read-only review of `_pp_split_lines` and the per-declaration filtering pass
+supports these expected strings: yielded characters are joined without byte
+re-indexing, directives/excluded declaration lines are replaced one-for-one,
+and splitting then joining preserves whether the input ends in LF.
+
+The separate native reproduction artifacts are under
+`/home/ormastes/simple-linux-bootstrap-build-20261009/parser-utf8-cfg-eof-native-probe-20261010/validation`.
+Before the repair, the ASCII directive fixture compiled and printed `cpu`,
+while the otherwise equivalent fixture containing an em dash in a comment
+failed with an unterminated-string parser diagnostic. Both source files end
+in LF and place `@cfg(x86_64)` on `final_text`. Those observations establish
+the original defect; they do not execute these four SSpec assertions or
+qualify the repaired compiler.
+
+Admission requires a working test runner to execute the four real full-text
+assertions, with the producer/source/runtime identities and results retained.
+This manual alone cannot qualify the fix while that runner is unavailable.
