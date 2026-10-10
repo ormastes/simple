@@ -160,30 +160,47 @@ impl HirLowering:
         -1
 
     me note_transitive_bare_type(name: text, owner_module: text, bare_bound_before: bool):
-        """Record (or invalidate) a bare name bound by a field dependency."""
-        if self.registering_lexical_import:
+        """Record (or invalidate) a bare name bound by a field dependency.
+
+        Module scope only: a nested (lexical) scope's binding is not the
+        module's, and `unbind_local_type` also drops the table-wide exact
+        index, so it must never run from a nested scope."""
+        if self.registering_lexical_import or self.symbols.current_scope.id != 0:
             return
         val row = self.transitive_bare_row(name)
+        val bound_id = self.symbols.local_type_binding_raw(name)
         if not bare_bound_before:
-            if self.import_binding_or_invalid(name).is_valid():
+            if bound_id >= 0:
                 if row < 0:
                     self.transitive_bare_names = self.transitive_bare_names.push(name)
                     self.transitive_bare_owners = self.transitive_bare_owners.push(owner_module)
+                    self.transitive_bare_ids = self.transitive_bare_ids.push(bound_id)
                 else:
                     self.transitive_bare_owners[row] = owner_module
+                    self.transitive_bare_ids[row] = bound_id
             return
         # Bare name already taken. Only a conflicting TRANSITIVE owner makes it
-        # ambiguous; an explicit import or own declaration simply keeps it.
+        # ambiguous, and only while the bare binding is still that transitive
+        # symbol: an explicit import or the module's own declaration (which
+        # replaces imports in the declare pass) keeps it.
         if row < 0:
             return
         val previous_owner = self.transitive_bare_owners[row]
-        if previous_owner != "" and previous_owner != "!" and previous_owner != owner_module:
-            self.symbols.unbind_local_type(name)
-            self.transitive_bare_owners[row] = ""
+        if previous_owner == "" or previous_owner == "!" or previous_owner == owner_module:
+            return
+        if bound_id != self.transitive_bare_ids[row]:
+            self.transitive_bare_owners[row] = "!"
+            return
+        self.symbols.unbind_local_type(name)
+        self.transitive_bare_owners[row] = ""
 
     me supersede_transitive_bare_type(local_name: text):
-        """An explicit import of `local_name` wins over a transitive binding."""
+        """An explicit import of `local_name` wins over a transitive binding:
+        drop the transitive bare binding and any enum state it materialized
+        under that short name, so the explicit registration starts clean."""
         if self.registering_field_dependency or self.registering_lexical_import:
+            return
+        if self.symbols.current_scope.id != 0:
             return
         val row = self.transitive_bare_row(local_name)
         if row < 0:
@@ -191,10 +208,49 @@ impl HirLowering:
         val owner = self.transitive_bare_owners[row]
         if owner == "!":
             return
-        if owner != "":
-            self.symbols.unbind_local_type(local_name)
         self.transitive_bare_owners[row] = "!"
-        self.transitive_override_name = local_name
+        if owner == "":
+            return
+        # The binding may already belong to something else (own declaration).
+        if self.symbols.local_type_binding_raw(local_name) != self.transitive_bare_ids[row]:
+            return
+        self.symbols.unbind_local_type(local_name)
+        self.purge_imported_enum_state(local_name)
+
+    me purge_imported_enum_state(local_name: text):
+        """Forget enum materialization keyed by `local_name`. Rebuilt rather
+        than `remove`d: Dict.remove differs between the seed interpreter
+        (returns a new dict) and native codegen (in place)."""
+        var kept_rows: [text] = []
+        val row_prefix = "{local_name}\u001f"
+        for owner_row in self.imported_enum_owner_rows:
+            if not owner_row.starts_with(row_prefix):
+                kept_rows.push(owner_row)
+        self.imported_enum_owner_rows = kept_rows
+        if self.imported_enums.contains_key(local_name):
+            var kept_enums: {text: ParserEnum} = {}
+            for enum_key in self.imported_enums.keys():
+                if enum_key != local_name:
+                    kept_enums[enum_key] = self.imported_enums[enum_key]
+            self.imported_enums = kept_enums
+        if self.imported_enum_owners.contains_key(local_name):
+            var kept_owners: {text: text} = {}
+            for owner_key in self.imported_enum_owners.keys():
+                if owner_key != local_name:
+                    kept_owners[owner_key] = self.imported_enum_owners[owner_key]
+            self.imported_enum_owners = kept_owners
+        if self.imported_enum_symbol_ids.contains_key(local_name):
+            var kept_ids: {text: i64} = {}
+            for id_key in self.imported_enum_symbol_ids.keys():
+                if id_key != local_name:
+                    kept_ids[id_key] = self.imported_enum_symbol_ids[id_key]
+            self.imported_enum_symbol_ids = kept_ids
+        if self.materialized_payload_bindings.contains_key(local_name):
+            var kept_bindings: {text: text} = {}
+            for binding_key in self.materialized_payload_bindings.keys():
+                if binding_key != local_name:
+                    kept_bindings[binding_key] = self.materialized_payload_bindings[binding_key]
+            self.materialized_payload_bindings = kept_bindings
 
     me register_imported_symbol(imported_index: i64, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
         # Keep the recursive import/materialization boundary scalar. Passing a
@@ -256,8 +312,6 @@ impl HirLowering:
         self.register_imported_symbol_inner(
             imported_index, imported_mod_name, imported_name, local_name,
             import_span, materialize_enum)
-        if self.transitive_override_name == local_name:
-            self.transitive_override_name = ""
         # Record misses too. A changed binding state must replace the old
         # scalar memo state so a later scope pop still triggers registration.
         self.registered_import_memo_record(
@@ -632,7 +686,7 @@ impl HirLowering:
             val existing_enum_symbol_id = self.import_binding_or_invalid(local_name)
             val already_bound = existing_enum_symbol_id.is_valid()
             # Repeated imports in sibling scopes retain the materialized ID.
-            if materialize_enum and self.transitive_override_name != local_name and self.imported_enum_symbol_ids.contains_key(local_name):
+            if materialize_enum and self.imported_enum_symbol_ids.contains_key(local_name):
                 val retained_id = self.imported_enum_symbol_ids[local_name]
                 self.symbols.bind_local_type_if_free(local_name, SymbolId(id: retained_id))
             val imported_type = self.symbols.define(local_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
@@ -648,7 +702,7 @@ impl HirLowering:
             # A directory-sibling declaration-only prebind may already own the
             # symbol. A later explicit import must still transition the enum
             # into materialized state and close over its payload dependencies.
-            if materialize_enum and (self.transitive_override_name == local_name or not self.imported_enums.contains_key(local_name)):
+            if materialize_enum and not self.imported_enums.contains_key(local_name):
                 val surface_enum = imported_mod.enum_values[enum_position]
                 self.imported_enums[local_name] = hir_surface_enum_to_enum(surface_enum, local_name)
                 self.imported_enum_owners[local_name] = imported_mod.module_name
