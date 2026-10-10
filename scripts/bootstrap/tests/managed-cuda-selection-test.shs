@@ -1,0 +1,93 @@
+#!/bin/sh
+# Selection/manifest controls only; this never manufactures compiler outputs.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-managed-cuda.XXXXXX")
+printf 'evidence=%s\n' "$scratch"
+. "$repo/scripts/bootstrap/lib/managed-cuda-selection.shs"
+source_root="$scratch/source"
+mkdir -p "$source_root/src/compiler" "$source_root/src/plugins/backend_registry"
+for mode in disabled dynamic; do
+  mkdir -p "$source_root/src/compositions/cuda_$mode/plugins/backend_registry"
+  cp "$repo/src/compositions/cuda_$mode/plugins/backend_registry/selected_cuda_backend.spl" \
+    "$source_root/src/compositions/cuda_$mode/plugins/backend_registry/"
+done
+cp "$repo/src/plugins/backend_registry/selected_cuda_backend.spl" "$source_root/src/plugins/backend_registry/"
+source_inventory="$source_root/inventory"
+printf '%s\n' src/compiler/simple.sdn \
+  src/plugins/backend_registry/selected_cuda_backend.spl \
+  src/compositions/cuda_disabled/plugins/backend_registry/selected_cuda_backend.spl \
+  src/compositions/cuda_dynamic/plugins/backend_registry/selected_cuda_backend.spl >"$source_inventory"
+manifest_program="$scratch/capture-manifest"
+cat >"$manifest_program" <<'CAPTURE'
+#!/bin/sh
+printf '%s\n' "$@" >"$CUDA_CAPTURE_ARGV"
+# Stop before creating a manifest, starting a manager, or emitting an object.
+exit 99
+CAPTURE
+chmod +x "$manifest_program"
+for runner in bootstrap-phase4-grouped bootstrap-provisional-phase3-phase4; do
+  awk '/^build_binary\(\) \{/ {copy=1} copy {print} copy && /^}$/ {exit}' \
+    "$repo/scripts/bootstrap/$runner.shs" >"$scratch/$runner.function"
+done
+for mode in disabled static dynamic; do
+  case "$mode" in
+    disabled) enabled=false placement=static expected_root=src/compositions/cuda_disabled ;;
+    static) enabled=true placement=static expected_root=src/plugins ;;
+    dynamic) enabled=true placement=dynamic expected_root=src/compositions/cuda_dynamic ;;
+  esac
+  printf 'compiler_backends:\n  cuda:\n    enabled: %s\n    placement: %s\n' "$enabled" "$placement" >"$source_root/src/compiler/simple.sdn"
+  bootstrap_managed_cuda_select "$source_root" "$source_inventory"
+  [ "$cuda_selected_mode" = "$mode" ] && [ "$cuda_selected_root" = "$expected_root" ]
+  printf '%s\n' "$cuda_selection_identity" >"$scratch/$mode.identity"
+  for runner in bootstrap-phase4-grouped bootstrap-provisional-phase3-phase4; do
+    root="$scratch/$mode/$runner"
+    export CUDA_CAPTURE_ARGV="$scratch/$mode-$runner.argv"
+    result=0
+    (
+      die() { echo "$*" >&2; exit 2; }
+      verify_shared_source() { :; }
+      verify_image_set() { :; }
+      disk_preflight() { :; }
+      provisional_select_binary_producer() { task_producer=$producer; }
+      producer=/pinned/producer template=/pinned/template
+      source_inventory_relative=inventory source_links_relative=links.inventory memory_bytes=1048576 lifetime_ms=1000 memory_policy=enforce
+      target=aarch64-unknown-linux-gnu threads=1
+      . "$scratch/$runner.function"
+      build_binary diagnostic-module-1 test/good.spl bin/module.o phase4 llvm object
+    ) >"$scratch/$mode-$runner.log" 2>&1 || result=$?
+    [ "$result" -eq 2 ] && [ -s "$CUDA_CAPTURE_ARGV" ]
+    awk -v root="$expected_root" '
+      previous=="--source" {if (++sources==1 && $0!=root) exit 1}
+      {previous=$0} END {if (sources<2) exit 1}' "$CUDA_CAPTURE_ARGV"
+    grep -Fxq "cache/diagnostic-module-1-llvm/$cuda_selection_identity" "$CUDA_CAPTURE_ARGV"
+    grep -Fxq -- --emit-object "$CUDA_CAPTURE_ARGV"
+    grep -Fxq aarch64-unknown-linux-gnu "$CUDA_CAPTURE_ARGV"
+    [ ! -e "$root/phase4/binaries/llvm/diagnostic-module-1/bin/module.o" ]
+    grep -Fxq "identity=$cuda_selection_identity" "$root/phase4/binaries/llvm/diagnostic-module-1/cuda-selection.env"
+  done
+done
+[ "$(cat "$scratch/disabled.identity" "$scratch/static.identity" "$scratch/dynamic.identity" | sort -u | wc -l)" -eq 3 ]
+# Replay identities change on either input, even when the selected mode is same.
+old_identity=$cuda_selection_identity
+printf '\n# policy identity change\n' >>"$source_root/src/compiler/simple.sdn"
+bootstrap_managed_cuda_select "$source_root" "$source_inventory"
+[ "$old_identity" != "$cuda_selection_identity" ]
+job="$scratch/record-replay"
+mkdir -p "$job"
+bootstrap_managed_cuda_record "$job"
+old_identity=$cuda_selection_identity
+printf '\n# template identity change\n' >>"$source_root/$cuda_template_relative"
+bootstrap_managed_cuda_select "$source_root" "$source_inventory"
+[ "$old_identity" != "$cuda_selection_identity" ]
+if bootstrap_managed_cuda_record "$job"; then exit 1; fi
+# A legacy task must not silently reuse manifest argv without a selected root.
+mkdir -p "$scratch/legacy"
+printf 'retained\n' >"$scratch/legacy/manifest.sdn"
+if bootstrap_managed_cuda_record "$scratch/legacy"; then exit 1; fi
+# A file existing outside the pinned inventory is not an admitted template.
+sed '/cuda_dynamic/d' "$source_inventory" >"$scratch/missing-template.inventory"
+if bootstrap_managed_cuda_select "$source_root" "$scratch/missing-template.inventory"; then exit 1; fi
+printf 'compiler_backends:\n  cuda:\n    enabled: maybe\n    placement: static\n' >"$source_root/src/compiler/simple.sdn"
+if bootstrap_managed_cuda_select "$source_root" "$source_inventory"; then exit 1; fi
+printf '%s\n' 'PASS: both real callback argv preserve all three selections and hash-bound cache identity; replay and missing authority fail closed'

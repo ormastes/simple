@@ -1,0 +1,64 @@
+#!/bin/sh
+# Select the same bytes as the bootstrap CUDA overlay, from the already sealed
+# manager source inventory. Never add an external build/ root to its authority.
+bootstrap_managed_cuda_select() {
+  cuda_source_root=$1 cuda_source_inventory=$2
+  cuda_manifest_relative=src/compiler/simple.sdn
+  cuda_manifest="$cuda_source_root/$cuda_manifest_relative"
+  [ -f "$cuda_manifest" ] && [ ! -L "$cuda_manifest" ] &&
+    [ -f "$cuda_source_inventory" ] && [ ! -L "$cuda_source_inventory" ] || return 2
+  grep -Fxq "$cuda_manifest_relative" "$cuda_source_inventory" || return 2
+  cuda_settings=$(awk '
+    /^compiler_backends:[[:space:]]*$/ {section=1; next}
+    /^[^[:space:]#]/ {section=0; cuda=0}
+    section && /^  cuda:[[:space:]]*$/ {cuda=1; blocks++; next}
+    section && /^  [^[:space:]#]/ {cuda=0}
+    section && cuda && $1=="enabled:" {enabled=$2; enabled_count++}
+    section && cuda && $1=="placement:" {placement=$2; placement_count++}
+    END {
+      if (blocks!=1 || enabled_count!=1 || placement_count!=1) exit 2
+      print enabled ":" placement
+    }' "$cuda_manifest") || return 2
+  case "$cuda_settings" in
+    true:static) cuda_selected_mode=static; cuda_selected_root=src/plugins ;;
+    true:dynamic) cuda_selected_mode=dynamic; cuda_selected_root=src/compositions/cuda_dynamic ;;
+    false:static|false:dynamic) cuda_selected_mode=disabled; cuda_selected_root=src/compositions/cuda_disabled ;;
+    *) return 2 ;;
+  esac
+  case "$cuda_selected_mode" in
+    static) cuda_template_relative=src/plugins/backend_registry/selected_cuda_backend.spl ;;
+    *) cuda_template_relative="$cuda_selected_root/plugins/backend_registry/selected_cuda_backend.spl" ;;
+  esac
+  cuda_template="$cuda_source_root/$cuda_template_relative"
+  [ -f "$cuda_template" ] && [ ! -L "$cuda_template" ] || return 2
+  grep -Fxq "$cuda_template_relative" "$cuda_source_inventory" || return 2
+  cuda_manifest_sha256=$(sha256sum "$cuda_manifest" | cut -d ' ' -f 1) || return 2
+  cuda_template_sha256=$(sha256sum "$cuda_template" | cut -d ' ' -f 1) || return 2
+  [ "${#cuda_manifest_sha256}" -eq 64 ] && [ "${#cuda_template_sha256}" -eq 64 ] || return 2
+  cuda_selection_identity="cuda-$cuda_manifest_sha256-$cuda_template_sha256"
+}
+
+bootstrap_managed_cuda_record() {
+  cuda_job_root=$1
+  cuda_record="$cuda_job_root/cuda-selection.env"
+  # A legacy manifest has no selected-root argument. Refuse replay instead of
+  # accepting its old argv under a newly written selection record.
+  if [ -e "$cuda_job_root/manifest.sdn" ] && [ ! -f "$cuda_record" ]; then
+    echo 'managed CUDA selection: retained manifest lacks selection identity; use a new job root' >&2
+    return 2
+  fi
+  cuda_pending="$cuda_record.pending.$$"
+  [ ! -e "$cuda_pending" ] && [ ! -L "$cuda_pending" ] || return 2
+  (umask 077; set -C; printf '%s\n' 'format=SIMPLE-MANAGED-CUDA-SELECTION-1' \
+    "mode=$cuda_selected_mode" "source_root=$cuda_selected_root" \
+    "manifest_path=$cuda_manifest_relative" "manifest_sha256=$cuda_manifest_sha256" \
+    "template_path=$cuda_template_relative" "template_sha256=$cuda_template_sha256" \
+    "identity=$cuda_selection_identity" >"$cuda_pending") || return 2
+  if [ -e "$cuda_record" ] || [ -L "$cuda_record" ]; then
+    [ -f "$cuda_record" ] && [ ! -L "$cuda_record" ] &&
+      cmp -s "$cuda_pending" "$cuda_record" || return 2
+    rm -f "$cuda_pending" || return 2
+  else
+    mv "$cuda_pending" "$cuda_record" || return 2
+  fi
+}
