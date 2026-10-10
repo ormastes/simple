@@ -4,7 +4,7 @@ Authored manual, not generated SSpec output. The six fixtures below are executab
 
 On retained80030, three original nil-pattern sources reproduce MIR rejection; three explicit-None counterparts emit objects and their real authored mains pass. The scalar pair checks Some(3), Some(0) and nil; the reordered pair retains identical checks with absence first. The array pair checks empty Some distinct from nil, each high-bit byte and the original arrays after matching. Positive executable evidence is3/3, representing14 exit-code assertions. Original nil sources must become compile-and-run positives once a producer containing the real fix is admitted; their expected failure is specific to80030, not the language contract.
 
-Setup preserves nil construction, native arrays, the canonical runtime, exact producer/tool/source pins and direct process containment. The originals are not rewritten to satisfy a parser. No production runtime stub, constant replacement, fake main or seed fallback is used. The original seven-method reader retry remains held; these fixtures do not prove every reader cast/string conversion or whole-suite behavior.
+Setup preserves nil construction, native arrays, the canonical runtime, exact producer/tool/source pins and direct process containment. The originals are not rewritten to satisfy a parser. No production runtime stub, constant replacement, fake main or seed fallback is used. The original module0424 final cycle3 now emits its real library object with all nine entry functions; its three-owner cache and snapshot bindings passed the retained audit. These fixtures and that object do not prove every reader cast/string conversion or whole-suite behavior.
 
 ## explicit_none.spl
 

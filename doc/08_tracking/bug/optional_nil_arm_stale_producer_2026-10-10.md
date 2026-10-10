@@ -12,7 +12,7 @@ Three explicit-None objects were linked through canonical helper74 and ran their
 
 The three links used the same idle0895 runtime project/cache:39 retained runtime objects remained unchanged. No explicit cache-hit records were emitted, so actual hit count is UNOBSERVED. A private direct Windows Job collector passed normal-exit, aggregate-descendant RSS-cap and deadline controls before use. Sanity used a128MiB sampled aggregate RSS limit and15-second deadline; link cap768MiB plus256MiB observer forecast. These are sampled limits, not kernel hard-memory limits. No subsecond, native-performance, full-runtime, core-CLI or six-product qualification is claimed.
 
-Original module0424 `src/lib/common/math/ieee754_bits.spl` is held at two consumed attempts. Its final cycle3 requires the actual workaround commit, this canonical DB record, a source-bound private projection and root-reviewed admission. The original runtime failures remain evidence. No fourth cycle or blanket replay of103 overlapping symptoms is authorized by this report.
+Original module0424 `src/lib/common/math/ieee754_bits.spl` completed its approved final cycle3 with exit0 and a43,214-byte combined COFF object, SHA256 `5387b85bee67915d16afbb79e885ec64cdd7c978497c9100c82752d404bd18e2`. All nine entry functions are defined. Canonical receipt/log/input audit passed, and an independent extended-path supplement bound all three actual snapshot-source fingerprints to admitted bytes and their cache objects to the combined definitions. The source projection includes the seven-arm workaround and the preexisting release endian repair. Inclusive observed time18.3741786seconds and sampled peak299540KiB are diagnostic observations, not a matched performance comparison. No executable was fabricated for this library entry. All three attempts are consumed; the original failures remain evidence, with no fourth cycle or blanket replay of103 overlapping symptoms. Whole-reader semantics and qualified compiler/core gates remain unproven.
 
 Evidence packet: `build/native_probe/phase3-enum-nil-arm-fix-20261010` (retained local artifacts; not all tracked). SHA256 inventory:
 
@@ -36,3 +36,10 @@ Fixture source bytes:
 - `test/fixtures/compiler/native_optional_nil_arm/original_nil_first.spl`: `5faa306058110fe1f09353017d7bea879b81ac385a98f9c10e1fac2667493404`
 - `test/fixtures/compiler/native_optional_nil_arm/explicit_none_bytes.spl`: `d8e85bd75283904666dc875cb7fb70d8c802c0e6bc5472f402b2705f50d628df`
 - `test/fixtures/compiler/native_optional_nil_arm/original_nil_bytes.spl`: `239cff24fed1371b24486a9684b845e4ad43d5ce3f96ae403c4d912754d6c07f`
+
+Final original-module evidence (retained local artifacts):
+
+- `original0424-final/request.json`: `ebf54574a8c4a92fae792a761882e9887c633530e37e0fbcea2097dd68c89361`
+- `original0424-final/module-0424/result.json`: `f664d091f0ecf6fd62d877fcadaa500802f2e4b372b235014847740e67e91136`
+- `original0424-final/independent-audit.json`: `456d101fa3b300693a3163c96de6b64e78f8535ade1b180254e4f927bd0edea0`
+- `original0424-final/cache-binding-addendum.json`: `4f9e8353da71cb8c3d109f71a8a2713ec610f060233813975202c19654ad3429`
