@@ -126,3 +126,23 @@ describe "18 perf-cliff lint: repeated materialization / linear search in loop":
         expect(should_keep_lint_result(allowed, "PERF-SCAN-001")).to_equal(false)
         val denied = LintConfig.from_sdn_string("lints:\n  linear_scan_in_loop: deny\n")
         expect(config_level_name(apply_config_level(denied, "PERF-SCAN-002", LintLevel.Warn))).to_equal("deny")
+
+    it "AC9 a one-wide slice compared with a one-character literal is a byte test, not a scan":
+        # linker_script.spl:104 shape -- 41 such lines were the bulk of the first population
+        expect(slice_compared_for_equality("if input[i + 1:i + 1 + 1] == \"*\":")).to_equal(false)
+        expect(slice_compared_for_equality("if s[i:i + 1] == \"\\n\":")).to_equal(false)
+        expect(slice_compared_for_equality("if \"*\" == s[i:i+1]:")).to_equal(false)
+        expect(slice_compared_for_equality("if s[i:i + 1] != '*':")).to_equal(false)
+        expect(codes("fn f(s: text, n: i64):\n    var i = 0\n    while i < n:\n        if s[i:i + 1] == \"*\":\n            pass\n        i = i + 1\n")).to_equal("")
+        # still reported: one-wide against a variable, a wider slice against a
+        # literal, and a one-wide slice against a longer literal
+        expect(slice_compared_for_equality("if s[i:i + 1] == sep:")).to_equal(true)
+        expect(slice_compared_for_equality("if s[i:i + 2] == \"*\":")).to_equal(true)
+        expect(slice_compared_for_equality("if s[i:i + 1] == \"ab\":")).to_equal(true)
+        expect(slice_compared_for_equality("if s[i:i + n] == \"*\":")).to_equal(true)
+
+    it "AC10 single-quoted literals are literals: no finding inside one, none lost after one":
+        expect(slice_compared_for_equality("print 's[i:i + n] == sub'")).to_equal(false)
+        expect(slice_compared_for_equality("val q = '[' + name[a:b]")).to_equal(false)
+        expect(slice_compared_for_equality("if tag == '#' and s[i:i + n] == sub:")).to_equal(true)
+        expect(slice_compared_for_equality("if s[i:i + n] == 'needle':")).to_equal(true)

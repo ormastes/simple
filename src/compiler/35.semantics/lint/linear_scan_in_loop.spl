@@ -79,27 +79,56 @@ fn is_equality_op_at(code: text, at: i64) -> bool:
     val first = code.byte_at(at)
     code.byte_at(at + 1) == 61 and (first == 61 or first == 33)
 
+fn is_quote_byte(b: i64) -> bool:
+    b == 34 or b == 39
+
+fn one_char_literal_starts_at(code: text, at: i64) -> bool:
+    """A quoted literal of exactly one character (or one escape) starts at `at`."""
+    if at + 2 >= code.len() or not is_quote_byte(code.byte_at(at)):
+        return false
+    val quote = code.byte_at(at)
+    if code.byte_at(at + 1) == 92:
+        return at + 3 < code.len() and code.byte_at(at + 3) == quote
+    code.byte_at(at + 1) != quote and code.byte_at(at + 2) == quote
+
+fn one_char_literal_ends_at(code: text, at: i64) -> bool:
+    """A quoted literal of exactly one character (or one escape) ends at `at`."""
+    if at < 2 or not is_quote_byte(code.byte_at(at)):
+        return false
+    val quote = code.byte_at(at)
+    if code.byte_at(at - 2) == quote and code.byte_at(at - 1) != quote:
+        return true
+    at >= 3 and code.byte_at(at - 3) == quote and code.byte_at(at - 2) == 92
+
+fn slice_is_one_wide(code: text, open: i64, colon: i64, close: i64) -> bool:
+    """`[lo:lo + 1]`: the upper bound is textually the lower bound plus one."""
+    val lo = code[open + 1:colon].replace(" ", "")
+    val hi = code[colon + 1:close].replace(" ", "")
+    lo != "" and hi == lo + "+1"
+
 pub fn slice_compared_for_equality(code: text) -> bool:
     """True when the line compares a slice `recv[a:b]` with `==` / `!=`.
 
     PERF-SCAN-002 shape: `s[i:i + n] == sub` materialises one substring (or
-    sub-array) per evaluation only to compare and drop it. A slice whose bounds
-    are both literals is ignored; so is anything inside a string literal or
-    after a `#` comment. One left-to-right pass over the line's bytes."""
+    sub-array) per evaluation only to compare and drop it. Not reported: a
+    slice whose bounds are both literals; a one-wide slice compared with a
+    one-character literal (`s[i:i + 1] == "*"`, a single-byte test, not a
+    scan); anything inside a `"` or `'` literal or after a `#` comment.
+    One left-to-right pass over the line's bytes."""
     val n = code.len()
     var i = 0
-    var in_string = false
+    var quote = 0
     while i < n:
         val b = code.byte_at(i)
-        if in_string:
+        if quote != 0:
             if b == 92:
                 i = i + 1
-            elif b == 34:
-                in_string = false
+            elif b == quote:
+                quote = 0
             i = i + 1
             continue
-        if b == 34:
-            in_string = true
+        if is_quote_byte(b):
+            quote = b
             i = i + 1
             continue
         if b == 35:
@@ -114,34 +143,39 @@ pub fn slice_compared_for_equality(code: text) -> bool:
         # Scan to the matching `]`, noting a top-level `:` and any identifier.
         var depth = 1
         var j = i + 1
-        var has_colon = false
+        var colon = -1
         var has_variable = false
-        var inner_string = false
+        var inner_quote = 0
         while j < n and depth > 0:
             val c = code.byte_at(j)
-            if inner_string:
+            if inner_quote != 0:
                 if c == 92:
                     j = j + 1
-                elif c == 34:
-                    inner_string = false
-            elif c == 34:
-                inner_string = true
+                elif c == inner_quote:
+                    inner_quote = 0
+            elif is_quote_byte(c):
+                inner_quote = c
             elif c == 91 or c == 40:
                 depth = depth + 1
             elif c == 93 or c == 41:
                 depth = depth - 1
-            elif c == 58 and depth == 1:
-                has_colon = true
+            elif c == 58 and depth == 1 and colon < 0:
+                colon = j
             elif (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95:
                 has_variable = true
             j = j + 1
-        if depth == 0 and has_colon and has_variable:
+        if depth == 0 and colon >= 0 and has_variable:
+            val one_wide = slice_is_one_wide(code, i, colon, j - 1)
             # `recv[a:b] == x`
             var after = j
             while after < n and code.byte_at(after) == 32:
                 after = after + 1
             if is_equality_op_at(code, after):
-                return true
+                var operand = after + 2
+                while operand < n and code.byte_at(operand) == 32:
+                    operand = operand + 1
+                if not (one_wide and one_char_literal_starts_at(code, operand)):
+                    return true
             # `x == recv[a:b]`
             var start = i - 1
             while start >= 0 and (is_ident_byte(code.byte_at(start)) or code.byte_at(start) == 46):
@@ -149,7 +183,11 @@ pub fn slice_compared_for_equality(code: text) -> bool:
             while start >= 0 and code.byte_at(start) == 32:
                 start = start - 1
             if is_equality_op_at(code, start - 1):
-                return true
+                var operand_end = start - 2
+                while operand_end >= 0 and code.byte_at(operand_end) == 32:
+                    operand_end = operand_end - 1
+                if not (one_wide and one_char_literal_ends_at(code, operand_end)):
+                    return true
         i = j
     false
 
