@@ -345,3 +345,13 @@ The compiler-owned JIT compatibility probe remains unqualified: a current-source
 The four-module dynlib gate now exposes two distinct native link gaps: imported generic calls carry bare names although the mutex owner defines qualified specialization symbols, and the lifetime object references unmaterialized generic `Mutex.lock` / `Mutex.unlock` methods. A source-level call-name fix and exact two-module unit assertions are committed, but current-source native verification is pending. See [the bug](../../../08_tracking/bug/item5_imported_generic_and_mutex_method_native_link_2026-10-11.md). Optional-provider loading and matched size/startup/RSS gates remain open.
 
 The current-source imported-generic HIR probe reaches monomorphization with zero unresolved calls after explicit inner-owner types, but its 300-module native-build worker crashes in MIR before link. This leaves the name fix, dynlib method references, and all size/startup/RSS gates open; see [the MIR worker bug](../../../08_tracking/bug/item5_mono_hir_probe_mir_worker_crash_2026-10-11.md).
+
+## 2026-10-11 KPF worker session ownership
+
+The three transport-bound backend worker session types now reside in the OS
+KPF owner and are imported explicitly by the placement parity spec. The
+compiler K1 facades no longer export them. The kernel closure census moved
+from 8 to 3 kernel-to-app/OS imports, with 3 K0-to-P and 0 K1-to-P imports
+remaining; 2,237 compiler files are classified and none are unclassified.
+This is a source-ownership improvement only. Native parity, optional-provider
+loading, and the matched size/startup/RSS gates remain open.
