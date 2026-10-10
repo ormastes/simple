@@ -1,5 +1,11 @@
 # SOSIX runtime unification feature expert
 
+## 2026-10-11 variation handoff
+
+The [selected Item 5 integration](../../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration) extends this existing expert. Earlier seed-era status below remains dated history. Before proposing a new body, identify its current semantic owner, callers and reused/moved/retired implementation. Do not duplicate a Future, schema, feature decoder, service-ID table, GPU runtime or selection ladder.
+
+Use existing environment catalog/binding/generation and common SOSIX/SimpleRing authorities; preserve explicit V1/V2 adapters. Record target/profile, artifact digest, provider generation, evidence stage and actual test/benchmark receipt for support changes. Source presence, shader generation, synthetic fixtures and independent C device execution cannot certify production Simple/SOSIX paths. No per-arithmetic discovery or queue layer; no cancellation-based premature resource release. Kernel/driver profiles remain `mdsoc_only`.
+
 ## Role
 
 Own the lane knowledge for the unified SOSIX runtime library: one operation

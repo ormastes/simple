@@ -1,5 +1,13 @@
 # SOSIX Runtime Library Unification — Design
 
+## 2026-10-11 SIMD/GPU variation boundary
+
+Use the [integrated proposal](../compiler/simd_gpu_sosix_variation_final_2026-10-10.md) with the [current Item 5 reconciliation](../compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration). SOSIX/common contracts and SimpleRing own host-service operations, result/wake, lease and retirement; compiler/ProcessingIR/library owners retain arithmetic, algorithm choice and kernel planning.
+
+GPU API adapters bind their existing resource mechanics to this lifecycle, rather than creating a second CUDA/Metal/Vulkan runtime or Future family. Sync APIs adapt the same operation. Timeout/cancel retains resources while native work is in flight; unload requires retirement and generation-pin release. CPU arithmetic adds no ring submission.
+
+Current C CUDA registry execution is separate evidence from the environment-variant task bridge and SOSIX-G. Do not convert either bridge's unavailable capability into supported status from that test. Keep earlier dated findings and historical performance reports scoped to their actual artifacts; fresh route, lifetime, OS-provider and physical device evidence remains necessary.
+
 **Date:** 2026-09-05
 **Status:** Ready for implementation (core milestone). Repo-verified at `56d032e6f0d`, host `aarch64-unknown-linux-gnu`, `bin/simple` = Rust seed.
 **Research:** `doc/01_research/runtime/sosix_unification/` (three external passes + `README_tldr.md` verification block). This design records only what the repo check changed or made concrete; rationale that the research already gives is cited, not repeated.

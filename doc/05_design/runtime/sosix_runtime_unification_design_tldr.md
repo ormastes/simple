@@ -1,5 +1,9 @@
 # SOSIX Runtime Library Unification — TL;DR
 
+## 2026-10-11 variation update
+
+[Current design](sosix_runtime_unification_design.md#2026-10-11-simdgpu-variation-boundary): reuse SOSIX/SimpleRing operation, wake, lease and retirement owners; bind existing GPU providers without a second runtime. Arithmetic remains direct with no ring hop. Cancellation is not retirement; live buffers and generations remain pinned. Current C CUDA execution is not environment-variant GPU/SOSIX-G admission. Historical platform and performance claims require their own exact receipts.
+
 Unify the contract and the library, not every provider. One operation lifecycle
 (lifted from the already-pure `src/os/sosix/core/` into
 `src/lib/common/contracts/sosix/`), one canonical `Future`, one frozen

@@ -1,5 +1,11 @@
 # Processing Backend Guide
 
+## 2026-10-11 variation integration
+
+Use the [current Item 5 owner map](../../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration). Existing portable-compute targets include CUDA/HIP/OpenCL/Metal/WebGPU while Vulkan/SPIR-V also has a separate route; metadata reconciliation is pending, not a reason to add a third planner.
+
+Share operation semantics, legality and resource plans; retain API-specific emitters and synchronization. Compile-facet artifacts and runtime device sessions have separate admission/evidence. Generating PTX, SPIR-V or MSL does not establish device execution. Existing environment/SOSIX resource owners govern binding and retirement; do not duplicate a renderer/tensor scheduler or device manager to integrate a backend.
+
 **Status:** Partial — `FillU32` CPU/Vulkan slice available
 
 The processing backend is the planned portable compute layer underneath

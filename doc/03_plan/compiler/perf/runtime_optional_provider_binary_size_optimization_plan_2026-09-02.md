@@ -1,5 +1,28 @@
 # Runtime Optional Provider and Binary-Size Optimization Plan
 
+## 2026-10-11 selected variation migration
+
+The user requested incorporation of the [SIMD/GPU/SOSIX variation design](../../../05_design/compiler/simd_gpu_sosix_variation_final_2026-10-10.md). This table adds its work to this existing Item 5 plan; it creates no competing implementation plan. All rows remain **planned/unqualified** until their own production evidence passes. Current owner corrections are in the [shared-interface design](../../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration).
+
+| Proposal package | Existing Item 5 phases | Work and exit evidence |
+|---|---|---|
+| P0: evidence/owners | 0 | Census actual selectors, probes, host effects, public callers and current artifacts; retain source/target/producer identities and support stage. |
+| P1: environment contracts | 1, 6 | Adapt existing snapshots/codegen profiles, exact feature IDs and target registry; negotiate schema changes; prove old-reader rejection and validator/codec parity. |
+| P2: sparse source/provider slots | 1, 3 | Extend existing resolver/catalog; reject unrelated shadowing; normalize legacy tier roots; verify selected-source cache invalidation. |
+| P3: SOSIX lifecycle | 2, 6 | Connect common operation, result/wake, retained-buffer and retirement owners; prove sync/async and GC-family parity without copied algorithm bodies. |
+| P4: OS provider wiring | 2, 6 | Per OS, record source -> compile -> link/load -> bind -> execute; preserve portable fallback honestly and retire bypasses only after parity. |
+| P5: SIMD planning | 2, 3, 6 | Inject target profile into shared vectorizer; exact ISA/mask/tail/numerical receipts; qualify each fixed/scalable transformation and worker domain. |
+| P6: GPU facets | 2, 3, 6 | Keep compile and runtime facets distinct; integrate existing CUDA/Metal/Vulkan emitters/providers with shared resource lifecycle; actual submit/complete/parity per claimed backend. |
+| P7: advanced optimization | 6 | Opt-in extraction/fusion/tiling/reduction only after semantic/effect legality and measured end-to-end benefit including transfers; no new invented numeric target. |
+| P8: packaging/SimpleOS | 3, 5, 6 | Sealed providers, existing binding generations, admitted transports and real trap/registration evidence; drain before unload; no ABI-crossing fallback. |
+| P9: retirement | 7 | Remove obsolete owners or bound behavior-free aliases; verify no duplicate selectors/lifecycles, current links/manuals and exact claim-to-receipt traceability. |
+
+Proposal P5 is not this plan's Phase 5 and neither is a compiler generation. P4 and P5 may proceed independently after shared contracts freeze. Unavailable DSP, OS or physical GPU rows remain open without blocking unrelated qualified repairs. Do not remove a working static provider before dynamic parity and rollback exist.
+
+Keep the immediate host sequence: finish the immutable bootstrap candidate and Hello gates; build and execute actual Simple DB/webserver fixtures; run matched AVX512 enabled/disabled cohorts; qualify current ARM/RISC-V providers/apps; measure default image/loading and cut over qualified providers. New shared contracts enter the next candidate, never a live frozen build. Release PRs may land independently qualified fixes, but documentation or a C-only test never closes full Item 5.
+
+Each package records existing owner, callers, reused/moved/retired body, retained aliases, baseline, rollback generation, evidence references and unresolved rows. Extend the existing trace database with variation-axis attributes rather than copying one feature per OS/ISA combination.
+
 ## 2026-10-09 priority and release baseline
 
 First priority is the nonbreaking item-5 plan/design and shared-interface
