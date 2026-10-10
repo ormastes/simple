@@ -3321,6 +3321,19 @@ bootstrap_stage3_copy_seed_tuple() {
     bootstrap_stage3_hosted_deps="$bootstrap_stage3_tuple_source/deps"
     bootstrap_stage3_hosted_candidates=
     bootstrap_stage3_hosted_count=0
+    bootstrap_stage3_hosted_selected=0
+    # An explicitly selected Cargo package publishes its rlib at the profile
+    # root. This is the selected output, unlike metadata variants retained in
+    # deps/build from earlier feature sets. Prefer it regardless of mtime;
+    # callers still own the Cargo lock and fingerprint the producing recipe.
+    bootstrap_stage3_hosted_root="$bootstrap_stage3_tuple_source/libspl_hosted_runtime.rlib"
+    if [ -e "$bootstrap_stage3_hosted_root" ] || [ -L "$bootstrap_stage3_hosted_root" ]; then
+        [ -f "$bootstrap_stage3_hosted_root" ] &&
+            [ ! -L "$bootstrap_stage3_hosted_root" ] || { echo "bootstrap_stage3_copy_seed_tuple: invalid selected hosted rlib" >&2; return 1; }
+        bootstrap_stage3_hosted_candidates=$bootstrap_stage3_hosted_root
+        bootstrap_stage3_hosted_count=1
+        bootstrap_stage3_hosted_selected=1
+    fi
     for bootstrap_stage3_hosted_path in \
         "$bootstrap_stage3_hosted_deps"/libspl_hosted_runtime-*.rlib \
         "$bootstrap_stage3_tuple_source"/build/spl_hosted_runtime/*/out/libspl_hosted_runtime-*.rlib; do
@@ -3328,8 +3341,9 @@ bootstrap_stage3_copy_seed_tuple() {
         [ -f "$bootstrap_stage3_hosted_path" ] &&
             [ ! -L "$bootstrap_stage3_hosted_path" ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 5" >&2; return 1; }
         bootstrap_stage3_hosted_count=$((bootstrap_stage3_hosted_count + 1))
-        if [ -z "$bootstrap_stage3_hosted_candidates" ] ||
-            [ "$bootstrap_stage3_hosted_path" -nt                 "$bootstrap_stage3_hosted_candidates" ]; then
+        if [ "$bootstrap_stage3_hosted_selected" -eq 0 ] &&
+            { [ -z "$bootstrap_stage3_hosted_candidates" ] ||
+              [ "$bootstrap_stage3_hosted_path" -nt "$bootstrap_stage3_hosted_candidates" ]; }; then
             bootstrap_stage3_hosted_candidates=$bootstrap_stage3_hosted_path
         fi
     done
@@ -3344,18 +3358,29 @@ bootstrap_stage3_copy_seed_tuple() {
     # Refusing outright surfaced as a bare "could not prepare immutable Rust
     # authority generation" naming nothing, after four successful builds.
     #
-    # Newest-wins matches the semantics this bootstrap ALREADY documents for the
+    # Without an explicit selected-package output, newest-wins matches the
+    # legacy semantics this bootstrap ALREADY documents for the
     # sibling archive slot ("The last cargo invocation wins the deps/ archive
     # slot", bootstrap-from-scratch.sh) -- so the tuple is frozen from the same
     # final state of the target dir rather than from an arbitrary member.
     #
     # Zero candidates is still fatal, and the choice is never silent.
     [ "$bootstrap_stage3_hosted_count" -ge 1 ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 6" >&2; return 1; }
-    if [ "$bootstrap_stage3_hosted_count" -gt 1 ]; then
+    if [ "$bootstrap_stage3_hosted_selected" -eq 1 ]; then
+        echo "bootstrap authority: freezing selected package output: $bootstrap_stage3_hosted_candidates" >&2
+    elif [ "$bootstrap_stage3_hosted_count" -gt 1 ]; then
         echo "bootstrap authority: $bootstrap_stage3_hosted_count spl_hosted_runtime rlibs in $bootstrap_stage3_hosted_deps; freezing the newest: $bootstrap_stage3_hosted_candidates" >&2
     fi
     bootstrap_stage3_hosted_name=deps/$(basename -- \
         "$bootstrap_stage3_hosted_candidates")
+    if [ "$bootstrap_stage3_hosted_selected" -eq 1 ]; then
+        # Preserve the admitted hashed deps/ spelling for every consumer.
+        # This suffix binds content, not Cargo metadata or a guessed feature
+        # identity; the tuple transaction still verifies the source bytes.
+        bootstrap_stage3_hosted_content_sha=$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_hosted_candidates") || return 1
+        bootstrap_stage3_hosted_name="deps/libspl_hosted_runtime-$bootstrap_stage3_hosted_content_sha.rlib"
+    fi
     set -- "$@" "$bootstrap_stage3_hosted_name"
 
     # Record source aliases for members whose cargo layout spelling differs
@@ -3629,6 +3654,12 @@ bootstrap_stage3_copy_seed_tuple() {
 "$bootstrap_stage3_tuple_destination/$bootstrap_stage3_hosted_relative"
     bootstrap_stage3_hosted_sha=$(bootstrap_stage3_hash_file \
         "$bootstrap_stage3_hosted_projected") || { echo "bootstrap_stage3_copy_seed_tuple: failed check 11" >&2; return 1; }
+    if [ "$bootstrap_stage3_hosted_selected" -eq 1 ]; then
+        [ "$bootstrap_stage3_hosted_sha" = "$bootstrap_stage3_hosted_content_sha" ] || {
+            echo "bootstrap_stage3_copy_seed_tuple: selected hosted rlib changed before projection" >&2
+            return 1
+        }
+    fi
     bootstrap_stage3_hosted_receipt=\
 "$bootstrap_stage3_tuple_destination/hosted-runtime.env"
     bootstrap_stage3_hosted_pending="${bootstrap_stage3_hosted_receipt}.tmp.$$"
