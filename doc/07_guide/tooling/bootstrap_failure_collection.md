@@ -456,3 +456,11 @@ Windows, macOS, FreeBSD and SimpleOS contracts. Distinguish source review from
 actual platform execution and unavailable providers; Linux PASS cannot stand
 for another host. The [POSIX/host interface index](../app/llm/simpleos_posix_host_interface_index.md)
 and LLM wiki's SOSIX/QEMU matrix route to the canonical owners and platform checks.
+
+## Native staging and terminal consumers
+
+Use [native staging and terminal evidence](bootstrap_native_staging.md) for the
+measured Linux/WSL cache-parent staging path, launch-interrupt ownership and atomic
+terminal receipts. Preserve the exact source/runtime boundaries and the campaign
+Phase 3/full-CLI gates; neither a progress marker nor a partial object inventory
+is a completed producer.

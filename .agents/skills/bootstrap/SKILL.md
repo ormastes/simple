@@ -33,3 +33,10 @@ and early manual linking, apply the shared
   suite execution. Report executable output and positive assertion counts,
   not merely successful linking. Reuse unchanged green evidence and respect
   finite per-cause repair budgets and recorded user exceptions.
+
+## Native staging and finality
+
+For serialized crash diagnosis, host CUDA policy, RAM cache-parent staging and
+terminal consumer authority, apply [native staging and terminal evidence](../../../doc/07_guide/tooling/bootstrap_native_staging.md).
+Keep campaign Phase 3 priority and full-CLI test ownership explicit; source review
+and a linked bootstrap binary do not admit suite execution.

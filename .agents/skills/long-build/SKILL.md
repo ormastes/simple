@@ -34,3 +34,10 @@ inspect additional diagnostics only for failed runs.
 7. Finish the finite graph with truthful PASS/FAILED/BLOCKED/SKIPPED rows and
    actual test counts. Reuse green results for unchanged inputs; stop at
    convergence and never run an indefinite identical retry loop.
+
+## Serialized native diagnosis
+
+Apply [native staging and terminal evidence](../../../doc/07_guide/tooling/bootstrap_native_staging.md)
+when the selected lane requires one compiler/thread. Keep the lock through owned
+child cleanup and archival; publish terminal status only after fallback/finalization
+completes. Source repair may remain parallel under separate ownership.
