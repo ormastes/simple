@@ -471,3 +471,7 @@ A guarded declaration-only native path now allows the 50-module Item 6 CAS entry
 ## 2026-10-10 native text conversion repair
 
 The focused six-module LLVM/core-C probe found nonempty text converting to an empty byte array before `sha256_text`; pure and accelerated byte SHA paths were correct. The common text-byte facade now has a guarded sized-array fallback, and that probe passes. The full CAS publisher was not rerun after this fix under the bounded verification cap, and no production time/RSS cohort is available. See [the runtime bug](../../../08_tracking/bug/native_text_to_bytes_empty_2026-10-10.md) and [the continuation report](../../../09_report/compiler/item56_release_continuation_2026-10-10.md).
+
+## 2026-10-11 native CAS readback update
+
+The focused second-generation native CAS scenario now passes publish, readback, stale-CAS rejection, and malformed-frame rejection using bounded byte decimal parsing. This updates the earlier native publication blocker; it does not qualify warm SCV recovery, production entrypoint cutover, or matched p95/RSS cohorts. See [the continuation report](../../../09_report/compiler/item56_release_continuation_2026-10-10.md).

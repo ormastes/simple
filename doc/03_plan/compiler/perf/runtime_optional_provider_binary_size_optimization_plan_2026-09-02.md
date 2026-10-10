@@ -339,3 +339,7 @@ The compiler interpreter JIT implementation was moved from the app facade to its
 ### 2026-10-10 native JIT probe blocker
 
 The compiler-owned JIT compatibility probe remains unqualified: a current-source pure-Simple Stage 2 compiler reaches 1,009 HIR units but rejects 12 modules on unresolved type closure before linking. The exact failed types and declaration owners are recorded in `doc/08_tracking/bug/item5_jit_probe_hir_type_closure_2026-10-10.md`. Structural closure remains 3 K0→P and 9 kernel→app/OS, with demand-load and matched size/startup/RSS still open.
+
+### 2026-10-11 native imported-generic link boundary
+
+The four-module dynlib gate now exposes two distinct native link gaps: imported generic calls carry bare names although the mutex owner defines qualified specialization symbols, and the lifetime object references unmaterialized generic `Mutex.lock` / `Mutex.unlock` methods. A source-level call-name fix and exact two-module unit assertions are committed, but current-source native verification is pending. See [the bug](../../../08_tracking/bug/item5_imported_generic_and_mutex_method_native_link_2026-10-11.md). Optional-provider loading and matched size/startup/RSS gates remain open.
