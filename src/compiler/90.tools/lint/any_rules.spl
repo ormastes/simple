@@ -1,0 +1,259 @@
+# Any rules — runner and lint/check transport (robustness item 7b).
+#
+# Three warn-first families, `allow` in EVERY lint profile. Opt-in only:
+# SIMPLE_ANY_RULES=warn|deny, or an explicit family level in simple.sdn.
+# All three apply to files under src/compiler/** only:
+#
+#   written_any_decl   W-ANY-DECL-001   a WRITTEN `Any`/`any` in a declaration
+#                      (param, return, field, local);
+#                      names the concrete type when the
+#                      initialiser / returns / default show one.
+#   any_fallback_use   W-HIR-INFER-003  a binding whose type fell back by
+#                      inference, used where a concrete type is needed
+#                      (arithmetic, comparison, typed argument, typed return).
+#                      Extends W-HIR-INFER-001/002, which cover receiver,
+#                      `for`, index and field uses and report at the
+#                      declaration.
+#   any_receiver_use   W-ANY-USE-001/002  `for` over / method call on a value
+#                      whose type is `Any`.
+#
+# WHERE IT RUNS. The rules need a lowered HirModule. `simple check` already
+# lowers one, so the rules run there (semantic_check.spl) when the environment
+# variable SIMPLE_ANY_RULES names a mask ("d" decl, "f" fallback, "r" receiver;
+# unset/empty = off, nothing is walked). `simple lint` does NOT import HIR
+# lowering: measured on the seed interpreter, importing it costs +7 s on every
+# lint run, a top-level `use lazy` is loaded eagerly there, and a
+# function-local `use` loads late but loses `impl` methods. So when a family
+# is on, lint runs `<self> check <file>` with the mask in the environment and
+# relays the findings; with every family off it starts no process at all.
+#
+# This module deliberately imports neither the parser nor HIR lowering.
+# Rules: 35.semantics/lint/{written_any_scan,hir_frontend_diagnostics}.spl.
+
+use std.io_runtime.{env_get, getpid}
+use std.nogc_sync_mut.io.file_ops.{file_append}
+use compiler.hir.hir_types.{HirModule}
+use compiler.semantics.lint.written_any_scan.{WrittenAnySite, scan_written_any, written_any_site_key}
+use compiler.semantics.lint.hir_frontend_diagnostics.{HirAnyReport, run_hir_any_diagnostics, hir_any_report_suggestion}
+
+pub struct AnyRuleFinding:
+    code: text
+    line: i64
+    col: i64
+    message: text
+
+# `walked` is the no-walk witness the acceptance spec pins: an empty mask (or
+# R1 alone on a file with no written `Any`) never visits the module.
+pub struct AnyRulesRun:
+    findings: [AnyRuleFinding]
+    walked: bool
+
+# What lint reads back from the `check` child. `checked` is false unless the
+# child printed its sentinel line: a crashed or too-old checker is "not
+# checked", never "clean".
+pub struct AnyRulesRelay:
+    findings: [AnyRuleFinding]
+    checked: bool
+
+pub fn any_rules_env_var() -> text:
+    "SIMPLE_ANY_RULES"
+
+pub fn any_rule_path_is_compiler_source(path: text) -> bool:
+    val normal = path.replace("\\", "/")
+    normal.starts_with("src/compiler/") or normal.contains("/src/compiler/")
+
+pub fn any_rules_mask(want_decl: bool, want_fallback: bool, want_receiver: bool) -> text:
+    var mask = ""
+    if want_decl:
+        mask = mask + "d"
+    if want_fallback:
+        mask = mask + "f"
+    if want_receiver:
+        mask = mask + "r"
+    mask
+
+# `off` (or `0`) in the environment is the kill switch: `check` walks nothing
+# and `lint` starts no checker, whatever simple.sdn says.
+pub fn any_rules_env_off() -> bool:
+    val raw = env_get(any_rules_env_var())
+    raw == "off" or raw == "0"
+
+# The opt-in switch for lint: `SIMPLE_ANY_RULES=warn` (or `deny`) turns all
+# three families on at that level. "" = the environment does not opt in. No
+# lint profile implies the rules (see config_and_model.build_default_levels).
+pub fn any_rules_env_level() -> text:
+    val raw = env_get(any_rules_env_var())
+    if raw == "warn" or raw == "warning":
+        return "warn"
+    if raw == "deny" or raw == "error":
+        return "deny"
+    ""
+
+# What `check` runs: a level word or `all` means every rule, otherwise the
+# value must be a mask made only of `d` (decl), `f` (fallback), `r` (receiver).
+# Anything else, including unset, `off` and `0`, runs nothing.
+pub fn any_rules_mask_from_env() -> text:
+    val raw = env_get(any_rules_env_var())
+    if raw == "":
+        return ""
+    if any_rules_env_level() != "" or raw == "all" or raw == "1":
+        return "dfr"
+    if raw.replace("d", "").replace("f", "").replace("r", "") != "":
+        return ""
+    any_rules_mask(raw.contains("d"), raw.contains("f"), raw.contains("r"))
+
+# The mask lint needs a checker run for; "" = do not start one. `want_*` are
+# the families an explicit simple.sdn level turned on; the environment level
+# turns all three on. The rules are about the compiler's own code: outside
+# src/compiler/** nothing runs. R1 alone needs no run when nothing is written.
+pub fn any_rules_lint_mask(
+    path: text, source: text,
+    want_decl: bool, want_fallback: bool, want_receiver: bool
+) -> text:
+    if any_rules_env_off() or not any_rule_path_is_compiler_source(path):
+        return ""
+    val env_on = any_rules_env_level() != ""
+    var decl_on = want_decl or env_on
+    val fallback_on = want_fallback or env_on
+    val receiver_on = want_receiver or env_on
+    if decl_on and not fallback_on and not receiver_on:
+        decl_on = scan_written_any(source).len() > 0
+    any_rules_mask(decl_on, fallback_on, receiver_on)
+
+fn any_rule_decl_message(site: WrittenAnySite, suggestion: text) -> text:
+    var what = ""
+    if site.slot == "param":
+        what = "parameter `{site.name}` of `{site.owner}`"
+    elif site.slot == "return":
+        what = "return type of `{site.owner}`"
+    elif site.slot == "field":
+        what = "field `{site.owner}.{site.name}`"
+    else:
+        what = "local `{site.name}` in `{site.owner}`"
+    var hint = "use a concrete type, a generic `<T>` or a closed enum"
+    if suggestion != "":
+        hint = "its value is `{suggestion}` here — write `{suggestion}`"
+    "written `{site.spelled}` in the {what}: compiler code must not erase types ({hint}; an `unsafe:` block is the reviewed escape)"
+
+pub fn any_rules_for_hir(path: text, source: text, hir: HirModule, mask: text) -> AnyRulesRun:
+    var out: [AnyRuleFinding] = []
+    val want_fallback = mask.contains("f")
+    val want_receiver = mask.contains("r")
+    val decl_on = mask.contains("d")
+    if not any_rule_path_is_compiler_source(path):
+        return AnyRulesRun(findings: out, walked: false)
+    if not decl_on and not want_fallback and not want_receiver:
+        return AnyRulesRun(findings: out, walked: false)
+    val sites = scan_written_any(source)
+    if not want_fallback and not want_receiver and sites.len() == 0:
+        return AnyRulesRun(findings: out, walked: false)
+    var keys: [text] = []
+    for site in sites:
+        keys = keys.push(written_any_site_key(site))
+    val report = run_hir_any_diagnostics(hir, keys)
+    if decl_on:
+        for site in sites:
+            val suggestion = hir_any_report_suggestion(report, written_any_site_key(site))
+            out = out.push(AnyRuleFinding(
+                code: "W-ANY-DECL-001", line: site.line, col: site.col,
+                message: any_rule_decl_message(site, suggestion)))
+    for finding in report.findings:
+        val wanted = if finding.family == "any_fallback_use": want_fallback else: want_receiver
+        if wanted:
+            out = out.push(AnyRuleFinding(
+                code: finding.code, line: finding.line, col: finding.col,
+                message: "in `{finding.function_name}`: {finding.message}"))
+    AnyRulesRun(findings: out, walked: true)
+
+# ---------------------------------------------------------------------------
+# check -> lint transport. Same `path:line:col: warning: [CODE] message` shape
+# as hir_frontend_finding_render, so one grep finds every frontend rule id.
+# ---------------------------------------------------------------------------
+fn any_rule_finding_render(path: text, f: AnyRuleFinding) -> text:
+    "{path}:{f.line}:{f.col}: warning: [{f.code}] {f.message}"
+
+fn any_rules_sentinel(mask: text, count: i64) -> text:
+    "any-rules: checked mask={mask} findings={count}"
+
+# At most this many Any-rule findings are printed (check) or relayed (lint)
+# per source file; the rest is summarised in one line.
+pub fn any_rules_max_shown() -> i64:
+    50
+
+pub fn any_rules_out_env_var() -> text:
+    "SIMPLE_ANY_RULES_OUT"
+
+# What `check` reports for one source: one line per finding, then the
+# sentinel. When SIMPLE_ANY_RULES_OUT names a file the lines are ALSO appended
+# there. That file, not stdout, is what lint and the ratchet read: the check
+# entry truncates worker stdout at 12 000 characters (measured: the sentinel
+# of isel_riscv64.spl was cut off), and a truncated report must never read
+# as a short one.
+pub fn any_rules_report_lines(path: text, mask: text, findings: [AnyRuleFinding]) -> [text]:
+    var lines: [text] = []
+    for finding in findings:
+        lines = lines.push(any_rule_finding_render(path, finding))
+    lines = lines.push(any_rules_sentinel(mask, findings.len()))
+    val out_path = env_get(any_rules_out_env_var())
+    if out_path != "":
+        file_append(out_path, lines.join("\n") + "\n")
+    # Printed output is capped per source; the report file above is not, so
+    # the ratchet still counts every finding.
+    val cap = any_rules_max_shown()
+    if findings.len() <= cap:
+        return lines
+    var shown: [text] = []
+    var i = 0
+    while i < cap:
+        shown = shown.push(lines[i])
+        i = i + 1
+    shown = shown.push("any-rules: {findings.len() - cap} more finding(s) not shown (cap {cap} per file)")
+    shown.push(any_rules_sentinel(mask, findings.len()))
+
+fn any_rule_code_is_known(code: text) -> bool:
+    (code == "W-ANY-DECL-001" or code == "W-HIR-INFER-003" or
+        code == "W-ANY-USE-001" or code == "W-ANY-USE-002")
+
+pub fn any_rules_parse_check_output(output: text) -> AnyRulesRelay:
+    var findings: [AnyRuleFinding] = []
+    var checked = false
+    val marker = ": warning: ["
+    for raw in output.split("\n"):
+        val line = raw.trim()
+        if line.starts_with("any-rules: checked "):
+            checked = true
+            continue
+        if not line.contains(marker):
+            continue
+        val halves = line.split(marker)
+        val head = halves[0]
+        val tail = line.substring(head.len() + marker.len(), line.len())
+        if not tail.contains("] "):
+            continue
+        val code = tail.split("] ")[0]
+        if not any_rule_code_is_known(code):
+            continue
+        # `head` is `<path>:<line>:<col>`; the path itself may hold `:` (C:\...).
+        val parts = head.split(":")
+        if parts.len() < 3:
+            continue
+        findings = findings.push(AnyRuleFinding(
+            code: code,
+            line: parts[parts.len() - 2].to_i64(),
+            col: parts[parts.len() - 1].to_i64(),
+            message: tail.substring(code.len() + 2, tail.len())))
+    AnyRulesRelay(findings: findings, checked: checked)
+
+# Where lint asks its `check` child to write the report for `path`: one file
+# per linting process and source in the system temp directory (cwd when none
+# is set), so concurrent lints of one file do not share a report.
+pub fn any_rules_report_path(path: text) -> text:
+    var dir = env_get("TMPDIR")
+    if dir == "":
+        dir = env_get("TEMP")
+    if dir == "":
+        dir = env_get("TMP")
+    if dir == "":
+        dir = "."
+    val flat = path.replace("\\", "_").replace("/", "_").replace(":", "_")
+    "{dir}/simple-any-rules-{getpid()}-{flat}.out"
