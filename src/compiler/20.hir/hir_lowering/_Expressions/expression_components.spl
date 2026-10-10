@@ -173,11 +173,185 @@ impl HirLowering:
                     is_unit = true
                 case VariantKind.Tuple(payload_types):
                     is_unit = payload_types.len() == 0
+                    # Slot rows: which enum each payload slot is declared as,
+                    # for patterns whose OUTER enum HIR cannot name (an
+                    # untyped subject, a generic enum, non-concrete slots);
+                    # declared_pattern_enum_slots covers every other case.
+                    var slot_idx = 0
+                    for untyped_slot_type in payload_types:
+                        val slot_type: Type = untyped_slot_type
+                        self.register_enum_payload_slot(owner.id, variant.name, slot_idx, slot_type, "")
+                        slot_idx = slot_idx + 1
+                case VariantKind.Struct(payload_fields):
+                    # A named payload (`BinOp(dest: LocalId, op: MirBinOp, ..)`)
+                    # arrives as Struct; positional patterns index its fields.
+                    var field_idx = 0
+                    for untyped_payload_field in payload_fields:
+                        val payload_field: ParserField = untyped_payload_field
+                        self.register_enum_payload_slot(owner.id, variant.name, field_idx, payload_field.type_, "")
+                        field_idx = field_idx + 1
                 case _: ()
             if is_unit:
+                val unit_row_known = self.enum_unit_pattern_names.contains_key("{owner.id}:{variant.name}")
                 self.enum_unit_pattern_names["{owner.id}:{variant.name}"] = true
                 if canonical_owner >= 0:
                     self.enum_unit_pattern_names["{canonical_owner}:{variant.name}"] = true
+                # Name-only row: answers "is this bare name a unit variant of
+                # SOME visible enum" when the subject's enum is unknown.
+                # `**:` marks a name that a SECOND enum also declares: the
+                # name alone then identifies no enum.
+                if self.enum_unit_pattern_names.contains_key("*:{variant.name}") and not unit_row_known:
+                    self.enum_unit_pattern_names["**:{variant.name}"] = true
+                self.enum_unit_pattern_names["*:{variant.name}"] = true
+
+    me bare_name_may_be_unit_variant(name: text) -> bool:
+        """The name-only rule's precondition: a Capitalized name that is a
+        unit variant of some visible enum. Lowercase names are excluded on
+        purpose -- the closure has enums with lowercase unit variants
+        (`body`, `mir`, `module`, ...) and a lowercase bare name in a
+        pattern is an ordinary binding the arm body reads."""
+        if name.len() == 0 or not "ABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(name[0:1]):
+            return false
+        self.enum_unit_pattern_names.contains_key("*:{name}")
+
+    me warn_bare_variant(name: text, message: text):
+        """Advisory on stderr, once per (module, name); lowering is unchanged.
+        `SIMPLE_BARE_VARIANT_WARN=0` silences it."""
+        if (hir_expr_env_get("SIMPLE_BARE_VARIANT_WARN") ?? "") == "0":
+            return
+        if self.enum_unit_pattern_names.contains_key("warned:{name}"):
+            return
+        self.enum_unit_pattern_names["warned:{name}"] = true
+        eprint("[hir-lower] WARNING: bare `{name}` {message} ({self.module_filename}; SIMPLE_BARE_VARIANT_WARN=0 silences)")
+
+    me register_enum_payload_slot(outer_owner: i64, variant_name: text, slot: i64, slot_type: Type, path: text):
+        """Row `{outer enum id}:{slot enum name}` under the index key
+        `{variant}:{slot}:{path}` (enum_payload_slot_rows), so a lookup reads
+        one list instead of walking every table key.
+        `path` is the chain of Option/Result wrappers between the slot and the enum
+        (`op: Op?` -> "/Some", `r: Result<i64, Op>` -> "/Err"), so
+        `case W(Some(Eq))` resolves `Eq` through the generic instantiation.
+        The outer enum is part of the key: two enums may declare the same
+        variant name with differently typed slots."""
+        val slot_type_name = parser_type_kind_named_name(slot_type.kind)
+        if slot_type_name != "":
+            val slot_type_args = parser_type_kind_named_args(slot_type.kind)
+            if slot_type_name == "Option" and slot_type_args.len() == 1:
+                val option_arg: Type = slot_type_args[0]
+                self.register_enum_payload_slot(outer_owner, variant_name, slot, option_arg, path + "/Some")
+                return
+            if slot_type_name == "Result" and slot_type_args.len() == 2:
+                val ok_arg: Type = slot_type_args[0]
+                val err_arg: Type = slot_type_args[1]
+                self.register_enum_payload_slot(outer_owner, variant_name, slot, ok_arg, path + "/Ok")
+                self.register_enum_payload_slot(outer_owner, variant_name, slot, err_arg, path + "/Err")
+                return
+            val slot_owner = self.symbols.lookup_or_invalid(slot_type_name)
+            if slot_owner.is_valid():
+                val row_key = "{variant_name}:{slot}:{path}"
+                val row = "{outer_owner}:{slot_type_name}"
+                var rows: [text] = []
+                if self.enum_payload_slot_rows.contains_key(row_key):
+                    rows = self.enum_payload_slot_rows[row_key]
+                if not rows.contains(row):
+                    rows = rows.push(row)
+                    self.enum_payload_slot_rows[row_key] = rows
+            return
+        if parser_type_kind_is_optional(slot_type.kind):
+            val optional_inner: Type = parser_type_kind_optional_inner(slot_type.kind, slot_type)
+            self.register_enum_payload_slot(outer_owner, variant_name, slot, optional_inner, path + "/Some")
+
+    me payload_slot_enum_owner(outer_owner: i64, outer_variant: text, slot: i64, path: text, name: text) -> i64:
+        """Symbol id of the one enum that payload slot `slot` (through `path`)
+        of `outer_variant` is declared as AND that owns the unit variant
+        `name`. `outer_owner` < 0 = outer enum unknown: every enum declaring
+        `outer_variant` is considered. -1 = none, -2 = several.
+
+        Reads the per-(variant, slot, path) row list and re-resolves the slot
+        enum by name:
+        the keys of an `{i64: bool}` dict come back as text on the seed, so
+        an id taken from such a key is not usable as a SymbolId there."""
+        val row_key = "{outer_variant}:{slot}:{path}"
+        if not self.enum_payload_slot_rows.contains_key(row_key):
+            return -1
+        val rows: [text] = self.enum_payload_slot_rows[row_key]
+        val wanted_outer = "{outer_owner}"
+        var found: i64 = -1
+        for untyped_row in rows:
+            val row: text = untyped_row
+            val row_parts = row.split(":")
+            val row_outer: text = row_parts[0]
+            if outer_owner < 0 or row_outer == wanted_outer:
+                val slot_type_name: text = row_parts[1]
+                val slot_owner = self.symbols.lookup_or_invalid(slot_type_name)
+                if slot_owner.is_valid() and self.enum_unit_pattern_names.contains_key("{slot_owner.id}:{name}"):
+                    if found >= 0 and found != slot_owner.id:
+                        return -2
+                    found = slot_owner.id
+        found
+
+    me lower_payload_slot_pattern(p: Pattern, outer_owner: i64, outer_variant: text, slot: i64, path: text) -> HirPattern:
+        """Sub-pattern in payload slot `slot` of `outer_variant` (of enum
+        `outer_owner`, < 0 when unknown), `path` wrappers deep. A bare name
+        that is a unit variant of the slot's declared enum
+        (`case BinOp(_, Eq, _, _) | BinOp(_, Ne, _, _):`,
+        `case W(Some(Eq)):`) is a variant test, typed with that enum so a
+        name several enums share (`Eq`) needs no owner search. Exactly one
+        slot enum must own the name; otherwise it stays a binding (the seed
+        binds when the slot's type is not an enum owning the name)."""
+        match p.kind:
+            case PatternKind.Binding(name, mutable):
+                if not mutable and self.bare_name_may_be_unit_variant(name):
+                    val slot_owner_id = self.payload_slot_enum_owner(outer_owner, outer_variant, slot, path, name)
+                    if slot_owner_id >= 0:
+                        val slot_enum_type = HirType(kind: HirTypeKind.Named(SymbolId(id: slot_owner_id), []), span: p.span)
+                        return HirPattern(kind: HirPatternKind.Enum(slot_enum_type, name, nil), has_type_: true, type_: slot_enum_type, span: p.span)
+            case PatternKind.Enum(wrapper_enum, wrapper, wrapper_payload):
+                if wrapper_enum == "" and (wrapper == "Some" or wrapper == "Ok" or wrapper == "Err"):
+                    if val wrapped = wrapper_payload:
+                        match wrapped:
+                            case Tuple(wrapped_patterns):
+                                if wrapped_patterns.len() == 1:
+                                    val inner = self.lower_payload_slot_pattern(wrapped_patterns[0], outer_owner, outer_variant, slot, path + "/" + wrapper)
+                                    return self.wrapper_pattern(wrapper, inner, p.span)
+                            case _: ()
+            case PatternKind.Or(alternatives):
+                var slot_alts: [HirPattern] = []
+                for alt in alternatives:
+                    slot_alts = slot_alts.push(self.lower_payload_slot_pattern(alt, outer_owner, outer_variant, slot, path))
+                return HirPattern(kind: HirPatternKind.Or(self.unify_or_pattern_bindings(slot_alts, p.span)), type_: nil, span: p.span)
+            case _: ()
+        self.lower_pattern(p)
+
+    me wrapper_pattern(wrapper: text, inner: HirPattern, span: Span) -> HirPattern:
+        """`Some(inner)` / `Ok(inner)` / `Err(inner)` exactly as lower_pattern
+        builds a bare one-slot enum pattern (unqualified -> Error type; the
+        payload wrapped in an explicit Some, see the landmine note there)."""
+        var wrapper_payload: HirPatternPayload? = nil
+        wrapper_payload = Some(HirPatternPayload.Tuple([inner]))
+        HirPattern(kind: HirPatternKind.Enum(HirType(kind: HirTypeKind.Error, span: span), wrapper, wrapper_payload), type_: nil, span: span)
+
+    me pattern_names_unit_variant(p: Pattern) -> bool:
+        """True when `p` contains a bare immutable name that is a unit
+        variant of some visible enum (directly, in an or-alternative, or
+        inside a positional payload)."""
+        match p.kind:
+            case PatternKind.Binding(name, mutable):
+                return not mutable and self.bare_name_may_be_unit_variant(name)
+            case PatternKind.Or(alternatives):
+                for alt in alternatives:
+                    if self.pattern_names_unit_variant(alt):
+                        return true
+            case PatternKind.Enum(_, _, nested_payload):
+                if val nested_pl = nested_payload:
+                    match nested_pl:
+                        case Tuple(nested_patterns):
+                            for nested in nested_patterns:
+                                if self.pattern_names_unit_variant(nested):
+                                    return true
+                        case _: ()
+            case _: ()
+        false
 
     me pattern_enum_same_owner(left: SymbolId, right: SymbolId) -> bool:
         if left.id == right.id:
@@ -295,12 +469,53 @@ impl HirLowering:
         match p.kind:
             case PatternKind.Binding(name, mutable):
                 if not mutable:
+                    # subject_unknown: HIR has NO static type for the subject
+                    # (nil / Infer / Error / Any). A known primitive, struct or
+                    # enum subject never takes the name-only rule below: there
+                    # the seed binds (`fn h(x: i64): match x: case Var:`).
+                    var subject_unknown = true
                     if val type_ = subject_type:
                         match type_.kind:
                             case HirTypeKind.Named(owner, _):
                                 if self.enum_unit_pattern_names.contains_key("{owner.id}:{name}"):
                                     return HirPattern(kind: HirPatternKind.Enum(type_, name, nil), has_type_: true, type_: type_, span: p.span)
-                            case _: ()
+                                subject_unknown = false
+                                # Subject is a registered enum that does not
+                                # own `name`, yet `name` is a unit variant of
+                                # another visible enum (`op: Op`, `case Return:`
+                                # with Return only in Kind). The seed rejects
+                                # this; here it still BINDS (a catch-all, as
+                                # before) and is reported on stderr only.
+                                # Warn-first on purpose: the closure has not
+                                # been measured for such arms, and an error
+                                # here would fail the bootstrap.
+                                if self.generic_enum_constructor_owners.contains_key(owner.id) and self.bare_name_may_be_unit_variant(name):
+                                    val subject_enum_name = self.symbols.symbol_name_scalar_raw(owner.id)
+                                    self.warn_bare_variant(name, "in a match over `{subject_enum_name}` is not one of its variants (it is a unit variant of another visible enum); it binds as a catch-all -- qualify it or rename the binding")
+                            case HirTypeKind.Infer(_, _):
+                                subject_unknown = true
+                            case HirTypeKind.Error:
+                                subject_unknown = true
+                            case HirTypeKind.Any:
+                                subject_unknown = true
+                            case _:
+                                subject_unknown = false
+                    # Subject enum not statically known (a genuinely untyped
+                    # subject: `fn f(x): match x: case Eq:`). The seed decides by
+                    # the runtime value's enum; statically, a bare name that is a
+                    # unit variant of a visible enum (glob-facade imports
+                    # included) is the same unqualified variant pattern
+                    # `case BinOp(..)` lowers to: MIR resolves it against the
+                    # scrutinee's enum (so a name shared by several enums
+                    # needs no choice here) and rejects an unknown variant.
+                    # Capitalized names only (bare_name_may_be_unit_variant). A
+                    # name two enums share identifies no enum on an untyped
+                    # subject: it binds, as on release, with a warning.
+                    if subject_unknown and self.bare_name_may_be_unit_variant(name):
+                        if self.enum_unit_pattern_names.contains_key("**:{name}"):
+                            self.warn_bare_variant(name, "over an untyped subject is a unit variant of several visible enums; it binds as a catch-all -- annotate the subject or qualify the variant")
+                        else:
+                            return HirPattern(kind: HirPatternKind.Enum(HirType(kind: HirTypeKind.Error, span: p.span), name, nil), type_: nil, span: p.span)
                 if val binding_type = subject_type:
                     if declared_pattern_slot_type_is_concrete(binding_type):
                         val symbol = self.symbols.define(name, SymbolKind.Variable, Some(binding_type), p.span, Visibility.Private, mutable, nil)
@@ -313,6 +528,61 @@ impl HirLowering:
                     # Preserve the fatal; do not run old lowering and create
                     # extra bindings after owner/arity/shape validation failed.
                     return HirPattern(kind: HirPatternKind.Error, has_type_: false, type_: nil, span: p.span)
+                if enum_name == "" and (variant_name == "Some" or variant_name == "Ok" or variant_name == "Err"):
+                    # `case Some(PriorModuleTld):` over a `Role?` subject. The
+                    # declared-slot path above only knows user enums; the
+                    # wrapped slot's type comes from the subject's generic
+                    # instantiation instead, so the bare name is resolved
+                    # exactly like a top-level arm over a `Role` subject (the
+                    # seed tests the variant; binding it made every later
+                    # `Some(..)` arm dead).
+                    if val wrapper_pl = payload:
+                        match wrapper_pl:
+                            case Tuple(wrapper_patterns):
+                                # Only when the wrapped pattern names a possible
+                                # unit variant: a plain `Some(x)` keeps its
+                                # existing lowering untouched.
+                                if wrapper_patterns.len() == 1 and self.pattern_names_unit_variant(wrapper_patterns[0]):
+                                    var wrapper_applies = false
+                                    var slot_subject: HirType? = nil
+                                    if val wrapper_subject = subject_type:
+                                        match wrapper_subject.kind:
+                                            case HirTypeKind.Optional(optional_inner):
+                                                if variant_name == "Some":
+                                                    slot_subject = Some(optional_inner)
+                                                    wrapper_applies = true
+                                            case HirTypeKind.Result(result_ok, result_err):
+                                                if variant_name == "Ok":
+                                                    slot_subject = Some(result_ok)
+                                                    wrapper_applies = true
+                                                if variant_name == "Err":
+                                                    slot_subject = Some(result_err)
+                                                    wrapper_applies = true
+                                            case HirTypeKind.Named(wrapper_symbol, wrapper_args):
+                                                val wrapper_type_name = self.symbols.symbol_name_scalar_raw(wrapper_symbol.id)
+                                                if wrapper_type_name == "Option" and wrapper_args.len() == 1 and variant_name == "Some":
+                                                    slot_subject = Some(wrapper_args[0])
+                                                    wrapper_applies = true
+                                                if wrapper_type_name == "Result" and wrapper_args.len() == 2:
+                                                    if variant_name == "Ok":
+                                                        slot_subject = Some(wrapper_args[0])
+                                                        wrapper_applies = true
+                                                    if variant_name == "Err":
+                                                        slot_subject = Some(wrapper_args[1])
+                                                        wrapper_applies = true
+                                            case HirTypeKind.Infer(_, _):
+                                                wrapper_applies = true
+                                            case HirTypeKind.Error:
+                                                wrapper_applies = true
+                                            case HirTypeKind.Any:
+                                                wrapper_applies = true
+                                            case _: ()
+                                    else:
+                                        wrapper_applies = true
+                                    if wrapper_applies:
+                                        val wrapped_inner = self.lower_match_pattern(wrapper_patterns[0], slot_subject)
+                                        return self.wrapper_pattern(variant_name, wrapped_inner, p.span)
+                            case _: ()
             case PatternKind.Tuple(elements):
                 if val tuple_type = subject_type:
                     match tuple_type.kind:
@@ -504,8 +774,16 @@ impl HirLowering:
                         match pl:
                             case Tuple(patterns):
                                 var hir_patterns: [HirPattern] = []
+                                # Reached only when lower_declared_enum_pattern
+                                # could not type the slots. A qualified pattern
+                                # still names its outer enum.
+                                var payload_outer_owner: i64 = -1
+                                if symbol.is_valid():
+                                    payload_outer_owner = symbol.id
+                                var payload_slot = 0
                                 for pat in patterns:
-                                    hir_patterns = hir_patterns.push(self.lower_pattern(pat))
+                                    hir_patterns = hir_patterns.push(self.lower_payload_slot_pattern(pat, payload_outer_owner, variant, payload_slot, ""))
+                                    payload_slot = payload_slot + 1
                                 hir_payload = Some(HirPatternPayload.Tuple(hir_patterns))
                             case Struct(fields):
                                 var hir_fields: [(text, HirPattern)] = []
