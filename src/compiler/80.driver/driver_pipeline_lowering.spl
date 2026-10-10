@@ -9,7 +9,7 @@ use compiler.mono.verify.post_mono_verify.{post_mono_archive_admission_v1}
 use driver_types.{CompileContext}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_ice_boundary.{
-    ice_boundary_begin_run, ice_boundary_module_start,
+    ice_boundary_module_start, ice_message_arena_aborted,
     ice_boundary_module_done, ice_boundary_fail, ice_boundary_keep_going
 }
 use compiler.driver.perf.compiler_work_counters.{compiler_work_mir_schedule_v1}
@@ -212,14 +212,23 @@ fn driver_trait_devirtualization_allowed_v1(
     (bug stage2_trait_typed_receiver_method_unresolved_2026-10-10)"""
     whole_closure_lowered and not archive_producing and not demand_routed
 
-fn _driver_mir_ice_continue(ctx: CompileContext, name: text, path: text, message: text) -> bool:
-    """Record a module whose MIR lowering failed as an ICE and poison it.
-    True when the lowering loop goes on to the remaining modules: the
-    boundary is in keep-going mode and the poison budget (1 under
-    --fail-fast) is not spent. The phase fails either way."""
+fn _driver_mir_ice_continue(ctx: CompileContext, name: text, path: text, message: text, arena_aborted: bool) -> bool:
+    """Record a module whose MIR lowering failed. True when the lowering loop
+    may go on to the remaining modules. The phase fails either way.
+
+    `arena_aborted` is the `lower_module_transient_scoped` Err case: that Err
+    is returned only after the scope machinery failed and the arena was
+    aborted, so the shared lowering instance is half-reclaimed and lowering
+    another module on it would be use-after-reclaim. That path never
+    continues. Keep-going is for failures that left the lowering intact (a
+    missing HIR module), in keep-going mode, within the poison budget (1 under
+    --fail-fast). Without a run directory this is release behaviour: the
+    message is added unchanged and the loop stops."""
     ctx.add_error(ice_boundary_fail(name, path, "mir_lower", "", message))
+    if arena_aborted or not ice_boundary_keep_going():
+        return false
     ctx.mark_module_poisoned(name)
-    ice_boundary_keep_going() and not ctx.poison_budget_exhausted()
+    not ctx.poison_budget_exhausted()
 
 fn _driver_collect_mir_errors(ctx: CompileContext, errors: [MirError]):
     # `err.fatal` is the site's own explicit declaration and takes precedence.
@@ -249,7 +258,6 @@ impl CompilerDriver:
         allow_bootstrap_shortcuts: bool
     ) -> bool:
         compiler_work_mir_schedule_v1(self.ctx.sources.len())
-        ice_boundary_begin_run()
         self.ctx.runtime_std_mir_emissions = {}
         if self.ctx.runtime_std_full_inventory_selection != nil and
                 (self.ctx.sources.len() == 0 or
@@ -464,9 +472,10 @@ impl CompilerDriver:
                 var mir_direct = if native_entry_closure_mir or driver_source_matches_entry(self.ctx, src_direct.path, name_direct) or (sosix_env_get_nullable("SIMPLE_UNSTUB_HIR") ?? "") == "1":
                     log_phase("aot:lower_to_mir:module:start idx={direct_idx} module={name_direct} path={src_direct.path}")
                     val direct_hir = self.ctx.hir_modules[name_direct]
-                    # ICE boundary: a module that cannot be lowered is recorded and
-                    # the loop goes on to its siblings (driver_ice_boundary.spl).
+                    # ICE boundary: a module with no HIR is recorded and the loop
+                    # goes on to its siblings (driver_ice_boundary.spl).
                     var ice_message = ice_boundary_module_start(name_direct, src_direct.path, "mir_lower", "")
+                    var ice_arena_aborted = ice_message_arena_aborted(ice_message)
                     if ice_message == "" and direct_hir == nil:
                         ice_message = "MIR lowering missing HIR module for {name_direct} ({src_direct.path})"
                         log_phase("aot:lower_to_mir:missing_hir idx={direct_idx} module={name_direct} path={src_direct.path}")
@@ -482,10 +491,11 @@ impl CompilerDriver:
                         # set and why ambient bootstrap is excluded.
                         val scoped_entry = direct_lowering.lower_module_transient_scoped(direct_hir, self.ctx.hir_modules.values(), direct_idx == 0)
                         if scoped_entry.is_err():
-                            # The scope has already been ended, so this module's
-                            # arena is gone and the module stays failed. Later
-                            # modules still lower so their own failures are
-                            # reported in the same run; the build fails either way.
+                            # Fail closed: the scope has already been ended, so the
+                            # arena (including the module we would have returned) is
+                            # gone. Never continue on a half-reclaimed lowering: the
+                            # module is recorded and the phase returns at once.
+                            ice_arena_aborted = true
                             ice_message = "MIR lowering transient scope failed for {name_direct}: {scoped_entry.unwrap_err()}"
                             log_phase("aot:lower_to_mir:transient_scope_failed idx={direct_idx} module={name_direct}")
                         else:
@@ -503,7 +513,7 @@ impl CompilerDriver:
                                 return false
                             log_phase("aot:lower_to_mir:module:done idx={direct_idx} module={name_direct} functions={lowered_entry.functions.len()}")
                     if ice_message != "":
-                        if not _driver_mir_ice_continue(self.ctx, name_direct, src_direct.path, ice_message):
+                        if not _driver_mir_ice_continue(self.ctx, name_direct, src_direct.path, ice_message, ice_arena_aborted):
                             return false
                     lowered_entry
                 else:
@@ -608,16 +618,16 @@ impl CompilerDriver:
                 # reachability from this boundary is unproven) could be live.
                 val ice_gate = ice_boundary_module_start(name, typed_hir_module.path, "mir_lower", "")
                 if ice_gate != "":
-                    if not _driver_mir_ice_continue(self.ctx, name, typed_hir_module.path, ice_gate):
+                    if not _driver_mir_ice_continue(self.ctx, name, typed_hir_module.path, ice_gate, ice_message_arena_aborted(ice_gate)):
                         return false
                     continue
                 val scoped_fallback = lowering.lower_module_transient_scoped(hir_module, self.ctx.hir_modules.values())
                 if scoped_fallback.is_err():
+                    # Arena already aborted: record and return, never continue.
                     log_phase("aot:lower_to_mir:transient_scope_failed module={name}")
-                    if not _driver_mir_ice_continue(self.ctx, name, typed_hir_module.path,
-                            "MIR lowering transient scope failed for {name}: {scoped_fallback.unwrap_err()}"):
-                        return false
-                    continue
+                    val _ice_stop = _driver_mir_ice_continue(self.ctx, name, typed_hir_module.path,
+                        "MIR lowering transient scope failed for {name}: {scoped_fallback.unwrap_err()}", true)
+                    return false
                 ice_boundary_module_done(name, "mir_lower")
                 var mir_module: MirModule = scoped_fallback.unwrap()
                 mir_module.name = name

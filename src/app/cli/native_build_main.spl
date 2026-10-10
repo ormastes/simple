@@ -43,9 +43,10 @@ use app.cli.native_build_streaming_request_owner.{native_build_streaming_surface
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_aggregate_exit, hir_shard_recovery_seal, hir_shard_recovery_progress, hir_shard_recovery_failure_count, hir_shard_recovery_finished, hir_shard_recovery_block, hir_shard_recovery_blocked}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory}
 use compiler.driver.driver_ice_boundary.{
-    ice_boundary_begin_run, ice_boundary_dead_worker_modules,
-    ice_boundary_attribute_dead_worker, ice_boundary_finalize,
-    ice_skip_list_extend, ice_crash_retry_budget}
+    ice_boundary_begin_run, ice_boundary_claim_run, ice_boundary_release_run,
+    ice_boundary_dead_worker_modules, ice_boundary_attribute_dead_worker,
+    ice_boundary_finalize, ice_skip_list_extend, ice_crash_retry_budget,
+    ice_crash_retry_allowed}
 use app.cli.native_build_warm_receipt.{
     NATIVE_BUILD_WARM_CANDIDATE_ENV, native_build_warm_receipt_prepare,
     native_build_warm_artifact_restore, native_build_warm_receipt_finish
@@ -908,18 +909,23 @@ pub fn native_build_authority_request_v1(args: [text], internal_worker: bool) ->
         index = index + 1
     Ok(NativeBuildAuthorityRequestV1(args: forwarded, refresh: refresh))
 
-# ICE boundary, parent side. The worker appends a `start` breadcrumb before each
-# module and a `done` after it, so a worker that exits non-zero with a module
-# still open died INSIDE that module (panic, access violation, kill): nothing
-# in-process can catch that. Name the module, then re-launch the worker with it
-# on SIMPLE_ICE_SKIP_MODULES so the remaining modules are still compiled and
-# the run reaches its end. The retried worker records the skipped module as an
-# attributed ICE and exits non-zero, so a build that needed this never passes.
-# Bounded by ice_crash_retry_budget(); a timeout is never retried.
+# ICE boundary, parent side, OPT-IN (SIMPLE_ICE_CRASH_RETRIES; the default
+# budget is 0 and this returns the first launch untouched). The worker appends
+# a `start` breadcrumb before each module and a `done` after it, so a worker
+# that crashed with a module still open died INSIDE that module: nothing
+# in-process can catch that. With a budget, re-launch the worker with the module
+# on SIMPLE_ICE_SKIP_MODULES so the remaining modules are still compiled and the
+# run reaches its end. The caller fails the build whenever a re-launch happened,
+# whatever the re-launched worker reports.
+# Never re-launched: an external kill (SIGKILL/SIGTERM), a wait failure
+# (status -1) or a timeout -- none of them says the module in flight is at
+# fault (ice_crash_retry_allowed).
 # Takes the result of the launch the caller already made and returns the result
 # of the last launch.
 pub fn native_build_relaunch_past_ice_crashes(worker_bin: text, relaunch_args: [text], timeout_ms: i64, retries_left: i64, stdout: text, stderr: text, code_raw: i32) -> (text, text, i32):
-    if code_raw == 0 or retries_left <= 0 or stderr.contains("[TIMEOUT:"):
+    val worker_status = native_build_normalize_exit_code(code_raw as i64)
+    if not ice_crash_retry_allowed(worker_status, native_build_posix_signal(worker_status),
+            stderr.contains("[TIMEOUT:"), retries_left):
         return (stdout, stderr, code_raw)
     val dead = ice_boundary_dead_worker_modules()
     if dead.len() == 0:
@@ -1146,13 +1152,34 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     val worker_spawn_trace = native_build_worker_spawn_trace_enabled()
     if worker_spawn_trace:
         eprint "[native-build-trace] worker_spawn:start timeout_ms={native_build_timeout_ms(args)} args={worker_args.len()}"
+    # ICE boundary: this process owns a run directory keyed by its pid and the
+    # output path and exports it to the worker (SIMPLE_ICE_DIR). False, with
+    # nothing created, when the boundary is off.
     val old_ice_skip = env_get("SIMPLE_ICE_SKIP_MODULES") ?? ""
-    ice_boundary_begin_run()
+    val ice_owned = ice_boundary_claim_run(requested_output)
     val (first_stdout, first_stderr, first_code) = process_run_timeout_live(simple_bin, worker_args, native_build_timeout_ms(args))
     val (stdout, stderr, code_raw) = native_build_relaunch_past_ice_crashes(
         simple_bin, worker_args, native_build_timeout_ms(args),
         ice_crash_retry_budget(), first_stdout, first_stderr, first_code)
-    val code = native_build_normalize_exit_code(code_raw as i64)
+    val worker_code = native_build_normalize_exit_code(code_raw as i64)
+    # A re-launch stepped over a module the worker died in. The re-launched
+    # worker normally records it and fails, but a module that takes a codegen
+    # path the boundary does not bracket would be compiled silently: a build
+    # that needed a re-launch never passes, whatever the last worker reports.
+    val ice_skip_now = env_get("SIMPLE_ICE_SKIP_MODULES") ?? ""
+    val ice_relaunched = ice_skip_now != old_ice_skip
+    val code = if ice_relaunched and worker_code == 0: 1 else: worker_code
+    # A module still open in the breadcrumbs is where the worker died. Record
+    # it while the run directory is still ours, then hand the directory back.
+    var ice_dead_lines: [text] = []
+    var ice_dead_summary = ""
+    if code != 0:
+        ice_dead_lines = ice_boundary_attribute_dead_worker(code as i64)
+        if ice_dead_lines.len() > 0:
+            ice_dead_summary = ice_boundary_finalize()
+    if ice_relaunched:
+        env_set("SIMPLE_ICE_SKIP_MODULES", old_ice_skip)
+    ice_boundary_release_run(ice_owned)
     if worker_spawn_trace:
         eprint "[native-build-trace] worker_spawn:returned status={code} stdout_len={stdout.len()} stderr_len={stderr.len()}"
     env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
@@ -1189,14 +1216,13 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
         # doc/08_tracking/bug/native_build_worker_sigill_ud2_at_codegen_entry_2026-09-26.md).
         val last_diag = native_build_last_diagnostic_line(stderr)
         stderr_write("error: native-build worker exited with code {code}.\n")
-        # ICE boundary: a module still open in the breadcrumbs is where the
-        # worker died. Record it in the receipt and name it up front.
-        val ice_dead_lines = ice_boundary_attribute_dead_worker(code as i64)
-        if ice_dead_lines.len() > 0:
-            for ice_line in ice_dead_lines:
-                stderr_write("error: {ice_line}\n")
-            stderr_write("error: {ice_boundary_finalize()}\n")
-        env_set("SIMPLE_ICE_SKIP_MODULES", old_ice_skip)
+        # ICE boundary: name the module the worker died in up front.
+        for ice_line in ice_dead_lines:
+            stderr_write("error: {ice_line}\n")
+        if ice_dead_summary != "":
+            stderr_write("error: {ice_dead_summary}\n")
+        if ice_relaunched:
+            stderr_write("error: native-build was re-launched past module(s) the worker died in ({ice_skip_now}); the build fails regardless of the last worker's status.\n")
         if last_diag != "":
             stderr_write("  worker error: {last_diag}\n")
         eprint_bounded(stderr)
