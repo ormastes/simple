@@ -26,6 +26,7 @@
    - Expected: inventory.exact_operation_recovery_api_present is true
    - Expected: inventory.complete_namespace_union_api_present is true
    - Expected: inventory.qualified_physical_scope is false
+   - Expected: cache_cooperative_namespace_host_next_missing_v1(inventory) is QualifiedEvidenceUnavailable
    - Expected: cache_cooperative_namespace_host_prerequisite_available_v1() is false
 
 
