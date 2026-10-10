@@ -22,3 +22,7 @@ Logs are under `build/mini_builds/item6_semantic_action_probe_{current,closure,l
 The kernel closure manifest now classifies five bootstrap admission fixture files as P-static in both projections. The checker self-test passed (11 fixtures). The actual checker moved from five unclassified files to zero unclassified out of 2,237, then reported 3 K0-to-P, 7 K1-to-P, and 11 kernel-to-app/OS import violations. Those dependency violations and all optional-provider runtime, matched-size, startup/RSS, and cutover gates remain open.
 
 Both direct environment access audit modes passed after the compiler change. This is narrower than release verification. The work branch remains isolated and unlanded.
+
+## Full-CLI verification availability
+
+The required core runtime smoke was attempted once with the Stage 2 candidate. It exited 1 at its first `-c` case: `error: unknown command '-c'`. The candidate help lists only `compile` and `native-build`; it is a bootstrap compiler, so this result is a tool-scope mismatch, not a language runtime failure. Full compiler/lib/MCP/LSP checks and MCP native smoke need a deployed full CLI and servers. GitHub authentication was absent when checked, so the branch remains local only.
