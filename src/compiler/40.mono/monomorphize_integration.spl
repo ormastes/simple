@@ -143,6 +143,12 @@ class MonomorphizationPass:
     env: Dict<i64, HirType>
     # Loud diagnostics for every generic call site this pass could not rewrite.
     diagnostics: [text]
+    # Diagnostics whose level resolved to `warning` (`mono_diag_level`): the
+    # build goes on and the site keeps the lowering it had before this pass
+    # learned to recognise it.
+    warnings: [text] = []
+    # "<code>|<subject>" already reported, for once-per-subject diagnostics.
+    reported_once: Dict<text, bool> = {}
     # Templates with >= 1 call site left unrewritten; never pruned, so the
     # dangling call and the template both stay visible to the verifier.
     unresolved_templates: Dict<text, bool>
@@ -216,6 +222,8 @@ impl MonomorphizationPass:
             next_symbol: MONO_SYMBOL_BASE,
             env: {},
             diagnostics: [],
+            warnings: [],
+            reported_once: {},
             unresolved_templates: {},
             generic_methods: {},
             generic_method_rejected: {},
@@ -774,6 +782,57 @@ impl MonomorphizationPass:
         if not hir_type_is_concrete(out):
             return (nil, owner_module)
         (out, owner_module)
+
+    me report_leveled(code: text, message: text) -> bool:
+        """Record `message` at the level `code` resolves to. True when it was
+        recorded as an ERROR (the call site counts as unresolved)."""
+        val level = mono_diag_level(code)
+        if level == "off":
+            return false
+        if level == "warning":
+            self.warnings = self.warnings.push(message)
+            return false
+        self.diagnostics = self.diagnostics.push(message)
+        true
+
+    me note_unknown_instance_field_read(base: HirExpr, field: text):
+        """E-MONO-040, once per generic type field and module: a container
+        field over a type parameter (`items: [T]`, `first: T?`) is read from a
+        receiver whose instance type is unknown, so the element / payload
+        reaches 50.mir untyped and an operator or interpolation on it works
+        on the raw word (right for an integer, WRONG for text or a struct).
+        The usual cause: the arguments of a same-module generic annotation
+        (`b: Bag<text>`) are dropped before HIR."""
+        val (bt, bmod) = self.infer_field_chain(base)
+        if bt == nil:
+            return
+        val btt: HirType = bt
+        match btt.kind:
+            case HirTypeKind.Named(sym, args):
+                if args.len() > 0:
+                    return
+                val identity = self.generic_type_identity(bmod, sym)
+                if identity == "":
+                    return
+                val key = "{identity}::{field}"
+                if not self.generic_type_fields.has(key):
+                    return
+                val declared: HirType = self.generic_type_fields[key]
+                if hir_type_is_concrete(declared):
+                    return
+                match declared.kind:
+                    case HirTypeKind.TypeParam(_, _):
+                        # A bare parameter field: 50.mir refuses an operator
+                        # on it by itself ("operator overload for struct T").
+                        return
+                    case _: ()
+                val once = "E-MONO-040|{self.current_module}|{key}"
+                if self.reported_once.has(once):
+                    return
+                self.reported_once[once] = true
+                self.report_leveled("E-MONO-040",
+                    "E-MONO-040: field `{field}` of generic `{identity}` is read in `{self.current_module}` from a receiver whose type arguments are unknown; its elements are untyped there, so an operator or interpolation on one uses the raw word (wrong unless the element is an integer). Give the receiver a known instance type (construct it in the function, or import the type by name so `Name<args>` annotations keep their arguments)")
+            case _: ()
 
     me generic_instance_field_read_type(base: HirExpr, field: text) -> HirType?:
         """Type of `base.field` when `base` is a known instance of a generic
@@ -2066,9 +2125,12 @@ impl MonomorphizationPass:
                     if template.type_params.len() == owner_args.len():
                         return known
                     reason = "the receiver has {owner_args.len()} type arguments and the impl declares {template.type_params.len()} type parameters"
-                self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
-                self.diagnostics = self.diagnostics.push(
-                    "E-MONO-034: method `{method}` of generic `{identity}` cannot be specialized for this receiver: {reason}; call site not monomorphized")
+                # Leveled (default `warning`): before this pass typed generic
+                # receivers such a call was simply left as a method call, and
+                # modules containing one compile today. `error` refuses it.
+                if self.report_leveled("E-MONO-034",
+                        "E-MONO-034: method `{method}` of generic `{identity}` cannot be specialized for this receiver: {reason}; call site not monomorphized (it stays a call of the unspecialized method, as before this check existed)"):
+                    self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
                 ""
             case _:
                 ""
@@ -2181,6 +2243,8 @@ impl MonomorphizationPass:
                 if instance_field != nil:
                     out.has_type_ = true
                     out.type_ = instance_field
+                else:
+                    self.note_unknown_instance_field_read(b1, field)
                 out.kind = HirExprKind.Field(self.rewrite_expr(b1), field, resolved)
             case HirExprKind.Index(base, index):
                 val b2: HirExpr = base
@@ -2981,6 +3045,43 @@ fn run_monomorphization_with_diagnostics(modules: Dict<text, HirModule>) -> (Dic
     var pass_ = MonomorphizationPass.create()
     val result = pass_.process_modules(modules)
     (result, pass_.get_stats(), pass_.diagnostics)
+
+fn run_monomorphization_with_report(modules: Dict<text, HirModule>) -> (Dict<text, HirModule>, MonoStats, [text], [text]):
+    """As `run_monomorphization_with_diagnostics`, plus the diagnostics whose
+    level resolved to `warning` (fourth element). Errors gate the build;
+    warnings are for the driver to print."""
+    var pass_ = MonomorphizationPass.create()
+    val result = pass_.process_modules(modules)
+    (result, pass_.get_stats(), pass_.diagnostics, pass_.warnings)
+
+# Levels of the diagnostics that may be met in code that compiles today.
+# `SIMPLE_MONO_LEVELS="E-MONO-034=error,E-MONO-040=off"` overrides per code
+# (error | warning | off). Every other E-MONO code is always an error.
+#   E-MONO-034  default warning: method of a generic impl not specializable
+#               for a known receiver (trait impl, own type parameters, ...).
+#   E-MONO-040  default warning: container field over a type parameter read
+#               from a receiver of unknown instance type.
+fn mono_diag_level(code: text) -> text:
+    var level = "error"
+    if code == "E-MONO-034" or code == "E-MONO-040":
+        level = "warning"
+    else:
+        return level
+    val raw = env_get("SIMPLE_MONO_LEVELS")
+    if raw == nil or raw == "":
+        return level
+    val spec: text = raw
+    for entry in spec.split(","):
+        val e: text = entry
+        val parts = e.split("=")
+        if parts.len() == 2:
+            val name: text = parts[0]
+            val wanted: text = parts[1]
+            if name.trim() == code:
+                val w = wanted.trim()
+                if w == "error" or w == "warning" or w == "off":
+                    level = w
+    level
 
 # Level-gated probe (default off): SIMPLE_MONO_DIAG=1 traces every function,
 # statement and expression the pass visits and every argument it could not

@@ -80,7 +80,7 @@ fn flow(extra: text, body: text) -> text:
     for sym in out_module.functions.keys():
         val f: HirFunction = out_module.functions[sym]
         val fname: text = f.name
-        if fname.starts_with("keep") or fname.starts_with("Box__") or fname.starts_with("twice"):
+        if fname.starts_with("keep") or fname.starts_with("Box__") or fname.starts_with("twice") or fname.starts_with("pick"):
             names = names.push(fname)
     names = names.sorted()
     var codes: [text] = []
@@ -202,6 +202,17 @@ describe "40.mono variable flow: one specialization per instantiation":
     # Result instantiations used to share ONE specialization body.
     it "two instantiations that mangle alike get distinct specializations":
         expect(flow("fn use_r(a: Result<i64, text>, b: Result<bool, text>) -> i64:\n    keep(a)\n    keep(b)\n    0\n\n", "    0\n")).to_equal("keep$unknown,keep$unknown_k1 unresolved=0 diags=")
+
+    # The same clash reached through CALL RESULTS (review probe P1): the
+    # instance types come from two functions' declared returns.
+    it "call results of two different Result types get distinct bodies":
+        expect(flow("fn ri() -> Result<i64, text>:\n    Ok(1)\n\nfn rb() -> Result<bool, text>:\n    Ok(true)\n\n", "    val a = keep(ri())\n    val b = keep(rb())\n")).to_equal("keep$unknown,keep$unknown_k1 unresolved=0 diags=")
+
+    # Review probe P2: one `T`, two witnesses that differ only INSIDE an
+    # array. The mangling spells both `arr_unknown`; the binding used to be
+    # accepted with the first witness.
+    it "witnesses that differ only inside a container are a conflict, not a binding":
+        expect(flow("fn ri() -> Result<i64, text>:\n    Ok(1)\n\nfn rb() -> Result<bool, text>:\n    Ok(true)\n\nfn pick<T>(a: T, b: T) -> T:\n    b\n\n", "    val xs = [ri()]\n    val ys = [rb()]\n    val z = pick(xs, ys)\n")).to_equal("keep,pick unresolved=1 diags=E-MONO-032")
 
     it "the same instantiation from two call sites still shares one":
         expect(flow("fn use_r(a: Result<i64, text>, b: Result<i64, text>) -> i64:\n    keep(a)\n    keep(b)\n    0\n\n", "    0\n")).to_equal("keep$unknown unresolved=0 diags=")

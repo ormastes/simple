@@ -27,7 +27,7 @@ use compiler.common.driver_core_types.{driver_core_compile_options_default}
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
 use compiler.backend.backend.mir_to_llvm.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
-use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
+use compiler.mono.monomorphize_integration.{run_monomorphization_with_report}
 
 val MODULE = "gcf_probe"
 
@@ -46,6 +46,7 @@ val PRELUDE = "struct Box<T>:\n" +
 struct Shaped:
     ir: text
     errors: [text]
+    warnings: [text]
 
 fn shape(body: text) -> Shaped:
     val src = PRELUDE + body
@@ -57,7 +58,7 @@ fn shape(body: text) -> Shaped:
         errors.push("hir: " + e.message)
     var mods: Dict<text, HirModule> = {}
     mods[MODULE] = hir
-    val (mono, _stats, diags) = run_monomorphization_with_diagnostics(mods)
+    val (mono, _stats, diags, warnings) = run_monomorphization_with_report(mods)
     for d in diags:
         errors.push("mono: " + d)
     val m: HirModule = mono[MODULE]
@@ -68,7 +69,7 @@ fn shape(body: text) -> Shaped:
             continue
         errors.push("mir: " + e.message)
     val ir = MirToLlvm.create(MODULE, CodegenTarget.X86_64, nil).translate_module(mir)
-    Shaped(ir: ir, errors: errors)
+    Shaped(ir: ir, errors: errors, warnings: warnings)
 
 fn function_body(ir: text, fn_name: text) -> [text]:
     """Lines of the LLVM function whose `define` names `fn_name`."""
@@ -271,3 +272,63 @@ describe "a generic fn returning a declared type: caller and callee agree":
             "fn probe() -> i64:\n" +
             "    val xs = listed(\"s\")\n" +
             "    xs.len()\n"), "listed$str")
+
+fn warned(s: Shaped, code: text, needle: text) -> bool:
+    for w in s.warnings:
+        val wt: text = w
+        if wt.contains(code) and wt.contains(needle):
+            return true
+    false
+
+# The arguments of a same-module annotation (`b: Bag<text>`) are dropped
+# before HIR, so a container field read through a PARAMETER has no known
+# element type and an operator on the element is lowered on the raw word --
+# right for an integer element, wrong for text. That cannot be refused
+# outright (`Bag<i64>` code relying on it compiles and runs correctly today),
+# so it is flagged: E-MONO-040, a warning by default, an error under
+# `SIMPLE_MONO_LEVELS=E-MONO-040=error`. Never silent.
+describe "container field through a receiver of unknown instance is flagged":
+    it "[T] elements through a parameter: E-MONO-040 names the field":
+        val s = shape(
+            "fn probe(b: Bag<text>) -> text:\n" +
+            "    b.items[0] + b.items[1]\n")
+        expect(s.errors.len()).to_equal(0)
+        expect(warned(s, "E-MONO-040", "field `items`")).to_equal(true)
+
+    it "T? payload through a parameter: E-MONO-040 names the field":
+        val s = shape(
+            "fn probe(b: Bag<text>) -> text:\n" +
+            "    (b.first ?? \"z\") + (b.first ?? \"y\")\n")
+        expect(s.errors.len()).to_equal(0)
+        expect(warned(s, "E-MONO-040", "field `first`")).to_equal(true)
+
+    it "is reported once per field, not once per read":
+        val s = shape(
+            "fn probe(b: Bag<text>) -> text:\n" +
+            "    b.items[0] + b.items[1] + b.items[2]\n")
+        var count = 0
+        for w in s.warnings:
+            val wt: text = w
+            if wt.contains("E-MONO-040"):
+                count = count + 1
+        expect(count).to_equal(1)
+
+    it "a known instance is not flagged":
+        val s = shape(
+            "fn probe() -> text:\n" +
+            "    val b = Bag(items: [\"a\", \"b\"], first: \"a\")\n" +
+            "    b.items[0] + b.items[1]\n")
+        expect(s.warnings.len()).to_equal(0)
+
+    it "a field read on a call result is refused: only the RETURN is typed":
+        # `boxit("t")` is `call ptr` (the return is typed), but its `Box<T>`
+        # annotation carries no arguments into HIR, so `.item` has no instance
+        # type and the operator is refused, as on any unknown instance.
+        val s = shape(
+            "fn boxit<T>(x: T) -> Box<T>:\n" +
+            "    Box(item: x)\n" +
+            "\n" +
+            "fn probe() -> text:\n" +
+            "    val b = boxit(\"t\")\n" +
+            "    b.item + b.item\n")
+        expect(verdict(s, "probe").contains("operator overload for struct T")).to_equal(true)
