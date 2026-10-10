@@ -273,6 +273,30 @@ nonempty generated facet fails with
 Empty facets remain valid for ordinary source modules. This is a safety gate,
 not completion of generated-source support.
 
+### Generated witness projection and migration
+
+The generated semantic witness must survive the TLDR-to-index projection.
+Schema 4 extends the existing index entry with `generated_source_digest` and
+supports both complete graphs and entry-scoped graphs. A full graph has no
+scope-entry identity; a scoped graph preserves its exact entry identity and
+reachable-source validation. Action identities bind that scope as before.
+Existing V1-V3 bytes remain decodable with an unknown generated witness; that
+unknown value must never establish semantic reuse, even between two otherwise
+compatible legacy generations. Migration therefore conservatively invalidates.
+
+New builder-produced entries copy the valid generated digest from their admitted
+TLDR header. Encoding and decoding require the field for schema 4. A missing
+witness is invalid, not an implicit empty facet. An actual ordinary-source empty
+facet has the digest of its validated empty bytes. Generated-only witness changes
+invalidate the owner and its exact reverse consumers; equal generated witnesses
+still allow existing semantic early cutoff when all other witnesses permit it.
+
+The implementation must test new-format round trips, unchanged legacy decoding,
+legacy conservative migration, builder field preservation, full/scoped graph
+distinction, generated-only invalidation, and unchanged-witness reuse. These
+tests validate projection and planning only. They do not replace independently
+selected producer authority or real generator execution evidence.
+
 - canonical relative package/module identities;
 - sorted edges, SCC members, diagnostics, and archive members;
 - normalized archive timestamp, UID/GID, mode, and path separators;

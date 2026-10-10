@@ -89,3 +89,37 @@ system scenarios and performance targets. Independent generated-plan authority
 and real generated producers remain unfinished. Preserve the draft until these
 requirements establish STATUS: PASS; then review its exact diff/comments and
 merge the PR into `release/1.0`.
+
+## Continuing acceptance research and implementation
+
+The next goal turn rebased the isolated integration worktree onto release commit
+`8f86655d67f3dda61677a5f3eafa32ec26a2f4a3`; this renews the candidate and does not
+carry forward runtime admission from its former base. Session owner is the
+primary item-six agent, worktree
+`C:/dev/simple-item6-phase2-verify-owner-20261010`, branch
+`work/item6-complete-release-20261010`, integration target `release/1.0`.
+Smaller-model research, SSpec and generated-projection lanes use separate
+`simple-item6-acceptance-contract-20261010`,
+`simple-item6-sspec-contract-20261010`, and
+`simple-item6-generated-index-20261010` worktrees; primary review remains required.
+
+Source review identified native text-ordering hazards in ownership identifier
+validation. The implementation now uses ASCII byte codes; regression cases cover
+all allowed character classes, whitespace and non-ASCII rejection. Inventory
+fixtures count UTF-8 bytes so non-ASCII policy tests reach the intended validator.
+
+The system spec retains all 44 names, order and original observable assertions,
+verified by comparing the before/after source. A shared invocation helper checks
+the exact scenario line and rejects the existing owner-only/incomplete markers,
+normalizing CRLF line endings. This is an evidence-substitution guard, not proof
+of compiler-origin receipts. The mirrored manual preserves that distinction.
+The actual checker probe reported that the compiled acceptance owner is absent;
+no SSpec execution or TDD red/green result is claimed.
+
+Additional research found generated-source identity is lost between the TLDR
+header and compact index entry. The detail design specifies schema-4 projection
+and conservative legacy migration; the isolated implementation lane must close
+that gap without treating it as generator execution. The domain research records
+the separate declaration, action execution, frozen byte admission and semantic
+projection requirements. Full runtime qualification and the original 44-scenario
+contract remain open.
