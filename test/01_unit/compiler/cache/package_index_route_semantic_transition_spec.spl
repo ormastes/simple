@@ -31,7 +31,7 @@ fn semantic_source(name: text, changed: bool) -> text:
 
 fn semantic_graph(revision: text, changed_a: bool, changed_c: bool) -> PackageModuleIndexGenerationV1:
     var graph = PackageModuleIndexGenerationV1(
-        2, sha256_text("producer"), "root", revision, "commit", "tree-{revision}",
+        4, sha256_text("producer"), "root", revision, "commit", "tree-{revision}",
         sha256_text("inventory-{revision}"), [], sha256_text("variant"))
     var entries: [PackageModuleIndexEntryV1] = []
     for name in ["a", "b", "c", "d"]:
@@ -45,6 +45,7 @@ fn semantic_graph(revision: text, changed_a: bool, changed_c: bool) -> PackageMo
             semantic, semantic, sha256_text("abi-{name}"), sha256_text("init-{name}"),
             sha256_text("provider-{name}"), "", sha256_text("manifest-{name}"),
             "scc-{name}", imports, reverse)
+        entry.generated_source_digest = sha256_text("generated:{name}")
         entry.action_digest = package_module_index_entry_action_digest_v1(graph, entry)
         entries.push(entry)
     graph.entries = entries
@@ -229,6 +230,79 @@ describe "admitted per-module semantic route":
             val invalidation = package_index_route_admitted_invalidation_v1(root, graph, ["c"])
             expect(invalidation.dirty_modules).to_equal(["c", "d"])
             dir_remove(root, true)
+
+    it "invalidates generated output changes through only their reverse consumers":
+        step("Publish a generated-only change with every other module facet stable")
+        val root = semantic_root("generated-change")
+        val previous = semantic_graph("before", false, false)
+        var current = semantic_graph("after", false, false)
+        var changed_entry = current.entries[2]
+        changed_entry.generated_source_digest = sha256_text("generated:c-next")
+        changed_entry.action_digest = package_module_index_entry_action_digest_v1(
+            current, changed_entry)
+        current.entries[2] = changed_entry
+        expect(package_module_index_publish_v1(root, previous)).to_equal(true)
+        expect(package_module_index_publish_v1(root, current)).to_equal(true)
+        val invalidation = package_index_route_admitted_invalidation_v1(
+            root, current, ["c"])
+        expect(invalidation.valid).to_equal(true)
+        expect(invalidation.dirty_modules).to_equal(["c", "d"])
+        expect(invalidation.dirty_packages).to_equal(["pkg-c", "pkg-d"])
+        dir_remove(root, true)
+
+    it "reuses generated consumers when the generated witness is unchanged":
+        step("Publish a private source edit while its generated witness stays stable")
+        val root = semantic_root("generated-same")
+        val previous = semantic_graph("before", false, false)
+        var current = semantic_graph("after", false, false)
+        var changed_entry = current.entries[2]
+        changed_entry.source_digest = sha256_text("private-source-edit")
+        changed_entry.action_digest = package_module_index_entry_action_digest_v1(
+            current, changed_entry)
+        current.entries[2] = changed_entry
+        expect(package_module_index_publish_v1(root, previous)).to_equal(true)
+        expect(package_module_index_publish_v1(root, current)).to_equal(true)
+        val invalidation = package_index_route_admitted_invalidation_v1(
+            root, current, ["c"])
+        expect(invalidation.valid).to_equal(true)
+        expect(invalidation.dirty_modules).to_equal(["c"])
+        step("Keep an empty V4 hint from replaying the retained transition")
+        val empty_hint = package_index_route_admitted_invalidation_v1(
+            root, current, [])
+        expect(empty_hint.valid).to_equal(true)
+        expect(empty_hint.dirty_modules).to_equal([])
+        dir_remove(root, true)
+
+    it "never claims reuse from a legacy generation without generated witnesses":
+        step("Publish matching V2 generations whose entries carry no generated witness")
+        val root = semantic_root("legacy-generated")
+        var previous = semantic_graph("before", false, false)
+        previous.schema_version = 2
+        var prior_entries: [PackageModuleIndexEntryV1] = []
+        for entry in previous.entries:
+            var legacy_entry = entry
+            legacy_entry.generated_source_digest = ""
+            legacy_entry.action_digest = package_module_index_entry_action_digest_v1(
+                previous, legacy_entry)
+            prior_entries.push(legacy_entry)
+        previous.entries = prior_entries
+        var current = previous
+        current.scv_revision_id = "after"
+        current.scv_tree_id = "tree-after"
+        var current_entries: [PackageModuleIndexEntryV1] = []
+        for entry in current.entries:
+            var legacy_entry = entry
+            legacy_entry.action_digest = package_module_index_entry_action_digest_v1(
+                current, legacy_entry)
+            current_entries.push(legacy_entry)
+        current.entries = current_entries
+        expect(package_module_index_publish_v1(root, previous)).to_equal(true)
+        expect(package_module_index_publish_v1(root, current)).to_equal(true)
+        val invalidation = package_index_route_admitted_invalidation_v1(
+            root, current, [])
+        expect(invalidation.valid).to_equal(true)
+        expect(invalidation.dirty_modules).to_equal(["a", "b", "c", "d"])
+        dir_remove(root, true)
 
     it "routes mixed edits through real dirty source and retained archive admission on POSIX":
         step("Admit logical source identities through the snapshot and reuse one real archive")
