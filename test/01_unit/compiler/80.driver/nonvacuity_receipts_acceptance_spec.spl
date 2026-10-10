@@ -1,0 +1,113 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Non-vacuity receipts — acceptance (robustness item 15a, compile lanes)
+
+A compile lane can return Success having lowered, emitted or linked nothing
+(or fewer units than it accounted for), and the spec or bootstrap stage built
+on it then passes over an empty artifact.
+
+`compiler.driver.driver_pass_receipt` carries a lane receipt
+(`lane_receipt name=... modules_lowered=... functions_emitted=...`) written to
+the existing `SIMPLE_PASS_RECEIPT` sink, with a fail-closed comparison of the
+lane's own counts.
+
+Guide: doc/07_guide/compiler/robustness/nonvacuity-receipts.md
+"""
+
+# @tag: unit, compiler, driver, robustness
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file, file_exists, file_delete, env_set, dir_create_all}
+use compiler.driver.driver_pass_receipt.{LaneReceipt, lane_receipt_check, lane_receipt_level, record_lane_receipt}
+
+fn lane(lowered: i64, objectless: i64, functions: i64, objects: i64, inputs: i64) -> LaneReceipt:
+    LaneReceipt(
+        lane: "fixture",
+        requires_code: true,
+        modules_seen: 12,
+        modules_lowered: lowered,
+        modules_objectless: objectless,
+        functions_emitted: functions,
+        statics_emitted: 0,
+        objects_written: objects,
+        link_inputs: inputs)
+
+fn failure_of(r: LaneReceipt, level: text) -> text:
+    val (_line, failure) = lane_receipt_check(r, level)
+    failure
+
+fn line_of(r: LaneReceipt, level: text) -> text:
+    val (line, _failure) = lane_receipt_check(r, level)
+    line
+
+val SPEC_DIR = "build/tmp/nonvacuity_receipts_acceptance"
+
+describe "compile-lane non-vacuity receipt":
+    it "passes a normal lane and says so in a machine-readable line":
+        val normal = lane(10, 2, 240, 8, 8)
+        expect(failure_of(normal, "error")).to_equal("")
+        expect(line_of(normal, "error")).to_equal(
+            "lane_receipt name=fixture verdict=ok modules_seen=12 modules_lowered=10 modules_objectless=2 functions_emitted=240 statics_emitted=0 objects_written=8 link_inputs=8 reason=-")
+
+    it "fails closed when the lane lowered zero modules":
+        val empty = lane(0, 0, 0, 0, 0)
+        expect(failure_of(empty, "error").starts_with("E-LANE-VACUOUS: fixture lane lowered zero modules")).to_equal(true)
+        expect(line_of(empty, "error")).to_contain(" verdict=vacuous ")
+        expect(line_of(empty, "error")).to_contain(" modules_lowered=0 ")
+
+    it "fails closed when modules were lowered but nothing was emitted, written or linked":
+        expect(failure_of(lane(10, 2, 0, 8, 8), "error")).to_contain("emitted zero functions and zero statics")
+        expect(failure_of(lane(10, 2, 240, 0, 8), "error")).to_contain("wrote zero objects")
+        expect(failure_of(lane(10, 2, 240, 8, 0), "error")).to_contain("has zero link inputs")
+
+    it "does not call a declaration-only object or archive lane vacuous":
+        var decl_only = lane(3, 0, 0, 3, 3)
+        decl_only.requires_code = false
+        expect(failure_of(decl_only, "error")).to_equal("")
+        expect(line_of(decl_only, "error")).to_contain(" verdict=mismatch ")
+        expect(failure_of(decl_only, "strict").starts_with("E-LANE-COUNT: ")).to_equal(true)
+
+    it "reports a lane that produced fewer units than it accounts for":
+        val short_objects = lane(10, 2, 240, 6, 6)
+        expect(line_of(short_objects, "error")).to_contain(" verdict=mismatch ")
+        expect(line_of(short_objects, "error")).to_contain("2 of 10 lowered module(s) ended with neither an object nor an objectless record")
+        val short_link = lane(10, 2, 240, 8, 5)
+        expect(line_of(short_link, "error")).to_contain("hands the linker 5 input(s) but accounted 8 object(s) written")
+        # warn-first: a count mismatch does not fail a lane that builds today
+        expect(failure_of(short_objects, "error")).to_equal("")
+        expect(failure_of(short_objects, "strict").starts_with("E-LANE-COUNT: fixture lane 2 of 10")).to_equal(true)
+        expect(failure_of(short_link, "strict").starts_with("E-LANE-COUNT: fixture lane hands the linker 5")).to_equal(true)
+
+    it "honours the level switch: warning never fails, off does no work":
+        val empty = lane(0, 0, 0, 0, 0)
+        expect(failure_of(empty, "warning")).to_equal("")
+        expect(line_of(empty, "warning")).to_contain(" verdict=vacuous ")
+
+        dir_create_all(SPEC_DIR)
+        val sink = SPEC_DIR + "/lane.receipt"
+        file_delete(sink)
+        env_set("SIMPLE_PASS_RECEIPT", sink)
+        env_set("SIMPLE_LANE_RECEIPT", "off")
+        expect(lane_receipt_level()).to_equal("off")
+        expect(record_lane_receipt(empty)).to_equal("")
+        expect(file_exists(sink)).to_equal(false)
+
+        env_set("SIMPLE_LANE_RECEIPT", "")
+        expect(lane_receipt_level()).to_equal("error")
+        expect(record_lane_receipt(empty).starts_with("E-LANE-VACUOUS: ")).to_equal(true)
+        expect(record_lane_receipt(lane(10, 2, 240, 8, 8))).to_equal("")
+        val written = read_file(sink)
+        expect(written).to_contain("lane_receipt name=fixture verdict=vacuous ")
+        expect(written).to_contain("lane_receipt name=fixture verdict=ok ")
+        env_set("SIMPLE_PASS_RECEIPT", "")
+        file_delete(sink)
+
+    it "is consulted by the native-build lane before it links":
+        val src = read_file("src/compiler/80.driver/driver_aot_native_output.spl")
+        val parts = src.split("log_build_progress(\"link\", \"objects\", object_files.len(),")
+        expect(parts.len() > 1).to_equal(true)
+        val before_link = parts[0]
+        expect(before_link).to_contain("val lane_failure = record_lane_receipt(LaneReceipt(")
+        expect(before_link).to_contain("return CompileResult.CodegenError(lane_failure)")
+        expect(src).to_contain("modules_lowered: total_modules,")
+        expect(src).to_contain("link_inputs: object_files.len()))")
