@@ -107,7 +107,7 @@ fn native_zero_work_admission_precedes_every_compiler_phase() {
         .expect("preflight admission");
     for phase in [
         "log_phase(\"compile:start\")",
-        "self.load_sources_impl()",
+        "self.load_sources_impl(nil)",
         "self.parse_all_committing_impl()",
         "self.lower_to_mir()",
     ] {

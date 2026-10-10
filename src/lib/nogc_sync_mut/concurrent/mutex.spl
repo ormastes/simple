@@ -8,13 +8,13 @@ declaring duplicate lock hooks.
 
 # --- SFFI declarations ---
 @unsafe(reason: "raw runtime mutex allocation ABI; contract: returned handle is runtime-owned", capabilities: [ffi])
-extern fn rt_mutex_new(initial: Any) -> Any
+extern fn rt_mutex_new<T>(initial: T) -> i64
 @unsafe(reason: "raw runtime mutex lock ABI; contract: nil means stale or foreign handle", capabilities: [ffi])
-extern fn rt_mutex_lock(mutex: Any) -> Any
+extern fn rt_mutex_lock<T>(mutex: i64) -> T
 @unsafe(reason: "raw runtime mutex try-lock ABI; contract: nil means contended or invalid handle", capabilities: [ffi])
-extern fn rt_mutex_try_lock(mutex: Any) -> Any
+extern fn rt_mutex_try_lock<T>(mutex: i64) -> T
 @unsafe(reason: "raw runtime mutex unlock ABI; contract: one means released and zero means invalid handle", capabilities: [ffi])
-extern fn rt_mutex_unlock(mutex: Any, new_value: Any) -> i64
+extern fn rt_mutex_unlock<T>(mutex: i64, new_value: T) -> i64
 
 # --- Mutex ---
 # @tag:api
@@ -23,7 +23,7 @@ extern fn rt_mutex_unlock(mutex: Any, new_value: Any) -> i64
 # Only one thread can hold the lock at any time.
 
 class Mutex:
-    _handle: Any  # Runtime mutex handle (opaque)
+    _handle: i64  # Runtime mutex handle (opaque)
 
     # Runs `f` while holding the lock, then releases — the guard pattern.
     #
@@ -65,7 +65,7 @@ class Mutex:
     # lock would hand the caller a fabricated "protected value" while holding
     # nothing, so absence is surfaced instead of coalesced.
     # @tag:api
-    fn lock() -> Any?:
+    fn lock<T>() -> T?:
         unsafe(capabilities: [ffi]):
             rt_mutex_lock(self._handle)
 
@@ -75,7 +75,7 @@ class Mutex:
     # Returns protected value if lock acquired successfully.
     # If successful, must call unlock() to release.
     # @tag:api
-    fn try_lock() -> Any?:
+    fn try_lock<T>() -> T?:
         unsafe(capabilities: [ffi]):
             rt_mutex_try_lock(self._handle)
 
@@ -84,7 +84,7 @@ class Mutex:
     # new_value becomes the new protected value.
     # After unlock, other threads can acquire the lock.
     # @tag:api
-    fn unlock(new_value: Any) -> i64:
+    fn unlock<T>(new_value: T) -> i64:
         unsafe(capabilities: [ffi]):
             rt_mutex_unlock(self._handle, new_value)
 
@@ -93,7 +93,7 @@ class Mutex:
 # Creates a new mutex protecting the given initial value.
 # Lock starts in unlocked state - first lock() succeeds immediately.
 # @tag:api
-fn mutex_new(initial: Any) -> Mutex:
+fn mutex_new<T>(initial: T) -> Mutex:
     val handle = unsafe(capabilities: [ffi]):
         rt_mutex_new(initial)
     Mutex(_handle: handle)
@@ -136,7 +136,7 @@ fn mutex_with_lock<T>(mutex: Mutex, f: fn(T) -> T) -> T:
 # Generic over `T` (f's real result type, e.g. the RwLock's protected value)
 # — `keep_value` stays `Any` on purpose: it is always the fixed gate
 # sentinel, never real data, so it never round-trips through user code.
-fn mutex_with_lock_keeping<T>(mutex: Mutex, keep_value: Any, f: fn() -> T) -> T:
+fn mutex_with_lock_keeping<T, K>(mutex: Mutex, keep_value: K, f: fn() -> T) -> T:
     unsafe(capabilities: [ffi]):
         rt_mutex_lock(mutex._handle)
     val result = f()
@@ -146,17 +146,17 @@ fn mutex_with_lock_keeping<T>(mutex: Mutex, keep_value: Any, f: fn() -> T) -> T:
 
 # DEPRECATED: prefer mutex_with_lock — manual lock/unlock pairing is unguarded.
 # Optional for the same reason as Mutex.lock() above.
-fn mutex_lock(mutex: Mutex) -> Any?:
+fn mutex_lock<T>(mutex: Mutex) -> T?:
     unsafe(capabilities: [ffi]):
         rt_mutex_lock(mutex._handle)
 
 # Optional: nil means the lock was already held (or the handle is not live).
-fn mutex_try_lock(mutex: Mutex) -> Any?:
+fn mutex_try_lock<T>(mutex: Mutex) -> T?:
     unsafe(capabilities: [ffi]):
         rt_mutex_try_lock(mutex._handle)
 
 # DEPRECATED: prefer mutex_with_lock — see mutex_lock.
-fn mutex_unlock(mutex: Mutex, new_value: Any) -> i64:
+fn mutex_unlock<T>(mutex: Mutex, new_value: T) -> i64:
     unsafe(capabilities: [ffi]):
         rt_mutex_unlock(mutex._handle, new_value)
 

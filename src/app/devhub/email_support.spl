@@ -3,7 +3,7 @@ use std.nogc_async_mut.sosix.host_facade.{sosix_file_exists, sosix_file_read, so
 use app.devhub.email_config_sdn.{parse_email_sdn_json}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.io_runtime.{time_now_unix_micros}
-use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_object_keys, json_to_string, json_get_type, json_serialize, json_object, json_string, json_array, json_boolean, json_pretty}
+use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_type, json_value_field, json_value_has, json_value_keys, json_value_len, json_value_at, json_value_text_or, json_value_serialize, json_value_pretty, json_value_object_from}
 use app.devhub.flags.{_extract_flag, _has_flag, _positional_args}
 use app.devhub.output.{print_error, print_success, print_warning, wants_json, print_table_dynamic}
 use app.devhub.email_translate.{
@@ -92,23 +92,25 @@ fn email_expand_path(path: text) -> text:
         return home + path[marker.len():]
     path
 
-fn _email_json_text(obj: any, key: text) -> text:
-    val value = json_object_get(obj, key)
-    if value == nil or json_get_type(value) != "string":
-        return ""
-    json_to_string(value) ?? ""
+fn _email_json_text(obj: JsonValue, key: text) -> text:
+    json_value_text_or(json_value_field(obj, key), "")
 
 fn parse_email_shared_config(content: text, path: text) -> EmailConfig:
-    val root = json_parse(content)
-    if root == nil or json_get_type(root) != "object":
+    val root = json_value_parse_opt(content)
+    if root == nil:
         return EmailConfig.default()
-    val entries = json_object_get(root, "accounts")
-    if entries == nil or json_get_type(entries) != "object":
+    parse_email_shared_config_value(root.unwrap(), path)
+
+fn parse_email_shared_config_value(root: JsonValue, path: text) -> EmailConfig:
+    if json_value_type(root) != "object":
+        return EmailConfig.default()
+    val entries = json_value_field(root, "accounts")
+    if json_value_type(entries) != "object":
         return EmailConfig.default()
     var accounts: [EmailAccount] = []
-    for name in json_object_keys(entries):
-        val entry = json_object_get(entries, name)
-        if entry != nil and json_get_type(entry) == "object":
+    for name in json_value_keys(entries):
+        val entry = json_value_field(entries, name)
+        if json_value_type(entry) == "object":
             val protocol = _email_json_text(entry, "protocol")
             val configured_provider = _email_json_text(entry, "provider")
             var provider = "outlook_imap"
@@ -168,7 +170,7 @@ fn load_email_config_checked(path: text) -> Result<EmailConfig, text>:
         return Ok(parse_email_shared_config(content, path))
     match parse_email_sdn_json(content):
         case Ok(root):
-            Ok(parse_email_shared_config(json_serialize(root), path))
+            Ok(parse_email_shared_config_value(root, path))
         case Err(code):
             Err(code)
 
@@ -176,7 +178,7 @@ fn load_email_config_checked(path: text) -> Result<EmailConfig, text>:
 fn _parse_email_config_content(content: text) -> EmailConfig:
     match parse_email_sdn_json(content):
         case Ok(root):
-            parse_email_shared_config(json_serialize(root), "")
+            parse_email_shared_config_value(root, "")
         case Err(_):
             EmailConfig.default()
 
@@ -207,18 +209,18 @@ class EmailRow:
     unread: bool
 
 
-fn _email_row_json(r: EmailRow) -> any:
-    var label_vals: [any] = []
+fn _email_row_json(r: EmailRow) -> JsonValue:
+    var label_vals: [JsonValue] = []
     for l in r.labels:
-        label_vals = label_vals + [json_string(l)]
-    json_object([
-        ("id", json_string(r.id)),
-        ("from", json_string(r.from_addr)),
-        ("subject", json_string(r.subject)),
-        ("date", json_string(r.date)),
-        ("labels", json_array(label_vals)),
-        ("starred", json_boolean(r.starred)),
-        ("unread", json_boolean(r.unread)),
+        label_vals = label_vals + [JsonValue.Str(l)]
+    json_value_object_from([
+        ("id", JsonValue.Str(r.id)),
+        ("from", JsonValue.Str(r.from_addr)),
+        ("subject", JsonValue.Str(r.subject)),
+        ("date", JsonValue.Str(r.date)),
+        ("labels", JsonValue.Array(label_vals)),
+        ("starred", JsonValue.Bool(r.starred)),
+        ("unread", JsonValue.Bool(r.unread)),
     ])
 
 
@@ -231,10 +233,10 @@ fn _render_email_rows(rows: [EmailRow], as_json: bool):
     doc §4's "empty LABELS cell, not a placeholder dash" rule, not a
     fabricated value."""
     if as_json:
-        var items: [any] = []
+        var items: [JsonValue] = []
         for r in rows:
             items = items + [_email_row_json(r)]
-        print json_pretty(json_array(items))
+        print json_value_pretty(JsonValue.Array(items))
         return
     if rows.len() == 0:
         print "No messages. Try a broader search, --limit, or check --account / your provider config."
@@ -247,13 +249,10 @@ fn _render_email_rows(rows: [EmailRow], as_json: bool):
     print_table_dynamic(headers, table_rows)
 
 
-fn _mjson_str(obj: any, key: text) -> text:
-    if obj == nil:
+fn _mjson_str(obj: JsonValue, key: text) -> text:
+    if not json_value_has(obj, key):
         return ""
-    val v = json_object_get(obj, key)
-    if v == nil:
-        return ""
-    val s = json_serialize(v)
+    val s = json_value_serialize(json_value_field(obj, key))
     if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
         return s[1:s.len() - 1]
     s
@@ -265,16 +264,17 @@ fn _parse_mailcli_json_rows(json_text: text) -> [EmailRow]:
     objects (see tools/mail-cli/lib/format.shs mail_format_parse_headers).
     It carries no flags/labels today (doc §3's documented pre-existing
     bug) — labels/starred/unread are always empty/false here, honestly."""
-    val parsed = json_parse(json_text)
-    if parsed == nil:
+    val parsed_opt = json_value_parse_opt(json_text)
+    if parsed_opt == nil:
         return []
-    if json_get_type(parsed) != "array":
+    val parsed = parsed_opt.unwrap()
+    if json_value_type(parsed) != "array":
         return []
     var rows: [EmailRow] = []
-    val n = json_array_length(parsed)
+    val n = json_value_len(parsed)
     var i = 0
     while i < n:
-        val item = json_array_get(parsed, i)
+        val item = json_value_at(parsed, i)
         rows = rows + [EmailRow(
             id: _mjson_str(item, "uid"),
             from_addr: _mjson_str(item, "from"),
