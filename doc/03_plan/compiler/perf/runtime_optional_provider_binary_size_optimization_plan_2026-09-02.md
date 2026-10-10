@@ -264,9 +264,10 @@ The latter result and its remaining release-small limits are in
 The BS7 producer now binds the unstripped outputs, C source, archive,
 capture receipt, and tool hashes in its cohort receipt. Its Linux checker
 requires those inputs and replays both links; the old label-only path is
-rejected. A real-LLD synthetic fixture passes the clean path and rejects
-evidence mutations for the prior C source; the final C `puts` source still
-needs its next bounded fixture run. The cohort receipt binds the NoGC hello, a separate
+rejected. A real-LLD synthetic fixture now passes the clean path with the selected literal
+C `puts("hello")` source and rejects matched-link, stdout, and sample
+evidence mutations. Its Simple-side test runtime also calls `puts`; this is
+a checker fixture, not a production size or startup qualification. The cohort receipt binds the NoGC hello, a separate
 interpreter executable, Python, and expected stdout. Each startup sample row
 must name its interpreter or Python executable hash; the matched-link checker
 requires C `puts` and verifies both replayed programs' stdout bytes.

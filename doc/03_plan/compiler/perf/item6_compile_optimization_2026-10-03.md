@@ -52,6 +52,12 @@ Any new requirements or relaxed budgets require user selection.
 5. `bin/release` is absent in the inspected Windows workspace. Runner discovery
    must validate binary provenance and non-vacuous execution. Wrapper fallback
    to a Rust seed cannot qualify any row.
+6. The release cold producer used the inventory-derived SCV tree ID as
+   `root_generation`, forcing conservative invalidation after every source edit.
+   A stable workspace-root identity is now wired as a candidate, with a focused
+   no-stub native helper PASS. Full transition behavior, exact invalidation and
+   paired time/RSS remain unverified; see
+   `doc/09_report/compiler/item6_stable_workspace_root_generation_2026-10-10.md`.
 
 ## Execution stages and acceptance evidence
 
