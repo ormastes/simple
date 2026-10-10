@@ -75,7 +75,7 @@ val HIR_CACHE_ENTRY_VERSION: text = "spl-hircache-v3"
 val HIR_CACHE_CHECKSUM_PREFIX: text = "C "
 # Rejection classes, in summary order. Every load that returns nil for an
 # EXISTING key increments exactly one of them.
-val HIR_CACHE_REJECT_REASONS: [text] = ["absent", "header", "checksum", "framing", "decode", "selfcheck"]
+val HIR_CACHE_REJECT_REASONS: [text] = ["absent", "header", "checksum", "framing", "decode"]
 
 # Diagnostic counters, same shape as the front-end cache's.
 var _hir_cache_hits: i64 = 0
@@ -89,7 +89,7 @@ var _hir_cache_stores: i64 = 0
 var _hir_cache_refused: i64 = 0
 var _hir_cache_last_reason: text = "-"
 # Index-aligned with HIR_CACHE_REJECT_REASONS.
-var _hir_cache_rejected: [i64] = [0, 0, 0, 0, 0, 0]
+var _hir_cache_rejected: [i64] = [0, 0, 0, 0, 0]
 # Recovered (warning-level) lowering diagnostics of the last loaded entry, so
 # a hit replays exactly what the in-process lowering would have reported.
 var _hir_cache_last_warnings: [text] = []
@@ -341,15 +341,18 @@ fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]
     if blob == "":
         _hir_cache_refuse("codec")
         return false
-    if hir_cache_selfcheck_enabled():
+    if _hir_cache_selfcheck_due():
+        _hir_cache_selfchecked = _hir_cache_selfchecked + 1
         val verdict = hir_cache_selfcheck_blob(blob)
         if verdict != "":
             # Loud on purpose: this is the diagnostic that was missing for the
             # weeks the codec wrote 3/true as nil. Names the first differing
             # line and field so the codec bug can be found from the log alone.
+            # A STORE-side refusal: counted as refused + selfcheck_failed,
+            # never as a miss (misses count loads).
             eprint("[hir-cache] SELFCHECK FAILED module={module.name} path={module.path} {verdict}; entry not stored")
             _hir_cache_refuse("selfcheck")
-            _hir_cache_reject("selfcheck")
+            _hir_cache_selfcheck_failed = _hir_cache_selfcheck_failed + 1
             return false
     val dir = hir_cache_dir()
     val _made = rt_dir_create_all(dir)
@@ -388,20 +391,51 @@ fn _hir_cache_refuse(reason: text):
     _hir_cache_refused = _hir_cache_refused + 1
     _hir_cache_last_reason = reason
 
-# Write-time round-trip self-check knob. Explicit env wins; the host-config
-# key hir_cache_selfcheck is applied to that env by host-env.shs --cache-env;
-# unset defaults to ON in bootstrap lanes (SIMPLE_BOOTSTRAP set) and OFF
-# elsewhere. SIMPLE_HIR_CODEC_ROUNDTRIP=1 (the pre-existing, build-continues-
-# from-decoded probe gated by check-hir-codec-roundtrip.shs) also turns it on.
-fn hir_cache_selfcheck_enabled() -> bool:
+# Write-time round-trip self-check knob -> mode "all" | "sampled" | "off".
+# SIMPLE_HIR_CACHE_SELFCHECK=1 checks every store, =0 never; the host-config
+# key hir_cache_selfcheck is applied to that env by host-env.shs --cache-env.
+# Unset: SIMPLE_HIR_CODEC_ROUNDTRIP=1 (the pre-existing build-continues-from-
+# decoded probe) means "all"; a bootstrap lane (SIMPLE_BOOTSTRAP set) gets
+# "sampled" -- every HIR_CACHE_SELFCHECK_SAMPLE-th store -- because a full
+# decode+re-encode per module is unmeasured on the 1163-module closure and
+# must not be switched on blind; anything else is "off". The lane env is NOT
+# extended with this variable: the stage-2 pre-exec guard requires the exact
+# canonical env name list and the producer fingerprint folds every SIMPLE_*.
+val HIR_CACHE_SELFCHECK_SAMPLE: i64 = 8
+
+fn hir_cache_selfcheck_mode() -> text:
     val explicit = sosix_env_get_nullable("SIMPLE_HIR_CACHE_SELFCHECK") ?? ""
     if explicit == "1":
-        return true
+        return "all"
     if explicit == "0":
-        return false
+        return "off"
     if (sosix_env_get_nullable("SIMPLE_HIR_CODEC_ROUNDTRIP") ?? "") == "1":
+        return "all"
+    if (sosix_env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") != "":
+        return "sampled"
+    "off"
+
+fn hir_cache_selfcheck_enabled() -> bool:
+    hir_cache_selfcheck_mode() != "off"
+
+var _hir_cache_selfcheck_seen: i64 = 0
+var _hir_cache_selfchecked: i64 = 0
+var _hir_cache_selfcheck_failed: i64 = 0
+
+fn _hir_cache_selfcheck_due() -> bool:
+    val mode = hir_cache_selfcheck_mode()
+    if mode == "off":
+        return false
+    if mode == "all":
         return true
-    (sosix_env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") != ""
+    _hir_cache_selfcheck_seen = _hir_cache_selfcheck_seen + 1
+    (_hir_cache_selfcheck_seen % HIR_CACHE_SELFCHECK_SAMPLE) == 1
+
+fn hir_cache_selfchecked() -> i64:
+    _hir_cache_selfchecked
+
+fn hir_cache_selfcheck_failed() -> i64:
+    _hir_cache_selfcheck_failed
 
 # Pure: "" when `blob` decodes and re-encodes to itself, else a diagnostic
 # naming the failure: `reason=decode` for a blob the decoder refuses, or
@@ -475,10 +509,12 @@ fn hir_cache_summary() -> text:
     val refused = _hir_cache_refused
     val failures = _hir_cache_store_failures
     val reason = _hir_cache_last_reason
+    val selfchecked = _hir_cache_selfchecked
+    val selfcheck_failed = _hir_cache_selfcheck_failed
     val dir = hir_cache_dir()
     val rejected = hir_cache_rejected_summary()
-    val selfcheck = if hir_cache_selfcheck_enabled(): 1 else: 0
-    val base = "[hir-cache] hits={hits} misses={misses} stores={stores} refused={refused} io_failed={failures} reason={reason} dir={dir} rejected={rejected} selfcheck={selfcheck}"
+    val selfcheck = hir_cache_selfcheck_mode()
+    val base = "[hir-cache] hits={hits} misses={misses} stores={stores} refused={refused} io_failed={failures} reason={reason} dir={dir} rejected={rejected} selfcheck={selfcheck} selfchecked={selfchecked} selfcheck_failed={selfcheck_failed}"
     if failures == 0:
         return base
     base + " store_failures={failures}"
@@ -693,7 +729,8 @@ export hir_cache_store_failures
 export hir_cache_refused, hir_cache_io_failed, hir_cache_rejected, hir_cache_rejected_summary
 export HirCacheEntry, hir_cache_entry_parse, hir_cache_entry_encode, hir_cache_entry_encode_body
 export hir_cache_body_checksum, hir_cache_header
-export hir_cache_selfcheck_enabled, hir_cache_selfcheck_blob, hir_cache_first_difference
+export hir_cache_selfcheck_enabled, hir_cache_selfcheck_mode, hir_cache_selfcheck_blob, hir_cache_first_difference
+export hir_cache_selfchecked, hir_cache_selfcheck_failed, HIR_CACHE_SELFCHECK_SAMPLE
 export hir_shard_spec, hir_shard_active, hir_shard_claimed, hir_shard_owns
 export hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary
 export hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block

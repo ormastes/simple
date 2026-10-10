@@ -59,16 +59,16 @@ summary() {
 }
 
 selftest() {
-    _l='[hir-cache] hits=3 misses=0 stores=0 refused=0 io_failed=0 reason=- dir=/x rejected=absent:0,header:0,checksum:0,framing:0,decode:0,selfcheck:0 selfcheck=1'
+    _l='[hir-cache] hits=3 misses=0 stores=0 refused=0 io_failed=0 reason=- dir=/x rejected=absent:0,header:0,checksum:0,framing:0,decode:0 selfcheck=all selfchecked=0 selfcheck_failed=0'
     [ "$(field "$_l" hits)" = 3 ] && [ "$(field "$_l" stores)" = 0 ] && [ "$(field "$_l" io_failed)" = 0 ] && [ "$(rejected_total "$_l")" = 0 ] || { echo "selftest: clean line misparsed"; return 1; }
-    _l='[hir-cache] hits=0 misses=3 stores=3 refused=0 io_failed=0 reason=- dir=/x rejected=absent:3,header:0,checksum:0,framing:0,decode:0,selfcheck:0 selfcheck=1'
+    _l='[hir-cache] hits=0 misses=3 stores=3 refused=0 io_failed=0 reason=- dir=/x rejected=absent:3,header:0,checksum:0,framing:0,decode:0 selfcheck=all selfchecked=0 selfcheck_failed=0'
     [ "$(field "$_l" hits)" = 0 ] && [ "$(rejected_total "$_l")" = 0 ] || { echo "selftest: cold line misparsed"; return 1; }
-    _l='[hir-cache] hits=1 misses=2 stores=2 refused=1 io_failed=0 reason=selfcheck dir=/x rejected=absent:0,header:0,checksum:2,framing:0,decode:0,selfcheck:1 selfcheck=1'
-    [ "$(rejected_total "$_l")" = 3 ] && [ "$(field "$_l" refused)" = 1 ] || { echo "selftest: rejected line misparsed"; return 1; }
+    _l='[hir-cache] hits=1 misses=2 stores=2 refused=1 io_failed=0 reason=selfcheck dir=/x rejected=absent:0,header:0,checksum:2,framing:0,decode:0 selfcheck=all selfchecked=3 selfcheck_failed=1'
+    [ "$(rejected_total "$_l")" = 2 ] && [ "$(field "$_l" refused)" = 1 ] && [ "$(field "$_l" selfcheck_failed)" = 1 ] || { echo "selftest: rejected line misparsed"; return 1; }
     _l='[hir-cache] disabled reason=off'
     [ "$(field "$_l" hits)" = -1 ] || { echo "selftest: disabled line produced a hit count"; return 1; }
     _d="$WORK/selftest"; mkdir -p "$_d"
-    printf 'noise\n[hir-cache] hits=0 misses=1 stores=1 refused=0 io_failed=0 reason=- dir=/x rejected=absent:1,header:0,checksum:0,framing:0,decode:0,selfcheck:0 selfcheck=1\nmore\n[hir-cache] hits=1 misses=0 stores=0 refused=0 io_failed=0 reason=- dir=/x rejected=absent:0,header:0,checksum:0,framing:0,decode:0,selfcheck:0 selfcheck=1\n' > "$_d/two.log"
+    printf 'noise\n[hir-cache] hits=0 misses=1 stores=1 refused=0 io_failed=0 reason=- dir=/x rejected=absent:1,header:0,checksum:0,framing:0,decode:0 selfcheck=all selfchecked=0 selfcheck_failed=0\nmore\n[hir-cache] hits=1 misses=0 stores=0 refused=0 io_failed=0 reason=- dir=/x rejected=absent:0,header:0,checksum:0,framing:0,decode:0 selfcheck=all selfchecked=0 selfcheck_failed=0\n' > "$_d/two.log"
     [ "$(field "$(summary "$_d/two.log")" hits)" = 1 ] || { echo "selftest: last summary line not selected"; return 1; }
     printf 'nothing here\n' > "$_d/none.log"
     [ -z "$(summary "$_d/none.log")" ] || { echo "selftest: summary found in a log without one"; return 1; }
@@ -146,8 +146,18 @@ if [ "$RC_WARM" != 0 ] || [ ! -f "$WORK/warm/out" ]; then
     echo "FAIL — warm build hit $HITS entries but failed (rc=$RC_WARM)"
     exit 1
 fi
-A=$(sha256sum "$WORK/cold/out" | cut -d' ' -f1)
-B=$(sha256sum "$WORK/warm/out" | cut -d' ' -f1)
+# sha256sum (coreutils) or shasum -a 256 (macOS); a host with neither is ERROR.
+digest_of() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
+    else echo ""; fi
+}
+A=$(digest_of "$WORK/cold/out")
+B=$(digest_of "$WORK/warm/out")
+if [ -z "$A" ] || [ -z "$B" ]; then
+    echo "ERROR — nothing was checked (no sha256sum or shasum on this host; binaries not compared)"
+    exit 2
+fi
 if [ "$A" != "$B" ]; then
     echo "FAIL — $HITS warm hit(s) but the binary built from cached HIR differs from the cold one: $A vs $B"
     exit 1
