@@ -44,3 +44,35 @@ the specialization in the table) instead of past the largest function id.
 the walker by arity instead of name for this reason. A debug driver over
 the same source printed `hir fn key=... name=walk$i64` and
 `fn walker_abi.C params=[i64, i64, funcptr/2]`.
+
+## Mitigation (2026-10-10, work/rel-robust-post-mono-verify-20261010)
+
+- Allocator: `collect_generics` now seeds `next_symbol` past every module's
+  `symbols.next_symbol_id` as well as past its function ids, so a
+  specialization can no longer land on a type parameter's or local's id.
+  A fixed high-range base (branch `work/rel-stage2-generic-class-params-20261010`,
+  `MONO_SYMBOL_BASE`) satisfies the same invariant; the two compose.
+- Verifier (`40.mono/verify/post_mono_verify.spl`), default-on, every profile
+  that runs the post-mono verifier:
+  - **E-MONO-035** specialization id bound by a module table to another
+    symbol, or below the table's next free id; also at CALL sites when the
+    CALLER's table binds the id (`walk$i64` -> `walker_abi.C` shape), with
+    the call-site span;
+  - **E-MONO-036** a call still binding a generic template with no emitted
+    definition (pruned after specialization), call-site span;
+  - **E-MONO-037** duplicate specialization key across the closure, plus
+    `post_mono_specialization_manifest` (sorted) for cross-run determinism;
+  - **E-MONO-038** `post_mono_archive_admission_v1`: a module lowered in an
+    archive-producing lane must have `MirLowering.devirtualized_calls` delta 0
+    (verifier twin of `driver_trait_devirtualization_allowed_v1`). Applied to
+    all three driver-owned lowering instances (direct, bootstrap-fixed,
+    fallback); the fallback instance never sets `trait_impl_closure_complete`
+    so it cannot devirtualize today — the check there is defense in depth.
+  - E-MONO-036 keys templates by `<module>.<name>` and skips `is_method`
+    templates: a generic class's method is `is_generic_template` under its
+    bare name, and keying it mis-read a cross-module call to a free function
+    of the same name (`std.nogc_async_mut.async_embedded` `ready`/`pending`).
+- Spec: `test/01_unit/compiler/mono/verify/post_mono_symbol_identity_spec.spl`
+  (18 examples). The real-pass walker case fails with E-MONO-035 before the
+  allocator seed and passes after. The by-arity lookup in
+  `generic_walker_fn_param_abi_spec.spl` can now be replaced by name.
