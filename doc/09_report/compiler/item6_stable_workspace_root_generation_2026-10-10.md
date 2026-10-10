@@ -43,3 +43,14 @@ explicit `src/lib` source root while keeping the project stdlib on disk;
 discovery stopped at the same syntax. This is a tool/source compatibility
 blocker, not an acceptance failure or evidence about the new root identity.
 The three build attempts have exhausted this session’s fix/verify limit.
+
+The current acceptance owner has a separate product-scope gap.
+`test/03_system/compiler/package_index/persistent_smf_package_index_spec.spl`
+calls `private-body-export-early-cutoff` without `--scope owner`, but
+`src/app/test/package_index_acceptance.spl` returns status 3 with
+`acceptance_status=incomplete` and names source-derived classification,
+compiler completion, and production filesystem observations as missing.
+The production route already has per-module comparison logic, but a compiled
+owner alone cannot satisfy this system scenario. It needs an actual edited
+source, new index publication, exact dirty-package execution, and observed
+time/RSS and file-read counters before this gate can pass.
