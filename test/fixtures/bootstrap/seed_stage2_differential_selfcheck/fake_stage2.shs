@@ -1,0 +1,26 @@
+#!/bin/sh
+# Fake stage-2 compiler for the selfcheck of scripts/check/check-seed-stage2-differential.shs.
+# Called like `native-build ... --backend <llvm|cranelift> --entry <main.spl> -o <exe>`. Fixture
+# markers, with tag L for llvm and C for cranelift:
+#   #<tag>>line       the produced executable prints line
+#   #<tag>-rc N       the produced executable exits N
+#   #<tag>-buildrc N  the build exits N and produces nothing (124 = what `timeout` reports)
+#   #<tag>-nobackend  the build says the backend is unknown
+entry=""; out=""; be=""
+while [ $# -gt 0 ]; do
+    case "$1" in --entry) entry=$2; shift ;; -o) out=$2; shift ;; --backend) be=$2; shift ;; esac
+    shift
+done
+tag=L; [ "$be" = cranelift ] && tag=C
+rc=0; body=""
+while IFS= read -r line; do
+    case "$line" in
+        "#$tag-nobackend"*) echo "error: unknown backend: $be" >&2; exit 2 ;;
+        "#$tag-buildrc "*) echo "error: E-FAKE-001 fake refusal" >&2; exit "${line#"#$tag-buildrc "}" ;;
+        "#$tag-rc "*) rc=${line#"#$tag-rc "} ;;
+        "#$tag>"*) body="${body}echo '${line#"#$tag>"}'
+" ;;
+    esac
+done < "$entry"
+printf '#!/bin/sh\n%sexit %s\n' "$body" "$rc" > "$out"
+chmod +x "$out"

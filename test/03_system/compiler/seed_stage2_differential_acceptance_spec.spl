@@ -1,0 +1,216 @@
+# Purpose and audience: executable acceptance evidence for the seed <-> stage-2 differential
+# corpus gate (robustness item 12b), for the compiler bootstrap owners.
+# @req REQ-SSPEC-COMPILER
+
+"""
+# Seed <-> stage-2 differential corpus gate — acceptance
+
+**Category:** Infrastructure
+**Status:** Implemented
+**Guide:** doc/07_guide/compiler/robustness/seed-stage2-differential.md
+
+## Purpose and Audience
+
+`scripts/check/check-seed-stage2-differential.shs` runs a corpus of small programs through the
+seed interpreter (oracle) and a stage-2 compiler (llvm and cranelift), and compares exit code and
+stdout. This spec drives the REAL driver with two fake compilers
+(`test/fixtures/bootstrap/seed_stage2_differential_selfcheck/`) so each acceptance criterion is
+observed as a verdict line and an exit code, not read out of the script text.
+
+## Scope and Preconditions
+
+Subprocess-only: `sh`, `cp`, `chmod`. No compiler is built and no stage-2 binary is needed.
+Real-binary results live in the baseline file, not here.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| SAME / DIFF / NOTRUN | per (case, lane) verdict; NOTRUN is never agreement |
+| baseline | shrink-only list of known DIFF / NOTRUN rows; a row that now agrees is stale |
+| fail-closed | nothing compared, or a missing compiler, is ERROR (exit 2), never PASS |
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run, dir_create_all, file_write, file_read, file_exists, dir_list, dir_exists}
+
+val guard = "scripts/check/check-seed-stage2-differential.shs"
+val selfcheck = "test/fixtures/bootstrap/seed_stage2_differential_selfcheck"
+val corpus = "test/fixtures/bootstrap/stage2_micro"
+val shipped_baseline = "scripts/check/seed_stage2_differential_baseline.txt"
+val scratch_root = "build/test-artifacts/seed_stage2_differential_acceptance"
+
+fn last_line(out: text) -> text:
+    val lines = out.trim().split("\n")
+    if lines.len() == 0:
+        return ""
+    lines[lines.len() - 1].trim()
+
+# Stage the fake compilers as executables and return (seed, stage2).
+fn fakes() -> (text, text):
+    dir_create_all(scratch_root)
+    val seed = scratch_root + "/fake_seed"
+    val stage2 = scratch_root + "/fake_stage2"
+    process_run("cp", [selfcheck + "/fake_seed.shs", seed])
+    process_run("cp", [selfcheck + "/fake_stage2.shs", stage2])
+    process_run("chmod", ["+x", seed, stage2])
+    (seed, stage2)
+
+# Run the driver on one selfcheck case with the given baseline text ("" = no baseline file).
+fn run_case(name: text, case_name: text, baseline: text) -> (text, i64):
+    val (seed, stage2) = fakes()
+    val work = scratch_root + "/" + name
+    dir_create_all(work)
+    val base = work + "/baseline.txt"
+    if baseline != "":
+        file_write(base, baseline + "\n")
+    val args = [guard, "--no-selftest", "--seed", seed, "--stage2", stage2,
+                "--corpus", selfcheck + "/cases", "--baseline", base, "--work", work + "/out", case_name]
+    val (out, _err, code) = process_run("sh", args)
+    (last_line(out), code)
+
+describe "Seed/stage-2 differential corpus gate":
+    # @manual scenario evidence
+
+    it "passes its own fatal selftest":
+        # @req REQ-SSPEC-COMPILER
+        step("passes its own fatal selftest")
+        val (out, _err, code) = process_run("sh", [guard, "--selftest"])
+        expect(out).to_contain("selftest OK")
+        expect(out.contains("selftest FAIL")).to_equal(false)
+        expect(code).to_equal(0)
+
+    it "reports PASS with a non-zero comparison count when every lane agrees":
+        # @req REQ-SSPEC-COMPILER
+        step("reports PASS with a non-zero comparison count when every lane agrees")
+        val (verdict, code) = run_case("agree", "agree", "")
+        expect(verdict).to_start_with("PASS — 3 comparison(s) across 1 case(s)")
+        expect(verdict).to_contain("3 SAME")
+        expect(code).to_equal(0)
+
+    it "fails and names the row when stage-2 prints different stdout":
+        # @req REQ-SSPEC-COMPILER
+        step("fails and names the row when stage-2 prints different stdout")
+        val (verdict, code) = run_case("diverge", "diverge", "")
+        expect(verdict).to_start_with("FAIL — ")
+        expect(verdict).to_contain("new DIFF: diverge:llvm;")
+        expect(verdict.contains("diverge:cranelift")).to_equal(false)
+        expect(code).to_equal(1)
+
+    it "fails when stage-2 refuses a program the seed runs":
+        # @req REQ-SSPEC-COMPILER
+        step("fails when stage-2 refuses a program the seed runs")
+        val (verdict, code) = run_case("s2rejects", "s2rejects", "")
+        expect(verdict).to_contain("new DIFF: s2rejects:llvm;")
+        expect(code).to_equal(1)
+
+    it "fails when only the exit code differs":
+        # @req REQ-SSPEC-COMPILER
+        step("fails when only the exit code differs")
+        val (verdict, code) = run_case("exitcode", "exitcode", "")
+        expect(verdict).to_contain("new DIFF: exitcode:llvm;")
+        expect(code).to_equal(1)
+
+    it "treats both compilers refusing a must-reject program as agreement":
+        # @req REQ-SSPEC-COMPILER
+        step("treats both compilers refusing a must-reject program as agreement")
+        val (verdict, code) = run_case("bothrefuse", "bothrefuse", "")
+        expect(verdict).to_start_with("PASS — 3 comparison(s)")
+        expect(code).to_equal(0)
+
+    it "passes a baselined divergence and counts it apart from agreement":
+        # @req REQ-SSPEC-COMPILER
+        step("passes a baselined divergence and counts it apart from agreement")
+        val (verdict, code) = run_case("diverge_known", "diverge", "diverge llvm DIFF  # known")
+        expect(verdict).to_start_with("PASS — 3 comparison(s)")
+        expect(verdict).to_contain("2 SAME, 1 baselined DIFF")
+        expect(code).to_equal(0)
+
+    it "fails a stale baseline row that now agrees":
+        # @req REQ-SSPEC-COMPILER
+        step("fails a stale baseline row that now agrees")
+        val (verdict, code) = run_case("stale", "agree", "agree llvm DIFF  # fixed since")
+        expect(verdict).to_start_with("FAIL — ")
+        expect(verdict).to_contain("stale baseline: agree:llvm;")
+        expect(code).to_equal(1)
+
+    it "never counts a NOTRUN row as agreement":
+        # @req REQ-SSPEC-COMPILER
+        step("never counts a NOTRUN row as agreement")
+        val (verdict, code) = run_case("timedout", "timedout", "")
+        expect(verdict).to_start_with("FAIL — 1 comparison(s)")
+        expect(verdict).to_contain("unbaselined NOTRUN: timedout:llvm timedout:cranelift;")
+        expect(code).to_equal(1)
+        step("A case with no main.spl is checked, is NOTRUN, and leaves nothing compared")
+        val (verdict2, code2) = run_case("missing_case", "no_such_case", "")
+        expect(verdict2).to_start_with("ERROR — nothing was checked")
+        expect(code2).to_equal(2)
+
+    it "reports ERROR when a compiler is missing":
+        # @req REQ-SSPEC-COMPILER
+        step("reports ERROR when a compiler is missing")
+        val (seed, stage2) = fakes()
+        val cases = selfcheck + "/cases"
+        val work = scratch_root + "/missing_compiler"
+        step("stage-2 path does not exist")
+        val (out1, _e1, code1) = process_run("sh", [guard, "--no-selftest", "--seed", seed,
+            "--stage2", scratch_root + "/absent_stage2", "--corpus", cases, "--work", work, "agree"])
+        expect(last_line(out1)).to_start_with("ERROR — nothing was checked (stage-2 compiler")
+        expect(code1).to_equal(2)
+        step("seed path does not exist")
+        val (out2, _e2, code2) = process_run("sh", [guard, "--no-selftest", "--seed",
+            scratch_root + "/absent_seed", "--stage2", stage2, "--corpus", cases, "--work", work, "agree"])
+        expect(last_line(out2)).to_start_with("ERROR — nothing was checked (seed compiler")
+        expect(code2).to_equal(2)
+        step("no --stage2 at all")
+        val (out3, _e3, code3) = process_run("sh", [guard, "--no-selftest", "--seed", seed,
+            "--corpus", cases, "--work", work, "agree"])
+        expect(last_line(out3)).to_start_with("ERROR — nothing was checked (no --stage2")
+        expect(code3).to_equal(2)
+
+    it "reports ERROR for an empty corpus":
+        # @req REQ-SSPEC-COMPILER
+        step("reports ERROR for an empty corpus")
+        val (seed, stage2) = fakes()
+        val empty = scratch_root + "/empty_corpus"
+        dir_create_all(empty)
+        val (out, _err, code) = process_run("sh", [guard, "--no-selftest", "--seed", seed,
+            "--stage2", stage2, "--corpus", empty, "--work", scratch_root + "/empty_out"])
+        expect(last_line(out)).to_start_with("ERROR — nothing was checked (no case under")
+        expect(code).to_equal(2)
+
+    it "ships a corpus where every case states its expectation and every baseline row names a case":
+        # @req REQ-SSPEC-COMPILER
+        step("ships a corpus where every case states its expectation and every baseline row names a case")
+        var cases = 0
+        var without_header = ""
+        for entry in dir_list(corpus):
+            val main = corpus + "/" + entry + "/main.spl"
+            if entry.starts_with("diff_") and file_exists(main):
+                cases = cases + 1
+                val src = file_read(main)
+                val has_run = src.contains("\n# Expected stdout:\n#   ")
+                val has_reject = src.contains("\n# Expected: reject\n")
+                if not has_run and not has_reject:
+                    without_header = without_header + " " + entry
+        expect(cases).to_be_greater_than(24)
+        expect(without_header).to_equal("")
+        step("Baseline rows: <case> <seed|llvm|cranelift> <DIFF|NOTRUN>, case must exist")
+        var rows = 0
+        var bad_rows = ""
+        for raw in file_read(shipped_baseline).split("\n"):
+            val line = raw.split("#")[0].trim()
+            if line != "":
+                rows = rows + 1
+                val parts = line.split(" ")
+                var ok = parts.len() == 3
+                if ok:
+                    val lane_ok = parts[1] == "seed" or parts[1] == "llvm" or parts[1] == "cranelift"
+                    val class_ok = parts[2] == "DIFF" or parts[2] == "NOTRUN"
+                    ok = lane_ok and class_ok and file_exists(corpus + "/" + parts[0] + "/main.spl")
+                if not ok:
+                    bad_rows = bad_rows + " [" + line + "]"
+        expect(rows).to_be_greater_than(0)
+        expect(bad_rows).to_equal("")
