@@ -39,3 +39,17 @@ Latest provider/consumer update:
 - Captured projection generation: six new scenarios UNRUN; discovery and lifetime
   authority still required. Three Astra repair lanes proceed independently.
 - Six native test products remain **0/6**; no measured 0.1-second compile claim.
+
+
+Follow-up plan (supersedes the earlier rename failure status):
+
+- Rename repair and unaligned-count control: two actual native passes; thirteen
+  distinct adapter criteria, without replaying eleven earlier greens.
+- Windows archive V2: private implementation and C compile pass; three actual
+  runtime fault/lifetime cases, Rust aliases and pure consumers remain UNRUN.
+- Managed synchronous parse-lease cut2: authored implementation, four native
+  groups and three frontend cases UNRUN; async/TestRunner integration remains.
+- Astra platform, compiler and formal lanes have separate acceptance gates;
+  bootstrap/test scheduling requests forty jobs after exact compiler admission.
+- **0/6** qualified Phase 2 products; full Phase 3/4 and 0.1-second compile
+  unverified. Missing SIMD/GPU/Sosix document remains NOT_ASSESSED.

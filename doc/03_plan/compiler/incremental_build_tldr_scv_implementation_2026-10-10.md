@@ -216,3 +216,71 @@ identify conflicts before implementation. For each conflict, recommend the
 option that preserves selected semantics and existing ownership, supported by
 correctness, compatibility and measured performance evidence; leave the final
 choice to the user.
+
+
+## Follow-up implementation and acceptance plan — 2026-10-10
+
+This update supersedes the earlier rename failure and unsupported-provider
+candidate status. It preserves the original 28 requirements and WP0–WP11.
+Private candidate code is not release implementation, and a compile pass is
+not runtime, bootstrap, formal-proof or performance acceptance.
+
+| Work item | Completed evidence or authored implementation | Remaining work and completion gate |
+|---|---|---|
+| Typed Windows retained-directory rename | The failed native criterion and new unaligned-count criterion both pass: two executed, zero failures. Eleven earlier greens were preserved without replay, giving thirteen distinct adapter criteria. Exact adapter source is locally applied | Bind a rebuilt seed to exact inputs; run the pure-Simple retained-directory caller and compiler Hello. No six-product qualification follows from these Rust unit tests |
+| Windows file-view identity | Private V2 candidate retains a complete volume/object identity in a forty-byte FVI2 record; legacy V1 stays a separate compatibility contract. Current-host high identity bits demonstrate why signed narrowing is unsafe | Preserve all bits, reject malformed frames and stale handles, bind actual private native owner and Rust aliases, then execute pure consumers. Never truncate or hash identity into authority |
+| Windows archive owner | Private seventeen-file cut2 includes retained no-follow ancestry, generation handles, short registry locks, packed-array reads/maps and streamed archive digest. Actual candidate C compile passed once; runtime tests remain UNRUN | Execute the three independent native allocation, mapping-fault and active-close controls. Inspect the link map for one actual owner; qualify Rust V2 aliases and pure consumers separately. Add UNC and case-policy evidence or explicit unsupported scope |
+| Cross-process parser sharing | Private synchronous lease cut2 connects actual managed frontend miss/recheck/parse/store/release paths to retained Windows kernel-mutex ownership. Its unmanaged helper preserves the original return path; four native control groups and three frontend SSpec cases are authored, all UNRUN | Independent review, crash/dead-owner controls, namespace/config isolation and actual duplicate-miss tests. Async parent-owned scheduling and TestRunner integration remain separate incomplete work; do not claim whole-service completion |
+| Real TLDR header consumers | Nineteen CLI/ABI/foreign-boundary/filesystem scenarios are authored, with a static 1,588-owner import closure | Bind an actual producer, captured generation and provider. Run parser/HIR/MIR/archive consumers; retain conservative foreign-boundary fallback. The constructed fixture receipt and static import audit do not establish generation authority |
+| SIMD/GPU/Sosix final design | The exact requested Downloads document remains unavailable at the checked path | Obtain the exact document, append its requirement/test coverage and compare contracts. Report concrete conflicts and recommend a choice before implementing conflicting semantics; coverage remains NOT_ASSESSED |
+
+### Parallel execution and review ownership
+
+1. The Astra platform lane completes Windows provider fault/lifetime controls
+   and exact library/source binding. The primary agent runs independently
+   bounded cases, continues to the remaining cases after an independent
+   failure, and records actual exits and cleanup counters.
+2. The Astra compiler lane completes synchronous parse sharing and actual TLDR
+   consumers. The Astra formal lane reviews retained capabilities, publication
+   fencing, dead-owner recovery and cold/warm models against real owners.
+   Authored models and source review are not executed formal verification.
+3. After exact compiler admission and Hello, bootstrap/test lanes independently
+   attempt supported Phase 1 remaining tests, six Phase 2 native test products,
+   Phase 3 vertical objects and Phase 4 tools with Phase 2. Request forty jobs,
+   measure active workers and memory, and reuse only valid cached artifacts.
+   Missing prerequisites remain blocked; they are never cached as successes.
+4. Final acceptance belongs to the primary reviewer. Source fixes land only
+   after their applicable gates. Performance changes require cold/warm timings,
+   memory and logic checks before publication. Preserve unrelated session work.
+
+The native controls must use actual runtime value constructors and borrowed
+payloads. Keep each test result on its owning thread or explicitly transfer it
+through an approved ownership interface. Check allocation failure, malformed
+length, mapped exception cleanup, close during a blocked read and stale-token
+refusal. No fake value layout, duplicate runtime owner or forced multiple-symbol
+link is accepted as evidence.
+
+### Evidence bindings and remaining acceptance
+
+- Rename execution receipt:
+  `build/windows-retained-interpreter-adapter-20261010/nt-rename-cut1/ROOT_NATIVE_EXECUTION_DISPOSITION.json`.
+  Adapter SHA256 `cccafd450416f148148d8717518c625e754f1dbcb5216e82531c76bb1121c654`;
+  two focused passes, thirteen distinct criteria; pure-Simple caller unexecuted.
+- Windows archive cut2 manifest SHA256
+  `afbb77866ebffb52cc75f963f964b88debac43911468e5ae1f9acda56c20a0f5`;
+  three-case native harness manifest SHA256
+  `b4f37090793e7fcf9424ba14f60215f57f7340397f9596b6033a8c4e198e6d81`.
+  C compile acceptance only; harness, aliases and consumers remain unqualified.
+- Synchronous parse-lease cut2 manifest SHA256
+  `f04a3bc59511056fc1364ea4dc220bbb3093023e9c99dd52261a13a495bf83d0`.
+  A cut1 execution request must not launch this successor under stale pins.
+
+These local build packets are evidence locators, not fresh-clone deliverables.
+Qualified Phase 2 products remain **0/6**. Full Phase 3/4 success, crash-safe edit
+hooks, complete source-linked formal refinement and measured 0.1-second SPL
+compilation remain unverified. No latency improvement is claimed by this plan.
+
+Retain the three-cycle limit, failed-only retries and no green replay. Every
+workaround requires a bug identifier, explicit tag, introducing commit and a
+removal condition tied to an applied, verified fix. Continue independent stages
+where inputs are usable; fail closed on identity, provenance or ownership gaps.
