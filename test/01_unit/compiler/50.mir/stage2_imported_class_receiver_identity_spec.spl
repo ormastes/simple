@@ -37,7 +37,7 @@ use compiler.common.config.{Logger}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir_lowering.types.{hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
-use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules, ModuleSurfacesByName}
 use compiler.hir.hir_types.*
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering_types.{MirLowering}
@@ -51,33 +51,51 @@ val ext2_source = "use lib.dep.\{Reg\}\n\nimpl Reg:\n    fn dup() -> i64:\n     
 
 var _last_mir: MirModule? = nil
 
-fn lower_consumer(consumer_source: text, with_ext2: bool) -> MirLowering:
+# Provider surfaces dominate this fixture's cost (module_surfaces_from_modules
+# took ~178s of ~195s per example under the interpreter the spec runner uses),
+# so providers are parsed, surfaced and HIR-lowered ONCE and shared; each
+# example lowers only its consumer.
+var _providers_ready = false
+var _surfaces: ModuleSurfacesByName? = nil
+var _dep_hir: HirModule? = nil
+var _ext_hir: HirModule? = nil
+var _ext2_hir: HirModule? = nil
+
+fn ensure_providers():
+    if _providers_ready:
+        return
     val log = Logger(level: 0)
     val dep_ast = parse_full_frontend(dep_source, "lib/dep.spl", "lib.dep", log)
     val ext_ast = parse_full_frontend(ext_source, "lib/ext.spl", "lib.ext", log)
     val ext2_ast = parse_full_frontend(ext2_source, "lib/ext2.spl", "lib.ext2", log)
-    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
     var modules: Dict<text, Module> = {}
     modules["lib.dep"] = dep_ast
     modules["lib.ext"] = ext_ast
-    var sources = [SourceFile(path: "lib/dep.spl", content: dep_source, module_name: "lib.dep"), SourceFile(path: "lib/ext.spl", content: ext_source, module_name: "lib.ext")]
-    if with_ext2:
-        modules["lib.ext2"] = ext2_ast
-        sources.push(SourceFile(path: "lib/ext2.spl", content: ext2_source, module_name: "lib.ext2"))
+    modules["lib.ext2"] = ext2_ast
+    val sources = [SourceFile(path: "lib/dep.spl", content: dep_source, module_name: "lib.dep"), SourceFile(path: "lib/ext.spl", content: ext_source, module_name: "lib.ext"), SourceFile(path: "lib/ext2.spl", content: ext2_source, module_name: "lib.ext2")]
     val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    _surfaces = Some(surfaces)
     var dep_lowering = hirlowering_for_module("lib.dep", surfaces)
     var ext_lowering = hirlowering_for_module("lib.ext", surfaces)
-    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
-    val dep_hir = dep_lowering.lower_module(dep_ast)
-    val ext_hir = ext_lowering.lower_module(ext_ast)
+    var ext2_lowering = hirlowering_for_module("lib.ext2", surfaces)
+    _dep_hir = Some(dep_lowering.lower_module(dep_ast))
+    _ext_hir = Some(ext_lowering.lower_module(ext_ast))
+    _ext2_hir = Some(ext2_lowering.lower_module(ext2_ast))
+    _providers_ready = true
+
+fn lower_consumer(consumer_source: text, with_ext2: bool) -> MirLowering:
+    ensure_providers()
+    val dep_hir: HirModule = _dep_hir.unwrap()
+    val ext_hir: HirModule = _ext_hir.unwrap()
+    val ext2_hir: HirModule = _ext2_hir.unwrap()
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", Logger(level: 0))
+    var consumer_lowering = hirlowering_for_module("app.main", _surfaces.unwrap())
     val consumer_hir = consumer_lowering.lower_module(consumer_ast)
     var providers = [dep_hir, ext_hir]
     var mir_lowering = MirLowering.new(consumer_hir.symbols)
     mir_lowering.prescan_module_struct_names(dep_hir)
     mir_lowering.prescan_module_struct_names(ext_hir)
     if with_ext2:
-        var ext2_lowering = hirlowering_for_module("lib.ext2", surfaces)
-        val ext2_hir = ext2_lowering.lower_module(ext2_ast)
         mir_lowering.prescan_module_struct_names(ext2_hir)
         providers.push(ext2_hir)
     mir_lowering.prescan_module_struct_names(consumer_hir)
@@ -85,6 +103,7 @@ fn lower_consumer(consumer_source: text, with_ext2: bool) -> MirLowering:
     val mir = mir_lowering.lower_module(consumer_hir, providers)
     _last_mir = Some(mir)
     mir_lowering
+
 
 
 fn mir_errors(lowering: MirLowering) -> text:
