@@ -107,7 +107,24 @@ impl HirLowering:
         val owner = self.symbols.lookup_or_invalid(local_name)
         if not owner.is_valid():
             return
+        # A field type can retain the provider-qualified identity while an
+        # explicit import has a distinct consumer-local alias. Register both
+        # only when their enum symbols prove the same declaration origin.
+        var canonical_owner = -1
+        if val local_symbol = self.symbols.get_symbol_raw(owner.id):
+            if local_symbol.kind != SymbolKind.Enum:
+                return
+            if self.imported_enum_owners.contains_key(local_name):
+                val origin = self.imported_enum_owners[local_name]
+                if origin != "" and (local_symbol.defining_module ?? "") == origin:
+                    val candidate = self.symbols.lookup_qualified_type_raw(origin, local_symbol.name)
+                    if candidate >= 0:
+                        if val canonical_symbol = self.symbols.get_symbol_raw(candidate):
+                            if canonical_symbol.kind == SymbolKind.Enum and canonical_symbol.name == local_symbol.name and (canonical_symbol.defining_module ?? "") == origin:
+                                canonical_owner = candidate
         self.generic_enum_constructor_owners[owner.id] = enum_.type_params.len() > 0
+        if canonical_owner >= 0:
+            self.generic_enum_constructor_owners[canonical_owner] = enum_.type_params.len() > 0
         for untyped_variant in enum_.variants:
             # The flat-AST bridge builds EVERY payload-less variant as
             # `VariantKind.Tuple([])` (module_assembly.spl), never
@@ -125,6 +142,8 @@ impl HirLowering:
                 case _: ()
             if is_unit:
                 self.enum_unit_pattern_names["{owner.id}:{variant.name}"] = true
+                if canonical_owner >= 0:
+                    self.enum_unit_pattern_names["{canonical_owner}:{variant.name}"] = true
 
     me lower_match_pattern(p: Pattern, subject_type: HirType?) -> HirPattern:
         # A bare name is a variant only when the subject's enum owns it.
