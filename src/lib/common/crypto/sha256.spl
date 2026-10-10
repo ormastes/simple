@@ -207,6 +207,8 @@ fn sha256_bytes(data: [i64]) -> [i64]:
 # included) plus the published FIPS 180-4 vectors for "" and "abc".
 @unsafe(reason: "raw SHA-256 accelerator; a non-32-byte result is the unsupported or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_tls13_sha256(data: [u8]) -> [u8]
+extern fn rt_stderr_write(s: text)
+var _sha256_fallback_noted: bool = false
 
 fn sha256_text(data: text) -> text:
     sha256_u8_fast_hex(text_to_utf8_bytes(data))
@@ -228,6 +230,15 @@ fn sha256_u8_fast_hex(raw: [u8]) -> text:
     # See doc/08_tracking/bug/jit_rt_tls13_sha256_returns_empty_2026-08-05.md --
     # remove this guard only once that defect is fixed and re-measured.
     if digest.len() != 32u64:
+        # Said ONCE per process: the pure-Simple fallback is engine-independent
+        # but costs orders of magnitude more per digest, and every cache entry
+        # checksum (frontend + HIR caches) now goes through here. A build that
+        # silently took this path would look like a ~25% parse-cost regression
+        # with nothing in the log to explain it.
+        if not _sha256_fallback_noted:
+            _sha256_fallback_noted = true
+            unsafe(capabilities: [ffi]):
+                rt_stderr_write("[sha256] runtime digest unavailable on this engine (got {digest.len()} bytes); using the pure-Simple fallback for every digest in this process\n")
         return sha256_u8_hex(raw)
     # ASCII hex digits written into one byte buffer and converted once: the
     # previous 64 one-character substrings + join cost ~170 runtime calls and
