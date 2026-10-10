@@ -138,3 +138,81 @@ The provisional native route is valid only with its own exact producer/source-sn
 ## Separate SIMD/GPU/Sosix document and conflict disposition
 
 The requested `C:/Users/user/Downloads/simple_simd_gpu_sosix_variation_final_2026-10-10.md` is still unavailable at the supplied path. Therefore its requirements, implementation coverage and conflicts are **NOT_ASSESSED**; no complete implementation claim is made. Obtain that exact document, map every selected requirement to existing owners and modern SSpec controls, and compare it with the current architecture before implementation. Do not substitute another SIMD document or silently choose a conflicting design. Report each real conflict with the two alternatives, compatibility/performance/safety evidence and a recommendation for user selection.
+
+
+## Latest evidence and parallel repair plan — 2026-10-10
+
+This section supersedes the preceding captured-index and provider statuses for
+the exact observations below. Earlier failures remain recorded. A source check,
+native unit test, OS probe, dependency audit and qualified compiler product are
+different evidence classes; none substitutes for another.
+
+| Slice | Actual evidence | Remaining acceptance |
+|---|---|---|
+| Captured-index decoder | First execution: four passes and four failures. Corrected imports and retried only four failures: four passes. Eight distinct source criteria now pass, with no green replay | Controls use constructed index fixtures; actual Git capture and connected bootstrap projection are not qualified. Shared application is held because another session's crypto API differs from the tested release API |
+| Windows typed file adapter | Twelve actual Rust tests executed: eleven passed, one retained-directory positive rename failed; zero ignored. Compilation took 8m51s, test execution 0.02s | Preserve the eleven greens; repair and run only the failed rename plus new unaligned-count control. The frozen seed has not been rebuilt or admitted |
+| Retained-directory rename diagnosis | Actual padded-buffer OS probe: Win32 class3 returns ERROR87 with destination present or absent. NT class10 refuses the existing destination with c0000035 and succeeds when absent; bytes and retained parent identity are checked | Diagnosis supports a typed NT route, not a padding-only fix. Candidate pure-Simple/typed adapter code remains UNRUN and unapplied; no root-null or absolute-path workaround |
+| Actual TLDR CLI/semantic/MIR consumer | Private cut6 authors nineteen UNRUN scenarios: nine CLI, five ABI, two foreign-boundary and three filesystem prerequisites. Static import audit resolves 1,588 owners with zero unknown imports | Execute against an exact provider and source closure. The dependency audit is not a compiler run or a speed measurement. Keep extern/export-C conservative fallback and current-generation validation |
+| Captured working bytes and materialization | Private generation cut authors six UNRUN controls for mutation/deletion after capture, index drift, foreign scope, repeated write and staged/working divergence | Materialize retained bytes, never reopen a mutable pathname. Complete ancestor/discovery/generated/tool authority before enabling projection or publication |
+| Windows pinned archive | Existing Windows runtime file-view/pinned-archive functions are unsupported stubs. The regular-file interpreter adapter does not implement this separate provider | Implement beneath-root native primitives in the existing owner, retain directory lifetime, preserve exact object identity, bound reads/maps and reject stale handles |
+
+Evidence receipts retained locally:
+
+- `build/windows-retained-interpreter-adapter-20261010/ROOT_NATIVE_EXECUTION_DISPOSITION.json`:
+  native test cycle one of three, eleven passes and one failure; adapter source
+  SHA256 `ffb8ec001d4333ec4d48af0e2131e6377110cfdd321554cdfb29ee9525d9ac63`.
+- `build/windows-retained-interpreter-adapter-20261010/nt-rename-cut1/probe-result.json`:
+  actual OS diagnosis; probe SHA256
+  `ec4e75fcd83d837089bd6cb8a36b91848a3a8cf0c286aa0766802c916c50ff9d`.
+- Captured-index failed-only execution receipt:
+  `build/phase2-six-products-80030-20261010/independent-next-step-review/producer-admission-repair/captured-index-source-diagnostic-cut3/ROOT_EXECUTION_DISPOSITION.json`.
+  Decoder source cut4 manifest SHA256
+  `9e3b6d88cca80a88bf30966e08a41803b5cfd334c1960ef176c3139969e762c5`.
+
+These diagnostic packets are local retained evidence, not distributed production
+metadata or a guarantee that their contents exist in a fresh clone.
+
+### Repair ownership and execution order
+
+| Parallel lane | Owner | Next finite task and acceptance |
+|---|---|---|
+| Rename and formal cache review | Astra formal lane | Review typed NtSetInformationFile class10, signed NTSTATUS and aligned IOSB16, bounded owned buffers and retained root. Execute only failed/new criteria, then bind rebuilt provider; source-linked cache refinement remains a separate gate |
+| Windows archive primitives and projection | Astra platform/projection lane | Author real native and modern SSpec controls first, then implement the existing runtime_file_view owner. Use retained no-follow ancestor opens, short table locks and I/O outside the global lock. Reject identity values that cannot be represented losslessly by the existing ABI; do not truncate/hash them |
+| TLDR consumer and performance | Astra compiler lane | Connect the nineteen authored scenarios to real parser/HIR/MIR/archive owners after provider binding; verify foreign ABI fallback, retained parse reuse and source/config invalidation. Keep static closure evidence separate from execution |
+| Scheduling, review and landing | Primary agent | Review exact candidate source/evidence, preserve unrelated dirty files, record bug/workaround links and land only the scoped verified changes. Lower-model sidecars: N/A for these safety-sensitive repairs |
+
+The three implementation lanes may proceed concurrently. OS primitives remain
+in the existing native boundary; Simple owners retain policy, digest and cache
+authority. No complete body import, duplicate mutation owner or new metadata
+authority is accepted as an optimization shortcut.
+
+After an exact compiler passes Hello and admission, independently schedule:
+Phase 1 supported remaining tests; six Phase 2 compiler/interpreter/loader test
+products across LLVM and Cranelift; Phase 3 vertical HIR/MIR/object attempts;
+Phase 4 tool objects/link/sanity using Phase 2; and failed smallest-to-largest
+link targets with valid objects. Request forty jobs per admitted build, measure
+actual workers and memory pressure, reuse valid caches and retry changed
+failures only. Failure in one independent module must not stop the others;
+missing input or provenance cannot be treated as successful compilation.
+
+Every new failure gets a reproducing case and nearby prevention controls.
+Workarounds require a bug identifier, tag, introducing commit and explicit
+removal condition after the actual fix is applied and verified. Do not replay
+passing checks or reopen a closed three-cycle feature under another name.
+
+### Completion and conflict gates
+
+Qualified Phase 2 native test products remain **0/6**. Complete Phase 3/4
+bootstrap, actual warm/cold native compile and link timings, the 0.1-second
+single-file target, TestRunner parse sharing, crash-safe IDE/Spipe hook overhead
+and full source-linked formal refinement remain unqualified. Performance
+publication requires measured improvements with memory, ownership and logic
+regression checks; this plan update publishes no source or performance claim.
+
+The exact SIMD/GPU/Sosix final document is still missing at the requested
+Downloads path as of this update. Its coverage and conflicts remain
+NOT_ASSESSED. Obtain the exact document, append its requirement/test matrix and
+identify conflicts before implementation. For each conflict, recommend the
+option that preserves selected semantics and existing ownership, supported by
+correctness, compatibility and measured performance evidence; leave the final
+choice to the user.
