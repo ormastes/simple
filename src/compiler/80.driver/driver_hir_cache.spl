@@ -238,12 +238,31 @@ fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]
     val final_path = hir_cache_path(key)
     val tmp = final_path + ".{rt_getpid()}.tmp"
     if not rt_file_write_text(tmp, hir_cache_header() + "\n" + warning_parts.join("") + blob):
+        # A failed write can leave a partial temp (disk full is the measured
+        # case); it was never unlinked and never reported.
+        val _partial = rt_file_delete(tmp)
+        _hir_cache_note_store_failure("write", tmp)
         return false
     if rt_file_move(tmp, final_path):
         _hir_cache_stores = _hir_cache_stores + 1
         return true
     val _cleaned = rt_file_delete(tmp)
+    _hir_cache_note_store_failure("rename", final_path)
     false
+
+# A cache that cannot store is a slow build, not a wrong one, so a failed store
+# stays non-fatal -- but it is counted, shown in the summary, and its first
+# occurrence is reported. A codec refusal is not an I/O failure and is not
+# counted here.
+var _hir_cache_store_failures: i64 = 0
+
+fn _hir_cache_note_store_failure(step: text, path: text):
+    _hir_cache_store_failures = _hir_cache_store_failures + 1
+    if _hir_cache_store_failures == 1:
+        eprint("[hir-cache] store failed at {step}: {path}; this module will be re-lowered next run (further failures are only counted)\n")
+
+fn hir_cache_store_failures() -> i64:
+    _hir_cache_store_failures
 
 fn hir_cache_hits() -> i64:
     _hir_cache_hits
@@ -255,7 +274,10 @@ fn hir_cache_stores() -> i64:
     _hir_cache_stores
 
 fn hir_cache_summary() -> text:
-    "[hir-cache] hits={_hir_cache_hits} misses={_hir_cache_misses} stores={_hir_cache_stores}"
+    val base = "[hir-cache] hits={_hir_cache_hits} misses={_hir_cache_misses} stores={_hir_cache_stores}"
+    if _hir_cache_store_failures == 0:
+        return base
+    base + " store_failures={_hir_cache_store_failures}"
 
 # ===== HIR sharding ==========================================================
 #
@@ -463,6 +485,7 @@ export HIR_CACHE_ENTRY_VERSION
 export hir_cache_enabled, hir_cache_dir, hir_cache_closure_digest, hir_cache_key
 export hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_last_warnings
 export hir_cache_hits, hir_cache_misses, hir_cache_stores, hir_cache_summary
+export hir_cache_store_failures
 export hir_shard_spec, hir_shard_active, hir_shard_claimed, hir_shard_owns
 export hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary
 export hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block

@@ -1,0 +1,42 @@
+# A failed HIR cache store must be counted, shown in the summary, and must not
+# leave its pid-unique temp file behind. Before this, a store that could not
+# write (disk full was the measured case) returned false silently.
+#
+# The cache directory is pointed below a regular FILE, so creating it and
+# writing into it both fail on every platform.
+
+use std.spec.*
+use app.io.env_ops.{env_get, env_set}
+use test.fixtures.compiler.completeness95.hir_cases_v1.{fixture_hir_module_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_store, hir_cache_stores,
+    hir_cache_store_failures, hir_cache_summary, hir_cache_enabled, hir_cache_path}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_getpid() -> i64
+
+describe "HIR cache store failure":
+    it "should count and report a store that cannot write, leaving no temp file":
+        val blocker = "build/hir_cache_store_failure_blocker_{rt_getpid()}.txt"
+        expect(rt_file_write_text(blocker, "not a directory\n")).to_equal(true)
+        val saved_scope = env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
+        val saved_dir = env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
+        expect(env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "store-failure-spec")).to_be(true)
+        expect(env_set("SIMPLE_HIR_CACHE_DIR", blocker + "/hir")).to_be(true)
+        expect(hir_cache_enabled()).to_equal(true)
+
+        val before_failures = hir_cache_store_failures()
+        val before_stores = hir_cache_stores()
+        expect(hir_cache_summary()).to_contain("stores=")
+        val stored = hir_cache_store("k1", fixture_hir_module_v1(false), [])
+
+        expect(stored).to_equal(false)
+        expect(hir_cache_stores()).to_equal(before_stores)
+        expect(hir_cache_store_failures()).to_equal(before_failures + 1)
+        expect(hir_cache_summary()).to_contain("store_failures={before_failures + 1}")
+        expect(rt_file_exists(hir_cache_path("k1") + ".{rt_getpid()}.tmp")).to_equal(false)
+
+        val _scope = env_set("SIMPLE_FRONTEND_CACHE_SCOPE", saved_scope)
+        val _dir = env_set("SIMPLE_HIR_CACHE_DIR", saved_dir)
+        val _gone = rt_file_delete(blocker)
