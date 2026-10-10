@@ -26,6 +26,23 @@
 #   W-HIR-INFER-002 inferred_type_fallback_use untyped `var c = []` / `{}`
 #            whose binding is then used as a receiver (element type unknown).
 #
+# Any rules (robustness item 7b) -- OFF in `run_hir_frontend_diagnostics`,
+# on only through `run_hir_any_diagnostics` (opt-in: SIMPLE_ANY_RULES or a
+# simple.sdn level, see 90.tools/lint/any_rules.spl). With `any_rules == false` the
+# walker does none of the bookkeeping below (it only keeps the `unsafe:`
+# depth counter):
+#   W-HIR-INFER-003 any_fallback_use  extends W-HIR-INFER-001/002 to the use
+#            positions they do not cover: a binding whose type fell back
+#            (unresolved callee return, untyped `[]`/`{}`, or an unannotated
+#            alias of an `Any` value) used as an arithmetic or comparison
+#            operand, passed to a typed parameter, or returned from a typed
+#            function. Reported AT THE USE.
+#   W-ANY-USE-001 any_receiver_use    `for` over a value declared/aliased `Any`
+#   W-ANY-USE-002 any_receiver_use    method call on such a receiver
+#            (both are known stage-2 failures). Bindings W-HIR-INFER-001/002
+#            already track are left to those codes, so one site never gets
+#            two findings.
+#
 # Registry: families and code->family mapping live in
 # src/compiler/90.tools/lint/_LintMain/config_and_model.spl; the default level
 # for every code here is `warn` and the driver typecheck pass never raises a
@@ -63,6 +80,10 @@ pub fn hir_frontend_family_for_code(code: text) -> text:
         return "non_exhaustive_match"
     if code == "W-HIR-INFER-001" or code == "W-HIR-INFER-002":
         return "inferred_type_fallback_use"
+    if code == "W-HIR-INFER-003":
+        return "any_fallback_use"
+    if code == "W-ANY-USE-001" or code == "W-ANY-USE-002":
+        return "any_receiver_use"
     ""
 
 pub fn hir_frontend_rule_codes() -> [text]:
@@ -160,6 +181,59 @@ fn hir_frontend_type_unresolved(hir: HirModule, t: HirType) -> bool:
         case Array(elem, _): hir_frontend_type_unresolved(hir, elem)
         case _: false
 
+pub fn hir_any_rule_codes() -> [text]:
+    ["W-HIR-INFER-003", "W-ANY-USE-001", "W-ANY-USE-002"]
+
+# A declared type a use position can be checked against.
+fn hir_any_type_concrete(t: HirType) -> bool:
+    match t.kind:
+        case Any: false
+        case Error: false
+        case Infer(_, _): false
+        case Unit: false
+        case TypeParam(_, _): false
+        case Optional(inner): hir_any_type_concrete(inner)
+        case Array(elem, _): hir_any_type_concrete(elem)
+        case _: true
+
+# Source spelling of a concrete type, "" when this module cannot spell it
+# (a suggestion is only made when it can be pasted back).
+fn hir_any_type_text(hir: HirModule, t: HirType) -> text:
+    if not hir_any_type_concrete(t):
+        return ""
+    val rendered = hir_frontend_type_name(hir, t)
+    if rendered.contains("<"):
+        return ""
+    rendered
+
+fn hir_any_bare_name(name: text) -> text:
+    if not name.contains("."):
+        return name
+    val parts = name.split(".")
+    parts[parts.len() - 1]
+
+# "" for an operator that accepts an untyped operand (logical and/or, ...).
+fn hir_any_binop_use(op: HirBinOp) -> text:
+    match op:
+        case Add: "an arithmetic operand"
+        case Sub: "an arithmetic operand"
+        case Mul: "an arithmetic operand"
+        case Div: "an arithmetic operand"
+        case Mod: "an arithmetic operand"
+        case Pow: "an arithmetic operand"
+        case Eq: "a comparison operand"
+        case NotEq: "a comparison operand"
+        case Lt: "a comparison operand"
+        case LtEq: "a comparison operand"
+        case Gt: "a comparison operand"
+        case GtEq: "a comparison operand"
+        case _: ""
+
+fn hir_any_is_nil_lit(e: HirExpr) -> bool:
+    match e.kind:
+        case NilLit: true
+        case _: false
+
 class HirFrontendWalker:
     hir: HirModule
     # unit-variant name -> comma-joined owning enum names visible here
@@ -174,6 +248,26 @@ class HirFrontendWalker:
     pending_line: Dict<i64, i64>
     pending_col: Dict<i64, i64>
     reported: Dict<i64, bool>
+    # ---- Any rules (item 7b); untouched while `any_rules` is false ----
+    any_rules: bool
+    # "fn/name", "fn/->", "Type.field" keys of WRITTEN `Any` declarations
+    # (written_any_scan.spl); only refines wording and return suggestions.
+    written: Dict<text, bool>
+    # symbol id -> origin, for params/locals whose declared type is `Any`
+    any_syms: Dict<i64, text>
+    # symbol id -> reason, for unannotated aliases of an `Any`/fallback value
+    alias_syms: Dict<i64, text>
+    # symbol id -> source spelling of its concrete type (suggestions)
+    known_types: Dict<i64, text>
+    any_seen: Dict<text, bool>
+    # written-Any key -> concrete type the initialiser/returns show
+    suggestions: Dict<text, text>
+    unsafe_depth: i64
+    fn_key: text
+    fn_ret_concrete: bool
+    fn_ret_text: text
+    ret_want: bool
+    ret_types: [text]
 
     static fn create(hir: HirModule) -> HirFrontendWalker:
         # Deterministic: enum names are sorted before the owner strings are
@@ -206,6 +300,13 @@ class HirFrontendWalker:
         val empty_line: Dict<i64, i64> = {}
         val empty_col: Dict<i64, i64> = {}
         val empty_reported: Dict<i64, bool> = {}
+        val empty_written: Dict<text, bool> = {}
+        val empty_any: Dict<i64, text> = {}
+        val empty_alias: Dict<i64, text> = {}
+        val empty_known: Dict<i64, text> = {}
+        val empty_seen: Dict<text, bool> = {}
+        val empty_suggestions: Dict<text, text> = {}
+        val empty_ret_types: [text] = []
         HirFrontendWalker(
             hir: hir,
             unit_variants: variants,
@@ -216,7 +317,20 @@ class HirFrontendWalker:
             pending_code: empty_code,
             pending_line: empty_line,
             pending_col: empty_col,
-            reported: empty_reported)
+            reported: empty_reported,
+            any_rules: false,
+            written: empty_written,
+            any_syms: empty_any,
+            alias_syms: empty_alias,
+            known_types: empty_known,
+            any_seen: empty_seen,
+            suggestions: empty_suggestions,
+            unsafe_depth: 0,
+            fn_key: "",
+            fn_ret_concrete: false,
+            fn_ret_text: "",
+            ret_want: false,
+            ret_types: empty_ret_types)
 
     fn symbol_name(sym: SymbolId) -> text:
         val s = self.hir.symbols.get_symbol(sym)
@@ -463,6 +577,207 @@ class HirFrontendWalker:
             anchor)
 
     # ------------------------------------------------------------------
+    # Any rules (item 7b): W-HIR-INFER-003, W-ANY-USE-001/002
+    # Every method here is reached only behind `if self.any_rules`.
+    # ------------------------------------------------------------------
+    fn expr_known_type(e: HirExpr) -> text:
+        match e.kind:
+            case IntLit(_, suffix):
+                if suffix.?: "" else: "i64"
+            case FloatLit(_, suffix):
+                if suffix.?: "" else: "f64"
+            case StringLit(_, _): "text"
+            case BoolLit(_): "bool"
+            case Var(s):
+                if self.known_types.contains_key(s.id): self.known_types[s.id] else: ""
+            case NamedVar(s, _):
+                if self.known_types.contains_key(s.id): self.known_types[s.id] else: ""
+            case Binary(op, _, _):
+                if hir_any_binop_use(op) == "a comparison operand": "bool" else: ""
+            case Call(callee, _, _):
+                val callee_sym = self.receiver_symbol(callee)
+                if not callee_sym.is_valid():
+                    return ""
+                for local_fn in self.hir.functions.values():
+                    if local_fn.symbol.id == callee_sym.id:
+                        return hir_any_type_text(self.hir, local_fn.return_type)
+                ""
+            case _: ""
+
+    me any_begin_function(f: HirFunction):
+        val empty_any: Dict<i64, text> = {}
+        val empty_alias: Dict<i64, text> = {}
+        val empty_known: Dict<i64, text> = {}
+        val empty_ret_types: [text] = []
+        self.any_syms = empty_any
+        self.alias_syms = empty_alias
+        self.known_types = empty_known
+        self.ret_types = empty_ret_types
+        self.unsafe_depth = 0
+        self.fn_key = hir_any_bare_name(f.name)
+        self.fn_ret_concrete = hir_any_type_concrete(f.return_type)
+        self.fn_ret_text = hir_frontend_type_name(self.hir, f.return_type)
+        self.ret_want = false
+        match f.return_type.kind:
+            case Any: self.ret_want = self.written.contains_key(self.fn_key + "/->")
+            case _: ()
+        for p in f.params:
+            if p.name == "self":
+                continue
+            match p.type_.kind:
+                case Any:
+                    if self.written.contains_key(self.fn_key + "/" + p.name):
+                        self.any_syms[p.symbol.id] = "parameter `{p.name}` is declared `Any`"
+                    else:
+                        self.any_syms[p.symbol.id] = "parameter `{p.name}` has no concrete type and lowers as `Any`"
+                case _:
+                    val spelled = hir_any_type_text(self.hir, p.type_)
+                    if spelled != "":
+                        self.known_types[p.symbol.id] = spelled
+
+    me any_end_function(f: HirFunction):
+        if f.body.has and self.fn_ret_concrete:
+            self.any_note_typed_use(f.body.value,
+                "the return value of `{self.fn_name}`",
+                "`{self.fn_ret_text}`", f.body.value.span)
+        if not self.ret_want:
+            return
+        if f.body.has:
+            self.ret_types = self.ret_types.push(self.expr_known_type(f.body.value))
+        if self.ret_types.len() == 0:
+            return
+        val first = self.ret_types[0]
+        if first == "":
+            return
+        for t in self.ret_types:
+            if t != first:
+                return
+        self.suggestions[self.fn_key + "/->"] = first
+
+    me any_note_let(sym: SymbolId, declared: HirType?, init: HirExpr):
+        val name = self.symbol_name(sym)
+        if declared.?:
+            val d: HirType = declared
+            var is_infer = false
+            match d.kind:
+                case Any:
+                    val key = self.fn_key + "/" + name
+                    if self.written.contains_key(key):
+                        self.any_syms[sym.id] = "local `{name}` is declared `Any`"
+                        val shown = self.expr_known_type(init)
+                        if shown != "":
+                            self.suggestions[key] = shown
+                    else:
+                        self.any_syms[sym.id] = "local `{name}` has no concrete type and lowers as `Any`"
+                    return
+                case Infer(_, _): is_infer = true
+                case _: ()
+            if not is_infer:
+                val spelled = hir_any_type_text(self.hir, d)
+                if spelled != "":
+                    self.known_types[sym.id] = spelled
+                return
+        val source = self.receiver_symbol(init)
+        if source.is_valid():
+            val source_untyped = (self.any_syms.contains_key(source.id) or
+                self.alias_syms.contains_key(source.id) or
+                self.pending_code.contains_key(source.id))
+            if source_untyped:
+                val source_name = self.symbol_name(source)
+                self.alias_syms[sym.id] = "it is initialised from `{source_name}`, whose type is not known"
+                return
+        val shown = self.expr_known_type(init)
+        if shown != "":
+            self.known_types[sym.id] = shown
+
+    me any_emit_once(code: text, sym: SymbolId, use_kind: text, message: text, anchor: Span):
+        val key = "{code}:{sym.id}:{anchor.line}:{anchor.col}:{use_kind}"
+        if self.any_seen.contains_key(key):
+            return
+        self.any_seen[key] = true
+        self.emit(code, message, anchor)
+
+    # W-HIR-INFER-003: a fallback-typed binding in a position that needs a
+    # concrete type. `needs` completes "which needs ...".
+    me any_note_typed_use(value: HirExpr, use_kind: text, needs: text, use_span: Span):
+        if self.unsafe_depth > 0:
+            return
+        val sym = self.receiver_symbol(value)
+        if not sym.is_valid():
+            return
+        var reason = ""
+        if self.pending_reason.contains_key(sym.id):
+            reason = self.pending_reason[sym.id]
+        elif self.alias_syms.contains_key(sym.id):
+            reason = self.alias_syms[sym.id]
+        else:
+            return
+        val name = self.symbol_name(sym)
+        self.any_emit_once("W-HIR-INFER-003", sym, use_kind,
+            "`{name}` is used as {use_kind}, which needs {needs}, but its type fell back to an untyped value ({reason}) — annotate `{name}` at its declaration",
+            first_set_span(value.span, use_span))
+
+    # W-ANY-USE-001/002: `for` over / method call on an `Any` value.
+    me any_note_receiver_use(receiver: HirExpr, code: text, what: text, use_span: Span):
+        if self.unsafe_depth > 0:
+            return
+        val sym = self.receiver_symbol(receiver)
+        if not sym.is_valid():
+            return
+        # W-HIR-INFER-001/002 own the bindings they track.
+        if self.pending_code.contains_key(sym.id):
+            return
+        var origin = ""
+        if self.any_syms.contains_key(sym.id):
+            origin = self.any_syms[sym.id]
+        elif self.alias_syms.contains_key(sym.id):
+            origin = self.alias_syms[sym.id]
+        else:
+            return
+        val name = self.symbol_name(sym)
+        self.any_emit_once(code, sym, what,
+            "{what} `{name}`, an `any` value ({origin}): this is a known stage-2 failure because the element/receiver type is erased — give `{name}` a concrete type",
+            first_set_span(use_span, receiver.span))
+
+    me any_note_call_args(callee: HirExpr, args: [HirCallArg], call_span: Span):
+        var interesting = false
+        for a in args:
+            val s = self.receiver_symbol(a.value)
+            if s.is_valid() and (self.pending_reason.contains_key(s.id) or self.alias_syms.contains_key(s.id)):
+                interesting = true
+        if not interesting:
+            return
+        val callee_sym = self.receiver_symbol(callee)
+        if not callee_sym.is_valid():
+            return
+        for local_fn in self.hir.functions.values():
+            if local_fn.symbol.id != callee_sym.id:
+                continue
+            var position = 0
+            for a in args:
+                var matched = false
+                var index = 0
+                for p in local_fn.params:
+                    val hit = if a.has_name: p.name == a.name else: index == position
+                    if hit and not matched and hir_any_type_concrete(p.type_):
+                        matched = true
+                        val shown = hir_frontend_type_name(self.hir, p.type_)
+                        self.any_note_typed_use(a.value,
+                            "an argument for parameter `{p.name}` of `{local_fn.name}`",
+                            "`{shown}`", call_span)
+                    index = index + 1
+                position = position + 1
+            return
+
+    me any_note_return(value: HirExpr, at: Span):
+        if self.ret_want:
+            self.ret_types = self.ret_types.push(self.expr_known_type(value))
+        if self.fn_ret_concrete:
+            self.any_note_typed_use(value,
+                "the return value of `{self.fn_name}`",
+                "`{self.fn_ret_text}`", at)
+
+    # ------------------------------------------------------------------
     # Walk
     # ------------------------------------------------------------------
     me walk_block(b: HirBlock):
@@ -478,6 +793,8 @@ class HirFrontendWalker:
             case Let(sym, type_, init):
                 self.check_binding_name(self.symbol_name(sym), "this `val`/`if val` declaration", first_set_span(st.span, init.span))
                 self.note_let(sym, type_, init, st.span)
+                if self.any_rules:
+                    self.any_note_let(sym, type_, init)
                 self.walk_expr(init)
             case Assign(target, _, value):
                 self.walk_expr(target)
@@ -527,15 +844,26 @@ class HirFrontendWalker:
                 self.walk_expr(base)
             case Unwrap(base):
                 self.walk_expr(base)
-            case Binary(_, left, right):
+            case Binary(op, left, right):
+                if self.any_rules:
+                    val use_kind = hir_any_binop_use(op)
+                    if use_kind != "":
+                        if not hir_any_is_nil_lit(right):
+                            self.any_note_typed_use(left, use_kind, "a concrete operand type", e.span)
+                        if not hir_any_is_nil_lit(left):
+                            self.any_note_typed_use(right, use_kind, "a concrete operand type", e.span)
                 self.walk_expr(left)
                 self.walk_expr(right)
             case Unary(_, operand):
                 self.walk_expr(operand)
             case Call(callee, args, _):
+                if self.any_rules:
+                    self.any_note_call_args(callee, args, e.span)
                 self.walk_expr(callee)
                 self.walk_args(args)
-            case MethodCall(receiver, _, args, _):
+            case MethodCall(receiver, method, args, _):
+                if self.any_rules:
+                    self.any_note_receiver_use(receiver, "W-ANY-USE-002", "method `.{method}()` is called on", e.span)
                 self.note_use(receiver, "a method-call receiver", e.span)
                 self.walk_expr(receiver)
                 self.walk_args(args)
@@ -570,6 +898,8 @@ class HirFrontendWalker:
                 val anchor = first_set_span(e.span, iter.span)
                 self.check_binding_name(self.symbol_name(var_), "this `for` loop", anchor)
                 self.note_use(iter, "a `for` iterable", anchor)
+                if self.any_rules:
+                    self.any_note_receiver_use(iter, "W-ANY-USE-001", "`for` iterates over", anchor)
                 self.walk_expr(iter)
                 self.walk_block(body)
             case With(items, body):
@@ -585,6 +915,8 @@ class HirFrontendWalker:
                 self.walk_block(body)
             case Return(value):
                 if value.?:
+                    if self.any_rules:
+                        self.any_note_return(value.unwrap(), e.span)
                     self.walk_expr(value.unwrap())
             case Break(_, value):
                 if value.?:
@@ -626,7 +958,9 @@ class HirFrontendWalker:
             case Comprehension(_, inner, _):
                 self.walk_expr(inner)
             case UnsafeBlock(body):
+                self.unsafe_depth = self.unsafe_depth + 1
                 self.walk_block(body)
+                self.unsafe_depth = self.unsafe_depth - 1
             case TryCatch(body, clauses, finally_):
                 self.walk_block(body)
                 for c in clauses:
@@ -652,7 +986,11 @@ class HirFrontendWalker:
         self.reported = empty_reported
         if f.is_extern:
             return
+        if self.any_rules:
+            self.any_begin_function(f)
         self.walk_block(f.body)
+        if self.any_rules:
+            self.any_end_function(f)
 
 fn hir_frontend_pad(n: i64) -> text:
     var s = "{n}"
@@ -689,6 +1027,62 @@ pub fn run_hir_frontend_diagnostics(hir: HirModule) -> [HirFrontendFinding]:
     for f in hir.functions.values():
         walker.walk_function(f)
     hir_frontend_sort_findings(walker.findings)
+
+pub struct HirAnyReport:
+    # W-HIR-INFER-003 / W-ANY-USE-001 / W-ANY-USE-002 only, sorted.
+    findings: [HirFrontendFinding]
+    # Parallel arrays: written-Any key ("fn/name", "fn/->", "Type.field") ->
+    # the concrete type its initialiser / returns / default show.
+    suggestion_keys: [text]
+    suggestion_types: [text]
+
+pub fn hir_any_report_suggestion(report: HirAnyReport, key: text) -> text:
+    var i = 0
+    while i < report.suggestion_keys.len():
+        if report.suggestion_keys[i] == key:
+            return report.suggestion_types[i]
+        i = i + 1
+    ""
+
+pub fn run_hir_any_diagnostics(hir: HirModule, written_keys: [text]) -> HirAnyReport:
+    """Any rules over a lowered module (read-only). `written_keys` are the
+    `written_any_site_key`s of the module's written-`Any` declarations."""
+    var walker = HirFrontendWalker.create(hir)
+    walker.any_rules = true
+    var written: Dict<text, bool> = {}
+    for key in written_keys:
+        written[key] = true
+    walker.written = written
+    for f in hir.functions.values():
+        walker.walk_function(f)
+    for s in hir.structs.values():
+        for field in s.fields:
+            val key = s.name + "." + field.name
+            if field.has_default and written.contains_key(key):
+                val shown = walker.expr_known_type(field.default)
+                if shown != "":
+                    walker.suggestions[key] = shown
+    for c in hir.classes.values():
+        for field in c.fields:
+            val key = c.name + "." + field.name
+            if field.has_default and written.contains_key(key):
+                val shown = walker.expr_known_type(field.default)
+                if shown != "":
+                    walker.suggestions[key] = shown
+    var findings: [HirFrontendFinding] = []
+    for f in walker.findings:
+        if f.family == "any_fallback_use" or f.family == "any_receiver_use":
+            findings = findings.push(f)
+    var keys: [text] = []
+    var types: [text] = []
+    for key in written_keys:
+        if walker.suggestions.contains_key(key):
+            keys = keys.push(key)
+            types = types.push(walker.suggestions[key])
+    HirAnyReport(
+        findings: hir_frontend_sort_findings(findings),
+        suggestion_keys: keys,
+        suggestion_types: types)
 
 pub fn hir_frontend_findings_with_code(findings: [HirFrontendFinding], code: text) -> [HirFrontendFinding]:
     var out: [HirFrontendFinding] = []

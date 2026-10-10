@@ -7,6 +7,7 @@ use compiler.types.type_infer.*
 use compiler.types.type_infer_types.{HmInferContext}
 use compiler.semantics.resolve.{resolve_methods}
 use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnostics, hir_frontend_finding_render, frontend_diag_enabled}
+use compiler.tools.lint.any_rules.{any_rules_mask_from_env, any_rules_for_hir, any_rules_report_lines}
 
 pub enum SimpleCheckCoverage:
     SyntaxOnly
@@ -107,6 +108,16 @@ pub fn simple_semantic_check_source(source: text, path: text) -> SimpleSemanticC
     if frontend_diag_enabled():
         for finding in run_hir_frontend_diagnostics(hir):
             warnings.push(hir_frontend_finding_render(path, finding))
+
+    # Any rules (item 7b): off unless SIMPLE_ANY_RULES names a mask -- `simple
+    # lint` sets it for its checker child when opted in. Off = no scan, no
+    # walk. The sentinel line lets the caller tell "ran, clean" from "never ran";
+    # the lines are also appended to $SIMPLE_ANY_RULES_OUT when that is set.
+    val any_mask = any_rules_mask_from_env()
+    if any_mask != "":
+        val any_run = any_rules_for_hir(path, source, hir, any_mask)
+        for line in any_rules_report_lines(path, any_mask, any_run.findings):
+            warnings.push(line)
 
     SimpleSemanticCheckResult(
         coverage: SimpleCheckCoverage.Semantic,
