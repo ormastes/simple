@@ -138,6 +138,11 @@ doing, neither done here:
   can list every cycle without paying a full HIR pass per discovery. Only that
   exact value downgrades; unset or anything else is fatal. Internal validator
   errors are never downgraded. There is no off switch.
+  **This is a diagnostic-only mode.** The compile continues past a REAL cycle
+  into layout and codegen with a struct that has no finite size. Use it to
+  collect the list of cycles, then fix them; never trust, run for results, or
+  ship anything a build produced under this setting. The closing warning line
+  says so on every such build.
 - **All three HIR pipelines print the same marker.** `[post-hir-validation-fatal]`
   (first 10) and `[post-hir-validation-fatal-count]` are now printed by
   `driver_validate_value_struct_layouts` itself; the bootstrap-entry and
