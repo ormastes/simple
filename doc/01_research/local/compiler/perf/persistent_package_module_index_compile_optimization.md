@@ -66,16 +66,19 @@ is rooted in the frozen snapshot.
 
 The acceptance contract names `PackageCompilePlanV1` and
 `PackageCompileReceiptV1` as the durable compiler evidence. A repository search
-at the base found no production definitions or producers for these names; they
-appear as expected output in the acceptance contract, not as admitted runtime
-artifacts. Similarly, `ScvFrozenSourceProviderV1` and
-`ScvCompileBridgeReceiptV1` are named in spec assertions but have no production
-owner/type implementation found in compiler or library source. The checker
-`scripts/check/check-persistent-smf-package-index.shs` is only a fail-closed
-wrapper: it exits 2 unless `build/test-tools/package_index_acceptance` (or the
-override binary) exists, then delegates to it. It contains no scenario logic.
-The canonical spec calls all 44 scenario names through this boundary; a
-missing binary must remain blocked/failing and must not be reported as PASS.
+at the base found no production declarations under these exact names. This is
+an evidence-binding gap: the contract has not identified an equivalent
+production artifact shape and producer that proves the required fields; it is
+not by itself proof that no equivalent capability exists. Similarly,
+`ScvFrozenSourceProviderV1` and `ScvCompileBridgeReceiptV1` are names in spec
+assertions, not names found in compiler/library declarations. Acceptance must
+bind equivalent production source-read ownership and bridge evidence explicitly
+before counting these capabilities as covered. The checker
+`scripts/check/check-persistent-smf-package-index.shs` is a fail-closed wrapper:
+it exits 2 unless `build/test-tools/package_index_acceptance` (or the override
+binary) exists, then delegates to it. It contains no scenario logic. The
+canonical spec calls all 44 scenario names through this boundary; a missing
+binary must remain blocked/failing and must not be reported as PASS.
 
 Generated metadata has a specific data-loss boundary: `generated_source_digest`
 is carried from cold HIR package output toward TLDR metadata, while
@@ -89,18 +92,42 @@ acceptance must not infer the expected value from the checker itself.
 
 The SCV inventory/snapshot implementation proves local primitives but not the
 requested cross-system invariants: automatic snapshot admission for ordinary
-compile calls, Git/SCV event refresh, ignored internal write-set enforcement,
-lease-safe crash cleanup, diagnostic bridge receipts, Git-state
-non-mutation, or compiler-wide source-open ownership. Index and archive types
-carry some SCV authority fields, but full provenance across plan, action,
-headers, archives, output and receipt remains unproved.
+compile calls, package-index refresh from Git/SCV events, ignored internal
+write-set enforcement, lease-safe crash cleanup, diagnostic bridge evidence,
+Git-state non-mutation during ordinary compile, or compiler-wide source-open
+ownership. The event acceptance helper
+`src/app/test/package_index_acceptance_events.spl` calls
+`compiler_inventory_refresh_v1` and
+`compiler_entrypoint_index_transition_v1`; its integration spec exercises a
+committed source change, inventory digest change, and generation advance. It
+also tests a binding-only recovery transition. This is real production-owner
+coverage for inventory refresh and index binding, but it does not establish
+selective package metadata/index refresh or automatic ordinary-compile wiring.
+The fixture's `acceptance_event_commit_v1` intentionally commits inside an
+isolated test repository, so it does not prove that ordinary automatic compile
+leaves user Git state unchanged. Index and archive types carry some SCV
+authority fields, but full provenance across plan, action, headers, archives,
+output and receipt remains unproved.
 
-Other implemented-looking helpers must be treated as candidates for testing,
-not acceptance results. Index readers/validators, metadata admission, archive
-receipts, invalidation and SCC scheduling exist, but production fixtures,
-boundary counters, controlled crash injection, measured dispatcher order,
-remote cache admission, full compile receipts and cross-entrypoint runs are
-absent or unverified. A unit test of a helper cannot substitute for a compiled
+Remote content verification also has a production helper:
+`compiler.driver.cache.remote.remote_client.remote_lookup_verified`. It checks
+producer read policy, namespace/schema/action identity, the locally recomputed
+manifest digest, each artifact's SHA-256, and size bounds. The remote integrity
+unit spec exercises authentic bytes and several mismatch/poison cases. The
+helper returns verified bytes and defers target, dependency, AOP/block-root
+validation and local publication to a local owner. Thus byte authentication is
+implemented; package-level local admission, graph-nonmutation guarantees,
+remote/local build reproducibility, and the full PSI remote scenarios remain
+unproved.
+
+Other implemented helpers must be treated as candidates for compiler-bound
+acceptance, not acceptance results. Index readers/validators, metadata
+admission, archive receipts, invalidation, SCC scheduling, inventory event
+refresh, snapshot staging, and remote byte authentication exist. Production
+fixture mutation through every owner, boundary counters, controlled crash
+injection, measured dispatcher order, full compile evidence binding,
+package-level remote admission, and cross-entrypoint runs remain absent or
+unverified. A unit test of a helper cannot substitute for a compiled
 production acceptance run.
 
 ## Design consequence
