@@ -153,7 +153,7 @@ class CompilerContextImpl:
                 lanes: 0,
                 args: [],
                 has_elem: false,
-                elem: nil
+                elem: []
             )
 
         var param_index = 0
@@ -424,9 +424,11 @@ struct TypeInfo:
     has_lanes: bool
     lanes: i64
     args: [TypeInfo]
-    # # DESUGARED: elem: TypeInfo
+    # Zero or one entry, gated by has_elem. A `struct` is a value type, so
+    # `elem: TypeInfo` would embed TypeInfo in itself (infinite size); `[TypeInfo]`
+    # is the indirection `args` already uses.
     has_elem: bool
-    elem: TypeInfo
+    elem: [TypeInfo]
 
 struct TypeHint:
     """Type hint for inference."""
@@ -739,10 +741,9 @@ fn json_to_type_info_text(jv: text) -> TypeInfo:
 
     val elem_object = sffi_json_field_object(jv, "elem")
     val has_elem_value = elem_object.len() > 0
-    val elem_value = if has_elem_value:
-        json_to_type_info_text(elem_object)
-    else:
-        default_type_info()
+    var elem_value: [TypeInfo] = []
+    if has_elem_value:
+        elem_value = [json_to_type_info_text(elem_object)]
 
     TypeInfo(
         kind: kind,
@@ -792,7 +793,7 @@ fn default_type_info() -> TypeInfo:
         lanes: 0,
         args: [],
         has_elem: false,
-        elem: nil
+        elem: []
     )
 
 fn sffi_json_field_tail(json_text: text, key: text) -> text:
@@ -1108,7 +1109,7 @@ fn serialize_type_json(ty: TypeInfo) -> text:
         fields.push('"args":' + serialize_types_json(ty.args))
 
     if ty.has_elem:
-        fields.push('"elem":' + serialize_type_json(ty.elem))
+        fields.push('"elem":' + serialize_type_json(ty.elem[0]))
 
     val joined = fields.join(",")
     "{" + joined + "}"
@@ -1187,7 +1188,7 @@ fn append_type_cache_key(builder: StringBuilder, ty: TypeInfo):
 
     if ty.has_elem:
         builder.push("e1")
-        append_type_cache_key(builder, ty.elem)
+        append_type_cache_key(builder, ty.elem[0])
     else:
         builder.push("e0")
     builder.push("}")
@@ -1269,32 +1270,32 @@ fn make_int_type(bits: i64, signed: bool) -> TypeInfo:
     var prefix = "u"
     if signed:
         prefix = "i"
-    var result = TypeInfo(kind: "int", name: "{prefix}{bits}", bits: bits, signed: signed, lanes: nil, args: [], elem: nil)
+    var result = TypeInfo(kind: "int", name: "{prefix}{bits}", bits: bits, signed: signed, lanes: nil, args: [], elem: [])
     result.has_bits = true
     result.has_signed = true
     result
 
 fn make_float_type(bits: i64) -> TypeInfo:
     """Create a float TypeInfo."""
-    var result = TypeInfo(kind: "float", name: "f{bits}", bits: bits, signed: nil, lanes: nil, args: [], elem: nil)
+    var result = TypeInfo(kind: "float", name: "f{bits}", bits: bits, signed: nil, lanes: nil, args: [], elem: [])
     result.has_bits = true
     result.has_signed = false
     result
 
 fn make_bool_type() -> TypeInfo:
     """Create a bool TypeInfo."""
-    var result = TypeInfo(kind: "bool", name: "bool", bits: 1, signed: nil, lanes: nil, args: [], elem: nil)
+    var result = TypeInfo(kind: "bool", name: "bool", bits: 1, signed: nil, lanes: nil, args: [], elem: [])
     result.has_bits = true
     result.bits = 1
     result
 
 fn make_string_type() -> TypeInfo:
     """Create a string TypeInfo."""
-    TypeInfo(kind: "string", name: "string", bits: nil, signed: nil, lanes: nil, args: [], elem: nil)
+    TypeInfo(kind: "string", name: "string", bits: nil, signed: nil, lanes: nil, args: [], elem: [])
 
 fn make_named_type(name: text) -> TypeInfo:
     """Create a named TypeInfo."""
-    TypeInfo(kind: "named", name: name, bits: nil, signed: nil, lanes: nil, args: [], elem: nil)
+    TypeInfo(kind: "named", name: name, bits: nil, signed: nil, lanes: nil, args: [], elem: [])
 
 # ============================================================================
 # Bytecode Helper Functions
