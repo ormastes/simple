@@ -60,3 +60,7 @@ The imported enum-payload owner alias now clears the earlier 42 HIR errors acros
 ## 2026-10-11 native CAS readback
 
 The Item 6 second-generation native CAS scenario now passes using bounded byte decimal parsing. The parser also rejects padded, oversized, and nonnumeric frame lengths in the same no-stub native fixture. The repair reduces repeated substring copying, but no matched p95/RSS cohort is available; the joint normalized-sum verdict remains unclaimed. Full entrypoint and warm recovery gates are still open.
+
+## 2026-10-11 imported generic current-source probe
+
+The isolated native HIR probe imports the edited monomorphizer and asserts exact owner-qualified generic call names. Its first build exposed a stale `Module` import in the unit harness; the parser owner now exports `ParserModule`. Its second build reached 300/300 HIR modules but refused seven generic transient-owner promotions on indexed inner values. Exact declared type arguments on those seven calls let the third build reach monomorphization with 9 generic functions, 60 call sites, 38 specializations, and zero unresolved calls. The pure-Simple Stage 2 native-build worker then terminated with signal 11 in MIR lowering before link or probe execution. The three-cycle cap is exhausted; no native Item 5 or paired size/startup/RSS claim follows. See [the worker crash record](../../08_tracking/bug/item5_mono_hir_probe_mir_worker_crash_2026-10-11.md).

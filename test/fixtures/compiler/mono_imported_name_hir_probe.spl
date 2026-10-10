@@ -1,0 +1,118 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Free generic fn across two modules on the native (HIR -> 40.mono) path.
+#
+# Pre-fix (#158 Phase A gate): lowering module `lib` fataled with
+#   "generic functions are not supported on the native build path yet"
+# before 40.mono ever saw the template, and even with the gate open the pass
+# found `call_sites=0` for a cross-module call: the callee arrives as
+# NamedVar("lib.pick_second") (qualified display name), its SymbolId is
+# MODULE-LOCAL, and the pass kept one global id->name map. Measured on
+# 2026-08-22; end-to-end native run of this exact fixture printed `35 103 7`
+# (doc/08_tracking/bug/stage1_lexer_hir_fatals_eprint_and_generic_len_helper_2026-08-22.md).
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.SourceFile
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.hirlowering_for_module
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule, SymbolId}
+use compiler.hir.hir_definitions.{HirFunction, HirStmt, HirStmtKind, HirExpr, HirExprKind}
+use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
+
+val LIB_SRC = "struct Acc:\n" +
+    "    n: i64\n" +
+    "\n" +
+    "fn pick_second<C>(a: C, b: C) -> C:\n" +
+    "    val keep = b\n" +
+    "    keep\n" +
+    "\n" +
+    "fn same<C>(v: C) -> C:\n" +
+    "    pick_second(v, v)\n"
+
+val MAIN_SRC = "use lib.{Acc, pick_second, same}\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    val a = pick_second(5, 35)\n" +
+    "    val b = pick_second(Acc(n: 1), Acc(n: 103))\n" +
+    "    val c = same(7)\n" +
+    "    if a == 35 and b.n == 103 and c == 7:\n" +
+    "        return 0\n" +
+    "    1\n"
+
+struct Lowered:
+    modules: Dict<text, HirModule>
+    errors: [text]
+
+fn lower_pair() -> Lowered:
+    lower_two("lib", LIB_SRC, "main", MAIN_SRC)
+
+fn lower_two(lib_name: text, lib_src: text, main_name: text, main_src: text) -> Lowered:
+    val log = Logger(level: 0)
+    val lib_parsed = parse_full_frontend(lib_src, lib_name + ".spl", lib_name, log)
+    val main_parsed = parse_full_frontend(main_src, main_name + ".spl", main_name, log)
+    var parsed: Dict<text, ParserModule> = {}
+    parsed[lib_name] = lib_parsed
+    parsed[main_name] = main_parsed
+    val surfaces_result = module_surfaces_from_modules(parsed, [
+        SourceFile(path: lib_name + ".spl", content: lib_src, module_name: lib_name),
+        SourceFile(path: main_name + ".spl", content: main_src, module_name: main_name)])
+    if surfaces_result.is_err():
+        return Lowered(modules: {}, errors: ["surface build failed: " + surfaces_result.unwrap_err()])
+    val surfaces = surfaces_result.unwrap()
+    var hir: Dict<text, HirModule> = {}
+    var errors: [text] = []
+    for name in [lib_name, main_name]:
+        var hl = hirlowering_for_module(name, surfaces)
+        hir[name] = hl.lower_module(parsed[name])
+        for e in hl.errors:
+            errors.push(e.message)
+    Lowered(modules: hir, errors: errors)
+
+fn function_names(m: HirModule) -> [text]:
+    var out: [text] = []
+    for sym in m.functions.keys():
+        val f: HirFunction = m.functions[sym]
+        out.push(f.name)
+    out
+
+fn callee_names_in_main(m: HirModule) -> [text]:
+    var out: [text] = []
+    for sym in m.functions.keys():
+        val f: HirFunction = m.functions[sym]
+        if f.name != "main":
+            continue
+        for st in f.body.stmts:
+            val s: HirStmt = st
+            match s.kind:
+                case HirStmtKind.Let(_, _, init):
+                    val ie: HirExpr = init
+                    match ie.kind:
+                        case HirExprKind.Call(callee, _, _):
+                            val ce: HirExpr = callee
+                            match ce.kind:
+                                case HirExprKind.NamedVar(_, n):
+                                    out.push(n)
+                                case _:
+                                    pass
+                        case _:
+                            pass
+                case _:
+                    pass
+    out
+
+
+fn main() -> i64:
+    val low = lower_pair()
+    if low.errors.len() != 0: return 1
+    val (mono, stats, diags) = run_monomorphization_with_diagnostics(low.modules)
+    if diags.len() != 0 or stats.unresolved_generic_calls != 0: return 2
+    val callees = callee_names_in_main(mono["main"])
+    if not callees.contains("lib.pick_second$i64"): return 3
+    if not callees.contains("lib.pick_second$Acc"): return 4
+    if not callees.contains("lib.same$i64"): return 5
+    print "PASS mono_imported_name_hir_probe"
+    0

@@ -343,3 +343,5 @@ The compiler-owned JIT compatibility probe remains unqualified: a current-source
 ### 2026-10-11 native imported-generic link boundary
 
 The four-module dynlib gate now exposes two distinct native link gaps: imported generic calls carry bare names although the mutex owner defines qualified specialization symbols, and the lifetime object references unmaterialized generic `Mutex.lock` / `Mutex.unlock` methods. A source-level call-name fix and exact two-module unit assertions are committed, but current-source native verification is pending. See [the bug](../../../08_tracking/bug/item5_imported_generic_and_mutex_method_native_link_2026-10-11.md). Optional-provider loading and matched size/startup/RSS gates remain open.
+
+The current-source imported-generic HIR probe reaches monomorphization with zero unresolved calls after explicit inner-owner types, but its 300-module native-build worker crashes in MIR before link. This leaves the name fix, dynlib method references, and all size/startup/RSS gates open; see [the MIR worker bug](../../../08_tracking/bug/item5_mono_hir_probe_mir_worker_crash_2026-10-11.md).

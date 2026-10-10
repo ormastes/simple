@@ -19,3 +19,7 @@ The four-module dynlib gate command is retained at `build/mini_builds/item5_dynl
 3. Trace and fix the independent `Mutex.lock` / `Mutex.unlock` emission failure, then pass the native dynlib fixture, Item 5 acceptance, and matched size/startup/RSS cohorts.
 
 At evidence capture the filesystem had 6.7 GB free, below the bootstrap minimum. No Item 5 pass or size claim follows from this candidate.
+
+## 2026-10-11 current-source HIR probe
+
+A 300-module native probe now compiles the edited monomorphizer source through HIR and monomorphization. Explicit types for seven indexed transient-owner promotions cleared an unrelated `E-MONO-032` gate; the final pass reported 60 generic call sites, 38 specializations, and zero unresolved. The native-build worker then crashed with signal 11 in MIR, before link or the exact-name assertions could run. The three-cycle limit is exhausted; see [the MIR worker bug](item5_mono_hir_probe_mir_worker_crash_2026-10-11.md). The generic symbol fix remains unqualified.
