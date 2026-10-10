@@ -178,6 +178,9 @@ impl HirLowering:
                 self.enum_unit_pattern_names["{owner.id}:{variant.name}"] = true
                 if canonical_owner >= 0:
                     self.enum_unit_pattern_names["{canonical_owner}:{variant.name}"] = true
+                # Name-only row: answers "is this bare name a unit variant of
+                # SOME visible enum" when the subject's enum is unknown.
+                self.enum_unit_pattern_names["*:{variant.name}"] = true
 
     me pattern_enum_same_owner(left: SymbolId, right: SymbolId) -> bool:
         if left.id == right.id:
@@ -295,12 +298,47 @@ impl HirLowering:
         match p.kind:
             case PatternKind.Binding(name, mutable):
                 if not mutable:
+                    # subject_unknown: HIR has NO static type for the subject
+                    # (nil / Infer / Error / Any). A known primitive, struct or
+                    # enum subject never takes the name-only rule below: there
+                    # the seed binds (`fn h(x: i64): match x: case Var:`).
+                    var subject_unknown = true
                     if val type_ = subject_type:
                         match type_.kind:
                             case HirTypeKind.Named(owner, _):
                                 if self.enum_unit_pattern_names.contains_key("{owner.id}:{name}"):
                                     return HirPattern(kind: HirPatternKind.Enum(type_, name, nil), has_type_: true, type_: type_, span: p.span)
-                            case _: ()
+                                subject_unknown = false
+                                # Subject is a registered enum that does not
+                                # own `name`, yet `name` is a unit variant of
+                                # another visible enum (`op: Op`, `case Return:`
+                                # with Return only in Kind). The seed rejects
+                                # this; here it still BINDS (a catch-all, as
+                                # before) and is reported on stderr only.
+                                # Warn-first on purpose: the closure has not
+                                # been measured for such arms, and an error
+                                # here would fail the bootstrap.
+                                if self.generic_enum_constructor_owners.contains_key(owner.id) and self.enum_unit_pattern_names.contains_key("*:{name}"):
+                                    val subject_enum_name = self.symbols.symbol_name_scalar_raw(owner.id)
+                                    eprint("[hir-lower] WARNING: bare `{name}` in a match over `{subject_enum_name}` is not one of its variants (it is a unit variant of another visible enum); it binds as a catch-all -- qualify it or rename the binding ({self.module_filename})")
+                            case HirTypeKind.Infer(_, _):
+                                subject_unknown = true
+                            case HirTypeKind.Error:
+                                subject_unknown = true
+                            case HirTypeKind.Any:
+                                subject_unknown = true
+                            case _:
+                                subject_unknown = false
+                    # Subject enum not statically known (a genuinely untyped
+                    # subject: `fn f(x): match x: case Eq:`). The seed decides by
+                    # the runtime value's enum; statically, a bare name that is a
+                    # unit variant of a visible enum (glob-facade imports
+                    # included) is the same unqualified variant pattern
+                    # `case BinOp(..)` lowers to: MIR resolves it against the
+                    # scrutinee's enum (so a name shared by several enums
+                    # needs no choice here) and rejects an unknown variant.
+                    if subject_unknown and self.enum_unit_pattern_names.contains_key("*:{name}"):
+                        return HirPattern(kind: HirPatternKind.Enum(HirType(kind: HirTypeKind.Error, span: p.span), name, nil), type_: nil, span: p.span)
                 if val binding_type = subject_type:
                     if declared_pattern_slot_type_is_concrete(binding_type):
                         val symbol = self.symbols.define(name, SymbolKind.Variable, Some(binding_type), p.span, Visibility.Private, mutable, nil)
