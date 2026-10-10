@@ -2472,7 +2472,7 @@ bootstrap_stage3_tool_requested_path() {
             lld-link) bootstrap_stage3_requested_tool=${CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER:-${LD:-lld-link}} ;;
             llvm-ar) bootstrap_stage3_requested_tool=${AR:-llvm-ar} ;;
             llvm-ranlib) bootstrap_stage3_requested_tool=${RANLIB:-llvm-ranlib} ;;
-            llc|llvm-as|opt|llvm-nm)
+            llc|llvm-as|opt|llvm-nm|llvm-readobj)
                 # Projection admission chooses once; strict compiler consumers
                 # use only these exact bytes, without repeating discovery.
                 for bootstrap_stage3_llvm_dir in "${SIMPLE_LLVM_BIN:-}" \
@@ -2531,10 +2531,22 @@ bootstrap_stage3_tool_authority_snapshot() (
     printf 'PATH=%s\n' "$bootstrap_stage3_tool_path" \
         >>"$bootstrap_stage3_tool_tmp" || return 1
     bootstrap_stage3_managed_llvm_tools=
+    case "${SIMPLE_MANAGED_CROSS_ARCHIVE_INSPECTOR:-}" in
+        '') ;;
+        1) [ "${SIMPLE_MANAGED_NATIVE_TOOLS:-}" = 1 ] || return 1 ;;
+        *) return 1 ;;
+    esac
     case "${SIMPLE_MANAGED_NATIVE_TOOLS:-}" in
         '') ;;
         1)
             bootstrap_stage3_managed_llvm_tools='llc llvm-as opt llvm-nm'
+            # Legacy consumers accept exactly eight roles. Only a caller with
+            # a compatible optional-role decoder may request the ninth pin.
+            if [ "${SIMPLE_MANAGED_CROSS_ARCHIVE_INSPECTOR:-}" = 1 ]; then
+                PATH="$bootstrap_stage3_tool_path" bootstrap_stage3_tool_requested_path \
+                    llvm-readobj '' '' >/dev/null 2>&1 || return 1
+                bootstrap_stage3_managed_llvm_tools="$bootstrap_stage3_managed_llvm_tools llvm-readobj"
+            fi
             printf 'managed-native-tools-format=1\n' >>"$bootstrap_stage3_tool_tmp" || return 1
             for bootstrap_stage3_managed_env in \
                 "INCLUDE=${INCLUDE:-}" "LIB=${LIB:-}" "LIBPATH=${LIBPATH:-}" \
@@ -2694,7 +2706,7 @@ bootstrap_stage3_tool_authority_snapshot() (
                 ar|llvm-ar) bootstrap_stage3_managed_role=ar ;;
                 ranlib|llvm-ranlib) bootstrap_stage3_managed_role=ranlib ;;
                 llvm-nm) bootstrap_stage3_managed_role=nm ;;
-                llc|llvm-as|opt) bootstrap_stage3_managed_role=$bootstrap_stage3_tool_name ;;
+                llc|llvm-as|opt|llvm-readobj) bootstrap_stage3_managed_role=$bootstrap_stage3_tool_name ;;
             esac
             if [ -n "$bootstrap_stage3_managed_role" ]; then
                 [ "$bootstrap_stage3_tool_version_status" -eq 0 ] || return 1
