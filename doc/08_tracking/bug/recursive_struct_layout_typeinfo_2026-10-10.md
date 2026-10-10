@@ -64,7 +64,7 @@ definer passed, stored verbatim by `SymbolTable.define`:
 Only the second spelling could match, so an edge to a struct whose symbol came
 from its own declaration was dropped by `if not structs.has(target): continue`.
 A struct embedding itself was therefore reported only when its symbol happened
-to have been prebound from a surface first — which is what the streaming
+to have been prebound from a surface first — which, by inference from the source rather than observation, is what the streaming
 closure did for `TypeInfo`, and why the result differed by pipeline rather than
 by source. This is not an ordering problem: no path desugars `T?` after
 validation (see below); it is an identity-spelling mismatch.
