@@ -34,3 +34,13 @@ The original 20 REQ-TRC requirements, 40 AC-TRC cases and WP0–WP7 remain open.
 ## Review-branch reconciliation
 
 The review branch was rebased onto release snapshot `e40f0bbd001abdd134ab8b350cc0bb39a12b4833` after the bounded diagnostic pass. The two stale helper calls remained present on that target and the patch applied without conflicts. Bootstrap/test observations above belong to the earlier frozen `d66172f8fde` source plus the patch; they are not renewed exact-head qualification of this newer base. This change is draft-only until the two failed regressions, missing general-runtime checks and authenticated admission are resolved.
+
+## 2026-10-11 release sync and completed focused repair
+
+Rebased the isolated work onto release snapshot `8303221132a0e44a739b30f92c3a1b7723534e86`. The missing writer to `global_constants_by_id` is now restored inside successful constant folding. The final focused native capsule reports **3 examples, 0 failures** after checking exact variants and payloads instead of boxed-text enum pointer equality. Construction: 2 compiled, 408 cached, zero failures, 7.0 seconds. Rust was used only for bootstrap construction; tests executed on the resulting pure-Simple native capsule. Source/binary/log digests are retained in `build/native_probe/traceability-release-sync-20261011-pass3/regression-receipt.json`. Both compiler cache and prior failed evidence are preserved.
+
+Astra high-effort review found zero P0/P1 in the final code delta and confirmed the revised assertions retain their contracts. The suite covers type agreement, not numeric alignment. Working direct-env guard passes; generated-doc tree has zero executable specs. Required broad compiler/lib/MCP/LSP checks remain unqualified because no admitted general-purpose runtime is available in this isolated lane. Overall verification remains WARN; this focused PASS is not complete product or release admission.
+
+The non-fast-forward push hook resolves only published main for an existing rebased ref. Main and this release line have 851 tip-side commits here, so rewriting the original draft branch would exceed its range guard. A new isolated branch tracking the published release line provides the supported, bounded push path, preserving the previous draft head.
+
+The current trusted default-branch workflow still offers only legacy `self_attestation`. Canonical SPipe guidance explicitly forbids emitting admission through that route. A non-mutating review request for PR 2892 was created; it requires external broker authority and does not authorize PASS. No protected merge, fabricated status, admin bypass, or release publication was performed.
