@@ -9,3 +9,5 @@ Owner proof: cuda_backend.spl operand_mir_type returns Result<MirType, CompileEr
 Primary reproducer: native-build actual src/plugins/backend_cuda/cuda_backend.spl using the recorded producer and normal dependency closure. No fourth full-scope HIR retry is authorized. A successful targeted compile must prove the CUDA module HIR artifact and still report dependency failures separately. It cannot invent an aggregate1160 PASS stamp.
 
 Nearby fixture test/fixtures/compiler/cuda_unary_type_owner_probe/main.spl checks negation integer/float inclusion, Boolean/I8 exclusion, bit-not integer inclusion and float exclusion. UNEXECUTED; expected stdout 1/1/0/0/1/0 on separate lines. It is a control, not a substitute for the actual CUDA reproducer. SPipe/core checks and dynamic CUDA artifact qualification remain pending.
+
+Workaround source commit: b7402e324 (parent b9ccb2ab9c86017724f29e5a2985dfe9b25d60dd). This follow-up registers the OPEN primary and active BUGDB rows and canonical @workaround tags. Qualifying evidence and release PR linkage must be appended after actual execution; no PASS is inferred from source review.
