@@ -27,12 +27,14 @@ divergences, all stricter than the seed (the seed accepts and loses the
 write): a closure under `[...]`, under `??`, and a write in a `with` body.
 
 Level switch `SIMPLE_CAPTURE_WRITE_CHECK=error|warning|off` (default and any
-unknown value: error). `warning` prints and continues; `off` skips the walk.
+unknown value: error, named once on stderr). `warning` prints and continues,
+and stores no parse-cache blob for a module it warned on; `off` skips the walk.
 """
 use std.spec.*
 use std.io_runtime.{env_set}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.frontend.flat_ast_bridge.{build_module_from_flat_pool_blob, flat_pool_capture_arm, flat_pool_capture_take}
+use compiler.frontend.flat_ast_bridge.{flat_capture_write_level_note}
 use compiler.core.parser.{parser_has_errors, parser_get_errors}
 
 # 24 lines: a probe body's first line is line 25.
@@ -66,6 +68,7 @@ val UNDER_INDEX_SRC = "fn wrap(f: fn(i64) -> i64) -> [i64]:\n    [f(1)]\n\nfn ma
 val UNDER_COALESCE_SRC = "fn call(f: fn() -> i64) -> i64?:\n    f()\n\nfn main():\n    var c = 0\n    val r = call(fn() -> i64:\n        c = c + 1\n        c\n    ) ?? 0\n"
 val GLOBAL_AFTER_SRC = "fn main():\n    G = 1\n    val f = fn() -> i64:\n        G = G + 1\n        G\n    f()\n\nvar G = 0\n"
 val GLOBAL_BEFORE_SRC = "var G = 0\n\nfn main():\n    G = 1\n    val f = fn() -> i64:\n        G = G + 1\n        G\n    f()\n"
+val MERGE_FORM_SRC = "fn main() -> i64:\n    var total = 0\n    val x = 2\n    val hook = fn() -> i64:\n        total = total + x\n        total\n    hook()\n"
 val PLAIN_WRITE_SRC = "fn main() -> i64:\n    var counter = 0\n    val hook = fn() -> i64:\n        counter = counter + 1\n        counter\n    hook()\n"
 
 fn diagnostics_of(src: text) -> [text]:
@@ -83,6 +86,14 @@ fn error_count_at_level(level: text) -> i64:
     val n = diagnostics_of(PLAIN_WRITE_SRC).len()
     env_set("SIMPLE_CAPTURE_WRITE_CHECK", "")
     n
+
+fn captured_blob_len(src: text, level: text) -> i64:
+    env_set("SIMPLE_CAPTURE_WRITE_CHECK", level)
+    flat_pool_capture_arm()
+    val _module = parse_and_build_module(src, "closure_capture_write_form.spl")
+    val blob = flat_pool_capture_take()
+    env_set("SIMPLE_CAPTURE_WRITE_CHECK", "")
+    blob.len()
 
 describe "captured-write check: closure-local declaration forms are not captures":
 
@@ -200,3 +211,21 @@ describe "captured-write check: SIMPLE_CAPTURE_WRITE_CHECK level":
         expect(blob.len()).to_be_greater_than(0)
         expect(hit_when_off != nil).to_equal(true)
         expect(hit_when_error == nil).to_equal(true)
+
+    it "stores no cache blob when the check fired at level warning":
+        # `total = total + x` is rewritten to `total.merge(x)` by the
+        # collection desugar, so a stored blob would pass the cache-hit
+        # re-check at level error. No blob also means no silent warm hit: the
+        # warning is printed on every build.
+        expect(captured_blob_len(MERGE_FORM_SRC, "warning")).to_equal(0)
+        expect(captured_blob_len(PLAIN_WRITE_SRC, "warning")).to_equal(0)
+
+    it "still stores a cache blob for a clean module at level warning":
+        expect(captured_blob_len(GLOBAL_BEFORE_SRC, "warning")).to_be_greater_than(0)
+
+    it "names an unknown level value and accepts the three known ones":
+        expect(flat_capture_write_level_note("bogus")).to_contain("SIMPLE_CAPTURE_WRITE_CHECK=bogus")
+        expect(flat_capture_write_level_note("")).to_equal("")
+        expect(flat_capture_write_level_note("error")).to_equal("")
+        expect(flat_capture_write_level_note("warning")).to_equal("")
+        expect(flat_capture_write_level_note("off")).to_equal("")

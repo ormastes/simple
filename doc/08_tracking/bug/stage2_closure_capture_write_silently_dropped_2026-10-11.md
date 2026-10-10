@@ -93,7 +93,11 @@ interpreted: 1.6-1.9% of the parse of the same module
 
 ## Level switch
 
-`SIMPLE_CAPTURE_WRITE_CHECK=error|warning|off`. Unset or unknown: `error`.
+`SIMPLE_CAPTURE_WRITE_CHECK=error|warning|off`. Unset or unknown: `error` (an
+unknown value is named once on stderr). A module warned on at `warning` gets
+no parse-cache blob, so the warning repeats on warm builds and an
+`x = x + y` write cannot hide behind a later cache hit. At `off` nothing is
+walked, so such a blob can be stored; only the cache-hit re-check guards it.
 `warning` prints `[capture_write_check] warning: <path>: line N: <text>` and
 compiles as before (the write is dropped); `off` skips the walk. The checker
 is not proven to be a subset of the seed's, so this is the escape if it ever
@@ -163,10 +167,10 @@ these (module-level statements).
 
 - `test/01_unit/compiler/50.mir/closure_capture_write_spec.spl`: 19 examples.
   Release tip `03ceb7f6408`: 11 of the first 14 fail. Now 19/19.
-- `test/01_unit/compiler/50.mir/closure_capture_write_forms_spec.spl`: 32
+- `test/01_unit/compiler/50.mir/closure_capture_write_forms_spec.spl`: 35
   examples (14 declaration forms, 8 writes under binding constructs, 3
-  stricter-than-seed, 1 position, 6 level switch / cache hit). 7 failed at
+  stricter-than-seed, 1 position, 9 level switch / cache). 7 failed at
   the first fix commit (`33dd836c9fe` after rebase; reviewed as `e544d6c2d44`).
-  Now 32/32.
+  Now 35/35.
 - `test/01_unit/compiler/interpreter/nested_fn_enclosing_var_mutation_spec.spl`
   (shared checker, interpreter side): 7/7.
