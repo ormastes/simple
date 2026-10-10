@@ -1,0 +1,120 @@
+# Native hash bucket order must not change a serialized symbol table or let an
+# unstable frame become cache authority. These tests exercise real codec calls.
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirModule, HirSymbol, SymbolTable, SymbolId, SymbolKind, ScopeId}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, hir_module_decode_stable}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_has,
+    hir_cache_load, hir_cache_store, hir_cache_last_warnings}
+use std.io_runtime.{file_read, file_write, file_exists, file_delete, dir_create_all}
+use std.env.variables.{env_get, env_has, env_set, env_unset}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+
+extern fn rt_getpid() -> i64
+
+fn expect_cache_scratch_reusable():
+    val began = transient_scope_begin()
+    val ended = if began: transient_scope_end() else: false
+    expect(began).to_equal(true)
+    expect(ended).to_equal(true)
+
+fn stable_cache_fixture(order: [i64]) -> HirModule:
+    var table: SymbolTable = SymbolTable.new()
+    for key in order:
+        table.symbols[key] = HirSymbol(
+            id: SymbolId(id: key), name: "symbol{key}",
+            kind: SymbolKind.Variable, type_: nil, scope: ScopeId(id: 0),
+            span: Span.empty(), visibility: Visibility.Private,
+            is_public: false, is_mutable: false, defining_module: nil,
+            builtin_method_tag: key)
+    table.next_symbol_id = 4
+    HirModule(name: "stable", path: "stable.spl", imports: [], exports: [],
+        domain_blocks: [], symbols: table, functions: {},
+        gpu_function_targets: {"zeta": "gpu", "alpha": "cpu"},
+        gpu_function_backend_orders: {}, classes: {}, structs: {}, enums: {},
+        bitfields: {}, traits: {}, impls: [], constants: {}, static_asserts: [],
+        aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [], types: [],
+        extend_enums: [])
+
+describe "Stable native HIR cache frames":
+    it "keeps all symbol records identical across dictionary insertion orders":
+        val first = stable_cache_fixture([3, 0, 1, 2])
+        val second = stable_cache_fixture([2, 3, 0, 1])
+        val before = first.symbols.symbols.keys()
+        val encoded = hir_module_encode(first)
+        expect(encoded.len()).to_be_greater_than(0)
+        expect(encoded).to_equal(hir_module_encode(second))
+        expect(first.symbols.symbols.keys()).to_equal(before)
+        val decoded = hir_module_decode_stable(encoded)
+        expect(decoded != nil).to_equal(true)
+        val restored = decoded.unwrap()
+        expect(restored.symbols.symbols[3].id.id).to_equal(3)
+        expect(restored.symbols.symbols[3].builtin_method_tag).to_equal(3)
+        expect(restored.symbols.symbols[3].name).to_equal("symbol3")
+        expect(hir_module_encode(restored)).to_equal(encoded)
+
+    it "refuses a decodable dictionary permutation at cache admission":
+        val encoded = hir_module_encode(stable_cache_fixture([3, 0, 1, 2]))
+        val sorted = "alpha\ncpu\nzeta\ngpu\n"
+        val permuted = "zeta\ngpu\nalpha\ncpu\n"
+        expect(encoded).to_contain(sorted)
+        val changed = encoded.replace(sorted, permuted)
+        expect(changed == encoded).to_equal(false)
+        expect(hir_module_decode(changed) != nil).to_equal(true)
+        expect(hir_module_decode_stable(changed)).to_be_nil()
+
+    it "refuses extra frame bytes instead of admitting a partial module":
+        val encoded = hir_module_encode(stable_cache_fixture([0, 1, 2, 3]))
+        expect(hir_module_decode_stable(encoded + "0\n")).to_be_nil()
+
+    it "reclaims normal loader misses while retaining an earlier hit and warnings":
+        # Run this native spec in its own process: frontend scope identity is
+        # intentionally memoized for process lifetime, as in a real compiler.
+        val names = ["SIMPLE_HIR_CACHE", "SIMPLE_HIR_CACHE_DIR",
+            "SIMPLE_FRONTEND_CACHE", "SIMPLE_FRONTEND_CACHE_SCOPE"]
+        var present: [bool] = []
+        var previous: [text] = []
+        for name in names:
+            present.push(env_has(name))
+            previous.push(env_get(name))
+        val directory = "build/native_probe/hir-loader-spec-{rt_getpid()}"
+        expect(dir_create_all(directory)).to_equal(true)
+        expect(env_set(names[0], "1")).to_equal(true)
+        expect(env_set(names[1], directory)).to_equal(true)
+        expect(env_set(names[2], "1")).to_equal(true)
+        expect(env_set(names[3], "native-hir-loader-scope-spec")).to_equal(true)
+        expect(hir_cache_enabled()).to_equal(true)
+        val module = stable_cache_fixture([3, 0, 1, 2])
+        val warnings = ["retained\nwarning", "literal\\slash", "한글 warning"]
+        expect(hir_cache_store("good", module, warnings)).to_equal(true)
+        val hit = hir_cache_load("good")
+        expect(hit != nil).to_equal(true)
+        expect(hit.unwrap().symbols.symbols[3].id.id).to_equal(3)
+        expect(hir_cache_last_warnings()).to_equal(warnings)
+        expect_cache_scratch_reusable()
+
+        val good = file_read(directory + "/good.hir")
+        val unstable = good.replace("alpha\ncpu\nzeta\ngpu\n", "zeta\ngpu\nalpha\ncpu\n")
+        expect(unstable == good).to_equal(false)
+        expect(file_write(directory + "/unstable.hir", unstable)).to_equal(true)
+        expect(file_write(directory + "/stale.hir", "stale-header\nW\n0\n")).to_equal(true)
+        if file_exists(directory + "/missing.hir"):
+            expect(file_delete(directory + "/missing.hir")).to_equal(true)
+        for key in ["missing", "stale", "unstable"]:
+            expect(hir_cache_load(key)).to_be_nil()
+            expect(hir_cache_last_warnings()).to_equal(warnings)
+            expect_cache_scratch_reusable()
+            expect(hir_cache_has(key)).to_equal(false)
+            expect(hir_cache_last_warnings()).to_equal(warnings)
+            expect_cache_scratch_reusable()
+        # The previously promoted optional wrapper and module both survive.
+        expect(hit.unwrap().symbols.symbols[3].name).to_equal("symbol3")
+        for key in ["good", "stale", "unstable"]:
+            expect(file_delete(directory + "/{key}.hir")).to_equal(true)
+        var index = 0
+        while index < names.len():
+            val restored = if present[index]: env_set(names[index], previous[index])
+                else: env_unset(names[index])
+            expect(restored).to_equal(true)
+            index = index + 1

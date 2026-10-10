@@ -31,14 +31,15 @@
 
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
 use compiler.hir.hir_types.{HirModule}
-use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, hir_codec_header}
-use compiler.frontend.core.flat_pool_codec.{flat_pool_escape, flat_pool_unescape}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode_stable, hir_codec_header}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_escape}
+use compiler.driver.hir_cache_envelope_reader.{hir_cache_decode_envelope}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_write}
 use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable}
-use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
 use compiler.driver.driver_source_pipeline_parsing.{driver_parse_shard_hash}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_complete, hir_shard_recovery_block, hir_shard_recovery_blocked}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory}
@@ -141,13 +142,40 @@ fn hir_cache_has(key: text) -> bool:
     val path = hir_cache_path(key)
     if not file_exists(path):
         return false
-    # A current header on a truncated/corrupt body is not completed work.
-    hir_cache_load(key) != nil
+    # Validate the whole frame, but retain neither its module nor diagnostics.
+    # Preserve any earlier load's warnings before releasing this scratch scope.
+    val previous_warnings = _hir_cache_last_warnings
+    if not transient_scope_begin():
+        return false
+    val valid = hir_cache_load_in_owned_scope(key) != nil
+    _hir_cache_last_warnings = previous_warnings
+    val ended = transient_scope_end()
+    valid and ended
 
 # nil for a miss, a foreign/corrupt entry, or a truncated one: every one of
 # those is "lower it in process", and the caller must not need to tell them
 # apart.
 fn hir_cache_load(key: text) -> HirModule?:
+    # Initialize the persistent frontend identity before entering scratch.
+    if key == "" or not hir_cache_enabled():
+        return nil
+    if not transient_scope_begin():
+        return nil
+    val decoded = hir_cache_load_in_owned_scope(key)
+    val paused = transient_scope_pause()
+    # A miss has no graph to promote: the runtime correctly rejects nil roots.
+    # The owned loader only replaces the persistent warning root on a hit.
+    var promoted = true
+    if paused and decoded != nil:
+        promoted = transient_promote(decoded) and transient_promote(_hir_cache_last_warnings)
+    val ended = transient_scope_end()
+    if not paused or not promoted or not ended:
+        panic("HIR cache decode scope ownership failed")
+    decoded
+
+# HIR shard transactions already own the decode's scratch lifetime. They retain
+# only their small diagnostics/receipts, so no full HIR root is promoted here.
+fn hir_cache_load_in_owned_scope(key: text) -> HirModule?:
     if key == "" or not hir_cache_enabled():
         return nil
     val path = hir_cache_path(key)
@@ -155,41 +183,16 @@ fn hir_cache_load(key: text) -> HirModule?:
         _hir_cache_misses = _hir_cache_misses + 1
         return nil
     val raw = file_read_nullable(path) ?? ""
-    val nl = raw.index_of("\n")
-    if raw == "" or nl < 0 or raw.substring(0, nl) != hir_cache_header():
+    val envelope = hir_cache_decode_envelope(raw, hir_cache_header())
+    if envelope == nil:
         _hir_cache_misses = _hir_cache_misses + 1
         return nil
-    # Entry body: "W" <count> <escaped warning lines...> then the codec blob.
-    var pos = nl + 1
-    var warnings: [text] = []
-    val w_nl = raw.index_of("\n", pos)
-    if w_nl < 0 or raw.substring(pos, w_nl) != "W":
-        _hir_cache_misses = _hir_cache_misses + 1
-        return nil
-    pos = w_nl + 1
-    val c_nl = raw.index_of("\n", pos)
-    if c_nl < 0:
-        _hir_cache_misses = _hir_cache_misses + 1
-        return nil
-    val warning_count = raw.substring(pos, c_nl).to_i64() ?? -1
-    if warning_count < 0:
-        _hir_cache_misses = _hir_cache_misses + 1
-        return nil
-    pos = c_nl + 1
-    var wi = 0
-    while wi < warning_count:
-        val l_nl = raw.index_of("\n", pos)
-        if l_nl < 0:
-            _hir_cache_misses = _hir_cache_misses + 1
-            return nil
-        warnings.push(flat_pool_unescape(raw.substring(pos, l_nl)))
-        pos = l_nl + 1
-        wi = wi + 1
-    val decoded = hir_module_decode(raw.substring(pos, raw.len()))
+    val entry = envelope.unwrap()
+    val decoded = hir_module_decode_stable(entry.body)
     if decoded == nil:
         _hir_cache_misses = _hir_cache_misses + 1
         return nil
-    _hir_cache_last_warnings = warnings
+    _hir_cache_last_warnings = entry.warnings
     _hir_cache_hits = _hir_cache_hits + 1
     decoded
 
@@ -200,10 +203,8 @@ fn hir_cache_load(key: text) -> HirModule?:
 # accident of layout.
 fn _hir_cache_entry_header_valid(path: text) -> bool:
     val raw = file_read_nullable(path) ?? ""
-    val nl = raw.index_of("\n")
-    if raw == "" or nl < 0:
-        return false
-    raw.substring(0, nl) == hir_cache_header()
+    var reader: FlatPoolReader = FlatPoolReader.new_canonical(raw)
+    reader.ok and reader.next() == hir_cache_header()
 
 fn hir_cache_last_warnings() -> [text]:
     _hir_cache_last_warnings
@@ -229,6 +230,11 @@ fn hir_cache_store(key: text, module: HirModule, warnings: [text]) -> bool:
 fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]) -> bool:
     val blob = hir_module_encode(module)
     if blob == "":
+        return false
+    # Publication is an evidence gate, independent of the diagnostic env flag.
+    # Refuse loss or unstable ordering before creating even a temporary file.
+    # This function's caller owns all temporary HIR and writer allocations.
+    if hir_module_decode_stable(blob) == nil:
         return false
     var warning_parts: [text] = ["W\n{warnings.len()}\n"]
     for w in warnings:
@@ -484,6 +490,7 @@ fn hir_shard_summary(levels: i64, lowered: i64) -> text:
 export HIR_CACHE_ENTRY_VERSION
 export hir_cache_enabled, hir_cache_dir, hir_cache_closure_digest, hir_cache_key
 export hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_last_warnings
+export hir_cache_load_in_owned_scope
 export hir_cache_hits, hir_cache_misses, hir_cache_stores, hir_cache_summary
 export hir_cache_store_failures
 export hir_shard_spec, hir_shard_active, hir_shard_claimed, hir_shard_owns

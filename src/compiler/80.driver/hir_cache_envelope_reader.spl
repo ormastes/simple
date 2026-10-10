@@ -1,0 +1,36 @@
+# The cache envelope and HIR body share a line protocol. Keep their boundary
+# in the typed FlatPoolReader; native inferred text offsets may be tagged.
+# Design: doc/05_design/hir_cache_envelope_reader.md
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_unescape}
+
+pub struct HirCacheEnvelope:
+    body: text
+    warnings: [text]
+
+pub fn hir_cache_decode_envelope(raw: text, expected_header: text) -> HirCacheEnvelope?:
+    var reader: FlatPoolReader = FlatPoolReader.new_canonical(raw)
+    # A provider that drops split fields must fail closed, never repair or
+    # normalize the body. In particular, preserve all terminal empty fields.
+    if not reader.ok or reader.lines.join("\n") != raw:
+        return nil
+    if reader.next() != expected_header or reader.next() != "W":
+        return nil
+    val warning_count: i64 = reader.next_len()
+    if not reader.ok:
+        return nil
+    var warnings: [text] = []
+    var warning_index: i64 = 0
+    while warning_index < warning_count:
+        warnings.push(flat_pool_unescape(reader.next()))
+        warning_index = warning_index + 1
+    if not reader.ok:
+        return nil
+    # Keep the exact suffix: HIR owns validation of its header and trailing
+    # bytes. No body field is unescaped, trimmed, filtered or re-serialized.
+    var body_lines: [text] = []
+    while reader.pos < reader.lines.len():
+        body_lines.push(reader.next())
+    val body = body_lines.join("\n")
+    if not reader.ok or body == "":
+        return nil
+    Some(HirCacheEnvelope(body: body, warnings: warnings))

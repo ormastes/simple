@@ -1,0 +1,40 @@
+# Real envelope parser calls; native execution remains required for ABI evidence.
+use std.spec.*
+use compiler.driver.hir_cache_envelope_reader.{hir_cache_decode_envelope}
+
+describe "HIR cache typed envelope reader":
+    it "reads three escaped warnings without changing any body byte":
+        val body = "hir-header\n한글\\n\n\n"
+        val raw = "scope\nW\n3\nfirst\\nsecond\nslash\\\\tail\n한글\n" + body
+        val parsed = hir_cache_decode_envelope(raw, "scope")
+        expect(parsed != nil).to_equal(true)
+        val entry = parsed.unwrap()
+        expect(entry.warnings).to_equal(["first\nsecond", "slash\\tail", "한글"])
+        expect(entry.body).to_equal(body)
+
+    it "preserves every trailing empty field for strict HIR admission":
+        for body in ["hir\n", "hir\n\n", "hir\n0\n", "hir\n\n\n"]:
+            val parsed = hir_cache_decode_envelope("scope\nW\n0\n" + body, "scope")
+            expect(parsed != nil).to_equal(true)
+            expect(parsed.unwrap().warnings).to_equal([])
+            expect(parsed.unwrap().body).to_equal(body)
+
+    it "keeps empty warnings separate from empty body lines":
+        val parsed = hir_cache_decode_envelope("scope\nW\n3\n\n\n\nhir\n\n", "scope")
+        expect(parsed != nil).to_equal(true)
+        expect(parsed.unwrap().warnings).to_equal(["", "", ""])
+        expect(parsed.unwrap().body).to_equal("hir\n\n")
+
+    it "rejects stale identity and a wrong warning marker":
+        expect(hir_cache_decode_envelope("stale\nW\n0\nhir\n", "scope")).to_be_nil()
+        expect(hir_cache_decode_envelope("scope\nX\n0\nhir\n", "scope")).to_be_nil()
+
+    it "rejects malformed, negative, noncanonical and oversized counts":
+        for count in ["", "x", "-1", "03", "+3", " 3", "9223372036854775808", "999"]:
+            val raw = "scope\nW\n" + count + "\nhir\n"
+            expect(hir_cache_decode_envelope(raw, "scope")).to_be_nil()
+
+    it "rejects truncated envelopes and never manufactures a terminal newline":
+        for raw in ["", "scope", "scope\n", "scope\nW\n", "scope\nW\n0\n",
+                "scope\nW\n3\nonly-one\n", "scope\nW\n0\nhir"]:
+            expect(hir_cache_decode_envelope(raw, "scope")).to_be_nil()

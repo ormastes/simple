@@ -25,7 +25,10 @@ use compiler.hir.generated.hir_codec.{hc_enc_hir_module, hc_dec_hir_module}
 use std.common.encoding.utf8.{text_byte_len}
 use std.common.crypto.sha256.{sha256_text}
 
-val HIR_CODEC_VERSION: text = "spl-hircodec-v6"
+# v8 uses typed dictionary key order and rejects v7 bucket-order records.
+# v7 rejected v6 records whose integer 3 was serialized as nil (N).
+# The canonical valid-integer grammar and ownership are unchanged.
+val HIR_CODEC_VERSION: text = "spl-hircodec-v8"
 val HIR_CANONICAL_CODEC_VERSION: text = "spl-hircodec-canonical-v4"
 val HIR_CANONICAL_CODEC_RULES_V1: text =
     "nil-before-present;i64-signed;symbol-id-signed;text-unsigned-utf8;" +
@@ -113,6 +116,17 @@ fn hir_module_decode(blob: text) -> HirModule?:
     if r.pos != r.lines.len() - 1 or r.lines[r.pos] != "":
         return nil
     Some(module)
+
+# Cache admission is stricter than the raw codec decoder. A structurally valid
+# but lossy or non-deterministic frame must not become a cache hit or durable
+# shard completion. Callers own the temporary decode/re-encode allocations.
+fn hir_module_decode_stable(blob: text) -> HirModule?:
+    val decoded = hir_module_decode(blob)
+    if decoded == nil:
+        return nil
+    if hir_module_encode(decoded.unwrap()) != blob:
+        return nil
+    decoded
 
 pub enum HirDecodeError:
     Malformed(detail: text)
@@ -246,4 +260,5 @@ export hir_canonical_codec_generated_available_v1
 export HirDecodeLimits, HirDecodeAuditUsage, HirDecodeAuditObserver, HirDecodeError
 export hir_module_encode, hir_module_encode_canonical, hir_module_encode_reason
 export hir_module_decode, hir_module_decode_bounded, hir_module_decode_bounded_audited
+export hir_module_decode_stable
 export HirCodecRoundTrip, hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line
