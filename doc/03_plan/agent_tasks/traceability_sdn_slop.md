@@ -201,3 +201,10 @@ without silently reinterpreting summaryv1. Remaining families/graph table closur
 stay open. Next is actual production CLI SDN migration and source-matched command
 acceptance, followed by the original WP2–WP7 dependency sequence. Full20/40,
 runner/manual/runtime/NFR and authenticated integration obligations remain open.
+
+## CLI private increment, 2026-10-11
+
+Implementation/merge owner: Codex root. Sidecar lanes: N/A. Final source reviewer:
+Astra (P0=0/P1=0). Execution reviewer: native SSpec failure preserved; no admission.
+Three-cycle cap reached with Unicode/NUL6/1. Continue only in a fresh bounded lane.
+Verified scalar/strict/typed release synchronization is independent.

@@ -112,3 +112,12 @@ invalid middle members and resource limits. Earlier and final source snapshots
 are retained separately, not combined as final-source coverage. Full qualification
 records/remaining families and real production CLI still need acceptance evidence.
 The complete forty-case matrix is unchanged.
+
+## CLI capture private increment — 2026-10-11
+
+Full20REQ/40AC and WP0–WP7 remain authoritative. The production SDN command
+SSpec passed7/0 at its initial native source stage. Capture controls remain6/1
+after the three-cycle cap; Unicode/NUL acceptance is unresolved. CLI/capture
+work stays private and must not be counted as release-qualified or full AC002/015
+completion. Follow doc/09_report/traceability_cli_tdd_2026-10-11.md and the
+tracked native Unicode capture bug before resuming a fresh bounded investigation.
