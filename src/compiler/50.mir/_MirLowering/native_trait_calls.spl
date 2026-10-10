@@ -1,0 +1,97 @@
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_types.*
+use compiler.mir.mir_instructions.*
+use compiler.mir.native_trait_metadata.*
+use compiler.mir._MirLowering.native_trait_registration.*
+use compiler.mir._MirLowering.native_trait_dispatch.*
+use compiler.mir._MirLowering.native_trait_conversion.*
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+
+impl MirLowering:
+    me lower_native_trait_method(receiver: HirExpr, owner: text, name: text,
+            arguments: [HirCallArg]) -> LocalId:
+        val layout_index = self.native_trait_layout_index(owner)
+        if layout_index < 0:
+            self.error_fatal("native trait dispatch lacks declaration: {owner}", Some(receiver.span))
+            return LocalId(id: -1)
+        val layout = self.native_trait_layouts[layout_index]
+        val slot_index = native_trait_slot_index(layout, name)
+        if not layout.object_safe or slot_index < 0:
+            self.error_fatal("native trait dispatch lacks object-safe method: {owner}::{name}", Some(receiver.span))
+            return LocalId(id: -1)
+        val slot = layout.methods[slot_index]
+        if slot.params.len() != arguments.len() + 1:
+            self.error_fatal("native trait argument count mismatch: {owner}::{name}", Some(receiver.span))
+            return LocalId(id: -1)
+        val receiver_local = self.lower_expr(receiver)
+        var locals: [LocalId] = []
+        var assigned: [bool] = []
+        for argument in arguments:
+            locals.push(LocalId(id: -1))
+            assigned.push(false)
+        var positional_index = 0
+        # Evaluate in source order, then arrange the already-evaluated values
+        # in declaration order. Named arguments must not reorder side effects.
+        for argument in arguments:
+            var index = positional_index
+            if argument.has_name:
+                index = -1
+                var candidate = 1
+                while candidate < slot.parameter_names.len():
+                    if slot.parameter_names[candidate] == argument.name: index = candidate - 1
+                    candidate = candidate + 1
+            else:
+                positional_index = positional_index + 1
+            if index < 0 or index >= locals.len():
+                self.error_fatal("unknown native trait argument: {owner}::{name}", Some(argument.span))
+                return LocalId(id: -1)
+            if assigned[index]:
+                self.error_fatal("duplicate native trait argument: {owner}::{name}", Some(argument.span))
+                return LocalId(id: -1)
+            val expected = slot.params[index + 1]
+            var local = self.lower_expr(argument.value)
+            local = self.coerce_native_trait_object(local, argument.value, expected)
+            match expected.kind:
+                case HirTypeKind.Optional(_):
+                    local = self.ensure_option_handle(local, expected)
+                case HirTypeKind.Int(width, _):
+                    if width < 64:
+                        val actual = self.local_mir_type_of(local)
+                        if val actual_type = actual:
+                            if actual_type.kind == MirTypeKind.I64 or actual_type.kind == MirTypeKind.U64:
+                                val narrowed_type = self.lower_type(expected)
+                                var builder = self.builder
+                                local = builder.emit_cast(mir_operand_copy(local), narrowed_type)
+                                self.builder = builder
+                case _: ()
+            locals[index] = local
+            assigned[index] = true
+        var operands: [MirOperand] = []
+        var index = 0
+        while index < locals.len():
+            if not assigned[index]:
+                self.error_fatal("missing native trait argument: {owner}::{name}", Some(receiver.span))
+                return LocalId(id: -1)
+            operands.push(mir_operand_copy(locals[index]))
+            index = index + 1
+        val result = self.emit_native_trait_slot_call(receiver_local, owner, name, operands)
+        if val local = result:
+            self.remember_local_hir_type(local.id, slot.result, 2, 0)
+            match slot.result.kind:
+                case HirTypeKind.Optional(_):
+                    self.option_value_locals[local.id] = true
+                    self.mark_runtime_value_local(local.id)
+                case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                    self.runtime_array_locals[local.id] = true
+                    self.mark_runtime_value_local(local.id)
+                case _: ()
+            return local
+        var builder = self.builder
+        val unit_local = builder.new_temp(MirType.unit())
+        self.builder = builder
+        unit_local

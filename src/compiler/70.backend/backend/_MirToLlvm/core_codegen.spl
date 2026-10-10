@@ -456,6 +456,12 @@ impl MirTextCodegen for MirToLlvm:
                 var g_init = "zeroinitializer"
                 if static_.init.?:
                     val init_const: MirConstant = static_.init.unwrap()
+                    # This is a static LLVM constant initializer, not an
+                    # executable MIR literal site. Opaque("str") needs a
+                    # runtime box, but LLVM global initializers cannot call
+                    # rt_string_new_literal and this backend has no module
+                    # constructor owner yet. Static startup boxing remains a
+                    # separate unresolved path.
                     match init_const.value:
                         case FloatLexeme(decimal): g_init = llvm_float_lexeme_constant(decimal, g_ty)
                         case _: g_init = self.translate_const_value(init_const.value)
@@ -465,7 +471,7 @@ impl MirTextCodegen for MirToLlvm:
                     # ("constant expression type mismatch: got 'ptr' but
                     # expected 'i64'", W107). Wrap in a constant ptrtoint so
                     # the raw char* address is stored as the i64 word,
-                    # matching how a raw string literal flows everywhere else.
+                    # preserving this existing raw global initializer.
                     match init_const.value:
                         case Str(_):
                             if g_ty == "i64":
@@ -609,6 +615,8 @@ impl MirTextCodegen for MirToLlvm:
                 else:
                     g_init = init_payload
             elif init_kind == 2:
+                # Bootstrap statics are also emitted as constant data. There
+                # is no LLVM module-init/constructor path here to box text.
                 g_init = self.translate_const_value(MirConstValue.Str(init_payload))
                 if g_ty == "i64":
                     g_init = "ptrtoint (ptr {g_init} to i64)"
@@ -1871,6 +1879,34 @@ impl MirTextCodegen for MirToLlvm:
 
     # === Required: per-category instruction methods ===
 
+    me is_boxed_text_literal_type(ty: MirType) -> bool:
+        match ty.kind:
+            case Opaque(name): name == "str"
+            case _: false
+
+    me emit_boxed_text_literal_into(value: text, dest_name: text, dest_ty: text):
+        # The rodata object has a trailing sentinel for C pointer consumers;
+        # the boxed RuntimeValue receives the explicit UTF-8 byte length.
+        val global_name = self.add_string_global(value)
+        val byte_len = escaped_string_byte_len(value)
+        val array_len = byte_len + 1
+        val nit = self.native_int()
+        val data_ptr = self.builder.fresh_local()
+        self.builder.emit("  {data_ptr} = getelementptr inbounds [{array_len} x i8], ptr {global_name}, {nit} 0, {nit} 0  ; text literal bytes")
+        val boxed = self.builder.fresh_local()
+        self.builder.emit("  {boxed} = call i64 @rt_string_new_literal(ptr {data_ptr}, i64 {byte_len})")
+        if dest_ty == "ptr":
+            self.builder.emit("  {dest_name} = inttoptr i64 {boxed} to ptr  ; boxed text literal")
+        elif dest_ty == "i64":
+            self.builder.emit("  {dest_name} = add i64 {boxed}, 0  ; boxed text literal")
+        else:
+            panic("LLVM text literal has unsupported result type: {dest_ty}")
+
+    me emit_boxed_text_literal_value(value: text, dest_ty: text) -> text:
+        val dest_name = self.builder.fresh_local()
+        self.emit_boxed_text_literal_into(value, dest_name, dest_ty)
+        dest_name
+
     me translate_const(dest: LocalId, value: MirConstValue, ty: MirType):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
@@ -1933,6 +1969,10 @@ impl MirTextCodegen for MirToLlvm:
                     val nit_fn = self.native_int()
                     self.mark_ptr_local(dest_id)
                     self.builder.emit("  {dest_name} = getelementptr i8, ptr {fn_ref}, {nit_fn} 0  ; fn ref")
+                elif self.is_boxed_text_literal_type(ty):
+                    if llvm_ty == "ptr":
+                        self.mark_ptr_local(dest_id)
+                    self.emit_boxed_text_literal_into(v, dest_name, llvm_ty)
                 else:
                     val global_name = self.add_string_global(v)
                     val str_len = escaped_string_byte_len(v) + 1
@@ -2533,17 +2573,21 @@ impl MirTextCodegen for MirToLlvm:
     me translate_const_operand_at(operands: [MirOperand], index: i64) -> text:
         val operand = operands[index]
         match operand.kind:
-            case Const(value, const_type):
+            case Const(value, const_ty):
                 match value:
                     case Int(v): "{v}"
-                    case FloatLexeme(v): llvm_float_lexeme_constant(v, self.llvm_type_text(const_type))
+                    case FloatLexeme(v): llvm_float_lexeme_constant(v, self.llvm_type_text(const_ty))
                     case Float(v): "{v}"
                     case Bool(v): if v: "1" else: "0"
                     case Str(v):
-                        val global_name = self.add_string_global(v)
-                        val str_len = v.len() + 1
-                        val nit = self.native_int()
-                        "getelementptr inbounds ([{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0)"
+                        if self.is_boxed_text_literal_type(const_ty):
+                            self.emit_boxed_text_literal_value(
+                                v, self.valid_llvm_type(self.llvm_type_text(const_ty)))
+                        else:
+                            val global_name = self.add_string_global(v)
+                            val str_len = escaped_string_byte_len(v) + 1
+                            val nit = self.native_int()
+                            "getelementptr inbounds ([{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0)"
                     case Zero: "0"
                     case Array(elements): "zeroinitializer  ; array ({elements.len()} elements)"
                     case Tuple(elements): "zeroinitializer  ; tuple ({elements.len()} elements)"
@@ -2605,11 +2649,26 @@ impl MirTextCodegen for MirToLlvm:
                                 self.unknown_func_decls[resolved] = true
                                 "@{resolved}"
                             case _: self.translate_const_value(const_val)
+                    case Opaque(name):
+                        match const_val:
+                            case Str(value):
+                                if name == "str":
+                                    self.emit_boxed_text_literal_value(
+                                        value, self.valid_llvm_type(self.llvm_type_text(const_ty)))
+                                else:
+                                    self.translate_const_value(const_val)
+                            case _: self.translate_const_value(const_val)
                     case _:
                         self.translate_const_value(const_val)
 
     me translate_const_value(value: MirConstValue) -> text:
-        """Translate MIR constant value to LLVM constant."""
+        """Translate an untyped LLVM constant.
+
+        This helper is intentionally type-erased for global initializer
+        expressions. Executable Opaque("str") values must use the typed
+        rt_string_new_literal path instead. Static text globals remain raw
+        until a startup-initialization owner can box them safely.
+        """
         match value:
             case Int(v): "{v}"
             case FloatLexeme(v): llvm_float_lexeme_constant(v, "double")

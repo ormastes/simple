@@ -1,0 +1,56 @@
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_types.*
+use compiler.mir.mir_instructions.*
+use compiler.mir.native_trait_metadata.*
+use compiler.mir._MirLowering.native_trait_registration.*
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.hir.hir_types.*
+
+fn native_trait_data_pointer_type() -> MirType:
+    MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false))
+
+fn native_trait_object_type() -> MirType:
+    MirType(kind: MirTypeKind.Tuple([
+        native_trait_data_pointer_type(), native_trait_data_pointer_type()]))
+
+impl MirLowering:
+    me native_trait_slot_signature(slot: NativeTraitMethodSlot) -> MirSignature:
+        # The thunk receiver is an erased data address, not a tagged Any or
+        # guessed i64. Every other argument/result retains its declared type.
+        var params: [MirType] = [native_trait_data_pointer_type()]
+        var index = 1
+        while index < slot.params.len():
+            params.push(self.lower_type(slot.params[index]))
+            index = index + 1
+        MirSignature(params: params, return_type: self.lower_type(slot.result),
+            is_variadic: false, params_known: true)
+
+    me emit_native_trait_slot_call(receiver: LocalId, owner: text, name: text,
+            arguments: [MirOperand]) -> LocalId?:
+        val layout_index = self.native_trait_layout_index(owner)
+        if layout_index < 0:
+            self.error_fatal("native trait dispatch missing declared owner: {owner}", nil)
+            return nil
+        val layout = self.native_trait_layouts[layout_index]
+        val slot_index = native_trait_slot_index(layout, name)
+        if not layout.object_safe or slot_index < 0:
+            self.error_fatal("native trait dispatch has no object-safe slot: {owner}::{name}", nil)
+            return nil
+        val signature = self.native_trait_slot_signature(layout.methods[slot_index])
+        if arguments.len() + 1 != signature.params.len():
+            self.error_fatal("native trait argument count mismatch: {owner}::{name}", nil)
+            return nil
+        var builder = self.builder
+        val data = builder.emit_get_field(mir_operand_copy(receiver), 0, native_trait_data_pointer_type())
+        val table = builder.emit_get_field(mir_operand_copy(receiver), 1, native_trait_data_pointer_type())
+        # Slots zero and one are the concrete copy/borrow metadata. Method
+        # slots follow in canonical name order, identical in every module.
+        val target = builder.emit_get_field(mir_operand_copy(table), slot_index + 2,
+            MirType(kind: MirTypeKind.FuncPtr(signature)))
+        var call_args: [MirOperand] = [mir_operand_copy(data)]
+        for argument in arguments: call_args.push(argument)
+        val result = builder.emit_call_indirect(mir_operand_copy(target), call_args,
+            signature, signature.return_type)
+        self.builder = builder
+        result

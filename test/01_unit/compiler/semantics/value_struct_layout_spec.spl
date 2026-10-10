@@ -100,12 +100,15 @@ ordering scenarios below must be re-reviewed.
 # @manual_section: value-struct-cycle-validation
 
 use std.spec
-use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirField, HirStruct, HirTypeParam}
+use compiler.common.attributes.{FunctionAttr}
+use compiler.hir.hir_definitions.{HirBlock, HirExpr, HirExprKind, HirField, HirFunction, HirStruct, HirTypeParam}
 use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable, SymbolKind}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
-use compiler.semantics.value_struct_layout.{validate_value_struct_layouts}
+use compiler.semantics.value_struct_layout.{
+    validate_value_struct_layouts, value_struct_layout_snapshot_v1
+}
 
 fn mk_span() -> Span:
     Span(start: 0, end: 0, line: 1, col: 1, file: "synthetic", length: 0)
@@ -408,6 +411,13 @@ describe "validate_value_struct_layouts aligned input boundary":
         val errors = validate_value_struct_layouts(
             ["physical.left", "physical.right"], [left_hir, right_hir])
         expect(errors.len()).to_equal(1)  # oracle: 1 — physical-key resolution stitches the two halves into one cycle
+        val left_layout = value_struct_layout_snapshot_v1(
+            "physical.left", left_hir.path, left_hir.structs, left_hir.symbols)
+        val right_layout = value_struct_layout_snapshot_v1(
+            "physical.right", right_hir.path, right_hir.structs, right_hir.symbols)
+        val compact_errors = validate_value_struct_layouts(
+            ["physical.left", "physical.right"], [left_layout, right_layout])
+        expect(compact_errors).to_equal(errors)  # oracle: compact symbol rows preserve cross-module cycle ownership
 
 describe "value struct layout membership-index source contract":
     it "keeps ordered traversal arrays and uses dictionaries only for membership":
@@ -433,3 +443,50 @@ describe "value struct layout membership-index source contract":
         expect(never_linear_scans_roots).to_equal(false)  # oracle: a linear root scan would regress the index contract
         expect(never_linear_scans_visited).to_equal(false)  # oracle: a linear visited scan would regress the index contract
         expect(no_third_membership_set).to_equal(false)  # oracle: exactly two membership structures are sanctioned
+
+describe "value struct layout retained validation snapshot":
+    it "preserves cycle detection while dropping non-struct symbols and HIR payloads":
+        # @req REQ-SEM-VSL-013
+        step("Build a cyclic struct module plus an unrelated function symbol, then snapshot only layout inputs")
+        var table = SymbolTable.new()
+        val node_sym = table.define("VslCompactNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val unrelated_fn = table.define("VslUnrelatedFunction", SymbolKind.Function, nil, mk_span(), Visibility.Public, false, nil)
+        val node_struct = mk_struct(node_sym, "VslCompactNode", [mk_field("self", named_type(node_sym))], [])
+        var hir = mk_module("vsl_compact_snapshot", table, [node_struct])
+        hir.functions[unrelated_fn] = HirFunction(
+            symbol: unrelated_fn,
+            name: "VslUnrelatedFunction",
+            type_params: [],
+            params: [],
+            return_type: i64_type(),
+            body: HirBlock(stmts: [], has: true, value: nil_expr(), span: mk_span()),
+            effects: [],
+            visibility: Visibility.Public,
+            is_async: false,
+            is_static: false,
+            is_public: true,
+            is_method: false,
+            is_mutable: false,
+            is_const: false,
+            is_extern: false,
+            func_attr: FunctionAttr.default(),
+            has_export_attr: false,
+            export_attr: nil,
+            has_driver_manifest_attr: false,
+            driver_manifest_attr: nil,
+            has_suspension: false,
+            has_vhdl_metadata: false,
+            vhdl_metadata: nil,
+            has_doc_comment: false,
+            doc_comment: "",
+            span: mk_span())
+        val snapshot = value_struct_layout_snapshot_v1(
+            hir.name, hir.path, hir.structs, hir.symbols)
+        val full_errors = validate_value_struct_layouts(["vsl_compact_snapshot"], [hir])
+        val snapshot_errors = validate_value_struct_layouts(["vsl_compact_snapshot"], [snapshot])
+        expect(snapshot.functions.len()).to_equal(0)  # oracle: function HIR is not retained for layout validation
+        expect(snapshot.classes.len()).to_equal(0)  # oracle: class HIR is not retained for layout validation
+        expect(snapshot.structs.len()).to_equal(1)  # oracle: struct layout data remains available
+        expect(snapshot.symbols.symbols.has(node_sym.id.id)).to_equal(true)  # oracle: struct symbols remain resolvable
+        expect(snapshot.symbols.symbols.has(unrelated_fn.id.id)).to_equal(false)  # oracle: unrelated symbol rows are dropped
+        expect(snapshot_errors).to_equal(full_errors)  # oracle: compact and full module inputs report the same cycle
