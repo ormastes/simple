@@ -2165,8 +2165,37 @@ impl MirLowering:
             case _:
                 self.error_fatal("unsupported MIR assignment target: {target.kind}", nil)
 
-    me lower_receiver_and_args(receiver: HirExpr, args: [HirCallArg]) -> [MirOperand]:
-        """Lower receiver and arguments for method calls."""
+    me lower_method_call_arg(arg: HirCallArg, param_types: [HirType], param_index: i64) -> LocalId:
+        """Lower one explicit method-call argument for the declared parameter
+        `param_types[param_index]` (an empty list or an out-of-range index
+        means "unknown": the argument stays raw, as before).
+
+        A SCALAR optional parameter (`i64?`, `bool?`, `f64?`, `char?`, ...)
+        gets the same promotion the free-function call path applies
+        (switch_operators_calls.spl, `case HirTypeKind.Optional(_)`): the
+        callee tests it with the Option handle predicates, and
+        `rt_is_none(3)` is true, so a raw `3` passed by `w.put(3)` read as
+        nil. Non-scalar optionals are left untouched here on purpose (a
+        pointer / text handle cannot collide with the nil word).
+        doc/08_tracking/bug/method_call_optional_param_arg_not_boxed_2026-10-11.md"""
+        var arg_local: LocalId = self.lower_expr(arg.value)
+        if arg.has_name or param_index < 0 or param_index >= param_types.len():
+            return arg_local
+        val declared_param_type = param_types[param_index]
+        match declared_param_type.kind:
+            case HirTypeKind.Optional(optional_inner):
+                val scalar_payload = match optional_inner.kind:
+                    case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char: true
+                    case _: false
+                if scalar_payload:
+                    arg_local = self.ensure_option_handle(arg_local, declared_param_type)
+            case _: ()
+        arg_local
+
+    me lower_receiver_and_args(receiver: HirExpr, args: [HirCallArg], param_types: [HirType]) -> [MirOperand]:
+        """Lower receiver and arguments for method calls. `param_types` is the
+        callee's declared parameter list with the receiver at index 0 (empty
+        when the callee is not known here)."""
         val receiver_local: LocalId = self.lower_expr(receiver)
         # Keep the implicit receiver insertion as an explicit push. The
         # self-hosted Stage 3 compiler has miscompiled the one-element generic
@@ -2175,9 +2204,11 @@ impl MirLowering:
         # return register as `self` (cross-architecture receiver loss).
         var arg_operands: [MirOperand] = []
         arg_operands = arg_operands.push(mir_operand_copy(receiver_local))
+        var explicit_index = 0
         for arg in args:
-            val arg_local: LocalId = self.lower_expr(arg.value)
+            val arg_local: LocalId = self.lower_method_call_arg(arg, param_types, explicit_index + 1)
             arg_operands = arg_operands.push(mir_operand_copy(arg_local))
+            explicit_index = explicit_index + 1
         arg_operands
 
     me lower_compound_combine(current: LocalId, op: HirAssignOp, rhs: LocalId, type_: MirType) -> LocalId:
