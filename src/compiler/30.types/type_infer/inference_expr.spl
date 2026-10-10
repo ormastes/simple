@@ -379,6 +379,94 @@ impl HmInferContext:
             case Ok(_): Ok(())
             case Err(e): Err(e)
 
+    fn nil_compare_type_name(ty: HirType) -> text:
+        """Render a resolved type for the E-TYPE-NIL-COMPARE message."""
+        match ty.kind:
+            case Int(bits, signed):
+                val prefix = if signed: "i" else: "u"
+                "{prefix}{bits}"
+            case Float(bits): "f{bits}"
+            case Bool: "bool"
+            case Char: "char"
+            case Str: "text"
+            case Unit: "()"
+            case Tuple(_): "tuple"
+            case Array(_, _): "array"
+            case Slice(_): "slice"
+            case Dict(_, _): "dict"
+            case Named(sym, _):
+                if self.symbol_names.contains_key(sym.id):
+                    self.symbol_names[sym.id]
+                else:
+                    "<type #{sym.id}>"
+            case _: "{ty.kind}"
+
+    fn nil_compare_kind_word(ty: HirType) -> text:
+        match ty.kind:
+            case Named(sym, _):
+                if self.symbol_kinds.contains_key(sym.id):
+                    self.symbol_kinds[sym.id]
+                else:
+                    "type"
+            case Tuple(_): "tuple"
+            case Array(_, _): "array"
+            case Slice(_): "slice"
+            case Dict(_, _): "dict"
+            case _: "scalar"
+
+    fn nil_compare_is_non_optional(ty: HirType) -> bool:
+        """True for a concrete type that can never hold nil. Optional, Result,
+        unresolved (Infer/Error/Any), type parameters, unions, trait objects,
+        pointers and references are left to ordinary unification."""
+        match ty.kind:
+            case Int(_, _): true
+            case Float(_): true
+            case Bool: true
+            case Char: true
+            case Str: true
+            case Unit: true
+            case Tuple(_): true
+            case Array(_, _): true
+            case Slice(_): true
+            case Dict(_, _): true
+            case Named(_, _): true
+            case _: false
+
+    fn nil_compare_anchor(span: Span, left: HirExpr, right: HirExpr) -> Span:
+        if span.line > 0:
+            return span
+        if left.span.line > 0:
+            return left.span
+        right.span
+
+    me nil_compare_diagnostic(op: HirBinOp, left: HirExpr, right: HirExpr, left_ty: HirType, right_ty: HirType, span: Span) -> text?:
+        """E-TYPE-NIL-COMPARE: nil when the comparison is not a nil compare on a
+        non-optional operand, otherwise the rendered diagnostic."""
+        val is_eq = match op:
+            case Eq: true
+            case _: false
+        val is_ne = match op:
+            case NotEq: true
+            case _: false
+        if not (is_eq or is_ne):
+            return nil
+        val right_is_nil = match right.kind:
+            case NilLit: true
+            case _: false
+        val left_is_nil = match left.kind:
+            case NilLit: true
+            case _: false
+        if right_is_nil == left_is_nil:
+            return nil
+        val operand_ty = self.resolve(if right_is_nil: left_ty else: right_ty)
+        if not self.nil_compare_is_non_optional(operand_ty):
+            return nil
+        val type_name = self.nil_compare_type_name(operand_ty)
+        val kind_word = self.nil_compare_kind_word(operand_ty)
+        val op_text = if is_eq: "==" else: "!="
+        val _ = span
+        Some("[E-TYPE-NIL-COMPARE] `{op_text} nil` on a {kind_word} declared non-optional (`{type_name}`) in function '{self.current_fn_name}': the declared type excludes nil, and under staged-native codegen the comparison reads nil's sentinel (RT_NIL=3) instead; if nil can arrive here, declare the operand `{type_name}?`, otherwise drop the comparison")
+
     me infer_return_expr(value: HirExpr?, span: Span) -> Result<HirType, TypeInferError>:
         """Infer a `return` statement and check it against the enclosing
         function's declared return type.
@@ -591,7 +679,24 @@ impl HmInferContext:
                     case Ok(left_ty):
                         match self.synthesize_expr(right):
                             case Ok(right_ty):
-                                self.infer_binary_op(op, left_ty, right_ty, span)
+                                # E-TYPE-NIL-COMPARE (family nil_compare_non_optional,
+                                # warn-first): `x == nil` / `x != nil` where x's
+                                # static type is a non-optional concrete type can
+                                # never be true/false by the language's own
+                                # semantics, and under staged-native codegen the
+                                # comparison is against nil's immediate (RT_NIL=3),
+                                # so `i64 == nil` is TRUE for 3 and `bool == nil`
+                                # TRUE for true (doc/08_tracking/bug/
+                                # rt_nil_sentinel_three_scalar_collision_native_2026-10-10.md).
+                                # Report it here with the declared type and a span;
+                                # the generic unification mismatch that used to fire
+                                # carried span 0:0 and named neither rule nor type.
+                                val nil_diag = self.nil_compare_diagnostic(op, left, right, left_ty, right_ty, span)
+                                if nil_diag.?:
+                                    self.error(TypeInferError.Other(nil_diag.unwrap(), self.nil_compare_anchor(span, left, right)))
+                                    Ok(HirType(kind: HirTypeKind.Bool, span: span))
+                                else:
+                                    self.infer_binary_op(op, left_ty, right_ty, span)
                             case Err(e): Err(e)
                     case Err(e): Err(e)
 
