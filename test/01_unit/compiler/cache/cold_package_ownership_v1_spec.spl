@@ -1,5 +1,6 @@
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, step}
 use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
 use std.scv.compile_source_inventory_core.{
     CompileSourceInventoryEntryV1, CompileSourceInventoryV1,
     compile_source_inventory_digest_v1
@@ -28,33 +29,35 @@ fn package_policy_test_entry(path: text, content: text) ->
         CompileSourceInventoryEntryV1:
     val digest = sha256_text(content)
     CompileSourceInventoryEntryV1(path, digest, digest, digest, digest,
-        digest, content.len())
+        digest, text_byte_len(content))
 
-fn package_policy_test_inventory(policy: text) -> CompileSourceInventoryV1:
+fn package_policy_test_inventory(policy: text, body: text = "std-source",
+        lib_manifest: text = "project:\n  name: simple-std\n") -> CompileSourceInventoryV1:
     CompileSourceInventoryV1(1, 1, [
         package_policy_test_entry("examples/10_tooling/demo.spl",
             "example-source"),
         package_policy_test_entry("src/lib/simple.sdn",
-            "project:\n  name: simple-std\n"),
-        package_policy_test_entry("src/lib/std.spl", "std-source"),
+            lib_manifest),
+        package_policy_test_entry("src/lib/std.spl", body),
         package_policy_test_entry("src/os/boot.spl", "os-source"),
         package_policy_test_entry("src/package_ownership/simple.sdn", policy),
         package_policy_test_entry("src/runtime/simple.sdn",
             "project:\n  name: simple.runtime\n"),
         package_policy_test_entry("src/runtime/startup.spl", "runtime-source")])
 
-fn package_policy_test_sources(inventory: CompileSourceInventoryV1) ->
+fn package_policy_test_sources(inventory: CompileSourceInventoryV1,
+        snapshot_root: text = "/snapshot") ->
         NativeFullInventorySourcesV1:
     NativeFullInventorySourcesV1(
-        ["/snapshot/examples/10_tooling/demo.spl",
-            "/snapshot/src/lib/std.spl", "/snapshot/src/os/boot.spl",
-            "/snapshot/src/runtime/startup.spl"],
+        ["{snapshot_root}/examples/10_tooling/demo.spl",
+            "{snapshot_root}/src/lib/std.spl", "{snapshot_root}/src/os/boot.spl",
+            "{snapshot_root}/src/runtime/startup.spl"],
         ["examples/10_tooling/demo.spl", "src/lib/std.spl",
             "src/os/boot.spl", "src/runtime/startup.spl"],
-        [sha256_text("example-source"), sha256_text("std-source"),
+        [sha256_text("example-source"), inventory.entries[2].content_digest,
             sha256_text("os-source"),
             sha256_text("runtime-source")],
-        [14, 10, 9, 14], 4, sha256_text("snapshot"),
+        [14, inventory.entries[2].byte_count, 9, 14], 4, sha256_text(snapshot_root),
         compile_source_inventory_digest_v1(inventory), sha256_text("receipt"))
 
 fn package_policy_test_manifests() -> [ColdPackageOwnershipManifestV1]:
@@ -64,6 +67,94 @@ fn package_policy_test_manifests() -> [ColdPackageOwnershipManifestV1]:
         "project:\n  name: simple.runtime\n")]
 
 describe "frozen cold package ownership":
+    it "keeps project compatibility across source edits and snapshot relocation":
+        step("Capture the original SCV-bound project namespace")
+        val policy = package_policy_test_text().replace("  schema: 1\n",
+            "  schema: 1\n  project_identity: org.simple-lang.fixture\n")
+        val inventory = package_policy_test_inventory(policy)
+        val original = cold_package_ownership_capture_v1(inventory,
+            package_policy_test_sources(inventory), policy,
+            package_policy_test_manifests()).unwrap()
+        expect(original.project_root_digest.len()).to_equal(64)
+        step("Change source content and snapshot while retaining project authority")
+        val edited_entries = package_policy_test_inventory(policy, "changed-private-body")
+        val edited = CompileSourceInventoryV1(1, 2, edited_entries.entries)
+        val next = cold_package_ownership_capture_v1(edited,
+            package_policy_test_sources(edited, "/relocated/snapshot"), policy,
+            package_policy_test_manifests()).unwrap()
+        expect(next.project_root_digest).to_equal(original.project_root_digest)
+        expect(next.members_by_source["src/lib/std.spl"].source_digest ==
+            original.members_by_source["src/lib/std.spl"].source_digest).to_equal(false)
+        expect(next.membership.source_inventory_digest ==
+            original.membership.source_inventory_digest).to_equal(false)
+
+    it "partitions project identities while retaining per-package manifest witnesses":
+        step("Capture a stable project identity from the frozen policy")
+        val policy = package_policy_test_text().replace("  schema: 1\n",
+            "  schema: 1\n  project_identity: org.simple-lang.fixture\n")
+        val inventory = package_policy_test_inventory(policy)
+        val original = cold_package_ownership_capture_v1(inventory,
+            package_policy_test_sources(inventory), policy,
+            package_policy_test_manifests()).unwrap()
+        step("Changing the declared project creates a different namespace")
+        val other_policy = policy.replace("org.simple-lang.fixture", "org.simple-lang.other")
+        val other_inventory = package_policy_test_inventory(other_policy)
+        val other = cold_package_ownership_capture_v1(other_inventory,
+            package_policy_test_sources(other_inventory), other_policy,
+            package_policy_test_manifests()).unwrap()
+        expect(other.project_root_digest == original.project_root_digest).to_equal(false)
+        step("Changing ownership policy partitions the project namespace")
+        val changed_policy = policy.replace("src/lib|simple.std|", "src/lib|simple.std.next|")
+        val policy_inventory = package_policy_test_inventory(changed_policy)
+        val policy_capture = cold_package_ownership_capture_v1(policy_inventory,
+            package_policy_test_sources(policy_inventory), changed_policy,
+            package_policy_test_manifests()).unwrap()
+        expect(policy_capture.project_root_digest == original.project_root_digest).to_equal(false)
+        expect(policy_capture.members_by_source["src/lib/std.spl"].package_identity).to_equal("simple.std.next")
+        step("Changed manifest bytes are admitted against the new SCV record")
+        val manifest = "project:\n  name: simple-std\n  version: 2\n"
+        val changed = package_policy_test_inventory(policy, "std-source", manifest)
+        val next = cold_package_ownership_capture_v1(changed,
+            package_policy_test_sources(changed), policy,
+            [ColdPackageOwnershipManifestV1("src/lib/simple.sdn", manifest),
+                package_policy_test_manifests()[1]]).unwrap()
+        expect(next.project_root_digest).to_equal(original.project_root_digest)
+        expect(next.members_by_source["src/lib/std.spl"].manifest_digest ==
+            original.members_by_source["src/lib/std.spl"].manifest_digest).to_equal(false)
+        step("Manifest argument ordering does not change namespace identity")
+        val reordered = cold_package_ownership_capture_v1(inventory,
+            package_policy_test_sources(inventory), policy,
+            [package_policy_test_manifests()[1], package_policy_test_manifests()[0]]).unwrap()
+        expect(reordered.project_root_digest).to_equal(original.project_root_digest)
+
+    it "keeps legacy policies conservative and rejects malformed project identity":
+        step("An absent identity preserves the legacy tree-root fallback")
+        val policy = package_policy_test_text()
+        val inventory = package_policy_test_inventory(policy)
+        expect(cold_package_ownership_capture_v1(inventory,
+            package_policy_test_sources(inventory), policy,
+            package_policy_test_manifests()).unwrap().project_root_digest).to_equal("")
+        step("A present but malformed identity cannot select the legacy fallback")
+        for identity in ["bad/name", "\"\"", "42", "[bad, name]", "\"bad name\"", "\"prójèct\""]:
+            val invalid_policy = policy.replace("  schema: 1\n",
+                "  schema: 1\n  project_identity: {identity}\n")
+            val invalid_inventory = package_policy_test_inventory(invalid_policy)
+            expect(cold_package_ownership_capture_v1(invalid_inventory,
+                package_policy_test_sources(invalid_inventory), invalid_policy,
+                package_policy_test_manifests()).unwrap_err()).to_equal(
+                    "cold-package-project-identity-invalid")
+
+    it "validates ASCII policy identities without native text ordering":
+        step("Admit every supported ASCII identifier character class")
+        val policy = package_policy_test_text().replace("  schema: 1\n",
+            "  schema: 1\n  project_identity: A0.z9_Project-Owner\n")
+        val inventory = package_policy_test_inventory(policy)
+        val captured = cold_package_ownership_capture_v1(inventory,
+            package_policy_test_sources(inventory), policy,
+            package_policy_test_manifests())
+        expect(captured.is_ok()).to_equal(true)
+        expect(captured.unwrap().project_root_digest.len()).to_equal(64)
+
     it "binds complete SCV sources to checked-in package labels and manifest digests":
         val policy = package_policy_test_text()
         val inventory = package_policy_test_inventory(policy)
