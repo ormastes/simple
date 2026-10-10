@@ -459,6 +459,7 @@ impl MirLowering:
             struct_field_repr_name: {},
             struct_field_hir_type: {},
             struct_bare_layout_owner: {},
+            struct_identity_layout_key: {},
             struct_field_array_element_type_name: {},
             struct_field_array_elem_type: {},
             struct_value_syms: {},
@@ -556,6 +557,54 @@ impl MirLowering:
         if defining_module != "":
             return "{defining_module}::{symbol.name}"
         symbol.name
+
+    me register_struct_identity_layout_key(symbol: HirSymbol, layout_key: text):
+        """Record which layout key a struct DECLARATION registered, under its
+        canonical `{dotted owner}::{Name}` identity (see
+        struct_identity_layout_key). First declaration wins, matching the
+        prescan's own first-wins metadata registration."""
+        val owner = mir_layout_canonical_module_name(symbol.defining_module ?? "")
+        if owner == "":
+            return
+        val identity = "{owner}::{symbol.name}"
+        if not self.struct_identity_layout_key.has(identity):
+            self.struct_identity_layout_key[identity] = layout_key
+
+    fn declared_struct_layout_key(shape: text) -> text:
+        """Fold a struct layout key onto the spelling its declaration
+        registered. `shape` is returned unchanged when it already names a
+        registered layout, or when no declaration owns its identity -- so an
+        unknown name stays unknown instead of borrowing a same-named layout."""
+        if shape == "" or self.struct_field_order.has(shape):
+            return shape
+        val separator = shape.rfind("::")
+        if separator <= 0:
+            return shape
+        val owner = mir_layout_canonical_module_name(shape.substring(0, separator))
+        val identity = "{owner}::{shape.substring(separator + 2)}"
+        if self.struct_identity_layout_key.has(identity):
+            return self.struct_identity_layout_key[identity]
+        shape
+
+    fn struct_owner_method_key(owner: text, method: text) -> text:
+        """`{owner}::{method}` dispatch-row key for a receiver's recorded owner.
+
+        A struct value is recorded under its qualified LAYOUT key
+        (`{module}::{Name}`, composite_layout_key), while
+        register_provider_method publishes a struct's methods under the
+        callable identity `{dotted module}.{Name}`. Answer that row when the
+        direct spelling has none; the module qualifier keeps a same-named
+        struct of another module out."""
+        val direct = "{owner}::{method}"
+        if self.struct_method_syms.has(direct):
+            return direct
+        val separator = owner.rfind("::")
+        if separator > 0:
+            val identity_owner = mir_layout_canonical_module_name(owner.substring(0, separator))
+            val identity_key = "{identity_owner}.{owner.substring(separator + 2)}::{method}"
+            if self.struct_method_syms.has(identity_key):
+                return identity_key
+        direct
 
     fn canonical_layout_digest(fields: [HirField], layout_attr: LayoutAttr) -> text:
         val layout = compute_struct_layout(fields, layout_attr)
@@ -1273,6 +1322,7 @@ impl MirLowering:
                     self.struct_bare_layout_owner[struct_def.name] = struct_key
                 if struct_key != struct_def.name:
                     self.register_composite_field_metadata(struct_key, struct_def.fields, module.symbols, false)
+                    self.register_struct_identity_layout_key(struct_symbol, struct_key)
                 val struct_attr = if struct_def.has_layout_attr: struct_def.layout_attr else: layoutattr_default_()
                 self.register_composite_layout_identity(struct_symbol, struct_def.fields, struct_attr)
             psi = psi + 1
@@ -1591,6 +1641,7 @@ impl MirLowering:
                 self.struct_bare_layout_owner[struct_def.name] = struct_key
                 if struct_key != struct_def.name:
                     self.register_composite_field_metadata(struct_key, struct_def.fields, module.symbols, true)
+                    self.register_struct_identity_layout_key(struct_symbol, struct_key)
             local_meta_i = local_meta_i + 1
         val local_class_values = module.classes.values()
         local_meta_i = 0

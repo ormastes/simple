@@ -359,3 +359,35 @@ and `_MirLoweringExpr/{method_calls_literals,switch_operators_calls}.spl` update
   `test/01_unit/compiler/backend/text_predicate_argument_shapes_native_spec.spl`.
   Rule: **never `tag_str_local_if_raw` a value whose producer may already be
   tagged; the only safe normaliser is `ensure_tagged_str`.**
+
+## 2026-10-10 — struct layout keys have two spellings; fold through `declared_struct_layout_key`
+
+`composite_layout_key(symbol)` is `{defining_module}::{Name}`, and
+`defining_module` is a SOURCE PATH on a declaration (`lib/nodes.spl`) but the
+DOTTED module name on an import (`lib.nodes`). Only the declaration's spelling
+is ever registered in `struct_field_order` / `struct_field_hir_type`. So a key
+computed from an IMPORT symbol names no layout: `resolve_field_index` then
+falls to index 0 and the field local carries no HIR type.
+
+That is what erased `val src = node_get(0)` when `node_get` (module B) returns a
+struct declared in module C: the prescan's `bootstrap_fn_ret_shape_register`
+stored B's import-spelled key, `for x in src.names:` died as `#143 ...
+collection mir type: I64`, and range-index / text methods on its fields failed
+the same way (bug `stage2_imported_fn_foreign_struct_return_type_erased_2026-10-10`).
+
+- `struct_identity_layout_key` maps the canonical identity
+  (`{mir_layout_canonical_module_name(owner)}::{Name}`) to the declared key;
+  filled by `prescan_module_struct_names` and `lower_module`'s local loop.
+- `declared_struct_layout_key(shape)` folds either spelling onto the declared
+  one. Apply it wherever a layout key arrives from ANOTHER module's symbol
+  table (currently the two `bootstrap_fn_ret_shape_lookup` consumers).
+- `struct_owner_method_key(owner, method)` bridges a qualified layout key to
+  the `{dotted module}.{Name}::{method}` row `register_provider_method`
+  publishes for struct methods.
+- In-process specs only reproduce this if `hirlowering_for_module` is given the
+  source PATH, as the driver does. With dotted names on both sides the two
+  spellings coincide and the bug is invisible
+  (`test/01_unit/compiler/50.mir/stage2_imported_fn_foreign_struct_return_spec.spl`).
+- Still bare-keyed, not changed here: Optional/Result struct payload shapes
+  (`bootstrap_fn_ret_opt_shape_*` / `ok_shape`) and
+  `optional_payload_struct_name`'s Struct arm.
