@@ -21,7 +21,7 @@ use compiler.backend.backend_api.*
 use compiler.backend.backend.backend_types.{CompiledModule, CompiledSymbol, CompiledSymbolKind, CodegenTarget, OptimizationLevel}
 export use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.llvm_passes.{LlvmPass, passes_for_level}
-use compiler.backend.llvm_ir_builder.{LlvmIRBuilder}
+use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, llvm_codegen_error_from_ir}
 use compiler.backend.mir_to_llvm.{MirToLlvm}
 use compiler.mir_opt.mir_opt.mod.{optimize_module, optimize_module_with_context, TargetOptContext, target_opt_context_default, OptLevel}
 use compiler.backend.feature_caps.{X86Caps}
@@ -285,6 +285,12 @@ class LlvmBackend:
         val runtime_decls = generate_runtime_declarations_for_target(self.target)
         var llvm_ir = runtime_decls + "\n" + "\n"
         llvm_ir = llvm_ir + translator.translate_module(optimized_module)
+        # Checked here, not only in compile_ir_to_object: the `opt` round trip
+        # below and the emit_llvm_ir return would otherwise hand a recorded
+        # codegen error back as successful IR.
+        val codegen_error = llvm_codegen_error_from_ir(llvm_ir)
+        if codegen_error != "":
+            return Err(codegen_error)
 
         # Run LLVM opt if available (optimize IR before llc)
         val opt_tool = find_opt()
