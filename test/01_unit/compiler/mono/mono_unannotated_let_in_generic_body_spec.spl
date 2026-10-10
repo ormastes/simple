@@ -1,0 +1,70 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+# Mono: an unannotated `val`/`var` inside a generic body
+
+HIR lowering records an unannotated binding as `HirStmtKind.Let(sym, nil, init)`
+(the type slot is nil, not an `Infer` placeholder). Specializing a generic
+function substitutes type parameters through every statement of its body, so
+the substitution must pass a nil annotation through untouched instead of
+handing it to the non-optional `substitute_type`.
+
+Before the fix every generic whose body has such a binding aborted the pass
+with `nil is forbidden by the non-optional return contract of
+'substitute_type'`.
+"""
+
+use std.spec
+use std.spec.step
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
+
+describe "mono substitution over an unannotated binding":
+    it "specializes a generic whose body has an unannotated val":
+        # @req REQ-SSPEC-COMPILER
+        step("unannotated val in a generic body survives substitution")
+        val src = "fn twice<T>(x: T) -> T:\n    val y = x\n    y\n\nfn root() -> i64:\n    twice(5)\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_let_val.spl", "mono_let_val", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_let_val.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (_out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(diags.len()).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(1)
+
+    it "still substitutes an annotated binding of the type parameter":
+        # @req REQ-SSPEC-COMPILER
+        step("annotated var in a generic body is substituted")
+        val src = "fn keep<T>(x: T) -> T:\n    var y: T = x\n    val z = y\n    z\n\nfn root() -> i64:\n    keep(7)\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_let_var.spl", "mono_let_var", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_let_var.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(diags.len()).to_equal(0)
+        expect(stats.specializations_created).to_equal(1)
+        val om: HirModule = out["m"]
+        var annotated_is_i64 = false
+        for k in om.functions.keys():
+            val f: HirFunction = om.functions[k]
+            if f.name == "keep$i64":
+                val first: HirStmt = f.body.stmts[0]
+                match first.kind:
+                    case HirStmtKind.Let(_, ty, _):
+                        if ty != nil:
+                            val lt: HirType = ty
+                            match lt.kind:
+                                case HirTypeKind.Int(_, _): annotated_is_i64 = true
+                                case _: annotated_is_i64 = false
+                    case _:
+                        annotated_is_i64 = false
+        expect(annotated_is_i64).to_equal(true)
