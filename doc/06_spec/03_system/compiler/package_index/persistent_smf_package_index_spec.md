@@ -285,9 +285,16 @@ owner. Source inspection, a fixture-only graph implementation, mocked schedule,
 or a test-created success receipt cannot satisfy any scenario. Missing evidence
 is a failure, not a skip.
 
+The executable also checks the harness's exact `scenario=<name>` output line and
+rejects `acceptance_scope=owner` and `acceptance_status=incomplete` lines. This
+prevents owner-only probes or explicitly incomplete harness output from being
+counted as full scenario acceptance. These markers do not prove that a production
+compiler ran or that its receipt supplied the scenario observations. Binding
+scenario assertions to production compiler receipts and their provenance remains
+an implementation gap; no such receipt contract is claimed by this spec.
+
 ## Freshness
 
-This manual mirrors the executable scenario names and assertions as of
-2026-09-02. SPipe/docgen execution is not claimed because the admitted
-self-hosted runtime required to execute and regenerate this manual is currently
-unavailable.
+This manual mirrors the executable scenario names and assertions. SPipe/docgen
+execution is not claimed because the admitted self-hosted runtime required to
+execute and regenerate this manual is currently unavailable.

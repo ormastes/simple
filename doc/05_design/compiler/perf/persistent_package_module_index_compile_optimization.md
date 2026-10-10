@@ -245,6 +245,58 @@ published graph receipt.
 
 ## Reproducibility normalization
 
+### Frozen cold-publisher root identity
+
+The frozen ownership policy may declare `ownership_v1.project_identity`, an
+explicit ASCII project namespace using the same bounded identifier grammar as
+package identities. After validating policy and supplied manifest bytes against
+SCV inventory records, the ownership capture computes a domain-separated digest
+of the length-framed namespace and policy digest. Manifest digests remain
+per-package witnesses for exact consumer invalidation. Source and manifest
+bytes, snapshot location, revision and epoch
+do not enter this root. They remain independently checked SCV witnesses in the
+index authority. The publisher applies the existing configuration-variant root
+partition afterwards.
+
+A missing project identity retains the legacy tree-root fallback. A malformed
+explicit identity is an error; it cannot silently request legacy behavior.
+Changing policy bytes partitions the root conservatively. The
+namespace is declared project configuration, not an authentication credential.
+The first generation after adopting this policy conservatively rebuilds; later
+source-only changes can reach the semantic transition checks.
+
+Generated declaration/receipt consistency is insufficient authorization at the
+compiled-output boundary: both currently arrive in the same artifact. Until an
+independently selected producer declaration is wired into that boundary, a
+nonempty generated facet fails with
+`cold-compiled-generated-authority-unavailable:<module>` before publication.
+Empty facets remain valid for ordinary source modules. This is a safety gate,
+not completion of generated-source support.
+
+### Generated witness projection and migration
+
+The generated semantic witness must survive the TLDR-to-index projection.
+Schema 4 extends the existing index entry with `generated_source_digest` and
+supports both complete graphs and entry-scoped graphs. A full graph has no
+scope-entry identity; a scoped graph preserves its exact entry identity and
+reachable-source validation. Action identities bind that scope as before.
+Existing V1-V3 bytes remain decodable with an unknown generated witness; that
+unknown value must never establish semantic reuse, even between two otherwise
+compatible legacy generations. Migration therefore conservatively invalidates.
+
+New builder-produced entries copy the valid generated digest from their admitted
+TLDR header. Encoding and decoding require the field for schema 4. A missing
+witness is invalid, not an implicit empty facet. An actual ordinary-source empty
+facet has the digest of its validated empty bytes. Generated-only witness changes
+invalidate the owner and its exact reverse consumers; equal generated witnesses
+still allow existing semantic early cutoff when all other witnesses permit it.
+
+The implementation must test new-format round trips, unchanged legacy decoding,
+legacy conservative migration, builder field preservation, full/scoped graph
+distinction, generated-only invalidation, and unchanged-witness reuse. These
+tests validate projection and planning only. They do not replace independently
+selected producer authority or real generator execution evidence.
+
 - canonical relative package/module identities;
 - sorted edges, SCC members, diagnostics, and archive members;
 - normalized archive timestamp, UID/GID, mode, and path separators;
