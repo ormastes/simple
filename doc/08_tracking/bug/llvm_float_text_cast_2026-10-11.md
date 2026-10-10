@@ -1,6 +1,6 @@
 # float(text) reached LLVM as a pointer-to-number cast
 
-Status: source repair candidate; execution and cross-target qualification pending.
+Status: integrated-candidate native fixtures PASS; isolated release-head and broader gates pending.
 
 The exhaustive module matrix rejected `type_check_eval_comparison_predicate`
 in `src/compiler/10.frontend/core/type_checker.spl` with an unsupported LLVM
@@ -41,13 +41,14 @@ exit 134, without an object. Its log/cache are retained under
 `build/native_probe/llvm-cast-roots/float-before*`. The source base is
 `1f3316d7dbc0db6f4cf8cf83d2a15dff7167e02f`.
 
-The root's coordinated compiler build must include this change before the
-native positive/negative fixtures and original module are rechecked. ARM
-objects must be EM183 and RISC-V objects EM243 using LLVM18 and explicit
-source/entry/target selection. No full compiler build was started here and no
-RISC-V execution is claimed.
+The coordinated compiler now includes this change. Scoped native positive/negative
+fixtures passed on ARM (EM183), and explicit-source LLVM18 compilation produced
+a genuine RISC-V object (EM243). Original module matrix qualification and the
+isolated release head remain pending. No RISC-V execution is claimed.
 
 The canonical parser's whitespace/hexadecimal spelling difference from the
 legacy seed builtin is explicitly tracked in
 `float_text_cast_parser_spelling_divergence_2026-10-11.md`; this repair does
 not claim complete spelling parity.
+
+Final scoped native qualification and exact receipts: [verification](../verification/native_text_float_cast_2026-10-11.md). Authored unit execution and standalone PR-head admission remain pending.
