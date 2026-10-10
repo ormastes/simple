@@ -1,4 +1,4 @@
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, step}
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory_core.{
     CompileSourceInventoryEntryV1, CompileSourceInventoryV1,
@@ -22,6 +22,7 @@ use compiler.driver.driver_build.native_group_scc_inventory.{
 use compiler.driver.driver_build.native_group_warm_route.{
     NativeGroupWarmRouteV1, native_group_warm_route_encode_v1,
     native_group_warm_route_decode_v1,
+    native_group_warm_route_index_route_v1,
     native_group_warm_dependency_smf_entries_v1
 }
 use compiler.driver.cache.package_index_route.{PackageArchiveAdmissionV1}
@@ -68,7 +69,7 @@ fn scc_index_entry(
 
 fn scc_index_generation() -> PackageModuleIndexGenerationV1:
     var generation = PackageModuleIndexGenerationV1(
-        schema_version: 2,
+        schema_version: 4,
         producer_digest: sha256_text("producer"),
         root_generation: "root-1",
         scv_revision_id: "scv-revision-v1-test",
@@ -86,6 +87,8 @@ fn scc_index_generation() -> PackageModuleIndexGenerationV1:
     var index = 0
     while index < generation.entries.len():
         var entry = generation.entries[index]
+        entry.generated_source_digest = sha256_text(
+            "generated:{entry.module_identity}")
         entry.action_digest = package_module_index_entry_action_digest_v1(
             generation, entry)
         generation.entries[index] = entry
@@ -104,7 +107,52 @@ fn scc_admit(paths: [text]) -> Result<NativeGroupSccInventoryV1, text>:
 
 describe "compiler-owned grouped native SCC inventory":
     it "round-trips an attempt-bound compact warm route":
-        val generation = scc_index_generation()
+        step("Carry the V4 schema and generated witness through worker route bytes")
+        var generation = scc_index_generation()
+        generation.schema_version = 4
+        var witnessed_entries: [PackageModuleIndexEntryV1] = []
+        for entry in generation.entries:
+            var witnessed = entry
+            witnessed.generated_source_digest = sha256_text(
+                "generated:{entry.module_identity}")
+            witnessed.action_digest = package_module_index_entry_action_digest_v1(
+                generation, witnessed)
+            witnessed_entries.push(witnessed)
+        generation.entries = witnessed_entries
+        var route = NativeGroupWarmRouteV1(
+            "D:/stage2/index", sha256_text("index"),
+            generation.producer_digest, generation.root_generation,
+            generation.variant_digest, generation.scv_revision_id,
+            generation.scv_commit_id, generation.scv_tree_id,
+            generation.inventory_digest, sha256_text("snapshot-rows"),
+            sha256_text("full-source-authority"),
+            "group-d", 1, "llvm", ["scc_d"],
+            [generation.entries[3]], [], [])
+        route.index_schema_version = 4
+        val encoded = native_group_warm_route_encode_v1(route)
+        expect(encoded != "").to_equal(true)
+        val decoded = native_group_warm_route_decode_v1(encoded)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().attempt).to_equal(1)
+        expect(decoded.unwrap().target_backend).to_equal("llvm")
+        expect(decoded.unwrap().source_entries.len()).to_equal(1)
+        expect(decoded.unwrap().index_schema_version).to_equal(4)
+        expect(decoded.unwrap().source_entries[0].generated_source_digest).to_equal(
+            generation.entries[3].generated_source_digest)
+        expect(decoded.unwrap().dependency_smf_entries.len()).to_equal(0)
+
+    it "decodes legacy worker routes for inspection but refuses archive reuse":
+        step("Keep V1 route bytes readable while requiring generated-witness migration")
+        var generation = scc_index_generation()
+        generation.schema_version = 2
+        var legacy_entries: [PackageModuleIndexEntryV1] = []
+        for entry in generation.entries:
+            var legacy = entry
+            legacy.generated_source_digest = ""
+            legacy.action_digest = package_module_index_entry_action_digest_v1(
+                generation, legacy)
+            legacy_entries.push(legacy)
+        generation.entries = legacy_entries
         val route = NativeGroupWarmRouteV1(
             "D:/stage2/index", sha256_text("index"),
             generation.producer_digest, generation.root_generation,
@@ -115,13 +163,15 @@ describe "compiler-owned grouped native SCC inventory":
             "group-d", 1, "llvm", ["scc_d"],
             [generation.entries[3]], [], [])
         val encoded = native_group_warm_route_encode_v1(route)
-        expect(encoded != "").to_equal(true)
+        expect(encoded.starts_with("simple-native-group-warm-route-v1\n")).to_equal(true)
         val decoded = native_group_warm_route_decode_v1(encoded)
         expect(decoded.is_ok()).to_equal(true)
-        expect(decoded.unwrap().attempt).to_equal(1)
-        expect(decoded.unwrap().target_backend).to_equal("llvm")
-        expect(decoded.unwrap().source_entries.len()).to_equal(1)
-        expect(decoded.unwrap().dependency_smf_entries.len()).to_equal(0)
+        if decoded.is_ok():
+            val routed = native_group_warm_route_index_route_v1(
+                decoded.unwrap(), "D:/stage2/snapshot")
+            expect(routed.is_err()).to_equal(true)
+            expect(routed.unwrap_err()).to_equal(
+                "native-group-route-generated-witness-migration-required")
 
     it "orders whole predecessor SCC SMFs from resolved import closure":
         val generation = scc_index_generation()
