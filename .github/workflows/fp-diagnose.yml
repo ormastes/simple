@@ -1,0 +1,60 @@
+name: Diagnose seed fingerprint
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: work/diagnose-seed-fingerprint-20261010
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Dump tool environment
+        run: |
+          set -x
+          echo "PATH=$PATH" > diag-env.txt
+          which rustc cargo cc llvm-config sha256sum perl find awk 2>&1 >> diag-env.txt || true
+          rustc -vV >> diag-env.txt 2>&1 || true
+          cargo -V >> diag-env.txt 2>&1 || true
+          cc --version | head -1 >> diag-env.txt 2>&1 || true
+          llvm-config --version >> diag-env.txt 2>&1 || true
+          llvm-config --link-static --libfiles >> diag-env.txt 2>&1 || true
+          llvm-config --link-static --system-libs >> diag-env.txt 2>&1 || true
+      - name: Run seed fingerprint with capture
+        run: |
+          set -x
+          cat > /tmp/fp-driver.sh <<'DRIVER'
+          #!/bin/sh
+          repo_root=$1
+          cd "$repo_root" || exit 99
+          . "${repo_root}/scripts/bootstrap/bootstrap-cache-policy.shs"
+          BOOTSTRAP_STAGE3_FACADE_PATH="${repo_root}/scripts/check/lib/bootstrap-stage3-provenance.shs"
+          BOOTSTRAP_STAGE3_VERSION_ROOT=${repo_root}
+          export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+          . "${BOOTSTRAP_STAGE3_FACADE_PATH}"
+          PORTABLE_LOCK_ATOMIC_HELPER_PATH="${repo_root}/scripts/check/lib/portable-hardlink-lock.pl"
+          export PORTABLE_LOCK_ATOMIC_HELPER_PATH
+          . "${repo_root}/scripts/check/lib/portable-process-lock.shs"
+          . "${repo_root}/scripts/bootstrap/bootstrap-authority-wiring.shs"
+          mkdir -p diag
+          bootstrap_authority_seed_inputs_fingerprint pre diag/tmp \
+            diag/err.manifest diag/err.log \
+            "$repo_root" llvm "--features llvm" "$PATH" x86_64-unknown-linux-gnu
+          echo "RC=$?"
+          DRIVER
+          sh /tmp/fp-driver.sh "$PWD" > diag-rc.txt 2>&1 || true
+          cat diag-rc.txt
+      - name: Upload diagnostic artifacts
+        if: always()
+        uses: actions/upload-artifact@ea1658d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fp-diagnose
+          path: |
+            diag-env.txt
+            diag-rc.txt
+            diag/err.manifest
+            diag/err.log
+            diag/rust-authority-fingerprint-current.details.env
