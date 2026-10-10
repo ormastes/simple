@@ -1,6 +1,6 @@
 # u16 array field decoded as a pointer
 
-Status: source repair; rebuilt native ARM and RISC-V gates pending.
+Status: integrated-candidate ARM fixture and RISC-V object PASS; isolated release-head and broader gates pending.
 Requirement: REQ-MIR-ARRAY-FIELD-SHAPE.
 
 The exhaustive LLVM matrix failed `parse_lex_program_valid` in
@@ -25,9 +25,12 @@ checks are unchanged.
 
 Authored metadata specs cover u16, text, and nested u16 arrays. The native
 fixture covers plain and field u16 reads, zero/high unsigned values, bit masks,
-and nested field reads. No runtime PASS is claimed before rebuilding.
+and nested field reads. These native controls passed with the coordinated
+rebuilt producer; authored metadata spec execution remains pending.
 
 Baseline producer SHA256:
 `67b29c2e79ef945dcea3b07ea1cedfad99892a1e4448108382571b25f1533f4f`.
 Local evidence: `build/native_probe/llvm-cast-roots/parse-before-gdb.log` and
 `u16-before.log`. The inferior aborted; GDB's process exit zero is not a pass.
+
+Final scoped native qualification and exact receipts: [verification](../verification/native_array_field_elements_2026-10-11.md). Authored unit execution and standalone PR-head admission remain pending.
