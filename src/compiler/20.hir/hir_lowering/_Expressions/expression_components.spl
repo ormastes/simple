@@ -37,6 +37,11 @@ fn declared_pattern_slot_types_are_concrete(types: [HirType]) -> bool:
             return false
     true
 
+fn or_bare_name_is_variant_reference(name: text) -> bool:
+    """Bare Capitalized pattern name: a constructor, never a variable."""
+    val first = name.char_at(0)
+    first >= "A" and first <= "Z"
+
 impl HirLowering:
     me lower_expr_list(exprs: [Expr]) -> [HirExpr]:
         var result: [HirExpr] = []
@@ -618,12 +623,19 @@ impl HirLowering:
         """Symbol ids of every variable binding in `p` (any depth). Bare
         names that are enum variants (`case Red | Green:`) are unit-variant
         references, not bindings, and are skipped; so are `_` wildcards (a
-        payload `_` may arrive as a Binding named "_")."""
+        payload `_` may arrive as a Binding named "_").
+
+        A bare Capitalized name is a variant reference even when this module
+        cannot resolve its enum: `enum_variant_names` only holds the module's
+        own and explicitly registered imported enums, so `case NilLit | UnitLit`
+        over an enum reached another way arrived here as two "bindings" and
+        failed Stage 3 with `[NilLit] vs [UnitLit]`. Such names are resolved
+        by variant name later, exactly as a single bare arm is."""
         var out: [i64] = []
         match p.kind:
             case Binding(sym, _):
                 val bname = self.symbols.symbol_name_scalar_raw(sym.id)
-                if bname != "_" and bname != "" and not self.enum_variant_names.contains_key(bname):
+                if bname != "_" and bname != "" and not self.enum_variant_names.contains_key(bname) and not or_bare_name_is_variant_reference(bname):
                     out.push(sym.id)
             case Tuple(elems):
                 for e in elems:
