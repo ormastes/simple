@@ -34,8 +34,9 @@ through `val` / `var` copies and assignments like `extern_result_locals`).
 | integer / float / bool literal | runtime (int), static (bool, float) | **static Some** | literal |
 | `x + 1`, `1 * 3`, `-x`, `~x`, shifts, bit ops | runtime | **static Some** | an arithmetic result is never nil |
 | `x == 1`, `<`, `not x` | static (Bool slot) | static Some | |
-| `x as i64` (cast to a scalar type) | runtime | **static Some** | |
+| `x as i64` where the operand is itself static, or a variable with a provably scalar local | runtime | **static Some** | a cast passes the operand WORD through, so it is static only inductively; `ext() as i64`, `d[k] as i64`, `v as i64` on an untyped `v` stay runtime (the first revision of this fix made every scalar cast static and laundered the extern exclusion) |
 | `if c: 1 else: 3`, if-chain with `else`, block, `a ?? 3` (every result static) | runtime | **static Some** | structural, depth-bounded (4) |
+| `if c: 3 else: nil`, `match k: case 1: 3 case _: nil` flowing into an annotated binding, a parameter, a `return` or the tail of a `-> T?` function | runtime on the JOINED word (3 -> None on both paths) | **boxed per arm** | `lower_expr_for_slot` threads the declared type into the conditional; each arm's tail goes through `ensure_option_handle` on its own (scalar arm Some, nil arm None, ambiguous arm classified per arm) |
 | `val n = x + 1; take(n)` (untyped local bound from the above) | runtime | **static Some** | marker copied at the binding |
 | `xs[i]` on a local DECLARED `[T]` / `[T; n]`, scalar `T` | runtime | **static Some** | same static element type the `== nil` fold uses |
 | param / annotated local / field / user call or method result with a declared scalar type | static | static Some | registered HIR type (unchanged) |
@@ -53,7 +54,8 @@ a representation change:
 | `Dict` read `d[k]`, `d.get(k)` | a miss returns the nil word in the value slot of a `Dict<K, i64>` |
 | builtin method result (`xs.len()`, `s.to_i64()`, `s.index_of(..)`, ...) | lowered to a runtime call into an I64 temp with no registered type; total ones (`len`) could be whitelisted per method -- not done here, a `len()` of exactly 3 is still None |
 | `a and b` / `a or b` on non-bool operands | may yield an operand |
-| `if` / `match` whose arm is not itself static (e.g. an arm that is a call) and the checker left no type | only the structural proof is available on the flat path |
+| a conditional with a nil arm that does NOT flow directly into a declared `T?` slot (`val t = if c: 3 else: nil` with no annotation, then `take(t)`) | the arms are joined as raw words before any Optional type is known |
+| a cast of an extern / untyped / Dict-read / field / call-result operand | the cast passes the word through; only a static expression or a provably scalar variable is accepted as operand |
 | char literal | not recognised by this harness' frontend path as `CharLit`; unverified |
 | a `var` re-assigned from an ambiguous source inside a loop AFTER a use | the marker is flow-insensitive in lowering order, like `nil_locals` / `extern_result_locals` |
 
@@ -103,6 +105,16 @@ and `src/lib/nogc_sync_mut/test_runner/test_runner_mcdc_report.spl:550,553,
 / locals and 85 scalar-optional fields in the three trees. Field reads
 (`self.count + 1` with `count: i64?`) are not in the scan.
 
+Tail and `return` are identical: a tail `o` with `o: bool?` in a `-> bool`
+function returns the payload too (it returned the presence predicate before,
+so `Some(false)` came back true).
+
+`a == b` / `a != b` on TWO scalar Optional locals is lowered as "same
+absence state and (absent or equal payloads)" (`rt_is_none` on both,
+payloads through `option_scalar_payload_of`); it was a raw compare of the
+two handle words, i.e. allocation identity, where the interpreter compares
+values (true for equal payloads and for nil == nil).
+
 Not covered: an Optional local used as an array INDEX (`xs[v]`), stored into
 a plain scalar FIELD, assigned to an existing plain scalar `var`, interpolated
 in a string, or tested for truthiness (`if flag:` with `flag: bool?`).
@@ -125,11 +137,28 @@ tests are folded away in a compiler built from the landed series.
 (`_MirLowering/module_lowering.spl`).
 
 Still open: an extern declared in ANOTHER module and imported is not in the
-calling module's function list, so it is not marked at all there.
+calling module's function list, so it is not marked at all there. Three
+nil-tested `rt_*` results of that kind exist in src/lib, all in
+`src/lib/nogc_sync_mut/io/browser_net_runtime.spl`: `:48`
+(`rt_tls_client_read_checked`, tested `:49`), `:53`
+(`rt_tls_client_read_timeout_checked`, `:54`) and `:58`
+(`rt_tls_client_read_bytes_timeout_checked`, `:59`).
+
+Closure scan for the per-arm shape (an annotated scalar-optional binding fed
+by an `if` / `match` with a nil arm): **3**, all in `src/compiler` --
+`35.semantics/resolve.spl:534` (`match`, arms `method_id.id` / `nil`: a
+method whose symbol id is 3 read as unresolved), `50.mir/
+mir_lowering_stmts.spl:1532` (`if has_init: <Dict.get> else: nil`) and
+`55.borrow/borrow_check/mod.spl:164` (`if unwind.?: ... typed_unwind.id else:
+nil`). No `return if .. nil` into a scalar optional was found.
 
 ## Specs
 
-- `test/01_unit/compiler/mir/optional_scalar_static_some_spec.spl` (11): shape
+- `test/01_unit/compiler/mir/optional_scalar_static_some_spec.spl` (18; the 7
+  added with the per-arm / cast / tail / optional-equality commit: 6 of them
+  red before it -- `if c: 3 else: nil` and the `match` form returned the
+  absent marker for 3, a `bool?` tail returned true for Some(false), a cast
+  of a Dict read boxed statically, `a == b` had no presence test): shape
   per source kind (static vs runtime), the extern order case for both the box
   and the `== nil` fold, and EXECUTED examples -- `take(3)` = 3, `take(0)`,
   `take(x + 1)` with x = 2, `takeb(true)` / `takeb(false)` present, nil
@@ -150,3 +179,11 @@ source, lowered by the same lowering and bound under those names (handle =
 2^60 + payload * 2 + discriminant; nil = the word 3). They prove the lowered
 control and data flow, for small non-negative integer and bool payloads; they
 do not exercise the real runtime, floats, or either native backend.
+
+## Unproven until a native run
+
+Everything here is shown on lowered MIR under the seed. Float payloads (the
+bitcast in and out of the handle), narrow integers (`i8?`..`u32?`, the cast
+back from the i64 payload word), and BOTH native backends are not exercised
+by any spec: the modelled runtime covers small non-negative integers and
+bools only. Imported (cross-module) externs remain unmarked (above).

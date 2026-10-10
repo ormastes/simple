@@ -926,7 +926,11 @@ impl MirLowering:
                         else:
                             MirType.i64()
 
-                        var init_local: LocalId = self.lower_expr(let_init)
+                        var init_local: LocalId = LocalId(id: 0)
+                        if val init_slot_type = let_type:
+                            init_local = self.lower_expr_for_slot(let_init, init_slot_type)
+                        else:
+                            init_local = self.lower_expr(let_init)
                         if val trait_expected = let_type:
                             init_local = self.coerce_native_trait_assignment(init_local, let_init.kind, trait_expected, let_init.span)
                         # [mir-let-instcount-probe] DIAGNOSTIC, default OFF (SIMPLE_MIRB_TRACE=1).
@@ -2177,6 +2181,38 @@ impl MirLowering:
             case _:
                 self.error_fatal("unsupported MIR assignment target: {target.kind}", nil)
 
+    me lower_expr_for_slot(value: HirExpr, declared: HirType) -> LocalId:
+        """Lower `value` for a slot of DECLARED type `declared` (annotated
+        binding, parameter, return type).
+
+        Only one shape is special: a conditional (`if` with `else`, if-chain
+        with `else`, `match`) flowing into a SCALAR optional. Lowered on its
+        own it joins the raw words of its arms -- `if c: 3 else: nil` yields
+        the word 3 on BOTH paths -- and no later classification can tell
+        them apart. Threading the declared type into the conditional makes
+        each arm box its own tail (lower_block_expected -> ensure_option_handle):
+        a scalar arm becomes Some, a nil arm None, an ambiguous arm is
+        classified per arm. Everything else is plain lower_expr.
+        doc/08_tracking/bug/optional_scalar_runtime_classified_three_becomes_none_2026-10-11.md"""
+        var scalar_optional_slot = false
+        if value != nil and declared != nil:
+            match declared.kind:
+                case HirTypeKind.Optional(optional_inner):
+                    scalar_optional_slot = hir_type_is_plain_scalar(optional_inner)
+                case _: ()
+        if scalar_optional_slot:
+            match value.kind:
+                case HirExprKind.If(cond, then_, else_):
+                    if else_ != nil:
+                        return self.lower_if(cond, then_, else_, Some(declared))
+                case HirExprKind.IfChain(arms, else_):
+                    if else_ != nil:
+                        return self.lower_if_chain(arms, else_, Some(declared))
+                case HirExprKind.MatchCase(scrutinee, arms):
+                    return self.lower_match_case(scrutinee, arms, Some(declared))
+                case _: ()
+        self.lower_expr(value)
+
     me lower_method_call_arg(arg: HirCallArg, param_types: [HirType], param_index: i64) -> LocalId:
         """Lower one explicit method-call argument for the declared parameter
         `param_types[param_index]` (an empty list or an out-of-range index
@@ -2190,10 +2226,10 @@ impl MirLowering:
         nil. Non-scalar optionals are left untouched here on purpose (a
         pointer / text handle cannot collide with the nil word).
         doc/08_tracking/bug/method_call_optional_param_arg_not_boxed_2026-10-11.md"""
-        var arg_local: LocalId = self.lower_expr(arg.value)
         if arg.has_name or param_index < 0 or param_index >= param_types.len():
-            return arg_local
+            return self.lower_expr(arg.value)
         val declared_param_type = param_types[param_index]
+        var arg_local: LocalId = self.lower_expr_for_slot(arg.value, declared_param_type)
         match declared_param_type.kind:
             case HirTypeKind.Optional(optional_inner):
                 val scalar_payload = match optional_inner.kind:

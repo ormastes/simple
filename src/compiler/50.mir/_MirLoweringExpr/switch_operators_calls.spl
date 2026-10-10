@@ -124,9 +124,11 @@ fn hir_block_is_static_scalar(block: HirBlock, depth: i64) -> bool:
 fn hir_expr_is_static_scalar(expr: HirExpr, depth: i64) -> bool:
     """True when `expr` is a NON-optional scalar by construction, so its
     value can never be nil whatever its bits: a numeric / bool / char
-    literal, an arithmetic, bitwise, shift or comparison result, a numeric
-    negation or bit complement, a cast to a scalar type, and an if / block /
-    `a ?? d` all of whose results are one of those. Purely structural (no
+    literal, an arithmetic, bitwise, shift or comparison result (a COMPUTED
+    value, whatever its operands), a numeric negation or bit complement, a
+    scalar cast of such an expression, and an if / block / `a ?? d` all of
+    whose results are one of those. Defined inductively: an operation that
+    merely passes a word through (a cast) is static only if its operand is. Purely structural (no
     type annotation needed, they are absent on the flat path). Depth-bounded
     so the per-expression probe in lower_expr stays O(1).
 
@@ -146,7 +148,11 @@ fn hir_expr_is_static_scalar(expr: HirExpr, depth: i64) -> bool:
             match op:
                 case HirUnaryOp.Neg | HirUnaryOp.Not | HirUnaryOp.BitNot: true
                 case _: false
-        case Cast(_, target): hir_type_is_plain_scalar(target)
+        # A cast passes its operand WORD through, so it is static only when
+        # the operand is: `ext() as i64` / `d[k] as i64` / `v as i64` on an
+        # untyped `v` can still be the nil word. (A cast of a declared scalar
+        # variable is recognised in lower_expr, which can see the local.)
+        case Cast(inner, target): hir_type_is_plain_scalar(target) and hir_expr_is_static_scalar(inner, depth + 1)
         case NullCoalesce(_, right): hir_expr_is_static_scalar(right, depth + 1)
         case Block(block): hir_block_is_static_scalar(block, depth)
         case If(_, then_, else_):
@@ -919,6 +925,35 @@ impl MirLowering:
         var b_eq = self.builder
         val same = b_eq.emit_binop(MirBinOp.Eq, mir_operand_copy(payload), mir_operand_copy(plain_local), MirType.bool())
         var result = b_eq.emit_binop(MirBinOp.BitAnd, mir_operand_copy(present), mir_operand_copy(same), MirType.bool())
+        if negate:
+            val false_local = b_eq.new_temp(MirType.bool())
+            b_eq.emit_const(false_local, MirConstValue.Bool(false), MirType.bool())
+            result = b_eq.emit_binop(MirBinOp.Eq, mir_operand_copy(result), mir_operand_copy(false_local), MirType.bool())
+        self.builder = b_eq
+        result
+
+    me lower_scalar_optional_eq_optional(left_local: LocalId, right_local: LocalId, negate: bool) -> LocalId:
+        """`a == b` / `a != b` on two scalar Optional locals: both absent, or
+        both present with equal payloads (negated for `!=`). A raw Eq
+        compared the two Option HANDLE words, i.e. allocation identity."""
+        var b = self.builder
+        val is_none_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_is_none"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false)))
+        ))
+        val left_none_res = b.emit_call(is_none_fn, [mir_operand_copy(left_local)], MirType.bool())
+        val right_none_res = b.emit_call(is_none_fn, [mir_operand_copy(right_local)], MirType.bool())
+        self.builder = b
+        val left_none = left_none_res ?? left_local
+        val right_none = right_none_res ?? right_local
+        val left_payload = self.option_scalar_payload_of(left_local)
+        val right_payload = self.option_scalar_payload_of(right_local)
+        var b_eq = self.builder
+        # same absence state AND (absent OR equal payloads)
+        val same_state = b_eq.emit_binop(MirBinOp.Eq, mir_operand_copy(left_none), mir_operand_copy(right_none), MirType.bool())
+        val same_payload = b_eq.emit_binop(MirBinOp.Eq, mir_operand_copy(left_payload), mir_operand_copy(right_payload), MirType.bool())
+        val absent_or_equal = b_eq.emit_binop(MirBinOp.BitOr, mir_operand_copy(left_none), mir_operand_copy(same_payload), MirType.bool())
+        var result = b_eq.emit_binop(MirBinOp.BitAnd, mir_operand_copy(same_state), mir_operand_copy(absent_or_equal), MirType.bool())
         if negate:
             val false_local = b_eq.new_temp(MirType.bool())
             b_eq.emit_const(false_local, MirConstValue.Bool(false), MirType.bool())
@@ -6321,7 +6356,10 @@ impl MirLowering:
                 if lambda_operand != nil:
                     arg_operands = arg_operands.push(lambda_operand.unwrap())
                     continue
-            var arg_local = self.lower_expr(arg_value)
+            var arg_local = if current_arg_index < call_param_types.len() and not arg.has_name:
+                self.lower_expr_for_slot(arg_value, call_param_types[current_arg_index])
+            else:
+                self.lower_expr(arg_value)
             var boundary_transfer_mode = MirTransferMode.Copy
             var boundary_transfer_payload = MirTransferPayload.InlineCopy
             var boundary_runtime_classify = true
