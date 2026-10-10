@@ -215,3 +215,14 @@ Owner: Codex root. Sidecar lanes: N/A. Final source/oracle reviewer: Astra,
 P0=0/P1=0; evidence WARN. Fixed Result fixture extraction, retained capped
 historical6/1, and added native3/0 plus actual provider6/5 ->6/0. Broader graph,
 runner, snapshot admission, projection/Slop and complete20/40 scopes remain next.
+
+## Typed graph private increment — 2026-10-11
+
+Implementation/merge owner: Codex root. Sidecar lanes: N/A. Design and final
+source/oracle/evidence reviewer: Astra, P0=0/P1=0. Native actual evidence stages:
+corrected baseline3/3 -> initial graph3/0; acceptance14/10 -> final14/0;
+intermediate superseded construction unexecuted. Graph-family typed carriers,
+strict decoding, closure and bounded canonical encoding now exist. Entire20/40
+and WP0–WP7 remain authoritative. Next WP1 work is other families and explicit
+common-envelope/all-family dispatch, followed by original WP2–WP7; broad runtime,
+coverage/NFR/manual evidence and authenticated integration stay open.

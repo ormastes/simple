@@ -62,3 +62,16 @@ All WP0–WP7 remain in the [plan](../../03_plan/agent_tasks/traceability_sdn_sl
 Modern SSpec acceptance must traverse real CLI/extractor/runner/reporting paths.
 Pure fixtures verify rules but cannot prove hook, deployed binary, remote gate,
 viewer, supported-host performance, or full feature completion.
+# Graph codec owner update — 2026-10-11
+
+The pure common domain now includes graph_types_v1, graph_fields_v1,
+graph_budget_v1, graph_schema_v1, graph_decode_v1, graph_encode_v1 and
+graph_wire_v1 behind graph_v1. These owners import no app IO, process, clock,
+network, compiler or test runner. The graph stores six named collections and
+external provenance-record identities with explicit path/span availability.
+Data consistency/reference closure remains separate from snapshot capture,
+claim resolution, policy, visibility, execution eligibility and authentication.
+Graph alias declarations preserve endpoints; this codec never folds them into
+canonical self-edges. Detailed contract and scoped14/0 evidence live in
+doc/05_design/infra/traceability_graph_codec_v1.md. Generic family dispatch and
+other required families remain pending; no whole WP1 or admission claim follows.

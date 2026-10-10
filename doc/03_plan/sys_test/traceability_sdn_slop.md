@@ -132,3 +132,19 @@ qualify concrete worktree-provider properties. See the CLI TDD report for
 source-stage boundaries, owned inputs and P2 oracle limitations. Direct Unicode
 selection is proven; find transport of that filename remains open. All20REQ/40AC
 remain required; no full runtime or protected admission PASS is claimed.
+
+## Typed graph component evidence — 2026-10-11
+
+The selected20REQ/40AC scope is unchanged. Corrected strict-valid missing-family
+baseline3/3 became initial graph3/0. Broader native acceptance14/10 exposed shared
+escaping-size mismatch; Astra exposed allocation order before output limits.
+Grouped fixes enforce exact size-only preflight before indexes/rows/keys and
+explicit escape-byte comparisons. Final modern system SSpec14/0 inspects actual
+typed payloads, reference closure, roles, parameter identity, cycle policy,
+deterministic output and resource boundaries. Astra reconciled11source/16artifact
+hashes and final log: scopedPASS P0=0/P1=0, fullverificationWARN.
+
+These component examples contribute evidence; they do not mark any whole AC done.
+All other families/dispatcher, extractors/resolver, snapshot/hook/admission,
+execution/DB, projections/Slop/extensions, coverage/runtime/NFR/manual evidence
+remain required. See doc/09_report/traceability_graph_codec_tdd_2026-10-11.md.
