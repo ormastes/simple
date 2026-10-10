@@ -1,0 +1,202 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Stage2 captured-write check: declaration forms, level switch, position
+
+Bug: doc/08_tracking/bug/stage2_closure_capture_write_silently_dropped_2026-10-11.md
+
+Companion of closure_capture_write_spec.spl. The check must never reject a
+closure that writes ITS OWN local, whatever form declared that local; the
+enclosing function has a same-named `var a` in every must-accept probe, so a
+declaration the checker fails to register shows up as a false capture.
+
+Oracle: `seed run` on each probe. "accept" means the seed's capture check let
+it through (its runtime result is not asserted here).
+
+| closure-local declared by | seed | here |
+|---------------------------|------|------|
+| `var (a, b) = pair()` / three-element tuple | accept | accept |
+| `val (a, b)`, shadowed by a nested closure's own `var a` | accept | accept |
+| `for (a, b) in` / `for i, a in` | accept | accept |
+| `case (a, b):` / `case Rect(a, b):` / `case Point(x: a, y: b):` / `case Some(a):` | accept | accept |
+| `if val a =` / `if val Some((a, b)) =` / `while val a =` | accept | accept |
+| `with e as a:` | accept | accept |
+| lambda parameters `\a, b:` | accept | accept |
+
+Captured writes under the same constructs stay rejected. Three deliberate
+divergences, all stricter than the seed (the seed accepts and loses the
+write): a closure under `[...]`, under `??`, and a write in a `with` body.
+
+Level switch `SIMPLE_CAPTURE_WRITE_CHECK=error|warning|off` (default and any
+unknown value: error). `warning` prints and continues; `off` skips the walk.
+"""
+use std.spec.*
+use std.io_runtime.{env_set}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.flat_ast_bridge.{build_module_from_flat_pool_blob, flat_pool_capture_arm, flat_pool_capture_take}
+use compiler.core.parser.{parser_has_errors, parser_get_errors}
+
+# 24 lines: a probe body's first line is line 25.
+val HEAD = "fn pair() -> (i64, i64):\n    (1, 2)\n\nfn opt(n: i64) -> i64?:\n    if n > 0:\n        return n\n    nil\n\nfn optpair(n: i64) -> (i64, i64)?:\n    if n > 0:\n        return (n, n)\n    nil\n\nclass Point:\n    x: i64\n    y: i64\n\nenum Shape:\n    Circle(i64)\n    Rect(i64, i64)\n\nfn main():\n    var a = 100\n    var c = 100\n"
+val TAIL = "    f()\n"
+
+val VAR_TUPLE = "    val f = fn() -> i64:\n        var (a, b) = pair()\n        a = a + b\n        a\n"
+val VAR_TUPLE3 = "    val f = fn() -> i64:\n        var (a, b, d) = (1, 2, 3)\n        a = a + b + d\n        a\n"
+val VAL_TUPLE_NESTED = "    val f = fn() -> i64:\n        val (a, b) = pair()\n        val g = fn() -> i64:\n            var a = b\n            a = a + 1\n            a\n        g() + a\n"
+val FOR_TUPLE = "    val f = fn() -> i64:\n        var s = 0\n        for (a, b) in [(1, 2), (3, 4)]:\n            a = a + b\n            s = s + a\n        s\n"
+val FOR_BARE_PAIR = "    val f = fn() -> i64:\n        var s = 0\n        for i, a in [(1, 2), (3, 4)]:\n            a = a + i\n            s = s + a\n        s\n"
+val MATCH_TUPLE = "    val f = fn() -> i64:\n        match pair():\n            case (a, b):\n                a = a + b\n                a\n"
+val MATCH_ENUM = "    val f = fn() -> i64:\n        var s = 0\n        match Shape.Rect(2, 3):\n            case Rect(a, b):\n                a = a + b\n                s = a\n            case Circle(a):\n                a = a + 1\n                s = a\n        s\n"
+val MATCH_STRUCT = "    val f = fn() -> i64:\n        var s = 0\n        match Point(x: 1, y: 2):\n            case Point(x: a, y: b):\n                a = a + b\n                s = a\n        s\n"
+val MATCH_SOME = "    val f = fn() -> i64:\n        var s = 0\n        match opt(3):\n            case Some(a):\n                a = a + 1\n                s = a\n            case nil:\n                s = 0\n        s\n"
+val IF_VAL = "    val f = fn() -> i64:\n        var s = 0\n        if val a = opt(2):\n            a = a + 1\n            s = a\n        s\n"
+val IF_VAL_SOME_TUPLE = "    val f = fn() -> i64:\n        var s = 0\n        if val Some((a, b)) = optpair(2):\n            a = a + b\n            s = a\n        s\n"
+val WHILE_VAL = "    val f = fn() -> i64:\n        var n = 2\n        var s = 0\n        while val a = opt(n):\n            a = a + 1\n            s = s + a\n            n = n - 1\n        s\n"
+val WITH_AS = "    val f = fn() -> i64:\n        var s = 0\n        with opt(3) as a:\n            a = opt(4)\n            s = 1\n        s\n"
+val LAMBDA_PARAMS = "    val g = \\a, b:\n        a = a + b\n        a\n    val f = fn() -> i64:\n        g(1, 2)\n"
+
+val W_WHILE_VAL = "    val f = fn() -> i64:\n        var n = 1\n        while val v = opt(n):\n            c = c + v\n            n = n - 1\n        c\n"
+val W_FOR_PAIR = "    val f = fn() -> i64:\n        for i, v in [(1, 2)]:\n            c = c + v\n        c\n"
+val W_IF_VAL_TUPLE = "    val f = fn() -> i64:\n        if val Some((x, y)) = optpair(2):\n            c = c + x\n        c\n"
+val W_ENUM_ARM = "    val f = fn() -> i64:\n        match Shape.Rect(2, 3):\n            case Rect(x, y):\n                c = c + x\n            case Circle(x):\n                c = c + 1\n        c\n"
+val W_LET_ELSE = "    val f = fn() -> i64:\n        val Some(y) = opt(3) else:\n            c = 0\n            return -1\n        c = c + y\n        c\n"
+val W_IF_EXPR = "    val f = fn() -> i64:\n        val r = if c > 0:\n            c = c + 1\n            1\n        else:\n            2\n        r\n"
+val W_WITH_BODY = "    val f = fn() -> i64:\n        with opt(3) as h:\n            c = c + 1\n        c\n"
+
+val UNDER_INDEX_SRC = "fn wrap(f: fn(i64) -> i64) -> [i64]:\n    [f(1)]\n\nfn main():\n    var c = 0\n    val r = wrap(\\x:\n        c = c + x\n        c\n    )[0]\n"
+val UNDER_COALESCE_SRC = "fn call(f: fn() -> i64) -> i64?:\n    f()\n\nfn main():\n    var c = 0\n    val r = call(fn() -> i64:\n        c = c + 1\n        c\n    ) ?? 0\n"
+val GLOBAL_AFTER_SRC = "fn main():\n    G = 1\n    val f = fn() -> i64:\n        G = G + 1\n        G\n    f()\n\nvar G = 0\n"
+val GLOBAL_BEFORE_SRC = "var G = 0\n\nfn main():\n    G = 1\n    val f = fn() -> i64:\n        G = G + 1\n        G\n    f()\n"
+val PLAIN_WRITE_SRC = "fn main() -> i64:\n    var counter = 0\n    val hook = fn() -> i64:\n        counter = counter + 1\n        counter\n    hook()\n"
+
+fn diagnostics_of(src: text) -> [text]:
+    val _module = parse_and_build_module(src, "closure_capture_write_form.spl")
+    if parser_has_errors(): parser_get_errors() else: []
+
+fn probe(body: text) -> [text]:
+    diagnostics_of(HEAD + body + TAIL)
+
+fn first_of(errors: [text]) -> text:
+    if errors.len() == 0: "" else: errors[0]
+
+fn error_count_at_level(level: text) -> i64:
+    env_set("SIMPLE_CAPTURE_WRITE_CHECK", level)
+    val n = diagnostics_of(PLAIN_WRITE_SRC).len()
+    env_set("SIMPLE_CAPTURE_WRITE_CHECK", "")
+    n
+
+describe "captured-write check: closure-local declaration forms are not captures":
+
+    it "accepts a tuple-destructured var":
+        expect(probe(VAR_TUPLE).len()).to_equal(0)
+
+    it "accepts a three-element tuple-destructured var":
+        expect(probe(VAR_TUPLE3).len()).to_equal(0)
+
+    it "accepts a nested closure shadowing a tuple-destructured val":
+        expect(probe(VAL_TUPLE_NESTED).len()).to_equal(0)
+
+    it "accepts a parenthesized for tuple":
+        expect(probe(FOR_TUPLE).len()).to_equal(0)
+
+    it "accepts an unparenthesized for pair":
+        expect(probe(FOR_BARE_PAIR).len()).to_equal(0)
+
+    it "accepts a match-arm tuple binding":
+        expect(probe(MATCH_TUPLE).len()).to_equal(0)
+
+    it "accepts match-arm enum payload bindings":
+        expect(probe(MATCH_ENUM).len()).to_equal(0)
+
+    it "accepts match-arm struct field bindings":
+        expect(probe(MATCH_STRUCT).len()).to_equal(0)
+
+    it "accepts a match-arm Some binding":
+        expect(probe(MATCH_SOME).len()).to_equal(0)
+
+    it "accepts an if-val binding":
+        expect(probe(IF_VAL).len()).to_equal(0)
+
+    it "accepts an if-val Some tuple binding":
+        expect(probe(IF_VAL_SOME_TUPLE).len()).to_equal(0)
+
+    it "accepts a while-val binding":
+        expect(probe(WHILE_VAL).len()).to_equal(0)
+
+    it "accepts a with-as binding":
+        expect(probe(WITH_AS).len()).to_equal(0)
+
+    it "accepts lambda parameters":
+        expect(probe(LAMBDA_PARAMS).len()).to_equal(0)
+
+describe "captured-write check: writes under binding constructs stay rejected":
+
+    it "rejects a captured write in a while-val body":
+        expect(first_of(probe(W_WHILE_VAL))).to_contain("captured variable `c` inside nested fn `f` (line 28)")
+
+    it "rejects a captured write in a for-pair body":
+        expect(first_of(probe(W_FOR_PAIR))).to_contain("captured variable `c` inside nested fn `f` (line 27)")
+
+    it "rejects a captured write in an if-val tuple body":
+        expect(first_of(probe(W_IF_VAL_TUPLE))).to_contain("captured variable `c` inside nested fn `f` (line 27)")
+
+    it "rejects a captured write in an enum arm":
+        expect(first_of(probe(W_ENUM_ARM))).to_contain("captured variable `c` inside nested fn `f` (line 28)")
+
+    it "rejects a captured write in a let-else body":
+        expect(first_of(probe(W_LET_ELSE))).to_contain("captured variable `c` inside nested fn `f` (line 27)")
+
+    it "rejects a captured write in an if expression branch":
+        expect(first_of(probe(W_IF_EXPR))).to_contain("captured variable `c` inside nested fn `f` (line 27)")
+
+    it "rejects a module var declared after the function, like the seed":
+        expect(first_of(diagnostics_of(GLOBAL_AFTER_SRC))).to_contain("captured variable `G` inside nested fn `f` (line 4)")
+
+    it "accepts the same module var declared before the function":
+        expect(diagnostics_of(GLOBAL_BEFORE_SRC).len()).to_equal(0)
+
+describe "captured-write check: deliberately stricter than the seed":
+
+    it "rejects a writing closure under an index expression":
+        expect(first_of(diagnostics_of(UNDER_INDEX_SRC))).to_contain("captured variable `c` inside a closure (line 7)")
+
+    it "rejects a writing closure under a null-coalesce":
+        expect(first_of(diagnostics_of(UNDER_COALESCE_SRC))).to_contain("captured variable `c` inside a closure (line 7)")
+
+    it "rejects a captured write in a with body":
+        expect(first_of(probe(W_WITH_BODY))).to_contain("captured variable `c` inside nested fn `f` (line 27)")
+
+describe "captured-write check: reported position":
+
+    it "reports at the write's own line, not at end of file":
+        expect(first_of(diagnostics_of(PLAIN_WRITE_SRC)).starts_with("line 4:")).to_equal(true)
+
+describe "captured-write check: SIMPLE_CAPTURE_WRITE_CHECK level":
+
+    it "is an error by default":
+        expect(error_count_at_level("")).to_equal(1)
+
+    it "is an error at level error":
+        expect(error_count_at_level("error")).to_equal(1)
+
+    it "stays an error for an unknown level":
+        expect(error_count_at_level("bogus")).to_equal(1)
+
+    it "does not fail the parse at level warning":
+        expect(error_count_at_level("warning")).to_equal(0)
+
+    it "does not fail the parse at level off":
+        expect(error_count_at_level("off")).to_equal(0)
+
+    it "refuses a cached parse that carries a captured write":
+        # A blob stored while the check was off (or by a compiler without it)
+        # must not come back as a clean cache hit.
+        env_set("SIMPLE_CAPTURE_WRITE_CHECK", "off")
+        flat_pool_capture_arm()
+        val _fresh = parse_and_build_module(PLAIN_WRITE_SRC, "closure_capture_write_form.spl")
+        val blob = flat_pool_capture_take()
+        val hit_when_off = build_module_from_flat_pool_blob(blob, PLAIN_WRITE_SRC, "closure_capture_write_form.spl")
+        env_set("SIMPLE_CAPTURE_WRITE_CHECK", "")
+        val hit_when_error = build_module_from_flat_pool_blob(blob, PLAIN_WRITE_SRC, "closure_capture_write_form.spl")
+        expect(blob.len()).to_be_greater_than(0)
+        expect(hit_when_off != nil).to_equal(true)
+        expect(hit_when_error == nil).to_equal(true)
