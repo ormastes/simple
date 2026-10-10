@@ -7,7 +7,12 @@ result with `mir_verify_module`:
 
   * `buf.push(s[i] as u8)` — the exact `bytes_util.spl:16` shape that crashed
     the LLVM backend ("unsupported LLVM value conversion from ptr to i8").
-    The verifier must now refuse it at MIR with MIRV-002 naming the function.
+    Since the text-cast fix (#2875) lowering emits a ConvertCall for it, so
+    the verifier must find ZERO MIRV-002 here: this example is now the
+    regression pin for that fix (a raw text -> u8 Cast coming back is caught).
+  * `p as u8` with `p` a struct — a source shape that still lowers to a raw
+    aggregate -> narrow-scalar Cast, kept as the source-level must-fail for
+    MIRV-002 (the MIR-level must-fail lives in mir_verify_types_casts_spec).
   * a plain arithmetic / branching function verifies clean (no false positive).
   * an enum match with guards: the 3a lowering self-check
     (E-MIR-MATCH-GUARD) stays silent when every guard is lowered, and the
@@ -57,13 +62,22 @@ val CLEAN_SRC: text = "fn pick(d: i64, c: bool) -> i64:\n    if d > 3 and c:\n  
 
 val GUARD_SRC: text = "enum D:\n    A\n    B\n    C\n\nfn pick(d: D, c: bool) -> i64:\n    match d:\n        case D.A if c:\n            1\n        case D.A | D.B if not c:\n            2\n        case _ if c:\n            3\n        case _:\n            4\n"
 
+val STRUCT_NARROW_CAST_SRC: text = "struct P:\n    x: i64\n    y: i64\n\nfn squash(p: P) -> u8:\n    p as u8\n"
+
 describe "MIR verify on lowered source: the ptr->i8 cast class (bug A)":
-    it "reports `s[i] as u8` as warn-first (non-fatal) MIRV-002 naming to_bytes, before any backend":
+    it "`s[i] as u8` lowers through a conversion call: zero MIRV-002 (regression pin for the text-cast fix)":
         val (mir, messages) = lower_src(TEXT_INDEX_CAST_SRC)
+        val report = mir_verify_module(mir)
+        expect(findings_for(report, "MIRV-002").len()).to_equal(0)
+        expect(report.fatal_count()).to_equal(0)
+
+    it "reports an aggregate cast to a narrow scalar (`p as u8`) as warn-first (non-fatal) MIRV-002 naming squash":
+        val (mir, messages) = lower_src(STRUCT_NARROW_CAST_SRC)
         val report = mir_verify_module(mir)
         val hits = findings_for(report, "MIRV-002")
         expect(hits.len()).to_equal(1)
-        expect(hits[0].function.ends_with("to_bytes")).to_equal(true)
+        expect(hits[0].function.ends_with("squash")).to_equal(true)
+        expect(hits[0].message.contains("aggregate")).to_equal(true)
         expect(hits[0].message.contains("-> u8")).to_equal(true)
         # Warn-first landing: reported, not fatal, until promoted in the registry.
         expect(hits[0].is_fatal()).to_equal(false)
