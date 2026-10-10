@@ -7,6 +7,12 @@ description: SPipe Skill — runner/docgen/process around executable SSpec `.spl
 
 ## Bootstrap failure collection
 
+For cached per-file continuation and manual link diagnosis, use
+[cached object continuation and early linking](../../doc/07_guide/tooling/bootstrap_failure_collection.md#cached-object-continuation-and-early-linking).
+Keep tagged workarounds separate from permanent fixes; create a reproducing
+scenario and similar prevention scenarios, with authored tests clearly marked
+unexecuted until the real runner executes them.
+
 For bootstrap build/test sweeps, continue independent scenarios after failures
 and collect terminal results. A usable artifact plus minimum sanity permits
 diagnostic continuation; failed qualification still prevents admission and

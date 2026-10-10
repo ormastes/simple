@@ -1,0 +1,86 @@
+use os.posix.dynlib.{DynLibKind}
+use os.posix.dynlib_sffi.{ProviderQueryCallV1}
+use os.smf.provider_loader.{
+    PROVIDER_ADMISSION_OK, PROVIDER_ADMISSION_LOAD_FAILED,
+    PROVIDER_SESSION_OK, PROVIDER_SESSION_NOT_OPEN, PROVIDER_SESSION_PIN_UNKNOWN,
+    PROVIDER_SESSION_VECTOR_CALL_FAILED,
+    ProviderAdmissionOutcomeV1, ProviderAdmissionResultV1,
+    ProviderLoaderSessionV1, ProviderSessionQueryV1,
+    provider_session_vector_call_owned_v1,
+}
+use std.nogc_sync_mut.composition.provider_contract.{simple_provider_query_error_v1}
+use std.nogc_sync_mut.composition.vector_kernel_contract.{
+    SIMPLE_VECTOR_OP_BITMAP_AND_U32, SIMPLE_VECTOR_STATUS_EXECUTION_FAILED,
+    SimpleVectorKernelRequestV1
+}
+
+fn _admission(status: i32) -> ProviderAdmissionResultV1:
+    val admitted = status == PROVIDER_ADMISSION_OK
+    ProviderAdmissionResultV1(
+        status: status,
+        outcome: if admitted: ProviderAdmissionOutcomeV1.Admitted else: ProviderAdmissionOutcomeV1.LoadFailed,
+        query_symbol_address: if admitted: 4096 else: 0,
+        artifact_digest: "",
+        process_callable: admitted,
+        reason: if admitted: "admitted" else: "loader-failed",
+    )
+
+fn _session(open: bool, pins: [u64]) -> ProviderLoaderSessionV1:
+    ProviderLoaderSessionV1(
+        library: DynLibKind.Invalid,
+        admission: _admission(if open: PROVIDER_ADMISSION_OK else: PROVIDER_ADMISSION_LOAD_FAILED),
+        open: open,
+        next_pin_id: 2,
+        live_pins: pins,
+        cli_invoke_symbol_address: 0,
+        cli_invoke_process_callable: false,
+    )
+
+fn _query(status: i32, pin_id: u64) -> ProviderSessionQueryV1:
+    ProviderSessionQueryV1(
+        status: status,
+        pin_id: pin_id,
+        call: ProviderQueryCallV1(
+            ok: status == PROVIDER_SESSION_OK,
+            call_status: 0,
+            result: simple_provider_query_error_v1(0),
+            diagnostic: ""),
+        reason: "")
+
+fn _request() -> SimpleVectorKernelRequestV1:
+    SimpleVectorKernelRequestV1(
+        opcode: SIMPLE_VECTOR_OP_BITMAP_AND_U32, left_address: 0, left_bytes: 0,
+        right_address: 0, right_bytes: 0, output_address: 0,
+        output_capacity_bytes: 0, argument: 0)
+
+describe "provider_session_vector_call_owned_v1 refuses before touching the provider":
+    it "refuses a closed session and returns the same owner":
+        val session = _session(false, [1])
+        val out = provider_session_vector_call_owned_v1(session, _query(PROVIDER_SESSION_OK, 1), _request())
+        expect(out.vector_call.status).to_equal(PROVIDER_SESSION_NOT_OPEN)
+        expect(out.vector_call.reason).to_equal("provider-session-not-open")
+        expect(out.vector_call.call.ok).to_equal(false)
+        expect(out.vector_call.call.response.status).to_equal(SIMPLE_VECTOR_STATUS_EXECUTION_FAILED)
+        expect(out.session.open).to_equal(false)
+        expect(out.session.live_pins.len()).to_equal(1)
+
+    it "refuses a failed query on an open session":
+        val out = provider_session_vector_call_owned_v1(
+            _session(true, [1]), _query(PROVIDER_SESSION_NOT_OPEN, 1), _request())
+        expect(out.vector_call.status).to_equal(PROVIDER_SESSION_NOT_OPEN)
+
+    it "refuses an unknown pin without changing live pins":
+        val out = provider_session_vector_call_owned_v1(
+            _session(true, [1]), _query(PROVIDER_SESSION_OK, 7), _request())
+        expect(out.vector_call.status).to_equal(PROVIDER_SESSION_PIN_UNKNOWN)
+        expect(out.vector_call.pin_id).to_equal(7)
+        expect(out.vector_call.reason).to_equal("provider-session-pin-unknown")
+        expect(out.session.live_pins.len()).to_equal(1)
+
+    it "reports a vector-call failure for an invalid library under a live pin":
+        val out = provider_session_vector_call_owned_v1(
+            _session(true, [1]), _query(PROVIDER_SESSION_OK, 1), _request())
+        expect(out.vector_call.status).to_equal(PROVIDER_SESSION_VECTOR_CALL_FAILED)
+        expect(out.vector_call.pin_id).to_equal(1)
+        expect(out.vector_call.call.ok).to_equal(false)
+        expect(out.session.live_pins.len()).to_equal(1)

@@ -9,6 +9,9 @@ Read the [bootstrap rules](../../../.claude/rules/bootstrap.md) and the
 [shared collection policy](../../../doc/07_guide/tooling/bootstrap_failure_collection.md).
 Use [parallel handoff](../../../doc/07_guide/app/llm/bootstrap_parallel_handoff.md)
 for required evidence and formal promotion boundaries.
+For tagged source workarounds, failed-file retries, independent object collection
+and early manual linking, apply the shared
+[cached object continuation workflow](../../../doc/07_guide/tooling/bootstrap_failure_collection.md#cached-object-continuation-and-early-linking).
 
 - Identify which compiler builds each phase and bind its actual bytes, source,
   runtime and tools. The Rust seed is bootstrap-only; do not substitute it for

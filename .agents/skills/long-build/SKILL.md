@@ -7,6 +7,10 @@ description: Coordinate long Simple builds and test matrices through finite depe
 
 Use the [shared collection policy](../../../doc/07_guide/tooling/bootstrap_failure_collection.md)
 as the continuation contract.
+Use its [cached object continuation workflow](../../../doc/07_guide/tooling/bootstrap_failure_collection.md#cached-object-continuation-and-early-linking)
+when a failed aggregate build still has reusable successful files. Read only
+the last log line, exit code and object size for successful compile observation;
+inspect additional diagnostics only for failed runs.
 
 1. Freeze the requested build/test inventory and dependencies. Record producer,
    source, runtime/tool identities, cache owners, outputs and current user worker
