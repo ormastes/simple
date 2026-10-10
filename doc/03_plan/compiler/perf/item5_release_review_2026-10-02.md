@@ -40,3 +40,7 @@ The worktree now contains this narrow authored bug repair, not a full feature
 backport. Runtime execution and backport admission remain unproven; no commits,
 PRs or protected ref movement occurred. The repeated-refusal adaptation requires
 reviewed result-revision evidence rather than a patch-equivalent claim.
+
+### 2026-10-10 HIR owner-import trial
+
+The cold-init native JIT compatibility probe reached 1009 HIR modules but failed the same 12 modules with 42 unresolved types as the prior baseline. The six speculative explicit imports were reverted. See `doc/08_tracking/bug/item5_jit_probe_hir_type_closure_2026-10-10.md`. JIT execution, provider size, startup, and RSS gates remain open.

@@ -146,3 +146,7 @@ The production source-closure callback crash is repaired at the driver call site
 ### 2026-10-10 bounded native publication result
 
 The repaired transition pointer now admits the first V1 generation in the no-stub LLVM/core-C CAS fixture. The same executable stops at its later second-generation action-digest validation (exit 11); the fixture does not publish/read/pin that generation. See `doc/08_tracking/bug/package_index_native_publication_blockers_2026-10-10.md`. Item 6 remains in progress; full entrypoint and paired time/RSS gates are unrun. The three-cycle cap prevents another retry in this session.
+
+### 2026-10-10 warm inventory revert gap
+
+Two warm Item 5 probe launches stopped at `snapshot-index-drift` after a tracked compiler source reverted to HEAD but the inventory retained its temporary bytes. A fresh compiler cache did not repair the persistent source cursor. Explicit cold init rebuilt authority and reached HIR; that run then failed on the separate Item 5 type-closure issue. See `doc/08_tracking/bug/scv_warm_inventory_misses_revert_to_head_2026-10-10.md`. Item 6 needs an event-authority regression and repair before warm correctness, full-entrypoint, or paired time/RSS acceptance can be claimed.
