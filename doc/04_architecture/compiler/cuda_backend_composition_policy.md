@@ -100,8 +100,20 @@ root or checkout fallback could then restore a default provider. The corrected
 selected-root interface returns `Found`, `Missing`, or `Ambiguous` explicitly.
 Numbered traversal propagates ambiguity through every path segment and stops
 before another root or named-import suffix can be tried. The pipeline fallback
-owner calls checkout resolution only for `Missing`; an ambiguity terminates
+branch calls checkout resolution directly only for `Missing`; an ambiguity terminates
 source loading with `SOURCE_ROOT_AMBIGUOUS`. Exact directories still take
 precedence over numbered siblings, and relative imports stay importer-owned.
 The older text-returning generic probe remains a compatibility boundary; the
 selected-root path never calls that lossy wrapper.
+
+The pipeline matches this enum directly. It does not pass checkout resolution
+as a callback: that extra abstraction caused null function-pointer dispatch in
+the integrated native compiler. Native verification must include the normal
+missing-module path as well as selected and ambiguous overlays.
+
+Actual native qualification shows this contract is not yet carried across the
+outer scanner and worker boundary: the worker currently derives roots from
+input files, and already-loaded names can skip selected authority checks.
+Disabled and ambiguous CUDA requests still admit the default implementation.
+The intended contract above is not an end-to-end completion claim; see
+`doc/08_tracking/bug/source_root_worker_authority_gap_2026-10-11.md`.

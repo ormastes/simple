@@ -30,3 +30,10 @@ Acceptance: the native fixture exits zero and prints
 `SOURCE_ROOT_RESOLUTION_PASS`; then execute the filesystem resolver spec and
 actual disabled bootstrap source/symbol exclusion checks. No full compiler
 rebuild was launched by this lane while integration was held for this repair.
+
+Changed producer `e9e8762c79e47d1c0db418d2a8ff5d5eda7b1ef8744ccff32227ae7463926491`
+builds the current eight-assertion owner fixture successfully, but execution
+still exits 7 and prints `second-match=AMBIGUOUS:195728911117105`. Assertions
+1–6 passed and assertion 8 was not reached. The four removed callback-API
+assertions are no longer part of this fixture. Logs:
+`build/cuda-policy/source-root-e9e8-{build,run}.log`. No repeat was attempted.
