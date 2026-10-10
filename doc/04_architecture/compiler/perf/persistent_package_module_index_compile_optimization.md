@@ -236,6 +236,20 @@ authority fails qualification.
 
 ## SCV freeze owner and write boundary
 
+The cold ownership capture also owns the optional stable project-root digest.
+Its inputs are SCV-validated `ownership_v1.project_identity` and policy bytes.
+Manifest digests remain per-package witnesses so manifest edits can invalidate
+their exact consumers. The full-index publisher consumes this
+digest instead of the changing source tree ID while retaining separate revision,
+commit, tree and inventory witnesses. Policies without the identity remain on
+the conservative legacy tree-root path. This permits semantic transition
+comparison across source edits without relaxing snapshot admission.
+
+Generated facets require a producer declaration selected independently of the
+compiled artifact. The current compiled-output bridge has no such input and
+therefore rejects nonempty generated facets before any index publication;
+artifact-supplied declarations and receipts remain consistency evidence only.
+
 The compile source-view owner runs before the catalog owner. It creates or
 inherits one immutable snapshot, validates its canonical inventory, and passes
 only frozen paths plus `(revision, commit, tree, inventory)` identity to index,

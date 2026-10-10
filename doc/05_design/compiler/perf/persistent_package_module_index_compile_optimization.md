@@ -245,6 +245,34 @@ published graph receipt.
 
 ## Reproducibility normalization
 
+### Frozen cold-publisher root identity
+
+The frozen ownership policy may declare `ownership_v1.project_identity`, an
+explicit ASCII project namespace using the same bounded identifier grammar as
+package identities. After validating policy and supplied manifest bytes against
+SCV inventory records, the ownership capture computes a domain-separated digest
+of the length-framed namespace and policy digest. Manifest digests remain
+per-package witnesses for exact consumer invalidation. Source and manifest
+bytes, snapshot location, revision and epoch
+do not enter this root. They remain independently checked SCV witnesses in the
+index authority. The publisher applies the existing configuration-variant root
+partition afterwards.
+
+A missing project identity retains the legacy tree-root fallback. A malformed
+explicit identity is an error; it cannot silently request legacy behavior.
+Changing policy bytes partitions the root conservatively. The
+namespace is declared project configuration, not an authentication credential.
+The first generation after adopting this policy conservatively rebuilds; later
+source-only changes can reach the semantic transition checks.
+
+Generated declaration/receipt consistency is insufficient authorization at the
+compiled-output boundary: both currently arrive in the same artifact. Until an
+independently selected producer declaration is wired into that boundary, a
+nonempty generated facet fails with
+`cold-compiled-generated-authority-unavailable:<module>` before publication.
+Empty facets remain valid for ordinary source modules. This is a safety gate,
+not completion of generated-source support.
+
 - canonical relative package/module identities;
 - sorted edges, SCC members, diagnostics, and archive members;
 - normalized archive timestamp, UID/GID, mode, and path separators;
