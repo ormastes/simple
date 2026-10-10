@@ -118,19 +118,34 @@ describe "generic struct type-param fields take the instantiation's type (BUG-IT
             "    w.v.n\n")
         expect_clean(s)
 
-    it "a parameter declared Pair<text, i64> reads its fields by the declared type arguments":
-        val s = shape(
+    # The frontend drops the arguments of a same-module `Pair<text, i64>`
+    # ANNOTATION (the parameter reaches HIR as bare `Pair`), so nothing knows
+    # this instance. Moving the field is fine; an operator on it is refused
+    # exactly as before BUG-IT-6 -- never lowered as an integer add of two
+    # field words. (This example used to claim the declared arguments typed
+    # the read; its only assertion was the absence of a diagnostic.)
+    it "a parameter declared Pair<text, i64>: a field move lowers, an operator on it is refused":
+        val moved = shape(
             "fn first(p: Pair<text, i64>) -> text:\n" +
             "    p.a\n" +
             "\n" +
+            "fn main() -> i64:\n" +
+            "    val p = Pair<text, i64>(a: \"a\", b: 7)\n" +
+            "    print \"\{first(p)\}\"\n" +
+            "    0\n")
+        expect_clean(moved)
+        val operated = shape(
             "fn second(p: Pair<text, i64>) -> i64:\n" +
             "    p.b + 1\n" +
             "\n" +
             "fn main() -> i64:\n" +
-            "    val p = Pair<text, i64>(a: \"a\", b: 7)\n" +
-            "    print \"\{first(p)\} \{second(p)\}\"\n" +
-            "    0\n")
-        expect_clean(s)
+            "    second(Pair<text, i64>(a: \"a\", b: 7))\n")
+        var refused = false
+        for e in operated.mir_errors:
+            val et: text = e
+            if et.contains("operator overload for struct B"):
+                refused = true
+        expect(refused).to_equal(true)
 
     it "a copied binding keeps the instance's field types":
         val s = shape(

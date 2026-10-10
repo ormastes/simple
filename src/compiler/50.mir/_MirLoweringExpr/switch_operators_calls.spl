@@ -47,6 +47,16 @@ fn mono_mangling_names_type(callee_name: text, type_name: text) -> bool:
             return true
     false
 
+fn mono_callee_is_local_specialization(callee_name: text) -> bool:
+    """True for a specialization placed in the module being lowered: 40.mono
+    spells it bare (`wrap$str`) and a specialization of another module
+    qualified (`lib.wrap$str`). Its signature was written against THIS
+    module table, so every SymbolId in it resolves here."""
+    val at = callee_name.index_of("$")
+    if at < 0:
+        return false
+    not callee_name.substring(0, at).contains(".")
+
 fn mono_layout_key_bare_name(layout_key: text) -> text:
     """`mod.path::Acc` -> `Acc`; a bare name is returned unchanged."""
     val parts = layout_key.split("::")
@@ -6156,7 +6166,11 @@ impl MirLowering:
                                     if sr_symbol != nil:
                                         match sr_symbol.kind:
                                             case SymbolKind.Struct | SymbolKind.Class | SymbolKind.Enum:
-                                                if mono_mangling_names_type(source_name, sr_symbol.name):
+                                                # ... or the specialization is this
+                                                # module's own: `fn wrap<T>(x: T) -> Acc`
+                                                # names `Acc` in no mangling, and the
+                                                # call was typed i64 against `define ptr`.
+                                                if mono_mangling_names_type(source_name, sr_symbol.name) or mono_callee_is_local_specialization(source_name):
                                                     return_type = self.lower_type(sr)
                                                     stamped_return = sr
                                                     stamped_struct_name = sr_symbol.name
@@ -6174,7 +6188,12 @@ impl MirLowering:
                                                 return_type = MirType(kind: MirTypeKind.Struct(self.canonical_mir_type_symbol(sr_by_name)))
                                                 stamped_struct_name = sr_shape
                                 case _:
-                                    ()
+                                    # `-> [Acc]`, `-> Acc?`: a container over a
+                                    # declared type. Only this module's own
+                                    # specialization spells ids of this table.
+                                    if mono_callee_is_local_specialization(source_name):
+                                        return_type = self.lower_type(sr)
+                                        stamped_return = sr
                     case _:
                         ()
             var direct_signature = MirSignature(params: [], return_type: return_type, is_variadic: false)
