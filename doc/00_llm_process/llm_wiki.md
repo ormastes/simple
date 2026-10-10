@@ -64,6 +64,16 @@ existing research options are not its approved scope.
 
 ## Bug-linked workarounds
 
+Required for every temporary build/test workaround: a source `@workaround`
+tag with canonical bug ID, an authoritative bug DB record, and the actual
+workaround commit SHA/link. Record intended-code recovery reference, original
+failure, producer/source, reproducing/prevention tests and background fix owner.
+Create the bug record first when unknown. If the qualified DB tool is unavailable,
+record a dated bug report and explicitly leave DB reconciliation pending. Keep
+the bug open until an applied underlying fix is verified; link its commit and
+the narrow workaround-removal commit. Fetching a fix alone is insufficient.
+
+
 The accepted workflow is
 [bug-linked workarounds](../07_guide/tooling/bug_linked_workarounds.md);
 implementation remains pending runtime qualification. Temporary source blocks
