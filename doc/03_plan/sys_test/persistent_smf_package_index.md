@@ -149,90 +149,68 @@ Required scenario names:
 
 ## SPipe Manual Flow Names
 
-Use these exact manual step labels across the executable and generated manual:
+Every scenario uses the same three current manual step labels, in order. Its
+scenario-specific setup and assertions remain named in the executable spec:
 
-- `Compile the requested package from the persistent SMF index`
-- `Reuse dependency export headers without opening source bodies`
-- `Reuse admitted package archives`
-- `Make the unrelated source tree unreadable`
-- `Edit one indexed package`
-- `Change a generated source input`
-- `Change one configuration or build-tag variant`
-- `Schedule independent ready packages`
-- `Invalidate one member of a package cycle`
-- `Compile a second request in the warm daemon`
-- `Compare clean and warm build receipts`
-- `Refuse an untrusted package index`
-- `Authorize one bounded index rebuild`
-- `Interrupt atomic index publication`
-- `Inspect the production compile receipt`
-- `Freeze one SCV revision before package discovery`
-- `Edit the live worktree during the frozen build`
-- `Detect source drift without mutating the active build`
-- `Interrupt SCV snapshot creation or cleanup`
-- `Inspect SCV-bound build provenance`
-- `Read only TLDR and demanded SMF sections`
-- `Stop invalidation after an unchanged export`
-- `Pin and refresh one daemon generation`
-- `Admit untrusted remote content locally`
-- `Compare reproducible compile modes`
-- `Inspect every production entrypoint`
-- `Invoke compile without an explicit SCV option`
-- `Apply one Git or SCV source event`
-- `Inspect automatic SCV internal writes`
-- `Edit only comments or whitespace in frozen source`
-- `Compare Git state before and after automatic SCV`
-- `Inspect quiet success and concise failure diagnostics`
+1. `Prepare the frozen package fixture`
+2. `Execute the production compiler scenario`
+3. `Verify compiler-bound evidence`
 
 ## Acceptance Matrix
 
-| Scenario | Required evidence |
-|---|---|
-| Explicit closure | Opened and compiled set is exactly `model,api,util,app`; scan count is zero. |
-| Unreadable unrelated tree | Compile succeeds; unrelated read count and recursive scan count are zero. |
-| Missing index denied | `PKG-IDX-001`; compilation does not start; no fallback scan. |
-| Header metadata reuse | Dependency closure metadata is admitted from `PackageTldrHeaderV1` and demanded `PackageExportSmfV1` sections; dependency source-body reads are zero. |
-| Package archive hit | Dependency archives are admitted by content/toolchain/variant digest; dependency recompiles are zero. |
-| Direct package edit | Editing `util` invalidates/compiles exactly `util,app`; `model,api` remain admitted. |
-| Indirect package edit | Editing `model` invalidates/compiles exactly `model,api,util,app`. |
-| Generated source | A changed generator input invalidates generated output and reverse dependents; unchanged generated identity stays cached. |
-| Config variant | Changing debug/release identity invalidates only the selected variant; other variant archives remain admitted. |
-| Build-tag variant | Changing `feature_x`/`feature_y` invalidates only the selected tag closure; no cross-variant archive reuse occurs. |
-| Independent schedule | Ready, dispatch, and commit orders are deterministic across repeated runs. |
-| SCC invalidation | Editing `cycle_a` invalidates the complete `cycle_a,cycle_b` SCC and reverse dependent `root`. |
-| Warm daemon | A second identical request reuses the same admitted index/header/archive generations with no metadata reload or compile. |
-| Reproducibility | Clean and warm/cached builds produce byte-identical outputs, headers, archives, plans, and receipts after volatile-field normalization. |
-| Authorized rebuild | Bounded policy reads declared manifest roots only, performs no recursive scan, and publishes atomically. |
-| Stale index | `PKG-IDX-002`; compilation does not start. |
-| Corrupt metadata | `PKG-IDX-003`; compilation does not start and no archive/header is consumed. |
-| Tampered index | `PKG-IDX-004`; compilation does not start. |
-| Crash before publish | Previous generation remains current; temporary residue is removed. |
-| Crash after publish | New complete generation is admitted; no mixed generation is observable. |
-| No hidden fallback | Missing/corrupt metadata never triggers a recursive source-tree walk. |
-| SCV snapshot admission | Revision, tree, canonical inventory, and file digests finalize before package discovery or action-ID creation. |
-| Frozen-source reads | Every source-open receipt resolves beneath `ScvCompileSnapshotV1`; live-worktree read count is zero. |
-| Concurrent edit isolation | Editing the live worktree after build admission does not change the active plan, inputs, output, or receipt. |
-| Drift handling | Drift either returns `SCV-BUILD-002` or schedules a distinct new snapshot/revision/build ID; the active build remains unchanged. |
-| Snapshot creation crash | No partial snapshot becomes admissible; previous admitted snapshot remains intact and orphan staging is recoverable. |
-| Snapshot cleanup crash | Active/leased snapshots are never removed; orphan cleanup is idempotent and cannot expose a mixed generation. |
-| Provenance | Package index, action IDs, headers, archives, outputs, and receipts bind the same SCV revision/tree/inventory digest. |
-| No live fallback | Missing/tampered snapshot data returns `SCV-BUILD-001`/`SCV-BUILD-003`/`SCV-BUILD-004`; live worktree is never consulted. |
-| Implicit quiet compile | A normal compile with no SCV option creates/reads the frozen snapshot automatically, emits no success chatter, and retains an observable receipt/log. |
-| Git/SCV event update | A source event atomically updates only the affected internal package metadata/index generation before the next build. |
-| Internal write boundary | Automatic SCV writes only beneath ignored `build/scv/compile/`; source, docs, manifests, project config, and developer-needed timestamps are unchanged. |
-| Git non-mutation | Git index, refs, commits, locks, and history are byte/state identical; no commit, push, rewrite, lock removal, or history command occurs. |
-| Comment-only edit | Frozen content digest changes; semantic/export/initializer/provider digests remain stable; changed package may reparse at most once; dependent invalidation/recompile counts are zero. |
-| Whitespace-only edit | Same contract as comment-only, including zero dependent invalidation and recompile. |
-| Quiet diagnostics | Success uses receipts/logs without normal output; failure/drift emits a stable code and concise bounded diagnostic pointing to evidence. |
-| Internal metadata lifecycle | Writes are atomic, bounded, owner-labeled, garbage-collectable, and crash recovery leaves no partial current generation. |
-| Lazy metadata sections | Closure planning reads only reached TLDR headers; semantic loading reads only demanded SMF sections and opens zero dependency sources. |
-| Private-body early cutoff | The producer action/archive may change, but byte-identical exports stop reverse propagation and retain every consumer. |
-| Undeclared generated output | Missing, extra, or unbound generator output returns `PKG-IDX-004`; no index/cache publication occurs. |
-| Daemon isolation | One request observes one generation, refresh occurs only between requests, and workspace close releases all pins and dirty state. |
-| Remote admission | Remote bytes pass complete local action/archive/member admission; remote graph, dirty-state, generation, and policy authority remain false. |
-| Remote poisoning | Cross-workspace, cross-variant, partial, replayed, or payload-mismatched content returns `PKG-IDX-005` without graph mutation or scan fallback. |
-| Cross-mode reproducibility | Worker counts, clean/incremental, daemon restart, checkout root/cwd, and local/remote hits produce byte-identical semantic evidence. |
-| Entrypoint no-scan matrix | Compile, check, bootstrap, MCP, LSP, daemon startup, and daemon request report zero recursive scans, unrelated reads, and discovery subprocesses. |
+The canonical source of names and baseline assertions is the executable spec at
+`test/03_system/compiler/package_index/persistent_smf_package_index_spec.spl`.
+The table below is the full 44-scenario contract. “Gap at base” records what
+the `c7f8d22a` source tree actually proves today; a present helper is not proof
+that its production path satisfies the acceptance criterion. Every row remains
+RED until the checker reports compiler-produced plan/receipt evidence.
+
+| # / scenario | Requirement | Production owner and callable surface | Fixture mutation | Compiler-bound measurement/evidence | Gap at base |
+|---|---|---|---|---|---|
+| 1 `explicit-closure-only` | REQ-001, NFR-001 | `package_index_route_current_v1`; `driver_source_pipeline_loading` | Request `app` in `model -> api,util -> app` graph | requested root, resolved/opened/compiled exact `model,api,util,app`; scan count | Route exists; no production compile plan/receipt type or admitted checker harness. |
+| 2 `unrelated-tree-unreadable` | REQ-001, NFR-001 | source loading owner plus filesystem open/scan boundary | Make `unrelated_secret` inaccessible, compile app | compile success, unrelated opens 0, recursive scans 0 | No source-open/scan receipt boundary or runnable checker. |
+| 3 `header-metadata-reuse` | REQ-001 | `package_tldr_admit_v1`; `package_archive_load_v1`; driver lowering | Poison/deny dependency source bodies after fixture admission | TLDR header cache hits; source body opens 0; export ABI digest matches | Admission helpers exist; end-to-end header-only load and counters unproved. |
+| 4 `metadata-section-lazy-read` | REQ-001 | `package_export_smf_section_v1`; `package_tldr_admit_v1` | Add unreached section and request one demanded section | reached headers list, demanded sections only, unreached reads 0 | Section helpers exist; production read instrumentation and demand path unproved. |
+| 5 `package-archive-cache-hit` | REQ-001, NFR-002 | `package_archive_load_v1`; `package_archive_receipt_decode_v1` | Seed admitted model/api/util archive receipts and repeat compile | archive hits; dependency recompile count 0; variant/action/member digests match | Archive API exists; production compile receipt and actual cache-hit path unproved. |
+| 6 `missing-index-denied` | REQ-004 | `package_module_index_read_current_v1`; `package_index_route_current_v1` | Remove CURRENT/index generation | `PKG-IDX-001`, compile not started, fallback/scan count 0 | Read/admission path exists; compiler error and counters not bound to receipt. |
+| 7 `direct-reverse-invalidation` | REQ-002 | `package_module_index_invalidate_v1`; route invalidation | Change util's public export | invalidated/compiled util,app; model,api retained | Invalidation helper exists; fixture-to-compiler mutation and measured compile set unproved. |
+| 8 `indirect-reverse-invalidation` | REQ-002 | `package_module_index_invalidate_v1`; `package_scc_schedule_v1` | Change model's public export | model,api,util,app invalidated/compiled; unrelated opens 0 | Same gap: no production scenario harness or emitted evidence. |
+| 9 `generated-source-invalidation` | REQ-002, REQ-005 | cold HIR producer/output owners; index builder entry projection | Change generator input and regenerate generated_api | producer/input/output digests; generated_api+generated_app invalidation; unchanged archive reuse | Concrete gap: generated digest reaches TLDR but builder entry drops it; index entry/route transition lack generated field/comparison. Also no real scenario runner. |
+| 10 `config-variant-isolation` | REQ-002 | `config_variant_encode_v1`, `config_variant_digest_v1`; package config receipt owner | Change debug variant only | debug invalidated; release retained; no cross-variant reuse | Variant identity helpers exist; compile/archive binding evidence unproved. |
+| 11 `build-tag-variant-isolation` | REQ-002 | config variant key/digest and package-index route | Switch feature_x while retaining feature_y | ConfigVariantKeyV1 match; affected tag only; cross-variant hits 0 | Key helpers exist; source/tag derivation and end-to-end isolation unproved. |
+| 12 `private-body-export-early-cutoff` | REQ-002, NFR-004 | `package_tldr_early_cutoff_v1`; semantic transition owner | Change private body without export change | producer archive changes; export digest stable; propagation stops; consumers compile 0 | Early-cutoff helper exists; semantic field ownership/effect on production reverse graph unproved. |
+| 13 `generated-output-undeclared-denied` | REQ-002, REQ-004 | index builder and cold generated-output owner | Add undeclared output or omit producer binding | `PKG-IDX-004`; generated output rejected; index/cache publish 0 | Generated identity field is omitted in builder projection; no production checker proving deny-before-publish. |
+| 14 `deterministic-independent-schedule` | REQ-003, NFR-002 | `package_scc_schedule_v1`; compile dispatch/commit owner | Repeat bundle build with alpha/beta ready together | ready, dispatch, commit order and schedule digest match | Scheduler helper exists; dispatch implementation and repeatable production receipt unproved. |
+| 15 `scc-group-invalidation` | REQ-003 | `package_scc_schedule_v1`; `package_scc_consume_index_schedule_v1` | Change cycle_a in cycle_a <-> cycle_b -> root | SCC invalidation cycle_a,cycle_b; reverse root; compile set exact | SCC helpers exist; production graph and receipt evidence unproved. |
+| 16 `daemon-warm-reuse` | REQ-003 | `PackageDaemonSessionV1`; package route/archive owners | Submit same request twice in one daemon | session receipt; index reload 0; second compile 0; archive hits | Session model exists; session integration in actual daemon request path and receipt absent. |
+| 17 `clean-warm-reproducibility` | REQ-003, NFR-002 | index/archive owners and plan/receipt producer | Compare clean build with warm cache build | output/header/archive/plan/receipt digests equal | `PackageCompilePlanV1`/`PackageCompileReceiptV1` production definitions and evidence producer absent. |
+| 18 `missing-index-bounded-rebuild` | REQ-004 | builder `package_module_index_build_from_inventory_v1`; atomic publisher | Remove index; authorize declared finite roots | roots read exactly once; scans 0; atomic publication | Builder/publisher exist; policy authority and bounded rebuild CLI integration unproved. |
+| 19 `stale-index-denied` | REQ-004 | `package_index_route_current_v1`; index admission | Change source inventory after index generation | `PKG-IDX-002`; compile not started; prior generation preserved; scans 0 | Admission compares authority fields; real stale fixture and compiler evidence unproved. |
+| 20 `tampered-index-denied` | REQ-004 | `package_module_index_decode_v1`; `package_module_index_validate_v1` | Alter serialized entry/digest | `PKG-IDX-004`; compile not started; scans 0 | Decode/validation helpers exist; production-bound mutation/diagnostic receipt unproved. |
+| 21 `corrupt-metadata-denied` | REQ-004 | `package_tldr_admit_v1`; `package_archive_load_v1` | Corrupt header/SMF before archive open | `PKG-IDX-003`; header/archive consumed false; scans 0 | Local validators exist; consumption boundary evidence unproved. |
+| 22 `crash-before-publish` | REQ-004 | `_package_module_index_publish_locked_v1`; archive batch publisher | Inject stop before CURRENT swap | previous generation remains; mixed generation false; temp residue 0 | Atomic publication code exists; fault injection and recovery test absent. |
+| 23 `crash-after-publish` | REQ-004 | same index/archive publishers | Interrupt after pointer publication | new complete generation only; mixed false; residue 0 | Same: publication helper is not crash evidence. |
+| 24 `no-hidden-full-scan-fallback` | REQ-001, REQ-004, NFR-001 | route failure handling; `driver_source_pipeline_loading` | Deny/corrupt indexed route then observe all reads | production receipt says fallback, recursive scan, unrelated read all 0 | Fail-closed route branches exist; no production boundary counters/compile receipt. |
+| 25 `scv-snapshot-bound-build` | REQ-005 | `scv_compile_snapshot_acquire_v1/open_v1`; driver HIR snapshot admission | Start clean snapshot before discovery | canonical inventory finalized; action IDs after; frozen provider identity | SCV snapshot API exists; no `ScvFrozenSourceProviderV1` production integration/plan receipt. |
+| 26 `scv-concurrent-worktree-edit-isolated` | REQ-005, NFR-003 | snapshot source owner and compiler source-loading boundary | Edit live file after snapshot admission | active snapshot/plan unchanged; output matches frozen bytes; live reads 0 | Snapshot materialization exists; compiler-wide source-open ownership is not proven. |
+| 27 `scv-source-drift-new-build` | REQ-005, NFR-003 | snapshot admission/provenance plus CLI build admission | Change source after frozen inventory; issue next request | drift detected; active build unchanged; distinct revision/build ID or explicit reject | No automatic request bridge/receipt for drift policy. |
+| 28 `scv-snapshot-create-crash` | REQ-005, NFR-003 | `scv_compile_snapshot_acquire_v1` staged publisher | Stop during staging before admission | partial snapshot denied; previous intact; orphan staging recovered | Atomic helpers exist; crash hook and lifecycle receipt absent. |
+| 29 `scv-snapshot-cleanup-crash` | REQ-005, NFR-003 | SCV snapshot lease/cleanup owner | Stop GC while active and orphan snapshots coexist | active snapshot survives; cleanup idempotent; generation consistent | Snapshot lease/GC production owner and crash evidence not established. |
+| 30 `scv-provenance-binding` | REQ-005 | snapshot identity; index builder/route; archive authority | Compile from one revision/tree/inventory | revision/tree/inventory binds plan, action, index, archive and receipt | Some index/archive types carry SCV IDs; full action/plan/receipt chain lacks integrated evidence. |
+| 31 `scv-no-live-worktree-fallback` | REQ-005 | driver source owner and snapshot open/admission | Remove/tamper frozen source while live source remains readable | `SCV-BUILD-004`; compile not started; live read/fallback 0 | Driver still has path-based raw source reads; no exclusive source-provider enforcement receipt. |
+| 32 `scv-implicit-compile-quiet` | REQ-006 | compile CLI/build admission bridge; snapshot acquire | Invoke ordinary compile without SCV option | automatic snapshot admitted; zero normal output; durable bridge receipt | Existing pipeline consumes SCV environment authority; implicit bridge/receipt type not present. |
+| 33 `scv-git-event-auto-index-update` | REQ-006 | Git/SCV event bridge; index builder/publisher | Apply one source event and inspect next generation | affected metadata only; unchanged entries not rewritten; atomic generation | No production event bridge found in compiler owners. |
+| 34 `scv-internal-write-boundary` | REQ-006 | compile-cache root/SCV publisher | Trigger automatic snapshot/index write | root exactly ignored `build/scv/compile`; outside/user/developer writes 0 | Existing snapshot cache path is not proof of enforced write-set boundary; no receipt. |
+| 35 `comment-only-semantic-reuse` | REQ-006, NFR-004 | `package_tldr_early_cutoff_v1`; package semantic transition owner | Comment-only edit to frozen dependency | raw content differs; semantic/export/initializer/provider stable; dependent invalidation/recompile 0 | Early cutoff surface exists; no complete semantic identity/compiled path evidence. |
+| 36 `whitespace-only-semantic-reuse` | REQ-006, NFR-004 | same semantic transition and invalidation owners | Whitespace-only edit to frozen dependency | same digest/count evidence as comment-only | Same gap; production receipt absent. |
+| 37 `scv-git-state-nonmutation` | REQ-006 | SCV bridge and internal write owner | Snapshot and compile; compare Git index, refs, HEAD, locks | state digests equal; Git mutation command count 0 | No automatic bridge run; no owned Git-state evidence source. |
+| 38 `scv-concise-failure-diagnostics` | REQ-006 | compile CLI diagnostics/receipt owner | Run quiet success and one denied/drift case | success lines 0; failure stable code, bounded text and receipt path | No bridge receipt/diagnostic owner implemented as a joined path. |
+| 39 `scv-internal-metadata-atomic-gc` | REQ-006 | SCV compile metadata publisher/GC | Publish then collect expired generation; interrupt publication | bounded size, owner marker, GC receipt, no partial CURRENT | Snapshot primitives exist; compile metadata root/GC receipt contract unproved. |
+| 40 `daemon-generation-workspace-isolation` | REQ-007 | `PackageDaemonSessionV1`; actual daemon workspace/request owner | Refresh index during request, between requests, close workspace | one generation/request; between-request refresh; zero remaining pins/dirty state | Session type exists; daemon routing/teardown integration and counters absent. |
+| 41 `remote-cache-local-admission` | REQ-007 | archive/action admission owners plus remote cache adapter | Supply remote bytes with untrusted graph/policy metadata | local action/member admission complete; remote graph/dirty/generation authority false | No production remote adapter path/evidence found in package cache owner. |
+| 42 `remote-cache-poison-denied` | REQ-007 | same remote adapter and archive validators | Poison cross-variant/workspace or payload mismatch | `PKG-IDX-005`; reject before graph mutation; scans/fallback 0 | Remote admission path absent; validator helpers alone do not establish poisoning defense. |
+| 43 `cross-mode-reproducibility` | REQ-003, REQ-007, NFR-002 | plan/receipt producer across driver/daemon/cache paths | Vary workers, daemon restart, cwd/root, local vs remote | normalized semantic evidence digests all equal | Plan/receipt evidence producer and remote path absent; no matrix runner. |
+| 44 `entrypoint-no-scan-matrix` | REQ-001, REQ-004, NFR-001 | compile/check/bootstrap/MCP/LSP/daemon entrypoints + filesystem boundary | Run identical isolated fixture through every entrypoint | entrypoint list exact; scan/unrelated reads/discovery subprocesses all 0 | No cross-entrypoint boundary instrumentation or compiled acceptance runner. |
 
 ## Fail-Fast Rules
 
