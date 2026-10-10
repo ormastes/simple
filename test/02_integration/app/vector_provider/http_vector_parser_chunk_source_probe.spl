@@ -1,0 +1,85 @@
+# Deterministic parser-source checks for chunk framing and incomplete input.
+# This does not load a provider or claim execution; the separate live-socket
+# probe covers the admitted provider and real HTTP requests.
+
+use std.nogc_sync_mut.http_server.vector_parser.{
+    http_vector_line_chunk_advance_v1,
+    http_vector_chunk_remainder_v1,
+    http_vector_line_eof_error_v1,
+    http_vector_body_eof_error_v1
+}
+use std.nogc_sync_mut.http_server.parser.{RUNTIME_READ_LINE_CAP}
+
+fn _fail(reason: text) -> i32:
+    println("FAIL HTTP vector parser chunk-source probe: " + reason)
+    1
+
+fn _bytes(value: text) -> [u8]:
+    text_to_bytes(value)
+
+fn _repeat_byte(count: i32, value: u8) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(value)
+        i = i + 1
+    out
+
+fn main() -> i32:
+    val partial = _bytes("GET /split HTTP/1.1\r")
+    val first = http_vector_line_chunk_advance_v1(
+        [], partial, 0, -1, -1)
+    if first.complete or first.error != "" or
+            bytes_to_text(first.bytes) != "GET /split HTTP/1.1\r" or
+            first.cursor != partial.len():
+        return _fail("first chunk did not retain trailing CR")
+
+    # This is a controlled two-chunk source: the first chunk ends at CR and
+    # the second begins at LF. The parser must carry the first chunk's CR and
+    # frame the second chunk's LF as the line terminator.
+    val suffix = _bytes("\nNEXT")
+    val second = http_vector_line_chunk_advance_v1(
+        first.bytes, suffix, 0, 0, -1)
+    if not second.complete or not second.line_ending_crlf or second.error != "" or
+            bytes_to_text(second.bytes) != "GET /split HTTP/1.1\r\n" or
+            second.cursor != 1 or
+            bytes_to_text(http_vector_chunk_remainder_v1(suffix, second.cursor)) != "NEXT":
+        return _fail("split CRLF was not assembled or suffix was consumed")
+
+    val same_chunk = _bytes("GET /same HTTP/1.1\r\n")
+    val newline_at = same_chunk.len() - 1
+    val crlf = http_vector_line_chunk_advance_v1(
+        [], same_chunk, 0, newline_at, newline_at - 1)
+    if not crlf.complete or not crlf.line_ending_crlf or bytes_to_text(crlf.bytes) !=
+            "GET /same HTTP/1.1\r\n":
+        return _fail("same-chunk CRLF framing changed")
+
+    val bare_lf = _bytes("GET /lf HTTP/1.1\n")
+    val lf_result = http_vector_line_chunk_advance_v1(
+        [], bare_lf, 0, bare_lf.len() - 1, -1)
+    if not lf_result.complete or lf_result.line_ending_crlf or
+            bytes_to_text(lf_result.bytes) != "GET /lf HTTP/1.1\n":
+        return _fail("bare LF was misclassified as CRLF")
+
+    if http_vector_line_eof_error_v1([]) !=
+            "Failed to read request line: end of stream" or
+            http_vector_line_eof_error_v1(_bytes("GET /partial")) !=
+            "400 Incomplete request line" or
+            http_vector_body_eof_error_v1() != "400 Failed to read request body":
+        return _fail("EOF/incomplete-input messages differ from scalar parser contract")
+
+    val almost_full = _repeat_byte(RUNTIME_READ_LINE_CAP - 2, 65u8)
+    val truncated = http_vector_line_chunk_advance_v1(
+        almost_full, _bytes("X"), 0, -1, -1)
+    if truncated.error != "431 Request line too long: truncated at {RUNTIME_READ_LINE_CAP} bytes without a newline" or
+            truncated.bytes.len() != RUNTIME_READ_LINE_CAP - 1:
+        return _fail("unterminated line truncation boundary changed")
+
+    val max_complete = http_vector_line_chunk_advance_v1(
+        almost_full, _bytes("\n"), 0, 0, -1)
+    if not max_complete.complete or max_complete.error != "" or
+            max_complete.bytes.len() != RUNTIME_READ_LINE_CAP - 1:
+        return _fail("maximum complete line boundary changed")
+
+    println("HTTP_VECTOR_CHUNK_SOURCE_PROBE_COMPLETE source_assertions_passed=true provider_execution=unclaimed")
+    0

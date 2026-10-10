@@ -1,0 +1,352 @@
+# Opt-in RowBitmap adapter for an admitted, demand-loaded vector provider.
+#
+# The existing RowBitmap methods remain the default. Callers that have an
+# artifact manifest and explicitly select this adapter can retain one loader
+# session across many bitmap operations. Raw staging buffers are call-local;
+# no Simple array backing pointer crosses the provider ABI.
+
+use std.nogc_sync_mut.db.accel.{RowBitmap}
+use std.nogc_sync_mut.ptr.raw.{
+    raw_alloc, raw_free, raw_read_i32, rt_write_u32s_to_raw
+}
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_PROVIDER_QUERY_V1_SIZE, SIMPLE_PROVIDER_OK,
+    SimpleProviderQueryV1, simple_provider_query_error_v1
+}
+use std.nogc_sync_mut.composition.vector_kernel_contract.{
+    SIMPLE_VECTOR_KERNELS_V1_INTERFACE,
+    SIMPLE_VECTOR_OP_BITMAP_AND_U32, SIMPLE_VECTOR_OP_BITMAP_OR_U32,
+    SIMPLE_VECTOR_CAP_BITMAP_AND_U32, SIMPLE_VECTOR_CAP_BITMAP_OR_U32,
+    SIMPLE_VECTOR_MAX_SPAN_BYTES, SIMPLE_VECTOR_STATUS_OK,
+    SIMPLE_VECTOR_REQUEST_V1_SIZE, SIMPLE_VECTOR_RESPONSE_V1_SIZE,
+    SimpleVectorKernelRequestV1
+}
+use os.posix.dynlib_sffi.{ProviderQueryCallV1}
+use os.smf.provider_loader.{
+    PROVIDER_ADMISSION_OK,
+    PROVIDER_SESSION_OK, PROVIDER_SESSION_NOT_OPEN,
+    PROVIDER_SESSION_QUERY_INCOMPATIBLE,
+    PROVIDER_SESSION_VECTOR_CALL_FAILED,
+    ProviderAdmissionRequestV1, ProviderLoaderSessionV1,
+    ProviderSessionQueryV1,
+    provider_admit_dynamic_v1, provider_session_query_owned_v1,
+    provider_session_vector_call_owned_v1,
+    provider_session_release_owned_v1, provider_session_close_owned_v1
+}
+
+val ROW_BITMAP_VECTOR_ABI_DIGEST_V1: text = "f16901349e16de8bb16f0769f492488fff27d0d0bd3b5f15c20b20b25f060600"
+val ROW_BITMAP_VECTOR_MAX_STAGING_BYTES_V1: u64 = 16777216
+val ROW_BITMAP_VECTOR_STAGE_FAILED_V1: i32 = -1
+
+class RowBitmapVectorSessionV1:
+    var loader_session: ProviderLoaderSessionV1
+    var and_query: ProviderSessionQueryV1
+    var or_query: ProviderSessionQueryV1
+    var open: bool
+    capability_bits: u64
+    status: i32
+    reason: text
+
+class RowBitmapVectorSessionOpenResultV1:
+    status: i32
+    session: RowBitmapVectorSessionV1
+    reason: text
+
+class RowBitmapVectorCallOwnedResultV1:
+    bitmap: RowBitmap
+    provider_used: bool
+    status: i32
+    reason: text
+    session: RowBitmapVectorSessionV1
+
+class RowBitmapVectorSessionCloseOwnedResultV1:
+    status: i32
+    reason: text
+    session: RowBitmapVectorSessionV1
+
+class _RowBitmapWordsResultV1:
+    words: [u32]
+    provider_used: bool
+    status: i32
+    reason: text
+    loader_session: ProviderLoaderSessionV1
+
+fn _row_bitmap_empty_query_v1() -> ProviderSessionQueryV1:
+    ProviderSessionQueryV1(
+        status: PROVIDER_SESSION_NOT_OPEN, pin_id: 0,
+        session_generation_id: 0, interface_id: 0,
+        requested_capability_bits: 0,
+        call: ProviderQueryCallV1(
+            ok: false, call_status: -1,
+            result: simple_provider_query_error_v1(-1),
+            diagnostic: "vector-provider-session-not-open"),
+        reason: "vector-provider-session-not-open")
+
+fn _row_bitmap_closed_session_v1(loader: ProviderLoaderSessionV1,
+        status: i32, reason: text) -> RowBitmapVectorSessionV1:
+    RowBitmapVectorSessionV1(
+        loader_session: loader,
+        and_query: _row_bitmap_empty_query_v1(),
+        or_query: _row_bitmap_empty_query_v1(),
+        open: false, capability_bits: 0, status: status, reason: reason)
+
+fn row_bitmap_vector_session_open_owned_v1(
+        admission_request: ProviderAdmissionRequestV1) -> RowBitmapVectorSessionOpenResultV1:
+    # Keep the caller's capability grant and required bits unchanged. A query
+    # can request only the bitmap operations already inside that grant.
+    val admission = provider_admit_dynamic_v1(admission_request)
+    if admission.admission.status != PROVIDER_ADMISSION_OK:
+        return RowBitmapVectorSessionOpenResultV1(
+            status: admission.admission.status,
+            session: _row_bitmap_closed_session_v1(
+                admission.session, admission.admission.status,
+                admission.admission.reason),
+            reason: admission.admission.reason)
+
+    val bitmap_caps = admission_request.granted_capability_bits &
+        (SIMPLE_VECTOR_CAP_BITMAP_AND_U32 | SIMPLE_VECTOR_CAP_BITMAP_OR_U32)
+    if bitmap_caps == 0:
+        val closed = provider_session_close_owned_v1(admission.session)
+        val reason = "bitmap-capability-not-granted"
+        return RowBitmapVectorSessionOpenResultV1(
+            status: PROVIDER_SESSION_QUERY_INCOMPATIBLE,
+            session: _row_bitmap_closed_session_v1(
+                closed.session, PROVIDER_SESSION_QUERY_INCOMPATIBLE, reason),
+            reason: reason)
+
+    var loader = admission.session
+    var and_query = _row_bitmap_empty_query_v1()
+    var or_query = _row_bitmap_empty_query_v1()
+    var active_caps: u64 = 0
+    var query_reason = "bitmap-capability-not-granted"
+    if (bitmap_caps & SIMPLE_VECTOR_CAP_BITMAP_AND_U32) != 0:
+        val and_request = SimpleProviderQueryV1(
+            descriptor_size: SIMPLE_PROVIDER_QUERY_V1_SIZE,
+            interface_id: SIMPLE_VECTOR_KERNELS_V1_INTERFACE,
+            minimum_major: 1, minimum_minor: 0, host_abi: admission_request.host_abi,
+            target_offset: 0, target_length: 0,
+            requested_capability_bits: SIMPLE_VECTOR_CAP_BITMAP_AND_U32)
+        val queried_and = provider_session_query_owned_v1(
+            loader, and_request, ROW_BITMAP_VECTOR_ABI_DIGEST_V1)
+        loader = queried_and.session
+        and_query = queried_and.query
+        query_reason = queried_and.query.reason
+        if queried_and.query.status == PROVIDER_SESSION_OK and
+                queried_and.query.call.result.status == SIMPLE_PROVIDER_OK:
+            active_caps = active_caps | SIMPLE_VECTOR_CAP_BITMAP_AND_U32
+    if (bitmap_caps & SIMPLE_VECTOR_CAP_BITMAP_OR_U32) != 0:
+        val or_request = SimpleProviderQueryV1(
+            descriptor_size: SIMPLE_PROVIDER_QUERY_V1_SIZE,
+            interface_id: SIMPLE_VECTOR_KERNELS_V1_INTERFACE,
+            minimum_major: 1, minimum_minor: 0, host_abi: admission_request.host_abi,
+            target_offset: 0, target_length: 0,
+            requested_capability_bits: SIMPLE_VECTOR_CAP_BITMAP_OR_U32)
+        val queried_or = provider_session_query_owned_v1(
+            loader, or_request, ROW_BITMAP_VECTOR_ABI_DIGEST_V1)
+        loader = queried_or.session
+        or_query = queried_or.query
+        query_reason = queried_or.query.reason
+        if queried_or.query.status == PROVIDER_SESSION_OK and
+                queried_or.query.call.result.status == SIMPLE_PROVIDER_OK:
+            active_caps = active_caps | SIMPLE_VECTOR_CAP_BITMAP_OR_U32
+    if active_caps == 0:
+        val closed = provider_session_close_owned_v1(loader)
+        return RowBitmapVectorSessionOpenResultV1(
+            status: PROVIDER_SESSION_QUERY_INCOMPATIBLE,
+            session: _row_bitmap_closed_session_v1(
+                closed.session, PROVIDER_SESSION_QUERY_INCOMPATIBLE, query_reason),
+            reason: query_reason)
+    val session = RowBitmapVectorSessionV1(
+        loader_session: loader,
+        and_query: and_query, or_query: or_query,
+        open: true, capability_bits: active_caps,
+        status: PROVIDER_SESSION_OK,
+        reason: if active_caps == bitmap_caps: "admitted-and-pinned" else: "partial-bitmap-capabilities")
+    RowBitmapVectorSessionOpenResultV1(
+        status: PROVIDER_SESSION_OK, session: session,
+        reason: session.reason)
+
+fn _row_bitmap_word_count_v1(row_count: i64) -> i64:
+    if row_count <= 0: 0 else: (row_count + 31) / 32
+
+fn _row_bitmap_scalar_words_v1(lhs: [u32], rhs: [u32], limit: i64,
+        opcode: u32) -> [u32]:
+    var words: [u32] = [0u32; limit]
+    var i = 0
+    while i < limit:
+        val left_word = if i < lhs.len(): lhs[i as i32] else: 0u32
+        val right_word = if i < rhs.len(): rhs[i as i32] else: 0u32
+        if opcode == SIMPLE_VECTOR_OP_BITMAP_AND_U32:
+            words[i as i32] = left_word & right_word
+        else:
+            words[i as i32] = left_word | right_word
+        i = i + 1
+    words
+
+@unsafe(reason: "copies bounded u32 bitmap spans through canonical raw allocator and admitted provider ABI", capabilities: [ffi, raw_ptr])
+fn _row_bitmap_provider_words_owned_v1(session: RowBitmapVectorSessionV1,
+        lhs: [u32], rhs: [u32], limit: i64, opcode: u32) -> _RowBitmapWordsResultV1:
+    if not session.open:
+        return _RowBitmapWordsResultV1(
+            words: _row_bitmap_scalar_words_v1(lhs, rhs, limit, opcode), provider_used: false,
+            status: PROVIDER_SESSION_NOT_OPEN,
+            reason: "vector-provider-session-not-open",
+            loader_session: session.loader_session)
+    val capability = if opcode == SIMPLE_VECTOR_OP_BITMAP_AND_U32:
+        SIMPLE_VECTOR_CAP_BITMAP_AND_U32 else: SIMPLE_VECTOR_CAP_BITMAP_OR_U32
+    if (session.capability_bits & capability) != capability:
+        return _RowBitmapWordsResultV1(
+            words: _row_bitmap_scalar_words_v1(lhs, rhs, limit, opcode), provider_used: false,
+            status: PROVIDER_SESSION_QUERY_INCOMPATIBLE,
+            reason: "bitmap-operation-not-granted", loader_session: session.loader_session)
+    if limit <= 0:
+        return _RowBitmapWordsResultV1(
+            words: [], provider_used: false, status: PROVIDER_SESSION_OK,
+            reason: "empty-bitmap", loader_session: session.loader_session)
+    if limit > ROW_BITMAP_VECTOR_MAX_STAGING_BYTES_V1 as i64 / 4 or
+            limit > SIMPLE_VECTOR_MAX_SPAN_BYTES as i64 / 4:
+        return _RowBitmapWordsResultV1(
+            words: _row_bitmap_scalar_words_v1(lhs, rhs, limit, opcode), provider_used: false,
+            status: ROW_BITMAP_VECTOR_STAGE_FAILED_V1,
+            reason: "bitmap-provider-staging-limit", loader_session: session.loader_session)
+
+    val staged_left: [u32] = [for i in 0..limit: if i < lhs.len(): lhs[i as i32] else: 0u32]
+    val staged_right: [u32] = [for i in 0..limit: if i < rhs.len(): rhs[i as i32] else: 0u32]
+    val byte_count = limit * 4
+    val left_ptr = raw_alloc(byte_count)
+    val right_ptr = raw_alloc(byte_count)
+    val output_ptr = raw_alloc(byte_count)
+    if left_ptr <= 0 or right_ptr <= 0 or output_ptr <= 0:
+        if left_ptr > 0: raw_free(left_ptr, byte_count)
+        if right_ptr > 0: raw_free(right_ptr, byte_count)
+        if output_ptr > 0: raw_free(output_ptr, byte_count)
+        return _RowBitmapWordsResultV1(
+            words: _row_bitmap_scalar_words_v1(lhs, rhs, limit, opcode), provider_used: false,
+            status: ROW_BITMAP_VECTOR_STAGE_FAILED_V1,
+            reason: "bitmap-provider-staging-allocation-failed",
+            loader_session: session.loader_session)
+
+    val left_written = rt_write_u32s_to_raw(left_ptr, staged_left)
+    val right_written = rt_write_u32s_to_raw(right_ptr, staged_right)
+    if left_written != limit or right_written != limit:
+        raw_free(output_ptr, byte_count)
+        raw_free(right_ptr, byte_count)
+        raw_free(left_ptr, byte_count)
+        return _RowBitmapWordsResultV1(
+            words: _row_bitmap_scalar_words_v1(lhs, rhs, limit, opcode), provider_used: false,
+            status: ROW_BITMAP_VECTOR_STAGE_FAILED_V1,
+            reason: "bitmap-provider-staging-copy-failed",
+            loader_session: session.loader_session)
+
+    val request = SimpleVectorKernelRequestV1(
+        opcode: opcode, left_address: left_ptr as u64, left_bytes: byte_count as u64,
+        right_address: right_ptr as u64, right_bytes: byte_count as u64,
+        output_address: output_ptr as u64, output_capacity_bytes: byte_count as u64,
+        argument: 0)
+    val selected_query = if opcode == SIMPLE_VECTOR_OP_BITMAP_AND_U32:
+        session.and_query else: session.or_query
+    val invoked = provider_session_vector_call_owned_v1(
+        session.loader_session, selected_query, request)
+    var result_words: [u32] = []
+    var used = false
+    var status = invoked.vector_call.status
+    var reason = invoked.vector_call.reason
+    if status == PROVIDER_SESSION_OK and
+            invoked.vector_call.call.response.status == SIMPLE_VECTOR_STATUS_OK and
+            invoked.vector_call.call.response.bytes_written == byte_count as u64:
+        var provider_words: [u32] = [0u32; limit]
+        var i = 0
+        while i < limit:
+            provider_words[i as i32] = raw_read_i32(output_ptr, i * 4) as u32
+            i = i + 1
+        result_words = provider_words
+        used = true
+        reason = "provider-invoked"
+    else:
+        result_words = _row_bitmap_scalar_words_v1(lhs, rhs, limit, opcode)
+        if status == PROVIDER_SESSION_OK:
+            status = PROVIDER_SESSION_VECTOR_CALL_FAILED
+            reason = "bitmap-provider-response-invalid"
+    raw_free(output_ptr, byte_count)
+    raw_free(right_ptr, byte_count)
+    raw_free(left_ptr, byte_count)
+    _RowBitmapWordsResultV1(
+        words: result_words, provider_used: used,
+        status: status, reason: reason, loader_session: invoked.session)
+
+fn row_bitmap_and_with_vector_provider_owned_v1(
+        session: RowBitmapVectorSessionV1, lhs: RowBitmap,
+        rhs: RowBitmap) -> RowBitmapVectorCallOwnedResultV1:
+    val row_count = if lhs.row_count < rhs.row_count: lhs.row_count else: rhs.row_count
+    val limit = _row_bitmap_word_count_v1(row_count)
+    val combined = _row_bitmap_provider_words_owned_v1(
+        session, lhs.words, rhs.words, limit, SIMPLE_VECTOR_OP_BITMAP_AND_U32)
+    var out = session
+    out.loader_session = combined.loader_session
+    RowBitmapVectorCallOwnedResultV1(
+        bitmap: RowBitmap(row_count: row_count, words: combined.words),
+        provider_used: combined.provider_used, status: combined.status,
+        reason: combined.reason, session: out)
+
+fn row_bitmap_or_with_vector_provider_owned_v1(
+        session: RowBitmapVectorSessionV1, lhs: RowBitmap,
+        rhs: RowBitmap) -> RowBitmapVectorCallOwnedResultV1:
+    val row_count = if lhs.row_count > rhs.row_count: lhs.row_count else: rhs.row_count
+    val limit = _row_bitmap_word_count_v1(row_count)
+    val combined = _row_bitmap_provider_words_owned_v1(
+        session, lhs.words, rhs.words, limit, SIMPLE_VECTOR_OP_BITMAP_OR_U32)
+    var out = session
+    out.loader_session = combined.loader_session
+    RowBitmapVectorCallOwnedResultV1(
+        bitmap: RowBitmap(row_count: row_count, words: combined.words),
+        provider_used: combined.provider_used, status: combined.status,
+        reason: combined.reason, session: out)
+
+fn row_bitmap_vector_session_close_owned_v1(
+        session: RowBitmapVectorSessionV1) -> RowBitmapVectorSessionCloseOwnedResultV1:
+    var out = session
+    if out.and_query.pin_id != 0:
+        val released = provider_session_release_owned_v1(
+            out.loader_session, out.and_query.pin_id)
+        if released.status != PROVIDER_SESSION_OK:
+            out.loader_session = released.session
+            return RowBitmapVectorSessionCloseOwnedResultV1(
+                status: released.status, reason: "vector-provider-pin-release-failed",
+                session: out)
+        out.loader_session = released.session
+        var query = out.and_query
+        query.pin_id = 0
+        out.and_query = query
+    if out.or_query.pin_id != 0:
+        val released = provider_session_release_owned_v1(
+            out.loader_session, out.or_query.pin_id)
+        if released.status != PROVIDER_SESSION_OK:
+            out.loader_session = released.session
+            return RowBitmapVectorSessionCloseOwnedResultV1(
+                status: released.status, reason: "vector-provider-pin-release-failed",
+                session: out)
+        out.loader_session = released.session
+        var query = out.or_query
+        query.pin_id = 0
+        out.or_query = query
+    if out.loader_session.open:
+        val closed = provider_session_close_owned_v1(out.loader_session)
+        out.loader_session = closed.session
+        if closed.status != PROVIDER_SESSION_OK:
+            return RowBitmapVectorSessionCloseOwnedResultV1(
+                status: closed.status, reason: "vector-provider-close-failed",
+                session: out)
+    out.open = false
+    out.capability_bits = 0
+    out.status = PROVIDER_SESSION_NOT_OPEN
+    out.reason = "closed"
+    RowBitmapVectorSessionCloseOwnedResultV1(
+        status: PROVIDER_SESSION_OK, reason: "closed", session: out)
+
+export RowBitmapVectorSessionV1, RowBitmapVectorSessionOpenResultV1
+export RowBitmapVectorCallOwnedResultV1, RowBitmapVectorSessionCloseOwnedResultV1
+export ROW_BITMAP_VECTOR_ABI_DIGEST_V1, ROW_BITMAP_VECTOR_MAX_STAGING_BYTES_V1
+export row_bitmap_vector_session_open_owned_v1
+export row_bitmap_and_with_vector_provider_owned_v1
+export row_bitmap_or_with_vector_provider_owned_v1
+export row_bitmap_vector_session_close_owned_v1

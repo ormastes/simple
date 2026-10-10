@@ -1,0 +1,120 @@
+# Independent ordinary PureDatabase app fixture. No vector or loader imports.
+# The runner observes optional-provider absence externally; this source does not
+# call any observer getter or infer no-load behavior from an API return value.
+
+use nogc_sync_mut.database.pure_sql.database.{PureDatabase}
+use nogc_sync_mut.database.sql.types.{DbRow}
+
+fn _fail(message: text) -> i32:
+    println("FAIL PureDatabase scalar query: " + message)
+    1
+
+fn _insert_rows(db: PureDatabase, table: text, count: i64) -> PureDatabase:
+    db.exec_sql("CREATE TABLE {table} (message_id INTEGER, room_id TEXT, room_seq INTEGER)").unwrap()
+    var row = 0
+    while row < count:
+        val room = if row % 4 == 0: "room-a" else: "room-b"
+        db.exec_sql("INSERT INTO {table} (message_id, room_id, room_seq) VALUES ({row + 1}, '{room}', {row + 1})").unwrap()
+        row = row + 1
+    db
+
+fn _sql(table: text, count: i64) -> text:
+    val threshold = count / 2
+    "SELECT message_id, room_seq FROM {table} WHERE room_id = 'room-a' AND room_seq > {threshold} ORDER BY room_seq"
+
+fn _expected_id(row: i64) -> bool:
+    (row - 1) % 4 == 0
+
+fn _check_rows(rows: [DbRow], count: i64) -> bool:
+    var expected_len = 0
+    var row = 0
+    val threshold = count / 2
+    while row < count:
+        if _expected_id(row + 1) and row + 1 > threshold:
+            expected_len = expected_len + 1
+        row = row + 1
+    if rows.len() != expected_len:
+        return false
+    var result_idx = 0
+    row = 0
+    while row < count:
+        val seq = row + 1
+        if _expected_id(seq) and seq > threshold:
+            if rows[result_idx].values.len() != 2 or
+                    rows[result_idx].values[0].to_text() != seq.to_text() or
+                    rows[result_idx].values[1].to_text() != seq.to_text():
+                return false
+            result_idx = result_idx + 1
+        row = row + 1
+    true
+
+fn _emit_rows(case_key: text, rows: [DbRow]) -> bool:
+    if rows.len() > 129: return false
+    var data = ""
+    var index = 0
+    while index < rows.len():
+        if rows[index].values.len() != 2: return false
+        if index > 0: data = data + ","
+        data = data + rows[index].values[0].to_text() + ":" + rows[index].values[1].to_text()
+        index = index + 1
+    if data == "": data = "-"
+    println("ITEM5_DB_ROWS_V1 case={case_key} rows={rows.len()} data={data}")
+    true
+
+fn _check_ordinary_or_rows(rows: [DbRow], count: i64) -> bool:
+    val expected_len = (count + 3) / 4
+    if rows.len() != expected_len: return false
+    var index = 0
+    while index < rows.len():
+        val expected_id = index * 4 + 1
+        if rows[index].values.len() != 1 or
+                rows[index].values[0].to_text() != expected_id.to_text():
+            return false
+        index = index + 1
+    true
+
+fn main() -> i32:
+    val counts: [i64] = [31, 32, 33, 511, 512, 513, 1023, 1024, 1025]
+    var case_idx = 0
+    while case_idx < counts.len():
+        val count = counts[case_idx]
+        val table = "scalar_messages_{count}"
+        var db = PureDatabase.memory().unwrap()
+        db = _insert_rows(db, table, count)
+        val sql = _sql(table, count)
+        val result = db.query(sql, [])
+        if result.is_err():
+            val _ = db.close()
+            return _fail("ordinary query failed at {count}")
+        val rows = result.unwrap()
+        if not _check_rows(rows, count):
+            val _ = db.close()
+            return _fail("ordinary query disagreed with the complete row oracle at {count}")
+        val cached = db.query(sql, [])
+        if cached.is_err() or not _check_rows(cached.unwrap(), count):
+            val _ = db.close()
+            return _fail("ordinary cached query disagreed with the row oracle at {count}")
+        val ordinary_or = db.query(
+            "SELECT message_id FROM {table} WHERE room_id = 'room-a' AND (room_seq > 0 OR room_seq < 0) ORDER BY message_id", [])
+        if ordinary_or.is_err() or not _check_ordinary_or_rows(ordinary_or.unwrap(), count):
+            val _ = db.close()
+            return _fail("ordinary OR query disagreed with the independent row oracle at {count}")
+        if not _emit_rows(count.to_text(), rows):
+            val _ = db.close()
+            return _fail("bounded row parity record failed at {count}")
+        val _ = db.close()
+        case_idx = case_idx + 1
+
+    var empty_db = PureDatabase.memory().unwrap()
+    empty_db = _insert_rows(empty_db, "empty_scalar", 1025)
+    val empty = empty_db.query(
+        "SELECT message_id, room_seq FROM empty_scalar WHERE room_id = 'no-room' AND room_seq > 0 ORDER BY room_seq", [])
+    if empty.is_err() or empty.unwrap().len() != 0:
+        val _ = empty_db.close()
+        return _fail("ordinary no-match query did not return an empty result")
+    if not _emit_rows("empty", empty.unwrap()):
+        val _ = empty_db.close()
+        return _fail("bounded no-match parity record failed")
+    val _ = empty_db.close()
+    println("PURE_DATABASE_SCALAR_QUERY_PASS queries=10 boundaries=31,32,33,511,512,513,1023,1024,1025 no_match=checked")
+    0
