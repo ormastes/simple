@@ -1,0 +1,243 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, mono, codegen
+#
+# BUG-IT-5 (stage2 micro_b / micro_f, 2026-10-10): `pick_second("a", "b")`
+# printed `140702839497239` and `.len()` on it SEGV'd, while the i64 and
+# struct instances were right. Measured in-process on release/1.0: the
+# specializations were EMITTED UNDER THE NAMES OF UNRELATED LOCALS --
+# `define ptr @m.g_untyped(ptr, ptr)`, `define i64 @m.g_typed(i64, i64)`,
+# `define double @m.g_len(double, double)` -- because 40.mono minted the
+# specialization's SymbolId as "largest FUNCTION id + 1" (4, 5, 6, ...),
+# which the caller module's SymbolTable already uses for its locals. MIR
+# resolves a callee's name and declared type THROUGH that table, so the
+# `text` instance was named, typed and called through `g_untyped`'s symbol.
+#
+# The fix hands specializations ids from MONO_SYMBOL_BASE (2^50), out of any
+# per-module table's range. These examples take one generic `pick<C>` through
+# HIR -> 40.mono -> 50.mir -> MirToLlvm for EVERY kind of T and require: a
+# `define` whose name is the mangled specialization, no `define` named after
+# a local of main, and the caller's `call` result type equal to the callee's
+# declared return type (the ABI agreement micro_f lacked).
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.backend.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
+
+val MODULE = "abi_probe"
+# Mirrors MONO_SYMBOL_BASE in monomorphize_integration.spl (2^50).
+val SYMBOL_BASE: i64 = 1125899906842624
+
+val SRC = "struct Acc:\n" +
+    "    n: i64\n" +
+    "\n" +
+    "enum Shape:\n" +
+    "    Dot\n" +
+    "    Line(i64)\n" +
+    "\n" +
+    "fn pick<C>(a: C, b: C) -> C:\n" +
+    "    b\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    val g_text = pick(\"a\", \"b\")\n" +
+    "    val g_typed: text = pick(\"a\", \"b\")\n" +
+    "    val g_len = pick(\"a\", \"b\").len()\n" +
+    "    val g_int = pick(1, 2)\n" +
+    "    val g_f = pick(1.5, 2.5)\n" +
+    "    val g_bool = pick(true, false)\n" +
+    "    val g_struct = pick(Acc(n: 1), Acc(n: 3))\n" +
+    "    val g_enum = pick(Shape.Dot, Shape.Line(4))\n" +
+    "    val g_arr = pick([1, 2], [3])\n" +
+    "    val o1: i64? = 1\n" +
+    "    val o2: i64? = nil\n" +
+    "    val g_opt = pick(o1, o2)\n" +
+    "    print \"\{g_text\} \{g_typed\} \{g_len\} \{g_int\} \{g_f\} \{g_bool\} \{g_struct.n\} \{g_arr.len()\}\"\n" +
+    "    0\n"
+
+struct Shaped:
+    ir: text
+    diags: [text]
+    mir_errors: [text]
+    spec_names: [text]
+    spec_symbol_ids: [i64]
+    # Name of the owning table's row at each specialization id ("" = no row),
+    # and that table's counter after the pass.
+    spec_row_names: [text]
+    table_next: i64
+    sites: i64
+    specs: i64
+    unresolved: i64
+
+fn shape() -> Shaped:
+    val file = "testdata/abi_probe.spl"
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(parse_full_frontend(SRC, file, MODULE, Logger(level: 0)))
+    var mods: Dict<text, HirModule> = {}
+    mods[MODULE] = hir
+    val (mono, stats, diags) = run_monomorphization_with_diagnostics(mods)
+    val m: HirModule = mono[MODULE]
+    var spec_names: [text] = []
+    var spec_ids: [i64] = []
+    var spec_rows: [text] = []
+    for sym in m.functions.keys():
+        val f: HirFunction = m.functions[sym]
+        if f.name.starts_with("pick$"):
+            spec_names.push(f.name)
+            spec_ids.push(f.symbol.id)
+            var row_name = ""
+            if val row = m.symbols.get_symbol_raw(f.symbol.id):
+                row_name = row.name
+            spec_rows.push(row_name)
+    val table_next = m.symbols.next_symbol_id
+    var lowering = MirLowering.new_for_target(m.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(m)
+    var mir_errors: [text] = []
+    for e in lowering.errors:
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        mir_errors.push(e.message)
+    val ir = MirToLlvm.create(MODULE, CodegenTarget.X86_64, nil).translate_module(mir)
+    Shaped(ir: ir, diags: diags, mir_errors: mir_errors, spec_names: spec_names,
+           spec_symbol_ids: spec_ids, spec_row_names: spec_rows, table_next: table_next, sites: stats.call_sites_found,
+           specs: stats.specializations_created, unresolved: stats.unresolved_generic_calls)
+
+fn names_fn(line: text, fn_name: text) -> bool:
+    """True when `line` references `fn_name` as a symbol, bare (`@f(`) or
+    qualified by the module path LLVM emission prefixes (`@a.b.f(`)."""
+    line.contains("@" + fn_name + "(") or line.contains("." + fn_name + "(")
+
+fn define_line(ir: text, fn_name: text) -> text:
+    """The `define` line of `fn_name`, or ""."""
+    for line in ir.split("\n"):
+        if line.starts_with("define ") and names_fn(line, fn_name):
+            return line
+    ""
+
+fn define_ret_type(line: text) -> text:
+    """`define <ret> @name(` -> `<ret>`."""
+    val after = line.substring(7, line.len())
+    val at = after.index_of(" @")
+    if at < 0:
+        return ""
+    after.substring(0, at)
+
+fn call_result_types(ir: text, fn_name: text) -> [text]:
+    """Result type token of every `call <ty> @fn_name(` in the IR."""
+    var out: [text] = []
+    for line in ir.split("\n"):
+        val marker = "call "
+        val at = line.index_of(marker)
+        if at < 0:
+            continue
+        if not names_fn(line, fn_name):
+            continue
+        val rest = line.substring(at + marker.len(), line.len())
+        val sp = rest.index_of(" @")
+        if sp < 0:
+            continue
+        out.push(rest.substring(0, sp))
+    out
+
+fn expect_spec_abi(s: Shaped, spec: text, expected_ret: text):
+    expect(s.spec_names.contains(spec)).to_equal(true)
+    val def_line = define_line(s.ir, spec)
+    expect(def_line != "").to_equal(true)
+    val ret = define_ret_type(def_line)
+    if expected_ret != "":
+        expect(ret).to_equal(expected_ret)
+    val calls = call_result_types(s.ir, spec)
+    expect(calls.len() > 0).to_equal(true)
+    for c in calls:
+        val ct: text = c
+        expect(ct).to_equal(ret)
+
+describe "generic specializations keep their own symbol identity through MIR and LLVM":
+    it "specializes pick at every T kind with no diagnostics":
+        val s = shape()
+        print "mono: sites={s.sites} specs={s.specs} unresolved={s.unresolved} names={s.spec_names.join(",")}"
+        for d in s.diags:
+            print "diag: {d}"
+        for e in s.mir_errors:
+            print "mir: {e}"
+        expect(s.diags.len()).to_equal(0)
+        expect(s.mir_errors.len()).to_equal(0)
+        expect(s.unresolved).to_equal(0)
+        expect(s.sites).to_equal(10)
+        expect(s.specs).to_equal(8)
+
+    it "mints specialization SymbolIds out of every per-module table's range":
+        val s = shape()
+        expect(s.spec_symbol_ids.len()).to_equal(8)
+        for id in s.spec_symbol_ids:
+            val i: i64 = id
+            expect(i >= SYMBOL_BASE).to_equal(true)
+
+    it "gives each specialization a row in its owning table, under its own name":
+        val s = shape()
+        expect(s.spec_row_names.len()).to_equal(8)
+        var i = 0
+        while i < s.spec_names.len():
+            expect(s.spec_row_names[i]).to_equal(s.spec_names[i])
+            i = i + 1
+
+    it "leaves the owning table's counter past every specialization of the pass":
+        val s = shape()
+        for id in s.spec_symbol_ids:
+            val sid: i64 = id
+            expect(s.table_next > sid).to_equal(true)
+        # Exactly the pass's final counter: base + one id per specialization.
+        expect(s.table_next).to_equal(SYMBOL_BASE + 8)
+
+    it "assigns the same id to the same specialization on every run":
+        val a = shape()
+        val b = shape()
+        var pairs_a: [text] = []
+        var pairs_b: [text] = []
+        var i = 0
+        while i < a.spec_names.len():
+            pairs_a = pairs_a.push("{a.spec_names[i]}={a.spec_symbol_ids[i]}")
+            i = i + 1
+        var j = 0
+        while j < b.spec_names.len():
+            pairs_b = pairs_b.push("{b.spec_names[j]}={b.spec_symbol_ids[j]}")
+            j = j + 1
+        expect(pairs_a.sorted().join(",")).to_equal(pairs_b.sorted().join(","))
+
+    it "emits no define named after a local of main (the BUG-IT-5 aliasing)":
+        val s = shape()
+        for local in ["g_text", "g_typed", "g_len", "g_int", "g_f", "g_bool", "g_struct", "g_enum", "g_arr", "g_opt", "o1", "o2"]:
+            val l: text = local
+            expect(define_line(s.ir, l)).to_equal("")
+
+    it "T = text: define ptr @pick$str and the caller consumes a ptr":
+        expect_spec_abi(shape(), "pick$str", "ptr")
+
+    it "T = i64: define i64 @pick$i64":
+        expect_spec_abi(shape(), "pick$i64", "i64")
+
+    it "T = f64: define double @pick$f64":
+        expect_spec_abi(shape(), "pick$f64", "double")
+
+    it "T = bool: caller and callee agree":
+        expect_spec_abi(shape(), "pick$bool", "")
+
+    it "T = struct: caller and callee agree":
+        expect_spec_abi(shape(), "pick$Acc", "")
+
+    it "T = enum: caller and callee agree":
+        expect_spec_abi(shape(), "pick$Shape", "")
+
+    it "T = array: caller and callee agree":
+        expect_spec_abi(shape(), "pick$arr_i64", "")
+
+    it "T = Option: caller and callee agree":
+        expect_spec_abi(shape(), "pick$opt_i64", "")
