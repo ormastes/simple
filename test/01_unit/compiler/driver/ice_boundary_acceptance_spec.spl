@@ -14,7 +14,7 @@ Two tiers, kept apart on purpose:
 # @cover src/compiler/80.driver/driver_ice_boundary.spl
 # @cover src/compiler/80.driver/driver_pipeline_lowering.spl
 use std.spec.*
-use std.io_runtime.{env_set, file_exists, file_read_nullable, file_read}
+use std.io_runtime.{env_set, env_get_opt, file_exists, file_read_nullable, file_read, dir_exists}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_pipeline_lowering.*
 use compiler.driver.driver_ice_boundary.*
@@ -47,6 +47,8 @@ fn ice_spec_env(case_name: text, boundary: text, inject: text, skip_list: text):
     env_set("SIMPLE_ICE_SKIP_MODULES", skip_list)
     env_set("SIMPLE_COMPILE_FAIL_FAST", "")
     env_set("SIMPLE_ICE_CRASH_RETRIES", "")
+    # The spec plays the owner of the run directory: only an owner resets it.
+    ice_boundary_begin_run()
 
 fn ice_spec_driver() -> CompilerDriver:
     # Three real one-function modules in a fixed order: the bad one is in the
@@ -133,7 +135,9 @@ describe "per-module ICE boundary":
         expect(ice_boundary_dead_worker_modules().len()).to_equal(0)
         expect(ice_boundary_finalize()).to_equal("")
         expect(file_exists(ice_receipt_path())).to_equal(false)
-        expect(file_exists(ice_breadcrumb_path())).to_equal(false)
+        # The owner removes a clean run's directory; nothing is left behind.
+        ice_boundary_release_run(true)
+        expect(dir_exists("build/test_ice_boundary/clean")).to_equal(false)
 
     it "records every failed module when more than one fails":
         ice_spec_env("two", "", "mod.alpha,mod.gamma", "")
@@ -169,7 +173,135 @@ describe "per-module ICE boundary":
         expect(ice_boundary_mode_from("0", "")).to_equal("off")
         expect(ice_boundary_mode_from("", "")).to_equal("on")
         expect(ice_boundary_mode_from("", "1")).to_equal("fail-fast")
+        # off is release behaviour: the failure text is passed through unprefixed.
+        expect(ice_boundary_fail("mod.x", "x.spl", "mir_lower", "", "raw message")).to_equal("raw message")
         expect(ice_crash_retry_budget()).to_equal(0)
+
+    it "a failure that aborted the lowering arena stops the phase at once: siblings are NOT lowered":
+        # lower_module_transient_scoped returns Err only after its arena is
+        # gone. Continuing on the shared lowering would be use-after-reclaim,
+        # so this path records the module and returns, keep-going or not.
+        ice_spec_env("arena", "", "mod.bad", "")
+        env_set("SIMPLE_ICE_INJECT_KIND", "arena")
+        var driver = ice_spec_driver()
+        expect(ice_spec_lower(driver)).to_equal(false)
+        env_set("SIMPLE_ICE_INJECT_KIND", "")
+        expect(ice_spec_fn_count(driver, "mod.alpha")).to_equal(1)
+        expect(ice_spec_fn_count(driver, "mod.gamma")).to_equal(-1)
+        expect(ice_records_read().len()).to_equal(1)
+        expect(ice_records_read()[0].module_name).to_equal("mod.bad")
+        expect(_driver_mir_ice_continue(driver.ctx, "mod.z", "z.spl", "scope failed", true)).to_equal(false)
+        expect(_driver_mir_ice_continue(driver.ctx, "mod.y", "y.spl", "missing HIR", false)).to_equal(true)
+
+    it "without a run directory the boundary is inert: JIT and plain compile keep release behaviour":
+        ice_spec_env("none", "", "mod.bad", "")
+        env_set("SIMPLE_ICE_DIR", "")
+        expect(ice_boundary_enabled()).to_equal(false)
+        var driver = ice_spec_driver()
+        expect(ice_spec_lower(driver)).to_equal(true)
+        expect(ice_spec_fn_count(driver, "mod.bad")).to_equal(1)
+        expect(ice_boundary_module_start("mod.q", "q.spl", "codegen", "llvm")).to_equal("")
+        expect(dir_exists("build/ice")).to_equal(false)
+
+describe "run directory ownership":
+    it "two builds from one working directory get separate directories and do not see each other":
+        ice_spec_env("own", "", "", "")
+        env_set("SIMPLE_ICE_ROOT", "build/test_ice_boundary/own_root")
+        env_set("SIMPLE_ICE_DIR", "")
+        # build A claims its directory and has a module in flight
+        expect(ice_boundary_claim_run("out/a.exe")).to_equal(true)
+        val dir_a = ice_boundary_dir()
+        expect(ice_boundary_module_start("mod.in_a", "a.spl", "codegen", "llvm")).to_equal("")
+        val crumb_a = ice_breadcrumb_path()
+        expect(file_exists(crumb_a)).to_equal(true)
+        # build B, same cwd, other output
+        env_set("SIMPLE_ICE_DIR", "")
+        expect(ice_boundary_claim_run("out/b.exe")).to_equal(true)
+        val dir_b = ice_boundary_dir()
+        expect(dir_b == dir_a).to_equal(false)
+        expect(dir_b).to_start_with("build/test_ice_boundary/own_root/")
+        # B does not see A's in-flight module, and B's reset does not delete A's files
+        expect(ice_boundary_dead_worker_modules().len()).to_equal(0)
+        ice_boundary_begin_run()
+        expect(file_exists(crumb_a)).to_equal(true)
+        ice_boundary_release_run(true)
+        expect(dir_exists(dir_b)).to_equal(false)
+        expect(file_exists(crumb_a)).to_equal(true)
+        # back in A: its module is still the one in flight
+        env_set("SIMPLE_ICE_DIR", dir_a)
+        expect(ice_boundary_dead_worker_modules().len()).to_equal(1)
+        expect(ice_boundary_dead_worker_modules()[0].module_name).to_equal("mod.in_a")
+
+    it "a non-owner never claims, resets or deletes a directory it was handed":
+        # still inside A's directory, as a worker child would be
+        val dir_a = ice_boundary_dir()
+        val crumb_a = ice_breadcrumb_path()
+        expect(dir_a).to_start_with("build/test_ice_boundary/own_root/")
+        expect(ice_boundary_claim_run("out/c.exe")).to_equal(false)
+        expect(ice_boundary_dir()).to_equal(dir_a)
+        ice_boundary_release_run(false)
+        expect(ice_boundary_dir()).to_equal(dir_a)
+        expect(file_exists(crumb_a)).to_equal(true)
+        # a worker's own end-of-phase call leaves the breadcrumbs to the owner
+        expect(ice_boundary_finalize()).to_equal("")
+        expect(file_exists(crumb_a)).to_equal(true)
+        # the lowering loop itself never resets or claims the directory
+        val lowering = file_read("src/compiler/80.driver/driver_pipeline_lowering.spl")
+        expect(lowering.contains("ice_boundary_begin_run")).to_equal(false)
+        expect(lowering.contains("ice_boundary_claim_run")).to_equal(false)
+        # the owner cleans up once the module is closed
+        ice_boundary_module_done("mod.in_a", "codegen")
+        ice_boundary_release_run(true)
+        expect(dir_exists(dir_a)).to_equal(false)
+        expect(ice_boundary_dir()).to_equal("")
+        env_set("SIMPLE_ICE_ROOT", "")
+
+describe "re-launch is opt-in and never follows a kill":
+    it "the retry budget is 0 unless SIMPLE_ICE_CRASH_RETRIES asks for it":
+        ice_spec_env("budget", "", "", "")
+        expect(ice_crash_retry_budget()).to_equal(0)
+        env_set("SIMPLE_ICE_CRASH_RETRIES", "3")
+        expect(ice_crash_retry_budget()).to_equal(3)
+        env_set("SIMPLE_COMPILE_FAIL_FAST", "1")
+        expect(ice_crash_retry_budget()).to_equal(0)
+        env_set("SIMPLE_COMPILE_FAIL_FAST", "")
+        env_set("SIMPLE_ICE_BOUNDARY", "off")
+        expect(ice_crash_retry_budget()).to_equal(0)
+        env_set("SIMPLE_ICE_CRASH_RETRIES", "")
+
+    it "an external kill, a wait failure or a timeout is never re-launched, a crash is":
+        # (exit status, posix signal, timed out, retries left)
+        expect(ice_crash_retry_allowed(-1073741819, 0, false, 1)).to_equal(true)
+        expect(ice_crash_retry_allowed(-139, 11, false, 1)).to_equal(true)
+        expect(ice_crash_retry_allowed(134, 0, false, 1)).to_equal(true)
+        expect(ice_crash_retry_allowed(-137, 9, false, 5)).to_equal(false)
+        expect(ice_crash_retry_allowed(-143, 15, false, 5)).to_equal(false)
+        expect(ice_crash_retry_allowed(-1, 0, false, 5)).to_equal(false)
+        expect(ice_crash_retry_allowed(134, 0, true, 5)).to_equal(false)
+        expect(ice_crash_retry_allowed(134, 0, false, 0)).to_equal(false)
+        expect(ice_crash_retry_allowed(0, 0, false, 5)).to_equal(false)
+
+    it "a killed worker is still named from its breadcrumb, without a re-launch":
+        ice_spec_env("killed", "", "", "")
+        expect(ice_boundary_module_start("mod.slow", "slow.spl", "codegen", "llvm")).to_equal("")
+        # exit status -1 (kill / wait failure): the helper must not launch anything.
+        val (kept_out, kept_err, kept_code) = native_build_relaunch_past_ice_crashes(
+            "no-such-worker-binary", [], 1000, 5, "first out", "first err", -1)
+        expect(kept_out).to_equal("first out")
+        expect(kept_code == -1).to_equal(true)
+        expect(env_get_opt("SIMPLE_ICE_SKIP_MODULES") ?? "").to_equal("")
+        val lines = ice_boundary_attribute_dead_worker(-1)
+        expect(lines.len()).to_equal(1)
+        expect(lines[0]).to_contain("module mod.slow (attributed)")
+
+    it "several modules in flight are reported as candidates, not each as the culprit":
+        ice_spec_env("inflight", "", "", "")
+        expect(ice_boundary_module_start("mod.p", "p.spl", "codegen", "llvm")).to_equal("")
+        expect(ice_boundary_module_start("mod.q", "q.spl", "codegen", "llvm")).to_equal("")
+        val lines = ice_boundary_attribute_dead_worker(-1073741819)
+        expect(lines.len()).to_equal(2)
+        expect(lines[0]).to_contain("one of 2 modules in flight: mod.p, mod.q")
+        expect(lines[1]).to_contain("one of 2 modules in flight: mod.p, mod.q")
 
 describe "dead-worker attribution":
     it "names the module a worker entered and never left, and nothing else":
@@ -208,7 +340,6 @@ describe "dead-worker attribution":
         expect(ice_skip_list_extend(skip_list, dead)).to_equal("mir_lower:mod.bad")
 
         ice_spec_env("retry", "", "", skip_list)
-        expect(ice_crash_retry_budget()).to_equal(2)
         var driver = ice_spec_driver()
         expect(ice_spec_lower(driver)).to_equal(false)
         expect(ice_spec_fn_count(driver, "mod.gamma")).to_equal(1)
@@ -283,5 +414,7 @@ describe "ICE boundary wiring":
         val parent = file_read("src/app/cli/native_build_main.spl")
         expect(parent).to_contain("ice_boundary_attribute_dead_worker(code as i64)")
         expect(parent).to_contain("native_build_relaunch_past_ice_crashes(")
+        expect(parent).to_contain("ice_boundary_claim_run(requested_output)")
+        expect(parent).to_contain("ice_boundary_release_run(ice_owned)")
         val aot = file_read("src/compiler/80.driver/driver_aot_pipeline.spl")
         expect(aot).to_contain("val ice_summary = ice_boundary_finalize()")
