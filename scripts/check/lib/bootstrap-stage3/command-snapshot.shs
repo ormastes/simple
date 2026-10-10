@@ -307,11 +307,14 @@ bootstrap_stage3_windows_frontend_environment() {
     bootstrap_stage3_policy_cap=$1
     bootstrap_stage3_policy_mode=$2
     bootstrap_stage3_policy_budget=$3
-    case "$bootstrap_stage3_policy_cap:$bootstrap_stage3_policy_budget" in
-        *[!0-9:]*|:*|*:) return 1 ;;
+    # Optional 4th argument: the job-scaled hard ceiling the caller resolved
+    # through tree-rss-policy.shs. Absent, the historical fixed ceiling holds.
+    bootstrap_stage3_policy_ceiling=${4:-6835937}
+    case "$bootstrap_stage3_policy_cap:$bootstrap_stage3_policy_budget:$bootstrap_stage3_policy_ceiling" in
+        *[!0-9:]*|:*|*:|*::*) return 1 ;;
     esac
     [ "$bootstrap_stage3_policy_cap" -gt 0 ] &&
-        [ "$bootstrap_stage3_policy_cap" -le 6835937 ] &&
+        [ "$bootstrap_stage3_policy_cap" -le "$bootstrap_stage3_policy_ceiling" ] &&
         [ "$bootstrap_stage3_policy_budget" -gt 0 ] &&
         [ "$bootstrap_stage3_policy_budget" -le 3000000 ] || return 1
     case "$bootstrap_stage3_policy_mode" in
@@ -337,12 +340,33 @@ bootstrap_stage3_run_transcribed() {
     # The same finite cap feeds the watchdog and the child's shard admission.
     # Carry it as explicit-env before freezing the transcript; do not widen the
     # fixed host-env schema or allow a caller to substitute a different budget.
-    bootstrap_stage3_run_rss_cap=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}
-    case "$bootstrap_stage3_run_rss_cap" in
-        ''|*[!0-9]*) echo 'bootstrap-transcript-error: invalid RSS cap' >&2; return 1 ;;
-    esac
-    [ "$bootstrap_stage3_run_rss_cap" -gt 0 ] &&
-        [ "$bootstrap_stage3_run_rss_cap" -le 6835937 ] || return 1
+    # The cap scales with the worker count of the command it governs (its own
+    # --threads), under a hard ceiling bounded by host RAM; policy and
+    # measurements: scripts/bootstrap/lib/tree-rss-policy.shs. A refusal used
+    # to be a bare `return 1`: no build log, no reason, and the caller's log
+    # reader then died on the missing file. Record why, where the stage
+    # diagnosis reads it.
+    . "$bootstrap_stage3_run_cwd/scripts/bootstrap/lib/tree-rss-policy.shs" || {
+        echo 'bootstrap-transcript-error: tree RSS policy is unavailable' >&2
+        return 1
+    }
+    bootstrap_stage3_run_rss_jobs=$(bootstrap_tree_rss_command_jobs "$@")
+    bootstrap_tree_rss_resolve "$bootstrap_stage3_run_rss_jobs" "$bootstrap_stage3_run_cwd" || {
+        printf 'error: pre-exec refusal: %s\n' "$bootstrap_tree_rss_refusal" \
+            > "$bootstrap_stage3_run_log.refusal" || :
+        printf 'bootstrap-transcript-error: %s\n' "$bootstrap_tree_rss_refusal" >&2
+        return 1
+    }
+    bootstrap_stage3_run_rss_cap=$bootstrap_tree_rss_cap_kib
+    bootstrap_stage3_run_rss_ceiling=$bootstrap_tree_rss_ceiling_kib
+    # Recorded in the watchdog receipt: which layer chose the cap, and which
+    # rule bounded it.
+    bootstrap_stage3_run_rss_source=$bootstrap_tree_rss_source
+    bootstrap_stage3_run_rss_bound=$bootstrap_tree_rss_bound
+    echo "  process-tree RSS policy: $bootstrap_tree_rss_summary" >&2
+    bootstrap_stage3_run_rss_jobs_arg=
+    [ "$bootstrap_stage3_run_rss_jobs" -eq 0 ] ||
+        bootstrap_stage3_run_rss_jobs_arg=--compiler-jobs=$bootstrap_stage3_run_rss_jobs
     for bootstrap_stage3_run_env in "$@"; do
         [ "$bootstrap_stage3_run_env" != -- ] || break
         case "$bootstrap_stage3_run_env" in
@@ -367,7 +391,8 @@ bootstrap_stage3_run_transcribed() {
             # plus its parent, and the watchdog retains memory enforcement.
             bootstrap_stage3_run_frontend_rows=$(bootstrap_stage3_windows_frontend_environment \
                 "$bootstrap_stage3_run_rss_cap" "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
-                "${SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB:-3000000}") || return 1
+                "${SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB:-3000000}" \
+                "$bootstrap_stage3_run_rss_ceiling") || return 1
             while IFS= read -r bootstrap_stage3_run_frontend_row; do
                 case "$bootstrap_stage3_run_frontend_row" in
                     SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=*)
@@ -440,6 +465,9 @@ ${ProgramData:-${PROGRAMDATA:-}}
                     --session-mode="$bootstrap_stage3_rss_session_mode" \
                     --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
                     --max-rss-kib="$bootstrap_stage3_run_rss_cap" \
+                    $bootstrap_stage3_run_rss_jobs_arg \
+                    --cap-source="$bootstrap_stage3_run_rss_source" \
+                    --cap-bound="$bootstrap_stage3_run_rss_bound" \
                     --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
                     --receipt="$bootstrap_stage3_run_log.rss.env" -- \
                 env -i "HOME=$bootstrap_stage3_run_home" \
@@ -480,6 +508,9 @@ ${ProgramData:-${PROGRAMDATA:-}}
             --session-mode="$bootstrap_stage3_rss_session_mode" \
             --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
             --max-rss-kib="$bootstrap_stage3_run_rss_cap" \
+            $bootstrap_stage3_run_rss_jobs_arg \
+            --cap-source="$bootstrap_stage3_run_rss_source" \
+            --cap-bound="$bootstrap_stage3_run_rss_bound" \
             --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
             --receipt="$bootstrap_stage3_run_log.rss.env" -- \
         /bin/sh -c '

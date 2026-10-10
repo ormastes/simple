@@ -458,7 +458,21 @@ static int parse_supervise(int argc, wchar_t **argv, options *o) {
         if (!wcscmp(a, L"--spec")) o->spec = v;
         else if (!wcscmp(a, L"--stats")) o->stats = v;
         else if (!wcscmp(a, L"--rss-cap-mode")) o->cap_mode = v;
-        else if (!wcscmp(a, L"--max-rss-kib")) { if (!parse_u32(v, 6835937ULL, &o->max_rss_kib) || !o->max_rss_kib) return 0; }
+        else if (!wcscmp(a, L"--max-rss-kib")) {
+            /* Policy (the job-scaled ceiling) belongs to the watchdog that
+               launches this helper. The mechanism only refuses a cap that
+               could never fire: one at or above host physical memory, so
+               the largest accepted value is one KiB below it. */
+            MEMORYSTATUSEX mem;
+            mem.dwLength = sizeof mem;
+            if (!GlobalMemoryStatusEx(&mem)) { reject("cannot read host physical memory"); return 0; }
+            if (mem.ullTotalPhys / 1024 < 2 ||
+                !parse_u32(v, mem.ullTotalPhys / 1024 - 1, &o->max_rss_kib) || !o->max_rss_kib) {
+                fprintf(stderr, "bootstrap-session: --max-rss-kib must be at least 1 and below host physical memory (%llu KiB)\n",
+                        (unsigned long long)(mem.ullTotalPhys / 1024));
+                return 0;
+            }
+        }
         else if (!wcscmp(a, L"--interval-ms")) { if (!parse_u32(v, 100ULL, &o->interval_ms) || !o->interval_ms) return 0; }
         else if (!wcscmp(a, L"--observation-budget-ms")) { if (!parse_u32(v, 5000ULL, &o->budget_ms) || o->budget_ms < 1000) return 0; }
         else if (!wcscmp(a, L"--timeout-seconds")) { if (!parse_u32(v, 0x7fffffffULL, &o->timeout_s)) return 0; }
