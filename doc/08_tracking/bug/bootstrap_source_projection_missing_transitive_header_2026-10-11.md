@@ -28,7 +28,7 @@ full build is held pending the user's explicit extension of that limit.
 
 The original frozen projection and failing compiler log remain intact. A
 separate object-only control materialized the exact failing C translation unit
-and all eight recursively quoted headers from the same Git tree. The real
+and its seven recursively quoted headers (eight files total) from the same Git tree. The real
 `clang-cl` invocation with the original compile flags then passed once.
 
 Receipt: `build/backend-plugin-component-20261011/RESULT.json`.
@@ -63,7 +63,7 @@ materializer fix commit and verified full build before resolving this report.
 The successor uses the same immutable logical tree and reads quoted includes
 recursively before creating the physical projection. Eleven distinct host
 controls passed across three bounded repair cycles, with no passing controls
-replayed. They cover the real omitted-header refusal, eight-header closure,
+replayed. They cover the real omitted-header refusal, eight-file closure,
 compact `#include"file.h"`, recursive dependencies, cycles, missing/escaping
 inputs and rejection of a changed build-recipe owner.
 
