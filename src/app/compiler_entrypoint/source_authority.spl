@@ -113,7 +113,13 @@ fn compiler_source_authority_acquire_v1(
     val refresh = compiler_inventory_refresh_v1(root, cache_root, inventory_roots, cold_init)
     if not refresh.valid: return compiler_source_authority_invalid_v1(refresh.reason)
     val snapshot = scv_compile_snapshot_acquire_v1(root, cache_root, source_roots)
-    if not snapshot.valid: return compiler_source_authority_invalid_v1(snapshot.reason)
+    if not snapshot.valid:
+        # The warm event cursor can miss a tracked file restored to HEAD. The
+        # snapshot read detects the stale row before admitting any bytes. Rebuild
+        # the complete inventory once; the cold call never retries itself.
+        if not cold_init and snapshot.reason.starts_with("snapshot-index-drift:"):
+            return compiler_source_authority_acquire_v1(root, cache_root, source_roots, true)
+        return compiler_source_authority_invalid_v1(snapshot.reason)
     compiler_source_authority_validate_v1(root, cache_root, snapshot,
         refresh.inventory_digest, refresh.inventory_generation, false)
 

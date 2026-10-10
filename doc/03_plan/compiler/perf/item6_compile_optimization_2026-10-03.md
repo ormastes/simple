@@ -150,3 +150,7 @@ The repaired transition pointer now admits the first V1 generation in the no-stu
 ### 2026-10-10 warm inventory revert gap
 
 Two warm Item 5 probe launches stopped at `snapshot-index-drift` after a tracked compiler source reverted to HEAD but the inventory retained its temporary bytes. A fresh compiler cache did not repair the persistent source cursor. Explicit cold init rebuilt authority and reached HIR; that run then failed on the separate Item 5 type-closure issue. See `doc/08_tracking/bug/scv_warm_inventory_misses_revert_to_head_2026-10-10.md`. Item 6 needs an event-authority regression and repair before warm correctness, full-entrypoint, or paired time/RSS acceptance can be claimed.
+
+### 2026-10-10 second-generation and warm-revert isolation
+
+The native CAS fixture exposed struct copy-then-mutate aliasing in its own negative control and in the production snapshot-path route. Both now construct independent entries. The repaired fixture publishes a second V2 generation, but readback exits 4 with no emitted reason; the pointed-to index bytes hash to CURRENT and contain one complete framed entry. The warm-revert recovery candidate retries cold inventory once on snapshot-index drift; its 135-module native probe passes HIR and monomorphization but stops at unrelated MIR lowering, so runtime correctness is unverified. See the two linked bug notes. Full entrypoint cutover, persistent semantic-index acceptance, and paired time/RSS gates remain open.

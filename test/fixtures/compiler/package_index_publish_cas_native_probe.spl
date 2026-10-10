@@ -11,6 +11,14 @@ use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 
 extern fn rt_getpid() -> i64
 
+fn probe_entry_with_digests(entry: PackageModuleIndexEntryV1, source_digest: text, action_digest: text) -> PackageModuleIndexEntryV1:
+    PackageModuleIndexEntryV1(
+        entry.package_identity, entry.module_identity, entry.source_identity,
+        source_digest, entry.smf_metadata_digest, entry.export_digest,
+        entry.abi_digest, entry.initializer_digest, entry.provider_digest,
+        action_digest, entry.manifest_digest, entry.scc_identity,
+        entry.direct_imports, entry.reverse_dependents)
+
 fn main() -> i64:
     val cache_root = "build/mini_builds/package-index-cas-{rt_getpid()}"
     dir_remove(cache_root, true)
@@ -32,8 +40,8 @@ fn main() -> i64:
         binding.scv_revision_id, binding.scv_commit_id,
         binding.scv_tree_id, binding.inventory_digest, [draft_entry],
         sha256_text("variant"), "")
-    var entry = graph.entries[0]
-    entry.action_digest = package_module_index_entry_action_digest_v1(graph, entry)
+    val entry = probe_entry_with_digests(draft_entry, digest,
+        package_module_index_entry_action_digest_v1(graph, draft_entry))
     if entry.action_digest !=
             "df5d134fb398d2063db35e0dfb64a728817eb0312ff9ff046b9a60d8fb702340":
         return 12
@@ -55,8 +63,8 @@ fn main() -> i64:
             entry.action_digest == package_module_index_entry_action_digest_v1(
                 next, entry):
         return 8
-    var edited = entry
-    edited.source_digest = sha256_text("source-edited")
+    val edited = probe_entry_with_digests(entry,
+        sha256_text("source-edited"), entry.action_digest)
     if semantic_action == package_module_index_entry_action_digest_v2(
             graph, edited):
         return 9
@@ -64,9 +72,12 @@ fn main() -> i64:
     if semantic_action == package_module_index_entry_action_digest_v2(
             next, entry):
         return 10
-    entry.action_digest = semantic_action
-    graph.entries[0] = entry
-    if package_module_index_validate_v1(graph) != "ok":
+    val semantic_entry = probe_entry_with_digests(entry,
+        entry.source_digest, semantic_action)
+    graph.entries[0] = semantic_entry
+    val second_validation = package_module_index_validate_v1(graph)
+    if second_validation != "ok":
+        print "second-generation-validation={second_validation} graph-variant={graph.variant_digest} next-variant={next.variant_digest} entry-source={entry.source_digest} edited-source={edited.source_digest} graph-source={graph.entries[0].source_digest} entry-action={semantic_entry.action_digest} graph-action={graph.entries[0].action_digest} expected-action={package_module_index_entry_action_digest_v2(graph, graph.entries[0])}"
         return 11
     if not package_module_index_publish_if_current_v1(
             cache_root, graph, bound.digest):

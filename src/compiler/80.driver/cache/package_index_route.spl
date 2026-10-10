@@ -42,6 +42,18 @@ struct PackageIndexRouteV1:
     package_schedule: [text]
     archive_admissions: [PackageArchiveAdmissionV1]
 
+fn package_index_route_source_projection_v1(
+    entry: PackageModuleIndexEntryV1, source_identity: text
+) -> PackageModuleIndexEntryV1:
+    # Native copy-then-field-mutate can alias the indexed entry. Construct a
+    # separate route value so a snapshot path never changes the admitted graph.
+    PackageModuleIndexEntryV1(
+        entry.package_identity, entry.module_identity, source_identity,
+        entry.source_digest, entry.smf_metadata_digest, entry.export_digest,
+        entry.abi_digest, entry.initializer_digest, entry.provider_digest,
+        entry.action_digest, entry.manifest_digest, entry.scc_identity,
+        entry.direct_imports, entry.reverse_dependents)
+
 fn package_index_route_sorted_unique_v1(values: [text]) -> [text]:
     for value in values:
         if value == "" or value.contains("\n") or value.contains("\r"):
@@ -356,9 +368,14 @@ fn _package_index_route_current_v1(
             # Published HIR seeds carry logical inventory paths. Project only
             # validated relative identities into the already-admitted snapshot;
             # the dirty owner then performs canonical/no-follow source checks.
-            var source_entry = entry!
-            if compile_source_inventory_path_valid_v1(source_entry.source_identity):
-                source_entry.source_identity = "{snapshot_root}/{source_entry.source_identity}"
+            val indexed_entry = entry!
+            val projected_source = if compile_source_inventory_path_valid_v1(
+                    indexed_entry.source_identity):
+                "{snapshot_root}/{indexed_entry.source_identity}"
+            else:
+                indexed_entry.source_identity
+            val source_entry = package_index_route_source_projection_v1(
+                indexed_entry, projected_source)
             val dirty = dirty_module_record_admit_v1(
                 generation, source_entry, snapshot_root, expected_revision,
                 expected_tree, expected_inventory, expected_producer,

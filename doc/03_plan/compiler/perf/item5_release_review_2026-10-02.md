@@ -44,3 +44,7 @@ reviewed result-revision evidence rather than a patch-equivalent claim.
 ### 2026-10-10 HIR owner-import trial
 
 The cold-init native JIT compatibility probe reached 1009 HIR modules but failed the same 12 modules with 42 unresolved types as the prior baseline. The six speculative explicit imports were reverted. See `doc/08_tracking/bug/item5_jit_probe_hir_type_closure_2026-10-10.md`. JIT execution, provider size, startup, and RSS gates remain open.
+
+### 2026-10-10 payload closure and later-stage blocker
+
+The imported enum-payload owner alias repair cleared all 42 former HIR type failures in the 1009-module JIT probe. The native build then stopped at 63 unspecialized generic call sites (E-MONO-033) before MIR, linking, or JIT execution. See `doc/08_tracking/bug/item5_jit_probe_hir_type_closure_2026-10-10.md`. Item 5 remains incomplete; provider closure, size, startup, and RSS acceptance have no comparable measurements.
