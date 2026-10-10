@@ -3,7 +3,9 @@
 # Closing any library copy revokes new borrows and defers dlclose until the
 # last admitted call returns. Identities never repeat within this process.
 
-use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}
+# @workaround bug=mutex_lock_return_only_generic_needs_call_type_2026-10-10
+# Integer-sentinel exclusion gates use the non-generic runtime-equivalent owner.
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock_gate, mutex_unlock}
 
 @unsafe(reason: "releases the native library after its final admitted use", capabilities: [ffi])
 extern fn spl_dlclose(handle: i64) -> i64
@@ -49,7 +51,7 @@ fn _dynlib_lifetime_index_v1(state: _DynlibLifetimeStateV1, identity: u64) -> i6
 # Zero means no ownership was accepted. The caller must close the raw handle.
 pub(package) fn dynlib_lifetime_register_v1(handle: i64) -> u64:
     if handle <= 0: return 0u64
-    val _ = mutex_lock(_dynlib_lifetime_gate_v1)
+    val _ = mutex_lock_gate(_dynlib_lifetime_gate_v1)
     var state: _DynlibLifetimeStateV1 = _dynlib_lifetime_state_v1
     state.result_identity = 0u64
     if state.next_identity != 0u64 and
@@ -70,7 +72,7 @@ pub(package) fn dynlib_lifetime_register_v1(handle: i64) -> u64:
 # Returns the native handle only after reserving one use. Zero refuses stale
 # identities and prevents callers from resolving or invoking an unloaded map.
 pub(package) fn dynlib_lifetime_begin_v1(identity: u64) -> i64:
-    val _ = mutex_lock(_dynlib_lifetime_gate_v1)
+    val _ = mutex_lock_gate(_dynlib_lifetime_gate_v1)
     var state: _DynlibLifetimeStateV1 = _dynlib_lifetime_state_v1
     state.result_handle = 0
     val index = _dynlib_lifetime_index_v1(state, identity)
@@ -85,7 +87,7 @@ pub(package) fn dynlib_lifetime_begin_v1(identity: u64) -> i64:
     state.result_handle
 
 pub(package) fn dynlib_lifetime_end_v1(identity: u64):
-    val _ = mutex_lock(_dynlib_lifetime_gate_v1)
+    val _ = mutex_lock_gate(_dynlib_lifetime_gate_v1)
     var state: _DynlibLifetimeStateV1 = _dynlib_lifetime_state_v1
     state.result_handle = 0
     val index = _dynlib_lifetime_index_v1(state, identity)
@@ -107,7 +109,7 @@ pub(package) fn dynlib_lifetime_end_v1(identity: u64):
 # True only for the first live-to-retiring transition. A later close through
 # another DynLib copy cannot close the same native handle twice.
 pub(package) fn dynlib_lifetime_retire_v1(identity: u64) -> bool:
-    val _ = mutex_lock(_dynlib_lifetime_gate_v1)
+    val _ = mutex_lock_gate(_dynlib_lifetime_gate_v1)
     var state: _DynlibLifetimeStateV1 = _dynlib_lifetime_state_v1
     state.result_handle = 0
     state.result_accepted = false
@@ -130,7 +132,7 @@ pub(package) fn dynlib_lifetime_retire_v1(identity: u64) -> bool:
     state.result_accepted
 
 pub(package) fn dynlib_lifetime_live_v1(identity: u64) -> bool:
-    val _ = mutex_lock(_dynlib_lifetime_gate_v1)
+    val _ = mutex_lock_gate(_dynlib_lifetime_gate_v1)
     var state: _DynlibLifetimeStateV1 = _dynlib_lifetime_state_v1
     state.result_accepted = false
     val index = _dynlib_lifetime_index_v1(state, identity)
