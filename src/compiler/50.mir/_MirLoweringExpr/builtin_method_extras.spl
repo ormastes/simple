@@ -71,6 +71,10 @@ impl MirLowering:
             match elem.kind:
                 case HirTypeKind.Error: return nil
                 case HirTypeKind.Infer(_, _): return nil
+                # An untyped literal (`val xs = ["a", "b"]`) records `[Any]`
+                # on its local while its MIR type is the real `Array(str)`;
+                # `Any` is no more a declared element type than `Infer`.
+                case HirTypeKind.Any: return nil
                 case _: return Some(elem)
         nil
 
@@ -161,6 +165,90 @@ impl MirLowering:
                 self.array_element_struct_syms[result.id] = source_struct ?? ""
         result
 
+    me builtin_runtime_tuples_to_native(rt_tuples: LocalId, field_types: [MirType]) -> LocalId:
+        """Convert an array of RUNTIME tuples into an array of NATIVE tuples.
+
+        The runtime builds a pair with rt_tuple_new: a heap object with a
+        length/flags header (it is an RtCoreArray flagged as a tuple). A native
+        (AOT) tuple is a bare block of fields built by an `Aggregate` and read
+        with `GetField` -- which is what a `for (a, b) in ...` destructure
+        emits. `GetField` on a runtime tuple therefore reads the HEADER words:
+        `for (i, x) in ["a", "b", "c"].enumerate()` printed `258:2` on every
+        iteration. The two are different layouts, so every pair is rebuilt
+        here: one rt_tuple_get per slot, the slot decoded by its field type
+        (primitive fields; any other field keeps its handle word), then one
+        `Aggregate`. The result array stores the native tuples the same way an
+        array literal of tuples does, so the ordinary indexed for-loop reads
+        them back unchanged."""
+        val loop_ty = MirType.i64()
+        val word_array = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))
+        val tuple_type = MirType(kind: MirTypeKind.Tuple(field_types))
+
+        var b_init = self.builder
+        val len_local = b_init.emit_call_value(self.rt_array_len_operand(), [mir_operand_copy(rt_tuples)], MirType.i64())
+        val new_cap = b_init.emit_const_int(0)
+        val result_arr = b_init.emit_call_value(
+            builtin_extra_rt_operand("rt_array_new", [MirType.i64()], word_array),
+            [mir_operand_copy(new_cap)], word_array)
+        val counter = b_init.new_local(nil, loop_ty, LocalKind.Var)
+        val zero = b_init.emit_const_int(0)
+        b_init.emit_copy(counter, zero)
+        val one = b_init.emit_const_int(1)
+        val cond_block = b_init.new_block(Some("tuple_native_cond"))
+        val body_block = b_init.new_block(Some("tuple_native_body"))
+        val exit_block = b_init.new_block(Some("tuple_native_exit"))
+        b_init.terminate_goto(cond_block)
+        b_init.switch_to_block(cond_block)
+        val in_range = b_init.emit_binop(MirBinOp.Lt, mir_operand_copy(counter), mir_operand_copy(len_local), MirType.bool())
+        b_init.terminate_if(mir_operand_copy(in_range), body_block, exit_block)
+        b_init.switch_to_block(body_block)
+        val rt_tuple = b_init.emit_call_value(self.rt_array_get_operand(), [mir_operand_copy(rt_tuples), mir_operand_copy(counter)], MirType.i64())
+        self.builder = b_init
+        self.runtime_array_locals[result_arr.id] = true
+        self.mark_runtime_value_local(result_arr.id)
+
+        var field_operands: [MirOperand] = []
+        var field_index = 0
+        while field_index < field_types.len():
+            val field_type = field_types[field_index]
+            var b_slot = self.builder
+            val slot_index = b_slot.emit_const_int(field_index)
+            val slot_word = b_slot.emit_call_value(
+                builtin_extra_rt_operand("rt_tuple_get", [MirType.i64(), MirType.i64()], MirType.i64()),
+                [mir_operand_copy(rt_tuple), mir_operand_copy(slot_index)], MirType.i64())
+            self.builder = b_slot
+            var field_value = slot_word
+            if self.builtin_elem_mir_is_primitive(field_type):
+                field_value = self.decode_runtime_value(slot_word, field_type)
+            field_operands = field_operands.push(mir_operand_copy(field_value))
+            field_index = field_index + 1
+
+        var b_build = self.builder
+        val native_tuple = b_build.emit_aggregate(AggregateKind.Tuple, field_operands, tuple_type)
+        self.builder = b_build
+        val stored_tuple = self.box_runtime_value(native_tuple)
+        var b_push = self.builder
+        b_push.emit_call(self.rt_array_push_operand(), [mir_operand_copy(result_arr), mir_operand_copy(stored_tuple)], MirType(kind: MirTypeKind.I8))
+        val incremented = b_push.emit_binop(MirBinOp.Add, mir_operand_copy(counter), mir_operand_copy(one), loop_ty)
+        b_push.emit_copy(counter, incremented)
+        b_push.terminate_goto(cond_block)
+        b_push.switch_to_block(exit_block)
+        self.builder = b_push
+        self.builtin_mark_array_result(result_arr, Some(tuple_type), nil, result_arr)
+
+    me builtin_dict_entry_field_type(declared: HirType?, mir_fallback: MirType) -> MirType:
+        """Field type of one side of a dict entry: the declared key/value type
+        (text in its `bootstrap_text_type` form, the one loop variables use),
+        else the dict's own MIR key/value type."""
+        if val declared_type = declared:
+            match declared_type.kind:
+                case HirTypeKind.Str: return self.bootstrap_text_type()
+                case HirTypeKind.Error: return mir_fallback
+                case HirTypeKind.Infer(_, _): return mir_fallback
+                case HirTypeKind.Any: return mir_fallback
+                case _: return self.lower_type(declared_type)
+        mir_fallback
+
     me try_lower_array_builtin_extra(receiver: HirExpr, arr: LocalId, method: text, args: [HirCallArg]) -> LocalId?:
         val shape =
             (method == "reversed" and args.len() == 0) or
@@ -231,18 +319,21 @@ impl MirLowering:
         # `for (i, x) in xs.enumerate()`. Same tuple-array shape (and the same
         # consumer, lower_for_array_indexed) as rt_dict_entries.
         if method == "enumerate":
+            # A struct/array/enum element would reach the loop as an untyped
+            # tuple field: its owner is lost and `p.field` silently resolves
+            # to field 0. Only elements with a self-describing decode lower.
+            if not self.builtin_elem_mir_is_primitive(elem_type):
+                return Some(self.builtin_extra_fail_closed("unsupported in stage2: array.enumerate() over a non-primitive element type (only integer, float, bool and text elements are lowered); index the array in a counted loop", Some(receiver.span)))
             var b_enum = self.builder
             val enum_raw = b_enum.emit_call_value(
                 builtin_extra_rt_operand("rt_array_enumerate", [MirType.i64()], word_array),
                 [mir_operand_copy(arr)], word_array)
             self.builder = b_enum
-            val pair_mir = MirType(kind: MirTypeKind.Tuple([MirType.i64(), elem_type]))
-            var pair_array_hir: HirType? = nil
-            if val enum_elem_hir = elem_hir:
-                val index_hir = HirType(kind: HirTypeKind.Int(64, true), span: receiver.span)
-                val pair_hir = HirType(kind: HirTypeKind.Tuple([index_hir, enum_elem_hir]), span: receiver.span)
-                pair_array_hir = Some(HirType(kind: HirTypeKind.Array(pair_hir, nil), span: receiver.span))
-            return Some(self.builtin_mark_array_result(enum_raw, Some(pair_mir), pair_array_hir, enum_raw))
+            # No HIR type is recorded on the result: `lower_type` of a declared
+            # `(i64, text)` gives text its fat-pointer form, which is not the
+            # field type the native tuples below are built with. The result's
+            # own MIR type is the authority for the loop.
+            return Some(self.builtin_runtime_tuples_to_native(enum_raw, [MirType.i64(), elem_type]))
 
         if not self.builtin_elem_mir_is_primitive(elem_type):
             return Some(self.builtin_extra_fail_closed("unsupported in stage2: array.{method}() over a non-primitive element type (only integer, float, bool and text elements are lowered); write the loop", Some(receiver.span)))
