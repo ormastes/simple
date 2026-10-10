@@ -68,3 +68,9 @@ The isolated native HIR probe imports the edited monomorphizer and asserts exact
 ## 2026-10-11 warm recovery graph handoff
 
 Source review identified that the existing warm-drift cold inventory retry did not authorize entrypoint graph reconstruction: admission could still refuse the stale complete graph, and the driver ignored rebuild-pending state. A successful bounded retry now sets an internal authority bit; admission selects the existing cold-rebuild-pending transition without replacing CURRENT, and the driver consumes that pending marker via SOSIX. Regression fixture assertions distinguish recovery from normal warm and explicit cold authority. Native recovery and paired time/RSS remain unverified; see [the recovery record](../../08_tracking/bug/scv_warm_inventory_misses_revert_to_head_2026-10-10.md).
+
+## 2026-10-11 cleanup and focused recovery evidence
+
+The isolated task worktree remained clean at entry. Reproducible bootstrap temporary Rust toolchain bytes, old Cargo target, SCV snapshots, mini-build outputs, and phase snapshots were removed after checking no task process used them. The older /tmp/simple-release-implementation-20261010 checkout remains because it owns the active worktree Git metadata. A saved core from the earlier callback crash was removed after its backtrace matched the existing bug record. Free disk space rose from 6.33 GiB to 16.75 GiB during cleanup, including concurrent host changes.
+
+One focused Stage 2 compile --format=smf of the warm-revert fixture passed HIR and monomorphization for 135 modules but failed in MIR on reached library code before output. The existing fixture is now asserted from the source-authority unit spec. Full native recovery, production graph rebuild, and paired time/RSS remain unverified; no release landing follows.

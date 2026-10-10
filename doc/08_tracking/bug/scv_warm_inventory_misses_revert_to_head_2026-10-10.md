@@ -25,3 +25,9 @@ Current-source review found a second boundary after the bounded inventory retry:
 The authority record now carries an internal `recovered_cold` bit only on a successful warm-drift cold retry. Entrypoint admission uses that bit to select the existing `cold-rebuild-pending` transition while preserving old CURRENT. The driver treats that pending marker as cold construction authorization through SOSIX environment access. Explicit cold and ordinary warm authority keep the bit false. The Git revert fixture asserts these signal states.
 
 This is an unverified source candidate. The previous native recovery fixture remains stopped at unrelated MIR failures, and current disk headroom is below compiler bootstrap minimum. It does not qualify automatic full-entrypoint recovery, an event-maintained warm route, or time/RSS budgets. Next evidence must exercise the complete graph-preserving admission and driver rebuild path, then prove unchanged warm requests stay on the warm route.
+
+## 2026-10-11 focused SMF route and regression wiring
+
+The admitted Stage 2 compiler compiled the current warm-revert fixture through parse, 135/135 HIR modules, and monomorphization using compile --format=smf. MIR lowering failed before an SMF was emitted. The first reported fatal error was unresolved method call: split in src/lib/scv/compile_snapshot.spl:275:22; the log also records unrelated enum-payload and iterable-lowering errors. Receipt: build/mini_builds/item6_warm_revert_smf_20261011/compile.log. This route cannot verify runtime recovery.
+
+test/01_unit/app/compiler_entrypoint/source_authority_spec.spl now calls the tracked-file-revert fixture as a real assertion. The test is pending an admitted full runtime; the source change does not establish an Item 6 PASS.
