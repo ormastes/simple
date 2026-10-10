@@ -175,12 +175,37 @@ impl HirLowering:
                     is_unit = payload_types.len() == 0
                 case _: ()
             if is_unit:
+                val unit_row_known = self.enum_unit_pattern_names.contains_key("{owner.id}:{variant.name}")
                 self.enum_unit_pattern_names["{owner.id}:{variant.name}"] = true
                 if canonical_owner >= 0:
                     self.enum_unit_pattern_names["{canonical_owner}:{variant.name}"] = true
                 # Name-only row: answers "is this bare name a unit variant of
                 # SOME visible enum" when the subject's enum is unknown.
+                # `**:` marks a name that a SECOND enum also declares: the
+                # name alone then identifies no enum.
+                if self.enum_unit_pattern_names.contains_key("*:{variant.name}") and not unit_row_known:
+                    self.enum_unit_pattern_names["**:{variant.name}"] = true
                 self.enum_unit_pattern_names["*:{variant.name}"] = true
+
+    me bare_name_may_be_unit_variant(name: text) -> bool:
+        """The name-only rule's precondition: a Capitalized name that is a
+        unit variant of some visible enum. Lowercase names are excluded on
+        purpose -- the closure has enums with lowercase unit variants
+        (`body`, `mir`, `module`, ...) and a lowercase bare name in a
+        pattern is an ordinary binding the arm body reads."""
+        if name.len() == 0 or not "ABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(name[0:1]):
+            return false
+        self.enum_unit_pattern_names.contains_key("*:{name}")
+
+    me warn_bare_variant(name: text, message: text):
+        """Advisory on stderr, once per (module, name); lowering is unchanged.
+        `SIMPLE_BARE_VARIANT_WARN=0` silences it."""
+        if (hir_expr_env_get("SIMPLE_BARE_VARIANT_WARN") ?? "") == "0":
+            return
+        if self.enum_unit_pattern_names.contains_key("warned:{name}"):
+            return
+        self.enum_unit_pattern_names["warned:{name}"] = true
+        eprint("[hir-lower] WARNING: bare `{name}` {message} ({self.module_filename}; SIMPLE_BARE_VARIANT_WARN=0 silences)")
 
     me pattern_enum_same_owner(left: SymbolId, right: SymbolId) -> bool:
         if left.id == right.id:
@@ -318,9 +343,9 @@ impl HirLowering:
                                 # Warn-first on purpose: the closure has not
                                 # been measured for such arms, and an error
                                 # here would fail the bootstrap.
-                                if self.generic_enum_constructor_owners.contains_key(owner.id) and self.enum_unit_pattern_names.contains_key("*:{name}"):
+                                if self.generic_enum_constructor_owners.contains_key(owner.id) and self.bare_name_may_be_unit_variant(name):
                                     val subject_enum_name = self.symbols.symbol_name_scalar_raw(owner.id)
-                                    eprint("[hir-lower] WARNING: bare `{name}` in a match over `{subject_enum_name}` is not one of its variants (it is a unit variant of another visible enum); it binds as a catch-all -- qualify it or rename the binding ({self.module_filename})")
+                                    self.warn_bare_variant(name, "in a match over `{subject_enum_name}` is not one of its variants (it is a unit variant of another visible enum); it binds as a catch-all -- qualify it or rename the binding")
                             case HirTypeKind.Infer(_, _):
                                 subject_unknown = true
                             case HirTypeKind.Error:
@@ -337,8 +362,14 @@ impl HirLowering:
                     # `case BinOp(..)` lowers to: MIR resolves it against the
                     # scrutinee's enum (so a name shared by several enums
                     # needs no choice here) and rejects an unknown variant.
-                    if subject_unknown and self.enum_unit_pattern_names.contains_key("*:{name}"):
-                        return HirPattern(kind: HirPatternKind.Enum(HirType(kind: HirTypeKind.Error, span: p.span), name, nil), type_: nil, span: p.span)
+                    # Capitalized names only (bare_name_may_be_unit_variant). A
+                    # name two enums share identifies no enum on an untyped
+                    # subject: it binds, as on release, with a warning.
+                    if subject_unknown and self.bare_name_may_be_unit_variant(name):
+                        if self.enum_unit_pattern_names.contains_key("**:{name}"):
+                            self.warn_bare_variant(name, "over an untyped subject is a unit variant of several visible enums; it binds as a catch-all -- annotate the subject or qualify the variant")
+                        else:
+                            return HirPattern(kind: HirPatternKind.Enum(HirType(kind: HirTypeKind.Error, span: p.span), name, nil), type_: nil, span: p.span)
                 if val binding_type = subject_type:
                     if declared_pattern_slot_type_is_concrete(binding_type):
                         val symbol = self.symbols.define(name, SymbolKind.Variable, Some(binding_type), p.span, Visibility.Private, mutable, nil)
