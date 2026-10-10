@@ -1,0 +1,564 @@
+#!/bin/sh
+# shs-pipe-exit-hygiene.shs — ADVISORY static scan of shell scripts for exit
+# status reads that are not the status the script thinks it is. Sourced by
+# scripts/check/check-range-shs-hygiene-push.shs (stderr NOTE on touched
+# scripts, and its `--tree` census); executed directly only for `--selftest`.
+#
+#   shs_hygiene_scan <label> <file> [<label> <file> ...]
+#   shs_hygiene_scan_list <listfile>          lines of "<file>\t<label>"
+#       one finding per line on stdout:  <label>\t<line>\t<RULE>\t<statement>
+#       returns 0 when the scan ran (findings or not), 2 when it could not.
+#   shs_hygiene_tree <root> <rev> <generate 0|1>
+#       whole-tree census of <rev>:scripts/**.sh|.shs against the shrink-only
+#       baseline; verdict on the last stdout line, returns 0/1/2.
+#
+# The scan NEVER decides a required verdict. A statement heuristic cannot know
+# whether a filter's status is the one the author wanted (`grep -v x | sort -u
+# > f && mv ...`, `n=$(wc -c <f | tr -d ' ') || return 1`, `if cmd | grep -q`
+# are all correct), so the rules are deliberately narrow — three shapes where
+# the status read is unambiguously not the command's own — and everything else
+# is left alone.
+#
+# RULES
+#   PIPE-STATUS       a bare pipeline whose LAST stage is tail|head|tee|cat,
+#                     immediately followed by a direct `$?` read (`rc=$?`,
+#                     `[ $? ...`, `test $?`, `exit $?`, `return $?`,
+#                     `case $? in`). That is the display filter's status, so a
+#                     failed or killed command reads as 0.
+#   TIMEOUT-UNCHECKED a bare `timeout ... cmd` statement (status not used at
+#                     all) immediately followed by an echo/printf that says
+#                     PASS/OK/passed/success: 124 and 137 are announced green.
+#   STALE-RC          a direct `$?` read whose previous statement is
+#                     echo/printf/sleep/date/`rm -f`, or
+#                     `local|export|readonly|declare|typeset v=$(cmd)`.
+#
+# NOT reported, by construction (each is a --selftest must-not-flag fixture):
+#   any file that mentions `pipefail` (set -o, shopt -so, in a subshell);
+#   PIPESTATUS; `&&`/`||` on the pipeline; `x=$(a | b) || ...`; a last stage
+#   that is grep/sort/cut/tr/sed/wc/awk; a left side that is echo/printf/cat or
+#   the end of a group (`} 2>&1 | tee log`); `if ...; then ...; else rc=$?`;
+#   a function body `f() { rc=$?; ... }`; `timeout ... || true`; `timeout`
+#   under `set -e`; a case pattern such as `head | tail )`.
+# Escape for a reviewed line:  `# exit-hygiene-ok: <reason>`.
+#
+# Not a shell parser: quoted text and here-documents are blanked, `$( )` is
+# tracked by paren depth, statements are split on `;` and newlines. A file
+# whose quoting it cannot balance is reported as SCAN-INCOMPLETE.
+
+SHS_HYGIENE_BASELINE_REL=scripts/check/shs_pipe_exit_hygiene_baseline.txt
+
+shs_hygiene_scan() {
+    _shh_list="${TMPDIR:-/tmp}/.shs_hygiene_labels.$$"
+    : > "$_shh_list" || return 2
+    while [ $# -ge 2 ]; do
+        printf '%s\t%s\n' "$2" "$1" >> "$_shh_list"
+        shift 2
+    done
+    shs_hygiene_scan_list "$_shh_list"
+    _shh_rc=$?
+    rm -f "$_shh_list"
+    return "$_shh_rc"
+}
+
+shs_hygiene_scan_list() {
+    command -v awk >/dev/null 2>&1 || { echo "awk unavailable" >&2; return 2; }
+    SHS_HYGIENE_LIST="$1" awk '
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+    function firstword(s,   a) { s = trim(s); split(s, a, /[ \t]/); return a[1] }
+    function strip_kw(s,   again) {
+        again = 1
+        while (again) {
+            again = 0
+            s = trim(s)
+            if (s ~ /^(then|do|else|time)([ \t]|$)/) { sub(/^(then|do|else|time)/, "", s); again = 1 }
+            else if (s ~ /^\{([ \t]|$)/) { sub(/^\{/, "", s); again = 1 }
+        }
+        return s
+    }
+    # blank everything nested inside $( ... )
+    function depth0(s,   i, n, c, d, out) {
+        if (index(s, "$(") == 0) return s
+        n = length(s); d = 0; out = ""
+        for (i = 1; i <= n; i++) {
+            c = substr(s, i, 1)
+            if (c == "$" && substr(s, i + 1, 1) == "(") { if (d == 0) out = out "$("; d++; i++; continue }
+            if (d > 0) {
+                if (c == "(") d++
+                else if (c == ")") { d--; if (d == 0) out = out ")" }
+                continue
+            }
+            out = out c
+        }
+        return out
+    }
+    function has_op(s) { return index(s, OR) > 0 || index(s, AND) > 0 }
+    function op_pos(s,   a, b) {
+        a = index(s, OR); b = index(s, AND)
+        if (a == 0) return b
+        if (b == 0) return a
+        return a < b ? a : b
+    }
+    # the statement BEGINS with a read of $? (so it is the previous
+    # statement status, not a condition, group or function body)
+    function status_read(s) {
+        s = trim(s)
+        sub(/^(if|elif|while|until)[ \t]+/, "", s)
+        sub(/^(local|readonly)[ \t]+/, "", s)
+        if (s ~ /^[A-Za-z_][A-Za-z0-9_]*="?\$\?/) return 1
+        if (s ~ /^(\[\[|\[|test)[ \t]+"?\$\?/) return 1
+        if (s ~ /^(exit|return|case)[ \t]+"?\$\?/) return 1
+        return 0
+    }
+    function count(s, ch,   n, i) {
+        n = 0
+        while ((i = index(s, ch)) > 0) { n++; s = substr(s, i + 1) }
+        return n
+    }
+    # bare pipeline at depth 0 whose last stage only displays
+    function display_pipe(s,   d, n, parts, fw, lw, last) {
+        d = depth0(strip_kw(s))
+        if (d ~ /^(if|elif|while|until|!)[ \t]/) return 0
+        if (count(d, ")") > count(d, "(")) return 0
+        n = split(d, parts, "|")
+        if (n < 2) return 0
+        fw = firstword(parts[1])
+        if (fw ~ /^(echo|printf|cat|print|:|true|\}|\)|done|fi|esac)$/ || fw == "") return 0
+        last = trim(parts[n]); sub(/^&/, "", last)
+        lw = firstword(last)
+        return (lw ~ /^(tail|head|tee|cat)$/) ? 1 : 0
+    }
+    function emit(i, rule,   t) {
+        if (ok[i]) return
+        t = trim(soft[i]); gsub(/[ \t]+/, " ", t)
+        if (length(t) > 140) t = substr(t, 1, 140) "..."
+        printf "%s\t%d\t%s\t%s\n", LABEL, sline[i], rule, t
+    }
+    function analyze(   i, s, nxt, t, w, prev, pd) {
+        for (i = 1; i <= nst; i++) {
+            s = stmt[i]
+            nxt = (i < nst) ? stmt[i + 1] : ""
+
+            if (!file_pf && i < nst && !has_op(s) && index(s, "PIPESTATUS") == 0 &&
+                index(nxt, "PIPESTATUS") == 0 && status_read(nxt) && display_pipe(s))
+                emit(i, "PIPE-STATUS")
+
+            t = strip_kw(s); w = firstword(t)
+            if ((w == "timeout" || w == "gtimeout") && i < nst && !ee[i] && !has_op(s) &&
+                index(depth0(s), "|") == 0 && index(s, "$?") == 0 && t !~ /&$/) {
+                w = firstword(strip_kw(nxt))
+                if ((w == "echo" || w == "printf") && index(nxt, "$?") == 0 &&
+                    soft[i + 1] ~ /(PASS|[Pp]assed|SUCCESS|[Ss]uccess|(^|[^A-Za-z])OK([^A-Za-z]|$))/)
+                    emit(i, "TIMEOUT-UNCHECKED")
+            }
+
+            if (i > 1 && status_read(s)) {
+                prev = stmt[i - 1]
+                while (has_op(prev)) prev = substr(prev, op_pos(prev) + 1)
+                prev = strip_kw(prev); pd = prev
+                w = firstword(prev)
+                gsub(/[0-9]*>&[0-9-]/, "", pd)
+                if (w ~ /^(echo|printf|sleep|date)$/ || (w == "rm" && prev ~ /^rm[ \t]+-[A-Za-z]*f/)) {
+                    if (index(prev, "|") == 0 && index(pd, ">") == 0) emit(i, "STALE-RC")
+                } else if (w ~ /^(local|export|readonly|declare|typeset)$/ &&
+                           index(prev, "=$(") + index(prev, "=\"$(") > 0)
+                    emit(i, "STALE-RC")
+            }
+        }
+    }
+    function reset(   k) {
+        for (k in stmt) delete stmt[k]
+        for (k in soft) delete soft[k]
+        for (k in sline) delete sline[k]
+        for (k in ok) delete ok[k]
+        for (k in ee) delete ee[k]
+        nst = 0; sp = 0; heredoc = ""; hd_tabs = 0; acc = ""; accs = ""; acc_line = 0; acc_ok = 0
+        file_pf = 0; errexit = 0
+    }
+    # split the accumulated logical line into statements
+    function flush(   n, i, c, d, startp, piece, spiece) {
+        n = length(acc); d = 0; startp = 1
+        if (index(acc, "pipefail") > 0) file_pf = 1
+        for (i = (index(acc, ";") == 0) ? n + 1 : 1; i <= n + 1; i++) {
+            c = (i <= n) ? substr(acc, i, 1) : ";"
+            if (c == "(") d++
+            else if (c == ")") { if (d > 0) d-- }
+            if (c == ";" && (d == 0 || i > n)) {
+                if (i < n && substr(acc, i + 1, 1) == ";") continue
+                piece = trim(substr(acc, startp, i - startp))
+                spiece = substr(accs, startp, i - startp)
+                startp = i + 1
+                sub(/;$/, "", piece); piece = trim(piece)
+                if (piece == "") continue
+                gsub(/\|\|/, OR, piece); gsub(/&&/, AND, piece)
+                if (piece ~ /^set[ \t]+-[A-Za-z]*e/ || piece ~ /^set[ \t].*errexit/) errexit = 1
+                nst++
+                stmt[nst] = piece; soft[nst] = spiece; sline[nst] = acc_line
+                ok[nst] = acc_ok; ee[nst] = errexit
+            }
+        }
+        acc = ""; accs = ""; acc_line = 0; acc_ok = 0
+    }
+    BEGIN {
+        CR = sprintf("%c", 13); SQ = sprintf("%c", 39); OR = sprintf("%c", 1); AND = sprintf("%c", 2)
+        TAB = sprintf("%c", 9); CODE_RE = "[\\\\\"#$()" SQ "]"
+        HD_RE = "<<-?[ \t]*[\"" SQ "\\\\]?[A-Za-z_][A-Za-z0-9_]*"
+        HD_STRIP = "^<<-?[ \t]*[\"" SQ "\\\\]?"
+        nfiles = 0
+        while ((getline ln < ENVIRON["SHS_HYGIENE_LIST"]) > 0) {
+            k = index(ln, TAB); nfiles++
+            fname[nfiles] = substr(ln, 1, k - 1); flabel[nfiles] = substr(ln, k + 1)
+        }
+        close(ENVIRON["SHS_HYGIENE_LIST"])
+        bad = 0
+        for (fi = 1; fi <= nfiles; fi++) {
+            reset(); LABEL = flabel[fi]; FNRX = 0
+            while ((r = (getline fline < fname[fi])) > 0) { FNRX++; proc(fline) }
+            if (r < 0) { print "cannot read " fname[fi] > "/dev/stderr"; bad = 1 }
+            close(fname[fi])
+            if (sp > 0 || heredoc != "")
+                print LABEL TAB FNRX TAB "SCAN-INCOMPLETE" TAB "quote or here-document still open at end of file"
+            flush(); analyze()
+        }
+        exit bad
+    }
+    function proc(line,   n, i, k, c, nx, mode, code, sft, contin, t, rest, span) {
+        if (substr(line, length(line), 1) == CR) line = substr(line, 1, length(line) - 1)
+        if (heredoc != "") {
+            t = line; if (hd_tabs) sub(/^\t+/, "", t)
+            if (t == heredoc) heredoc = ""
+            return
+        }
+        n = length(line); code = ""; sft = ""; contin = 0; i = 1
+        while (i <= n) {
+            mode = (sp > 0) ? st[sp] : "c"
+            rest = substr(line, i)
+            if (mode == "s") k = index(rest, SQ)
+            else if (mode == "d") k = match(rest, /[\\"$]/)
+            else k = match(rest, CODE_RE)
+            if (k == 0) k = length(rest) + 1
+            if (k > 1) {
+                span = substr(rest, 1, k - 1)
+                if (mode == "s" || mode == "d") {
+                    t = span; gsub(/[^A-Za-z0-9 .:=-]/, "_", t); sft = sft t
+                    gsub(/./, "_", span); code = code span
+                } else { code = code span; sft = sft span }
+                i += k - 1
+                if (i > n) break
+            }
+            c = substr(line, i, 1); nx = substr(line, i + 1, 1)
+            if (mode == "s") { sp--; code = code c; sft = sft c }
+            else if (mode == "d") {
+                if (c == "\\") { code = code "__"; sft = sft "__"; i++ }
+                else if (c == "\"") { sp--; code = code c; sft = sft c }
+                else if (nx == "?") { code = code "$?"; sft = sft "$?"; i++ }
+                else if (nx == "(") { sp++; st[sp] = "p"; pd[sp] = 1; code = code "$("; sft = sft "$("; i++ }
+                else { code = code "_"; sft = sft "_" }
+            } else {
+                if (c == "\\") {
+                    if (i == n) contin = 1
+                    else { code = code "__"; sft = sft "__"; i++ }
+                }
+                else if (c == SQ) { sp++; st[sp] = "s"; code = code c; sft = sft c }
+                else if (c == "\"") { sp++; st[sp] = "d"; code = code c; sft = sft c }
+                else if (c == "#" && (i == 1 || substr(line, i - 1, 1) ~ /[ \t;]/)) break
+                else if (c == "$" && nx == "(") { sp++; st[sp] = "p"; pd[sp] = 1; code = code "$("; sft = sft "$("; i++ }
+                else if (c == "(" && mode == "p") { pd[sp]++; code = code c; sft = sft c }
+                else if (c == ")" && mode == "p") { pd[sp]--; if (pd[sp] == 0) sp--; code = code c; sft = sft c }
+                else { code = code c; sft = sft c }
+            }
+            i++
+        }
+        if (acc_line == 0) acc_line = FNRX
+        if (index(line, "exit-hygiene-ok:") > 0) acc_ok = 1
+        acc = acc code " "; accs = accs sft " "
+        # here-document: skip its body (delimiter read from the raw line)
+        if (sp == 0 && index(code, "<<") > 0 && index(code, "<<<") == 0 && match(line, HD_RE)) {
+            t = substr(line, RSTART, RLENGTH)
+            hd_tabs = (t ~ /^<<-/)
+            sub(HD_STRIP, "", t)
+            heredoc = t
+        }
+        t = trim(code)
+        if (contin || sp > 0 || t ~ /(\||&&)$/) return
+        flush()
+    }
+    ' </dev/null || return 2
+    return 0
+}
+
+# shs_hygiene_tree <root> <rev> <generate 0|1>
+shs_hygiene_tree() {
+    _tr_root=$1; _tr_rev=$2; _tr_gen=$3
+    _tr_oid=$(git -C "$_tr_root" rev-parse --verify --quiet "$_tr_rev^{commit}" 2>/dev/null) ||
+        { echo "ERROR — nothing was checked (rev $_tr_rev is not a commit)"; return 2; }
+    _tr_w=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    mkdir -p "$_tr_w/x"
+    git -C "$_tr_root" archive --format=tar -o "$_tr_w/s.tar" "$_tr_oid" scripts 2>/dev/null ||
+        { rm -rf "$_tr_w"; echo "ERROR — nothing was checked (git archive of $_tr_rev:scripts failed)"; return 2; }
+    tar -xf "$_tr_w/s.tar" -C "$_tr_w/x" 2>/dev/null ||
+        { rm -rf "$_tr_w"; echo "ERROR — nothing was checked (cannot unpack $_tr_rev:scripts)"; return 2; }
+    ( cd "$_tr_w/x" && find scripts -type f \( -name '*.shs' -o -name '*.sh' \) -print ) > "$_tr_w/paths.raw" ||
+        { rm -rf "$_tr_w"; echo "ERROR — nothing was checked (cannot enumerate scripts)"; return 2; }
+    LC_ALL=C sort "$_tr_w/paths.raw" > "$_tr_w/paths.txt"
+    awk -v d="$_tr_w/x/" '{ print d $0 "\t" $0 }' "$_tr_w/paths.txt" > "$_tr_w/list.txt"
+    _tr_n=$(awk 'END { print NR + 0 }' "$_tr_w/list.txt")
+    if [ "$_tr_n" -eq 0 ]; then
+        rm -rf "$_tr_w"; echo "ERROR — nothing was checked (no scripts/**.sh|.shs at $_tr_rev)"; return 2
+    fi
+    shs_hygiene_scan_list "$_tr_w/list.txt" > "$_tr_w/out.txt"
+    _tr_rc=$?
+    if [ "$_tr_rc" -ne 0 ]; then
+        rm -rf "$_tr_w"; echo "ERROR — nothing was checked (exit-hygiene scanner failed)"; return 2
+    fi
+    _tr_inc=$(awk -F '\t' '$3 == "SCAN-INCOMPLETE" { n++ } END { print n + 0 }' "$_tr_w/out.txt")
+    awk -F '\t' '$3 != "SCAN-INCOMPLETE" { c[$3 "\t" $1]++ } END { for (k in c) print c[k] "\t" k }' "$_tr_w/out.txt" > "$_tr_w/now.raw"
+    LC_ALL=C sort -t "$(printf '\t')" -k3,3 -k2,2 "$_tr_w/now.raw" > "$_tr_w/now.txt"
+    _tr_found=$(awk -F '\t' '{ s += $1 } END { print s + 0 }' "$_tr_w/now.txt")
+    _tr_base="$_tr_root/$SHS_HYGIENE_BASELINE_REL"
+    if [ "$_tr_gen" -eq 1 ]; then
+        {
+            echo "# shs_pipe_exit_hygiene_baseline.txt — SHRINK-ONLY census of exit-status hygiene findings."
+            echo "# <count><TAB><rule><TAB><path>. Written by: sh scripts/check/check-range-shs-hygiene-push.shs --tree --generate-baseline"
+            echo "# A row may be lowered or removed, never raised: fix the script, or mark the reviewed line"
+            echo "# '# exit-hygiene-ok: <reason>'. A row the tree no longer needs is STALE and fails --tree."
+            cat "$_tr_w/now.txt"
+        } > "$_tr_base"
+        rm -rf "$_tr_w"
+        echo "PASS — $_tr_n script(s) scanned at $_tr_rev, baseline rewritten with $_tr_found finding(s)"
+        return 0
+    fi
+    if [ ! -f "$_tr_base" ]; then
+        rm -rf "$_tr_w"; echo "ERROR — nothing was checked (baseline $SHS_HYGIENE_BASELINE_REL is missing)"; return 2
+    fi
+    awk '!/^#/ && NF' "$_tr_base" > "$_tr_w/base.txt"
+    awk -F '\t' '
+        FILENAME == ARGV[1] { b[$2 "\t" $3] = $1; next }
+        { k = $2 "\t" $3; seen[k] = 1
+          if ($1 > b[k] + 0) print "above\t" $1 "\t" b[k] + 0 "\t" k
+          else if ($1 < b[k] + 0) print "stale\t" $1 "\t" b[k] "\t" k }
+        END { for (k in b) if (!(k in seen)) print "stale\t0\t" b[k] "\t" k }
+    ' "$_tr_w/base.txt" "$_tr_w/now.txt" > "$_tr_w/diff.txt"
+    _tr_above=$(awk '/^above/ { n++ } END { print n + 0 }' "$_tr_w/diff.txt")
+    _tr_stale=$(awk '/^stale/ { n++ } END { print n + 0 }' "$_tr_w/diff.txt")
+    _tr_bsum=$(awk -F '\t' '{ s += $1 } END { print s + 0 }' "$_tr_w/base.txt")
+    if [ "$_tr_above" -gt 0 ] || [ "$_tr_stale" -gt 0 ]; then
+        echo "exit-hygiene rows that differ from the baseline (kind / now / baseline / rule / path):"
+        sed 's/^/  /' "$_tr_w/diff.txt"
+        awk -F '\t' 'FILENAME == ARGV[1] { if ($1 == "above") want[$5 SUBSEP $4] = 1; next } (($1 SUBSEP $3) in want) { print "  " $1 ":" $2 ": " $3 ": " $4 }' \
+            "$_tr_w/diff.txt" "$_tr_w/out.txt"
+        awk -F '\t' '{ print $5 }' "$_tr_w/diff.txt" > "$_tr_w/names.raw"
+        LC_ALL=C sort -u "$_tr_w/names.raw" > "$_tr_w/names.txt"
+        _tr_names=$(tr '\n' ' ' < "$_tr_w/names.txt")
+        rm -rf "$_tr_w"
+        echo "FAIL — $_tr_n script(s) scanned at $_tr_rev, $_tr_found finding(s) (baseline $_tr_bsum), $_tr_above row(s) above baseline, $_tr_stale stale row(s): ${_tr_names% }"
+        return 1
+    fi
+    rm -rf "$_tr_w"
+    echo "PASS — $_tr_n script(s) scanned at $_tr_rev, $_tr_found finding(s) all baselined (baseline $_tr_bsum), $_tr_inc scan(s) incomplete"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# --selftest (explicit only; the range gate never runs these fixtures)
+# ---------------------------------------------------------------------------
+shs_hygiene_selftest() {
+    _st=$(mktemp -d) || return 2
+    _st_fails=0; _st_n=0
+    : > "$_st/hx.list"; : > "$_st/hx.want"
+    # _hx <id> <rule|none> <script text>
+    _hx() {
+        printf '%s\n' "$3" > "$_st/hx.$1.sh"
+        printf '%s\t%s\n' "$_st/hx.$1.sh" "$1" >> "$_st/hx.list"
+        printf '%s\t%s\n' "$1" "$2" >> "$_st/hx.want"
+        _st_n=$((_st_n + 1))
+    }
+    # ---- must flag
+    _hx F1 PIPE-STATUS 'build 2>&1 | tail -5
+rc=$?'
+    _hx F2 PIPE-STATUS 'build 2>&1 | tee log; rc=$?'
+    _hx F3 PIPE-STATUS 'build | head -40
+if [ $? -ne 0 ]; then exit 1; fi'
+    _hx F4 PIPE-STATUS 'run_all | tee "$LOG"
+exit $?'
+    _hx F5 TIMEOUT-UNCHECKED 'timeout 30 ./verify
+echo "PASS verify"'
+    _hx F6 STALE-RC 'cc x.c
+echo "compiled"
+rc=$?'
+    _hx F7 STALE-RC 'run || { echo "failed" >&2; exit $?; }'
+    _hx F8 STALE-RC 'f() {
+    local out=$(run_it)
+    rc=$?
+}'
+    # ---- must NOT flag: the 20 legitimate shapes from the 2026-10-10 review
+    _hx R01 none 'build 2>&1 | tee log; rc=${PIPESTATUS[0]}
+exit "$rc"'
+    _hx R02 none 'set -euo pipefail
+build 2>&1 | tail -5
+rc=$?'
+    _hx R03 none 'if git ls-files | grep -q "\.spl$"; then echo yes; fi'
+    _hx R04 none 'git log --oneline | head -1
+echo done'
+    _hx R05 none 'f() {
+size=$(wc -c <"$1" | tr -d " ") || return 1
+}'
+    _hx R06 none 'grep -v vendor "$LIST" | sort -u > "$LIST.2" && mv "$LIST.2" "$LIST"'
+    _hx R07 none 'git diff --name-only | grep -q "\.spl$"
+has_source=$?'
+    _hx R08 none '(set -o pipefail; build 2>&1 | tee log)
+rc=$?'
+    _hx R09 none 'timeout 60 qemu-system-x86_64 -serial file:"$LOG" || true
+echo "qemu done; looking for PASS marker in serial log"
+grep -q "TEST PASS" "$LOG" || exit 1'
+    _hx R10 none 'if run_gate; then echo ok; else rc=$?; echo "failed $rc"; fi'
+    _hx R11 none 'echo "starting"
+on_exit() { rc=$?; rm -rf "$tmp"; exit "$rc"; }
+trap on_exit EXIT'
+    _hx R12 none 'HB=$(grep HEARTBEAT "$LOG" 2>/dev/null | tail -n 1) || HB=""'
+    _hx R13 none 'du -ch "$D"/*.img 2>/dev/null | tail -1 || echo " (none found)"'
+    _hx R14 none 'digest=$(sha256sum "$f" | cut -d " " -f 1) || die "hash unavailable"'
+    _hx R15 none 'case "$1" in
+  head | tail ) shift && mode=$1 ;;
+esac'
+    _hx R16 none 'set -o errexit -o nounset -o pipefail
+x=$(build | tail -1) || exit 1'
+    _hx R17 none 'wait "$pid"; rc=$?
+echo "rc=$rc"'
+    _hx R18 none 'set -eu
+timeout 30 ./verify
+echo "PASS verify"'
+    _hx R19 none 'shopt -so pipefail
+build | tee log
+rc=$?'
+    _hx R20 none 'pgrep -f simple | grep -v "$$" ; alive_rc=$?'
+    # ---- must NOT flag: further correct forms
+    _hx C1 none 'build > log 2>&1; rc=$?
+tail -5 log
+exit "$rc"'
+    _hx C2 none 'echo "$out" | tail -1
+rc=$?
+build || rc=$?'
+    _hx C3 none 'timeout 30 ./verify; rc=$?
+[ "$rc" -eq 0 ] || exit "$rc"
+echo "PASS verify"
+if timeout 5 ./probe; then echo PASS; fi'
+    _hx C4 none 'cc x.c; rc=$?
+echo "compiled rc=$rc"
+run || { rc=$?; echo "failed" >&2; exit "$rc"; }
+out=$(run_it); rc=$?
+( job >log 2>&1; echo $? > rcfile ) &'
+    _hx C5 none 'cat <<EOF
+build | tail -5
+rc=$?
+EOF
+# build | tail -5
+build | tee log   # exit-hygiene-ok: fixture
+rc=$?'
+    _hx C6 none '{
+    build
+    echo "$?" >"$STATUS"
+} 2>&1 | tee "$BUILD_LOG"
+TEE_CODE=$?'
+    _hx C7 none 'cp a b && echo copied
+source_rc=0
+grep -v vendor list | sort -u | head -3
+echo next'
+
+    shs_hygiene_scan_list "$_st/hx.list" > "$_st/hx.out"; _st_rc=$?
+    [ "$_st_rc" -eq 0 ] || { echo "selftest FAIL: scanner did not run (rc=$_st_rc)"; _st_fails=$((_st_fails + 1)); }
+    awk -F '\t' '
+        FILENAME == ARGV[1] { want[$1] = $2; order[++n] = $1; next }
+        { if (index(" " got[$1] " ", " " $3 " ") == 0) got[$1] = (got[$1] == "" ? $3 : got[$1] " " $3) }
+        END {
+            for (i = 1; i <= n; i++) {
+                k = order[i]; g = (k in got) ? got[k] : "none"
+                if (g != want[k]) print "selftest FAIL " k ": expected " want[k] ", scanner said " g
+            }
+        }' "$_st/hx.want" "$_st/hx.out" > "$_st/hx.fail"
+    if [ -s "$_st/hx.fail" ]; then
+        cat "$_st/hx.fail"
+        _st_fails=$((_st_fails + $(awk 'END { print NR + 0 }' "$_st/hx.fail")))
+    fi
+    [ "$_st_n" -eq 35 ] || { echo "selftest FAIL: rule fixture count drifted ($_st_n)"; _st_fails=$((_st_fails + 1)); }
+
+    # ---- tree census on a fixture repo: missing baseline / clean / above / stale
+    _r="$_st/r"
+    mkdir -p "$_r/scripts/check" && git -C "$_r" init -q && git -C "$_r" config user.email s@t &&
+        git -C "$_r" config user.name selftest && git -C "$_r" config core.autocrlf false
+    printf '#!/bin/sh\nbuild 2>&1 | tail -5\nrc=$?\n' > "$_r/scripts/check/debt.shs"
+    printf '#!/bin/sh\nbuild > log 2>&1; rc=$?\n' > "$_r/scripts/check/clean.shs"
+    git -C "$_r" add -A && git -C "$_r" commit -q -m base
+    _o=$(shs_hygiene_tree "$_r" HEAD 0); _rc=$?
+    [ "$_rc" -eq 2 ] || { echo "selftest FAIL T1: missing baseline did not ERROR (rc=$_rc)"; _st_fails=$((_st_fails + 1)); }
+    _o=$(shs_hygiene_tree "$_r" HEAD 1); _rc=$?
+    _o=$(shs_hygiene_tree "$_r" HEAD 0); _rc=$?
+    case "$_rc:$_o" in
+        0:"PASS — 2 script(s) scanned at HEAD, 1 finding(s) all baselined (baseline 1), 0 scan(s) incomplete") ;;
+        *) echo "selftest FAIL T2: baselined tree not accepted (rc=$_rc: $_o)"; _st_fails=$((_st_fails + 1)) ;;
+    esac
+    printf 'timeout 9 ./v\necho PASS\n' >> "$_r/scripts/check/clean.shs"
+    git -C "$_r" commit -q -am grow
+    _o=$(shs_hygiene_tree "$_r" HEAD 0); _rc=$?
+    case "$_rc:$_o" in
+        1:*"FAIL — 2 script(s) scanned at HEAD, 2 finding(s) (baseline 1), 1 row(s) above baseline, 0 stale row(s): scripts/check/clean.shs") ;;
+        *) echo "selftest FAIL T3: growth not rejected (rc=$_rc: $_o)"; _st_fails=$((_st_fails + 1)) ;;
+    esac
+    printf '#!/bin/sh\nbuild > log 2>&1; rc=$?\n' > "$_r/scripts/check/clean.shs"
+    printf '#!/bin/sh\nbuild > log 2>&1; rc=$?\ntail -5 log\n' > "$_r/scripts/check/debt.shs"
+    git -C "$_r" commit -q -am fixed
+    _o=$(shs_hygiene_tree "$_r" HEAD 0); _rc=$?
+    case "$_rc:$_o" in
+        1:*"FAIL — 2 script(s) scanned at HEAD, 0 finding(s) (baseline 1), 0 row(s) above baseline, 1 stale row(s): scripts/check/debt.shs") ;;
+        *) echo "selftest FAIL T4: stale baseline row not rejected (rc=$_rc: $_o)"; _st_fails=$((_st_fails + 1)) ;;
+    esac
+    # the working copy must not decide: an uncommitted offender is invisible
+    _o=$(shs_hygiene_tree "$_r" HEAD 1); _rc=$?
+    printf 'build | tail -1\nrc=$?\n' >> "$_r/scripts/check/clean.shs"
+    _o=$(shs_hygiene_tree "$_r" HEAD 0); _rc=$?
+    [ "$_rc" -eq 0 ] || { echo "selftest FAIL T5: uncommitted edit changed the verdict (rc=$_rc: $_o)"; _st_fails=$((_st_fails + 1)); }
+    _st_n=$((_st_n + 5))
+
+    # ---- the range gate stays ADVISORY: a new offender is a stderr NOTE and
+    # the verdict is the same PASS a correct script gets.
+    _gate="$SHS_HYGIENE_HERE/../check-range-shs-hygiene-push.shs"
+    if [ -r "$_gate" ]; then
+        _g="$_st/g"
+        mkdir -p "$_g/scripts/tools" "$_g/config/check" && git -C "$_g" init -q && git -C "$_g" config user.email s@t &&
+            git -C "$_g" config user.name selftest && git -C "$_g" config core.autocrlf false
+        printf 'notes\n' > "$_g/README.md"
+        git -C "$_g" add -A && git -C "$_g" commit -q -m base
+        printf '#!/bin/sh\nset -eu\nLIST=$1\necho start\ngrep -v vendor "$LIST" | sort -u > "$LIST.2" && mv "$LIST.2" "$LIST"\nif run_gate; then echo ok; else rc=$?; echo "failed $rc"; exit "$rc"; fi\n' > "$_g/scripts/tools/list-tidy.shs"
+        printf '#!/bin/sh\nbuild 2>&1 | tail -5\nrc=$?\nexit "$rc"\n' > "$_g/scripts/tools/offender.shs"
+        git -C "$_g" add -A && git -C "$_g" commit -q -m scripts
+        sh "$_gate" --root "$_g" HEAD~1..HEAD > "$_st/gate.out" 2> "$_st/gate.err"; _rc=$?
+        _o=$(tail -1 "$_st/gate.out")
+        case "$_rc:$_o" in
+            0:"PASS — 2 file(s) in HEAD~1..HEAD examined, 2 .shs parsed, 0 new guard(s) wired") ;;
+            *) echo "selftest FAIL G1: advisory finding changed the gate verdict (rc=$_rc: $_o)"; _st_fails=$((_st_fails + 1)) ;;
+        esac
+        grep -q 'scripts/tools/offender.shs:2: PIPE-STATUS' "$_st/gate.err" ||
+            { echo "selftest FAIL G2: offender not named in the advisory NOTE"; _st_fails=$((_st_fails + 1)); }
+        if grep -q 'list-tidy.shs' "$_st/gate.err"; then
+            echo "selftest FAIL G3: a correct script was named in the advisory NOTE"; _st_fails=$((_st_fails + 1))
+        fi
+        _st_n=$((_st_n + 3))
+    fi
+
+    rm -rf "$_st"
+    if [ "$_st_fails" -ne 0 ]; then
+        echo "FAIL — $_st_n fixture(s) checked, $_st_fails failed"
+        return 1
+    fi
+    echo "PASS — $_st_n fixture(s) checked, selftest only"
+    return 0
+}
+
+case "${0##*/}" in
+    shs-pipe-exit-hygiene.shs)
+        SHS_HYGIENE_HERE=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SHS_HYGIENE_HERE=.
+        case "${1:-}" in
+            --selftest) shs_hygiene_selftest; exit $? ;;
+            *) echo "ERROR — nothing was checked (sourced library; the only direct mode is --selftest)"; exit 2 ;;
+        esac
+        ;;
+esac
