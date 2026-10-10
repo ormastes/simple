@@ -1,0 +1,65 @@
+# Regression for bootstrap_final_worker_frontend_replay_2026-10-11.
+# Real writer values must never collide with the native nil sentinel (3).
+use std.spec.*
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_type_kind}
+use compiler.hir.hir_codec.{hir_codec_header, hir_module_decode}
+
+describe "HIR codec native scalar representation":
+    it "preserves three among adjacent signed integer values":
+        var writer: HirCodecWriter = HirCodecWriter.create()
+        for value in [-3, -1, 0, 1, 2, 3, 4, 7]:
+            writer.put_i64(value)
+        expect(writer.ok).to_equal(true)
+        expect(writer.finish()).to_equal("-3\n-1\n0\n1\n2\n3\n4\n7\n")
+
+    it "preserves a three element count followed by its payload":
+        var writer: HirCodecWriter = HirCodecWriter.create()
+        val values: [i64] = [13, 23, 33]
+        writer.put_i64(values.len())
+        for value in values:
+            writer.put_i64(value)
+        expect(writer.ok).to_equal(true)
+        expect(writer.finish()).to_equal("3\n13\n23\n33\n")
+
+    it "preserves the full signed integer range":
+        var writer: HirCodecWriter = HirCodecWriter.create()
+        val minimum: i64 = -9223372036854775807 - 1
+        writer.put_i64(minimum)
+        writer.put_i64(9223372036854775807)
+        expect(writer.ok).to_equal(true)
+        expect(writer.finish()).to_equal("-9223372036854775808\n9223372036854775807\n")
+
+    it "keeps optional integer absence in the generated presence frame":
+        val element = HirType(kind: HirTypeKind.Unit, span: Span.empty())
+        var absent: HirCodecWriter = HirCodecWriter.create()
+        hc_enc_hir_type_kind(absent, HirTypeKind.Array(element, nil))
+        expect(absent.ok).to_equal(true)
+        expect(absent.finish()).to_equal("7\n1\n1\n5\n1\n0\n0\n0\n0\n\n0\n0\n")
+        var present: HirCodecWriter = HirCodecWriter.create()
+        hc_enc_hir_type_kind(present, HirTypeKind.Array(element, Some(3)))
+        expect(present.ok).to_equal(true)
+        expect(present.finish()).to_equal("7\n1\n1\n5\n1\n0\n0\n0\n0\n\n0\n1\n3\n")
+
+    it "preserves the bounded writer admission checks for three":
+        var accepted: HirCodecWriter = HirCodecWriter.create_canonical_bounded(22, 64, 22)
+        accepted.put_i64(3)
+        expect(accepted.ok).to_equal(true)
+        expect(accepted.finish()).to_equal("3\n")
+        var refused: HirCodecWriter = HirCodecWriter.create_canonical_bounded(21, 64, 22)
+        refused.put_i64(3)
+        expect(refused.ok).to_equal(false)
+        expect(refused.finish()).to_equal("")
+
+    it "rejects the old producer grammar before decoding its body":
+        expect(hir_codec_header()).to_start_with("spl-hircodec-v8 ")
+        expect(hir_module_decode("spl-hircodec-v6 spl-flatpool-v4\nN\n")).to_be_nil()
+
+    it "keeps boolean scalar bytes distinct":
+        var writer: HirCodecWriter = HirCodecWriter.create()
+        writer.put_bool(false)
+        writer.put_bool(true)
+        expect(writer.ok).to_equal(true)
+        expect(writer.finish()).to_equal("0\n1\n")
