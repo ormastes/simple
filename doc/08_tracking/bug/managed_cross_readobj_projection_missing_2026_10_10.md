@@ -1,0 +1,13 @@
+# Managed cross-runtime inspector was never captured
+
+Status: narrow capture repair, focused shell regression PASS; actual cross Simple admission/apps pending.
+
+0d3 cross_runtime_admit_v1 requires strict managed role llvm-readobj to inspect every ELF archive member. native_tool_projection_decode_v1 accepts this optional role, but authority.shs neither discovers nor emits it. A genuine canonical snapshot therefore cannot satisfy the new cross archive consumer even when LLVM provides the inspector. Do not bypass archive validation or hand-author an admission receipt.
+
+The repair extends the existing LLVM tool resolver, optionally includes llvm-readobj in the real snapshot inventory when available, and emits the role using the same canonical path/hash/version validation as other managed tools. Missing inspector preserves same-host eight-role captures; cross admission still fails closed without its required role. A discovered inspector with failing version probe aborts snapshot publication, not silently omit it. Unmanaged captures are unchanged.
+
+Behavioral test bootstrap_managed_readobj_authority_test.shs invokes actual canonical snapshot capture with isolated executable fixtures: selected inspector canonical path and hash; changed executable bytes change hash; nonzero inspector version probe rejects output; absent inspector leaves eight valid roles. All four cases passed once on Linux, no bootstrap/native build rerun. No live0d3 source or active Cargo cache changed.
+
+Generation path: source the existing bootstrap-stage3-provenance.shs facade from the reviewed helper revision; set SIMPLE_MANAGED_NATIVE_TOOLS=1 and explicit target-bound Clang/tool environment, then invoke bootstrap_stage3_tool_authority_snapshot(absolute output, canonical PATH, source root). Use bootstrap_stage3_directory_snapshot(absolute output, matching target runtime directory) for runtime bytes and canonical source_snapshot owner where strict runtime-source compilation needs it. Export their actual paths/digests through SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH/SHA256, SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH, SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH/SHA256, and matching SIMPLE_RUNTIME_PATH; replay every managed-tool-env assignment exactly. Actual cross compiler/tool/sysroot pins must describe the selected target, not host discovery. These are input snapshots only: they do not turn diagnostic Phase2 into admitted Stage3 or relabel test-profile runtime as canonical profile-bootstrap authority.
+
+Next gate: real matching target archive acceptance, wrong-machine rejection, target Hello compile/link/admission receipt and QEMU execution, then all vector DB/HTTP profiles. Old6ef ARM/RV archives remain distinct from rebuilt0d3 runtime containing exact float inverse.

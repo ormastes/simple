@@ -1,0 +1,48 @@
+#!/bin/sh
+# Exercise real snapshot capture, not a hand-authored managed-tool receipt.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/simple-readobj-authority.XXXXXX")
+fixture=$(CDPATH= cd -- "$fixture" && pwd -P)
+case "$fixture" in /*/simple-readobj-authority.*) ;; *) exit 1;; esac
+trap 'rm -rf -- "$fixture"' EXIT HUP INT TERM
+mkdir "$fixture/bin" "$fixture/selected"
+# Isolate discovery so absence cannot fall through to a system llvm-readobj.
+for tool in sh env perl sed file cmp sha256sum basename uname mv rm; do
+    ln -s "$(command -v "$tool")" "$fixture/bin/$tool"
+done
+for tool in cargo rustc clang ld ar ranlib llc llvm-as opt llvm-nm; do
+    printf '#!/bin/sh\nprintf "fixture %s version 1\\n"\n' "$tool" > "$fixture/bin/$tool"
+    chmod +x "$fixture/bin/$tool"
+done
+printf '#!/bin/sh\nprintf "selected inspector version 1\\n"\n' > "$fixture/selected/llvm-readobj"
+chmod +x "$fixture/selected/llvm-readobj"
+bootstrap_stage3_host_platform() { printf '%s\n' x86_64-unknown-linux-gnu; }
+bootstrap_stage3_target_c_compiler() { printf '%s\n' "$fixture/bin/clang"; }
+bootstrap_stage3_resolve_rust_toolchain() {
+    printf 'rustc-path=%s\ncargo-path=%s\n' "$fixture/bin/rustc" "$fixture/bin/cargo"
+}
+export SIMPLE_MANAGED_NATIVE_TOOLS=1 SIMPLE_LLVM_BIN="$fixture/selected"
+unset LLVM_SYS_231_PREFIX SIMPLE_LLVM_WIN_ROOT_23 LLVM_CONFIG LD AR RANLIB
+bootstrap_stage3_tool_authority_snapshot "$fixture/present" "$fixture/bin" "$root"
+expected=$(bootstrap_stage3_hash_file "$fixture/selected/llvm-readobj")
+grep -Fqx "managed-tool=llvm-readobj|path=$fixture/selected/llvm-readobj|sha256=$expected" "$fixture/present"
+[ "$(grep -c '^managed-tool=' "$fixture/present")" -eq 9 ]
+# Content identity must change when the actual selected executable changes.
+printf '# mutation\n' >> "$fixture/selected/llvm-readobj"
+bootstrap_stage3_tool_authority_snapshot "$fixture/changed" "$fixture/bin" "$root"
+changed=$(bootstrap_stage3_hash_file "$fixture/selected/llvm-readobj")
+[ "$changed" != "$expected" ]
+grep -Fqx "managed-tool=llvm-readobj|path=$fixture/selected/llvm-readobj|sha256=$changed" "$fixture/changed"
+# A discoverable but failing inspector is not silently omitted.
+printf '#!/bin/sh\nexit 7\n' > "$fixture/selected/llvm-readobj"
+if bootstrap_stage3_tool_authority_snapshot "$fixture/broken" "$fixture/bin" "$root"; then
+    echo 'FAIL: broken inspector version probe admitted' >&2; exit 1
+fi
+[ ! -e "$fixture/broken" ]
+rm "$fixture/selected/llvm-readobj"
+bootstrap_stage3_tool_authority_snapshot "$fixture/absent" "$fixture/bin" "$root"
+[ "$(grep -c '^managed-tool=' "$fixture/absent")" -eq 8 ]
+! grep -q '^managed-tool=llvm-readobj|' "$fixture/absent"
+echo 'PASS: selected inspector identity, byte mutation, broken probe rejection, legacy eight-role compatibility'
