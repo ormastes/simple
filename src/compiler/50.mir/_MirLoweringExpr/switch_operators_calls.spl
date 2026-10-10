@@ -633,19 +633,36 @@ impl MirLowering:
         # ABI-compatible with every existing consumer, and the static path is
         # retained verbatim for scalar payloads.
         # doc/08_tracking/bug/option_none_promoted_to_some_by_static_nil_provenance_2026-09-14.md
+        # A local whose DECLARED HIR type is already Optional (a `T?` param,
+        # an annotated binding copied forward) holds the canonical handle (or
+        # the bare nil sentinel every presence predicate reads as None): it
+        # must never be wrapped a second time. Params are registered in
+        # local_hir_types at function entry but never in option_value_locals,
+        # so without this `fn pass(v: i64?) -> i64?: v` returned Some(handle)
+        # and a None caller value arrived as present.
+        if self.local_declared_hir_type_is_optional(local.id):
+            self.option_value_locals[local.id] = true
+            self.mark_runtime_value_local(local.id)
+            return local
         val disc = if self.nil_locals.has(local.id): 1 else: 0
-        val runtime_disc = disc == 0 and option_payload_is_boxed(option_type)
+        # Representation rule (native_scalar_nil_compare_payload_bits_2026-10-10):
+        # an Optional value is ALWAYS the enum-id-1 handle or the bare nil
+        # sentinel, never a raw payload word. The discriminant may be fixed
+        # here only when the source is provably one thing: a nil literal
+        # (None) or a value whose static type is a NON-optional scalar (Some,
+        # whatever its bits -- including 3, true and 0). Every other source
+        # (boxed payloads, an i64 slot of unknown provenance: extern results,
+        # Dict/Array reads, untyped values, a handle the registries lost
+        # track of) is classified at RUNTIME by normalize_option_handle:
+        # already a handle -> unchanged, sentinel -> None, else Some.
+        val static_scalar_some = disc == 0 and not option_payload_is_boxed(option_type) and self.local_is_provably_scalar_payload(local)
+        if disc == 0 and not static_scalar_some:
+            return self.normalize_option_handle(local, option_type)
         var b = self.builder
         val enum_id_local = b.new_temp(MirType(kind: MirTypeKind.I32))
         b.emit_const(enum_id_local, MirConstValue.Int(1), MirType(kind: MirTypeKind.I32))
         var disc_local = b.new_temp(MirType(kind: MirTypeKind.I32))
-        if runtime_disc:
-            # None=1 exactly when the payload word is the nil sentinel (3).
-            val nil_key = b.emit_const_int(3)
-            val is_nil = b.emit_binop(MirBinOp.Eq, mir_operand_copy(local), mir_operand_copy(nil_key), MirType.bool())
-            disc_local = b.emit_cast(mir_operand_copy(is_nil), MirType(kind: MirTypeKind.I32))
-        else:
-            b.emit_const(disc_local, MirConstValue.Int(disc), MirType(kind: MirTypeKind.I32))
+        b.emit_const(disc_local, MirConstValue.Int(disc), MirType(kind: MirTypeKind.I32))
         var payload_local = local
         if disc == 1:
             payload_local = b.emit_const_int(3)
@@ -686,6 +703,97 @@ impl MirLowering:
             self.remember_local_hir_type(tagged.id, option_type, 2, 0)
             return tagged
         local
+
+    me local_declared_hir_type_is_optional(local_id: i64) -> bool:
+        """True when the lowering registered an Optional HIR type for this
+        local (function params at entry, annotated bindings, values copied
+        forward from either)."""
+        match self.find_local_hir_type(local_id):
+            case Some(found):
+                if found != nil and found != 0:
+                    return match found.kind:
+                        case HirTypeKind.Optional(_): true
+                        case _: false
+            case nil: ()
+        false
+
+    me local_is_provably_scalar_payload(local: LocalId) -> bool:
+        """True when `local` is certainly a raw NON-optional scalar value, so
+        wrapping it as Some is correct whatever its bits: its registered HIR
+        type is Int/Float/Bool/Char, or its MIR slot is a scalar type that is
+        never used as an erased/handle slot (anything but I64/U64). An I64
+        slot with no scalar HIR type is of unknown provenance and is not."""
+        if self.is_runtime_value_local(local.id) or self.option_value_locals.has(local.id):
+            return false
+        # An extern's declared scalar return may be the raw nil word.
+        if self.extern_result_locals.has(local.id):
+            return false
+        match self.find_local_hir_type(local.id):
+            case Some(found):
+                if found != nil and found != 0:
+                    match found.kind:
+                        case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
+                            return true
+                        case HirTypeKind.Optional(_):
+                            return false
+                        case _: ()
+            case nil: ()
+        var scalar_slot = false
+        if val mir_ty = self.local_mir_type_of(local):
+            scalar_slot = match mir_ty.kind:
+                case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32: true
+                case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32: true
+                case MirTypeKind.F32 | MirTypeKind.F64 | MirTypeKind.Bool | MirTypeKind.Char: true
+                case _: false
+        scalar_slot
+
+    me normalize_option_handle(local: LocalId, option_type: HirType) -> LocalId:
+        """Runtime classification of a word of unknown provenance into the
+        canonical Optional handle: already an enum-id-1 handle -> unchanged;
+        the bare nil sentinel (3) -> None; anything else -> Some(word). This
+        is what makes `nil` a real, distinct value for scalar optionals:
+        Some(3), Some(true) and Some(0) are heap handles, never the raw
+        sentinel, and a handle is never wrapped twice."""
+        var b = self.builder
+        val enum_id_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_id"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val id_res = b.emit_call(enum_id_fn, [mir_operand_copy(local)], MirType.i64())
+        val id_local = id_res ?? LocalId(id: 0)
+        val option_id = b.emit_const_int(1)
+        val is_handle = b.emit_binop(MirBinOp.Eq, mir_operand_copy(id_local), mir_operand_copy(option_id), MirType.bool())
+        val handle_block = b.new_block(Some("option_norm_handle"))
+        val raw_block = b.new_block(Some("option_norm_raw"))
+        val merge_block = b.new_block(Some("option_norm_merge"))
+        val result = b.new_temp(MirType.i64())
+        b.terminate_if(mir_operand_copy(is_handle), handle_block, raw_block)
+        b.switch_to_block(handle_block)
+        b.emit_copy(result, local)
+        b.terminate_goto(merge_block)
+        b.switch_to_block(raw_block)
+        # None=1 exactly when the word is the nil sentinel (3); the payload
+        # word is passed through untouched either way.
+        val nil_key = b.emit_const_int(3)
+        val is_nil = b.emit_binop(MirBinOp.Eq, mir_operand_copy(local), mir_operand_copy(nil_key), MirType.bool())
+        val enum_id_local = b.new_temp(MirType(kind: MirTypeKind.I32))
+        b.emit_const(enum_id_local, MirConstValue.Int(1), MirType(kind: MirTypeKind.I32))
+        val disc_local = b.emit_cast(mir_operand_copy(is_nil), MirType(kind: MirTypeKind.I32))
+        val ctor = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val boxed_res = b.emit_call(ctor, [mir_operand_copy(enum_id_local), mir_operand_copy(disc_local), mir_operand_copy(local)], MirType.i64())
+        val boxed = boxed_res ?? LocalId(id: 0)
+        b.emit_copy(result, boxed)
+        b.terminate_goto(merge_block)
+        b.switch_to_block(merge_block)
+        self.builder = b
+        val tagged = self.tag_enum_construct_result(result)
+        self.option_value_locals[tagged.id] = true
+        self.mark_runtime_value_local(tagged.id)
+        self.remember_local_hir_type(tagged.id, option_type, 2, 0)
+        tagged
 
     me direct_call_extern_name(func: MirOperand) -> text:
         """Extract the callee's symbol name from a direct-call `func`
