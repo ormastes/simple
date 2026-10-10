@@ -48,3 +48,7 @@ The cold-init native JIT compatibility probe reached 1009 HIR modules but failed
 ### 2026-10-10 payload closure and later-stage blocker
 
 The imported enum-payload owner alias repair cleared all 42 former HIR type failures in the 1009-module JIT probe. The native build then stopped at 63 unspecialized generic call sites (E-MONO-033) before MIR, linking, or JIT execution. See `doc/08_tracking/bug/item5_jit_probe_hir_type_closure_2026-10-10.md`. Item 5 remains incomplete; provider closure, size, startup, and RSS acceptance have no comparable measurements.
+
+### 2026-10-11 gate-only lock follow-up
+
+The six dynlib gate-only generic calls use the concrete mutex gate helper. A focused native build reports zero unresolved generic calls and reaches link after replacing an unsupported indexed array removal with shift-and-pop. Missing mutex link symbols still block runtime execution. The full JIT, demand-load closure, and measured size/startup/RSS gates remain open; see the Item 5 HIR/mono bug note.
