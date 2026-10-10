@@ -16,7 +16,7 @@ use compiler.core.ast_expr.{EXPR_TUPLE, EXPR_UNARY, EXPR_UNSAFE_BLOCK, EXPR_WHIL
 use compiler.core.ast_stmt.{STMT_ASSIGN, STMT_BLOCK, STMT_COMPOUND_ASSIGN, STMT_EXPR, STMT_FOR}
 use compiler.core.ast_stmt.{STMT_IF, STMT_LAZY_VAL_DECL, STMT_MATCH, STMT_RETURN, STMT_VAL_DECL, STMT_VAR_DECL, STMT_WHILE}
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
-use compiler.core.types.{span_line}
+use compiler.core.types.{span_col, span_line}
 
 # Pure-Simple twin of src/compiler_rust/parser/src/capture_write_check.rs: a
 # nested fn or lambda must not assign to a local of an enclosing function or
@@ -33,6 +33,8 @@ var cw_frame_boundary: [bool] = []
 var cw_frame_fn: [text] = []
 var cw_pending_fn: text = ""
 var cw_error: text = ""
+var cw_error_line: i64 = 0
+var cw_error_col: i64 = 0
 var cw_globals: [text] = []
 
 fn cw_is_global(name: text) -> bool:
@@ -105,6 +107,8 @@ fn cw_note_assign(target_eid: i64, span_id: i64):
     if kind == 2:
         val sid = if span_id > 0: span_id else: t.span_id
         val line = if sid > 0: span_line(sid) else: 0
+        cw_error_line = line
+        cw_error_col = if sid > 0: span_col(sid) else: 0
         cw_error = cw_message(t.s_val, cw_current_fn(), line)
     elif kind == 0 and not cw_is_global(t.s_val):
         cw_declare(t.s_val)
@@ -154,7 +158,8 @@ fn cw_walk_stmt(sid: i64):
         cw_pending_fn = s.name
         cw_walk_expr(s.expr_idx)
         cw_pending_fn = ""
-        cw_declare(s.name)
+        # A destructuring decl carries its names encoded as "(a, b)".
+        cw_declare_iter(s.name)
         return
     if tag == STMT_ASSIGN or tag == STMT_COMPOUND_ASSIGN:
         for veid in s.body:
@@ -239,22 +244,22 @@ fn cw_walk_expr(eid: i64):
 # Returns "" when the module is clean, else the first diagnostic.
 fn capture_write_check_module() -> text:
     cw_error = ""
+    cw_error_line = 0
+    cw_error_col = 0
     # Module-level val/var are globals, never captures: without this an
     # enclosing fn that assigns a global (`G = 0`) would implicitly declare
     # it as a local, and a closure writing the same global would be rejected
-    # although the seed accepts it (its checker has a module frame).
+    # although the seed accepts it (its checker has a module frame). Collected
+    # in declaration order, as the seed does: a global declared AFTER a
+    # function is not yet known inside it.
     cw_globals = []
-    var gid: i64 = 0
-    val total = decl_count()
-    while gid < total:
-        val g: CoreDecl = decl_get(gid)
-        if g.tag == DECL_VAL or g.tag == DECL_VAR or g.tag == DECL_LAZY_VAL:
-            cw_globals.push(g.name)
-        gid = gid + 1
     var did: i64 = 0
+    val total = decl_count()
     while did < total and cw_error == "":
         val d: CoreDecl = decl_get(did)
-        if d.tag == DECL_FN and not d.name.starts_with("__lambda_"):
+        if d.tag == DECL_VAL or d.tag == DECL_VAR or d.tag == DECL_LAZY_VAL:
+            cw_globals.push(d.name)
+        elif d.tag == DECL_FN and not d.name.starts_with("__lambda_"):
             cw_names = []
             cw_name_frame = []
             cw_frame_boundary = []
@@ -267,4 +272,12 @@ fn capture_write_check_module() -> text:
         did = did + 1
     cw_error
 
-export capture_write_check_module
+# Source position of the write the last capture_write_check_module() reported
+# (0 when the span is unknown).
+fn capture_write_error_line() -> i64:
+    cw_error_line
+
+fn capture_write_error_col() -> i64:
+    cw_error_col
+
+export capture_write_check_module, capture_write_error_line, capture_write_error_col

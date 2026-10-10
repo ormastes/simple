@@ -400,5 +400,5 @@ language rule for reads; a WRITE is a compile error (owner ruling 2026-09-27).
 The gate is not in MIR: `core/capture_write_check.spl` runs on the flat AST in
 `parse_and_build_module_with_scope_owner`, before `desugar_collections`
 (which turns `x = x + y` into `x.merge(y)`). Do not add by-reference capture
-in MIR to "fix" a dropped write. Bug:
+in MIR to "fix" a dropped write. Escape: `SIMPLE_CAPTURE_WRITE_CHECK=warning|off`. Bug:
 `doc/08_tracking/bug/stage2_closure_capture_write_silently_dropped_2026-10-11.md`.

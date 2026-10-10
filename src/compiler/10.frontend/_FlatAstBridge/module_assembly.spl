@@ -11,7 +11,7 @@ use compiler.frontend.trace_policy.{
 # ParserModule shape expected by HIR lowering. This is used as the bootstrap-safe
 # frontend path when the newer parser surface is unavailable.
 
-use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parser_error}
+use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parser_error, parser_error_at}
 use compiler.frontend.core.string_interpolation_expand.{expand_string_interpolations_with_placeholder_receipt}
 use compiler.frontend.core.string_interpolation_expand.{si_stats_reset, si_stats_report}
 use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_call_args_after_interpolation_known_present}
@@ -31,7 +31,7 @@ use compiler.core.ast_expr.*
 use compiler.core.ast_stmt.*
 use compiler.core.ast_stmt.{STMT_GPU_LAUNCH, stmt_get_gpu_grid, stmt_get_gpu_block}
 use compiler.core.ast_coverage_inventory.{compiler_coverage_inventory_record_module}
-use compiler.core.capture_write_check.{capture_write_check_module}
+use compiler.core.capture_write_check.{capture_write_check_module, capture_write_error_line, capture_write_error_col}
 use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY, TYPE_ANY, TYPE_NIL}
 use compiler.core.types.{TYPE_DICT, TYPE_FN, TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
 use compiler.core.types.{TYPE_RESULT, TYPE_FUTURE, TYPE_POLL, TYPE_TASK, TYPE_GENERIC_ERASED}
@@ -129,6 +129,13 @@ fn _sffi_transient_array_scope_end() -> bool:
 
 fn flat_module_env_get(key: text) -> text:
     _sffi_env_get(key) ?? ""
+
+# SIMPLE_CAPTURE_WRITE_CHECK=error|warning|off. Unset or unknown is `error`:
+# a closure write to a captured local is silently dropped by MIR, so the
+# permissive levels are opt-in escapes, never a default.
+fn flat_capture_write_level() -> text:
+    val level = flat_module_env_get("SIMPLE_CAPTURE_WRITE_CHECK")
+    if level == "off" or level == "warning": level else: "error"
 
 fn flat_decl_tag_text(idx: i64) -> text:
     val tag = decl_get_tag(idx)
@@ -1368,7 +1375,15 @@ pub fn build_module_from_flat_pool_blob(blob: text, source: text, path: text) ->
     reset_all_pools()
     parser_init_with_path(source, path)
     val _hp_t1 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
-    if not flat_pools_restore_all(blob):
+    var blob_usable = flat_pools_restore_all(blob)
+    # A blob stored at a permissive SIMPLE_CAPTURE_WRITE_CHECK level, or by a
+    # compiler without the check (phase-2 import, shared store), must not come
+    # back as a clean hit: treat it as a miss so the fresh parse reports it.
+    # The blob is post-desugar, so an `x = x + y` write is not visible here.
+    if blob_usable and flat_capture_write_level() == "error":
+        if capture_write_check_module() != "":
+            blob_usable = false
+    if not blob_usable:
         # Leave nothing half-restored behind for the reparse that follows.
         reset_all_pools()
         parser_init_with_path(source, path)
@@ -1451,11 +1466,19 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
     # (closures capture by value and are read-only). MIR lowers a closure body
     # against a by-value snapshot, so without this the write is silently
     # dropped. Must run before desugar_collections, which rewrites
-    # `x = x + y` into `x.merge(y)` and so erases the assignment. A parse
-    # with errors is never stored, so a cache hit cannot bypass this.
-    val capture_write_diagnostic = capture_write_check_module()
-    if capture_write_diagnostic != "":
-        parser_error(capture_write_diagnostic)
+    # `x = x + y` into `x.merge(y)` and so erases the assignment. An error
+    # parse is never stored; build_module_from_flat_pool_blob re-checks a hit.
+    val capture_write_level = flat_capture_write_level()
+    if capture_write_level != "off":
+        val capture_write_diagnostic = capture_write_check_module()
+        if capture_write_diagnostic != "":
+            val capture_write_line = capture_write_error_line()
+            if capture_write_level == "warning":
+                print "[capture_write_check] warning: {path}: line {capture_write_line}: {capture_write_diagnostic}"
+            elif capture_write_line > 0:
+                parser_error_at(capture_write_line, capture_write_error_col(), capture_write_diagnostic)
+            else:
+                parser_error(capture_write_diagnostic)
     desugar_collections(0, 0)
     val _pp_t4 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
     compiler_coverage_inventory_record_module(path)
