@@ -323,3 +323,7 @@ retains a different repeated-rejection contract; renew its tests separately.
 ## 2026-10-10 kernel closure continuation
 
 The five bootstrap admission programs are now classified as P-static fixtures in the kernel closure manifest. The checker self-test passes and the full census reports 2,237 classified, zero unclassified. Its dependency gate still fails with 3 K0-to-P, 7 K1-to-P, and 11 kernel-to-app/OS imports. This is a Phase 0 repair, not optional-provider or size qualification. See [the continuation report](../../../09_report/compiler/item56_release_continuation_2026-10-10.md).
+
+## 2026-10-10 VHDL partition alignment
+
+The first manifest projection now classifies `src/compiler/70.backend/backend/_VhdlProcess/**` as P_STATIC, matching the already-existing kernel-plugin-fabric projection. The closure checker reports zero K1-to-P imports after this correction (previously seven). It still rejects three K0-to-P and eleven kernel-to-app/OS imports. This is ownership accounting, not provider demand loading or binary-size qualification. See [the continuation report](../../../09_report/compiler/item56_release_continuation_2026-10-10.md).
