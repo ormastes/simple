@@ -490,5 +490,6 @@ qualification blocker rather than evidence that the Item 6 graph cutover works.
 See [the exact reproduction](../../../08_tracking/bug/item5_vhdl_port_stage2_hir_collection_plan_owner_2026-10-11.md).
 
 A focused typed owner binding lets the direct collection-plan compile finish
-HIR but its 90-module MIR pass reports 58 errors; the ordinary CLI and
-Item 6 native performance cohorts remain unqualified.
+HIR. A later narrow equality repair clears collection-plan MIR diagnostics,
+but the 90-module MIR pass still reports 55 errors in other modules. The
+ordinary CLI and Item 6 native performance cohorts remain unqualified.

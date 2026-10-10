@@ -57,3 +57,22 @@ The typed bindings preserve the declared enum owner and are kept as a
 source-level repair candidate. The underlying field-projection owner bug
 remains open; the MIR failures are a separate current-source qualification
 blocker. The three-cycle limit for this focused diagnosis is exhausted.
+
+## 2026-10-11 narrow MIR equality repair
+
+The first direct MIR error was three whole-`HirExpr` comparisons in
+`collection_plan.spl`. The loop is now taken from the one stored original
+block, so its redundant `original_loop` copy is gone. Validation compares the
+source binding by symbol and type and compares admitted variable/literal
+mappings by their values and types. Two authored regression cases cover source
+and induction binding mutation after extraction.
+
+A bounded direct compile with the same admitted Stage 2 binary reached HIR
+90/90 and MIR 90/90, then exited 1 after 100.321 s with 55 MIR errors, down
+from 58. No diagnostic names `collection_plan.spl`; the first remaining error
+is `DimExprKind.Named` payload mismatch at `hir_types.spl:797:51`.
+Other errors include ambiguous bare variants in
+`hir_lowering/type_equality.spl`, missing enum runtime identity, and
+`PlatformLayoutDiagnostic` payload mismatch. This is stage-scoped compile
+evidence, not a unit/spec PASS or Item 5 qualification. The focused VHDL port
+spec and native size/startup cohort remain unrun.

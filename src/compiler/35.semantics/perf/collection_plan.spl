@@ -63,7 +63,6 @@ struct CollectionPlanFacts:
 
 struct CollectionLoopOrigin:
     original_block: HirBlock
-    original_loop: HirExpr
     induction_symbol: SymbolId
     mapped_expr: HirExpr
     accumulator_symbol: SymbolId
@@ -74,6 +73,46 @@ fn collection_origin_variable(expr: HirExpr) -> i64:
         case HirExprKind.Var(symbol): symbol.id
         case HirExprKind.NamedVar(symbol, _): symbol.id
         case _: -1
+
+fn collection_origin_same_suffix(a: text?, b: text?) -> bool:
+    if a.? != b.?:
+        return false
+    if a.?:
+        return a.unwrap() == b.unwrap()
+    true
+
+fn collection_origin_same_mapping(a: HirExpr, b: HirExpr) -> bool:
+    if not a.has_type_ or not b.has_type_ or not hir_types_equal(a.type_, b.type_):
+        return false
+    match a.kind:
+        case HirExprKind.Var(symbol):
+            collection_origin_variable(b) == symbol.id
+        case HirExprKind.NamedVar(symbol, _):
+            collection_origin_variable(b) == symbol.id
+        case HirExprKind.IntLit(value, suffix):
+            match b.kind:
+                case HirExprKind.IntLit(other, other_suffix):
+                    value == other and collection_origin_same_suffix(suffix, other_suffix)
+                case _: false
+        case HirExprKind.FloatLit(value, suffix):
+            match b.kind:
+                case HirExprKind.FloatLit(other, other_suffix):
+                    value == other and collection_origin_same_suffix(suffix, other_suffix)
+                case _: false
+        case HirExprKind.FloatLexeme(value, suffix):
+            match b.kind:
+                case HirExprKind.FloatLexeme(other, other_suffix):
+                    value == other and collection_origin_same_suffix(suffix, other_suffix)
+                case _: false
+        case HirExprKind.BoolLit(value):
+            match b.kind:
+                case HirExprKind.BoolLit(other): value == other
+                case _: false
+        case HirExprKind.CharLit(value):
+            match b.kind:
+                case HirExprKind.CharLit(other): value == other
+                case _: false
+        case _: false
 
 fn collection_loop_origin_matches(origin: CollectionLoopOrigin, source: HirExpr, output_type: HirType) -> bool:
     val block = origin.original_block
@@ -92,39 +131,43 @@ fn collection_loop_origin_matches(origin: CollectionLoopOrigin, source: HirExpr,
         case _: return false
     match block.stmts[1].kind:
         case HirStmtKind.Expr(loop_expr):
-            if loop_expr != origin.original_loop: return false
-        case _: return false
-    match origin.original_loop.kind:
-        case HirExprKind.For(_, iter, body, _):
-            if iter != source or body.has or body.stmts.len() != 1: return false
-            val source_id = collection_origin_variable(source)
-            if source_id < 0 or source_id == origin.accumulator_symbol.id or source_id == origin.induction_symbol.id:
-                return false
-            match source.type_.kind:
-                case HirTypeKind.Array(element, _):
-                    match origin.mapped_expr.kind:
-                        case HirExprKind.Var(symbol):
-                            if symbol.id != origin.induction_symbol.id or not hir_types_equal(origin.mapped_expr.type_, element): return false
-                        case HirExprKind.NamedVar(symbol, _):
-                            if symbol.id != origin.induction_symbol.id or not hir_types_equal(origin.mapped_expr.type_, element): return false
-                        case HirExprKind.IntLit(_, _): pass
-                        case HirExprKind.FloatLit(_, _): pass
-                        case HirExprKind.FloatLexeme(_, _): pass
-                        case HirExprKind.BoolLit(_): pass
-                        case HirExprKind.CharLit(_): pass
+            if not loop_expr.has_type_: return false
+            match loop_expr.kind:
+                case HirExprKind.For(binding, iter, body, label):
+                    if binding.id != origin.induction_symbol.id or not iter.has_type_ or label.?:
+                        return false
+                    val source_id = collection_origin_variable(source)
+                    if source_id < 0 or source_id == origin.accumulator_symbol.id or source_id == origin.induction_symbol.id:
+                        return false
+                    if collection_origin_variable(iter) != source_id or not hir_types_equal(iter.type_, source.type_) or body.has or body.stmts.len() != 1:
+                        return false
+                    match source.type_.kind:
+                        case HirTypeKind.Array(element, _):
+                            match origin.mapped_expr.kind:
+                                case HirExprKind.Var(symbol):
+                                    if symbol.id != origin.induction_symbol.id or not hir_types_equal(origin.mapped_expr.type_, element): return false
+                                case HirExprKind.NamedVar(symbol, _):
+                                    if symbol.id != origin.induction_symbol.id or not hir_types_equal(origin.mapped_expr.type_, element): return false
+                                case HirExprKind.IntLit(_, _): pass
+                                case HirExprKind.FloatLit(_, _): pass
+                                case HirExprKind.FloatLexeme(_, _): pass
+                                case HirExprKind.BoolLit(_): pass
+                                case HirExprKind.CharLit(_): pass
+                                case _: return false
                         case _: return false
-                case _: return false
-            match body.stmts[0].kind:
-                case HirStmtKind.Expr(call):
-                    if not call.has_type_: return false
-                    match call.kind:
-                        case HirExprKind.MethodCall(receiver, _, args, resolution):
-                            if not receiver.has_type_ or collection_origin_variable(receiver) != origin.accumulator_symbol.id or not hir_types_equal(receiver.type_, output_type):
-                                return false
-                            if args.len() != 1 or args[0].has_name or args[0].value != origin.mapped_expr: return false
-                            match resolution:
-                                case MethodResolution.InstanceMethod(_, symbol):
-                                    if symbol.id != origin.append_symbol.id: return false
+                    match body.stmts[0].kind:
+                        case HirStmtKind.Expr(call):
+                            if not call.has_type_: return false
+                            match call.kind:
+                                case HirExprKind.MethodCall(receiver, _, args, resolution):
+                                    if not receiver.has_type_ or collection_origin_variable(receiver) != origin.accumulator_symbol.id or not hir_types_equal(receiver.type_, output_type):
+                                        return false
+                                    if args.len() != 1 or args[0].has_name or not collection_origin_same_mapping(args[0].value, origin.mapped_expr):
+                                        return false
+                                    match resolution:
+                                        case MethodResolution.InstanceMethod(_, symbol):
+                                            if symbol.id != origin.append_symbol.id: return false
+                                        case _: return false
                                 case _: return false
                         case _: return false
                 case _: return false
@@ -233,18 +276,12 @@ fn validate_collection_plan(plan: CollectionPlan) -> Result<bool, text>:
                 if val origin = node.loop_origin:
                     if node.kind != CollectionPlanKind.Map or node.call_arguments.len() != 0:
                         return Err("collection loop origin requires an explicit mapping node")
-                    if not origin.original_loop.has_type_ or not origin.mapped_expr.has_type_:
+                    if not origin.mapped_expr.has_type_:
                         return Err("collection loop origin has untyped operands")
                     if origin.induction_symbol.id < 0 or origin.accumulator_symbol.id < 0 or origin.append_symbol.id < 0:
                         return Err("collection loop origin has invalid symbols")
                     if origin.induction_symbol.id == origin.accumulator_symbol.id:
                         return Err("collection loop origin aliases its accumulator")
-                    match origin.original_loop.kind:
-                        case HirExprKind.For(binding, iter, _, label):
-                            if binding.id != origin.induction_symbol.id or not iter.has_type_ or label.?:
-                                return Err("collection loop origin has invalid iteration binding")
-                        case _:
-                            return Err("collection loop origin is not a canonical for")
                     val input = node.inputs[0]
                     if input < 0 or input >= i or not plan.nodes[input].source_expr.?:
                         return Err("collection loop origin requires its original source")
