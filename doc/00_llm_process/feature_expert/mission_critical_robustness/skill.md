@@ -275,3 +275,20 @@ failed bucket; with the single-spec fix ablated a crash degrades from
   `bin/simple help test | grep unstable`, then re-run the five fixtures.
 - Acceptance against the fixture set is being measured by another lane —
   **do not record a verdict here until that lane reports.**
+
+## Any rules, opt-in lints (robustness item 7b, 2026-10-11)
+
+- Three warn-first families, `allow` in EVERY profile (opt-in: `SIMPLE_ANY_RULES=warn` or a simple.sdn family level; never imply them from `robust`/`critical` — `src/compiler/simple.sdn` is `critical` and that made plain lint 2.5x slower),
+  files under `src/compiler/**` only: `written_any_decl` (`W-ANY-DECL-001`),
+  `any_fallback_use` (`W-HIR-INFER-003`), `any_receiver_use`
+  (`W-ANY-USE-001/002`). Guide: `doc/07_guide/compiler/robustness/any-warn-rules.md`.
+- `simple lint` does not lower HIR. With a family on it runs `<self> check
+  <file>` with `SIMPLE_ANY_RULES=<mask>` and relays the findings;
+  `SIMPLE_ANY_RULES=off` is the kill switch. Do not import HIR lowering into
+  `90.tools/lint/_LintMain/*`: on the seed it costs +7 s per lint run, a
+  top-level `use lazy` is loaded eagerly there, and a function-local `use`
+  loses `impl` methods (`method index_module_callable not found on SymbolTable`).
+- HIR cannot tell a written `Any` from the fallback one (both
+  `HirTypeKind.Any`; unresolved imported type names are `Error`, not `Any`),
+  so the declaration rule is a source scan (`written_any_scan.spl`).
+- Shrink-only ratchet: `scripts/check/check-any-warn-rules-ratchet.shs`.

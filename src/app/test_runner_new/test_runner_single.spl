@@ -37,13 +37,13 @@ use std.nogc_sync_mut.test_runner.resource_policy.{test_max_procs_value_valid}
 # so a crash reported "no examples executed" instead of CRASHED. Reused rather
 # than reimplemented on purpose -- a second copy of this classification would
 # drift out of sync exactly as the duplicated composite-grammar parsers did.
-use std.test_runner.test_executor_parsing.{make_result_from_output}
+use std.test_runner.test_executor_parsing.{make_result_from_output, spec_source_has_raw_assert}
 use std.string_core.{char_code}
 use std.common.coverage_sdn.{parse_coverage_sdn, merge_coverage, render_coverage_sdn}
 use common.plugin.aspect_params.{aspect_coverage_cutover_policy_v1}
 use app.test_daemon.light_protocol.{timeout_verdict_line, has_verdict_line, exit_code_reason, unrun_verdict_line, unrun_reason}
 
-use std.io_runtime.{file_exists}
+use std.io_runtime.{file_exists, file_read_nullable}
 @unsafe(reason: "raw test-source/coverage text ABI; helper return types cannot carry I/O errors", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{file_write}
@@ -729,6 +729,51 @@ fn read_test_result_evidence(path: text) -> (i64, i64, i64):
         return (0, 0, 0)
     (passed, failed, 1)
 
+# Expectation tally sidecar written by std.spec next to the v1 evidence file
+# (`<evidence>.expectations`, "simple-bdd-expectations-v1\n<n>\n"). Returns
+# -1 for absent/unreadable/malformed -- UNKNOWN, which must never be read as
+# zero: only a tally that says 0 makes a file VACUOUS (BUG-02 / T12).
+fn read_test_result_expectations(evidence_path: text) -> i64:
+    if evidence_path == "":
+        return -1
+    val path = evidence_path + ".expectations"
+    if not file_exists(path):
+        return -1
+    val content = file_read_nullable(path) ?? ""
+    val parts = content.split("\n")
+    if parts.len() < 2 or parts[0] != "simple-bdd-expectations-v1":
+        return -1
+    val n_text = parts[1].trim()
+    val n = n_text.to_i64() ?? -1
+    if n < 0 or n.to_text() != n_text or content != "simple-bdd-expectations-v1\n{n_text}\n":
+        return -1
+    n
+
+# One line, grep-stable, emitted beside the verdict for a VACUOUS file.
+fn vacuous_verdict_line(path: text, executed: i64) -> text:
+    "SPEC FILE VACUITY: {path} outcome=VACUOUS executed={executed} expectations=0"
+
+# The documented switch from warn-first to fail: SIMPLE_TEST_VACUOUS_STRICT=1.
+fn vacuous_strict_enabled() -> bool:
+    env_get("SIMPLE_TEST_VACUOUS_STRICT") == "1"
+
+val VACUOUS_BASELINE_PATH: text = "scripts/check/vacuous_spec_zero_assertion_baseline.txt"
+
+# True when `path` (slash-normalised) is listed in the baseline file: a
+# known zero-assertion spec that strict mode must not fail until fixed.
+fn vacuous_baselined(path: text) -> bool:
+    if not file_exists(VACUOUS_BASELINE_PATH):
+        return false
+    val wanted = path.replace("\\", "/")
+    val content = file_read_nullable(VACUOUS_BASELINE_PATH) ?? ""
+    for line in content.split("\n"):
+        val entry = line.trim()
+        if entry == "" or entry.starts_with("#"):
+            continue
+        if entry == wanted or wanted.ends_with("/" + entry):
+            return true
+    false
+
 # --- SIMPLE_COVERAGE measured line coverage (2026-08-02) -------------------
 # The seed interpreter already records executed statement lines in a global
 # collector when SIMPLE_COVERAGE=1 (driver real_main -> init_coverage_from_env,
@@ -1300,8 +1345,11 @@ fn main() -> i64:
         print "error: test-runner: cannot restore structured result environment"
         return 1
     val (evidence_passed, evidence_failed, has_evidence) = read_test_result_evidence(evidence_path)
+    val evidence_expectations = read_test_result_expectations(evidence_path)
     if evidence_path != "" and file_exists(evidence_path):
         val _ = file_delete(evidence_path)
+    if evidence_path != "" and file_exists(evidence_path + ".expectations"):
+        val _ = file_delete(evidence_path + ".expectations")
     if exec_path != run.path and file_exists(exec_path):
         val _ = file_delete(exec_path)
     val child_stdout = stdout
@@ -1524,6 +1572,28 @@ fn main() -> i64:
     # same file is neutralised (but counted) in a sweep. Neutralisation
     # itself lives in test_runner_main.in_development_adjust; duplicating it
     # here would make an explicit run unable to show its own failure.
+    # Zero-EXPECTATION gate (BUG-02 / T12; task 15a). The zero-EXAMPLE gates
+    # above catch a file that ran nothing; this catches a file whose examples
+    # ran, exited clean, and never evaluated a single expect()/assert -- the
+    # shape of a lowering spec whose module came back empty, where every
+    # `to_contain` on "" was skipped by an early return. Gated on a tally the
+    # child actually wrote (sidecar present and == 0); an unknown tally (-1:
+    # engines that do not run std.spec's counters, or no evidence path) is
+    # never treated as zero. Feature-gated SKIP files have passed == 0 and
+    # are untouched.
+    # WARN-FIRST: the line is always printed; the verdict flips to a failure
+    # only under SIMPLE_TEST_VACUOUS_STRICT=1, and even then a file listed in
+    # scripts/check/vacuous_spec_zero_assertion_baseline.txt is exempt until
+    # it is fixed and removed from that file. Live only on this runner: the
+    # Rust seed evaluates describe/it/expect as intrinsics and writes no
+    # sidecar, so under the seed the tally is unknown and nothing fires.
+    if failed == 0 and passed > 0 and evidence_expectations == 0 and unverified_error == "" and not spec_source_has_raw_assert(file_read_nullable(run.path) ?? ""):
+        print vacuous_verdict_line(run.path, passed)
+        if vacuous_strict_enabled() and not vacuous_baselined(run.path):
+            failed = 1
+            print "error: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated"
+        else:
+            print "warning: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated (advisory; SIMPLE_TEST_VACUOUS_STRICT=1 fails it)"
     if source_is_in_development(rt_file_read_text(run.path)):
         print in_development_explicit_line(run.path)
     print_summary(run.path, passed, failed, real_skipped, real_pending, duration_ms, if failed == 0: unverified_error else: "")

@@ -7,6 +7,12 @@ description: SPipe Skill — runner/docgen/process around executable SSpec `.spl
 
 ## Bootstrap failure collection
 
+For one-thread crash diagnosis, host CUDA policy, RAM cache-parent staging and
+owned-process finality, use [native staging and terminal evidence](../../doc/07_guide/tooling/bootstrap_native_staging.md).
+A compile last-line/exit/object-size observation is not an SSpec verdict. Preserve
+actual test counts, stopped bug records, campaign Phase 3 priority and the full
+CLI command-owner gate; authored fixtures remain unexecuted until observed.
+
 For cached per-file continuation and manual link diagnosis, use
 [cached object continuation and early linking](../../doc/07_guide/tooling/bootstrap_failure_collection.md#cached-object-continuation-and-early-linking).
 Keep tagged workarounds separate from permanent fixes; create a reproducing

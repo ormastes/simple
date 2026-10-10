@@ -195,6 +195,11 @@ impl MirLowering:
         self.local_hir_type_resource_states = []
         self.bitfield_value_syms = {}
         self.struct_value_syms = {}
+        # Keyed by LocalId like struct_value_syms, and LocalIds restart per
+        # function: a `W(v: "s")` built in one function must not type the
+        # fields of whatever local reuses its id in the next one.
+        self.generic_instance_field_types = {}
+        self.generic_instance_field_struct_names = {}
         self.runtime_array_locals = {}
         self.runtime_dict_locals = {}
         self.runtime_elem_value_type = {}
@@ -204,6 +209,8 @@ impl MirLowering:
         self.tagged_text_locals = {}
         self.option_value_locals = {}
         self.nil_locals = {}
+        self.extern_result_locals = {}
+        self.static_scalar_locals = {}
         self.resource_owned_locals = []
         self.consumed_resource_locals = {}
 
@@ -683,7 +690,24 @@ impl MirLowering:
         # current_has_vhdl_metadata above, so nested lowering cannot leak it.
         val previous_fn_returns_bool = self.current_fn_returns_bool
         self.current_fn_returns_bool = fn_returns_bool
-        val result = if fn_returns_bool:
+        # ... and for a scalar-optional function whose TAIL is a conditional:
+        # each arm must box its own value (see lower_expr_for_slot), which the
+        # threaded expected type does. Any other tail of a `-> T?` function
+        # keeps the plain path and is boxed once, after the block.
+        var fn_tail_conditional_into_scalar_optional = false
+        match fn_.return_type.kind:
+            case HirTypeKind.Optional(tail_optional_inner):
+                if hir_type_is_plain_scalar(tail_optional_inner) and fn_.body.has and fn_.body.value != nil:
+                    match fn_.body.value.kind:
+                        case HirExprKind.If(_, _, tail_if_else):
+                            fn_tail_conditional_into_scalar_optional = tail_if_else != nil
+                        case HirExprKind.IfChain(_, tail_chain_else):
+                            fn_tail_conditional_into_scalar_optional = tail_chain_else != nil
+                        case HirExprKind.MatchCase(_, _):
+                            fn_tail_conditional_into_scalar_optional = true
+                        case _: ()
+            case _: ()
+        val result = if fn_returns_bool or fn_tail_conditional_into_scalar_optional:
             self.lower_block_expected(fn_.body, fn_.return_type)
         else:
             self.lower_block(fn_.body)
@@ -718,6 +742,24 @@ impl MirLowering:
                         # must be boxed before the caller records the result as
                         # a RuntimeValue local.
                         returned_tail_local = self.box_runtime_value(tail_local)
+                    case HirTypeKind.Optional(_):
+                        # `-> T?` implicit tail: the same canonical-handle
+                        # promotion the explicit `return` path applies
+                        # (lower_return_expr). Without it a `-> i64?` body
+                        # ending in a raw scalar, a nil literal or an untyped
+                        # value returned the raw word, so the caller's
+                        # presence test read payload bits against the nil
+                        # sentinel (3 -> None, nil -> ... whatever the word
+                        # was). Already-boxed tails pass through unchanged.
+                        returned_tail_local = self.ensure_option_handle(tail_local, fn_.return_type)
+                    case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
+                        # Scalar tail that is a scalar Optional local (`v`
+                        # after `if v == nil: return ..`): return the payload,
+                        # exactly as `return v` does. Bool included: a tail
+                        # already coerced to a presence predicate (`opt.?`)
+                        # is a fresh Bool temp, not an Optional local, and is
+                        # returned unchanged by the helper.
+                        returned_tail_local = self.option_scalar_payload_of(returned_tail_local)
                     case _:
                         ()
                 # WP-E: the function's own tail value moves the resource out
@@ -964,6 +1006,10 @@ impl MirLowering:
             module.constants = constants
             bldr.module = module
             self.builder = bldr
+            # Address materialization and ordinary folded reads share this
+            # resolved-symbol cache. Keep it in sync with the module constant.
+            if sym_id_always >= 0:
+                self.global_constants_by_id[sym_id_always] = mir_const
             # mutglobal2 lane (module-level `var`/`val` mutation end-to-end,
             # see scratchpad/mutglobal_plan.md + scratchpad/mutglobal2
             # report): `global_symbol_ids`/`global_const_exprs` (registered
@@ -1222,6 +1268,45 @@ impl MirLowering:
                 # recovered "unresolved type"). Registering such a type must
                 # not abort the whole bootstrap compile — degrade to the
                 # tagged any/i64 slot the runtime already uses for `any`.
+                #
+                # 1a (MIR half, CURRENT_BUG_PREVENTION.md): the erasure is no
+                # longer silent. It is recorded as a lowering ADVISORY naming
+                # owner + span (`self.advisory` -> `self.mir_advisories`, NOT
+                # `self.errors`: bootstrap_type_registration, backend/compiler,
+                # jit_interpreter and simpleos focused_pipeline all abort on
+                # `errors.len() > 0`, and array/dict literal lowering compares
+                # `errors.len()` around element lowering). It is a real error
+                # only under SIMPLE_MIR_VERIFY_LEVELS="E-MIR-TYPE-Error=error".
+                val type_error_level = self.mir_advisory_level("E-MIR-TYPE-Error")
+                if type_error_level == "off":
+                    return MirType.i64()
+                val error_fn = if self.mir_tag_probe_active_function != "":
+                    self.mir_tag_probe_active_function
+                else:
+                    "<module-level>"
+                val error_span: Span? = if type_.span.file != "" or type_.span.line > 0:
+                    Some(type_.span)
+                else:
+                    nil
+                if type_error_level == "error":
+                    # Promoted: every occurrence is a real error. No rate
+                    # limit and no summary line -- a "suppressed" note must
+                    # never itself become an error.
+                    self.advisory("E-MIR-TYPE-Error", "unresolved HIR type (HirTypeKind.Error) reached lower_type in fn {error_fn} (module {self.current_module_id}) and was erased to i64", error_span)
+                    return MirType.i64()
+                # Rate limit (advisory level only): at most 3 reports per
+                # module + function, then one summary line, so an unresolved
+                # import does not produce hundreds of identical diagnostics
+                # (measured 240/file). Keyed by module AND function, and the
+                # table is cleared at each module boundary (`lower_module`),
+                # so a same-named function in a later module is reported.
+                val report_key = "{self.current_module_id}::{error_fn}"
+                val prior_reports = self.mir_type_error_reports[report_key] ?? 0
+                self.mir_type_error_reports[report_key] = prior_reports + 1
+                if prior_reports < 3:
+                    self.advisory("E-MIR-TYPE-Error", "unresolved HIR type (HirTypeKind.Error) reached lower_type in fn {error_fn} (module {self.current_module_id}) and was erased to i64", error_span)
+                elif prior_reports == 3:
+                    self.advisory("E-MIR-TYPE-Error", "further unresolved HIR types in fn {error_fn} (module {self.current_module_id}) suppressed after 3 reports", error_span)
                 MirType.i64()
             case HirTypeKind.Isolated(inner):
                 # `iso T` ERASES to T's MIR representation. Isolation is an

@@ -49,6 +49,26 @@ struct MirLowering:
     # call's return type to the i64 fallback (text returns printed as
     # decimals under the numeric print coercion).
     fn_return_types: Dict<i64, HirType>
+    # Symbol ids of `extern fn` declarations (lower_module pre-pass). An
+    # extern's declared scalar return (`-> i64`) is NOT a nil-free contract:
+    # the C/Rust runtime returns the raw nil word for "absent" (e.g.
+    # rt_enum_payload on a payload-less variant), so a result local of such
+    # a call must never be treated as a provably non-nil scalar.
+    extern_fn_symbols: Dict<i64, bool>
+    # Locals holding (a copy of) an extern call's result. Consulted by the
+    # `== nil` scalar fold and by ensure_option_handle's static-Some path;
+    # propagated through let/var copies like nil_locals.
+    extern_result_locals: Dict<i64, bool>
+    # Locals produced by an expression that is a NON-optional scalar by
+    # construction, whatever its bits: an integer/float/bool/char literal, an
+    # arithmetic, bitwise or comparison result, a numeric negation, a cast to
+    # a scalar type, or an if/block/`??` whose every result is one of those
+    # (hir_expr_is_static_scalar). Such a value has no nil state, so
+    # ensure_option_handle boxes it as Some without the runtime sentinel
+    # test -- that test reads the integer 3 as nil. Propagated through
+    # let/var copies like extern_result_locals.
+    # doc/08_tracking/bug/optional_scalar_runtime_classified_three_becomes_none_2026-10-11.md
+    static_scalar_locals: Dict<i64, bool>
     current_function_symbols: [SymbolId]
     current_function_names: [text]
     loop_stack: [(BlockId, BlockId)]  # (continue_block, break_block)
@@ -155,6 +175,29 @@ struct MirLowering:
     # struct_value_syms (see lower_expr's Field arm) so a further `.field`
     # on that result can resolve correctly.
     struct_field_type_name: Dict<text, [text]>
+    # Generic structs (BUG-IT-6, stage2 micro_g). Struct NAME -> ordered
+    # field markers: the TYPE PARAMETER name when a field is declared as a
+    # bare type parameter (`struct Pair<A, B>: a: A`), "" otherwise. Such a
+    # field has no declared representation of its own; reading it used to
+    # lower the field as a struct named `A` (and `p.a + p.b` died with
+    # "operator overload for struct A").
+    struct_field_type_param: Dict<text, [text]>
+    # Struct NAME -> its declared type-parameter names in order, so a base
+    # whose HIR type is `Pair<text, i64>` (a parameter or annotated let)
+    # maps a type-param field to the instantiation's argument.
+    struct_type_param_names: Dict<text, [text]>
+    # Construct-result LOCAL id -> per-field MIR type actually stored by
+    # that `Pair(a: "a", b: 7)` (and the nested struct name each field
+    # holds), so a type-param field read off that instance gets the
+    # INSTANCE's type, not the template's. Copied along with
+    # struct_value_syms when a struct value is copied into a new binding.
+    # Struct NAME -> per-field flag: the declared type holds a type parameter
+    # INSIDE a container (`items: [T]`, `first: T?`, `by: Dict<text, T>`).
+    # Such a field is typed by the instance too, but has a shape of its own,
+    # so it is not a `struct_field_type_param` entry.
+    struct_field_over_type_param: Dict<text, [bool]>
+    generic_instance_field_types: Dict<i64, [MirType]>
+    generic_instance_field_struct_names: Dict<i64, [text]>
     # Struct NAME -> ordered field representation markers. `"str"` marks a
     # declared `text` field whose projected MIR local must remain
     # Opaque("str"); leaving it as the generic i64 fallback breaks native
@@ -168,6 +211,12 @@ struct MirLowering:
     # then the module being lowered). register_provider_struct relocates the
     # bare entry only for that owner, never for another same-named provider.
     struct_bare_layout_owner: Dict<text, text>
+    # Canonical struct identity (`{dotted owner module}::{Name}`) -> the
+    # qualified layout key its DECLARATION registered. A declaration's
+    # defining_module is a source path and an import's is the dotted module
+    # name, so `composite_layout_key` of an imported struct symbol names no
+    # registered layout; this maps either spelling back to the declared one.
+    struct_identity_layout_key: Dict<text, text>
     # Struct NAME -> ordered array-element struct names for fields such as
     # `commands: [DrawIrCommand]`. Field loads use this to preserve both the
     # runtime-array identity and the decoded element layout.
@@ -248,6 +297,11 @@ struct MirLowering:
     # implementor set is unknown there, so trait-object calls fail closed at
     # compile time. Not reset per module.
     trait_impl_closure_complete: bool
+    # Running count of trait-object calls this lowering DEVIRTUALIZED (direct
+    # call to the single implementor). Never reset; the driver reads the delta
+    # per module and refuses to archive a module whose delta is non-zero
+    # (post_mono_archive_admission_v1, E-MONO-038).
+    devirtualized_calls: i64 = 0
     # Closure HIR modules consulted ONLY for trait-implementor registration
     # when lower_module receives no providers (the stage3 bootstrap-fixed
     # path lowers bootstrap_main alone; passing it full providers would also
@@ -534,6 +588,24 @@ struct MirLowering:
     # Reset at each module boundary; authority comes from local HirFunction
     # extern declarations, never a bare name or function-shaped value.
     exact_extern_signatures: Dict<i64, MirSignature> = {}
+    # E-MIR-TYPE-Error advisories already emitted (rate limit; see
+    # lower_type's HirTypeKind.Error arm). Key: "<module id>::<function>".
+    # Reset at each module boundary; unused when the level is `error`.
+    mir_type_error_reports: Dict<text, i64> = {}
+    # Lowering ADVISORIES (E-MIR-TYPE-Error, E-MIR-MATCH-GUARD). Deliberately
+    # NOT `errors`: every non-driver route treats `errors.len() > 0` as fatal
+    # and lowering itself compares `errors.len()` around sub-lowerings
+    # (`errors_before`), so an advisory in `errors` changes behaviour. The
+    # driver reports these as warnings; see `MirLowering.advisory`.
+    mir_advisories: [MirError] = []
+    # SIMPLE_MIR_VERIFY_LEVELS resolved once per lowering (id -> level).
+    mir_advisory_levels: Dict<text, text> = {}
+    mir_advisory_levels_loaded: bool = false
+    # 3a guard-count invariant (lower_match_case): guard branches the match
+    # being lowered must emit / has emitted. Saved and restored around nested
+    # matches. Level: advisory id E-MIR-MATCH-GUARD.
+    match_guards_expected: i64 = 0
+    match_guards_lowered: i64 = 0
 
 impl MirLowering:
     fn local_symbol_slot(symbol_id: i64) -> i64:
@@ -635,6 +707,40 @@ impl MirLowering:
             if authoritative_slot >= 0 and authoritative_slot < self.local_symbol_values.len():
                 return self.local_symbol_values[authoritative_slot]
         LocalId(id: -1)
+
+    fn hir_type_mentions_type_param(ty: HirType, symbols: SymbolTable) -> bool:
+        """True when a type parameter occurs anywhere in `ty`, under either
+        spelling (`TypeParam`, or `Named` of a symbol `symbols` declares as a
+        type parameter)."""
+        if ty == nil:
+            return false
+        match ty.kind:
+            case HirTypeKind.TypeParam(_, _): true
+            case HirTypeKind.Named(sym, args):
+                val info = symbols.get_symbol_raw(sym.id)
+                if info != nil and info.kind == SymbolKind.TypeParam:
+                    return true
+                self.any_hir_type_mentions_type_param(args, symbols)
+            case HirTypeKind.Array(elem, _): self.hir_type_mentions_type_param(elem, symbols)
+            case HirTypeKind.Slice(elem): self.hir_type_mentions_type_param(elem, symbols)
+            case HirTypeKind.Optional(inner): self.hir_type_mentions_type_param(inner, symbols)
+            case HirTypeKind.Dict(k, v):
+                self.hir_type_mentions_type_param(k, symbols) or self.hir_type_mentions_type_param(v, symbols)
+            case HirTypeKind.Result(ok, err):
+                self.hir_type_mentions_type_param(ok, symbols) or self.hir_type_mentions_type_param(err, symbols)
+            case HirTypeKind.Tuple(elems): self.any_hir_type_mentions_type_param(elems, symbols)
+            case HirTypeKind.Function(params, ret, _):
+                self.any_hir_type_mentions_type_param(params, symbols) or self.hir_type_mentions_type_param(ret, symbols)
+            case _: false
+
+    fn any_hir_type_mentions_type_param(types: [HirType], symbols: SymbolTable) -> bool:
+        if types == nil:
+            return false
+        for raw in types:
+            val t: HirType = raw
+            if self.hir_type_mentions_type_param(t, symbols):
+                return true
+        false
 
     me remember_local_hir_type(local_id: i64, type_: HirType, isolation_state: i64, resource_state: i64):
         val normalized_state = if isolation_state == 1:

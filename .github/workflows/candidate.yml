@@ -96,6 +96,35 @@ jobs:
           echo "attempt=$((10#$attempt))" >> "$GITHUB_OUTPUT"
           echo "attempt_name=$attempt_name" >> "$GITHUB_OUTPUT"
 
+      - name: Ensure LLVM dev archives referenced by llvm-config exist
+        run: |
+          set -euo pipefail
+          # ubuntu-latest image rolls can leave llvm-config --libfiles
+          # referencing archives the image no longer ships. Observed
+          # 2026-10-10 (image 20261004.327): libPolly.a / libPollyISL.a were
+          # listed by /usr/lib/llvm-18/bin/llvm-config but absent from
+          # /usr/lib/llvm-18/lib, so the seed-inputs fingerprint failed
+          # fail-closed ("failed to fingerprint Rust seed inputs", candidate
+          # v1.0.0-rc.1 a008) before any stage could start. Verify every
+          # advertised archive and install its provider before bootstrap.
+          llvm_config=/usr/lib/llvm-18/bin/llvm-config
+          [ -x "$llvm_config" ] || exit 0
+          missing=""
+          for lib in $($llvm_config --link-static --libfiles); do
+            [ -f "$lib" ] || missing="$missing $lib"
+          done
+          if [ -n "$missing" ]; then
+            echo "llvm-config advertises missing archives:$missing" >&2
+            sudo apt-get update
+            case "$missing" in
+              *libPolly*) sudo apt-get install -y libpolly-18-dev ;;
+              *) echo "no provider mapping for missing archives" >&2; exit 1 ;;
+            esac
+            for lib in $($llvm_config --link-static --libfiles); do
+              [ -f "$lib" ] || { echo "still missing after install: $lib" >&2; exit 1; }
+            done
+          fi
+
       - name: Build receipt-free admitted Stage 2 trust root
         env:
           SIMPLE_NO_STUB_FALLBACK: '1'

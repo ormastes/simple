@@ -43,3 +43,17 @@ Cycle1 stopped at an overbroad preparation closure bound. Cycle2 rejected a hist
 ## Remaining gates
 
 The manual mirrors the eight real parser/surface scenarios. Alias binding and complete `register_imported_symbol` error propagation are not proved. Alternative `export M.{...}` syntax remains a separate pre-existing limitation. No full Phase4 product, self-hosted rebuild, native test, large-facade allocation benchmark, full compiler/lib check, MCP/LSP check, MCP stdio/native smoke, or `spipe-docgen` result is claimed. Required broader checks remain UNRUN and block production-readiness/release claims. Shared older/dirty working files were not replaced with whole release owners.
+
+## Defence in depth: unroutable hints are pruned (bug-key `export-origin-runtime-facade`, P4-HIR-2)
+
+The repair above removes the two producers of the bad origins: the scanner no longer reads `export use` lines, and the runtime facade names its owners explicitly. A third, independent guard now sits at the consumer of the hints. `resolve_export_origins` (`src/compiler/20.hir/hir_lowering/module_surface_export_index.spl`) drops every `generated-comment` origin whose owner module is not a registered surface before any resolution tier reads it. A `# Re-exported from X.spl` marker is provenance, valid only when `X` is a child of the facade package; a marker left over a bare export whose owner lives elsewhere used to freeze `<facade package>.X` and fail every importer, including package siblings that never name the facade, with `invalid export origin`. After the prune the export resolves through its explicit route or package-sibling inference, exactly as a facade with no marker does. Hints that name a real child are unchanged.
+
+Spec: `test/01_unit/compiler/20.hir/export_origin_generated_comment_foreign_package_spec.spl` (in-process HIR lowering, seed `seed-head/simple.exe test`), 5/5 with the prune. On the release tree without the prune the reviewer measured 2/4 on the first four examples: the bare-export and package-sibling cases still report `invalid export origin`.
+
+One behaviour change. A stale marker over a bare export whose package has TWO declarers of the name now fails at surface build with `ambiguous facade export: module=… item=… package=…` (`module_surface_unique_sibling_origin`) instead of failing later, per importer, with `invalid export origin`. Both are fail-closed; the new one is earlier and names the real problem. Reviewer census on release: 81 stale hints in 13 facades, none with two declarers. The spec's last example pins this.
+
+Still loose in source, not changed here: a bare export under a stale marker that is never imported into its facade resolves to nothing, so an explicit `use facade.{Name}` reports `module … has no exported item Name`.
+
+No source workaround is needed on release. The marker-rewording `sed` proposed with the first version of this prune is obsolete.
+
+Unrelated red found while checking: `test/01_unit/compiler/loader/runtime_export_origins_spec.spl` is 0/3 on release and on this change alike (`semantic: variable 'CompilerContext' not found`). It is a file-content spec that never reaches HIR; its expected strings contain unescaped `{CompilerContext}`-style braces, which the seed interpolates. It needs `\{ … \}`.

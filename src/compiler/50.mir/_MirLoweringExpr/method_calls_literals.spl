@@ -7,6 +7,7 @@ use compiler.mir._MirLowering.native_trait_registration.*
 use compiler.mir._MirLowering.native_trait_dispatch.*
 use compiler.mir._MirLowering.native_trait_conversion.*
 use compiler.mir._MirLowering.native_trait_calls.*
+use compiler.mir._MirLoweringExpr.builtin_method_extras.*
 # MIR Lowering - Expression Lowering
 #
 # Expression lowering from HIR to MIR:
@@ -694,6 +695,11 @@ impl MirLowering:
         narrowed
 
     me lower_result_unwrap(receiver: HirExpr, payload_type: HirType, default_expr: HirExpr?, unwrap_err: bool) -> LocalId:
+        self.lower_result_unwrap_core(receiver, payload_type, default_expr, unwrap_err, 0, false)
+
+    me lower_result_unwrap_core(receiver: HirExpr, payload_type: HirType, default_expr: HirExpr?, unwrap_err: bool, prelowered: LocalId, has_prelowered: bool) -> LocalId:
+        # `has_prelowered`: the receiver was already evaluated (a chained
+        # `r.map(f).unwrap_or(d)`); reuse that local, never lower it twice.
         var result_type = MirType.i64()
         var is_text = false
         var supported = false
@@ -747,7 +753,7 @@ impl MirLowering:
             self.builder = b_bad
             return bad
 
-        val receiver_local = self.lower_expr(receiver)
+        val receiver_local = if has_prelowered: prelowered else: self.lower_expr(receiver)
         var b_disc = self.builder
         val disc_op = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_enum_discriminant"),
@@ -1676,6 +1682,48 @@ impl MirLowering:
         if mir_mc_trace_state == 1:
             eprint("[mir-method-call] option-probe method={method}\n")
 
+        # Result combinators (BUG-IT-10): map / map_err / ok, and unwrap /
+        # unwrap_or / unwrap_err on a receiver whose Result type is known only
+        # from its lowered local (`r.map(f).unwrap_or(d)` -- a chained call
+        # carries no static expression type on this pipeline). Type-directed:
+        # only a receiver PROVEN to be a Result is taken; a chained map/map_err
+        # receiver is lowered once and reused by every later arm.
+        val result_combinator_shape =
+            (method == "map" and args.len() == 1) or
+            (method == "map_err" and args.len() == 1) or
+            (method == "ok" and args.len() == 0) or
+            (method == "unwrap" and args.len() == 0 and result_ok_type == nil) or
+            (method == "unwrap_or" and args.len() == 1 and result_ok_type == nil) or
+            (method == "unwrap_err" and args.len() == 0 and result_err_type == nil)
+        # is_ok / is_err on a STATICALLY typed Result stay with
+        # try_lower_result_predicate below; only the chained form
+        # (`r.map(f).is_ok()`), which that helper cannot type, is taken here.
+        val result_chained_predicate_shape = (method == "is_ok" or method == "is_err") and args.len() == 0
+        if (result_combinator_shape or result_chained_predicate_shape) and resolution_is_unresolved and not option_method_receiver:
+            var combinator_type: HirType? = nil
+            var combinator_static_result = false
+            if val combinator_static_type = self.enum_match_expr_type(receiver):
+                match combinator_static_type.kind:
+                    case HirTypeKind.Result(_, _):
+                        combinator_static_result = true
+                        if not result_chained_predicate_shape:
+                            combinator_type = Some(combinator_static_type)
+                    case _: ()
+            if combinator_type == nil and not combinator_static_result and not has_prelowered_method_receiver:
+                match receiver.kind:
+                    case MethodCall(_, chained_method, _, _):
+                        if chained_method == "map" or chained_method == "map_err":
+                            prelowered_method_receiver = self.lower_expr(receiver)
+                            has_prelowered_method_receiver = true
+                    case _: ()
+            if combinator_type == nil and not combinator_static_result and has_prelowered_method_receiver:
+                if val combinator_local_type = self.find_local_hir_type(prelowered_method_receiver.id):
+                    match combinator_local_type.kind:
+                        case HirTypeKind.Result(_, _): combinator_type = Some(combinator_local_type)
+                        case _: ()
+            if val combinator_result_type = combinator_type:
+                return self.lower_result_combinator(receiver, method, args, combinator_result_type, prelowered_method_receiver, has_prelowered_method_receiver)
+
         # Flat/native HIR can leave custom predicate methods unresolved. Probe
         # their owner before the text fallbacks below so a struct method named
         # starts_with/ends_with/contains keeps normal custom-method precedence.
@@ -1711,7 +1759,7 @@ impl MirLowering:
                 if not predicate_receiver_is_text and resolution_is_unresolved:
                     val predicate_owner = self.struct_value_syms.get(prelowered_method_receiver.id)
                     if predicate_owner != nil and predicate_owner != "":
-                        predicate_has_custom_owner = self.struct_method_syms.contains("{predicate_owner}::{method}")
+                        predicate_has_custom_owner = self.struct_method_syms.contains(self.struct_owner_method_key(predicate_owner ?? "", method))
         if mir_mc_trace_state == 1:
             eprint("[mir-method-call] predicate-owner method={method}\n")
 
@@ -1737,7 +1785,7 @@ impl MirLowering:
             method == "split_lines" or method == "lines" or
             method == "to_int" or method == "to_i64" or method == "trim_start" or method == "trim_left" or
             method == "trim_end" or method == "last_index_of" or method == "partition" or
-            method == "parse_int"
+            method == "parse_int" or method == "repeat"
         # A custom nominal/static receiver must keep its selected owner even
         # when its method leaf collides with a primitive text builtin.
         var primitive_text_receiver = declared_text_receiver
@@ -1796,7 +1844,7 @@ impl MirLowering:
                         has_prelowered_method_receiver = true
                     val chr_owner = self.struct_value_syms.get(prelowered_method_receiver.id)
                     if chr_owner != nil and chr_owner != "":
-                        chr_has_custom_owner = self.struct_method_syms.contains("{chr_owner}::{method}")
+                        chr_has_custom_owner = self.struct_method_syms.contains(self.struct_owner_method_key(chr_owner ?? "", method))
         if chr_method_shape and chr_primitive_resolution_allowed and not chr_has_custom_owner and not has_prelowered_method_receiver:
             prelowered_method_receiver = self.lower_expr(receiver)
             has_prelowered_method_receiver = true
@@ -2983,7 +3031,7 @@ impl MirLowering:
         #                  src/lib/text.spl's own last_index_of shares)
         # `to_i64` / `trim_left` are the seed's aliases for to_int /
         # trim_start (codegen/instr/calls.rs sffi_alias_target).
-        if (method == "trim" or method == "strip" or method == "lower" or method == "to_lower" or method == "to_upper" or method == "upper" or method == "chars" or method == "to_float" or method == "split" or method == "partition" or method == "rpartition" or method == "replace" or method == "rfind" or method == "find" or method == "index_of" or method == "contains" or method == "parse_f64" or method == "to_int" or method == "to_i64" or method == "trim_start" or method == "trim_left" or method == "trim_end" or method == "last_index_of" or method == "parse_int") and (text_builtin_resolution_allowed or (method == "contains" and predicate_receiver_is_text)) and not contains_recv_is_array and not predicate_has_custom_owner:
+        if (method == "trim" or method == "strip" or method == "lower" or method == "to_lower" or method == "to_upper" or method == "upper" or method == "chars" or method == "to_float" or method == "split" or method == "partition" or method == "rpartition" or method == "replace" or method == "rfind" or method == "find" or method == "index_of" or method == "contains" or method == "parse_f64" or method == "to_int" or method == "to_i64" or method == "trim_start" or method == "trim_left" or method == "trim_end" or method == "last_index_of" or method == "parse_int" or method == "repeat") and (text_builtin_resolution_allowed or (method == "contains" and predicate_receiver_is_text)) and not contains_recv_is_array and not predicate_has_custom_owner:
             if mir_mc_trace_state == 1:
                 eprint("[mir-method-call] text-special-enter method={method}\n")
             val ts_arity_ok = match method:
@@ -2991,6 +3039,7 @@ impl MirLowering:
                 case "rfind" | "partition" | "rpartition": args.len() == 1
                 case "find" | "index_of": args.len() == 1
                 case "last_index_of": args.len() == 1
+                case "repeat": args.len() == 1
                 case "replace": args.len() == 2
                 case "contains": args.len() == 1
                 case _: args.len() == 0
@@ -3054,7 +3103,8 @@ impl MirLowering:
                         if not partition_separator_is_text:
                             self.error_fatal("text.{method} expects a text separator", Some(ts_arg.value.span))
                             return self.builder.emit_const_int(0)
-                    val ts_arg_ready = if method == "split" and ts_arg_index == 1: ts_arg_local else: self.ensure_tagged_str(ts_arg_local)
+                    # `split`'s limit and `repeat`'s count are integers, not text.
+                    val ts_arg_ready = if (method == "split" and ts_arg_index == 1) or method == "repeat": ts_arg_local else: self.ensure_tagged_str(ts_arg_local)
                     ts_ops = ts_ops.push(mir_operand_copy(ts_arg_ready))
                     ts_arg_index = ts_arg_index + 1
                 val ts_sym = match method:
@@ -3068,6 +3118,7 @@ impl MirLowering:
                     case "to_int" | "to_i64": "rt_string_to_int_lenient"
                     case "parse_int": "rt_string_parse_int"
                     case "last_index_of": "rt_string_rfind"
+                    case "repeat": "rt_string_repeat"
                     case "rfind": "rt_string_rfind"
                     case "find" | "index_of": "rt_string_find"
                     case "contains": "rt_string_contains"
@@ -3091,7 +3142,7 @@ impl MirLowering:
                 # of "a-b" (silent wrong, no error at all; verified via
                 # SIMPLE_KEEP_LLVM_IR).
                 val ts_dest_ty = match method:
-                    case "replace" | "trim" | "strip" | "trim_start" | "trim_left" | "trim_end" | "lower" | "to_lower" | "to_upper" | "upper":
+                    case "replace" | "repeat" | "trim" | "strip" | "trim_start" | "trim_left" | "trim_end" | "lower" | "to_lower" | "to_upper" | "upper":
                         MirType(kind: MirTypeKind.Opaque("str"))
                     case "contains":
                         MirType.bool()
@@ -3324,17 +3375,18 @@ impl MirLowering:
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] resolution-arm=instance method={method}\n")
                 # Direct method call on type
+                val method_param_types = self.resolved_call_hir_param_types(method_id)
                 val arg_operands = if wb_kind != 0:
-                    self.build_args_from_receiver(wb_receiver, args)
+                    self.build_args_from_receiver(wb_receiver, args, method_param_types)
                 else if has_prelowered_method_receiver:
                     # Predicate dispatch may pre-lower a receiver to prove
                     # whether stale resolved owner metadata must yield to
                     # primitive text. Reuse that value for a genuine custom
                     # instance method so a call-expression receiver is never
                     # evaluated twice.
-                    self.build_args_from_receiver(prelowered_method_receiver, args)
+                    self.build_args_from_receiver(prelowered_method_receiver, args, method_param_types)
                 else:
-                    self.lower_receiver_and_args(receiver, args)
+                    self.lower_receiver_and_args(receiver, args, method_param_types)
                 val method_operand = self.symbol_to_operand(method_id)
                 val return_type = self.resolved_call_return_type(method_id)
                 # Pad omitted trailing defaulted params -- this arm calls
@@ -3373,12 +3425,13 @@ impl MirLowering:
             case TraitMethod(trait_id, method_id):
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] resolution-arm=trait method={method}\n")
+                val method_param_types = self.resolved_call_hir_param_types(method_id)
                 val arg_operands = if wb_kind != 0:
-                    self.build_args_from_receiver(wb_receiver, args)
+                    self.build_args_from_receiver(wb_receiver, args, method_param_types)
                 else if has_prelowered_method_receiver:
-                    self.build_args_from_receiver(prelowered_method_receiver, args)
+                    self.build_args_from_receiver(prelowered_method_receiver, args, method_param_types)
                 else:
-                    self.lower_receiver_and_args(receiver, args)
+                    self.lower_receiver_and_args(receiver, args, method_param_types)
                 val method_operand = self.symbol_to_operand(method_id)
                 val return_type = self.resolved_call_return_type(method_id)
                 # Same receiver/self index-0 alignment as the InstanceMethod
@@ -3412,11 +3465,11 @@ impl MirLowering:
                     prelowered_method_receiver
                 else:
                     self.lower_expr(receiver)
-                val arg_operands = self.build_args_from_receiver(free_receiver, args)
+                val arg_operands = self.build_args_from_receiver(free_receiver, args, self.resolved_call_hir_param_types(func_id))
                 var selected_func_id = func_id
                 val free_owner = self.struct_value_syms.get(free_receiver.id)
                 if chr_method_shape and chr_has_custom_owner and free_owner != nil and free_owner != "":
-                    val owner_method_key = "{free_owner}::{method}"
+                    val owner_method_key = self.struct_owner_method_key(free_owner ?? "", method)
                     if self.struct_method_syms.contains(owner_method_key):
                         selected_func_id = self.struct_method_syms[owner_method_key]
                 val func_operand = self.symbol_to_operand(selected_func_id)
@@ -3450,9 +3503,14 @@ impl MirLowering:
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] resolution-arm=static method={method}\n")
                 var arg_operands: [MirOperand] = []
+                # A static method has no receiver slot: explicit argument i
+                # is declared parameter i.
+                val static_param_types = self.resolved_call_hir_param_types(method_id)
+                var static_arg_index = 0
                 for arg in args:
-                    val arg_local = self.lower_expr(arg.value)
+                    val arg_local = self.lower_method_call_arg(arg, static_param_types, static_arg_index)
                     arg_operands = arg_operands.push(mir_operand_copy(arg_local))
+                    static_arg_index = static_arg_index + 1
 
                 val method_operand = self.symbol_to_operand(method_id)
                 val return_type = self.resolved_call_return_type(method_id)
@@ -3562,9 +3620,12 @@ impl MirLowering:
                 if static_method_id != nil:
                     val resolved_static_method_id = static_method_id ?? SymbolId(id: -1)
                     var static_args: [MirOperand] = []
+                    val name_static_param_types = self.resolved_call_hir_param_types(resolved_static_method_id)
+                    var name_static_arg_index = 0
                     for arg in args:
-                        val static_arg = self.lower_expr(arg.value)
+                        val static_arg = self.lower_method_call_arg(arg, name_static_param_types, name_static_arg_index)
                         static_args.push(mir_operand_copy(static_arg))
+                        name_static_arg_index = name_static_arg_index + 1
                     var static_return_type = self.resolved_call_return_type(resolved_static_method_id)
                     val static_result_name = self.struct_method_return_names.get("{static_receiver_name}::{method}")
                     if static_result_name != nil and static_result_name != "":
@@ -3640,7 +3701,7 @@ impl MirLowering:
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] unresolved-owner-get method={method}\n")
                 if unresolved_struct_name != nil and unresolved_struct_name != "":
-                    val unresolved_method_key = "{unresolved_struct_name}::{method}"
+                    val unresolved_method_key = self.struct_owner_method_key(unresolved_struct_name ?? "", method)
                     # register_owner_method recorded two declaring modules for
                     # this owner/method row; dispatching to either would be a
                     # silent guess. Same fatal prefix as the miss below.
@@ -3697,9 +3758,12 @@ impl MirLowering:
                         # the exact Stage 3 receiver-loss trigger.
                         var im_arg_operands: [MirOperand] = []
                         im_arg_operands = im_arg_operands.push(mir_operand_copy(unresolved_receiver_local))
+                        val im_param_types = self.resolved_call_hir_param_types(resolved_method_id)
+                        var im_arg_index = 0
                         for arg in args:
-                            val im_arg_local = self.lower_expr(arg.value)
+                            val im_arg_local = self.lower_method_call_arg(arg, im_param_types, im_arg_index + 1)
                             im_arg_operands = im_arg_operands.push(mir_operand_copy(im_arg_local))
+                            im_arg_index = im_arg_index + 1
                         val im_method_operand = self.symbol_to_operand(resolved_method_id)
                         val im_return_type = self.resolved_call_return_type(resolved_method_id)
                         # Full-array pad, receiver included -- same alignment
@@ -3983,6 +4047,15 @@ impl MirLowering:
                 # same-named method on some other Unresolved-typed receiver
                 # (which this codebase does not currently have, but might grow)
                 # can't be misdispatched as an array op.
+                # BUG-IT-9 / BUG-IT-10: array reversed/sorted/index_of/enumerate/
+                # find/reduce and numeric abs/min/max/floor/ceil/round. Both
+                # helpers are type-directed and return nil for any receiver they
+                # cannot PROVE, which keeps the loud unresolved failure below.
+                if val array_extra = self.try_lower_array_builtin_extra(receiver, unresolved_receiver_local, method, args):
+                    return array_extra
+                if val numeric_extra = self.try_lower_numeric_builtin(receiver, unresolved_receiver_local, method, args):
+                    return numeric_extra
+
                 if self.local_is_runtime_array(unresolved_receiver_local):
                     if mir_mc_trace_state == 1:
                         eprint("[mir-method-call] unresolved-array method={method}\n")
@@ -4323,7 +4396,7 @@ impl MirLowering:
             case _:
                 ""
 
-    me build_args_from_receiver(receiver_local: LocalId, args: [HirCallArg]) -> [MirOperand]:
+    me build_args_from_receiver(receiver_local: LocalId, args: [HirCallArg], param_types: [HirType]) -> [MirOperand]:
         """Build arg operands starting from a pre-lowered receiver local.
 
         Used by the indexed/field writeback path in `lower_method_call` to
@@ -4335,9 +4408,11 @@ impl MirLowering:
         # of a zero-explicit-argument method call.
         var arg_operands: [MirOperand] = []
         arg_operands = arg_operands.push(mir_operand_copy(receiver_local))
+        var explicit_index = 0
         for arg in args:
-            val arg_local = self.lower_expr(arg.value)
+            val arg_local = self.lower_method_call_arg(arg, param_types, explicit_index + 1)
             arg_operands = arg_operands.push(mir_operand_copy(arg_local))
+            explicit_index = explicit_index + 1
         arg_operands
 
     me remember_method_return_provenance(result_local: LocalId, method_key: text):
@@ -4560,7 +4635,9 @@ impl MirLowering:
         (whole-closure lowering); partial demand/incremental lowering cannot
         know the implementor set and is a compile error."""
         val owners = self.trait_impl_owners.get(trait_key) ?? []
-        val arg_operands = self.lower_receiver_and_args(receiver, args)
+        # The implementor is chosen below, after the operands are lowered, so
+        # no declared parameter list is known here: arguments stay raw.
+        val arg_operands = self.lower_receiver_and_args(receiver, args, [])
         var has_generic_owner = false
         for owner in owners:
             if owner.starts_with("generic:"):
@@ -4579,6 +4656,9 @@ impl MirLowering:
                 var b = self.builder
                 val result = b.emit_call(method_operand, final_args, return_type)
                 self.builder = b
+                # Devirtualized: counted so an archive-producing lane can refuse
+                # this module (E-MONO-038, post_mono_archive_admission_v1).
+                self.devirtualized_calls = self.devirtualized_calls + 1
                 if val result_local = result:
                     self.remember_call_hir_return(result_local, method_id)
                     return result_local

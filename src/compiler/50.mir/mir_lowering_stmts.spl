@@ -589,7 +589,14 @@ impl MirLowering:
             case MirTypeKind.Struct(sym): sym
             case _: nil
         if val type_symbol = struct_symbol_id:
-            return self.copy_struct_value_recursive(init_local, struct_type_name, type_symbol, [struct_type_name])
+            val copied = self.copy_struct_value_recursive(init_local, struct_type_name, type_symbol, [struct_type_name])
+            # A generic instance's per-field types travel with the copy
+            # (BUG-IT-6), exactly like its struct identity does.
+            if self.generic_instance_field_types.has(init_local.id):
+                self.generic_instance_field_types[copied.id] = self.generic_instance_field_types[init_local.id]
+            if self.generic_instance_field_struct_names.has(init_local.id):
+                self.generic_instance_field_struct_names[copied.id] = self.generic_instance_field_struct_names[init_local.id]
+            return copied
         nil
 
     me maybe_copy_array_value(init_local: LocalId, effective_type: MirType, init_is_place: bool) -> LocalId?:
@@ -919,7 +926,11 @@ impl MirLowering:
                         else:
                             MirType.i64()
 
-                        var init_local: LocalId = self.lower_expr(let_init)
+                        var init_local: LocalId = LocalId(id: 0)
+                        if val init_slot_type = let_type:
+                            init_local = self.lower_expr_for_slot(let_init, init_slot_type)
+                        else:
+                            init_local = self.lower_expr(let_init)
                         if val trait_expected = let_type:
                             init_local = self.coerce_native_trait_assignment(init_local, let_init.kind, trait_expected, let_init.span)
                         # [mir-let-instcount-probe] DIAGNOSTIC, default OFF (SIMPLE_MIRB_TRACE=1).
@@ -938,6 +949,10 @@ impl MirLowering:
                                 # same flat optional. Never read `.kind` until
                                 # the payload itself is proven non-nil.
                                 if declared_type != nil:
+                                    # `val x: i64 = v` with `v: i64?` binds the
+                                    # payload, not the Option handle.
+                                    if hir_type_is_plain_scalar(declared_type):
+                                        init_local = self.option_scalar_payload_of(init_local)
                                     match declared_type.kind:
                                         case HirTypeKind.Optional(_):
                                             init_local = self.ensure_option_handle(init_local, declared_type)
@@ -1271,6 +1286,10 @@ impl MirLowering:
                                     self.option_value_locals[local.id] = true
                                 if self.nil_locals.contains(init_local.id):
                                     self.nil_locals[local.id] = true
+                                if self.extern_result_locals.contains(init_local.id):
+                                    self.extern_result_locals[local.id] = true
+                                if self.static_scalar_locals.contains(init_local.id):
+                                    self.static_scalar_locals[local.id] = true
                                 val found_init_hir_type = self.find_local_hir_type(init_local.id)
                                 if env_get_opt("SIMPLE_ANYQ_PROBE") == Some("1"):
                                     match found_init_hir_type:
@@ -1296,6 +1315,10 @@ impl MirLowering:
                                     if let_type.?:
                                         val declared_type: HirType = let_type ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
                                         self.remember_local_hir_type(local.id, declared_type, 0, 0)
+                                    else:
+                                        # Untyped `var best = 0`: record the
+                                        # proven numeric type of the initialiser.
+                                        self.builtin_remember_numeric_init(let_init, local)
                                 # Bug (array-of-structs field misread), CONFLICT-FLAG
                                 # (mir_lowering_stmts.spl is fenced, touched per the
                                 # fence rule's "CONFLICT-FLAG if must touch"
@@ -1566,6 +1589,10 @@ impl MirLowering:
                                     self.mark_tagged_text_local(local.id)
                                 if has_init and self.nil_locals.contains(init_local.id):
                                     self.nil_locals[local.id] = true
+                                if has_init and self.extern_result_locals.contains(init_local.id):
+                                    self.extern_result_locals[local.id] = true
+                                if has_init and self.static_scalar_locals.contains(init_local.id):
+                                    self.static_scalar_locals[local.id] = true
                                 if has_init:
                                     val found_init_hir_type = self.find_local_hir_type(init_local.id)
                                     if found_init_hir_type.?:
@@ -1599,6 +1626,10 @@ impl MirLowering:
                                             # Typed rebind, same reason as `mir_type` above.
                                             val ht2: HirType = type_
                                             self.remember_local_hir_type(local.id, ht2, 0, 0)
+                                        elif val untyped_init_expr = init:
+                                            # Untyped `var best = 0`: record the
+                                            # proven numeric type of the initialiser.
+                                            self.builtin_remember_numeric_init(untyped_init_expr, local)
                                 # Bug (array-of-structs field misread), CONFLICT-FLAG
                                 # (mir_lowering_stmts.spl is fenced): mirror the same
                                 # array_element_struct_syms propagation as the other
@@ -1799,6 +1830,14 @@ impl MirLowering:
                     self.nil_locals[local.id] = true
                 else:
                     self.nil_locals = marker_map_without(self.nil_locals, local.id)
+                if self.extern_result_locals.contains(assigned_value.id):
+                    self.extern_result_locals[local.id] = true
+                else:
+                    self.extern_result_locals = marker_map_without(self.extern_result_locals, local.id)
+                if self.static_scalar_locals.contains(assigned_value.id):
+                    self.static_scalar_locals[local.id] = true
+                else:
+                    self.static_scalar_locals = marker_map_without(self.static_scalar_locals, local.id)
                 val found_assigned_hir_type = self.find_local_hir_type(assigned_value.id)
                 match found_assigned_hir_type:
                     case Some(assigned_hir_type):
@@ -2142,8 +2181,73 @@ impl MirLowering:
             case _:
                 self.error_fatal("unsupported MIR assignment target: {target.kind}", nil)
 
-    me lower_receiver_and_args(receiver: HirExpr, args: [HirCallArg]) -> [MirOperand]:
-        """Lower receiver and arguments for method calls."""
+    me lower_expr_for_slot(value: HirExpr, declared: HirType) -> LocalId:
+        """Lower `value` for a slot of DECLARED type `declared` (annotated
+        binding, parameter, return type).
+
+        Only one shape is special: a conditional (`if` with `else`, if-chain
+        with `else`, `match`) flowing into a SCALAR optional. Lowered on its
+        own it joins the raw words of its arms -- `if c: 3 else: nil` yields
+        the word 3 on BOTH paths -- and no later classification can tell
+        them apart. Threading the declared type into the conditional makes
+        each arm box its own tail (lower_block_expected -> ensure_option_handle):
+        a scalar arm becomes Some, a nil arm None, an ambiguous arm is
+        classified per arm. Everything else is plain lower_expr.
+        doc/08_tracking/bug/optional_scalar_runtime_classified_three_becomes_none_2026-10-11.md"""
+        var scalar_optional_slot = false
+        if value != nil and declared != nil:
+            match declared.kind:
+                case HirTypeKind.Optional(optional_inner):
+                    scalar_optional_slot = hir_type_is_plain_scalar(optional_inner)
+                case _: ()
+        if scalar_optional_slot:
+            match value.kind:
+                case HirExprKind.If(cond, then_, else_):
+                    if else_ != nil:
+                        return self.lower_if(cond, then_, else_, Some(declared))
+                case HirExprKind.IfChain(arms, else_):
+                    if else_ != nil:
+                        return self.lower_if_chain(arms, else_, Some(declared))
+                case HirExprKind.MatchCase(scrutinee, arms):
+                    return self.lower_match_case(scrutinee, arms, Some(declared))
+                case _: ()
+        self.lower_expr(value)
+
+    me lower_method_call_arg(arg: HirCallArg, param_types: [HirType], param_index: i64) -> LocalId:
+        """Lower one explicit method-call argument for the declared parameter
+        `param_types[param_index]` (an empty list or an out-of-range index
+        means "unknown": the argument stays raw, as before).
+
+        A SCALAR optional parameter (`i64?`, `bool?`, `f64?`, `char?`, ...)
+        gets the same promotion the free-function call path applies
+        (switch_operators_calls.spl, `case HirTypeKind.Optional(_)`): the
+        callee tests it with the Option handle predicates, and
+        `rt_is_none(3)` is true, so a raw `3` passed by `w.put(3)` read as
+        nil. Non-scalar optionals are left untouched here on purpose (a
+        pointer / text handle cannot collide with the nil word).
+        doc/08_tracking/bug/method_call_optional_param_arg_not_boxed_2026-10-11.md"""
+        if arg.has_name or param_index < 0 or param_index >= param_types.len():
+            return self.lower_expr(arg.value)
+        val declared_param_type = param_types[param_index]
+        var arg_local: LocalId = self.lower_expr_for_slot(arg.value, declared_param_type)
+        match declared_param_type.kind:
+            case HirTypeKind.Optional(optional_inner):
+                val scalar_payload = match optional_inner.kind:
+                    case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char: true
+                    case _: false
+                if scalar_payload:
+                    arg_local = self.ensure_option_handle(arg_local, declared_param_type)
+            case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
+                # The reverse direction: a scalar Optional passed where the
+                # plain scalar is declared hands over its payload.
+                arg_local = self.option_scalar_payload_of(arg_local)
+            case _: ()
+        arg_local
+
+    me lower_receiver_and_args(receiver: HirExpr, args: [HirCallArg], param_types: [HirType]) -> [MirOperand]:
+        """Lower receiver and arguments for method calls. `param_types` is the
+        callee's declared parameter list with the receiver at index 0 (empty
+        when the callee is not known here)."""
         val receiver_local: LocalId = self.lower_expr(receiver)
         # Keep the implicit receiver insertion as an explicit push. The
         # self-hosted Stage 3 compiler has miscompiled the one-element generic
@@ -2152,9 +2256,11 @@ impl MirLowering:
         # return register as `self` (cross-architecture receiver loss).
         var arg_operands: [MirOperand] = []
         arg_operands = arg_operands.push(mir_operand_copy(receiver_local))
+        var explicit_index = 0
         for arg in args:
-            val arg_local: LocalId = self.lower_expr(arg.value)
+            val arg_local: LocalId = self.lower_method_call_arg(arg, param_types, explicit_index + 1)
             arg_operands = arg_operands.push(mir_operand_copy(arg_local))
+            explicit_index = explicit_index + 1
         arg_operands
 
     me lower_compound_combine(current: LocalId, op: HirAssignOp, rhs: LocalId, type_: MirType) -> LocalId:
@@ -3254,6 +3360,16 @@ impl MirLowering:
         match iter.kind:
             case Range(start, end, inclusive, step):
                 return self.lower_for_range(var_, start, end, inclusive, step, body, source_span)
+            case MethodCall(step_receiver, step_method, step_args, _):
+                # `for i in (a..b).step(n)` (BUG-IT-9): a bounded, not already
+                # stepped range. Anything else keeps the iterator path.
+                if step_method == "step" and step_args.len() == 1:
+                    match step_receiver.kind:
+                        case Range(stepped_start, stepped_end, stepped_inclusive, stepped_step):
+                            if stepped_step == nil:
+                                if val stepped_end_expr = stepped_end:
+                                    return self.lower_for_range_stepped(mir_stmt_symbol_id_value(var_), stepped_start, stepped_end_expr, stepped_inclusive, step_args[0].value, body, source_span)
+                        case _: ()
             case _:
                 pass  # Fall through to iterator protocol
 
@@ -3501,12 +3617,31 @@ impl MirLowering:
                 case HirTypeKind.Dict(dict_key_t, dict_value_t):
                     dict_entry_hir = Some(HirType(kind: HirTypeKind.Tuple([dict_key_t, dict_value_t]), span: collection_hir_type.span))
                 case HirTypeKind.Array(elem_t, _) | HirTypeKind.Slice(elem_t):
+                    # `[Any]` / `[Infer]` / `[Error]` name NO element type. An
+                    # untyped array literal (`val words = ["alpha", "beta"]`)
+                    # carries `[Any]` as its local HIR type while its MIR type
+                    # is the authoritative `Array(str)`. Letting `[Any]` win
+                    # typed the loop variable I64 (`lower_type(Any)`), so `w`
+                    # was not text and every text builtin on it
+                    # (`w.substring(0, 1)`, stage2 micro_c) died as
+                    # `unresolved method call`. Only a REAL declared element
+                    # type overrides the array's own MIR element type below --
+                    # the same `Infer | Error | Any` rule the index-read path
+                    # (`words[0]`, expr_dispatch.spl) already applies. For a
+                    # genuinely erased `[Any]` array both sources say I64.
+                    var elem_t_is_placeholder = false
                     match elem_t.kind:
-                        case HirTypeKind.Str:
-                            element_type = self.bootstrap_text_type()
-                        case _:
-                            element_type = self.lower_type(elem_t)
-                    element_type_from_hir = true
+                        case HirTypeKind.Error: elem_t_is_placeholder = true
+                        case HirTypeKind.Infer(_, _): elem_t_is_placeholder = true
+                        case HirTypeKind.Any: elem_t_is_placeholder = true
+                        case _: ()
+                    if not elem_t_is_placeholder:
+                        match elem_t.kind:
+                            case HirTypeKind.Str:
+                                element_type = self.bootstrap_text_type()
+                            case _:
+                                element_type = self.lower_type(elem_t)
+                        element_type_from_hir = true
                     # A declared `[Record]` collection that is not an array
                     # literal or typed param (e.g. a method result,
                     # `for child in self.children()`) never populated

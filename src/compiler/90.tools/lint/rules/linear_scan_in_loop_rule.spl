@@ -1,9 +1,30 @@
 use compiler.semantics.lint.linear_scan_in_loop.{check_linear_scan_in_loop}
 use compiler.tools.lint.lint_rule_api.{LintParamsV1, LintUnit, StaticLintCategory, StaticLintFinding, StaticLintLevel, StaticLintRule, lint_rule_provider_iface, static_lint_rule}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+
+pub fn linear_scan_lint_mode(raw: text?) -> text:
+    """Level switch SIMPLE_LINT_LINEAR_SCAN -> off | warning | error.
+
+    `off` skips the scan itself, not just its output. Unset or unknown values
+    keep the default `warning`: an unreadable switch never escalates."""
+    val value = (raw ?? "").trim().lower()
+    if value == "off" or value == "allow" or value == "0":
+        return "off"
+    if value == "error" or value == "deny":
+        return "error"
+    "warning"
+
+pub fn linear_scan_findings_for_mode(mode: text, unit: LintUnit) -> [StaticLintFinding]:
+    if mode == "off":
+        return []
+    var level = StaticLintLevel.Warn
+    if mode == "error":
+        level = StaticLintLevel.Deny
+    [StaticLintFinding(f.code, level, StaticLintCategory.Warning, f.message, f.hint, f.line_num, 0) for f in check_linear_scan_in_loop(unit.content, unit.path)]
 
 fn check_rule(params: LintParamsV1, unit: LintUnit) -> [StaticLintFinding]:
     val _ = params
-    [StaticLintFinding(f.code, StaticLintLevel.Warn, StaticLintCategory.Warning, f.message, f.hint, f.line_num, 0) for f in check_linear_scan_in_loop(unit.content, unit.path)]
+    linear_scan_findings_for_mode(linear_scan_lint_mode(env_get_nullable("SIMPLE_LINT_LINEAR_SCAN")), unit)
 
 pub fn linear_scan_in_loop_lint_rule() -> StaticLintRule:
     static_lint_rule("linear_scan_in_loop", lint_rule_provider_iface("linear_scan_in_loop"), check_rule)

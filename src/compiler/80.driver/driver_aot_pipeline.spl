@@ -5,6 +5,7 @@ use compiler.driver.driver_aot_output.*
 # call below still needs its owning module in this compilation closure.
 use plugins.backend_vhdl.driver.driver_aot_vhdl_output.*
 use compiler.driver.driver_log_helpers.{log_debug, log_error, log_phase, log_bootstrap_flat_warning, log_build_progress}
+use compiler.driver.driver_ice_boundary.{ice_boundary_finalize}
 # NOTE: these two MUST stay at module scope. A function-body-scoped
 # `use <path>.{name}` is a silent no-op for symbol resolution, which made the
 # both-format branch below die post-link with `error[E1002]: function
@@ -100,7 +101,12 @@ impl CompilerDriver:
             # doc/07_guide/language/dict_native_pitfalls.md for the sibling
             # Dict case). See
             # doc/08_tracking/bug/array_first_unresolved_native_codegen_core_dump_2026-08-06.md.
-            val msg = if self.ctx.has_errors(): self.ctx.error_message_at(0) else: "MIR lowering failed"
+            # ICE boundary: when modules failed inside the per-module boundary the
+            # result names all of them (and the receipt), not just the first error.
+            val ice_summary = ice_boundary_finalize()
+            if ice_summary != "":
+                log_error(ice_summary)
+            val msg = if ice_summary != "": ice_summary elif self.ctx.has_errors(): self.ctx.error_message_at(0) else: "MIR lowering failed"
             log_build_progress("mir", "modules", -1, -1, "lower_to_mir",
                 4, 6, 1, 0, "failed")
             return CompileResult.CodegenError(msg)

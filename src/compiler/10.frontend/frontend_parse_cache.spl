@@ -47,7 +47,11 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 # Entry format version. Bumping this invalidates every stored entry without
 # anyone having to delete a directory: an old entry's first line no longer
 # matches and is a miss.
-val FRONTEND_CACHE_ENTRY_VERSION: text = "spl-fecache-v2"
+# v3 (task 8a): a `C <sha256 of blob>` line follows the header; load verifies
+# it before handing the blob to the pool decoder, so a truncated or bit-flipped
+# entry is a counted miss, never a partial pool restore.
+val FRONTEND_CACHE_ENTRY_VERSION: text = "spl-fecache-v3"
+val FRONTEND_CACHE_CHECKSUM_PREFIX: text = "C "
 
 use compiler.frontend.frontend_cache_root_admission_v1.{frontend_cache_root_admission_v1}
 
@@ -136,7 +140,27 @@ pub fn frontend_parse_cache_load(key: text) -> text:
     val header = raw.substring(0, nl)
     if header != frontend_parse_cache_header():
         return ""
-    raw.substring(nl + 1, raw.len())
+    frontend_parse_cache_entry_blob(raw.substring(nl + 1, raw.len()))
+
+# Pure: the part of an entry after the header line -> the verified blob, or
+# "" when the checksum line is missing, malformed, or does not match the
+# bytes under it (checksum mismatch counted by the caller as a miss).
+pub fn frontend_parse_cache_entry_blob(after_header: text) -> text:
+    val c_end = after_header.index_of("\n")
+    if c_end < 0:
+        return ""
+    val line = after_header.substring(0, c_end)
+    if not line.starts_with(FRONTEND_CACHE_CHECKSUM_PREFIX) or line.len() != FRONTEND_CACHE_CHECKSUM_PREFIX.len() + 64:
+        return ""
+    val blob = after_header.substring(c_end + 1, after_header.len())
+    if blob == "" or sha256_text(blob) != line.substring(FRONTEND_CACHE_CHECKSUM_PREFIX.len(), line.len()):
+        return ""
+    blob
+
+# Pure: header + checksum line + blob, exactly what frontend_parse_cache_load
+# accepts back.
+pub fn frontend_parse_cache_entry_encode(header: text, blob: text) -> text:
+    header + "\n" + FRONTEND_CACHE_CHECKSUM_PREFIX + sha256_text(blob) + "\n" + blob
 
 # Written via a pid-unique temp file then renamed, so a concurrent reader (the
 # shard workers of step 4 run in parallel processes over one cache dir) can
@@ -149,7 +173,7 @@ pub fn frontend_parse_cache_store(key: text, blob: text) -> bool:
     val made = dir_create_all(dir)
     val final_path = frontend_parse_cache_path(key)
     val tmp = final_path + ".{getpid()}.tmp"
-    if not file_write_exact(tmp, frontend_parse_cache_header() + "\n" + blob):
+    if not file_write_exact(tmp, frontend_parse_cache_entry_encode(frontend_parse_cache_header(), blob)):
         frontend_parse_cache_note_store_failure(dir, made)
         return false
     if file_move_cross_device(tmp, final_path):
@@ -178,7 +202,7 @@ pub fn frontend_parse_cache_store_phase3_immutable_v1(key: text, blob: text) -> 
     val dir = frontend_parse_cache_dir()
     val _made = dir_create_all(dir)
     val final_path = frontend_parse_cache_path(key)
-    val encoded = frontend_parse_cache_header() + "\n" + blob
+    val encoded = frontend_parse_cache_entry_encode(frontend_parse_cache_header(), blob)
     if not file_create_excl(final_path, encoded):
         return false
     if file_hash_sha256_or_empty(final_path) != sha256_text(encoded):
@@ -202,7 +226,8 @@ pub fn frontend_parse_cache_stores() -> i64:
 pub fn frontend_parse_cache_misses() -> i64:
     _fe_cache_misses
 
-export FRONTEND_CACHE_ENTRY_VERSION
+export FRONTEND_CACHE_ENTRY_VERSION, FRONTEND_CACHE_CHECKSUM_PREFIX
+export frontend_parse_cache_entry_blob, frontend_parse_cache_entry_encode
 export frontend_parse_cache_scope, frontend_parse_cache_enabled
 export frontend_parse_cache_dir, frontend_parse_cache_key
 export frontend_parse_cache_load, frontend_parse_cache_store

@@ -1,0 +1,166 @@
+#!/bin/sh
+# check-hir-cache-cold-warm-parity.shs — the HIR cache must (1) actually HIT on
+# a warm rebuild of an unchanged closure and (2) hand the warm build the same
+# HIR the cold build lowered, so both builds produce the same binary.
+#
+# Task 8b of CURRENT_BUG_PREVENTION.md; plan ids CACHE-03 (invalidation matches
+# real dependencies), IR-05 (stale/corrupt cached IR rejected), BUG-02 (zero
+# cases is non-passing evidence). ADVISORY tier: push-hir-cache-cold-warm-parity
+# (push_blocking: false); it needs a native-build-capable `bin/simple`.
+#
+# WHY: the codec wrote 3/true as nil for weeks and the cache reported
+#   [hir-cache] hits=0 misses=1163
+# on every bootstrap build. Nothing failed, because nothing asserted that a warm
+# rebuild hits. This gate is that assertion, plus the equivalence the hits must
+# preserve.
+#
+# Two builds of the same closure against one PRIVATE cache dir:
+#   cold  SIMPLE_HIR_CACHE=1 SIMPLE_HIR_CACHE_SELFCHECK=1, empty dir  -> stores
+#   warm  same env, same dir                                         -> hits
+# Both builds print the driver's summary line (always, since task 8a):
+#   [hir-cache] hits=H misses=M stores=S refused=R io_failed=I reason=.. dir=.. rejected=absent:a,header:h,checksum:c,framing:f,decode:d,selfcheck:s selfcheck=1
+#
+# Verdict (always the LAST line of stdout):
+#   PASS — <n> module(s) stored cold, <h> hit(s) warm, 0 rejected, binary identical   exit 0
+#   FAIL — ...names the broken invariant                                              exit 1
+#   ERROR — nothing was checked (<reason>)                                            exit 2
+# A cold build that stored 0 entries, or a warm build that printed no summary,
+# is ERROR/FAIL, never a pass. --selftest runs before every scan and is fatal.
+#
+# Default closure: the 3-module driver fixture. BUILD_SOURCE / BUILD_ENTRY
+# (relative to the repo root) select a bigger one.
+
+set -u
+
+ROOT="${ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
+BUILD_SOURCE="${BUILD_SOURCE:-test/02_integration/compiler/driver/fixtures/native_build_cache}"
+BUILD_ENTRY="${BUILD_ENTRY:-$BUILD_SOURCE/main.spl}"
+BUILD_TIMEOUT="${BUILD_TIMEOUT:-14400}"
+WORK="${WORK:-${TMPDIR:-/tmp}/hir-cache-cold-warm-$$}"
+mkdir -p "$WORK"
+trap 'rm -rf "$WORK"' EXIT
+
+# field LINE NAME -> value of NAME=<value> on a space-separated summary line,
+# or -1 when absent. `rejected=` is a comma list handled by rejected_total.
+field() {
+    printf '%s\n' "$1" | tr ' ' '\n' | awk -F= -v k="$2" '$1 == k { print substr($0, length(k) + 2); found = 1 } END { if (!found) print -1 }'
+}
+# rejected_total LINE -> sum of every class in rejected=a:1,b:2,... except
+# `absent` (an absent entry on a COLD build is the expected miss).
+rejected_total() {
+    _r=$(field "$1" rejected)
+    [ "$_r" != "-1" ] || { echo -1; return; }
+    printf '%s\n' "$_r" | tr ',' '\n' | awk -F: '$1 != "absent" { s += $2 } END { print s + 0 }'
+}
+# summary LOGFILE -> the LAST [hir-cache] line of the log ("" when none).
+summary() {
+    grep '^\[hir-cache\] ' "$1" 2>/dev/null | tail -1
+}
+
+selftest() {
+    _l='[hir-cache] hits=3 misses=0 stores=0 refused=0 io_failed=0 reason=- dir=/x rejected=absent:0,header:0,checksum:0,framing:0,decode:0 selfcheck=all selfchecked=0 selfcheck_failed=0'
+    [ "$(field "$_l" hits)" = 3 ] && [ "$(field "$_l" stores)" = 0 ] && [ "$(field "$_l" io_failed)" = 0 ] && [ "$(rejected_total "$_l")" = 0 ] || { echo "selftest: clean line misparsed"; return 1; }
+    _l='[hir-cache] hits=0 misses=3 stores=3 refused=0 io_failed=0 reason=- dir=/x rejected=absent:3,header:0,checksum:0,framing:0,decode:0 selfcheck=all selfchecked=0 selfcheck_failed=0'
+    [ "$(field "$_l" hits)" = 0 ] && [ "$(rejected_total "$_l")" = 0 ] || { echo "selftest: cold line misparsed"; return 1; }
+    _l='[hir-cache] hits=1 misses=2 stores=2 refused=1 io_failed=0 reason=selfcheck dir=/x rejected=absent:0,header:0,checksum:2,framing:0,decode:0 selfcheck=all selfchecked=3 selfcheck_failed=1'
+    [ "$(rejected_total "$_l")" = 2 ] && [ "$(field "$_l" refused)" = 1 ] && [ "$(field "$_l" selfcheck_failed)" = 1 ] || { echo "selftest: rejected line misparsed"; return 1; }
+    _l='[hir-cache] disabled reason=off'
+    [ "$(field "$_l" hits)" = -1 ] || { echo "selftest: disabled line produced a hit count"; return 1; }
+    _d="$WORK/selftest"; mkdir -p "$_d"
+    printf 'noise\n[hir-cache] hits=0 misses=1 stores=1 refused=0 io_failed=0 reason=- dir=/x rejected=absent:1,header:0,checksum:0,framing:0,decode:0 selfcheck=all selfchecked=0 selfcheck_failed=0\nmore\n[hir-cache] hits=1 misses=0 stores=0 refused=0 io_failed=0 reason=- dir=/x rejected=absent:0,header:0,checksum:0,framing:0,decode:0 selfcheck=all selfchecked=0 selfcheck_failed=0\n' > "$_d/two.log"
+    [ "$(field "$(summary "$_d/two.log")" hits)" = 1 ] || { echo "selftest: last summary line not selected"; return 1; }
+    printf 'nothing here\n' > "$_d/none.log"
+    [ -z "$(summary "$_d/none.log")" ] || { echo "selftest: summary found in a log without one"; return 1; }
+    echo "selftest: 6 fixture(s) ok"
+    return 0
+}
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS — 6 selftest fixture(s) checked"
+    exit 0
+fi
+
+CACHE="$WORK/hir"
+build() {
+    _tag="$1"
+    mkdir -p "$WORK/$_tag" "$CACHE"
+    ( cd "$ROOT" && env SIMPLE_FRONTEND_CACHE_DIR="$WORK/fe" SIMPLE_HIR_CACHE=1 \
+        SIMPLE_HIR_CACHE_SELFCHECK=1 SIMPLE_HIR_CACHE_DIR="$CACHE" \
+        "$SIMPLE_BIN" native-build --source "$BUILD_SOURCE" --entry-closure --threads 1 \
+        --timeout "$BUILD_TIMEOUT" --cache-dir "$WORK/$_tag/cache" \
+        --entry "$BUILD_ENTRY" --output "$WORK/$_tag/out" ) > "$WORK/$_tag/log" 2>&1
+    echo $?
+}
+
+RC_COLD=$(build cold)
+COLD=$(summary "$WORK/cold/log")
+if [ "$RC_COLD" != 0 ] || [ ! -f "$WORK/cold/out" ]; then
+    tail -5 "$WORK/cold/log"
+    echo "ERROR — nothing was checked (cold build failed rc=$RC_COLD)"
+    exit 2
+fi
+if [ -z "$COLD" ]; then
+    echo "ERROR — nothing was checked (cold build printed no [hir-cache] summary line)"
+    exit 2
+fi
+case "$COLD" in
+    *disabled*) echo "ERROR — nothing was checked (HIR cache disabled in the cold build: $COLD)"; exit 2 ;;
+esac
+STORED=$(field "$COLD" stores)
+if [ "$STORED" -le 0 ]; then
+    echo "FAIL — cold build stored 0 HIR cache entries ($COLD)"
+    exit 1
+fi
+if grep -q 'SELFCHECK FAILED' "$WORK/cold/log"; then
+    grep 'SELFCHECK FAILED' "$WORK/cold/log" | head -3
+    echo "FAIL — $STORED module(s) stored cold but the write-time self-check rejected others: $(grep -c 'SELFCHECK FAILED' "$WORK/cold/log") failure(s)"
+    exit 1
+fi
+
+RC_WARM=$(build warm)
+WARM=$(summary "$WORK/warm/log")
+if [ -z "$WARM" ]; then
+    tail -5 "$WORK/warm/log"
+    echo "FAIL — warm build printed no [hir-cache] summary line (rc=$RC_WARM)"
+    exit 1
+fi
+HITS=$(field "$WARM" hits)
+REJ=$(rejected_total "$WARM")
+IOF=$(field "$WARM" io_failed)
+REF=$(field "$WARM" refused)
+if [ "$HITS" -le 0 ]; then
+    echo "FAIL — cache never hits: warm rebuild of an unchanged closure reported hits=$HITS after the cold build stored $STORED ($WARM)"
+    exit 1
+fi
+if [ "$REJ" -ne 0 ] || [ "$IOF" -ne 0 ] || [ "$REF" -ne 0 ]; then
+    echo "FAIL — warm build rejected/refused entries it had just written: rejected=$REJ refused=$REF io_failed=$IOF ($WARM)"
+    exit 1
+fi
+if [ "$RC_WARM" != 0 ] || [ ! -f "$WORK/warm/out" ]; then
+    tail -5 "$WORK/warm/log"
+    echo "FAIL — warm build hit $HITS entries but failed (rc=$RC_WARM)"
+    exit 1
+fi
+# sha256sum (coreutils) or shasum -a 256 (macOS); a host with neither is ERROR.
+digest_of() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
+    else echo ""; fi
+}
+A=$(digest_of "$WORK/cold/out")
+B=$(digest_of "$WORK/warm/out")
+if [ -z "$A" ] || [ -z "$B" ]; then
+    echo "ERROR — nothing was checked (no sha256sum or shasum on this host; binaries not compared)"
+    exit 2
+fi
+if [ "$A" != "$B" ]; then
+    echo "FAIL — $HITS warm hit(s) but the binary built from cached HIR differs from the cold one: $A vs $B"
+    exit 1
+fi
+echo "PASS — $STORED module(s) stored cold, $HITS hit(s) warm, 0 rejected, binary identical ($(echo "$A" | cut -c1-16))"
+exit 0

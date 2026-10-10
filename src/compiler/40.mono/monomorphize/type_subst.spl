@@ -296,9 +296,14 @@ fn substitute_stmt(stmt: HirStmt, subst: TypeSubstitution) -> HirStmt:
     var out = stmt
     match stmt.kind:
         case HirStmtKind.Let(sym, ty, init):
-            val lt: HirType = ty
+            # An unannotated binding lowers with a nil type slot; only a
+            # written annotation can mention a type parameter.
+            var new_ty = ty
+            if ty != nil:
+                val lt: HirType = ty
+                new_ty = substitute_type(lt, subst)
             val li: HirExpr = init
-            out.kind = HirStmtKind.Let(sym, substitute_type(lt, subst), substitute_expr(li, subst))
+            out.kind = HirStmtKind.Let(sym, new_ty, substitute_expr(li, subst))
         case HirStmtKind.Assign(target, op, value):
             val at: HirExpr = target
             val av: HirExpr = value
@@ -535,6 +540,10 @@ fn substitute_expr(expr: HirExpr, subst: TypeSubstitution) -> HirExpr:
             val ai2: HirExpr = inner
             val at3: HirType = target
             out.kind = HirExprKind.As(substitute_expr(ai2, subst), substitute_type(at3, subst))
+        case HirExprKind.ConvertCall(inner, target):
+            val cvi: HirExpr = inner
+            val cvt2: HirType = target
+            out.kind = HirExprKind.ConvertCall(substitute_expr(cvi, subst), substitute_type(cvt2, subst))
 
         # Special
         case HirExprKind.Range(start, end, inclusive, step):
@@ -579,6 +588,36 @@ fn substitute_expr(expr: HirExpr, subst: TypeSubstitution) -> HirExpr:
                     na2.asm_body = substitute_asm(aa.asm_body, subst)
                 aarms = aarms.push(na2)
             out.kind = HirExprKind.InlineAsmMatch(aarms)
+
+        # Interpolation segments, type tests and try/catch hold full
+        # expressions/blocks too (same positions `rewrite_expr` in
+        # monomorphize_integration.spl walks for call sites).
+        case HirExprKind.StringLit(value, interps):
+            # Flat value-or-nil, as HIR lowering builds it (never `Some([..])`).
+            if interps.?:
+                var new_interps: [HirInterpolation] = []
+                for item in interps:
+                    val it: HirInterpolation = item
+                    var ni = it
+                    ni.expr = substitute_expr(it.expr, subst)
+                    new_interps = new_interps.push(ni)
+                out.kind = HirExprKind.StringLit(value, new_interps)
+        case HirExprKind.TypeTest(value, type_name):
+            val ttv: HirExpr = value
+            out.kind = HirExprKind.TypeTest(substitute_expr(ttv, subst), type_name)
+        case HirExprKind.TryCatch(body, clauses, finally_):
+            val tcb: HirBlock = body
+            var new_clauses: [HirCatchClause] = []
+            for clause in clauses:
+                val cc: HirCatchClause = clause
+                var ncc = cc
+                if cc.has_pattern:
+                    ncc.pattern = substitute_pattern(cc.pattern, subst)
+                if cc.has_type_:
+                    ncc.type_ = substitute_type(cc.type_, subst)
+                ncc.body = substitute_block(cc.body, subst)
+                new_clauses = new_clauses.push(ncc)
+            out.kind = HirExprKind.TryCatch(substitute_block(tcb, subst), new_clauses, substitute_block_opt(finally_, subst))
 
         case _:
             # Literals, Var/NamedVar, Continue and CustomBlock carry no nested

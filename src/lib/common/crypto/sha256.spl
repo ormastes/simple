@@ -207,6 +207,12 @@ fn sha256_bytes(data: [i64]) -> [i64]:
 # included) plus the published FIPS 180-4 vectors for "" and "abc".
 @unsafe(reason: "raw SHA-256 accelerator; a non-32-byte result is the unsupported or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_tls13_sha256(data: [u8]) -> [u8]
+# Set when the runtime digest was unavailable and the pure-Simple fallback ran.
+# This module does no I/O; a caller that cares about the cost reports it.
+var _sha256_fallback_used: bool = false
+
+fn sha256_runtime_fallback_used() -> bool:
+    _sha256_fallback_used
 
 fn sha256_text(data: text) -> text:
     sha256_u8_fast_hex(text_to_utf8_bytes(data))
@@ -228,6 +234,10 @@ fn sha256_u8_fast_hex(raw: [u8]) -> text:
     # See doc/08_tracking/bug/jit_rt_tls13_sha256_returns_empty_2026-08-05.md --
     # remove this guard only once that defect is fixed and re-measured.
     if digest.len() != 32u64:
+        # The fallback is engine-independent but costs orders of magnitude more
+        # per digest; recorded so the driver can say so once (see
+        # driver_hir_cache.hir_cache_body_checksum).
+        _sha256_fallback_used = true
         return sha256_u8_hex(raw)
     # ASCII hex digits written into one byte buffer and converted once: the
     # previous 64 one-character substrings + join cost ~170 runtime calls and
@@ -641,4 +651,5 @@ fn sha256_bytes_scalar(data: [i64]) -> [i64]:
 
 export sha256_u8_hex, sha256_u8_fast_hex
 export sha256_u8_hex_zeroizing
+export sha256_runtime_fallback_used
 export Sha256StreamV1, sha256_stream_v1_new

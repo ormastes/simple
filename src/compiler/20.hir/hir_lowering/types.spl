@@ -78,6 +78,11 @@ class HirLowering:
     type_inference_config: TypeInferenceConfig?
     module_filename: text          # Filename/path for visibility matching and defining_module population
     allow_ambient_bootstrap_policy: bool
+    # 3a guard-count invariant (match_desugaring.spl build_match_expr): guards
+    # accounted for while desugaring the current match, and the resolved
+    # E-MIR-MATCH-GUARD level ("" = not resolved yet).
+    match_guards_desugared: i64
+    match_guard_level: text
     # Source-written `Any` policy, set by the driver:
     #   script (interpreter)          -> allowed
     #   compiled, below robust        -> allowed
@@ -569,6 +574,9 @@ class HirLowering:
     reexport_chase_memo_hits: i64
     # Append-only ABI slot: actual lowered declarations for contextual patterns.
     declared_pattern_enum_slots: Dict<text, HirDeclaredPatternEnumSlots> = {}
+    # Append-only ABI slot: `{variant}:{slot}:{wrapper path}` -> rows
+    # `{outer enum id}:{slot enum name}` (register_enum_payload_slot).
+    enum_payload_slot_rows: Dict<text, [text]> = {}
 
 struct HirDeclaredPatternEnumSlots:
     # Declaration-only metadata: no field symbols/default expressions.
@@ -645,6 +653,8 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         type_inference_config: nil,
         module_filename: "",
         allow_ambient_bootstrap_policy: true,
+        match_guards_desugared: 0,
+        match_guard_level: "",
         forbid_written_any: false,
         written_any_unsafe_depth: 0,
         module_resolver: nil,
@@ -791,7 +801,8 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         reexport_walk_valid: true,
         reexport_chase_calls: 0,
         reexport_chase_memo_hits: 0,
-        declared_pattern_enum_slots: {}
+        declared_pattern_enum_slots: {},
+        enum_payload_slot_rows: {}
     )
 
 fn hirlowering_new() -> HirLowering:
@@ -1016,7 +1027,7 @@ impl HirLowering:
                 case "i8" | "i16" | "i32" | "i64" | "int" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "bool" | "char" | "text" | "str" | "String" | "fn":
                     self.lower_named_kind(nm, [], lt.span)
                 case _:
-                    self.lower_named_kind(nm, self.lower_type_list(nargs), lt.span)
+                    self.lower_named_instance_kind(nm, nargs, lt.span)
             return HirType(kind: named_kind, span: lt.span)
 
         val d_tuple: i64 = hir_type_kind_disc(TypeKind.Tuple([]))
@@ -1124,6 +1135,61 @@ impl HirLowering:
             kind = HirTypeKind.Infer(0, 0)
 
         HirType(kind: kind, span: lt.span)
+
+    me lower_named_instance_kind(name: text, args: [Type], span: Span) -> HirTypeKind:
+        """`Name<args>` annotation of a user type.
+
+        Until the parser learned to keep `Name<args>` for a name imported by
+        an explicit `use` item, every such annotation reached HIR as `Any`:
+        neither the base nor its ARGUMENTS were ever resolved, so a file
+        could spell one whose base is not resolvable here (a re-export chain
+        this module cannot follow) or whose argument is not in scope, and
+        still compile. Keeping the instance must not turn such a file into
+        an error: when the annotation does not lower cleanly, every
+        diagnostic it raised is withdrawn and it stays `Any`, as before.
+        The builtin generics (`Option`, `Result`, `Dict`) always reached HIR
+        with their arguments and keep their own diagnostics."""
+        val errors_before = self.errors.len()
+        self.named_instance_kind_or_any(name, self.lower_type_list(args), span, errors_before)
+
+    me named_instance_kind_or_any(name: text, hir_args: [HirType], span: Span, errors_before: i64) -> HirTypeKind:
+        """`lower_named_kind` for an annotation whose arguments were lowered
+        after `errors_before` diagnostics; see `lower_named_instance_kind`."""
+        val kind = self.lower_named_kind(name, hir_args, span)
+        if hir_args.len() == 0 or name == "Option" or name == "Result" or name == "Dict":
+            return kind
+        if self.errors.len() == errors_before:
+            return kind
+        var kept_errors: [LoweringError] = []
+        var kept_messages: [text] = []
+        var kept_recovered: [bool] = []
+        var i = 0
+        while i < errors_before:
+            kept_errors = kept_errors.push(self.errors[i])
+            kept_messages = kept_messages.push(self.diagnostic_messages[i])
+            kept_recovered = kept_recovered.push(self.diagnostic_recovered[i])
+            i = i + 1
+        self.errors = kept_errors
+        self.diagnostic_messages = kept_messages
+        self.diagnostic_recovered = kept_recovered
+        HirTypeKind.Any
+
+    me lower_resolved_named_kind(symbol_id: SymbolId, hir_args: [HirType], span: Span) -> HirTypeKind:
+        """Named type whose base resolved to `symbol_id`.
+
+        The parser keeps `Name<args>` for ANY name a file imports by an
+        explicit `use` item -- it cannot know the kind of an imported name.
+        Only an imported class or struct (or an alias, expanded below) is an
+        instantiation whose identity and arguments carry on; an imported
+        trait or enum applied to arguments keeps the erased `Any` it had
+        before that parser rule existed."""
+        if hir_args.len() > 0 and self.type_alias_position(symbol_id) < 0:
+            if val named_info = self.symbols.get_symbol_raw(symbol_id.id):
+                val named_owner = named_info.defining_module ?? ""
+                if named_owner != "" and named_owner != self.module_filename:
+                    if named_info.kind == SymbolKind.Trait or named_info.kind == SymbolKind.Enum:
+                        return HirTypeKind.Any
+        self.lower_named_symbol_kind(symbol_id, hir_args, span)
 
     me lower_named_kind(name: text, hir_args: [HirType], span: Span) -> HirTypeKind:
         # Only the current alias's formal parameters substitute into its body.
@@ -1318,7 +1384,7 @@ impl HirLowering:
                 if symbol_id.is_valid():
                     if custom_primitive_is_name(name):
                         custom_primitive_bind_symbol(name, symbol_id.id)
-                    self.lower_named_symbol_kind(symbol_id, hir_args, span)
+                    self.lower_resolved_named_kind(symbol_id, hir_args, span)
                 # SEED-PARITY (2026-08-01): the three rules below all sit AFTER
                 # the symbol lookup, exactly where the seed puts them
                 # (type_resolver.rs:141 single-letter, :178 tuple, :182 bare

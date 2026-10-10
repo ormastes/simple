@@ -3092,6 +3092,11 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_perf_dump_sdn", time::rt_perf_dump_sdn_fn);
     insert_simple!("rt_perf_free_sdn", time::rt_perf_free_sdn_fn);
     insert_simple!("rt_perf_clear", time::rt_perf_clear_fn);
+    // sffi/diag.spl wrappers (native twins: runtime io_print.rs / runtime_native.c).
+    // Without these an interpreted `print_err` / `debug_exit_success` call died
+    // with "unknown extern function".
+    insert_simple!("rt_print_err", io::stderr_write);
+    insert_simple!("rt_debug_exit_success", system::rt_debug_exit_success);
 
     m.insert(
         "compiler__driver__driver__compiler_driver_create",

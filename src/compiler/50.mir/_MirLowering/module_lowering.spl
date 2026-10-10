@@ -433,6 +433,9 @@ impl MirLowering:
             local_hir_type_isolation_states: [],
             local_hir_type_resource_states: [],
             fn_return_types: {},
+            extern_fn_symbols: {},
+            extern_result_locals: {},
+            static_scalar_locals: {},
             current_function_symbols: [],
             current_function_names: [],
             loop_stack: empty_loop_stack,
@@ -463,9 +466,15 @@ impl MirLowering:
             class_type_names: {},
             struct_field_type_ownership_key: {},
             struct_field_type_name: {},
+            struct_field_type_param: {},
+            struct_field_over_type_param: {},
+            struct_type_param_names: {},
+            generic_instance_field_types: {},
+            generic_instance_field_struct_names: {},
             struct_field_repr_name: {},
             struct_field_hir_type: {},
             struct_bare_layout_owner: {},
+            struct_identity_layout_key: {},
             struct_field_array_element_type_name: {},
             struct_field_array_elem_type: {},
             struct_value_syms: {},
@@ -477,6 +486,7 @@ impl MirLowering:
             trait_impl_owners: {},
             trait_impl_methods: {},
             trait_impl_closure_complete: false,
+            devirtualized_calls: 0,
             trait_impl_provider_modules: [],
             enum_payload_struct_names: {},
             enum_single_payload_types: {},
@@ -563,6 +573,54 @@ impl MirLowering:
         if defining_module != "":
             return "{defining_module}::{symbol.name}"
         symbol.name
+
+    me register_struct_identity_layout_key(symbol: HirSymbol, layout_key: text):
+        """Record which layout key a struct DECLARATION registered, under its
+        canonical `{dotted owner}::{Name}` identity (see
+        struct_identity_layout_key). First declaration wins, matching the
+        prescan's own first-wins metadata registration."""
+        val owner = mir_layout_canonical_module_name(symbol.defining_module ?? "")
+        if owner == "":
+            return
+        val identity = "{owner}::{symbol.name}"
+        if not self.struct_identity_layout_key.has(identity):
+            self.struct_identity_layout_key[identity] = layout_key
+
+    fn declared_struct_layout_key(shape: text) -> text:
+        """Fold a struct layout key onto the spelling its declaration
+        registered. `shape` is returned unchanged when it already names a
+        registered layout, or when no declaration owns its identity -- so an
+        unknown name stays unknown instead of borrowing a same-named layout."""
+        if shape == "" or self.struct_field_order.has(shape):
+            return shape
+        val separator = shape.rfind("::")
+        if separator <= 0:
+            return shape
+        val owner = mir_layout_canonical_module_name(shape.substring(0, separator))
+        val identity = "{owner}::{shape.substring(separator + 2)}"
+        if self.struct_identity_layout_key.has(identity):
+            return self.struct_identity_layout_key[identity]
+        shape
+
+    fn struct_owner_method_key(owner: text, method: text) -> text:
+        """`{owner}::{method}` dispatch-row key for a receiver's recorded owner.
+
+        A struct value is recorded under its qualified LAYOUT key
+        (`{module}::{Name}`, composite_layout_key), while
+        register_provider_method publishes a struct's methods under the
+        callable identity `{dotted module}.{Name}`. Answer that row when the
+        direct spelling has none; the module qualifier keeps a same-named
+        struct of another module out."""
+        val direct = "{owner}::{method}"
+        if self.struct_method_syms.has(direct):
+            return direct
+        val separator = owner.rfind("::")
+        if separator > 0:
+            val identity_owner = mir_layout_canonical_module_name(owner.substring(0, separator))
+            val identity_key = "{identity_owner}.{owner.substring(separator + 2)}::{method}"
+            if self.struct_method_syms.has(identity_key):
+                return identity_key
+        direct
 
     fn canonical_layout_digest(fields: [HirField], layout_attr: LayoutAttr) -> text:
         val layout = compute_struct_layout(fields, layout_attr)
@@ -1104,6 +1162,16 @@ impl MirLowering:
     fn asm_target_spec_backend(spec: AsmTargetSpec) -> text:
         spec.backend
 
+    me register_struct_type_param_names(name: text, type_params: [HirTypeParam]):
+        """Record a generic struct's type-parameter names in declaration
+        order (empty for a non-generic struct), keyed like the field maps."""
+        var names: [text] = []
+        for tp in type_params:
+            val tpt: HirTypeParam = tp
+            names.push(tpt.name)
+        if names.len() > 0 or not self.struct_type_param_names.has(name):
+            self.struct_type_param_names[name] = names
+
     me register_composite_field_metadata(name: text, fields: [HirField], symbols: SymbolTable, overwrite: bool):
         """Register name-keyed struct/class field metadata."""
         var field_names: [text] = []
@@ -1113,6 +1181,8 @@ impl MirLowering:
         var field_hir_types: [HirType] = []
         var field_array_element_type_names: [text] = []
         var field_elem_types: [HirType] = []
+        var field_type_params: [text] = []
+        var field_over_type_params: [bool] = []
         var fi = 0
         while fi < fields.len():
             val field = fields[fi]
@@ -1121,6 +1191,7 @@ impl MirLowering:
             var field_type_ownership_key = ""
             var field_repr_name = ""
             var field_array_element_type_name = ""
+            var field_type_param = ""
             var field_elem_type = HirType(kind: HirTypeKind.Error, span: field.span)
             var field_hir_type = HirType(kind: HirTypeKind.Error, span: field.span)
             if field.type_ != nil:
@@ -1128,14 +1199,21 @@ impl MirLowering:
                 match field.type_.kind:
                     case Str:
                         field_repr_name = "str"
+                    case TypeParam(tp_name, _):
+                        field_type_param = tp_name
                     case Named(field_type_sym, _):
                         val field_type_symbol = symbols.get_symbol_raw(field_type_sym.id)
                         if field_type_symbol.?:
-                            field_type_name = field_type_symbol.name
-                            field_type_ownership_key = self.composite_layout_key(field_type_symbol)
-                            if field_type_symbol.kind == SymbolKind.Class:
-                                field_type_name = mir_class_identity(field_type_symbol)
-                                field_type_ownership_key = field_type_name
+                            if field_type_symbol.kind == SymbolKind.TypeParam:
+                                # `a: A` of `struct Pair<A, B>`: not a struct
+                                # named A -- the instance decides (BUG-IT-6).
+                                field_type_param = field_type_symbol.name
+                            else:
+                                field_type_name = field_type_symbol.name
+                                field_type_ownership_key = self.composite_layout_key(field_type_symbol)
+                                if field_type_symbol.kind == SymbolKind.Class:
+                                    field_type_name = mir_class_identity(field_type_symbol)
+                                    field_type_ownership_key = field_type_name
                     case Array(field_element_type, _):
                         field_array_element_type_name = "__runtime_array__"
                         # Bug (native_class_array_field_mutation_segfault /
@@ -1179,7 +1257,15 @@ impl MirLowering:
             field_hir_types.push(field_hir_type)
             field_array_element_type_names.push(field_array_element_type_name)
             field_elem_types.push(field_elem_type)
+            field_type_params.push(field_type_param)
+            var field_over_type_param = false
+            if field_type_param == "" and field.type_ != nil:
+                field_over_type_param = self.hir_type_mentions_type_param(field.type_, symbols)
+            field_over_type_params.push(field_over_type_param)
             fi = fi + 1
+        if overwrite or not self.struct_field_type_param.has(name):
+            self.struct_field_type_param[name] = field_type_params
+            self.struct_field_over_type_param[name] = field_over_type_params
         # Field-index-collision diagnostic (stage3 borrow-checker SIGSEGV,
         # 2026-08-07): ~1,500 struct/class names are duplicated across
         # src/{compiler,lib,app}. A bare-name re-registration with a
@@ -1273,6 +1359,7 @@ impl MirLowering:
             # 2026-07-17) -- no separate inline loop needed here.
             val bare_layout_was_free = not self.struct_field_order.has(struct_def.name)
             self.register_composite_field_metadata(struct_def.name, struct_def.fields, module.symbols, false)
+            self.register_struct_type_param_names(struct_def.name, struct_def.type_params)
             val struct_symbol = module.symbols.get_symbol_raw(struct_def.symbol.id)
             if struct_symbol != nil:
                 val struct_key = self.composite_layout_key(struct_symbol)
@@ -1280,6 +1367,8 @@ impl MirLowering:
                     self.struct_bare_layout_owner[struct_def.name] = struct_key
                 if struct_key != struct_def.name:
                     self.register_composite_field_metadata(struct_key, struct_def.fields, module.symbols, false)
+                    self.register_struct_identity_layout_key(struct_symbol, struct_key)
+                    self.register_struct_type_param_names(struct_key, struct_def.type_params)
                 val struct_attr = if struct_def.has_layout_attr: struct_def.layout_attr else: layoutattr_default_()
                 self.register_composite_layout_identity(struct_symbol, struct_def.fields, struct_attr)
             psi = psi + 1
@@ -1450,6 +1539,21 @@ impl MirLowering:
                     prescan_param_tys.push(prescan_param.type_)
                 bootstrap_fn_param_hir_types_register(prescan_fn.name, prescan_param_tys)
 
+    me lower_bootstrap_entry_module(module: HirModule) -> MirModule:
+        """Lower the stage3 fixed-entry module (`app.cli.bootstrap_main`).
+
+        The stage3 bootstrap-fixed lane used to call `lower_module(hir)`: one
+        argument, both defaults omitted, under a method name `HirLowering`
+        also declares with that one-argument arity. The natively compiled
+        stage2 died at that call with an access violation on every phase-3
+        build, while `lower_module_transient_scoped(hir, providers, is_entry)`
+        - three explicit arguments - lowered the same module on the same
+        binary. This entry is named by no other class and forwards every
+        argument explicitly, the call shape the direct lane already proves.
+        doc/08_tracking/bug/stage3_bootstrap_fixed_lower_module_segv_2026-10-11.md"""
+        val no_providers: [HirModule] = []
+        self.lower_module(module, no_providers, true)
+
     me lower_module_transient_scoped(module: HirModule, providers: [HirModule] = [], is_entry_module: bool = true) -> Result<MirModule, text>:
         """`lower_module` with the per-module lowering arena reclaimed.
 
@@ -1589,6 +1693,8 @@ impl MirLowering:
             if trait_provider.name != module.name:
                 self.register_native_trait_implementations(trait_provider)
         self.exact_extern_signatures = {}
+        # E-MIR-TYPE-Error rate limit is per module (see lower_type).
+        self.mir_type_error_reports = {}
         for raw_declaration in module.functions.values():
             val declaration: HirFunction = raw_declaration
             self.record_exact_extern_declaration_v1(declaration)
@@ -1606,12 +1712,15 @@ impl MirLowering:
         while local_meta_i < local_struct_values.len():
             val struct_def = local_struct_values[local_meta_i]
             self.register_composite_field_metadata(struct_def.name, struct_def.fields, module.symbols, true)
+            self.register_struct_type_param_names(struct_def.name, struct_def.type_params)
             val struct_symbol = module.symbols.get_symbol_raw(struct_def.symbol.id)
             if struct_symbol != nil:
                 val struct_key = self.composite_layout_key(struct_symbol)
                 self.struct_bare_layout_owner[struct_def.name] = struct_key
                 if struct_key != struct_def.name:
                     self.register_composite_field_metadata(struct_key, struct_def.fields, module.symbols, true)
+                    self.register_struct_identity_layout_key(struct_symbol, struct_key)
+                    self.register_struct_type_param_names(struct_key, struct_def.type_params)
             local_meta_i = local_meta_i + 1
         val local_class_values = module.classes.values()
         local_meta_i = 0
@@ -2095,6 +2204,13 @@ impl MirLowering:
                 eprint("[mir-prescan-function] start module={module.name} index={psi} name={prescan_fn.name}")
             if not prescan_fn.is_extern:
                 self.prescan_block_for_struct_types(prescan_fn.body)
+            else:
+                # Mark every extern BEFORE any body is lowered. The lowering
+                # loop below also records it, but only when it reaches the
+                # declaration, so a caller lowered earlier saw the extern's
+                # `-> i64` result as a declared scalar: `ext() == nil` folded
+                # to false and `take(ext())` boxed a nil word as Some.
+                self.extern_fn_symbols[prescan_fn.symbol.id] = true
             if prescan_trace:
                 eprint("[mir-prescan-function] done module={module.name} index={psi} name={prescan_fn.name}")
             psi = psi + 1
@@ -2113,6 +2229,10 @@ impl MirLowering:
                 # #158 Phase C: generic templates are non-emittable (see the
                 # function-symbol loop above for the full rationale).
             elif self.hir_function_is_extern(fn_):
+                # Record the extern's symbol so call-result locals can be
+                # excluded from nil-free scalar reasoning (see
+                # extern_fn_symbols in mir_lowering_types.spl).
+                self.extern_fn_symbols[fn_.symbol.id] = true
                 fni = fni + 1
                 # skip extern functions
             else:

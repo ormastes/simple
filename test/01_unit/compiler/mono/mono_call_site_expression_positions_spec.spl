@@ -1,0 +1,179 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, mono
+#
+# 40.mono must COUNT and REPOINT a generic call site in EVERY expression
+# position, not only the ones a call commonly sits in. Stage2 micro_h
+# (test/fixtures/bootstrap/stage2_micro/micro_h) measured the gap on
+# 2026-10-10: `print "direct={pick_second(1, 2)} ..."` reported
+# `[mono] call_sites=0` and the native link died with
+# `undefined symbol: pick_second` -- `rewrite_expr` treated
+# `HirExprKind.StringLit(_, interps)` as a leaf (BUG-IT-8).
+#
+# Each example below places the same free generic `pick<C>(a: C, b: C) -> C`
+# in one expression position, runs the pass, and requires: every site
+# counted, zero unresolved, zero diagnostics, and -- by walking the WHOLE
+# rewritten body with the generated `walk_hir_block` visitor -- no callee
+# left under the template name, only mangled specializations.
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirFunction, HirExpr, HirExprKind}
+use compiler.hir.generated.hir_visitor.{HirWalkNode, walk_hir_block}
+use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
+
+val PRELUDE = "struct Acc:\n" +
+    "    n: i64\n" +
+    "\n" +
+    "fn pick<C>(a: C, b: C) -> C:\n" +
+    "    b\n" +
+    "\n" +
+    "fn apply(f: fn(i64) -> i64) -> i64:\n" +
+    "    f(3)\n" +
+    "\n"
+
+struct Outcome:
+    sites: i64
+    specs: i64
+    unresolved: i64
+    diags: i64
+    template_callees: i64
+    spec_callees: [text]
+    fn_names: [text]
+
+fn collect_callee(node: HirWalkNode, acc: [text]) -> [text]:
+    match node:
+        case HirWalkNode.Expr(e):
+            val ex: HirExpr = e
+            match ex.kind:
+                case HirExprKind.Call(callee, _, _):
+                    val ce: HirExpr = callee
+                    match ce.kind:
+                        case HirExprKind.NamedVar(_, n):
+                            acc.push(n)
+                        case _:
+                            pass
+                case _:
+                    pass
+        case _:
+            pass
+    acc
+
+fn run(main_body: text) -> Outcome:
+    val src = PRELUDE + "fn main(xs: [i64], n: i64) -> i64:\n" + main_body
+    val file = "testdata/mono_positions.spl"
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(parse_full_frontend(src, file, "mono_positions", Logger(level: 0)))
+    var mods: Dict<text, HirModule> = {}
+    mods["mono_positions"] = hir
+    val (mono, stats, diags) = run_monomorphization_with_diagnostics(mods)
+    val m: HirModule = mono["mono_positions"]
+    var template_callees = 0
+    var spec_callees: [text] = []
+    var fn_names: [text] = []
+    for sym in m.functions.keys():
+        val f: HirFunction = m.functions[sym]
+        fn_names.push(f.name)
+        if f.name != "main":
+            continue
+        val callees: [text] = walk_hir_block(f.body, [], collect_callee)
+        for c in callees:
+            val ct: text = c
+            if ct == "pick":
+                template_callees = template_callees + 1
+            if ct.starts_with("pick$"):
+                spec_callees.push(ct)
+    Outcome(sites: stats.call_sites_found, specs: stats.specializations_created,
+            unresolved: stats.unresolved_generic_calls, diags: diags.len(),
+            template_callees: template_callees, spec_callees: spec_callees, fn_names: fn_names)
+
+fn expect_all_repointed(body: text, sites: i64, specs: [text], walked: i64 = -1):
+    """`walked` overrides the number of repointed callees the generated
+    walker is expected to SEE, for positions it does not descend into."""
+    val o = run(body)
+    expect(o.diags).to_equal(0)
+    expect(o.unresolved).to_equal(0)
+    expect(o.sites).to_equal(sites)
+    expect(o.template_callees).to_equal(0)
+    expect(o.spec_callees.len()).to_equal(if walked >= 0: walked else: sites)
+    for s in specs:
+        val st: text = s
+        expect(o.fn_names.contains(st)).to_equal(true)
+    # the consumed template is pruned
+    expect(o.fn_names.contains("pick")).to_equal(false)
+
+describe "40.mono counts and repoints generic call sites in every expression position":
+    it "string interpolation segments (BUG-IT-8, stage2 micro_h)":
+        expect_all_repointed(
+            "    print \"a=\{pick(1, 2)\} b=\{pick(\"x\", \"y\").len()\}\"\n    0\n",
+            2, ["pick$i64", "pick$str"])
+
+    it "let initializer, typed let and expression statement":
+        expect_all_repointed(
+            "    val a = pick(1, 2)\n    val b: text = pick(\"x\", \"y\")\n    pick(3, 4)\n    a\n",
+            3, ["pick$i64", "pick$str"])
+
+    it "return value and block tail value":
+        expect_all_repointed(
+            "    if n > 0:\n        return pick(1, 2)\n    pick(3, 4)\n",
+            2, ["pick$i64"])
+
+    it "binary operands, unary operand and comparison":
+        expect_all_repointed(
+            "    val a = pick(1, 2) + pick(3, 4) * 2\n    val b = -pick(5, 6)\n    val c = pick(\"x\", \"y\") == \"y\"\n    a + b\n",
+            4, ["pick$i64", "pick$str"])
+
+    it "call argument, nested generic argument and method-call argument":
+        expect_all_repointed(
+            "    val a = apply(\\v: v) + pick(pick(1, 2), 3)\n    var ys: [i64] = []\n    ys.push(pick(7, 8))\n    a\n",
+            3, ["pick$i64"])
+
+    it "method-call receiver and index":
+        expect_all_repointed(
+            "    val l = pick(\"x\", \"y\").len()\n    val e = xs[pick(0, 1)]\n    l + e\n",
+            2, ["pick$i64", "pick$str"])
+
+    it "if condition, while condition and loop body":
+        expect_all_repointed(
+            "    var i = 0\n    if pick(1, 2) > 1:\n        i = 1\n    while i < pick(2, 3):\n        i = i + pick(1, 1)\n    i\n",
+            3, ["pick$i64"])
+
+    it "match scrutinee, guard and arm body":
+        expect_all_repointed(
+            "    match pick(1, 2):\n        case v if pick(v, 1) > 0:\n            pick(v, 2)\n        case _:\n            0\n",
+            3, ["pick$i64"])
+
+    it "lambda body":
+        expect_all_repointed(
+            "    apply(\\v: pick(1, 2))\n",
+            1, ["pick$i64"])
+
+    it "array, dict and struct-literal element positions":
+        expect_all_repointed(
+            "    val arr = [pick(1, 2), pick(3, 4)]\n    val d = {\"k\": pick(5, 6)}\n    val s = Acc(n: pick(7, 8))\n    arr[0] + s.n\n",
+            4, ["pick$i64"])
+
+    it "comprehension element and filter clause":
+        # Both sites are counted and repointed by the pass (measured
+        # `sites=2`, callee `pick$i64` in the element). The generated
+        # `walk_hir_comp_clause` (20.hir/generated/hir_visitor.spl) is a
+        # stub that never calls `walk_hir_comp_clause_kind`, so the walker
+        # cannot see the filter clause's callee: it reports 1, not 2. That
+        # is a generated-visitor gap, pinned here as `walked: 1` until the
+        # generator emits the clause descent.
+        expect_all_repointed(
+            "    val ys = [pick(x, 1) for x in xs if pick(x, 0) > 0]\n    ys.len()\n",
+            2, ["pick$i64"], 1)
+
+    it "for iterable and for body":
+        expect_all_repointed(
+            "    var t = 0\n    for x in [pick(1, 2)]:\n        t = t + pick(x, 3)\n    t\n",
+            2, ["pick$i64"])
+
+    it "option/result positions: ?? operands and unwrap base":
+        expect_all_repointed(
+            "    val o: i64? = nil\n    val a = o ?? pick(1, 2)\n    a\n",
+            1, ["pick$i64"])
