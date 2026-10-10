@@ -1,0 +1,476 @@
+#!/bin/sh
+# check-seed-stage2-differential.shs -- seed <-> stage-2 differential corpus gate (robustness 12b).
+#
+# Every bootstrap blocker of 2026-10 was a program the Rust seed runs one way and the pure-Simple
+# stage-2 compiler rejects or compiles differently. This gate runs a fixed corpus of small programs
+# (one per divergence class) through
+#   A  the seed interpreter            `<seed> run <case>/main.spl`           (the oracle)
+#   B  a stage-2 compiler, per backend `<stage2> native-build --backend <b>`  then runs the executable
+# and compares exit code + stdout. The corpus is test/fixtures/bootstrap/stage2_micro/<case>/main.spl
+# (the stage-2 micro-program ladder's directory and header format; run.shs there is the
+# stage-2-only runner). Header of main.spl:
+#   # Expected stdout:        followed by `#   <line>` lines  -> the program must run, exit 0, print them
+#   # Expected: reject        -> both compilers must refuse the program
+#
+# Lanes and verdicts, one row per (case, lane):
+#   seed       seed vs the header's expectation      SAME | DIFF | NOTRUN
+#   llvm       stage-2 llvm vs the seed              SAME | DIFF | NOTRUN
+#   cranelift  stage-2 cranelift vs the seed         SAME | DIFF | NOTRUN
+# NOTRUN (oracle or build timed out, backend not built into this stage-2, case has no main.spl) is
+# never counted as agreement. A "refusal" is: seed exits non-zero with empty stdout; stage-2
+# native-build fails. Both refusing is SAME.
+#
+# Baseline (shrink-only), default scripts/check/seed_stage2_differential_baseline.txt, one entry per
+# line `<case> <lane> <DIFF|NOTRUN>  # why`. A DIFF/NOTRUN row not in the baseline FAILS; a baselined
+# row that now is SAME, changed class, or names a case that no longer exists FAILS as stale.
+# A baseline describes ONE stage-2 binary; pass --baseline for another.
+#
+# Usage (from anywhere; toolchain env such as CC / SIMPLE_WINDOWS_ABI is the caller's job):
+#   sh scripts/check/check-seed-stage2-differential.shs --stage2 <path> [options] [case ...]
+#     --seed <path>        seed binary (default $SIMPLE_SEED, else bin/simple)
+#     --runtime <dir>      stage-2 runtime authority (default <stage2 dir>/stage2-runtime-authority if present)
+#     --target <triple>    passed to native-build (default: not passed)
+#     --backends <list>    comma list of llvm,cranelift (default both)
+#     --corpus <dir>       default test/fixtures/bootstrap/stage2_micro
+#     --baseline <file>    default scripts/check/seed_stage2_differential_baseline.txt
+#     --work <dir>         build/output dir (default build/seed_stage2_differential)
+#     --jobs <n>           parallel stage-2 builds (default 2)   --threads <n> per build (default 4)
+#     --timeout <s>        per build (default 3600)              KEEP_WORK=1 keeps per-build caches
+#     --generate-baseline  rewrite the baseline from this run (one command re-baselines against
+#                          another stage-2: --stage2 <new> --generate-baseline). Reviewed updates only.
+#   sh scripts/check/check-seed-stage2-differential.shs --selftest
+#
+# Verdict, always the LAST stdout line:
+#   PASS  -- <n> comparison(s) across <c> case(s): ... 0 new, 0 stale       exit 0  (n > 0)
+#   FAIL  -- ... naming every new / stale / changed row                      exit 1
+#   ERROR -- nothing was checked (<reason>)                                  exit 2
+# A missing or non-executable compiler, an empty corpus, or a run where no row was actually
+# compared is ERROR, never PASS. The selftest (fake compilers through the same code path) runs
+# before every scan and is fatal. Exit statuses are read on the line after the invocation, never
+# through a pipe.
+set -u
+
+here=$(cd "$(dirname "$0")" && pwd)
+REPO=$(cd "$here/../.." && pwd)
+
+expected_stdout() {  # $1 = main.spl ; prints the `#   ` block after `# Expected stdout:`
+    awk 'f && /^#   / { sub(/^#   /, ""); print; next } f { exit } /^# Expected stdout:$/ { f = 1 }' "$1"
+}
+
+case_kind() {  # $1 = main.spl ; prints run | reject | none
+    if grep -q '^# Expected: reject$' "$1"; then echo reject
+    elif grep -q '^# Expected stdout:$' "$1"; then echo run
+    else echo none; fi
+}
+
+with_timeout() {  # $1 = seconds, rest = command. Falls back to no limit where no timeout tool exists.
+    _wt_s=$1; shift
+    if command -v timeout >/dev/null 2>&1; then timeout "$_wt_s" "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$_wt_s" "$@"
+    else "$@"; fi
+}
+
+baseline_class() {  # $1 = case, $2 = lane ; prints DIFF | NOTRUN | ""
+    [ -f "$BASELINE" ] || return 0
+    awk -v c="$1" -v l="$2" '{ sub(/#.*/, "") } $1 == c && $2 == l { print $3; exit }' "$BASELINE"
+}
+
+# seed_job <case>: writes $WORK/<case>/seed/{rc,out,err}
+seed_job() {
+    _sd="$WORK/$1/seed"; mkdir -p "$_sd"
+    if [ ! -f "$CORPUS/$1/main.spl" ]; then echo missing > "$_sd/rc"; : > "$_sd/out"; return 0; fi
+    (cd "$REPO" && with_timeout "$SEED_TMO" "$SEED" run "$CORPUS_ARG/$1/main.spl" > "$_sd/raw" 2> "$_sd/err")
+    _src=$?
+    tr -d '\r' < "$_sd/raw" > "$_sd/out"; rm -f "$_sd/raw"
+    echo "$_src" > "$_sd/rc"
+}
+
+# stage2_job <case> <backend>: writes $WORK/<case>/<backend>/{status,run.rc,run.out,build.log}
+#   status: `built <secs>` | `reject <rc> <secs>` | `notrun <reason>`
+stage2_job() {
+    _jd="$WORK/$1/$2"; mkdir -p "$_jd"
+    _exe="$_jd/prog$EXE_SUFFIX"
+    # The driver publishes by renaming staging output over -o and refuses if a previous one is there.
+    rm -f "$_exe" "$_jd/run.out" "$_jd/run.rc" "$_jd/status"
+    if [ ! -f "$CORPUS/$1/main.spl" ]; then echo "notrun no-main.spl" > "$_jd/status"; return 0; fi
+    _t0=$(date +%s)
+    (cd "$REPO" && with_timeout "$TMO" "$STAGE2" native-build $TARGET_ARGS --backend "$2" \
+        --runtime-bundle core-c-bootstrap \
+        --source src/compiler --source src/app --source src/lib --source "$CORPUS_ARG" \
+        --entry-closure --threads "$THREADS" --cache-dir "$_jd/cache" --mode dynload \
+        --entry "$CORPUS_ARG/$1/main.spl" $RUNTIME_ARGS --verbose -o "$_exe" > "$_jd/build.log" 2>&1)
+    _brc=$?
+    _wall=$(( $(date +%s) - _t0 ))
+    [ "${KEEP_WORK:-0}" = 1 ] || rm -rf "$_jd/cache"
+    if [ "$_brc" -eq 124 ]; then echo "notrun build-timeout-${TMO}s" > "$_jd/status"; return 0; fi
+    if [ "$_brc" -ne 0 ] || [ ! -f "$_exe" ]; then
+        if grep -a -i -q -E "(unknown|unsupported|unavailable) backend|backend[^\n]{0,60}(not available|not supported|not compiled|unavailable)" "$_jd/build.log"; then
+            echo "notrun backend-unavailable" > "$_jd/status"; return 0
+        fi
+        echo "reject $_brc $_wall" > "$_jd/status"; return 0
+    fi
+    (cd "$_jd" && with_timeout 60 "./prog$EXE_SUFFIX" > run.raw 2> run.err)
+    _rrc=$?
+    tr -d '\r' < "$_jd/run.raw" > "$_jd/run.out"; rm -f "$_jd/run.raw"
+    echo "$_rrc" > "$_jd/run.rc"
+    [ "${KEEP_WORK:-0}" = 1 ] || rm -f "$_exe"
+    echo "built $_wall" > "$_jd/status"
+}
+
+build_reason() {  # $1 = build.log ; one short line saying why stage-2 refused (most specific first)
+    for _pat in "E-[A-Z]+-[A-Za-z0-9]+[^\"]{0,110}" "undefined symbol: [^ ]+" "MIR lowering error: .{0,110}" \
+                "unresolved [a-z ]{0,30}: ?[^ ]{0,60}" "worker error: .{0,110}" "error: .{0,110}"; do
+        # Long tokens are host paths / mangled module names: keep their tail so rows are host-neutral.
+        _why=$(grep -a -o -E "$_pat" "$1" 2>/dev/null | head -1 | tr -d '\r' | tr '\t' ' ' |
+            awk '{ for (i = 1; i <= NF; i++) if (length($i) > 60) $i = "..." substr($i, length($i) - 39); print }')
+        if [ -n "$_why" ]; then printf '%s\n' "$_why"; return 0; fi
+    done
+    echo "see build.log"
+}
+
+# classify_seed <case> -> V DETAIL ; SEED_SIG = refuse | ran | notrun
+classify_seed() {
+    _main="$CORPUS/$1/main.spl"
+    _rc=$(cat "$WORK/$1/seed/rc" 2>/dev/null); _rc=${_rc:-missing}
+    SEED_RC=$_rc
+    if [ "$_rc" = missing ]; then SEED_SIG=notrun; V=NOTRUN; DETAIL="no main.spl"; return; fi
+    if [ "$_rc" -eq 124 ]; then SEED_SIG=notrun; V=NOTRUN; DETAIL="seed timed out"; return; fi
+    if [ "$_rc" -ne 0 ] && [ ! -s "$WORK/$1/seed/out" ]; then SEED_SIG=refuse; else SEED_SIG=ran; fi
+    _kind=$(case_kind "$_main")
+    case "$_kind" in
+        reject)
+            if [ "$SEED_SIG" = refuse ]; then V=SAME; DETAIL="seed refuses (rc=$_rc), as expected"
+            else V=DIFF; DETAIL="expected a refusal; seed ran rc=$_rc: $(head -1 "$WORK/$1/seed/out")"; fi ;;
+        run)
+            if [ "$_rc" -eq 0 ] && [ "$(cat "$WORK/$1/seed/out")" = "$(expected_stdout "$_main")" ]; then
+                V=SAME; DETAIL="seed rc=0, stdout as expected"
+            elif [ "$SEED_SIG" = refuse ]; then V=DIFF; DETAIL="seed refuses (rc=$_rc); expected: $(expected_stdout "$_main" | head -1)"
+            else V=DIFF; DETAIL="seed rc=$_rc: $(head -1 "$WORK/$1/seed/out") | expected: $(expected_stdout "$_main" | head -1)"; fi ;;
+        *)  V=NOTRUN; DETAIL="main.spl has no '# Expected stdout:' or '# Expected: reject' header" ;;
+    esac
+}
+
+# classify_stage2 <case> <backend> -> V DETAIL   (needs SEED_SIG / SEED_RC from classify_seed)
+classify_stage2() {
+    _jd="$WORK/$1/$2"
+    _stat=$(cat "$_jd/status" 2>/dev/null); _stat=${_stat:-notrun no-status}
+    set -- "$1" "$2" $_stat
+    if [ "$SEED_SIG" = notrun ]; then V=NOTRUN; DETAIL="oracle did not run"; return; fi
+    case "$3" in
+        notrun) V=NOTRUN; DETAIL="$4" ;;
+        reject)
+            if [ "$SEED_SIG" = refuse ]; then V=SAME; DETAIL="both refuse (seed rc=$SEED_RC, build rc=$4, $5s)"
+            else V=DIFF; DETAIL="seed ran rc=$SEED_RC, stage2 refuses (build rc=$4, $5s): $(build_reason "$_jd/build.log")"; fi ;;
+        built)
+            _rrc=$(cat "$_jd/run.rc")
+            if [ "$SEED_SIG" = refuse ]; then V=DIFF; DETAIL="seed refuses (rc=$SEED_RC), stage2 built ($4s) and ran rc=$_rrc: $(head -1 "$_jd/run.out")"
+            elif [ "$_rrc" != "$SEED_RC" ]; then V=DIFF; DETAIL="exit code: seed $SEED_RC, stage2 $_rrc (build $4s)"
+            elif [ "$(cat "$_jd/run.out")" != "$(cat "$WORK/$1/seed/out")" ]; then
+                V=DIFF; DETAIL="stdout: seed [$(head -1 "$WORK/$1/seed/out")] stage2 [$(head -1 "$_jd/run.out")] (build $4s)"
+            else V=SAME; DETAIL="rc=$_rrc and stdout equal (build $4s)"; fi ;;
+        *)  V=NOTRUN; DETAIL="unreadable status" ;;
+    esac
+}
+
+# execute_cases <case...> : runs the oracle and every stage-2 lane, then writes $WORK/results.txt
+# (`<case> <lane> <verdict> <detail>`). Uses SEED STAGE2 CORPUS CORPUS_ARG WORK BACKENDS JOBS.
+execute_cases() {
+    # Oracle first (seconds per case), then the stage-2 builds, JOBS at a time.
+    for _c in "$@"; do seed_job "$_c"; done
+    _n=0
+    for _c in "$@"; do
+        for _b in $BACKENDS; do
+            stage2_job "$_c" "$_b" &
+            _n=$((_n + 1))
+            if [ "$_n" -ge "$JOBS" ]; then wait; _n=0; fi
+        done
+    done
+    wait
+    : > "$WORK/results.txt"
+    for _c in "$@"; do
+        classify_seed "$_c"
+        printf '%s seed %s %s\n' "$_c" "$V" "$DETAIL" >> "$WORK/results.txt"
+        for _b in $BACKENDS; do
+            classify_stage2 "$_c" "$_b"
+            printf '%s %s %s %s\n' "$_c" "$_b" "$V" "$DETAIL" >> "$WORK/results.txt"
+        done
+    done
+    : > "$WORK/corpus_cases.txt"
+    for _d in "$CORPUS"/*/; do
+        [ -f "${_d}main.spl" ] || continue
+        _name=${_d%/}; printf '%s\n' "${_name##*/}" >> "$WORK/corpus_cases.txt"
+    done
+}
+
+# write_baseline <case...> : rewrite $BASELINE from the DIFF / NOTRUN rows of those cases.
+write_baseline() {
+    {
+        echo "# seed <-> stage-2 differential: known divergences (shrink-only)."
+        echo "# Format: <case> <lane> <DIFF|NOTRUN>  # why. Checked by scripts/check/check-seed-stage2-differential.shs."
+        echo "# A row that now agrees, changes class, or names a missing case is a stale-baseline FAIL."
+        echo "# Generated $(date -u +%Y-%m-%dT%H:%MZ) with stage2: $STAGE2_ID"
+        awk -v cases=" $* " 'index(cases, " " $1 " ") && ($3 == "DIFF" || $3 == "NOTRUN") {
+            d = $0; sub(/^[^ ]+ [^ ]+ [^ ]+ ?/, "", d); gsub(/#/, "", d)
+            printf "%s %s %s  # %s\n", $1, $2, $3, substr(d, 1, 200) }' "$WORK/results.txt"
+    } > "$BASELINE"
+    echo "NOTE: baseline rewritten: $BASELINE" >&2
+}
+
+# evaluate <case...> : prints the per-row table for those cases and the verdict. Returns 0/1/2.
+# One awk process: results rows x baseline rows. Uses WORK BASELINE FULL_RUN BACKENDS_LABEL.
+evaluate() {
+    if [ $# -eq 0 ]; then echo "ERROR — nothing was checked (no case under $CORPUS)"; return 2; fi
+    awk -v cases=" $* " -v ncases="$#" -v full="$FULL_RUN" -v label="$BACKENDS_LABEL" \
+        -v basefile="$BASELINE" -v corpusfile="$WORK/corpus_cases.txt" '
+    BEGIN {
+        while ((getline line < corpusfile) > 0) exists[line] = 1
+        while ((getline line < basefile) > 0) {
+            sub(/#.*/, "", line); $0 = line
+            if (NF == 0) continue
+            if (NF != 3 || ($2 != "seed" && $2 != "llvm" && $2 != "cranelift") || ($3 != "DIFF" && $3 != "NOTRUN")) {
+                malformed = malformed " " $1 ":" $2; continue
+            }
+            base[$1 " " $2] = $3
+            # Full runs only: a row whose case is gone could never be matched again.
+            if (full == 1 && !($1 in exists)) stale = stale " " $1 ":" $2 "(no-such-case)"
+        }
+        printf "%-38s %-10s %-7s %-8s %s\n", "case", "lane", "verdict", "baseline", "detail"
+    }
+    index(cases, " " $1 " ") {
+        rows++
+        v = $3; b = base[$1 " " $2]; key = $1 ":" $2
+        d = $0; sub(/^[^ ]+ [^ ]+ [^ ]+ ?/, "", d)
+        if (v == "SAME" || v == "DIFF") compared++
+        if (v == "SAME" && b == "")            { same++; mark = "-" }
+        else if (v == "SAME")                  { stale = stale " " key; mark = "STALE" }
+        else if (v == "DIFF" && b == "DIFF")   { kd++; mark = "known" }
+        else if (v == "NOTRUN" && b == "NOTRUN") { kn++; mark = "known" }
+        else if (v == "DIFF" && b == "")       { newd = newd " " key; mark = "NEW" }
+        else if (v == "NOTRUN" && b == "")     { newn = newn " " key; mark = "NEW" }
+        else                                   { changed = changed " " key; mark = "CHANGED" }
+        printf "%-38s %-10s %-7s %-8s %s\n", $1, $2, v, mark, d
+    }
+    END {
+        if (malformed != "") { printf "ERROR — nothing was checked (malformed baseline row(s) in %s:%s)\n", basefile, malformed; exit 2 }
+        if (compared + 0 == 0) { printf "ERROR — nothing was checked (%d row(s), none compared: every row is NOTRUN)\n", rows; exit 2 }
+        summary = sprintf("%d comparison(s) across %d case(s) [%s]: %d SAME, %d baselined DIFF, %d baselined NOTRUN", compared, ncases, label, same, kd, kn)
+        if (newd newn stale changed != "") {
+            out = "FAIL — " summary ";"
+            if (newd != "") out = out " new DIFF:" newd ";"
+            if (newn != "") out = out " unbaselined NOTRUN:" newn ";"
+            if (stale != "") out = out " stale baseline:" stale ";"
+            if (changed != "") out = out " baseline class changed:" changed ";"
+            print out; exit 1
+        }
+        print "PASS — " summary ", 0 new, 0 stale"
+    }' "$WORK/results.txt"
+    _erc=$?
+    return "$_erc"
+}
+
+# run_corpus <case...> : execute + (optionally rewrite the baseline) + evaluate. Returns 0/1/2.
+run_corpus() {
+    if [ $# -eq 0 ]; then echo "ERROR — nothing was checked (no case under $CORPUS)"; return 2; fi
+    mkdir -p "$WORK" || { echo "ERROR — nothing was checked (cannot create work dir $WORK)"; return 2; }
+    execute_cases "$@"
+    [ "$GENERATE" != 1 ] || write_baseline "$@"
+    evaluate "$@"
+}
+
+# ---------------------------------------------------------------------------------------------
+# Selftest: the fake seed and fake stage-2 under test/fixtures/bootstrap/seed_stage2_differential_selfcheck/
+# driven through the same execute/classify/evaluate code. All fixtures are executed ONCE; each
+# scenario then evaluates a case subset against its own baseline (process spawns are the whole
+# cost on Windows hosts). The fixture markers are documented in fake_stage2.shs there.
+selftest() {
+    _sc="$REPO/test/fixtures/bootstrap/seed_stage2_differential_selfcheck"
+    if [ ! -f "$_sc/fake_seed.shs" ] || [ ! -f "$_sc/fake_stage2.shs" ] || [ ! -d "$_sc/cases" ]; then
+        echo "selftest: fixtures missing under $_sc"; return 1
+    fi
+    _tmp=$(mktemp -d 2>/dev/null || mktemp -d -t seedstage2diff) || { echo "selftest: no temp dir"; return 1; }
+    # Copies, so a checkout that lost the executable bit still selftests.
+    cp "$_sc/fake_seed.shs" "$_tmp/fake_seed" && cp "$_sc/fake_stage2.shs" "$_tmp/fake_stage2" &&
+        chmod +x "$_tmp/fake_seed" "$_tmp/fake_stage2" || { echo "selftest: cannot stage fake compilers"; return 1; }
+    _fx="$_sc/cases"
+
+    SEED="$_tmp/fake_seed"; STAGE2="$_tmp/fake_stage2"; STAGE2_ID=fake; CORPUS="$_fx"; CORPUS_ARG="$_fx"
+    EXE_SUFFIX=""; TARGET_ARGS=""; RUNTIME_ARGS=""; THREADS=1; TMO=60; SEED_TMO=60; JOBS=6
+    BACKENDS="llvm cranelift"; BACKENDS_LABEL="llvm,cranelift"; GENERATE=0; FULL_RUN=0
+    WORK="$_tmp/work"; mkdir -p "$WORK"
+    # `nosuchcase` has no directory: it must be checked and come out NOTRUN, not be skipped.
+    execute_cases agree diverge s2rejects bothrefuse exitcode timedout oraclebad nobackend seedaccepts nosuchcase
+    _fails=0
+    st_eval() {  # $1 = label, $2 = expected rc, $3 = glob the LAST line must match, $4 = baseline text, rest = cases
+        _label=$1; _xrc=$2; _glob=$3; _btxt=$4; shift 4
+        BASELINE="$_tmp/$_label.baseline"
+        if [ "$_btxt" = "-" ]; then rm -f "$BASELINE"; else printf '%s\n' "$_btxt" > "$BASELINE"; fi
+        ST_OUT=$(evaluate "$@")
+        _orc=$?
+        _last=${ST_OUT##*
+}
+        # shellcheck disable=SC2254
+        case "$_last" in
+            $_glob) _ok=1 ;;
+            *) _ok=0 ;;
+        esac
+        if [ "$_orc" -ne "$_xrc" ] || [ "$_ok" -ne 1 ]; then
+            echo "selftest FAIL [$_label]: want rc=$_xrc + '$_glob', got rc=$_orc: $_last"
+            _fails=$((_fails + 1))
+        fi
+    }
+    # 1 agreement on every lane -> PASS, 3 comparisons
+    st_eval agree 0 'PASS — 3 comparison(s) across 1 case(s)*3 SAME, 0 baselined DIFF*0 new, 0 stale' - agree
+    # 2 stdout differs on the SECOND line, llvm only, not baselined -> FAIL naming exactly that row
+    st_eval diverge 1 'FAIL — *new DIFF: diverge:llvm;' - diverge
+    # 3 the same divergence, baselined -> PASS and counted as a baselined DIFF
+    st_eval diverge_known 0 'PASS — 3 comparison(s)*2 SAME, 1 baselined DIFF*' 'diverge llvm DIFF # known' diverge
+    # 4 stale baseline: the row agrees now -> FAIL
+    st_eval stale 1 'FAIL — *stale baseline: agree:llvm;' 'agree llvm DIFF # fixed since' agree
+    # 5 stage-2 refuses what the seed runs -> DIFF, with the refusal reason in the table
+    st_eval s2rejects 1 'FAIL — *new DIFF: s2rejects:llvm;' - s2rejects
+    case "$ST_OUT" in *"E-FAKE-001"*) ;; *) echo "selftest FAIL [s2rejects]: refusal reason not shown"; _fails=$((_fails + 1));; esac
+    # 6 both refuse a reject-kind case -> SAME on all three lanes
+    st_eval bothrefuse 0 'PASS — 3 comparison(s)*3 SAME*' - bothrefuse
+    # 7 same stdout, different exit code (SEGV-shaped) -> DIFF
+    st_eval exitcode 1 'FAIL — *new DIFF: exitcode:llvm;' - exitcode
+    # 8 build timeout -> NOTRUN is never agreement: unbaselined FAILs
+    st_eval timedout 1 'FAIL — 1 comparison(s)*unbaselined NOTRUN: timedout:llvm timedout:cranelift;' - timedout
+    # 9 ... and a baselined NOTRUN is reported apart from the compared rows
+    st_eval timedout_known 0 'PASS — 1 comparison(s)*1 SAME, 0 baselined DIFF, 2 baselined NOTRUN*' 'timedout llvm NOTRUN # slow
+timedout cranelift NOTRUN # slow' timedout
+    # 10 a baselined NOTRUN that now really differs -> class changed
+    st_eval class_changed 1 'FAIL — *baseline class changed: diverge:llvm;' 'diverge llvm NOTRUN # was a timeout' diverge
+    # 11 the oracle disagrees with the header: seed lane DIFF, stage-2 lanes still SAME vs the seed
+    st_eval oraclebad 1 'FAIL — 3 comparison(s)*2 SAME*new DIFF: oraclebad:seed;' - oraclebad
+    # 12 a backend this stage-2 does not carry -> NOTRUN for that lane
+    st_eval nobackend 1 'FAIL — 2 comparison(s)*unbaselined NOTRUN: nobackend:cranelift;' - nobackend
+    # 13 the seed accepts a must-reject program while stage-2 refuses -> all three lanes DIFF
+    st_eval seedaccepts 1 'FAIL — *new DIFF: seedaccepts:seed seedaccepts:llvm seedaccepts:cranelift;' - seedaccepts
+    # 14 a requested case without main.spl is checked and NOTRUN; nothing compared -> ERROR
+    st_eval missingcase 2 'ERROR — nothing was checked (3 row(s), none compared*' - nosuchcase
+    # 15 empty case list -> ERROR
+    st_eval empty 2 'ERROR — nothing was checked (no case under*' -
+    # 16 full run: a baseline row for a case that no longer exists is stale
+    FULL_RUN=1
+    st_eval removed 1 'FAIL — *stale baseline: gone:llvm(no-such-case);' 'gone llvm DIFF # case was deleted' agree
+    FULL_RUN=0
+    # 17 malformed baseline row -> ERROR, never a silent ignore
+    st_eval malformed 2 'ERROR — nothing was checked (malformed baseline row(s)*' 'agree llvm' agree
+    # 18 a generated baseline makes the same rows PASS
+    BASELINE="$_tmp/generate.baseline"; write_baseline diverge 2>/dev/null
+    _gen=$(cat "$BASELINE")
+    st_eval generate 0 'PASS — 3 comparison(s)*2 SAME, 1 baselined DIFF*' "$_gen" diverge
+    case "$_gen" in *"
+diverge llvm DIFF "*) ;; *) echo "selftest FAIL [generate]: baseline row not written"; _fails=$((_fails + 1));; esac
+    # 19-21 missing compilers -> ERROR through the real argument path
+    _o=$(sh "$0" --no-selftest --stage2 "$_tmp/absent_stage2" --seed "$_tmp/fake_seed" --corpus "$_fx" --work "$_tmp/m1" 2>/dev/null)
+    _orc=$?
+    case "$_orc:${_o##*
+}" in 2:"ERROR — nothing was checked (stage-2 compiler"*) ;; *) echo "selftest FAIL [missing stage2]: rc=$_orc $_o"; _fails=$((_fails + 1));; esac
+    _o=$(sh "$0" --no-selftest --stage2 "$_tmp/fake_stage2" --seed "$_tmp/absent_seed" --corpus "$_fx" --work "$_tmp/m2" 2>/dev/null)
+    _orc=$?
+    case "$_orc:${_o##*
+}" in 2:"ERROR — nothing was checked (seed compiler"*) ;; *) echo "selftest FAIL [missing seed]: rc=$_orc $_o"; _fails=$((_fails + 1));; esac
+    _o=$(sh "$0" --no-selftest --seed "$_tmp/fake_seed" --corpus "$_fx" --work "$_tmp/m3" 2>/dev/null)
+    _orc=$?
+    case "$_orc:${_o##*
+}" in 2:"ERROR — nothing was checked (no --stage2"*) ;; *) echo "selftest FAIL [no --stage2]: rc=$_orc $_o"; _fails=$((_fails + 1));; esac
+    rm -rf "$_tmp"
+    if [ "$_fails" -ne 0 ]; then echo "check-seed-stage2-differential: selftest FAILED ($_fails)"; return 1; fi
+    echo "check-seed-stage2-differential: selftest OK (21 fixtures)"
+    return 0
+}
+
+# ---------------------------------------------------------------------------------------------
+SEED=${SIMPLE_SEED:-}
+STAGE2=""; RUNTIME=""; TARGET=${TARGET:-}; BACKEND_LIST="llvm,cranelift"
+CORPUS=""; BASELINE=""; WORK=""; JOBS=2; THREADS=4; TMO=3600; SEED_TMO=${SEED_TMO:-300}
+GENERATE=0; MODE=run; RUN_SELFTEST=1
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) MODE=selftest ;;
+        --no-selftest) RUN_SELFTEST=0 ;;   # skips only the selftest (acceptance spec, selftest child runs)
+        --generate-baseline) GENERATE=1 ;;
+        --stage2) STAGE2=${2-}; shift ;;
+        --seed) SEED=${2-}; shift ;;
+        --runtime) RUNTIME=${2-}; shift ;;
+        --target) TARGET=${2-}; shift ;;
+        --backends) BACKEND_LIST=${2-}; shift ;;
+        --corpus) CORPUS=${2-}; shift ;;
+        --baseline) BASELINE=${2-}; shift ;;
+        --work) WORK=${2-}; shift ;;
+        --jobs) JOBS=${2-}; shift ;;
+        --threads) THREADS=${2-}; shift ;;
+        --timeout) TMO=${2-}; shift ;;
+        --) shift; break ;;
+        -*) echo "ERROR — nothing was checked (unknown option $1)"; exit 2 ;;
+        *) break ;;
+    esac
+    shift
+done
+
+if [ "$MODE" = selftest ]; then
+    selftest
+    _rc=$?
+    [ "$_rc" -eq 0 ] || exit 2
+    exit 0
+fi
+if [ "$RUN_SELFTEST" = 1 ]; then
+    _self=$(selftest)
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then printf '%s\n' "$_self" >&2; echo "ERROR — nothing was checked (selftest failed)"; exit 2; fi
+fi
+
+[ -n "$SEED" ] || SEED="$REPO/bin/simple"
+if [ -z "$STAGE2" ]; then echo "ERROR — nothing was checked (no --stage2 <path> given)"; exit 2; fi
+if [ ! -f "$SEED" ] || [ ! -x "$SEED" ]; then echo "ERROR — nothing was checked (seed compiler missing or not executable: $SEED)"; exit 2; fi
+if [ ! -f "$STAGE2" ] || [ ! -x "$STAGE2" ]; then echo "ERROR — nothing was checked (stage-2 compiler missing or not executable: $STAGE2)"; exit 2; fi
+case "$JOBS" in ''|*[!0-9]*|0) echo "ERROR — nothing was checked (--jobs must be a positive integer)"; exit 2 ;; esac
+
+if [ -z "$CORPUS" ]; then CORPUS="$REPO/test/fixtures/bootstrap/stage2_micro"; CORPUS_ARG="test/fixtures/bootstrap/stage2_micro"
+else
+    [ -d "$CORPUS" ] || { echo "ERROR — nothing was checked (corpus directory missing: $CORPUS)"; exit 2; }
+    CORPUS=$(cd "$CORPUS" && pwd); CORPUS_ARG=$CORPUS
+fi
+[ -d "$CORPUS" ] || { echo "ERROR — nothing was checked (corpus directory missing: $CORPUS)"; exit 2; }
+[ -n "$BASELINE" ] || BASELINE="$REPO/scripts/check/seed_stage2_differential_baseline.txt"
+[ -n "$WORK" ] || WORK="$REPO/build/seed_stage2_differential"
+mkdir -p "$WORK" && WORK=$(cd "$WORK" && pwd) || { echo "ERROR — nothing was checked (cannot create work dir)"; exit 2; }
+
+BACKENDS=$(printf '%s' "$BACKEND_LIST" | tr ',' ' ')
+for _b in $BACKENDS; do
+    case "$_b" in llvm|cranelift) ;; *) echo "ERROR — nothing was checked (unknown backend '$_b'; use llvm,cranelift)"; exit 2 ;; esac
+done
+[ -n "$BACKENDS" ] || { echo "ERROR — nothing was checked (empty --backends)"; exit 2; }
+BACKENDS_LABEL=$BACKEND_LIST
+
+TARGET_ARGS=""; [ -z "$TARGET" ] || TARGET_ARGS="--target $TARGET"
+EXE_SUFFIX=""
+case "$TARGET:$(uname -s 2>/dev/null)" in *windows*|*:MINGW*|*:MSYS*|*:CYGWIN*) EXE_SUFFIX=".exe" ;; esac
+if [ -z "$RUNTIME" ] && [ -d "$(dirname "$STAGE2")/stage2-runtime-authority" ]; then
+    RUNTIME="$(cd "$(dirname "$STAGE2")" && pwd)/stage2-runtime-authority"
+fi
+RUNTIME_ARGS=""; [ -z "$RUNTIME" ] || RUNTIME_ARGS="--runtime-path $RUNTIME"
+STAGE2_ID="$STAGE2"
+if command -v sha256sum >/dev/null 2>&1; then STAGE2_ID="$STAGE2 sha256=$(sha256sum "$STAGE2" | cut -c1-16)"; fi
+
+# Same build environment as test/fixtures/bootstrap/stage2_micro/run.shs.
+if [ "${BOOT-1}" = "" ]; then unset SIMPLE_BOOTSTRAP; else export SIMPLE_BOOTSTRAP="${BOOT-1}"; fi
+export SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_NATIVE_FILE_TIMEOUT=0 SIMPLE_NO_DEPRECATED_WARNINGS=1
+export SIMPLE_CACHE_SCOPE="${SIMPLE_CACHE_SCOPE:-seed-stage2-differential}"
+
+if [ $# -gt 0 ]; then FULL_RUN=0
+else
+    FULL_RUN=1
+    [ "$BACKEND_LIST" = "llvm,cranelift" ] || FULL_RUN=0
+    set --
+    for _d in "$CORPUS"/*/; do
+        [ -f "${_d}main.spl" ] || continue
+        _name=${_d%/}; _name=${_name##*/}
+        set -- "$@" "$_name"
+    done
+fi
+echo "seed:   $SEED"
+echo "stage2: $STAGE2_ID"
+run_corpus "$@"
+exit $?
