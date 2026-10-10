@@ -44,3 +44,7 @@ Astra high-effort review found zero P0/P1 in the final code delta and confirmed 
 The non-fast-forward push hook resolves only published main for an existing rebased ref. Main and this release line have 851 tip-side commits here, so rewriting the original draft branch would exceed its range guard. A new isolated branch tracking the published release line provides the supported, bounded push path, preserving the previous draft head.
 
 The current trusted default-branch workflow still offers only legacy `self_attestation`. Canonical SPipe guidance explicitly forbids emitting admission through that route. A non-mutating review request for PR 2892 was created; it requires external broker authority and does not authorize PASS. No protected merge, fabricated status, admin bypass, or release publication was performed.
+
+### Final target reconciliation
+
+The first new-branch push was correctly refused because release advanced to `7f445e481c2e2ebdff3ef7e1b0aa70a49beca45b` while the focused tests ran, and the new published commit was not yet present locally. Fetched it and rebased the two owned commits cleanly. Those upstream changes touch only bootstrap scripts and documentation; the entire `src` and `test` trees are identical between the tested and updated release bases. The retained source digests still match the final code. Existing focused evidence therefore remains applicable without repeating a passing test. Continuity evidence is retained in `build/native_probe/traceability-release-sync-20261011-pass3/rebase-source-continuity.json`.
