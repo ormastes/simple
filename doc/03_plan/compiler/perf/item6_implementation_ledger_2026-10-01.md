@@ -42,6 +42,12 @@ direct-env checks passed; the Simple unit spec and native cold/warm run remain
 publish a V3 graph, remove the entry-closure scan, prove concurrent index
 switching across the whole worker, or establish a performance gain.
 
+The admitted production route now requires the CLI-published package-index digest
+and rejects a different CURRENT generation before source or archive planning. The
+focused route spec covers an absent pin, a moved pin, and the matching graph.
+Execution remains pending on an admitted self-hosted runner; this guard does
+not remove the pre-route entry-closure source scan.
+
 ## SPipe TDD sequence
 
 The system test must use these five steps against one admitted compiler and
