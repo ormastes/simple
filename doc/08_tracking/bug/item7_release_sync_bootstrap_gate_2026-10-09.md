@@ -43,3 +43,66 @@ bound to an admitted parent, runtime snapshot, planner and current source, then
 run bootstrap and the pending compiler acceptance checks. Do not fabricate
 authority or substitute diagnostic binaries. Full item 7 coding, runtime
 verification, and the mutable-link-input receipt repair remain incomplete.
+
+
+## 2026-10-10: latest release and bounded Phase 2 diagnostics
+
+STATUS: FAIL for release readiness. No feature push or merge performed.
+
+Rebased all 39 retained commits onto fetched `release/1.0`
+`f92764f2b97f99de8b60db2d454208de55564be2`. The rebased head was
+`2b536680aac`; integration repairs were checkpointed at `741f4c5d8a2`.
+Preserved release binding inference, typed pool promotion, native trait imports,
+and runtime value tracking alongside the collection implementation.
+The release and feature branches both independently used flat-pool v3 for
+incompatible additions: their combined layout is now v4. Cache fixtures follow
+that version. Named-argument graph validation now traverses function parameters
+and return tags; valid and corrupt-cache regression cases were added but have
+NOT executed. A smaller-model agent performed bounded reviews/implementation;
+the parent reviewed its diffs. The unrelated dirty main worktree was untouched.
+Three external Rust target metadata deletions were preserved in the named stash
+`item7-pre-sync-external-target-metadata`, not included in this change.
+
+A frozen diagnostic Phase 2 producer was used:
+`C:/dev/simple-item7-phase2-diag-20261010/simple.exe`, SHA256
+`d7acc81607946e437cbb916674109db5fa48da9fa2eefe7c353ba7fe1f95cd87`.
+Its existing LLVM Hello receipt is diagnostic-only (source `111968e72bc5`),
+not source-matched qualification of this branch. Frozen `--version` exited 0.
+The six-product request for this producer remains unqualified, 0/6 products;
+BDD callback typing and unavailable Cranelift core-C providers block its full
+runner. No Rust seed was substituted.
+
+Three bounded LLVM native-build attempts used the actual literal membership
+fixture, private caches, core-C bootstrap runtime, Windows x86_64 target,
+180-second process-tree watchdog and 5 GiB RSS cap:
+
+1. `literal-compile`: exit 1, `snapshot-index-drift` for `types.spl` after
+   integration edits during preparation. Invalidated by this session's edits;
+   this is not evidence of a compiler regression.
+2. `literal-clean-compile`: unchanged checkpoint `741f4c5d8a2`; timeout exit
+   124, peak RSS 879096 KiB. No native executable or feature execution. Only
+   the workaround coverage warning preceded the timeout.
+3. `literal-focused-compile`: exact fixture bytes copied into standalone
+   `src/main.spl`; exit 1, `git-event-source-unavailable`. The standalone
+   fixture lacked Git event metadata. No compilation/feature execution.
+
+Fixture SHA256:
+`ef502973d7094a47097f2c4bf5427319717156a0dda1feaad4d705a1543669d8`.
+Commands, complete retained streams, exit codes and RSS/owner receipts are in
+`C:/dev/simple-item7-phase2-diag-20261010/`; each attempt has a separate
+`check-literal*.shs` command and `literal-*-compile` directory. The process
+observer's exit 1 for a failed child is distinct from the native watchdog
+status (124 for the second attempt). No fourth attempt was made.
+
+The full release-to-working-tree whitespace check passed. Tracked
+`doc/06_spec/*_spec.spl` count is zero (checked through Git because this
+worktree is sparse). `direct-env-runtime-guard.shs --working` passed.
+`check-flat-ast-codec-complete.shs` FAILED: 179 pools examined, with
+`par_list_type_import_seen` neither encoded nor decoded. Source comparison
+attributes this parser-control-state omission to the release baseline
+`f92764f2b97`, not the feature; it still leaves the required guard failing.
+The final staged environment-access guard also passed (documentation-only
+staged delta). Runtime tests,
+SPipe generation, full compiler/lib/MCP checks and bootstrap qualification
+remain unverified. The previously documented mutable-link-input receipt gap
+and remaining item 7 implementation requirements still prevent stable landing.
