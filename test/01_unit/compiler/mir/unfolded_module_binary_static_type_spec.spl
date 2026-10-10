@@ -68,3 +68,39 @@ describe "unfolded module binary static type inference":
     it "keeps genuinely unresolved binary initializers diagnostic":
         val errors = static_error_report("var UNKNOWN = missing_value + 5\n")
         expect(errors).to_contain("cannot derive module static type from unresolved binary initializer")
+
+fn module_lowering_static_report(source: text, wanted: text) -> text:
+    # Drives the production `lower_module` loop rather than the two explicit
+    # passes above, so the registration/typing order is the compiler's own.
+    val path = "unfolded_module_binary_static_order_fixture.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var report = ""
+    for error in lowering.errors:
+        report = report + "error:" + error.message + "\n"
+    for static_ in mir.statics.values():
+        if static_.name.ends_with("__" + wanted) or static_.name == wanted:
+            match static_.type_.kind:
+                case MirTypeKind.I64: report = report + "static:i64"
+                case _: report = report + "static:other"
+    report
+
+describe "unfolded module binary static typing is order independent":
+    it "types a difference of two annotated module vars through lower_module":
+        # Shape of src/compiler/10.frontend/core/test_core.spl:286, which the
+        # stage2 compiler rejected when `passed` was visited before its operands.
+        val source = "var executed: i64 = 0\nvar failed: i64 = 0\nval passed = executed - failed\n"
+        val report = module_lowering_static_report(source, "passed")
+        expect(report.contains("cannot derive module static type")).to_be(false)
+        expect(report).to_contain("static:i64")
+
+    it "types a dependent static that is visited before its operands":
+        # The constants table is not iterated in source order (the seed walks
+        # it by name), so the dependent binding sorts ahead of both operands.
+        val late = "var zz_first: i64 = 1\nvar zz_second: i64 = 2\nval aa_total = zz_first + zz_second\n"
+        val late_report = module_lowering_static_report(late, "aa_total")
+        expect(late_report.contains("cannot derive module static type")).to_be(false)
+        expect(late_report).to_contain("static:i64")
