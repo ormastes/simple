@@ -1,27 +1,24 @@
 # Incremental compiler implementation plan — TLDR
 
-The selected 2026-10-08 design is mapped to 28 requirements and twelve work
-packages. Implementation and native qualification are incomplete. This plan
-does not claim a compiler speedup or successful full bootstrap.
+All 28 selected requirements and WP0–WP11 remain in scope. Implementation,
+native qualification and the full bootstrap/test objective are incomplete.
 
-- Reuse one SourceChange service, the existing SCV metadata/WAL, compiler cache
-  gateway and scheduler; avoid separate durable stores and edit algorithms.
-- Keep canonical `.tld`/`__init__.tld` package summaries. Adapt experimental
-  `.tldr` data through an explicit versioned compatibility boundary.
-- Preserve bootstrap's physical authority checks on a captured source
-  projection, including changed inputs. Keep caches outside that projection.
-- Source/header/AST/artifact reuse requires matching content, generation,
-  producer, configuration and complete dependency coverage. Timestamps are hints.
-- Publish a usable binary before optional postchecks, while mandatory checks
-  remain necessary for qualified CI/release success.
-- Production metadata uses SDN and framed binary. Private JSON diagnostic
-  manifests are evidence tooling, not the production control plane.
+- Keep canonical `.tld` headers and exact content/generation/provider admission.
+- Preserve full bootstrap authority on a complete captured source projection.
+- Reuse the existing SCV durable owner, compiler gateway and task scheduler.
+- The index has nine distinct observed structural passes; the topology timeout
+  remains unknown and eleven batch cases are unrun. No native/perf claim.
+- Fifteen SourceEdit semantic cases passed once. Preserve the original
+  controller attribution failure and its retained-only reconciliation.
+- Fix the reviewed cold codec parameter-loss blocker before enabling reuse.
+  Connected IDE/SCV, complete projection and native publication tests remain unrun.
+- Continue independent supported Phase 1 tests, then six real Phase 2 test
+  binaries and Phase 3 tests, alongside remaining Phase 3/4 module/product builds.
+  Qualified Phase 2 test binaries: 0/6. Full Phase 3/4 and speedup are unverified.
+- Request 40 build jobs, record actual admission, reuse valid caches, and retry
+  only changed failures. Do not replay green or closed three-cycle lanes.
+- Source/perf fixes land only after their applicable gates; this is a plan update.
 
-The first shared byte-transition validator and its fifteen tests are authored
-but unrun. The index diagnostic has seven passing cases, two failed fixtures,
-and one topology timeout with unknown outcome. Native performance and complete
-consumer integration remain unverified. The separate SIMD/GPU/SOSIX document
-is unavailable and is not covered by this plan.
-
+The supplied SIMD/GPU/Sosix design remains unavailable and is not substituted.
 See [implementation plan](incremental_build_tldr_scv_implementation_2026-10-10.md)
 and [acceptance matrix](../sys_test/incremental_build_tldr_scv_acceptance_2026-10-10.md).
