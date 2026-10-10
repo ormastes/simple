@@ -1,9 +1,9 @@
 #!/bin/sh
 # check-frontend-diag-ratchet.shs — ratchet on warn-first FRONTEND diagnostics
-# over the compiler's own source (src/compiler/**.spl).
+# over the compiler's own source.
 #
-# Rules (all default `warn`, registry: 90.tools/lint/_LintMain/config_and_model.spl):
-#   E-TYPE-NIL-COMPARE   nil_compare_non_optional    (30.types/type_infer)
+# Rules (registry: 90.tools/lint/_LintMain/config_and_model.spl):
+#   E-TYPE-NIL-COMPARE   nil_compare_non_optional    (30.types/type_infer; an ERROR)
 #   MEXH007              variant_shadow_binding      (35.semantics/lint/hir_frontend_diagnostics.spl)
 #   MEXH004/008/009      non_exhaustive_match        (same module, HIR arm reachability)
 #   W-HIR-INFER-001/002  inferred_type_fallback_use  (same module)
@@ -15,81 +15,154 @@
 # check-any-inventory-ratchet.shs). Regenerate only with --generate-baseline
 # after reading the diff.
 #
-# MEASUREMENT: `bin/simple check` (semantic) per file, warnings grepped by
-# rule id. Single-file lowering cannot resolve imports, so W-HIR-INFER-001
-# UNDERCOUNTS here; the driver typecheck pass is the full-closure measurement.
+# SCOPE: the pinned module list scripts/check/frontend_diag_scope.txt (the 28
+# modules the 2026-10-10 baseline was measured on; one `simple check` per
+# module is ~10 s on the seed). `--all` widens to every src/compiler/**.spl.
+#
+# MEASUREMENT: `$SIMPLE_BIN check <file>` per file, rule ids grepped from
+# stdout+stderr. A checker that CRASHES (rc >= 128, or 124 from timeout) is
+# ERROR, never a lower count — absence of a scan is absence of evidence.
+# Single-file lowering cannot resolve imports, so W-HIR-INFER-001 undercounts
+# here; the driver typecheck pass is the full-closure measurement.
 #
 # VERDICT (always the last line of stdout)
 #   PASS  — <n> file(s) checked, <k> finding(s) (baseline <b>)   exit 0
 #   FAIL  — ...                                                 exit 1
 #   ERROR — nothing was checked (<reason>)                      exit 2
+#
+# --selftest runs 4 fixtures against a fake checker and is fatal; it also
+# runs before every real scan.
 set -u
 
 ROOT="$(pwd)"
 GENERATE=0
 LIMIT=""
+ALL_FILES=0
+SELFTEST_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --root) ROOT="${2:-}"; shift 2 ;;
     --generate-baseline) GENERATE=1; shift ;;
     --limit) LIMIT="${2:-}"; shift 2 ;;
     --all) ALL_FILES=1; shift ;;
+    --selftest) SELFTEST_ONLY=1; shift ;;
     *) echo "ERROR — unknown argument: $1"; exit 2 ;;
   esac
 done
+
+RULES='E-TYPE-NIL-COMPARE MEXH007 MEXH008 MEXH009 MEXH004 W-HIR-INFER-001 W-HIR-INFER-002'
+RULE_RE='\[\(E-TYPE-NIL-COMPARE\|MEXH007\|MEXH008\|MEXH009\|MEXH004\|W-HIR-INFER-001\|W-HIR-INFER-002\)\]'
+
+# scan ROOT SIMPLE OUT_COUNTS -> prints "N TOTAL" ; returns 2 on ERROR
+# Writes per-rule counts ("RULE N" lines) into OUT_COUNTS.
+scan() {
+  _root="$1"; _simple="$2"; _counts="$3"
+  _tmp="$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/fdr.$$.$(date +%s)")"
+  mkdir -p "$_tmp"
+  _scope="$_root/scripts/check/frontend_diag_scope.txt"
+  if [ "$ALL_FILES" -eq 1 ] || [ ! -f "$_scope" ]; then
+    find "$_root/src/compiler" -name '*.spl' -type f 2>/dev/null \
+      | grep -v '/archive/\|/generated/' | sort > "$_tmp/files"
+  else
+    sed "s|^|$_root/|" "$_scope" | grep . > "$_tmp/files"
+  fi
+  [ -n "$LIMIT" ] && { head -n "$LIMIT" "$_tmp/files" > "$_tmp/files.l"; mv "$_tmp/files.l" "$_tmp/files"; }
+  _n=$(grep -c . "$_tmp/files" | tr -d ' ')
+  if [ "$_n" -eq 0 ]; then
+    rm -rf "$_tmp"; echo "ERROR — nothing was checked (no src/compiler/**.spl under $_root)"; return 2
+  fi
+  : > "$_tmp/findings"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    "$_simple" check "$f" > "$_tmp/one" 2>&1
+    _rc=$?
+    if [ "$_rc" -ge 128 ] || [ "$_rc" -eq 124 ]; then
+      rm -rf "$_tmp"; echo "ERROR — nothing was checked (checker crashed rc=$_rc on $f)"; return 2
+    fi
+    grep -o "$RULE_RE" "$_tmp/one" | tr -d '[]' >> "$_tmp/findings" || :
+  done < "$_tmp/files"
+  : > "$_counts"
+  for rule in $RULES; do
+    _c=$(grep -c "^$rule\$" "$_tmp/findings" | tr -d ' '); _c=${_c:-0}
+    echo "$rule $_c" >> "$_counts"
+  done
+  _total=$(grep -c . "$_tmp/findings" | tr -d ' ')
+  rm -rf "$_tmp"
+  echo "$_n $_total"
+  return 0
+}
+
+# compare COUNTS BASELINE N TOTAL -> prints verdict, returns 0/1
+compare() {
+  _counts="$1"; _base="$2"; _n="$3"; _total="$4"
+  _fail=""
+  for rule in $RULES; do
+    now=$(awk -v r="$rule" '$1==r{print $2}' "$_counts"); now=${now:-0}
+    base=$(awk -v r="$rule" '$1==r{print $2}' "$_base"); base=${base:-0}
+    [ "$now" -gt "$base" ] && _fail="$_fail $rule:+$((now-base))"
+    [ "$now" -lt "$base" ] && _fail="$_fail $rule:stale($now<$base)"
+  done
+  _bt=$(awk '{s+=$2} END{print s+0}' "$_base")
+  if [ -n "$_fail" ]; then
+    echo "FAIL — $_n file(s) checked, $_total finding(s) (baseline $_bt):$_fail"; return 1
+  fi
+  echo "PASS — $_n file(s) checked, $_total finding(s) (baseline $_bt)"; return 0
+}
+
+selftest() {
+  _st="$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/fdr-st.$$")"
+  mkdir -p "$_st/root/src/compiler" "$_st/root/scripts/check" "$_st/bin"
+  printf 'fn a() -> i64: 0\n' > "$_st/root/src/compiler/a.spl"
+  printf 'fn b() -> i64: 0\n' > "$_st/root/src/compiler/b.spl"
+  printf 'src/compiler/a.spl\nsrc/compiler/b.spl\n' > "$_st/root/scripts/check/frontend_diag_scope.txt"
+  # fake checker: a.spl -> one MEXH007 + one W-HIR-INFER-002 ; b.spl -> one MEXH007 ; CRASH_FILE -> segv
+  cat > "$_st/bin/fake" <<'EOF'
+#!/bin/sh
+case "$2" in
+  *a.spl) echo "x.spl:1:1: warning: [MEXH007] in \`a\`: m"; echo "x.spl:2:1: warning: [W-HIR-INFER-002] in \`a\`: m" ;;
+  *b.spl) echo "x.spl:1:1: warning: [MEXH007] in \`b\`: m" ;;
+  *crash.spl) exit 139 ;;
+esac
+exit 0
+EOF
+  chmod +x "$_st/bin/fake"
+  _counts="$_st/counts"
+  # 1. matching baseline -> PASS
+  printf 'MEXH007 2\nW-HIR-INFER-002 1\n' > "$_st/base_ok"
+  _r=$(scan "$_st/root" "$_st/bin/fake" "$_counts") || { echo "ERROR — selftest 1: scan failed ($_r)"; exit 2; }
+  _v=$(compare "$_counts" "$_st/base_ok" $_r); case "$_v" in PASS*) ;; *) echo "ERROR — selftest 1 expected PASS, got: $_v"; exit 2 ;; esac
+  # 2. growth -> FAIL naming the rule
+  printf 'MEXH007 1\nW-HIR-INFER-002 1\n' > "$_st/base_low"
+  _v=$(compare "$_counts" "$_st/base_low" $_r); case "$_v" in FAIL*MEXH007:+1*) ;; *) echo "ERROR — selftest 2 expected FAIL MEXH007:+1, got: $_v"; exit 2 ;; esac
+  # 3. stale (fell) -> FAIL
+  printf 'MEXH007 2\nW-HIR-INFER-002 3\n' > "$_st/base_high"
+  _v=$(compare "$_counts" "$_st/base_high" $_r); case "$_v" in FAIL*stale*) ;; *) echo "ERROR — selftest 3 expected stale FAIL, got: $_v"; exit 2 ;; esac
+  # 4. crashing checker -> ERROR, never a count
+  printf 'fn c() -> i64: 0\n' > "$_st/root/src/compiler/crash.spl"
+  printf 'src/compiler/crash.spl\n' >> "$_st/root/scripts/check/frontend_diag_scope.txt"
+  _r=$(scan "$_st/root" "$_st/bin/fake" "$_counts"); _rc=$?
+  case "$_rc:$_r" in 2:ERROR*crashed*) ;; *) echo "ERROR — selftest 4 expected ERROR on crash, got rc=$_rc: $_r"; exit 2 ;; esac
+  rm -rf "$_st"
+  echo "selftest: 4 fixture(s) passed"
+}
+
+selftest
+[ "$SELFTEST_ONLY" -eq 1 ] && exit 0
 
 BASELINE="$ROOT/scripts/check/frontend_diag_baseline.txt"
 SIMPLE="${SIMPLE_BIN:-$ROOT/bin/simple}"
 [ -x "$SIMPLE" ] || { echo "ERROR — nothing was checked (no runnable simple at $SIMPLE; set SIMPLE_BIN)"; exit 2; }
 
-TMP="$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/fdr.$$")"
-mkdir -p "$TMP"
-trap 'rm -rf "$TMP"' EXIT INT TERM
-
-# Scope: the pinned module list in frontend_diag_scope.txt (the 28 modules the
-# 2026-10-10 baseline was measured on; one `simple check` per module costs
-# ~10 s on the seed, so the whole tree is not a pre-push budget). `--all`
-# widens to every src/compiler/**.spl — regenerate the baseline when you do.
-SCOPE="$ROOT/scripts/check/frontend_diag_scope.txt"
-if [ "${ALL_FILES:-0}" -eq 1 ] || [ ! -f "$SCOPE" ]; then
-  find "$ROOT/src/compiler" -name '*.spl' -type f 2>/dev/null \
-    | grep -v '/archive/\|/generated/' | sort > "$TMP/files"
-else
-  sed "s|^|$ROOT/|" "$SCOPE" | grep . > "$TMP/files"
-fi
-[ -n "$LIMIT" ] && { head -n "$LIMIT" "$TMP/files" > "$TMP/files.l"; mv "$TMP/files.l" "$TMP/files"; }
-N=$(grep -c . "$TMP/files")
-[ "$N" -gt 0 ] || { echo "ERROR — nothing was checked (no src/compiler/**.spl under $ROOT)"; exit 2; }
-
-: > "$TMP/findings"
-while IFS= read -r f; do
-  [ -n "$f" ] || continue
-  "$SIMPLE" check "$f" 2>/dev/null \
-    | grep -o '\[\(E-TYPE-NIL-COMPARE\|MEXH007\|MEXH008\|MEXH009\|MEXH004\|W-HIR-INFER-001\|W-HIR-INFER-002\)\]' \
-    | tr -d '[]' >> "$TMP/findings" || :
-done < "$TMP/files"
-
-sort "$TMP/findings" | uniq -c | awk '{print $2" "$1}' | sort > "$TMP/counts"
-TOTAL=$(grep -c . "$TMP/findings" | tr -d ' ')
+COUNTS="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/fdr-counts.$$")"
+trap 'rm -f "$COUNTS"' EXIT INT TERM
+R=$(scan "$ROOT" "$SIMPLE" "$COUNTS") || { echo "$R"; exit 2; }
+set -- $R
+N="$1"; TOTAL="$2"
 
 if [ "$GENERATE" -eq 1 ]; then
-  cp "$TMP/counts" "$BASELINE"
+  cp "$COUNTS" "$BASELINE"
   echo "PASS — $N file(s) checked, $TOTAL finding(s) (baseline regenerated)"
   exit 0
 fi
 [ -f "$BASELINE" ] || { echo "ERROR — nothing was checked (missing $BASELINE; run --generate-baseline)"; exit 2; }
-
-FAIL=""
-for rule in E-TYPE-NIL-COMPARE MEXH007 MEXH008 MEXH009 MEXH004 W-HIR-INFER-001 W-HIR-INFER-002; do
-  now=$(awk -v r="$rule" '$1==r{print $2}' "$TMP/counts"); now=${now:-0}
-  base=$(awk -v r="$rule" '$1==r{print $2}' "$BASELINE"); base=${base:-0}
-  if [ "$now" -gt "$base" ]; then FAIL="$FAIL $rule:+$((now-base))"; fi
-  if [ "$now" -lt "$base" ]; then FAIL="$FAIL $rule:stale($now<$base)"; fi
-done
-BASE_TOTAL=$(awk '{s+=$2} END{print s+0}' "$BASELINE")
-if [ -n "$FAIL" ]; then
-  echo "FAIL — $N file(s) checked, $TOTAL finding(s) (baseline $BASE_TOTAL):$FAIL"
-  exit 1
-fi
-echo "PASS — $N file(s) checked, $TOTAL finding(s) (baseline $BASE_TOTAL)"
-exit 0
+compare "$COUNTS" "$BASELINE" "$N" "$TOTAL"

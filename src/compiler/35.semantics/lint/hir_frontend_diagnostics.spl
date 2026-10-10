@@ -40,6 +40,14 @@ use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.semantics.lint.match_exhaustiveness.{_mexh_is_suspect_case_name}
 
+extern fn rt_env_get(key: text) -> text
+
+# Kill switch: `SIMPLE_FRONTEND_DIAG=0` skips the HIR walk in every consumer
+# (semantic_check, driver typecheck pass). Anything else, including unset,
+# keeps the rules on; the walk is read-only and warn-only either way.
+pub fn frontend_diag_enabled() -> bool:
+    (rt_env_get("SIMPLE_FRONTEND_DIAG") ?? "") != "0"
+
 pub struct HirFrontendFinding:
     code: text
     family: text
@@ -101,6 +109,33 @@ fn hir_frontend_module_imports(hir: HirModule, module_path: text) -> bool:
             return true
     false
 
+# Re-export chains (`lib.api: export use lib.model.*`, consumer `use lib.api.*`
+# or `use lib.api.{node_get, Node}`): the consumer never imports lib.model by
+# path, yet the type IS available. Measured: whenever a type arrives through
+# an import -- direct, glob, or via a re-exporting facade -- the importer's
+# symbol table holds a SECOND type symbol with that name (the import
+# registration), while the erased signature-only shape registers exactly one.
+fn hir_frontend_import_names(hir: HirModule, name: text) -> bool:
+    for imp in hir.imports:
+        for item in imp.items:
+            if item.name == name:
+                return true
+            if item.alias.? and item.alias.unwrap() == name:
+                return true
+    false
+
+fn hir_frontend_type_symbol_count(hir: HirModule, name: text) -> i64:
+    var n = 0
+    for s in hir.symbols.symbols.values():
+        if s.name == name:
+            match s.kind:
+                case SymbolKind.Struct: n = n + 1
+                case SymbolKind.Class: n = n + 1
+                case SymbolKind.Enum: n = n + 1
+                case SymbolKind.TypeAlias: n = n + 1
+                case _: ()
+    n
+
 fn hir_frontend_type_unresolved(hir: HirModule, t: HirType) -> bool:
     match t.kind:
         case Error: true
@@ -112,10 +147,15 @@ fn hir_frontend_type_unresolved(hir: HirModule, t: HirType) -> bool:
             val s = hir.symbols.get_symbol(sym)
             if not s.?:
                 return true
-            val dm = s.unwrap().defining_module
+            val symbol = s.unwrap()
+            val dm = symbol.defining_module
             if not dm.?:
                 return false
-            not hir_frontend_module_imports(hir, dm.unwrap())
+            if hir_frontend_module_imports(hir, dm.unwrap()):
+                return false
+            if hir_frontend_import_names(hir, symbol.name):
+                return false
+            hir_frontend_type_symbol_count(hir, symbol.name) < 2
         case Optional(inner): hir_frontend_type_unresolved(hir, inner)
         case Array(elem, _): hir_frontend_type_unresolved(hir, elem)
         case _: false
@@ -136,21 +176,30 @@ class HirFrontendWalker:
     reported: Dict<i64, bool>
 
     static fn create(hir: HirModule) -> HirFrontendWalker:
-        var variants: Dict<text, text> = {}
+        # Deterministic: enum names are sorted before the owner strings are
+        # built, so a Dict iteration order change cannot reorder a message.
+        var enum_names: [text] = []
         for en in hir.enums.values():
-            for v in en.variants:
-                var is_unit = false
-                match v.kind:
-                    case Unit: is_unit = true
-                    case Tuple(types): is_unit = types.len() == 0
-                    case _: ()
-                if is_unit:
-                    if variants.contains_key(v.name):
-                        val owners = variants[v.name]
-                        if not (owners == en.name or owners.contains(en.name + ",") or owners.ends_with("," + en.name)):
-                            variants[v.name] = owners + "," + en.name
-                    else:
-                        variants[v.name] = en.name
+            enum_names = enum_names.push(en.name)
+        enum_names = enum_names.sort()
+        var variants: Dict<text, text> = {}
+        for enum_name in enum_names:
+            for en in hir.enums.values():
+                if en.name != enum_name:
+                    continue
+                for v in en.variants:
+                    var is_unit = false
+                    match v.kind:
+                        case Unit: is_unit = true
+                        case Tuple(types): is_unit = types.len() == 0
+                        case _: ()
+                    if is_unit:
+                        if variants.contains_key(v.name):
+                            val owners = variants[v.name]
+                            if not (owners == en.name or owners.starts_with(en.name + ",") or owners.contains("," + en.name + ",") or owners.ends_with("," + en.name)):
+                                variants[v.name] = owners + "," + en.name
+                        else:
+                            variants[v.name] = en.name
         val empty_findings: [HirFrontendFinding] = []
         val empty_reason: Dict<i64, text> = {}
         val empty_code: Dict<i64, text> = {}
@@ -605,11 +654,41 @@ class HirFrontendWalker:
             return
         self.walk_block(f.body)
 
+fn hir_frontend_pad(n: i64) -> text:
+    var s = "{n}"
+    while s.len() < 9:
+        s = "0" + s
+    s
+
+fn hir_frontend_sort_key(f: HirFrontendFinding) -> text:
+    hir_frontend_pad(f.line) + ":" + hir_frontend_pad(f.col) + ":" + f.code + ":" + f.function_name + ":" + f.message
+
+pub fn hir_frontend_sort_findings(findings: [HirFrontendFinding]) -> [HirFrontendFinding]:
+    """Deterministic order (line, col, code, function, message): functions
+    are visited in Dict order, which is not a stable contract."""
+    var keys: [text] = []
+    for f in findings:
+        keys = keys.push(hir_frontend_sort_key(f))
+    val sorted_keys = keys.sort()
+    var out: [HirFrontendFinding] = []
+    var used: [bool] = []
+    for f in findings:
+        used = used.push(false)
+    for k in sorted_keys:
+        var i = 0
+        while i < findings.len():
+            if not used[i] and keys[i] == k:
+                used[i] = true
+                out = out.push(findings[i])
+                break
+            i = i + 1
+    out
+
 pub fn run_hir_frontend_diagnostics(hir: HirModule) -> [HirFrontendFinding]:
     var walker = HirFrontendWalker.create(hir)
     for f in hir.functions.values():
         walker.walk_function(f)
-    walker.findings
+    hir_frontend_sort_findings(walker.findings)
 
 pub fn hir_frontend_findings_with_code(findings: [HirFrontendFinding], code: text) -> [HirFrontendFinding]:
     var out: [HirFrontendFinding] = []

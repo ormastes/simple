@@ -6,7 +6,7 @@ use compiler.hir.hir_lowering.items.*
 use compiler.types.type_infer.*
 use compiler.types.type_infer_types.{HmInferContext}
 use compiler.semantics.resolve.{resolve_methods}
-use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnostics, hir_frontend_finding_render}
+use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnostics, hir_frontend_finding_render, frontend_diag_enabled}
 
 pub enum SimpleCheckCoverage:
     SyntaxOnly
@@ -16,10 +16,11 @@ pub struct SimpleSemanticCheckResult:
     coverage: SimpleCheckCoverage
     proof: LintRunResultV1
     diagnostics: [text]
-    # Warn-first frontend findings (MEXH007/008/009, W-HIR-INFER-00x, and the
-    # E-TYPE-NIL-COMPARE typing rule). They are REPORTED but never counted in
-    # `proof`, so a clean module with warnings stays `CompleteClean` and
-    # `simple check` keeps exit 0 (UP §4 lifecycle: warning -> promoted deny).
+    # Warn-first HIR frontend findings (MEXH007/008/009, W-HIR-INFER-00x).
+    # They are REPORTED but never counted in `proof`, so a clean module with
+    # warnings stays `CompleteClean` and `simple check` keeps exit 0 (UP §4
+    # lifecycle: warning -> promoted deny). E-TYPE-NIL-COMPARE is NOT here:
+    # it replaces a pre-existing type error and stays in `diagnostics`.
     warnings: [text]
 
 fn _check_proof(
@@ -74,10 +75,11 @@ pub fn simple_syntax_check_result(diagnostic_count: u32) -> SimpleSemanticCheckR
         diagnostics: [],
         warnings: [])
 
-# Rule ids that ride the inference error list but are in their warn-first
-# lifecycle: they are projected to `warnings`, not `diagnostics`.
-fn _semantic_warn_first_marker(message: text) -> bool:
-    message.contains("E-TYPE-NIL-COMPARE")
+# E-TYPE-NIL-COMPARE is a typing diagnostic of the inference pass: a
+# non-optional-vs-nil comparison was already a (generic) type error before
+# the rule named it, so it stays in `diagnostics` (never loosened). The HIR
+# rules below honour the SIMPLE_FRONTEND_DIAG=0 kill switch
+# (hir_frontend_diagnostics.frontend_diag_enabled).
 
 pub fn simple_semantic_check_source(source: text, path: text) -> SimpleSemanticCheckResult:
     val parsed = parse_and_build_module(source, path)
@@ -94,11 +96,7 @@ pub fn simple_semantic_check_source(source: text, path: text) -> SimpleSemanticC
         var inference = HmInferContext.with_builtins()
         inference.infer_module(hir)
         for error in inference.errors:
-            val message = error.message()
-            if _semantic_warn_first_marker(message):
-                warnings.push("{path}:{error.span().line}:{error.span().col}: warning[semantic]: {message}")
-            else:
-                diagnostics.push("{path}:{error.span().line}:{error.span().col}: error[semantic]: {message}")
+            diagnostics.push("{path}:{error.span().line}:{error.span().col}: error[semantic]: {error.message()}")
 
         val (_, resolution_errors) = resolve_methods(hir)
         for error in resolution_errors:
@@ -106,8 +104,9 @@ pub fn simple_semantic_check_source(source: text, path: text) -> SimpleSemanticC
 
     # HIR frontend rules are read-only over the lowered module and run even
     # when lowering reported errors (their findings are warnings either way).
-    for finding in run_hir_frontend_diagnostics(hir):
-        warnings.push(hir_frontend_finding_render(path, finding))
+    if frontend_diag_enabled():
+        for finding in run_hir_frontend_diagnostics(hir):
+            warnings.push(hir_frontend_finding_render(path, finding))
 
     SimpleSemanticCheckResult(
         coverage: SimpleCheckCoverage.Semantic,

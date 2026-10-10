@@ -30,22 +30,28 @@ use compiler.tools.lint._LintMain.config_and_model.{build_default_levels}
 
 val model_src = "pub struct Node:\n    n: i64\n\npub fn make() -> Node:\n    Node(n: 1)\n"
 val api_src = "use lib.model.\{Node, make\}\n\npub fn node_get(i: i64) -> Node:\n    make()\n\npub fn names() -> [text]:\n    []\n"
+# Facade that RE-EXPORTS the model: a consumer importing only lib.facade can
+# still see Node (glob or explicit item), and must not be warned.
+val facade_src = "export use lib.model.*\n\npub fn node_get(i: i64) -> Node:\n    make()\n"
 
-fn lower_consumer(src: text) -> HirModule:
+fn lower_consumer_with_api(src: text, api_source: text) -> HirModule:
     val log = Logger(level: 0)
     val model_ast = parse_full_frontend(model_src, "lib/model.spl", "lib.model", log)
-    val api_ast = parse_full_frontend(api_src, "lib/api.spl", "lib.api", log)
+    val api_ast = parse_full_frontend(api_source, "lib/api.spl", "lib.api", log)
     val consumer_ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
     var modules: Dict<text, Module> = {}
     modules["lib.model"] = model_ast
     modules["lib.api"] = api_ast
     val sources = [
         SourceFile(path: "lib/model.spl", content: model_src, module_name: "lib.model"),
-        SourceFile(path: "lib/api.spl", content: api_src, module_name: "lib.api")
+        SourceFile(path: "lib/api.spl", content: api_source, module_name: "lib.api")
     ]
     val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
     var lowering = hirlowering_for_module("app.main", surfaces)
     lowering.lower_module(consumer_ast)
+
+fn lower_consumer(src: text) -> HirModule:
+    lower_consumer_with_api(src, api_src)
 
 fn lower_single(src: text) -> HirModule:
     var lowering = HirLowering.with_filename("probe/single.spl")
@@ -97,6 +103,18 @@ describe "W-HIR-INFER-001 stays silent when the type is known":
     it "does not fire when the erased binding is never used as a receiver":
         val hir = lower_consumer("use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    0\n")
         expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
+
+    it "does not fire when the type arrives through a re-exporting facade imported with a glob":
+        val hir = lower_consumer_with_api("use lib.api.*\n\nfn f() -> i64:\n    val src = node_get(0)\n    src.n\n", facade_src)
+        expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
+
+    it "does not fire when the re-exported type is named in the facade import":
+        val hir = lower_consumer_with_api("use lib.api.\{node_get, Node\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    src.n\n", facade_src)
+        expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
+
+    it "still fires when only the facade FUNCTION is imported and the re-exported type is not":
+        val hir = lower_consumer_with_api("use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    src.n\n", facade_src)
+        expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(1)
 
     it "does not fire when the callee itself is unresolved (that is a lowering error, not an erased type)":
         val hir = lower_single("fn f() -> i64:\n    val src = node_get(0)\n    for x in src:\n        pass\n    0\n")
