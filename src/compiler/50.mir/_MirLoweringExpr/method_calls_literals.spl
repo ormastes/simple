@@ -3375,17 +3375,18 @@ impl MirLowering:
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] resolution-arm=instance method={method}\n")
                 # Direct method call on type
+                val method_param_types = self.resolved_call_hir_param_types(method_id)
                 val arg_operands = if wb_kind != 0:
-                    self.build_args_from_receiver(wb_receiver, args)
+                    self.build_args_from_receiver(wb_receiver, args, method_param_types)
                 else if has_prelowered_method_receiver:
                     # Predicate dispatch may pre-lower a receiver to prove
                     # whether stale resolved owner metadata must yield to
                     # primitive text. Reuse that value for a genuine custom
                     # instance method so a call-expression receiver is never
                     # evaluated twice.
-                    self.build_args_from_receiver(prelowered_method_receiver, args)
+                    self.build_args_from_receiver(prelowered_method_receiver, args, method_param_types)
                 else:
-                    self.lower_receiver_and_args(receiver, args)
+                    self.lower_receiver_and_args(receiver, args, method_param_types)
                 val method_operand = self.symbol_to_operand(method_id)
                 val return_type = self.resolved_call_return_type(method_id)
                 # Pad omitted trailing defaulted params -- this arm calls
@@ -3424,12 +3425,13 @@ impl MirLowering:
             case TraitMethod(trait_id, method_id):
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] resolution-arm=trait method={method}\n")
+                val method_param_types = self.resolved_call_hir_param_types(method_id)
                 val arg_operands = if wb_kind != 0:
-                    self.build_args_from_receiver(wb_receiver, args)
+                    self.build_args_from_receiver(wb_receiver, args, method_param_types)
                 else if has_prelowered_method_receiver:
-                    self.build_args_from_receiver(prelowered_method_receiver, args)
+                    self.build_args_from_receiver(prelowered_method_receiver, args, method_param_types)
                 else:
-                    self.lower_receiver_and_args(receiver, args)
+                    self.lower_receiver_and_args(receiver, args, method_param_types)
                 val method_operand = self.symbol_to_operand(method_id)
                 val return_type = self.resolved_call_return_type(method_id)
                 # Same receiver/self index-0 alignment as the InstanceMethod
@@ -3463,7 +3465,7 @@ impl MirLowering:
                     prelowered_method_receiver
                 else:
                     self.lower_expr(receiver)
-                val arg_operands = self.build_args_from_receiver(free_receiver, args)
+                val arg_operands = self.build_args_from_receiver(free_receiver, args, self.resolved_call_hir_param_types(func_id))
                 var selected_func_id = func_id
                 val free_owner = self.struct_value_syms.get(free_receiver.id)
                 if chr_method_shape and chr_has_custom_owner and free_owner != nil and free_owner != "":
@@ -3501,9 +3503,14 @@ impl MirLowering:
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] resolution-arm=static method={method}\n")
                 var arg_operands: [MirOperand] = []
+                # A static method has no receiver slot: explicit argument i
+                # is declared parameter i.
+                val static_param_types = self.resolved_call_hir_param_types(method_id)
+                var static_arg_index = 0
                 for arg in args:
-                    val arg_local = self.lower_expr(arg.value)
+                    val arg_local = self.lower_method_call_arg(arg, static_param_types, static_arg_index)
                     arg_operands = arg_operands.push(mir_operand_copy(arg_local))
+                    static_arg_index = static_arg_index + 1
 
                 val method_operand = self.symbol_to_operand(method_id)
                 val return_type = self.resolved_call_return_type(method_id)
@@ -3613,9 +3620,12 @@ impl MirLowering:
                 if static_method_id != nil:
                     val resolved_static_method_id = static_method_id ?? SymbolId(id: -1)
                     var static_args: [MirOperand] = []
+                    val name_static_param_types = self.resolved_call_hir_param_types(resolved_static_method_id)
+                    var name_static_arg_index = 0
                     for arg in args:
-                        val static_arg = self.lower_expr(arg.value)
+                        val static_arg = self.lower_method_call_arg(arg, name_static_param_types, name_static_arg_index)
                         static_args.push(mir_operand_copy(static_arg))
+                        name_static_arg_index = name_static_arg_index + 1
                     var static_return_type = self.resolved_call_return_type(resolved_static_method_id)
                     val static_result_name = self.struct_method_return_names.get("{static_receiver_name}::{method}")
                     if static_result_name != nil and static_result_name != "":
@@ -3748,9 +3758,12 @@ impl MirLowering:
                         # the exact Stage 3 receiver-loss trigger.
                         var im_arg_operands: [MirOperand] = []
                         im_arg_operands = im_arg_operands.push(mir_operand_copy(unresolved_receiver_local))
+                        val im_param_types = self.resolved_call_hir_param_types(resolved_method_id)
+                        var im_arg_index = 0
                         for arg in args:
-                            val im_arg_local = self.lower_expr(arg.value)
+                            val im_arg_local = self.lower_method_call_arg(arg, im_param_types, im_arg_index + 1)
                             im_arg_operands = im_arg_operands.push(mir_operand_copy(im_arg_local))
+                            im_arg_index = im_arg_index + 1
                         val im_method_operand = self.symbol_to_operand(resolved_method_id)
                         val im_return_type = self.resolved_call_return_type(resolved_method_id)
                         # Full-array pad, receiver included -- same alignment
@@ -4383,7 +4396,7 @@ impl MirLowering:
             case _:
                 ""
 
-    me build_args_from_receiver(receiver_local: LocalId, args: [HirCallArg]) -> [MirOperand]:
+    me build_args_from_receiver(receiver_local: LocalId, args: [HirCallArg], param_types: [HirType]) -> [MirOperand]:
         """Build arg operands starting from a pre-lowered receiver local.
 
         Used by the indexed/field writeback path in `lower_method_call` to
@@ -4395,9 +4408,11 @@ impl MirLowering:
         # of a zero-explicit-argument method call.
         var arg_operands: [MirOperand] = []
         arg_operands = arg_operands.push(mir_operand_copy(receiver_local))
+        var explicit_index = 0
         for arg in args:
-            val arg_local = self.lower_expr(arg.value)
+            val arg_local = self.lower_method_call_arg(arg, param_types, explicit_index + 1)
             arg_operands = arg_operands.push(mir_operand_copy(arg_local))
+            explicit_index = explicit_index + 1
         arg_operands
 
     me remember_method_return_provenance(result_local: LocalId, method_key: text):
@@ -4620,7 +4635,9 @@ impl MirLowering:
         (whole-closure lowering); partial demand/incremental lowering cannot
         know the implementor set and is a compile error."""
         val owners = self.trait_impl_owners.get(trait_key) ?? []
-        val arg_operands = self.lower_receiver_and_args(receiver, args)
+        # The implementor is chosen below, after the operands are lowered, so
+        # no declared parameter list is known here: arguments stay raw.
+        val arg_operands = self.lower_receiver_and_args(receiver, args, [])
         var has_generic_owner = false
         for owner in owners:
             if owner.starts_with("generic:"):

@@ -1,6 +1,7 @@
 # Method-call arguments are not coerced to Option handles for `T?` scalar parameters
 
-**Status:** open. Found in review of the rebased nil/optional series
+**Status:** source fix on `work/rel-method-optional-arg-box-20261011` (on top
+of the series; NOT verified natively -- needs a rebuilt stage 2). Found in review of the rebased nil/optional series
 (`work/rel-native-nil-compare-rebased-20261010`, resolution `933101bb85e`).
 **Engines:** staged-native (any compiler built by the pure-Simple MIR
 lowering), both backends. The interpreter is unaffected (dynamic values).
@@ -93,3 +94,40 @@ non-optional parameters.
 Limits: non-scalar optionals (`text?`, `Foo?`, `[T]?`) are out of scope of
 this record -- their arguments are raw on method calls too, but a pointer or
 text handle cannot collide with the nil word the way the integer 3 does.
+
+## Fix (follow-up branch `work/rel-method-optional-arg-box-20261011`)
+
+`lower_method_call_arg(arg, param_types, param_index)`
+(`src/compiler/50.mir/mir_lowering_stmts.spl`) lowers one explicit argument
+and, when the declared parameter is a SCALAR optional (inner type Int / Float
+/ Bool / Char), applies `ensure_option_handle` -- the same call the
+free-function path makes. It is used by every place `lower_method_call`
+lowers explicit arguments of a user method:
+
+| arm | parameter list | receiver slot |
+|---|---|---|
+| `InstanceMethod`, `TraitMethod` (via `lower_receiver_and_args` / `build_args_from_receiver`) | `resolved_call_hir_param_types(method_id)` | index 0 |
+| `FreeFunction` (receiver-syntax call, via `build_args_from_receiver`) | `resolved_call_hir_param_types(func_id)` | index 0 |
+| `StaticMethod` | `resolved_call_hir_param_types(method_id)` | none |
+| `Unresolved`, owner recovered by name (instance and static variants) | `resolved_call_hir_param_types(<recovered id>)` | index 0 / none |
+
+Spec: `test/01_unit/compiler/mir/method_call_optional_arg_handle_spec.spl`
+(7 examples; 5 of the first version's 6 failed before the fix with `expected 0
+to equal 1`). Arms actually reached, confirmed with `SIMPLE_MIRB_TRACE=1`:
+`Unresolved` (instance, trait-impl method, second parameter, nil literal,
+bool, f64), `StaticMethod`, and -- with `resolve_methods` -- `InstanceMethod`.
+
+Not covered, stated rather than papered over:
+
+- `TraitMethod` and `FreeFunction` arms share the helper but no spec reaches
+  them: the in-process resolver harness lowers the `W.make(3)` /
+  `w.ufcs_take(3)` callers to an empty body, and a trait method called on its
+  concrete implementor resolves as `InstanceMethod`.
+- Trait-OBJECT receivers (`lower_trait_object_method_call`): the implementor
+  is chosen after the operands are lowered, so no parameter list is known
+  there and arguments stay raw.
+- Named arguments (`w.put(v: 3)`) stay raw: the positional index is not the
+  parameter index.
+- Non-scalar optionals (`text?`, `Foo?`) are deliberately untouched, to keep
+  the change from altering every method call in the compiler closure.
+- Unknown callee (no symbol / no registered parameter list): raw, as before.
