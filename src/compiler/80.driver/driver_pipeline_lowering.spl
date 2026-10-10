@@ -2,6 +2,7 @@
 #
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
 use compiler.mir.mir_verify.{mir_verify_module}
+use compiler.mir.mir_verify_levels.{mir_verify_levels_from_env, mir_verify_warning_cap}
 use compiler.driver.driver_pass_receipt.{PassReceipt, record_pass_receipt}
 use compiler.common.assurance.warning_phase.{warning_phase_enabled_for_value, warning_phase_env_var_name}
 use compiler.hir.hir.*
@@ -221,6 +222,43 @@ fn _driver_collect_mir_errors(ctx: CompileContext, errors: [MirError]):
         else:
             ctx.add_warning(_format_mir_error(err))
 
+fn _mir_advisory_code(message: text) -> text:
+    val colon = message.index_of(":") ?? -1
+    if colon <= 0:
+        return "E-MIR-ADVISORY"
+    message.substring(0, colon)
+
+fn driver_collect_mir_advisories(ctx: CompileContext, advisories: [MirError]):
+    """Report MIR lowering advisories (`MirLowering.mir_advisories`:
+    E-MIR-TYPE-Error, E-MIR-MATCH-GUARD at their default level) as driver
+    WARNINGS. They never enter `MirLowering.errors`, so they cannot fail a
+    build here or on any other route. Output is capped per advisory code
+    (`mir_verify_warning_cap()` lines, then one count line); the full count
+    goes to the `mir_lowering_advisory` pass receipt."""
+    val cap = mir_verify_warning_cap()
+    var codes: [text] = []
+    var counts: Dict<text, i64> = {}
+    for advisory in advisories:
+        val code = _mir_advisory_code(advisory.message)
+        val seen = counts[code] ?? 0
+        if seen == 0:
+            codes = codes.push(code)
+        counts[code] = seen + 1
+        if seen < cap:
+            ctx.add_warning(_format_mir_error(advisory))
+    for code in codes:
+        val total = counts[code] ?? 0
+        if total > cap:
+            ctx.add_warning("MIR lowering advisory {code}: {total} in this build; first {cap} shown, {total - cap} more not shown (SIMPLE_MIR_VERIFY_LEVELS={code}=off silences, {code}=error makes them fatal)")
+    val _advisory_receipt = record_pass_receipt(PassReceipt(
+        pass_name: "mir_lowering_advisory",
+        profile: ctx.assurance_policy.strictness.name(),
+        executed: true,
+        modules_checked: 0,
+        diagnostics: advisories.len(),
+        errors_raised: 0
+    ))
+
 impl CompilerDriver:
     # --------------------------------------------------------------------------
     # MIR Lowering
@@ -249,7 +287,30 @@ impl CompilerDriver:
         channel as `MirError.fatal` (`ctx.add_error`); warn-first rules and
         the one-level downgrade under SIMPLE_ASSURANCE_WARNING_PHASE go to
         `ctx.add_warning`. Returns false when at least one fatal finding was
-        recorded, so nothing invalid reaches codegen."""
+        recorded, so nothing invalid reaches codegen.
+
+        Levels are resolved ONCE here. A malformed SIMPLE_MIR_VERIFY_LEVELS
+        is a build error (fail closed), and when every rule is `off` the
+        walk itself is skipped (receipt state=skipped). Warning lines are
+        capped per rule per build; errors are never capped."""
+        val levels = mir_verify_levels_from_env()
+        if levels.config_error != "":
+            self.ctx.add_error("MIR verify: invalid SIMPLE_MIR_VERIFY_LEVELS ({levels.config_error}); refusing to guess a level. Valid: <MIRV-id|E-MIR-TYPE-Error|E-MIR-MATCH-GUARD|*>=<error|warning|off>, comma separated")
+            return false
+        if levels.verifier_off:
+            val _mir_verify_skip_receipt = record_pass_receipt(PassReceipt(
+                pass_name: "mir_verify",
+                profile: self.ctx.assurance_policy.strictness.name(),
+                executed: false,
+                modules_checked: 0,
+                diagnostics: 0,
+                errors_raised: 0
+            ))
+            log_phase("mir_verify: skipped (every rule is off in SIMPLE_MIR_VERIFY_LEVELS)")
+            return true
+        val warning_cap = mir_verify_warning_cap()
+        var rule_order: [text] = []
+        var rule_warnings: Dict<text, i64> = {}
         val warning_phase = warning_phase_enabled_for_value(
             sosix_env_get_nullable(warning_phase_env_var_name()) ?? "")
         var modules_checked = 0
@@ -282,7 +343,7 @@ impl CompilerDriver:
                 # ("MIRV-002=error,MIRV-005e=off,*=warning"). `off` = not
                 # reported; `error` = fatal unless the global warning phase
                 # downgrades it one level.
-                val level = finding.level()
+                val level = levels.level_of(finding.rule)
                 if level == "off":
                     suppressed_total = suppressed_total + 1
                     continue
@@ -292,7 +353,18 @@ impl CompilerDriver:
                     fatal_total = fatal_total + 1
                     self.ctx.add_error(finding.format())
                 else:
-                    self.ctx.add_warning(finding.format())
+                    val rule_seen = rule_warnings[finding.rule] ?? 0
+                    if rule_seen == 0:
+                        rule_order = rule_order.push(finding.rule)
+                    rule_warnings[finding.rule] = rule_seen + 1
+                    if rule_seen < warning_cap:
+                        self.ctx.add_warning(finding.format())
+        var per_rule = ""
+        for capped_rule in rule_order:
+            val rule_total = rule_warnings[capped_rule] ?? 0
+            per_rule = per_rule + " {capped_rule}={rule_total}"
+            if rule_total > warning_cap:
+                self.ctx.add_warning("MIR verify [{capped_rule}]: {rule_total} warning(s) in this build; first {warning_cap} shown, {rule_total - warning_cap} more not shown (SIMPLE_MIR_VERIFY_LEVELS={capped_rule}=off silences)")
         val _mir_verify_receipt = record_pass_receipt(PassReceipt(
             pass_name: "mir_verify",
             profile: self.ctx.assurance_policy.strictness.name(),
@@ -301,7 +373,7 @@ impl CompilerDriver:
             diagnostics: findings_total,
             errors_raised: fatal_total
         ))
-        log_phase("mir_verify: modules={modules_checked} functions={functions_total} instructions={instructions_total} findings={findings_total} fatal={fatal_total} suppressed={suppressed_total}")
+        log_phase("mir_verify: modules={modules_checked} functions={functions_total} instructions={instructions_total} findings={findings_total} fatal={fatal_total} suppressed={suppressed_total} warnings_by_rule:{per_rule}")
         if fatal_total > 0:
             print "error[MIRV]: MIR validity verification found {fatal_total} fatal finding(s) across {modules_checked} module(s); refusing to hand invalid MIR to any backend"
             return false
@@ -440,6 +512,7 @@ impl CompilerDriver:
             var bootstrap_mir = bootstrap_lowering.lower_module(bootstrap_hir)
             self.ctx.bootstrap_entry_mir = Some(bootstrap_mir)
             _driver_collect_mir_errors(self.ctx, bootstrap_lowering.errors)
+            driver_collect_mir_advisories(self.ctx, bootstrap_lowering.mir_advisories)
             if val archived_devirt = post_mono_archive_admission_v1(
                     "app.cli.bootstrap_main", bootstrap_lowering.devirtualized_calls,
                     self.ctx.runtime_std_full_inventory_selection != nil):
@@ -577,6 +650,7 @@ impl CompilerDriver:
                         self.ctx.sources.len(), name_direct,
                         4, 6, 0, 0, "running")
             _driver_collect_mir_errors(self.ctx, direct_lowering.errors)
+            driver_collect_mir_advisories(self.ctx, direct_lowering.mir_advisories)
             if self.ctx.error_count_value != 0:
                 return false
             if self.ctx.runtime_std_full_inventory_selection != nil:
@@ -683,6 +757,7 @@ impl CompilerDriver:
                 if name == "app.cli.bootstrap_main":
                     self.ctx.set_bootstrap_entry_mir(name, mir_module)
             _driver_collect_mir_errors(self.ctx, lowering.errors)
+            driver_collect_mir_advisories(self.ctx, lowering.mir_advisories)
             log_debug("[lower_to_mir] MIR done")
         return self.ctx.error_count_value == 0
         for src3 in self.ctx.sources:

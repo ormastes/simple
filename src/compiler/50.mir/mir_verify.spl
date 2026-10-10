@@ -15,8 +15,8 @@
 # one small index array per function, no graph, no snapshot, no second copy.
 #
 # Rule ids `MIRV-00n[x]` and their lifecycle (error | warning) are recorded in
-# `config/compiler/mir_verify_rules.sdn`; `MIR_VERIFY_RULES` below is the
-# in-binary projection of that registry and the spec
+# `config/compiler/mir_verify_rules.sdn`; `mir_verify_rules()` in
+# `mir_verify_levels.spl` is the in-binary projection of that registry and the spec
 # `mir_verify_rule_registry_spec.spl` pins the two in agreement. A rule whose
 # lifecycle is `warning` is warn-first (noisy on the compiler's own source
 # today — see MIR_VERIFY_FINDINGS.md); promotion happens by editing the
@@ -28,86 +28,7 @@ use compiler.mir.mir_types.*
 use compiler.mir.mir_instruction_support.*
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_instruction_graph.{MirInst, MirBlock, MirFunction, MirModule}
-use std.nogc_sync_mut.io.env_ops.{env_get}
-
-# ============================================================================
-# Rule registry projection
-# ============================================================================
-
-struct MirVerifyRule:
-    id: text
-    family: text
-    lifecycle: text              # registry default: "warning" | "error"
-    promotion_candidate: bool    # zero hits so far; eligible for "error" after a full-closure zero-hit run
-
-# Keep in sync with config/compiler/mir_verify_rules.sdn (pinned by spec).
-# WARN-FIRST LANDING (review of 0df5354dfca): every rule starts at `warning`.
-# Promotion to `error` happens per rule, in the registry, only after a
-# phase-3 + phase-4 full-closure run shows zero hits for that rule.
-fn mir_verify_rules() -> [MirVerifyRule]:
-    [
-        MirVerifyRule(id: "MIRV-001", family: "unresolved_type", lifecycle: "warning", promotion_candidate: true),
-        MirVerifyRule(id: "MIRV-002", family: "illegal_cast", lifecycle: "warning", promotion_candidate: false),
-        MirVerifyRule(id: "MIRV-002b", family: "bitcast_width", lifecycle: "warning", promotion_candidate: true),
-        MirVerifyRule(id: "MIRV-003", family: "unit_static", lifecycle: "warning", promotion_candidate: true),
-        MirVerifyRule(id: "MIRV-003b", family: "unit_stored_local", lifecycle: "warning", promotion_candidate: false),
-        MirVerifyRule(id: "MIRV-004", family: "call_generic_template", lifecycle: "warning", promotion_candidate: true),
-        MirVerifyRule(id: "MIRV-004b", family: "call_arity", lifecycle: "warning", promotion_candidate: false),
-        MirVerifyRule(id: "MIRV-004c", family: "call_arg_type", lifecycle: "warning", promotion_candidate: false),
-        MirVerifyRule(id: "MIRV-004d", family: "call_abi_kind", lifecycle: "warning", promotion_candidate: false),
-        MirVerifyRule(id: "MIRV-005", family: "cfg_structure", lifecycle: "warning", promotion_candidate: true),
-        MirVerifyRule(id: "MIRV-005b", family: "use_undeclared_local", lifecycle: "warning", promotion_candidate: true),
-        MirVerifyRule(id: "MIRV-005c", family: "unused_condition", lifecycle: "warning", promotion_candidate: false),
-        MirVerifyRule(id: "MIRV-005d", family: "invalid_variant", lifecycle: "warning", promotion_candidate: true),
-        MirVerifyRule(id: "MIRV-005e", family: "local_never_defined", lifecycle: "warning", promotion_candidate: false),
-        MirVerifyRule(id: "MIRV-006", family: "field_out_of_layout", lifecycle: "warning", promotion_candidate: true),
-        MirVerifyRule(id: "MIRV-006b", family: "layout_owner_unresolved", lifecycle: "warning", promotion_candidate: false),
-        MirVerifyRule(id: "MIRV-007", family: "duplicate_symbol", lifecycle: "warning", promotion_candidate: true),
-        MirVerifyRule(id: "MIRV-007b", family: "static_initializer_type", lifecycle: "warning", promotion_candidate: false)
-    ]
-
-fn mir_verify_rule_lifecycle(rule_id: text) -> text:
-    """Registry default for a rule ('' = unregistered)."""
-    for rule in mir_verify_rules():
-        if rule.id == rule_id:
-            return rule.lifecycle
-    ""
-
-# Per-rule level override: SIMPLE_MIR_VERIFY_LEVELS="MIRV-002=error,MIRV-005e=off,*=warning"
-# Levels: "error" (fatal, aborts before codegen) | "warning" | "off" (not reported).
-# `*` sets the level for every rule not named explicitly. Unknown rule ids and
-# unknown levels are ignored (fail closed to the registry default), never a
-# silent downgrade of a named rule.
-fn mir_verify_rule_level_from_spec(rule_id: text, spec: text) -> text:
-    var level = mir_verify_rule_lifecycle(rule_id)
-    if level == "":
-        # Unregistered id: a programming error in this file; report loudly.
-        level = "error"
-    if spec == "":
-        return level
-    var wildcard = ""
-    var exact = ""
-    for item in spec.split(","):
-        val entry = item.trim()
-        val eq = entry.index_of("=") ?? -1
-        if eq <= 0:
-            continue
-        val key = entry.substring(0, eq).trim()
-        val value = entry.substring(eq + 1).trim().lower()
-        if value != "error" and value != "warning" and value != "off":
-            continue
-        if key == "*":
-            wildcard = value
-        elif key == rule_id:
-            exact = value
-    if exact != "":
-        return exact
-    if wildcard != "":
-        return wildcard
-    level
-
-fn mir_verify_rule_level(rule_id: text) -> text:
-    mir_verify_rule_level_from_spec(rule_id, env_get("SIMPLE_MIR_VERIFY_LEVELS"))
+use compiler.mir.mir_verify_levels.{MirVerifyRule, MirVerifyLevels, mir_verify_rules, mir_verify_rule_lifecycle, mir_verify_levels_from_spec, mir_verify_levels_from_env, mir_verify_rule_level_from_spec, mir_verify_rule_level}
 
 # ============================================================================
 # Findings
@@ -124,7 +45,10 @@ struct MirVerifyFinding:
 
 impl MirVerifyFinding:
     fn level() -> text:
-        """Resolved level: registry default overridden by SIMPLE_MIR_VERIFY_LEVELS."""
+        """Resolved level: registry default overridden by SIMPLE_MIR_VERIFY_LEVELS.
+        Re-reads the environment: for specs and single findings only. The
+        driver resolves `mir_verify_levels_from_env()` once per run and
+        calls `levels.level_of(finding.rule)`."""
         mir_verify_rule_level(self.rule)
 
     fn is_fatal() -> bool:
@@ -791,17 +715,40 @@ impl MirFnVerifier:
                     match vt.kind:
                         case MirTypeKind.Enum(symbol): enum_sym = Some(symbol)
                         case _: ()
+                # Duplicate-case and variant membership are set lookups, so a
+                # switch of n cases over an enum of m variants costs O(n + m),
+                # not O(n*n + n*m).
+                var seen_cases: Dict<i64, bool> = {}
+                var variant_set: Dict<i64, bool> = {}
+                var variant_set_ready = false
+                var enum_name = ""
+                var variant_count = 0
+                if val es0 = enum_sym:
+                    val enum_def = module.types[es0]
+                    if enum_def != nil:
+                        match enum_def!.kind:
+                            case MirTypeDefKind.Enum(variants):
+                                for v in variants:
+                                    variant_set[v.discriminant] = true
+                                variant_set_ready = true
+                                enum_name = enum_def!.name
+                                variant_count = variants.len()
+                            case _: ()
                 var i = 0
                 while i < targets.len():
-                    self.check_target(targets[i].target, "Switch case {targets[i].value}")
-                    var j = 0
-                    while j < i:
-                        if targets[j].value == targets[i].value:
-                            self.report("MIRV-005", "Switch has duplicate case value {targets[i].value}")
-                            j = i
-                        j = j + 1
+                    val case_value = targets[i].value
+                    self.check_target(targets[i].target, "Switch case {case_value}")
+                    if seen_cases.has(case_value):
+                        self.report("MIRV-005", "Switch has duplicate case value {case_value}")
+                    else:
+                        seen_cases[case_value] = true
                     if val es = enum_sym:
-                        self.check_variant(es, targets[i].value, module, "Switch case")
+                        if variant_set_ready:
+                            if not variant_set.has(case_value):
+                                self.report("MIRV-005d", "Switch case references variant {case_value}, which is not a variant of enum '{enum_name}' ({variant_count} variant(s))")
+                        else:
+                            # Unresolved owner / not an enum: O(1) report path.
+                            self.check_variant(es, case_value, module, "Switch case")
                     i = i + 1
             case MirTerminator.Unreachable: ()
             case MirTerminator.Abort(_): ()
@@ -1004,7 +951,8 @@ fn mir_verify_module(module: MirModule) -> MirVerifyReport:
     MirVerifyReport(findings: findings, functions_checked: functions_checked,
                     instructions_checked: instructions_checked)
 
-export MirVerifyRule, MirVerifyFinding, MirVerifyReport
-export mir_verify_rules, mir_verify_rule_lifecycle
+export MirVerifyRule, MirVerifyLevels, MirVerifyFinding, MirVerifyReport
+export mir_verify_rules, mir_verify_rule_lifecycle, mir_verify_levels_from_spec, mir_verify_levels_from_env
+export mir_verify_rule_level_from_spec, mir_verify_rule_level
 export mir_verify_module, mir_verify_function
 export mir_verify_type_class, mir_verify_type_text, mir_verify_type_unresolved_reason

@@ -1224,10 +1224,15 @@ impl MirLowering:
                 # tagged any/i64 slot the runtime already uses for `any`.
                 #
                 # 1a (MIR half, CURRENT_BUG_PREVENTION.md): the erasure is no
-                # longer silent. It is recorded as a non-fatal MIR diagnostic
-                # naming owner + span so the driver prints it (warn-first;
-                # promotion to `error_fatal` is gated on the compiler's own
-                # source being clean — see MIR_VERIFY_FINDINGS.md gap G1).
+                # longer silent. It is recorded as a lowering ADVISORY naming
+                # owner + span (`self.advisory` -> `self.mir_advisories`, NOT
+                # `self.errors`: bootstrap_type_registration, backend/compiler,
+                # jit_interpreter and simpleos focused_pipeline all abort on
+                # `errors.len() > 0`, and array/dict literal lowering compares
+                # `errors.len()` around element lowering). It is a real error
+                # only under SIMPLE_MIR_VERIFY_LEVELS="E-MIR-TYPE-Error=error".
+                if self.mir_advisory_level("E-MIR-TYPE-Error") == "off":
+                    return MirType.i64()
                 val error_fn = if self.mir_tag_probe_active_function != "":
                     self.mir_tag_probe_active_function
                 else:
@@ -1242,9 +1247,9 @@ impl MirLowering:
                 val prior_reports = self.mir_type_error_reports[error_fn] ?? 0
                 self.mir_type_error_reports[error_fn] = prior_reports + 1
                 if prior_reports < 3:
-                    self.error("E-MIR-TYPE-Error: unresolved HIR type (HirTypeKind.Error) reached lower_type in fn {error_fn} (module {self.current_module_id}) and was erased to i64", error_span)
+                    self.advisory("E-MIR-TYPE-Error", "unresolved HIR type (HirTypeKind.Error) reached lower_type in fn {error_fn} (module {self.current_module_id}) and was erased to i64", error_span)
                 elif prior_reports == 3:
-                    self.error("E-MIR-TYPE-Error: further unresolved HIR types in fn {error_fn} (module {self.current_module_id}) suppressed after 3 reports", error_span)
+                    self.advisory("E-MIR-TYPE-Error", "further unresolved HIR types in fn {error_fn} (module {self.current_module_id}) suppressed after 3 reports", error_span)
                 MirType.i64()
             case HirTypeKind.Isolated(inner):
                 # `iso T` ERASES to T's MIR representation. Isolation is an
