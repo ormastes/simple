@@ -2,7 +2,7 @@
 # Independent diagnostic Phase 3 and Phase 4 lanes use a hello-qualified
 # provisional producer. No Stage 2 admission or canonical PASS is emitted.
 set -eu
-die() { echo "provisional-phase3-phase4: $*" >&2; exit 1; }
+die() { echo "provisional-phase3-phase4: $*" >&2; exit 2; }
 regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
 absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
 positive() { case "$1" in ''|0|0*|*[!0-9]*) return 1 ;; *) [ "$1" -gt 0 ] 2>/dev/null ;; esac; }
@@ -157,6 +157,9 @@ esac
   || die "module role files differ from compiled authority"
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository root unavailable"
+# Reject invalid target/schema before starting any independent source task.
+perl -I "$repo_root/scripts/bootstrap/lib" -MBootstrapNativeImage=verify_native_object \
+  -e 'verify_native_object(undef, $ARGV[0])' "$target" || die "unsupported diagnostic target"
 prepare="$repo_root/scripts/bootstrap/prepare-provisional-native-groups.shs"
 shared_parse_root_check="$repo_root/scripts/bootstrap/lib/shared-parse-cas-root.shs"
 shared_parse_source_check="$repo_root/scripts/bootstrap/lib/shared-parse-source-authority.shs"
@@ -313,7 +316,8 @@ build_binary() {
   id=$1 entry=$2 output=$3 task_phase=$4 backend=$5
   # Diagnostic module tasks use the same manager, source authority and cache
   # ownership as binary tasks, but stop at object emission. Never promote them.
-  case "${6:-binary}" in
+  output_kind=${6:-binary}
+  case "$output_kind" in
     binary) set -- ;;
     object) set -- --emit-object ;;
     *) die "unsupported build output kind" ;;
@@ -352,13 +356,24 @@ build_binary() {
   SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST="$source_authority_digest" \
   "$builder_program" run --manifest "$job_root/manifest.sdn" \
     --state "$job_root/state" --source-root "$source_root" \
-    --output-root "$job_root" || die "$id manager task failed"
+    --output-root "$job_root" || {
+      manager_status=$?
+      verify_shared_source
+      verify_image_set
+      [ "$manager_status" -eq 1 ] || die "$id manager ownership/admission aborted: $manager_status"
+      return 1
+    }
   verify_shared_source
   "$builder_program" verify --manifest "$job_root/manifest.sdn" \
     --state "$job_root/state" --source-root "$source_root" \
     --output-root "$job_root" || die "$id receipt/output verification failed"
   regular "$job_root/$output" && regular "$job_root/state/receipts/$task_id.sdn" \
     || die "$id has no published output and terminal receipt"
+  if [ "$output_kind" = object ]; then
+    perl -I "$repo_root/scripts/bootstrap/lib" -MBootstrapNativeImage=verify_native_object \
+      -e 'verify_native_object(@ARGV)' "$job_root/$output" "$target" >"$job_root/object-validation.log" 2>&1 \
+      || { echo "$id: emitted object does not match $target; see $job_root/object-validation.log" >&2; return 1; }
+  fi
   printf '%s=%s\n' "${task_phase}_${backend}_${id}" "$(hash_file "$job_root/$output")" >>"$hashes"
   printf '%s=%s\n' "${task_phase}_${backend}_${id}_manager_receipt_sha256" \
     "$(hash_file "$job_root/state/receipts/$task_id.sdn")" >>"$hashes"
@@ -432,7 +447,13 @@ build_index() {
   SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST="$source_authority_digest" \
   "$builder_program" run --manifest "$job_root/manifest.sdn" \
     --state "$state_root" --source-root "$input_root" --output-root "$output_root" \
-    || die "$backend managed index build failed"
+    || {
+      manager_status=$?
+      verify_shared_source
+      verify_image_set
+      [ "$manager_status" -eq 1 ] || die "$backend index manager ownership/admission aborted: $manager_status"
+      return 1
+    }
   "$builder_program" verify --manifest "$job_root/manifest.sdn" \
     --state "$state_root" --source-root "$input_root" --output-root "$output_root" \
     || die "$backend managed index receipt verification failed"
@@ -464,7 +485,13 @@ run_module_backend() {
   regular "$manifest" || die "$task_phase/$backend group manifest unavailable"
   verify_image_set
   "$group_program" native-groups-run --manifest "$manifest" \
-    || die "$task_phase/$backend module run failed or produced only diagnostic objects"
+    || {
+      manager_status=$?
+      verify_shared_source
+      verify_image_set
+      [ "$manager_status" -eq 1 ] || die "$task_phase/$backend group manager ownership/admission aborted: $manager_status"
+      return 1
+    }
   verify_image_set
   "$group_program" native-groups-verify --manifest "$manifest" \
     --state "$root/$task_phase/modules/$backend/state" \
@@ -559,7 +586,14 @@ statuses=$(mktemp "$root/task-status.XXXXXX") || die "task status log unavailabl
 schedule="$repo_root/scripts/bootstrap/lib/provisional-task-schedule.shs"
 regular "$schedule" || die "tracked diagnostic task schedule missing"
 . "$schedule"
-provisional_dispatch_tasks
+schedule_status=0
+provisional_dispatch_tasks || schedule_status=$?
+# Retain every failed/blocked unit even when authority abort prevents a receipt.
+awk '/_status=(FAILED|BLOCKED|ABORTED)$/ {print}' "$statuses" >"$statuses.failures" \
+  || die "failure summary publication failed"
+printf 'provisional-phase3-phase4: schedule=%s failures=%s outcomes=%s\n' \
+  "$schedule_status" "$statuses.failures" "$statuses" >&2
+[ "$schedule_status" -ne 2 ] || die "owner aborted; retained task outcomes: $statuses"
 verify_shared_source
 [ "$(authority_field excluded_inventory_path)" = "$excluded_inventory" ] &&
   [ "$(authority_field excluded_inventory_digest)" = "$excluded_inventory_digest" ] &&
