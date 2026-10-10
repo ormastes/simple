@@ -47,7 +47,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/app/io/jit_sffi.spl") ?? ""
+val source = rt_file_read_text("src/compiler/95.interp/execution/jit_sffi.spl") ?? ""
 
 expect(source).to_contain("out.to_int() ?? -1")
 expect(source.contains("out.to_int()\n")).to_equal(false)

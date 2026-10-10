@@ -331,3 +331,7 @@ The first manifest projection now classifies `src/compiler/70.backend/backend/_V
 ## 2026-10-10 loader dependency cut
 
 The canonical loader no longer imports `os.smf.smf_generation` for local-only hot-reload state. The real relocation success and resource lifecycle retain publication authority; the prior temporary readiness state had no independent failure path. Kernel closure now has ten app/OS import violations, three K0-to-P violations, and zero K1-to-P violations. Compiler bootstrap and runtime acceptance still require qualification before this contributes to an Item 5 pass. See [the continuation report](../../../09_report/compiler/item56_release_continuation_2026-10-10.md).
+
+## 2026-10-10 JIT owner closure continuation
+
+The compiler interpreter JIT implementation was moved from the app facade to its compiler owner, leaving an app compatibility export. The structural closure count fell from 10 to 9 kernel→app/OS edges while 3 K0→P edges remain. Native execution and size/startup/RSS gates are still open; see `doc/09_report/compiler/target5_jit_owner_closure_2026-10-10.md`.
