@@ -304,6 +304,44 @@ describe "admitted per-module semantic route":
         expect(invalidation.dirty_modules).to_equal(["a", "b", "c", "d"])
         dir_remove(root, true)
 
+    it "migrates a V2 graph fully when transition evidence is missing":
+        step("Migrate unknown legacy witnesses conservatively")
+        for hint in [[], ["c"]]:
+            val root = semantic_root("legacy-no-transition-{hint.len()}")
+            var legacy = semantic_graph("legacy", false, false)
+            legacy.schema_version = 2
+            var entries: [PackageModuleIndexEntryV1] = []
+            for entry in legacy.entries:
+                var unwitnessed = entry
+                unwitnessed.generated_source_digest = ""
+                unwitnessed.action_digest = package_module_index_entry_action_digest_v1(
+                    legacy, unwitnessed)
+                entries.push(unwitnessed)
+            legacy.entries = entries
+            expect(package_module_index_publish_v1(root, legacy)).to_equal(true)
+            val dir = "{root}/package-module-index-v1"
+            val pointer = file_read("{dir}/TRANSITION")
+            expect(file_delete("{dir}/{pointer}.transition")).to_equal(true)
+            val invalidation = package_index_route_admitted_invalidation_v1(
+                root, legacy, hint)
+            expect(invalidation.valid).to_equal(true)
+            expect(invalidation.dirty_modules).to_equal(["a", "b", "c", "d"])
+            dir_remove(root, true)
+
+    it "rejects unknown V4 hints when transition evidence is missing":
+        step("Preserve current-schema fallback scope")
+        val root = semantic_root("v4-missing-transition-unknown-hint")
+        val current = semantic_graph("current", false, false)
+        expect(package_module_index_publish_v1(root, current)).to_equal(true)
+        val dir = "{root}/package-module-index-v1"
+        val pointer = file_read("{dir}/TRANSITION")
+        expect(file_delete("{dir}/{pointer}.transition")).to_equal(true)
+        val invalidation = package_index_route_admitted_invalidation_v1(
+            root, current, ["unknown"])
+        expect(invalidation.valid).to_equal(false)
+        expect(invalidation.reason).to_equal("changed-module-unknown:unknown")
+        dir_remove(root, true)
+
     it "routes mixed edits through real dirty source and retained archive admission on POSIX":
         step("Admit logical source identities through the snapshot and reuse one real archive")
         val root = semantic_root("route")
