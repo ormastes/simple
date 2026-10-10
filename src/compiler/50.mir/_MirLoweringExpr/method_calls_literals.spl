@@ -4622,7 +4622,7 @@ impl MirLowering:
             )))
         )))
 
-    me lower_array_lit(elements: [HirExpr]) -> LocalId:
+    me lower_array_lit(elements: [HirExpr], element_context: HirType? = nil) -> LocalId:
         """Lower array literal."""
         var operands: [MirOperand] = []
         var lowered_elem_type = MirType.i64()
@@ -4654,7 +4654,18 @@ impl MirLowering:
             # build that crashes at runtime is strictly worse than today's
             # build-time failure, so that path is NOT taken here; this is a
             # guard-only fix (still a clean loud build failure, never a crash).
-            val local = self.lower_expr(elem)
+            val errors_before = self.errors.len()
+            var local = if val expected = element_context:
+                self.lower_declared_enum_payload_expression(expected, elem)
+            else:
+                self.lower_expr(elem)
+            if self.errors.len() != errors_before:
+                return self.builder.emit_const_int(0)
+            if val expected = element_context:
+                if not self.enum_payload_local_compatible(expected, elem, local):
+                    self.error_fatal("enum payload array element type mismatch", Some(elem.span))
+                    return self.builder.emit_const_int(0)
+                local = self.adapt_declared_enum_payload(expected, local)
             if local == nil:
                 self.error_fatal("unsupported array element (cannot lower to a value)", nil)
                 operands = operands.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
@@ -4688,7 +4699,7 @@ impl MirLowering:
 
         # The lowered local is authoritative. Flat HIR expression metadata may
         # still carry the parser's default i64 for typed variables.
-        val elem_type = lowered_elem_type
+        val elem_type = if val expected = element_context: self.lower_type(expected) else: lowered_elem_type
         val array_type = MirType(kind: MirTypeKind.Array(elem_type, elements.len()))
 
         val arr_local = self.builder.emit_aggregate(
@@ -4697,6 +4708,8 @@ impl MirLowering:
             array_type
         )
         self.runtime_array_locals[arr_local.id] = true
+        if element_context.?:
+            self.runtime_elem_value_type[arr_local.id] = elem_type
         self.mark_runtime_value_local(arr_local.id)
         if elem_struct_name != "":
             self.array_element_struct_syms[arr_local.id] = elem_struct_name
@@ -4714,7 +4727,7 @@ impl MirLowering:
         val key_local = self.lower_expr(key_expr)
         self.box_runtime_value(key_local)
 
-    me lower_dict_lit(entries: [(HirExpr, HirExpr)]) -> LocalId:
+    me lower_dict_lit(entries: [(HirExpr, HirExpr)], key_context: HirType? = nil, value_context: HirType? = nil) -> LocalId:
         """Lower a dict literal `{k: v, ...}` to rt_dict_new + rt_dict_set calls.
 
         The result is a tagged i64 dict handle; the local is registered in
@@ -4727,8 +4740,8 @@ impl MirLowering:
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
         ))
         val cap_hint = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64()))
-        var key_type = MirType.i64()
-        var value_type = MirType.i64()
+        var key_type = if val expected = key_context: self.lower_type(expected) else: MirType.i64()
+        var value_type = if val expected = value_context: self.lower_type(expected) else: MirType.i64()
         var first_entry = true
         # Bug #189 sibling (dict LITERAL). A struct-valued dict learns its
         # element struct NAME from exactly one of two places, and a literal hit
@@ -4764,13 +4777,35 @@ impl MirLowering:
                 # producing a garbage `d[k]` lookup key and a silently-wrong
                 # sum. Lower the key raw first (capturing its true type), box
                 # it after, exactly like the value already does.
-                val key_local_raw = self.lower_expr(key_expr)
-                if first_entry:
+                val errors_before = self.errors.len()
+                var key_local_raw = if val expected = key_context:
+                    self.lower_declared_enum_payload_expression(expected, key_expr)
+                else:
+                    self.lower_expr(key_expr)
+                if self.errors.len() != errors_before:
+                    return self.builder.emit_const_int(0)
+                if val expected = key_context:
+                    if not self.enum_payload_local_compatible(expected, key_expr, key_local_raw):
+                        self.error_fatal("enum payload dictionary key type mismatch", Some(key_expr.span))
+                        return self.builder.emit_const_int(0)
+                    key_local_raw = self.adapt_declared_enum_payload(expected, key_local_raw)
+                if first_entry and not key_context.?:
                     key_type = self.local_mir_type_of(key_local_raw) ?? key_type
                 val key_local = self.box_runtime_value(key_local_raw)
-                val value_local = self.lower_expr(value_expr)
+                var value_local = if val expected = value_context:
+                    self.lower_declared_enum_payload_expression(expected, value_expr)
+                else:
+                    self.lower_expr(value_expr)
+                if self.errors.len() != errors_before:
+                    return self.builder.emit_const_int(0)
+                if val expected = value_context:
+                    if not self.enum_payload_local_compatible(expected, value_expr, value_local):
+                        self.error_fatal("enum payload dictionary value type mismatch", Some(value_expr.span))
+                        return self.builder.emit_const_int(0)
+                    value_local = self.adapt_declared_enum_payload(expected, value_local)
                 if first_entry:
-                    value_type = self.local_mir_type_of(value_local) ?? value_type
+                    if not value_context.?:
+                        value_type = self.local_mir_type_of(value_local) ?? value_type
                     first_entry = false
                 # Capture BEFORE box_runtime_value, mirroring how value_type is
                 # read off the raw local just above: struct construction
@@ -4792,6 +4827,8 @@ impl MirLowering:
             b_typed.emit_copy(typed, dict_local)
             self.builder = b_typed
             self.runtime_dict_locals[typed.id] = true
+            if value_context.?:
+                self.runtime_elem_value_type[typed.id] = value_type
             self.mark_runtime_value_local(typed.id)
             if value_struct_name != "" and value_struct_name != "__runtime_array__":
                 self.array_element_struct_syms[typed.id] = value_struct_name
