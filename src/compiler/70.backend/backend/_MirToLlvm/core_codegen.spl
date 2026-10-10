@@ -31,7 +31,7 @@ use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.llvm_type_mapper.LlvmTypeMapper
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
     llvm_ir_builder_build, llvm_ir_builder_handle,
-    llvm_ir_builder_push_line}
+    llvm_ir_builder_push_line, llvm_codegen_error_module}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
 use compiler.mir.mir_coverage_probe_admission.{
@@ -175,7 +175,9 @@ pub fn llvm_assert_unique_ssa_defs(ir: text) -> text:
     emitted both reported duplicates."""
     val offender = llvm_first_duplicate_ssa_def(ir)
     if offender != "":
-        panic("llvm-emitter-ssa-violation:{offender} -- a value is defined twice in one function; the MIR local behind it is multi-def and was not slotted by ssa_alloca_transform_blocks")
+        val ssa_diagnostic = "compile error: llvm-emitter-ssa-violation:{offender} -- a value is defined twice in one function; the MIR local behind it is multi-def and was not slotted by ssa_alloca_transform_blocks"
+        eprint("error: {ssa_diagnostic}")
+        return llvm_codegen_error_module([ssa_diagnostic])
     ir
 
 pub fn llvm_first_duplicate_ssa_def(ir: text) -> text:
@@ -335,7 +337,7 @@ impl MirTextCodegen for MirToLlvm:
         val coverage_probe_diagnostic =
             mir_coverage_probe_admission_diagnostic_module_v1(module)
         if coverage_probe_diagnostic != "":
-            panic("compile error: {coverage_probe_diagnostic}")
+            self.codegen_error(coverage_probe_diagnostic)
         self.entry_main_symbol = is_entry_module
         self.bootstrap_string_globals_active =
             allow_bootstrap_shortcuts and self.bootstrap_mode_enabled()
@@ -573,6 +575,8 @@ impl MirTextCodegen for MirToLlvm:
 
         if not bootstrap_debug:
             self.builder.emit_tbaa_hierarchy()
+        if self.codegen_errors.len() > 0:
+            return llvm_codegen_error_module(self.codegen_errors)
         return llvm_assert_unique_ssa_defs(llvm_ir_builder_build(self.builder))
 
     me register_bootstrap_signatures():
@@ -882,7 +886,7 @@ impl MirTextCodegen for MirToLlvm:
         # malformed `%lN` text.
         val missing_call_destination = self.first_unemitted_call_destination(body)
         if missing_call_destination >= 0:
-            panic("compile error: LLVM Call destination %l{missing_call_destination} was not emitted")
+            self.codegen_error("LLVM Call destination %l{missing_call_destination} was not emitted")
 
         if ir_handle >= 0:
             val closing = "\n}\n"
@@ -943,6 +947,7 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:entry index={index}"
         val inst: MirInst = instructions[index]
+        self.current_inst_span = inst.span
         val inst_kind = inst.kind
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:kind index={index}"
@@ -1098,7 +1103,7 @@ impl MirTextCodegen for MirToLlvm:
             self.translate_call_at(instructions, index, ir_handle)
             val call_dest_id = inst.bootstrap_call_dest_local_id()
             if call_dest_id >= 0 and not self.defined_locals.contains_key(call_dest_id):
-                panic("compile error: LLVM Call destination %l{call_dest_id} was not emitted")
+                self.codegen_error("LLVM Call destination %l{call_dest_id} was not emitted")
             return
 
         match inst_kind:
@@ -1201,9 +1206,9 @@ impl MirTextCodegen for MirToLlvm:
             case DebugValue(_, _): ()
             case Nop: ()
             case DecisionProbe(_, semantic_id, _, _, _, _):
-                panic("compile error: unlowered DecisionProbe '{semantic_id}' reached LLVM instruction translation")
+                self.codegen_error("unlowered DecisionProbe '{semantic_id}' reached LLVM instruction translation")
             case ConditionProbe(_, semantic_id, _, _, _, _, _, _):
-                panic("compile error: unlowered ConditionProbe '{semantic_id}' reached LLVM instruction translation")
+                self.codegen_error("unlowered ConditionProbe '{semantic_id}' reached LLVM instruction translation")
             # ----------------------------------------------------------------
             # Lane C7 (backend coverage, hardening plan 2026-08-21 sections
             # 11.3-11.6). EXPLICIT arms for the 32 MirInstKind variants that
@@ -1308,6 +1313,21 @@ impl MirTextCodegen for MirToLlvm:
         eprint("[mir-to-llvm] {code} at={llvm_format_span(span)}")
         self.emit_unsupported_panic("{code}: LLVM backend does not lower {variant} at {llvm_format_span(span)}")
 
+    me codegen_error(message: text):
+        """Record a recoverable LLVM codegen diagnostic for this module.
+
+        A `panic` here used to fail-fast the whole native-build worker
+        (Windows 0xC0000409), taking every other module of a `--keep-going`
+        build with it and naming neither module nor function. The error is
+        recorded with module + function + source span instead; translation
+        continues so further errors in the same module are reported too, and
+        translate_module returns `llvm_codegen_error_module`, which
+        compile_ir_to_object* turn into a per-module Err. Still fail-closed:
+        no object is ever produced from a module that recorded an error."""
+        val diagnostic = "compile error: {message} [module={self.builder.module_name} function={self.current_function_name} at={llvm_format_span(self.current_inst_span)}]"
+        eprint("error: {message} [module={self.builder.module_name} function={self.current_function_name} at={llvm_format_span(self.current_inst_span)}]")
+        self.codegen_errors = self.codegen_errors.push(diagnostic)
+
     me mark_instruction_dest_defined_at(instructions: [MirInst], index: i64):
         val inst: MirInst = instructions[index]
         match inst.kind:
@@ -1374,8 +1394,12 @@ impl MirTextCodegen for MirToLlvm:
         if src_unsigned and cast_inst == "sitofp":
             cast_inst = "uitofp"
         if cast_inst.len() == 0:
-            panic("compile error: unsupported LLVM value conversion from {src_ty} to {dst_ty} function={self.current_function_name} value={value}")
-            return value
+            # No scalar meaning (e.g. ptr -> i8 would truncate an address).
+            # Recorded, not panicked: `undef` keeps the rest of the function
+            # well-formed and translate_module poisons the module text. The
+            # message keeps fd783466423's function/value context verbatim.
+            self.codegen_error("unsupported LLVM value conversion from {src_ty} to {dst_ty} function={self.current_function_name} value={value}")
+            return "undef"
         val tmp = self.builder.fresh_local()
         self.builder.emit("  {tmp} = {cast_inst} {src_ty} {value} to {dst_ty}")
         tmp
@@ -1621,7 +1645,7 @@ impl MirTextCodegen for MirToLlvm:
                         # diagnostic context only: a floating value is never a
                         # legal text/pointer return and no cast is synthesized.
                         if is_float_type(self.valid_llvm_type(ret_src_ty)) and ret_ty == "ptr":
-                            panic("compile error: LLVM return type mismatch function={self.current_function_name} terminator=Ret block={block_index} local={return_local_id} value={val_str} source={ret_src_ty} target={ret_ty}")
+                            self.codegen_error("LLVM return type mismatch function={self.current_function_name} terminator=Ret block={block_index} local={return_local_id} value={val_str} source={ret_src_ty} target={ret_ty}")
                         val ret_val = self.value_as_type_signed(val_str, ret_src_ty, ret_ty, ret_src_unsigned)
                         self.builder.emit_ret(ret_ty, ret_val)
                         if bootstrap_debug:
@@ -1736,7 +1760,7 @@ impl MirTextCodegen for MirToLlvm:
                 val elf_arch_supported = unwind_arch == "x86_64" or unwind_arch == "aarch64" or unwind_arch == "riscv64"
                 val posix_elf_supported = unwind_os == "linux" or unwind_os == "freebsd"
                 if not elf_arch_supported or not posix_elf_supported:
-                    panic("E-BACKEND-LLVM-UNWIND-ABI: recoverable exceptions are supported only on POSIX ELF x86_64/AArch64/RV64")
+                    self.codegen_error("E-BACKEND-LLVM-UNWIND-ABI: recoverable exceptions are supported only on POSIX ELF x86_64/AArch64/RV64")
                 val payload_ops: [MirOperand] = [payload]
                 val tag_ops: [MirOperand] = [type_tag]
                 val payload_raw = self.translate_operand_at(payload_ops, 0)
@@ -1752,7 +1776,7 @@ impl MirTextCodegen for MirToLlvm:
                 val elf_arch_supported = unwind_arch == "x86_64" or unwind_arch == "aarch64" or unwind_arch == "riscv64"
                 val posix_elf_supported = unwind_os == "linux" or unwind_os == "freebsd"
                 if not elf_arch_supported or not posix_elf_supported:
-                    panic("E-BACKEND-LLVM-UNWIND-ABI: recoverable exceptions are supported only on POSIX ELF x86_64/AArch64/RV64")
+                    self.codegen_error("E-BACKEND-LLVM-UNWIND-ABI: recoverable exceptions are supported only on POSIX ELF x86_64/AArch64/RV64")
                 val payload_ops: [MirOperand] = [payload]
                 val tag_ops: [MirOperand] = [type_tag]
                 val payload_raw = self.translate_operand_at(payload_ops, 0)
@@ -1778,7 +1802,7 @@ impl MirTextCodegen for MirToLlvm:
                     val elf_arch_supported = unwind_arch == "x86_64" or unwind_arch == "aarch64" or unwind_arch == "riscv64"
                     val posix_elf_supported = unwind_os == "linux" or unwind_os == "freebsd"
                     if not elf_arch_supported or not posix_elf_supported:
-                        panic("E-BACKEND-LLVM-UNWIND-ABI: recoverable exceptions are supported only on POSIX ELF x86_64/AArch64/RV64")
+                        self.codegen_error("E-BACKEND-LLVM-UNWIND-ABI: recoverable exceptions are supported only on POSIX ELF x86_64/AArch64/RV64")
                 var func_val = self.translate_operand_at(func_operands, 0)
                 match func.kind:
                     case Copy(local) | Move(local):
