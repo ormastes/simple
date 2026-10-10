@@ -1440,6 +1440,21 @@ impl MirTextCodegen for MirToLlvm:
             case _:
                 false
 
+    me equality_compare_type(left: MirOperand, right: MirOperand) -> text:
+        """LLVM type an Eq/Ne compare runs at. The LEFT operand's type, as
+        before, except that an i1 (Bool) left against a wider integer right
+        compares at the right's width. Narrowing the right operand to i1
+        TRUNCATED it: the raw nil sentinel 3 became 1, so a stage-2-built
+        `true == nil` (bool param on the left) answered true while
+        `nil == true` answered false. Widening the i1 (zext) is value-
+        preserving for every bool/int pairing, so the compare result is
+        exact in both operand orders."""
+        val left_ty = self.valid_llvm_type(self.get_operand_type(left))
+        val right_ty = self.valid_llvm_type(self.get_operand_type(right))
+        if left_ty == "i1" and (right_ty == "i8" or right_ty == "i16" or right_ty == "i32" or right_ty == "i64"):
+            return right_ty
+        left_ty
+
     me value_as_type(value: text, from_ty: text, to_ty: text) -> text:
         var src_ty = self.valid_llvm_type(from_ty)
         # POSITIVE `.?` form only (see get_local_type): Option-match on
@@ -2274,13 +2289,13 @@ impl MirTextCodegen for MirToLlvm:
                 else:
                     self.builder.emit_ashr(dest_name, ty, left_val, shr_amount)
             case Eq:
-                val eq_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
+                val eq_cmp_ty = self.equality_compare_type(left, right)
                 val eq_pred = if is_float_type(eq_cmp_ty): "oeq" else: "eq"
                 val eq_left = self.value_as_type(left_raw, self.get_operand_type(left), eq_cmp_ty)
                 val eq_right = self.value_as_type(right_raw, self.get_operand_type(right), eq_cmp_ty)
                 self.emit_comparison(dest_name, ty, eq_pred, eq_cmp_ty, eq_left, eq_right)
             case Ne:
-                val ne_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
+                val ne_cmp_ty = self.equality_compare_type(left, right)
                 val ne_pred = if is_float_type(ne_cmp_ty): "one" else: "ne"
                 val ne_left = self.value_as_type(left_raw, self.get_operand_type(left), ne_cmp_ty)
                 val ne_right = self.value_as_type(right_raw, self.get_operand_type(right), ne_cmp_ty)
