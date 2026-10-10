@@ -6,7 +6,7 @@ use std.common.hash.djb2.{djb2_hash_text}
 use std.nogc_sync_mut.rt_hal.parallel_executor.{RtHalProviderRegistry}
 use std.nogc_sync_mut.rt_hal.exact_boundary.{RtHalDigest256, RtHalExactRequest, RtHalCanonicalReceipt, RtHalExactArenaPort, rt_hal_compare_observed_pure_exact}
 use std.nogc_sync_mut.runtime.thread_local.{rt_thread_local_new, rt_thread_local_get, rt_thread_local_set}
-use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_lock_gate, mutex_unlock}
 use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
 use std.nogc_sync_mut.concurrent.thread.{thread_yield}
 
@@ -135,10 +135,13 @@ pub fn rt_hal_boundary_worker_spawn_hook() -> bool:
         return false
     val encoded = rt_thread_local_get(owner_tls)
     if encoded > 0: return true
-    # @workaround bug=mutex_lock_return_only_generic_needs_call_type_2026-10-10 reason=explicit known mutex lock sentinel type until return-only generic inference is repaired
-    # This lock stores only the integer sentinel initialized above and
-    # restored by each unlock. T is return-only in mutex_lock<T>, so state it.
-    val held = mutex_lock<i64>(owner_install_lock)
+    # mutex_lock_gate: the generic mutex_lock<T> cannot specialize here
+    # under strict monomorphization (return-only T, uninferable; call-site
+    # explicit type args are ignored — bug
+    # mutex_lock_return_only_generic_needs_call_type_2026-10-10). This lock
+    # stores only the integer sentinel initialized above and restored by each
+    # unlock, so the concrete i64? gate lock is the correct instantiation.
+    val held = mutex_lock_gate(owner_install_lock)
     if held == nil:
         active_workers.fetch_sub(1, MemoryOrdering.Release)
         global_failure.store(1, MemoryOrdering.Release)
