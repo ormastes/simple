@@ -27,8 +27,13 @@ id (E-MONO-035); after it the report is clean.
 """
 
 use std.spec
+use std.io_runtime.{file_read}
 use compiler.hir.hir.*
+use compiler.mir.mir.*
 use compiler.common.diagnostics.span.{Span}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.driver.driver_pipeline_lowering.{driver_trait_devirtualization_allowed_v1}
 use compiler.mono.monomorphize_integration.{run_monomorphization}
 use compiler.verify.post_mono_verify.*
 
@@ -248,6 +253,27 @@ fn call_targets_plain_function_sharing_a_template_name() -> HirModule:
                       mk_block([], mk_typed_expr(HirExprKind.Var(SymbolId(id: 100)), i64_type())))
     mk_module_with_table("pm_plain", [plain, caller_fn(1, 0)], table)
 
+fn table_importing(name: text, owner_module: text, at_id: i64) -> SymbolTable:
+    """A consumer table whose id `at_id` binds imported Function `name`
+    defined in `owner_module` (ids below are filler)."""
+    var table = SymbolTable.new()
+    define_n(table, at_id, SymbolKind.Variable, "v")
+    val sid = table.define(name, SymbolKind.Function, nil, mk_span(), Visibility.Public, false, Some(owner_module))
+    expect sid.id == at_id
+    table
+
+fn module_with_free_fn_and_generic_method(mod_name: text, name: text) -> HirModule:
+    val free_fn = mk_fn(0, name, [], [param(100, "n", i64_type())], i64_type(),
+                        mk_block([], mk_typed_expr(HirExprKind.Var(SymbolId(id: 100)), i64_type())))
+    var method_tpl = mk_fn(1, name, [], [param(101, "self", i64_type())], i64_type(),
+                           mk_block([], mk_typed_expr(HirExprKind.Var(SymbolId(id: 101)), i64_type())))
+    method_tpl.is_method = true
+    method_tpl.is_generic_template = true
+    var table = SymbolTable.new()
+    val _ = table.define(name, SymbolKind.Function, nil, mk_span(), Visibility.Public, false, nil)
+    val _m = table.define(name, SymbolKind.Method, nil, mk_span(), Visibility.Public, false, nil)
+    mk_module_with_table(mod_name, [free_fn, method_tpl], table)
+
 # --- fixtures: E-MONO-037 -----------------------------------------------------
 
 fn duplicate_key_across_modules() -> Dict<text, HirModule>:
@@ -342,6 +368,37 @@ describe "E-MONO-036: no call binds an un-emitted generic template":
         expect r.unemitted_template_call == 0
         expect post_mono_report_is_clean(r)
 
+    it "flags a cross-module import-bound call to a pruned template of the owner module":
+        # `tpl` emitted `walk$i64` and pruned `walk`; `user` still calls the
+        # imported `walk` (its table binds the id to Function `walk` defined
+        # in `tpl`).
+        var modules: Dict<text, HirModule> = {}
+        modules["tpl"] = mk_module("tpl", [spec_fn(7)])
+        modules["user"] = mk_module_with_table("user", [caller_fn(1, 5)], table_importing("walk", "tpl", 5))
+        val r = post_mono_verify_modules(modules)
+        expect r.unemitted_template_call == 1
+        val d: text = post_mono_report_diagnostics(r)[0]
+        expect d.starts_with("E-MONO-036")
+        expect d.contains("tpl.walk")
+        expect d.contains("walker_abi.spl:12:5")
+
+    it "does not flag a cross-module call to a free fn sharing its name with a generic-class method (async_embedded ready/pending shape)":
+        # `ae` owns a non-generic FREE `ready` and a generic class whose
+        # METHOD is also `ready` (is_method + is_generic_template, bare name).
+        # A consumer calling the free `ready` through its import must not be
+        # read as a call to the method template.
+        var modules: Dict<text, HirModule> = {}
+        modules["ae"] = module_with_free_fn_and_generic_method("ae", "ready")
+        modules["consumer"] = mk_module_with_table("consumer", [caller_fn(1, 5)], table_importing("ready", "ae", 5))
+        val r = post_mono_verify_modules(modules)
+        expect r.unemitted_template_call == 0
+        expect r.symbol_id_collision == 0
+        # The still-emitted method template is reported by the pre-existing
+        # section 9.5 "generic emitted definition" counter -- a different,
+        # correct finding, not the E-MONO-036 false positive under test.
+        expect r.generic_emitted_definition == 1
+        expect count_code(r, "E-MONO-036") == 0
+
 describe "E-MONO-037: specialization keys are unique and deterministic":
     it "flags the same mangled key emitted in two modules":
         val r = post_mono_verify_modules(duplicate_key_across_modules())
@@ -380,6 +437,33 @@ describe "E-MONO-038: devirtualized MIR is never archived":
 
     it "admits an archive-producing module with zero devirtualized calls":
         expect post_mono_archive_admission_v1("pkg.consumer", 0, true) == nil
+
+describe "E-MONO-038 at the driver: every MirLowering the driver owns is admitted":
+    it "reads the devirtualization delta off a real MirLowering and refuses it in an archive lane":
+        val target_context = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(SymbolTable.new(), target_context)
+        expect lowering.devirtualized_calls == 0
+        val before: i64 = lowering.devirtualized_calls
+        # The single devirtualizing emit_call site increments this counter.
+        lowering.devirtualized_calls = lowering.devirtualized_calls + 1
+        val verdict = post_mono_archive_admission_v1("pkg.consumer", lowering.devirtualized_calls - before, true)
+        expect verdict != nil
+        expect post_mono_archive_admission_v1("pkg.consumer", lowering.devirtualized_calls - before, false) == nil
+
+    it "agrees with the driver gate: whenever archiving forbids devirtualization, admission refuses a devirtualized module":
+        # gate(whole_closure, archive_producing, demand_routed)
+        expect driver_trait_devirtualization_allowed_v1(true, true, false) == false
+        expect post_mono_archive_admission_v1("m", 1, true) != nil
+        expect driver_trait_devirtualization_allowed_v1(true, false, false) == true
+        expect post_mono_archive_admission_v1("m", 1, false) == nil
+
+    it "is wired on the direct, bootstrap-fixed and fallback lowering instances":
+        val src = file_read("src/compiler/80.driver/driver_pipeline_lowering.spl")
+        # Three call sites (the import names the function without `(`).
+        expect src.split("post_mono_archive_admission_v1(").len() - 1 == 3
+        expect src.contains("direct_lowering.devirtualized_calls - devirt_before")
+        expect src.contains("bootstrap_lowering.devirtualized_calls")
+        expect src.contains("lowering.devirtualized_calls - fallback_devirt_before")
 
 describe "real mono pass: the walker shape with a populated symbol table":
     it "allocates the specialization past the table, so the verifier is clean and the spec id is not the type parameter's":

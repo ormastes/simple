@@ -64,7 +64,14 @@ the same source printed `hir fn key=... name=walk$i64` and
     `post_mono_specialization_manifest` (sorted) for cross-run determinism;
   - **E-MONO-038** `post_mono_archive_admission_v1`: a module lowered in an
     archive-producing lane must have `MirLowering.devirtualized_calls` delta 0
-    (verifier twin of `driver_trait_devirtualization_allowed_v1`).
+    (verifier twin of `driver_trait_devirtualization_allowed_v1`). Applied to
+    all three driver-owned lowering instances (direct, bootstrap-fixed,
+    fallback); the fallback instance never sets `trait_impl_closure_complete`
+    so it cannot devirtualize today — the check there is defense in depth.
+  - E-MONO-036 keys templates by `<module>.<name>` and skips `is_method`
+    templates: a generic class's method is `is_generic_template` under its
+    bare name, and keying it mis-read a cross-module call to a free function
+    of the same name (`std.nogc_async_mut.async_embedded` `ready`/`pending`).
 - Spec: `test/01_unit/compiler/mono/verify/post_mono_symbol_identity_spec.spl`
   (18 examples). The real-pass walker case fails with E-MONO-035 before the
   allocator seed and passes after. The by-arity lookup in
