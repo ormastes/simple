@@ -36,3 +36,24 @@ focused regression with the real `CollectionPlanFacts` enum cases and an
 unrelated enum negative case. Do not replace qualified patterns with a broad
 catch-all that could accept an incompatible owner. Rebuild an admitted
 self-hosted compiler and rerun this spec in a fresh bounded verification cycle.
+
+## 2026-10-11 focused owner-binding candidate
+
+Two smaller admitted Stage 2 probes compiled imported and local enum fields
+without an owner error. In the real `collection_plan.spl`, the two
+`match node.kind` sites match the two observed owner errors. Binding
+`node.kind` to a local `CollectionPlanKind` before each match lets a
+bounded direct compile reach HIR 90/90 and monomorphization, then MIR 90/90.
+The command was `SIMPLE_LIB=src timeout 240s <admitted-stage2> compile
+src/compiler/35.semantics/perf/collection_plan.spl --format=smf
+--output build/item56-collection-plan-typed.smf`. It exited 1 after
+99.896 s because MIR reported 58 errors across the 90-module closure,
+including unsupported `HirExpr` struct equality at
+`collection_plan.spl:95:16`, enum payload/identity errors in HIR/type
+modules, and ambiguous bare enum variants. This direct compile is not an
+executable test PASS and does not qualify the VHDL port.
+
+The typed bindings preserve the declared enum owner and are kept as a
+source-level repair candidate. The underlying field-projection owner bug
+remains open; the MIR failures are a separate current-source qualification
+blocker. The three-cycle limit for this focused diagnosis is exhausted.
