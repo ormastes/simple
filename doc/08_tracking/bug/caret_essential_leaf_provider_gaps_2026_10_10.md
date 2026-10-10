@@ -34,3 +34,5 @@ executable typed checks. Both are AUTHORED_UNEXECUTED; compiler source, backend,
 runtime, cache, and execution receipts must be bound before qualification.
 Remaining enum payload, local binding, and collection method failures remain
 open. No host access or runtime FFI declaration changed.
+
+Concrete leaf type repair commit: `e298d4513` (qualified tests still pending).
