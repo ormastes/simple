@@ -53,7 +53,7 @@ use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, hir_codec_head
 use compiler.frontend.core.flat_pool_codec.{flat_pool_escape, flat_pool_unescape}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope}
-use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.sha256.{sha256_text, sha256_runtime_fallback_used}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_write}
 use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -270,8 +270,17 @@ fn hir_cache_entry_encode_body(warnings: [text], blob: text) -> text:
 # sha256 rather than a pure-Simple CRC: sha256_text is runtime-backed
 # (rt_tls13_sha256), so it costs microseconds per module under the
 # interpreter, where a per-byte CRC loop would cost seconds.
+# The one-time note lives here, not in std.common: a build that silently took
+# the pure-Simple digest path looks like a ~25% parse-cost regression with
+# nothing in the log to explain it.
+var _hir_cache_sha_fallback_noted: bool = false
+
 fn hir_cache_body_checksum(body: text) -> text:
-    sha256_text(body)
+    val sum = sha256_text(body)
+    if not _hir_cache_sha_fallback_noted and sha256_runtime_fallback_used():
+        _hir_cache_sha_fallback_noted = true
+        eprint("[hir-cache] runtime sha256 unavailable on this engine; entry checksums use the pure-Simple fallback for this process")
+    sum
 
 fn _hir_cache_reject_index(reason: text) -> i64:
     var i = 0
