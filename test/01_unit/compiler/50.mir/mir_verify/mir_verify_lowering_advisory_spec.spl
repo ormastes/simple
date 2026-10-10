@@ -179,3 +179,60 @@ describe "MIR lowering advisories: E-MIR-MATCH-GUARD routing":
         expect(guard_route("E-MIR-MATCH-GUARD=off")).to_equal("errors=0 fatal=0 advisories=0")
         expect(guard_route("E-MIR-MATCH-GUARD=error")).to_equal("errors=1 fatal=1 advisories=0")
         expect(guard_route("E-MIR-TYPE-Error=error")).to_equal("errors=0 fatal=0 advisories=1")
+
+val MANY_SRC: text = "use nowhere.missing.Missing\n\nfn g(a: Missing, b: Missing, c: Missing, d: Missing, e: Missing, f: Missing) -> i64:\n    0\n"
+
+fn hir_of(src: text, file: text, name: text) -> HirModule:
+    val parsed = parse_full_frontend(src, file, name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    hir_lowering.lower_module(parsed)
+
+fn two_modules_same_fn_name() -> (i64, i64):
+    """One lowering, two modules that both define `g` with unresolved types.
+    Returns (advisories from the first module, advisories from the second)."""
+    val saved = env_get("SIMPLE_MIR_VERIFY_LEVELS")
+    val _a = env_set("SIMPLE_MIR_VERIFY_LEVELS", "")
+    val first = hir_of(MANY_SRC, "testdata/mv_first.spl", "mv_first")
+    val second = hir_of(MANY_SRC, "testdata/mv_second.spl", "mv_second")
+    var lowering = MirLowering.new_for_target(first.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val _m1 = lowering.lower_module(first)
+    val n1 = lowering.mir_advisories.len()
+    val _m2 = lowering.lower_module(second)
+    val n2 = lowering.mir_advisories.len() - n1
+    val _b = env_set("SIMPLE_MIR_VERIFY_LEVELS", saved)
+    (n1, n2)
+
+fn promoted_type_errors() -> (i64, i64, i64):
+    """MANY_SRC under E-MIR-TYPE-Error=error.
+    Returns (errors, errors that are not fatal, errors mentioning 'suppressed')."""
+    val saved = env_get("SIMPLE_MIR_VERIFY_LEVELS")
+    val _a = env_set("SIMPLE_MIR_VERIFY_LEVELS", "E-MIR-TYPE-Error=error")
+    val hir = hir_of(MANY_SRC, "testdata/mv_many.spl", "mv_many")
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val _m = lowering.lower_module(hir)
+    val _b = env_set("SIMPLE_MIR_VERIFY_LEVELS", saved)
+    var non_fatal = 0
+    var summaries = 0
+    for e in lowering.errors:
+        if not e.fatal:
+            non_fatal = non_fatal + 1
+        if e.message.contains("suppressed"):
+            summaries = summaries + 1
+    (lowering.errors.len(), non_fatal, summaries)
+
+describe "MIR lowering advisories: E-MIR-TYPE-Error rate limit":
+    it "default level: at most 3 reports per function plus one summary line":
+        val (errors, advisories, _insts, _zeros, _first) = lower_with(MANY_SRC, "")
+        expect(errors).to_equal(0)
+        expect(advisories).to_equal(4)
+
+    it "the limit is per module + function: a same-named function in a later module is still reported":
+        val (n1, n2) = two_modules_same_fn_name()
+        expect(n1).to_equal(4)
+        expect(n2).to_equal(4)
+
+    it "promoted to error: every occurrence is flagged, nothing is rate-limited, and no summary line becomes an error":
+        val (errors, non_fatal, summaries) = promoted_type_errors()
+        expect(errors >= 6).to_equal(true)
+        expect(non_fatal).to_equal(0)
+        expect(summaries).to_equal(0)

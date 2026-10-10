@@ -102,6 +102,11 @@ val MVT_AGG: i64 = 4       # Tuple(text)/Struct/Enum/Array/Slice/Result/Union/ve
 val MVT_UNIT: i64 = 5
 val MVT_NEVER: i64 = 6
 
+# Variant-membership key = slot * span + discriminant (see enum_slot_of).
+val MV_VARIANT_KEY_SPAN: i64 = 4294967296
+# Switches up to this many cases are checked for duplicates pairwise.
+val MV_SWITCH_PAIRWISE_MAX: i64 = 8
+
 fn mir_verify_type_class(t: MirType) -> i64:
     match t.kind:
         case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64: MVT_INT
@@ -305,6 +310,13 @@ struct MirFnVerifier:
     cur_block: i64
     cur_inst: i64
     cur_span: Span?
+    # Variant-membership cache, built once per enum per function (see
+    # `enum_slot_of`). All three containers stay empty for a function that
+    # never names an enum variant.
+    enum_slot: Dict<i64, i64>       # enum SymbolId.id -> slot (-1 = uncached path)
+    variant_keys: Dict<i64, bool>   # slot * MV_VARIANT_KEY_SPAN + discriminant
+    enum_names: [text]              # per slot, for the diagnostic only
+    enum_counts: [i64]
 
 impl MirFnVerifier:
     me report(rule: text, message: text):
@@ -441,7 +453,53 @@ impl MirFnVerifier:
             case _:
                 ()
 
+    me enum_slot_of(symbol: SymbolId, module: MirModule) -> i64:
+        """Slot of `symbol`'s variant set in this function's cache; the set is
+        built ONCE per enum per function. -1 = not a resolved enum whose
+        discriminants all lie in [0, MV_VARIANT_KEY_SPAN): the caller takes
+        the uncached diagnostic path in `check_variant`."""
+        val cached = self.enum_slot[symbol.id] ?? -2
+        if cached != -2:
+            return cached
+        var slot = -1
+        val def_opt = module.types[symbol]
+        if def_opt != nil:
+            match def_opt!.kind:
+                case MirTypeDefKind.Enum(variants):
+                    var in_range = true
+                    for v in variants:
+                        if v.discriminant < 0 or v.discriminant >= MV_VARIANT_KEY_SPAN:
+                            in_range = false
+                    if in_range:
+                        slot = self.enum_names.len()
+                        for v in variants:
+                            self.variant_keys[slot * MV_VARIANT_KEY_SPAN + v.discriminant] = true
+                        self.enum_names = self.enum_names.push(def_opt!.name)
+                        self.enum_counts = self.enum_counts.push(variants.len())
+                case _: ()
+        self.enum_slot[symbol.id] = slot
+        slot
+
+    me check_switch_duplicates(targets: [SwitchCase]):
+        """Duplicate case values of a LARGE switch (set lookup, O(n)). Small
+        switches are compared pairwise inline with no allocation."""
+        var seen_cases: Dict<i64, bool> = {}
+        for t in targets:
+            if seen_cases.has(t.value):
+                self.report("MIRV-005", "Switch has duplicate case value {t.value}")
+            else:
+                seen_cases[t.value] = true
+
     me check_variant(symbol: SymbolId, variant: i64, module: MirModule, what: text):
+        val slot = self.enum_slot_of(symbol, module)
+        if slot >= 0:
+            if variant < 0 or variant >= MV_VARIANT_KEY_SPAN or not self.variant_keys.has(slot * MV_VARIANT_KEY_SPAN + variant):
+                val enum_name = self.enum_names[slot]
+                val variant_count = self.enum_counts[slot]
+                self.report("MIRV-005d", "{what} references variant {variant}, which is not a variant of enum '{enum_name}' ({variant_count} variant(s))")
+            return
+        # Uncached path: unresolved owner, not an enum, or discriminants
+        # outside the key span (one linear scan).
         val def_opt = module.types[symbol]
         if def_opt == nil:
             self.report("MIRV-006b", "{what} references enum#{symbol.id} whose definition is not resolved in this module")
@@ -715,41 +773,29 @@ impl MirFnVerifier:
                     match vt.kind:
                         case MirTypeKind.Enum(symbol): enum_sym = Some(symbol)
                         case _: ()
-                # Duplicate-case and variant membership are set lookups, so a
-                # switch of n cases over an enum of m variants costs O(n + m),
-                # not O(n*n + n*m).
-                var seen_cases: Dict<i64, bool> = {}
-                var variant_set: Dict<i64, bool> = {}
-                var variant_set_ready = false
-                var enum_name = ""
-                var variant_count = 0
-                if val es0 = enum_sym:
-                    val enum_def = module.types[es0]
-                    if enum_def != nil:
-                        match enum_def!.kind:
-                            case MirTypeDefKind.Enum(variants):
-                                for v in variants:
-                                    variant_set[v.discriminant] = true
-                                variant_set_ready = true
-                                enum_name = enum_def!.name
-                                variant_count = variants.len()
-                            case _: ()
+                # Non-error path allocates nothing: the case text is built only
+                # when a target is missing, the variant set comes from the
+                # per-function cache, and duplicate detection is pairwise up
+                # to MV_SWITCH_PAIRWISE_MAX cases (a set beyond that).
+                val case_count = targets.len()
                 var i = 0
-                while i < targets.len():
+                while i < case_count:
                     val case_value = targets[i].value
-                    self.check_target(targets[i].target, "Switch case {case_value}")
-                    if seen_cases.has(case_value):
-                        self.report("MIRV-005", "Switch has duplicate case value {case_value}")
-                    else:
-                        seen_cases[case_value] = true
+                    val case_target = targets[i].target
+                    if not self.block_exists(case_target):
+                        self.report("MIRV-005", "Switch case {case_value} targets block {case_target.id}, which does not exist in this function")
+                    if case_count <= MV_SWITCH_PAIRWISE_MAX:
+                        var j = 0
+                        while j < i:
+                            if targets[j].value == case_value:
+                                self.report("MIRV-005", "Switch has duplicate case value {case_value}")
+                                j = i
+                            j = j + 1
                     if val es = enum_sym:
-                        if variant_set_ready:
-                            if not variant_set.has(case_value):
-                                self.report("MIRV-005d", "Switch case references variant {case_value}, which is not a variant of enum '{enum_name}' ({variant_count} variant(s))")
-                        else:
-                            # Unresolved owner / not an enum: O(1) report path.
-                            self.check_variant(es, case_value, module, "Switch case")
+                        self.check_variant(es, case_value, module, "Switch case")
                     i = i + 1
+                if case_count > MV_SWITCH_PAIRWISE_MAX:
+                    self.check_switch_duplicates(targets)
             case MirTerminator.Unreachable: ()
             case MirTerminator.Abort(_): ()
             case MirTerminator.Throw(payload, type_tag):
@@ -808,11 +854,15 @@ fn mir_verify_function(func: MirFunction, module: MirModule, fn_by_name: Dict<te
     while k <= max_block:
         block_pos = block_pos.push(-1)
         k = k + 1
+    # One Option for the whole function: instructions without their own span
+    # share it instead of allocating `Some(func.span)` each.
+    val fn_span: Span? = Some(func.span)
     var v = MirFnVerifier(
         module_name: module.name, fn_name: func.name, findings: [],
         pos_of_id: pos_of_id, locals: func.locals, defined: defined, used: used,
         cond_def: cond_def, block_pos: block_pos, cur_block: -1, cur_inst: -1,
-        cur_span: Some(func.span))
+        cur_span: fn_span, enum_slot: {}, variant_keys: {}, enum_names: [],
+        enum_counts: [])
     var bi = 0
     while bi < func.blocks.len():
         val b = func.blocks[bi]
@@ -865,17 +915,17 @@ fn mir_verify_function(func: MirFunction, module: MirModule, fn_by_name: Dict<te
         while ii < b.instructions.len():
             val inst = b.instructions[ii]
             v.cur_inst = ii
-            v.cur_span = if inst.span != nil: inst.span else: Some(func.span)
+            v.cur_span = if inst.span != nil: inst.span else: fn_span
             v.visit_inst(inst, module, fn_by_name)
             ii = ii + 1
         instructions = instructions + ii
-        v.cur_span = Some(func.span)
+        v.cur_span = fn_span
         v.visit_terminator(b.terminator, module)
         bi = bi + 1
     # --- final linear sweep over locals (5b, 5c) -----------------------------
     v.cur_block = -1
     v.cur_inst = -1
-    v.cur_span = Some(func.span)
+    v.cur_span = fn_span
     p = 0
     while p < func.locals.len():
         if v.used[p] > 0 and not v.defined[p]:
