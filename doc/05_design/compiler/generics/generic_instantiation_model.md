@@ -110,8 +110,24 @@ on pointer width; H-RET32 below is the one known place where a 64-bit assumption
 ## 6. Diagnostics
 
 E-MONO-030 polymorphic recursion past depth 16; E-MONO-032 type arguments neither written nor
-inferable; E-MONO-034 method of a generic impl not specializable for this receiver;
-E-MONO-031/035–038 post-mono verification. No new code was added in this lane.
+inferable; E-MONO-031/035–038 post-mono verification. These are always errors.
+
+Two diagnostics can be met in code that compiles today and are therefore **leveled**
+(`SIMPLE_MONO_LEVELS="E-MONO-034=error,E-MONO-040=off"`, values `error | warning | off`,
+resolved by `mono_diag_level`; the driver prints warnings through `add_warning`):
+
+- **E-MONO-034** (default `warning`) — method of a generic impl that cannot be specialized
+  for a known receiver (trait impl, own type parameters, `Owner__method` clash across
+  modules). The call stays the unspecialized method call it was before the check existed.
+  Census (review round 2): 0 sites in `src/compiler`, about 92 in `src/lib` + `src/app`.
+- **E-MONO-040** (default `warning`, new) — a container field over a type parameter
+  (`items: [T]`, `first: T?`) is read from a receiver whose instance is unknown; reported
+  once per field and module. See H-ANNOT.
+
+Rule for this lane: nothing may turn a module that compiles today into a hard error without
+such a switch. The restored 50.mir refusal "operator overload for struct T" is not new: every
+unknown-instance route refuses on release without e6a135b3296 (measured: the "refused" group
+of `generic_struct_field_instance_paths_spec` is green there).
 
 ## 7. Evidence — what is proven, what is only checked
 
@@ -147,6 +163,30 @@ E-MONO-031/035–038 post-mono verification. No new code was added in this lane.
 A note on the sweep itself: it caught its own first universe (380 "types", 15 of them
 duplicates) through the size assertions.
 
+### What the model and the differential do NOT cover
+
+- **`infer_expr_type`** — the part of 40.mono that changed most in this lane — has no model.
+  It is example-tested only (`generic_variable_flow_spec`).
+- **The symbol spelling of a type parameter.** HIR emits a declaration's own `T` as
+  `Named(sym_of_T, [])`; the differential feeds `substitute_type` / `bind_type_params` the
+  `TypeParam(name)` spelling only, so `TypeSubstitution.by_symbol` and
+  `typesubstitution_canonical` are covered by the example specs, not by the sweep.
+- **Constructors outside the universe**: Result, Ref, Ptr, Isolated, Union, Projection, Tensor,
+  DynTrait, tuples of more than two members, functions of more than one parameter, effects,
+  fixed array sizes. `hir_type_key` / `type_key` ignore array sizes, function effects and the
+  *values* of tensor dimensions (only their count) by design; two types differing only there
+  share a key.
+- **A zero-argument nominal pattern** (`p: Acc`) matches anything in production
+  (`bind_type_params` cannot compare module-local ids) and has no counterpart in the model,
+  whose named types always carry one or two arguments.
+- **`mangled_name` / `_k<n>`** is covered since review round 2: the refinement spec checks the
+  display name against structural equality over 1,671 type-argument lists (the universe's 147
+  singles and 1,521 pairs, plus three lists chosen because their display names clash). Inside
+  the universe the display mangling happens to be injective, so without those three the
+  suffix path would not run. Two key-sharing defects were found in this area by reading, which
+  is why it is in the sweep now; both also have permanent example specs (review probes P1, P2).
+- Nothing here says anything about 50.mir or codegen; those are example-tested.
+
 ## 8. Holes
 
 Fixed in this lane (each has a spec that was red first, except where noted):
@@ -159,18 +199,18 @@ Fixed in this lane (each has a spec that was red first, except where noted):
 | F-FIELD | `b.item` / `b.items` on a generic instance untyped in 40.mono | generic field tables by ownership identity |
 | F-ELEM | `xs[i]`, `d[k]`, `t.0`, `o ?? d`, `o!`, binary/unary, `if` value, dict literal untyped | new `infer_expr_type` arms |
 | F-RANGE | `for i in 0..n` loop variable untyped | bound to i64 for i64 bounds |
-| K-SHARE | two instantiations with one mangled name shared a body | structural `type_key`, `_k<n>` (not observed red: found by reading, pinned after) |
-| K-BIND | witnesses differing only inside a nested fn/Result/Slice type agreed | structural `hir_type_key` (same remark) |
+| K-SHARE | two instantiations with one mangled name shared a body | structural `type_key`, `_k<n>` (found by reading; the reviewer's probe P1 was red on the pre-fix tree and is a permanent example now) |
+| K-BIND | witnesses differing only inside a nested fn/Result/Slice type agreed | structural `hir_type_key` (same: probe P2) |
 | E6-LEAK | per-instance field record never reset per function | reset with the other per-function tables |
 | E6-SILENT | unknown instance: integer add of two field words instead of the refusal | template lowering kept for an untyped bare-parameter field |
-| F-RET-NOM | same-module `fn wrap<T>(x: T) -> Acc` / `-> Box<T>` / `-> [Acc]`: call typed `i64` against `define ptr` | the stamped signature of a local specialization types the call |
-| F-CONT | `[T]` / `T?` field: element / payload typed by the declaration (`T`) → `text` elements added as integers | mono stamp + `struct_field_over_type_param` |
+| F-RET-NOM | same-module `fn wrap<T>(x: T) -> Acc` / `-> Box<T>` / `-> [Acc]`: call typed `i64` against `define ptr` | the stamped signature of a local specialization types the call's RETURN (a field read on that result is still an unknown instance, H-ANNOT) |
+| F-CONT | `[T]` / `T?` field of an instance **built in the function** (or otherwise known to 40.mono): element / payload typed by the declaration (`T`) → `text` elements added as integers | mono stamp + `struct_field_over_type_param`. Through a parameter it is still wrong — H-ANNOT / E-MONO-040 |
 
 Open:
 
 | id | hole | behaviour today |
 |---|---|---|
-| H-ANNOT | the arguments of a **same-module** generic type annotation are dropped before HIR (`r: W<text>`, `-> W<text>`, field `w: W<text>` arrive as bare `W`; only names imported by an explicit `use` keep them) | instance unknown on those routes → operator refused; a plain move lowers. Fixing it is a frontend change that also needs `bind_type_params` to stop comparing module-local ids (it would turn today's "no evidence" into a mismatch for cross-module callers, e.g. `80.driver/cache/gateway/cache_gateway_adapter.spl`) |
+| H-ANNOT | the arguments of a **same-module** generic type annotation are dropped before HIR (`r: W<text>`, `-> W<text>`, field `w: W<text>` arrive as bare `W`; only names imported by an explicit `use` keep them) | instance unknown on those routes. Bare-parameter field (`v: T`): operator refused, a plain move lowers. **Container field (`items: [T]`, `first: T?`): NOT fail-closed** — `b.items[0] + b.items[1]` through a parameter is lowered as an integer add (right for `Bag<i64>`, WRONG for `Bag<text>`); it cannot be refused outright because the integer case compiles and runs correctly today, so it is flagged by E-MONO-040 (warning by default, error on request). The same holds for a field read on a call result: `boxit("t")` is `call ptr` (only the RETURN is typed), `.item` on it is refused. Fixing it is a frontend change that also needs `bind_type_params` to stop comparing module-local ids (it would turn today's "no evidence" into a mismatch for cross-module callers, e.g. `80.driver/cache/gateway/cache_gateway_adapter.spl`) |
 | H-EXPL | written type arguments at a call (`f<T>(x)`, `Box<i64>(…)`) | consumed when HIR carries them (`call_type_args`, `generic_constructor_type`); the parser side belongs to the explicit-type-args lane |
 | H-IFVAL | `if val v = o` types `v` as `T?` | specialization at `T?` (`keep$opt_str`); same machine word, pipeline-wide convention |
 | H-NAMED | same-named types of two modules share a specialization / display name | unchanged |
@@ -180,3 +220,25 @@ Open:
 | H-BUILTIN | result type of a builtin method, `match` as a value, untyped lambda parameter | refused (E-MONO-032) |
 | H-VISIT | `generated/hir_visitor.spl:walk_hir_comp_clause` never calls `walk_hir_comp_clause_kind`; `post_mono_verify.spl` lacks TryCatch; `hir_subst/body_subst.spl` lacks TryCatch and TypeTest | generated/other-lane files, not touched |
 | H-PARSE | `\s: text: …` (typed lambda parameter, documented syntax) is a parse error in the pure parser | not a generics defect; recorded only |
+
+## 9. The parser rule for imported generic annotations (class-params commit in this branch)
+
+An annotation `Foo<i64>` whose base is imported by an explicit `use` item is now
+`Named(Foo, [i64])` instead of `Any` (about 1,119 lines in `src/lib`, 66 in `src/app`, 0 in
+`src/compiler`). Observable change: such a value has a class identity and type arguments, so
+40.mono can specialize methods on it and 50.mir can resolve them; before, it was an erased
+word. Because the old `Any` never resolved the base or its arguments, keeping the instance
+could have raised `unresolved type` for files that compile today; `lower_named_instance_kind`
+therefore withdraws every diagnostic such an annotation raises and leaves it `Any`.
+
+Measured on 10 `src/lib` consumer/provider pairs through HIR + 40.mono (harness with only
+those two modules loaded, so most have pre-existing unresolved imports): consumer HIR error
+counts are identical to release for all 10 (0, 0, 3, 6, 7, 19, 19, 42, 61, 170); mono errors
+0 on both; the two pairs that are clean on release stay clean. Without the withdrawal the same
+run had up to 28 extra errors per consumer (`unresolved type: IoError` and the like, all
+arguments or bases the erased annotation never looked at). Provider-side counts are higher
+than release in 5 pairs (same error kinds reported more often, in modules that already fail
+in this harness) — not investigated further.
+
+Cache: the flat-pool label is `spl-flatpool-v6`. Development builds of this lane wrote the
+instance-registry layout under the v4 and the v5 label; purge dev caches from that lineage.

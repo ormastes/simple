@@ -251,3 +251,58 @@ describe "model vs production: keys":
         print "keys pairs={checked}"
         expect(bad).to_equal("")
         expect(checked).to_equal(21609)
+
+describe "model vs production: one specialization name per instantiation":
+    it "mangled_name is stable per type list and never shared by two (the _k<n> path)":
+        # Two key-sharing defects were found here by reading, so the display
+        # name is checked against structural equality over the whole closed
+        # universe: singles, and pairs over the 39 closed depth<=1 types.
+        var pass_ = MonomorphizationPass.create()
+        var lists: [[MType]] = []
+        for t in mu_closed_types():
+            val tt: MType = t
+            lists = lists.push([tt])
+        val parts = mu_depth1(mu_closed_atoms())
+        for a in parts:
+            val x: MType = a
+            for b in parts:
+                val y: MType = b
+                lists = lists.push([x, y])
+        # Outside the universe on purpose: two shapes whose DISPLAY names are
+        # known to clash. A function type inside a tuple mangles as `unknown`,
+        # and `_` both separates arguments and nests a tuple (the 3-tuple
+        # clashes with the universe pair `[Tuple<i64,i64>, i64]`).
+        val i64t = mt_con("i64")
+        lists = lists.push([mt_app(MT_TUPLE, [mt_app(MT_FN, [i64t, mt_con("bool")]), i64t])])
+        lists = lists.push([mt_app(MT_TUPLE, [mt_app(MT_FN, [mt_con("text"), mt_con("bool")]), i64t])])
+        lists = lists.push([mt_app(MT_TUPLE, [i64t, i64t, i64t])])
+        var owner: Dict<text, text> = {}
+        var names: [text] = []
+        var suffixed = 0
+        var bad = ""
+        for l in lists:
+            val args: [MType] = l
+            val model_key = mk_key("m", "f", args)
+            val name = pass_.mangled_name("f", to_hir_list(args))
+            # What `request_specialization` does next: the name is taken.
+            pass_.spec_symbols[name] = 1
+            if owner.has(name):
+                bad = "{name} names both {owner[name]} and {model_key}"
+            owner[name] = model_key
+            names = names.push(name)
+            if name.contains("_k"):
+                suffixed = suffixed + 1
+        # Asking again gives the same name (no fresh suffix on a re-request).
+        var i = 0
+        while i < lists.len():
+            val again: [MType] = lists[i]
+            if pass_.mangled_name("f", to_hir_list(again)) != names[i]:
+                bad = "unstable name for {mt_render_list(again)}"
+            i = i + 1
+        print "mangled_name lists={lists.len()} names={owner.keys().len()} suffixed={suffixed}"
+        expect(bad).to_equal("")
+        expect(lists.len()).to_equal(1671)
+        expect(owner.keys().len()).to_equal(1671)
+        # Inside the universe the display mangling happens to be injective;
+        # the two added pairs are the clashes, each resolved by one suffix.
+        expect(suffixed).to_equal(2)
