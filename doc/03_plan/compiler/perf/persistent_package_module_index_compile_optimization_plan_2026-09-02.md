@@ -493,3 +493,14 @@ A focused typed owner binding lets the direct collection-plan compile finish
 HIR. A later narrow equality repair clears collection-plan MIR diagnostics,
 but the 90-module MIR pass still reports 55 errors in other modules. The
 ordinary CLI and Item 6 native performance cohorts remain unqualified.
+
+### 2026-10-11 canonical cache-key encoding
+
+The shared `canon_seq` encoder now joins all already-encoded items in one
+runtime string allocation. A no-stub admitted Stage 2 native microbenchmark
+with 4,096 items lowers p95 from 98,423 to 582 µs and peak process RSS from
+286,880 to 3,520 KiB; the normalized time-plus-memory sum is 0.01818
+against 2.0 baseline. The exact fixture, build provenance, samples, and
+isolated binary sizes are in [the focused report](../../../09_report/compiler/target6_canon_seq_join_perf_2026-10-11.md).
+This is cache-key encoding evidence only; full entrypoint cutover and matched
+native compilation cohorts remain open.
