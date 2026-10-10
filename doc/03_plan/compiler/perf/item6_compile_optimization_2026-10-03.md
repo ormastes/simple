@@ -138,3 +138,7 @@ runtime acceptance. The snapshot-derived root-generation gap remains present,
 the compiled acceptance artifact is unavailable in this isolated worktree, and
 both inspected Windows binaries explicitly identify as Rust seeds. Item 6
 remains **BLOCKED / IN PROGRESS**, with no performance or qualification PASS.
+
+## 2026-10-10 current-source continuation
+
+The production source-closure callback crash is repaired at the driver call site, and a rebuilt pure-Simple Stage 2 candidate passed naming sanity. The outer compiler-test gate stopped before tests for a missing explicit MC/DC waiver record. Three bounded native action-key probe attempts then failed on Cranelift imported globals, a reduced source inventory, and LLVM invalid IR; the semantic v2 key has no execution PASS. See [the continuation report](../../../09_report/compiler/item56_release_continuation_2026-10-10.md). Stages E–H and the selected time/RSS gates remain open.

@@ -13,3 +13,7 @@ Bootstrap evidence: the first run was invalidated by an in-flight runtime source
 Other checks: the C source compiled, `git diff --check` passed before its commit, both `direct-env-runtime-guard` modes passed, and `doc/06_spec` contains zero `*_spec.spl` files. These checks are narrower than a verify PASS. No release branch merge or GitHub push occurred; GitHub credentials were unavailable. The dedicated branch was updated in the local repository.
 
 Next session: repair the Stage 2 HIR worker crash with a fresh bounded verification budget; obtain admitted current-source compiler evidence; run the Item 6 CAS and production edit acceptance; complete Item 5 provider/size/startup gates and Item 6 time/RSS gates; then review and land on `release/1.0`.
+
+## Continuation
+
+The subsequent production call-site repair passed Stage 2 naming sanity. Compiler-test delegation and Item 5/6 qualification remain open; see [the continuation report](item56_release_continuation_2026-10-10.md).

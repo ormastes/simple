@@ -319,3 +319,7 @@ retains a different repeated-rejection contract; renew its tests separately.
 - Unstripped and stripped size targets pass.
 - Release-small contains no unjustified unwind/exception/RTTI machinery.
 - Documentation, manifests, executable SPipe, and generated manuals agree.
+
+## 2026-10-10 kernel closure continuation
+
+The five bootstrap admission programs are now classified as P-static fixtures in the kernel closure manifest. The checker self-test passes and the full census reports 2,237 classified, zero unclassified. Its dependency gate still fails with 3 K0-to-P, 7 K1-to-P, and 11 kernel-to-app/OS imports. This is a Phase 0 repair, not optional-provider or size qualification. See [the continuation report](../../../09_report/compiler/item56_release_continuation_2026-10-10.md).

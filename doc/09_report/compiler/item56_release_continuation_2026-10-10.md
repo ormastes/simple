@@ -1,0 +1,24 @@
+# Items 5 and 6 release continuation (2026-10-10)
+
+Status: IN PROGRESS. No full Item 5/6 verification PASS or release landing.
+
+## Compiler admission repair
+
+At work branch `f25b700f050`, a production source-closure helper call through a function value was replaced with a direct call. A core from the prior rejected candidate showed PC 0 at the helper's `blr x7` and `x7=0`. See [the focused callback bug](../../08_tracking/bug/source_root_resolution_callback_native_null_2026-10-10.md).
+
+The first post-fix bootstrap stopped at its Stage 2 cache binding because source identity had changed. A second run explicitly invalidated that incompatible Stage 2 cache, rebuilt 1,222 modules, passed the previously crashing module-path-naming sanity, and published pure-Simple Stage 2 parent sanity/provenance receipts. Candidate SHA-256: `5f03d7ca69b935133656c07a0eb0154b8095a73609d25669005e2c62e5d09032`. The outer bootstrap stopped before compiler tests: delegated seed spec rows require four explicit MC/DC waiver fields. No waiver was invented. Evidence: `build/mini_builds/item56_stage2_fallback_fix_invalidate_20261010/bootstrap.log`, `.simple/storage/build/bootstrap/stage2/aarch64-unknown-linux-gnu/stage2-sanity.receipt`, and `stage2-provenance.receipt`.
+
+## Item 6 focused action-key probe
+
+Three bounded attempts used that exact Stage 2 candidate and `SIMPLE_NO_STUB_FALLBACK=1`:
+1. Cranelift with compiler and full library source roots reached AOT; imported global declarations in process-observation modules were rejected, and the worker aborted (exit 122).
+2. Cranelift with only compiler source root could not resolve required `std.nogc_sync_mut.sffi.fs` from the frozen source inventory (exit 1).
+3. LLVM with compiler and full library roots emitted invalid IR in `package_module_index_validate_v1`: `%l633 = add ptr 3, 0` at the retained `message.module.ll` line 8147 (exit 1).
+
+Logs are under `build/mini_builds/item6_semantic_action_probe_{current,closure,llvm}_20261010/`. These failures do not show the semantic v2 key is wrong; they prevent the native fixture from executing. This session's three probe verify/fix cycles are exhausted. Production cold/warm behavior and time/RSS still lack evidence.
+
+## Item 5 closure audit
+
+The kernel closure manifest now classifies five bootstrap admission fixture files as P-static in both projections. The checker self-test passed (11 fixtures). The actual checker moved from five unclassified files to zero unclassified out of 2,237, then reported 3 K0-to-P, 7 K1-to-P, and 11 kernel-to-app/OS import violations. Those dependency violations and all optional-provider runtime, matched-size, startup/RSS, and cutover gates remain open.
+
+Both direct environment access audit modes passed after the compiler change. This is narrower than release verification. The work branch remains isolated and unlanded.
