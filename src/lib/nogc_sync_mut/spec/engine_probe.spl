@@ -70,7 +70,8 @@ module rejects unknown names up front rather than letting that happen.
 
 extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
 use std.io_runtime.{env_get, env_set}
-use std.io_runtime.{file_exists}
+use std.io_runtime.{file_exists, getpid, host_os}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.nogc_sync_mut.sffi.io.{path_absolute}
 
 val PROBE_TIMEOUT_MS: i64 = 120000
@@ -120,6 +121,14 @@ pub fn simple_binary() -> text:
     val self_path = path_absolute("/proc/self/exe") ?? ""
     if self_path.len() > 0 and self_path != "/proc/self/exe" and file_exists(self_path):
         return self_path
+    # Windows has no /proc: ask PowerShell for this pid's image path so the probe
+    # still runs on the invoking build instead of the tracked bin/simple.exe,
+    # which can be older than the source tree (BUG-IT-1, 2026-10-10).
+    if host_os() == "windows":
+        val (win_out, _win_err, win_code) = process_run_bounded("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "(Get-Process -Id {getpid()}).Path"], 20000, 65536)
+        val win_path = win_out.trim()
+        if win_code == 0 and win_path != "" and not win_path.ends_with(".spl") and file_exists(win_path):
+            return win_path
     if file_exists("bin/simple"):
         return "bin/simple"
     "./bin/simple"

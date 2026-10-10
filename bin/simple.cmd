@@ -4,6 +4,14 @@ setlocal
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..") do set "REPO_ROOT=%%~fI"
 
+rem An explicit SIMPLE_BINARY always wins: the operator named the compiler to use,
+rem and no locally discovered binary (which may be older than the source tree,
+rem BUG-IT-1 2026-10-10) may shadow it.
+if defined SIMPLE_BINARY if exist "%SIMPLE_BINARY%" (
+    "%SIMPLE_BINARY%" %*
+    goto :done
+)
+
 set "BOOTSTRAP_BIN="
 if exist "%REPO_ROOT%\src\compiler_rust\target\bootstrap\simple.exe" (
     for %%P in ("%REPO_ROOT%\src\compiler_rust\target\bootstrap\simple.exe") do if %%~zP GTR 0 (
@@ -51,7 +59,10 @@ if defined BOOTSTRAP_BIN (
     goto :done
 )
 
-echo error: no Simple runtime found 1>&2
+echo error: no Simple runtime found under %REPO_ROOT% 1>&2
+echo   set SIMPLE_BINARY to a seed built from this tree, or deploy one: 1>&2
+echo   sh scripts/bootstrap/bootstrap-windows.sh --msvc ^&^& sh scripts/setup/setup.shs 1>&2
+echo   check a deployed binary with: sh scripts/check/check-deployed-simple-runnable.shs 1>&2
 exit /b 1
 
 :done

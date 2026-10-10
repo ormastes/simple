@@ -198,3 +198,59 @@ validated on the first real run rather than in a fixture.
 - `.claude/rules/vcs.md` § Pre-push guards (verdict conventions)
 - `.claude/rules/commands.md` § A `src/lib/**` change needs NO build
 - `scripts/check/check-c-runtime-compiles-push.shs` (shape this guard copies)
+
+## Companion: the execution guard (2026-10-10)
+
+`scripts/check/check-deployed-simple-runnable.shs`
+
+The mtime comparison above is blind on Windows. There `bin/simple.exe` is a
+git-**tracked** file, so its mtime is the *checkout* time of the worktree: a
+fresh worktree always looks newer than every commit, however old the bytes
+are. That is how BUG-IT-1
+(`doc/08_tracking/bug/windows_tracked_seed_cannot_parse_release_stdlib_2026-10-10.md`)
+sat unnoticed for eight days: the tracked seed (sha256 `e2a42543d62f`, committed
+2026-09-29) predates block-form `@when(os=...):` in `src/lib` (2026-10-02), so
+`run`/`test`/`lint` all died in ~1s with `expected Fn, found Colon` while
+`--version` answered cleanly.
+
+The execution guard asks the only question that does not depend on timestamps:
+*can the deployed entrypoint run a program that imports the current stdlib?* It
+writes a three-line program importing `std.io_runtime`, runs
+`<root>/bin/simple run <probe>` (falling back to `bin/simple.exe`; `--bin PATH`
+or `SIMPLE_DEPLOYED_BIN` overrides) and requires exit 0 **and** the probe token
+on stdout. Cost ~1.2s.
+
+```bash
+sh scripts/check/check-deployed-simple-runnable.shs               # deployed entrypoint
+sh scripts/check/check-deployed-simple-runnable.shs --bin <seed>  # a candidate, before deploying
+```
+
+| verdict | exit | meaning |
+|---|---|---|
+| `PASS — 1 invocation(s) executed, ...` | 0 | the binary runs the current stdlib |
+| `FAIL — 1 invocation(s) executed, ... (rc=N): <first diagnostic>` | 1 | stale or broken; do not use it |
+| `ERROR — nothing was checked (...)` | 2 | no entrypoint to execute — never a pass |
+
+`--selftest` (6 fixtures, fatal, runs before every scan): working entrypoint,
+the incident's parse-error shape, a silent exit 0 without the token, a crash
+after printing the token, no entrypoint, and a nonexistent `--bin`.
+
+Wiring: advisory push-tier row `push-deployed-simple-runnable` in
+`config/check/must_check_gates.sdn` (it needs a deployed executable, so it
+cannot block a binary-less host), and `scripts/setup/setup.shs` runs it and
+prints a `WARNING` naming the verdict when the deployed binary is unusable.
+
+### What to do on FAIL
+
+Use a seed built from the tree you are in, and name it explicitly — the test
+runner and `bin/simple.cmd` honour `SIMPLE_BINARY` before anything else:
+
+```bash
+(cd src/compiler_rust && cargo build --locked --offline --profile bootstrap -p simple-driver)
+export SIMPLE_BINARY="$PWD/src/compiler_rust/target/bootstrap/simple.exe"
+```
+
+Run cargo from `src/compiler_rust`, not the repo root with `--manifest-path`:
+the vendored-sources config lives in `src/compiler_rust/.cargo/config.toml` and
+cargo discovers it from the working directory. From the root the build fails
+with `inkwell does not have that feature`.
