@@ -91,3 +91,17 @@ existing numbered-directory resolver still rejects ambiguous NN.name siblings.
 The outer native-build source-root order already participates in its SCV key.
 The change requires a newly built producer; the recorded producer still fails
 the disabled closure gate.
+
+## Ambiguous overlay authority
+
+Exact-head review of the first draft found that an ambiguous numbered directory
+was collapsed into the same empty string as a missing module. A later source
+root or checkout fallback could then restore a default provider. The corrected
+selected-root interface returns `Found`, `Missing`, or `Ambiguous` explicitly.
+Numbered traversal propagates ambiguity through every path segment and stops
+before another root or named-import suffix can be tried. The pipeline fallback
+owner calls checkout resolution only for `Missing`; an ambiguity terminates
+source loading with `SOURCE_ROOT_AMBIGUOUS`. Exact directories still take
+precedence over numbered siblings, and relative imports stay importer-owned.
+The older text-returning generic probe remains a compatibility boundary; the
+selected-root path never calls that lossy wrapper.

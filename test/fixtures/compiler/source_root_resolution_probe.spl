@@ -1,0 +1,50 @@
+use compiler.common.source_root_resolution.{SourceRootResolutionV1,
+    source_root_numbered_candidate_v1, source_root_numbered_match_v1,
+    source_root_resolution_with_fallback_v1}
+
+fn resolution_text(result: SourceRootResolutionV1) -> text:
+    match result:
+        case SourceRootResolutionV1.Found(path): path
+        case SourceRootResolutionV1.Missing: "MISSING"
+        case SourceRootResolutionV1.Ambiguous(reason): "AMBIGUOUS:" + reason
+
+fn forbidden_fallback(module_path: text, entry_dir: text) -> text:
+    assert(false)
+    ""
+
+fn default_fallback(module_path: text, entry_dir: text) -> text:
+    entry_dir + "/" + module_path + ".spl"
+
+fn absent_fallback(module_path: text, entry_dir: text) -> text:
+    ""
+
+fn main() -> i64:
+    if not source_root_numbered_candidate_v1("00.driver", "driver"): return 1
+    if not source_root_numbered_candidate_v1("999.driver", "driver"): return 2
+    if source_root_numbered_candidate_v1("1000.driver", "driver"): return 3
+    if source_root_numbered_candidate_v1("a.driver", "driver"): return 4
+    if source_root_numbered_candidate_v1("00.backend", "driver"): return 5
+    val first = source_root_numbered_match_v1(SourceRootResolutionV1.Missing,
+        "overlay/00.driver", "overlay/driver")
+    if resolution_text(first) != "overlay/00.driver": return 6
+    val ambiguous = source_root_numbered_match_v1(first,
+        "overlay/10.driver", "overlay/driver")
+    print "second-match=" + resolution_text(ambiguous)
+    if resolution_text(ambiguous) != "AMBIGUOUS:overlay/driver": return 7
+    val retained = source_root_numbered_match_v1(ambiguous,
+        "default/driver", "default/driver")
+    if resolution_text(retained) != "AMBIGUOUS:overlay/driver": return 8
+    val rejected = source_root_resolution_with_fallback_v1(ambiguous,
+        "compiler.driver", "checkout", forbidden_fallback)
+    if resolution_text(rejected) != "AMBIGUOUS:overlay/driver": return 9
+    val selected = source_root_resolution_with_fallback_v1(first,
+        "compiler.driver", "checkout", forbidden_fallback)
+    if resolution_text(selected) != "overlay/00.driver": return 10
+    val fallback = source_root_resolution_with_fallback_v1(SourceRootResolutionV1.Missing,
+        "normal", "checkout", default_fallback)
+    if resolution_text(fallback) != "checkout/normal.spl": return 11
+    val missing = source_root_resolution_with_fallback_v1(SourceRootResolutionV1.Missing,
+        "absent", "checkout", absent_fallback)
+    if resolution_text(missing) != "MISSING": return 12
+    print "SOURCE_ROOT_RESOLUTION_PASS"
+    0

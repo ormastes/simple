@@ -96,3 +96,31 @@ left intact rather than breaking public API without a demonstrated path.
 Root order already participates in native_build_closure's `_nb_scv_key_v1` via
 `source_dirs.join("|")`; manifest and template digests appear in generated root
 identity. A rebuilt producer and final linked-symbol audit remain required.
+
+## Review correction: ambiguity is not absence
+
+Root review found an introduced authority bug in initial commit `11fdfa806e7`:
+ambiguous numbered overlays returned empty text, allowing a later valid source
+root or checkout fallback. The tri-state correction preserves `Found`, `Missing`
+and `Ambiguous` across selected-root traversal and pipeline fallback. Explicit
+CUDA/K1 ambiguous overlays with valid default roots, exact-root precedence,
+normal missing fallback and relative behavior have executable regression specs.
+The native owner probe includes a forbidden fallback that asserts false if it
+is invoked for either `Found` or `Ambiguous`.
+
+The first bounded native owner attempt failed at MIR enum construction
+`SourceRootResolutionV1.Found`: payload type mismatch at index 0. An explicit
+`text` binding for the typed fallback callback result and retaining existing
+terminal variants were applied; this compiler-inference limitation is recorded
+here rather than treating a source-only test as executable evidence. Broad
+filesystem and integrated closure qualification remain pending.
+
+The corrected owner compiled to a two-object native executable, but exited 7
+after six successful assertions. The final diagnostic build also exited 7,
+printing `second-match=AMBIGUOUS:196341791234865` instead of the expected path.
+This is **FAIL**, not twelve passing assertions. The compiler/payload-formatting
+failure is recorded in
+`doc/08_tracking/bug/source_root_resolution_native_enum_failure_2026-10-11.md`.
+Three bounded attempts are exhausted; the source correction and executable
+regressions are reviewable, but filesystem specs, native owner admission and
+integrated disabled closure/symbol gates remain pending. No full rebuild ran.

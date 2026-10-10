@@ -11,6 +11,8 @@ use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_active_v1,
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.source_root_resolution.{SourceRootResolutionV1,
+    source_root_resolution_with_fallback_v1}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.driver.driver_source_loading.{
@@ -1024,10 +1026,19 @@ impl CompilerDriver:
                         log_phase(
                             "phase1:load_sources:closure:already-loaded module={closure_mp} used_in={closure_src.path}")
                         continue
-                    var closure_file = _driver_resolve_source_root_entry_import_v1(
+                    val selected_source = _driver_resolve_source_root_entry_import_v1(
                         closure_mp_input, closure_source_roots)
-                    if closure_file == "":
-                        closure_file = _driver_resolve_entry_import(closure_mp_input, closure_dir)
+                    val resolved_source = source_root_resolution_with_fallback_v1(
+                        selected_source, closure_mp_input, closure_dir, _driver_resolve_entry_import)
+                    val closure_file = match resolved_source:
+                        case SourceRootResolutionV1.Found(path): path
+                        case SourceRootResolutionV1.Missing: ""
+                        case SourceRootResolutionV1.Ambiguous(directory):
+                            val reason = "SOURCE_ROOT_AMBIGUOUS: import '{closure_mp}' has competing numbered directories under '{directory}'"
+                            self.ctx.add_error(reason)
+                            log_phase(reason)
+                            driver_entry_scan_cache_release()
+                            return (self.ctx, false)
                     if closure_file == "":
                         # LOUD error naming the module path. Single-segment
                         # unresolved names are skipped: they are more likely
