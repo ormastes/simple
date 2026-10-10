@@ -1299,10 +1299,19 @@ impl MonomorphizationPass:
         # MIR resolves a direct callee by NAME (`lower_call`'s NamedVar arm
         # uses the baked display name; its Var arm looks the id up in the
         # CALLER's symbol table, where a fresh mono symbol does not exist).
-        # So the repointed callee is a NamedVar carrying the mangled name,
-        # re-qualified exactly as the original callee was.
+        # So the repointed callee is a NamedVar carrying the mangled name
+        # under the specialization's declaration owner.
         val spec_name: text = self.mangled_name(gname, targs)
-        new_callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId.new(target), mono_requalify(callee, spec_name)),
+        # Native codegen emits the specialization under its declaring module.
+        # An imported call may arrive with a bare display name even though the
+        # template owner is known; keeping that bare name leaves an unresolved
+        # external at link (mutex_new$i64 is a measured example).
+        val owner_module: text = self.template_module[gname]
+        val display_name = if owner_module != self.current_module:
+            "{owner_module}.{spec_name}"
+        else:
+            mono_requalify(callee, spec_name)
+        new_callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId.new(target), display_name),
                              has_type_: callee.has_type_,
                              type_: callee.type_,
                              span: callee.span)
