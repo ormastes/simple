@@ -31,7 +31,7 @@ fn prepare_no_event_checkout(label: text) -> text:
 
 fn no_event_pointer(cache: text) -> text:
     val pointer = compile_source_inventory_read_pointer_content_v1(cache) ?? ""
-    expect(pointer).to_contain("simple-compile-event-cursor-v3")
+    expect(pointer).to_contain("simple-compile-event-cursor-v4")
     pointer
 
 describe "SCV warm refresh skips unchanged publication without skipping admission":
@@ -75,15 +75,30 @@ describe "SCV warm refresh skips unchanged publication without skipping admissio
         # A second acquisition also proves the rejected owner released its lock.
         expect(compile_source_inventory_revalidate_pointer_v1(cache, changed_pointer).valid).to_equal(true)
 
+        step("Restore the tracked file to HEAD and publish its original content without a watcher event")
+        expect(file_write(root + "/src/main.spl", "export fn main(): 1\n")).to_equal(true)
+        val restored = compiler_inventory_refresh_v1(root, cache, ["src"], false)
+        expect(restored.valid).to_equal(true)
+        expect(restored.inventory_digest == changed.inventory_digest).to_equal(false)
+        expect(restored.inventory_generation > changed.inventory_generation).to_equal(true)
+        val restored_inventory = compile_source_inventory_read_current_v1(cache)
+        expect(restored_inventory.valid).to_equal(true)
+        expect(restored_inventory.inventory!.entries[0].content_digest).to_equal(
+            sha256_text("export fn main(): 1\n"))
+        val restored_pointer = no_event_pointer(cache)
+        expect(restored_pointer == changed_pointer).to_equal(false)
+        expect(compiler_inventory_refresh_v1(root, cache, ["src"], false).valid).to_equal(true)
+        expect(no_event_pointer(cache)).to_equal(restored_pointer)
+
         step("Reject a pointer changed after an embedded NUL, preserving complete-byte binding")
-        val nul_pointer = changed_pointer + "\0unexpected-current-suffix"
+        val nul_pointer = restored_pointer + "\0unexpected-current-suffix"
         expect(file_write(cache + "/source-inventory/CURRENT", nul_pointer)).to_equal(true)
-        val nul_changed = compile_source_inventory_revalidate_pointer_v1(cache, changed_pointer)
+        val nul_changed = compile_source_inventory_revalidate_pointer_v1(cache, restored_pointer)
         expect(nul_changed.valid).to_equal(false)
         expect(nul_changed.reason).to_equal("publish-cursor-superseded")
         expect(sha256_text(file_read(cache + "/source-inventory/CURRENT"))).to_equal(sha256_text(nul_pointer))
-        expect(file_write(cache + "/source-inventory/CURRENT", changed_pointer)).to_equal(true)
-        expect(compile_source_inventory_revalidate_pointer_v1(cache, changed_pointer).valid).to_equal(true)
+        expect(file_write(cache + "/source-inventory/CURRENT", restored_pointer)).to_equal(true)
+        expect(compile_source_inventory_revalidate_pointer_v1(cache, restored_pointer).valid).to_equal(true)
         dir_remove(root, true)
 
     it "rejects a tampered generation even when the captured pointer is unchanged":
