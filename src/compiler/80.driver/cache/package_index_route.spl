@@ -3,6 +3,7 @@
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.cache.package_module_index.{
     PACKAGE_MODULE_INDEX_SCHEMA_V2, PACKAGE_MODULE_INDEX_SCHEMA_V3,
+    PACKAGE_MODULE_INDEX_SCHEMA_V4,
     PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
     PackageModuleChangeV1, PackageModuleInvalidationV1,
     package_module_index_read_current_v1,
@@ -127,16 +128,26 @@ fn package_index_route_admitted_invalidation_v1(
     cache_root: text, generation: PackageModuleIndexGenerationV1,
     changed_modules: [text]
 ) -> PackageModuleInvalidationV1:
-    # An empty event set is a no-op request, not a replay of the last transition.
-    if changed_modules.len() == 0:
+    # V4 can prove generated-output reuse, so an empty hint is a no-op.
+    # Older formats cannot prove it and must conservatively migrate.
+    if (changed_modules.len() == 0 and
+            generation.schema_version >= PACKAGE_MODULE_INDEX_SCHEMA_V4):
         return package_module_index_invalidate_v1(generation, [], false)
+    var selected: [text] = []
+    for entry in generation.entries:
+        selected.push(entry.module_identity)
+    # Missing transition evidence makes a current-schema hint public; it does
+    # not imply unrelated roots changed. Only legacy witness migration needs
+    # the complete graph. Preserve unknown-hint rejection in the current path.
+    val fallback_modules = if generation.schema_version < PACKAGE_MODULE_INDEX_SCHEMA_V4:
+        selected else: changed_modules
     val transition = package_index_transition_read_v1(
         "{cache_root}/package-module-index-v1", package_module_index_digest_v1(generation))
     if transition.is_err():
-        return package_module_index_invalidate_v1(generation, changed_modules, true)
+        return package_module_index_invalidate_v1(generation, fallback_modules, true)
     val previous = package_module_index_decode_v1(transition.unwrap().previous_encoded)
     if not previous.valid or previous.generation == nil:
-        return package_module_index_invalidate_v1(generation, changed_modules, true)
+        return package_module_index_invalidate_v1(generation, fallback_modules, true)
     val old = previous.generation!
     # Topology/owner changes need cold or conservative migration. A same-name
     # module in another package or variant is not evidence for private reuse.
@@ -146,7 +157,10 @@ fn package_index_route_admitted_invalidation_v1(
             old.variant_digest != generation.variant_digest or
             old.scope_entry_source_identity != generation.scope_entry_source_identity or
             old.entries.len() != generation.entries.len()):
-        return package_module_index_invalidate_v1(generation, changed_modules, true)
+        return package_module_index_invalidate_v1(generation, selected, true)
+    if (old.schema_version < PACKAGE_MODULE_INDEX_SCHEMA_V4 or
+            generation.schema_version < PACKAGE_MODULE_INDEX_SCHEMA_V4):
+        return package_module_index_invalidate_v1(generation, selected, true)
     var changes: [PackageModuleChangeV1] = []
     var known: Dict<text, bool> = {}
     var changed: Dict<text, bool> = {}
@@ -160,7 +174,7 @@ fn package_index_route_admitted_invalidation_v1(
                 prior.scc_identity != entry.scc_identity or
                 prior.direct_imports != entry.direct_imports or
                 prior.reverse_dependents != entry.reverse_dependents):
-            return package_module_index_invalidate_v1(generation, changed_modules, true)
+            return package_module_index_invalidate_v1(generation, selected, true)
         known[entry.module_identity] = true
         val content = prior.source_digest != entry.source_digest
         # SMF metadata includes body-sensitive imported sections. Do not treat
@@ -171,9 +185,12 @@ fn package_index_route_admitted_invalidation_v1(
         val abi = prior.abi_digest != entry.abi_digest
         val initializer = prior.initializer_digest != entry.initializer_digest
         val provider = prior.provider_digest != entry.provider_digest
-        if content or exports or abi or initializer or provider:
+        val generated = prior.generated_source_digest !=
+            entry.generated_source_digest
+        if content or exports or abi or initializer or provider or generated:
             changes.push(PackageModuleChangeV1(
-                entry.module_identity, content, exports, abi, initializer, provider))
+                entry.module_identity, content, exports, abi, initializer,
+                provider, generated))
             changed[entry.module_identity] = true
     # Hints may request extra work but cannot assert semantic equivalence or
     # omit actual graph deltas. An unproven hint remains conservatively public.
@@ -210,10 +227,13 @@ fn _package_index_route_current_v1(
         return PackageIndexRouteV1(false, "index-{admitted.reason}", [], [], [], [])
     val generation = admitted.generation!
     if (generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2 and
-            generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V3) or
+            generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V3 and
+            generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V4) or
             generation.variant_digest != expected_variant_digest:
         return PackageIndexRouteV1(false, "index-variant-mismatch", [], [], [], [])
-    if generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V3 and
+    if (generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V3 or
+            (generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V4 and
+                generation.scope_entry_source_identity != "")) and
             (entry_path == "" or
                 entry_path != generation.scope_entry_source_identity):
         return PackageIndexRouteV1(false, "index-scope-mismatch", [], [], [], [])
@@ -267,8 +287,11 @@ fn _package_index_route_current_v1(
 
     var schedule: [text] = []
     var dirty_packages: [text] = []
-    if changed_modules.len() > 0:
-        val invalidation = if admitted_semantic_changes:
+    # Legacy generated witnesses are unknown even when no edit event arrived.
+    # Both public routing entrypoints must migrate before archive lookup.
+    val legacy_generated_witness = generation.schema_version < PACKAGE_MODULE_INDEX_SCHEMA_V4
+    if changed_modules.len() > 0 or legacy_generated_witness:
+        val invalidation = if admitted_semantic_changes or legacy_generated_witness:
             package_index_route_admitted_invalidation_v1(cache_root, generation, changed_modules)
         else:
             package_module_index_invalidate_v1(generation, changed_modules, public_interface_changed)
