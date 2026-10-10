@@ -1372,6 +1372,16 @@ impl MirLowering:
         self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, ws_recv)
         ws_result
 
+    me lower_text_index_operand(value: HirExpr) -> LocalId:
+        # Text search/slice runtime indices use raw i64, while an erased
+        # producer can leave a tagged RuntimeValue in an i64 MIR local.
+        # Decode by producer provenance, never by the integer's low bits:
+        # a raw index of 3 is valid, and wide tagged integers need unboxing.
+        val lowered = self.lower_expr(value)
+        if self.is_runtime_value_local(lowered.id):
+            return self.decode_runtime_value(lowered, MirType.i64())
+        lowered
+
     fn array_slice_bound_is_integer(value: HirExpr, local: LocalId) -> bool:
         # The flat/native HIR path leaves MethodResolution.Unresolved and
         # does not validate its argument types. Do not reinterpret tagged Any
@@ -2724,7 +2734,7 @@ impl MirLowering:
             if val sub_recv_raw = sub_recv_res:
                 var sub_args: [MirOperand] = [mir_operand_copy(sub_recv_raw)]
                 for arg in args:
-                    val sub_arg_local = self.lower_expr(arg.value)
+                    val sub_arg_local = self.lower_text_index_operand(arg.value)
                     sub_args = sub_args.push(mir_operand_copy(sub_arg_local))
                 if args.len() == 1:
                     val sublen_op = MirOperand(kind: MirOperandKind.Const(
@@ -2893,7 +2903,7 @@ impl MirLowering:
         # byte-indexed raw i64 result, -1 for not-found; start < 0 clamps to
         # 0; start past the end returns -1 (empty needle: min(start, len)).
         # Receiver/needle go through ensure_tagged_str (same rationale as the
-        # trim/find arm below); start stays a raw i64 as rt_text_find expects.
+        # trim/find arm below); decode tagged starts at the raw i64 boundary.
         # Array receivers are excluded with the same type + runtime-local
         # probe as `contains` above so a (nonexistent) two-arg array
         # index_of still fails LOUDLY on the ordinary Unresolved path
@@ -2920,7 +2930,7 @@ impl MirLowering:
                 val tf_recv = self.ensure_tagged_str(tf_recv_raw)
                 val tf_needle_raw = self.lower_expr(args[0].value)
                 val tf_needle = self.ensure_tagged_str(tf_needle_raw)
-                val tf_start = self.lower_expr(args[1].value)
+                val tf_start = self.lower_text_index_operand(args[1].value)
                 var tf_ops: [MirOperand] = []
                 tf_ops = tf_ops.push(mir_operand_copy(tf_recv))
                 tf_ops = tf_ops.push(mir_operand_copy(tf_needle))
@@ -2933,6 +2943,9 @@ impl MirLowering:
                 val tf_res = b_tf.emit_call(tf_op, tf_ops, MirType.i64())
                 self.builder = b_tf
                 if val tf_local = tf_res:
+                    # The runtime returns a raw index (including 3 and -1),
+                    # not a nullable or tagged RuntimeValue.
+                    self.remember_local_hir_type(tf_local.id, HirType(kind: HirTypeKind.Int(64, true), span: receiver.span), 2, 0)
                     return tf_local
                 return tf_recv
         # to_upper / parse_f64 use the same erased-receiver fallback family as
@@ -3116,6 +3129,8 @@ impl MirLowering:
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] text-special-builder-writeback-before method={method}\n")
                 self.builder = b_ts
+                if method == "find" or method == "index_of" or method == "rfind" or method == "last_index_of":
+                    self.remember_local_hir_type(ts_local.id, HirType(kind: HirTypeKind.Int(64, true), span: receiver.span), 2, 0)
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] text-special-builder-writeback-after method={method}\n")
                 if mir_mc_trace_state == 1:
@@ -3219,7 +3234,7 @@ impl MirLowering:
                                     var arg_operands: [MirOperand] = []
                                     arg_operands = arg_operands.push(mir_operand_copy(receiver_local))
                                     for arg in args:
-                                        val arg_local = self.lower_expr(arg.value)
+                                        val arg_local = self.lower_text_index_operand(arg.value)
                                         arg_operands = arg_operands.push(mir_operand_copy(arg_local))
                                     if args.len() == 1:
                                         val len_operand = MirOperand(kind: MirOperandKind.Const(
