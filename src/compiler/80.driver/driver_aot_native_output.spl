@@ -215,6 +215,7 @@ use compiler.driver.driver_build.build_outcome.{BuildOutcomeKind, BuildUnitOutco
     build_outcome_retain_diagnostics, build_outcome_count_diagnostic_lines,
     build_outcome_retained_diagnostic_count}
 use compiler.driver.driver_log_helpers.{log_build_progress}
+use compiler.driver.driver_pass_receipt.{LaneReceipt, lane_receipt_enabled, record_lane_receipt}
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 use compiler.driver.cache.native_build_environment_identity.{native_build_environment_fingerprint_v1}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, process_run}
@@ -1893,6 +1894,14 @@ impl CompilerDriver:
         # Compile all modules and collect object files
         var object_files: [text] = []
 
+        # Lane non-vacuity receipt (driver_pass_receipt.spl). These are counts
+        # of work this function already does; `SIMPLE_LANE_RECEIPT=off` skips
+        # the counting as well as the check.
+        val lane_receipt_on = lane_receipt_enabled()
+        var lane_functions: i64 = 0
+        var lane_statics: i64 = 0
+        var lane_objectless: i64 = 0
+
         # NOT `ctx.options.low_memory` on its own: under `--output-format both`
         # compile_to_smf runs after this function over the SAME ctx and
         # re-iterates ctx.mir_modules, so evicting here silently produced an
@@ -1973,6 +1982,9 @@ impl CompilerDriver:
             "pending", 5, 6, 0, 0, "running")
         for name in module_names:
             progress_cache_scanned = progress_cache_scanned + 1
+            if lane_receipt_on:
+                lane_functions = lane_functions + ctx.mir_modules[name].functions.len()
+                lane_statics = lane_statics + ctx.mir_modules[name].statics.len()
             # ParserImport/export facades contribute symbols through their imported
             # implementation modules and have no object code of their own.
             if ctx.modules.has(name) and driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name]):
@@ -1980,6 +1992,7 @@ impl CompilerDriver:
                     ctx, name)
                 if objectless_reason != "":
                     return CompileResult.CodegenError(objectless_reason)
+                lane_objectless = lane_objectless + 1
                 continue
             val cache_source = driver_native_module_cache_source(ctx, name)
             var used_cache = false
@@ -2608,6 +2621,24 @@ impl CompilerDriver:
             else:
                 ""
             return CompileResult.CodegenError("native-build produced no object files{entry_hint} — no modules compiled. Try adding an import (use std.text) or using the standard entry point.")
+
+        # Non-vacuity receipt at the link boundary: every lowered module is now
+        # an OK outcome or an objectless facade (the verdict above refused
+        # anything else). A lane that got here having lowered or emitted
+        # nothing fails closed instead of linking a hollow artifact.
+        val lane_failure = record_lane_receipt(LaneReceipt(
+            lane: "native-build",
+            requires_code: not emit_object_requested and
+                not emit_archive_requested and not emit_shared_requested,
+            modules_seen: all_module_names.len(),
+            modules_lowered: total_modules,
+            modules_objectless: lane_objectless,
+            functions_emitted: lane_functions,
+            statics_emitted: lane_statics,
+            objects_written: module_outcomes.len(),
+            link_inputs: object_files.len()))
+        if lane_failure != "":
+            return CompileResult.CodegenError(lane_failure)
 
         val cold_object_reason = driver_cold_hir_persist_verified_objects_v1(
             ctx, machine_cache_root())

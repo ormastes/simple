@@ -18,7 +18,7 @@
 # can never drag a new module graph into the interpreter session that parses
 # source in the same process.
 
-use compiler.driver.driver_log_helpers.{log_debug}
+use compiler.driver.driver_log_helpers.{log_debug, log_warn}
 use std.io_runtime.{env_get_opt, file_append_text}
 
 struct PassReceipt:
@@ -50,4 +50,116 @@ fn record_pass_receipt(r: PassReceipt) -> text:
             panic("E-SFFI-014: pass receipt append failed for {sink}")
     line
 
+# ---------------------------------------------------------------------------
+# Compile-lane non-vacuity receipt.
+#
+# A pass receipt proves a pass RAN. It does not prove the lane PRODUCED
+# anything: a native build that lowered no module, emitted no function, or
+# linked fewer objects than it accounted for can still return Success, and a
+# spec or bootstrap stage built on it then passes vacuously. A lane receipt is
+# the lane's own already-held counts, written to the same sink, plus the
+# comparison that turns "succeeded with nothing" into a failure. It is a
+# comparison of counts the lane holds at its link boundary, not a new pass.
+#
+# Level switch, `SIMPLE_LANE_RECEIPT`:
+#   off      no counting at the call site, no receipt, no check
+#   warning  receipt always; every finding is a warning, never a failure
+#   error    (default) a ZERO count fails the lane closed; a count MISMATCH
+#            (fewer than the lane claims) is a warning
+#   strict   a count mismatch fails the lane as well
+
+struct LaneReceipt:
+    """Counts one compile lane holds when it is about to report success.
+
+    `modules_seen` is every module the lane was offered, `modules_lowered` the
+    ones it took to code generation. Every lowered module must end as exactly
+    one of `objects_written` or `modules_objectless`; `link_inputs` is what the
+    link/archive step is actually handed. `requires_code` is true for a lane
+    whose artifact cannot be valid without code (an executable); an object or
+    archive of declaration-only modules is legal, so there a zero function
+    count is a count finding, not vacuity."""
+    lane: text
+    requires_code: bool
+    modules_seen: i64
+    modules_lowered: i64
+    modules_objectless: i64
+    functions_emitted: i64
+    statics_emitted: i64
+    objects_written: i64
+    link_inputs: i64
+
+fn lane_receipt_level() -> text:
+    val raw = env_get_opt("SIMPLE_LANE_RECEIPT") ?? ""
+    if raw == "off" or raw == "warning" or raw == "strict":
+        return raw
+    "error"
+
+fn lane_receipt_enabled() -> bool:
+    lane_receipt_level() != "off"
+
+fn lane_receipt_vacuity_reason(r: LaneReceipt) -> text:
+    """Non-empty when the lane produced NOTHING of some kind it must produce."""
+    if r.modules_lowered <= 0:
+        return "lowered zero modules"
+    if r.requires_code and r.functions_emitted + r.statics_emitted <= 0:
+        return "emitted zero functions and zero statics"
+    if r.objects_written <= 0:
+        return "wrote zero objects"
+    if r.link_inputs <= 0:
+        return "has zero link inputs"
+    ""
+
+fn lane_receipt_mismatch_reason(r: LaneReceipt) -> text:
+    """Non-empty when the lane produced fewer than its own counts claim."""
+    if r.modules_lowered > r.modules_seen:
+        return "lowered {r.modules_lowered} module(s) but was offered {r.modules_seen}"
+    val accounted = r.objects_written + r.modules_objectless
+    if accounted < r.modules_lowered:
+        val missing = r.modules_lowered - accounted
+        return "{missing} of {r.modules_lowered} lowered module(s) ended with neither an object nor an objectless record"
+    if r.link_inputs < r.objects_written:
+        return "hands the linker {r.link_inputs} input(s) but accounted {r.objects_written} object(s) written"
+    if r.functions_emitted + r.statics_emitted <= 0:
+        return "emitted zero functions and zero statics"
+    ""
+
+fn lane_receipt_line(r: LaneReceipt, verdict: text, reason: text) -> text:
+    "lane_receipt name={r.lane} verdict={verdict} modules_seen={r.modules_seen} modules_lowered={r.modules_lowered} modules_objectless={r.modules_objectless} functions_emitted={r.functions_emitted} statics_emitted={r.statics_emitted} objects_written={r.objects_written} link_inputs={r.link_inputs} reason={reason}"
+
+fn lane_receipt_check(r: LaneReceipt, level: text) -> (text, text):
+    """Pure decision: `(receipt line, fail-closed message)`. The message is
+    empty when the lane may report success at `level`."""
+    val vacuity = lane_receipt_vacuity_reason(r)
+    if vacuity != "":
+        val line = lane_receipt_line(r, "vacuous", vacuity)
+        if level == "warning":
+            return (line, "")
+        return (line, "E-LANE-VACUOUS: {r.lane} lane {vacuity}; a lane that produced nothing is not a success ({line})")
+    val mismatch = lane_receipt_mismatch_reason(r)
+    if mismatch != "":
+        val line = lane_receipt_line(r, "mismatch", mismatch)
+        if level == "strict":
+            return (line, "E-LANE-COUNT: {r.lane} lane {mismatch} ({line})")
+        return (line, "")
+    (lane_receipt_line(r, "ok", "-"), "")
+
+fn record_lane_receipt(r: LaneReceipt) -> text:
+    """Emit the lane receipt (debug log + `SIMPLE_PASS_RECEIPT` sink) and return
+    the fail-closed message, or "" when the lane may report success."""
+    val level = lane_receipt_level()
+    if level == "off":
+        return ""
+    val (line, failure) = lane_receipt_check(r, level)
+    log_debug(line)
+    val sink = env_get_opt("SIMPLE_PASS_RECEIPT") ?? ""
+    if sink != "":
+        if not file_append_text(sink, line + "\n"):
+            panic("E-SFFI-014: lane receipt append failed for {sink}")
+    if failure == "" and not line.contains(" verdict=ok "):
+        log_warn("non-vacuity: {line}")
+    failure
+
 export PassReceipt, pass_receipt_line, record_pass_receipt
+export LaneReceipt, lane_receipt_level, lane_receipt_enabled
+export lane_receipt_vacuity_reason, lane_receipt_mismatch_reason
+export lane_receipt_line, lane_receipt_check, record_lane_receipt
