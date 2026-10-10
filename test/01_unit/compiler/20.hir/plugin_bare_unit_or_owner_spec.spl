@@ -65,6 +65,16 @@ val payload_mismatch_source = "enum Probe:\n    Copy(src: i64, dst: i64)\n    Ot
 
 val unresolved_bare_variant_source = "fn pick(value) -> i64:\n    match value:\n        case Alpha | Beta: return 1\n        case _: return 0\n"
 
+fn has_owner_mismatch_error(lowering: HirLowering) -> bool:
+    for error in lowering.errors:
+        if error.message.contains("qualified enum pattern owner differs from subject owner"):
+            return true
+    false
+
+val owner_enums_source = "enum Left:\n    A(v: i64)\n    B\n\nenum Right:\n    C(v: i64)\n    D\n\n"
+val wrong_owner_source = owner_enums_source + "fn pick(value: Left) -> i64:\n    match value:\n        case Right.C(v): return v\n        case _: return 0\n"
+val right_owner_source = owner_enums_source + "fn pick(value: Left) -> i64:\n    match value:\n        case Left.A(v): return v\n        case _: return 0\n"
+
 describe "qualified enum OR-pattern owners":
     it "matches the actual MIR comparison operation alternatives":
         expect(comparison_operator(MirBinOp.Eq)).to_equal(true)
@@ -94,3 +104,7 @@ describe "qualified enum OR-pattern owners":
     it "treats bare capitalized alternatives of an unresolved enum as variant references":
         val lowering = lower_probe(unresolved_bare_variant_source)
         expect(has_payload_binding_error(lowering)).to_equal(false)
+
+    it "rejects a qualified pattern of a differently named enum and accepts the subject's own":
+        expect(has_owner_mismatch_error(lower_probe(wrong_owner_source))).to_equal(true)
+        expect(has_owner_mismatch_error(lower_probe(right_owner_source))).to_equal(false)
