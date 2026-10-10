@@ -178,6 +178,46 @@ fn r_txt() -> i64:
 
 fn r_alt() -> i64:
     g_alt(2, true) * 1000 + g_alt(2, false) * 100 + g_alt(4, true) * 10 + g_alt(4, false)
+# negative literal, unguarded and guarded, scalar and inside a tuple
+fn g_negplain(n: i64) -> i64:
+    match n:
+        case -1:
+            2
+        case _:
+            3
+
+fn g_neg(n: i64, c: bool) -> i64:
+    match n:
+        case -1 if c:
+            1
+        case _:
+            3
+
+fn g_negtup(a: i64, b: i64, c: bool) -> i64:
+    match (a, b):
+        case (-1, y) if c:
+            1
+        case _:
+            3
+
+# statement match, no arm accepts: nothing runs
+fn g_stmt(n: i64) -> i64:
+    var r = 5
+    match n:
+        case 1:
+            r = 1
+        case x if x > 10:
+            r = 2
+    r
+
+fn r_neg() -> i64:
+    g_negplain(-1) * 100000 + g_negplain(1) * 10000 + g_neg(-1, true) * 1000 + g_neg(1, true) * 100 + g_neg(-1, false) * 10 + g_negtup(-1, 0, true)
+
+fn r_negtup() -> i64:
+    g_negtup(-1, 0, true) * 100 + g_negtup(1, 0, true) * 10 + g_negtup(-1, 0, false)
+
+fn r_stmt() -> i64:
+    g_stmt(1) * 100 + g_stmt(50) * 10 + g_stmt(3)
 # SHAPES-END
 
 val SELF_PATH: text = "test/01_unit/compiler/50.mir/match_guard/match_guard_parity_spec.spl"
@@ -322,12 +362,11 @@ describe "match guard parity: the guard branch reaches stage-2-path MIR":
         expect(r_dflt()).to_equal(124)
         expect(run_mir(mir, "r_dflt")).to_equal(r_dflt())
 
-    it "guard on a wildcard default arm: MIR evaluates it (the seed does not -- see bug record)":
+    it "guard on a wildcard default arm: MIR result == oracle":
         val (mir, messages) = lower_text(shapes_source())
         expect(guard_branches(mir, "g_wild")).to_equal(1)
-        # Expected by the language rule, NOT by the oracle: the seed
-        # interpreter takes `case _ if c:` with c == false (it returns 133).
-        expect(run_mir(mir, "r_wild")).to_equal(134)
+        expect(r_wild()).to_equal(134)
+        expect(run_mir(mir, "r_wild")).to_equal(r_wild())
 
     it "or-of-literals and range arms, both guarded: MIR result == oracle":
         val (mir, messages) = lower_text(shapes_source())
@@ -353,3 +392,16 @@ describe "match guard parity: if-chain shapes (tuple, text) against their unguar
         expect(if_count(twin, "g_txt")).to_be_greater_than(0)
         expect(if_count(mir, "g_txt")).to_be_greater_than(if_count(twin, "g_txt"))
         expect(r_txt()).to_equal(123)
+
+describe "match guard parity: shapes that were silently wrong or diverged from the seed":
+    it "negative literal arms test the value (`case -1:` and `case -1 if c:`), MIR result == oracle":
+        val (mir, messages) = lower_text(shapes_source())
+        expect(r_neg()).to_equal(231331)
+        expect(run_mir(mir, "r_neg")).to_equal(r_neg())
+        expect(r_negtup()).to_equal(133)
+        expect(run_mir(mir, "r_negtup")).to_equal(r_negtup())
+
+    it "a statement match no arm accepts falls through like the seed (no abort)":
+        val (mir, messages) = lower_text(shapes_source())
+        expect(r_stmt()).to_equal(125)
+        expect(run_mir(mir, "r_stmt")).to_equal(r_stmt())

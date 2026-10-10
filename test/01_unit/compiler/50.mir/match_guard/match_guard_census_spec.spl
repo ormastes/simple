@@ -44,13 +44,31 @@ struct CensusRow:
     guarded_arms: i64
     hits: i64
 
+fn is_guarded_case_line(line: text) -> bool:
+    """`case <pattern> if <expr>:` -- the ` if ` must come before the colon
+    that ends the arm head and outside string literals. `case X: if c: ...`
+    and `case _("... if ..."):` are not guards."""
+    val t = line.trim()
+    if not t.starts_with("case "):
+        return false
+    var head = ""
+    var in_string = false
+    var i = 0
+    while i < t.len():
+        val ch = t.substring(i, i + 1)
+        if ch == "\"":
+            in_string = not in_string
+        elif not in_string:
+            if ch == ":":
+                return head.contains(" if ")
+            head = head + ch
+        i = i + 1
+    false
+
 fn textual_guarded_arms(src: text) -> i64:
-    # `case ... if ...:` lines; an upper bound (a guard spelled inside a
-    # docstring is counted too).
     var n = 0
     for line in src.split("\n"):
-        val t = line.trim()
-        if t.starts_with("case ") and t.contains(" if "):
+        if is_guarded_case_line(line):
             n = n + 1
     n
 
@@ -107,3 +125,10 @@ describe "match guard-count invariant: census on real compiler modules":
         expect(files).to_be_greater_than(0)
         expect(total_arms).to_be_greater_than(0)
         expect(total_hits).to_equal(0)
+
+    it "counts only real guards (`case P if g:`), not `case X: if ...` or text inside a string":
+        expect(is_guarded_case_line("        case (1, y) if y > 10:")).to_equal(true)
+        expect(is_guarded_case_line("        case \"Tuple\" if allow_tuple: value")).to_equal(true)
+        expect(is_guarded_case_line("        case Foo: if c: 1 else: 2")).to_equal(false)
+        expect(is_guarded_case_line("        case _(\"fail closed if Result gains\"):")).to_equal(false)
+        expect(is_guarded_case_line("        if x: case_like()")).to_equal(false)

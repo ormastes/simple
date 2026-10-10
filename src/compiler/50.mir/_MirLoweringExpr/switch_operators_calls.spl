@@ -2544,7 +2544,8 @@ impl MirLowering:
         source order: per arm, test the pattern (IntLit / or-of-IntLit; a
         Wildcard or Binding needs no test), bind, then branch on the guard --
         false falls to the next arm. An unguarded Wildcard/Binding arm ends
-        the chain; without one, a value no arm accepts traps.
+        the chain; without one, a value no arm accepts falls through to the
+        merge (statement match: nothing ran, like the seed).
 
         Every guard branch increments `match_guards_lowered`, which
         lower_match_case compares with the number of guarded arms (3a)."""
@@ -2681,18 +2682,15 @@ impl MirLowering:
 
         # Cascade tail: reached only when no arm accepted the value.
         var b_tail = self.builder
-        if closed:
-            b_tail.terminate_goto(merge_block)
-        else:
-            val trap_msg = "match: no arm matched and every guard was false"
-            val trap_local = b_tail.new_temp(self.bootstrap_text_type())
-            b_tail.emit_const(trap_local, MirConstValue.Str(trap_msg), self.bootstrap_text_type())
-            val trap_op = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_panic"),
-                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [self.bootstrap_text_type()], return_type: MirType.unit(), is_variadic: false)))
-            ))
-            b_tail.emit_call(trap_op, [mir_operand_copy(trap_local)], MirType.unit())
-            b_tail.terminate_abort(trap_msg)
+        if not closed and result_defined:
+            # No arm accepted the value. A statement match falls through, as
+            # in the seed and in the if-chain lowering of tuple/text matches.
+            # A value match has nothing to yield (the seed raises "match
+            # expression exhausted"); it gets the same placeholder the other
+            # match lowerings use so the merge never reads an undefined local
+            # (bug if_chain_match_no_arm_matched_is_silent_2026-10-10).
+            b_tail.emit_const(result, MirConstValue.Int(0), MirType.i64())
+        b_tail.terminate_goto(merge_block)
         b_tail.switch_to_block(merge_block)
         self.builder = b_tail
         if not result_defined:
