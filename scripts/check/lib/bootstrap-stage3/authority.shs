@@ -2472,7 +2472,7 @@ bootstrap_stage3_tool_requested_path() {
             lld-link) bootstrap_stage3_requested_tool=${CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER:-${LD:-lld-link}} ;;
             llvm-ar) bootstrap_stage3_requested_tool=${AR:-llvm-ar} ;;
             llvm-ranlib) bootstrap_stage3_requested_tool=${RANLIB:-llvm-ranlib} ;;
-            llc|llvm-as|opt|llvm-nm)
+            llc|llvm-as|opt|llvm-nm|llvm-readobj)
                 # Projection admission chooses once; strict compiler consumers
                 # use only these exact bytes, without repeating discovery.
                 for bootstrap_stage3_llvm_dir in "${SIMPLE_LLVM_BIN:-}" \
@@ -2531,10 +2531,22 @@ bootstrap_stage3_tool_authority_snapshot() (
     printf 'PATH=%s\n' "$bootstrap_stage3_tool_path" \
         >>"$bootstrap_stage3_tool_tmp" || return 1
     bootstrap_stage3_managed_llvm_tools=
+    case "${SIMPLE_MANAGED_CROSS_ARCHIVE_INSPECTOR:-}" in
+        '') ;;
+        1) [ "${SIMPLE_MANAGED_NATIVE_TOOLS:-}" = 1 ] || return 1 ;;
+        *) return 1 ;;
+    esac
     case "${SIMPLE_MANAGED_NATIVE_TOOLS:-}" in
         '') ;;
         1)
             bootstrap_stage3_managed_llvm_tools='llc llvm-as opt llvm-nm'
+            # Legacy consumers accept exactly eight roles. Only a caller with
+            # a compatible optional-role decoder may request the ninth pin.
+            if [ "${SIMPLE_MANAGED_CROSS_ARCHIVE_INSPECTOR:-}" = 1 ]; then
+                PATH="$bootstrap_stage3_tool_path" bootstrap_stage3_tool_requested_path \
+                    llvm-readobj '' '' >/dev/null 2>&1 || return 1
+                bootstrap_stage3_managed_llvm_tools="$bootstrap_stage3_managed_llvm_tools llvm-readobj"
+            fi
             printf 'managed-native-tools-format=1\n' >>"$bootstrap_stage3_tool_tmp" || return 1
             for bootstrap_stage3_managed_env in \
                 "INCLUDE=${INCLUDE:-}" "LIB=${LIB:-}" "LIBPATH=${LIBPATH:-}" \
@@ -2694,7 +2706,7 @@ bootstrap_stage3_tool_authority_snapshot() (
                 ar|llvm-ar) bootstrap_stage3_managed_role=ar ;;
                 ranlib|llvm-ranlib) bootstrap_stage3_managed_role=ranlib ;;
                 llvm-nm) bootstrap_stage3_managed_role=nm ;;
-                llc|llvm-as|opt) bootstrap_stage3_managed_role=$bootstrap_stage3_tool_name ;;
+                llc|llvm-as|opt|llvm-readobj) bootstrap_stage3_managed_role=$bootstrap_stage3_tool_name ;;
             esac
             if [ -n "$bootstrap_stage3_managed_role" ]; then
                 [ "$bootstrap_stage3_tool_version_status" -eq 0 ] || return 1
@@ -3321,6 +3333,19 @@ bootstrap_stage3_copy_seed_tuple() {
     bootstrap_stage3_hosted_deps="$bootstrap_stage3_tuple_source/deps"
     bootstrap_stage3_hosted_candidates=
     bootstrap_stage3_hosted_count=0
+    bootstrap_stage3_hosted_selected=0
+    # An explicitly selected Cargo package publishes its rlib at the profile
+    # root. This is the selected output, unlike metadata variants retained in
+    # deps/build from earlier feature sets. Prefer it regardless of mtime;
+    # callers still own the Cargo lock and fingerprint the producing recipe.
+    bootstrap_stage3_hosted_root="$bootstrap_stage3_tuple_source/libspl_hosted_runtime.rlib"
+    if [ -e "$bootstrap_stage3_hosted_root" ] || [ -L "$bootstrap_stage3_hosted_root" ]; then
+        [ -f "$bootstrap_stage3_hosted_root" ] &&
+            [ ! -L "$bootstrap_stage3_hosted_root" ] || { echo "bootstrap_stage3_copy_seed_tuple: invalid selected hosted rlib" >&2; return 1; }
+        bootstrap_stage3_hosted_candidates=$bootstrap_stage3_hosted_root
+        bootstrap_stage3_hosted_count=1
+        bootstrap_stage3_hosted_selected=1
+    fi
     for bootstrap_stage3_hosted_path in \
         "$bootstrap_stage3_hosted_deps"/libspl_hosted_runtime-*.rlib \
         "$bootstrap_stage3_tuple_source"/build/spl_hosted_runtime/*/out/libspl_hosted_runtime-*.rlib; do
@@ -3328,8 +3353,9 @@ bootstrap_stage3_copy_seed_tuple() {
         [ -f "$bootstrap_stage3_hosted_path" ] &&
             [ ! -L "$bootstrap_stage3_hosted_path" ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 5" >&2; return 1; }
         bootstrap_stage3_hosted_count=$((bootstrap_stage3_hosted_count + 1))
-        if [ -z "$bootstrap_stage3_hosted_candidates" ] ||
-            [ "$bootstrap_stage3_hosted_path" -nt                 "$bootstrap_stage3_hosted_candidates" ]; then
+        if [ "$bootstrap_stage3_hosted_selected" -eq 0 ] &&
+            { [ -z "$bootstrap_stage3_hosted_candidates" ] ||
+              [ "$bootstrap_stage3_hosted_path" -nt "$bootstrap_stage3_hosted_candidates" ]; }; then
             bootstrap_stage3_hosted_candidates=$bootstrap_stage3_hosted_path
         fi
     done
@@ -3344,18 +3370,29 @@ bootstrap_stage3_copy_seed_tuple() {
     # Refusing outright surfaced as a bare "could not prepare immutable Rust
     # authority generation" naming nothing, after four successful builds.
     #
-    # Newest-wins matches the semantics this bootstrap ALREADY documents for the
+    # Without an explicit selected-package output, newest-wins matches the
+    # legacy semantics this bootstrap ALREADY documents for the
     # sibling archive slot ("The last cargo invocation wins the deps/ archive
     # slot", bootstrap-from-scratch.sh) -- so the tuple is frozen from the same
     # final state of the target dir rather than from an arbitrary member.
     #
     # Zero candidates is still fatal, and the choice is never silent.
     [ "$bootstrap_stage3_hosted_count" -ge 1 ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 6" >&2; return 1; }
-    if [ "$bootstrap_stage3_hosted_count" -gt 1 ]; then
+    if [ "$bootstrap_stage3_hosted_selected" -eq 1 ]; then
+        echo "bootstrap authority: freezing selected package output: $bootstrap_stage3_hosted_candidates" >&2
+    elif [ "$bootstrap_stage3_hosted_count" -gt 1 ]; then
         echo "bootstrap authority: $bootstrap_stage3_hosted_count spl_hosted_runtime rlibs in $bootstrap_stage3_hosted_deps; freezing the newest: $bootstrap_stage3_hosted_candidates" >&2
     fi
     bootstrap_stage3_hosted_name=deps/$(basename -- \
         "$bootstrap_stage3_hosted_candidates")
+    if [ "$bootstrap_stage3_hosted_selected" -eq 1 ]; then
+        # Preserve the admitted hashed deps/ spelling for every consumer.
+        # This suffix binds content, not Cargo metadata or a guessed feature
+        # identity; the tuple transaction still verifies the source bytes.
+        bootstrap_stage3_hosted_content_sha=$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_hosted_candidates") || return 1
+        bootstrap_stage3_hosted_name="deps/libspl_hosted_runtime-$bootstrap_stage3_hosted_content_sha.rlib"
+    fi
     set -- "$@" "$bootstrap_stage3_hosted_name"
 
     # Record source aliases for members whose cargo layout spelling differs
@@ -3629,6 +3666,12 @@ bootstrap_stage3_copy_seed_tuple() {
 "$bootstrap_stage3_tuple_destination/$bootstrap_stage3_hosted_relative"
     bootstrap_stage3_hosted_sha=$(bootstrap_stage3_hash_file \
         "$bootstrap_stage3_hosted_projected") || { echo "bootstrap_stage3_copy_seed_tuple: failed check 11" >&2; return 1; }
+    if [ "$bootstrap_stage3_hosted_selected" -eq 1 ]; then
+        [ "$bootstrap_stage3_hosted_sha" = "$bootstrap_stage3_hosted_content_sha" ] || {
+            echo "bootstrap_stage3_copy_seed_tuple: selected hosted rlib changed before projection" >&2
+            return 1
+        }
+    fi
     bootstrap_stage3_hosted_receipt=\
 "$bootstrap_stage3_tuple_destination/hosted-runtime.env"
     bootstrap_stage3_hosted_pending="${bootstrap_stage3_hosted_receipt}.tmp.$$"
@@ -5804,7 +5847,7 @@ bootstrap_stage3_seed_inputs_fingerprint() (
             >>"$bootstrap_stage3_seed_records" || exit 1
         printf '%s\n' \
             'recipe.1=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap --target <selected-platform> -p simple-driver <selected-llvm-features>' \
-            'recipe.2=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap --target <selected-platform> -p simple-native-all <selected-llvm-features>' \
+            'recipe.2=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap --target <selected-platform> -p simple-native-all -p spl_hosted_runtime <selected-llvm-features>' \
             'recipe.3=env CARGO_PROFILE_BOOTSTRAP_LTO=off cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap --target <selected-platform> -p simple-runtime --features runtime-symbol-table' \
             'recipe.4=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap --target <selected-platform> -p simple-compiler-backfill' \
             >>"$bootstrap_stage3_seed_records" || exit 1
