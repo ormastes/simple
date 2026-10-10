@@ -53,4 +53,30 @@ sh -x -c '
 rc=$?
 echo "RC=$rc"
 tail -80 diag/trace.txt
+
+if [ "$rc" -ne 0 ]; then
+  echo "=== phase 2: inspect and attempt apt fix ==="
+  ls -la /usr/lib/llvm-18/lib/libPolly.a /usr/lib/llvm-18/lib/libPollyISL.a 2>&1 || true
+  dpkg -l | grep -i "llvm-18\|polly" || true
+  apt-cache policy libpolly-18-dev 2>/dev/null || true
+  sudo apt-get install -y libpolly-18-dev > diag/apt-install.log 2>&1 || true
+  tail -5 diag/apt-install.log || true
+  ls -la /usr/lib/llvm-18/lib/libPolly.a 2>&1 || true
+  sh -x -c '
+    . "${repo_root}/scripts/bootstrap/bootstrap-cache-policy.shs"
+    BOOTSTRAP_STAGE3_FACADE_PATH="${repo_root}/scripts/check/lib/bootstrap-stage3-provenance.shs"
+    BOOTSTRAP_STAGE3_VERSION_ROOT="${repo_root}"
+    export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+    . "${BOOTSTRAP_STAGE3_FACADE_PATH}"
+    PORTABLE_LOCK_ATOMIC_HELPER_PATH="${repo_root}/scripts/check/lib/portable-hardlink-lock.pl"
+    export PORTABLE_LOCK_ATOMIC_HELPER_PATH
+    . "${repo_root}/scripts/check/lib/portable-process-lock.shs"
+    PATH="/usr/lib/llvm-18/bin:$PATH"
+    export PATH
+    bootstrap_stage3_seed_inputs_fingerprint "${repo_root}" llvm "--features llvm" "$PATH" x86_64-unknown-linux-gnu
+  ' > diag/inner2.out 2> diag/trace2.txt
+  rc2=$?
+  echo "RC2=$rc2 hash2=$(cat diag/inner2.out)"
+  tail -10 diag/trace2.txt
+fi
 exit 0
