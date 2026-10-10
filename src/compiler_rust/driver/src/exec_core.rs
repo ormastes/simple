@@ -1535,6 +1535,11 @@ fn should_force_interpreter_for_source(path: &Path) -> bool {
     normalized.ends_with("src/app/simpleos_nvme_serial_check/main.spl")
 }
 
+fn source_is_lint_entry(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    normalized.ends_with("src/app/cli/lint_entry.spl")
+}
+
 fn should_prefer_interpreter_for_source(path: &Path, extension: &str, cli_args_backed: bool) -> bool {
     match interpreter_preference_reason(path, extension, cli_args_backed) {
         Some(reason) => {
@@ -1564,6 +1569,23 @@ fn interpreter_preference_reason(path: &Path, extension: &str, cli_args_backed: 
     }
     if std::env::var_os("SIMPLE_EXECUTION_MODE").is_some() {
         return None;
+    }
+    // `lint` / `fix` / `fmt` (all `src/app/cli/lint_entry.spl`) stay on the
+    // interpreter unless a lane is requested explicitly above. Their JIT lane
+    // has no parity proof and is measurably WRONG, not merely slower: on a
+    // fixture with two positional duplicate-typed calls the interpreter reports
+    // 2 `unnamed_duplicate_typed_args` warnings and the JIT reports
+    // `Lint passed: all files clean` (`_collect_indexed_call_replacements`
+    // returns 0 rows when JIT-compiled). A lint that answers "clean" for a
+    // dirty file is worse than one that crashes. Until 2026-10-09 this entry
+    // only ever ran interpreted, by accident (a HIR lowering error made every
+    // JIT attempt fall back); once that error was fixed the JIT lane went live
+    // and SEGV'd, then exited 70 on `Array.sort_by`, then went falsely green.
+    // On small files the interpreter is also the faster lane (7-14s vs 29s, the
+    // JIT lane's fixed compile cost); large files were not compared.
+    // See doc/08_tracking/bug/lint_jit_segv_text_as_string_array_2026-10-10.md.
+    if source_is_lint_entry(path) {
+        return Some("lint-jit-parity-unproven");
     }
     // Was an unconditional SUBSTRING gate ("cli-args-substring"): any entry file
     // merely MENTIONING `std.cli` / `get_cli_args` / `sys_get_args` was diverted
@@ -1707,6 +1729,25 @@ mod tests {
         std::env::remove_var("SIMPLE_EXECUTION_MODE");
         assert_eq!(interpreter_preference_reason(&path, "spl", true), None);
         assert!(!should_prefer_interpreter_for_source(&path, "spl", true));
+    }
+
+    /// The lint entry is pinned to the interpreter by default (its JIT lane
+    /// reports dirty files as clean), under either path separator, and an
+    /// explicit `SIMPLE_EXECUTION_MODE` still reaches the JIT for parity work.
+    /// A sibling CLI entry must not be swept in.
+    #[test]
+    fn interpreter_preference_reason_pins_the_lint_entry() {
+        std::env::remove_var("SIMPLE_EXECUTION_MODE");
+        for lint in ["repo/src/app/cli/lint_entry.spl", r"C:\repo\src\app\cli\lint_entry.spl"] {
+            assert_eq!(
+                interpreter_preference_reason(Path::new(lint), "spl", true),
+                Some("lint-jit-parity-unproven")
+            );
+        }
+        assert_eq!(
+            interpreter_preference_reason(Path::new("repo/src/app/cli/check_entry.spl"), "spl", true),
+            None
+        );
     }
 
     /// `.shs` and the forced allowlist are separate gates and must not be
