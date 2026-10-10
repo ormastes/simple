@@ -173,16 +173,6 @@ fn hir_expr_static_unsigned(e: HirExpr) -> bool:
         case _:
             false
 
-fn hir_expr_is_optional_type(e: HirExpr) -> bool:
-    if e == nil or not e.has_type_:
-        return false
-    val t = e.type_
-    if t == nil:
-        return false
-    match t.kind:
-        case HirTypeKind.Optional(_): true
-        case _: false
-
 fn hir_type_has_unresolved_type_param(ty: HirType) -> bool:
     """True when `ty` still carries a bare, uninstantiated `TypeParam`
     anywhere in its structure (shallow recursion through the composite type
@@ -908,6 +898,79 @@ impl MirLowering:
         if val type_ = self.builder.local_type(local):
             return self.mir_type_is_str(type_)
         false
+
+    me nil_compare_operand_hir_type(e: HirExpr, local: LocalId) -> HirType?:
+        """Static HIR type of one side of a nil compare: the expression's
+        own type-checker annotation when present, else the DECLARED type
+        the lowering registered for the local (function params, annotated
+        bindings -- function_lowering.spl remember_local_hir_type). The
+        fallback matters on the flat/bootstrap HIR path and in in-process
+        lowering specs, where `type_` is frequently absent."""
+        if e != nil and e.has_type_:
+            val t = e.type_
+            if t != nil:
+                return Some(t)
+        match self.find_local_hir_type(local.id):
+            case Some(found):
+                if found != nil and found != 0:
+                    return Some(found)
+            case nil: ()
+        # `xs[i]` on a declared `[T]`/`[T; n]` local: the element read's temp
+        # carries no registered type on the flat path, but the array local
+        # does, and its element type is the read's static type.
+        if e != nil:
+            match e.kind:
+                case HirExprKind.Index(index_base, _):
+                    match index_base.kind:
+                        case HirExprKind.Var(base_symbol) | HirExprKind.NamedVar(base_symbol, _):
+                            val base_local = self.find_local(base_symbol.id)
+                            if base_local.id >= 0:
+                                match self.find_local_hir_type(base_local.id):
+                                    case Some(base_type):
+                                        if base_type != nil and base_type != 0:
+                                            match base_type.kind:
+                                                case HirTypeKind.Array(elem, _) | HirTypeKind.Slice(elem):
+                                                    return Some(elem)
+                                                case _: ()
+                                    case nil: ()
+                        case _: ()
+                case _: ()
+        nil
+
+    me nil_compare_operand_is_declared_optional(e: HirExpr, local: LocalId) -> bool:
+        if val t = self.nil_compare_operand_hir_type(e, local):
+            return match t.kind:
+                case HirTypeKind.Optional(_): true
+                case _: false
+        false
+
+    me nil_compare_operand_is_plain_scalar(e: HirExpr, local: LocalId) -> bool:
+        """True when `e` (one side of `== nil` / `!= nil`) is a STATICALLY
+        non-optional primitive scalar whose lowered local is also a plain
+        scalar MIR slot with no nil state: HIR type Int/Float/Bool/Char,
+        MIR type I8..U64/F32/F64/Bool/Char, and not tracked as an Option
+        handle, a nil literal or a tagged runtime value. Such an operand
+        can never be nil, so the compare folds to a constant instead of
+        comparing payload bits against the raw nil sentinel (3)."""
+        var hir_scalar = false
+        if val t = self.nil_compare_operand_hir_type(e, local):
+            hir_scalar = match t.kind:
+                case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char: true
+                case _: false
+        if not hir_scalar:
+            return false
+        if self.option_value_locals.contains(local.id) or self.nil_locals.contains(local.id):
+            return false
+        if self.is_runtime_value_local(local.id):
+            return false
+        var mir_scalar = false
+        if val mir_ty = self.local_mir_type_of(local):
+            mir_scalar = match mir_ty.kind:
+                case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64: true
+                case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: true
+                case MirTypeKind.F32 | MirTypeKind.F64 | MirTypeKind.Bool | MirTypeKind.Char: true
+                case _: false
+        mir_scalar
 
     me local_enum_type_id(local: LocalId) -> i64:
         """Return the canonical declared owner id for a proven enum local."""
@@ -3237,10 +3300,10 @@ impl MirLowering:
                     case _: false
                 var nil_check_operand = LocalId(id: -1)
                 if op_is_eq_or_neq and right_is_nil_lit and not left_is_nil_lit:
-                    if hir_expr_is_optional_type(left) or self.option_value_locals.contains(left_local.id):
+                    if self.nil_compare_operand_is_declared_optional(left, left_local) or self.option_value_locals.contains(left_local.id):
                         nil_check_operand = left_local
                 elif op_is_eq_or_neq and left_is_nil_lit and not right_is_nil_lit:
-                    if hir_expr_is_optional_type(right) or self.option_value_locals.contains(right_local.id):
+                    if self.nil_compare_operand_is_declared_optional(right, right_local) or self.option_value_locals.contains(right_local.id):
                         nil_check_operand = right_local
                 if nil_check_operand.id >= 0:
                     val nil_check_func_name = match op:
@@ -3255,6 +3318,39 @@ impl MirLowering:
                     val nil_check_res = self.emit_resolved_direct_call(nil_check_func, [mir_operand_copy(nil_check_operand)], MirType.bool())
                     if val nil_check_local = nil_check_res:
                         return nil_check_local
+                # `v == nil` / `v != nil` / `nil == v` against a STATICALLY
+                # non-optional primitive scalar (i64/i32/u8/.../f64/bool/
+                # char): fold to a constant. The nil literal is materialized
+                # as the raw word 3 (`case NilLit` below) and a plain scalar
+                # slot holds its raw payload bits, so the generic Eq fall-
+                # through compared PAYLOAD BITS against the sentinel: the
+                # integer 3 read as nil, and on the LLVM backend a `bool`
+                # operand (i1) made the compare run at i1 width, truncating
+                # the constant 3 to 1 so `true == nil` was true as well.
+                # The tree-walk interpreter (seed, SIMPLE_EXECUTION_MODE=
+                # interpret) answers false/true here for every scalar value,
+                # and a non-optional scalar has no nil state to observe, so
+                # the constant is the only representation-independent
+                # answer. Guarded on BOTH the HIR static type and the local's
+                # own MIR scalar type, and skipped for any local the lowering
+                # already tracks as an Option handle, a nil literal or a
+                # tagged runtime value (those still carry a real nil state
+                # and keep the tag-aware paths above / rt_native_eq below).
+                # Closes hir_codec_put_i64_three_encoded_as_nil_native
+                # (`HirCodecWriter.put_i64`/`put_bool` wrote `N` for 3/true,
+                # so the stage-2 HIR cache never hit).
+                if op_is_eq_or_neq and left_is_nil_lit != right_is_nil_lit:
+                    val scalar_expr = if right_is_nil_lit: left else: right
+                    val scalar_local = if right_is_nil_lit: left_local else: right_local
+                    if self.nil_compare_operand_is_plain_scalar(scalar_expr, scalar_local):
+                        val folded_value = match op:
+                            case NotEq: true
+                            case _: false
+                        var b_fold = self.builder
+                        val folded = b_fold.new_temp(MirType.bool())
+                        b_fold.emit_const(folded, MirConstValue.Bool(folded_value), MirType.bool())
+                        self.builder = b_fold
+                        return folded
                 var bin_is_enum_eq = false
                 var eq_left_local = left_local
                 var eq_right_local = right_local
@@ -4747,6 +4843,15 @@ impl MirLowering:
                 # ExistsCheck (`.?`) fix just below, which sidesteps this the
                 # same way `lower_if` (mir_lowering_stmts.spl) does.
                 val left_local = self.lower_expr(left)
+                # A STATICALLY non-optional primitive scalar on the left has
+                # no nil state: `v ?? d` is `v`. Branching on rt_is_some(v)
+                # here read the payload bits against the raw nil sentinel,
+                # so `3 ?? 99` natively yielded 99 (same defect as `3 == nil`
+                # being true -- see nil_compare_operand_is_plain_scalar).
+                # The default's effects are never evaluated, matching the
+                # interpreter, which only evaluates the right side on nil.
+                if self.nil_compare_operand_is_plain_scalar(left, left_local):
+                    return left_local
                 var result_type = MirType.i64()
                 var coalesce_missing_type = true
                 if val expr_type = expr_value.type_:
@@ -4951,6 +5056,16 @@ impl MirLowering:
                 # `lower_if` (mir_lowering_stmts.spl) sidesteps it exactly
                 # this way, so mirror that proven pattern.
                 val base_local = self.lower_expr(base)
+                # `.?` on a STATICALLY non-optional primitive scalar is always
+                # present (0 and false included), so its value is the scalar
+                # itself. The parser desugars `if val x = v:` into `x = v.?`
+                # + `x != nil`; branching on rt_is_some(v) here read the
+                # payload bits against the raw nil sentinel, so `if val x =
+                # 3` took the else branch natively. Returning the base local
+                # keeps its declared scalar type on `x`, which then folds
+                # the `!= nil` test (nil_compare_operand_is_plain_scalar).
+                if self.nil_compare_operand_is_plain_scalar(base, base_local):
+                    return base_local
                 var result_type = MirType.i64()
                 if val expr_type = expr_value.type_:
                     result_type = self.lower_type(expr_type)

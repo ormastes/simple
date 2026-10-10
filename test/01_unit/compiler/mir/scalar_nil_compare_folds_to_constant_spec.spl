@@ -1,0 +1,146 @@
+"""
+Regression coverage for `v == nil` / `v != nil` / `nil == v` / `v ?? d` /
+`if val x = v` on STATICALLY non-optional primitive scalars.
+
+Root cause (doc/08_tracking/bug/native_scalar_nil_compare_payload_bits_2026-10-10.md):
+MIR lowering materializes the `nil` literal as the raw word 3 and the
+generic Eq fall-through compared a plain scalar slot's PAYLOAD BITS against
+it, so under staged-native codegen the integer 3 read as nil, and on the
+LLVM backend (where `bool` is i1) the compare ran at i1 width, truncating
+the sentinel 3 to 1 so `true == nil` was true as well. That is what made
+`HirCodecWriter.put_i64` / `put_bool` write `N` for 3 and for true, so the
+stage-2 HIR cache never hit.
+
+The MIR owner must fold such a compare to a constant (false for `==`, true
+for `!=`): a non-optional scalar has no nil state to observe, and that is
+the tree-walk interpreter's answer. Optional-typed operands keep the
+rt_is_none / rt_is_some presence helpers.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn lower_function_json(src: text, target: text) -> text:
+    val module = parse_full_frontend(src, "scalar_nil.spl", "scalar_nil.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("scalar_nil.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    for function in mir.functions.values():
+        if function.name == target or function.name.ends_with(".{target}"):
+            return serialize_mir_function(function)
+    ""
+
+# A folded compare is a single Bool const; a payload-bits compare is a
+# BinOp Eq/Ne whose right operand is the nil sentinel const 3.
+fn compares_against_sentinel(mir_json: text) -> bool:
+    mir_json.contains("\"op\":\"Eq\"") or mir_json.contains("\"op\":\"Ne\"")
+
+fn param_fn(ty: text, op: text, name: text) -> text:
+    "fn {name}(v: {ty}) -> bool:\n    v {op} nil\n\n"
+
+fn param_fn_rev(ty: text, op: text, name: text) -> text:
+    "fn {name}(v: {ty}) -> bool:\n    nil {op} v\n\n"
+
+describe "non-optional scalar nil compare folds to a constant", tag: ["only-compiled"]:
+    it "folds `v == nil` to false and `v != nil` to true for every integer width":
+        var source = ""
+        val types = ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"]
+        for ty in types:
+            source = source + param_fn(ty, "==", "{ty}_eq") + param_fn(ty, "!=", "{ty}_ne")
+        for ty in types:
+            val eq_json = lower_function_json(source, "{ty}_eq")
+            expect(eq_json.len() > 0).to_equal(true)
+            expect(compares_against_sentinel(eq_json)).to_equal(false)
+            expect(eq_json.contains("rt_is_none")).to_equal(false)
+            expect(eq_json).to_contain("\"value\":false")
+            val ne_json = lower_function_json(source, "{ty}_ne")
+            expect(compares_against_sentinel(ne_json)).to_equal(false)
+            expect(ne_json.contains("rt_is_some")).to_equal(false)
+            expect(ne_json).to_contain("\"value\":true")
+
+    it "folds bool, f32, f64 and char operands in both operand orders":
+        val source = (
+            param_fn("bool", "==", "bool_eq") + param_fn("bool", "!=", "bool_ne") +
+            param_fn_rev("bool", "==", "bool_eq_rev") + param_fn_rev("bool", "!=", "bool_ne_rev") +
+            param_fn("f64", "==", "f64_eq") + param_fn("f32", "!=", "f32_ne") +
+            param_fn_rev("f64", "!=", "f64_ne_rev") +
+            param_fn("char", "==", "char_eq") + param_fn_rev("i64", "==", "i64_eq_rev")
+        )
+        val falses = ["bool_eq", "bool_eq_rev", "f64_eq", "char_eq", "i64_eq_rev"]
+        for name in falses:
+            val j = lower_function_json(source, name)
+            expect(j.len() > 0).to_equal(true)
+            expect(compares_against_sentinel(j)).to_equal(false)
+            expect(j).to_contain("\"value\":false")
+        val trues = ["bool_ne", "bool_ne_rev", "f32_ne", "f64_ne_rev"]
+        for name in trues:
+            val j = lower_function_json(source, name)
+            expect(j.len() > 0).to_equal(true)
+            expect(compares_against_sentinel(j)).to_equal(false)
+            expect(j).to_contain("\"value\":true")
+
+    it "folds locals, struct fields, array elements and call results typed as scalars":
+        val source = (
+            "struct Box:\n    i: i64\n    b: bool\n    f: f64\n\n" +
+            "fn ret3() -> i64:\n    3\n\n" +
+            "fn local_eq() -> bool:\n    val x: i64 = 3\n    x == nil\n\n" +
+            "fn field_eq(bx: Box) -> bool:\n    bx.i == nil\n\n" +
+            "fn field_bool_ne(bx: Box) -> bool:\n    bx.b != nil\n\n" +
+            "fn field_f64_eq(bx: Box) -> bool:\n    bx.f == nil\n\n" +
+            "fn elem_eq(xs: [i64]) -> bool:\n    xs[1] == nil\n\n" +
+            "fn call_eq() -> bool:\n    ret3() == nil\n"
+        )
+        for name in ["local_eq", "field_eq", "field_f64_eq", "elem_eq", "call_eq"]:
+            val j = lower_function_json(source, name)
+            expect(j.len() > 0).to_equal(true)
+            expect(compares_against_sentinel(j)).to_equal(false)
+            expect(j.contains("rt_is_none")).to_equal(false)
+            expect(j).to_contain("\"value\":false")
+        val fb = lower_function_json(source, "field_bool_ne")
+        expect(compares_against_sentinel(fb)).to_equal(false)
+        expect(fb).to_contain("\"value\":true")
+
+    it "folds `if val x = v` and `v ?? d` on a non-optional scalar to the Some path":
+        val source = (
+            "fn ifval_i64(v: i64) -> i64:\n    if val x = v:\n        x\n    else:\n        -1\n\n" +
+            "fn ifval_bool(v: bool) -> i64:\n    if val x = v:\n        1\n    else:\n        0\n\n" +
+            "fn coalesce_i64(v: i64) -> i64:\n    v ?? 99\n\n" +
+            "fn coalesce_bool(v: bool) -> bool:\n    v ?? false\n"
+        )
+        for name in ["ifval_i64", "ifval_bool"]:
+            val j = lower_function_json(source, name)
+            expect(j.len() > 0).to_equal(true)
+            expect(j.contains("rt_is_some")).to_equal(false)
+            expect(compares_against_sentinel(j)).to_equal(false)
+        for name in ["coalesce_i64", "coalesce_bool"]:
+            val j = lower_function_json(source, name)
+            expect(j.len() > 0).to_equal(true)
+            expect(j.contains("rt_is_some")).to_equal(false)
+            expect(j.contains("null_coalesce")).to_equal(false)
+
+    it "keeps presence helpers for Optional-typed, text, enum and struct operands":
+        val source = (
+            "struct P:\n    x: i64\n\n" +
+            "enum Color:\n    Red\n    Green\n\n" +
+            "fn opt_i64_eq(v: i64?) -> bool:\n    v == nil\n\n" +
+            "fn opt_bool_ne(v: bool?) -> bool:\n    v != nil\n\n" +
+            "fn opt_f64_eq(v: f64?) -> bool:\n    nil == v\n\n" +
+            "fn text_eq(v: text) -> bool:\n    v == nil\n\n" +
+            "fn enum_eq(v: Color) -> bool:\n    v == nil\n\n" +
+            "fn struct_eq(v: P) -> bool:\n    v == nil\n"
+        )
+        expect(lower_function_json(source, "opt_i64_eq")).to_contain("rt_is_none")
+        expect(lower_function_json(source, "opt_bool_ne")).to_contain("rt_is_some")
+        expect(lower_function_json(source, "opt_f64_eq")).to_contain("rt_is_none")
+        # Non-scalar operands can carry a real nil at runtime: never folded.
+        for name in ["text_eq", "enum_eq", "struct_eq"]:
+            val j = lower_function_json(source, name)
+            expect(j.len() > 0).to_equal(true)
+            expect(j.contains("\"value\":false")).to_equal(false)
