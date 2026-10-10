@@ -19,3 +19,5 @@ under test/fixtures/compiler/chained_named_receiver_owner provide the direct
 reproduction and three runtime checks. All executable qualification is pending.
 The permanent compiler owner must retain the declared result type of a nested
 method call, with an adjacent negative unknown-method rejection regression.
+
+Second source workaround candidate: retain an explicit typed ByteSpan receiver before slice as well as the typed result; actual first result-only variant generated string-slice calls and failed its first equality check despite a nonempty object and successful link. Receipt `/home/ormastes/simple-phase4-web-a0-parallel-20261010/leaf-fixtures/typed-span/evidence.json`; disassembly diagnosis adjacent. New receiver candidate UNEXECUTED; original valid chained control remains unchanged.
