@@ -147,7 +147,7 @@ Specs (interpreted; fail-before / pass-after unless noted):
 `put_i64(nil)`->`N`, `put_i64(3)`->`3`, key order), `test/01_unit/compiler/
 types/nil_into_scalar_slot_check_spec.spl` (4), `test/01_unit/compiler/mir/
 optional_scalar_handle_representation_spec.spl` (5: 6 scalar types x
-producers {return, binding, call-arg, field, nil literal, extern/untyped} x
+producers {return, binding, call-arg, field, nil literal, extern/Dict/untyped} x
 consumers {`== nil`, `!= nil`, `if val`, `.?`, `unwrap`, `??`, `?`, match}).
 Neighbouring specs `null_coalesce_lowering_spec`, `optional_float_nil_compare
 _lowering_spec`, `option_return_boxing_paths_spec`, `local_mir_type_nilable_
@@ -158,26 +158,137 @@ unmodified base (measured by checking out the original files) -- pre-existing.
 ## W-nil-compare: sites that relied on a typed scalar carrying nil
 
 Direct scalar-typed param/local `== nil` in `src/compiler`: 5 sites, all HIR
-codec, all retyped in this series. Call sites that nil-test a scalar-returning
-function (`f(...) == nil`, `if val x = f(...)`; heuristic scan over
-src/compiler, src/app, src/lib): 38, e.g. `20.hir/hir_types.spl:510,547,566`
-(`get -> i32`), `80.driver/cache/cas_batch_transaction.spl:63`
-(`rt_file_read_regular_no_follow_bounded -> i64`, extern: still a runtime
-compare), `90.tools/coupling/layer_check.spl:23-31` (`extract_layer_number
--> i64`), `src/app/office/mod.spl:1316,1459,1462,1529` (`parse_range ->
-i64`), `src/lib/js/builtins/json.spl:43` (`parse_f64 -> f64`),
-`src/lib/nogc_sync_mut/diag.spl:258,334,355` (`get -> i32`),
-`src/lib/nogc_sync_mut/play/wm/mod.spl:260,354,381` (`to_i64 -> i64`),
-`src/lib/blink/style/cascade.spl:149,249` (`parse_color_value -> u32`, `if
-val`). Functions declared `-> <scalar>` whose body has a bare `nil` return
-line: 2088 (heuristic; top files `tooling/easy_fix/rules.spl` 57, `90.tools/
-fix/rules/impl_/lint_short_grammar.spl` 57, `40.mono/monomorphize/
-deferred_deserialize.spl` 54, `95.interp/mir_interpreter.spl` 39). The
-checker's return rule rejects `-> i64: nil` only when it can type the tail;
-these are the declarations that should become `T?`. Not mass-edited. The 14
-parser sites comparing `rt_enum_payload(...) -> i64` with nil
-(`10.frontend/parser_types_expr.spl:83-267`, `parser_types.spl:449,458`) are
-EXTERN results and keep the runtime compare (fix 1).
+codec, all retyped in this series.
+
+**The "38 call sites / 2088 functions" figures first recorded here were
+wrong** and are superseded by the audit below: that scan keyed on the callee
+NAME only (so `symbols.get(name) == nil` on a Dict counted as "`get -> i32`")
+and counted every `-> T?` function with a `nil` line as a scalar one.
+
+### Audit: nil-tests of a `-> <scalar>` call result (pre-landing requirement)
+
+Oracle fact that bounds the problem (seed probes, `SIMPLE_EXECUTION_MODE=
+interpret`): the seed REJECTS a nil leaving any non-optional return at
+runtime, whatever its origin (`return nil`, a `nil` tail, an untyped value
+that happens to be nil): `error: semantic: nil is forbidden by the
+non-optional return contract of 'f'`. So under the seed a `-> <scalar>`
+function never yields nil and `f() == nil` is never true; only natively did
+the word 3 leak through. Retyping to `T?` is what makes such a test mean
+something on both engines.
+
+What the fold actually reaches (in-process lowering probe, same harness as
+`scalar_nil_compare_folds_to_constant_spec`): FOLDED -- free `-> i64` call
+(`== nil`, `??`), a local bound from one, a method on a TYPED user receiver,
+a wrapper `-> i64` that returns an extern's result, a non-optional scalar
+struct field, `xs[i]` on `[i64]`. NOT folded (runtime test kept) -- a direct
+extern call, `a?.m() ?? d`, text builtins (`to_i64`, `index_of`,
+`parse_int`), `Dict.get` / `d[k]`, any untyped receiver.
+
+Scan (src/compiler, src/lib, src/app; 14,066 `.spl`, 145,757 definitions
+indexed; forms `f() == nil` / `!= nil` (27), `if val x = f()` (55), `f().?`
+(24), `f() ?? d` (2,405), and `val x = f()` later nil-tested (784)): 3,295
+hits on a callee NAME that has at least one `-> <scalar>` definition. Each
+was resolved to the callee definition(s) (same file, `use` import,
+`self`/owner, declared receiver type; the rest by hand):
+
+| class | hits | disposition |
+|---|---|---|
+| callee resolves to a `T?` / `Option` / struct / text return | 941 | not scalar; not folded |
+| builtin receiver (text / Dict / array), no user definition | 845 | builtin lowering (`parse_int`/`parse_f64` carry the runtime-value marker) |
+| untyped receiver, collection/text method name (`get` 666, `to_i64` 484, `index_of` 149, `find` 53, `first`/`last`/`pop` 11) | 1,363 | builtin; the 15 in a file that names a class with a scalar `get` were read: all Dict |
+| untyped receiver, other names (`read_u32`/`read_u16` 35, `as_int`/`as_bool` 23, `get_int` 19, `source_to_addr` 7, ...) | 97 | read one by one: the callee is `T?`/`Option`/`Result`, or the receiver is a dynamic/untyped value that the fold does not reach (`BinaryReader.read_u32 -> u32?`, interpreter `Value.as_int -> Option<i64>`, `DbRow.get_int -> i64?`, `DebugInfoBridge.source_to_addr -> i64?`, `AdaptiveMap.remove -> V?`, ...) |
+| direct EXTERN `-> i64` result | 27 | already excluded from the fold (`extern_fn_symbols` -> `extern_result_locals`): `10.frontend/parser_types.spl:449,458`, `parser_types_expr.spl` x17 (83..267, `rt_enum_payload` / `rt_tuple_get`), `70.backend/backend/cranelift_codegen_adapter.spl:762..820` x8 (`rt_tuple_get`) |
+| undeclared runtime builtin (`rt_file_read_text` x10 in src/app/check + src/app/deps, `rt_file_write_text` x1 in `nogc_async_mut/mcp/main_lazy_json.spl:307`) | 11 | untyped call, not folded |
+| scan false positives (docstring `wm_chrome_theme.spl:351`, shadowed local `95.interp/mir_interpreter.spl:573`, `std.gc` `GcHeap.allocate -> [u8]?`, `match_pattern -> Dict<text, text>?` x2) | 5 | none |
+| **user-defined, non-extern `-> <scalar>` callee** | **6** | table below |
+
+So the true number of such call sites is **6, not 38** (2 in `src/compiler`):
+
+| site | test | callee | returns nil? | decision |
+|---|---|---|---|---|
+| `src/compiler/70.backend/linker/link_deps.spl:56` | `?? false` | `get_config_bool(section, key, default_val) -> bool` (`std.config_parser`) | no; the call omitted `default_val` (seed: arity error) | dead test removed, `false` passed as the default |
+| `src/compiler/80.driver/shb/shb_extractor.spl:81` | `?? ""` | `decl_get_ret_type -> i64` | no (-1 or a type tag) | dead test removed |
+| `src/lib/nogc_sync_mut/src/config.spl:664` | `?? 4` | `parse_int -> i64` (same file) | no (0 on garbage) | dead test removed |
+| `src/app/mcp/startup_log.spl:16`, `src/app/simple_lsp_mcp/startup_log.spl:16` | `?? 0` | `time_now_unix_micros -> i64` (wrapper of extern `rt_time_now_unix_micros`) | no | dead test removed (x2) |
+| `src/lib/nogc_async_mut/async_host/worker_thread.spl:79` | `task_id == nil` | `ThreadSafeQueue.try_pop -> usize` (0 = empty) | no | **not changed, reported**: dead on both engines today (0 is not the word 3); the intended test is `== 0`, and the `match task_id: case Some(id)` below treats the `usize` as an Option. Fixing it changes behaviour under the seed; not in the compiler closure |
+
+No callee had to be excluded from the fold beyond the extern results above.
+
+Functions declared `-> <scalar>` that return a nil LITERAL: **3, not 2088**
+(none of them has a nil-testing caller in src/):
+
+| function | decision |
+|---|---|
+| `FlatPoolReader.decode_nullable_i64(raw) -> i64` (`10.frontend/core/flat_pool_codec.spl:260`) | retyped `-> i64?`; callers: `hir_codec_reader_budget_v1_spec` only |
+| `FlatPoolReader.decode_nullable_bool(raw) -> bool` (`:276`) | retyped `-> bool?`; same spec (its `decode_nullable_bool("2")` example stopped dying on this contract; it now reaches the next one, `decode_text -> text` returning nil -- text, out of scope here) |
+| `hc_read_f64(r) -> f64` (`20.hir/hir_codec_support.spl:477`), `return nil` x2 when the reader is poisoned | `return 0.0`, mirroring `next_i64`'s `return 0`; sole caller is the generated codec, which discards the value once `r.ok` is false. Under the seed a truncated float literal was a hard error instead of a cache miss |
+
+Limits of the audit: text resolution, not the type checker. A `-> <scalar>`
+function that returns an untyped / Optional / extern value without a nil
+literal is invisible to it (the seed errors on that path, natively the word
+leaks), and so is a receiver whose class is only known by inference in a
+file that never names it.
+
+Text builtins that are TOTAL under the seed but nil-tested anyway
+(`s.to_i64() == nil` / `if val x = s.to_i64()`; the seed returns 0, never
+nil): 13 sites, 2 in `src/compiler` (`80.driver/cache/gateway/
+semantic_scope_live_owner_v2.spl:670`, `80.driver/cache/publication/
+selected_head_reopen_validation.spl:61`), 4 in `nogc_sync_mut/play/wm/
+mod.spl`. Dead under the oracle already (the author meant `parse_int`);
+unchanged, since switching them changes seed behaviour.
+
+### Audit: the two seed divergences in the tree
+
+**`fn h(v: i64): v == nil` (nil into a scalar parameter / annotated local).**
+Functions that nil-test (`==`, `!=`, `??`, `.?`, `if val`) a parameter or an
+annotated local of non-optional scalar type: **0** in src/compiler, src/lib
+and src/app (two independent scans). Nothing relies on it.
+
+**`B(i: nil).i == nil` (nil stored in a non-optional scalar field).**
+
+- Stores: explicit `field: nil` into a declared scalar field at **15**
+  constructor sites over 5 struct types, all `# DESUGARED` `has_x` / `x: T`
+  pairs: `ParserField.fixed_address` (`10.frontend/desugar/
+  state_enum.spl:170`), `MacroCall.span` / `MacroArg.span` (`35.semantics/
+  macro_check/mod.spl:100,274`), `TemplateError.span` (`macro_check/
+  template.spl:134`), `TypeInfo.bits` / `.signed` / `.lanes` (`99.loader/
+  loader/compiler_sffi.spl:1272..1297`, 11). Fields simply omitted from a
+  constructor are not countable by text and add to this.
+- Tests: `.field == nil` / `!= nil` / `?? d` / `.?` / `if val` hits on a
+  field NAME with a scalar declaration: 628; 332 resolve to an Optional or
+  struct field, 4 to a scalar one, 290 have a receiver the scan could not
+  type (117 compiler, 78 lib, 95 app). The compiler ones were read: Optional
+  or struct (`PackageModuleIndexReadV1.generation`, `CompileOptions.opt_level:
+  i64?`, `MachOProviderV1.minimum_os: Option<i64>`, `once: bool?`, ...) except
+  the rows below. lib/app (173) were sampled (12 highest-ratio names), not
+  read exhaustively: none stored nil (e.g. `Engine2DReadback.backend_handle`
+  is always built with 0 although the comment at `simple_web_html_layout_
+  renderer_paint_tiles_gpu.spl:234` says nil).
+- **No nil-test reads any of the 5 nil-storing fields** (readers gate on
+  `has_x`), so nothing in the tree relies on the divergence.
+
+| site | test | field | decision |
+|---|---|---|---|
+| `src/compiler/70.backend/linker/mold.spl:518-520` | `config.pie ?? true`, `.debug ?? false`, `.verbose ?? false` | `LinkConfig.pie/debug/verbose: bool`, never built with nil | dead tests removed (3) |
+| `src/compiler/20.hir/portable_body_graph.spl:151` | `edge.caller_symbol_id == nil or edge.callee_symbol_id == nil` | `PortableBodyDependencyEdgeV1.*_symbol_id: i64`, built from symbol ids | dead tests removed (2); the `< 0` and membership checks stay |
+| `20.hir/hir_lowering/_Items/declaration_lowering.spl:839`, `trait_impl_lowering.spl:56` | `if f.bits.?:` | `BitfieldField.bits: i64` (0 with `has_bits` false) | unchanged: `.?` on a scalar folds to the VALUE, and the seed's `.?` on an int also yields the value (`0.?` -> 0, falsy), so both engines take the same branch |
+
+Known consequence, not fixed: a desugared field that holds nil and is passed
+to an `i64?` parameter (`w.put_i64(node.fixed_address)` in the generated HIR
+codec) is boxed as `Some(<raw word 3>)` by the representation rule, so the
+native compiler writes `3` where the seed writes `N`. Readers gate on
+`has_fixed_address` and the round trip is stable, but the cache bytes differ
+between the two engines for those fields; storing 0 instead of nil at the 15
+sites (as `_FlatAstBridge/module_assembly.spl` already does) would remove it.
+
+### Array elements
+
+`xs[7] == nil` on a declared `[i64]` folds to false, while `rt_array_get`
+returns the nil word for an out-of-bounds index. The seed does not answer
+true there either: it raises `array index out of bounds: index is 7 but
+length is 2`. So an out-of-bounds read that used to be observable natively as
+"nil" is now indistinguishable from the integer 3; bounds must be checked
+with `i < xs.len()`.
 
 ## Seed follow-up (filed here)
 
