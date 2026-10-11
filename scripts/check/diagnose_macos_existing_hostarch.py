@@ -91,8 +91,69 @@ def run(debugger):
         frame = thread.GetFrameAtIndex(0)
         target.BreakpointDelete(breakpoint.GetID())
         return frame
+    def capture_child():
+        # Exact SHA404042 facade ABI: x0=text, x1=[text], x2=deadline.
+        spawn = symbol("src__lib__nogc_sync_mut__io__process_ops__process_run_timeout_live")
+        frame = stop_at(spawn)
+        command = bytes.fromhex(text(frame, frame.FindRegister("x0").GetValueAsUnsigned())["hex"]).decode("utf-8")
+        raw = frame.FindRegister("x1").GetValueAsUnsigned()
+        error = lldb.SBError()
+        if raw & 7 != 1 or (raw & ~7) < 4096:
+            raise RuntimeError("invalid worker argv tag")
+        header = process.ReadMemory(raw & ~7, 32, error)
+        if error.Fail() or len(header) != 32 or header[0] != 2 or header[1] & 0x18:
+            raise RuntimeError("invalid worker argv array header")
+        count = int.from_bytes(header[8:16], "little")
+        capacity = int.from_bytes(header[16:24], "little")
+        data = int.from_bytes(header[24:32], "little")
+        if not 2 <= count <= 128 or capacity < count or data < 4096:
+            raise RuntimeError("unbounded worker argv")
+        elements = process.ReadMemory(data, count * 8, error)
+        if error.Fail() or len(elements) != count * 8:
+            raise RuntimeError("worker argv memory unavailable")
+        argv = [bytes.fromhex(text(frame, int.from_bytes(elements[i:i+8], "little"))["hex"]).decode("utf-8") for i in range(0, len(elements), 8)]
+        if command != os.environ["SIMPLE_BINARY"] or argv[:2] != ["run", "src/app/cli/native_build_worker.spl"]:
+            raise RuntimeError("unexpected subprocess; refuse guessed child route")
+        names = ["SIMPLE_SCV_SNAPSHOT_ROOT", "SIMPLE_SCV_REVISION_ID", "SIMPLE_SCV_COMMIT_ID", "SIMPLE_SCV_TREE_ID", "SIMPLE_SCV_INVENTORY_DIGEST", "SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", "SIMPLE_SCV_INVENTORY_GENERATION", "SIMPLE_SCV_SOURCE_DRIFTED", "SIMPLE_NATIVE_BUILD_WORKER", "SIMPLE_FRONTEND_CACHE_DIR", "SIMPLE_ICE_DIR", "SIMPLE_ICE_SKIP_MODULES", "SIMPLE_NATIVE_BUILD_WARM_CLOSURE_CANDIDATE"]
+        environment = []
+        options = lldb.SBExpressionOptions()
+        options.SetTimeoutInMicroSeconds(2000000)
+        options.SetIgnoreBreakpoints(True)
+        for name in names:
+            value = frame.EvaluateExpression('(unsigned long long)getenv("%s")' % name, options)
+            if value.GetError().Fail():
+                raise RuntimeError("required environment accessor unavailable")
+            pointer = value.GetValueAsUnsigned()
+            if pointer:
+                value_text = process.ReadCStringFromMemory(pointer, 4097, error)
+                if error.Fail() or len(value_text.encode("utf-8")) > 4096:
+                    raise RuntimeError("unbounded child authority environment")
+                environment.append(name + "=" + value_text)
+        env_map = dict(value.split("=", 1) for value in environment)
+        if not env_map.get("SIMPLE_SCV_SNAPSHOT_ROOT") or env_map.get("SIMPLE_NATIVE_BUILD_WORKER") != "1":
+            raise RuntimeError("child authority incomplete")
+        evidence["child_handoff"] = {"command": command, "argv": argv, "environment": env_map, "cwd": os.getcwd(), "qualification": "UNADMITTED"}
+        persist()
+        kill_error = process.Kill()
+        if kill_error.Fail() or process.GetState() != lldb.eStateExited:
+            raise RuntimeError("coordinator termination not confirmed; refuse dual worker")
+        # Explicit full inheritance: remove even absent captured keys before overlay.
+        launch_environment = dict(os.environ)
+        for name in names:
+            launch_environment.pop(name, None)
+        launch_environment.update(env_map)
+        launch = lldb.SBLaunchInfo(argv)
+        launch.SetWorkingDirectory(os.getcwd())
+        launch.SetEnvironmentEntries([name + "=" + value for name, value in launch_environment.items()], False)
+        launch.SetLaunchFlags(lldb.eLaunchFlagStopAtEntry)
+        error = lldb.SBError()
+        child = target.Launch(launch, error)
+        if error.Fail() or not child.IsValid():
+            raise RuntimeError("captured child launch failed")
+        return child
     try:
-        # Workflow launches stopped at executable entry; wait for the actual host owner.
+        # Capture actual coordinator handoff, then debug its native child directly.
+        process = capture_child()
         host = target.FindBreakpointByID(1)
         bounded_continue(70)
         if process.GetState() != lldb.eStateStopped or host.GetHitCount() != 1:
