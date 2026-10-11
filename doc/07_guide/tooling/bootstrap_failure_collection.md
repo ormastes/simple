@@ -1,5 +1,30 @@
 # Collect bootstrap, build, and test failures
 
+## Windows bootstrap harness prerequisites
+
+The MSVC setup helper supports callers using `set -euo pipefail`. SDK discovery
+must skip non-SDK Include children such as `wdf` without turning the final
+directory predicate into a pipeline failure. Keep missing-SDK and tool failures
+visible. `bash scripts/check/check-windows-msvc-sdk-discovery.shs` checks that
+boundary; see the [SDK discovery bug](../../08_tracking/bug/windows_msvc_sdk_discovery_pipefail_2026-10-11.md).
+
+Run the PATH fixture with
+`python scripts/check/check-bootstrap-path-access.py --script scripts/bootstrap/bootstrap-from-scratch.sh --output <fresh-private-directory>`.
+On Windows it discovers native Bash beside Git on PATH; for MSYS2 or a custom
+installation, pass `--shell "C:/path with spaces/bash.exe"`. On POSIX it resolves
+`bash` from PATH. Windows ambient Bash is not selected automatically because it
+may be the WSL launcher. Shell discovery occurs before creating the output
+directory, and an existing output directory is rejected to preserve evidence.
+
+`sh scripts/check/check-bootstrap-windows-authority-paths.shs` exercises the
+actual `run_rust_authority_cargo` and `run_rust_authority_command` owners together.
+The fixture binds `PLATFORM_RUST_TRIPLE`, checks the forwarded
+`build --target x86_64-pc-windows-msvc` arguments, and checks scoped
+`TEMP`/`TMP`/`SystemRoot` through all four LLVM/LTO branches. It substitutes the
+Cargo process and resource setup; it does not compile the seed or admit a phase.
+Keep these host-harness results separate from compiler and Phase4 evidence.
+See the [harness drift bug and retained results](../../08_tracking/bug/windows_bootstrap_contract_harness_drift_2026-10-11.md).
+
 During bootstrap diagnosis, reach the end of all independently runnable build
 and test work instead of ending the investigation at the first failure. This
 is the shared agent policy for SPipe, bootstrap, builds, tests, and bug repair.
@@ -23,6 +48,23 @@ The regression `sh scripts/check/check-bootstrap-keep-going-policy.shs` exercise
 production orchestration with failing/passing fake commands and inventory rows;
 it also checks policy inheritance, ordered overrides, cache preservation, and
 fatal snapshot admission. Other runners may still need their own policy wiring.
+
+## Phase verification campaign bounds
+
+The phase verifier has a single 7200-second campaign deadline, separate from
+`--timeout-seconds` for each row. Set `--campaign-timeout-seconds` or
+`BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS` to select another positive budget.
+The owner reaps its job/process tree on expiry or interruption and retains
+partial rows, incomplete counts, caches and a nonpassing campaign receipt.
+Nested row RSS enforcement remains unchanged.
+
+If mandatory fullCLI or test-runner construction fails, independent module
+diagnostics default to 8 deterministic entries. Configure the nonnegative
+`BOOTSTRAP_VERIFY_FAILED_TOOL_MODULE_LIMIT` for another finite sample. The full
+inventory remains retained; excluded entries are explicitly unexecuted/BLOCKED.
+Healthy prerequisites retain the complete inventory. This sample cannot admit
+missing tools or replace test-suite evidence. Regression:
+`sh scripts/bootstrap/tests/verification-campaign-test.shs`.
 
 ## Agent continuation and explicit diagnostic exceptions
 
@@ -399,3 +441,81 @@ If no valid workaround exists, leave that dependency BLOCKED and continue
 other work. Preserve progress rather than rebuilding from Phase 1. A later
 rebuild must revisit the owning bug and verify the intended path before
 removing the workaround; restarting a process does not reset the repair count.
+
+## Cached object continuation and early linking
+
+Keep caches enabled with a stable, exclusively owned cache directory. Preserve
+successful frontend, HIR and native outputs and report actual cache reuse; never
+force fingerprints or infer reuse from object existence. Minimize compiler
+rebuilds by using the existing producer for valid source workarounds while a
+separate agent repairs the compiler. A new producer or changed dependency may
+invalidate more than the failed file; obey the normal cache contract.
+
+Freeze the complete requested source/target inventory before collection. Report
+HIR failures, monomorphization failures, MIR failures, object-emission failures,
+dependency-blocked files and unattempted files separately. Worker progress is
+not the final aggregate ledger. HIR acceptance does not prove an object exists.
+Count emitted objects by their actual paths, sizes and hashes, with producer,
+source, target, backend and ABI identities retained in the receipt.
+
+Advance independent passing files through HIR, monomorphization, MIR and object
+generation where the supported compiler interface and complete dependencies
+permit it. A diagnostic subset must preserve the remaining required inventory;
+do not disable the full build's aggregate guard or call blocked files successful.
+Use supported per-unit object commands rather than inventing a failed-only mode.
+Bound each collection epoch, preserve pending rows and caches, and resume without
+rerunning unchanged successes. Parallel jobs need separate writable source/SCV
+and cache ownership as well as measured combined resource capacity.
+
+For user-authorized workarounds, freeze a separate source revision and retain the
+original failure. Tag affected blocks using the existing
+[@workaround contract](bug_linked_workarounds.md), linking the bug, exact scope
+and removal/retest condition. Preserve pattern binders, guards, error behavior
+and every required module; never replace an unsupported construct with a dummy
+success. Retry failed files and normally invalidated dependents, then continue
+through later stages. A workaround build remains provisional until its real
+runtime checks pass. Fix the underlying owner in parallel and add both an exact
+reproducing scenario and similar prevention cases, including negative cases
+where relevant. Authored tests remain unexecuted until observed on the real runner.
+
+As soon as a target has its complete verified object set, attempt manual linking
+to expose linker failures early. Retain the actual generated linker argv and
+verify every object/runtime input against the target's compile receipts; do not
+guess flags or substitute stale objects. Preserve the primary link failure,
+all missing/duplicate-symbol and relocation diagnostics, and the separate relink
+result. Link success still requires executable smoke tests and the exact new
+compiler's Hello compile/run before dependent provisional phases.
+
+When observing a successful compile, read only the last log line, exit code and
+object size; retain full logs on disk. Inspect additional log contents only when
+the run fails. A crash, nonzero exit, or absent/empty required object is a failure.
+Run lint with the built pure-Simple CLI, retain real diagnostics, and report a
+missing lint owner as blocked rather than substituting the seed.
+
+Host access in product code goes through SoSix aliases/facades, with raw runtime
+calls confined to the appropriate provider owner. Review OS fixes against
+Windows, macOS, FreeBSD and SimpleOS contracts. Distinguish source review from
+actual platform execution and unavailable providers; Linux PASS cannot stand
+for another host. The [POSIX/host interface index](../app/llm/simpleos_posix_host_interface_index.md)
+and LLM wiki's SOSIX/QEMU matrix route to the canonical owners and platform checks.
+
+## Native staging and terminal consumers
+
+Use [native staging and terminal evidence](bootstrap_native_staging.md) for the
+measured Linux/WSL cache-parent staging path, launch-interrupt ownership and atomic
+terminal receipts. Preserve the exact source/runtime boundaries and the campaign
+Phase 3/full-CLI gates; neither a progress marker nor a partial object inventory
+is a completed producer.
+
+For a Windows durable-flush stall, retain the native stack and compare a bounded
+independent file-sync probe on the affected volume and NTFS. The
+[ReFS incident](../../08_tracking/bug/windows_refs_durable_flush_stall_2026-10-11.md)
+required an NTFS source copy as well as output, CAS and temporary roots: compile
+SCV writes remain under `<checkout>/build/scv`. Keep durability enabled and
+preserve failed receipts; storage relocation does not admit the candidate.
+
+The provisional Hello owner scopes `SIMPLE_SCV_INVENTORY_COLD_INIT=1` to its
+first compile only when both current and legacy inventory publication paths
+are absent. Existing publications use warm admission, including malformed
+ones; preserve their failures. Do not export cold initialization across an
+entire phase campaign. See the [first-build fix](../../08_tracking/bug/provisional_hello_missing_inventory_init_2026-10-11.md).

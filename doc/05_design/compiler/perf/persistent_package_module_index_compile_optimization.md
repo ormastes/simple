@@ -245,6 +245,114 @@ published graph receipt.
 
 ## Reproducibility normalization
 
+### Frozen cold-publisher root identity
+
+The frozen ownership policy may declare `ownership_v1.project_identity`, an
+explicit ASCII project namespace using the same bounded identifier grammar as
+package identities. After validating policy and supplied manifest bytes against
+SCV inventory records, the ownership capture computes a domain-separated digest
+of the length-framed namespace and policy digest. Manifest digests remain
+per-package witnesses for exact consumer invalidation. Source and manifest
+bytes, snapshot location, revision and epoch
+do not enter this root. They remain independently checked SCV witnesses in the
+index authority. The publisher applies the existing configuration-variant root
+partition afterwards.
+
+A missing project identity retains the legacy tree-root fallback. A malformed
+explicit identity is an error; it cannot silently request legacy behavior.
+Changing policy bytes partitions the root conservatively. The
+namespace is declared project configuration, not an authentication credential.
+The first generation after adopting this policy conservatively rebuilds; later
+source-only changes can reach the semantic transition checks.
+
+Generated declaration/receipt consistency is insufficient authorization at the
+compiled-output boundary: both currently arrive in the same artifact. Until an
+independently selected producer declaration is wired into that boundary, a
+nonempty generated facet fails with
+`cold-compiled-generated-authority-unavailable:<module>` before publication.
+Empty facets remain valid for ordinary source modules. This is a safety gate,
+not completion of generated-source support.
+
+### Generated witness projection and migration
+
+The generated semantic witness must survive the TLDR-to-index projection.
+Schema 4 extends the existing index entry with `generated_source_digest` and
+supports both complete graphs and entry-scoped graphs. A full graph has no
+scope-entry identity; a scoped graph preserves its exact entry identity and
+reachable-source validation. Action identities bind that scope as before.
+Existing V1-V3 bytes remain decodable with an unknown generated witness; that
+unknown value must never establish semantic reuse, even between two otherwise
+compatible legacy generations. Migration therefore conservatively invalidates.
+The typed bootstrap index-build request selects `index_schema=V4` explicitly.
+Requests selecting V2 or V3 are rejected rather than silently producing a
+different schema. Legacy immutable indexes remain readable for migration.
+Grouped warm-route wire V2 carries the index schema and generated witnesses;
+legacy wire V1 remains decodable for inspection. Actual grouped warm execution
+and retries require the new complete graph, so old archive routes cannot bypass
+conservative migration through a second entrypoint.
+
+New builder-produced entries copy the valid generated digest from their admitted
+TLDR header. Encoding and decoding require the field for schema 4. A missing
+witness is invalid, not an implicit empty facet. An actual ordinary-source empty
+facet has the digest of its validated empty bytes. Generated-only witness changes
+invalidate the owner and its exact reverse consumers; equal generated witnesses
+still allow existing semantic early cutoff when all other witnesses permit it.
+
+The implementation must test new-format round trips, unchanged legacy decoding,
+legacy conservative migration, builder field preservation, full/scoped graph
+distinction, generated-only invalidation, and unchanged-witness reuse. These
+tests validate projection and planning only. They do not replace independently
+selected producer authority or real generator execution evidence.
+
+For a current-schema graph, unavailable or corrupt transition evidence treats
+the supplied changed-module hints as public changes and follows their reverse
+closure. It must preserve unknown-hint rejection and avoid dirtying unrelated
+modules merely because the transition file is absent. Legacy generations lack
+generated witnesses and therefore require full migration invalidation, even
+with an empty or partial hint list. Incompatible topology or authority likewise
+cannot establish semantic reuse. Regression specs must distinguish these cases.
+
+### Generator authority and snapshot ordering
+
+The full-index publication seam joins already compiled outputs; it is too late
+to run a generator whose source must participate in parsing and dependency
+resolution. The production sequence must instead preserve two immutable views:
+
+1. Freeze the selected configuration, producer executable and declared inputs
+   in input snapshot S. Resolve and bind the selected action before execution;
+   reject duplicate output ownership and input/output overlap.
+2. Run that selected producer with read access restricted to its declared inputs
+   and write access restricted to its owned output staging area. A pinned cwd,
+   process group or successful output hash is not filesystem confinement.
+   Unsupported enforcement must refuse before spawning or publishing.
+3. Verify process outcome and exact output set, then freeze a derived compilation
+   snapshot S' containing the admitted generated bytes. Preserve S as parent
+   authority; never add files to or modify S. Generated sources must enter the
+   source inventory before HIR and dependency discovery, not after compilation.
+4. Carry the independently selected plan binding through driver-owned context
+   to `cold_full_index_publish_from_driver_v1`. Supply that binding separately
+   from `ColdHirCompiledPackageArtifactV1`; its optional declaration and receipt
+   fields are evidence to check, not the expected authority.
+5. At `cold_hir_package_outputs_from_driver_v1`, verify the selected declaration,
+   execution and derived snapshot together before forming any generated facet
+   or publishing index/archive state. Schema-4 projection then preserves the
+   admitted semantic witness.
+
+The existing `BuildActionV1` can identify declared action inputs/outputs;
+`BuildTaskV1` and process-observation owners supply lifecycle and resource
+evidence. Their inspected contracts lack a filesystem policy and observed-I/O
+receipt. Extending or connecting them must establish that boundary explicitly.
+Returning a caller-supplied success flag or hashing only listed outputs cannot
+satisfy the undeclared-output scenario.
+
+The production acceptance fixture must exercise: selected-plan substitution,
+changed producer bytes, declared input mutation before freeze, an undeclared
+read, an extra output, missing output, nonzero exit, and failed derived-snapshot
+publication. Each refusal asserts no index/archive publication and retains the
+original snapshot identity. The success fixture compiles generated source from
+S', then changes its input and checks the exact reverse-consumer invalidation.
+These execution and authority steps remain planned, not implemented or verified.
+
 - canonical relative package/module identities;
 - sorted edges, SCC members, diagnostics, and archive members;
 - normalized archive timestamp, UID/GID, mode, and path separators;

@@ -99,8 +99,36 @@ CXX=fixture-cxx AR=fixture-ar LD=fixture-ld RUSTFLAGS=fixture-rustflags
 SIMPLE_ABI_POLICY=v1
 export CC LLVM_CONFIG CXX AR LD RUSTFLAGS SIMPLE_ABI_POLICY
 full() { bootstrap_stage3_seed_inputs_fingerprint "$1" "${2:-cranelift}" "${3:-none}" "$tool_path" "${4:-x86_64-unknown-linux-gnu}"; }
+# Capture the real records at the optional diagnostic sidecar boundary. This
+# fixture does not publish any seed stamp, generation or admitted artifact.
+bootstrap_stage3_write_seed_fingerprint_details() { cp "$2" "$1"; }
+BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_PATH="$fixture/fingerprint.records"
+export BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_PATH
 base=$(full "$a")
+unset BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_PATH
 bootstrap_stage3_valid_fingerprint "$base" || fail 'invalid aggregate'
+[ "$(bootstrap_stage3_hash_file "$fixture/fingerprint.records")" = "$base" ] ||
+    fail 'captured recipe records were not included in aggregate'
+# Read the production invocation, retaining package selection and argument
+# order while normalizing only the two documented variable placeholders.
+native_recipe=$(awk '
+    /^  run_rust_authority_cargo rust-native-all-build default/ {
+        while (getline > 0) {
+            more = sub(/[[:space:]]*\\$/, "")
+            sub(/^[[:space:]]+/, "")
+            printf "%s%s", separator, $0
+            separator = " "
+            if (!more) { print ""; exit }
+        }
+    }
+' "$repo/scripts/bootstrap/bootstrap-from-scratch.sh" |
+    sed 's/"${PLATFORM_RUST_TRIPLE}"/<selected-platform>/; s/${llvm_features}/<selected-llvm-features>/')
+[ -n "$native_recipe" ] || fail 'canonical native-all invocation missing'
+[ "$(sed -n 's/^recipe.2=//p' "$fixture/fingerprint.records")" = "cargo $native_recipe" ] ||
+    fail 'native-all fingerprint recipe differs from actual package selection'
+sed 's/ -p spl_hosted_runtime / /' "$fixture/fingerprint.records" >"$fixture/old-recipe.records"
+[ "$(bootstrap_stage3_hash_file "$fixture/old-recipe.records")" != "$base" ] ||
+    fail 'selecting hosted runtime did not invalidate old seed identity'
 [ "$(full "$b")" = "$base" ] || fail 'full relocated fingerprint changed'
 # Cached Cargo output must be pruned before traversal, not merely filtered
 # from results. Refuse unpruned discovery rather than using a timing limit.

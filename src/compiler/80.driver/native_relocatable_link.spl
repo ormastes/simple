@@ -1,8 +1,16 @@
 # Relocatable object output is not an archive or a final PE image.
 # ld.lld is the ELF driver; lld-link has no COFF partial-link operation.
+#
+# COFF partial links need GNU BFD ld. LLD's MinGW driver is ALSO installed as
+# `ld` / `x86_64-w64-mingw32-ld` (llvm-mingw toolchains), and it rejects `-r`
+# with "unknown argument: -r". So a COFF plan carries an ordered candidate list
+# that prefers the explicit `.bfd` spelling, and the driver admits the first
+# candidate whose `--version` does not identify as LLD.
 pub struct NativeRelocatableLink:
     program: text
     args: [text]
+    candidates: [text]
+    requires_bfd: bool
 
 pub fn native_relocatable_link_plan(
     target: text, host_os: text, host_arch: text,
@@ -12,18 +20,33 @@ pub fn native_relocatable_link_plan(
         (target == "" and host_os == "windows")
     var program = "ld.lld"
     var args: [text] = ["-r"]
+    var candidates: [text] = ["ld.lld"]
+    var requires_bfd = false
     if windows:
         val arch = if target == "": host_arch else: target.split("-")[0]
+        var prefix = ""
         if arch == "x86_64":
-            program = if host_os == "windows": "ld" else: "x86_64-w64-mingw32-ld"
+            prefix = if host_os == "windows": "" else: "x86_64-w64-mingw32-"
             args = ["-m", "i386pep", "-r"]
         elif arch == "i386" or arch == "i686" or arch == "x86":
-            program = if host_os == "windows": "ld" else: "i686-w64-mingw32-ld"
+            prefix = if host_os == "windows": "" else: "i686-w64-mingw32-"
             args = ["-m", "i386pe", "-r"]
         else:
             return Err("emit-object COFF relocatable linking is unsupported for architecture {arch}; use --emit-archive for a multi-object artifact")
+        program = "{prefix}ld"
+        candidates = ["{prefix}ld.bfd", "{prefix}ld"]
+        requires_bfd = true
     for obj in objects:
         args = args.push(obj)
     args = args.push("-o")
     args = args.push(output)
-    Ok(NativeRelocatableLink(program: program, args: args))
+    Ok(NativeRelocatableLink(program: program, args: args, candidates: candidates,
+        requires_bfd: requires_bfd))
+
+pub fn native_relocatable_linker_version_admissible(requires_bfd: bool, version_text: text) -> bool:
+    """A COFF partial link needs GNU BFD ld; LLD (any driver) has no COFF `-r`."""
+    if not requires_bfd:
+        return true
+    if version_text.contains("LLD"):
+        return false
+    version_text.contains("GNU ld")

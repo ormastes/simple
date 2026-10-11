@@ -1,5 +1,13 @@
 # SOSIX runtime library (`std.nogc_async_mut.sosix`)
 
+## Current qualification note — 2026-10-11
+
+Availability statements elsewhere in this guide are dated observations, not a current cross-platform certification matrix. Use the [variation/SOSIX integration](../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration) and exact source-matched provider receipts for support claims.
+
+A shared operation API may use a portable synchronous provider; it does not establish native asynchronous OS completion. Exact POSIX aliases require matching return/error, offset, cancellation and lifetime behavior, not similar function names. CUDA-off CPU execution, C CUDA provider execution, environment-variant GPU-task binding and SOSIX-G qualification are separate capabilities. Timeout does not free an in-flight buffer. No arbitrary CUDA/Metal/Vulkan provider or worker profile becomes supported through this documentation update.
+
+In particular, raw bytes-or-negative-errno results are not POSIX `-1` plus `errno`. Positioned-write parity must account for `O_APPEND` behavior on the selected provider; a spelling-compatible alias is insufficient. Preserve the typed raw-result contract until a tested translation provides exact POSIX semantics.
+
 One library for OS-service access, bound by hosted Simple code and by SimpleOS
 alike. Contracts are pure values under `std.common.contracts.sosix`; the hosted
 composition lives in `std.nogc_async_mut.sosix`; SimpleOS binds the same

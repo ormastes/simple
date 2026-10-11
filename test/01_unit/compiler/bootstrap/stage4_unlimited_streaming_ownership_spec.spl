@@ -8,12 +8,17 @@ val PHASE_GATES = "src/compiler/80.driver/driver_phase_gates.spl"
 val ORCHESTRATION = "src/compiler/80.driver/driver_orchestration.spl"
 val PRODUCER = "scripts/bootstrap/bootstrap-from-scratch.sh"
 
+# 5aa6543d121 split the selector into env/ctx composition
+# (`driver_streaming_surface_route` in driver_phase_gates.spl) and a pure
+# decision in driver_streaming_surface_policy.spl; check both halves.
+val STREAMING_POLICY = "src/compiler/80.driver/driver_streaming_surface_policy.spl"
+
 fn streaming_selector(source: text) -> text:
-    val start = source.index_of("fn driver_streaming_surface_enabled(ctx: CompileContext) -> bool:")
+    val start = source.index_of("pub fn driver_streaming_surface_route(ctx: CompileContext) -> i64:")
     val end = source.index_of("fn bootstrap_last_fixed_input")
     if start < 0 or end <= start:
         return ""
-    source.substring(start, end)
+    source.substring(start, end) + "\n" + file_read(STREAMING_POLICY)
 
 describe "Stage4 unlimited streaming ownership":
     it "selects structural streaming independently of low-memory resource policy":
@@ -28,12 +33,17 @@ describe "Stage4 unlimited streaming ownership":
     it "retains legacy Stage4 admission while adding the Stage3 owner gate":
         val gates = file_read(PHASE_GATES)
         val selector = streaming_selector(gates)
-        expect(selector).to_contain("(driver_env_get_opt(\"SIMPLE_BOOTSTRAP\") ?? \"\") == \"1\"")
-        expect(selector).to_contain("((driver_env_get_opt(\"SIMPLE_STAGE3_STREAMING_SURFACES\") ?? \"\") == \"1\" or")
-        expect(selector).to_contain("((driver_env_get_opt(\"SIMPLE_BOOTSTRAP_STAGE4\") ?? \"\") == \"1\" and")
-        expect(selector).to_contain("(driver_env_get_opt(\"SIMPLE_STAGE4_STREAMING_SURFACES\") ?? \"\") == \"1\")) and")
-        expect(selector).to_contain("driver_source_entry_closure_enabled(ctx) and")
-        expect(selector).to_contain("ctx.options.backend != \"vhdl\"")
+        # 5aa6543d121: explicit streaming no longer also requires
+        # SIMPLE_BOOTSTRAP; Stage3 alone, or legacy Stage4 + its streaming
+        # flag, requests it.
+        expect(selector.contains("driver_env_get_opt(\"SIMPLE_BOOTSTRAP\")")).to_equal(false)
+        expect(selector).to_contain("driver_env_get_opt(\"SIMPLE_STAGE3_STREAMING_SURFACES\") ?? \"\",")
+        expect(selector).to_contain("driver_env_get_opt(\"SIMPLE_BOOTSTRAP_STAGE4\") ?? \"\",")
+        expect(selector).to_contain("driver_env_get_opt(\"SIMPLE_STAGE4_STREAMING_SURFACES\") ?? \"\")")
+        expect(selector).to_contain("stage3 == \"1\" or (stage4 == \"1\" and stage4_streaming == \"1\")")
+        expect(selector).to_contain("driver_source_entry_closure_enabled(ctx))")
+        expect(selector).to_contain("ctx.options.backend == \"vhdl\")")
+        expect(selector).to_contain("if vhdl: return -5")
         expect(gates).to_contain("(driver_env_get_opt(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\") ?? \"\") == \"1\"")
         expect(file_read(ORCHESTRATION)).to_contain("pub use compiler.driver.driver_phase_gates.\{driver_streaming_surface_enabled}")
 

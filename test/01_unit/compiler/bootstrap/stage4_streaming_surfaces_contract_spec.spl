@@ -32,13 +32,18 @@ val RUNTIME_CHECK = "src/runtime/test/rt_transient_heap_scope_selfcheck.c"
 val RUST_RUNTIME = "src/compiler_rust/runtime/src/value/collections.rs"
 val RUST_MEMORY = "src/runtime/runtime_memory.c"
 
+# 5aa6543d121 split the selector: driver_phase_gates.spl composes the env /
+# ctx inputs in `driver_streaming_surface_route`, and the pure decision lives
+# in driver_streaming_surface_policy.spl. The selector text is both halves.
+val STREAMING_POLICY = "src/compiler/80.driver/driver_streaming_surface_policy.spl"
+
 fn streaming_selector() -> text:
     val gates = file_read(PHASE_GATES)
-    val start = gates.index_of("fn driver_streaming_surface_enabled(ctx: CompileContext) -> bool:")
+    val start = gates.index_of("pub fn driver_streaming_surface_route(ctx: CompileContext) -> i64:")
     val end = gates.index_of("fn bootstrap_last_fixed_input(")
     if start < 0 or end <= start:
         return ""
-    gates.substring(start, end)
+    gates.substring(start, end) + "\n" + file_read(STREAMING_POLICY)
 
 fn streaming_surface_helper() -> text:
     val driver = file_read(SOURCE_PARSING)
@@ -117,13 +122,19 @@ describe "Stage4 streaming surface ownership":
         expect(selector.len()).to_be_greater_than(0)
         expect(selector).to_contain("ctx.options.mode == CompileMode.Aot")
         expect(selector.contains("low_memory")).to_equal(false)
-        expect(selector).to_contain("(driver_env_get_opt(\"SIMPLE_BOOTSTRAP\") ?? \"\") == \"1\"")
-        expect(selector).to_contain("driver_source_entry_closure_enabled(ctx) and")
+        # 5aa6543d121: an explicit streaming request no longer also requires
+        # SIMPLE_BOOTSTRAP (ordinary native-build entries need the same
+        # per-file parser ownership); a request that cannot be honored is
+        # rejected with a negative route instead of silently retaining all.
+        expect(selector.contains("driver_env_get_opt(\"SIMPLE_BOOTSTRAP\")")).to_equal(false)
+        expect(selector).to_contain("driver_source_entry_closure_enabled(ctx))")
         expect(gates).to_contain("(driver_env_get_opt(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\") ?? \"\") == \"1\"")
         expect(selector).to_contain("SIMPLE_BOOTSTRAP_STAGE4")
         expect(selector).to_contain("SIMPLE_STAGE4_STREAMING_SURFACES")
         expect(selector).to_contain("SIMPLE_STAGE3_STREAMING_SURFACES")
-        expect(selector).to_contain("ctx.options.backend != \"vhdl\"")
+        expect(selector).to_contain("ctx.options.backend == \"vhdl\")")
+        expect(selector).to_contain("if vhdl: return -5")
+        expect(gates).to_contain("fn driver_streaming_surface_enabled(ctx: CompileContext) -> bool:\n    driver_streaming_surface_route(ctx) == 1")
         expect(producer).to_contain("SIMPLE_BOOTSTRAP_LOW_MEMORY=\"$\{NATIVE_LOW_MEMORY}\"")
         expect(producer).to_contain("SIMPLE_STAGE4_STREAMING_SURFACES=1")
         expect(producer).to_contain("SIMPLE_STAGE3_STREAMING_SURFACES=1")
@@ -147,10 +158,12 @@ describe "Stage4 streaming surface ownership":
 
     it "keeps streaming opt-in with Stage3 and legacy Stage4 producers":
         val selector = streaming_selector()
-        expect(selector).to_contain("((driver_env_get_opt(\"SIMPLE_STAGE3_STREAMING_SURFACES\") ?? \"\") == \"1\" or\n         ((driver_env_get_opt(\"SIMPLE_BOOTSTRAP_STAGE4\") ?? \"\") == \"1\" and\n          (driver_env_get_opt(\"SIMPLE_STAGE4_STREAMING_SURFACES\") ?? \"\") == \"1\"))")
+        expect(selector).to_contain("driver_env_get_opt(\"SIMPLE_STAGE3_STREAMING_SURFACES\") ?? \"\",\n        driver_env_get_opt(\"SIMPLE_BOOTSTRAP_STAGE4\") ?? \"\",\n        driver_env_get_opt(\"SIMPLE_STAGE4_STREAMING_SURFACES\") ?? \"\")")
+        expect(selector).to_contain("stage3 == \"1\" or (stage4 == \"1\" and stage4_streaming == \"1\")")
+        expect(selector).to_contain("if not requested: return 0")
         expect(selector).to_contain("driver_source_entry_closure_enabled(ctx)")
         expect(selector).to_contain("ctx.options.mode == CompileMode.Aot")
-        expect(selector).to_contain("ctx.options.backend != \"vhdl\"")
+        expect(selector).to_contain("ctx.options.backend == \"vhdl\")")
 
     it "switches Stage3 declaration arenas on after compact surfaces":
         val producer = file_read(PRODUCER)
@@ -180,7 +193,8 @@ describe "Stage4 streaming surface ownership":
         # persistent by a pause).
         val body = streaming_surface_helper()
         val begin = body.index_of("if not _sffi_transient_array_scope_begin():")
-        val parse = body.index_of("self.parse_full_frontend_selected_v1(", begin)
+        # 65b0304d3a2 renamed the scoped selected-policy parse entry.
+        val parse = body.index_of("self.parse_full_frontend_in_borrowed_scope_selected_v1(", begin)
         val owner = body.index_of("ModuleSurfaceParserOwner.new(module)", parse)
         val build = body.index_of("module_surface_from_owner(", owner)
         val surface_unwrap = body.index_of("val surface = surface_result.unwrap()", build)
@@ -231,7 +245,11 @@ describe "Stage4 streaming surface ownership":
         expect(end).to_be_greater_than(start)
         val body = driver.substring(start, end)
         val begin = body.index_of("if not rt_transient_array_scope_begin():")
-        val parse = body.index_of("parse_full_frontend(", begin)
+        # 06572a9d85c reparses under the surface's selected policy and promotes
+        # the retained frontend owners through one helper; dd4da7c6fae ends
+        # the scope through the reverse-reference publish, which itself calls
+        # driver_end_transient_parse_scope (driver_hir_pipeline_support.spl).
+        val parse = body.index_of("self.parse_full_frontend_in_borrowed_scope_selected_v1(", begin)
         val lower = body.index_of("lowering.lower_parser_module_unstub(module, is_entry)", parse)
         val pause = body.index_of("if not rt_transient_array_scope_pause():", lower)
         val promote = body.index_of("if not rt_transient_heap_promote(hir_module):", pause)
@@ -239,8 +257,8 @@ describe "Stage4 streaming surface ownership":
         val memos = body.index_of("lowering.promote_phase_memo_transient_owners()", diagnostics)
         val symbols = body.index_of("lowering.promote_symbol_table_transient_owners()", memos)
         val flat_row = body.index_of("bootstrap_hir_modules_promote_last()", symbols)
-        val registries = body.index_of("driver_promote_frontend_registry_owners()", flat_row)
-        val reclaim = body.index_of("if not driver_end_transient_parse_scope():", registries)
+        val registries = body.index_of("driver_promote_retained_frontend_owners_v1(", flat_row)
+        val reclaim = body.index_of("if not driver_publish_reverse_reference_parse_scope_v1(reverse_token):", registries)
         expect(begin).to_be_greater_than(0)
         expect(parse).to_be_greater_than(begin)
         expect(lower).to_be_greater_than(parse)
@@ -261,9 +279,13 @@ describe "Stage4 streaming surface ownership":
         expect(owner_start).to_be_greater_than(0)
         expect(owner_end).to_be_greater_than(owner_start)
         val owner = lowering_types.substring(owner_start, owner_end)
+        # Diagnostic roots promote through the layer-local
+        # `_hir_diagnostic_promote_raw` wrapper (no_direct_rt ratchet); the
+        # symbol-table owner still calls the extern directly.
+        for diag_root in ["self.errors", "self.diagnostic_messages", "self.diagnostic_recovered"]:
+            expect(owner).to_contain("_hir_diagnostic_promote_raw(" + diag_root + ")")
         for root in [
-            "self.errors", "self.diagnostic_messages",
-            "self.diagnostic_recovered", "table.symbols", "table.scopes",
+            "table.symbols", "table.scopes",
             "table.qualified_functions", "table.qualified_types",
             "table.module_callables"
         ]:

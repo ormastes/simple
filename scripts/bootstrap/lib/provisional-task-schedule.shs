@@ -2,68 +2,90 @@
 # Caller provides build_binary/build_index/prepare_backend/run_module_backend.
 # Every independent task gets one terminal scheduling outcome.
 provisional_dispatch_tasks() {
+  # Admission/schema/owner failures are never source diagnostics. A peer may
+  # finish its current task, but must not launch another after an owner abort.
+  provisional_stop_check() { [ ! -e "$lane_root/abort" ] || exit 2; }
+  provisional_classify() {
+    case "$1" in
+      0) outcome=SUCCEEDED ;;
+      1|124|134|137|139) outcome=FAILED ;;
+      20) outcome=BLOCKED ;;
+      *) outcome=ABORTED; : >"$lane_root/abort" ;;
+    esac
+  }
+  provisional_continue() { [ "$outcome" != ABORTED ] || exit 2; }
+
   attempt_binary() {
+    provisional_stop_check
     task_phase=$1 backend=$2 id=$3 entry=$4 output=$5
     if (build_binary "$id" "$entry" "$output" "$task_phase" "$backend"); then
       outcome=SUCCEEDED
     else
       result=$?
-      if [ "$result" -eq 20 ]; then outcome=BLOCKED; else outcome=FAILED; fi
+      provisional_classify "$result"
     fi
     printf '%s=%s\n' "${task_phase}_${backend}_${id}_status" "$outcome" >>"$statuses"
     printf '%s=unproven\n' "${task_phase}_${backend}_${id}_tool_evidence" >>"$statuses"
+    provisional_continue
   }
   attempt_modules() {
+    provisional_stop_check
     task_phase=$1 backend=$2 config=$3
     if (build_index "$task_phase" "$backend" "$config"); then
       index_outcome=SUCCEEDED
     else
       result=$?
-      if [ "$result" -eq 20 ]; then index_outcome=BLOCKED; else index_outcome=FAILED; fi
+      provisional_classify "$result"; index_outcome=$outcome
     fi
     printf '%s=%s\n' "${task_phase}_${backend}_index_status" "$index_outcome" >>"$statuses"
     printf '%s=unproven\n' "${task_phase}_${backend}_index_tool_evidence" >>"$statuses"
+    [ "$index_outcome" != ABORTED ] || exit 2
     if [ "$index_outcome" = SUCCEEDED ]; then
-      if (prepare_backend "$task_phase" "$backend" && run_module_backend "$task_phase" "$backend"); then
+      if (prepare_backend "$task_phase" "$backend"); then :; else
+        printf '%s=ABORTED\n' "${task_phase}_${backend}_preparation_status" >>"$statuses"
+        : >"$lane_root/abort"
+        exit 2
+      fi
+      if (run_module_backend "$task_phase" "$backend"); then
         group_outcome=SUCCEEDED
       else
         result=$?
-        if [ "$result" -eq 20 ]; then group_outcome=BLOCKED; else group_outcome=FAILED; fi
+        provisional_classify "$result"; group_outcome=$outcome
       fi
     else
       group_outcome=BLOCKED
     fi
     printf '%s=%s\n' "${task_phase}_${backend}_group_status" "$group_outcome" >>"$statuses"
     printf '%s=unproven\n' "${task_phase}_${backend}_group_tool_evidence" >>"$statuses"
+    [ "$group_outcome" != ABORTED ] || exit 2
     # A failed whole-program index/group is not evidence that every module
     # fails. Re-enter the normal compiler through the manager for each entry;
     # never consume a partial index or manufacture a qualified group receipt.
-    if [ "$task_phase" = phase3 ] && [ "$group_outcome" != SUCCEEDED ]; then
+    if [ "$group_outcome" != SUCCEEDED ]; then
       # Validate before constructing task paths; the grouped preparer may not
       # have run when its index failed. Source membership is checked by manager.
       [ -f "$module_inventory" ] && [ ! -L "$module_inventory" ] &&
-        [ -s "$module_inventory" ] || return 1
+        [ -s "$module_inventory" ] || { : >"$lane_root/abort"; return 2; }
       awk 'length($0)==0 || index($0,"\r") || $0 !~ /\.spl$/ ||
         $0 ~ /^\// || $0 ~ /[:\\]/ || $0 ~ /(^|\/)\.\.?(\/|$)/ { bad=1 }
-        END { exit bad }' "$module_inventory" || return 1
+        END { exit bad }' "$module_inventory" || { : >"$lane_root/abort"; return 2; }
       diagnostic_number=0
       while IFS= read -r diagnostic_entry || [ -n "$diagnostic_entry" ]; do
+        provisional_stop_check
         diagnostic_number=$((diagnostic_number + 1))
         diagnostic_id="diagnostic-module-$diagnostic_number"
         diagnostic_exit=0
-        if (build_binary "$diagnostic_id" "$diagnostic_entry" bin/module.o phase3 "$backend" object); then
+        if (build_binary "$diagnostic_id" "$diagnostic_entry" bin/module.o "$task_phase" "$backend" object); then
           diagnostic_outcome=OBJECT_EMITTED_UNQUALIFIED
         else
           diagnostic_exit=$?
-          if [ "$diagnostic_exit" -eq 20 ]; then
-            diagnostic_outcome=BLOCKED
-          else
-            diagnostic_outcome=FAILED
-          fi
+          provisional_classify "$diagnostic_exit"
+          diagnostic_outcome=$outcome
         fi
-        printf '%s=%s\n' "phase3_${backend}_${diagnostic_id}_entry" "$diagnostic_entry" \
-          "phase3_${backend}_${diagnostic_id}_status" "$diagnostic_outcome" \
-          "phase3_${backend}_${diagnostic_id}_exit" "$diagnostic_exit" >>"$statuses"
+        printf '%s=%s\n' "${task_phase}_${backend}_${diagnostic_id}_entry" "$diagnostic_entry" \
+          "${task_phase}_${backend}_${diagnostic_id}_status" "$diagnostic_outcome" \
+          "${task_phase}_${backend}_${diagnostic_id}_exit" "$diagnostic_exit" >>"$statuses"
+        [ "$diagnostic_outcome" != ABORTED ] || exit 2
       done <"$module_inventory"
     fi
   }
@@ -71,34 +93,36 @@ provisional_dispatch_tasks() {
   # parent combines the journals, in deterministic backend order.
   dispatch_backend() {
     backend=$1
-    attempt_binary phase3 "$backend" phase3-bootstrap src/app/cli/bootstrap_main.spl "bin/simple$exe_suffix"
-    attempt_binary phase4 "$backend" bootstrap src/app/cli/bootstrap_main.spl "bin/simple_bootstrap$exe_suffix"
-    attempt_binary phase4 "$backend" full-cli src/app/cli/_CliMain/main_and_help.spl "bin/simple$exe_suffix"
-    attempt_binary phase4 "$backend" test-runner src/app/test_runner_new/main.spl "bin/simple_test_runner$exe_suffix"
-    attempt_binary phase4 "$backend" interpreter src/app/cli/interpreter_main.spl "bin/simple_interpreter$exe_suffix"
-    attempt_binary phase4 "$backend" mcp src/app/mcp/main.spl "bin/simple_mcp_server$exe_suffix"
-    attempt_binary phase4 "$backend" lsp src/app/simple_lsp_mcp/main.spl "bin/simple_lsp_mcp_server$exe_suffix"
+    attempt_binary phase3 "$backend" phase3-bootstrap src/app/cli/bootstrap_main.spl "bin/simple$exe_suffix" || return 2
+    attempt_binary phase4 "$backend" bootstrap src/app/cli/bootstrap_main.spl "bin/simple_bootstrap$exe_suffix" || return 2
+    attempt_binary phase4 "$backend" full-cli src/app/cli/_CliMain/main_and_help.spl "bin/simple$exe_suffix" || return 2
+    attempt_binary phase4 "$backend" test-runner src/app/test_runner_new/main.spl "bin/simple_test_runner$exe_suffix" || return 2
+    attempt_binary phase4 "$backend" interpreter src/app/cli/interpreter_main.spl "bin/simple_interpreter$exe_suffix" || return 2
+    attempt_binary phase4 "$backend" mcp src/app/mcp/main.spl "bin/simple_mcp_server$exe_suffix" || return 2
+    attempt_binary phase4 "$backend" lsp src/app/simple_lsp_mcp/main.spl "bin/simple_lsp_mcp_server$exe_suffix" || return 2
     # Discover independent product failures before potentially long suites.
     for subsystem in compiler interpreter loader; do
+      provisional_stop_check
       if (run_native_subsystem "$backend" "$subsystem"); then
         outcome=SUCCEEDED
       else
         result=$?
-        if [ "$result" -eq 20 ]; then outcome=BLOCKED; else outcome=FAILED; fi
+        provisional_classify "$result"
       fi
       printf '%s=%s\n' "phase4_${backend}_native_${subsystem}_status" "$outcome" >>"$statuses"
       printf '%s=unproven\n' "phase4_${backend}_native_${subsystem}_tool_evidence" >>"$statuses"
+      provisional_continue
     done
     # A hello-qualified Phase 3 compiler can build the next generation while
     # broader module qualification remains pending. Every inventory still runs.
     case "$backend" in llvm) config=$phase3_llvm_index_config ;; cranelift) config=$phase3_cranelift_index_config ;; esac
-    attempt_modules phase3 "$backend" "$config"
+    attempt_modules phase3 "$backend" "$config" || return 2
     case "$backend" in llvm) config=$llvm_index_config ;; cranelift) config=$cranelift_index_config ;; esac
-    attempt_modules phase4 "$backend" "$config"
+    attempt_modules phase4 "$backend" "$config" || return 2
   }
   parent_statuses=$statuses
   parent_hashes=$hashes
-  lane_root=$(mktemp -d "${parent_statuses}.lanes.XXXXXX") || return 1
+  lane_root=$(mktemp -d "${parent_statuses}.lanes.XXXXXX") || return 2
   (
     statuses="$lane_root/llvm.statuses" hashes="$lane_root/llvm.hashes"
     : >"$statuses"; : >"$hashes"
@@ -112,11 +136,15 @@ provisional_dispatch_tasks() {
   ) &
   cranelift_pid=$!
   dispatch_result=0
-  wait "$llvm_pid" || dispatch_result=1
-  wait "$cranelift_pid" || dispatch_result=1
+  wait "$llvm_pid" || dispatch_result=2
+  wait "$cranelift_pid" || dispatch_result=2
   for backend in llvm cranelift; do
-    cat "$lane_root/$backend.statuses" >>"$parent_statuses" || dispatch_result=1
-    cat "$lane_root/$backend.hashes" >>"$parent_hashes" || dispatch_result=1
+    cat "$lane_root/$backend.statuses" >>"$parent_statuses" || dispatch_result=2
+    cat "$lane_root/$backend.hashes" >>"$parent_hashes" || dispatch_result=2
   done
+  [ ! -e "$lane_root/abort" ] || dispatch_result=2
+  if [ "$dispatch_result" -eq 0 ] && grep -Eq '_status=(FAILED|BLOCKED)$' "$parent_statuses"; then
+    dispatch_result=1
+  fi
   return "$dispatch_result"
 }

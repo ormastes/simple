@@ -26,7 +26,7 @@
    - Expected: backend.supports_target(CodegenTarget.HipHsaco) is true
    - Expected: backend.supports_target(CodegenTarget.CudaPtx) is false
    - Expected: backend.supports_target(CodegenTarget.OpenClC) is false
-   - Expected: backend.output_kind() equals `CodegenOutputKind.GpuCode`
+   - Expected: backend.output_kind() == CodegenOutputKind.GpuCode is true
 
 
 <details>
@@ -44,7 +44,7 @@ expect(backend.backend_name()).to_equal("hip")
 expect(backend.supports_target(CodegenTarget.HipHsaco)).to_equal(true)
 expect(backend.supports_target(CodegenTarget.CudaPtx)).to_equal(false)
 expect(backend.supports_target(CodegenTarget.OpenClC)).to_equal(false)
-expect(backend.output_kind()).to_equal(CodegenOutputKind.GpuCode)
+expect(backend.output_kind() == CodegenOutputKind.GpuCode).to_equal(true)
 ```
 
 </details>
@@ -68,7 +68,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-UNIT
 step("builds generated Engine2D HIP C++ to HSACO artifact evidence")
-val exported = "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32"
+val exported = "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32 simple_2d_bitmap_glyph_raster_u32"
 val contract = hip_backend_2d_compile_contract("simple_2d_optimization", "ELF AMDGCN HSACO", exported, 4096)
 
 expect(contract.ready).to_equal(true)
@@ -107,7 +107,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-UNIT
 step("exposes one shared generated Engine2D contract for CUDA and HIP")
-val exported = "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32"
+val exported = "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32 simple_2d_bitmap_glyph_raster_u32"
 val cuda = cuda_generated_2d_compile_contract("simple_2d_optimization", ".version 8.0", exported, 4096)
 val hip = hip_generated_2d_compile_contract("simple_2d_optimization", "ELF AMDGCN HSACO", exported, 4096)
 val bad_cuda = cuda_generated_2d_compile_contract("simple_2d_optimization", "ELF AMDGCN HSACO", exported, 4096)
@@ -185,10 +185,10 @@ expect(result.unwrap_err().message).to_contain("HIP MIR lowering is not implemen
 
 | Field | Value |
 |-------|-------|
-| Category | Compiler |
+| Category | Other |
 | Status | Active |
 | Source | `test/01_unit/compiler/codegen/hip_backend_contract_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-10-09 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -208,51 +208,3 @@ Tests covering HIP backend contract.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `fd01383c585a5af794bc8f9cd521ab83ca1fa6d834666458e519ef7474f346f6`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `fd01383c585a5af794bc8f9cd521ab83ca1fa6d834666458e519ef7474f346f6`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `fd01383c585a5af794bc8f9cd521ab83ca1fa6d834666458e519ef7474f346f6`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/compiler/codegen/hip_backend_contract_spec.spl
-mirror: doc/06_spec/01_unit/compiler/codegen/hip_backend_contract_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/compiler/codegen/hip_backend_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/codegen/hip_backend_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler/codegen/hip_backend_contract_spec.spl:23:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'names the HIP backend and supports HSACO artifact targets only' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/codegen/hip_backend_contract_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds generated Engine2D HIP C++ to HSACO artifact evidence' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/codegen/hip_backend_contract_spec.spl:49:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exposes one shared generated Engine2D contract for CUDA and HIP' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

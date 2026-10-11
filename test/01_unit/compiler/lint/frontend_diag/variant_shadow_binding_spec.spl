@@ -1,0 +1,173 @@
+# @req REQ-SSPEC-UNIT
+"""
+# MEXH007: a binding name shadows a unit variant of a visible enum (rule 2b)
+
+Bug class (#2801/#2821, phase-3 P3-HIR-1): a bare `case Eq:` over a subject
+whose enum does not own `Eq` lowers as an irrefutable BINDING and silently
+captures every value. HIR lowering 2a (`9e8a321091d`) resolves a bare name
+against the subject; this lint is the complementary warning for the shape that
+still lowers as a `Binding` while some visible enum has a unit variant of that
+name — in `case` arms, `for` loop variables and `val` / `if val` bindings.
+
+Consistency with 2a: the example whose subject type is unknown asserts
+"MEXH007 fires iff the pattern survived lowering as a Binding", so it holds
+before and after 2a lands.
+"""
+
+# @tag: unit, compiler, lint, hir, enum
+
+use std.spec.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnostics, hir_frontend_findings_with_code, HirFrontendFinding}
+use compiler.tools.lint._LintMain.config_and_model.{build_default_levels}
+
+val ops_src = "pub enum Op:\n    Eq\n    Ne\n\npub enum Tok:\n    Plus\n    Minus\n\npub enum Box:\n    Val(i64)\n"
+
+fn lower_single(src: text) -> HirModule:
+    var lowering = HirLowering.with_filename("probe/single.spl")
+    lowering.lower_module(parse_full_frontend(src, "probe/single.spl", "probe.single", Logger(level: 0)))
+
+fn lower_consumer(src: text) -> HirModule:
+    val log = Logger(level: 0)
+    val ops_ast = parse_full_frontend(ops_src, "lib/ops.spl", "lib.ops", log)
+    val consumer_ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.ops"] = ops_ast
+    val sources = [SourceFile(path: "lib/ops.spl", content: ops_src, module_name: "lib.ops")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    lowering.lower_module(consumer_ast)
+
+fn mexh007(hir: HirModule) -> [HirFrontendFinding]:
+    hir_frontend_findings_with_code(run_hir_frontend_diagnostics(hir), "MEXH007")
+
+fn pattern_has_binding_named(hir: HirModule, p: HirPattern, name: text) -> bool:
+    match p.kind:
+        case Binding(sym, _):
+            val s = hir.symbols.get_symbol(sym)
+            if s.?: s.unwrap().name == name else: false
+        case Or(ps):
+            for q in ps:
+                if pattern_has_binding_named(hir, q, name):
+                    return true
+            false
+        case Enum(_, _, payload):
+            if payload.?:
+                match payload.unwrap():
+                    case HirPatternPayload.Tuple(ps):
+                        for q in ps:
+                            if pattern_has_binding_named(hir, q, name):
+                                return true
+                        false
+                    case _: false
+            else:
+                false
+        case _: false
+
+fn expr_has_binding_named(hir: HirModule, e: HirExpr, name: text) -> bool:
+    match e.kind:
+        case MatchCase(_, arms):
+            for arm in arms:
+                if pattern_has_binding_named(hir, arm.pattern, name):
+                    return true
+                if block_has_binding_named(hir, arm.body, name):
+                    return true
+            false
+        case Block(b): block_has_binding_named(hir, b, name)
+        case _: false
+
+fn block_has_binding_named(hir: HirModule, b: HirBlock, name: text) -> bool:
+    for st in b.stmts:
+        match st.kind:
+            case Expr(e):
+                if expr_has_binding_named(hir, e, name):
+                    return true
+            case _: ()
+    if b.has:
+        return expr_has_binding_named(hir, b.value, name)
+    false
+
+fn function_has_binding_named(hir: HirModule, fn_name: text, name: text) -> bool:
+    for f in hir.functions.values():
+        if f.name == fn_name:
+            return block_has_binding_named(hir, f.body, name)
+    false
+
+describe "MEXH007 on a local enum pair":
+    it "warns when `case Eq:` over a Tok subject binds while Op.Eq is a visible unit variant":
+        val hir = lower_single(ops_src + "\nfn f(t: Tok) -> i64:\n    match t:\n        case Plus: 1\n        case Eq: 2\n        case _: 3\n")
+        val ws = mexh007(hir)
+        expect(ws.len()).to_equal(1)
+        expect(ws[0].message).to_contain("ambiguous bare pattern `Eq`")
+        expect(ws[0].message).to_contain("visible enum(s) Op")
+        expect(ws[0].message).to_contain("write `Op.Eq`")
+        expect(ws[0].function_name).to_equal("f")
+        expect(ws[0].family).to_equal("variant_shadow_binding")
+        expect(ws[0].line > 0).to_equal(true)
+
+    it "warns on a `for` loop variable named like a unit variant":
+        val hir = lower_single(ops_src + "\nfn h(xs: [i64]) -> i64:\n    var n = 0\n    for Eq in xs:\n        n = n + Eq\n    n\n")
+        val ws = mexh007(hir)
+        expect(ws.len()).to_equal(1)
+        expect(ws[0].message).to_contain("this `for` loop binds a new variable named `Eq`")
+
+    it "warns on an `if val Plus = o` binding":
+        val hir = lower_single(ops_src + "\nfn k(o: Op?) -> i64:\n    if val Plus = o:\n        return 1\n    0\n")
+        val ws = mexh007(hir)
+        expect(ws.len()).to_equal(1)
+        expect(ws[0].message).to_contain("`val`/`if val` declaration")
+        expect(ws[0].message).to_contain("visible enum(s) Tok")
+
+describe "MEXH007 stays silent on legitimate shapes":
+    it "does not warn when the bare names are variants of the subject's own enum":
+        val hir = lower_single(ops_src + "\nfn g(o: Op) -> i64:\n    match o:\n        case Eq | Ne: 1\n")
+        expect(mexh007(hir).len()).to_equal(0)
+
+    it "does not warn on a lowercase binding or a wildcard":
+        val hir = lower_single(ops_src + "\nfn g(o: Op) -> i64:\n    match o:\n        case Eq: 1\n        case other: 2\n")
+        expect(mexh007(hir).len()).to_equal(0)
+
+    it "does not warn on a binding named like a PAYLOAD variant (not a unit variant)":
+        val hir = lower_single(ops_src + "\nfn g(o: Op) -> i64:\n    match o:\n        case Val: 1\n        case _: 2\n")
+        expect(mexh007(hir).len()).to_equal(0)
+
+    it "does not warn on a qualified `Tok.Plus` arm":
+        val hir = lower_single(ops_src + "\nfn g(t: Tok) -> i64:\n    match t:\n        case Tok.Plus: 1\n        case Tok.Minus: 2\n")
+        expect(mexh007(hir).len()).to_equal(0)
+
+describe "MEXH007 across modules":
+    it "sees unit variants of an explicitly imported enum":
+        val hir = lower_consumer("use lib.ops.\{Op, Tok\}\n\nfn f(t: Tok) -> i64:\n    match t:\n        case Plus: 1\n        case Eq: 2\n        case _: 3\n")
+        val ws = mexh007(hir)
+        expect(ws.len()).to_equal(1)
+        expect(ws[0].message).to_contain("visible enum(s) Op")
+
+    it "sees unit variants of a glob-imported enum":
+        val hir = lower_consumer("use lib.ops.*\n\nfn f(t: Tok) -> i64:\n    match t:\n        case Plus: 1\n        case Eq: 2\n        case _: 3\n")
+        val ws = mexh007(hir)
+        expect(ws.len()).to_equal(1)
+        expect(ws[0].message).to_contain("Op")
+
+    it "fires on an unknown-subject bare arm exactly when it survived lowering as a Binding (2a contract)":
+        val src = "use lib.ops.\{Op, Tok, Box\}\n\nfn f(b: Box) -> i64:\n    match b:\n        case Val(x):\n            match x:\n                case Eq: 1\n                case _: 0\n"
+        val hir = lower_consumer(src)
+        val survived = function_has_binding_named(hir, "f", "Eq")
+        val ws = mexh007(hir)
+        if survived:
+            expect(ws.len()).to_equal(1)
+        else:
+            expect(ws.len()).to_equal(0)
+
+describe "MEXH007 registry":
+    it "is a warn-level family in the canonical catalog":
+        val levels = build_default_levels()
+        expect(levels.contains_key("variant_shadow_binding")).to_equal(true)
+        expect(levels["variant_shadow_binding"]).to_equal("warn")

@@ -1,0 +1,28 @@
+#!/bin/sh
+# Scheduler admission controls, separate from real compiler evidence.
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-collect-all-admission.XXXXXX")
+printf 'evidence=%s\n' "$tmp"
+statuses="$tmp/provisional.statuses" hashes="$tmp/hashes"
+: >"$statuses"; : >"$hashes"
+exe_suffix=
+build_binary() { exit 2; }
+. "$script_root/lib/provisional-task-schedule.shs"
+code=0
+provisional_dispatch_tasks || code=$?
+[ "$code" -eq 2 ]
+grep -q '_phase3-bootstrap_status=ABORTED' "$statuses"
+! grep -q '^phase4_' "$statuses"
+. "$script_root/lib/managed-task-schedule.shs"
+module_inventory="$tmp/inventory"
+printf '%s\n' src/first.spl src/later.spl >"$module_inventory"
+statuses="$tmp/managed.statuses"
+: >"$statuses"
+managed_failed=0
+code=0
+managed_attempt_objects phase4 llvm || code=$?
+[ "$code" -eq 2 ]
+! grep -q 'diagnostic-module-2' "$statuses"
+grep -q 'ABORTED' "$statuses"
+echo 'PASS: authority abort is durable and prevents later independent tasks'

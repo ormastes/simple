@@ -173,6 +173,14 @@ Windows/Linux bootstraps; no running cache is cleaned by the contract fixtures.
 
 ## Bug-linked source workarounds
 
+For per-file MIR/object continuation and early manual linking, follow
+[cached object continuation](bootstrap_failure_collection.md#cached-object-continuation-and-early-linking).
+Minimize compiler rebuilds: an existing producer may build a tagged source
+workaround while its permanent repair is developed separately. Reuse only
+normally validated entries, report actual reused/rebuilt counts, and retain
+dependency invalidation when the producer, ABI or inputs change. A request to
+recompile failed files does not authorize stale dependent objects.
+
 Follow [bug-linked workarounds](bug_linked_workarounds.md) when a temporary
 source change avoids a compiler/runtime bug (accepted contract; runtime
 qualification pending). Place `@workaround bug=<canonical-id>` immediately
@@ -193,3 +201,11 @@ exists while earlier admission continues. Freeze producer bytes, isolate
 writable caches/outputs, and budget CPU and memory across Windows/Linux lanes.
 Diagnostic scheduling does not change receipt-bound cache admission or permit
 promotion before the required verification succeeds.
+
+## Lexical cache parent and native staging
+
+The [native staging guide](bootstrap_native_staging.md#choose-staging-from-the-actual-producer-path)
+describes a scoped Linux/WSL producer whose object directory follows the lexical
+cache parent, not TMPDIR alone. A reviewed RAM-parent alias may retain the same
+physical cache; it must preserve all normal fingerprints and single-writer
+authority. Storage indirection is not forced cache admission.

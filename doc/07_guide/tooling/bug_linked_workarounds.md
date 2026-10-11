@@ -28,6 +28,29 @@ comment prefix. The optional `recover` field is a Git recovery reference of
 7–64 hexadecimal characters. Put the optional reason last and describe the
 defect being avoided. The marker does not resolve the bug or waive a failed check.
 
+## Required workaround traceability
+
+Every temporary build or test workaround must have all three links before it
+is used: an immediately preceding `@workaround bug=<canonical-id>` source
+annotation, an authoritative bug DB record, and a Git commit containing the
+workaround change. This applies to HIR/MIR repairs, temporary test comments,
+disabled checks and build-script workarounds. Do not treat a provisional object
+or executable as proof that the underlying bug is fixed.
+
+Record the original failure and affected source locations, the recovery commit
+for intended code, the workaround commit SHA/link, producer/source identities,
+reproducing and prevention tests, and the background fix owner in the bug
+record. The workaround commit is distinct from the later underlying-fix commit.
+If the qualified DB command is unavailable, retain these fields in a dated bug
+report and mark DB reconciliation pending; do not claim the DB was updated.
+An unknown defect needs a canonical bug record before a workaround is accepted.
+
+Keep the bug open while the workaround is active. After the underlying fix is
+applied and verified with the affected producer, record its commit and narrowly
+remove the workaround in a separate linked change. A fetched fix or a changed
+DB status alone does not authorize reverting source. Reuse valid caches and
+retain original failures throughout recovery.
+
 ## Find related workarounds
 
 ```sh

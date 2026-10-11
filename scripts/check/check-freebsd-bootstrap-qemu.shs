@@ -1075,6 +1075,20 @@ copy_guest_bootstrap_logs() {
 # ── Smoke / Full ───────────────────────────────────────────────────────
 printf '[7/7] Bootstrap (%s)\n' "$MODE"
 
+initialize_guest_host_config() {
+    # VM_SSH is the same selected user used for source sync and bootstrap.
+    # Resolve HOME in the guest; never initialize root's config on behalf of
+    # a non-root build user. Smoke guests need not have a checkout yet.
+    $VM_SSH /bin/sh -s -- "$1" <<'HOST_CONFIG_INIT' ||
+if test -f "$HOME/simple/scripts/setup/setup-freebsd-host.shs"; then
+    sh "$HOME/simple/scripts/setup/setup-freebsd-host.shs"
+else
+    test "$1" = optional
+fi
+HOST_CONFIG_INIT
+        fail "FreeBSD build-user host configuration initialization failed"
+}
+
 if [ "$MODE" = "smoke" ]; then
     # Smoke: verify clang exists and can compile a trivial C program
     CLANG_CHECK=$($VM_SSH "command -v clang >/dev/null 2>&1 && echo ok || echo missing" 2>/dev/null)
@@ -1095,6 +1109,7 @@ if [ "$MODE" = "smoke" ]; then
     # Test trivial C compilation
     $VM_SSH "echo 'int main(){return 0;}' > /tmp/test.c && clang -o /tmp/test /tmp/test.c && /tmp/test && echo ok" 2>/dev/null | grep -q ok
     pass "Trivial C compilation works"
+    initialize_guest_host_config optional
 
     SCRIPT_OK=1
     SUCCESS_MESSAGE="FreeBSD $QEMU_ARCH QEMU smoke PASS"
@@ -1229,6 +1244,7 @@ else
     # be in bootstrap_planner_v2_reason_allowed
     # (scripts/check/lib/bootstrap-planner-admission-bound.shs).
     GUEST_ENV="env PATH=/usr/local/llvm23/bin:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin LLVM_SYS_231_PREFIX=/usr/local/llvm23 LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig"
+    initialize_guest_host_config required
     if [ "$MODE" = phase2-only ]; then
         PHASE2_GUEST_CPUS=$($VM_SSH "sysctl -n hw.ncpu" 2>/dev/null) ||
             fail "Cannot read FreeBSD guest CPU count"
@@ -1362,7 +1378,7 @@ else
     fi
     GUEST_STAGE2='stage2=$(find build/bootstrap/stage2 -type f -name simple -print -quit) && test -n "$stage2"'
     info "Building receipt-free admitted Stage 2 trust root in VM..."
-    if ! $VM_SSH "cd ${VM_HOME}/simple && ${GUEST_ENV} sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=llvm --mode=dynload --full-bootstrap --stop-after-stage2 --no-mcp --jobs=2"; then
+    if ! $VM_SSH "cd ${VM_HOME}/simple && ${GUEST_ENV} sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=llvm --mode=dynload --full-bootstrap --stop-after-stage2 --no-mcp --jobs=full"; then
         copy_guest_bootstrap_logs
         fail "Canonical FreeBSD stage2 trust-root bootstrap failed"
     fi

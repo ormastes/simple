@@ -68,3 +68,59 @@ test script has not been run as a single invocation.
 Full compiler/core/MCP checks, successful rebuilt-compiler Hello execution and
 Phase 2 qualification remain pending. This change establishes admission logic
 and transport behavior, not completion of the backend build/test task.
+
+## Update 2026-10-09: the cap travels with the watchdog; Windows fallback removed
+
+Design change. The "absent required Windows tree budget selects the
+sequential path" rule above was deliberate: a correct host-memory answer
+still misses a smaller enforced process-tree cap that was never passed down.
+It was also incomplete in the other direction: owners outside the
+transcribed lanes enforce a cap and pass nothing --
+`scripts/bootstrap/run-process-group-timeout.shs` (default 5,859,375 KiB,
+used by `bootstrap-phase-verification.shs` matrix tasks with
+`SIMPLE_BOOTSTRAP` unset and `--threads 4`) and both
+`prepare-provisional-hello.shs` / `prepare-provisional-manager-images.shs`
+(enforced `cap_kib`, `--threads N`). On POSIX those fanned out by host
+memory under a cap they could not see.
+
+Root fix: `scripts/resource/process-tree-rss-watchdog.pl`, which every one of
+those owners goes through, now exports its enforced cap as
+`SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB` to the whole tree (a smaller inherited
+value is kept; an aggregate test tree hints the per-worker target; monitor
+mode sets nothing). A transcribed lane's explicit-env value still wins in its
+own child: on POSIX that is the cap in enforce mode and an explicit `0` in
+monitor mode; on Windows it is the frontend share, `min(cap, 3000000)` in
+enforce mode and `3000000` in monitor mode
+(`command-snapshot.shs` `bootstrap_stage3_windows_frontend_environment`).
+Pinned by `scripts/bootstrap/tests/watchdog-shard-budget-export-test.shs`
+(real watchdog, 7 cases including the wrapper default).
+
+With every enforced cap declared, `shard_mem_clamp.spl` uses one rule on all
+platforms: a declared budget clamps (40% reserved); an undeclared one means
+no enclosing cap, and fanout is bounded by measured host headroom (60% of
+min(available physical, available commit) on Windows, MemAvailable
+elsewhere); unknown memory is sequential. The Windows-only sequential
+fallback is gone. Motivation: it serialized every Windows native-build
+outside the transcribing wrapper, sized against per-worker figures the later
+re-measurement no longer supports (Stage 2 peak below 1 GB per process; the
+~15 GB reading in `stage2_memory_grows_monotonically_with_module_count_2026-09-26.md`
+traced to a 16x Windows /proc unit error, per the coordinator's
+re-measurement, not repeated here). Residual: an enforcing owner that
+bypasses the watchdog (or an external job-object cap) is not seen; that is a
+defect in that owner.
+
+`SIMPLE_HOST_MAX_THREADS` bounds the shard request on every platform
+(lower-only). `SIMPLE_HOST_WORKER_MEM_MIB` may raise but never lower a
+phase's worker budget (ignored with a warning below the default); the
+per-phase `SIMPLE_{PARSE,HIR}_SHARD_WORKER_KB` stays the deliberate way down.
+
+Intentional performance consequence (recorded 2026-10-09): an aggregate test
+tree (`--budget-scope=aggregate-tests`) exports the per-worker target,
+976,562 KiB. The clamp keeps 60% of it, 585,937 KiB, below one 1,650,000 KiB
+parse worker, so any native-build run inside an aggregate test worker always
+shards sequentially, on POSIX too (it previously fanned out by host memory
+there). That is the intended trade: each test worker's compile is budgeted at
+the per-worker target, and the aggregate cap already accounts for the
+parallelism across workers. A product lane that inherits a watchdog cap larger
+than its own frontend share keeps its share (`product-frontend-policy.shs`
+takes the minimum instead of rejecting the larger value).

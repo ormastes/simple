@@ -16,10 +16,30 @@ if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" 
   session_mode=inherit
 fi
 runner=$(CDPATH= cd -- "$(dirname -- "$0")/../resource" && pwd -P)/process-tree-rss-watchdog.pl
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+. "$repo/scripts/bootstrap/lib/tree-rss-policy.shs"
+compiler_jobs=0
+if [ "${2:-}" = native-build ]; then
+  compiler_jobs=$(bootstrap_tree_rss_command_jobs "$@")
+fi
+# Preserve the legacy override's precedence while validating every cap through
+# the same worker/host policy used by the transcribed bootstrap command owner.
+if [ -z "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-}" ] && \
+   [ -n "${SIMPLE_PROCESS_TREE_RSS_CAP_KIB:-}" ]; then
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$SIMPLE_PROCESS_TREE_RSS_CAP_KIB
+fi
+bootstrap_tree_rss_resolve "$compiler_jobs" "$repo" || {
+  printf 'process-timeout-policy-error: %s\n' "$bootstrap_tree_rss_refusal" >&2
+  exit 125
+}
+compiler_jobs_arg=
+[ "$compiler_jobs" -eq 0 ] || compiler_jobs_arg=--compiler-jobs=$compiler_jobs
 exec perl "$runner" \
   --session-mode="$session_mode" \
   --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
-  --max-rss-kib="${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-${SIMPLE_PROCESS_TREE_RSS_CAP_KIB:-5859375}}" \
+  --max-rss-kib="$bootstrap_tree_rss_cap_kib" \
+  $compiler_jobs_arg \
+  --cap-source="$bootstrap_tree_rss_source" --cap-bound="$bootstrap_tree_rss_bound" \
   --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
   --receipt="${SIMPLE_PROCESS_TREE_RSS_RECEIPT:-$TMPDIR/simple-process-tree-rss.$$.env}" \
   --timeout-seconds="$timeout_seconds" --term-grace-seconds="$grace_seconds" \

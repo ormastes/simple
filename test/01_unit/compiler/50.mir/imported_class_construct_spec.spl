@@ -1,0 +1,76 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+# Stage2 MIR: constructing an imported class / struct
+
+`use lib.b.{Mode}` then `Mode(n: 1)` aborted the seed-run compiler with
+
+    nil is forbidden by the non-optional return contract of 'lower_call'
+
+`lower_call` (`-> LocalId`) did `return nil` on its "missing class provider
+metadata" path. That path is reached whenever the class's provider module was
+not registered with this MIR lowering (no `providers` entry for it); on the
+native lane the same `nil` is an undefined local. It now records the fatal
+diagnostic with the call's span and returns a defined placeholder, so the
+build fails closed instead of the compiler crashing.
+
+With the provider registered (the driver's `lower_module(module, providers)`
+contract) named and positional construction of an imported class, struct and
+generic class lower without errors; those examples are guards.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn construct_errors(provider: text, consumer: text, register_provider: bool) -> text:
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    modules["lib.b"] = parse_full_frontend(provider, "lib/b.spl", "lib.b", log)
+    val sources = [SourceFile(path: "lib/b.spl", content: provider, module_name: "lib.b")]
+    val consumer_ast = parse_full_frontend(consumer, "app/main.spl", "app.main", log)
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var out = ""
+    for he in consumer_lowering.errors:
+        out = out + "HIR " + he.message + "\n"
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    if register_provider:
+        var provider_lowering = hirlowering_for_module("lib.b", surfaces)
+        val provider_hir = provider_lowering.lower_module(modules["lib.b"])
+        val _mir = mir_lowering.lower_module(consumer_hir, [provider_hir])
+    else:
+        val _mir_alone = mir_lowering.lower_module(consumer_hir)
+    for e in mir_lowering.errors:
+        out = out + "MIR " + e.message + "\n"
+    out
+
+val import_mode = "use lib.b.\{Mode\}\n\n"
+val both_forms = import_mode + "fn named() -> Mode:\n    Mode(n: 1)\n\nfn positional() -> Mode:\n    Mode(2)\n\nfn bound() -> i64:\n    val m = Mode(n: 3)\n    m.n\n"
+val class_src = "pub class Mode:\n    n: i64\n"
+val struct_src = "pub struct Mode:\n    n: i64\n"
+val generic_src = "pub class Mode<T>:\n    n: T\n"
+val generic_consumer = import_mode + "fn mk() -> i64:\n    val m = Mode(n: 1)\n    0\n"
+
+describe "constructing an imported class or struct":
+    it "lowers named and positional construction of an imported class":
+        expect(construct_errors(class_src, both_forms, true)).to_equal("")
+
+    it "lowers named and positional construction of an imported struct":
+        expect(construct_errors(struct_src, both_forms, true)).to_equal("")
+
+    it "lowers a generic imported class constructed without type arguments":
+        expect(construct_errors(generic_src, generic_consumer, true)).to_equal("")
+
+    it "fails closed, without crashing, when the class provider is not registered":
+        val errs = construct_errors(class_src, both_forms, false)
+        expect(errs.contains("missing class provider metadata for lib.b.Mode")).to_equal(true)

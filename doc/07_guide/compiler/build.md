@@ -579,3 +579,11 @@ Its ordinary HIR codec is `spl-hircodec-v3`, canonical codec is
 `spl-hircodec-canonical-v2`, and older cache identities are invalidated. See
 [the item 3 evidence](../../03_plan/evidence/seven_plans/windows/item3_builtin_identity_2026-09-29.md)
 before using this development branch; no optimizer/fusion capability is claimed.
+
+## Native staging and terminal evidence
+
+For the investigated Linux/WSL bootstrap path, see
+[native staging and terminal evidence](../tooling/bootstrap_native_staging.md):
+one-thread crash diagnosis, host-local CUDA configuration, cache-parent staging,
+owned-child cleanup, final receipt publication and full-CLI qualification. These
+are scoped workflow lessons, not new compiler defaults or completed build claims.

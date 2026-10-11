@@ -1,0 +1,52 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+# Mono field-chain inference resolves each hop in the DECLARING module
+
+SymbolIds are module-local. On `o.inner.ids` written in module `b`, the type of
+`o.inner` is the field type declared in module `a`, so its Named id belongs to
+`a`'s table. Resolving that id in `b` (the module being rewritten) can hit an
+unrelated `b` type with the same id and answer the wrong field type.
+"""
+
+use std.spec
+use std.spec.step
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.mono.monomorphize_integration.{MonomorphizationPass, hir_type_key}
+
+fn mk_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn mk_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: nil, span: Span.empty())
+
+describe "mono field chain owner module":
+    it "types a two-hop chain through the declaring module, not a colliding caller id":
+        # @req REQ-SSPEC-COMPILER
+        step("types a two-hop chain through the declaring module, not a colliding caller id")
+        var pass_ = MonomorphizationPass.create()
+        pass_.current_module = "b"
+        # Module a: Outer is #5, Inner is #6. Module b imports Outer as #5 and
+        # declares its own unrelated Clash as #6.
+        pass_.named_symbol_names["a#5"] = "Outer"
+        pass_.named_symbol_names["a#6"] = "Inner"
+        pass_.named_symbol_names["b#5"] = "Outer"
+        pass_.named_symbol_names["b#6"] = "Clash"
+        val u32_arr = mk_type(HirTypeKind.Array(mk_type(HirTypeKind.Int(32, false)), nil))
+        val i64_arr = mk_type(HirTypeKind.Array(mk_type(HirTypeKind.Int(64, true)), nil))
+        pass_.field_types["Outer::inner"] = mk_type(HirTypeKind.Named(SymbolId(id: 6), []))
+        pass_.field_owner_modules["Outer::inner"] = "a"
+        pass_.field_types["Inner::ids"] = u32_arr
+        pass_.field_owner_modules["Inner::ids"] = "a"
+        pass_.field_types["Clash::ids"] = i64_arr
+        pass_.field_owner_modules["Clash::ids"] = "b"
+        pass_.env[1] = mk_type(HirTypeKind.Named(SymbolId(id: 5), []))
+        val o = mk_expr(HirExprKind.Var(SymbolId(id: 1)))
+        val inner = mk_expr(HirExprKind.Field(o, "inner", nil))
+        val ids = mk_expr(HirExprKind.Field(inner, "ids", nil))
+        val got = pass_.infer_expr_type(ids)
+        expect(got != nil).to_equal(true)
+        val gt: HirType = got
+        expect(hir_type_key(gt)).to_equal(hir_type_key(u32_arr))

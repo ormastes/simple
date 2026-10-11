@@ -1,0 +1,43 @@
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirTypeKind}
+
+describe "generic composite field prescan scope":
+    it "binds multi-character struct and class parameters without leaking them":
+        val source = "struct PostingList<Id>:\n    ids: [Id]\nclass Cell<Element>:\n    value: Element\nfn main() -> i64:\n    0\n"
+        val parsed = parse_full_frontend(source, "generic_fields", "generic_fields", Logger(level: 0))
+        var lowering = HirLowering.with_filename("generic_fields")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.structs.len()).to_equal(1)
+        expect(hir.classes.len()).to_equal(1)
+        expect(hir.symbols.lookup_or_invalid("Id").is_valid()).to_equal(false)
+        expect(hir.symbols.lookup_or_invalid("Element").is_valid()).to_equal(false)
+        # Class fields retain the prescan cache; do not leave a Named symbol
+        # from the now-popped temporary scope in it.
+        val cell_fields = lowering.struct_field_types_by_name["Cell"]
+        val field = cell_fields["value"]
+        val is_canonical = match field.kind:
+            case HirTypeKind.TypeParam(name, _): name == "Element"
+            case _: false
+        expect(is_canonical).to_equal(true)
+        expect(lowering.prescan_type_parameters.len()).to_equal(0)
+
+    it "rejects an undeclared field type inside a generic declaration":
+        val source = "struct Broken<Id>:\n    ids: [Id]\n    missing: MissingType\nfn main() -> i64:\n    0\n"
+        val parsed = parse_full_frontend(source, "broken_generic", "broken_generic", Logger(level: 0))
+        var lowering = HirLowering.with_filename("broken_generic")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_be_greater_than(0)
+        expect(hir.symbols.lookup_or_invalid("MissingType").is_valid()).to_equal(false)
+
+    it "rejects a sibling field that tries to use another declaration's binder":
+        val source = "struct Owner<Id>:\n    ids: [Id]\nstruct Sibling:\n    invalid: Id\nfn main() -> i64:\n    0\n"
+        val parsed = parse_full_frontend(source, "sibling_scope", "sibling_scope", Logger(level: 0))
+        var lowering = HirLowering.with_filename("sibling_scope")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_be_greater_than(0)
+        expect(hir.symbols.lookup_or_invalid("Id").is_valid()).to_equal(false)

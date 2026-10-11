@@ -1,6 +1,14 @@
 <!-- claude-arch -->
 # Architecture: Unified SIMD (FixedVec + ScalableVec)
 
+## 2026-10-11 target-aware variation addendum
+
+Apply the [selected variation design](../../../05_design/compiler/simd_gpu_sosix_variation_final_2026-10-10.md) through the [current shared owners](../../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration). Fixed vectors, scalable vectors and GPU SIMT are different lowering/execution models, not interchangeable vector widths.
+
+The existing MIR vectorizer must receive the output target profile and precise operation legality. Host-global fallback and width-only AVX2/AVX512 requirement receipts remain migration work, not evidence of support. Define inactive-lane, mask, tail, alias and numerical behavior once; qualify each lowering against independent scalar oracles. SVE vector length and RVV execution state belong to admitted worker domains. Existing feature-registry IDs/masks remain authoritative; no second all-ISA selector or per-ISA vectorizer coordinator.
+
+The following historical model is superseded where it equates CPU vectors with GPU SIMT or proposes a new feature-bitmask owner. Fixed/scalable CPU semantics and explicit warp/subgroup operations remain distinct under the current addendum; reuse the already implemented feature registry. Historical proposal:
+
 This document defines the unified SIMD architecture for the Simple compiler. The design bridges seven
 target ISAs — NEON, SSE/AVX/AVX2/AVX-512, SVE/SVE2, RVV 1.0, PTX, and SPIR-V — through a two-type
 model (`FixedVec<T, const N>` for fixed-width targets and `ScalableVec<T>` for length-agnostic targets)

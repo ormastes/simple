@@ -1,0 +1,71 @@
+# Native regression, deliberately uses plain trait annotations.
+# Must be compiled and executed with each qualified self-hosted backend.
+# No source-check/interpreter result qualifies the native dispatch boundary.
+
+trait DispatchOwnerProbe:
+    me parse_probe_v1(value: i64) -> i64
+    me close_probe_v1() -> i64
+
+class AddOwnerProbe:
+    bias: i64
+    closed: bool
+
+impl DispatchOwnerProbe for AddOwnerProbe:
+    me parse_probe_v1(value: i64) -> i64:
+        if self.closed: return -1
+        self.bias + value
+
+    me close_probe_v1() -> i64:
+        if self.closed: return -1
+        self.closed = true
+        101
+
+class MultiplyOwnerProbe:
+    factor: i64
+    closed: bool
+
+class TraitOwnerHolderProbe:
+    owner: DispatchOwnerProbe
+    optional_owner: DispatchOwnerProbe?
+
+impl DispatchOwnerProbe for MultiplyOwnerProbe:
+    me parse_probe_v1(value: i64) -> i64:
+        if self.closed: return -1
+        self.factor * value
+
+    me close_probe_v1() -> i64:
+        if self.closed: return -1
+        self.closed = true
+        202
+
+fn make_owner_probe(choice: i64) -> DispatchOwnerProbe:
+    if choice == 0:
+        return AddOwnerProbe(bias: 7, closed: false)
+    MultiplyOwnerProbe(factor: 4, closed: false)
+
+fn exercise_owner_probe(owner: DispatchOwnerProbe, expected: i64, close_code: i64) -> i64:
+    if owner.parse_probe_v1(value: 5) != expected: return 1
+    if owner.close_probe_v1() != close_code: return 2
+    if owner.parse_probe_v1(5) != -1: return 3
+    if owner.close_probe_v1() != -1: return 4
+    0
+
+fn main() -> i64:
+    var first: DispatchOwnerProbe = make_owner_probe(0)
+    var second: DispatchOwnerProbe = make_owner_probe(1)
+    if exercise_owner_probe(first, 12, 101) != 0: return 11
+    if exercise_owner_probe(second, 20, 202) != 0: return 12
+    # Ordinary class parameters keep reference semantics after trait erasure.
+    if first.parse_probe_v1(5) != -1: return 13
+    if second.parse_probe_v1(5) != -1: return 14
+    val holder = TraitOwnerHolderProbe(owner: AddOwnerProbe(bias: 9, closed: false),
+        optional_owner: MultiplyOwnerProbe(factor: 6, closed: false))
+    if holder.owner.parse_probe_v1(5) != 14: return 15
+    if val optional_owner = holder.optional_owner:
+        if optional_owner.parse_probe_v1(5) != 30: return 16
+    else:
+        return 17
+    val empty_holder = TraitOwnerHolderProbe(owner: AddOwnerProbe(bias: 1, closed: false), optional_owner: nil)
+    if empty_holder.optional_owner.?: return 18
+    print "PASS native trait two-owner dispatch checks=13"
+    0

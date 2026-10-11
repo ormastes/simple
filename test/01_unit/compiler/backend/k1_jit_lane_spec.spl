@@ -1,0 +1,57 @@
+use std.spec.*
+use compiler.backend.backend.backend_types.{BackendCompileOptions, compileoptions_default_options}
+use compiler.backend.backend.static_backend_registry.{k1_backend_unavailable_message_v1}
+use compiler.backend.backend.static_jit_lane.{
+    installed_k1_jit_lane_name_v1, k1_jit_lane_unavailable_message_v1,
+    k1_jit_lane_run_modules_v1, k1_jit_lane_execute_smf_v1}
+use compiler.backend.backend.cranelift_retained_params_v2.{
+    CRANELIFT_RETAINED_OPTIMIZATION_V2, cranelift_retained_params_encode_v2,
+    cranelift_retained_params_decode_v2}
+use compiler.common.driver_core_types.{CompileResult}
+
+fn _codegen_error_text(result: CompileResult) -> text:
+    match result:
+        case CodegenError(message): message
+        case _: ""
+
+# No composition root is bound in a unit spec, so the kernel-side slots are
+# exactly what an LLVM-only kernel sees: no Cranelift entry, no JIT lane.
+describe "K1 JIT lane slot without a JIT-linking composition":
+    it "reports no installed lane":
+        expect(installed_k1_jit_lane_name_v1()).to_equal("")
+
+    it "refuses JIT execution by name instead of reaching an unlinked backend":
+        val message = _codegen_error_text(k1_jit_lane_run_modules_v1([]))
+        expect(message.contains("no JIT backend lane is linked in this build")).to_equal(true)
+        expect(message.contains("JIT execution")).to_equal(true)
+
+    it "refuses SMF execution the same way":
+        val message = _codegen_error_text(k1_jit_lane_execute_smf_v1("missing.smf"))
+        expect(message.contains("no JIT backend lane is linked in this build")).to_equal(true)
+        expect(message.contains("SMF execution")).to_equal(true)
+
+    it "names the unselected policy when no K1 table is installed":
+        expect(k1_jit_lane_unavailable_message_v1("x").contains("K1 policy 'unselected'")).to_equal(true)
+        expect(k1_backend_unavailable_message_v1("cranelift").contains(
+            "cranelift backend not available in this build (K1 policy 'unselected')")).to_equal(true)
+
+describe "retained Cranelift V2 params across the K1 port":
+    it "round-trips triple, cpu and features through CodegenParamsV1.ext":
+        val options = compileoptions_default_options()
+        val params = cranelift_retained_params_encode_v2(options,
+            Some("x86_64-pc-windows-msvc"), Some("x86-64-v3"), ["avx2", "bmi2"])
+        expect(params.optimization).to_equal(CRANELIFT_RETAINED_OPTIMIZATION_V2)
+        expect(params.ext.len()).to_equal(3)
+        val decoded = cranelift_retained_params_decode_v2(params)
+        expect(decoded.target_triple ?? "").to_equal("x86_64-pc-windows-msvc")
+        expect(decoded.cpu ?? "").to_equal("x86-64-v3")
+        expect(decoded.features.len()).to_equal(2)
+        expect(decoded.features[1]).to_equal("bmi2")
+
+    it "decodes an unretained request as absent values":
+        val options = compileoptions_default_options()
+        val decoded = cranelift_retained_params_decode_v2(
+            cranelift_retained_params_encode_v2(options, nil, nil, []))
+        expect(decoded.target_triple == nil).to_equal(true)
+        expect(decoded.cpu == nil).to_equal(true)
+        expect(decoded.features.len()).to_equal(0)

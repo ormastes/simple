@@ -1,0 +1,57 @@
+"""
+HIR codec scalar writers keep nil distinct from every payload, 3 and true
+included (doc/08_tracking/bug/native_scalar_nil_compare_payload_bits_2026-10-10.md).
+
+The writers keep their non-optional `i64` / `bool` parameters and tell nil
+apart by the RENDERED TEXT (`"{v}" == "nil"`, PR #2882,
+hir_codec_put_i64_three_encoded_as_nil_native_2026-10-10.md). They never test
+`v == nil` on the scalar slot, so the scalar nil fold has nothing to fold
+here, and they are only ever given PLAIN scalars: an `i64?` / `bool?`
+parameter would be wrong today, because method-call arguments are not coerced
+to Option handles (method_call_optional_param_arg_not_boxed_2026-10-11.md).
+This spec pins the oracle contract next to the fold specs.
+"""
+
+use std.spec.*
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.hir_codec_key_order.{hc_i64_key_before_v1}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+
+describe "HIR codec scalar writers keep nil distinct from every payload":
+    it "writes nil as N and every integer, including 3, as digits":
+        var w = HirCodecWriter.create()
+        w.put_i64(nil)
+        w.put_i64(3)
+        w.put_i64(0)
+        val n: i64 = 3
+        w.put_i64(n)
+        expect(w.ok).to_equal(true)
+        expect(w.finish()).to_equal("N\n3\n0\n3\n")
+
+    it "writes true as 1 and false as 0":
+        var w = HirCodecWriter.create()
+        w.put_bool(true)
+        w.put_bool(false)
+        val t: bool = true
+        w.put_bool(t)
+        expect(w.finish()).to_equal("1\n0\n1\n")
+
+    it "reads a written 3 back as 3 and a written nil back as nil":
+        var w = HirCodecWriter.create()
+        w.put_i64(3)
+        w.put_i64(nil)
+        w.put_bool(true)
+        var r = FlatPoolReader.new(w.finish())
+        expect(r.next_i64()).to_equal(3)
+        expect(r.next()).to_equal("N")
+        expect(r.next()).to_equal("1")
+        expect(r.ok).to_equal(true)
+
+    it "orders a nil key before every integer key, including 3":
+        expect(hc_i64_key_before_v1(nil, 3)).to_equal(true)
+        expect(hc_i64_key_before_v1(nil, 0)).to_equal(true)
+        expect(hc_i64_key_before_v1(3, nil)).to_equal(false)
+        expect(hc_i64_key_before_v1(nil, nil)).to_equal(false)
+        expect(hc_i64_key_before_v1(3, 3)).to_equal(false)
+        expect(hc_i64_key_before_v1(2, 3)).to_equal(true)
+        expect(hc_i64_key_before_v1(3, 2)).to_equal(false)

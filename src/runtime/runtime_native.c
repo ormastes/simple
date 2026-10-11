@@ -5726,6 +5726,20 @@ int64_t rt_string_substr_from(int64_t value, int64_t start) {
  * bug started. These names had no compiled implementation at all before, so
  * exiting is exactly as loud as the behaviour it replaces, never quieter. */
 static void rt_refuse_non_text_receiver(const char* method, int64_t receiver) {
+    /* TAG_INT is 0, so a raw 0 is ambiguous: either the integer 0 or storage
+     * that was never written, typically a module global whose __module_init_*
+     * never ran
+     * (doc/08_tracking/bug/windows_cranelift_weak_module_initializer_2026-10-04.md).
+     * Name both possibilities rather than claiming either. */
+    if (receiver == 0) {
+        fprintf(stderr,
+                "Runtime error: str.%s received a null receiver (0x0). Raw 0 is "
+                "either the integer 0 or storage that was never written (for "
+                "example a module global whose initializer never ran); neither "
+                "is text. Refusing to substitute a value. receiver=0x0\n",
+                method);
+        exit(70);
+    }
     fprintf(stderr,
             "Runtime error: str.%s was called on a receiver that is not text. "
             "This method has no compiled implementation for that receiver type -- "
@@ -5768,10 +5782,32 @@ int64_t rt_reverse(int64_t receiver) {
      * value directly, exactly as rt_array_len_safe does. */
     SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
     if (arr) {
-        int64_t n = rt_array_len(arr);
-        SplArray* out = rt_array_new(n > 0 ? n : 0);
-        if (!out) return rt_core_nil();
-        for (int64_t i = n - 1; i >= 0; i--) rt_array_push(out, rt_array_get(arr, i));
+        /* Copy, then reverse the copy's slots in place. rt_array_copy keeps the
+         * storage layout (BYTES = 1-byte raw slots, U64_PACKED = raw u64 slots,
+         * otherwise tagged words). The previous get+push loop moved a packed
+         * array's RAW slots into a generic array, where every consumer then
+         * read them as tagged values -- `[u8].reversed()` came back as garbage
+         * and lost its byte layout. */
+        SplArray* out = rt_array_copy(arr);
+        RtCoreArray* copy = rt_core_array_ptr(out);
+        if (!copy || out == arr) return rt_core_nil();
+        if (copy->len > 1 && copy->data) {
+            if (copy->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+                uint8_t* bytes = (uint8_t*)copy->data;
+                for (int64_t i = 0, j = copy->len - 1; i < j; i++, j--) {
+                    uint8_t tmp = bytes[i];
+                    bytes[i] = bytes[j];
+                    bytes[j] = tmp;
+                }
+            } else {
+                int64_t* slots = (int64_t*)copy->data;
+                for (int64_t i = 0, j = copy->len - 1; i < j; i++, j--) {
+                    int64_t tmp = slots[i];
+                    slots[i] = slots[j];
+                    slots[j] = tmp;
+                }
+            }
+        }
         return (int64_t)(uintptr_t)out;
     }
     RtCoreString* s = rt_core_as_string(receiver);
@@ -6462,6 +6498,37 @@ void rt_eprintln_value(int64_t value) {
     rt_core_print_value_to(stderr, value);
     fputc('\n', stderr);
     fflush(stderr);
+}
+
+/* ---- sffi/diag.spl externs (std.nogc_sync_mut.sffi.diag) -----------------
+ * These three are wrapped by src/lib/nogc_sync_mut/sffi/diag.spl. Until
+ * 2026-10-11 they had no native definition in either runtime lane, which is a
+ * hard link error on Windows-MSVC as soon as diag.spl is in a closure
+ * (libspl_objects.a is /WHOLEARCHIVE'd and lld-link resolves before /OPT:REF).
+ * See doc/08_tracking/bug/stage2_link_undefined_diag_externs_2026-10-11.md.
+ * Rust twins: src/compiler_rust/runtime/src/value/sffi/io_print.rs. */
+
+/* extern fn rt_print_err(msg: text): msg to stderr, no trailing newline. */
+void rt_print_err(int64_t msg) {
+    rt_eprint_value(msg);
+}
+
+/* extern fn rt_debug_exit_success(): "run finished OK, terminate now".
+ * Baremetal x86 writes 0 to the QEMU isa-debug-exit port; a hosted process
+ * has no such port, so the equivalent is a flushed, clean exit(0). */
+void rt_debug_exit_success(void) {
+    fflush(stdout);
+    fflush(stderr);
+    exit(0);
+}
+
+/* extern fn rt_perf_dump_sdn() -> text: SDN dump of rt_perf_region_* stats.
+ * No native lane has a perf-region recorder (only the seed interpreter does),
+ * so no region can have been recorded: return the empty table, byte-identical
+ * to the interpreter's output for an empty table. */
+int64_t rt_perf_dump_sdn(void) {
+    static const char empty[] = "perf_regions:\n  []\n";
+    return rt_string_new((const uint8_t*)empty, (uint64_t)(sizeof(empty) - 1));
 }
 
 SPL_WEAK bool rt_math_is_nan(double value) {
@@ -7231,6 +7298,17 @@ double rt_math_floor(double x) {
 
 double rt_math_ceil(double x) {
     return ceil(x);
+}
+
+/* Mirror the Rust runtime (value/sffi/math.rs): f64::round rounds half AWAY
+ * from zero, which is C round() -- NOT nearbyint/rint -- and f64::abs is
+ * fabs. Both were Rust-only, so `f.round()` / `f.abs()` could not link here. */
+double rt_math_round(double x) {
+    return round(x);
+}
+
+double rt_math_abs(double x) {
+    return fabs(x);
 }
 
 double rt_math_log(double x) {
@@ -9741,7 +9819,33 @@ int64_t rt_array_any(SplArray* array, int64_t closure_value) {
  * had a runtime_sffi spec and a Rust definition but no definition here at all,
  * so `arr.index_of(v)` was an unresolved symbol on the C lane. */
 int64_t rt_array_index_of(SplArray* array, int64_t value) {
-    if (!rt_core_array_ptr(array)) return -1;
+    RtCoreArray* packed = rt_core_array_ptr(array);
+    if (!packed) return -1;
+    if (packed->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) {
+        /* Packed arrays store RAW slots, while the needle arrives as a tagged
+         * int or a heap u64 box. Comparing a raw slot with rt_native_eq would
+         * read the byte as a tagged word and never match (or match the wrong
+         * element). Decode the needle once and compare numerically; a needle
+         * that is not a non-negative integer cannot be an element. */
+        uint64_t want;
+        RtCoreUInt* boxed = rt_core_as_heap_uint(value);
+        if (boxed) {
+            want = boxed->value;
+        } else if (rt_core_is_int(value)) {
+            int64_t signed_want = rt_core_as_int(value);
+            if (signed_want < 0) return -1;
+            want = (uint64_t)signed_want;
+        } else {
+            return -1;
+        }
+        int is_bytes = (packed->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+        for (int64_t i = 0; i < packed->len; i++) {
+            uint64_t slot = is_bytes ? (uint64_t)((uint8_t*)packed->data)[i]
+                                     : ((uint64_t*)packed->data)[i];
+            if (slot == want) return i;
+        }
+        return -1;
+    }
     for (int64_t i = 0; i < rt_array_len(array); i++) {
         if (rt_native_eq(rt_array_get(array, i), value)) return i;
     }
@@ -15931,6 +16035,10 @@ int64_t rt_io_tcp_bind(int64_t addr_val) {
     int opt = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     if (bind(fd, (struct sockaddr*)&sa, sizeof(sa)) < 0) { close(fd); return -1; }
+    /* Bug: redis_tagged_text_runtime_abi_2026_10_11. Match the canonical
+     * rt_io_tcp_bind listener contract (also used by the Rust provider).
+     * bind_fd remains the separate pre-listen socket operation. */
+    if (listen(fd, 128) < 0) { close(fd); return -1; }
     return (int64_t)fd;
 }
 
@@ -17048,23 +17156,143 @@ int64_t rt_array_first(int64_t array) {
     return rt_array_get(a, 0);
 }
 
-/* collections.rs:5349 -- [[i, elem], ...]: one 2-element array per entry. */
+/* collections.rs:5963 -- [(i, elem), ...]: one 2-TUPLE per entry, with the
+ * index as a TAGGED int. This used to build a plain 2-element array holding
+ * the RAW index, which matched neither the Rust runtime (rt_tuple_new +
+ * RuntimeValue::from_int) nor rt_dict_entries above: a consumer decoding the
+ * pair as `(i64, T)` read index >> 3. Same tuple shape as rt_dict_entries so
+ * `for (i, x) in xs.enumerate()` and `for (k, v) in dict` share one decoder. */
 int64_t rt_array_enumerate(int64_t array) {
-    SplArray* a = (SplArray*)(intptr_t)array;
+    SplArray* a = rt_core_as_array(array) ? (SplArray*)(uintptr_t)array : NULL;
     SplArray* out;
     int64_t n, i;
-    if (a == NULL) return 0;
+    if (a == NULL) return rt_core_nil();
     n = rt_array_len(a);
     out = rt_array_new(n > 0 ? n : 1);
-    if (out == NULL) return 0;
+    if (out == NULL) return rt_core_nil();
     for (i = 0; i < n; i++) {
-        SplArray* pair = rt_array_new(2);
-        if (pair == NULL) break;
-        rt_array_push(pair, i);
-        rt_array_push(pair, rt_array_get(a, i));
-        rt_array_push(out, (int64_t)(intptr_t)pair);
+        int64_t pair = rt_tuple_new(2);
+        if (pair == rt_core_nil()) return rt_core_nil();
+        rt_tuple_set(pair, 0, rt_value_int(i));
+        rt_tuple_set(pair, 1, rt_array_get(a, i));
+        rt_array_push(out, pair);
     }
-    return (int64_t)(intptr_t)out;
+    return (int64_t)(uintptr_t)out;
+}
+
+/* collections.rs:5793 -- sum of the numeric elements: int 0 for an empty
+ * array, nil for a non-array. Integer accumulation wraps (Rust release `+=`);
+ * any float element promotes the result to float(int_sum) + float_sum.
+ * Non-numeric elements are skipped, as in Rust. Byte / packed-u64 arrays store
+ * raw untagged slots, so every slot there is an integer. This is a SUPERSET of
+ * Rust: Rust's is_int() is tag-only (core.rs), while this also folds the C
+ * lane's heap-boxed wide ints (rt_core_as_heap_int), which Rust never makes. */
+int64_t rt_array_sum(int64_t array) {
+    RtCoreArray* ca = rt_core_as_array(array);
+    if (!ca) return rt_core_nil();
+    SplArray* a = (SplArray*)(uintptr_t)array;
+    int64_t n = rt_array_len(a);
+    int raw_slots = (ca->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) != 0;
+    uint64_t int_sum = 0;
+    double float_sum = 0.0;
+    int has_float = 0;
+    for (int64_t i = 0; i < n; i++) {
+        int64_t v = rt_array_get(a, i);
+        RtCoreWideInt* wide;
+        if (raw_slots) {
+            int_sum += (uint64_t)v;
+        } else if (rt_core_is_int(v)) {
+            int_sum += (uint64_t)rt_core_as_int(v);
+        } else if ((wide = rt_core_as_heap_int(v)) != NULL) {
+            int_sum += (uint64_t)wide->value;
+        } else if (rt_core_is_float(v)) {
+            has_float = 1;
+            float_sum += rt_core_as_float(v);
+        }
+    }
+    if (has_float) return rt_value_float((double)(int64_t)int_sum + float_sum);
+    return rt_value_int((int64_t)int_sum);
+}
+
+/* collections.rs:6038 -- new array of the first clamp(n, 0, len) elements;
+ * nil for a non-array. Rust arrays hold one RuntimeValue per element, so its
+ * take always yields the same element VALUES. The C lane also has BYTES and
+ * packed-u64 arrays whose slots are raw (rt_array_get returns the raw byte /
+ * word), so the result keeps the source's STORAGE-LAYOUT flags (BYTES,
+ * U64_PACKED) and copies the raw slots: pushing raw slots into a plain tagged
+ * array would misdecode them. Other flags (e.g. TUPLE) are not propagated: the
+ * result is a plain array, as the previous C push-based take produced. */
+int64_t rt_array_take(int64_t array, int64_t n) {
+    RtCoreArray* ca = rt_core_as_array(array);
+    if (!ca) return rt_core_nil();
+    int64_t len = ca->len;
+    int64_t take = n < 0 ? 0 : (n < len ? n : len);
+    SplArray* out = rt_core_array_new(take, (uint8_t)(ca->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)));
+    RtCoreArray* co = out ? rt_core_array_ptr(out) : NULL;
+    if (!co) return rt_core_nil();
+    size_t elem_size = (ca->flags & RT_CORE_ARRAY_FLAG_BYTES) ? sizeof(uint8_t) : sizeof(int64_t);
+    if (take > 0) memcpy(co->data, ca->data, (size_t)take * elem_size);
+    co->len = take;
+    return (int64_t)(uintptr_t)out;
+}
+
+/* RuntimeValue::as_int (value/core.rs:303) applied to one element of a Simple
+ * array: heap-boxed wide ints yield their value, everything else sign-extends
+ * the 61-bit payload. Byte / packed-u64 arrays hand back raw untagged slots. */
+static inline int64_t spl_core_array_elem_as_int(const RtCoreArray* ca, int64_t slot) {
+    RtCoreWideInt* wide;
+    if (ca->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) return slot;
+    if ((wide = rt_core_as_heap_int(slot)) != NULL) return wide->value;
+    return rt_core_as_int(slot);
+}
+
+/* file_ops.rs:1929 -- copy a Simple [u32] into packed raw u32 storage at ptr.
+ * Returns the element count written; 0 for a null ptr or an empty/non-array
+ * value (Rust's rt_array_len gives 0 for nil and -1 for a non-array). */
+int64_t rt_write_u32s_to_raw(int64_t ptr, int64_t values) {
+    RtCoreArray* ca;
+    SplArray* a;
+    uint32_t* dst;
+    int64_t len, i;
+    if (ptr == 0) return 0;
+    ca = rt_core_as_array(values);
+    if (!ca) return 0;
+    a = (SplArray*)(uintptr_t)values;
+    len = rt_array_len(a);
+    if (len <= 0) return 0;
+    dst = (uint32_t*)(uintptr_t)ptr;
+    for (i = 0; i < len; i++) {
+        dst[i] = (uint32_t)spl_core_array_elem_as_int(ca, rt_array_get(a, i));
+    }
+    return len;
+}
+
+/* file_ops.rs:2040 -- copy an exact FillU32 result (count == len, every word
+ * equal to `expected`) and return its wire checksum: sum of (word & 0x7fffffff)
+ * mod 2147483647, 1 standing in for 0, -1 when any word differs from expected,
+ * 0 for invalid arguments. All words are written before the verdict, as in Rust. */
+int64_t rt_write_fill_u32s_to_raw_checksum(int64_t ptr, int64_t values, int64_t count, int64_t expected) {
+    RtCoreArray* ca;
+    SplArray* a;
+    uint32_t* dst;
+    uint32_t want;
+    int64_t checksum = 0, i;
+    int exact = 1;
+    if (ptr == 0 || count <= 0 || expected < 0 || expected > (int64_t)UINT32_MAX) return 0;
+    ca = rt_core_as_array(values);
+    if (!ca) return 0;
+    a = (SplArray*)(uintptr_t)values;
+    if (count != rt_array_len(a)) return 0;
+    dst = (uint32_t*)(uintptr_t)ptr;
+    want = (uint32_t)expected;
+    for (i = 0; i < count; i++) {
+        uint32_t value = (uint32_t)spl_core_array_elem_as_int(ca, rt_array_get(a, i));
+        dst[i] = value;
+        checksum = (checksum + (int64_t)(value & 0x7fffffffu)) % 2147483647;
+        exact &= (value == want);
+    }
+    if (!exact) return -1;
+    return checksum == 0 ? 1 : checksum;
 }
 
 /* collections.rs:1464 -- append `count` elements of src onto dst; true on ok. */
@@ -17103,24 +17331,71 @@ int64_t rt_string_lines(int64_t string) {
     return parts;
 }
 
-/* collections.rs:4239 -- Some(int) on a fully-numeric string, None otherwise. */
+/* Strict optional integer parse for text.parse_int/parse_i64, matching the
+ * Rust runtime (collections.rs rt_string_parse_int: `s.trim().parse::<i64>()`)
+ * and the Simple twin (simple_core/core_string.spl rt_string_parse_int): a
+ * tagged integer on success, NIL on failure. The previous body returned an
+ * Option enum handle wrapping the LENIENT strtoll value, so "12x" parsed as
+ * Some(12) and the result ABI differed from both other lanes. */
 int64_t rt_string_parse_int(int64_t string) {
-    int64_t len = rt_string_len(string);
-    if (len <= 0) return rt_option_none();
-    return rt_option_some(rt_string_to_int(string));
+    RtCoreString* s = rt_core_as_string(string);
+    if (!s) return rt_core_nil();
+    uint64_t begin = 0;
+    uint64_t finish = s->len;
+    while (begin < finish && (s->data[begin] == ' ' || s->data[begin] == '\t' ||
+                              s->data[begin] == '\n' || s->data[begin] == '\r' ||
+                              s->data[begin] == '\f' || s->data[begin] == '\v')) begin++;
+    while (finish > begin && (s->data[finish - 1] == ' ' || s->data[finish - 1] == '\t' ||
+                              s->data[finish - 1] == '\n' || s->data[finish - 1] == '\r' ||
+                              s->data[finish - 1] == '\f' || s->data[finish - 1] == '\v')) finish--;
+    if (begin >= finish) return rt_core_nil();
+    int negative = 0;
+    if (s->data[begin] == '+' || s->data[begin] == '-') {
+        negative = s->data[begin] == '-';
+        begin++;
+    }
+    if (begin >= finish) return rt_core_nil();
+    uint64_t limit = negative ? 9223372036854775808ULL : 9223372036854775807ULL;
+    uint64_t magnitude = 0;
+    for (uint64_t i = begin; i < finish; i++) {
+        uint8_t byte = (uint8_t)s->data[i];
+        if (byte < '0' || byte > '9') return rt_core_nil();
+        uint64_t digit = (uint64_t)(byte - '0');
+        if (magnitude > (limit - digit) / 10ULL) return rt_core_nil();
+        magnitude = magnitude * 10ULL + digit;
+    }
+    if (negative) {
+        if (magnitude == 9223372036854775808ULL) return rt_value_int(INT64_MIN);
+        return rt_value_int(-(int64_t)magnitude);
+    }
+    return rt_value_int((int64_t)magnitude);
 }
 
 /* ---- unique / shared / handle (6): real semantics, objects.rs ----------
  * objects.rs boxes the value in a heap cell; the C runtime has no such cell
  * type, and the transparent identity box it would degrade to is exactly what
  * the Rust versions observably do for get(new(v)) == v. Ownership/refcount
- * tracking is NOT modelled -- recorded as a follow-up, not silently implied. */
+ * tracking is NOT modelled -- recorded as a follow-up, not silently implied.
+ * INVARIANT: nothing frees a shared value in this lane (no C
+ * rt_shared_release). rt_weak_upgrade below is identity ONLY while that
+ * holds; whoever adds a release path must give weak pointers a liveness check
+ * (Rust: refcount > 0) at the same time. */
 int64_t rt_unique_new(int64_t value) { return value; }
 int64_t rt_unique_get(int64_t unique) { return unique; }
 int64_t rt_shared_new(int64_t value) { return value; }
 int64_t rt_shared_get(int64_t shared) { return shared; }
 int64_t rt_handle_new(int64_t value) { return value; }
 int64_t rt_handle_get(int64_t handle) { return handle; }
+
+/* objects.rs:864/918 -- weak pointers over the shared cell above. Rust's weak
+ * upgrade answers nil only once the shared cell's refcount reached zero and it
+ * was freed. In this lane a shared value IS its own cell and no release path
+ * exists (there is no C rt_shared_release), so the referent is always live:
+ * downgrade keeps the referent and upgrade returns it, which is exactly the
+ * Rust result for a live cell. Codegen emits both for PointerKind::Weak
+ * (codegen/instr/pointers.rs). */
+int64_t rt_shared_downgrade(int64_t shared) { return shared; }
+int64_t rt_weak_upgrade(int64_t weak) { return weak; }
 
 /* ---- pointer (3): no Rust counterpart exists; emitter contract unknown -- */
 SPL_RT_TRAP1(rt_pointer_new)

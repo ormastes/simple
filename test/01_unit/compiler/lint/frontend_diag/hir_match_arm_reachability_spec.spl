@@ -1,0 +1,63 @@
+# @req REQ-SSPEC-UNIT
+"""
+# MEXH004 / MEXH008 / MEXH009 on lowered HIR match arms (rule R4)
+
+The AST lint (35.semantics/lint/match_exhaustiveness.spl) guesses arm shapes
+from text; these three run over the lowered `HirMatchArm` list, after bare
+variant names have been resolved, so a duplicate variant arm, an arm after an
+unguarded catch-all, and a trailing guarded catch-all with no fallback are
+decided on real pattern kinds. Family `non_exhaustive_match` (existing).
+"""
+
+# @tag: unit, compiler, lint, hir, enum
+
+use std.spec.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnostics, hir_frontend_findings_with_code, HirFrontendFinding}
+
+val op_src = "enum Op:\n    Eq\n    Ne\n    Lt\n\n"
+
+fn lower_single(src: text) -> HirModule:
+    var lowering = HirLowering.with_filename("probe/arms.spl")
+    lowering.lower_module(parse_full_frontend(src, "probe/arms.spl", "probe.arms", Logger(level: 0)))
+
+fn arm_findings(src: text, code: text) -> [HirFrontendFinding]:
+    hir_frontend_findings_with_code(run_hir_frontend_diagnostics(lower_single(op_src + src)), code)
+
+describe "arm reachability on lowered HIR":
+    it "MEXH004: an arm after an unguarded `_` is unreachable":
+        val ws = arm_findings("fn f(o: Op) -> i64:\n    match o:\n        case Eq: 1\n        case _: 2\n        case Ne: 3\n", "MEXH004")
+        expect(ws.len()).to_equal(1)
+        expect(ws[0].message).to_contain("unreachable match arm")
+        expect(ws[0].function_name).to_equal("f")
+        expect(ws[0].family).to_equal("non_exhaustive_match")
+
+    it "MEXH008: a second unguarded arm for the same unit variant is unreachable":
+        val ws = arm_findings("fn g(o: Op) -> i64:\n    match o:\n        case Eq: 1\n        case Eq: 2\n        case Ne: 3\n        case Lt: 4\n", "MEXH008")
+        expect(ws.len()).to_equal(1)
+        expect(ws[0].message).to_contain("duplicate match arm for variant `Eq`")
+
+    it "MEXH009: a guarded catch-all as the LAST arm has no fallback":
+        val ws = arm_findings("fn h(o: Op, b: bool) -> i64:\n    match o:\n        case Eq: 1\n        case _ if b: 2\n", "MEXH009")
+        expect(ws.len()).to_equal(1)
+        expect(ws[0].message).to_contain("guarded catch-all arm is the last arm")
+
+describe "arm reachability negatives":
+    it "distinct variants plus a trailing `_` are clean":
+        val src = "fn f(o: Op) -> i64:\n    match o:\n        case Eq: 1\n        case Ne: 2\n        case _: 3\n"
+        expect(arm_findings(src, "MEXH004").len()).to_equal(0)
+        expect(arm_findings(src, "MEXH008").len()).to_equal(0)
+        expect(arm_findings(src, "MEXH009").len()).to_equal(0)
+
+    it "a guarded `_` followed by an unguarded `_` is a legal fallback chain":
+        val src = "fn f(o: Op, b: bool) -> i64:\n    match o:\n        case _ if b: 1\n        case _: 2\n"
+        expect(arm_findings(src, "MEXH009").len()).to_equal(0)
+        expect(arm_findings(src, "MEXH004").len()).to_equal(0)
+
+    it "a guarded variant arm followed by the same unguarded variant is not a duplicate":
+        val src = "fn f(o: Op, b: bool) -> i64:\n    match o:\n        case Eq if b: 1\n        case Eq: 2\n        case _: 3\n"
+        expect(arm_findings(src, "MEXH008").len()).to_equal(0)

@@ -1,7 +1,7 @@
 # Bitbucket Cloud / Data Center wire protocol helpers.
 # Pure URL, body, error and JSON functions; no dependency on the client adapter.
 
-use std.json.{json_object_get, json_array_get, json_array_length, json_serialize}
+use std.common.json.value.{JsonValue, json_value_has, json_value_field, json_value_items, json_value_is_null, json_value_serialize}
 use app.devhub.atlassian_site.{AtlassianSite, bitbucket_owner_url, bitbucket_pr_collection_url, bitbucket_repo_url, bitbucket_page_query}
 use app.devhub.errors.{ItfError, ITF_ERR_AUTH, ITF_ERR_NOT_FOUND, ITF_ERR_API, ITF_ERR_CONFLICT, ITF_ERR_NETWORK}
 use app.devhub.redaction.redact_devhub_diagnostic
@@ -328,27 +328,21 @@ fn bb_should_retry(status: i64, retry_after_header: text) -> (bool, i64):
     (true, n)
 
 
-fn _bb_str(obj: any, key: text) -> text:
+fn _bb_str(obj: JsonValue, key: text) -> text:
     """Safely extract a string field from JSON object."""
-    if obj == nil:
+    if not json_value_has(obj, key):
         return ""
-    val value = json_object_get(obj, key)
-    if value == nil:
-        return ""
-    val s = json_serialize(value)
+    val s = json_value_serialize(json_value_field(obj, key))
     if s.starts_with("\"") and s.ends_with("\""):
         return s[1:s.len() - 1]
     s
 
 
-fn _bb_int(obj: any, key: text) -> i64:
+fn _bb_int(obj: JsonValue, key: text) -> i64:
     """Safely extract an integer field from JSON object."""
-    if obj == nil:
+    if not json_value_has(obj, key):
         return 0
-    val value = json_object_get(obj, key)
-    if value == nil:
-        return 0
-    val s = json_serialize(value)
+    val s = json_value_serialize(json_value_field(obj, key))
     var result: i64 = 0
     for ch in s:
         if ch >= "0" and ch <= "9":
@@ -356,35 +350,21 @@ fn _bb_int(obj: any, key: text) -> i64:
     result
 
 
-fn _bb_bool(obj: any, key: text) -> bool:
+fn _bb_bool(obj: JsonValue, key: text) -> bool:
     """Safely extract a boolean field from JSON object. Missing/non-bool -> false."""
-    if obj == nil:
+    if not json_value_has(obj, key):
         return false
-    val value = json_object_get(obj, key)
-    if value == nil:
-        return false
-    json_serialize(value) == "true"
+    json_value_serialize(json_value_field(obj, key)) == "true"
 
 
-fn _bb_parse_values_array(parsed: any) -> [any]:
+fn _bb_parse_values_array(parsed: JsonValue) -> [JsonValue]:
     """Bitbucket paginated responses wrap entries in {'values': [...]}.
 
     Returns the inner array as a list of raw JSON nodes, or [] on miss.
     """
-    if parsed == nil:
-        return []
-    val values = json_object_get(parsed, "values")
-    if values == nil:
-        return []
-    val n = json_array_length(values)
-    var out: [any] = []
-    var i: i64 = 0
-    while i < n:
-        out = out + [json_array_get(values, i)]
-        i = i + 1
-    out
+    json_value_items(json_value_field(parsed, "values"))
 
-fn _bb_combine_values_json(values: [any], capped: bool) -> text:
+fn _bb_combine_values_json(values: [JsonValue], capped: bool) -> text:
     """Re-serialize accumulated multi-page value nodes as a single
     {"values": [...]} JSON body, for --json output when more than one page
     was fetched.
@@ -397,7 +377,7 @@ fn _bb_combine_values_json(values: [any], capped: bool) -> text:
     change in the common case."""
     var parts: [text] = []
     for v in values:
-        parts = parts + [json_serialize(v)]
+        parts = parts + [json_value_serialize(v)]
     var body = "\"values\": [" + parts.join(", ") + "]"
     if capped:
         body = body + ", \"_capped\": true"
@@ -408,7 +388,7 @@ fn _bb_combine_values_json(values: [any], capped: bool) -> text:
 # Ready-to-merge logic (pure — covered by unit tests)
 # ============================================================================
 
-fn bb_eval_ready_to_merge(pr_parsed: any, statuses_parsed: any) -> (bool, text):
+fn bb_eval_ready_to_merge(pr_parsed: JsonValue, statuses_parsed: JsonValue) -> (bool, text):
     """Pure helper: given parsed PR JSON + parsed statuses JSON, decide ready.
 
     Ready iff:
@@ -416,24 +396,23 @@ fn bb_eval_ready_to_merge(pr_parsed: any, statuses_parsed: any) -> (bool, text):
       2. participants[role=REVIEWER, approved=true].count >= 1
       3. all statuses[*].state == "SUCCESSFUL"
     """
-    if pr_parsed == nil:
+    if json_value_is_null(pr_parsed):
         return (false, "missing PR data")
     val state = _bb_str(pr_parsed, "state")
     if state != "OPEN":
         return (false, "PR state is " + state + ", expected OPEN")
-    val participants = json_object_get(pr_parsed, "participants")
-    if participants == nil:
+    if not json_value_has(pr_parsed, "participants"):
         return (false, "no participants in PR")
-    val pn = json_array_length(participants)
+    val participants = json_value_items(json_value_field(pr_parsed, "participants"))
+    val pn = participants.len()
     var approved_reviewers: i64 = 0
     var i: i64 = 0
     while i < pn:
-        val p = json_array_get(participants, i)
+        val p = participants[i]
         val role = _bb_str(p, "role")
         if role == "REVIEWER":
-            val approved_obj = json_object_get(p, "approved")
-            if approved_obj != nil:
-                val s = json_serialize(approved_obj)
+            if json_value_has(p, "approved"):
+                val s = json_value_serialize(json_value_field(p, "approved"))
                 if s == "true":
                     approved_reviewers = approved_reviewers + 1
         i = i + 1

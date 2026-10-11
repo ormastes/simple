@@ -4,7 +4,7 @@
 # Counts are measured, never assumed. See:
 #   doc/03_plan/infra/binary_runtime_hardening/plan.md
 #   doc/01_research/infra/sspec_binary/binary_sspec_rt_hardening_frozen_design_2026-08-18.md
-# Usage: sh scripts/check/check-no-direct-rt.shs [--selftest-only] [--root DIR] [--roots r1,r2,...] [--offenders FILE] [--rev REV] [--baseline-rev REV]
+# Usage: sh scripts/check/check-no-direct-rt.shs [--selftest-only] [--root DIR] [--roots r1,r2,...] [--offenders FILE] [--rev REV] [--baseline-rev REV] [--critical [--closure-entry FILE.spl]]
 #
 # --roots (comma-separated repo-relative dirs, default "src,examples,tools,scripts,test"):
 # widened 2026-08-28 from src-only to also scan examples/, tools/, scripts/ and
@@ -94,6 +94,16 @@ GENERATE_BASELINE=0
 # the offender tally is computed and then deleted, so only the top 5 are ever
 # visible and only on a FAIL.
 OFFENDERS_OUT=""
+# --closure-entry FILE (repo-relative .spl, requires --critical): restrict the
+# scan to the static top-level `use` closure of one binary entry, e.g. the
+# stage3 compiler (src/app/cli/bootstrap_main.spl) or the test runner
+# (src/app/test_runner_new/main.spl). The closure is computed by the existing
+# check-no-free-generic-fn-in-bootstrap-closure.shs --print-closure (one BFS
+# implementation, not two). Critical-only because the tracked baseline is a
+# whole-roots number and is meaningless for a closure subset.
+CLOSURE_ENTRY=""
+RT_CLOSURE_LIST=""
+RT_SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 # Every value-taking option is read through require_value(). Writing the old
 # `shift; VAR="$1"` inline meant that a value-taking option given LAST (the
 # dispatcher builds these command lines from a manifest row, so a row that
@@ -122,6 +132,7 @@ while [ $# -gt 0 ]; do
     --rev) require_value "$1" $#; shift; REV="$1" ;;
     --baseline-rev) require_value "$1" $#; shift; BASELINE_REV="$1" ;;
     --count-only) COUNT_ONLY=1 ;;
+    --closure-entry) require_value "$1" $#; shift; CLOSURE_ENTRY="$1" ;;
     *) echo "ERROR — unknown argument: $1"; exit 2 ;;
   esac
   shift
@@ -133,6 +144,10 @@ if [ -n "$BASELINE_REV" ] && [ -z "$REV" ]; then
 fi
 if [ -n "$BASELINE_REV" ] && { [ "$CRITICAL" -eq 1 ] || [ "$GENERATE_BASELINE" -eq 1 ]; }; then
   echo "ERROR — nothing was checked: --baseline-rev is incompatible with --critical and --generate-baseline"
+  exit 2
+fi
+if [ -n "$CLOSURE_ENTRY" ] && { [ "$CRITICAL" -ne 1 ] || [ -n "$REV" ] || [ "$GENERATE_BASELINE" -eq 1 ] || [ "$COUNT_ONLY" -eq 1 ]; }; then
+  echo "ERROR — nothing was checked: --closure-entry requires --critical and is incompatible with --rev, --baseline-rev, --count-only and --generate-baseline"
   exit 2
 fi
 ORIGINAL_ROOT="$ROOT"
@@ -199,6 +214,14 @@ BASELINE_FILE="$ROOT/scripts/check/no_direct_rt_baseline.txt"
 # Call-position matches only; a line whose first non-space char is '#' is a
 # comment and never a call site (measured false positive: js/builtins/date.spl).
 RT_RE='^[^#]*\brt_[a-z0-9_]*\('
+# POSIX-ERE twin of RT_RE for the grep fallback: `\b` is not POSIX, so the
+# boundary is spelled out (start of line, or a preceding non-word non-# char).
+# Two KNOWN divergences from rg, both absent from today's tree (only reachable
+# on a host without rg): (1) word boundary is ASCII under LC_ALL=C, so a
+# preceding non-ASCII letter (`ért_u(`) counts here but not under rg's
+# Unicode `\b`; (2) a NUL-bearing file is skipped as binary by rg but counted
+# by grep -c. Both err toward counting MORE, never fewer.
+RT_ERE='^([^#]*[^#[:alnum:]_])?rt_[a-z0-9_]*\('
 # Declarations are boundary metadata, not runtime calls. They are measured
 # separately so neither class can disappear from the structured result.
 DECL_RE='^[[:space:]]*extern[[:space:]]+fn[[:space:]]+rt_[a-z0-9_]*\('
@@ -256,17 +279,40 @@ rt_normalize_seps() {
 # <repo-root> is used only to compute repo-relative paths for allowlist
 # matching; <scan-root> is the directory actually walked (no auto /src
 # appending — callers pass the exact directory they want scanned).
+# rt_grep_count <ere> <nul-manifest> <out>
+# Portable fallback for `rg --count`: prints "<path>:<matching-line-count>" for
+# every manifest file with >= 1 matching line, exactly rg's --count shape.
+# Fails (non-zero) on any grep error. grep exits 1 for "no match", which is not
+# an error, so the per-batch wrapper maps 0/1 -> 0 and 2+ -> 1; xargs then
+# returns non-zero only when a batch hit a real error.
+rt_grep_count() {
+  xargs -0 sh -c 'LC_ALL=C grep -c -H -E -- "$0" "$@"; rc=$?; [ "$rc" -le 1 ]' "$1" < "$2" > "$3.all" || return 1
+  # Status checked, not assumed: an I/O error here would otherwise leave an
+  # empty match list and launder into forbidden=0. rc 1 = no non-zero rows.
+  grep -v ':0$' "$3.all" > "$3"
+  rgc_rc=$?
+  rm -f "$3.all"
+  [ "$rgc_rc" -le 1 ] || return 1
+  return 0
+}
+
 scan_dir() {
   sd_repo_root="$1"; sd_scan_root="$2"; sd_allow="$3"; sd_off="${4:-}"
   sd_scanned=0; sd_allowed=0; sd_forbidden=0; sd_decls=0
   sd_native_root=$(rt_win_native_root "$sd_scan_root")
-  if ! command -v rg >/dev/null 2>&1; then
-    echo "ERR"
-    return
-  fi
+  # Scanner: ripgrep when installed (fast path), otherwise find + POSIX grep.
+  # Until 2026-10-09 a missing `rg` returned ERR unconditionally, so on any host
+  # without a real ripgrep binary (measured: Windows Git Bash, where `rg` was
+  # only an interactive shell function invisible to `sh`) the selftest died with
+  # "forbidden call not counted (got 'ERR')" and the gate checked nothing.
+  # NO_DIRECT_RT_FORCE_GREP=1 forces the fallback (selftest exercises both).
+  sd_use_rg=0
+  if [ "${NO_DIRECT_RT_FORCE_GREP:-0}" = "0" ] && command -v rg >/dev/null 2>&1; then sd_use_rg=1; fi
   # Build and compare NUL-delimited manifests before scanning. This proves the
   # fast rg traversal sees the exact find-defined file set; hidden/ignored files
   # cannot disappear, and either traversal fails closed instead of looking empty.
+  # The grep fallback scans the find manifest itself, so equality holds by
+  # construction.
   tmp_scan=$(mktemp -d) || { echo "ERR"; return; }
   tmp_find_raw="$tmp_scan/find.raw"
   tmp_rg_raw="$tmp_scan/rg.raw"
@@ -276,23 +322,19 @@ scan_dir() {
   tmp_decls="$tmp_scan/decls"
   tmp_classified="$tmp_scan/classified"
   if ! find "$sd_scan_root" -name '*.spl' -type f ! -path '*/vendor/*' -print0 > "$tmp_find_raw"; then
-    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
-    echo "ERR"
-    return
+    rm -rf "$tmp_scan"; echo "ERR"; return
   fi
-  rg --files --null --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' "$sd_scan_root" > "$tmp_rg_raw"
-  st=$?
-  rt_normalize_seps "$tmp_rg_raw" "$sd_scan_root" "$sd_native_root" nul || st=99
-  # `rg --files` uses 1 for an empty but successful traversal.
-  if [ $st -gt 1 ]; then
-    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
-    echo "ERR"
-    return
+  if ! LC_ALL=C sort -z "$tmp_find_raw" > "$tmp_find"; then
+    rm -rf "$tmp_scan"; echo "ERR"; return
   fi
-  if ! LC_ALL=C sort -z "$tmp_find_raw" > "$tmp_find" || ! LC_ALL=C sort -z "$tmp_rg_raw" > "$tmp_rg" || ! cmp -s "$tmp_find" "$tmp_rg"; then
-    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
-    echo "ERR"
-    return
+  if [ "$sd_use_rg" = "1" ]; then
+    rg --files --null --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' "$sd_scan_root" > "$tmp_rg_raw"
+    st=$?
+    rt_normalize_seps "$tmp_rg_raw" "$sd_scan_root" "$sd_native_root" nul || st=99
+    # `rg --files` uses 1 for an empty but successful traversal.
+    if [ $st -gt 1 ] || ! LC_ALL=C sort -z "$tmp_rg_raw" > "$tmp_rg" || ! cmp -s "$tmp_find" "$tmp_rg"; then
+      rm -rf "$tmp_scan"; echo "ERR"; return
+    fi
   fi
   # Count NUL terminators, not awk records. one-true-awk (/usr/bin/awk on
   # macOS) does not honour RS="\0": a 2-record NUL-delimited stream comes back
@@ -300,29 +342,26 @@ scan_dir() {
   # hidden/ignored fixture failed closed with ERROR on every BSD-awk host.
   # `tr -dc` + `wc -c` is exact and portable.
   if ! sd_scanned=$(tr -dc '\0' < "$tmp_find" | wc -c | tr -d ' \t'); then
-    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
-    echo "ERR"
-    return
+    rm -rf "$tmp_scan"; echo "ERR"; return
   fi
-  rg --count --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' "$RT_RE" "$sd_scan_root" > "$tmp_matches"
-  st=$?
-  # The count outputs feed $f -> rel -> allowlist prefix matching, whose
-  # entries are `/`-separated. Normalizing only the manifest above would
-  # reclassify every allowlisted provider as forbidden.
-  rt_normalize_seps "$tmp_matches" "$sd_scan_root" "$sd_native_root" nl || st=99
-  # rg exit 1 means no matches; >1 is a scanner error.
-  if [ $st -gt 1 ]; then
-    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
-    echo "ERR"
-    return
-  fi
-  rg --count --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' "$DECL_RE" "$sd_scan_root" > "$tmp_decls"
-  st=$?
-  rt_normalize_seps "$tmp_decls" "$sd_scan_root" "$sd_native_root" nl || st=99
-  if [ $st -gt 1 ]; then
-    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches" "$tmp_decls" "$tmp_classified"; rmdir "$tmp_scan"
-    echo "ERR"
-    return
+  if [ "$sd_use_rg" = "1" ]; then
+    rg --count --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' "$RT_RE" "$sd_scan_root" > "$tmp_matches"
+    st=$?
+    # The count outputs feed $f -> rel -> allowlist prefix matching, whose
+    # entries are `/`-separated. Normalizing only the manifest above would
+    # reclassify every allowlisted provider as forbidden.
+    rt_normalize_seps "$tmp_matches" "$sd_scan_root" "$sd_native_root" nl || st=99
+    # rg exit 1 means no matches; >1 is a scanner error.
+    [ $st -gt 1 ] && { rm -rf "$tmp_scan"; echo "ERR"; return; }
+    rg --count --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' "$DECL_RE" "$sd_scan_root" > "$tmp_decls"
+    st=$?
+    rt_normalize_seps "$tmp_decls" "$sd_scan_root" "$sd_native_root" nl || st=99
+    [ $st -gt 1 ] && { rm -rf "$tmp_scan"; echo "ERR"; return; }
+  elif [ "$sd_scanned" -gt 0 ]; then
+    rt_grep_count "$RT_ERE" "$tmp_find" "$tmp_matches" || { rm -rf "$tmp_scan"; echo "ERR"; return; }
+    rt_grep_count "$DECL_RE" "$tmp_find" "$tmp_decls" || { rm -rf "$tmp_scan"; echo "ERR"; return; }
+  else
+    : > "$tmp_matches"; : > "$tmp_decls"
   fi
   awk -F: '
     FILENAME == ARGV[1] { matched[$1]=$2; order[++count]=$1; next }
@@ -334,6 +373,12 @@ scan_dir() {
       }
     }
   ' "$tmp_matches" "$tmp_decls" > "$tmp_classified"
+  # --closure-entry: keep only files in the entry closure (repo-relative list).
+  if [ -n "$RT_CLOSURE_LIST" ]; then
+    awk -F: -v root="$sd_repo_root/" 'FILENAME == ARGV[1] { keep[root $0] = 1; next } ($1 in keep)' "$RT_CLOSURE_LIST" "$tmp_classified" > "$tmp_classified.c" || { rm -rf "$tmp_scan"; echo "ERR"; return; }
+    mv -f "$tmp_classified.c" "$tmp_classified"
+    sd_scanned=$(tr '\0' '\n' < "$tmp_find" | awk -v root="$sd_repo_root/" 'FILENAME == ARGV[1] { keep[root $0] = 1; next } ($0 in keep) { n++ } END { print n + 0 }' "$RT_CLOSURE_LIST" -)
+  fi
   while IFS=: read -r f matched declarations; do
     [ -n "$f" ] || continue
     sd_decls=$((sd_decls + declarations))
@@ -602,7 +647,45 @@ selftest() {
   # `--roots src --rev`). Asserted for EVERY value-taking option, and on BOTH
   # channels: the verdict must be on stdout (a caller reading the last stdout
   # line must see it) and the exit status must be 2.
-  for st_opt in --offenders --root --roots --rev --baseline-rev; do
+  # fixture 21: word boundary and comment exclusion — `xrt_a(`, `my_rt_b(`
+  # and `# rt_c(` are not call sites; `(rt_d(` and line-start `rt_e(` are.
+  mkdir -p "$st_dir/m/src/lib"
+  printf 'fn f(): xrt_a(1)\nfn g(): my_rt_b(1)\n# rt_c(1)\nfn h(): (rt_d(1))\nrt_e(1)\n' > "$st_dir/m/src/lib/edge.spl"
+  printf 'fn f():\r\n    y = rt_crlf(1)\r\n' > "$st_dir/m/src/lib/crlf.spl"
+  r=$(scan_dir "$st_dir/m" "$st_dir/m/src" /dev/null)
+  set -- $r
+  if [ "${4:-x}" != "3" ]; then echo "ERROR — selftest failed: word-boundary/comment/CRLF classification wrong (got '$r', want forbidden=3)"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 22: the find+grep fallback (used when ripgrep is absent) must
+  # agree exactly with the default scanner on every fixture tree above, so a
+  # host without rg gets the same verdict, not a different one. Without rg
+  # both sides run the fallback, so the parity half is recorded as NOT
+  # EXERCISED in the PASS line rather than counted as passed.
+  if command -v rg >/dev/null 2>&1; then RT_ST_PARITY="rg-vs-grep parity exercised"; else RT_ST_PARITY="rg-vs-grep parity NOT EXERCISED (no rg on PATH)"; fi
+  for st_t in a b b1 b2 d e f g m; do
+    case "$st_t" in b) st_al="$st_dir/allow.txt" ;; b1) st_al="$st_dir/allow1.txt" ;; b2) st_al="$st_dir/allow2.txt" ;; *) st_al=/dev/null ;; esac
+    st_def=$(scan_dir "$st_dir/$st_t" "$st_dir/$st_t/src" "$st_al")
+    st_fb=$(NO_DIRECT_RT_FORCE_GREP=1 scan_dir "$st_dir/$st_t" "$st_dir/$st_t/src" "$st_al")
+    if [ "$st_def" = "ERR" ] || [ "$st_def" != "$st_fb" ]; then echo "ERROR — selftest failed: grep fallback disagrees on fixture $st_t (default '$st_def', fallback '$st_fb')"; rm -rf "$st_dir"; exit 2; fi
+  done
+  st_fb=$(NO_DIRECT_RT_FORCE_GREP=1 scan_dir "$st_dir/missing" "$st_dir/missing/src" /dev/null 2>/dev/null)
+  if [ "$st_fb" != "ERR" ]; then echo "ERROR — selftest failed: grep fallback did not fail closed on a missing root (got '$st_fb')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 23: --closure-entry counts ONLY the entry's import closure — the
+  # reachable call site fails critical mode, the unreachable one is not seen —
+  # and refuses to run outside --critical (no closure baseline exists).
+  mkdir -p "$st_dir/n/src/app" "$st_dir/n/src/lib/x"
+  printf 'use std.x.a\nfn main(): pass_do_nothing()\n' > "$st_dir/n/src/app/main.spl"
+  printf 'fn f(): rt_in()\n' > "$st_dir/n/src/lib/x/a.spl"
+  printf 'fn g(): rt_out()\nfn h(): rt_out2()\n' > "$st_dir/n/src/lib/x/b.spl"
+  st_cl_out=$(NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/n" --roots src --closure-entry src/app/main.spl --critical 2>&1)
+  st_cl_rc=$?
+  case "$st_cl_rc:$(printf '%s\n' "$st_cl_out" | tail -1)" in
+    "1:FAIL — critical mode: 1 forbidden direct rt_* call site(s) (roots=src, src=1 closure=src/app/main.spl(2 files)), extern_decls=0; top offenders: src/lib/x/a.spl:1 ") : ;;
+    *) echo "ERROR — selftest failed: --closure-entry did not scope to the closure (rc=$st_cl_rc, out=[$(printf '%s\n' "$st_cl_out" | tail -1)])"; rm -rf "$st_dir"; exit 2 ;;
+  esac
+  NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/n" --roots src --closure-entry src/app/main.spl >/dev/null 2>&1
+  st_cl_rc=$?
+  if [ "$st_cl_rc" != "2" ]; then echo "ERROR — selftest failed: --closure-entry without --critical did not refuse (rc=$st_cl_rc)"; rm -rf "$st_dir"; exit 2; fi
+  for st_opt in --offenders --root --roots --rev --baseline-rev --closure-entry; do
     st_missing_out=$(NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" "$st_opt" 2>/dev/null)
     st_missing_rc=$?
     if [ "$st_missing_rc" != "2" ] || [ "$st_missing_out" != "ERROR — nothing was checked: $st_opt requires a value" ]; then
@@ -615,12 +698,26 @@ selftest() {
 
 if [ "${NO_DIRECT_RT_SELFTEST_CHILD:-0}" = "0" ]; then selftest; fi
 if [ $SELFTEST_ONLY -eq 1 ]; then
-  echo "PASS — 20 selftest fixture(s) checked"
+  case "${RT_ST_PARITY:-}" in
+    *"NOT EXERCISED"*) echo "PASS — 22 selftest fixture(s) checked, 1 not exercised: $RT_ST_PARITY" ;;
+    *) echo "PASS — 23 selftest fixture(s) checked ($RT_ST_PARITY)" ;;
+  esac
   exit 0
 fi
 
 # ---- real scan ----
 if [ ! -d "$ROOT/src" ]; then echo "ERROR — nothing was checked: no src/ under $ROOT"; exit 2; fi
+if [ -n "$CLOSURE_ENTRY" ]; then
+  RT_CLOSURE_LIST=$(mktemp) || { echo "ERROR — nothing was checked: mktemp failed"; exit 2; }
+  trap 'rm -f "$RT_CLOSURE_LIST"' EXIT INT TERM
+  sh "$RT_SELF_DIR/check-no-free-generic-fn-in-bootstrap-closure.shs" --root "$ROOT" --entry "$CLOSURE_ENTRY" --print-closure > "$RT_CLOSURE_LIST" 2>/dev/null
+  rt_cl_rc=$?
+  if [ "$rt_cl_rc" -ne 0 ] || [ ! -s "$RT_CLOSURE_LIST" ]; then
+    echo "ERROR — nothing was checked: could not compute the closure of $CLOSURE_ENTRY (rc=$rt_cl_rc)"
+    exit 2
+  fi
+  RT_CLOSURE_LABEL=" closure=$CLOSURE_ENTRY($(wc -l < "$RT_CLOSURE_LIST" | tr -d ' \t') files)"
+fi
 if [ -n "$OFFENDERS_OUT" ]; then OFF_FILE="$OFFENDERS_OUT"; else OFF_FILE="$(mktemp).off"; fi
 : > "$OFF_FILE"
 # Keep the tally only when the caller explicitly asked for it.
@@ -635,7 +732,7 @@ if [ "$counts" = "ERR" ]; then
   exit 2
 fi
 agg="${counts%%|*}"
-breakdown="${counts#*|}"
+breakdown="${counts#*|}${RT_CLOSURE_LABEL:-}"
 set -- $agg
 if [ $# -ne 5 ]; then
   rt_off_done
@@ -682,6 +779,13 @@ if [ $CRITICAL -eq 1 ] && [ "$forbidden" -gt 0 ]; then
   echo "fix: route through the std.* semantic API, or a sanctioned provider alias (see scripts/check/no_direct_rt_allowlist.txt)."
   echo "FAIL — critical mode: $forbidden forbidden direct rt_* call site(s) (roots=$ROOTS,$breakdown), extern_decls=$decls; top offenders: $top"
   exit 1
+fi
+# A closure-scoped run has no baseline of its own (the tracked one is a
+# whole-roots number), so its zero-forbidden verdict is the critical PASS.
+if [ -n "$CLOSURE_ENTRY" ]; then
+  rt_off_done
+  echo "PASS — critical mode: $scanned closure file(s) scanned (roots=$ROOTS,$breakdown), forbidden=0, extern_decls=$decls"
+  exit 0
 fi
 
 # ---- baseline ratchet ----

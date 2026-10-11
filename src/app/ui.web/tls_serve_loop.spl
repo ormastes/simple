@@ -67,13 +67,13 @@ fn tls_serve_loop_close_connection(handle: i64) -> Result<(), text>:
 # plain TcpStream, giving ws_handler and ui_routes a single stream surface.
 #
 # kind == "tls": uses tls_handle + rt_tls_server_* SFFI
-# kind == "tcp": uses tcp_stream field (TcpStream cast via Any)
+# kind == "tcp": uses tcp_stream field (TcpStream)
 # =========================================================================
 
 class ConnStream:
     kind: text            # "tls" or "tcp"
     tls_handle: i64       # active when kind == "tls"
-    tcp_stream: Any       # active when kind == "tcp" (holds a TcpStream)
+    tcp_stream: TcpStream?  # active when kind == "tcp"
     buffer: text          # internal read buffer for line assembly
     open: bool
 
@@ -109,7 +109,7 @@ class ConnStream:
                 return Err("connection closed")
 
             if self.kind == "tcp":
-                val tcp = self.tcp_stream as TcpStream
+                val tcp = self.tcp_stream.unwrap()
                 match tcp.read_line():
                     Err(e):
                         self.open = false
@@ -133,7 +133,7 @@ class ConnStream:
     me read_exact(n: i64) -> Result<text, text>:
         """Read exactly n bytes (as text) from the stream."""
         if self.kind == "tcp":
-            val tcp = self.tcp_stream as TcpStream
+            val tcp = self.tcp_stream.unwrap()
             match tcp.read_exact(n):
                 Err(e):
                     self.open = false
@@ -163,7 +163,7 @@ class ConnStream:
     me read_bytes(n: i64) -> Result<[u8], text>:
         """Read exactly n bytes as a byte array from the stream."""
         if self.kind == "tcp":
-            val tcp = self.tcp_stream as TcpStream
+            val tcp = self.tcp_stream.unwrap()
             match tcp.read(n):
                 Err(e):
                     self.open = false
@@ -183,7 +183,7 @@ class ConnStream:
         if not self.open:
             return Err("connection closed")
         if self.kind == "tcp":
-            val tcp = self.tcp_stream as TcpStream
+            val tcp = self.tcp_stream.unwrap()
             match tcp.write_all(data):
                 Err(e):
                     self.open = false
@@ -202,7 +202,7 @@ class ConnStream:
         if not self.open:
             return Err("connection closed")
         if self.kind == "tcp":
-            val tcp = self.tcp_stream as TcpStream
+            val tcp = self.tcp_stream.unwrap()
             match tcp.write_all(data):
                 Err(e):
                     self.open = false
@@ -221,7 +221,7 @@ class ConnStream:
         if self.open:
             self.open = false
             if self.kind == "tcp":
-                val tcp = self.tcp_stream as TcpStream
+                val tcp = self.tcp_stream.unwrap()
                 tcp.close()
             else:
                 val _ = tls_serve_loop_close_connection(self.tls_handle)
@@ -440,21 +440,20 @@ fn _tls_reload_file(file_path: text, session: UISession, last_content: text):
             Err(e):
                 print "Warning: TLS server UI parse error: {e}"
 
-fn _tls_file_watcher_loop(file_path: Any, event_channel: Any):
+fn _tls_file_watcher_loop(file_path: text, event_channel: BoundedChannel<UIEvent>):
     """Periodically check file for changes; sends FileChanged events."""
     var last_content = ""
-    if file_exists(file_path as text):
-        last_content = read_file(file_path as text)
+    if file_exists(file_path):
+        last_content = read_file(file_path)
     loop:
         thread_sleep(500)
-        val path = file_path as text
+        val path = file_path
         if not file_exists(path):
             continue
         val current = read_file(path)
         if current != last_content:
             last_content = current
-            val ch = event_channel as BoundedChannel<UIEvent>
-            ch.send(UIEvent.FileChanged)
+            event_channel.send(UIEvent.FileChanged)
 
 fn _tls_read_body(conn: ConnStream, headers: text) -> text:
     val content_length = ui_web_content_length(headers)

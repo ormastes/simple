@@ -37,7 +37,7 @@ use std.nogc_sync_mut.http_client.types.{
 }
 use std.nogc_sync_mut.sffi.system.{sleep_secs}
 use std.nogc_sync_mut.oauth2.{oauth2_get_token, oauth2_parse_retry_after}
-use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize, json_get_type}
+use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_field, json_value_has, json_value_len, json_value_at, json_value_serialize}
 use std.common.text_advanced.{escape_json}
 
 
@@ -196,46 +196,37 @@ fn _outlook_patch(client: OutlookClient, url: text, payload: text) -> (i64, text
 # JSON parsing helpers
 # ============================================================================
 
-fn _ojson_str(obj: any, key: text) -> text:
-    if obj == nil:
+fn _ojson_str(obj: JsonValue, key: text) -> text:
+    if not json_value_has(obj, key):
         return ""
-    val v = json_object_get(obj, key)
-    if v == nil:
-        return ""
-    val s = json_serialize(v)
+    val s = json_value_serialize(json_value_field(obj, key))
     if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
         return s[1:s.len() - 1]
     s
 
 
-fn _ojson_int(obj: any, key: text) -> i64:
-    if obj == nil:
+fn _ojson_int(obj: JsonValue, key: text) -> i64:
+    if not json_value_has(obj, key):
         return 0
-    val v = json_object_get(obj, key)
-    if v == nil:
-        return 0
-    val s = json_serialize(v)
+    val s = json_value_serialize(json_value_field(obj, key))
     var n: i64 = 0
-    var any = false
+    var seen_digit = false
     for ch in s:
         if ch >= "0" and ch <= "9":
             n = n * 10 + (ch.to_i64() - "0".to_i64())
-            any = true
-        else if any:
+            seen_digit = true
+        else if seen_digit:
             return n
-    if any: n else: 0
+    if seen_digit: n else: 0
 
 
-fn _ojson_bool(obj: any, key: text) -> bool:
-    if obj == nil:
+fn _ojson_bool(obj: JsonValue, key: text) -> bool:
+    if not json_value_has(obj, key):
         return false
-    val v = json_object_get(obj, key)
-    if v == nil:
-        return false
-    json_serialize(v).trim() == "true"
+    json_value_serialize(json_value_field(obj, key)).trim() == "true"
 
 
-fn _parse_folder(obj: any) -> OutlookFolder:
+fn _parse_folder(obj: JsonValue) -> OutlookFolder:
     OutlookFolder(
         id: _ojson_str(obj, "id"),
         display_name: _ojson_str(obj, "displayName"),
@@ -245,13 +236,13 @@ fn _parse_folder(obj: any) -> OutlookFolder:
     )
 
 
-fn _parse_message(obj: any) -> OutlookMessage:
+fn _parse_message(obj: JsonValue) -> OutlookMessage:
     var from_addr = ""
     var from_name = ""
-    val from_obj = json_object_get(obj, "from")
-    if from_obj != nil:
-        val email_addr = json_object_get(from_obj, "emailAddress")
-        if email_addr != nil:
+    if json_value_has(obj, "from"):
+        val from_obj = json_value_field(obj, "from")
+        if json_value_has(from_obj, "emailAddress"):
+            val email_addr = json_value_field(from_obj, "emailAddress")
             from_addr = _ojson_str(email_addr, "address")
             from_name = _ojson_str(email_addr, "name")
     OutlookMessage(
@@ -285,20 +276,20 @@ fn outlook_list_folders(client: OutlookClient) -> (bool, [OutlookFolder], text):
             first_body = body
         if status < 200 or status >= 300:
             return (false, folders, body)
-        val parsed = json_parse(body)
-        if parsed == nil:
+        val parsed_opt = json_value_parse_opt(body)
+        if parsed_opt == nil:
             return (false, folders, "invalid JSON response")
-        val arr = json_object_get(parsed, "value")
-        if arr != nil:
-            val n = json_array_length(arr)
+        val parsed = parsed_opt.unwrap()
+        val arr = json_value_field(parsed, "value")
+        if json_value_has(parsed, "value"):
+            val n = json_value_len(arr)
             var i = 0
             while i < n:
-                folders = folders + [_parse_folder(json_array_get(arr, i))]
+                folders = folders + [_parse_folder(json_value_at(arr, i))]
                 i = i + 1
         # @odata.nextLink is an absolute URL — use as-is.
-        val next = json_object_get(parsed, "@odata.nextLink")
-        if next != nil:
-            url = json_serialize(next)
+        if json_value_has(parsed, "@odata.nextLink"):
+            url = json_value_serialize(json_value_field(parsed, "@odata.nextLink"))
             if url.starts_with("\"") and url.ends_with("\"") and url.len() >= 2:
                 url = url[1:url.len() - 1]
         else:
@@ -333,19 +324,19 @@ fn outlook_list_messages(client: OutlookClient, folder_id: text, filter: text, t
             first_body = body
         if status < 200 or status >= 300:
             return (false, messages, body)
-        val parsed = json_parse(body)
-        if parsed == nil:
+        val parsed_opt = json_value_parse_opt(body)
+        if parsed_opt == nil:
             return (false, messages, "invalid JSON response")
-        val arr = json_object_get(parsed, "value")
-        if arr != nil:
-            val n = json_array_length(arr)
+        val parsed = parsed_opt.unwrap()
+        val arr = json_value_field(parsed, "value")
+        if json_value_has(parsed, "value"):
+            val n = json_value_len(arr)
             var i = 0
             while i < n:
-                messages = messages + [_parse_message(json_array_get(arr, i))]
+                messages = messages + [_parse_message(json_value_at(arr, i))]
                 i = i + 1
-        val next = json_object_get(parsed, "@odata.nextLink")
-        if next != nil:
-            url = json_serialize(next)
+        if json_value_has(parsed, "@odata.nextLink"):
+            url = json_value_serialize(json_value_field(parsed, "@odata.nextLink"))
             if url.starts_with("\"") and url.ends_with("\"") and url.len() >= 2:
                 url = url[1:url.len() - 1]
         else:
@@ -373,11 +364,11 @@ fn outlook_get_message(client: OutlookClient, msg_id: text, expand_attachments: 
     if status < 200 or status >= 300:
         return (false, empty, body)
 
-    val parsed = json_parse(body)
-    if parsed == nil:
+    val parsed_opt = json_value_parse_opt(body)
+    if parsed_opt == nil:
         return (false, empty, "invalid JSON response")
 
-    (true, _parse_message(parsed), body)
+    (true, _parse_message(parsed_opt.unwrap()), body)
 
 
 fn outlook_mark_read(client: OutlookClient, msg_id: text, is_read: bool) -> (bool, text):

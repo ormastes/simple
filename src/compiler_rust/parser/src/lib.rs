@@ -3,6 +3,7 @@
 
 pub mod arena;
 pub mod capture_write_check;
+pub mod cond_compile;
 pub mod ast;
 pub mod diagnostic;
 pub mod doc_gen;

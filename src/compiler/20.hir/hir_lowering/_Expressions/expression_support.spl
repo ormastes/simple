@@ -15,9 +15,9 @@ use compiler.core.lexer_chars.{is_digit}
 use std.string_core.{char_code}
 
 extern fn rt_env_get(key: text) -> text?
-extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_enum_discriminant<T>(value: T) -> i64
 @unsafe(reason: "raw retained-dictionary handle probe; the handle and key representation must match the active runtime", capabilities: [ffi])
-extern fn rt_dict_contains(dict: i64, key: Any) -> bool
+extern fn rt_dict_contains<K>(dict: i64, key: K) -> bool
 
 # `rt_env_get` yields nil for an UNSET variable, so both the extern and this
 # wrapper are OPTIONAL — every call site below already uses the optional-safe
@@ -71,7 +71,16 @@ fn is_interp_builtin_fn(name: text) -> bool:
      # the same way. Kept in sync by
      # scripts/check/check-interp-builtin-list-sync.shs.
      name == "__assert" or name == "file_is_regular_no_follow" or
-     name == "rt_file_exists_probe_begin" or name == "rt_file_exists_probe_end")
+     name == "rt_file_exists_probe_begin" or name == "rt_file_exists_probe_end" or
+     # `len(x)` free-function form: the HIR interpreter dispatches it by name
+     # (interpreter_calls.spl lookup_builtin_tag "len" arm) and the seed
+     # accepts it natively, but the allow-list omission made every UI/TUI
+     # module using the free form die at HIR with "unresolved name: len"
+     # (tui/layout.spl, tui/widget.spl, tui/widgets/* — 34 sites). The MIR
+     # native lane re-dispatches it as a MethodCall so it shares the
+     # receiver-provenanced rt_len/rt_string_len lowering (see the
+     # direct_name == "len" intercept in lower_call).
+     name == "len")
 
 fn primitive_cast_type_kind(name: text) -> HirTypeKind?:
     """`i32(x)`-style primitive casts: a fixed-width numeric type name used

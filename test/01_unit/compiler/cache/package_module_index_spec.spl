@@ -1,9 +1,11 @@
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, step}
 use compiler.driver.cache.package_module_index.{
     PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
     PackageTldrHeaderV1, PersistentSmfPackageIndexV1,
     package_module_index_encode_v1, package_module_index_decode_v1,
+    package_module_index_entry_encode_v1,
     package_module_index_entry_action_digest_v1,
+    package_module_index_validate_v1,
     package_module_index_publish_if_current_v1,
     package_module_index_read_current_v1,
     package_module_index_invalidate_changes_v1, PackageModuleChangeV1
@@ -104,6 +106,135 @@ describe "persistent package/module index":
         expect(package_module_index_entry_action_digest_v1(
             other_variant, generation.entries[0]) ==
             generation.entries[0].action_digest).to_equal(false)
+
+    it "round-trips the generated source witness in the current schema":
+        step("Encode and decode V4 entries with authoritative generated digests")
+        var generation = admitted_package_index()
+        generation.schema_version = 4
+        var entries: [PackageModuleIndexEntryV1] = []
+        for entry in generation.entries:
+            var witnessed = entry
+            witnessed.generated_source_digest = sha256_text(
+                "generated:{entry.module_identity}")
+            witnessed.action_digest = package_module_index_entry_action_digest_v1(
+                generation, witnessed)
+            entries.push(witnessed)
+        generation.entries = entries
+        val encoded = package_module_index_encode_v1(generation)
+        expect(encoded.starts_with("simple-package-module-index-v4\nschema=4")).to_equal(true)
+        val decoded = package_module_index_decode_v1(encoded)
+        expect(decoded.valid).to_equal(true)
+        expect(decoded.generation!.schema_version).to_equal(4)
+        expect(decoded.generation!.entries[0].generated_source_digest).to_equal(
+            generation.entries[0].generated_source_digest)
+
+    it "round-trips a scoped V4 graph and rejects unreachable entries":
+        step("Preserve V4 scope identity and verify its direct-import closure")
+        val zero = "0000000000000000000000000000000000000000000000000000000000000000"
+        val a = package_index_entry("a", ["b"], [], zero)
+        val b = package_index_entry("b", [], ["a"], zero)
+        var scoped = package_index_generation([a, b])
+        scoped.schema_version = 4
+        scoped.scope_entry_source_identity = "src/a.spl"
+        var entries: [PackageModuleIndexEntryV1] = []
+        for entry in scoped.entries:
+            var witnessed = entry
+            witnessed.generated_source_digest = sha256_text(
+                "generated:{entry.module_identity}")
+            witnessed.action_digest = package_module_index_entry_action_digest_v1(
+                scoped, witnessed)
+            entries.push(witnessed)
+        scoped.entries = entries
+        val encoded = package_module_index_encode_v1(scoped)
+        val decoded = package_module_index_decode_v1(encoded)
+        expect(decoded.valid).to_equal(true)
+        expect(decoded.generation!.schema_version).to_equal(4)
+        expect(decoded.generation!.scope_entry_source_identity).to_equal(
+            "src/a.spl")
+        expect(decoded.generation!.entries.len()).to_equal(2)
+        expect(decoded.generation!.entries[1].generated_source_digest).to_equal(
+            scoped.entries[1].generated_source_digest)
+
+        val c = package_index_entry("c", [], [], zero)
+        var unreachable = scoped
+        unreachable.entries = unreachable.entries.push(c)
+        var all_entries: [PackageModuleIndexEntryV1] = []
+        for entry in unreachable.entries:
+            var witnessed = entry
+            if witnessed.generated_source_digest == "":
+                witnessed.generated_source_digest = sha256_text("generated:c")
+            witnessed.action_digest = package_module_index_entry_action_digest_v1(
+                unreachable, witnessed)
+            all_entries.push(witnessed)
+        unreachable.entries = all_entries
+        expect(package_module_index_validate_v1(unreachable)).to_equal(
+            "scope-unreachable-entry")
+        expect(package_module_index_encode_v1(unreachable)).to_equal("")
+
+    it "rejects missing and malformed V4 generated digests":
+        step("Require a valid generated digest on every authoritative V4 row")
+        val zero = "0000000000000000000000000000000000000000000000000000000000000000"
+        val entry = package_index_entry("a", [], [], zero)
+        var generation = package_index_generation([entry])
+        generation.schema_version = 4
+        var missing = entry
+        missing.action_digest = package_module_index_entry_action_digest_v1(
+            generation, missing)
+        generation.entries = [missing]
+        expect(package_module_index_validate_v1(generation)).to_equal(
+            "generated-source-digest-invalid:a")
+        expect(package_module_index_encode_v1(generation)).to_equal("")
+
+        var malformed = entry
+        malformed.generated_source_digest = "z".repeat(64)
+        malformed.action_digest = package_module_index_entry_action_digest_v1(
+            generation, malformed)
+        generation.entries = [malformed]
+        expect(package_module_index_validate_v1(generation)).to_equal(
+            "generated-source-digest-invalid:a")
+        expect(package_module_index_encode_v1(generation)).to_equal("")
+
+    it "migrates V1 through V3 entries without inventing a generated witness":
+        step("Decode a legacy V2 index and preserve its unknown witness state")
+        val legacy = admitted_package_index()
+        val encoded = package_module_index_encode_v1(legacy)
+        val decoded = package_module_index_decode_v1(encoded)
+        expect(decoded.valid).to_equal(true)
+        expect(decoded.generation!.schema_version).to_equal(2)
+        expect(decoded.generation!.entries[0].generated_source_digest).to_equal("")
+
+    it "refuses to silently drop a witness from a legacy entry encoding":
+        step("Reject legacy row encoding when the new witness would be discarded")
+        var entry = package_index_entry("legacy", [], [], sha256_text("action"))
+        entry.generated_source_digest = sha256_text("generated")
+        expect(package_module_index_entry_encode_v1(entry)).to_equal("")
+
+    it "continues to decode V1 bindings and scoped V3 rows":
+        step("Read both the snapshot-only and scoped legacy envelopes")
+        val legacy_v1 = PackageModuleIndexGenerationV1(
+            1, sha256_text("producer-v1"), "root-v1", "revision-v1",
+            "commit-v1", "tree-v1", sha256_text("inventory-v1"), [])
+        val decoded_v1 = package_module_index_decode_v1(
+            package_module_index_encode_v1(legacy_v1))
+        expect(decoded_v1.valid).to_equal(true)
+        expect(decoded_v1.generation!.schema_version).to_equal(1)
+
+        val zero = "0000000000000000000000000000000000000000000000000000000000000000"
+        val entry = package_index_entry("legacy", [], [], zero)
+        var scoped = package_index_generation([entry])
+        scoped.schema_version = 3
+        scoped.scope_entry_source_identity = "src/legacy.spl"
+        var scoped_entry = entry
+        scoped_entry.action_digest = package_module_index_entry_action_digest_v1(
+            scoped, scoped_entry)
+        scoped.entries = [scoped_entry]
+        val decoded_v3 = package_module_index_decode_v1(
+            package_module_index_encode_v1(scoped))
+        expect(decoded_v3.valid).to_equal(true)
+        expect(decoded_v3.generation!.schema_version).to_equal(3)
+        expect(decoded_v3.generation!.scope_entry_source_identity).to_equal(
+            "src/legacy.spl")
+        expect(decoded_v3.generation!.entries[0].generated_source_digest).to_equal("")
 
     it "does not propagate an unrelated content-only root":
         val result = package_module_index_invalidate_changes_v1(

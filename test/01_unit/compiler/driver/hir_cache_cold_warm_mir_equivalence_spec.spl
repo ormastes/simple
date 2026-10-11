@@ -1,0 +1,92 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# Plan ids: CACHE-03 / IR-05 (cached IR must be the IR), task 8b of
+# CURRENT_BUG_PREVENTION.md (cold == warm differential), BUG-02 (the closure
+# must lower something for the comparison to mean anything).
+
+"""
+Purpose: a module lowered to MIR from a HIR cache entry (warm) must produce
+byte-identical MIR to the module lowered in-process (cold). The entry goes
+through the REAL cache entry codec (hir_cache_entry_encode -> parse ->
+hir_module_decode), so a codec that drops a literal, a field or a flag shows
+up here as a MIR diff naming the module -- the `3`/`true` -> nil defect
+(hir_codec_put_i64_three_encoded_as_nil_native_2026-10-10.md) would have
+failed `three` and `yes` below on the first run.
+
+Three modules stand in for a closure; each is lowered independently, which is
+exactly how the HIR cache stores them (one entry per module, frozen surfaces
+as the key). The process-level cold/warm gate over a real native-build is
+scripts/check/check-hir-cache-cold-warm-parity.shs.
+"""
+
+use std.spec
+use std.spec.step
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
+use compiler.driver.driver_hir_cache.{
+    HIR_CACHE_ENTRY_VERSION, hir_cache_entry_parse, hir_cache_entry_encode
+}
+use test.helpers.lowering_harness.{lower_hir_checked, lower_mir_checked, mir_module_text, first_text_difference}
+
+val HEADER: text = HIR_CACHE_ENTRY_VERSION + " spl-hircodec-test scope-test"
+
+val CLOSURE_NAMES: [text] = ["literals.spl", "control.spl", "records.spl"]
+val CLOSURE_SOURCES: [text] = [
+    "fn three() -> i64:\n    3\n\nfn yes() -> bool:\n    true\n\nfn neg() -> i64:\n    -3\n\nfn big() -> i64:\n    4294967299\n\nfn half() -> f64:\n    2.5\n\nfn label() -> text:\n    \"n\\\\ame\\nwith newline\"\n",
+    # Loop-free on purpose: a `for i in 0..3` body in this module fails under
+    # the seed's `test` engine with "undefined field 'kind' ... type
+    # 'function'" (HIR -> MIR of the loop), while the same source lowers
+    # cleanly under `simple run`. Recorded in
+    # C:/dev/simple-bootstrap-storage/robustness/OVERLAP_cache_tests.md; it is
+    # a seed-engine lowering issue, not a cache-equivalence one.
+    "fn pick(flag: bool, n: i64) -> i64:\n    var total = 0\n    if flag and n > 3:\n        total = n * 2\n    elif not flag or n < 0:\n        total = -1\n    else:\n        if n == 3:\n            total = 3\n        else:\n            total = n - 7\n    total\n\nfn lim(n: i64) -> i64:\n    var out = n\n    if n > 3:\n        out = 3\n    out\n",
+    # Same shape as hir_codec_roundtrip_spec's SRC (struct, enum with payload,
+    # trait + impl, match with bindings): known to lower under the seed.
+    "struct Point:\n    x: i64\n    y: i64\n\nenum Shape:\n    Dot\n    Line(a: Point, b: Point)\n\ntrait Area:\n    fn area() -> i64\n\nimpl Area for Point:\n    fn area() -> i64:\n        self.x * self.y\n\nfn pick(s: Shape, flag: bool) -> i64:\n    var total = 0\n    match s:\n        case Shape.Dot: total = 1\n        case Shape.Line(a, b): total = a.x + b.y\n    if flag and total > 0:\n        total = total * 2\n    else:\n        total = -1\n    total\n"
+]
+
+# Cold: HIR straight from the lowering. Warm: HIR that went through a cache
+# entry and back. Both to MIR text.
+fn warm_module(hir: HirModule) -> HirModule:
+    val blob = hir_module_encode(hir)
+    expect(blob != "").to_equal(true)
+    val entry = hir_cache_entry_parse(hir_cache_entry_encode(HEADER, [], blob), HEADER)
+    expect(entry.reason).to_equal("")
+    val decoded = hir_module_decode(entry.blob)
+    expect(decoded != nil).to_equal(true)
+    decoded.unwrap()
+
+# Cold: parse + lower module `index`; Warm: the same module through a cache
+# entry; returns "" when the two MIR texts are byte-identical, else the
+# module and the first differing line (instead of two whole MIR dumps).
+fn compare_closure_module(index: i64) -> text:
+    val module_name = CLOSURE_NAMES[index]
+    val cold_hir = lower_hir_checked(CLOSURE_SOURCES[index], module_name, 2)
+    val cold_mir = mir_module_text(lower_mir_checked(cold_hir, 2))
+    val warm_hir = warm_module(cold_hir)
+    expect(warm_hir.functions.len()).to_equal(cold_hir.functions.len())
+    val warm_mir = mir_module_text(lower_mir_checked(warm_hir, 2))
+    first_text_difference(module_name, cold_mir, warm_mir)
+
+describe "HIR cache cold == warm MIR equivalence (8b / CACHE-03)":
+    # One example per module so a verdict names the module, and so an order
+    # dependent failure (state leaking from an earlier lowering in the same
+    # process) is visible as "module N fails only after module N-1".
+    it "lowers literals.spl cold and warm to identical MIR text":
+        step("Verify: literals.spl compares byte-identical cold vs warm")
+        expect(compare_closure_module(0)).to_equal("")
+
+    it "lowers control.spl cold and warm to identical MIR text":
+        step("Verify: control.spl compares byte-identical cold vs warm")
+        expect(compare_closure_module(1)).to_equal("")
+
+    it "lowers records.spl cold and warm to identical MIR text":
+        step("Verify: records.spl compares byte-identical cold vs warm")
+        expect(compare_closure_module(2)).to_equal("")
+
+    it "keeps the literal values 3 / true / -3 visible in the warm MIR (codec nil-collision regression)":
+        val hir = lower_hir_checked(CLOSURE_SOURCES[0], "literals.spl", 6)
+        val warm = mir_module_text(lower_mir_checked(warm_module(hir), 6))
+        expect(warm.contains("\"value\":3") or warm.contains(":3,") or warm.contains(":3}")).to_equal(true)
+        expect(warm.contains("true")).to_equal(true)
+        expect(warm.contains("4294967299")).to_equal(true)

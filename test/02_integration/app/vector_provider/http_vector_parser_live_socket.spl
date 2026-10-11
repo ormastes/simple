@@ -1,0 +1,223 @@
+# Native loopback probe for the opt-in HTTP parser + admitted vector provider.
+# Arguments: <provider-artifact> <sha256>. The provider is a production DSO;
+# this probe does not infer ISA execution from CPUID or provider admission.
+
+use std.nogc_sync_mut.http_server.router.{Router}
+use std.nogc_sync_mut.http_server.server.{
+    SimpleHttpServer, HttpConnectionOwnedResultV1
+}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse}
+use std.nogc_sync_mut.http_server.vector_parser.{
+    HttpVectorRequestParserV1,
+    http_vector_parser_session_open_owned_v1
+}
+use std.nogc_sync_mut.http_server.request_parser.{
+    http_request_parser_close_owned_v1
+}
+use std.nogc_sync_mut.composition.vector_kernel_contract.{
+    SIMPLE_VECTOR_CAP_HTTP_FIND_BYTE, SIMPLE_VECTOR_CAP_HTTP_FIND_CRLF
+}
+use os.smf.provider_loader.{
+    PROVIDER_SESSION_OK, ProviderAdmissionRequestV1
+}
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.nogc_sync_mut.sffi.system.{args}
+use std.common.base_encoding.{text_to_bytes}
+
+val LIVE_MARKER_V1: text = "ITEM5_HTTP_APP_LIVE"
+val LONG_QUERY_V1: text = "pad=" + "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+val LONG_HEADER_V1: text = "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+
+fn _valid_request() -> text:
+    "POST /vector?{LONG_QUERY_V1} HTTP/1.1\r\nHost: loopback\r\nX-Item5-Pad: {LONG_HEADER_V1}\r\nContent-Length: 4\r\nConnection: close\r\n\r\nWiki"
+
+fn _duplicate_host_request() -> text:
+    "GET /vector?{LONG_QUERY_V1} HTTP/1.1\r\nHost: first\r\nHost: second\r\nConnection: close\r\n\r\n"
+
+fn _emit_http_wire(case_key: text, wire: text) -> bool:
+    val bytes = text_to_bytes(wire)
+    if bytes.len() == 0 or bytes.len() > 8192: return false
+    val digits = "0123456789abcdef"
+    var encoded = ""
+    var index = 0
+    while index < bytes.len():
+        val octet = bytes[index] as i64
+        val high = octet / 16
+        val low = octet % 16
+        encoded = encoded + digits.slice(high, high + 1) + digits.slice(low, low + 1)
+        index = index + 1
+    println("ITEM5_HTTP_WIRE_V1 case={case_key} bytes={bytes.len()} hex={encoded}")
+    true
+
+
+class HttpVectorLiveSocketResultV1:
+    wire: text
+    connection: HttpConnectionOwnedResultV1
+    ok: bool
+    reason: text
+
+fn _fail(message: text) -> i32:
+    println("FAIL HTTP vector live socket probe: " + message)
+    1
+
+fn _handler(request: HttpRequest) -> HttpResponse:
+    val remote_prefix = "127.0.0.1:"
+    val remote_valid = request.remote_addr.starts_with(remote_prefix) and
+        request.remote_addr.len() > remote_prefix.len()
+    val query_valid = request.query == LONG_QUERY_V1
+    val padding_valid = request.header("X-Item5-Pad") == LONG_HEADER_V1
+    HttpResponse.ok("{LIVE_MARKER_V1} path={request.path};body={request.body};query_valid={query_valid};padding_valid={padding_valid};remote_valid={remote_valid}")
+
+fn _admission_request(path: text, digest: text, grant: u64,
+        required: u64) -> ProviderAdmissionRequestV1:
+    ProviderAdmissionRequestV1(
+        artifact_path: path, artifact_kind: "native",
+        expected_artifact_digest: digest,
+        granted_capability_bits: grant,
+        required_capability_bits: required,
+        host_abi: 1, minimum_host_abi: 1, maximum_host_abi: 1,
+        requested_interface_major: 1, requested_interface_minor: 0,
+        provided_interface_major: 1, provided_interface_minor: 0)
+
+fn _server(parser: HttpVectorRequestParserV1) -> SimpleHttpServer:
+    var router = Router.new()
+    router.post("/vector", _handler)
+    var server = SimpleHttpServer.new("127.0.0.1", 0, router)
+    server.with_http_request_parser_v1(parser)
+
+fn _drive_one(server: SimpleHttpServer, bytes: text) -> HttpVectorLiveSocketResultV1:
+    var owner = server
+    match TcpListener.bind("127.0.0.1:0"):
+        Err(_):
+            return HttpVectorLiveSocketResultV1(
+                wire: "", connection: HttpConnectionOwnedResultV1(
+                    handled: false, provider_used: false, provider_attempts: 0,
+                    provider_successes: 0, buffered_remainder: [],
+                    parser: nil, reason: "listener-bind-failed"),
+                ok: false, reason: "listener-bind-failed")
+        Ok(listener):
+            match listener.local_addr():
+                Err(_):
+                    val _ = listener.close()
+                    return HttpVectorLiveSocketResultV1(
+                        wire: "", connection: HttpConnectionOwnedResultV1(
+                            handled: false, provider_used: false, provider_attempts: 0,
+                            provider_successes: 0, buffered_remainder: [],
+                            parser: nil, reason: "listener-address-failed"),
+                        ok: false, reason: "listener-address-failed")
+                Ok(address):
+                    match TcpStream.connect(address):
+                        Err(_):
+                            val _ = listener.close()
+                            return HttpVectorLiveSocketResultV1(
+                                wire: "", connection: HttpConnectionOwnedResultV1(
+                                    handled: false, provider_used: false, provider_attempts: 0,
+                                    provider_successes: 0, buffered_remainder: [],
+                                    parser: nil, reason: "client-connect-failed"),
+                                ok: false, reason: "client-connect-failed")
+                        Ok(client):
+                            var wire = ""
+                            var outcome = HttpConnectionOwnedResultV1(
+                                handled: false, provider_used: false, provider_attempts: 0,
+                                provider_successes: 0, buffered_remainder: [],
+                                parser: nil, reason: "request-not-served")
+                            if client.write_text_status(bytes):
+                                match listener.accept():
+                                    Err(_): pass
+                                    Ok(connection):
+                                        if owner.admission.try_acquire():
+                                            outcome = owner.handle_connection_on_owner_v1(connection)
+                                        else:
+                                            val _ = connection.close()
+                                match client.read_text():
+                                    Err(_): pass
+                                    Ok(response): wire = response
+                            val _ = client.close()
+                            val _ = listener.close()
+                            HttpVectorLiveSocketResultV1(
+                                wire: wire, connection: outcome,
+                                ok: wire != "", reason: outcome.reason)
+
+fn _run_with_session(path: text, digest: text,
+        grant: u64, required: u64, request: text) -> HttpVectorLiveSocketResultV1:
+    val opened = http_vector_parser_session_open_owned_v1(
+        _admission_request(path, digest, grant, required))
+    val parser = HttpVectorRequestParserV1.from_session(opened.session)
+    val result = _drive_one(_server(parser), request)
+    if opened.status == PROVIDER_SESSION_OK:
+        if result.connection.parser == nil:
+            return HttpVectorLiveSocketResultV1(
+                wire: result.wire, connection: result.connection,
+                ok: false, reason: "connection-result-dropped-parser-owner")
+        val closed = http_request_parser_close_owned_v1(result.connection.parser!)
+        if closed.status != PROVIDER_SESSION_OK:
+            return HttpVectorLiveSocketResultV1(
+                wire: result.wire, connection: result.connection,
+                ok: false, reason: "provider-session-close-failed:{closed.reason}")
+    result
+
+fn main() -> i32:
+    val args = args()
+    if args.len() < 2:
+        return _fail("usage: <provider-artifact> <sha256>")
+    val artifact_path = args[args.len() - 2]
+    val artifact_digest = args[args.len() - 1]
+    if artifact_path == "" or artifact_digest.len() != 64:
+        return _fail("provider path/digest arguments are invalid")
+
+    val caps = SIMPLE_VECTOR_CAP_HTTP_FIND_BYTE | SIMPLE_VECTOR_CAP_HTTP_FIND_CRLF
+    val request = _valid_request()
+    val opened = http_vector_parser_session_open_owned_v1(
+        _admission_request(artifact_path, artifact_digest, caps, caps))
+    if opened.status != PROVIDER_SESSION_OK:
+        return _fail("HTTP provider admission failed: " + opened.reason)
+    val parser = HttpVectorRequestParserV1.from_session(opened.session)
+    var vector_server = _server(parser)
+    val vector = _drive_one(vector_server, request)
+    var failure = ""
+    if not vector.ok or not vector.connection.handled or
+            not vector.connection.provider_used or
+            vector.connection.provider_attempts <= 0 or
+            vector.connection.provider_successes != vector.connection.provider_attempts:
+        failure = "admitted provider was not used for the live request: " + vector.reason
+    if not vector.wire.contains("HTTP/1.1 200") or
+            not vector.wire.contains("{LIVE_MARKER_V1} path=/vector;body=Wiki;query_valid=true;padding_valid=true;remote_valid=true") or
+            not vector.wire.contains("X-Content-Type-Options: nosniff"):
+        failure = "provider parser changed live route/body/security response or peer address was invalid"
+    if vector.connection.parser == nil:
+        failure = "first connection dropped the parser continuation"
+    else:
+        vector_server = vector_server.with_http_request_parser_v1(vector.connection.parser!)
+
+    val denied = _run_with_session(
+        artifact_path, artifact_digest,
+        SIMPLE_VECTOR_CAP_HTTP_FIND_BYTE, 0, request)
+    if not denied.ok or not denied.connection.handled or
+            denied.connection.provider_used or denied.connection.provider_attempts != 0 or
+            denied.wire != vector.wire:
+        failure = "capability refusal did not preserve scalar live behavior"
+
+    val rejected = _drive_one(vector_server, _duplicate_host_request())
+    if not rejected.ok or rejected.connection.handled or
+            not rejected.connection.provider_used or
+            not rejected.wire.contains("HTTP/1.1 400") or
+            not rejected.wire.contains("X-Content-Type-Options: nosniff") or
+            rejected.wire.contains(LIVE_MARKER_V1):
+        failure = "duplicate Host security rejection changed on the vector path"
+    if not rejected.connection.provider_used:
+        failure = "retained provider session was not reused for the second socket"
+
+    if rejected.connection.parser == nil:
+        failure = "connection result dropped the parser owner before cleanup"
+    else:
+        val closed = http_request_parser_close_owned_v1(rejected.connection.parser!)
+        if closed.status != PROVIDER_SESSION_OK:
+            failure = "provider session close failed: " + closed.reason
+
+    if failure != "": return _fail(failure)
+    if not _emit_http_wire("valid", vector.wire) or
+            not _emit_http_wire("duplicate-host", rejected.wire):
+        return _fail("bounded full-wire parity record failed")
+
+    println("HTTP_VECTOR_LIVE_SOCKET_PROBE_COMPLETE provider_used=true retained_session_reused=true scalar_fallback=true security_rejection=true")
+    0

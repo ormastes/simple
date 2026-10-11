@@ -1,0 +1,257 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: builtin methods without a resolver symbol (BUG-IT-9 / BUG-IT-10)
+
+Edge cases for the lowerings in
+`src/compiler/50.mir/_MirLoweringExpr/builtin_method_extras.spl`:
+array `reversed` / `sorted` / `index_of` / `enumerate` / `find` / `reduce`,
+numeric `abs` / `min` / `max` / `floor` / `ceil` / `round`, Result `map` /
+`map_err` / `ok`, list comprehensions and `(a..b).step(n)`.
+
+Each example checks three things: no diagnostic, the runtime symbol (or loop
+shape) the lowering must use, and -- for the forms stage2 does not lower --
+that the failure is LOUD and names the construct rather than silently
+producing a value.
+"""
+
+# @tag: unit, compiler, mir, builtins
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+struct ExtraLowered:
+    messages: [text]
+    callees: [text]
+    labels: [text]
+
+fn extra_lower(src: text) -> ExtraLowered:
+    val file = "testdata/fixture_builtin_extras.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_builtin_extras", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push("hir: " + e.message)
+    for e in lowering.errors:
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        messages = messages.push("mir: " + e.message)
+    var callees: [text] = []
+    var labels: [text] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            labels = labels.push(block.label ?? "")
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                            case _: pass
+                    case _: pass
+    ExtraLowered(messages: messages, callees: callees, labels: labels)
+
+fn extra_clean(src: text) -> ExtraLowered:
+    val low = extra_lower(src)
+    for m in low.messages:
+        print "diagnostic: {m}"
+    expect(low.messages.len()).to_equal(0)
+    low
+
+fn extra_has(items: [text], wanted: text) -> bool:
+    for item in items:
+        if item == wanted:
+            return true
+    false
+
+fn extra_message_with(low: ExtraLowered, fragment: text) -> bool:
+    for m in low.messages:
+        if m.contains(fragment):
+            return true
+    # Miss: show what WAS reported so a failure names the real diagnostic.
+    for m in low.messages:
+        print "diagnostic (wanted `{fragment}`): {m}"
+    false
+
+describe "builtin method extras: arrays":
+    it "reversed() and sorted() move tagged elements through the runtime for any element type":
+        val low = extra_clean("fn f(xs: [i64], ts: [text], fs: [f64]) -> i64:\n" +
+            "    val a = xs.reversed()\n" +
+            "    val b = xs.sorted()\n" +
+            "    val c = ts.sorted()\n" +
+            "    val d = fs.reversed()\n" +
+            "    var n = 0\n" +
+            "    for t in c:\n" +
+            "        n = n + t.len()\n" +
+            "    a.len() + b.len() + d.len() + n\n")
+        expect(extra_has(low.callees, "rt_reverse")).to_equal(true)
+        expect(extra_has(low.callees, "rt_array_sorted")).to_equal(true)
+
+    it "sorted(by: comparator) fails closed instead of ignoring the comparator":
+        val low = extra_lower("fn f(xs: [i64]) -> i64:\n" +
+            "    val a = xs.sorted(by: \\p, q: q - p)\n" +
+            "    a.len()\n")
+        expect(extra_message_with(low, "array.sorted(by: comparator)")).to_equal(true)
+        expect(extra_has(low.callees, "rt_array_sorted")).to_equal(false)
+
+    it "index_of() boxes the needle and calls the array runtime, not the text one":
+        val low = extra_clean("fn f(xs: [i64], ts: [text]) -> i64:\n" +
+            "    xs.index_of(2) + ts.index_of(\"c\")\n")
+        expect(extra_has(low.callees, "rt_array_index_of")).to_equal(true)
+        expect(extra_has(low.callees, "rt_index_of")).to_equal(false)
+
+    it "find() inlines the predicate over i64, text and f64 elements and stops at the first hit":
+        val low = extra_clean("fn f(xs: [i64], ts: [text], fs: [f64]) -> i64:\n" +
+            "    val a = xs.find(\\x: x == 2) ?? -1\n" +
+            "    val b = ts.find(\\t: t == \"a\") ?? \"\"\n" +
+            "    val c = fs.find(\\v: v < 0.0) ?? 0.0\n" +
+            "    a + b.len() + c.to_i64()\n")
+        expect(extra_has(low.labels, "find_hit")).to_equal(true)
+        expect(extra_has(low.callees, "rt_array_find")).to_equal(false)
+
+    it "find() on an array with no known element type fails closed":
+        val low = extra_lower("fn f(xs: [text]) -> i64:\n" +
+            "    val kept = xs.filter(\\t: t.len() > 0)\n" +
+            "    val a = kept.find(\\t: t == \"a\") ?? \"\"\n" +
+            "    a.len()\n")
+        expect(extra_message_with(low, "element type is not statically known")).to_equal(true)
+
+    it "find() with a predicate that is not a lambda literal fails closed":
+        val low = extra_lower("fn is_two(x: i64) -> bool:\n" +
+            "    x == 2\n" +
+            "\n" +
+            "fn f(xs: [i64]) -> i64:\n" +
+            "    xs.find(is_two) ?? -1\n")
+        expect(extra_message_with(low, "array.find(predicate)")).to_equal(true)
+
+    it "reduce() keeps the accumulator type for i64, f64 and text folds":
+        val low = extra_clean("fn f(xs: [i64], ts: [text], fs: [f64]) -> i64:\n" +
+            "    val a = xs.reduce(10, \\acc, x: acc - x)\n" +
+            "    val b = fs.reduce(0.0, \\acc, v: acc + v)\n" +
+            "    val c = ts.reduce(\"\", \\acc, t: acc + t)\n" +
+            "    a + b.to_i64() + c.len()\n")
+        expect(extra_has(low.labels, "reduce_body")).to_equal(true)
+        expect(extra_has(low.callees, "rt_array_reduce")).to_equal(false)
+
+    it "reduce() with a combiner that is not a lambda literal fails closed":
+        val low = extra_lower("fn add(a: i64, b: i64) -> i64:\n" +
+            "    a + b\n" +
+            "\n" +
+            "fn f(xs: [i64]) -> i64:\n" +
+            "    xs.reduce(0, add)\n")
+        expect(extra_message_with(low, "array.reduce(init, combiner)")).to_equal(true)
+
+describe "builtin method extras: numeric":
+    it "integer abs/min/max lower to compares, not float runtime calls":
+        val low = extra_clean("fn f(x: i64, y: i64) -> i64:\n" +
+            "    x.abs() + x.min(y) + x.max(3)\n")
+        expect(extra_has(low.labels, "abs_pick")).to_equal(true)
+        expect(extra_has(low.labels, "min_pick")).to_equal(true)
+        expect(extra_has(low.labels, "max_pick")).to_equal(true)
+        expect(extra_has(low.callees, "rt_math_abs")).to_equal(false)
+        expect(extra_has(low.callees, "rt_math_min")).to_equal(false)
+
+    it "float abs/min/max/floor/ceil/round call the f64 runtime":
+        val low = extra_clean("fn f(a: f64, b: f64) -> f64:\n" +
+            "    a.abs() + a.min(b) + a.max(1.5) + a.floor() + a.ceil() + a.round()\n")
+        expect(extra_has(low.callees, "rt_math_abs")).to_equal(true)
+        expect(extra_has(low.callees, "rt_math_min")).to_equal(true)
+        expect(extra_has(low.callees, "rt_math_max")).to_equal(true)
+        expect(extra_has(low.callees, "rt_math_floor")).to_equal(true)
+        expect(extra_has(low.callees, "rt_math_ceil")).to_equal(true)
+        expect(extra_has(low.callees, "rt_math_round")).to_equal(true)
+
+    it "a mixed int/float min fails closed":
+        val low = extra_lower("fn f(x: i64, a: f64) -> i64:\n" +
+            "    x.min(a)\n")
+        expect(extra_message_with(low, "int.min(x)")).to_equal(true)
+
+    it "floor() on an integer stays unresolved":
+        val low = extra_lower("fn f(x: i64) -> i64:\n" +
+            "    x.floor()\n")
+        expect(extra_message_with(low, "unresolved method call: floor")).to_equal(true)
+
+describe "builtin method extras: Result":
+    it "map / map_err / ok and a chained unwrap_or rebuild or project the Result":
+        val low = extra_clean("fn f(v: Result<i64, text>) -> i64:\n" +
+            "    val a = v.map(\\x: x * 2).unwrap_or(0)\n" +
+            "    val b = v.map_err(\\m: m.len()).unwrap_or(0)\n" +
+            "    val c = v.ok() ?? 0\n" +
+            "    val d = v.map(\\x: x + 1).map(\\y: y * 3).unwrap_or(7)\n" +
+            "    a + b + c + d\n")
+        expect(extra_has(low.callees, "rt_enum_new")).to_equal(true)
+        expect(extra_has(low.labels, "result_map_active")).to_equal(true)
+        expect(extra_has(low.labels, "result_map_err_active")).to_equal(true)
+        expect(extra_has(low.labels, "result_ok_active")).to_equal(true)
+
+    it "map with a mapper that is not a lambda literal fails closed":
+        val low = extra_lower("fn twice(x: i64) -> i64:\n" +
+            "    x * 2\n" +
+            "\n" +
+            "fn f(v: Result<i64, text>) -> i64:\n" +
+            "    v.map(twice).unwrap_or(0)\n")
+        expect(extra_message_with(low, "Result.map(f)")).to_equal(true)
+
+describe "builtin method extras: for-in and comprehensions":
+    it "enumerate() yields (index, element) tuples through the runtime":
+        val low = extra_clean("fn f(ts: [text], xs: [i64]) -> i64:\n" +
+            "    var s = 0\n" +
+            "    for (i, t) in ts.enumerate():\n" +
+            "        s = s + i * t.len()\n" +
+            "    for (j, x) in xs.enumerate():\n" +
+            "        s = s + j + x\n" +
+            "    s\n")
+        expect(extra_has(low.callees, "rt_array_enumerate")).to_equal(true)
+
+    it "a stepped range tests the bound in the direction of the step and rejects a zero step":
+        val low = extra_clean("fn f(n: i64, k: i64) -> i64:\n" +
+            "    var c = 0\n" +
+            "    for i in (0..n).step(2):\n" +
+            "        c = c + i\n" +
+            "    for j in (n..=0).step(k):\n" +
+            "        if j == 3:\n" +
+            "            continue\n" +
+            "        c = c + j\n" +
+            "    c\n")
+        expect(extra_has(low.labels, "for_step_up")).to_equal(true)
+        expect(extra_has(low.labels, "for_step_down")).to_equal(true)
+        expect(extra_has(low.labels, "for_step_zero")).to_equal(true)
+
+    it "for-in over reversed() of a call result":
+        val low = extra_clean("fn make(n: i64) -> [i64]:\n" +
+            "    var out: [i64] = []\n" +
+            "    for i in 0..n:\n" +
+            "        out.push(i)\n" +
+            "    out\n" +
+            "\n" +
+            "fn f(n: i64) -> i64:\n" +
+            "    var s = 0\n" +
+            "    for w in make(n).reversed():\n" +
+            "        s = s + w\n" +
+            "    s\n")
+        expect(extra_has(low.callees, "rt_reverse")).to_equal(true)
+
+    it "a list comprehension over an array or a range lowers to a loop and push":
+        val low = extra_clean("fn f(xs: [i64], ts: [text], n: i64) -> i64:\n" +
+            "    val a = [x * x for x in xs if x > 0]\n" +
+            "    val b = [t.len() for t in ts]\n" +
+            "    val c = [i * 2 for i in (0..=n) if i != 1]\n" +
+            "    a.len() + b.len() + c.len()\n")
+        expect(extra_has(low.labels, "comp_body")).to_equal(true)
+        expect(extra_has(low.labels, "comp_pass")).to_equal(true)
+        expect(extra_has(low.callees, "rt_array_push")).to_equal(true)
+
+    it "a comprehension over a dict fails closed and names the construct":
+        val low = extra_lower("fn f(d: Dict<text, i64>) -> i64:\n" +
+            "    val a = [k.len() for k in d]\n" +
+            "    a.len()\n")
+        expect(extra_message_with(low, "E-MIR-EXPR-Comprehension")).to_equal(true)
+        expect(extra_message_with(low, "not a typed array or an integer range")).to_equal(true)

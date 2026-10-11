@@ -1,0 +1,94 @@
+"""
+Checker rule: nil (or an Optional-typed value) flowing INTO a non-optional
+scalar slot -- call argument, annotated binding, assignment, struct field --
+is diagnosed, mirroring the existing return-contract rule.
+
+Why (doc/08_tracking/bug/native_scalar_nil_compare_payload_bits_2026-10-10.md):
+natively a non-optional `i64`/`bool`/`f64`/`char` slot cannot hold a nil (nil
+and the integer 3 share the word 3), so MIR lowering folds `v == nil` on such
+a slot to false. The seed interpreter still lets a nil literal reach an `i64`
+parameter and answers `v == nil` true there; this rule names those flows so
+the declaration becomes `T?` (where nil stays a real, distinct value) instead
+of silently diverging. The driver's typecheck pass is Advisory by default
+(SIMPLE_TYPECHECK_PROFILE), so this is warn-first.
+
+Not covered (would need flow typing): an untyped/Any value that is nil at
+runtime.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.types.type_infer_types.{HmInferContext}
+# The HM context's methods live in impl blocks spread over the package
+# modules; the seed attaches an impl only when its module is loaded.
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.generalization.*
+use compiler.types.type_infer.inference.*
+use compiler.types.type_infer.inference_control.*
+use compiler.types.type_infer.inference_expr.*
+use compiler.types.type_infer.inference_expr_calls.*
+use compiler.types.type_infer.inference_expr_ops.*
+use compiler.types.type_infer.inference_effects.*
+use compiler.types.type_infer.traits.*
+
+fn nil_flow_errors(src: text) -> [text]:
+    val module = parse_full_frontend(src, "nil_flow.spl", "nil_flow.spl", Logger(level: 0))
+    var hl = HirLowering.with_filename("nil_flow.spl")
+    val hir = hl.lower_module(module)
+    var ctx = HmInferContext.with_builtins()
+    ctx.infer_module(hir)
+    var out: [text] = []
+    for e in ctx.errors:
+        match e:
+            case Other(msg, _):
+                if msg.contains("cannot flow into the non-optional scalar type"):
+                    out = out.push(msg)
+            case _: ()
+    out
+
+describe "nil into a non-optional scalar slot is diagnosed":
+    it "flags a nil literal passed to an i64 / bool / f64 parameter":
+        val src = (
+            "fn fi(v: i64) -> bool:\n    v == nil\n\n" +
+            "fn fb(v: bool) -> bool:\n    v == nil\n\n" +
+            "fn ff(v: f64) -> bool:\n    v == nil\n\n" +
+            "fn main():\n    fi(nil)\n    fb(nil)\n    ff(nil)\n"
+        )
+        val errs = nil_flow_errors(src)
+        expect(errs.len()).to_equal(3)
+        expect(errs[0]).to_contain("nil cannot flow into the non-optional scalar type")
+        expect(errs[0]).to_contain("declare the parameter/binding/field as")
+
+    it "flags a nil literal bound to an annotated scalar":
+        val errs = nil_flow_errors("fn main():\n    val x: i64 = nil\n    val y: bool = nil\n")
+        expect(errs.len()).to_equal(2)
+
+    # KNOWN GAP (measured, not assumed): `y = nil` on a `var y: bool` and
+    # `Box(i: nil)` on an `i: i64` field produce 0 diagnostics today -- the
+    # inferencer's Assign arm checks the value against the SYNTHESIZED
+    # target type (a generalized scheme instance, not the declared scalar)
+    # and struct-literal fields are not checked against their declared
+    # field types at all. Both flows remain under the MIR fold; tracked in
+    # the bug record's "W-nil-compare" section.
+
+    it "flags an Optional-typed value passed where a scalar is declared":
+        val src = (
+            "fn fi(v: i64) -> bool:\n    v == nil\n\n" +
+            "fn main(o: i64?):\n    fi(o)\n"
+        )
+        val errs = nil_flow_errors(src)
+        expect(errs.len()).to_equal(1)
+        expect(errs[0]).to_contain("optional value of type")
+
+    it "accepts scalar values into scalar slots and nil into optional slots":
+        val src = (
+            "struct Box:\n    i: i64?\n\n" +
+            "fn fi(v: i64) -> bool:\n    v == nil\n\n" +
+            "fn fo(v: i64?) -> bool:\n    v == nil\n\n" +
+            "fn main():\n    fi(3)\n    fi(0)\n    fo(nil)\n    fo(3)\n    val x: i64 = 3\n    val o: i64? = nil\n    val bx = Box(i: nil)\n"
+        )
+        expect(nil_flow_errors(src).len()).to_equal(0)

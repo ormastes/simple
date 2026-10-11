@@ -1,0 +1,147 @@
+"""
+Purpose: pins the two text->number source forms and their native lowering.
+`x as T` on text is the code point of a ONE-character text and a runtime error
+("type mismatch: cannot cast str to T") for any other character count;
+`T(x)` (HirExprKind.ConvertCall) is a value parse. Both used to reach the
+backend as one raw MIR Cast of a text pointer: LLVM aborted with `unsupported
+LLVM value conversion from ptr to i8` (first seen in
+src/lib/nogc_sync_mut/fs_driver/bytes_util.spl) and Cranelift parsed both.
+The reference values asserted directly below are evaluated by whatever runs
+this spec, so under the seed they ARE the seed's semantics. Also pins that an
+LLVM codegen error is a recorded per-module diagnostic, not a process abort.
+Audience: compiler engineers maintaining MIR -> LLVM scalar conversions.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.backend.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.backend.llvm_ir_builder.{llvm_codegen_error_module, llvm_codegen_error_from_ir}
+
+val BYTES_SRC = "fn text_to_bytes_pure(s: text) -> [u8]:\n    var buf: [u8] = []\n    var i: i64 = 0\n    while i < s.len():\n        buf = buf.push(s.byte_at(i) as u8)\n        i = i + 1\n    buf\n"
+val AS_INT_SRC = "fn code_of(s: text) -> i64:\n    s as i64\n"
+val AS_U8_SRC = "fn byte_of(s: text, i: i64) -> u8:\n    s[i] as u8\n"
+val AS_FLOAT_SRC = "fn code_f(s: text) -> f64:\n    s as f64\n"
+val CALL_INT_SRC = "fn parse_i(s: text) -> i64:\n    i64(s)\n"
+val CALL_I32_SRC = "fn parse_n(s: text) -> i32:\n    i32(s)\n"
+val CALL_FLOAT_SRC = "fn parse_f(s: text) -> f64:\n    f64(s)\n"
+val CALL_NUMERIC_SRC = "fn widen(x: i32) -> i64:\n    i64(x)\n"
+
+fn llvm_of(src: text, name: text) -> text:
+    val parsed = parse_full_frontend(src, name + ".spl", name, Logger(level: 0))
+    var hl = HirLowering.with_filename(name + ".spl")
+    val hir = hl.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    MirToLlvm.create(name, CodegenTarget.X86_64, nil).translate_module(mir)
+
+fn clean(llvm: text) -> bool:
+    not llvm.contains("SIMPLE-LLVM-CODEGEN-ERROR") and not llvm.contains("undef")
+
+describe "reference semantics of text -> number (the values native code must match)":
+    it "`x as T` is the code point of a one-character text":
+        val ascii = "a"
+        val latin = "é"
+        val emoji = "😀"
+        expect(ascii as i64).to_equal(97)
+        expect(latin as i64).to_equal(233)
+        expect(emoji as i64).to_equal(128512)
+        expect(ascii as f64).to_equal(97.0)
+
+    it "`T(x)` parses the text":
+        expect(i64("42")).to_equal(42)
+        expect(int("42")).to_equal(42)
+        expect(i64("-5")).to_equal(-5)
+        expect(i64("4x")).to_equal(4)
+        expect(i64("abc")).to_equal(0)
+        expect(i64("")).to_equal(0)
+        expect(i64("7")).to_equal(7)
+        expect(float("42")).to_equal(42.0)
+        expect(f64("1.5")).to_equal(1.5)
+
+describe "`x as T` on text lowers to a checked code point":
+    it "traps unless the text is exactly one character, then reads its code point":
+        val llvm = llvm_of(AS_INT_SRC, "as_int")
+        expect(clean(llvm)).to_be(true)
+        expect(llvm.contains("call i64 @rt_string_char_count(")).to_be(true)
+        expect(llvm.contains("type mismatch: cannot cast str to i64")).to_be(true)
+        expect(llvm.contains("call void @rt_panic(")).to_be(true)
+        expect(llvm.contains("call i64 @__simple_rt_string_char_code_at(")).to_be(true)
+        expect(llvm.contains("call i64 @rt_string_to_int_lenient(")).to_be(false)
+
+    it "narrows the code point for `s[i] as u8`":
+        val llvm = llvm_of(AS_U8_SRC, "as_u8")
+        expect(clean(llvm)).to_be(true)
+        expect(llvm.contains("call i64 @__simple_rt_string_char_code_at(")).to_be(true)
+        expect(llvm.contains("type mismatch: cannot cast str to u8")).to_be(true)
+        expect(llvm.contains("to i8")).to_be(true)
+
+    it "converts the code point to a float for `text as f64`":
+        val llvm = llvm_of(AS_FLOAT_SRC, "as_float")
+        expect(clean(llvm)).to_be(true)
+        expect(llvm.contains("call i64 @__simple_rt_string_char_code_at(")).to_be(true)
+        expect(llvm.contains("type mismatch: cannot cast str to f64")).to_be(true)
+        expect(llvm.contains("sitofp")).to_be(true)
+
+describe "`T(x)` on text lowers to a parse, never a code point":
+    it "parses `i64(text)`":
+        val llvm = llvm_of(CALL_INT_SRC, "call_int")
+        expect(clean(llvm)).to_be(true)
+        expect(llvm.contains("call i64 @rt_string_to_int_lenient(")).to_be(true)
+        expect(llvm.contains("call i64 @__simple_rt_string_char_code_at(")).to_be(false)
+        expect(llvm.contains("cannot cast str")).to_be(false)
+
+    it "parses then narrows `i32(text)`":
+        val llvm = llvm_of(CALL_I32_SRC, "call_i32")
+        expect(clean(llvm)).to_be(true)
+        expect(llvm.contains("call i64 @rt_string_to_int_lenient(")).to_be(true)
+        expect(llvm.contains("to i32")).to_be(true)
+
+    it "parses `f64(text)`":
+        val llvm = llvm_of(CALL_FLOAT_SRC, "call_float")
+        expect(clean(llvm)).to_be(true)
+        expect(llvm.contains("call i64 @rt_string_to_float(")).to_be(true)
+        expect(llvm.contains("call double @rt_value_as_float(")).to_be(true)
+
+    it "stays a plain numeric cast for a numeric argument":
+        val llvm = llvm_of(CALL_NUMERIC_SRC, "call_numeric")
+        expect(clean(llvm)).to_be(true)
+        expect(llvm.contains("call i64 @rt_string_to_int_lenient(")).to_be(false)
+        expect(llvm.contains("call i64 @rt_string_char_count(")).to_be(false)
+        expect(llvm.contains("sext i32")).to_be(true)
+
+describe "text_to_bytes_pure reads UTF-8 bytes":
+    it "lowers through the byte accessor with no text cast at all":
+        val llvm = llvm_of(BYTES_SRC, "text_bytes")
+        expect(clean(llvm)).to_be(true)
+        expect(llvm.contains("byte_at(")).to_be(true)
+        expect(llvm.contains("call i64 @rt_string_char_count(")).to_be(false)
+        expect(llvm.contains("@rt_array_push")).to_be(true)
+
+describe "an LLVM codegen error is a per-module diagnostic, not a process abort":
+    it "records module, function and location instead of panicking":
+        var translator = MirToLlvm.create("demo.mod", CodegenTarget.X86_64, nil)
+        translator.current_function_name = "demo_fn"
+        val placeholder = translator.emit_value_type_conversion("%l1", "ptr", "i8", false)
+        expect(placeholder).to_equal("undef")
+        expect(translator.codegen_errors.len()).to_equal(1)
+        val diagnostic = translator.codegen_errors[0]
+        expect(diagnostic.contains("unsupported LLVM value conversion from ptr to i8")).to_be(true)
+        expect(diagnostic.contains("module=demo.mod")).to_be(true)
+        expect(diagnostic.contains("function=demo_fn")).to_be(true)
+        expect(diagnostic.contains("at=")).to_be(true)
+
+    it "carries the diagnostics in unassemblable module text the object step rejects":
+        val poisoned = llvm_codegen_error_module(["compile error: first [module=m function=f at=a.spl:1:2]", "compile error: second"])
+        expect(poisoned.contains("define ")).to_be(false)
+        val carried = llvm_codegen_error_from_ir("declare void @x()\n" + poisoned)
+        expect(carried.contains("compile error: first [module=m function=f at=a.spl:1:2]")).to_be(true)
+        expect(carried.contains("compile error: second")).to_be(true)
+        expect(llvm_codegen_error_from_ir("define i64 @f() {\n  ret i64 0\n}\n")).to_equal("")

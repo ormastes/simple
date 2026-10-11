@@ -1,0 +1,75 @@
+# Execution status: UNEXECUTED. Native first-loss receipt is documented in the bug report.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering._Expressions.expression_components.*
+
+fn canonical_pattern_owner(pattern: HirPattern) -> i64:
+    match pattern.kind:
+        case HirPatternKind.Enum(type_, name, _):
+            if name == "Ready":
+                match type_.kind:
+                    case HirTypeKind.Named(owner, _): return owner.id
+                    case _: ()
+        case _: ()
+    -1
+
+fn canonical_pattern_subject(owner: SymbolId) -> HirType:
+    HirType(kind: HirTypeKind.Named(owner, []), span: Span.empty())
+
+fn canonical_pattern_ready() -> Pattern:
+    Pattern(kind: PatternKind.Binding("Ready", false), span: Span.empty())
+
+fn canonical_pattern_declaration() -> ParserEnum:
+    val parsed = parse_full_frontend("enum Event<T>:\n    Ready\n    Item(T)\n", "provider", "provider", Logger(level: 0))
+    parsed.enums["Event"]
+
+describe "unit pattern metadata retains canonical imported enum owners":
+    it "normalizes both a provider field owner and a distinct local alias":
+        var hir = HirLowering.new()
+        val canonical = hir.symbols.define("Event", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, Some("provider"))
+        hir.symbols.bind_qualified_type("provider", "Event", canonical)
+        val alias = hir.symbols.define("Alias", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, Some("provider"))
+        hir.symbols.rename_symbol(alias, "Event")
+        expect(alias.id == canonical.id).to_be(false)
+        hir.imported_enum_owners["Alias"] = "provider"
+        hir.register_enum_unit_patterns(canonical_pattern_declaration(), "Alias")
+        expect(canonical_pattern_owner(hir.lower_match_pattern(canonical_pattern_ready(), canonical_pattern_subject(canonical)))).to_equal(canonical.id)
+        expect(canonical_pattern_owner(hir.lower_match_pattern(canonical_pattern_ready(), canonical_pattern_subject(alias)))).to_equal(alias.id)
+        expect(hir.generic_enum_constructor_owners.get(canonical.id) ?? false).to_be(true)
+        expect(hir.generic_enum_constructor_owners.get(alias.id) ?? false).to_be(true)
+        expect(hir.enum_unit_pattern_names.contains_key("{canonical.id}:Item")).to_be(false)
+        expect(hir.enum_unit_pattern_names.contains_key("{alias.id}:Item")).to_be(false)
+        expect(hir.symbols.lookup_or_invalid("Alias").id).to_equal(alias.id)
+        expect(hir.symbols.lookup_qualified_type_raw("provider", "Event")).to_equal(canonical.id)
+        val unrelated = hir.symbols.define("Other", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, Some("other"))
+        hir.symbols.rename_symbol(unrelated, "Event")
+        hir.symbols.bind_qualified_type("other", "Event", unrelated)
+        expect(canonical_pattern_owner(hir.lower_match_pattern(canonical_pattern_ready(), canonical_pattern_subject(unrelated)))).to_equal(-1)
+        val mutable = Pattern(kind: PatternKind.Binding("Ready", true), span: Span.empty())
+        expect(canonical_pattern_owner(hir.lower_match_pattern(mutable, canonical_pattern_subject(canonical)))).to_equal(-1)
+
+    it "does not bridge stale import metadata across a local enum shadow":
+        var hir = HirLowering.new()
+        val foreign = hir.symbols.define("Foreign", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, Some("provider"))
+        hir.symbols.rename_symbol(foreign, "Event")
+        hir.symbols.bind_qualified_type("provider", "Event", foreign)
+        val own = hir.symbols.define("Event", SymbolKind.Enum, nil, Span.empty(), Visibility.Private, false, Some("consumer"))
+        hir.imported_enum_owners["Event"] = "provider"
+        hir.register_enum_unit_patterns(canonical_pattern_declaration(), "Event")
+        expect(canonical_pattern_owner(hir.lower_match_pattern(canonical_pattern_ready(), canonical_pattern_subject(own)))).to_equal(own.id)
+        expect(canonical_pattern_owner(hir.lower_match_pattern(canonical_pattern_ready(), canonical_pattern_subject(foreign)))).to_equal(-1)
+
+    it "does not register a lexical variable as an enum":
+        var hir = HirLowering.new()
+        val local = hir.symbols.define("Event", SymbolKind.Variable, nil, Span.empty(), Visibility.Private, false, nil)
+        hir.imported_enum_owners["Event"] = "provider"
+        hir.register_enum_unit_patterns(canonical_pattern_declaration(), "Event")
+        expect(hir.generic_enum_constructor_owners.contains_key(local.id)).to_be(false)
+        expect(canonical_pattern_owner(hir.lower_match_pattern(canonical_pattern_ready(), canonical_pattern_subject(local)))).to_equal(-1)

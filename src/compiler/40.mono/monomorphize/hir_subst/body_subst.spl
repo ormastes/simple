@@ -224,7 +224,8 @@ fn hs_asm(asm_node: HirAsm, ctx: HirSubstCtx) -> HirAsm:
 fn hs_interpolations(interps: [HirInterpolation]?, ctx: HirSubstCtx) -> [HirInterpolation]?:
     if interps == nil:
         return nil
-    val list: [HirInterpolation] = interps
+    # Preserve nil above, but unwrap a present cached Some(list) here.
+    val list: [HirInterpolation] = interps ?? []
     var out: [HirInterpolation] = []
     for i in list:
         val it: HirInterpolation = i
@@ -265,9 +266,14 @@ fn subst_hir_stmt(stmt: HirStmt, ctx: HirSubstCtx) -> HirStmt:
             out.kind = HirStmtKind.Expr(subst_hir_expr(et, ctx))
             handled = true
         case HirStmtKind.Let(symbol, ty, init):
-            val lt: HirType = ty
+            # An unannotated binding lowers with a nil type slot; only a
+            # written annotation can mention a type parameter.
+            var new_ty = ty
+            if ty != nil:
+                val lt: HirType = ty
+                new_ty = hs_type(lt, ctx)
             val li: HirExpr = init
-            out.kind = HirStmtKind.Let(symbol, hs_type(lt, ctx), subst_hir_expr(li, ctx))
+            out.kind = HirStmtKind.Let(symbol, new_ty, subst_hir_expr(li, ctx))
             handled = true
         case HirStmtKind.Assign(target, op, value):
             val at: HirExpr = target
@@ -575,6 +581,11 @@ fn subst_hir_expr(expr: HirExpr, ctx: HirSubstCtx) -> HirExpr:
             val ase: HirExpr = inner
             val ast: HirType = target
             out.kind = HirExprKind.As(subst_hir_expr(ase, ctx), hs_type(ast, ctx))
+            handled = true
+        case HirExprKind.ConvertCall(inner, target):
+            val cve: HirExpr = inner
+            val cvt: HirType = target
+            out.kind = HirExprKind.ConvertCall(subst_hir_expr(cve, ctx), hs_type(cvt, ctx))
             handled = true
         case HirExprKind.Range(start, end, inclusive, step):
             out.kind = HirExprKind.Range(hs_expr_opt(start, ctx), hs_expr_opt(end, ctx), inclusive, hs_expr_opt(step, ctx))

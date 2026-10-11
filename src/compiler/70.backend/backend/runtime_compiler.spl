@@ -49,19 +49,76 @@ fn _is_msvc_cc(cc: text) -> bool:
     val driver = parts[parts.len() - 1]
     driver == "cl" or driver == "cl.exe" or driver == "clang-cl" or driver == "clang-cl.exe"
 
+pub fn windows_link_flavor_select(target: text, linker_abi: text, flavor_override: text,
+        abi_override: text, msystem: text) -> text:
+    """Pure Windows toolchain-flavor selector: "msvc" or "gnu".
+
+    Precedence mirrors the Rust seed's `Target::linker_flavor`
+    (src/compiler_rust/common/src/target.rs): an ABI-qualified TARGET wins
+    (`*-windows-msvc` / `windows-msvc` -> msvc; `*-windows-gnu`,
+    `*-w64-mingw32` / `windows-gnu` -> gnu), then the explicit env overrides
+    `SIMPLE_LINKER_FLAVOR` (msvc|gnu|mingw) and `SIMPLE_WINDOWS_ABI`
+    (msvc|gnu), and only for an UNQUALIFIED target does the host shell
+    environment (MSYSTEM, set by every MSYS2/Git Bash shell) decide.
+
+    Incident 2026-10-09: the previous MSYSTEM-first order linked
+    `--target x86_64-pc-windows-msvc` through the MinGW arm whenever the
+    driver ran from Git Bash, failing with "Windows GNU linking requires
+    bootstrap-owned clang through CC" although the target named MSVC."""
+    val normalized_target = target.lower()
+    val normalized_abi = linker_abi.lower()
+    if normalized_abi == "windows-msvc" or normalized_target.ends_with("-windows-msvc"):
+        return "msvc"
+    if normalized_abi == "windows-gnu" or normalized_target.ends_with("-windows-gnu") or
+            normalized_target.ends_with("-w64-mingw32"):
+        return "gnu"
+    val flavor = flavor_override.lower()
+    if flavor == "msvc":
+        return "msvc"
+    if flavor == "gnu" or flavor == "mingw":
+        return "gnu"
+    val abi = abi_override.lower()
+    if abi == "msvc":
+        return "msvc"
+    if abi == "gnu":
+        return "gnu"
+    if msystem != "":
+        return "gnu"
+    "msvc"
+
+pub fn windows_link_flavor_env_conflict(target: text, linker_abi: text, flavor_override: text) -> text:
+    """Message when SIMPLE_LINKER_FLAVOR contradicts an ABI-qualified target
+    (the target wins, exactly as in the seed); "" when there is no conflict."""
+    val flavor = flavor_override.lower()
+    if flavor != "msvc" and flavor != "gnu" and flavor != "mingw":
+        return ""
+    val selected = windows_link_flavor_select(target, linker_abi, "", "", "")
+    val requested = if flavor == "mingw": "gnu" else: flavor
+    if selected == requested:
+        return ""
+    if not target.lower().contains("-windows-") and linker_abi == "":
+        return ""
+    "SIMPLE_LINKER_FLAVOR=" + flavor_override + " ignored: target '" + target + "' names the " + selected + " ABI"
+
+fn _env_text(name: text) -> text:
+    val value = env_get_nullable(name)
+    if value == nil:
+        return ""
+    value
+
+pub fn windows_link_flavor_for_target(target: text, linker_abi: text) -> text:
+    """windows_link_flavor_select over the live environment. An empty
+    `target` falls back to SIMPLE_NATIVE_BUILD_TARGET (the driver's --target)."""
+    val effective_target = if target != "": target else: _env_text("SIMPLE_NATIVE_BUILD_TARGET")
+    val flavor_override = _env_text("SIMPLE_LINKER_FLAVOR")
+    val conflict = windows_link_flavor_env_conflict(effective_target, linker_abi, flavor_override)
+    if conflict != "":
+        print "[linker-flavor] {conflict}"
+    windows_link_flavor_select(effective_target, linker_abi, flavor_override,
+        _env_text("SIMPLE_WINDOWS_ABI"), _env_text("MSYSTEM"))
+
 fn _is_mingw() -> bool:
-    val linker_flavor = env_get_nullable("SIMPLE_LINKER_FLAVOR")
-    if linker_flavor == "msvc":
-        return false
-    if linker_flavor == "gnu":
-        return true
-    val windows_abi = env_get_nullable("SIMPLE_WINDOWS_ABI")
-    if windows_abi == "msvc":
-        return false
-    if windows_abi == "gnu":
-        return true
-    val msystem = env_get_nullable("MSYSTEM")
-    msystem != "" and msystem != nil
+    windows_link_flavor_for_target("", "") == "gnu"
 
 fn _msys_drive_path(p: text) -> text:
     """On Windows, rewrite an MSYS/Cygwin '/d/foo' path to native 'd:/foo'.

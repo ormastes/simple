@@ -1,0 +1,120 @@
+# Opt-in inventory transaction evidence. Never grants cache authority.
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+use std.nogc_sync_mut.io.stderr_ops.{stderr_write}
+use std.io_runtime.{getpid}
+
+fn inventory_trace_token_valid_v1(token: text) -> bool:
+    if token.len() < 16 or token.len() > 64: return false
+    for ch in token:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+# Cursor fields are diagnostic input too: never allow arbitrary text into a record.
+fn inventory_trace_digest_v1(value: text) -> text:
+    if value == "": return ""
+    if value.len() != 64: return "invalid"
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return "invalid"
+    value
+
+class CompilerInventoryTraceV1:
+    prefix: text
+    begin_record: text = ""
+    observed_record: text = ""
+    prepared_record: text = ""
+    result_record: text = ""
+    last_phase: i64 = 0
+    lock_released: bool = true
+    query_kind: i64 = 0
+    query_count: i64 = 0
+    query_status: i64 = -1
+    query_bytes: i64 = -1
+    query_digest: text = ""
+    old_digest: text = ""
+    old_generation: i64 = -1
+    old_membership: text = ""
+    publication_succeeded: bool = false
+    published_digest: text = ""
+    published_generation: i64 = -1
+    overflow: bool = false
+    invalid_fields: bool = false
+
+    me begin(root: text, source_roots: [text], cold_init: bool):
+        var families = 0
+        if source_roots.contains("src"): families = families + 1
+        if source_roots.contains("test"): families = families + 2
+        self.begin_record = self.prefix + " phase=1 root={sha256_text(root)} families={families} cold={cold_init}\n"
+        self.last_phase = 1
+
+    me captured_pointer(pointer: text, digest: text, generation: i64, membership: text):
+        val safe_membership = inventory_trace_digest_v1(membership)
+        if safe_membership == "invalid": self.invalid_fields = true
+        self.old_digest = digest
+        self.old_generation = generation
+        self.old_membership = membership
+        self.begin_record = self.begin_record[:-1] + " expected={sha256_text(pointer)} old_generation={generation} old_membership={safe_membership}\n"
+        if self.begin_record.len() > 1024:
+            self.begin_record = ""
+            self.overflow = true
+
+    me captured_query(kind: i64, status: i64, stdout: text):
+        self.query_count = self.query_count + 1
+        self.query_kind = kind
+        self.query_status = status
+        self.query_bytes = text_byte_len(stdout)
+        self.query_digest = sha256_text(stdout)
+
+    me observed(events: i64, paths: i64, src_digest: text, test_digest: text):
+        val safe_src = inventory_trace_digest_v1(src_digest)
+        val safe_test = inventory_trace_digest_v1(test_digest)
+        if safe_src == "invalid" or safe_test == "invalid": self.invalid_fields = true
+        self.observed_record = self.prefix + " phase=2 queries={self.query_count} query_kind={self.query_kind} query_status={self.query_status} query_bytes={self.query_bytes} query_sha={self.query_digest} events={events} paths={paths} src={safe_src} test={safe_test}\n"
+        self.last_phase = 2
+        if self.observed_record.len() > 1024:
+            self.observed_record = ""
+            self.overflow = true
+
+    me prepared(deleted: i64, paths: i64, membership: text):
+        val safe_membership = inventory_trace_digest_v1(membership)
+        if safe_membership == "invalid": self.invalid_fields = true
+        self.prepared_record = self.prefix + " phase=3 deleted={deleted} paths={paths} membership={safe_membership}\n"
+        self.last_phase = 3
+        if self.prepared_record.len() > 1024:
+            self.prepared_record = ""
+            self.overflow = true
+
+    me published(digest: text, generation: i64):
+        self.publication_succeeded = true
+        self.published_digest = inventory_trace_digest_v1(digest)
+        if self.published_digest == "invalid": self.invalid_fields = true
+        self.published_generation = generation
+
+    me finish(valid: bool, reason: text, digest: text, generation: i64):
+        val safe_digest = inventory_trace_digest_v1(digest)
+        if safe_digest == "invalid": self.invalid_fields = true
+        self.result_record = self.prefix + " phase=4 reached={self.last_phase} valid={valid} reason_sha={sha256_text(reason)} returned={safe_digest} generation={generation} published={self.publication_succeeded} committed={self.published_digest} committed_generation={self.published_generation} query_status={self.query_status} query_bytes={self.query_bytes} overflow={self.overflow} invalid_fields={self.invalid_fields}\n"
+        if self.result_record.len() > 1024:
+            self.result_record = ""
+            self.overflow = true
+
+    fn emit():
+        # The owner sets this only after its successful unlock. On unlock failure
+        # silence is intentional: the collector must report INCOMPLETE.
+        if not self.lock_released: return
+        if self.begin_record != "": stderr_write(self.begin_record)
+        if self.observed_record != "": stderr_write(self.observed_record)
+        if self.prepared_record != "": stderr_write(self.prepared_record)
+        if self.result_record != "": stderr_write(self.result_record)
+
+fn inventory_trace_create_v1(token: text) -> CompilerInventoryTraceV1?:
+    if not inventory_trace_token_valid_v1(token): return nil
+    Some(CompilerInventoryTraceV1(prefix: "inventory-trace-v1 attempt={token} pid={getpid()}"))
+
+export CompilerInventoryTraceV1
+export inventory_trace_token_valid_v1
+export inventory_trace_create_v1
+
+export inventory_trace_digest_v1

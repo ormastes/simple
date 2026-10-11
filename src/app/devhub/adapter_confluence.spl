@@ -17,7 +17,7 @@
 # builds request tuples), so no request was ever sent.
 
 use std.nogc_async_mut.sosix.host_facade.{sosix_process_run}
-use std.json.{json_parse, json_serialize, json_object_get, json_array_get, json_array_length, json_get_type, json_to_string}
+use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_type, json_value_has, json_value_field, json_value_len, json_value_at, json_value_serialize, json_value_text_or}
 use app.devhub.config.{ItfConfig}
 use app.devhub.auth.{confluence_auth_header, confluence_api_base}
 use app.devhub.request_headers.{configured_target_headers}
@@ -153,26 +153,26 @@ fn confluence_response_result(stdout: text, stderr: text, exit_code: i64) -> (i6
 # Page parsing helpers
 # ============================================================================
 
-fn _parse_page_ref(json_obj: any) -> PageRef:
+fn _parse_page_ref(json_obj: JsonValue) -> PageRef:
     """Parse a v1 content JSON object into PageRef."""
     val id = _json_str(json_obj, "id")
     val title = _json_str(json_obj, "title")
     val status = _json_str(json_obj, "status")
 
     var space_key = ""
-    val space_obj = json_object_get(json_obj, "space")
-    if space_obj != nil:
+    val space_obj = json_value_field(json_obj, "space")
+    if json_value_has(json_obj, "space"):
         space_key = _json_str(space_obj, "key")
 
     var version = 0
-    val version_obj = json_object_get(json_obj, "version")
-    if version_obj != nil:
+    val version_obj = json_value_field(json_obj, "version")
+    if json_value_has(json_obj, "version"):
         version = _json_int(version_obj, "number")
 
     # _links.base + _links.webui gives the absolute page URL.
     var url = ""
-    val links = json_object_get(json_obj, "_links")
-    if links != nil:
+    val links = json_value_field(json_obj, "_links")
+    if json_value_has(json_obj, "_links"):
         val webui = _json_str(links, "webui")
         if webui != "":
             url = _json_str(links, "base") + webui
@@ -180,54 +180,50 @@ fn _parse_page_ref(json_obj: any) -> PageRef:
     PageRef(id: id, title: title, space_id: space_key, version: version, status: status, url: url)
 
 
-fn _parse_page_list_item(json_obj: any) -> PageListItem:
+fn _parse_page_list_item(json_obj: JsonValue) -> PageListItem:
     """Parse a v1 content JSON into PageListItem (lightweight)."""
     val ref = _parse_page_ref(json_obj)
     var modified = ""
-    val version_obj = json_object_get(json_obj, "version")
-    if version_obj != nil:
+    val version_obj = json_value_field(json_obj, "version")
+    if json_value_has(json_obj, "version"):
         modified = _json_str(version_obj, "when")
     PageListItem(id: ref.id, title: ref.title, space_id: ref.space_id, status: ref.status, last_modified: modified)
 
 
 fn _parse_results(body: text) -> (bool, [PageListItem], text):
     """Parse a `{results: [...]}` listing response."""
-    val parsed = json_parse(body)
-    if parsed == nil:
+    val parsed_opt = json_value_parse_opt(body)
+    if parsed_opt == nil:
         return (false, [], "invalid JSON response")
-    val results_arr = json_object_get(parsed, "results")
-    if results_arr == nil or json_get_type(results_arr) != "array":
+    val parsed = parsed_opt.unwrap()
+    val results_arr = json_value_field(parsed, "results")
+    if json_value_type(results_arr) != "array":
         return (false, [], "invalid Confluence response: results must be an array")
     var items: [PageListItem] = []
-    val arr_len = json_array_length(results_arr)
+    val arr_len = json_value_len(results_arr)
     var i = 0
     while i < arr_len:
-        items = items + [_parse_page_list_item(json_array_get(results_arr, i))]
+        items = items + [_parse_page_list_item(json_value_at(results_arr, i))]
         i = i + 1
     (true, items, body)
 
 
-fn _json_str(obj: any, key: text) -> text:
+fn _json_str(obj: JsonValue, key: text) -> text:
     """Safely extract a string field from JSON object."""
-    if obj == nil:
+    if not json_value_has(obj, key):
         return ""
-    val value = json_object_get(obj, key)
-    if value == nil:
-        return ""
-    val vtype = json_get_type(value)
+    val value = json_value_field(obj, key)
+    val vtype = json_value_type(value)
     if vtype == "string":
-        return json_to_string(value)
-    json_serialize(value)
+        return json_value_text_or(value, "")
+    json_value_serialize(value)
 
 
-fn _json_int(obj: any, key: text) -> i64:
+fn _json_int(obj: JsonValue, key: text) -> i64:
     """Safely extract an integer field from JSON object."""
-    if obj == nil:
+    if not json_value_has(obj, key):
         return 0
-    val value = json_object_get(obj, key)
-    if value == nil:
-        return 0
-    val s = json_serialize(value)
+    val s = json_value_serialize(json_value_field(obj, key))
     var result = 0
     for ch in s:
         if ch >= "0" and ch <= "9":
@@ -265,15 +261,16 @@ fn confluence_get_page(config: ItfConfig, page_id: text) -> (bool, PageContent, 
     if not _ok(status):
         return (false, empty, body)
 
-    val parsed = json_parse(body)
-    if parsed == nil:
+    val parsed_opt = json_value_parse_opt(body)
+    if parsed_opt == nil:
         return (false, empty, "invalid JSON response")
+    val parsed = parsed_opt.unwrap()
 
     var storage_body = ""
-    val body_obj = json_object_get(parsed, "body")
-    if body_obj != nil:
-        val storage_obj = json_object_get(body_obj, "storage")
-        if storage_obj != nil:
+    val body_obj = json_value_field(parsed, "body")
+    if json_value_has(parsed, "body"):
+        val storage_obj = json_value_field(body_obj, "storage")
+        if json_value_has(body_obj, "storage"):
             storage_body = _json_str(storage_obj, "value")
 
     (true, PageContent(ref: _parse_page_ref(parsed), body_storage: storage_body), body)
@@ -289,9 +286,10 @@ fn confluence_create_page(config: ItfConfig, space_key: text, title: text, body_
     val (status, resp_body) = _confluence_request(config, "POST", "", payload, [])
     if not _ok(status):
         return (false, _empty_ref(), resp_body)
-    val parsed = json_parse(resp_body)
-    if parsed == nil:
+    val parsed_opt = json_value_parse_opt(resp_body)
+    if parsed_opt == nil:
         return (false, _empty_ref(), "invalid JSON response")
+    val parsed = parsed_opt.unwrap()
     (true, _parse_page_ref(parsed), resp_body)
 
 
@@ -306,9 +304,10 @@ fn confluence_update_page(config: ItfConfig, page_id: text, title: text, body_st
     val (status, resp_body) = _confluence_request(config, "PUT", "/{page_id}", payload, [])
     if not _ok(status):
         return (false, _empty_ref(), resp_body)
-    val parsed = json_parse(resp_body)
-    if parsed == nil:
+    val parsed_opt = json_value_parse_opt(resp_body)
+    if parsed_opt == nil:
         return (false, _empty_ref(), "invalid JSON response")
+    val parsed = parsed_opt.unwrap()
     (true, _parse_page_ref(parsed), resp_body)
 
 

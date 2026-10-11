@@ -2,10 +2,6 @@
 
 > A `match` used as a VALUE inside a call's argument list, a struct-literal field list, an array literal or a dict literal ends at that list's separator or closing bracket — the `,` / `)` / `]` / `}` shares the last arm's line, so the lexer has not flushed a DEDENT yet.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
-
 <details>
 <summary>Full Scenario Manual</summary>
 
@@ -19,8 +15,12 @@ A `match` used as a VALUE inside a call's argument list, a struct-literal field 
 |-------|-------|
 | Category | Syntax / Self-hosted frontend parity |
 | Status | Active |
+| Requirements | REQ-SSPEC-UNIT — existing unit regression contract. |
+| Plan | doc/03_plan/sspec_modernization_plan.md |
+| Design | doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md |
+| Research | doc/01_research/domain/sspec_documentization_maintenance.md |
 | Source | `test/01_unit/compiler/parser_inline_match_in_argument_list_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-10-10 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -57,208 +57,110 @@ Box(
 )
 ```
 
-## Scenarios
+## Verification scope and provenance
 
-### inline match terminated by the enclosing argument or field list
+This manual's scenarios are maintained in this source docstring because the
+current human-documentation branch does not extract the compact `it(...)`
+blocks below. They are correlated with all nine executable scenario titles
+and all 23 assertion lines. This is manual-derived documentation, not proof
+that the generator extracted those blocks correctly.
 
-#### ends a struct-literal field at the field-terminating comma
+The two previously failing call-argument scenarios passed under the Phase1
+bootstrap diagnostic runtime, including zero and negative inputs. Seven prior
+passing scenarios were not rerun. This does not qualify the native frontend
+or imply a new full-suite execution.
 
-<details>
-<summary>Executable SSpec</summary>
+**Requirements:** doc/02_requirements/feature/sspec_documentization_maintenance.md (REQ-SSPEC-UNIT)
+**Plan:** doc/03_plan/sspec_modernization_plan.md
+**Design:** doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+**Research:** doc/01_research/domain/sspec_documentization_maintenance.md
 
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+## Scenarios and exact expected results
 
-```simple
-# @req REQ-SSPEC-UNIT
-```
+### ends a struct-literal field at the field-terminating comma
 
-</details>
+Call the named grammar fixture with each listed input and compare its result
+to the exact expected text. The original declarations remain in this file.
 
-#### ends the last struct-literal field at the closing paren
+- `assert_equal(match_field_then_comma(1), "one")`
+- `assert_equal(match_field_then_comma(7), "other")`
 
-<details>
-<summary>Executable SSpec</summary>
+### ends the last struct-literal field at the closing paren
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+Call the named grammar fixture with each listed input and compare its result
+to the exact expected text. The original declarations remain in this file.
 
-```simple
-assert_equal(match_field_then_rparen(1), "one")
-assert_equal(match_field_then_rparen(7), "other")
-```
+- `assert_equal(match_field_then_rparen(1), "one")`
+- `assert_equal(match_field_then_rparen(7), "other")`
 
-</details>
+### ends a call argument at the argument-separating comma
 
-#### ends a call argument at the argument-separating comma
+Call the named grammar fixture with each listed input and compare its result
+to the exact expected text. The original declarations remain in this file.
 
-<details>
-<summary>Executable SSpec</summary>
+- `assert_equal(match_call_arg_then_comma(1), "one/1")`
+- `assert_equal(match_call_arg_then_comma(7), "other/7")`
+- `assert_equal(match_call_arg_then_comma(0), "other/0")`
+- `assert_equal(match_call_arg_then_comma(-7), "other/-7")`
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+### ends the last call argument at the closing paren on the arm's line
 
-```simple
-assert_equal(match_call_arg_then_comma(1), "one/1")
-assert_equal(match_call_arg_then_comma(7), "other/7")
-```
+Call the named grammar fixture with each listed input and compare its result
+to the exact expected text. The original declarations remain in this file.
 
-</details>
+- `assert_equal(match_last_call_arg_then_rparen(1), "one/1")`
+- `assert_equal(match_last_call_arg_then_rparen(7), "other/7")`
+- `assert_equal(match_last_call_arg_then_rparen(0), "other/0")`
+- `assert_equal(match_last_call_arg_then_rparen(-7), "other/-7")`
 
-#### ends the last call argument at the closing paren on the arm's line
+### ends an array element at the element-separating comma
 
-<details>
-<summary>Executable SSpec</summary>
+Call the named grammar fixture with each listed input and compare its result
+to the exact expected text. The original declarations remain in this file.
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+- `assert_equal(match_array_element_then_comma(1), "one+tail")`
+- `assert_equal(match_array_element_then_comma(7), "other+tail")`
 
-```simple
-assert_equal(match_last_call_arg_then_rparen(1), "one/1")
-assert_equal(match_last_call_arg_then_rparen(7), "other/7")
-```
+### ends case-spelled arms at the same terminators
 
-</details>
+Call the named grammar fixture with each listed input and compare its result
+to the exact expected text. The original declarations remain in this file.
 
-#### ends an array element at the element-separating comma
+- `assert_equal(match_case_arms_then_comma(1), "one")`
+- `assert_equal(match_case_arms_then_comma(7), "other")`
 
-<details>
-<summary>Executable SSpec</summary>
+### lets a nested match end without consuming the outer terminator
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+Call the named grammar fixture with each listed input and compare its result
+to the exact expected text. The original declarations remain in this file.
 
-```simple
-assert_equal(match_array_element_then_comma(1), "one+tail")
-assert_equal(match_array_element_then_comma(7), "other+tail")
-```
+- `assert_equal(nested_match_then_comma(1, 2), "one-two")`
+- `assert_equal(nested_match_then_comma(1, 9), "one-other")`
+- `assert_equal(nested_match_then_comma(7, 2), "other")`
 
-</details>
+### still ends a statement match at the DEDENT
 
-#### ends case-spelled arms at the same terminators
+Call the named grammar fixture with each listed input and compare its result
+to the exact expected text. The original declarations remain in this file.
 
-<details>
-<summary>Executable SSpec</summary>
+- `assert_equal(match_as_statement(1), "one")`
+- `assert_equal(match_as_statement(7), "other")`
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+### still ends a local-bound match at the DEDENT
 
-```simple
-assert_equal(match_case_arms_then_comma(1), "one")
-assert_equal(match_case_arms_then_comma(7), "other")
-```
+Call the named grammar fixture with each listed input and compare its result
+to the exact expected text. The original declarations remain in this file.
 
-</details>
+- `assert_equal(match_bound_to_local(1), "one")`
+- `assert_equal(match_bound_to_local(7), "other")`
 
-#### lets a nested match end without consuming the outer terminator
 
-<details>
-<summary>Executable SSpec</summary>
+## Related Documentation
 
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-assert_equal(nested_match_then_comma(1, 2), "one-two")
-assert_equal(nested_match_then_comma(1, 9), "one-other")
-assert_equal(nested_match_then_comma(7, 2), "other")
-```
-
-</details>
-
-#### still ends a statement match at the DEDENT
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-assert_equal(match_as_statement(1), "one")
-assert_equal(match_as_statement(7), "other")
-```
-
-</details>
-
-#### still ends a local-bound match at the DEDENT
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-assert_equal(match_bound_to_local(1), "one")
-assert_equal(match_bound_to_local(7), "other")
-```
-
-</details>
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
+- **Requirements:** `REQ-SSPEC-UNIT — existing unit regression contract.`
+- **Plan:** `doc/03_plan/sspec_modernization_plan.md`
+- **Design:** `doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md`
+- **Research:** `doc/01_research/domain/sspec_documentization_maintenance.md`
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `311f8bd265c14c9939eee7813c1ca4e95c80a252e619b74aac1b0fa5743a86ad`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `311f8bd265c14c9939eee7813c1ca4e95c80a252e619b74aac1b0fa5743a86ad`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `311f8bd265c14c9939eee7813c1ca4e95c80a252e619b74aac1b0fa5743a86ad`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
-
-SSpec documentization score: 89/100
-source: test/01_unit/compiler/parser_inline_match_in_argument_list_spec.spl
-mirror: doc/06_spec/01_unit/compiler/parser_inline_match_in_argument_list_spec.md (current)
-findings: 7 blockers: 0
-  narrative=100 structure=60 oracle=100
-  traceability=100 evidence=100 coverage=100 maintainability=55
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/compiler/parser_inline_match_in_argument_list_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/parser_inline_match_in_argument_list_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler/parser_inline_match_in_argument_list_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
-  why: Long flat dumps obscure the primary workflow.
-  improve: Group secondary detail and keep the primary workflow visible.
-test/01_unit/compiler/parser_inline_match_in_argument_list_spec.spl:148:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'ends a struct-literal field at the field-terminating comma' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/01_unit/compiler/parser_inline_match_in_argument_list_spec.spl:154:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'ends the last struct-literal field at the closing paren' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/01_unit/compiler/parser_inline_match_in_argument_list_spec.spl:158:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'ends a call argument at the argument-separating comma' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/01_unit/compiler/parser_inline_match_in_argument_list_spec.spl:162:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'ends the last call argument at the closing paren on the arm's line' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-<!-- sspec-maintain:scorecard:end -->

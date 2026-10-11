@@ -1,0 +1,117 @@
+# @req REQ-SSPEC-UNIT
+"""
+# E-TYPE-NIL-COMPARE: `== nil` / `!= nil` on a non-optional type (rule 6a)
+
+Bug class: doc/08_tracking/bug/rt_nil_sentinel_three_scalar_collision_native_2026-10-10.md —
+`HirCodecWriter.put_i64(v: i64)` decided "write nil" with `v == nil`; under
+staged-native codegen that compares against nil's sentinel (RT_NIL=3), so every
+3 and every `true` was written as nil and the HIR cache never hit.
+
+The static half lives in `src/compiler/30.types/type_infer/inference_expr.spl`
+(Binary case). It fires at the comparison span and names the declared type and
+the enclosing function. It is an ERROR, not a warning: before the rule existed
+the same comparison was already rejected by unification (a generic span-0:0
+`type mismatch`), so naming it must not loosen that check (RBH §7 row 4). The
+driver typecheck pass reports it at the pass's own severity (Advisory by
+default, Deny under robust+). Family `nil_compare_non_optional`, `deny`.
+"""
+
+# @tag: unit, compiler, lint, type_infer, nil
+
+use std.spec.*
+use compiler.tools.lint.semantic_check.{simple_semantic_check_source, simple_check_is_clean, SimpleSemanticCheckResult}
+use compiler.tools.lint._LintMain.config_and_model.{build_default_levels}
+
+fn check(src: text) -> SimpleSemanticCheckResult:
+    simple_semantic_check_source(src, "nil_probe.spl")
+
+fn nil_errors(r: SimpleSemanticCheckResult) -> [text]:
+    var out: [text] = []
+    for d in r.diagnostics:
+        if d.contains("E-TYPE-NIL-COMPARE"):
+            out = out.push(d)
+    out
+
+describe "E-TYPE-NIL-COMPARE fires on a non-optional operand":
+    it "flags `x == nil` on an i64 parameter, naming the type, the hint and the function":
+        val r = check("fn f(x: i64) -> bool:\n    return x == nil\n")
+        val es = nil_errors(r)
+        expect(es.len()).to_equal(1)
+        expect(es[0]).to_contain("`== nil` on a scalar declared non-optional (`i64`)")
+        expect(es[0]).to_contain("if nil can arrive here, declare the operand `i64?`")
+        expect(es[0]).to_contain("function 'f'")
+        expect(es[0]).to_contain("nil_probe.spl:2:")
+        expect(es[0]).to_contain("error[semantic]")
+        # exactly one diagnostic: the generic unification mismatch is replaced, not added to
+        expect(r.diagnostics.len()).to_equal(1)
+
+    it "flags `b != nil` on a bool parameter":
+        val r = check("fn f(b: bool) -> bool:\n    if b != nil:\n        return true\n    return false\n")
+        val es = nil_errors(r)
+        expect(es.len()).to_equal(1)
+        expect(es[0]).to_contain("`!= nil` on a scalar declared non-optional (`bool`)")
+
+    it "flags a non-optional struct parameter and says `struct`":
+        val r = check("struct P:\n    x: i64\n\nfn f(p: P) -> bool:\n    return p == nil\n")
+        val es = nil_errors(r)
+        expect(es.len()).to_equal(1)
+        expect(es[0]).to_contain("struct declared non-optional (`P`)")
+
+    it "flags a non-optional class parameter and says `class`":
+        val r = check("class C:\n    x: i64\n\nfn f(c: C) -> bool:\n    return c == nil\n")
+        val es = nil_errors(r)
+        expect(es.len()).to_equal(1)
+        expect(es[0]).to_contain("class declared non-optional (`C`)")
+
+    it "flags a local `val v = 3` compared with nil (locals are now visible to the rule)":
+        val r = check("fn f() -> bool:\n    val v = 3\n    return v != nil\n")
+        val es = nil_errors(r)
+        expect(es.len()).to_equal(1)
+        expect(es[0]).to_contain("`i64`")
+        # the old `undefined: v` must not come back
+        expect(r.diagnostics.len()).to_equal(1)
+
+    it "resolves a local that shadows a parameter to the LOCAL (id-first lookup)":
+        # `x` the param is i64; the local `x` is text. The diagnostic must name text.
+        val r = check("fn f(x: i64) -> bool:\n    val x = \"s\"\n    return x == nil\n")
+        val es = nil_errors(r)
+        expect(es.len()).to_equal(1)
+        expect(es[0]).to_contain("(`text`)")
+
+    it "flags `nil == x` with nil on the left":
+        val r = check("fn f(x: text) -> bool:\n    return nil == x\n")
+        val es = nil_errors(r)
+        expect(es.len()).to_equal(1)
+        expect(es[0]).to_contain("`text`")
+
+describe "E-TYPE-NIL-COMPARE stays silent where nil is a legal value":
+    it "accepts `x == nil` on an `i64?` parameter":
+        val r = check("fn f(x: i64?) -> bool:\n    return x == nil\n")
+        expect(nil_errors(r).len()).to_equal(0)
+        expect(r.diagnostics.len()).to_equal(0)
+        expect(simple_check_is_clean(r)).to_equal(true)
+
+    it "accepts a local bound from a `text?` callee":
+        val r = check("fn g() -> text?:\n    return nil\n\nfn f() -> bool:\n    val v = g()\n    return v == nil\n")
+        expect(nil_errors(r).len()).to_equal(0)
+
+    it "accepts an optional field read":
+        val r = check("struct W:\n    o: i64?\n\nfn f(w: W) -> bool:\n    return w.o == nil\n")
+        expect(nil_errors(r).len()).to_equal(0)
+
+    it "does not touch ordinary comparisons":
+        val r = check("fn f(x: i64, y: i64) -> bool:\n    return x == y\n")
+        expect(nil_errors(r).len()).to_equal(0)
+        expect(r.diagnostics.len()).to_equal(0)
+
+describe "E-TYPE-NIL-COMPARE severity":
+    it "is an error in `diagnostics` (never a loosening of the prior unification error) and not a warning":
+        val r = check("fn f(x: i64) -> bool:\n    return x == nil\n")
+        expect(nil_errors(r).len()).to_equal(1)
+        expect(r.warnings.len()).to_equal(0)
+        expect(simple_check_is_clean(r)).to_equal(false)
+
+    it "is registered in the canonical lint catalog at level deny":
+        val levels = build_default_levels()
+        expect(levels.contains_key("nil_compare_non_optional")).to_equal(true)
+        expect(levels["nil_compare_non_optional"]).to_equal("deny")

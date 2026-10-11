@@ -33,7 +33,7 @@
 # (cmd_bb.spl) can print an explicit dim note instead of silently truncating
 # results — see the repo's "no silent truncation" rule.
 
-use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize, json_get_type}
+use std.common.json.value.{JsonValue, json_value_parse_or_null, json_value_field, json_value_has, json_value_is_null, json_value_len, json_value_at}
 use std.nogc_sync_mut.io.process_ops.{process_run}
 use app.devhub.config.{ItfConfig, load_config, resolve_auth_token}
 use app.devhub.atlassian_site.{AtlassianSite, ATLASSIAN_AUTH_BEARER, atlassian_normalize_auth, atlassian_auth_header, atlassian_strip_slash, bitbucket_api_root, bitbucket_owner_url, bitbucket_repo_url, bitbucket_pr_collection_url, bitbucket_page_query, bitbucket_resolve_deployment, bitbucket_server_base}
@@ -308,61 +308,61 @@ fn _bb_delete(client: BbClient, url: text) -> (i64, text, text):
 # Parsing helpers
 # ============================================================================
 
-fn bb_parse_pr(obj: any) -> BbPr:
+fn bb_parse_pr(obj: JsonValue) -> BbPr:
     """Parse a Bitbucket PR JSON object."""
     val empty = BbPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "", updated_on: "")
-    if obj == nil:
+    if json_value_is_null(obj):
         return empty
     val id = _bb_int(obj, "id")
     val title = _bb_str(obj, "title")
     val state = _bb_str(obj, "state")
     var source_branch = ""
-    val source = json_object_get(obj, "source")
-    if source != nil:
-        val br = json_object_get(source, "branch")
-        if br != nil:
+    val source = json_value_field(obj, "source")
+    if not json_value_is_null(source):
+        val br = json_value_field(source, "branch")
+        if not json_value_is_null(br):
             source_branch = _bb_str(br, "name")
     var dest_branch = ""
-    val dest = json_object_get(obj, "destination")
-    if dest != nil:
-        val br = json_object_get(dest, "branch")
-        if br != nil:
+    val dest = json_value_field(obj, "destination")
+    if not json_value_is_null(dest):
+        val br = json_value_field(dest, "branch")
+        if not json_value_is_null(br):
             dest_branch = _bb_str(br, "name")
     var author = ""
-    val author_obj = json_object_get(obj, "author")
-    if author_obj != nil:
+    val author_obj = json_value_field(obj, "author")
+    if not json_value_is_null(author_obj):
         author = _bb_str(author_obj, "display_name")
     var web_url = ""
-    val links = json_object_get(obj, "links")
-    if links != nil:
-        val html = json_object_get(links, "html")
-        if html != nil:
+    val links = json_value_field(obj, "links")
+    if not json_value_is_null(links):
+        val html = json_value_field(links, "html")
+        if not json_value_is_null(html):
             web_url = _bb_str(html, "href")
     var merge_commit = ""
-    val mc = json_object_get(obj, "merge_commit")
-    if mc != nil:
+    val mc = json_value_field(obj, "merge_commit")
+    if not json_value_is_null(mc):
         merge_commit = _bb_str(mc, "hash")
     var updated_on = _bb_str(obj, "updated_on")
     # Server / Data Center 1.0 field names.
     if source_branch == "":
-        source_branch = _bb_str(json_object_get(obj, "fromRef"), "displayId")
+        source_branch = _bb_str(json_value_field(obj, "fromRef"), "displayId")
     if dest_branch == "":
-        dest_branch = _bb_str(json_object_get(obj, "toRef"), "displayId")
-    if author == "" and author_obj != nil:
-        author = _bb_str(json_object_get(author_obj, "user"), "displayName")
-    if web_url == "" and links != nil:
-        val self_links = json_object_get(links, "self")
-        if self_links != nil and json_array_length(self_links) > 0:
-            web_url = _bb_str(json_array_get(self_links, 0), "href")
+        dest_branch = _bb_str(json_value_field(obj, "toRef"), "displayId")
+    if author == "" and not json_value_is_null(author_obj):
+        author = _bb_str(json_value_field(author_obj, "user"), "displayName")
+    if web_url == "" and not json_value_is_null(links):
+        val self_links = json_value_field(links, "self")
+        if json_value_len(self_links) > 0:
+            web_url = _bb_str(json_value_at(self_links, 0), "href")
     if updated_on == "":
         updated_on = _bb_str(obj, "updatedDate")
     BbPr(id: id, title: title, state: state, source_branch: source_branch, dest_branch: dest_branch, author: author, web_url: web_url, merge_commit: merge_commit, updated_on: updated_on)
 
 
-fn bb_parse_repo(obj: any) -> BbRepo:
+fn bb_parse_repo(obj: JsonValue) -> BbRepo:
     """Parse a Bitbucket repository JSON object (list or view response)."""
     val empty = BbRepo(slug: "", name: "", full_name: "", description: "", is_private: false, updated_on: "", main_branch: "", web_url: "")
-    if obj == nil:
+    if json_value_is_null(obj):
         return empty
     val slug = _bb_str(obj, "slug")
     val name = _bb_str(obj, "name")
@@ -371,57 +371,56 @@ fn bb_parse_repo(obj: any) -> BbRepo:
     val is_private = _bb_bool(obj, "is_private")
     val updated_on = _bb_str(obj, "updated_on")
     var main_branch = ""
-    val mb = json_object_get(obj, "mainbranch")
-    if mb != nil:
+    val mb = json_value_field(obj, "mainbranch")
+    if not json_value_is_null(mb):
         main_branch = _bb_str(mb, "name")
     var web_url = ""
-    val links = json_object_get(obj, "links")
-    if links != nil:
-        val html = json_object_get(links, "html")
-        if html != nil:
+    val links = json_value_field(obj, "links")
+    if not json_value_is_null(links):
+        val html = json_value_field(links, "html")
+        if not json_value_is_null(html):
             web_url = _bb_str(html, "href")
     BbRepo(slug: slug, name: name, full_name: full_name, description: description, is_private: is_private, updated_on: updated_on, main_branch: main_branch, web_url: web_url)
 
 
-fn _bb_parse_comment(obj: any) -> BbComment:
+fn _bb_parse_comment(obj: JsonValue) -> BbComment:
     """Parse a Bitbucket PR comment JSON object."""
     val empty = BbComment(id: 0, author: "", content: "", inline_path: "", inline_to: -1)
-    if obj == nil:
+    if json_value_is_null(obj):
         return empty
     val id = _bb_int(obj, "id")
     var author = ""
-    val user = json_object_get(obj, "user")
-    if user != nil:
+    val user = json_value_field(obj, "user")
+    if not json_value_is_null(user):
         author = _bb_str(user, "display_name")
     var content = ""
-    val content_obj = json_object_get(obj, "content")
-    if content_obj != nil:
+    val content_obj = json_value_field(obj, "content")
+    if not json_value_is_null(content_obj):
         content = _bb_str(content_obj, "raw")
     var inline_path = ""
     var inline_to: i64 = -1
-    val inline = json_object_get(obj, "inline")
-    if inline != nil:
+    val inline = json_value_field(obj, "inline")
+    if not json_value_is_null(inline):
         inline_path = _bb_str(inline, "path")
-        val to_val = json_object_get(inline, "to")
-        if to_val != nil:
+        if json_value_has(inline, "to"):
             inline_to = _bb_int(inline, "to")
     # Server / Data Center 1.0: {text, author.displayName, anchor{path,line}}.
     if content == "":
         content = _bb_str(obj, "text")
     if author == "":
-        author = _bb_str(json_object_get(obj, "author"), "displayName")
-    val anchor = json_object_get(obj, "anchor")
-    if inline_path == "" and anchor != nil:
+        author = _bb_str(json_value_field(obj, "author"), "displayName")
+    val anchor = json_value_field(obj, "anchor")
+    if inline_path == "" and not json_value_is_null(anchor):
         inline_path = _bb_str(anchor, "path")
-        if json_object_get(anchor, "line") != nil:
+        if json_value_has(anchor, "line"):
             inline_to = _bb_int(anchor, "line")
     BbComment(id: id, author: author, content: content, inline_path: inline_path, inline_to: inline_to)
 
 
-fn _bb_parse_status(obj: any) -> BbStatus:
+fn _bb_parse_status(obj: JsonValue) -> BbStatus:
     """Parse a Bitbucket commit-status JSON object."""
     val empty = BbStatus(key: "", state: "", name: "", url: "")
-    if obj == nil:
+    if json_value_is_null(obj):
         return empty
     BbStatus(
         key: _bb_str(obj, "key"),
@@ -436,7 +435,7 @@ fn _bb_parse_status(obj: any) -> BbStatus:
 # Pagination loop (shared by bb_list_repos / bb_list_prs)
 # ============================================================================
 
-fn _bb_fetch_list_page(client: BbClient, url: text) -> (bool, [any], text, text):
+fn _bb_fetch_list_page(client: BbClient, url: text) -> (bool, [JsonValue], text, text):
     """Fetch + parse one page of a Bitbucket paginated list endpoint.
 
     Repositories and pull-requests list responses share the same shape
@@ -451,20 +450,20 @@ fn _bb_fetch_list_page(client: BbClient, url: text) -> (bool, [any], text, text)
     if status != 200:
         val err = bb_map_http_error(status, body, BB_OP_GENERAL)
         return (false, [], "", err.display())
-    val parsed = json_parse(body)
-    if parsed == nil:
+    val parsed = json_value_parse_or_null(body)
+    if json_value_is_null(parsed):
         return (false, [], "", "invalid JSON response")
     val values = _bb_parse_values_array(parsed)
     if client.site().is_datacenter():
         # DC paging: no `next` URL — {isLastPage, nextPageStart} + `start=`.
-        if _bb_bool(parsed, "isLastPage") or json_object_get(parsed, "nextPageStart") == nil:
+        if _bb_bool(parsed, "isLastPage") or not json_value_has(parsed, "nextPageStart"):
             return (true, values, "", "")
         return (true, values, bb_dc_page_url(url, _bb_int(parsed, "nextPageStart")), "")
     val next = _bb_str(parsed, "next")
     (true, values, next, "")
 
 
-fn _bb_collect_pages(client: BbClient, fetch_page: fn(BbClient, text) -> (bool, [any], text, text), first_url: text, limit: i64) -> (bool, [any], text, bool):
+fn _bb_collect_pages(client: BbClient, fetch_page: fn(BbClient, text) -> (bool, [JsonValue], text, text), first_url: text, limit: i64) -> (bool, [JsonValue], text, bool):
     """Follow a Bitbucket `next`-link chain, accumulating parsed JSON value
     nodes until `limit` items are collected or there is no further page.
 
@@ -482,7 +481,7 @@ fn _bb_collect_pages(client: BbClient, fetch_page: fn(BbClient, text) -> (bool, 
     exactly the page that also satisfies `limit`, that's a success, not a
     truncation — `capped` stays false.
     """
-    var out: [any] = []
+    var out: [JsonValue] = []
     var url = first_url
     var page: i64 = 0
     while url != "" and out.len() < limit and page < BB_MAX_PAGES:
@@ -518,10 +517,10 @@ fn _bb_dc_statuses_url(client: BbClient, ws: text, repo: text, pr_id: i64) -> te
     val (status, body, _retry) = _bb_get(client, bb_pr_url_for(client.site(), ws, repo, pr_id))
     if status != 200:
         return ""
-    val parsed = json_parse(body)
-    if parsed == nil:
+    val parsed = json_value_parse_or_null(body)
+    if json_value_is_null(parsed):
         return ""
-    val sha = _bb_str(json_object_get(parsed, "fromRef"), "latestCommit")
+    val sha = _bb_str(json_value_field(parsed, "fromRef"), "latestCommit")
     if sha == "":
         return ""
     client.site().base_url + "/rest/build-status/1.0/commits/" + sha
@@ -551,8 +550,8 @@ fn bb_create_pr_with_body(client: BbClient, ws: text, repo: text, title: text, s
     if status != 200 and status != 201:
         val err = bb_map_http_error(status, body, BB_OP_GENERAL)
         return (false, empty, err.display())
-    val parsed = json_parse(body)
-    if parsed == nil:
+    val parsed = json_value_parse_or_null(body)
+    if json_value_is_null(parsed):
         return (false, empty, "invalid JSON response")
     (true, bb_parse_pr(parsed), body)
 
@@ -567,8 +566,8 @@ fn bb_get_pr(client: BbClient, ws: text, repo: text, pr_id: i64) -> (bool, BbPr,
     if status != 200:
         val err = bb_map_http_error(status, body, BB_OP_GENERAL)
         return (false, empty, err.display())
-    val parsed = json_parse(body)
-    if parsed == nil:
+    val parsed = json_value_parse_or_null(body)
+    if json_value_is_null(parsed):
         return (false, empty, "invalid JSON response")
     (true, bb_parse_pr(parsed), body)
 
@@ -584,8 +583,8 @@ fn bb_list_pr_comments(client: BbClient, ws: text, repo: text, pr_id: i64) -> (b
     if status != 200:
         val err = bb_map_http_error(status, body, BB_OP_GENERAL)
         return (false, [], err.display())
-    val parsed = json_parse(body)
-    if parsed == nil:
+    val parsed = json_value_parse_or_null(body)
+    if json_value_is_null(parsed):
         return (false, [], "invalid JSON response")
     val raw = _bb_parse_values_array(parsed)
     var out: [BbComment] = []
@@ -593,7 +592,7 @@ fn bb_list_pr_comments(client: BbClient, ws: text, repo: text, pr_id: i64) -> (b
         if not is_dc:
             out = out + [_bb_parse_comment(v)]
         else if _bb_str(v, "action") == "COMMENTED":
-            out = out + [_bb_parse_comment(json_object_get(v, "comment"))]
+            out = out + [_bb_parse_comment(json_value_field(v, "comment"))]
     (true, out, body)
 
 
@@ -612,8 +611,8 @@ fn bb_post_pr_comment(client: BbClient, ws: text, repo: text, pr_id: i64, conten
     if status != 200 and status != 201:
         val err = bb_map_http_error(status, body, BB_OP_GENERAL)
         return (false, empty, err.display())
-    val parsed = json_parse(body)
-    if parsed == nil:
+    val parsed = json_value_parse_or_null(body)
+    if json_value_is_null(parsed):
         return (false, empty, "invalid JSON response")
     (true, _bb_parse_comment(parsed), body)
 
@@ -664,8 +663,8 @@ fn bb_merge_pr(client: BbClient, ws: text, repo: text, pr_id: i64, strategy: tex
         val (pr_status, pr_body, _r) = _bb_get(client, bb_pr_url_for(client.site(), ws, repo, pr_id))
         if pr_status != 200:
             return (false, empty, bb_map_http_error(pr_status, pr_body, BB_OP_GENERAL).display())
-        val pr_parsed = json_parse(pr_body)
-        if pr_parsed == nil:
+        val pr_parsed = json_value_parse_or_null(pr_body)
+        if json_value_is_null(pr_parsed):
             return (false, empty, "invalid JSON response")
         url = url + "?version=" + _bb_int(pr_parsed, "version").to_string()
         payload = bb_build_dc_merge_body(strategy)
@@ -673,8 +672,8 @@ fn bb_merge_pr(client: BbClient, ws: text, repo: text, pr_id: i64, strategy: tex
     if status != 200 and status != 202:
         val err = bb_map_http_error(status, body, BB_OP_MERGE)
         return (false, empty, err.display())
-    val parsed = json_parse(body)
-    if parsed == nil:
+    val parsed = json_value_parse_or_null(body)
+    if json_value_is_null(parsed):
         return (false, empty, "invalid JSON response")
     (true, bb_parse_pr(parsed), body)
 
@@ -692,8 +691,8 @@ fn bb_get_pr_statuses(client: BbClient, ws: text, repo: text, pr_id: i64) -> (bo
     if status != 200:
         val err = bb_map_http_error(status, body, BB_OP_GENERAL)
         return (false, [], err.display())
-    val parsed = json_parse(body)
-    if parsed == nil:
+    val parsed = json_value_parse_or_null(body)
+    if json_value_is_null(parsed):
         return (false, [], "invalid JSON response")
     val raw = _bb_parse_values_array(parsed)
     var out: [BbStatus] = []
@@ -713,15 +712,15 @@ fn bb_check_ready_to_merge(client: BbClient, ws: text, repo: text, pr_id: i64) -
     val (pr_status, pr_body, _r1) = _bb_get(client, pr_url)
     if pr_status != 200:
         return (false, "GET PR failed: HTTP " + pr_status.to_string())
-    val pr_parsed = json_parse(pr_body)
-    if pr_parsed == nil:
+    val pr_parsed = json_value_parse_or_null(pr_body)
+    if json_value_is_null(pr_parsed):
         return (false, "invalid PR JSON")
     val statuses_url = if client.site().is_datacenter(): _bb_dc_statuses_url(client, ws, repo, pr_id) else: bb_pr_sub_url_for(client.site(), ws, repo, pr_id,"statuses")
     val (st_status, st_body, _r2) = _bb_get(client, statuses_url)
     if st_status != 200:
         return (false, "GET statuses failed: HTTP " + st_status.to_string())
-    val st_parsed = json_parse(st_body)
-    if st_parsed == nil:
+    val st_parsed = json_value_parse_or_null(st_body)
+    if json_value_is_null(st_parsed):
         return (false, "invalid statuses JSON")
     bb_eval_ready_to_merge(pr_parsed, st_parsed)
 
@@ -757,8 +756,8 @@ fn bb_repo_view(client: BbClient, ws: text, repo: text) -> (bool, BbRepo, text):
     if status != 200:
         val err = bb_map_http_error(status, body, BB_OP_GENERAL)
         return (false, empty, err.display())
-    val parsed = json_parse(body)
-    if parsed == nil:
+    val parsed = json_value_parse_or_null(body)
+    if json_value_is_null(parsed):
         return (false, empty, "invalid JSON response")
     (true, bb_parse_repo(parsed), body)
 

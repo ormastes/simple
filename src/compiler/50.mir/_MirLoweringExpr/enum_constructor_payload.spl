@@ -73,6 +73,46 @@ impl MirLowering:
             return "payload arity mismatch"
         ""
 
+    me lower_declared_enum_payload_expression(expected: HirType, expression: HirExpr) -> LocalId:
+        # Context is passed down this literal tree only. Every child is lowered
+        # once and checked before the container acquires its declared metadata.
+        val errors_before = self.errors.len()
+        match expected.kind:
+            case HirTypeKind.Array(element, size):
+                match expression.kind:
+                    case HirExprKind.ArrayLit(elements, _):
+                        if val fixed_size = size:
+                            if fixed_size != elements.len():
+                                self.error_fatal("enum payload array length mismatch", Some(expression.span))
+                                return self.builder.emit_const_int(0)
+                        # HIR stores a synthesized default element type on an
+                        # unannotated empty array; it is not an ascription.
+                        # Casts and typed variables stay on the ordinary path.
+                        val local = self.lower_array_lit(elements, Some(element))
+                        if self.errors.len() == errors_before:
+                            self.remember_local_hir_type(local.id, expected, 0, 0)
+                        return local
+                    case _: ()
+            case HirTypeKind.Dict(key_type, value_type):
+                match expression.kind:
+                    case HirExprKind.DictLit(entries, annotated_key, annotated_value):
+                        # The raw HIR key annotation is nullable despite its
+                        # historic non-optional field declaration.
+                        if annotated_key != nil and not enum_payload_types_compatible(key_type, annotated_key):
+                            self.error_fatal("enum payload dictionary key annotation mismatch", Some(expression.span))
+                            return self.builder.emit_const_int(0)
+                        if val annotated = annotated_value:
+                            if not enum_payload_types_compatible(value_type, annotated):
+                                self.error_fatal("enum payload dictionary value annotation mismatch", Some(expression.span))
+                                return self.builder.emit_const_int(0)
+                        val local = self.lower_dict_lit(entries, Some(key_type), Some(value_type))
+                        if self.errors.len() == errors_before:
+                            self.remember_local_hir_type(local.id, expected, 0, 0)
+                        return local
+                    case _: ()
+            case _: ()
+        self.lower_expr(expression)
+
     me enum_payload_local_compatible(expected: HirType, expression: HirExpr, local: LocalId) -> bool:
         # A literal nil takes its optional type from the declared payload slot.
         # Its lowered I64 carrier alone is not evidence: integer 3 is not nil.

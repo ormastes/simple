@@ -1,0 +1,13 @@
+# If-val loses its declared optional payload owner before HIR patterns
+
+Status: source-proven metadata loss; proposed repair UNEXECUTED.
+
+Producer 449ab2f963a92292343d6976bee105b51e4f862cf0793cd02a1cc06adcbecdfe compiled real HirExpr fixture HIR successfully, but its dependency hir_symbol_table_methods fails Class|Struct|Enum|Trait after `if val symbol = self.get_symbol_raw(raw_id)`. Its explicitly typed HirSymbol counterpart has no failure. Authoritative queue and diagnostics: /mnt/c/Temp/simple-canonical-unit-owner-evidence-20261010/validation/review.json.
+
+First-loss source chain: parser_stmts1565 creates stmt_if_val_decl; convert_nodes1858 wraps the initializer in ExistsCheck; expression_core lowered that wrapper with no HIR type, and binding_source_type only recovered direct variable declarations. Receiver MethodCall also had no attached return type. The exact called declaration returns HirSymbol?.
+
+Repair: recover only an existing Optional signature from exact receiver-owner method lookup, direct callable declaration or typed value; retain Optional on ExistsCheck. Append default-false Stmt.bind_optional_payload and preserve the existing parser marker in the flat bridge. Only marked binding inference extracts the payload type; ordinary val x=opt.? stays Optional. Explicit annotations retain priority. No change to expression evaluation, enum arity, symbol bindings, runtime nil handling or name-based fallback.
+
+Reconstruction audit at d755: 58 textual Stmt constructors across 11 compiler files; generated visitor/HIR children occurrences wrap existing nodes rather than reconstruct AST Stmt. Flat bridge is the only existing Val reconstruction from flat nodes and now sets provenance. Module assembly and poll_generator synthesize new statements (default false); frontend and tools desugar_async reconstruct only Expr statements and return original Val/Var nodes unchanged. Other HIR/performance sites are node visitors or new synthetic statements. while-val parser_stmts1716 uses the same stmt_if_val_decl marker, retained through nested loop statement list conversion; explicit if-val opt.? avoids double wrapping. By-value copies retain all fields. Constructor audit lists: /mnt/c/Temp/simple-canonical-unit-owner-evidence-20261010/all-stmt-constructors.txt.
+
+Parser aggregate layout changes require normal source fingerprint/cache invalidation; no forced cache identity allowed. No source trace or ABI bypass. Required gates: structural if_val_payload_owner_spec (UNEXECUTED); actual HirSymbol dependency/retained-body object; primitive native fixture present, absent, ordinary Optional, while-val and single-evaluation outputs. No broad Phase3 rerun authorized here.

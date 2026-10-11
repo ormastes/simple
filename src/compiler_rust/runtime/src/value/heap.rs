@@ -192,7 +192,15 @@ use std::sync::{Mutex, OnceLock};
 
 const MIN_VALID_HEAP_ADDR: usize = 4096;
 
-static HEAP_ALLOCATION_REGISTRY: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
+/// Membership-only set keyed by heap addresses. The default SipHash `RandomState`
+/// buys DoS resistance that pointer keys do not need, and every validated
+/// heap access (`validate_heap_obj`, e.g. each `rt_array_get`) hashes once:
+/// measured 2026-10-09 on a Windows stage2 cold parse, SipHash alone was ~39%
+/// of compiler CPU. aHash with fixed keys keeps the exact same membership
+/// semantics and table layout.
+pub(crate) type HeapPtrSet<K> = HashSet<K, std::hash::BuildHasherDefault<ahash::AHasher>>;
+
+static HEAP_ALLOCATION_REGISTRY: OnceLock<Mutex<HeapPtrSet<usize>>> = OnceLock::new();
 
 // ---------------------------------------------------------------------------
 // Byte-level accounting (header bytes only).
@@ -240,8 +248,8 @@ fn note_heap_free(kind: u8, bytes: u64) {
     }
 }
 
-fn heap_allocation_registry() -> &'static Mutex<HashSet<usize>> {
-    HEAP_ALLOCATION_REGISTRY.get_or_init(|| Mutex::new(HashSet::new()))
+fn heap_allocation_registry() -> &'static Mutex<HeapPtrSet<usize>> {
+    HEAP_ALLOCATION_REGISTRY.get_or_init(|| Mutex::new(HeapPtrSet::default()))
 }
 
 #[inline]

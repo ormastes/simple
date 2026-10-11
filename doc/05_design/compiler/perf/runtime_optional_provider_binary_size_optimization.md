@@ -1,5 +1,16 @@
 # Runtime Optional Provider and Binary-Size Optimization Detail Design
 
+## 2026-10-09 shared-interface compatibility
+
+Use the [current release owner map and handoff](item5_shared_provider_interfaces_2026-10-09.md)
+before implementing the compile/loader flows below. It preserves existing V1
+wire layouts and callable/session ownership, separates host eligibility from
+generated target intent, and identifies which pre-open and app changes remain
+drafts. Those flows are required behavior; they are not evidence that every
+refusal, generation cache, or exact-closure type is implemented today. Phase 5
+size/loading evidence must bind the same immutable producer, consumer, runtime
+and provider cohort. Existing requirements, rollback and effect-once rules remain.
+
 ## 2026-10-02 current-source design update
 
 See [the item 5 research/design supplement](item5_provider_size_research_design_2026-10-02.md)

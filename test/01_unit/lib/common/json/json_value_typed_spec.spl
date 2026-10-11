@@ -1,0 +1,67 @@
+"""
+## Purpose and audience
+Purpose: Prove the any-free typed JSON parser (std.common.json.value).
+Audience: compiler and tooling engineers who maintain compiled JSON consumers.
+"""
+# @req: REQ-LIB-COMMON-001 — stable requirement identity for this spec.
+
+"""
+Typed JSON parse tree for compiled callers.
+
+`json_parse_value` shares the dynamic parser's tokenizer and error messages
+but returns a closed `JsonValue` enum instead of untyped ("tag", payload)
+values, so compiled modules can consume JSON without a written `any`.
+"""
+
+use std.spec.*
+use std.common.json.value.{JsonValue, json_parse_value, json_value_type, json_value_get, json_value_as_text, json_value_as_number, json_value_as_array}
+
+describe "typed JSON values (std.common.json.value)":
+    """As a compiled caller, I parse JSON into a typed tree with the same
+    semantics as the dynamic parser."""
+
+    it "reads object members by key, last duplicate wins":
+        step("Verify: object members by key with last-value-wins duplicates")
+        # @req: REQ-LIB-COMMON-001
+        val root = json_parse_value("{\"name\": \"x\", \"n\": 1, \"name\": \"y\"}").unwrap()
+        expect(json_value_type(root)).to_equal("object")
+        expect(json_value_as_text(json_value_get(root, "name").unwrap()).unwrap()).to_equal("y")
+        expect(json_value_get(root, "missing").is_none()).to_equal(true)
+
+    it "parses arrays in order":
+        step("Verify: arrays keep element order")
+        # @req: REQ-LIB-COMMON-001
+        val items = json_value_as_array(json_parse_value("[\"a\", true, null]").unwrap()).unwrap()
+        expect(items.len()).to_equal(3)
+        expect(json_value_as_text(items[0]).unwrap()).to_equal("a")
+        expect(json_value_type(items[1])).to_equal("boolean")
+        expect(json_value_type(items[2])).to_equal("null")
+
+    it "distinguishes int and float numbers but widens both":
+        step("Verify: Int for integral tokens, Float otherwise")
+        # @req: REQ-LIB-COMMON-001
+        val items = json_value_as_array(json_parse_value("[42, -7, 1.5, 2e3]").unwrap()).unwrap()
+        val first_is_int = match items[0]:
+            case Int(v): v == 42
+            case _: false
+        expect(first_is_int).to_equal(true)
+        val third_is_float = match items[2]:
+            case Float(_): true
+            case _: false
+        expect(third_is_float).to_equal(true)
+        expect(json_value_as_number(items[1]).unwrap()).to_equal(-7.0)
+        expect(json_value_as_number(items[3]).unwrap()).to_equal(2000.0)
+
+    it "unescapes strings":
+        step("Verify: string escapes decode")
+        # @req: REQ-LIB-COMMON-001
+        val value = json_parse_value("\"a\\nb\\u0041\"").unwrap()
+        expect(json_value_as_text(value).unwrap()).to_equal("a\nbA")
+
+    it "reports the dynamic parser's error messages":
+        step("Verify: malformed input yields Err with the same message")
+        # @req: REQ-LIB-COMMON-001
+        expect(json_parse_value("").is_err()).to_equal(true)
+        expect(json_parse_value("[1, 2").err().unwrap()).to_equal("Unclosed array")
+        expect(json_parse_value("{\"a\": 1,}").err().unwrap()).to_equal("Trailing comma in object")
+        expect(json_parse_value("1 2").err().unwrap()).to_equal("Unexpected trailing tokens")

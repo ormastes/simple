@@ -1,0 +1,241 @@
+#!/bin/sh
+# check-any-warn-rules-ratchet.shs — SHRINK-ONLY ratchet on the Any rules
+# (robustness item 7b) over the compiler's own source.
+#
+# Rules (registry: 90.tools/lint/_LintMain/config_and_model.spl; runner:
+# 90.tools/lint/any_rules.spl):
+#   W-ANY-DECL-001   written_any_decl   written `Any` in a src/compiler/** declaration
+#   W-HIR-INFER-003  any_fallback_use   fallback-typed binding used where a concrete type is needed
+#   W-ANY-USE-001    any_receiver_use   `for` over an `any` value
+#   W-ANY-USE-002    any_receiver_use   method call on an `any` receiver
+#
+# WHY SHRINK-ONLY: the rules are warn-first. The measured population per rule
+# is frozen in scripts/check/any_warn_rules_baseline.txt. GROWTH of any count
+# FAILS. A count that FELL passes and is reported, so burning debt down never
+# blocks a push; --generate-baseline then lowers the file and REFUSES to raise
+# any count that an existing baseline already holds.
+#
+# SCOPE: scripts/check/any_warn_rules_scope.txt (40 modules; the 28 of the
+# frontend-diag baseline plus 12 more). `--all` widens to src/compiler/**.
+#
+# MEASUREMENT: `SIMPLE_ANY_RULES=dfr $SIMPLE_BIN check <file>` per file, at
+# most $JOBS (default 3) at a time. This is the exact child an opted-in
+# `simple lint` starts and relays, without lint's own per-declaration
+# cost. A checker that CRASHES (rc >= 128 or 124) or that does not write the
+# `any-rules: checked` sentinel to its report file is ERROR, never a lower count.
+# Single-file lowering does not resolve imports, so W-HIR-INFER-003 on a value
+# returned by an IMPORTED function is undercounted here.
+#
+# VERDICT (always the last line of stdout)
+#   PASS  — <n> file(s) checked, <k> finding(s) (baseline <b>)   exit 0
+#   FAIL  — ...                                                 exit 1
+#   ERROR — nothing was checked (<reason>)                      exit 2
+#
+# --keep-dir DIR appends every finding and sentinel line to
+# DIR/findings.tsv, for reading the population rather than counting it.
+#
+# --selftest runs 6 fixtures against a fake checker and is fatal; it also
+# runs before every real scan.
+set -u
+
+ROOT="$(pwd)"
+GENERATE=0
+LIMIT=""
+ALL_FILES=0
+SELFTEST_ONLY=0
+KEEP_DIR=""
+JOBS="${JOBS:-3}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --root) ROOT="${2:-}"; shift 2 ;;
+    --generate-baseline) GENERATE=1; shift ;;
+    --limit) LIMIT="${2:-}"; shift 2 ;;
+    --all) ALL_FILES=1; shift ;;
+    --selftest) SELFTEST_ONLY=1; shift ;;
+    --keep-dir) KEEP_DIR="${2:-}"; shift 2 ;;
+    *) echo "ERROR — unknown argument: $1"; exit 2 ;;
+  esac
+done
+
+RULES='W-ANY-DECL-001 W-HIR-INFER-003 W-ANY-USE-001 W-ANY-USE-002'
+RULE_RE='warning: \[\(W-ANY-DECL-001\|W-HIR-INFER-003\|W-ANY-USE-001\|W-ANY-USE-002\)\]'
+
+# check_one SIMPLE FILE REPORT RC_FILE — exit status read directly, never via a
+# pipe. The report is read from SIMPLE_ANY_RULES_OUT, not stdout: the check
+# entry truncates worker stdout at 12 000 characters.
+check_one() {
+  SIMPLE_ANY_RULES=dfr SIMPLE_ANY_RULES_OUT="$3" "$1" check "$2" > "$3.log" 2>&1
+  echo "$?" > "$4"
+}
+
+# scan ROOT SIMPLE OUT_COUNTS -> prints "N TOTAL" ; returns 2 on ERROR
+scan() {
+  _root="$1"; _simple="$2"; _counts="$3"
+  _tmp="$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/awr.$$.$(date +%s)")"
+  mkdir -p "$_tmp"
+  _scope="$_root/scripts/check/any_warn_rules_scope.txt"
+  if [ "$ALL_FILES" -eq 1 ] || [ ! -f "$_scope" ]; then
+    ( cd "$_root" && find src/compiler -name '*.spl' -type f 2>/dev/null ) \
+      | grep -v '/archive/\|/generated/' | sort > "$_tmp/files"
+  else
+    grep . "$_scope" > "$_tmp/files"
+  fi
+  [ -n "$LIMIT" ] && { head -n "$LIMIT" "$_tmp/files" > "$_tmp/files.l"; mv "$_tmp/files.l" "$_tmp/files"; }
+  _n=$(grep -c . "$_tmp/files" | tr -d ' ')
+  if [ "$_n" -eq 0 ]; then
+    rm -rf "$_tmp"; echo "ERROR — nothing was checked (no src/compiler/**.spl under $_root)"; return 2
+  fi
+  # Relative paths from the root: R1 keys on a `src/compiler/` path.
+  _i=0; _running=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    _i=$((_i + 1))
+    ( cd "$_root" && check_one "$_simple" "$f" "$_tmp/out.$_i" "$_tmp/rc.$_i" ) &
+    _running=$((_running + 1))
+    if [ "$_running" -ge "$JOBS" ]; then wait; _running=0; fi
+  done < "$_tmp/files"
+  wait
+  : > "$_tmp/findings"
+  _i=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    _i=$((_i + 1))
+    _rc=$(cat "$_tmp/rc.$_i" 2>/dev/null); _rc=${_rc:-125}
+    if [ "$_rc" -ge 128 ] || [ "$_rc" -eq 124 ]; then
+      rm -rf "$_tmp"; echo "ERROR — nothing was checked (checker crashed rc=$_rc on $f)"; return 2
+    fi
+    if ! grep -q '^any-rules: checked ' "$_tmp/out.$_i" 2>/dev/null; then
+      rm -rf "$_tmp"; echo "ERROR — nothing was checked (no any-rules sentinel for $f, rc=$_rc; is a check worker available? set SIMPLE_BINARY)"; return 2
+    fi
+    grep -o "$RULE_RE" "$_tmp/out.$_i" | sed 's/^warning: \[//; s/\]$//' >> "$_tmp/findings" || :
+    if [ -n "$KEEP_DIR" ]; then
+      mkdir -p "$KEEP_DIR"
+      grep -e "$RULE_RE" -e '^any-rules: checked ' "$_tmp/out.$_i" >> "$KEEP_DIR/findings.tsv" || :
+    fi
+  done < "$_tmp/files"
+  : > "$_counts"
+  for rule in $RULES; do
+    _c=$(grep -c "^$rule\$" "$_tmp/findings" | tr -d ' '); _c=${_c:-0}
+    echo "$rule $_c" >> "$_counts"
+  done
+  _total=$(grep -c . "$_tmp/findings" | tr -d ' ')
+  rm -rf "$_tmp"
+  echo "$_n $_total"
+  return 0
+}
+
+# compare COUNTS BASELINE N TOTAL -> prints verdict, returns 0/1
+compare() {
+  _counts="$1"; _base="$2"; _n="$3"; _total="$4"
+  _fail=""; _shrunk=""
+  for rule in $RULES; do
+    now=$(awk -v r="$rule" '$1==r{print $2}' "$_counts"); now=${now:-0}
+    base=$(awk -v r="$rule" '$1==r{print $2}' "$_base"); base=${base:-0}
+    [ "$now" -gt "$base" ] && _fail="$_fail $rule:+$((now-base))"
+    [ "$now" -lt "$base" ] && _shrunk="$_shrunk $rule:$base->$now"
+  done
+  _bt=$(awk '{s+=$2} END{print s+0}' "$_base")
+  if [ -n "$_fail" ]; then
+    echo "FAIL — $_n file(s) checked, $_total finding(s) (baseline $_bt):$_fail"; return 1
+  fi
+  if [ -n "$_shrunk" ]; then
+    echo "PASS — $_n file(s) checked, $_total finding(s) (baseline $_bt); shrunk, lower the baseline with --generate-baseline:$_shrunk"; return 0
+  fi
+  echo "PASS — $_n file(s) checked, $_total finding(s) (baseline $_bt)"; return 0
+}
+
+# generate COUNTS BASELINE N TOTAL -> writes baseline unless a count would rise
+generate() {
+  _counts="$1"; _base="$2"; _n="$3"; _total="$4"
+  if [ -f "$_base" ]; then
+    _rise=""
+    for rule in $RULES; do
+      now=$(awk -v r="$rule" '$1==r{print $2}' "$_counts"); now=${now:-0}
+      base=$(awk -v r="$rule" '$1==r{print $2}' "$_base"); base=${base:-0}
+      [ "$now" -gt "$base" ] && _rise="$_rise $rule:$base->$now"
+    done
+    if [ -n "$_rise" ]; then
+      echo "FAIL — shrink-only baseline refuses to rise:$_rise"; return 1
+    fi
+  fi
+  cp "$_counts" "$_base"
+  echo "PASS — $_n file(s) checked, $_total finding(s) (baseline written)"; return 0
+}
+
+selftest() {
+  _keep="$KEEP_DIR"; KEEP_DIR=""
+  _st="$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/awr-st.$$")"
+  mkdir -p "$_st/root/src/compiler" "$_st/root/scripts/check" "$_st/bin"
+  printf 'fn a() -> i64: 0\n' > "$_st/root/src/compiler/a.spl"
+  printf 'fn b() -> i64: 0\n' > "$_st/root/src/compiler/b.spl"
+  printf 'src/compiler/a.spl\nsrc/compiler/b.spl\n' > "$_st/root/scripts/check/any_warn_rules_scope.txt"
+  # fake checker: honours the mask env; a.spl -> 2 findings, b.spl -> 1, crash.spl -> segv, mute.spl -> no sentinel
+  cat > "$_st/bin/fake" <<'EOF'
+#!/bin/sh
+[ "${SIMPLE_ANY_RULES:-}" = "dfr" ] || exit 0
+out="${SIMPLE_ANY_RULES_OUT:-/dev/null}"
+case "$2" in
+  *a.spl) { echo "x.spl:1:1: warning: [W-ANY-USE-001] in a: m"; echo "x.spl:2:1: warning: [W-HIR-INFER-003] in a: m"; echo "x.spl:3:1: warning: [MEXH007] in a: other lane"; } >> "$out" ;;
+  *b.spl) echo "x.spl:1:1: warning: [W-ANY-USE-001] in b: m" >> "$out" ;;
+  *crash.spl) exit 139 ;;
+  *mute.spl) exit 1 ;;
+esac
+echo "any-rules: checked mask=dfr findings=0" >> "$out"
+exit 1
+EOF
+  chmod +x "$_st/bin/fake"
+  _counts="$_st/counts"
+  # 1. matching baseline -> PASS (and the other lane's MEXH007 is not counted)
+  printf 'W-ANY-USE-001 2\nW-HIR-INFER-003 1\n' > "$_st/base_ok"
+  _r=$(scan "$_st/root" "$_st/bin/fake" "$_counts") || { echo "ERROR — selftest 1: scan failed ($_r)"; exit 2; }
+  case "$_r" in "2 3") ;; *) echo "ERROR — selftest 1 expected '2 3', got: $_r"; exit 2 ;; esac
+  _v=$(compare "$_counts" "$_st/base_ok" $_r); case "$_v" in "PASS — 2 file(s) checked, 3 finding(s) (baseline 3)") ;; *) echo "ERROR — selftest 1 expected PASS, got: $_v"; exit 2 ;; esac
+  # 2. growth -> FAIL naming the rule
+  printf 'W-ANY-USE-001 1\nW-HIR-INFER-003 1\n' > "$_st/base_low"
+  _v=$(compare "$_counts" "$_st/base_low" $_r); case "$_v" in FAIL*W-ANY-USE-001:+1*) ;; *) echo "ERROR — selftest 2 expected FAIL W-ANY-USE-001:+1, got: $_v"; exit 2 ;; esac
+  # 3. shrink -> PASS, reported
+  printf 'W-ANY-USE-001 2\nW-HIR-INFER-003 4\n' > "$_st/base_high"
+  _v=$(compare "$_counts" "$_st/base_high" $_r); case "$_v" in PASS*shrunk*W-HIR-INFER-003:4-\>1*) ;; *) echo "ERROR — selftest 3 expected shrunk PASS, got: $_v"; exit 2 ;; esac
+  # 4. --generate-baseline lowers, and refuses to raise
+  _v=$(generate "$_counts" "$_st/base_high" $_r); case "$_v" in PASS*) ;; *) echo "ERROR — selftest 4a expected baseline written, got: $_v"; exit 2 ;; esac
+  grep -q '^W-HIR-INFER-003 1$' "$_st/base_high" || { echo "ERROR — selftest 4a baseline was not lowered"; exit 2; }
+  _v=$(generate "$_counts" "$_st/base_low" $_r); case "$_v" in FAIL*refuses*W-ANY-USE-001:1-\>2*) ;; *) echo "ERROR — selftest 4b expected refusal, got: $_v"; exit 2 ;; esac
+  grep -q '^W-ANY-USE-001 1$' "$_st/base_low" || { echo "ERROR — selftest 4b baseline was raised"; exit 2; }
+  # 5. crashing checker -> ERROR, never a count
+  printf 'fn c() -> i64: 0\n' > "$_st/root/src/compiler/crash.spl"
+  printf 'src/compiler/a.spl\nsrc/compiler/crash.spl\n' > "$_st/root/scripts/check/any_warn_rules_scope.txt"
+  _r=$(scan "$_st/root" "$_st/bin/fake" "$_counts"); _rc=$?
+  case "$_rc:$_r" in 2:ERROR*crashed*) ;; *) echo "ERROR — selftest 5 expected ERROR on crash, got rc=$_rc: $_r"; exit 2 ;; esac
+  # 6. a checker that never ran the rules (no sentinel) -> ERROR, not 0 findings
+  printf 'fn m() -> i64: 0\n' > "$_st/root/src/compiler/mute.spl"
+  printf 'src/compiler/a.spl\nsrc/compiler/mute.spl\n' > "$_st/root/scripts/check/any_warn_rules_scope.txt"
+  _r=$(scan "$_st/root" "$_st/bin/fake" "$_counts"); _rc=$?
+  case "$_rc:$_r" in 2:ERROR*sentinel*) ;; *) echo "ERROR — selftest 6 expected ERROR without sentinel, got rc=$_rc: $_r"; exit 2 ;; esac
+  rm -rf "$_st"
+  KEEP_DIR="$_keep"
+  echo "selftest: 6 fixture(s) passed"
+}
+
+selftest
+[ "$SELFTEST_ONLY" -eq 1 ] && exit 0
+
+BASELINE="$ROOT/scripts/check/any_warn_rules_baseline.txt"
+SIMPLE="${SIMPLE_BIN:-$ROOT/bin/simple}"
+[ -x "$SIMPLE" ] || { echo "ERROR — nothing was checked (no runnable simple at $SIMPLE; set SIMPLE_BIN)"; exit 2; }
+# `check` interprets src/app/check/main.spl with a worker binary; measure with
+# the binary under test unless the caller chose another one explicitly.
+SIMPLE_BINARY="${SIMPLE_BINARY:-$SIMPLE}"; export SIMPLE_BINARY
+SIMPLE_EXECUTION_MODE="${SIMPLE_EXECUTION_MODE:-interpreter}"; export SIMPLE_EXECUTION_MODE
+
+COUNTS="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/awr-counts.$$")"
+trap 'rm -f "$COUNTS"' EXIT INT TERM
+R=$(scan "$ROOT" "$SIMPLE" "$COUNTS") || { echo "$R"; exit 2; }
+set -- $R
+N="$1"; TOTAL="$2"
+
+if [ "$GENERATE" -eq 1 ]; then
+  generate "$COUNTS" "$BASELINE" "$N" "$TOTAL"
+  exit $?
+fi
+[ -f "$BASELINE" ] || { echo "ERROR — nothing was checked (missing $BASELINE; run --generate-baseline)"; exit 2; }
+compare "$COUNTS" "$BASELINE" "$N" "$TOTAL"

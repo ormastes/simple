@@ -195,6 +195,7 @@ fn rt_expr_dispatches(expr: HirExpr, fn_names: Dict<i64, text>) -> bool:
                 nil: false
         case HirExprKind.Cast(value, _): rt_expr_dispatches(value, fn_names)
         case HirExprKind.As(value, _): rt_expr_dispatches(value, fn_names)
+        case HirExprKind.ConvertCall(value, _): rt_expr_dispatches(value, fn_names)
         case HirExprKind.Range(start, end, _, step):
             if val value = start:
                 if rt_expr_dispatches(value, fn_names): return true
@@ -323,6 +324,7 @@ fn rt_expr_allocates(expr: HirExpr) -> bool:
                 nil: false
         case HirExprKind.Cast(value, _): rt_expr_allocates(value)
         case HirExprKind.As(value, _): rt_expr_allocates(value)
+        case HirExprKind.ConvertCall(value, _): rt_expr_allocates(value)
         case HirExprKind.Range(start, end, _, step):
             if val value = start:
                 if rt_expr_allocates(value): return true
@@ -426,8 +428,27 @@ fn rt_annotation_bound_diagnostic(fn_name: text, raw_bounds: text) -> text:
     "error[RT-E-BOUND-CAPABILITY-UNVERIFIED]: @rt declaration '" +
         fn_name + "' uses annotation bounds; provide a reviewed typed numeric capability bound to the function closure"
 
-fn validate_rt_criticality(modules: Dict<text, HirModule>) -> [text]:
-    var diagnostics: [text] = []
+fn rt_sort_criticality_diagnostics(items: [RtCriticalDiagnostic]) -> [RtCriticalDiagnostic]:
+    var out: [RtCriticalDiagnostic] = []
+    for item in items:
+        var at = out.len()
+        var i = 0
+        while i < out.len():
+            if item.message < out[i].message:
+                at = i
+                break
+            i = i + 1
+        out.push(item)
+        var j = out.len() - 1
+        while j > at:
+            out[j] = out[j - 1]
+            j = j - 1
+        out[at] = item
+    out
+
+fn validate_rt_criticality_diagnostics(modules: Dict<text, HirModule>) -> [RtCriticalDiagnostic]:
+    """Validate RT roots while retaining warning/error severity for callers."""
+    var diagnostics: [RtCriticalDiagnostic] = []
     val claims = rt_criticality_claim_keys()
     var has_rt_hal = false
     for module in modules.values():
@@ -477,7 +498,11 @@ fn validate_rt_criticality(modules: Dict<text, HirModule>) -> [text]:
             facts.push(RtCriticalFact(name: rt_stable_fn_id(module_key, fn_.symbol.id), own_effects: own,
                 bounded_effects: 0, callees: stable_callees,
                 line: fn_.span.line, effect_units: units))
-    var admitted_roots: Dict<text, bool> = {}
+    # Resolve each claim once. Rank propagation then shares one scalar graph
+    # closure across all roots, including explicit lower-tier callers of a
+    # critical or verified dependency.
+    var claim_roots: Dict<text, text> = {}
+    var declared_ranks: Dict<text, i64> = {}
     for key in claims:
         if not module_ids.contains(rt_criticality_claim_path(key)): continue
         val fn_name = rt_criticality_claim_fn(key)
@@ -490,24 +515,80 @@ fn validate_rt_criticality(modules: Dict<text, HirModule>) -> [text]:
                 if fn_.name == fn_name:
                     if root_id != "": root_id = "__rt_ambiguous_root__"
                     else: root_id = rt_stable_fn_id(module_key, fn_.symbol.id)
+        claim_roots[key] = root_id
+        val rank = rt_profile_assurance_rank(profile)
+        if root_id != "" and rank > (declared_ranks[root_id] ?? 0):
+            declared_ranks[root_id] = rank
+    for module_key in modules.keys():
+        val module = modules[module_key]
+        for fn_ in module.functions.values():
+            if fn_.func_attr.is_rt_hal:
+                val root_id = rt_stable_fn_id(module_key, fn_.symbol.id)
+                if (declared_ranks[root_id] ?? 0) < 3:
+                    declared_ranks[root_id] = 3
+    val effective_ranks = rt_effective_assurance_closure(facts, declared_ranks)
+    var fact_positions: Dict<text, i64> = {}
+    var fact_position = 0
+    while fact_position < facts.len():
+        fact_positions[facts[fact_position].name] = fact_position
+        fact_position = fact_position + 1
+    var admitted_roots: Dict<text, bool> = {}
+    for key in claims:
+        if not claim_roots.contains_key(key): continue
+        val fn_name = rt_criticality_claim_fn(key)
+        val profile = rt_criticality_profile(key)
+        val root_id = claim_roots[key]
         # The parser exclusively owns the implicit warning/error, preventing a
         # warning+error pair at the promotion epoch. Semantics owns explicit
         # profile validity and lower-tier reasons.
         if profile != "":
             for d in rt_critical_profile_diagnostics(fn_name, profile,
                 rt_criticality_reason(key), rt_implicit_profile_is_error()):
-                if d.starts_with("error["): diagnostics.push(d)
+                if d.starts_with("error["):
+                    diagnostics.push(RtCriticalDiagnostic(
+                        severity: RtCriticalDiagnosticSeverity.Error, message: d))
         val raw_bound_error = rt_annotation_bound_diagnostic(fn_name,
             rt_criticality_bounds_for(key))
-        if raw_bound_error != "": diagnostics.push(raw_bound_error)
-        if rt_critical_profile(profile):
+        if raw_bound_error != "":
+            diagnostics.push(RtCriticalDiagnostic(
+                severity: RtCriticalDiagnosticSeverity.Error, message: raw_bound_error))
+        var effective_rank = rt_profile_assurance_rank(profile)
+        if fact_positions.contains_key(root_id):
+            effective_rank = effective_ranks[fact_positions[root_id]]
+        val unresolved = root_id == "" or root_id == "__rt_ambiguous_root__"
+        val admission_identity = if unresolved: "claim:" + key else: root_id
+        val admission_root = if unresolved: admission_identity else: root_id
+        if admitted_roots.contains_key(admission_identity): continue
+        if effective_rank >= 3:
             if rt_criticality_is_hal(key):
                 val hal_facts = rt_hal_facts_with_reviewed_intrinsic(root_id, facts)
-                for d in rt_admit_with_manifest(root_id, hal_facts): diagnostics.push(d)
+                for d in rt_admit_with_manifest(root_id, hal_facts):
+                    diagnostics.push(RtCriticalDiagnostic(
+                        severity: RtCriticalDiagnosticSeverity.Error, message: d))
             else:
-                val hal_facts = rt_hal_facts_with_reviewed_intrinsic(root_id, facts)
-                for d in rt_admit_with_manifest(root_id, hal_facts): diagnostics.push(d)
-            admitted_roots[root_id] = true
+                # Ordinary roots retain the exact compiler fact graph used by
+                # the reviewed digest. A HAL-only synthetic edge would change
+                # that digest and silently discard valid allocation authority.
+                for d in rt_admit_with_manifest(admission_root, facts):
+                    diagnostics.push(RtCriticalDiagnostic(
+                        severity: RtCriticalDiagnosticSeverity.Error, message: d))
+            admitted_roots[admission_identity] = true
+        elif fact_positions.contains_key(root_id):
+            for d in rt_admit_with_manifest(root_id, facts):
+                if d.starts_with("error[RT-E-UNBOUNDED-ALLOCATION]"):
+                    val level = if rt_implicit_profile_is_error(): "error" else: "warning"
+                    val code = if rt_implicit_profile_is_error():
+                        "RT-E-STEADY-ALLOCATION-001"
+                    else:
+                        "RT-W-STEADY-ALLOCATION-001"
+                    val severity = if rt_implicit_profile_is_error():
+                        RtCriticalDiagnosticSeverity.Error
+                    else:
+                        RtCriticalDiagnosticSeverity.Warning
+                    diagnostics.push(RtCriticalDiagnostic(severity: severity,
+                        message: level + "[" + code + "]: explicit lower-tier RT closure '" +
+                            fn_name + "' contains unproved steady-state allocation"))
+            admitted_roots[admission_identity] = true
     # Non-flat/full frontend routes preserve @rt(hal) directly in FunctionAttr
     # and do not emit the flat parser's inert criticality marker. Admit those
     # roots here with the same default critical closure, exactly once.
@@ -518,15 +599,26 @@ fn validate_rt_criticality(modules: Dict<text, HirModule>) -> [text]:
             val root_id = rt_stable_fn_id(module_key, fn_.symbol.id)
             if admitted_roots.contains_key(root_id): continue
             val hal_facts = rt_hal_facts_with_reviewed_intrinsic(root_id, facts)
-            for d in rt_admit_with_manifest(root_id, hal_facts): diagnostics.push(d)
+            for d in rt_admit_with_manifest(root_id, hal_facts):
+                diagnostics.push(RtCriticalDiagnostic(
+                    severity: RtCriticalDiagnosticSeverity.Error, message: d))
             admitted_roots[root_id] = true
-    val ordered = rt_sort_text(diagnostics)
+    val ordered = rt_sort_criticality_diagnostics(diagnostics)
     # A config owner must seal a fresh manifest for every compilation. Never
     # let reviewed authority leak into a later long-lived compiler request.
     rt_bound_manifest_clear()
     ordered
 
+fn validate_rt_criticality(modules: Dict<text, HirModule>) -> [text]:
+    """Preserve the existing error-only string adapter for compiler callers."""
+    var errors: [text] = []
+    for diagnostic in validate_rt_criticality_diagnostics(modules):
+        if diagnostic.severity == RtCriticalDiagnosticSeverity.Error:
+            errors.push(diagnostic.message)
+    errors
+
 export validate_rt_criticality, rt_name_effects
+export validate_rt_criticality_diagnostics
 export rt_expr_allocates, rt_block_allocates
 export rt_expr_dispatches, rt_block_dispatches
 export rt_direct_callee_dispatches

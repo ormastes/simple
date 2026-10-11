@@ -2446,9 +2446,9 @@ fn project_stage4_archive_closure(
     temp_dir: &Path,
     stem: &str,
 ) -> Result<PathBuf, String> {
-    if !cfg!(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")) {
+    if !cfg!(any(all(target_os = "linux", target_env = "gnu"), target_os = "freebsd", target_os = "macos")) {
         return Err(
-            "Stage4 archive projection currently requires native GNU/Linux or macOS linker semantics".to_string(),
+            "Stage4 archive projection currently requires native GNU/Linux, FreeBSD or macOS linker semantics".to_string(),
         );
     }
     let output = temp_dir.join(format!("libsimple_{stem}.a"));
@@ -2521,7 +2521,7 @@ fn project_stage4_archive_closure(
             closure_cmd.arg(format!("-fuse-ld={linker}"));
         }
         closure_cmd.arg("-nostdlib").arg("-Wl,-r");
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         closure_cmd.arg("-no-pie").arg("-Wl,--gc-sections");
         for symbol in &requested {
             #[cfg(target_os = "macos")]
@@ -2563,12 +2563,12 @@ fn project_stage4_archive_closure(
             }
             closure_cmd.arg(&refs_o);
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         closure_cmd.arg("-Wl,--start-group");
         for archive in inputs {
             closure_cmd.arg(archive);
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         closure_cmd.arg("-Wl,--end-group");
         let closure = closure_cmd
             .arg("-o")
@@ -4258,6 +4258,37 @@ mod llvm_tool_policy_tests {
             .current_dir(directory.path()).output().unwrap();
         assert!(run.status.success(), "adjacent real SQLite DLL execution failed: {:?} {}", run.status.code(), String::from_utf8_lossy(&run.stderr));
         assert!(String::from_utf8_lossy(&run.stdout).contains("SQLite SDK version "));
+    }
+
+    #[test]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "freebsd"))]
+    fn bootstrap_capsule_links_directory_check_without_stealing_array_ownership() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = super::build_core_c_runtime_library(&directory.path().join("core"))
+            .expect("compile the real core runtime");
+        let capsule = super::build_bootstrap_mutex_runtime_capsule_archive(
+            &core, &directory.path().join("capsule"),
+        ).expect("project the native bootstrap runtime capsule");
+        let (defined, _) = super::archive_global_symbols(&capsule).unwrap();
+        let weak = super::archive_weak_global_symbols(&capsule).unwrap();
+        assert_eq!(defined.get("rt_sosix_directory_pair_check_v1"), Some(&1));
+        for owner in ["rt_array_bytes_validate", "rt_array_bytes_copy_checked"] {
+            assert!(!defined.contains_key(owner) || weak.contains(owner),
+                "capsule must not replace the outer array owner: {owner}");
+        }
+        let source = directory.path().join("directory_check.c");
+        // Invalid encoded values exercise the actual exported ABI and runtime
+        // validation. A success stub would fail both assertions.
+        std::fs::write(&source, "#include <stdint.h>\n#include <errno.h>\nextern int64_t rt_sosix_directory_pair_check_v1(int64_t, int64_t);\nint main(void) { if (rt_sosix_directory_pair_check_v1(0, 0) != -EINVAL) return 1; if (rt_sosix_directory_pair_check_v1(1, 0) != -EINVAL) return 2; return 0; }\n").unwrap();
+        let executable = directory.path().join("directory_check");
+        let link = std::process::Command::new(super::find_c_compiler())
+            .arg(&source).arg(&capsule).arg(&core)
+            .args(["-pthread", "-lm", "-o"]).arg(&executable)
+            .output().unwrap();
+        assert!(link.status.success(), "real capsule link: {}", String::from_utf8_lossy(&link.stderr));
+        let run = std::process::Command::new(&executable).output().unwrap();
+        assert!(run.status.success(), "real directory ABI checks: {:?} {}",
+            run.status.code(), String::from_utf8_lossy(&run.stderr));
     }
 
     #[test]

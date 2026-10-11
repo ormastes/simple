@@ -1,3 +1,5 @@
+# @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
+use compiler.hir.hir_types.{SymbolKind}
 # Part of src/compiler/50.mir/mir_lowering.spl: bootstrap HIR-globals-to-MIR-module lowering helpers
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.function_lowering.*
@@ -412,7 +414,7 @@ fn bootstrap_flat_symbol_table(module_index: i64) -> SymbolTable:
         val symbol = bootstrap_hir_module_symbol_at(module_index, symbol_index)
         table.register_preserved_symbol(symbol)
         match symbol.kind:
-            case Class | Struct | Enum | Trait:
+            case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum | SymbolKind.Trait:
                 table.bind_qualified_type(symbol.defining_module ?? "", symbol.name, symbol.id)
             case _: ()
         symbol_index = symbol_index + 1
@@ -518,8 +520,13 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
                 found_globals = lowering.register_provider_global_bindings(provider_name, provider_symbols, provider_constants, demands, found_globals, callable_demands)
             provider_index = provider_index + 1
         lowering.reject_missing_global_providers(demands, found_globals)
+    # Register every binding before typing any static: an unfolded
+    # initializer recovers its type from its operands' registered
+    # initializers, so one interleaved pass made it visit-order dependent
+    # (same split as lower_module, module_lowering.spl).
     for const_ in constants:
         lowering.lower_const(const_)
+    for const_ in constants:
         lowering.lower_static(const_)
     if bootstrap_reject_fatal_mir_errors(lowering):
         exit(1)
@@ -963,8 +970,10 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
         lowering.current_function_names = function_names
         val const_vals = hir_module.constants.values()
         val module_index = _bootstrap_mir_module_count_value
+        # Two passes; see the constants loop above.
         for const_ in const_vals:
             lowering.lower_const(const_)
+        for const_ in const_vals:
             lowering.lower_static(const_)
         if bootstrap_reject_fatal_mir_errors(lowering):
             exit(1)

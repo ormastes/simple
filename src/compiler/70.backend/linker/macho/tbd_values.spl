@@ -1,34 +1,37 @@
 # Strict schema helpers shared by both text encodings.
 use compiler.backend.linker.macho.tbd_types.{MachOTbdLimitsV1, MachOTbdTargetV1}
 use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.common.json.value.{JsonValue, json_value_type, json_value_items, json_value_keys, json_value_has, json_value_field, json_value_text_or, json_value_as_number}
 
-fn tbd_object(value: any) -> Result<{text: any}, text>:
-    if value == nil or value.0 != "object": return Err("TBD expected object")
-    Ok(value.1)
+# An object is passed on as the JsonValue.Object itself; read its members with
+# json_value_has / json_value_field.
+fn tbd_object(value: JsonValue) -> Result<JsonValue, text>:
+    if json_value_type(value) != "object": return Err("TBD expected object")
+    Ok(value)
 
-fn tbd_array(value: any) -> Result<[any], text>:
-    if value == nil or value.0 != "array": return Err("TBD expected array")
-    Ok(value.1)
+fn tbd_array(value: JsonValue) -> Result<[JsonValue], text>:
+    if json_value_type(value) != "array": return Err("TBD expected array")
+    Ok(json_value_items(value))
 
-fn tbd_text(value: any, limits: MachOTbdLimitsV1) -> Result<text, text>:
-    if value == nil or value.0 != "string": return Err("TBD expected string")
-    val name: text = value.1
+fn tbd_text(value: JsonValue, limits: MachOTbdLimitsV1) -> Result<text, text>:
+    if json_value_type(value) != "string": return Err("TBD expected string")
+    val name: text = json_value_text_or(value, "")
     if name == "" or name.len() > limits.max_name_bytes or name.contains("\0"):
         return Err("TBD invalid or oversized name")
     for index in 0..name.len():
         if name.byte_at(index) > 127: return Err("TBD unsupported non-ASCII name")
     Ok(name)
 
-fn tbd_keys(fields: {text: any}, allowed: [text]) -> Result<bool, text>:
-    for key in fields.keys():
+fn tbd_keys(fields: JsonValue, allowed: [text]) -> Result<bool, text>:
+    for key in json_value_keys(fields):
         if not allowed.contains(key): return Err("TBD unsupported field {key}")
     Ok(true)
 
-fn tbd_required(fields: {text: any}, key: text) -> Result<any, text>:
-    if not fields.has(key): return Err("TBD missing field {key}")
-    Ok(fields[key])
+fn tbd_required(fields: JsonValue, key: text) -> Result<JsonValue, text>:
+    if not json_value_has(fields, key): return Err("TBD missing field {key}")
+    Ok(json_value_field(fields, key))
 
-fn tbd_names(value: any, limits: MachOTbdLimitsV1) -> Result<[text], text>:
+fn tbd_names(value: JsonValue, limits: MachOTbdLimitsV1) -> Result<[text], text>:
     val values = tbd_array(value)?
     var names: [text] = []
     var seen: {text: bool} = {}
@@ -49,7 +52,7 @@ fn tbd_decimal(value: text, maximum: i64) -> Result<i64, text>:
         number = number * 10 + digit
     Ok(number)
 
-fn tbd_version(value: any, limits: MachOTbdLimitsV1) -> Result<i64, text>:
+fn tbd_version(value: JsonValue, limits: MachOTbdLimitsV1) -> Result<i64, text>:
     val version = tbd_text(value, limits)?
     val parts = version.split(".")
     if parts.len() < 1 or parts.len() > 3: return Err("TBD invalid packed version")
@@ -60,10 +63,11 @@ fn tbd_version(value: any, limits: MachOTbdLimitsV1) -> Result<i64, text>:
     if parts.len() > 2: patch = tbd_decimal(parts[2], 255)?
     Ok((major << 16) | (minor << 8) | patch)
 
-fn tbd_integer(value: any, maximum: i64, yaml: bool, limits: MachOTbdLimitsV1) -> Result<i64, text>:
+fn tbd_integer(value: JsonValue, maximum: i64, yaml: bool, limits: MachOTbdLimitsV1) -> Result<i64, text>:
     if yaml: return tbd_decimal(tbd_text(value, limits)?, maximum)
-    if value == nil or value.0 != "number": return Err("TBD expected integer")
-    val number: f64 = value.1
+    val numeric = json_value_as_number(value)
+    if numeric.is_none(): return Err("TBD expected integer")
+    val number: f64 = numeric.unwrap()
     if number < 0.0 or number > maximum as f64: return Err("TBD integer outside bounds")
     val integer = number as i64
     if integer as f64 != number: return Err("TBD expected integral number")
@@ -88,11 +92,11 @@ fn tbd_declared_target(value: text) -> Result<bool, text>:
             return Err("TBD invalid declared simulator target")
     Ok(true)
 
-fn tbd_scope(fields: {text: any}, declared: [text], required: bool, limits: MachOTbdLimitsV1) -> Result<[text], text>:
-    if not fields.has("targets"):
+fn tbd_scope(fields: JsonValue, declared: [text], required: bool, limits: MachOTbdLimitsV1) -> Result<[text], text>:
+    if not json_value_has(fields, "targets"):
         if required: return Err("TBD missing scoped targets")
         return Ok(declared)
-    val targets = tbd_names(fields["targets"], limits)?
+    val targets = tbd_names(json_value_field(fields, "targets"), limits)?
     if targets.len() == 0: return Err("TBD empty scoped targets")
     for target in targets:
         if not declared.contains(target): return Err("TBD scoped target not declared")

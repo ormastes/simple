@@ -2,9 +2,12 @@ use compiler.driver.driver_compiler_type.{CompilerDriver}
 use std.io_runtime.{exit, hash_text}
 use std.env.{env_get}
 use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{CompileMode}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable, sosix_cwd}
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{
-    cold_hir_typed_receipts_from_lowered_sources_v1
+    cold_hir_typed_receipts_from_lowered_sources_v1,
+    cold_hir_source_mismatch_evidence_v1
 }
 use compiler.driver.smf.runtime_std_hir_emission_v1.{
     RuntimeStdHirModuleEmissionV1, runtime_std_hir_emit_module_v1
@@ -63,13 +66,14 @@ use compiler.driver.driver_hir_pipeline_passes.{
     run_enum_contract_pass
 }
 use compiler.semantics.resolve.{resolve_methods}
+use compiler.semantics.value_struct_layout.{value_struct_layout_snapshot_v1}
 use compiler.driver.driver_safety_severity.{SafetyPassSeverity, safety_pass_severity_phased}
 use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity, typecheck_pass_severity}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_last_warnings, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
-use compiler.driver.driver_hir_cache.{hir_cache_store_in_owned_scope, hir_cache_clear_last_warnings}
+use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_in_owned_scope, hir_cache_clear_last_warnings}
 use compiler.driver.driver_hir_cache.{hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block, hir_shard_inventory}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
 use compiler.common.cache.reverse_reference_facts.{
@@ -77,8 +81,8 @@ use compiler.common.cache.reverse_reference_facts.{
 }
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
-extern fn rt_transient_heap_promote(value: Any) -> bool
-extern fn rt_heap_ref_wellformed(value: Any) -> bool
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+extern fn rt_heap_ref_wellformed<T>(value: T) -> bool
 extern fn rt_stdout_flush()
 
 fn driver_log_typed_hir_abi_interface_v1(module: HirModule, path: text):
@@ -94,6 +98,11 @@ fn driver_log_typed_hir_abi_result_v1(module_name: text, result: Result<text, te
 
 fn driver_hir_explicit_semantic_policy(ctx: CompileContext) -> bool:
     (ctx.config["compiler_explicit_semantic_policy"] ?? "") == "1"
+
+fn driver_hir_forbids_written_any(ctx: CompileContext) -> bool:
+    """Robust/critical compiled code may write `Any` only inside `unsafe:`."""
+    ctx.options.mode != CompileMode.Interpret and
+        ctx.assurance_policy.strictness.at_least(AssuranceStrictness.Robust)
 
 fn driver_hir_ambient_bootstrap_enabled(ctx: CompileContext) -> bool:
     not driver_hir_explicit_semantic_policy(ctx) and
@@ -260,18 +269,15 @@ impl CompilerDriver:
                         self.ctx.source_module_names_owner,
                         self.ctx.hir_modules):
                     case Err(reason):
-                        if reason == "cold-hir-module-source-mismatch" and
-                                self.ctx.source_paths_owner.len() > 0:
-                            val source_path = self.ctx.source_paths_owner[0]
-                            val hir_path = if self.ctx.hir_modules.len() > 0:
-                                self.ctx.hir_modules[0].path
-                            else:
-                                ""
-                            val bounded_root = if source_root.len() > 256: source_root[:256] else: source_root
-                            val bounded_source = if source_path.len() > 256: source_path[:256] else: source_path
-                            val bounded_hir = if hir_path.len() > 256: hir_path[:256] else: hir_path
-                            self.ctx.add_error(
-                                "cold HIR path evidence: root='{bounded_root}' source='{bounded_source}' hir='{bounded_hir}'")
+                        if reason == "cold-hir-module-source-mismatch":
+                            # Guarded evidence construction lives in
+                            # cold_hir_source_mismatch_evidence_v1 (bounds-checked
+                            # source/module iteration, hir_modules.has(name)
+                            # before any dict index, 256-char bounding).
+                            self.ctx.add_error(cold_hir_source_mismatch_evidence_v1(
+                                source_root, self.ctx.source_paths_owner,
+                                self.ctx.source_module_names_owner,
+                                self.ctx.hir_modules))
                         self.ctx.add_error("cold HIR receipt capture failed: {reason}")
                         return false
                     case Ok(receipts):
@@ -480,7 +486,7 @@ impl CompilerDriver:
         var abi_receipt: (text, Result<text, text>) = ("", Err(""))
         var errors: [text] = []
         var warnings: [text] = []
-        val cache_result = hir_cache_load(cache_key)
+        val cache_result = hir_cache_load_in_owned_scope(cache_key)
         if val found = cache_result:
             module = found
             cached = true
@@ -595,11 +601,14 @@ impl CompilerDriver:
         var lowering: HirLowering = hirlowering_for_module("", surfaces)
         if driver_hir_explicit_semantic_policy(self.ctx):
             lowering.use_explicit_semantic_policy()
+        lowering.forbid_written_any = driver_hir_forbids_written_any(self.ctx)
         var lowered_by_surface: Dict<i64, HirModule> = {}
         var shard_completed_surfaces: Dict<i64, bool> = {}
         var poisoned_by_surface: Dict<i64, bool> = {}
         var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
         var validation_module_keys: [text] = []
+        # Values are struct/symbol-only HirModule views, not second owners of
+        # the complete HIR stored in phase_hir_modules.
         var validation_module_values: [HirModule] = []
         var phase_entry_hir: HirModule? = nil
         var streaming_hir_module_count: i64 = self.ctx.hir_module_count_value
@@ -943,7 +952,9 @@ impl CompilerDriver:
             # surface name preserves the defining-module provenance.
             validation_module_keys.push(
                 surfaces.surfaces[surface_index].logical_name)
-            validation_module_values.push(hir_module)
+            validation_module_values.push(value_struct_layout_snapshot_v1(
+                surfaces.surfaces[surface_index].logical_name,
+                source.path, hir_module.structs, hir_module.symbols))
             if is_requested_bootstrap_entry:
                 phase_entry_hir = Some(hir_module)
             if not driver_hir_mem_snapshot(
@@ -975,8 +986,9 @@ impl CompilerDriver:
         # the fault is somewhere between here and streaming_source_reclaim:done
         # below. Each step now leaves a marker so a crash names its own step.
         log_phase("phase3:hir:loop:done modules={progress_hir_done}")
-        if hir_cache_enabled():
-            print hir_cache_summary()
+        # Always printed (task 8a): a disabled cache prints
+        # `[hir-cache] disabled reason=...`, so no build log is silent about it.
+        print hir_cache_summary()
         if hir_shard_mode:
             print hir_shard_summary(hir_level_count, hir_shard_lowered)
             if not hir_shard_complete():
@@ -1027,15 +1039,8 @@ impl CompilerDriver:
         for validation_error in driver_validate_value_struct_layouts(
                 validation_module_keys, validation_module_values,
                 self.ctx.hir_modules):
-            if validation_error_count < 10:
-                eprint("[post-hir-validation-fatal] {validation_error}")
             validation_error_count = validation_error_count + 1
             self.ctx.add_error(validation_error)
-        if validation_error_count > 0:
-            var validation_errors_shown = validation_error_count
-            if validation_errors_shown > 10:
-                validation_errors_shown = 10
-            eprint("[post-hir-validation-fatal-count] count={validation_error_count} shown={validation_errors_shown}")
         log_phase("phase3:hir:validate:done errors={validation_error_count}")
         if (self.ctx.error_count_value > 0):
             return false
@@ -1144,6 +1149,8 @@ impl CompilerDriver:
             dtrace("[DRV] lac-branch=modules-loop (sources<=0)")
             var bootstrap_hir_modules: Dict<text, HirModule> = {}
             var bootstrap_validation_module_keys: [text] = []
+            # Layout validation consumes compact module views; keep the full
+            # lowered modules only in bootstrap_hir_modules.
             var bootstrap_validation_module_values: [HirModule] = []
             val bootstrap_entry_name = bootstrap_entry_module_name(self.ctx)
             var bootstrap_lowering_errors: [LoweringError] = []
@@ -1154,6 +1161,7 @@ impl CompilerDriver:
                 bootstrap_lowering_messages, bootstrap_lowering_recovered)
             if driver_hir_explicit_semantic_policy(self.ctx):
                 bootstrap_lowering.use_explicit_semantic_policy()
+            bootstrap_lowering.forbid_written_any = driver_hir_forbids_written_any(self.ctx)
             for module in self.ctx.modules.values():
                 val name = module.name
                 log_trace("processing module")
@@ -1171,7 +1179,9 @@ impl CompilerDriver:
                     err_idx = err_idx + 1
                 bootstrap_hir_modules[name] = resolved_module
                 bootstrap_validation_module_keys.push(name)
-                bootstrap_validation_module_values.push(resolved_module)
+                bootstrap_validation_module_values.push(value_struct_layout_snapshot_v1(
+                    name, resolved_module.path, resolved_module.structs,
+                    resolved_module.symbols))
             self.ctx.hir_modules = bootstrap_hir_modules
             self.ctx.hir_module_count_value = bootstrap_validation_module_keys.len()
             val bootstrap_entry_module = bootstrap_hir_modules[bootstrap_entry_name]
@@ -1186,6 +1196,7 @@ impl CompilerDriver:
             return self.ctx.error_count_value == 0
         var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
         var validation_module_keys: [text] = []
+        # The side array owns only struct layout data and struct symbols.
         var validation_module_values: [HirModule] = []
         var phase_entry_hir: HirModule? = nil
         var retained_hir_module_count: i64 = self.ctx.hir_module_count_value
@@ -1205,6 +1216,7 @@ impl CompilerDriver:
             module_lowering_diagnostic_recovered)
         if driver_hir_explicit_semantic_policy(self.ctx):
             lowering.use_explicit_semantic_policy()
+        lowering.forbid_written_any = driver_hir_forbids_written_any(self.ctx)
         val hir_bootstrap_mode_gate = driver_hir_ambient_bootstrap_enabled(self.ctx)
         if hir_bootstrap_mode_gate:
             bootstrap_hir_modules_reset()
@@ -1639,7 +1651,10 @@ impl CompilerDriver:
                         retained_module_surfaces.surfaces[validation_surface_index].logical_name)
                     if source_idx < 4:
                         log_phase("phase3:hir:validation:key-push:done index={source_idx}")
-                    validation_module_values = validation_module_values.push(hir_module)
+                    validation_module_values = validation_module_values.push(
+                        value_struct_layout_snapshot_v1(
+                            name, hir_module.path, hir_module.structs,
+                            hir_module.symbols))
                     if source_idx < 4:
                         log_phase("phase3:hir:validation:value-push:done index={source_idx}")
             if focused_future_driver_diag:
@@ -1665,8 +1680,9 @@ impl CompilerDriver:
         # HirType formatting which is not yet available; trait solver errors
         # cover the primary use cases for now.
 
-        if hir_cache_enabled():
-            print hir_cache_summary()
+        # Always printed (task 8a): a disabled cache prints
+        # `[hir-cache] disabled reason=...`, so no build log is silent about it.
+        print hir_cache_summary()
         if hir_shard_mode:
             # Shard children exist only to fill the HIR cache. Everything after
             # this point is the real build's job and must not run N times.
@@ -1819,6 +1835,7 @@ impl CompilerDriver:
             "", retained_module_surfaces)
         if driver_hir_explicit_semantic_policy(ctx):
             compatibility_lowering.use_explicit_semantic_policy()
+        compatibility_lowering.forbid_written_any = driver_hir_forbids_written_any(ctx)
         for src2 in ctx.sources:
             val name = src2.module_name
             val module = ctx.modules[name]

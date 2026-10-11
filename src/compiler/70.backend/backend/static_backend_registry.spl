@@ -67,7 +67,32 @@ pub fn validate_k1_static_backend_table_v1(policy: text,
             table[1].link_class == BackendLinkClass.KernelLinked and
             table[2].kind == BackendKind.Llvm and
             table[2].link_class == BackendLinkClass.KernelLinked
+    # LLVM-only kernel (src/compositions/kernel_llvm): the lane whose runtime
+    # bundle has no Cranelift at all (core-c-bootstrap links only the C core
+    # runtime, and every rt_cranelift_*/spl_cranelift_* symbol is Rust-only).
+    # Its table carries no Cranelift entry, so the kernel's Cranelift requests
+    # resolve to PLUG-E-NOTFOUND and k1_backend_unavailable_message_v1 instead
+    # of an undefined symbol at link time or a trap at run time.
+    if policy == "llvm":
+        return table.len() == 2 and
+            table[0].kind == BackendKind.Interpreter and
+            table[0].link_class == BackendLinkClass.KernelLinked and
+            table[1].kind == BackendKind.Llvm and
+            table[1].link_class == BackendLinkClass.KernelLinked
     false
+
+# Diagnostic for a backend the kernel can name but the installed K1
+# composition does not link. Shared by every kernel-side request site so the
+# refusal is one sentence everywhere (backend_helpers, builtin_adapter, the
+# JIT lane) and never a nil stub or an unresolved extern.
+pub fn k1_backend_unavailable_message_v1(backend_name: text) -> text:
+    val policy = if _k1_static_backend_table_installed_v1:
+        _k1_static_backend_policy_v1
+    else:
+        "unselected"
+    "{backend_name} backend not available in this build (K1 policy '{policy}'): " +
+        "select a kernel composition that links it " +
+        "(SIMPLE_KERNEL_K1_POLICY=llvm-cranelift) or load it with --backend-plugin <path>"
 
 pub fn install_k1_static_backend_table_v1(policy: text,
         table: [StaticBackendEntryV1]) -> bool:

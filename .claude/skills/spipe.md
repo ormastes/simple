@@ -7,6 +7,18 @@ description: SPipe Skill — runner/docgen/process around executable SSpec `.spl
 
 ## Bootstrap failure collection
 
+For one-thread crash diagnosis, host CUDA policy, RAM cache-parent staging and
+owned-process finality, use [native staging and terminal evidence](../../doc/07_guide/tooling/bootstrap_native_staging.md).
+A compile last-line/exit/object-size observation is not an SSpec verdict. Preserve
+actual test counts, stopped bug records, campaign Phase 3 priority and the full
+CLI command-owner gate; authored fixtures remain unexecuted until observed.
+
+For cached per-file continuation and manual link diagnosis, use
+[cached object continuation and early linking](../../doc/07_guide/tooling/bootstrap_failure_collection.md#cached-object-continuation-and-early-linking).
+Keep tagged workarounds separate from permanent fixes; create a reproducing
+scenario and similar prevention scenarios, with authored tests clearly marked
+unexecuted until the real runner executes them.
+
 For bootstrap build/test sweeps, continue independent scenarios after failures
 and collect terminal results. A usable artifact plus minimum sanity permits
 diagnostic continuation; failed qualification still prevents admission and
@@ -2044,6 +2056,25 @@ Two judgement rules that go with it:
 - **Size never indicts a module on its own.** A file at 38% of its historical
   line count was a legitimate split; a 294-byte file was a deliberate facade
   over a 123 KB core. Size opens an investigation; it never closes one.
+
+## Host-dependent specs read the host config (2026-10-09)
+
+A spec or scenario that depends on host facts (worker count, cpu family / ISA
+features, os, LLVM root, gpu) reads them from the layered host config, never
+from a hardcoded value: `SIMPLE_HOST_<KEY>` env > `~/.config/simple/host.sdn`
+> `config/host/<hostname>.sdn` > `config/host/host_config.sdn` (tracked, values
+commented). Pure resolver: `std.common.config_core.host_config` (pass document
+texts + env snapshot, so fixtures stay hermetic); shell: `sh
+scripts/setup/host-env.shs --get <key>`. Gate an ISA-specific scenario on
+`host_config_cpu_features(...)` and record the skip reason when the extension
+is absent. Precedence spec: `test/01_unit/lib/common/config_core/host_config_spec.spl`.
+Guide: `doc/07_guide/infra/toolchain/host_config.md`.
+Cache settings live there too (`cache_root`, `cache_scope`, `frontend_cache`,
+`hir_cache`, `native_build_cache_dir`, `cache_max_bytes`, `cache_max_gb`) as
+defaults for the existing `SIMPLE_*CACHE*` vars; a spec that needs a specific
+cache state sets the consumer var explicitly (it always wins) and never relies
+on the host's user file. Use `host_config_cache_env(entries, env)` to test the
+mapping hermetically.
 
 ## Running specs on a loaded box (harness truths, 2026-07-29)
 

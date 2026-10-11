@@ -1,0 +1,61 @@
+# Retained Cranelift V2 target request carried across the K1 backend port.
+#
+# The kernel (backend_helpers, backend_plugin/builtin_adapter) never imports
+# the Cranelift adapter; it reaches Cranelift only through the K1 static
+# backend table installed by the selected composition. BackendPortV1.run_fn
+# takes CodegenParamsV1, whose `ext` rows are the only typed channel for the
+# retained target triple / CPU / ISA features that the V2 AOT path needs, so
+# both sides agree on these rows here. This module knows nothing about
+# Cranelift's SFFI surface and is safe in every kernel composition.
+
+use common.plugin.iface_id.{ParamExt}
+use compiler.backend.backend_port.{CodegenParamsV1, codegen_params_v1}
+use compiler.backend.backend.backend_types.{BackendCompileOptions}
+use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text}
+
+pub val CRANELIFT_RETAINED_OPTIMIZATION_V2: text = "retained-v2"
+pub val CRANELIFT_RETAINED_TARGET_EXT_V2: text = "simple.codegen.cranelift.retained_target_triple.v2"
+pub val CRANELIFT_RETAINED_CPU_EXT_V2: text = "simple.codegen.cranelift.retained_cpu.v2"
+pub val CRANELIFT_RETAINED_FEATURES_EXT_V2: text = "simple.codegen.cranelift.retained_features.v2"
+# Schema identity of the ext payload, in the same `sha256:<schema-id>` form the
+# other ParamExt producers use (aspect_params_env.spl): the payload is the
+# UTF-8 bytes of one text value, so the schema id names that encoding.
+val CRANELIFT_RETAINED_PAYLOAD_SCHEMA_V2: text = "sha256:simple.codegen.cranelift.retained_text_utf8.v2"
+
+pub struct CraneliftRetainedTargetV2:
+    target_triple: text?
+    cpu: text?
+    features: [text]
+
+fn _retained_ext_v2(name: text, value: text) -> ParamExt:
+    ParamExt(name, 2, text_to_utf8_bytes(value), CRANELIFT_RETAINED_PAYLOAD_SCHEMA_V2)
+
+pub fn cranelift_retained_params_encode_v2(options: BackendCompileOptions,
+        target_triple: text?, cpu: text?, features: [text]) -> CodegenParamsV1:
+    var params = codegen_params_v1(options.target.to_text(),
+        CRANELIFT_RETAINED_OPTIMIZATION_V2, "configured", options)
+    var ext: [ParamExt] = []
+    if val triple = target_triple:
+        ext.push(_retained_ext_v2(name: CRANELIFT_RETAINED_TARGET_EXT_V2, value: triple))
+    if val requested_cpu = cpu:
+        ext.push(_retained_ext_v2(name: CRANELIFT_RETAINED_CPU_EXT_V2, value: requested_cpu))
+    if features.len() > 0:
+        ext.push(_retained_ext_v2(name: CRANELIFT_RETAINED_FEATURES_EXT_V2,
+            value: features.join(",")))
+    params.ext = ext
+    params
+
+pub fn cranelift_retained_params_decode_v2(params: CodegenParamsV1) -> CraneliftRetainedTargetV2:
+    var target_triple: text? = nil
+    var cpu: text? = nil
+    var features: [text] = []
+    for ext in params.ext:
+        if ext.ext_name == CRANELIFT_RETAINED_TARGET_EXT_V2:
+            target_triple = Some(bytes_to_text(ext.payload))
+        elif ext.ext_name == CRANELIFT_RETAINED_CPU_EXT_V2:
+            cpu = Some(bytes_to_text(ext.payload))
+        elif ext.ext_name == CRANELIFT_RETAINED_FEATURES_EXT_V2:
+            val joined = bytes_to_text(ext.payload)
+            if joined != "":
+                features = joined.split(",")
+    CraneliftRetainedTargetV2(target_triple: target_triple, cpu: cpu, features: features)

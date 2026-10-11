@@ -7,8 +7,16 @@ use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{raw_asm_rejected_directive, is_known_asm_clobber}
 use compiler.hir.hir_lowering.types.HirLowering
-use compiler.hir.hir_lowering.types.{hir_heap_ref_wellformed}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+
+# FORMATION probe for a heap-typed field word: answers 1 for a word outside the
+# zero page (runtime_native.c rt_heap_ref_wellformed). Not a liveness proof.
+# Called directly, never through a Simple wrapper: a struct-typed PARAMETER of
+# a Simple function is deep-cloned on entry, and that clone dereferences the
+# very word this probe exists to validate. An extern argument is passed as the
+# raw word.
+@unsafe(reason: "raw heap-reference formation probe; false is not a liveness proof", capabilities: [ffi])
+extern fn rt_heap_ref_wellformed<T>(value: T) -> bool
 
 impl HirLowering:
     me strip_discarded_string_interps(s: Stmt) -> Stmt:
@@ -99,10 +107,10 @@ impl HirLowering:
                                     stmts = stmts.push(lowered_scalar)
                                 else:
                                     block_has_value = true
-                                    val type_ok = expr.has_type_ and hir_heap_ref_wellformed(expr.type_)
+                                    val type_ok = expr.has_type_ and rt_heap_ref_wellformed(expr.type_)
                                     if expr.has_type_ and not type_ok:
                                         eprint("E-HIR-BLOCK-VALUE-TYPE-MALFORMED: block tail expression claims has_type_ but its type_ word is not a well-formed heap reference")
-                                    val span_ok = hir_heap_ref_wellformed(expr.span)
+                                    val span_ok = rt_heap_ref_wellformed(expr.span)
                                     if not span_ok:
                                         eprint("E-HIR-BLOCK-VALUE-SPAN-MALFORMED: block tail expression span word is not a well-formed heap reference; falling back to the block span")
                                     if span_ok:
@@ -160,7 +168,7 @@ impl HirLowering:
                                     # must never be interpreted, so re-form it as
                                     # a known-good one rather than carrying an
                                     # arbitrary word into a deref.
-                                    val type_ok = expr.has_type_ and hir_heap_ref_wellformed(expr.type_)
+                                    val type_ok = expr.has_type_ and rt_heap_ref_wellformed(expr.type_)
                                     if expr.has_type_ and not type_ok:
                                         eprint("E-HIR-BLOCK-VALUE-TYPE-MALFORMED: block tail expression claims has_type_ but its type_ word is not a well-formed heap reference")
                                     # CONTAINMENT: never carry a FOREIGN HirType
@@ -181,7 +189,7 @@ impl HirLowering:
                                     # authoritative) and is already the common
                                     # case — 88 of 141 HirExpr constructions in
                                     # src/compiler pass `type_: nil`.
-                                    val span_ok = hir_heap_ref_wellformed(expr.span)
+                                    val span_ok = rt_heap_ref_wellformed(expr.span)
                                     # Level-gated capture probe: prints the
                                     # ACTUAL presence bit / wellformedness of the
                                     # tail type_ and span words at CAPTURE, so a
@@ -231,8 +239,8 @@ impl HirLowering:
         # stderr to truncation, hiding the genuine diagnostics underneath.
         # Probe the span (the word this function actually carries forward), and
         # the type only when `has_type_` claims one is present.
-        val b_type_ok = (not block_value_expr.has_type_) or hir_heap_ref_wellformed(block_value_expr.type_)
-        if block_has_value and not (b_type_ok and hir_heap_ref_wellformed(block_value_expr.span)):
+        val b_type_ok = (not block_value_expr.has_type_) or rt_heap_ref_wellformed(block_value_expr.type_)
+        if block_has_value and not (b_type_ok and rt_heap_ref_wellformed(block_value_expr.span)):
             eprint("E-HIR-BLOCK-VALUE-TYPE-DECAYED: block tail expression type_/span word became a non-well-formed heap reference between capture and HirBlock construction; substituting a placeholder")
             # `b.span` unconditionally: probe B also covers the span word, so
             # re-reading `block_value_expr.span` here could be the very thing

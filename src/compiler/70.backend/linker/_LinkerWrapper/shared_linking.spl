@@ -22,6 +22,7 @@ use compiler.backend.linker.linker_wrapper.*
 
 use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, env_get, host_os, host_arch, process_run, cwd}
 use std.log.{debug, info}
+use compiler.backend.linker._LinkerWrapper.link_command_record.{record_link_command}
 use std.string_builder.{StringBuilder}
 use compiler.backend.linker.managed_native_args_v1.{managed_native_extra_args_error_v1, managed_native_input_args_error_v1}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_resolve_v1}
@@ -150,9 +151,7 @@ fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConf
     args = args.push("-o")
     args = args.push(mingw_driver_path(output))
 
-    val cmd_text = cc + " " + args.join(" ")
-    if config.verbose:
-        print "[linker-wrapper] Windows GNU Clang command: {cmd_text}"
+    val cmd_text = record_link_command(output, cc, args, config.verbose)
 
     val (link_out, link_err, link_code) = process_run(cc, args)
     if link_code == 0:
@@ -188,7 +187,7 @@ fn link_to_shared(object_files: [text], output: text, config: NativeLinkConfig) 
     # Shared/DLL links obey the same named runtime authority as executables.
     # Validate before platform dispatch so MSVC, MinGW, and Unix cannot silently
     # omit or replace an explicit provider bundle.
-    val msvc_runtime = os == "windows" and not _is_mingw_env()
+    val msvc_runtime = os == "windows" and windows_link_flavor_for_config(config) == "msvc"
     val provider_error = native_runtime_provider_selection_error_for_config_platform(
         config, msvc_runtime)
     if provider_error != "":
@@ -286,8 +285,9 @@ fn _link_shared_unix(object_files: [text], output: text, config: NativeLinkConfi
         Err("Shared library linking failed: {err_msg}")
 
 fn _link_shared_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
-    """Link a shared library on Windows."""
-    if _is_mingw_env():
+    """Link a shared library on Windows. The GNU/MSVC arm is decided from the
+    target (windows_link_flavor_for_config), never from MSYSTEM alone."""
+    if windows_link_flavor_for_config(config) == "gnu":
         return _link_shared_mingw(object_files, output, config)
     _link_shared_msvc(object_files, output, config)
 
@@ -412,10 +412,7 @@ fn _link_shared_mingw(object_files: [text], output: text, config: NativeLinkConf
 
     args = args.push("-o")
     args = args.push(mingw_driver_path(output))
-    val cmd_text = cc + " " + args.join(" ")
-
-    if config.verbose:
-        print "[linker-wrapper] Windows GNU Clang DLL command: {cmd_text}"
+    val cmd_text = record_link_command(output, cc, args, config.verbose)
 
     val (link_out, link_err, link_code) = process_run(cc, args)
     if link_code == 0:

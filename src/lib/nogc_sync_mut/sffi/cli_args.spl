@@ -1,4 +1,7 @@
-# Process arguments are independent of optional CLI command dispatch providers.
+# Process arguments, exit and file probes are independent of optional CLI
+# command dispatch providers (rt_cli_run_*/handle_* are Rust-seed-only and are
+# absent from the core-C runtime, so importing std.sffi.cli for these four
+# names made every core-lane binary fail to link on ~34 rt_cli_* symbols).
 # Preserve the existing sys_get_args ownership and indexing contract.
 @unsafe(reason: "raw process argument-array ownership ABI", capabilities: [ffi])
 extern fn sys_get_args() -> [text]
@@ -17,3 +20,28 @@ fn cli_arg_at(index: i64) -> text:
 fn cli_get_args() -> [text]:
     unsafe(capabilities: [ffi]):
         sys_get_args()
+
+@unsafe(reason: "raw process termination ABI", capabilities: [ffi])
+extern fn rt_cli_exit(code: i64)
+
+fn cli_exit(code: i64):
+    unsafe(capabilities: [ffi]):
+        rt_cli_exit(code)
+
+# Backed by the core runtime file primitives, not the seed-only
+# rt_cli_file_exists / rt_cli_read_file: the self-hosted CLI does not link
+# those, so `simple <file>` aborted in its file-dispatch probe with
+# "called unresolved symbol rt_cli_file_exists (stubbed for link only)".
+@unsafe(reason: "raw file-existence predicate; false sentinel includes missing, inaccessible, or provider failure", capabilities: [ffi])
+extern fn rt_file_exists(path: text) -> bool
+
+fn cli_file_exists(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_exists(path)
+
+@unsafe(reason: "raw nullable file read; nil is the invalid, unreadable, or runtime-failure sentinel", capabilities: [ffi])
+extern fn rt_file_read_text(path: text) -> text?
+
+fn cli_read_file(path: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_file_read_text(path) ?? ""

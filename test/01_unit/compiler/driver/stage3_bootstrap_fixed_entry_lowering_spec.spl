@@ -1,0 +1,96 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+# Stage3 fixed-entry MIR lowering uses a uniquely named, fully-argumented entry
+
+Bug: doc/08_tracking/bug/stage3_bootstrap_fixed_lower_module_segv_2026-10-11.md
+
+The stage3 "bootstrap-fixed" lane lowers exactly one module,
+`app.cli.bootstrap_main`. It called `bootstrap_lowering.lower_module(hir)` -
+one argument, both defaults omitted, and a method name that `HirLowering`
+also carries with that same one-argument arity. The natively compiled stage2
+died there with an access violation on EVERY phase-3 build, including a
+14-line entry, before the first function was lowered. The direct lane, which
+calls `lower_module_transient_scoped(hir, providers, is_entry)` with all three
+arguments, lowers the very same module on the very same binary.
+
+The fix gives the fixed lane its own entry point, `lower_bootstrap_entry_module`,
+which no other class declares and which forwards every argument explicitly.
+
+The behaviour cases run in-process (the seed dispatches both spellings
+correctly, so they pin equivalence, not the crash). The source-shape cases pin
+the call shape itself, which is what the native binary is sensitive to.
+"""
+
+use std.spec
+use std.spec.step
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+extern fn rt_file_read_text(path: text) -> text
+
+val ENTRY_SRC = "fn helper(n: i64) -> i64:\n    n + 1\n\nfn main() -> i64:\n    helper(41)\n"
+
+fn sorted_function_names(mir: MirModule) -> text:
+    var names: [text] = []
+    for function in mir.functions.values():
+        names = names.push(function.name)
+    var out = ""
+    for wanted in ["helper", "main"]:
+        for name in names:
+            if name == wanted or name.ends_with("." + wanted):
+                out = out + wanted + ";"
+    "{names.len()}:{out}"
+
+fn fixed_branch_source() -> text:
+    val source = rt_file_read_text("src/compiler/80.driver/driver_pipeline_lowering.spl") ?? ""
+    val start = source.find("log_bootstrap_flat_warning(\"mir:bootstrap_fixed\")")
+    val stop = source.find("aot:bootstrap_fixed:done")
+    if start < 0 or stop <= start:
+        return ""
+    source[start:stop]
+
+describe "stage3 fixed-entry MIR lowering":
+    it "lowers the entry module to the same functions as lower_module with explicit defaults":
+        # @req REQ-SSPEC-COMPILER
+        step("lower_bootstrap_entry_module matches lower_module(hir, [], true)")
+        val parsed_a = parse_full_frontend(ENTRY_SRC, "testdata/fixed_entry_a.spl", "fixed_entry_a", Logger(level: 0))
+        var hir_lowering_a = HirLowering.with_filename("testdata/fixed_entry_a.spl")
+        val hir_a = hir_lowering_a.lower_module(parsed_a)
+        val target_context = driver_mir_target_context(driver_core_compile_options_default())
+        var entry_lowering = MirLowering.new_for_target(hir_a.symbols, target_context)
+        val entry_mir = entry_lowering.lower_bootstrap_entry_module(hir_a)
+
+        val parsed_b = parse_full_frontend(ENTRY_SRC, "testdata/fixed_entry_a.spl", "fixed_entry_a", Logger(level: 0))
+        var hir_lowering_b = HirLowering.with_filename("testdata/fixed_entry_a.spl")
+        val hir_b = hir_lowering_b.lower_module(parsed_b)
+        var plain_lowering = MirLowering.new_for_target(hir_b.symbols, target_context)
+        val no_providers: [HirModule] = []
+        val plain_mir = plain_lowering.lower_module(hir_b, no_providers, true)
+
+        expect(entry_lowering.errors.len()).to_equal(0)
+        expect(sorted_function_names(entry_mir)).to_equal("2:helper;main;")
+        expect(sorted_function_names(entry_mir)).to_equal(sorted_function_names(plain_mir))
+
+    it "routes the fixed lane through the uniquely named entry, never bare lower_module":
+        # @req REQ-SSPEC-COMPILER
+        step("driver fixed branch calls lower_bootstrap_entry_module")
+        val branch = fixed_branch_source()
+        expect(branch.len()).to_be_greater_than(0)
+        expect(branch).to_contain("bootstrap_lowering.lower_bootstrap_entry_module(bootstrap_hir)")
+        expect(branch).to_not_contain(".lower_module(")
+
+    it "forwards every lower_module argument explicitly from the entry":
+        # @req REQ-SSPEC-COMPILER
+        step("lower_bootstrap_entry_module passes providers and is_entry_module explicitly")
+        val source = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
+        val start = source.find("me lower_bootstrap_entry_module(module: HirModule) -> MirModule:")
+        expect(start).to_be_greater_than(0)
+        val body = source[start:start + 1600]
+        expect(body).to_contain("self.lower_module(module, no_providers, true)")

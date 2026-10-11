@@ -162,9 +162,20 @@ done
 jq -e '([.rules[] | select(.type == "pull_request")][0].parameters.allowed_merge_methods) == ["merge"]' \
     .github/rulesets/spipe-vcs-v3-release-lines.json >/dev/null ||
     fail "release-line admission requires an exact two-parent merge"
-grep -Eq "branches: \[main, master, develop, 'release/\*\*'\]" \
-    .github/workflows/required-gates.yml ||
+# The pull_request trigger must cover the protected lines; additional lane
+# branches (for example release_windows) are permitted but cannot replace
+# any protected entry (exact-equality here previously broke every candidate
+# qualify when a lane branch was added to the trigger, 2026-10-10 a009).
+pr_branches_line=$(grep -E "branches: \[.*'release/\*\*'" \
+    .github/workflows/required-gates.yml || true)
+test -n "$pr_branches_line" ||
     fail "configured release-line check does not run on release pull requests"
+for entry in main master develop "'release/**'"; do
+    case "$pr_branches_line" in
+        *"$entry"*) ;;
+        *) fail "configured release-line check does not run on release pull requests" ;;
+    esac
+done
 
 [ "$(grep -Ec 'approving_reviews: 0' .spipe/policy/vcs.sdn)" -eq 2 ] ||
     fail "canonical approval counts are stale"

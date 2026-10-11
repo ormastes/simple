@@ -451,16 +451,79 @@ pub fn set_runtime_path_override(path: PathBuf) {
 static TARGET_OVERRIDE: OnceLock<simple_common::target::Target> = OnceLock::new();
 
 /// Set the cross-compilation target override (called from CLI arg parsing).
+///
+/// Also exports `SIMPLE_NATIVE_BUILD_TARGET` for this process and every
+/// worker child it spawns -- the same contract the pure-Simple native-build
+/// CLI honours -- so the lexer's `@when` evaluation
+/// (`simple_parser::cond_compile::default_target`) and every text-level strip
+/// path select the `--target` branches, never the host's.
 pub fn set_target_override(target: simple_common::target::Target) {
-    let _set_result = TARGET_OVERRIDE.set(target);
+    if TARGET_OVERRIDE.set(target).is_err() {
+        // First call wins (OnceLock). A long-lived host that asks for a
+        // different target later must not end up with one target in the
+        // backend and another in the lexer's environment.
+        if TARGET_OVERRIDE.get() != Some(&target) {
+            eprintln!(
+                "warning: --target `{target}` ignored: this process already compiles for `{}`",
+                TARGET_OVERRIDE.get().map(|t| t.to_string()).unwrap_or_default()
+            );
+        }
+        return;
+    }
+    // Same names on every parse path of this process (lexer, text strip)...
+    simple_parser::cond_compile::set_explicit_target(target.os.name(), target.arch.name());
+    // ...and the triple for worker children, which re-derive the names.
+    std::env::set_var("SIMPLE_NATIVE_BUILD_TARGET", target.to_string());
 }
 
-/// Get the effective compilation target (override or host).
+/// Get the effective compilation target: the `--target` override, else the
+/// environment-driven default the lexer's `@when` evaluation uses
+/// (`SIMPLE_TARGET_OS`/`SIMPLE_TARGET_ARCH` > `SIMPLE_NATIVE_BUILD_TARGET` >
+/// host, see `simple_parser::cond_compile::default_target`), so the text-level
+/// strip paths (discovery, import loader, parsed-source cache) select the same
+/// branches as the lexer.
 pub(crate) fn effective_target() -> simple_common::target::Target {
-    TARGET_OVERRIDE
-        .get()
-        .copied()
-        .unwrap_or_else(simple_common::target::Target::host)
+    TARGET_OVERRIDE.get().copied().unwrap_or_else(env_default_target)
+}
+
+fn env_default_target() -> simple_common::target::Target {
+    use simple_common::target::{Target, TargetOS};
+    let host = Target::host();
+    let (os, arch) = simple_parser::cond_compile::default_target();
+    let os = match os {
+        "windows" => TargetOS::Windows,
+        "linux" => TargetOS::Linux,
+        "macos" => TargetOS::MacOS,
+        "freebsd" => TargetOS::FreeBSD,
+        "simpleos" => TargetOS::SimpleOS,
+        "none" => TargetOS::None,
+        other => {
+            // `@when` selection itself is unaffected: it evaluates the
+            // NAMES (`cfg_strip::cfg_target`). Only `Target`-typed consumers
+            // (backend, `@cfg(<arch>)` strip) have to fall back, and say so.
+            warn_unrepresentable("OS", other, host.os.name());
+            host.os
+        }
+    };
+    let arch = arch.parse().unwrap_or_else(|_| {
+        warn_unrepresentable("architecture", arch, host.arch.name());
+        host.arch
+    });
+    Target::new(arch, os)
+}
+
+fn warn_unrepresentable(kind: &str, requested: &str, fallback: &str) {
+    static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let key = format!("{kind}:{requested}");
+    let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+    if !warned.contains(&key) {
+        warned.push(key);
+        eprintln!(
+            "warning: target {kind} `{requested}` (from SIMPLE_TARGET_*/SIMPLE_NATIVE_BUILD_TARGET) has no seed \
+             backend target; `@when` still selects `{requested}` branches, but backend/`@cfg(arch)` \
+             selection falls back to the host `{fallback}`"
+        );
+    }
 }
 
 /// Grouped duplicate struct definitions: bare type name → list of field-lists.

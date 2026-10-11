@@ -236,6 +236,33 @@ authority fails qualification.
 
 ## SCV freeze owner and write boundary
 
+The cold ownership capture also owns the optional stable project-root digest.
+Its inputs are SCV-validated `ownership_v1.project_identity` and policy bytes.
+Manifest digests remain per-package witnesses so manifest edits can invalidate
+their exact consumers. The full-index publisher consumes this
+digest instead of the changing source tree ID while retaining separate revision,
+commit, tree and inventory witnesses. Policies without the identity remain on
+the conservative legacy tree-root path. This permits semantic transition
+comparison across source edits without relaxing snapshot admission.
+
+Generated facets require a producer declaration selected independently of the
+compiled artifact. The current compiled-output bridge has no such input and
+therefore rejects nonempty generated facets before any index publication;
+artifact-supplied declarations and receipts remain consistency evidence only.
+
+Generated support also requires preserving `generated_source_digest` beyond
+TLDR construction. The schema-4 implementation candidate persists it in full
+and entry-scoped graphs and binds it into module action identity. Semantic
+transition comparison uses it for owner/reverse-consumer invalidation. Legacy
+graphs remain readable, but unknown generated witnesses force conservative
+invalidation; grouped worker routes require migration before archive reuse. The
+bootstrap request explicitly selects V4, and full-inventory consumers still
+reject entry-scoped graphs. These changes await runtime qualification. Real
+producer execution, independently selected declaration authority, and this
+projection are separate required steps; none substitutes for another. See
+`doc/01_research/domain/compiler/perf/generated_package_authority.md` for the
+evidence and acceptance sequence.
+
 The compile source-view owner runs before the catalog owner. It creates or
 inherits one immutable snapshot, validates its canonical inventory, and passes
 only frozen paths plus `(revision, commit, tree, inventory)` identity to index,
