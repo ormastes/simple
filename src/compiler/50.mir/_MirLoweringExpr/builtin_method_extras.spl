@@ -22,6 +22,8 @@ use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.hir.hir_types.{SymbolKind}
 use compiler.mir._MirLowering.provider_metadata.{mir_class_identity}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 
 fn builtin_extra_rt_operand(name: text, params: [MirType], return_type: MirType) -> MirOperand:
     MirOperand(kind: MirOperandKind.Const(
@@ -815,7 +817,12 @@ impl MirLowering:
                 if val declaration = self.symbols.get_symbol_raw(owner.id):
                     match declaration.kind:
                         case SymbolKind.Struct | SymbolKind.Class:
-                            return Some(MirType.i64())
+                            val owner_key = if declaration.kind == SymbolKind.Class:
+                                mir_class_identity(declaration)
+                            else:
+                                self.declared_struct_layout_key(self.composite_layout_key(declaration))
+                            if self.struct_field_order.has(owner_key):
+                                return Some(MirType.i64())
                         case _: ()
                 return nil
             case _: return nil
@@ -828,6 +835,8 @@ impl MirLowering:
             [mir_operand_copy(receiver_local)], MirType.i64())
         self.builder = b_payload
         var payload_value = self.enum_payload_value(payload_word, payload_mir)
+        if nominal_owner != "" and self.result_err_record_owners.contains(receiver_local.id):
+            payload_value = self.materialize_result_err_record_payload(payload_value, nominal_owner, payload_hir.span)
         var payload_is_text = false
         match payload_hir.kind:
             case HirTypeKind.Str: payload_is_text = true
@@ -846,12 +855,28 @@ impl MirLowering:
                     if val declaration = self.symbols.get_symbol_raw(owner.id):
                         match declaration.kind:
                             case SymbolKind.Struct:
-                                self.struct_value_syms[payload_value.id] = declaration.name
+                                self.struct_value_syms[payload_value.id] = self.declared_struct_layout_key(self.composite_layout_key(declaration))
                             case SymbolKind.Class:
                                 self.struct_value_syms[payload_value.id] = mir_class_identity(declaration)
                             case _: ()
                 case _: ()
-        self.remember_local_hir_type(payload_value.id, payload_hir, 0, 0)
+        var retained_hir = payload_hir
+        if nominal_owner != "":
+            # Registry return types may carry provider-local SymbolIds. Rebind
+            # only an exact owner, preserving its generic arguments. Recording
+            # a colliding consumer ID would make an identity mapper return the
+            # wrong nominal type even though its runtime handle was intact.
+            match payload_hir.kind:
+                case HirTypeKind.Named(symbol, type_args):
+                    if not self.symbol_matches_ownership_key(symbol.id, nominal_owner):
+                        val separator = nominal_owner.rfind("::")
+                        val bare_start = if separator >= 0: separator + 2 else: nominal_owner.rfind(".") + 1
+                        retained_hir = HirType(kind: HirTypeKind.Error, span: payload_hir.span)
+                        if val rebound = self.symbols.lookup_exact_type(nominal_owner.substring(bare_start)):
+                            if self.symbol_matches_ownership_key(rebound.id, nominal_owner):
+                                retained_hir = HirType(kind: HirTypeKind.Named(rebound, type_args), span: payload_hir.span)
+                case _: ()
+        self.remember_local_hir_type(payload_value.id, retained_hir, 0, 0)
         payload_value
 
     me builtin_result_mapper_hir_type(local: LocalId, span: Span) -> HirType?:
@@ -859,6 +884,12 @@ impl MirLowering:
         # Result.map additionally carries nominal records, but only when the
         # mapper retained a declared HIR owner (never by guessing from I64).
         if val known = self.find_local_hir_type(local.id):
+            match known.kind:
+                case HirTypeKind.Named(symbol, _):
+                    if val owner = self.struct_value_syms.get(local.id):
+                        if not self.symbol_matches_ownership_key(symbol.id, owner):
+                            return nil
+                case _: ()
             if self.builtin_result_payload_mir(known) != nil:
                 return Some(known)
         self.option_map_value_hir_type(local, span)
@@ -899,8 +930,14 @@ impl MirLowering:
         val source_hir = if maps_err: err_hir else: ok_hir
         # Call-return SymbolIds may belong to the provider's symbol table.
         # Its retained name registry is authoritative for that payload owner.
-        val source_owner = self.result_variant_payload_struct_name(receiver, if maps_err: "Err" else: "Ok") ?? ""
-        val source_mir_opt = if source_owner != "": Some(MirType.i64()) else: self.builtin_result_payload_mir(source_hir)
+        val source_owner = if maps_err and self.result_err_record_owners.contains(receiver_local.id):
+            self.checked_result_err_record_owner(receiver_local.id, receiver.span)
+        else:
+            self.declared_struct_layout_key(self.result_variant_payload_struct_name(receiver, if maps_err: "Err" else: "Ok") ?? "")
+        val source_mir_opt: MirType? = if source_owner != "":
+            if self.struct_field_order.has(source_owner): Some(MirType.i64()) else: nil
+        else:
+            self.builtin_result_payload_mir(source_hir)
         if source_mir_opt == nil:
             return self.builtin_extra_fail_closed("unsupported Result.{method}() payload type: expected a proven scalar, text or nominal record", Some(receiver.span))
         val source_mir = source_mir_opt ?? MirType.i64()
@@ -987,6 +1024,10 @@ impl MirLowering:
         self.builder = b_new
         self.mark_runtime_value_local(result_local.id)
         self.remember_local_hir_type(result_local.id, new_result_type, 2, 0)
+        if not maps_err:
+            self.copy_result_err_record_owner(receiver_local.id, result_local.id)
+        elif val mapped_owner = self.struct_value_syms.get(mapped.id):
+            self.result_err_record_owners[result_local.id] = mapped_owner
         result_local
 
     me lower_list_comprehension(kind: HirComprehensionKind, value_expr: HirExpr, clauses: [HirCompClause], span: Span) -> LocalId:
