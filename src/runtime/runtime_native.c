@@ -5034,7 +5034,7 @@ int64_t rt_string_join(int64_t array_value, int64_t separator) {
  * C strings. Raw literal addresses need not be aligned, so their low bits alone
  * cannot distinguish them from tagged handles. Small non-text values are empty,
  * as in rt_interp_cstr; arbitrary non-text heap values are not accepted inputs. */
-static int8_t rt_core_join_text_view(int64_t value, const char** data, size_t* len) {
+static int8_t core_join_text_view(int64_t value, const char** data, size_t* len) {
     RtCoreString* string = rt_core_as_string(value);
     if (string) {
         if (string->len > SIZE_MAX - sizeof(RtCoreString) - 1) return 0;
@@ -5057,13 +5057,13 @@ int64_t rt_array_join_any(int64_t array_value, int64_t separator) {
     if (!array) return rt_string_new(NULL, 0);
     const char* sep;
     size_t sep_len;
-    if (!rt_core_join_text_view(separator, &sep, &sep_len)) return rt_string_new(NULL, 0);
+    if (!core_join_text_view(separator, &sep, &sep_len)) return rt_string_new(NULL, 0);
     const size_t limit = SIZE_MAX - sizeof(RtCoreString) - 1;
     size_t total = 0;
     for (int64_t i = 0; i < array->len; i++) {
         const char* item;
         size_t item_len;
-        if (!rt_core_join_text_view(((int64_t*)array->data)[i], &item, &item_len)
+        if (!core_join_text_view(((int64_t*)array->data)[i], &item, &item_len)
             || item_len > limit - total) return rt_string_new(NULL, 0);
         total += item_len;
         if (i + 1 < array->len) {
@@ -5080,7 +5080,7 @@ int64_t rt_array_join_any(int64_t array_value, int64_t separator) {
     for (int64_t i = 0; i < array->len; i++) {
         const char* item;
         size_t item_len;
-        if (!rt_core_join_text_view(((int64_t*)array->data)[i], &item, &item_len)
+        if (!core_join_text_view(((int64_t*)array->data)[i], &item, &item_len)
             || item_len > total - pos) {
             free(out);
             return rt_string_new(NULL, 0);
