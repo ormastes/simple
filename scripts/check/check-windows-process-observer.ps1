@@ -58,4 +58,10 @@ Require ($failed -and $partial.Count -eq 0) 'partial native snapshot escaped as 
 $failed = $false
 try { ConvertTo-BootstrapProgressRows $fixture 777 400 | Out-Null } catch { $failed = $true }
 Require $failed 'missing root accepted as empty healthy tree'
-Write-Output 'PASS windows process observer: 14 checks'
+$nativeIdentity = Get-BootstrapNativeProcessIdentity $PID
+Require ($nativeIdentity -match ('^windows:' + $PID + ':\d+$')) 'native birth token malformed'
+Require ((Get-BootstrapNativeProcessIdentity $PID) -ceq $nativeIdentity) 'live native birth identity changed'
+$failed = $false
+try { Get-BootstrapNativeProcessIdentity 0 | Out-Null } catch { $failed = $true }
+Require $failed 'invalid native PID accepted'
+Write-Output 'PASS windows process observer: 17 checks'
