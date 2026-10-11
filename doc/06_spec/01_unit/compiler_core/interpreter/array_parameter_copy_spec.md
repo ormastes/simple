@@ -32,3 +32,23 @@ is marked passed, skipped, or weakened. Zero compiler rebuilds.
 Pure Simple compiler/core/library/MCP qualification and runtime smokes remain
 pending because the release runtime is unavailable on this host. This change
 is a draft repair, not a qualified release admission.
+
+## Changed-producer qualification
+
+A separately captured immutable cached producer, SHA-256
+`15102d32226b3fbead63d3c63e33e99a6f0e9ffcddea06080fb65872445cbafb`,
+accepts the original full imports on Windows. Its actual host reports
+`windows` / `AMD64`; the diagnostic target was pinned to
+`windows` / `x86_64` / `x86_64-pc-windows-msvc`.
+
+The final unchanged seven-case specification executed all seven examples:
+**6 passed, 1 failed**, zero skipped/dropped, exit 1. The real function parameter
+binding case still leaks element replacement: caller element was `9`, expected
+`1`. Nested arrays, class identity, struct/array fields, scalar/empty controls,
+self cycles, and mutual/shared cycles passed. This is a failing Stage 1 Windows
+diagnostic, not native admission. No repair/retry followed this qualification.
+The older producer's three blocked cycles remain terminal evidence.
+
+The alternate producer did not honor Linux target overrides in the independent
+tiny conditional-import probe. Its result applies only to this pinned Windows
+host/target. No projection of the original library imports was used.
