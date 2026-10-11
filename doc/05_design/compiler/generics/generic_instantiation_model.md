@@ -330,3 +330,27 @@ zero bypasses. An independent project copy with `example : False := by decide`
 appended to the manual file failed the default build at `GenericsConstraints`.
 The empty-substitution, closed-type and idempotence proofs use Lean's `propext`;
 the distinct-owner proof reports no axioms. This is reduced-model evidence only.
+
+## H-ANNOT repair candidate, 2026-10-11 — verification pending
+
+The implementation candidate retains `Name<args>` for registered local names
+and forward references, using the existing named-instance flat-pool layout.
+The `List<T>` array alias and explicitly imported class precedence remain in the
+parser. HIR preserves diagnostics for locally resolved declarations; unresolved
+import surfaces retain their existing recovery rule.
+
+Preserving those arguments exposes module-local symbol ids to inference.
+`NominalBindingContext` carries the template and caller symbol tables and owner
+names. Recursive matching resolves each nominal base through its own table and
+compares the declaration's module and name before matching its arguments. It
+does not equate nominal bases merely because their raw ids or display names
+agree. Existing context-free model tests retain their single-table API.
+
+Acceptance is specified in
+`doc/02_requirements/feature/generic_annotation_preservation.md`. The field-path
+specs now require concatenation for annotated text instances, integer addition
+for annotated integer instances, and refusal only for a genuinely argumentless
+receiver. This supersedes the intended H-ANNOT behavior in section 8, but **does
+not yet supersede its verified status**: the candidate has not run on an admitted
+self-hosted test runtime or rebuilt native compiler. No formal proof of this
+parser-to-native path is claimed.
