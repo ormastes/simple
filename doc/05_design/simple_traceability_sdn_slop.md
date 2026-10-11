@@ -283,3 +283,27 @@ All forty original ACs remain active. Source-authored scenarios, documentation
 and declaration ledgers establish implementation progress only; production
 execution, manual quality, cross-host/UI/gate evidence and release admission
 remain separately unverified until their real receipts exist.
+
+### 2026-10-11 owner preparation implementation checkpoint
+
+The current source adds `TestDatabaseExtended.record_trace_run_plan`,
+`get_trace_run_plan` and `validate_trace_run_active`. The plan table uses an
+explicit storage schema and reversible UTF-8 hex scalars because the legacy
+DB row codec cannot safely preserve nested SDN quotes. The logical payload is
+canonical `simple.trace.run-plan/v1` SDN. Every read validates the table,
+decoded identities, duplicate rows, canonical payload and unverified validity.
+Recording requires exactly one valid running run and precedes observations.
+
+`RunnerTestDb.prepare_trace_run` saves before exposing prepared state. A failed
+save poisons that wrapper; the caller must discard and reload it. Static
+`resume_trace_run` loads persisted state afresh and validates the run and plan.
+Neither operation grants a concurrent writer lease or admits test evidence.
+The v1 plan still lacks the full input, shard and attempt provenance contract;
+these APIs do not implement the proposed full TraceRun finalization protocol.
+
+The live runner still requires pre-dispatch planning and child-protocol wiring.
+Observation storage migration must use an explicit row version, decode keys
+before filtering/replay checks and keep surviving historical rows unverified.
+No lost legacy row can be reconstructed from a passing aggregate counter.
+Actual native execution, disk reload/crash recovery, lease contention and
+failure-path acceptance remain required; authored fixtures are not receipts.
