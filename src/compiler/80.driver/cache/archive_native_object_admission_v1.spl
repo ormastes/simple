@@ -1,0 +1,84 @@
+# Archive-only native link admission. The route has already validated the
+# pinned package archives; this boundary rechecks every object immediately
+# before presenting its CAS path to the linker.
+use compiler.driver.cache.binary_object_cas.{
+    BINARY_OBJECT_CAS_MAX_BYTES, binary_object_cas_blob_path,
+    binary_object_cas_read, binary_object_magic_kind}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.nogc_async_mut.sosix.host_facade.{sosix_dir_is_real_no_follow}
+
+struct ArchiveNativeObjectActionV1:
+    key: text
+    kind: text
+    target_symbol: text
+    action_digest: text
+
+fn archive_native_object_format_v1(target: text) -> text:
+    if target.contains("windows") or target.contains("mingw"): return "coff"
+    if target.contains("darwin") or target.contains("apple") or
+            target.contains("macos"): return "macho"
+    if target.contains("linux") or target.contains("freebsd") or
+            target.contains("netbsd") or target.contains("openbsd"):
+        return "elf"
+    ""
+
+fn archive_native_object_parent_real_v1(path: text) -> bool:
+    val normalized = path.replace("\\", "/")
+    val slash = normalized.rfind("/")
+    if slash < 1 or normalized.contains("//"): return false
+    val parts = normalized.substring(0, slash).split("/")
+    var current = if normalized.starts_with("/"): "/" else: "."
+    var index = if normalized.starts_with("/"): 1 else: 0
+    if parts[0].len() == 2 and (parts[0].byte_at(1) as i64) == 58:
+        current = parts[0] + "/"
+        index = 1
+    elif parts[0] == ".":
+        index = 1
+    while index < parts.len():
+        val part = parts[index]
+        if part == "" or part == "." or part == "..": return false
+        current = if current.ends_with("/"):
+            current + part
+        else:
+            current + "/" + part
+        if not sosix_dir_is_real_no_follow(current): return false
+        index = index + 1
+    true
+
+fn archive_native_object_paths_v1(
+    actions: [ArchiveNativeObjectActionV1], cache_root: text, target: text
+) -> Result<[text], text>:
+    if actions.len() == 0:
+        return Err("archive-native-actions-missing")
+    if actions.len() > 1000000:
+        return Err("archive-native-actions-exceed-limit")
+    val expected_format = archive_native_object_format_v1(target)
+    if expected_format == "": return Err("archive-native-target-unsupported")
+    var paths: [text] = []
+    var symbols: {text: bool} = {}
+    var keys: {text: bool} = {}
+    for action in actions:
+        if action.kind != "compile-native":
+            return Err("archive-native-action-not-linkable:{action.target_symbol}")
+        if action.target_symbol == "" or
+                symbols.has(action.target_symbol) or
+                not sha256_lower_hex_valid(action.key) or
+                keys.has(action.key) or
+                not sha256_lower_hex_valid(action.action_digest):
+            return Err("archive-native-action-identity-invalid")
+        val path = binary_object_cas_blob_path(
+            cache_root, action.action_digest)
+        if path == "" or not archive_native_object_parent_real_v1(path):
+            return Err("archive-native-object-parent-invalid:{action.target_symbol}")
+        val bytes = binary_object_cas_read(
+            cache_root, action.action_digest, BINARY_OBJECT_CAS_MAX_BYTES)
+        if bytes == nil or binary_object_magic_kind(bytes!) != expected_format or
+                not archive_native_object_parent_real_v1(path):
+            return Err("archive-native-object-invalid:{action.target_symbol}")
+        symbols[action.target_symbol] = true
+        keys[action.key] = true
+        paths.push(path)
+    Ok(paths)
+
+export ArchiveNativeObjectActionV1
+export archive_native_object_format_v1, archive_native_object_paths_v1

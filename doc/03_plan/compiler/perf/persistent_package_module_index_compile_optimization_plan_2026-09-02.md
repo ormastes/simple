@@ -607,3 +607,27 @@ The required core runtime smoke reports `selected_simple_binary_lacks_emit_archi
 the MCP native smoke reports `missing_simple_binary:bin/simple` in this
 isolated worktree. Neither is a PASS, and the selected Stage 2 compiler only
 provides compile/native-build commands.
+
+### 2026-10-11 archive-only native linker consumption
+
+The AOT path now admits each installed `compile-native` archive action against
+the binary-object CAS immediately before linking. Admission requires a unique
+module symbol and action key, a valid object digest, a regular no-follow CAS
+read with matching bytes, real parent directories, and an object format matching
+the requested target. The linker receives the verified CAS object paths for
+clean archive-only and mixed dirty/archive routes. An objectless semantic action
+or missing/corrupt CAS object fails closed; group builds refuse archive actions.
+The existing zero-MIR guard now permits a nonempty admitted archive object set.
+
+A focused integration spec covers accepted ELF, absent object, semantic-only
+action, and target mismatch. It has not executed because this worktree lacks
+a usable self-hosted `bin/simple`. The first bounded Stage 2 helper compile
+failed in the pre-existing interface-action archive MIR lowering; moving the
+helper's input to a local action record removed that closure. The second compile
+completed 45 modules through MIR and failed during SMF packaging without an
+error detail. The final explicit-output compile also completed 45 modules through MIR and failed
+in SMF packaging without an error detail. The three-cycle verification cap is
+reached for this helper. Full CLI warm
+linking, object-format coverage across targets, matched p95/RSS cohorts, and
+the release verification gate remain open. The default V3 capture switch stays
+off.

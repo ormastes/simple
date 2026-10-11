@@ -1,0 +1,49 @@
+# @cover src/compiler/80.driver/cache/archive_native_object_admission_v1.spl
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.driver.cache.binary_object_cas.{binary_object_cas_put}
+use compiler.driver.cache.archive_native_object_admission_v1.{
+    ArchiveNativeObjectActionV1, archive_native_object_paths_v1,
+    archive_native_object_format_v1}
+
+val ARCHIVE_NATIVE_TEST_ROOT: text = "build/test/archive-native-object-admission-v1"
+
+fn test_actions(kind: text, object_digest: text) -> [ArchiveNativeObjectActionV1]:
+    [ArchiveNativeObjectActionV1(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        kind, "pkg.main", object_digest)]
+
+describe "archived native object admission":
+    it "links one digest verified ELF object from an admitted action":
+        step("Publish an ELF shaped native object to the binary CAS")
+        val object: [u8] = [127u8, 69u8, 76u8, 70u8, 1u8, 2u8, 3u8, 4u8]
+        val digest = binary_object_cas_put(ARCHIVE_NATIVE_TEST_ROOT, object)
+        expect(digest.len()).to_equal(64)
+        step("Admit its native action for the Linux target")
+        val result = archive_native_object_paths_v1(
+            test_actions("compile-native", digest),
+            ARCHIVE_NATIVE_TEST_ROOT, "x86_64-unknown-linux-gnu")
+        expect(result.is_ok()).to_equal(true)
+        if result.is_ok():
+            expect(result.unwrap().len()).to_equal(1)
+
+    it "rejects semantic only and missing native objects":
+        val missing = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        expect(archive_native_object_paths_v1(
+            test_actions("compile-semantic", missing),
+            ARCHIVE_NATIVE_TEST_ROOT,
+            "x86_64-unknown-linux-gnu").is_err()).to_equal(true)
+        expect(archive_native_object_paths_v1(
+            test_actions("compile-native", missing),
+            ARCHIVE_NATIVE_TEST_ROOT,
+            "x86_64-unknown-linux-gnu").is_err()).to_equal(true)
+
+    it "rejects a target format mismatch":
+        val object: [u8] = [127u8, 69u8, 76u8, 70u8, 1u8, 2u8, 3u8, 4u8]
+        val digest = binary_object_cas_put(ARCHIVE_NATIVE_TEST_ROOT, object)
+        expect(archive_native_object_paths_v1(
+            test_actions("compile-native", digest),
+            ARCHIVE_NATIVE_TEST_ROOT,
+            "x86_64-pc-windows-msvc").is_err()).to_equal(true)
+        expect(archive_native_object_format_v1(
+            "aarch64-apple-darwin")).to_equal("macho")
