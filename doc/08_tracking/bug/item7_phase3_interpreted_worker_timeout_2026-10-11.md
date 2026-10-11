@@ -1,4 +1,4 @@
-# Item7 Phase3 compiler build: interpreted worker timeout
+# Item7 Phase3 compiler build: worker timeout and memory limit
 
 Status: OPEN. Diagnostic build failed; this is not Phase3 admission evidence.
 
@@ -85,3 +85,31 @@ Hello World native sanity and the standalone adaptive loop probe are UNRUN until
 a candidate executable exists. Full item7 Simple acceptance tests, source-matched
 runner admission, general compiler loop instrumentation and broader typed join
 support remain open. The narrow C capture selfcheck PASS does not close them.
+
+## Producer-entry correction and focused routing repair
+
+The producer's original build request at
+`build/function-type-void-return-20261010/native-successor/request.json` pins
+entry `src/app/cli/bootstrap_main.spl`, source commit
+`1aff09312af1a48fba98634b6d59fcafe59b9602`, and executable SHA-256 `80030...28071`.
+Its version/help also identifies it as a bootstrap compiler. That source already
+dispatches marked, allowlisted worker children to compiled functions. Therefore
+the earlier interpretation hypothesis is **not established** by the child argv,
+CPU or RSS data. Neither retained failure receipt records an execution mode.
+The failures establish time/resource exhaustion, not its internal cause.
+
+Separately, the full CLI had no equivalent interception and handed these fixed
+worker paths to ordinary source-run handling. The repair adds its compiled
+dispatch before global flag filtering, while preserving source admission,
+selected backend installation, inherited worker marker, fixed allowlist and
+unchanged policy handoff. A shared backend-neutral worker entry removes duplicated
+handoff validation from bootstrap and the legacy source fallback. Explicit
+interpreter entry behavior and subprocess isolation remain unchanged.
+
+The routing repair must not be described as a verified solution to the old
+bootstrap producer's RSS failure. Seven authored routing contract scenarios
+cover negative requests and exact payload preservation; execution and a rebuilt
+compiler are required before claiming the repair verified. The next bounded
+bootstrap diagnostic can use the supported single positional native-build route
+to avoid retaining a coordinator and compiler worker simultaneously, without
+injecting an internal marker or relaxing the memory limit.
