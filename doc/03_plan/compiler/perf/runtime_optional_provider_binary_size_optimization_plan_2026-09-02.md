@@ -408,3 +408,7 @@ contract.
 ## 2026-10-11 Stage4 caller link-input closure
 
 The strict LLVM Stage4 path now rejects caller libraries, library paths, and linker flags before archive projection, closing a post-profile input route alongside the earlier `SIMPLE_LINK_OBJECTS` rejection. A two-object no-stub native probe passes all three rejection families. This is one exact-closure admission repair; `RuntimeFeatureClosureV1`, provider demand loading, full Stage4 CLI qualification, and matched size/startup/RSS remain open. See [the focused report](../../../09_report/compiler/target5_stage4_explicit_link_inputs_2026-10-11.md).
+
+## 2026-10-11 Stage4 strip identity binding
+
+`strip_output` now participates in the Stage4 link-profile input, separating stripped and unstripped image receipts. A focused two-object no-stub native probe passes, and a unit case checks the profile-input distinction. This is receipt correctness for the size gate, not the matched 15 KiB/1.05x hello or startup/RSS qualification. See [the focused report](../../../09_report/compiler/target5_stage4_strip_profile_identity_2026-10-11.md).
