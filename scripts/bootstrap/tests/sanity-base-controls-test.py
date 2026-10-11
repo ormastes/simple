@@ -1,6 +1,7 @@
 """Evidence parser tests; never execute a compiler or claim product qualification."""
 import importlib.util
 import pathlib
+import re
 import shutil
 import os
 import subprocess
@@ -58,6 +59,7 @@ class ControlTests(unittest.TestCase):
         for key,value,reason in [('status','fail','fresh aggregate status'),
             ('base_control_profile','unknown','fresh control provenance'),
             ('base_control_writer_sha256','changed','fresh control writer'),
+            ('base_control_writer_sha256','6ef8cd107ac6cc2575778cc9ddda69de425860fb86ddba2938a8fc42071cf52a','fresh control writer'),
             ('base_control_snapshot_sha256','changed','fresh control snapshot'),
             ('candidate_sha256_after','changed','fresh full criterion'),
             ('frontend_smoke_bootstrap0_raw_status','124','fresh full criterion'),
@@ -74,8 +76,19 @@ class ControlTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'changed actual fresh writer'):
                 m.verify_actual_writer(changed)
 
+    def test_helper_identity_matches_shell_gate(self):
+        shell = (HELPER.parent / 'sanity.shs').read_text()
+        pin = re.search(r'bootstrap_stage3_hash_file "\$bcc_helper"\)" = \'([0-9a-f]{64})\'', shell)
+        self.assertIsNotNone(pin, 'composed control helper must retain its byte gate')
+        self.assertEqual(pin.group(1), m.digest(HELPER.resolve()))
+
     def test_shell_dispatch_gates(self):
-        bash = 'C:/Program Files/Git/bin/bash.exe' if os.name=='nt' else shutil.which('bash')
+        if os.name == 'nt':
+            git = shutil.which('git')
+            bash = pathlib.Path(git).resolve().parent.parent / 'bin/bash.exe' if git else None
+            self.assertTrue(bash and bash.is_file(), 'Git Bash must accompany the Git executable')
+        else:
+            bash = shutil.which('bash')
         self.assertTrue(bash)
         facade = HELPER.parent.parent/'bootstrap-stage3-provenance.shs'
         def shellpath(p):
