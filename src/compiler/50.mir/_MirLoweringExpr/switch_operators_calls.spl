@@ -1,4 +1,5 @@
 use compiler.mir._MirLoweringExpr.optional_record_owner.*
+use compiler.mir._MirLowering.declaration_providers_v1.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use compiler.mir._MirLoweringExpr.lambda_abi.{lambda_abi_type_resolved}
 use compiler.mir.nominal_owner_diagnostics.{mir_nominal_profile_take_receipt}
@@ -1224,6 +1225,8 @@ impl MirLowering:
         val callee_name = self.direct_call_extern_name(func)
         if callee_name == "":
             return args_in
+        if self.declaration_repository != nil:
+            return self.pad_declaration_default_call_args_v1(callee_name, args_in)
         val maybe_params = bootstrap_fn_param_defaults_lookup(callee_name)
         if not maybe_params.?:
             return args_in
@@ -5268,11 +5271,10 @@ impl MirLowering:
                 if self.struct_field_has_default.has(struct_name):
                     val hd_flags = self.struct_field_has_default[struct_name]
                     if fi < hd_flags.len() and hd_flags[fi]:
-                        val def_exprs = self.struct_field_default_expr[struct_name]
-                        if fi < def_exprs.len():
-                            match def_exprs[fi].kind:
+                        if val default_expr = self.resolve_struct_field_default_expr_v1(struct_name, fi):
+                            match default_expr.kind:
                                 case Error:
-                                    self.error_fatal("unsupported provider default for {struct_name}.{field_names[fi]}; supply the field explicitly", Some(def_exprs[fi].span))
+                                    self.error_fatal("unsupported provider default for {struct_name}.{field_names[fi]}; supply the field explicitly", Some(default_expr.span))
                                     return nil
                                 case _: ()
                             var default_function_slot = false
@@ -5283,11 +5285,11 @@ impl MirLowering:
                             var def_v = if default_function_slot:
                                 val declared_slot = self.declared_field_type_in_current_table(struct_name, fi, field_hir_types[fi])
                                 if not lambda_abi_type_resolved(declared_slot):
-                                    self.error_fatal("function field initializer has no complete consumer signature", Some(def_exprs[fi].span))
+                                    self.error_fatal("function field initializer has no complete consumer signature", Some(default_expr.span))
                                     return nil
-                                self.lower_expr_for_slot(def_exprs[fi], declared_slot)
+                                self.lower_expr_for_slot(default_expr, declared_slot)
                             else:
-                                self.lower_expr(def_exprs[fi])
+                                self.lower_expr(default_expr)
                             if def_v != nil:
                                 if fi < field_hir_types.len():
                                     match field_hir_types[fi].kind:
@@ -5300,7 +5302,7 @@ impl MirLowering:
                                 instance_field_types.push(self.local_mir_type_of(def_v) ?? MirType.i64())
                                 filled_default = true
                             else:
-                                self.error_fatal("cannot lower declared default for {struct_name}", Some(def_exprs[fi].span))
+                                self.error_fatal("cannot lower declared default for {struct_name}", Some(default_expr.span))
                                 return nil
                 if not filled_default:
                     # No declared default (or it could not be lowered). For an
@@ -6271,6 +6273,36 @@ impl MirLowering:
                 lw.global_statics_by_id = self.global_statics_by_id
                 lw.global_constants_by_id = self.global_constants_by_id
                 lw.global_const_exprs = self.global_const_exprs
+                if self.declaration_repository != nil:
+                    # Share only admitted declaration metadata and expression
+                    # descriptors. Lifted bodies have their own lambda scratch.
+                    lw.declaration_repository = self.declaration_repository
+                    lw.declaration_parameter_defaults = self.declaration_parameter_defaults
+                    lw.declaration_parameter_defaults_ambiguous = self.declaration_parameter_defaults_ambiguous
+                    lw.declaration_field_defaults = self.declaration_field_defaults
+                    lw.declaration_field_default_owners = self.declaration_field_default_owners
+                    lw.callable_link_names = self.callable_link_names
+                    lw.imported_global_initializers = self.imported_global_initializers
+                    lw.native_trait_layouts = self.native_trait_layouts
+                    lw.native_trait_implementations = self.native_trait_implementations
+                    lw.native_trait_thunks = self.native_trait_thunks
+                    lw.trait_impl_owners = self.trait_impl_owners
+                    lw.trait_impl_methods = self.trait_impl_methods
+                    lw.trait_impl_closure_complete = self.trait_impl_closure_complete
+                    lw.devirtualized_calls = self.devirtualized_calls
+                    lw.composite_layout_digests = self.composite_layout_digests
+                    lw.composite_layout_owner_counts = self.composite_layout_owner_counts
+                    lw.class_type_names = self.class_type_names
+                    lw.struct_field_hir_type = self.struct_field_hir_type
+                    lw.struct_field_type_ownership_key = self.struct_field_type_ownership_key
+                    lw.struct_field_has_default = self.struct_field_has_default
+                    lw.struct_field_type_param = self.struct_field_type_param
+                    lw.struct_type_param_names = self.struct_type_param_names
+                    lw.struct_field_over_type_param = self.struct_field_over_type_param
+                    lw.struct_method_ambiguous = self.struct_method_ambiguous
+                    lw.enum_variant_owners = self.enum_variant_owners
+                    lw.enum_runtime_id_index = self.enum_runtime_id_index
+                    lw.enum_runtime_id_names = self.enum_runtime_id_names
                 var b = lw.builder
                 b.begin_function(gen_symbol, gen_name, sig, lam.span)
                 lw.builder = b
@@ -6338,6 +6370,11 @@ impl MirLowering:
                     lw.lower_expr_for_slot(body, typed_return)
                 else:
                     lw.lower_expr(body)
+                if self.declaration_repository != nil and lw.errors.len() > 0:
+                    for raw_error in lw.errors:
+                        val error: MirError = raw_error
+                        self.errors.push(error)
+                    return nil
                 if val typed_return = declared_return:
                     match typed_return.kind:
                         case HirTypeKind.Optional(_): result = lw.ensure_option_handle(result, typed_return)
@@ -6348,6 +6385,15 @@ impl MirLowering:
                     result = lw.box_runtime_value(result)
                 self.canonical_type_symbols = lw.canonical_type_symbols
                 self.next_canonical_type_symbol = lw.next_canonical_type_symbol
+                if self.declaration_repository != nil:
+                    # Defaults first demanded inside the lift can add genuine
+                    # global bindings. Preserve their owner/projection tables
+                    # explicitly rather than relying on dictionary sharing.
+                    self.global_symbol_ids = lw.global_symbol_ids
+                    self.global_constants_by_id = lw.global_constants_by_id
+                    self.imported_global_initializers = lw.imported_global_initializers
+                    self.native_trait_thunks = lw.native_trait_thunks
+                    self.devirtualized_calls = lw.devirtualized_calls
                 var b2 = lw.builder
                 if not b2.current_block_has_explicit_terminator():
                     if return_type.kind == MirTypeKind.Unit:
@@ -6386,6 +6432,15 @@ impl MirLowering:
                     lifted_static_i = lifted_static_i + 1
                 host_mod.statics = host_statics
                 var host_fns = host_mod.functions
+                if self.declaration_repository != nil:
+                    # Complete default bodies can themselves lift closures.
+                    # Publish the actual child definitions with their parent.
+                    for raw_child in b3.module.functions.values():
+                        val child: MirFunction = raw_child
+                        if host_fns.has(child.symbol):
+                            self.error_fatal("parameter default lifted callable has a conflicting emitted owner", Some(lam.span))
+                            return nil
+                        host_fns[child.symbol] = child
                 host_fns[gen_symbol] = mir_fn
                 host_mod.functions = host_fns
                 host_b.module = host_mod

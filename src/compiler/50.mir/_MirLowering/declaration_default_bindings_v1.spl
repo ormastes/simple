@@ -1,0 +1,217 @@
+# Real lexical bindings for a used complete parameter-default expression.
+# The frame is scoped scratch. MirLowering remains the actual mutable owner.
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_symbol_table_methods.{_hir_symbol_owner_module}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+use compiler.mir.hir_declaration_types_v1.*
+use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir._MirLowering.provider_globals.*
+use compiler.mir._MirLowering.declaration_providers_v1.*
+use compiler.mir._MirLowering.declaration_default_rewrite_v1.*
+
+class MirHirDefaultBindingFrameV1:
+    provider: MirHirModuleDeclarationsV1
+    links: Dict<i64, text>
+    lexical_ids: Dict<i64, i64>
+    declaration_ids: Dict<i64, i64>
+    failed: bool
+
+impl MirLowering:
+    me declaration_default_fail_v1(frame: MirHirDefaultBindingFrameV1, message: text, span: Span):
+        if not frame.failed: self.error_fatal(message, Some(span))
+        frame.failed = true
+
+    me remap_declaration_default_type_v1(type_: HirType, frame: MirHirDefaultBindingFrameV1) -> HirType:
+        if type_ == nil: return type_
+        self.relocate_provider_type(type_, frame.provider.symbols)
+
+    me declaration_default_resolution_v1(resolution: MethodResolution,
+            frame: MirHirDefaultBindingFrameV1, span: Span) -> MethodResolution:
+        val mapped = self.relocate_provider_resolution(resolution, frame.provider.symbols, frame.links)
+        var valid = true
+        match mapped:
+            case MethodResolution.InstanceMethod(type_id, method_id) | MethodResolution.StaticMethod(type_id, method_id) | MethodResolution.TraitMethod(type_id, method_id):
+                valid = type_id.id >= 0 and method_id.id >= 0
+            case MethodResolution.FreeFunction(method_id): valid = method_id.id >= 0
+            case MethodResolution.Unresolved | MethodResolution.BuiltinCollection(_): ()
+        if not valid: self.declaration_default_fail_v1(frame, "parameter default method resolution lost its canonical declaration", span)
+        mapped
+
+    me declaration_default_allocate_lexical_v1(source_id: SymbolId,
+            frame: MirHirDefaultBindingFrameV1) -> SymbolId:
+        if frame.lexical_ids.has(source_id.id): return SymbolId(id: frame.lexical_ids[source_id.id])
+        if not frame.provider.symbols.symbols.has(source_id.id):
+            self.declaration_default_fail_v1(frame, "parameter default lexical binder has no provider symbol", Span.empty())
+            return SymbolId(id: -1)
+        val source: HirSymbol = frame.provider.symbols.symbols[source_id.id]
+        match source.kind:
+            case SymbolKind.Variable | SymbolKind.Parameter: ()
+            case _:
+                self.declaration_default_fail_v1(frame, "parameter default binder is not a lexical declaration", source.span)
+                return SymbolId(id: -1)
+        var type_: HirType? = nil
+        if val declared = source.type_:
+            type_ = Some(self.remap_declaration_default_type_v1(declared, frame))
+        # Allocation is through the real consumer SymbolTable counter. The
+        # private spelling guarantees a new binding; no reserved numeric ID
+        # range or guessed source identity is used.
+        val expected_id = self.symbols.next_symbol_id
+        val allocation_name = "__mir_default_{expected_id}_{source.name}"
+        val target = self.symbols.define_with_binding(allocation_name, source.kind,
+            type_, source.span, source.visibility, source.is_mutable,
+            Some(self.current_module_id), false)
+        if target.id != expected_id or not self.symbols.symbols.has(target.id):
+            self.declaration_default_fail_v1(frame, "parameter default lexical allocation failed", source.span)
+            return SymbolId(id: -1)
+        var ids = frame.lexical_ids
+        ids[source_id.id] = target.id
+        frame.lexical_ids = ids
+        target
+
+    me declaration_default_bind_operand_v1(source: SymbolId, operand: MirOperand,
+            frame: MirHirDefaultBindingFrameV1):
+        val target = self.declaration_default_allocate_lexical_v1(source, frame)
+        if target.id < 0: return
+        val kind: MirOperandKind = operand.kind
+        val local = match kind:
+            case MirOperandKind.Copy(value) | MirOperandKind.Move(value): value
+            case MirOperandKind.Const(value, type_):
+                var builder = self.builder
+                val materialized = builder.new_temp(type_)
+                builder.emit_const(materialized, value, type_)
+                self.builder = builder
+                materialized
+        # Keep the actual operand's scalar/tagged/closure provenance. Binding
+        # does not reinterpret a raw word or overwrite its HIR metadata.
+        self.bind_local(target.id, local)
+
+    me declaration_default_bind_parameter_v1(param: MirHirParamDeclarationV1, operand: MirOperand,
+            frame: MirHirDefaultBindingFrameV1):
+        self.declaration_default_bind_operand_v1(param.symbol, operand, frame)
+        if frame.failed: return
+        val target_id = frame.lexical_ids[param.symbol.id]
+        var target: HirSymbol = self.symbols.symbols[target_id]
+        # HirParam is the callable signature's authority, including inferred
+        # callable types and explicit mutability not duplicated in SymbolTable.
+        target.type_ = Some(self.remap_declaration_default_type_v1(param.type_, frame))
+        target.is_mutable = param.is_mutable
+        self.symbols.symbols[target_id] = target
+
+    me declaration_default_global_symbol_v1(source: HirSymbol,
+            frame: MirHirDefaultBindingFrameV1) -> SymbolId:
+        if self.declaration_repository == nil:
+            self.declaration_default_fail_v1(frame, "parameter default global lacks admitted declarations", source.span)
+            return SymbolId(id: -1)
+        val repository: MirHirDeclarationRepositoryV1 = self.declaration_repository.unwrap()
+        var source_owner = mir_layout_canonical_module_name(source.defining_module ?? "")
+        if source_owner == "":
+            # Older owned declarations can omit defining_module. Only an
+            # actual retained local declaration with this exact symbol can
+            # supply its owner; an imported alias without ownership cannot.
+            for raw_global in frame.provider.globals:
+                val declaration: MirHirGlobalDeclarationV1 = raw_global
+                if declaration.symbol.id == source.id.id and declaration.name == source.name:
+                    source_owner = mir_layout_canonical_module_name(frame.provider.name)
+        if source_owner == "":
+            self.declaration_default_fail_v1(frame, "parameter default global has no canonical provider owner", source.span)
+            return SymbolId(id: -1)
+        var selected_owner = ""
+        var selected: MirHirGlobalDeclarationV1? = nil
+        for name in repository.ordered_modules:
+            val provider: MirHirModuleDeclarationsV1 = repository.modules[name]
+            for raw_global in provider.globals:
+                val declaration: MirHirGlobalDeclarationV1 = raw_global
+                if declaration.name != source.name: continue
+                if not provider.symbols.symbols.has(declaration.symbol.id): continue
+                val definition: HirSymbol = provider.symbols.symbols[declaration.symbol.id]
+                val owner = mir_layout_canonical_module_name(definition.defining_module ?? provider.name)
+                if owner != source_owner: continue
+                if selected != nil:
+                    self.declaration_default_fail_v1(frame, "parameter default global has conflicting provider declarations", source.span)
+                    return SymbolId(id: -1)
+                selected = Some(declaration)
+                selected_owner = name
+        if selected == nil:
+            self.declaration_default_fail_v1(frame, "parameter default global provider declaration is missing", source.span)
+            return SymbolId(id: -1)
+        val declaration: MirHirGlobalDeclarationV1 = selected.unwrap()
+        val provider: MirHirModuleDeclarationsV1 = repository.modules[selected_owner]
+        val definition: HirSymbol = provider.symbols.symbols[declaration.symbol.id]
+        val storage_name = mir_global_storage_name(definition.defining_module ?? provider.name, declaration.name)
+        # Reuse an existing actual storage declaration rather than creating a
+        # second export/provider with the same name.
+        for raw_static in self.global_statics_by_id.values():
+            val static_: MirStatic = raw_static
+            if static_.name == storage_name:
+                if not self.symbols.symbols.has(static_.symbol.id):
+                    self.declaration_default_fail_v1(frame, "parameter default global storage symbol is absent", source.span)
+                    return SymbolId(id: -1)
+                return static_.symbol
+        val type_ = self.relocate_provider_type(declaration.type_, provider.symbols)
+        val target = self.symbols.define_with_binding(storage_name, source.kind, Some(type_),
+            source.span, source.visibility, source.is_mutable, Some(source_owner), false)
+        if val initializer = self.load_declaration_raw_expression_v1(selected_owner, declaration.initializer):
+            val actual = HirConst(symbol: declaration.symbol, name: declaration.name,
+                type_: declaration.type_, value: initializer, is_mutable: declaration.is_mutable,
+                visibility: declaration.visibility, is_public: declaration.is_public,
+                is_volatile: declaration.is_volatile, has_fixed_address: declaration.has_fixed_address,
+                fixed_address: declaration.fixed_address, span: declaration.span)
+            val key = mir_global_declaration_key(source_owner, declaration.name)
+            val demanded: Dict<text, [i64]> = {key: [target.id]}
+            val found = self.register_provider_global_bindings_with_initializer_policy_v1(
+                provider.name, provider.symbols, [actual], demanded, {}, {}, provider.needs_initialization)
+            if not found.has(key):
+                self.declaration_default_fail_v1(frame, "parameter default global storage could not be bound", source.span)
+                return SymbolId(id: -1)
+            return target
+        frame.failed = true
+        SymbolId(id: -1)
+
+    me declaration_default_reference_v1(source_id: SymbolId,
+            frame: MirHirDefaultBindingFrameV1) -> SymbolId:
+        if frame.lexical_ids.has(source_id.id): return SymbolId(id: frame.lexical_ids[source_id.id])
+        if frame.declaration_ids.has(source_id.id): return SymbolId(id: frame.declaration_ids[source_id.id])
+        if not frame.provider.symbols.symbols.has(source_id.id):
+            self.declaration_default_fail_v1(frame, "parameter default reference lacks a provider symbol", Span.empty())
+            return SymbolId(id: -1)
+        val source: HirSymbol = frame.provider.symbols.symbols[source_id.id]
+        var target = SymbolId(id: -1)
+        match source.kind:
+            case SymbolKind.Function | SymbolKind.Method:
+                target = self.relocate_provider_callable(source_id, frame.provider.symbols, frame.links)
+                if target.id >= 0:
+                    var relocated: HirSymbol = self.symbols.symbols[target.id]
+                    relocated.builtin_method_tag = source.builtin_method_tag
+                    self.symbols.symbols[target.id] = relocated
+            case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum | SymbolKind.Trait:
+                target = self.relocate_provider_type_symbol(source_id, frame.provider.symbols)
+            case SymbolKind.Const | SymbolKind.Variable:
+                target = self.declaration_default_global_symbol_v1(source, frame)
+            case _:
+                self.declaration_default_fail_v1(frame, "parameter default reference is not a bound lexical or canonical declaration", source.span)
+        if target.id < 0:
+            self.declaration_default_fail_v1(frame, "parameter default canonical reference could not be relocated", source.span)
+            return target
+        var ids = frame.declaration_ids
+        ids[source_id.id] = target.id
+        frame.declaration_ids = ids
+        target
+
+    me declaration_default_frame_v1(provider: MirHirModuleDeclarationsV1,
+            function: MirHirFunctionDeclarationV1, supplied: [MirOperand]) -> MirHirDefaultBindingFrameV1:
+        val frame = MirHirDefaultBindingFrameV1(provider: provider,
+            links: self.declaration_links_v1(provider), lexical_ids: {}, declaration_ids: {}, failed: false)
+        if supplied.len() > function.params.len():
+            self.declaration_default_fail_v1(frame, "parameter default supplied argument count exceeds declaration", function.span)
+            return frame
+        var index = 0
+        while index < supplied.len():
+            val param: MirHirParamDeclarationV1 = function.params[index]
+            self.declaration_default_bind_parameter_v1(param, supplied[index], frame)
+            index = index + 1
+        frame

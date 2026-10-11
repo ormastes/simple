@@ -1,0 +1,85 @@
+# These are binder mechanics on actual frontend HIR. They neither manufacture
+# final archive authority nor qualify the still inactive production route.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+use compiler.mir.hir_declaration_types_v1.*
+use compiler.mir._MirLowering.declaration_default_bindings_v1.*
+use compiler.mir._MirLowering.declaration_default_rewrite_v1.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+
+fn default_binding_actual_module(name: text) -> HirModule:
+    val source = "fn evaluate(base: i64) -> i64:\n    val callback = \\value: value + base\n    callback(5)\n"
+    val ast = parse_full_frontend(source, "{name}.spl", name, Logger(level: 0))
+    var frontend = HirLowering.with_filename("{name}.spl")
+    val module = frontend.lower_module(ast)
+    expect(frontend.errors.len()).to_equal(0)
+    module
+
+fn default_binding_provider(module: HirModule) -> MirHirModuleDeclarationsV1:
+    # This intentionally has no final-stage seals and cannot be admitted by
+    # mir_hir_module_declarations_valid_v1. The pure binder only needs symbols.
+    MirHirModuleDeclarationsV1(name: module.name, path: module.path,
+        final_repository_authority: "", final_archive_key: "", final_body_digest: "",
+        symbols: module.symbols, functions: [], structs: [], classes: [], enums: [],
+        bitfields: [], traits: [], impls: [], globals: [], needs_initialization: false,
+        declaration_digest: "", stage: "binder-mechanics-only")
+
+describe "complete foreign default lexical binding on actual HIR":
+    it "allocates fresh symbols and retains the actual prior argument operand":
+        val provider = default_binding_actual_module("provider")
+        val consumer = default_binding_actual_module("consumer")
+        val function: HirFunction = provider.functions.values()[0]
+        val consumer_function: HirFunction = consumer.functions.values()[0]
+        val original_counter = provider.symbols.next_symbol_id
+        val consumer_counter = consumer.symbols.next_symbol_id
+        var lowering = MirLowering.new(consumer.symbols)
+        lowering.current_module_id = consumer.name
+        var builder = lowering.builder
+        builder.begin_function(consumer_function.symbol, consumer_function.name,
+            MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false), consumer_function.span)
+        val supplied = builder.emit_const_int(6)
+        lowering.builder = builder
+        val frame = MirHirDefaultBindingFrameV1(provider: default_binding_provider(provider),
+            links: {}, lexical_ids: {}, declaration_ids: {}, failed: false)
+        lowering.declaration_default_bind_operand_v1(function.params[0].symbol,
+            mir_operand_copy(supplied), frame)
+        val target_base = frame.lexical_ids[function.params[0].symbol.id]
+        expect(target_base >= consumer_counter).to_equal(true)
+        expect(lowering.lambda_binding_local(target_base).id).to_equal(supplied.id)
+        match function.body.stmts[0].kind:
+            case HirStmtKind.Let(_, _, expression):
+                val remapped = lowering.remap_declaration_default_expr_v1(expression, frame)
+                match expression.kind:
+                    case HirExprKind.Lambda(params, _, _):
+                        match remapped.kind:
+                            case HirExprKind.Lambda(mapped_params, _, _):
+                                expect(mapped_params[0].symbol.id != params[0].symbol.id).to_equal(true)
+                                expect(lowering.symbols.symbols.has(mapped_params[0].symbol.id)).to_equal(true)
+                            case _: panic("binder lost the actual lambda")
+                    case _: panic("frontend did not produce a lambda")
+            case _: panic("frontend did not produce the callback binding")
+        expect(frame.failed).to_equal(false)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(provider.symbols.next_symbol_id).to_equal(original_counter)
+
+    it "rejects a binder without an actual provider declaration before emission":
+        val provider = default_binding_actual_module("provider")
+        val consumer = default_binding_actual_module("consumer")
+        var lowering = MirLowering.new(consumer.symbols)
+        val frame = MirHirDefaultBindingFrameV1(provider: default_binding_provider(provider),
+            links: {}, lexical_ids: {}, declaration_ids: {}, failed: false)
+        val missing = SymbolId(id: provider.symbols.next_symbol_id)
+        expect(provider.symbols.symbols.has(missing.id)).to_equal(false)
+        val mapped = lowering.declaration_default_allocate_lexical_v1(missing, frame)
+        expect(mapped.id).to_equal(-1)
+        expect(frame.failed).to_equal(true)
+        expect(lowering.errors.len()).to_equal(1)
+        expect(frame.lexical_ids.len()).to_equal(0)
