@@ -14,8 +14,19 @@ table. Failed results contain no usable types.
 
 This helper is prerequisite work for H-XMOD and H-RET32: actual generic type
 arguments must move caller-to-template before specializing; stamped signatures
-must move template-to-caller before MIR reads them. Wiring and removal of unsafe
-MIR name heuristics are pending. Merely adding this helper fixes no call site.
+must move template-to-caller before MIR reads them. Wiring is carried by the
+generic-annotation lane (#3042); this lane's MIR consumer change depends on it.
+Merely adding this helper fixes no call site.
+
+The dependent MIR candidate consumes caller-owned specialization signatures,
+including nominal array and optional payload metadata. It avoids the legacy
+name-keyed return registry for those signatures and resolves canonical owners
+to the declaration's registered layout spelling. Non-specialization calls keep
+their existing behavior. The new `generic_return_owner` native fixture checks
+a generic provider returning a third module's `Node`, with a different `Node`
+in the caller, array/optional returns, nonzero fields and method dispatch.
+It also checks a generic `Any` return retains tagged-value metadata.
+Expected stdout: `names=ab count=2 array=real optional=2 decoy=41 erased=13`.
 
 Source review found and corrected three issues before publication: accepting
 same-kind stale qualified target entries; lexical allocator reuse; and source
