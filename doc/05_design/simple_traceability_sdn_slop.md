@@ -537,3 +537,32 @@ cover leader-exits-first descendants, forced cancellation, active-process
 drain, and job cleanup uncertainty. Until the platform provider is implemented
 and its native tests pass, SDN worker wrapping remains explicitly unavailable
 on that platform.
+
+### Retained semantic partitions: implementation constraints
+
+The exact-candidate delta adapter currently performs a cold build and reports
+that it reused no base facts. The next implementation must retain extracted
+owner-local declarations separately from global identity and locator resolution.
+A declaration referencing another file must resolve against the complete
+candidate inventory, including unchanged artifacts; extracting it in isolation
+must not manufacture a missing endpoint.
+
+Each partition binds its artifact bytes, declaration membership, extractor,
+schema, policy and configuration identities. Composition returns a new fact
+value rather than depending on mutation of a by-value argument. Rebinding a
+reused partition to a new subject must preserve the old generation, including
+nested diagnostics and provenance collections.
+
+Input hash equality alone does not authenticate retained facts or their
+dependency inventory. Persisted caches remain performance hints until their
+payload, input manifest and producer are validated at the owning boundary.
+Untrusted or incomplete dependencies require reconstruction. Public mutable
+records must not acquire admission authority merely by naming trusted versions.
+
+Verification must compare actual typed facts, resolved edges, provenance and
+diagnostics with an independent cold reference. Routing both comparison paths
+through the same new composition function is insufficient. Fixtures must isolate
+missing-identity and membership invalidation, changed declarations, duplicate
+identities, deletion, global locator resolution, and preservation of the old
+generation. This section describes pending implementation constraints, not
+executed reuse or an admitted persistent store.
