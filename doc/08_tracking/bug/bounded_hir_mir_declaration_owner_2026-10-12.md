@@ -55,6 +55,16 @@ The source DTO SymbolTable remains read-only; consumers allocate into the
 distinct decoded current-module table. An unbound lexical reference or missing
 canonical declaration fails before lowering that default.
 
+Bootstrap function predeclarations can have no defining_module. Foreign
+defaults resolve those through the exact retained local function record and
+its actual symbol, never through the consumer's current module or a bare name.
+Explicit foreign references require canonical provider ownership and an exact
+declaration. Repeated references to the same trait/default function record must
+encode identically; conflicting declarations fail. The current callable type
+comes from retained HirFunction parameters/result/effects, rather than an older
+predeclaration SymbolTable type. Its emission name uses the existing actual
+declaration link owner. Abstract trait metadata supplies no invented body.
+
 MIR lambda scratch is saved/reset/restored at the actual function emission
 boundary. Inline lowering keeps the current function's registry; explicit
 child function lowering restores the parent's remembered bindings. The module
@@ -113,3 +123,17 @@ references exist and the new schema/codec/producer files remain below the
 800-line source boundary. git diff --check passed. These checks do not replace
 native compilation, execution, cache corruption controls or bounded full CLI
 qualification against the newly admitted producer/runtime authority.
+
+
+The follow-up binds callable record names and kinds to the retained table row.
+Qualified methods additionally need an actual nominal/trait/impl member edge and
+`SymbolTable.method_symbol_name`; matching a suffix does not prove ownership.
+The exact local source reference must match that row's name and kind. This also
+protects nil-owner bootstrap predeclarations without trusting their stale type:
+the actual complete callable record supplies parameters, result and effects.
+Before publishing that signature, the binder invokes the existing recursive
+`lower_type` diagnostics and `lambda_abi_type_resolved` contract. The added
+actual-frontend mechanics cases cover nil-owner/stale-Unit predeclarations,
+record-name conflicts, and a nested unresolved inference variable. They are
+UNRUN. The current authored total is seven unit cases and sixteen native guards;
+there is no native execution, final-route activation, or measured RSS result.
