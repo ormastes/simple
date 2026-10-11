@@ -1,5 +1,30 @@
 # Collect bootstrap, build, and test failures
 
+## Windows bootstrap harness prerequisites
+
+The MSVC setup helper supports callers using `set -euo pipefail`. SDK discovery
+must skip non-SDK Include children such as `wdf` without turning the final
+directory predicate into a pipeline failure. Keep missing-SDK and tool failures
+visible. `bash scripts/check/check-windows-msvc-sdk-discovery.shs` checks that
+boundary; see the [SDK discovery bug](../../08_tracking/bug/windows_msvc_sdk_discovery_pipefail_2026-10-11.md).
+
+Run the PATH fixture with
+`python scripts/check/check-bootstrap-path-access.py --script scripts/bootstrap/bootstrap-from-scratch.sh --output <fresh-private-directory>`.
+On Windows it discovers native Bash beside Git on PATH; for MSYS2 or a custom
+installation, pass `--shell "C:/path with spaces/bash.exe"`. On POSIX it resolves
+`bash` from PATH. Windows ambient Bash is not selected automatically because it
+may be the WSL launcher. Shell discovery occurs before creating the output
+directory, and an existing output directory is rejected to preserve evidence.
+
+`sh scripts/check/check-bootstrap-windows-authority-paths.shs` exercises the
+actual `run_rust_authority_cargo` and `run_rust_authority_command` owners together.
+The fixture binds `PLATFORM_RUST_TRIPLE`, checks the forwarded
+`build --target x86_64-pc-windows-msvc` arguments, and checks scoped
+`TEMP`/`TMP`/`SystemRoot` through all four LLVM/LTO branches. It substitutes the
+Cargo process and resource setup; it does not compile the seed or admit a phase.
+Keep these host-harness results separate from compiler and Phase4 evidence.
+See the [harness drift bug and retained results](../../08_tracking/bug/windows_bootstrap_contract_harness_drift_2026-10-11.md).
+
 During bootstrap diagnosis, reach the end of all independently runnable build
 and test work instead of ending the investigation at the first failure. This
 is the shared agent policy for SPipe, bootstrap, builds, tests, and bug repair.
@@ -23,6 +48,23 @@ The regression `sh scripts/check/check-bootstrap-keep-going-policy.shs` exercise
 production orchestration with failing/passing fake commands and inventory rows;
 it also checks policy inheritance, ordered overrides, cache preservation, and
 fatal snapshot admission. Other runners may still need their own policy wiring.
+
+## Phase verification campaign bounds
+
+The phase verifier has a single 7200-second campaign deadline, separate from
+`--timeout-seconds` for each row. Set `--campaign-timeout-seconds` or
+`BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS` to select another positive budget.
+The owner reaps its job/process tree on expiry or interruption and retains
+partial rows, incomplete counts, caches and a nonpassing campaign receipt.
+Nested row RSS enforcement remains unchanged.
+
+If mandatory fullCLI or test-runner construction fails, independent module
+diagnostics default to 8 deterministic entries. Configure the nonnegative
+`BOOTSTRAP_VERIFY_FAILED_TOOL_MODULE_LIMIT` for another finite sample. The full
+inventory remains retained; excluded entries are explicitly unexecuted/BLOCKED.
+Healthy prerequisites retain the complete inventory. This sample cannot admit
+missing tools or replace test-suite evidence. Regression:
+`sh scripts/bootstrap/tests/verification-campaign-test.shs`.
 
 ## Agent continuation and explicit diagnostic exceptions
 
@@ -464,3 +506,16 @@ measured Linux/WSL cache-parent staging path, launch-interrupt ownership and ato
 terminal receipts. Preserve the exact source/runtime boundaries and the campaign
 Phase 3/full-CLI gates; neither a progress marker nor a partial object inventory
 is a completed producer.
+
+For a Windows durable-flush stall, retain the native stack and compare a bounded
+independent file-sync probe on the affected volume and NTFS. The
+[ReFS incident](../../08_tracking/bug/windows_refs_durable_flush_stall_2026-10-11.md)
+required an NTFS source copy as well as output, CAS and temporary roots: compile
+SCV writes remain under `<checkout>/build/scv`. Keep durability enabled and
+preserve failed receipts; storage relocation does not admit the candidate.
+
+The provisional Hello owner scopes `SIMPLE_SCV_INVENTORY_COLD_INIT=1` to its
+first compile only when both current and legacy inventory publication paths
+are absent. Existing publications use warm admission, including malformed
+ones; preserve their failures. Do not export cold initialization across an
+entire phase campaign. See the [first-build fix](../../08_tracking/bug/provisional_hello_missing_inventory_init_2026-10-11.md).

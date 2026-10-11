@@ -3,6 +3,7 @@ use compiler.mir._MirLoweringExpr.expr_dispatch.*
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.text_static_builtins.*
 use compiler.mir._MirLoweringExpr.result_predicates.*
+use compiler.mir._MirLoweringExpr.result_tuple_payload.*
 use compiler.mir._MirLowering.native_trait_registration.*
 use compiler.mir._MirLowering.native_trait_dispatch.*
 use compiler.mir._MirLowering.native_trait_conversion.*
@@ -705,7 +706,14 @@ impl MirLowering:
         var supported = false
         var result_struct_name = ""
         var result_is_array = false
+        var result_is_tuple = false
         match payload_type.kind:
+            case HirTypeKind.Tuple(_):
+                if default_expr == nil:
+                    if val tuple_type = result_tuple_payload_type(payload_type):
+                        result_type = tuple_type
+                        result_is_tuple = true
+                        supported = true
             case HirTypeKind.Bool:
                 if default_expr == nil:
                     result_type = MirType.bool()
@@ -784,6 +792,8 @@ impl MirLowering:
         if val payload_local = payload_res:
             payload_value = payload_local
         payload_value = self.enum_payload_value(payload_value, result_type)
+        if result_is_tuple:
+            payload_value = self.recover_result_tuple_payload(payload_value, result_type)
         if is_text:
             var b_text = self.builder
             val text_op = MirOperand(kind: MirOperandKind.Const(
@@ -5702,6 +5712,16 @@ impl MirLowering:
                 if val elem_type = maybe_elem_type:
                     if elem_type != nil:
                         elem_ty = self.lower_type(elem_type)
+            # Runtime collection indexing can return an i64 handle whose
+            # record identity lives in the local owner map. Carry that owner
+            # in the tuple field type so projection can restore it; retaining
+            # only I64 loses the layout needed by nonzero fields and methods.
+            match elem_ty.kind:
+                case MirTypeKind.I64:
+                    val owner = self.struct_value_syms.get(local.id) ?? ""
+                    if owner != "" and owner != "__runtime_array__":
+                        elem_ty = MirType(kind: MirTypeKind.Opaque(owner))
+                case _: ()
             types = types.push(elem_ty)
 
         val tuple_type = MirType(kind: MirTypeKind.Tuple(types))
