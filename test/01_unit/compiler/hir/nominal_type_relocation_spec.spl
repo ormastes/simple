@@ -1,0 +1,176 @@
+# @req REQ-GENERIC-OWNER-TRANSPORT
+# @tag: unit, compiler, hir, generics
+use std.spec.{describe, it, expect}
+use compiler.hir.hir_types.*
+use compiler.hir.nominal_type_relocation.{hir_relocate_types}
+use compiler.common.diagnostics.span.Span
+
+fn relocation_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn relocation_named(id: SymbolId) -> HirType:
+    relocation_type(HirTypeKind.Named(id, []))
+
+fn relocation_declare(symbols: SymbolTable, owner: text, kind: SymbolKind = SymbolKind.Struct) -> SymbolId:
+    val id = symbols.define("Node", kind, nil, Span.empty(), Visibility.Public, false, owner)
+    symbols.bind_qualified_type(owner, "Node", id)
+    id
+
+describe "nominal HIR type transport":
+    it "keeps different declarations distinct despite equal source and target ids":
+        var provider = SymbolTable.new()
+        var consumer = SymbolTable.new()
+        val original = relocation_declare(provider, "lib.nodes")
+        val decoy = relocation_declare(consumer, "app.main")
+        val source_count = provider.symbols.len()
+        val source_next = provider.next_symbol_id
+        expect(original.id).to_equal(decoy.id)
+        val result = hir_relocate_types([relocation_named(original)], provider, "lib.nodes", consumer, "app.main")
+        expect(result.valid).to_be(true)
+        expect(result.types.len()).to_equal(1)
+        match result.types[0].kind:
+            case HirTypeKind.Named(id, _):
+                expect(id.id == decoy.id).to_be(false)
+                expect(result.symbols.lookup_qualified_type_raw("lib.nodes", "Node")).to_equal(id.id)
+                expect(result.symbols.get_symbol_raw(id.id).defining_module ?? "").to_equal("lib.nodes")
+            case _: expect(false).to_be(true)
+        expect(consumer.lookup_or_invalid("Node").id).to_equal(decoy.id)
+        expect(provider.get_symbol_raw(original.id).defining_module ?? "").to_equal("lib.nodes")
+        expect(provider.symbols.len()).to_equal(source_count)
+        expect(provider.next_symbol_id).to_equal(source_next)
+
+    it "reuses an existing imported declaration and preserves its lexical alias":
+        var provider = SymbolTable.new()
+        var consumer = SymbolTable.new()
+        val original = relocation_declare(provider, "lib.nodes")
+        consumer.define("padding", SymbolKind.Variable, nil, Span.empty(), Visibility.Private, false, nil)
+        val imported = relocation_declare(consumer, "lib.nodes")
+        val before = consumer.next_symbol_id
+        val result = hir_relocate_types([relocation_named(original), relocation_named(original)], provider, "lib.nodes", consumer, "app.main")
+        expect(result.valid).to_be(true)
+        expect(result.symbols.next_symbol_id).to_equal(before)
+        for type_ in result.types:
+            match type_.kind:
+                case HirTypeKind.Named(id, _): expect(id.id).to_equal(imported.id)
+                case _: expect(false).to_be(true)
+
+    it "uses stored declaration ownership before the provider module fallback":
+        var provider = SymbolTable.new()
+        var consumer = SymbolTable.new()
+        val original = relocation_declare(provider, "lib/original.spl")
+        val result = hir_relocate_types([relocation_named(original)], provider, "lib.reexport", consumer, "app.main")
+        expect(result.valid).to_be(true)
+        expect(result.symbols.lookup_qualified_type_raw("lib.original", "Node")).to_be_greater_than(-1)
+        expect(result.symbols.lookup_qualified_type_raw("lib.reexport", "Node")).to_equal(-1)
+
+    it "uses source module ownership for a local unqualified declaration":
+        var provider = SymbolTable.new()
+        var consumer = SymbolTable.new()
+        val original = provider.define("Node", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, nil)
+        val result = hir_relocate_types([relocation_named(original)], provider, "lib.nodes", consumer, "app.main")
+        expect(result.valid).to_be(true)
+        expect(result.symbols.lookup_qualified_type_raw("lib.nodes", "Node")).to_be_greater_than(-1)
+
+    it "rejects a later absent symbol before mutating the target table":
+        var provider = SymbolTable.new()
+        var consumer = SymbolTable.new()
+        val original = relocation_declare(provider, "lib.nodes")
+        val before = consumer.next_symbol_id
+        val result = hir_relocate_types([relocation_named(original), relocation_named(SymbolId(id: 99999))], provider, "lib.nodes", consumer, "app.main")
+        expect(result.valid).to_be(false)
+        expect(result.error).to_contain("absent")
+        expect(result.types.len()).to_equal(0)
+        expect(consumer.next_symbol_id).to_equal(before)
+        expect(consumer.lookup_qualified_type_raw("lib.nodes", "Node")).to_equal(-1)
+
+    it "rejects a non-type symbol and conflicting target kind":
+        var provider = SymbolTable.new()
+        var consumer = SymbolTable.new()
+        val variable = provider.define("value", SymbolKind.Variable, nil, Span.empty(), Visibility.Private, false, nil)
+        val bad = hir_relocate_types([relocation_named(variable)], provider, "lib.nodes", consumer, "app.main")
+        expect(bad.valid).to_be(false)
+        val original = relocation_declare(provider, "lib.nodes")
+        relocation_declare(consumer, "lib.nodes", SymbolKind.Enum)
+        val conflict = hir_relocate_types([relocation_named(original)], provider, "lib.nodes", consumer, "app.main")
+        expect(conflict.valid).to_be(false)
+        expect(conflict.error).to_contain("differs")
+
+    it "relocates nested function and fixed array types without losing dimensions":
+        var provider = SymbolTable.new()
+        var consumer = SymbolTable.new()
+        val original = relocation_declare(provider, "lib.nodes")
+        val array = relocation_type(HirTypeKind.Array(relocation_named(original), Some(7)))
+        val function = relocation_type(HirTypeKind.Function([array], relocation_type(HirTypeKind.Optional(relocation_named(original))), []))
+        val result = hir_relocate_types([function], provider, "lib.nodes", consumer, "app.main")
+        expect(result.valid).to_be(true)
+        val relocated_id = result.symbols.lookup_qualified_type_raw("lib.nodes", "Node")
+        match result.types[0].kind:
+            case HirTypeKind.Function(params, ret, effects):
+                expect(effects.len()).to_equal(0)
+                match params[0].kind:
+                    case HirTypeKind.Array(inner, size):
+                        expect(size ?? -1).to_equal(7)
+                        match inner.kind:
+                            case HirTypeKind.Named(id, _): expect(id.id).to_equal(relocated_id)
+                            case _: expect(false).to_be(true)
+                    case _: expect(false).to_be(true)
+                match ret.kind:
+                    case HirTypeKind.Optional(inner):
+                        match inner.kind:
+                            case HirTypeKind.Named(id, _): expect(id.id).to_equal(relocated_id)
+                            case _: expect(false).to_be(true)
+                    case _: expect(false).to_be(true)
+            case _: expect(false).to_be(true)
+
+    it "rejects a stale qualified binding pointing to an unrelated same-kind type":
+        var provider = SymbolTable.new()
+        var consumer = SymbolTable.new()
+        val original = relocation_declare(provider, "lib.nodes")
+        val decoy = relocation_declare(consumer, "app.main")
+        consumer.bind_qualified_type("lib.nodes", "Node", decoy)
+        val before = consumer.next_symbol_id
+        val result = hir_relocate_types([relocation_named(original)], provider, "lib.nodes", consumer, "app.main")
+        expect(result.valid).to_be(false)
+        expect(result.error).to_contain("wrong identity")
+        expect(consumer.next_symbol_id).to_equal(before)
+
+    it "rejects conflicting source aliases before either reaches an empty target":
+        var provider = SymbolTable.new()
+        var consumer = SymbolTable.new()
+        val first = relocation_declare(provider, "lib.nodes")
+        val second = provider.define("Alias", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, "lib.nodes")
+        var conflicting = provider.get_symbol_raw(second.id)
+        conflicting.name = "Node"
+        provider.symbols[second.id] = conflicting
+        val before = consumer.next_symbol_id
+        val result = hir_relocate_types([relocation_named(first), relocation_named(second)], provider, "lib.nodes", consumer, "app.main")
+        expect(result.valid).to_be(false)
+        expect(result.error).to_contain("disagree")
+        expect(consumer.next_symbol_id).to_equal(before)
+
+    it "does not reuse or rename a lexical qualified-looking variable":
+        var provider = SymbolTable.new()
+        var consumer = SymbolTable.new()
+        val original = relocation_declare(provider, "lib.nodes")
+        val decoy = consumer.define("lib.nodes.Node", SymbolKind.Variable, nil, Span.empty(), Visibility.Private, false, "app.main")
+        val result = hir_relocate_types([relocation_named(original)], provider, "lib.nodes", consumer, "app.main")
+        expect(result.valid).to_be(true)
+        val relocated_id = result.symbols.lookup_qualified_type_raw("lib.nodes", "Node")
+        expect(relocated_id == decoy.id).to_be(false)
+        expect(consumer.get_symbol_raw(decoy.id).name).to_equal("lib.nodes.Node")
+        expect(consumer.get_symbol_raw(decoy.id).kind == SymbolKind.Variable).to_be(true)
+        expect(consumer.lookup_or_invalid("lib.nodes.Node").id).to_equal(decoy.id)
+
+    it "does not mutate a shared source and target table lacking a qualified index":
+        var symbols = SymbolTable.new()
+        val original = symbols.define("Node", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, nil)
+        val before = symbols.next_symbol_id
+        val count = symbols.symbols.len()
+        val result = hir_relocate_types([relocation_named(original)], symbols, "app.main", symbols, "app/main.spl")
+        expect(result.valid).to_be(true)
+        expect(symbols.next_symbol_id).to_equal(before)
+        expect(symbols.symbols.len()).to_equal(count)
+        expect(symbols.lookup_qualified_type_raw("app.main", "Node")).to_equal(-1)
+        match result.types[0].kind:
+            case HirTypeKind.Named(id, _): expect(id.id).to_equal(original.id)
+            case _: expect(false).to_be(true)
