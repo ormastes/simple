@@ -565,6 +565,14 @@ first cold refresh, before any inventory generation was published. The
 three-cycle fixture limit is exhausted. See the updated
 [inventory regression](../../../08_tracking/bug/scv_inventory_retains_deleted_source_after_move_2026-10-11.md)
 and [Option equality bug](../../../08_tracking/bug/native_typed_option_none_not_equal_nil_2026-10-11.md).
+GDB later traced the cold-refresh crash to an optional trace parameter
+forwarded as `Some(None)`. The MIR lowerer now marks incoming optional
+parameter locals as canonical handles before call adaptation, avoiding
+that extra allocation and the incorrect presence result in current-source
+builds. A one-module native forwarding fixture is red on the older Stage 2
+binary; the current-source MIR probe has no executable result because its
+331-module build stalled in unrelated HIR. This is a source candidate, not
+a qualified SCV runtime or warm compile PASS.
 The isolated Stage 2 binary lacks `check` and `test` commands and rejects
 `-c`, so the required compiler/lib/MCP checks and core eval smoke cannot be
 claimed from it. The MCP native smoke also has no server binaries in this
