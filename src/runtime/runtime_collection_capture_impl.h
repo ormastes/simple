@@ -51,8 +51,10 @@ typedef struct RtCollectionCaptureEntry {
     int64_t hash_collisions;
     int64_t filter_evaluated;
     int64_t filter_accepted;
+    int64_t loop_trips;
     int hash_probe_observed;
     int filter_observed;
+    int loop_observed;
 } RtCollectionCaptureEntry;
 
 static atomic_flag spl_collection_capture_lock = ATOMIC_FLAG_INIT;
@@ -390,6 +392,45 @@ int64_t spl_collection_capture_note_filter(int64_t site_value,
     return 1;
 }
 
+/* A loop completion belongs to an already observed collection site. It must
+ * not invent a zero-cardinality collection for an unknown loop identity. */
+int64_t spl_collection_capture_note_loop(int64_t site_value,
+                                         int64_t target_value,
+                                         int64_t trips) {
+    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_acquire)) return 1;
+    char site_buffer[RT_COLLECTION_CAPTURE_MAX_SITE_BYTES + 1];
+    char target_buffer[RT_COLLECTION_CAPTURE_MAX_TARGET_BYTES + 1];
+    const char* target = spl_collection_capture_text(target_value, target_buffer,
+        RT_COLLECTION_CAPTURE_MAX_TARGET_BYTES);
+    spl_collection_capture_lock_enter();
+    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_relaxed)) {
+        spl_collection_capture_lock_leave();
+        return 1;
+    }
+    if (!spl_collection_capture_target_matches_locked(target)) {
+        spl_collection_capture_lock_leave();
+        return 1;
+    }
+    const char* site = spl_collection_capture_text(site_value, site_buffer,
+        RT_COLLECTION_CAPTURE_MAX_SITE_BYTES);
+    RtCollectionCaptureEntry* entry = NULL;
+    if (trips >= 0 && spl_collection_capture_token_valid(site,
+            RT_COLLECTION_CAPTURE_MAX_SITE_BYTES, 1))
+        entry = spl_collection_capture_find_site_locked(site);
+    if (!entry || entry->loop_trips > INT64_MAX - trips ||
+            (!entry->loop_observed &&
+             spl_collection_capture_record_count >= RT_COLLECTION_CAPTURE_MAX_RECORDS)) {
+        spl_collection_capture_error = 1;
+        spl_collection_capture_lock_leave();
+        return 0;
+    }
+    entry->loop_trips += trips;
+    if (!entry->loop_observed) spl_collection_capture_record_count++;
+    entry->loop_observed = 1;
+    spl_collection_capture_lock_leave();
+    return 1;
+}
+
 /* Return floor(accepted * 1000000 / evaluated) without overflowing i64. */
 static int64_t spl_collection_capture_filter_selectivity(int64_t evaluated,
                                                          int64_t accepted) {
@@ -470,20 +511,21 @@ int64_t spl_collection_capture_finish(void) {
     }
     for (size_t i = 0; !failed && i < count; i++) {
         RtCollectionCaptureEntry* entry = ordered[i];
-        const char* names[7] = {
+        const char* names[8] = {
             "collection_size", "lookup_count", "distinct_key_count",
             "materialization_count", "hash_probe_count", "hash_collision_count",
-            "filter_selectivity"
+            "filter_selectivity", "loop_trip_count"
         };
-        const int64_t values[7] = {
+        const int64_t values[8] = {
             entry->peak_size, entry->lookups, entry->current_size,
             entry->materializations, entry->hash_probes, entry->hash_collisions,
             spl_collection_capture_filter_selectivity(entry->filter_evaluated,
-                entry->filter_accepted)
+                entry->filter_accepted), entry->loop_trips
         };
-        for (size_t metric = 0; !failed && metric < 7; metric++) {
+        for (size_t metric = 0; !failed && metric < 8; metric++) {
             if ((metric == 4 || metric == 5) && !entry->hash_probe_observed) continue;
             if (metric == 6 && !entry->filter_observed) continue;
+            if (metric == 7 && !entry->loop_observed) continue;
             char row[8192];
             size_t sample_id = next_metric_sample++;
             int len = snprintf(row, sizeof(row),

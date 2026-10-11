@@ -140,3 +140,20 @@ cycles are rejected before recursive AST conversion. New regression cases are
 authored but UNRUN pending an admitted Simple test runner; v6 snapshots are
 explicitly rejected. See the item7 release/bootstrap blocker report for the
 failed Phase 3 admission check and the separately passing native capture check.
+
+### Completed explicit set-loop observations (2026-10-11)
+
+`adaptive_set_for_each_observed` visits the existing complete sorted snapshot.
+It copies site/target identity before callbacks and records snapshot cardinality
+even when capture starts after construction. Each body entry increments the
+trip count before callback execution. Continue advances, Break completes, and
+Err returns without a completed-loop event. Successful empty input has a known
+zero count. Capture rejection affects profile finish, not the loop result.
+
+`spl_collection_capture_note_loop` accepts only an existing site and accumulates
+completed trips under the shared lock. A first loop measurement costs one
+serialized metric row, including zero; subsequent completions reuse that row.
+Negative counts, signed overflow and the 100000-row cap fail capture. Unobserved
+loop metrics remain absent. Interpreter/native dispatch share this owner.
+The native owner selfcheck passed; the Simple wrapper scenarios are UNRUN.
+This API does not instrument arbitrary compiler loops or enable join lowering.

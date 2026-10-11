@@ -52,11 +52,15 @@ int main(void) {
     assert(spl_collection_capture_note_hash_probe(site, target, 1, 0) == 1);
     assert(spl_collection_capture_note_filter(site, target, 3, 1) == 1);
     assert(spl_collection_capture_note_filter(site, target, 1, 1) == 1);
+    assert(spl_collection_capture_note_loop(site, wrong, 100) == 1);
+    assert(spl_collection_capture_note_loop(site, target, 3) == 1);
+    assert(spl_collection_capture_note_loop(site, target, 2) == 1);
     assert(spl_collection_capture_note_materialization(site, wrong) == 1);
     assert(spl_collection_capture_note_materialization(site, target) == 1);
     assert(spl_collection_capture_note_materialization(site, target) == 1);
     assert(spl_collection_capture_note_size(site, target, 0) == 1);
     char* body = finish_text();
+    assert(strstr(body, "name=loop_trip_count;value=5") != NULL);
     assert(body && strstr(body, "site=ast://capture/selfcheck#1") != 0);
     assert(strstr(body, "size_p95=2;lookup_p95=2;hits_p95=1;misses_p95=1") != 0);
     assert(strstr(body, "metric;sample=1;site=ast://capture/selfcheck#1;target=x86_64-v3;name=collection_size;value=2") != 0);
@@ -94,7 +98,34 @@ int main(void) {
     assert(spl_collection_capture_note_filter(site, target, 1, 0) == 0);
     assert(spl_collection_capture_finish() == rt_value_nil());
 
-    /* The full 100000-record allowance admits exactly 12500 worst-case sites. */
+    /* A completed empty loop is measured zero; an untouched site stays absent. */
+    assert(spl_collection_capture_begin(target) == 1);
+    assert(spl_collection_capture_note_size(site, target, 0) == 1);
+    assert(spl_collection_capture_note_loop(site, target, 0) == 1);
+    body = finish_text();
+    assert(strstr(body, "name=loop_trip_count;value=0") != NULL);
+    assert(count_rows(str(body)) == 6);
+    free(body);
+    assert(spl_collection_capture_begin(target) == 1);
+    assert(spl_collection_capture_note_size(site, target, 1) == 1);
+    body = finish_text();
+    assert(strstr(body, "loop_trip_count") == NULL);
+    free(body);
+    /* Missing collection context, negative counts and overflow poison capture. */
+    assert(spl_collection_capture_begin(target) == 1);
+    assert(spl_collection_capture_note_loop(site, target, 0) == 0);
+    assert(spl_collection_capture_finish() == rt_value_nil());
+    assert(spl_collection_capture_begin(target) == 1);
+    assert(spl_collection_capture_note_size(site, target, 1) == 1);
+    assert(spl_collection_capture_note_loop(site, target, -1) == 0);
+    assert(spl_collection_capture_finish() == rt_value_nil());
+    assert(spl_collection_capture_begin(target) == 1);
+    assert(spl_collection_capture_note_size(site, target, 1) == 1);
+    assert(spl_collection_capture_note_loop(site, target, INT64_MAX) == 1);
+    assert(spl_collection_capture_note_loop(site, target, 1) == 0);
+    assert(spl_collection_capture_finish() == rt_value_nil());
+
+    /* Exactly 12500 sites with hash and filter samples use all 100000 rows. */
     assert(spl_collection_capture_begin(target) == 1);
     for (int index = 0; index < 12500; index++) {
         char site_text[64];
@@ -117,6 +148,8 @@ int main(void) {
         assert(spl_collection_capture_note_filter(current_site, target, 1, 1) == 1);
     }
     int64_t overflow_site = str("ast://capture/capacity/overflow");
+    int64_t occupied_site = str("ast://capture/capacity/0");
+    assert(spl_collection_capture_note_loop(occupied_site, target, 0) == 0);
     assert(spl_collection_capture_note_filter(overflow_site, target, 1, 1) == 0);
     assert(spl_collection_capture_finish() == rt_value_nil());
     assert(spl_collection_capture_begin(target) == 1);

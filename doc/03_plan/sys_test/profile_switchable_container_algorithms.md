@@ -60,3 +60,12 @@ Identity gate: capture a first-run profile under `@collection_algorithm("auto")`
 Native feedback gate: `test/02_integration/compiler/profile_switchable_native_feedback_it_spec.spl` captures a real workload with `simple run`, builds that source with the captured `.sprof`, executes the native binary, and checks hot set/map promotion before insertion while cold and forced-linear instances stay linear. It also checks wrong-target rejection preserves the previous binary. This is an executable acceptance spec, not a PASS until it runs under an admitted source-matched pure-Simple CLI.
 
 Collision replay gate: `test/03_system/app/compiler/feature/profile_switchable_container_algorithms_spec.spl` now also writes paired hash probe/collision samples for four parser-issued auto sites and replays them through interpreter and LLVM native execution. The fixture checks ordered storage before insertion and after clear, set/map value preservation, and an explicitly linear control. This is pending the same qualified pure-Simple runtime; it covers integer keys but does not yet establish arbitrary aggregate `Ord` dispatch or typed MIR substitution.
+
+PSC-AC-003 continuation: `test/01_unit/lib/collections/adaptive_set_loop_spec.spl`
+checks the explicit observed set-loop API with ordered callback traces, all
+representations, Continue, counted Break, error omission, empty zero, malformed
+snapshots, and capture rejection without changing logical results. Scenarios
+are authored, UNRUN. The native capture-owner selfcheck passed the corresponding
+counter, target, zero/absence, overflow and budget contracts. General compiler
+loop site transport/instrumentation and joins remain open; this slice does not
+mark PSC-AC-003 complete.

@@ -822,6 +822,7 @@ int64_t  spl_collection_capture_note_lookup(int64_t site, int64_t target, int64_
 int64_t  spl_collection_capture_note_materialization(int64_t site, int64_t target);
 int64_t  spl_collection_capture_note_hash_probe(int64_t site, int64_t target, int64_t probes, int64_t collisions);
 int64_t  spl_collection_capture_note_filter(int64_t site, int64_t target, int64_t evaluated, int64_t accepted);
+int64_t  spl_collection_capture_note_loop(int64_t site, int64_t target, int64_t trips);
 int64_t  spl_collection_capture_finish(void);
 int64_t  spl_collection_capture_abort(void);
 int64_t  rt_text_eq_any(int64_t left, int64_t right);
