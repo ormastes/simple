@@ -33,3 +33,17 @@ existing streaming environment opt-in can measure that ownership route, but
 cannot admit this source change. Acceptance requires rebuilding the producer,
 compiling its complete CLI with the original inventory and resource controls,
 and recording comparable peak RSS and elapsed time plus actual CLI behavior.
+
+The standalone native fixture
+`test/fixtures/compiler/low_memory_streaming_request/main.spl` passed with the
+admitted producer SHA256
+`1ad6ea53c67f3e01efc5c1b0ac8aa4dcef184a0987b4d3c806c59e14e96be584`.
+It compiled two actual modules with LLVM for Windows MSVC; the compile owner
+reported exit 0, 45088 ms compiler elapsed and 287608 KiB peak RSS. The resulting
+executable SHA256
+`81a3eec4a4e31876aead5acc0fe5885f429fbce4a8da23138f4e950f14bc5c25`
+ran with exit 0 and `low-memory streaming policy: 11 checks passed`. Evidence is
+retained under `C:/dev/simple-phase3-hir-memory-evidence/policy-probe*`, with
+600 seconds and 5859375 KiB enforced. This confirms the policy helper's native
+behavior. It does not execute a rebuilt driver, the SSpec suite or the full CLI,
+and no comparable baseline establishes a memory improvement yet.
