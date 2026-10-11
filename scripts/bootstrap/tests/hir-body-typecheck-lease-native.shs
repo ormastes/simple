@@ -7,6 +7,20 @@ die() { echo "hir-body-lease-fixture: $*" >&2; exit 96; }
 [ "$#" = 5 ] || die 'usage: --preflight|--run CANONICAL_ROOT FIXTURE_ROOT STAGE3_LANE FRESH_EVIDENCE_DIR'
 mode=$1
 case "$mode" in --preflight|--run) ;; *) die invalid-mode ;; esac
+fixture_kind=${SIMPLE_HIR_LEASE_FIXTURE_KIND:-typecheck}
+case "$fixture_kind" in
+    typecheck)
+        fixture_dir=test/fixtures/compiler/hir_body_typecheck_lease
+        fixture_files='main.spl provider.spl mismatch.spl'
+        fixture_receipt='HIR body typecheck lease: 31 checks passed'
+        fixture_checks=31 ;;
+    mono)
+        fixture_dir=test/fixtures/compiler/hir_mono_archive
+        fixture_files='main.spl provider.spl root.spl recursive.spl growing.spl alternate.spl'
+        fixture_receipt='HIR mono archive consumer: 29 checks passed'
+        fixture_checks=29 ;;
+    *) die unsupported-fixture-kind ;;
+esac
 canonical_root=$(cd "$2" && pwd -P)
 fixture_root=$(cd "$3" && pwd -P)
 lane=$(cd "$4" && pwd -P)
@@ -77,12 +91,12 @@ if [ -n "$fixture_links_receipt" ]; then
     cp "$fixture_links_receipt" "$evidence/input-fixture-materialization.env"
 fi
 # Canonical snapshot owns src and its normal source/tool roots, excluding
-# vendor/target caches. The three actual lease fixture files are added below;
+# vendor/target caches. The whitelisted actual fixture files are added below;
 # the canonical bootstrap snapshot intentionally does not include these tests.
 bootstrap_stage3_source_snapshot "$evidence/source.before.txt" "$fixture_root" || die source-snapshot-refused
 fixture_snapshot() {
-    for file in main.spl provider.spl mismatch.spl; do
-        path="test/fixtures/compiler/hir_body_typecheck_lease/$file"
+    for file in $fixture_files; do
+        path="$fixture_dir/$file"
         [ -f "$path" ] && [ ! -L "$path" ] || return 1
         printf '%s %s\n' "$(bootstrap_stage3_hash_file "$path")" "$path"
     done
@@ -98,6 +112,7 @@ closure_sha=$(printf '%s\n' "$source_sha" "$fixture_source_sha" | sha256sum)
 closure_sha=${closure_sha%% *}
 {
     printf 'schema=hir-body-lease-fixture-input-v1\n'
+    printf 'fixture_kind=%s\nfixture_entry=%s/main.spl\n' "$fixture_kind" "$fixture_dir"
     printf 'producer_path=%s\nproducer_sha256=%s\n' "$producer" "$producer_sha"
     printf 'runtime_receipt_path=%s\nruntime_receipt_sha256=%s\n' "$capsule" "$capsule_sha"
     printf 'source_snapshot_sha256=%s\nfixture_snapshot_sha256=%s\nclosure_sha256=%s\n' "$source_sha" "$fixture_source_sha" "$closure_sha"
@@ -119,6 +134,8 @@ export SIMPLE_NATIVE_BUILD_TARGET=x86_64-pc-windows-msvc SIMPLE_RUNTIME_RISCV64_
 export SIMPLE_NATIVE_BUILD_CACHE_DIR="$evidence/cache" SIMPLE_RT_OBJ_CACHE_DIR="$evidence/cache/runtime-objects"
 export SIMPLE_FRONTEND_CACHE_DIR="$evidence/cache/frontend" SIMPLE_HIR_CACHE_DIR="$evidence/cache/hir"
 export SIMPLE_FRONTEND_CACHE=1 SIMPLE_HIR_CACHE=1 SIMPLE_STUB_HIR=0 SIMPLE_FRONTEND_DIAG=1
+# The fixture checks the production defaults, including E-MONO-040 warning.
+unset SIMPLE_MONO_LEVELS SIMPLE_MONO_DIAG
 export SIMPLE_SHARD_MEM_CLAMP=1 SIMPLE_PARSE_SHARD_MAX=1 SIMPLE_PARSE_SHARD_WORKER_KB=1650000
 export SIMPLE_HIR_SHARD_WORKER_KB=3000000 SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=3000000
 export TMPDIR="$evidence/tmp" TMP="$(cygpath -w "$evidence/tmp")" TEMP="$(cygpath -w "$evidence/tmp")"
@@ -129,7 +146,7 @@ watchdog="$canonical_root/scripts/resource/process-tree-rss-watchdog.pl"
 set +e
 perl "$watchdog" --session-mode=new --rss-cap-mode=enforce --max-rss-kib=5859375 \
     --timeout-seconds=600 --receipt="$evidence/compile.rss.env" -- \
-    "$producer" native-build test/fixtures/compiler/hir_body_typecheck_lease/main.spl \
+    "$producer" native-build "$fixture_dir/main.spl" \
     --backend=llvm --low-memory --timeout 600 --threads 1 -o "$fixture" \
     > "$evidence/compile.log" 2>&1
 compile_rc=$?
@@ -174,5 +191,5 @@ set -e
 printf '%s\n' "$execution_rc" > "$evidence/execution.exit.txt"
 [ "$execution_rc" = 0 ] || exit "$execution_rc"
 [ "$(bootstrap_stage3_hash_file "$fixture")" = "$fixture_sha" ] || die fixture-executable-mutated
-grep -qx 'HIR body typecheck lease: 31 checks passed' "$evidence/execution.log" || die missing-positive-receipt
-printf 'hir-body-lease-fixture: PASS (31 native checks)\n'
+grep -Fqx "$fixture_receipt" "$evidence/execution.log" || die missing-positive-receipt
+printf 'hir-body-lease-fixture: PASS (%s native checks, %s)\n' "$fixture_checks" "$fixture_kind"

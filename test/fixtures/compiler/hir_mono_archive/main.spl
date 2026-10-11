@@ -1,0 +1,355 @@
+# Native only. Complete decoded functions are observed while their scope lives.
+use provider.{outer}
+use compiler.driver.cache.hir_body_typecheck_lease_v1.*
+use compiler.driver.cache.hir_mono_archive_consumer_v1.*
+use compiler.driver.driver_hir_cache.{hir_cache_header, hir_cache_load_in_owned_scope,
+    hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1, hir_cache_path}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{HirFunction, HirParam, HirExpr, HirExprKind, HirCallArg, HirStmt, HirStmtKind}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.mono.monomorphize_integration.{MonomorphizationPass, mono_sym_key, mono_type_identity}
+use compiler.mono.mono_archive_types_v1.{MonoTemplateSignatureV1, mono_template_signature_v1}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use std.env.{env_get}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+struct BodyObservation:
+    digest: text
+    literal_sum: i64
+    calls: [text]
+    type_params: i64
+    symbol_name: text
+    next_symbol: i64
+
+fn literal_sum(expr: HirExpr) -> i64:
+    if expr == nil: return 0
+    match expr.kind:
+        case HirExprKind.IntLit(value, _): value
+        case HirExprKind.Return(value): if val inner = value: literal_sum(inner) else: 0
+        case _: 0
+
+fn call_names(expr: HirExpr) -> [text]:
+    if expr == nil: return []
+    match expr.kind:
+        case HirExprKind.Call(callee, _, _):
+            match callee.kind:
+                case HirExprKind.NamedVar(_, name): [name]
+                case _: []
+        case HirExprKind.Return(value): if val inner = value: call_names(inner) else: []
+        case _: []
+
+fn observe_body(receipt: MonoArchivePublicationV1) -> Result<BodyObservation, text>:
+    if not transient_scope_begin(): return Err("observation scope unavailable")
+    var observed: BodyObservation? = nil
+    if val module = hir_cache_load_in_owned_scope(receipt.output_archive_key):
+        for raw in module.functions.values():
+            val function: HirFunction = raw
+            if function.symbol.id != receipt.target_symbol: continue
+            var total = if function.body.has: literal_sum(function.body.value) else: 0
+            var names = if function.body.has: call_names(function.body.value) else: []
+            for stmt in function.body.stmts:
+                match stmt.kind:
+                    case HirStmtKind.Expr(expr):
+                        total = total + literal_sum(expr)
+                        names = names + call_names(expr)
+                    case _: ()
+            var symbol_name = ""
+            if module.symbols.symbols.has(function.symbol.id):
+                symbol_name = module.symbols.symbols[function.symbol.id].name
+            observed = Some(BodyObservation(digest: mono_archive_function_digest_v1(function),
+                literal_sum: total, calls: names, type_params: function.type_params.len(),
+                symbol_name: symbol_name, next_symbol: module.symbols.next_symbol_id))
+    val admitted = observed != nil
+    val paused = transient_scope_pause()
+    val owned = if paused and admitted: transient_promote(observed) else: false
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not ended or not cache_owned or (admitted and not owned): panic("observation ownership")
+    if val value = observed: return Ok(value)
+    Err("complete output body unavailable")
+
+fn lower_fixture(file: text, name: text) -> HirModule:
+    val path = "test/fixtures/compiler/hir_mono_archive/" + file
+    val source = file_read_nullable(path) ?? ""
+    val parsed = parse_full_frontend(source, path, name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_parser_module_unstub(parsed, false)
+
+fn archive_fixture(module: HirModule) -> Result<HirBodyArchiveV1, text>:
+    hir_body_archive_store_v1(HirBodyArchiveInputV1(source_path: module.path,
+        module_name: module.name, is_entry: false,
+        closure_digest: env_get("SIMPLE_HIR_LEASE_CLOSURE_DIGEST"),
+        runtime_provider_digest: env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_DIGEST"),
+        runtime_provider_receipt_path: env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_RECEIPT"),
+        producer_header: hir_cache_header(), stage: "lowered-unresolved-v1"), module, [])
+
+fn collector(modules: Dict<text, HirModule>) -> MonomorphizationPass:
+    var pass_ = MonomorphizationPass.create()
+    for name in modules.keys():
+        val module: HirModule = modules[name]
+        pass_.module_paths[name] = module.path
+        pass_.collect_declared_globals(module, name)
+        pass_.collect_generics(module, name)
+    pass_
+
+fn fixture_function(module: HirModule, name: text) -> HirFunction:
+    for raw in module.functions.values():
+        val function: HirFunction = raw
+        if function.name == name: return function
+    panic("fixture function absent")
+
+fn integer_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: Span.default())
+
+fn generic_call(name: text, arg: HirExpr, type_: HirType) -> HirExpr:
+    val span = Span.default()
+    val callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId.new(-1), name),
+        has_type_: false, type_: integer_type(), span: span)
+    HirExpr(kind: HirExprKind.Call(callee, [HirCallArg(has_name: false, name: "", value: arg, span: span)], [type_]),
+        has_type_: true, type_: integer_type(), span: span)
+
+fn root_for(module: HirModule, template: text, repeat: bool, warn: bool) -> HirModule:
+    var output = module
+    var root = fixture_function(module, "root")
+    val span = root.span
+    val arg = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true, type_: integer_type(), span: span)
+    val call = generic_call(template, arg, integer_type())
+    root.body.stmts = []
+    if repeat:
+        val text_type = HirType(kind: HirTypeKind.Str, span: span)
+        val text_arg = HirExpr(kind: HirExprKind.StringLit("second specialization", nil), has_type_: true, type_: text_type, span: span)
+        root.body.stmts = [HirStmt(kind: HirStmtKind.Expr(call), span: span),
+            HirStmt(kind: HirStmtKind.Expr(generic_call(template, text_arg, text_type)), span: span)]
+    if warn:
+        val param: HirParam = root.params[0]
+        val base = HirExpr(kind: HirExprKind.Var(param.symbol), has_type_: true, type_: param.type_, span: span)
+        val field = HirExpr(kind: HirExprKind.Field(base, "values", nil), has_type_: false, type_: integer_type(), span: span)
+        root.body.stmts = root.body.stmts + [HirStmt(kind: HirStmtKind.Expr(field), span: span), HirStmt(kind: HirStmtKind.Expr(field), span: span)]
+    root.body.has = true
+    root.body.value = call
+    output.functions[root.symbol] = root
+    output
+
+fn admission_for(root: HirModule, provider: HirModule) -> Result<MonoArchiveAdmissionV1, text>:
+    val a = archive_fixture(root)
+    val b = archive_fixture(provider)
+    if a.is_err() or b.is_err(): return Err("fixture archive failed")
+    var modules: Dict<text, HirModule> = {}
+    modules[root.name] = root
+    modules[provider.name] = provider
+    var archives: Dict<text, HirBodyArchiveV1> = {}
+    archives[root.name] = a.unwrap()
+    archives[provider.name] = b.unwrap()
+    mono_archive_admit_v1(archives, collector(modules))
+
+fn signature_after_scope(function: HirFunction) -> MonoTemplateSignatureV1:
+    if not transient_scope_begin(): panic("signature scope unavailable")
+    var input = function
+    var param: HirParam = input.params[0]
+    param.has_default = true
+    param.default = HirExpr(kind: HirExprKind.StringLit("scratch executable default", nil),
+        has_type_: true, type_: integer_type(), span: input.span)
+    input.params = [param]
+    val signature = mono_template_signature_v1(input)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(signature) else: false
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: panic("signature ownership")
+    signature
+
+fn main() -> i64:
+    if env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_DIGEST").len() != 64 or env_get("SIMPLE_HIR_LEASE_CLOSURE_DIGEST").len() != 64: return 1
+    var checks = 1
+    if outer<i64>(7) != 43 or outer<text>("complete native provider") != 43: return 2
+    checks = checks + 1
+    val provider = lower_fixture("provider.spl", "lease.provider")
+    val original_root = lower_fixture("root.spl", "lease.root")
+    val root = root_for(original_root, "outer", true, true)
+    val built = admission_for(root, provider)
+    if built.is_err(): return 3
+    checks = checks + 1
+    val admission = built.unwrap()
+    var modules: Dict<text, HirModule> = {}
+    modules[root.name] = root
+    modules[provider.name] = provider
+    var reference = MonomorphizationPass.create()
+    val retained_modules = reference.process_modules(modules)
+    val root_function = fixture_function(root, "root")
+    val first = mono_archive_rewrite_root_v1(admission, root.name, root_function.symbol.id)
+    if first.is_err() or first.unwrap().delta.requests.len() != 2 or admission.state.queue.len() != 0: return 4
+    checks = checks + 1
+    val first_receipt = first.unwrap()
+    if first_receipt.delta.warnings.len() != 1 or not first_receipt.delta.warnings[0].contains("E-MONO-040") or first_receipt.delta.reported_once.len() != 1: return 5
+    checks = checks + 1
+    if mono_archive_apply_v1(admission, first_receipt).is_err() or admission.state.queue.len() != 2: return 6
+    checks = checks + 1
+    if not mono_archive_apply_v1(admission, first_receipt).is_err() or admission.state.epoch != 1: return 7
+    checks = checks + 1
+    val repeated = mono_archive_rewrite_root_v1(admission, root.name, root_function.symbol.id)
+    if repeated.is_err() or repeated.unwrap().delta.requests.len() != 0 or repeated.unwrap().delta.warnings.len() != 0 or repeated.unwrap().delta.reported_once.len() != 0: return 8
+    checks = checks + 1
+    if mono_archive_apply_v1(admission, repeated.unwrap()).is_err(): return 9
+    checks = checks + 1
+    var emitted = 0
+    while admission.state.cursor < admission.state.queue.len():
+        val next = mono_archive_drain_one_v1(admission)
+        if next.is_err(): return 10
+        val receipt = next.unwrap()
+        val observation = observe_body(receipt)
+        if observation.is_err(): return 11
+        val body = observation.unwrap()
+        if body.digest != receipt.output_function_digest or body.type_params != 0 or body.symbol_name != receipt.target_name or body.next_symbol <= receipt.target_symbol: return 12
+        if not reference.specialized_functions.has(receipt.target_name) or mono_archive_function_digest_v1(reference.specialized_functions[receipt.target_name]) != body.digest: return 13
+        if receipt.target_name.starts_with("inner") and body.literal_sum != 43: return 14
+        if receipt.target_name.starts_with("outer") and (body.calls.len() == 0 or not body.calls[0].starts_with("inner")): return 15
+        if mono_archive_apply_v1(admission, receipt).is_err(): return 16
+        emitted = emitted + 1
+    if emitted != 4 or admission.state.emitted.len() != 4 or not mono_archive_drain_one_v1(admission).is_err(): return 17
+    checks = checks + 1
+    if first_receipt.delta.requests[0].module_name != provider.name or first_receipt.stage != "mono-function-rewrite-v1": return 18
+    checks = checks + 1
+    val inner = fixture_function(provider, "inner")
+    val signature = signature_after_scope(inner)
+    if not transient_scope_begin(): return 19
+    var scratch: [text] = []
+    var i = 0
+    while i < 128:
+        scratch = scratch.push("scope growth {i}")
+        i = i + 1
+    val refused = mono_archive_rewrite_root_v1(admission, root.name, root_function.symbol.id).is_err() and mono_archive_apply_v1(admission, first_receipt).is_err()
+    val scratch_valid = scratch.len() == 128 and scratch[127] == "scope growth 127"
+    if not transient_scope_end(): return 20
+    if not refused or not scratch_valid or signature.param_types.len() != 1 or signature.type_params.len() != 1 or first_receipt.delta.requests[0].template_name != "outer" or outer<text>("after second scope") != 43: return 21
+    checks = checks + 1
+    val provider_key = mono_sym_key(provider.name, inner.symbol.id)
+    if not admission.state.facts.symbol_identities.has(provider_key) or admission.state.facts.symbol_identities[provider_key] != mono_type_identity(provider.symbols, inner.symbol, provider.name): return 22
+    checks = checks + 1
+    val frame_path = hir_cache_path(first_receipt.output_archive_key)
+    val frame = file_read_nullable(frame_path) ?? ""
+    val fresh_root = mono_archive_rewrite_root_v1(admission, root.name, root_function.symbol.id)
+    if frame == "" or fresh_root.is_err(): return 23
+    checks = checks + 1
+    val fresh = fresh_root.unwrap()
+    val fresh_path = hir_cache_path(fresh.output_archive_key)
+    val fresh_frame = file_read_nullable(fresh_path) ?? ""
+    val epoch = admission.state.epoch
+    if not file_write(fresh_path, "corrupt actual module"): return 24
+    if not mono_archive_apply_v1(admission, fresh).is_err() or admission.state.epoch != epoch: return 25
+    checks = checks + 1
+    if not file_write(fresh_path, fresh_frame) or mono_archive_apply_v1(admission, fresh).is_err(): return 26
+    checks = checks + 1
+    var forged = first_receipt
+    forged.stage = "final-mono-module-v1"
+    if not mono_archive_apply_v1(admission, forged).is_err(): return 27
+    checks = checks + 1
+    # The actual recursively specialized body deduplicates its own request.
+    val recursive = lower_fixture("recursive.spl", "lease.recursive")
+    val recursive_root = root_for(original_root, "recursive", false, false)
+    val recursive_built = admission_for(recursive_root, recursive)
+    if recursive_built.is_err(): return 28
+    val rec = recursive_built.unwrap()
+    val rec_root = mono_archive_rewrite_root_v1(rec, recursive_root.name, root_function.symbol.id)
+    if rec_root.is_err() or mono_archive_apply_v1(rec, rec_root.unwrap()).is_err(): return 29
+    val rec_body = mono_archive_drain_one_v1(rec)
+    if rec_body.is_err() or rec_body.unwrap().delta.requests.len() != 0: return 30
+    checks = checks + 1
+    if mono_archive_apply_v1(rec, rec_body.unwrap()).is_err() or rec.state.cursor != 1 or rec.state.queue.len() != 1: return 31
+    checks = checks + 1
+    # Polymorphic recursion reaches the existing exact depth diagnostic.
+    val growing = lower_fixture("growing.spl", "lease.growing")
+    val growing_root = root_for(original_root, "growing", false, false)
+    val growing_built = admission_for(growing_root, growing)
+    if growing_built.is_err(): return 32
+    val growth = growing_built.unwrap()
+    val growth_root = mono_archive_rewrite_root_v1(growth, growing_root.name, root_function.symbol.id)
+    if growth_root.is_err() or mono_archive_apply_v1(growth, growth_root.unwrap()).is_err(): return 33
+    var depth_messages: [text] = []
+    var visits = 0
+    while growth.state.cursor < growth.state.queue.len() and visits < 20:
+        val body = mono_archive_drain_one_v1(growth)
+        if body.is_err(): return 34
+        depth_messages = depth_messages + body.unwrap().delta.diagnostics
+        if mono_archive_apply_v1(growth, body.unwrap()).is_err(): return 35
+        visits = visits + 1
+    if visits > 17 or growth.state.cursor != growth.state.queue.len() or depth_messages.len() != 1 or not depth_messages[0].contains("E-MONO-030"): return 36
+    checks = checks + 1
+    var depth_modules: Dict<text, HirModule> = {}
+    depth_modules[growing_root.name] = growing_root
+    depth_modules[growing.name] = growing
+    var depth_reference = MonomorphizationPass.create()
+    val depth_outputs = depth_reference.process_modules(depth_modules)
+    if depth_messages != depth_reference.diagnostics or growth.state.emitted.len() != depth_reference.specialized_functions.len(): return 37
+    checks = checks + 1
+    # Actual table-local IDs collide across physical modules. Last declaration
+    # selection is compared with the retained pass, not changed by this seam.
+    val alternate = lower_fixture("alternate.spl", "lease.alternate")
+    val alternate_outer = fixture_function(alternate, "outer")
+    if alternate_outer.symbol.id != inner.symbol.id: return 38
+    checks = checks + 1
+    var collision_modules: Dict<text, HirModule> = {}
+    collision_modules[root.name] = root
+    collision_modules[provider.name] = provider
+    collision_modules[alternate.name] = alternate
+    var collision_archives: Dict<text, HirBodyArchiveV1> = {}
+    for name in collision_modules.keys():
+        val stored = archive_fixture(collision_modules[name])
+        if stored.is_err(): return 39
+        collision_archives[name] = stored.unwrap()
+    val collision_built = mono_archive_admit_v1(collision_archives, collector(collision_modules))
+    if collision_built.is_err(): return 40
+    val collision = collision_built.unwrap()
+    val alternate_key = mono_sym_key(alternate.name, alternate_outer.symbol.id)
+    if alternate_key == provider_key or not collision.state.facts.symbol_identities.has(alternate_key) or
+            collision.state.facts.symbol_identities[alternate_key] != mono_type_identity(alternate.symbols, alternate_outer.symbol, alternate.name): return 41
+    checks = checks + 1
+    val collision_root = mono_archive_rewrite_root_v1(collision, root.name, root_function.symbol.id)
+    if collision_root.is_err() or collision_root.unwrap().delta.requests.len() != 2 or collision_root.unwrap().delta.requests[0].module_name != alternate.name or mono_archive_apply_v1(collision, collision_root.unwrap()).is_err(): return 42
+    checks = checks + 1
+    val collision_body = mono_archive_drain_one_v1(collision)
+    if collision_body.is_err(): return 43
+    val collision_observed = observe_body(collision_body.unwrap())
+    var collision_reference = MonomorphizationPass.create()
+    val collision_outputs = collision_reference.process_modules(collision_modules)
+    if collision_observed.is_err() or collision_observed.unwrap().literal_sum != 17 or
+            collision_observed.unwrap().digest != mono_archive_function_digest_v1(collision_reference.specialized_functions[collision_body.unwrap().target_name]): return 44
+    checks = checks + 1
+    if mono_archive_apply_v1(collision, collision_body.unwrap()).is_err() or collision.state.emitted.len() != 1: return 45
+    checks = checks + 1
+    # Declaration facts cannot authorize a different complete provider body.
+    var mismatch_collector = collector(modules)
+    var wrong_template: HirFunction = mismatch_collector.generic_functions["outer"]
+    wrong_template.return_type = HirType(kind: HirTypeKind.Bool, span: wrong_template.span)
+    mismatch_collector.generic_functions["outer"] = wrong_template
+    val mismatch_built = mono_archive_admit_v1(admission.repository.modules, mismatch_collector)
+    if mismatch_built.is_err(): return 46
+    val mismatch = mismatch_built.unwrap()
+    val mismatch_root = mono_archive_rewrite_root_v1(mismatch, root.name, root_function.symbol.id)
+    if mismatch_root.is_err() or mono_archive_apply_v1(mismatch, mismatch_root.unwrap()).is_err(): return 47
+    val mismatch_epoch = mismatch.state.epoch
+    if not mono_archive_drain_one_v1(mismatch).is_err() or mismatch.state.epoch != mismatch_epoch or mismatch.state.emitted.len() != 0: return 48
+    checks = checks + 1
+    val current = mono_archive_rewrite_root_v1(admission, root.name, root_function.symbol.id)
+    if current.is_err(): return 49
+    var altered = current.unwrap()
+    altered.delta.diagnostics = ["fabricated diagnostic"]
+    val before_altered = admission.state.epoch
+    if not mono_archive_apply_v1(admission, altered).is_err() or admission.state.epoch != before_altered: return 50
+    checks = checks + 1
+    var wrong_archive = admission.repository.modules[provider.name]
+    wrong_archive.input.closure_digest = sha256_text("explicit invalid closure control")
+    var wrong_archives: Dict<text, HirBodyArchiveV1> = {}
+    wrong_archives[root.name] = admission.repository.modules[root.name]
+    wrong_archives[provider.name] = wrong_archive
+    if not mono_archive_admit_v1(wrong_archives, collector(modules)).is_err(): return 51
+    checks = checks + 1
+    if checks != 29: return 52
+    print "HIR mono archive consumer: {checks} checks passed"
+    0
