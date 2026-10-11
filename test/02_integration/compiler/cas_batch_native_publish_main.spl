@@ -46,6 +46,46 @@ fn probe_case(root: text, package_name: text, scc: text, dependencies: [text], a
     print "publish-load-pin-ok:{package_name}:generation-bytes={generation!.bytes().len()}"
     true
 
+fn probe_multi_package_scc(root: text, authority: PackageArchiveAuthorityV1) -> bool:
+    val scc = "scc-multi"
+    val alpha = probe_entry("alpha", scc)
+    val beta = probe_entry("beta", scc)
+    val alpha_dependency = sha256_text("alpha-dependency")
+    val beta_dependency = sha256_text("beta-dependency")
+    val alpha_interface_digest = sha256_text("interface-alpha")
+    val beta_interface_digest = sha256_text("interface-beta")
+    val alpha_action_digest = sha256_text("action-alpha")
+    val beta_action_digest = sha256_text("action-beta")
+    val alpha_input = PackageArchivePublishInputV1(
+        alpha, [alpha_dependency],
+        "symbol|alpha|function|i64|{alpha_interface_digest}",
+        "action|compile-alpha|compile|alpha|{alpha_action_digest}", true)
+    val beta_input = PackageArchivePublishInputV1(
+        beta, [beta_dependency],
+        "symbol|beta|function|i64|{beta_interface_digest}",
+        "action|compile-beta|compile|beta|{beta_action_digest}", true)
+    if not package_archive_publish_scc_v1(root, scc, authority,
+            [alpha_input, beta_input]):
+        print "multi-package-publish-failed"
+        return false
+    val alpha_aggregate = package_archive_aggregate_entry_v1([alpha])
+    val beta_aggregate = package_archive_aggregate_entry_v1([beta])
+    if alpha_aggregate == nil or beta_aggregate == nil:
+        return false
+    val alpha_loaded = package_archive_load_v1(
+        root, alpha_aggregate!, authority, [alpha_dependency])
+    val beta_loaded = package_archive_load_v1(
+        root, beta_aggregate!, authority, [beta_dependency])
+    if not alpha_loaded.valid or not beta_loaded.valid:
+        print "multi-package-load-failed"
+        return false
+    if alpha_loaded.receipt == nil or beta_loaded.receipt == nil or
+            alpha_loaded.receipt!.package_key != "alpha" or
+            beta_loaded.receipt!.package_key != "beta":
+        return false
+    print "multi-package-scc-publish-load-ok"
+    true
+
 fn main() -> i64:
     val root = "build/tmp/cas_batch_native_publish/{rt_getpid()}-{rt_time_now_unix_micros()}"
     val authority = PackageArchiveAuthorityV1(
@@ -54,5 +94,7 @@ fn main() -> i64:
     if not probe_case(root, "zero", "scc-zero", [], authority):
         return 1
     if not probe_case(root, "one", "scc-one", [sha256_text("dependency")], authority):
+        return 1
+    if not probe_multi_package_scc(root, authority):
         return 1
     0

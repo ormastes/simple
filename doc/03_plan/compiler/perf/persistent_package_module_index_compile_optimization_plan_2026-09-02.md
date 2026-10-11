@@ -689,3 +689,13 @@ source changes and three-cycle boundary are recorded in
 The next verification must finish MIR/link, run the fixture, and read back a
 V3 CURRENT generation. Full CLI warm reuse, native p95/RSS cohorts, and Item 6
 cutover remain open.
+
+### 2026-10-11 SCC archive grouping candidate
+
+The cold archive publisher now groups input indexes by package once,
+preserving publication order while removing its per-package full input scan.
+The focused same-SCC multi-package fixture is authored. Its 69-module
+no-stub Stage 2 build passed HIR but failed native MIR lowering in archive
+and CAS dependencies, so no executable or paired p95/RSS sum result exists.
+See the SCC grouping report and archive MIR bug. This is a source candidate,
+not Item 6 completion or release qualification.

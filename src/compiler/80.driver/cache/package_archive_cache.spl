@@ -392,12 +392,22 @@ fn package_archive_publish_scc_v1(
 ) -> bool:
     if scc_identity == "" or inputs.len() == 0:
         return false
+    # Preserve first-seen package order and per-package input order while
+    # avoiding a full input scan for every package in a large SCC.
     var required: [text] = []
-    for input in inputs:
+    var input_indexes_by_package: Dict<text, [i64]> = {}
+    var input_index = 0
+    while input_index < inputs.len():
+        val input = inputs[input_index]
         if not input.success or input.entry.scc_identity != scc_identity:
             return false
-        if not required.contains(input.entry.package_identity):
-            required = required.push(input.entry.package_identity)
+        val package_identity = input.entry.package_identity
+        if not input_indexes_by_package.has(package_identity):
+            input_indexes_by_package[package_identity] = []
+            required = required.push(package_identity)
+        input_indexes_by_package[package_identity] =
+            input_indexes_by_package[package_identity].push(input_index)
+        input_index = input_index + 1
     val begun = cas_batch_begin_v1(
         root, cas_batch_current_v1(root), scc_identity, required)
     if begun.is_err():
@@ -408,12 +418,11 @@ fn package_archive_publish_scc_v1(
         var dependencies_all: [text] = []
         var interfaces: [text] = []
         var actions: [text] = []
-        for input in inputs:
-            if input.entry.package_identity != package_identity:
-                continue
+        for grouped_index in input_indexes_by_package[package_identity]:
+            val input = inputs[grouped_index]
             package_entries.push(input.entry)
-            dependencies_all = dependencies_all.concat(
-                input.dependency_interface_digests)
+            for dependency_digest in input.dependency_interface_digests:
+                dependencies_all.push(dependency_digest)
             interfaces.push(input.interface_content)
             actions.push(input.action_content)
         val aggregate = package_archive_aggregate_entry_v1(package_entries)
