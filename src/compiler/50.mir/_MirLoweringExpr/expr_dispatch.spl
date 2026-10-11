@@ -2880,12 +2880,10 @@ impl MirLowering:
             result_type = self.bootstrap_text_type()
         elif not result_type_from_base and has_index_result_hir_type:
             result_type = self.lower_type(index_result_hir_type)
-        if is_tuple_base and not result_type_from_base and not has_index_result_hir_type:
-            # gap (c) fallback (see the Tuple(field_types) arm above): no
-            # HIR-sourced element type reached this call, so fall back to
-            # the tuple's own MIR-registered field type at the literal
-            # index instead of leaving result_type at the untyped i64
-            # default.
+        if is_tuple_base and not result_type_from_base:
+            # The tuple's stored MIR field type describes its actual ABI.
+            # A HIR annotation may lower text to a different representation
+            # and cannot replace that type (or its record owner provenance).
             val lit_field_idx = self.tuple_index_literal(index)
             if lit_field_idx >= 0 and lit_field_idx < tuple_field_mir_types.len():
                 result_type = tuple_field_mir_types[lit_field_idx]
@@ -3051,6 +3049,11 @@ impl MirLowering:
             var bf = self.builder
             val field_local = bf.emit_get_field(mir_operand_copy(base_local), self.tuple_index_literal(index), result_type)
             self.builder = bf
+            # Native tuple storage already contains decoded scalars or intact
+            # runtime handles. Do not decode the field a second time. Restore
+            # the semantic owner/container markers on this fresh projection
+            # so destructured records resolve fields and methods by name.
+            self.mark_native_tuple_projection(field_local, result_type)
             field_local
         else:
             var b = self.builder
@@ -3062,6 +3065,32 @@ impl MirLowering:
             val loaded = b.emit_load(mir_operand_copy(ptr), result_type)
             self.builder = b
             loaded
+
+    me mark_native_tuple_projection(local: LocalId, field_type: MirType):
+        match field_type.kind:
+            case MirTypeKind.Struct(symbol):
+                val owner = self.mir_struct_symbol_name(symbol)
+                if owner != "":
+                    self.struct_value_syms[local.id] = owner
+            case MirTypeKind.Opaque(owner):
+                if owner != "" and owner != "str" and owner != "__runtime_array__":
+                    self.struct_value_syms[local.id] = owner
+            case MirTypeKind.Array(element, _) | MirTypeKind.Slice(element):
+                self.runtime_array_locals[local.id] = true
+                self.mark_runtime_value_local(local.id)
+                match element.kind:
+                    case MirTypeKind.Struct(symbol):
+                        val owner = self.mir_struct_symbol_name(symbol)
+                        if owner != "":
+                            self.array_element_struct_syms[local.id] = owner
+                    case MirTypeKind.Opaque(owner):
+                        if owner != "" and owner != "str" and owner != "__runtime_array__":
+                            self.array_element_struct_syms[local.id] = owner
+                    case _: ()
+            case MirTypeKind.Dict(_, _):
+                self.runtime_dict_locals[local.id] = true
+                self.mark_runtime_value_local(local.id)
+            case _: ()
 
     me tuple_index_literal(index: HirExpr) -> i64:
         """Recover the literal field index from a `t.N` desugared Index
