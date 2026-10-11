@@ -204,3 +204,38 @@ declaration authority must be separate from artifact receipts. The design now
 records this lifecycle and explicit success/refusal cases. No claim is made that
 existing process lifecycle evidence enforces filesystem access or that these
 planned generator stages are implemented.
+
+## Release-phase3 port (2026-10-11)
+
+The user changed the integration target to GitHub `release_phase3`. The new
+isolated worktree is `C:/dev/simple-item6-release-phase3-20261011`, branch
+`work/item6-release-phase3-20261011`, based on target commit
+`20f619fe31baa4decbe40f6d367fb5e4f115bbd8`. PR 3072 targets that exact branch.
+The former PR 2867 was merged into `release/1.0` by another actor; that merge
+does not prove the changes exist on or are qualified for `release_phase3`.
+
+Patch comparison found the earlier six commits already present on the target.
+Only the nine missing schema, consumer, regression and follow-up documentation
+commits were applied. `git range-diff` reports exact equivalence for all nine;
+there were no conflicts or implementation adaptations. Whitespace checks passed.
+
+The available Phase-2 parent is
+`rel-bootstrap-recovery-20261011/stage2/x86_64-pc-windows-msvc/simple.exe`
+under `C:/dev/simple-bootstrap-storage`, SHA-256
+`1d18beed32d7156d9dc0ed2025ed6da77af289778f97632b8f57e07e5a7137b8`.
+Matching parent provenance, sanity and admission receipts were located. The
+canonical parent-only validator is being run against this worktree; its log and
+terminal status live in
+`C:/dev/simple-bootstrap-storage/item6-release-phase3-20261011/`.
+This is a prerequisite check, not Phase-3 compilation or qualification evidence.
+
+The prior generic-successor attempt failed before compilation because its
+sparse checkout omitted `release/version.sdn`. This checkout includes that
+authority and the kernel policy. Additional tracked link targets and the pinned
+SPipe submodule are materialized before freezing the build source. Parent
+admission cannot substitute for a source-bound planner receipt: direct Stage-3
+resume requires its source snapshot to match the admitted Stage-2 source. New
+source changes therefore require a qualified successor producer first.
+
+STATUS: IN PROGRESS. Neither a Phase-3 PASS nor release admission is claimed.
+The original generated-execution and runtime acceptance gaps remain open.
