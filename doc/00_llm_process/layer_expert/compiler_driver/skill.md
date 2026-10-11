@@ -145,6 +145,15 @@ uses the same actual borrowed emitter/witness implementation. All-success ctx
 publication and original error categories remain; two new compiled examples
 are unrun. This is scoped retained-path emission, not full pipeline activation.
 
+`cache/driver_hir_archive_schedule_v1.spl` and the actual CompilerDriver capture
+wrapper replay the frozen streaming surface/source owner, independent authored
+aliases, shared visit producer and separate physical layout schedule. A shard's
+all-source recipe cannot admit full publication. The `schedule` and
+`schedule_shard` native selectors each require 13 checks in a fresh runtime
+process; both remain unrun. Aspect policy replay now accepts explicit actual
+ordered claim DTOs without registry mutation. Genuine source/policy and
+transformed-body ownership remains required before production activation.
+
 ## 2026-09-26 — `native-build` restored: backend table in the interpreted worker, entry-file hashing, module-init reads
 
 - **The interpreted native-build worker never installed the static backend

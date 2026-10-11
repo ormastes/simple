@@ -66,3 +66,13 @@ sharing its actual implementation with borrowed archive capture. It retains all
 real emitted payload/file/witness outputs and original error categories; two
 additional compiled-spec examples remain unrun. Full HIR graph retention and
 the required cap qualification are still unresolved by this local change.
+
+Actual streaming schedule capture binds physical surfaces, each independent
+authored alias, real visit order and distinct logical/layout orders. The
+`schedule` and `schedule_shard` selectors each require 13 native checks in
+separate runtime processes. Shard order is prospective and refuses full
+publication admission. Explicit aspect claim replay preserves ordered real
+registry inputs without installing another compilation's claims. These controls
+are unrun and still need the genuine transformed-stage prerequisite owner.
+The narrow MIR compatibility-default detach API removes only default/ambiguity
+roots and preserves return/type/link metadata; two frontend examples are unrun.
