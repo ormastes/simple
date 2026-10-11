@@ -1,0 +1,65 @@
+# @req REQ-GENERIC-IFVAL-PAYLOAD
+# @tag: unit, compiler, mono, generics
+use std.spec
+use compiler.hir.hir_types.*
+use compiler.common.diagnostics.span.Span
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mono.monomorphize_integration.{MonomorphizationPass, hir_type_key}
+
+fn ifval_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn ifval_collect(binding_type: HirType, explicit_type: HirType?) -> HirType:
+    var pass_ = MonomorphizationPass.create()
+    pass_.current_module = "ifval"
+    val source_type = ifval_type(HirTypeKind.Optional(ifval_type(HirTypeKind.Str)))
+    var symbols = SymbolTable.new()
+    val local = symbols.define("payload", SymbolKind.Variable, binding_type, Span.empty(), Visibility.Private, false, nil)
+    pass_.module_symbols["ifval"] = symbols
+    val source = HirExpr(kind: HirExprKind.Var(SymbolId(id: 40)), has_type_: true, type_: source_type, span: Span.empty())
+    val checked = HirExpr(kind: HirExprKind.ExistsCheck(source), has_type_: true, type_: source_type, span: Span.empty())
+    pass_.collect_lets_stmt(HirStmt(kind: HirStmtKind.Let(local, explicit_type, checked), span: Span.empty()))
+    pass_.env[local.id]
+
+describe "if-val generic inference respects HIR binding provenance":
+    it "uses the HIR payload binding rather than the optional initializer type":
+        val payload = ifval_type(HirTypeKind.Str)
+        expect(hir_type_key(ifval_collect(payload, nil))).to_equal(hir_type_key(payload))
+
+    it "retains Optional for an ordinary value-position existence check":
+        val optional = ifval_type(HirTypeKind.Optional(ifval_type(HirTypeKind.Str)))
+        expect(hir_type_key(ifval_collect(optional, nil))).to_equal(hir_type_key(optional))
+
+    it "preserves an explicit annotation before inferred symbol evidence":
+        val payload = ifval_type(HirTypeKind.Str)
+        val optional = ifval_type(HirTypeKind.Optional(payload))
+        expect(hir_type_key(ifval_collect(payload, optional))).to_equal(hir_type_key(optional))
+
+    it "specializes real parsed text and integer if-val payload calls at the payload types":
+        val source = "fn identity<T>(value: T) -> T:\n    value\n\n" +
+            "fn text_value(value: text?) -> text:\n    if val payload = value:\n        return identity(payload) + \"b\"\n    \"none\"\n\n" +
+            "fn int_value(value: i64?) -> i64:\n    if val payload = value:\n        return identity(payload) + 2\n    -1\n"
+        var lowering = HirLowering.with_filename("ifval.spl")
+        val hir = lowering.lower_module(parse_full_frontend(source, "ifval.spl", "ifval", Logger(level: 0)))
+        expect(lowering.errors.len()).to_equal(0)
+        var modules: Dict<text, HirModule> = {}
+        modules["ifval"] = hir
+        var pass_ = MonomorphizationPass.create()
+        val result = pass_.run(modules)
+        expect(pass_.diagnostics.len()).to_equal(0)
+        expect(pass_.stats.specializations_created).to_equal(2)
+        expect(pass_.stats.unresolved_generic_calls).to_equal(0)
+        var found_text = false
+        var found_int = false
+        for function in pass_.specialized_functions.values():
+            val specialized: HirFunction = function
+            expect(specialized.params.len()).to_equal(1)
+            match specialized.params[0].type_.kind:
+                case HirTypeKind.Str: found_text = true
+                case HirTypeKind.Int(64, true): found_int = true
+                case _: expect(false).to_be(true)
+        expect(found_text).to_be(true)
+        expect(found_int).to_be(true)
