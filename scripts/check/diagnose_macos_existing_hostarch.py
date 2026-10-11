@@ -142,6 +142,7 @@ def run(debugger):
         for name in names:
             launch_environment.pop(name, None)
         launch_environment.update(env_map)
+        launch_environment.pop("_SIMPLE_STACK_SET", None)  # Frozen Rust spawn owner removes this.
         launch = lldb.SBLaunchInfo(argv)
         launch.SetWorkingDirectory(os.getcwd())
         launch.SetEnvironmentEntries([name + "=" + value for name, value in launch_environment.items()], False)
@@ -176,10 +177,14 @@ def run(debugger):
             raise RuntimeError("child host breakpoint relocation not confirmed")
         evidence["child_launch"]["host_breakpoint_load_address"] = host_address
         persist()
-        bounded_continue(70)
-        if process.GetState() != lldb.eStateStopped or host.GetHitCount() != 1:
-            raise RuntimeError("host_arch breakpoint not reached")
         host.SetEnabled(False)
+        # SHA404042: exact linker guard call, not any earlier architecture query.
+        linker = symbol("src__compiler__backend__linker___LinkerWrapper__native_linking__native_link_with_admitted_inputs_and_engine_v1")
+        guard = stop_at(linker + 0x508)
+        if guard.GetPC() != linker + 0x508:
+            raise RuntimeError("specific linker host-query callsite not reached")
+        evidence["link_guard"] = {"owner_load_address": linker, "call_load_address": guard.GetPC(), "expected_call_offset": 0x508}
+        persist()
         shell = symbol(PREFIX + "shell_output")
         frame = stop_at(shell)
         command = text(frame, frame.FindRegister("x0").GetValueAsUnsigned())
@@ -209,7 +214,22 @@ def run(debugger):
         if process.GetState() != lldb.eStateStopped:
             raise RuntimeError("host_arch return not observed")
         frame = thread.GetFrameAtIndex(0)
+        if frame.GetPC() != linker + 0x50c:
+            raise RuntimeError("host_arch did not return to exact linker guard")
         evidence["host_arch"] = text(frame, frame.FindRegister("x0").GetValueAsUnsigned())
+        evidence["link_guard"]["return_load_address"] = frame.GetPC()
+        persist()
+        frame = stop_at(linker + 0x510)  # after mov x25,x0
+        evidence["link_guard"]["arch_x25"] = text(frame, frame.FindRegister("x25").GetValueAsUnsigned())
+        persist()
+        frame = stop_at(linker + 0x51c)  # support predicate returned; cbz follows
+        supported = frame.FindRegister("x0").GetValueAsUnsigned()
+        if supported not in [0, 1]:
+            raise RuntimeError("invalid linker support predicate result")
+        evidence["link_guard"]["supported"] = supported
+        if supported == 0:
+            frame = stop_at(linker + 0x898)  # actual error formatter call
+            evidence["link_guard"]["error_arch"] = text(frame, frame.FindRegister("x1").GetValueAsUnsigned())
         evidence["capture"] = "COMPLETE"
     except Exception as error:
         evidence["capture"] = "INCOMPLETE"
