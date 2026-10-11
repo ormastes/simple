@@ -1,0 +1,179 @@
+# Complete module assembly is explicitly unverified until aggregate post-mono
+# validators and the driver's existing diagnostic policy admit it.
+use compiler.hir.hir_types.{HirModule, SymbolId, HirSymbol, SymbolKind, ScopeId, BUILTIN_METHOD_NONE}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.mono.monomorphize_integration.{is_generic_function, mono_sym_key, sorted_function_indices}
+use compiler.mono.mono_archive_state_v1.{mono_archive_state_digest_v1, mono_archive_scratch_pass_v1}
+use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveV1,
+    hir_body_archive_matches_v1, hir_body_archive_warnings_digest_v1,
+    hir_body_archive_load_in_owned_scope_v1}
+use compiler.driver.cache.hir_mono_archive_consumer_v1.{MonoArchivePublicationV1,
+    mono_archive_load_function_in_owned_scope_v1}
+use compiler.driver.cache.hir_mono_archive_execution_v1.{MonoArchiveExecutionV1,
+    mono_archive_execution_complete_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_in_owned_scope,
+    hir_cache_last_warnings, hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+
+struct MonoArchiveAssembledModuleV1:
+    input_archive: HirBodyArchiveV1
+    archive_key: text
+    body_digest: text
+    lowering_warnings_digest: text
+    coverage_digest: text
+    closure_state_digest: text
+    final_symbol_counter: i64
+    stage: text
+
+fn mono_archive_assembled_key_v1(descriptor: MonoArchiveAssembledModuleV1) -> text:
+    var writer = HirCodecWriter.create()
+    writer.put_text(descriptor.input_archive.archive_key)
+    writer.put_text(descriptor.input_archive.body_digest)
+    writer.put_text(descriptor.body_digest)
+    writer.put_text(descriptor.lowering_warnings_digest)
+    writer.put_text(descriptor.coverage_digest)
+    writer.put_text(descriptor.closure_state_digest)
+    writer.put_i64(descriptor.final_symbol_counter)
+    writer.put_text(descriptor.stage)
+    if not writer.ok: return ""
+    sha256_text("mono-assembled-module-key-v1\n" + writer.finish())
+
+fn mono_archive_module_coverage_v1(owner: MonoArchiveExecutionV1, name: text) -> text:
+    var writer = HirCodecWriter.create()
+    writer.put_text(owner.admission.repository.authority)
+    writer.put_text(owner.schedule_digest)
+    writer.put_text(name)
+    var found = false
+    for module in owner.roots:
+        if module.module_name != name: continue
+        found = true
+        writer.put_i64(module.symbols.len())
+        for symbol in module.symbols:
+            val key = mono_sym_key(name, symbol)
+            if not owner.root_records.has(key): return ""
+            val receipt = owner.root_records[key]
+            writer.put_i64(symbol)
+            writer.put_text(receipt.output_archive_key)
+            writer.put_text(receipt.function_archive_key)
+            writer.put_text(receipt.delta_digest)
+    if not found: return ""
+    var count = 0
+    for receipt in owner.specialization_records:
+        if receipt.module_name == name: count = count + 1
+    writer.put_i64(count)
+    for receipt in owner.specialization_records:
+        if receipt.module_name != name: continue
+        writer.put_i64(receipt.target_symbol)
+        writer.put_text(receipt.target_name)
+        writer.put_text(receipt.output_archive_key)
+        writer.put_text(receipt.function_archive_key)
+        writer.put_text(receipt.delta_digest)
+    if not writer.ok: return ""
+    sha256_text("mono-complete-module-coverage-v1\n" + writer.finish())
+
+fn mono_archive_assembly_record_matches_v1(receipt: MonoArchivePublicationV1,
+        archive: HirBodyArchiveV1) -> bool:
+    receipt.module_name == archive.input.module_name and
+        receipt.input_archive_key == archive.archive_key and receipt.input_body_digest == archive.body_digest
+
+fn mono_archive_assemble_module_v1(owner: MonoArchiveExecutionV1,
+        name: text) -> Result<MonoArchiveAssembledModuleV1, text>:
+    if not mono_archive_execution_complete_v1(owner) or not owner.admission.repository.modules.has(name):
+        return Err("mono assembly execution coverage refused")
+    if not transient_scope_begin(): return Err("mono assembly scope unavailable")
+    val archive: HirBodyArchiveV1 = owner.admission.repository.modules[name]
+    val state_digest = mono_archive_state_digest_v1(owner.admission.state)
+    val coverage = mono_archive_module_coverage_v1(owner, name)
+    var descriptor: MonoArchiveAssembledModuleV1? = nil
+    if state_digest != "" and coverage != "" and hir_body_archive_matches_v1(archive, archive.input):
+        val original_loaded = hir_body_archive_load_in_owned_scope_v1(archive, archive.input)
+        if original_loaded.is_ok():
+            val original = original_loaded.unwrap()
+            var valid = original.name == name
+            var output = original
+            var functions: Dict<SymbolId, HirFunction> = {}
+            val function_values: [HirFunction] = original.functions.values()
+            for function_index in sorted_function_indices(function_values):
+                val function: HirFunction = function_values[function_index]
+                if is_generic_function(function) or function.is_generic_template:
+                    functions[function.symbol] = function
+                    continue
+                val key = mono_sym_key(name, function.symbol.id)
+                if not owner.root_records.has(key):
+                    valid = false
+                    continue
+                val receipt = owner.root_records[key]
+                val record = mono_archive_load_function_in_owned_scope_v1(receipt)
+                if not mono_archive_assembly_record_matches_v1(receipt, archive) or record.is_err():
+                    valid = false
+                    continue
+                val complete = record.unwrap()
+                if complete.name != function.name or complete.symbol.id != function.symbol.id:
+                    valid = false
+                    continue
+                functions[complete.symbol] = complete
+            var owns_specialization = false
+            for receipt in owner.specialization_records:
+                if receipt.module_name != name: continue
+                val record = mono_archive_load_function_in_owned_scope_v1(receipt)
+                if not mono_archive_assembly_record_matches_v1(receipt, archive) or record.is_err():
+                    valid = false
+                    continue
+                val complete = record.unwrap()
+                functions[complete.symbol] = complete
+                output.symbols.register_preserved_symbol(HirSymbol(id: complete.symbol,
+                    name: complete.name, kind: SymbolKind.Function, type_: nil, scope: ScopeId(id: 0),
+                    span: complete.span, visibility: Visibility.Private, is_public: false, is_mutable: false,
+                    defining_module: name, builtin_method_tag: BUILTIN_METHOD_NONE))
+                owns_specialization = true
+            if owns_specialization and output.symbols.next_symbol_id < owner.admission.state.next_symbol:
+                output.symbols.next_symbol_id = owner.admission.state.next_symbol
+            output.functions = functions
+            val worker = mono_archive_scratch_pass_v1(owner.admission.state)
+            for item in owner.admission.state.queue:
+                if owner.admission.state.emitted.has(item.mangled_name):
+                    worker.archive_emitted_templates[item.mangled_name] = item.template_name
+            output = worker.prune_consumed_templates(output)
+            if valid:
+                var assembled = MonoArchiveAssembledModuleV1(input_archive: archive,
+                    archive_key: "", body_digest: sha256_text(hir_module_encode(output)),
+                    lowering_warnings_digest: archive.lowering_warnings_digest,
+                    coverage_digest: coverage, closure_state_digest: state_digest,
+                    final_symbol_counter: output.symbols.next_symbol_id, stage: "mono-assembled-unverified-v1")
+                assembled.archive_key = mono_archive_assembled_key_v1(assembled)
+                if assembled.archive_key != "" and hir_cache_store_in_owned_scope(
+                        assembled.archive_key, output, hir_cache_last_warnings()): descriptor = Some(assembled)
+    val admitted = descriptor != nil
+    val paused = transient_scope_pause()
+    val owned = if paused and admitted: transient_promote(descriptor) else: false
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not ended or not cache_owned or (admitted and not owned): panic("mono assembly ownership")
+    if val complete = descriptor: return Ok(complete)
+    Err("mono assembly complete input, function records, or publication refused")
+
+fn mono_archive_load_assembled_module_in_owned_scope_v1(descriptor: MonoArchiveAssembledModuleV1) -> Result<HirModule, text>:
+    if transient_array_scope_state_v1() != 1 or hir_cache_last_warnings().len() != 0 or
+            descriptor.stage != "mono-assembled-unverified-v1" or
+            descriptor.archive_key != mono_archive_assembled_key_v1(descriptor) or
+            descriptor.coverage_digest.len() != 64 or descriptor.closure_state_digest.len() != 64 or
+            not hir_body_archive_matches_v1(descriptor.input_archive, descriptor.input_archive.input):
+        return Err("mono assembled descriptor or owned scope refused")
+    if val module = hir_cache_load_in_owned_scope(descriptor.archive_key):
+        if module.name == descriptor.input_archive.input.module_name and
+                module.path == descriptor.input_archive.input.source_path and
+                sha256_text(hir_module_encode(module)) == descriptor.body_digest and
+                module.symbols.next_symbol_id == descriptor.final_symbol_counter and
+                hir_body_archive_warnings_digest_v1(hir_cache_last_warnings()) == descriptor.lowering_warnings_digest:
+            return Ok(module)
+    Err("mono assembled complete body refused")
+
+export MonoArchiveAssembledModuleV1
+export mono_archive_assemble_module_v1, mono_archive_load_assembled_module_in_owned_scope_v1

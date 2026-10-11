@@ -190,6 +190,8 @@ class MonomorphizationPass:
     archive_symbol_identities: Dict<text, text> = {}
     template_recipes: Dict<text, MonoTemplateRecipeV1> = {}
     archive_requests: [MonoSpecializationRequestV1] = []
+    # Filled only from completed FIFO emission records during archive assembly.
+    archive_emitted_templates: Dict<text, text> = {}
 
 struct MonoStats:
     generic_functions_found: i64
@@ -2559,6 +2561,10 @@ impl MonomorphizationPass:
         symbol)."""
         if self.unresolved_templates.has(name):
             return false
+        if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
+            for template in self.archive_emitted_templates.values():
+                if template == name: return true
+            return false
         for mangled in self.specialized_functions.keys():
             val m: text = mangled
             if self.spec_template[m] == name:
@@ -2585,7 +2591,8 @@ impl MonomorphizationPass:
         if module == nil:
             return module
         if self.specialized_functions.len() == 0:
-            return module
+            if self.template_body_mode != MonoTemplateBodyModeV1.ArchiveRequests or self.archive_emitted_templates.len() == 0:
+                return module
         var out = module
         var kept: Dict<SymbolId, HirFunction> = {}
         for sym_id in module.functions.keys():

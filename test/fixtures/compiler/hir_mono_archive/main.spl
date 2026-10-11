@@ -3,6 +3,7 @@ use provider.{outer}
 use compiler.driver.cache.hir_body_typecheck_lease_v1.*
 use compiler.driver.cache.hir_mono_archive_consumer_v1.*
 use compiler.driver.cache.hir_mono_archive_execution_v1.*
+use compiler.driver.cache.hir_mono_archive_assembly_v1.*
 use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_store_blob_v1,
     hir_owned_artifact_load_blob_v1, hir_owned_artifact_context_v1}
 use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{
@@ -122,6 +123,20 @@ fn record_controls(receipt: MonoArchivePublicationV1) -> i64:
     val ended = transient_scope_end()
     if not paused or not ended: panic("record controls ownership")
     checks
+
+fn observe_assembled(descriptor: MonoArchiveAssembledModuleV1) -> Result<text, text>:
+    if not transient_scope_begin(): return Err("assembled observation scope unavailable")
+    val decoded = mono_archive_load_assembled_module_in_owned_scope_v1(descriptor)
+    val digest = if decoded.is_ok(): sha256_text(hir_module_encode(decoded.unwrap())) else: ""
+    val admitted = digest != ""
+    val paused = transient_scope_pause()
+    val owned = if paused and admitted: transient_promote(digest) else: false
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not ended or not cache_owned or (admitted and not owned): panic("assembled observation ownership")
+    if admitted: return Ok(digest)
+    Err("complete assembled body unavailable")
 
 fn lower_fixture(file: text, name: text) -> HirModule:
     val path = "test/fixtures/compiler/hir_mono_archive/" + file
@@ -574,7 +589,8 @@ fn main() -> i64:
     execution.roots = actual_registered_roots
     checks = checks + 1
     if not mono_archive_execute_next_specialization_v1(execution).is_err() or
-            mono_archive_execution_complete_v1(execution) or execution.expected_epoch != 0: return 138
+            mono_archive_execution_complete_v1(execution) or execution.expected_epoch != 0 or
+            not mono_archive_assemble_module_v1(execution, root.name).is_err(): return 138
     checks = checks + 1
     val execution_root = mono_archive_execute_next_root_v1(execution)
     if execution_root.is_err() or not mono_archive_roots_complete_v1(execution): return 139
@@ -608,12 +624,37 @@ fn main() -> i64:
     val complete_roots = execution.root_records
     execution.root_records = {}
     if mono_archive_execution_complete_v1(execution) or
-            not mono_archive_execute_next_specialization_v1(execution).is_err() or execution.expected_epoch != completion_epoch: return 146
+            not mono_archive_execute_next_specialization_v1(execution).is_err() or execution.expected_epoch != completion_epoch or
+            not mono_archive_assemble_module_v1(execution, root.name).is_err(): return 146
     execution.root_records = complete_roots
     checks = checks + 1
     execution.admission.state.epoch = execution.admission.state.epoch + 1
     if mono_archive_execution_complete_v1(execution) or not mono_archive_execute_next_root_v1(execution).is_err(): return 147
     execution.admission.state.epoch = completion_epoch
+    checks = checks + 1
+    val assembled_root_result = mono_archive_assemble_module_v1(execution, root.name)
+    if assembled_root_result.is_err(): return 160
+    val assembled_root = assembled_root_result.unwrap()
+    val observed_root_module = observe_assembled(assembled_root)
+    if observed_root_module.is_err() or observed_root_module.unwrap() !=
+            sha256_text(hir_module_encode(retained_modules[root.name])) or
+            not mono_archive_load_assembled_module_in_owned_scope_v1(assembled_root).is_err(): return 161
+    checks = checks + 1
+    val assembled_provider_result = mono_archive_assemble_module_v1(execution, provider.name)
+    if assembled_provider_result.is_err(): return 162
+    val assembled_provider = assembled_provider_result.unwrap()
+    val observed_provider_module = observe_assembled(assembled_provider)
+    if observed_provider_module.is_err() or observed_provider_module.unwrap() !=
+            sha256_text(hir_module_encode(retained_modules[provider.name])) or
+            assembled_provider.final_symbol_counter != retained_modules[provider.name].symbols.next_symbol_id: return 163
+    checks = checks + 1
+    var wrong_assembly_stage = assembled_root
+    wrong_assembly_stage.stage = "mono-final-module-v1"
+    if not observe_assembled(wrong_assembly_stage).is_err(): return 164
+    checks = checks + 1
+    if not transient_scope_begin(): return 165
+    val nested_assembly_refused = mono_archive_assemble_module_v1(execution, root.name).is_err()
+    if not transient_scope_end() or not nested_assembly_refused or execution.expected_epoch != completion_epoch: return 166
     checks = checks + 1
     # Each alternate descriptor is individually valid against real stored HIR,
     # physical source and the launcher's actual canonical receipt bytes. The
@@ -656,6 +697,6 @@ fn main() -> i64:
             not mono_archive_admit_v1(path_mismatch_modules, collector(modules)).is_err() or
             selected_owner.epoch != 1 or selected_owner.archives.len() != 1: return 156
     checks = checks + 1
-    if checks != 71: return 52
+    if checks != 75: return 52
     print "HIR mono archive consumer: {checks} checks passed"
     0
