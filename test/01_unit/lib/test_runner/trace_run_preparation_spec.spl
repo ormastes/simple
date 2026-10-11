@@ -6,7 +6,7 @@ use std.io_runtime.{getpid, time_now_unix_micros}
 use std.database.core.{SdnRow, SdnTable}
 use std.database.test_extended.database.{TestDatabaseExtended, load_test_database_extended}
 use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
-use std.common.traceability.case_events.{TraceCaseEvent}
+use std.common.traceability.case_events.{TraceCaseEvent, encode_trace_case_event}
 use std.common.traceability.run_plan.{TracePlannedCase, TraceRunPlan}
 use std.common.traceability.run_request.{TraceRunRequest}
 use std.common.traceability.storage_scalar.{encode_trace_storage_scalar}
@@ -66,6 +66,47 @@ describe "runner frozen trace preparation":
                 expect(plan.run_id == "unused-template-id").to_equal(false)
                 expect(owner.trace_run_is_prepared(plan.run_id)).to_equal(true)
                 expect(owner.prepare_trace_request(request).is_err()).to_equal(true)
+
+    it "rejects oversized request transport before allocating a run or changing tables":
+        val template = _preparation_plan("unused-template-id")
+        val huge_case = TracePlannedCase(case_id: "case-1", test_path: "test/trace_spec.spl",
+            case_name: "x".repeat(1048577), test_definition_id: "definition-1", lane_id: "unit")
+        val request = TraceRunRequest(subject_id: template.subject_id,
+            configuration_id: template.configuration_id, expectation_id: template.expectation_id,
+            binary_id: template.binary_id, cases: [huge_case])
+        var owner = RunnerTestDb(db: TestDatabaseExtended.create("unused-oversized-request"), current_run_id: "")
+        val runs_before = match owner.db.db.get_table("test_runs"):
+            case Some(table): table.rows.len()
+            case None: fail("run table unexpectedly missing before preparation")
+        expect(owner.prepare_trace_request(request).is_err()).to_equal(true)
+        expect(owner.current_run_id).to_equal("")
+        match owner.db.db.get_table("test_runs"):
+            case Some(table): expect(table.rows.len()).to_equal(runs_before)
+            case None: fail("run table disappeared after rejected preparation")
+        match owner.db.db.get_table("trace_run_plans"):
+            case Some(_): fail("oversized request created a trace plan table")
+            case None: ()
+
+    it "poisons the owner when active run validation fails after allocation":
+        var db = TestDatabaseExtended.create("unused-invalid-active-run")
+        match db.db.get_table_mut("test_runs"):
+            case None: fail("run table unexpectedly missing")
+            case Some(table):
+                var invalid_table = table
+                invalid_table.columns = ["run_id", "status", "end_time"]
+                db.db.set_table("test_runs", invalid_table)
+        val template = _preparation_plan("unused-template-id")
+        val request = TraceRunRequest(subject_id: template.subject_id,
+            configuration_id: template.configuration_id, expectation_id: template.expectation_id,
+            binary_id: template.binary_id, cases: template.cases)
+        var owner = RunnerTestDb(db: db, current_run_id: "")
+        expect(owner.prepare_trace_request(request).is_err()).to_equal(true)
+        expect(owner.current_run_id != "").to_equal(true)
+        expect(owner.save().is_err()).to_equal(true)
+        expect(owner.start_run()).to_equal("")
+        val encoded_event = encode_trace_case_event(TraceCaseEvent("planned case", "started", "not_finished"))
+        val event_sdn = "[{encoded_event}]"
+        expect(owner.record_trace_case_events(owner.current_run_id, "test/trace_spec.spl", event_sdn).is_err()).to_equal(true)
 
     it "rejects missing, wrong, and ambiguous active run identities":
         var db = TestDatabaseExtended.create("unused-trace-preparation-memory")
@@ -137,7 +178,11 @@ describe "runner frozen trace preparation":
             case Err(reason): expect(reason).to_contain("durably prepared")
         expect(owner.trace_run_is_prepared(run_id)).to_equal(false)
         expect(owner.prepare_trace_run(_preparation_plan(run_id)).is_err()).to_equal(true)
+        expect(owner.save().is_err()).to_equal(true)
         expect(owner.start_run()).to_equal("")
+        val encoded_event = encode_trace_case_event(TraceCaseEvent("planned case", "started", "not_finished"))
+        val event_sdn = "[{encoded_event}]"
+        expect(owner.record_trace_case_events(run_id, "test/trace_spec.spl", event_sdn).is_err()).to_equal(true)
         file_delete(blocked_path + ".tmp")
         dir_remove(blocked_path, false)
 

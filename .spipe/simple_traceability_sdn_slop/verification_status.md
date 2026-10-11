@@ -20,15 +20,19 @@ Historical Phase 2 probes do not qualify the Phase 3 candidate.
 
 - No admitted source-matched Phase 3 runtime has executed this feature's
   build, CLI, SDN parser or SSpec acceptance checks.
-- Native SDN case-event transport is now wired into the runner's database
-  child; the previous rejected tab-delimited proposal is not the current
-  implementation. Durable pre-dispatch frozen-plan ownership and execution
-  provenance remain incomplete.
+- Native SDN case-event transport is wired into the runner's database child.
+  Owner APIs now persist immutable intent, allocate run IDs from strict SDN
+  requests, poison failed preparation wrappers and resume freshly loaded
+  persisted plans. The result child reconciles submitted cases against the
+  frozen plan before marking execution complete. Parent pre-dispatch selection,
+  acknowledgement verification, full input/shard/attempt provenance and all
+  worker routes remain incomplete.
 - Contract review found that the legacy database table codec does not safely
-  round-trip nested quotes and commas. Frozen plan and observation fields
-  require reversible owner-safe scalar storage plus real reload fixtures
-  before their persistence can be trusted. In-memory fixtures alone cannot
-  discharge this finding.
+  round-trip nested quotes and commas. New frozen-plan and v2 observation rows
+  now use reversible owner-safe scalar storage. Authored specs cover real
+  reload, replay, mixed versions and save failures, but have not executed.
+  Surviving legacy rows remain unverified; lost rows cannot be reconstructed.
+  Repeated full-history validation also has an open performance issue.
 - Production graph persistence/invalidation, trusted admission integration,
   runner plan/provenance admission and complete viewer interactions remain
   implementation work. All 40 acceptance criteria remain unexecuted.
