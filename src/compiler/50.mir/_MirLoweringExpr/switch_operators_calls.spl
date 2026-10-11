@@ -1,4 +1,5 @@
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
+use compiler.mir._MirLoweringExpr.lambda_abi.{lambda_abi_type_resolved}
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
 use compiler.hir.hir_types.{SymbolKind}
 # Part of src/compiler/50.mir/mir_lowering_expr.spl: switch/if-chain dispatch, binary/unary operators, call lowering
@@ -5102,7 +5103,15 @@ impl MirLowering:
                                     self.error_fatal("unsupported provider default for {struct_name}.{field_names[fi]}; supply the field explicitly", Some(def_exprs[fi].span))
                                     return nil
                                 case _: ()
-                            var def_v = self.lower_expr(def_exprs[fi])
+                            var default_function_slot = false
+                            if fi < field_hir_types.len():
+                                match field_hir_types[fi].kind:
+                                    case HirTypeKind.Function(_, _, _): default_function_slot = true
+                                    case _: ()
+                            var def_v = if default_function_slot:
+                                self.lower_expr_for_slot(def_exprs[fi], field_hir_types[fi])
+                            else:
+                                self.lower_expr(def_exprs[fi])
                             if def_v != nil:
                                 if fi < field_hir_types.len():
                                     match field_hir_types[fi].kind:
@@ -5164,7 +5173,15 @@ impl MirLowering:
             # then SIGSEGVs at runtime for the exact same box/unbox concern.
             # Staying guard-only here for the same reason: a clean loud build
             # failure, never a crash, is the only difference this fix makes.
-            var v = self.lower_expr(chosen)
+            var function_slot = false
+            if fi < field_hir_types.len():
+                match field_hir_types[fi].kind:
+                    case HirTypeKind.Function(_, _, _): function_slot = true
+                    case _: ()
+            var v = if function_slot:
+                self.lower_expr_for_slot(chosen, field_hir_types[fi])
+            else:
+                self.lower_expr(chosen)
             if v == nil:
                 self.error("unsupported struct field initializer (cannot lower to a value)", nil)
                 ops = ops.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
@@ -5800,6 +5817,15 @@ impl MirLowering:
         false
 
     me lower_lambda_value(lam: HirExpr) -> MirOperand?:
+        var declared: HirType? = nil
+        if lam.has_type_ and lam.type_ != nil:
+            match lam.type_.kind:
+                case HirTypeKind.Function(_, _, _):
+                    if lambda_abi_type_resolved(lam.type_): declared = Some(lam.type_)
+                case _: ()
+        self.lower_lambda_value_for_type(lam, declared)
+
+    me lower_lambda_value_for_type(lam: HirExpr, declared: HirType?) -> MirOperand?:
         """Materialize a `Lambda` used as a first-class value.
 
         Lifts the lambda to a synthesized top-level MIR function
@@ -5844,16 +5870,32 @@ impl MirLowering:
                         return nil
                     ci = ci + 1
                 val arity = params.len()
-                # Force the flat i64 runtime ABI on params/return: lambda params
-                # are `Infer` and the whole native call path passes i64 operands.
+                # Untyped callbacks retain their established word ABI. A
+                # declaration-owned function slot supplies the complete typed
+                # signature to BOTH the lift and its indirect caller.
+                var declared_params: [HirType] = []
+                var declared_return: HirType? = nil
+                if val signature_type = declared:
+                    match signature_type.kind:
+                        case HirTypeKind.Function(signature_params, signature_return, _):
+                            if signature_params.len() != arity:
+                                self.error_fatal("lambda parameter count differs from its declared function slot", Some(lam.span))
+                                return nil
+                            if not lambda_abi_type_resolved(signature_type):
+                                self.error_fatal("lambda function slot has an unresolved ABI type", Some(lam.span))
+                                return nil
+                            declared_params = signature_params
+                            declared_return = Some(signature_return)
+                        case _: ()
                 var mir_params: [MirType] = []
                 if capture_syms.len() > 0:
                     mir_params = mir_params.push(MirType.i64())
                 var mpi = 0
                 while mpi < arity:
-                    mir_params = mir_params.push(MirType.i64())
+                    mir_params = mir_params.push(if declared_return != nil: self.lower_type(declared_params[mpi]) else: MirType.i64())
                     mpi = mpi + 1
-                val sig = MirSignature(params: mir_params, return_type: MirType.i64(), is_variadic: false)
+                val return_type = if val typed_return = declared_return: self.lower_type(typed_return) else: MirType.i64()
+                val sig = MirSignature(params: mir_params, return_type: return_type, is_variadic: false)
                 val lift_n = _mir_lambda_lift_counter
                 val gen_name = "__lambda_lift_{lift_n}"
                 _mir_lambda_lift_counter = _mir_lambda_lift_counter + 1
@@ -5931,7 +5973,10 @@ impl MirLowering:
                 while qi < arity:
                     val psym = param_syms[qi]
                     if psym >= 0:
-                        lw.bind_local(psym, LocalId(id: qi + offset))
+                        val parameter_local = LocalId(id: qi + offset)
+                        lw.bind_local(psym, parameter_local)
+                        if declared_return != nil:
+                            lw.remember_local_hir_type(parameter_local.id, declared_params[qi], 0, 0)
                     qi = qi + 1
                 if capture_syms.len() > 0:
                     val env_local = LocalId(id: offset - 1)
@@ -5955,7 +6000,10 @@ impl MirLowering:
                         if capture_struct != nil:
                             lw.struct_value_syms[loaded_local.id] = capture_struct ?? ""
                         cap_i = cap_i + 1
-                val result = lw.lower_expr(body)
+                val result = if val typed_return = declared_return:
+                    lw.lower_expr_for_slot(body, typed_return)
+                else:
+                    lw.lower_expr(body)
                 self.canonical_type_symbols = lw.canonical_type_symbols
                 self.next_canonical_type_symbol = lw.next_canonical_type_symbol
                 var b2 = lw.builder
@@ -6344,6 +6392,20 @@ impl MirLowering:
                         call_param_types = params
                     case _:
                         ()
+        var indirect_return: HirType? = nil
+        if not is_direct:
+            if val callable_type = self.receiver_declared_type(callee):
+                match callable_type.kind:
+                    case HirTypeKind.Function(typed_params, typed_return, _):
+                        if not lambda_abi_type_resolved(callable_type):
+                            self.error_fatal("indirect function call has an unresolved ABI type", Some(callee.span))
+                            return self.builder.emit_const_int(0)
+                        if typed_params.len() != args.len():
+                            self.error_fatal("indirect function call argument count differs from its declaration", Some(callee.span))
+                            return self.builder.emit_const_int(0)
+                        call_param_types = typed_params
+                        indirect_return = Some(typed_return)
+                    case _: ()
         var direct_text_pointer_bridge = false
         var direct_pair_text_indices: [i64] = []
         var direct_boxed_text_indices: [i64] = []
@@ -6388,7 +6450,10 @@ impl MirLowering:
             # materialize a raw lifted fnptr or a closure handle.
             val lambda_disc = _sffi_enum_discriminant(HirExprKind.Lambda([], arg_value, []))
             if _sffi_enum_discriminant(arg_kind) == lambda_disc:
-                val lambda_operand = self.lower_lambda_value(arg_value)
+                val expected_lambda_type: HirType? = if current_arg_index < call_param_types.len() and not arg.has_name:
+                    Some(call_param_types[current_arg_index])
+                else: nil
+                val lambda_operand = self.lower_lambda_value_for_type(arg_value, expected_lambda_type)
                 if lambda_operand != nil:
                     arg_operands = arg_operands.push(lambda_operand.unwrap())
                     continue
@@ -6634,10 +6699,14 @@ impl MirLowering:
 
         val callee_local = self.lower_expr(callee)
         var param_types: [MirType] = []
+        var indirect_param_index = 0
         for arg_op in arg_operands:
-            param_types.push(MirType.i64())
+            param_types.push(if indirect_return != nil: self.lower_type(call_param_types[indirect_param_index]) else: MirType.i64())
+            indirect_param_index = indirect_param_index + 1
         var ret_type = MirType.i64()
-        if callee.has_type_:
+        if val typed_return = indirect_return:
+            ret_type = self.lower_type(typed_return)
+        elif callee.has_type_:
             ret_type = self.lower_type(callee.type_)
         val sig = MirSignature(params: param_types, return_type: ret_type, is_variadic: false)
         self.emit_function_value_call(callee_local, arg_operands, sig, ret_type)
@@ -6687,9 +6756,11 @@ impl MirLowering:
         closure_b.switch_to_block(closure_block)
         var closure_params: [MirType] = [MirType.i64()]
         var closure_args: [MirOperand] = [mir_operand_copy(callee_local)]
+        var closure_arg_index = 0
         for arg_op in arg_operands:
-            closure_params = closure_params.push(MirType.i64())
+            closure_params = closure_params.push(if closure_arg_index < sig.params.len(): sig.params[closure_arg_index] else: MirType.i64())
             closure_args = closure_args.push(arg_op)
+            closure_arg_index = closure_arg_index + 1
         val closure_sig = MirSignature(params: closure_params, return_type: ret_type, is_variadic: false)
         val closure_call_result = closure_b.emit_call_indirect(mir_operand_copy(closure_target), closure_args, closure_sig, ret_type)
         if closure_call_result != nil and result_slot != nil:

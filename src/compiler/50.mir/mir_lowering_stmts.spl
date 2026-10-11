@@ -1,4 +1,5 @@
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
+use compiler.mir._MirLoweringExpr.lambda_abi.{lambda_abi_type_resolved}
 # MIR Lowering - Statement and Control Flow Lowering
 #
 # Statement and control flow lowering from HIR to MIR:
@@ -888,7 +889,7 @@ impl MirLowering:
                             # this pipeline's MIR mutates in place, not via SSA
                             # renaming) does not leak into calls of this lambda.
                             self.lambda_capture_snapshot[symbol_value_id] = self.snapshot_lambda_capture(let_init)
-                            val lambda_operand: MirOperand? = self.lower_lambda_value(let_init)
+                            val lambda_operand: MirOperand? = self.lower_lambda_value_for_type(let_init, let_type)
                             if val lifted_lambda = lambda_operand:
                                 match lifted_lambda.kind:
                                     case Const(_, lambda_type):
@@ -2192,7 +2193,8 @@ impl MirLowering:
         """Lower `value` for a slot of DECLARED type `declared` (annotated
         binding, parameter, return type).
 
-        Only one shape is special: a conditional (`if` with `else`, if-chain
+        Function slots propagate their signature into a literal lambda's
+        lift. A conditional (`if` with `else`, if-chain
         with `else`, `match`) flowing into a SCALAR optional. Lowered on its
         own it joins the raw words of its arms -- `if c: 3 else: nil` yields
         the word 3 on BOTH paths -- and no later classification can tell
@@ -2201,6 +2203,20 @@ impl MirLowering:
         a scalar arm becomes Some, a nil arm None, an ambiguous arm is
         classified per arm. Everything else is plain lower_expr.
         doc/08_tracking/bug/optional_scalar_runtime_classified_three_becomes_none_2026-10-11.md"""
+        if value != nil and declared != nil:
+            match declared.kind:
+                case HirTypeKind.Function(_, _, _):
+                    match value.kind:
+                        case HirExprKind.Lambda(_, _, _):
+                            if not lambda_abi_type_resolved(declared):
+                                self.error_fatal("lambda function slot has an unresolved ABI type", Some(value.span))
+                                return self.builder.emit_const_int(0)
+                            var typed_lambda = value
+                            typed_lambda.has_type_ = true
+                            typed_lambda.type_ = declared
+                            return self.lower_expr(typed_lambda)
+                        case _: ()
+                case _: ()
         var scalar_optional_slot = false
         if value != nil and declared != nil:
             match declared.kind:
