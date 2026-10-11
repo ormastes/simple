@@ -6,7 +6,7 @@ use compiler.driver.driver_build.native_full_inventory_sources.{NativeFullInvent
 use compiler.driver.cache.cold_package_ownership_v1.{
     ColdPackageOwnershipManifestV1, cold_package_ownership_capture_scoped_v1}
 use compiler.driver.cache.cold_hir_semantic_action_emission_v1.{
-    cold_hir_semantic_source_witness_v1, cold_hir_semantic_action_emit_v1}
+    cold_hir_semantic_source_witness_v1, cold_hir_compiled_action_emit_v1}
 use compiler.driver.cache.cold_hir_compiled_payload_file_v1.{ColdHirCompiledPayloadFileV1}
 use compiler.driver.cache.cold_hir_native_object_persistence_v1.{ColdHirNativeObjectArtifactV1}
 use compiler.driver.cache.cold_hir_compiled_package_outputs_v1.{
@@ -51,7 +51,8 @@ fn cold_scoped_index_publish_from_driver_v1(
             count != ctx.source_byte_lengths_owner.len() or
             count != ctx.source_module_names_owner.len() or
             count != ctx.runtime_std_hir_emissions.len() or
-            count != ctx.runtime_std_mir_emissions.len():
+            count != ctx.runtime_std_mir_emissions.len() or
+            count != ctx.cold_hir_native_object_artifacts.len():
         return Err("scoped-index-driver-authority-invalid")
     var inventory_by_source: Dict<text, i64> = {}
     var inventory_index = 0
@@ -112,6 +113,14 @@ fn cold_scoped_index_publish_from_driver_v1(
         producer_digest, root_generation, snapshot.revision_id,
         snapshot.commit_id, snapshot.tree_id, inventory_digest,
         variant, selection.entry_source_identity)
+    var object_by_module: Dict<text, i64> = {}
+    var object_i = 0
+    while object_i < ctx.cold_hir_native_object_artifacts.len():
+        val object = ctx.cold_hir_native_object_artifacts[object_i]
+        if object.module_identity == "" or object_by_module.has(object.module_identity):
+            return Err("scoped-index-native-object-duplicate")
+        object_by_module[object.module_identity] = object_i
+        object_i = object_i + 1
     var objects: [ColdHirNativeObjectArtifactV1] = []
     var compiled: [ColdHirCompiledPackageArtifactV1] = []
     for receipt in ctx.cold_hir_typed_receipts:
@@ -126,12 +135,16 @@ fn cold_scoped_index_publish_from_driver_v1(
                 mir.module_identity != seed.module_identity or
                 mir.source_digest != seed.source_digest:
             return Err("scoped-index-artifact-source-differs")
+        if not object_by_module.has(seed.module_identity):
+            return Err("scoped-index-native-object-missing")
+        val object = ctx.cold_hir_native_object_artifacts[
+            object_by_module[seed.module_identity]]
         val mir_file = ColdHirCompiledPayloadFileV1(
             mir.mir_file.path, mir.mir_file.digest, mir.mir_file.byte_count)
         val witness = cold_hir_semantic_source_witness_v1(authority, row)
-        val action = cold_hir_semantic_action_emit_v1(
+        val action = cold_hir_compiled_action_emit_v1(
             receipt, row, witness, mir_file, authority,
-            selection.artifact_root)?
+            object, selection.artifact_root)?
         objects = objects.push(action.object_artifact)
         compiled = compiled.push(ColdHirCompiledPackageArtifactV1(
             seed.module_identity, owner.package_identity, hir.export_file,

@@ -8,7 +8,7 @@ use app.io._CliCompile.compile_options.{cli_native_default_opt_level, cli_parse_
 use app.io.env_ops (env_get, env_set)
 use app.io.process_ops (process_run)
 use app.io.file_ops (file_exists, file_write, file_copy, file_remove)
-use app.io.dir_ops (dir_create)
+use app.io.dir_ops (dir_create, dir_remove_all)
 use app.io.sysinfo_ops (getpid)
 use app.io.time_ops (time_now_unix_micros)
 use app.io.cli_ops.{cli_current_exe_path}
@@ -740,6 +740,15 @@ fn _cli_native_build_prepare_scoped_facets_v1(
                 snapshot_root.len() + 1, frozen_entry.len())))
     true
 
+fn _cli_native_build_release_scoped_root_v1(driver: CompilerDriver) -> bool:
+    if driver.ctx.cold_hir_scoped_selection == nil:
+        return true
+    val root = driver.ctx.cold_hir_scoped_selection!.artifact_root
+    if root == "" or dir_remove_all(root) != 0:
+        _cli_eprint("Error: scoped-index private artifact cleanup failed")
+        return false
+    true
+
 fn _cli_native_build_compile_indexed_v1(
     driver: CompilerDriver, args: [text], entry_point: text,
     collection_profile_path: text, collection_workload: text,
@@ -758,9 +767,11 @@ fn _cli_native_build_compile_indexed_v1(
     val variant = match native_build_variant_from_driver_v1(driver, args):
         case Ok(value): value
         case Err(reason):
+            val _cleaned = _cli_native_build_release_scoped_root_v1(driver)
             return CompileResult.CodegenError(
                 "native-build variant invalid: {reason}")
     if not native_build_variant_matches_pinned_v1(variant):
+        val _cleaned = _cli_native_build_release_scoped_root_v1(driver)
         return CompileResult.CodegenError(
             "native-build options differ from admitted package graph")
     var base_digest = ""
@@ -768,24 +779,35 @@ fn _cli_native_build_compile_indexed_v1(
         match native_build_scoped_index_base_digest_v1():
             case Ok(value): base_digest = value
             case Err(reason):
+                val _cleaned = _cli_native_build_release_scoped_root_v1(driver)
                 return CompileResult.CodegenError(
                     "scoped-index base admission failed: {reason}")
     val result = native_build_compile_with_collection_profile(
         driver, entry_point, collection_profile_path,
         collection_workload, collection_target, collection_profile_digest)
-    if not result.is_success() or not scoped:
+    if not result.is_success():
+        if scoped:
+            val _cleaned = _cli_native_build_release_scoped_root_v1(driver)
+        return result
+    if not scoped:
         return result
     val completed_variant = match native_build_variant_from_driver_v1(driver, args):
         case Ok(value): value
         case Err(reason):
+            val _cleaned = _cli_native_build_release_scoped_root_v1(driver)
             return CompileResult.CodegenError(
                 "scoped-index completed variant invalid: {reason}")
     if config_variant_digest_v1(completed_variant) !=
             config_variant_digest_v1(variant):
+        val _cleaned = _cli_native_build_release_scoped_root_v1(driver)
         return CompileResult.CodegenError(
             "scoped-index compile variant changed during AOT")
-    match native_build_scoped_index_publish_v1(
-            driver, variant, base_digest):
+    val published = native_build_scoped_index_publish_v1(
+        driver, variant, base_digest)
+    if not _cli_native_build_release_scoped_root_v1(driver):
+        return CompileResult.CodegenError(
+            "scoped-index private artifact cleanup failed")
+    match published:
         case Ok(_): result
         case Err(reason):
             CompileResult.CodegenError(

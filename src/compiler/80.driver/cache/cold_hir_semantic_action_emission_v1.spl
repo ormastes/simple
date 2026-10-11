@@ -6,9 +6,7 @@ use compiler.driver.cache.cold_hir_semantic_seed_v1.{ColdHirTypedReceiptV1}
 use compiler.driver.cache.cold_hir_native_object_persistence_v1.{
     ColdHirNativeObjectArtifactV1
 }
-use compiler.driver.cache.cold_hir_compiled_package_outputs_v1.{
-    ColdHirCompiledPayloadFileV1
-}
+use compiler.driver.cache.cold_hir_compiled_payload_file_v1.{ColdHirCompiledPayloadFileV1}
 use compiler.driver.cache.package_module_index_builder.{
     PackageModuleIndexBuildAuthorityV1,
     package_module_index_root_for_variant_v1
@@ -98,13 +96,13 @@ fn cold_hir_semantic_source_witness_v1(
         "{source.source_identity.len()}:{source.source_identity}|" +
         "{source.content_digest}|{source.byte_count}")
 
-fn cold_hir_semantic_action_emit_v1(
+fn _cold_hir_action_emit_v1(
     receipt: ColdHirTypedReceiptV1,
     source: CompileSourceInventoryEntryV1,
     source_witness_digest: text,
     mir_file: ColdHirCompiledPayloadFileV1,
     authority: PackageModuleIndexBuildAuthorityV1,
-    artifact_root: text
+    object: ColdHirNativeObjectArtifactV1, artifact_root: text
 ) -> Result<ColdHirSemanticActionEmissionV1, text>:
     val seed = receipt.seed
     if not _cold_semantic_absolute_v1(artifact_root) or
@@ -167,11 +165,28 @@ fn cold_hir_semantic_action_emit_v1(
                 seed.module_identity, seed.source_identity,
                 seed.source_digest, mir_file.digest) != "ok":
         return Err("cold-semantic-mir-schema-invalid")
+    if object.module_identity != seed.module_identity:
+        return Err("cold-semantic-object-identity-mismatch")
+    if object.object_format == "none":
+        if object.object_digest != "" or object.object_byte_count != 0 or
+                object.capsule_identity != "" or
+                object.capsule_receipt_digest != "":
+            return Err("cold-semantic-objectless-receipt-invalid")
+    elif (object.object_format != "elf" and object.object_format != "coff" and
+            object.object_format != "macho") or
+            not builder_digest_valid_v1(object.object_digest) or
+            object.object_byte_count <= 0 or
+            object.capsule_identity == "" or
+            not builder_digest_valid_v1(object.capsule_receipt_digest):
+        return Err("cold-semantic-native-object-receipt-invalid")
     val semantic_key = sha256_text(
         "simple-cold-hir-semantic-action-v1|" +
         "{seed.abi_digest}|{expected_witness}|{mir_file.digest}")
-    val content = "action|{semantic_key}|compile-semantic|" +
-        "{seed.module_identity}|{mir_file.digest}"
+    val action_key = if object.object_format == "none": semantic_key else: object.capsule_receipt_digest
+    val action_kind = if object.object_format == "none": "compile-semantic" else: "compile-native"
+    val action_digest = if object.object_format == "none": mir_file.digest else: object.object_digest
+    val content = "action|{action_key}|{action_kind}|" +
+        "{seed.module_identity}|{action_digest}"
     val decoded = interface_action_archive_payloads_decode_v1(
         receipt.interface_content, content)
     if decoded.is_err():
@@ -199,12 +214,31 @@ fn cold_hir_semantic_action_emit_v1(
             sha256_text(readback.unwrap()) != sha256_text(content):
         return Err("cold-semantic-action-readback-mismatch")
     Ok(ColdHirSemanticActionEmissionV1(
-        seed.module_identity, expected_witness, semantic_key,
+        seed.module_identity, expected_witness, action_key,
         ColdHirCompiledPayloadFileV1(
             path, sha256_text(content), text_byte_len(content)),
-        ColdHirNativeObjectArtifactV1(
-            seed.module_identity, "", 0, "none", "", "")))
+        object))
+
+fn cold_hir_semantic_action_emit_v1(
+    receipt: ColdHirTypedReceiptV1, source: CompileSourceInventoryEntryV1,
+    source_witness_digest: text, mir_file: ColdHirCompiledPayloadFileV1,
+    authority: PackageModuleIndexBuildAuthorityV1, artifact_root: text
+) -> Result<ColdHirSemanticActionEmissionV1, text>:
+    _cold_hir_action_emit_v1(receipt, source, source_witness_digest,
+        mir_file, authority, ColdHirNativeObjectArtifactV1(
+            receipt.seed.module_identity, "", 0, "none", "", ""),
+        artifact_root)
+
+fn cold_hir_compiled_action_emit_v1(
+    receipt: ColdHirTypedReceiptV1, source: CompileSourceInventoryEntryV1,
+    source_witness_digest: text, mir_file: ColdHirCompiledPayloadFileV1,
+    authority: PackageModuleIndexBuildAuthorityV1,
+    object: ColdHirNativeObjectArtifactV1, artifact_root: text
+) -> Result<ColdHirSemanticActionEmissionV1, text>:
+    _cold_hir_action_emit_v1(receipt, source, source_witness_digest,
+        mir_file, authority, object, artifact_root)
 
 export ColdHirSemanticActionEmissionV1
 export cold_hir_semantic_source_witness_v1
 export cold_hir_semantic_action_emit_v1
+export cold_hir_compiled_action_emit_v1

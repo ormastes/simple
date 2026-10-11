@@ -585,3 +585,25 @@ This is a source-level connection, not a qualified production cutover. A
 self-hosted compile, first V3 publication, subsequent warm native build,
 archive object attachment, artifact cleanup, and paired p95/RSS evidence
 remain open. The default capture switch remains off until those gates pass. The bounded no-stub Stage 2 wrapper compile found two HIR diagnostics from a wrong cwd facade import, now corrected. A later 1,019-unit CLI compile parsed but timed out in HIR; a focused variant-helper compile completed that helper’s HIR module with zero diagnostics before the bounded run was stopped. No type, native, or end-to-end V3 PASS is claimed. The producer releases retained source/HIR/MIR graphs before archive aggregation; a peak-RSS benefit remains unmeasured.
+
+### 2026-10-11 V3 native action receipt attachment
+
+The scoped V3 producer now requires the compact object artifact set produced
+by the existing capsule-verified AOT persistence gate. It maps each typed
+module to exactly one artifact, writes a `compile-native` action bound to the
+accepted capsule receipt digest and object CAS digest, and retains the
+semantic action for an explicitly objectless module. The compiled-package
+publisher already checks the action against the object receipt and verifies
+the CAS blob before archive publication and CURRENT CAS. The ordinary CLI
+retires its private HIR/MIR/action directory after publication readback and
+also attempts cleanup on handled failures through the app IO facade.
+
+A focused action-emission case was added, but no executable PASS is claimed.
+Two bounded admitted Stage 2 emitter compiles parsed 525 and 516 modules,
+then timed out in HIR at 95 and 83 modules respectively before a type or
+native verdict. A production first V3 graph, archive-only warm object
+materialization, full CLI proof, and matched p95/RSS cohorts remain open.
+The required core runtime smoke reports `selected_simple_binary_lacks_emit_archive:bin/simple`;
+the MCP native smoke reports `missing_simple_binary:bin/simple` in this
+isolated worktree. Neither is a PASS, and the selected Stage 2 compiler only
+provides compile/native-build commands.

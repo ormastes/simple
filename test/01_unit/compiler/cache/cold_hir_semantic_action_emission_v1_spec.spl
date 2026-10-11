@@ -1,4 +1,5 @@
 use std.spec.{describe, it, expect}
+use std.spec.step
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.file_ops.{
     secure_temp_dir, file_create_exclusive,
@@ -11,9 +12,10 @@ use compiler.driver.cache.cold_hir_semantic_seed_v1.{
 use compiler.driver.cache.cold_hir_compiled_package_outputs_v1.{
     ColdHirCompiledPayloadFileV1
 }
+use compiler.driver.cache.cold_hir_native_object_persistence_v1.{ColdHirNativeObjectArtifactV1}
 use compiler.driver.cache.cold_hir_semantic_action_emission_v1.{
     cold_hir_semantic_source_witness_v1,
-    cold_hir_semantic_action_emit_v1
+    cold_hir_semantic_action_emit_v1, cold_hir_compiled_action_emit_v1
 }
 use compiler.driver.cache.package_module_index_builder.{
     PackageModuleIndexBuildAuthorityV1
@@ -156,3 +158,46 @@ describe "objectless cold HIR semantic action emission":
         expect(cold_hir_semantic_action_emit_v1(
             typed, source, witness, mir, authority, root).is_err()
         ).to_equal(true)
+
+    it "binds a native object receipt into the action archive":
+        step("binds a native object receipt into the action archive")
+        val root = cold_semantic_test_root_v1()
+        val source_digest = sha256_text("native-source")
+        val source = CompileSourceInventoryEntryV1(
+            "src/native.spl", source_digest, source_digest, source_digest,
+            source_digest, source_digest, 13)
+        val authority = PackageModuleIndexBuildAuthorityV1(
+            sha256_text("producer"), "root", "revision", "commit", "tree",
+            sha256_text("inventory"), ConfigVariantKeyV1(
+                "x86_64-unknown-linux-gnu", "llvm", [], "debug",
+                "abi-v1", [], []), "src/native.spl")
+        val abi = "native-abi"
+        val abi_digest = sha256_text(abi)
+        val typed = ColdHirTypedReceiptV1(
+            ColdHirSemanticSeedV1("native", source.source_identity,
+                source_digest, authority.inventory_digest, abi_digest, []),
+            abi, "symbol|native|module|{abi_digest}|{abi_digest}")
+        val mir_content = runtime_std_mir_body_payload_v1(
+            MirModule("native", {}, {}, {}, {}), source.source_identity,
+            source_digest).unwrap().content
+        val mir_path = root + "/native.mir"
+        expect(file_create_exclusive(mir_path, mir_content)).to_equal(true)
+        val mir_file = ColdHirCompiledPayloadFileV1(
+            mir_path, sha256_text(mir_content), mir_content.len())
+        val witness = cold_hir_semantic_source_witness_v1(authority, source)
+        val object_digest = sha256_text("native-object-bytes")
+        val capsule_digest = sha256_text("admitted-capsule-receipt")
+        val object = ColdHirNativeObjectArtifactV1(
+            "native", object_digest, 19, "elf", "capsule-v1", capsule_digest)
+        val wrong_module = ColdHirNativeObjectArtifactV1(
+            "other", object_digest, 19, "elf", "capsule-v1", capsule_digest)
+        expect(cold_hir_compiled_action_emit_v1(
+            typed, source, witness, mir_file, authority, wrong_module, root
+        ).unwrap_err()).to_equal("cold-semantic-object-identity-mismatch")
+        val emitted = cold_hir_compiled_action_emit_v1(
+            typed, source, witness, mir_file, authority, object, root).unwrap()
+        val content = "action|{capsule_digest}|compile-native|native|{object_digest}"
+        expect(emitted.semantic_action_key).to_equal(capsule_digest)
+        expect(emitted.object_artifact.object_digest).to_equal(object_digest)
+        expect(file_read_regular_no_follow_bounded(
+            emitted.action_file.path, 4096).unwrap()).to_equal(content)
