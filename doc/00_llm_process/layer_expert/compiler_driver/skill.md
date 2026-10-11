@@ -177,6 +177,14 @@ overrides remain mandatory. The `postfacts` selector now hashes all three real
 fixture source files and requires 26 native checks, still unrun. Selection flags
 alone grant no accepted policy or stage ownership.
 
+`cache/driver_hir_post_validation_policy_v1.spl` and its once-only real driver
+bridge capture actual ordered claims and pre-consumption capabilities under the
+verified full schedule/journal. Aliases retain their independent authored paths
+while proving the genuine earlier canonical body and physical bytes. The
+`postpolicy` selector requires 17 checks and the exact managed tool/runtime
+handoff, still unrun. Actual complete gates, weave and cold/quiet stage use must
+be independently replayed before production or final admission.
+
 ## 2026-09-26 — `native-build` restored: backend table in the interpreted worker, entry-file hashing, module-init reads
 
 - **The interpreted native-build worker never installed the static backend

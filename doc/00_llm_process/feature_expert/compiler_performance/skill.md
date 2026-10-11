@@ -98,3 +98,10 @@ than consulting another compilation's ambient claims. Ordinary wrappers keep
 their original selection. Global/local HAL still enables the full graph, while
 no-claim effect layouts remain unmeasured. The real managed archive fixture now
 requires 26 checks (including the separately archived HAL source), all unrun.
+
+The once-only policy capture now pins actual ordered claim rows and
+pre-consumption RT capabilities to the real source/schedule/journal/provider
+recipe. Canonical newline and independent authored-alias proof are checked.
+`postpolicy` requires 17 native checks, including a real stable graph allocation
+capability, retained manifest consumption and replay preserving the next grant.
+All are unrun; immutable capture alone is not accepted full-gate admission.
