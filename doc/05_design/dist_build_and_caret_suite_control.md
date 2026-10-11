@@ -16,131 +16,131 @@ Authenticate → validate schema → authorize → match environment → durably
 
 ### F01 — Contracts and baseline
 
-Version, operation ID, payload digest, principal, policy revision and session generation are mandatory on new managed requests; a V1 decoder cannot discard V2 constraints.
-
-Boundary: `src/lib/common/build_manager/contracts.spl`. Algorithm/change: Inventory installed runtime digests and caller seams; add versioned authority/environment envelopes around existing V1 contracts; reject unknown required fields and preserve legacy fixtures.
-
-Failure verification: AT-01–07; baseline and compatibility fixtures. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success.
+| Concern | Design |
+|---|---|
+| Invariant | Version, operation ID, payload digest, principal, policy revision and session generation are mandatory on new managed requests; a V1 decoder cannot discard V2 constraints. |
+| Owner and algorithm | Boundary: `src/lib/common/build_manager/contracts.spl`. Algorithm/change: Inventory installed runtime digests and caller seams; add versioned authority/environment envelopes around existing V1 contracts; reject unknown required fields and preserve legacy fixtures. |
+| Rejection evidence | Failure verification: AT-01–07; baseline and compatibility fixtures. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
 ### F02 — Host registry and credential roles
 
-Endpoint identity is pinned separately from SSH account, provider profile, node identity and signer identity; unknown enrollment never opens a connection.
-
-Boundary: `src/app/llm_caret`. Algorithm/change: Resolve independent host roles from strict SDN; enroll host fingerprint with explicit operator action; store credential references; implement rotation, revocation and dependency inspection.
-
-Failure verification: AT-01,05,11,25; changed-key and revoked-role tests. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success.
+| Concern | Design |
+|---|---|
+| Invariant | Endpoint identity is pinned separately from SSH account, provider profile, node identity and signer identity; unknown enrollment never opens a connection. |
+| Owner and algorithm | Boundary: `src/app/llm_caret`. Algorithm/change: Resolve independent host roles from strict SDN; enroll host fingerprint with explicit operator action; store credential references; implement rotation, revocation and dependency inspection. |
+| Rejection evidence | Failure verification: AT-01,05,11,25; changed-key and revoked-role tests. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
 ### F03 — Scoped grants and approvals
 
-Approval resolves once against authenticated approver, request digest, policy revision, expiry and generation. Provider CLI shell activity remains contained by host controls.
-
-Boundary: `src/app/llm_caret/tools.spl`. Algorithm/change: Pass immutable caller context into permission_decision; enforce project/host/operation/resource scopes at remote admission; bind approval to exact digest; add safe filesystem owner integration and actual account sandbox.
-
-Failure verification: AT-03–06,11,26; forged approval, path-race and bypass rejection. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success.
+| Concern | Design |
+|---|---|
+| Invariant | Approval resolves once against authenticated approver, request digest, policy revision, expiry and generation. Provider CLI shell activity remains contained by host controls. |
+| Owner and algorithm | Boundary: `src/app/llm_caret/tools.spl`. Algorithm/change: Pass immutable caller context into permission_decision; enforce project/host/operation/resource scopes at remote admission; bind approval to exact digest; add safe filesystem owner integration and actual account sandbox. |
+| Rejection evidence | Failure verification: AT-03–06,11,26; forged approval, path-race and bypass rejection. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
 ### F04 — Managed SSH and persistent sessions
 
-smux owns PTY/VT; client EOF detaches; input and size leases are distinct. Timeout yields ownership unknown, never PID-only adoption or duplicate launch.
-
-Boundary: `src/app/llm_caret/workbench/session_contract.spl`. Algorithm/change: Extend SessionId generation binding with host boot/service/process identities; invoke a fixed broker with framed typed stdin; launch provider through existing execution/smux owners; persist session bindings and reconcile reconnect.
-
-Failure verification: AT-01,02,07–10,19; real remote turn, detach and reconnect receipt. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success.
+| Concern | Design |
+|---|---|
+| Invariant | smux owns PTY/VT; client EOF detaches; input and size leases are distinct. Timeout yields ownership unknown, never PID-only adoption or duplicate launch. |
+| Owner and algorithm | Boundary: `src/app/llm_caret/workbench/session_contract.spl`. Algorithm/change: Extend SessionId generation binding with host boot/service/process identities; invoke a fixed broker with framed typed stdin; launch provider through existing execution/smux owners; persist session bindings and reconcile reconnect. |
+| Rejection evidence | Failure verification: AT-01,02,07–10,19; real remote turn, detach and reconnect receipt. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
 ### F05 — Caret controls and model tools
 
-Read-only preview never takes terminal geometry lease. Session close, turn cancel, build cancel and history delete require separate verbs and scopes.
-
-Boundary: `src/app/llm_caret/tools.spl`. Algorithm/change: Add host/project/environment selectors to existing cs workbench; keep provider grammar; expose typed inspect, submit, status, cancel and artifact tools; capture target generation before queuing input.
-
-Failure verification: AT-03,07–10,12; tui captures and stale-target rejection. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success.
+| Concern | Design |
+|---|---|
+| Invariant | Read-only preview never takes terminal geometry lease. Session close, turn cancel, build cancel and history delete require separate verbs and scopes. |
+| Owner and algorithm | Boundary: `src/app/llm_caret/tools.spl`. Algorithm/change: Add host/project/environment selectors to existing cs workbench; keep provider grammar; expose typed inspect, submit, status, cancel and artifact tools; capture target generation before queuing input. |
+| Rejection evidence | Failure verification: AT-03,07–10,12; tui captures and stale-target rejection. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
 ### F06 — Exact environment matching
 
-Session host, execution host, compilation target and test runtime are separate fields. ENV_NO_MATCH reports failed predicates; no local or emulated fallback.
-
-Boundary: `src/lib/common/build_manager/contracts.spl`. Algorithm/change: Define requested profile versus observed binding; probe runtime/compiler/SDK/ABI/ISA/isolation; filter eligible authorized workers before reservation; worker revalidates effective binding.
-
-Failure verification: AT-12–14,27; native-versus-emulated mismatch fixtures. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success.
+| Concern | Design |
+|---|---|
+| Invariant | Session host, execution host, compilation target and test runtime are separate fields. ENV_NO_MATCH reports failed predicates; no local or emulated fallback. |
+| Owner and algorithm | Boundary: `src/lib/common/build_manager/contracts.spl`. Algorithm/change: Define requested profile versus observed binding; probe runtime/compiler/SDK/ABI/ISA/isolation; filter eligible authorized workers before reservation; worker revalidates effective binding. |
+| Rejection evidence | Failure verification: AT-12–14,27; native-versus-emulated mismatch fixtures. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
 ### F07 — Immutable snapshots and build execution
 
-Admitted→Reserved→Running→Collecting→Settled; disconnect enters OwnershipUnknown. Retry waits for prior terminal/reap evidence; cleanup cannot touch agent worktree.
-
-Boundary: `src/app/bootstrap_builder/transport.spl`. Algorithm/change: Capture files and links consistently with digest manifest; stage through typed broker; retain existing DAG/retry owner; allocate exclusive attempt root and resource lease; parent admits only declared validated outputs.
-
-Failure verification: AT-13,15,19,20; two-host build and failure/cancel/reap receipts. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success.
+| Concern | Design |
+|---|---|
+| Invariant | Admitted→Reserved→Running→Collecting→Settled; disconnect enters OwnershipUnknown. Retry waits for prior terminal/reap evidence; cleanup cannot touch agent worktree. |
+| Owner and algorithm | Boundary: `src/app/bootstrap_builder/transport.spl`. Algorithm/change: Capture files and links consistently with digest manifest; stage through typed broker; retain existing DAG/retry owner; allocate exclusive attempt root and resource lease; parent admits only declared validated outputs. |
+| Rejection evidence | Failure verification: AT-13,15,19,20; two-host build and failure/cancel/reap receipts. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
 ### F08 — Shared CAS, quotas and grouped compiler state
 
-Digest integrity is independent of publication authorization. Group-shared indexes are read-only and compiler/source/toolchain qualified. Exhaustion falls back only where optional cache semantics allow.
-
-Boundary: `src/app/cache_gateway/quota.spl`. Algorithm/change: Add authorized namespace lookups; atomically reserve temporary and committed bytes; pin active inputs; single-flight immutable fetch; journal reservations and release; connect compiler keys without sharing writable attempt state.
-
-Failure verification: AT-16–18; concurrent quota, corruption and pin tests. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success.
+| Concern | Design |
+|---|---|
+| Invariant | Digest integrity is independent of publication authorization. Group-shared indexes are read-only and compiler/source/toolchain qualified. Exhaustion falls back only where optional cache semantics allow. |
+| Owner and algorithm | Boundary: `src/app/cache_gateway/quota.spl`. Algorithm/change: Add authorized namespace lookups; atomically reserve temporary and committed bytes; pin active inputs; single-flight immutable fetch; journal reservations and release; connect compiler keys without sharing writable attempt state. |
+| Rejection evidence | Failure verification: AT-16–18; concurrent quota, corruption and pin tests. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
 ### F09 — Native Windows and platform host facades
 
-App logic stays common; host differences stay in SOSIX/provider leaves. JobObject, WSL, Hyper-V and process-isolated container are different runtime classes.
-
-Boundary: `src/app/bootstrap_builder/windows_group_broker.spl`. Algorithm/change: Reuse Windows broker/process port and ConPTY owners; implement typed filesystem and process calls through host facades; qualify both connection directions and paths with spaces/non-ASCII.
-
-Failure verification: AT-02,06,08,14,20,27; actual windows installed-binary receipts. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success.
+| Concern | Design |
+|---|---|
+| Invariant | App logic stays common; host differences stay in SOSIX/provider leaves. JobObject, WSL, Hyper-V and process-isolated container are different runtime classes. |
+| Owner and algorithm | Boundary: `src/app/bootstrap_builder/windows_group_broker.spl`. Algorithm/change: Reuse Windows broker/process port and ConPTY owners; implement typed filesystem and process calls through host facades; qualify both connection directions and paths with spaces/non-ASCII. |
+| Rejection evidence | Failure verification: AT-02,06,08,14,20,27; actual windows installed-binary receipts. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
 ### F10 — Signed evidence and GitHub CI
 
-Bind receipt to source/head/base candidate, test selection, environment, policy, artifacts, signer and expiry. Developer assertions cannot satisfy trusted-executor checks.
-
-Boundary: `src/app/ci/pipeline_runner.spl`. Algorithm/change: Submit common Jobs from CI; encode check-specific receipts; isolate executor attestation and protected verifier keys; extend base-owned pr-fast-check verifier; report every required check on all selected events.
-
-Failure verification: AT-05,21,22,25; forged/stale receipt and fork-event fixtures. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success.
+| Concern | Design |
+|---|---|
+| Invariant | Bind receipt to source/head/base candidate, test selection, environment, policy, artifacts, signer and expiry. Developer assertions cannot satisfy trusted-executor checks. |
+| Owner and algorithm | Boundary: `src/app/ci/pipeline_runner.spl`. Algorithm/change: Submit common Jobs from CI; encode check-specific receipts; isolate executor attestation and protected verifier keys; extend base-owned pr-fast-check verifier; report every required check on all selected events. |
+| Rejection evidence | Failure verification: AT-05,21,22,25; forged/stale receipt and fork-event fixtures. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
 ### F11 — SHS/SDN containers and images
 
-Canonical equivalent plans have equal digest; meaningful runtime differences change binding. Native-container demand fails if only weaker class is available.
-
-Boundary: `src/app/ci/pipeline_runner.spl`. Algorithm/change: Normalize SHS authoring and direct SDN to one validated plan; bind interpreter and provider overlays; qualify native runtime providers; pin image generation per attempt; drain before replacement.
-
-Failure verification: AT-13,23,27; equivalent recipe and real provider receipts. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success.
+| Concern | Design |
+|---|---|
+| Invariant | Canonical equivalent plans have equal digest; meaningful runtime differences change binding. Native-container demand fails if only weaker class is available. |
+| Owner and algorithm | Boundary: `src/app/ci/pipeline_runner.spl`. Algorithm/change: Normalize SHS authoring and direct SDN to one validated plan; bind interpreter and provider overlays; qualify native runtime providers; pin image generation per attempt; drain before replacement. |
+| Rejection evidence | Failure verification: AT-13,23,27; equivalent recipe and real provider receipts. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
 ### F12 — Source updates and disposable attempts
 
-Updating a branch never mutates an admitted attempt; restart only discards settled attempt storage. User edits remain in separate worktree ownership.
-
-Boundary: `src/app/bootstrap_builder/transport.spl`. Algorithm/change: Resolve new revision to new snapshot; allocate fresh scratch; retain active source/image pins; reconcile process/artifact ownership before GC; add rollback generation and session-edit preservation.
-
-Failure verification: AT-15,19,20,23; update-during-build and rollback fixture. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success.
+| Concern | Design |
+|---|---|
+| Invariant | Updating a branch never mutates an admitted attempt; restart only discards settled attempt storage. User edits remain in separate worktree ownership. |
+| Owner and algorithm | Boundary: `src/app/bootstrap_builder/transport.spl`. Algorithm/change: Resolve new revision to new snapshot; allocate fresh scratch; retain active source/image pins; reconcile process/artifact ownership before GC; add rollback generation and session-edit preservation. |
+| Rejection evidence | Failure verification: AT-15,19,20,23; update-during-build and rollback fixture. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
 ### F13 — Inbound mirror and guarded backup
 
-Fetch failure reports stale data; mirror cannot push canonical refs implicitly. Snapshot uses pinned object IDs, never latest alias.
-
-Boundary: `scripts/scv-migration/push-both.shs`. Algorithm/change: Keep outbound backup separate; add inbound bare-mirror controller with ref allowlist; resolve commits, gitlinks and LFS objects to snapshot manifest; expose fetch age and conflict; recover failed atomic publication.
-
-Failure verification: AT-23,24; divergence, failed fetch and wrong gitlink tests. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success.
+| Concern | Design |
+|---|---|
+| Invariant | Fetch failure reports stale data; mirror cannot push canonical refs implicitly. Snapshot uses pinned object IDs, never latest alias. |
+| Owner and algorithm | Boundary: `scripts/scv-migration/push-both.shs`. Algorithm/change: Keep outbound backup separate; add inbound bare-mirror controller with ref allowlist; resolve commits, gitlinks and LFS objects to snapshot manifest; expose fetch age and conflict; recover failed atomic publication. |
+| Rejection evidence | Failure verification: AT-23,24; divergence, failed fetch and wrong gitlink tests. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
 ### F14 — Additional hosts and opportunistic clients
 
-Capability discovery is not execution proof. Offline client ownership must reconcile before retry; unsupported role stays UNSUPPORTED.
-
-Boundary: `src/lib/common/build_manager/contracts.spl`. Algorithm/change: Admit enrolled client workers with explicit budgets and runtime classes; qualify macOS/FreeBSD/SimpleOS and ARM/RISC-V separately; bind cross-target and native/emulated test identities.
-
-Failure verification: AT-12,14,19,20,27; per-role installed native/emulated receipts. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success.
+| Concern | Design |
+|---|---|
+| Invariant | Capability discovery is not execution proof. Offline client ownership must reconcile before retry; unsupported role stays UNSUPPORTED. |
+| Owner and algorithm | Boundary: `src/lib/common/build_manager/contracts.spl`. Algorithm/change: Admit enrolled client workers with explicit budgets and runtime classes; qualify macOS/FreeBSD/SimpleOS and ARM/RISC-V separately; bind cross-target and native/emulated test identities. |
+| Rejection evidence | Failure verification: AT-12,14,19,20,27; per-role installed native/emulated receipts. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
 ### F15 — Qualified TLS and optional RDMA
 
-SSH vertical slice remains independent. RDMA is not HTTPS; outstanding work drains and revoked buffer generations invalidate before memory reuse.
-
-Boundary: `src/app/bootstrap_builder/transport.spl`. Algorithm/change: Introduce qualified secure RPC provider behind existing operation contracts; parity-test auth/replay/cancel; later add RDMA artifact path with bounded grants and completion retirement.
-
-Failure verification: AT-11,28; transport parity and hardware retirement receipts. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success.
+| Concern | Design |
+|---|---|
+| Invariant | SSH vertical slice remains independent. RDMA is not HTTPS; outstanding work drains and revoked buffer generations invalidate before memory reuse. |
+| Owner and algorithm | Boundary: `src/app/bootstrap_builder/transport.spl`. Algorithm/change: Introduce qualified secure RPC provider behind existing operation contracts; parity-test auth/replay/cancel; later add RDMA artifact path with bounded grants and completion retirement. |
+| Rejection evidence | Failure verification: AT-11,28; transport parity and hardware retirement receipts. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
 ### F16 — Operational evidence and performance
 
-No source inspection becomes runtime PASS. Publish sample counts and p50/p95/p99 where justified; proposed numerical budgets require baseline and user selection.
-
-Boundary: `doc/03_plan/sys_test`. Algorithm/change: Retain fixture/runtime/host digests and raw timing/RSS; measure cold/warm startup, input responsiveness, build/CAS states and reconciliation independently; add diagnostic redaction, drain, revoke and rollback procedures.
-
-Failure verification: AT-01–28; failure-injection matrix and measured baseline. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success.
+| Concern | Design |
+|---|---|
+| Invariant | No source inspection becomes runtime PASS. Publish sample counts and p50/p95/p99 where justified; proposed numerical budgets require baseline and user selection. |
+| Owner and algorithm | Boundary: `doc/03_plan/sys_test`. Algorithm/change: Retain fixture/runtime/host digests and raw timing/RSS; measure cold/warm startup, input responsiveness, build/CAS states and reconciliation independently; add diagnostic redaction, drain, revoke and rollback procedures. |
+| Rejection evidence | Failure verification: AT-01–28; failure-injection matrix and measured baseline. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
 
 ## MDSOC++ capsule interaction design

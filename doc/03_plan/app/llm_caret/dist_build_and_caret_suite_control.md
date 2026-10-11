@@ -2,7 +2,7 @@
 
 Date: 2026-10-12. Branch: `release_phase3`; inspected HEAD: `d5df0cb60`. Status: proposed planning/design, not implemented or runtime-qualified. This lane imports the supplied research without changing its historical claims. Existing uncommitted Caret production artifacts are preserved and remain separately owned. Scope is documentation; requirement selection precedes implementation.
 
-Research: [source](../../../01_research/app/llm_caret/dist_build_and_caret_suite_control_research_plan_2026-10-11.md). Companion: [detail design](../../../05_design/dist_build_and_caret_suite_control.md). Existing Caret product plan: [production](caret_suite_production.md). DBC milestones here and CSP milestones there are separate namespaces. Shared work must have one owner and one acceptance receipt.
+Research: [source](../../../01_research/app/llm_caret/dist_build_and_caret_suite_control_research_plan_2026-10-11.md). Companion: [detail design](../../../05_design/dist_build_and_caret_suite_control.md). Existing uncommitted Caret product plan: `doc/03_plan/app/llm_caret/caret_suite_production.md` (separate owner; not included in this PR). DBC milestones here and CSP milestones there are separate namespaces. Shared work must have one owner and one acceptance receipt.
 
 ## Delivery sequence
 
