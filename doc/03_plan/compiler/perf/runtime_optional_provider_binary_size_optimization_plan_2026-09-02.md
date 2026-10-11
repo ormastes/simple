@@ -492,7 +492,16 @@ other bundles retain the existing strong-provider extraction behavior and the
 hosted support-library flags are unchanged. A focused contract checks the
 core-C omission and host-GPU retention across target spellings.
 
-This is a source candidate. The session's Item 5 native retry cap is already
-exhausted, so the new contract and a current-source core-C hello have not run.
+At the prior session cutoff, the Item 5 native retry cap was exhausted, so
+neither the focused contract nor a current-source core-C hello had run. The
+focused contract result is recorded below; the full hello remains unrun.
 No byte reduction, startup/RSS improvement, provider demand-load parity, or
 Phase 7 PASS is claimed until the actual link map and paired cohorts prove it.
+
+The focused no-stub pure-Simple native contract now passes on the selected
+bundle argument: core-C emits no forced Vulkan root on four target spellings,
+host-GPU retains that root, and links without the aggregate archive have no
+support flags. See the [native contract report](../../../09_report/compiler/target5_core_c_vulkan_root_native_contract_2026-10-11.md).
+The 49,392-byte fixture is not a product-size cohort. The live kernel closure
+still has two K0→OS release imports, and matched Stage4 size/startup/RSS plus
+Phase 7 demand-load evidence remain open.
