@@ -96,3 +96,10 @@ tracked source. Optional-trace and Git-listing return rewrites did not change
 the result and were removed. A focused process-output ABI probe is authored
 but unexecuted; see
 `doc/09_report/compiler/target6_tracked_move_native_abi_diagnostic_2026-10-11.md`.
+
+The focused 44-module process-output fixture later passed the exact cold
+`ls-files` request and text split. An explicit-validity Git-event batch
+candidate linked in the 66-module fixture, which then crashed in
+`CompilerInventoryTraceV1.captured_pointer` before publication. The next
+bounded run must resolve that trace boundary and still prove the full V4
+tracked-move sequence; the direct Git output test does not prove it.

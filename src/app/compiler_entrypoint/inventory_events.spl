@@ -45,6 +45,16 @@ struct CompilerInventoryGitEventsV1:
     untracked_paths: [text]
     tracked_paths: [text]
 
+struct CompilerInventoryGitBatchV1:
+    # Keep the refresh handoff explicit: the native Stage 2 compiler has
+    # reboxed typed Option parameters and results in this call graph.
+    valid: bool
+    value: CompilerInventoryGitEventsV1
+
+fn compiler_inventory_git_batch_invalid_v1() -> CompilerInventoryGitBatchV1:
+    CompilerInventoryGitBatchV1(false, CompilerInventoryGitEventsV1(
+        [], "", "", [], []))
+
 struct CompilerInventoryUntrackedDigestsV1:
     valid: bool
     src_digest: text
@@ -338,16 +348,11 @@ fn compiler_inventory_parse_porcelain_v1(
         changed, digests.src_digest, digests.test_digest, digests.paths,
         tracked_paths))
 
-fn compiler_inventory_git_events_v1(
-    root: text, previous_head: text, head: text, source_roots: [text], cold_init: bool
-) -> CompilerInventoryGitEventsV1?:
-    _compiler_inventory_git_events_traced_v1(root, previous_head, head, source_roots, cold_init, nil)
-
 fn _compiler_inventory_git_events_traced_v1(
     root: text, previous_head: text, head: text,
     source_roots: [text], cold_init: bool,
     trace: CompilerInventoryTraceV1?
-) -> CompilerInventoryGitEventsV1?:
+) -> CompilerInventoryGitBatchV1:
     # Reuse the refresh owner's captured HEAD for both diffs. A second
     # rev-parse costs a process on every warm request and can bind events from
     # one revision to a cursor naming another if a commit lands mid-refresh.
@@ -361,53 +366,54 @@ fn _compiler_inventory_git_events_traced_v1(
             root, ["-c", "core.quotePath=false", "ls-files", "-t",
                 "--cached", "--others", "--exclude-standard", "--"] + source_roots, trace, 1)
         if listed == nil:
-            return nil
+            return compiler_inventory_git_batch_invalid_v1()
         var untracked_paths: [text] = []
         for line in listed!.split("\n"):
             if line == "":
                 continue
             if line.len() <= 2 or line[1:2] != " ":
-                return nil
+                return compiler_inventory_git_batch_invalid_v1()
             val tag = line[0:1]
             if tag != "?" and tag != "H" and tag != "S" and tag != "M" and
                     tag != "R" and tag != "C":
-                return nil
+                return compiler_inventory_git_batch_invalid_v1()
             val path = line[2:]
             if tag == "?":
                 untracked_paths = untracked_paths.push(path)
             val next = compiler_inventory_event_push_v1(
                 events, root, "create", path)
             if next == nil:
-                return nil
+                return compiler_inventory_git_batch_invalid_v1()
             events = next!
         val digests = compiler_inventory_untracked_digests_v1(
             untracked_paths.join("\n"), source_roots)
         if not digests.valid:
-            return nil
+            return compiler_inventory_git_batch_invalid_v1()
         val working = _compiler_inventory_git_lines_traced_v1(
             root, ["-c", "core.quotePath=false", "status", "--porcelain=v1",
                 "--untracked-files=no", "--no-renames", "--"] + source_roots,
             trace, 3)
         if working == nil:
-            return nil
+            return compiler_inventory_git_batch_invalid_v1()
         val dirty = compiler_inventory_parse_porcelain_v1(
             root, working!, [], source_roots)
         if dirty == nil:
-            return nil
-        return Some(CompilerInventoryGitEventsV1(
-            events, digests.src_digest, digests.test_digest,
-            digests.paths, dirty!.tracked_paths))
+            return compiler_inventory_git_batch_invalid_v1()
+        return CompilerInventoryGitBatchV1(true,
+            CompilerInventoryGitEventsV1(
+                events, digests.src_digest, digests.test_digest,
+                digests.paths, dirty!.tracked_paths))
     if head == "" or previous_head == "":
-        return nil
+        return compiler_inventory_git_batch_invalid_v1()
     if head != previous_head:
         val committed = _compiler_inventory_git_lines_traced_v1(
             root, ["-c", "core.quotePath=false", "diff", "--name-status",
                 "--no-renames", previous_head, head, "--"] + source_roots, trace, 2)
         if committed == nil:
-            return nil
+            return compiler_inventory_git_batch_invalid_v1()
         val next = compiler_inventory_parse_name_status_v1(root, committed!, events)
         if next == nil:
-            return nil
+            return compiler_inventory_git_batch_invalid_v1()
         events = next!
     # One porcelain listing replaces the separate tracked diff and untracked
     # ls-files processes on every warm request. The captured HEAD above still
@@ -416,9 +422,12 @@ fn _compiler_inventory_git_events_traced_v1(
         root, ["-c", "core.quotePath=false", "status", "--porcelain=v1",
             "--untracked-files=all", "--no-renames", "--"] + source_roots, trace, 3)
     if working == nil:
-        return nil
-    compiler_inventory_parse_porcelain_v1(
+        return compiler_inventory_git_batch_invalid_v1()
+    val parsed = compiler_inventory_parse_porcelain_v1(
         root, working!, events, source_roots)
+    if parsed == nil:
+        return compiler_inventory_git_batch_invalid_v1()
+    CompilerInventoryGitBatchV1(true, parsed!)
 
 fn compiler_inventory_decode_v1(value: text) -> text:
     if value == "%empty":
@@ -703,11 +712,12 @@ fn _compiler_inventory_refresh_locked_v1(
     val head = compiler_inventory_git_head_v1(root)
     if head == "":
         return compiler_inventory_invalid_v1("git-event-source-unavailable")
-    val observed = match _compiler_inventory_git_events_traced_v1(
-            root, if cursor.valid: cursor.git_head else: head, head,
-            source_roots, cold_init, trace):
-        case Some(batch): batch
-        case _: return compiler_inventory_invalid_v1("git-event-refresh-failed")
+    val batch = _compiler_inventory_git_events_traced_v1(
+        root, if cursor.valid: cursor.git_head else: head, head,
+        source_roots, cold_init, trace)
+    if not batch.valid:
+        return compiler_inventory_invalid_v1("git-event-refresh-failed")
+    val observed = batch.value
     if trace.?:
         trace!.observed(observed.events.len(), observed.untracked_paths.len(),
             observed.untracked_src_digest, observed.untracked_test_digest)

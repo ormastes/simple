@@ -748,3 +748,10 @@ source. Source-only trace and Git-listing rewrites did not improve the result
 and were removed. The focused process-output ABI probe is the next gate;
 see [the diagnostic](../../../09_report/compiler/target6_tracked_move_native_abi_diagnostic_2026-10-11.md).
 V4 warm deletion, full CLI cutover, and matched p95/RSS remain open.
+
+The focused no-stub process-output fixture now passes the exact cold
+`ls-files` request and splitting in a 44-module closure. An explicit-validity
+Git-event batch candidate links in the 66-module fixture but its execution
+crashes in the optional trace's `captured_pointer` before inventory
+publication. See the updated diagnostic. The source candidate has no V4
+runtime PASS, and the session's three-cycle limit is reached.

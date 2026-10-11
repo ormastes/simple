@@ -90,9 +90,11 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   Finish the typed TLDR/SMF producer and graph publication, replace the
   binding-only index, then run the SPipe and native cold/warm/edit/SCC/variant
   time/RSS cohorts with the normalized-sum rule.
-- [ ] Run the focused process-output ABI probe and repair its failing boundary
-  before retrying the V4 tracked-move native fixture. The latest 66-module
-  fixture links but fails before cold publication; see
+- [x] Run the focused process-output ABI probe against Git stdout and the exact
+  cold `ls-files` request; both pass in the 44-module native closure.
+- [ ] Repair the optional trace boundary and finish the V4 tracked-move native
+  fixture. Its explicit-batch candidate links but crashes before cold
+  publication; see
   `doc/09_report/compiler/target6_tracked_move_native_abi_diagnostic_2026-10-11.md`.
 - [ ] Run the full Target 5 demand-load/Phase 7 matrix and Target 6 verification
   gates. Close the technical TODO only after a `STATUS: PASS` report; the user's
