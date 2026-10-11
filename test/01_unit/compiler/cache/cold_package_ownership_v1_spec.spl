@@ -10,7 +10,7 @@ use compiler.driver.driver_build.native_full_inventory_sources.{
 use compiler.driver.cache.cold_package_ownership_v1.{
     ColdPackageOwnershipManifestV1,
     cold_package_ownership_rules_parse_v1,
-    cold_package_ownership_capture_v1
+    cold_package_ownership_capture_v1, cold_package_ownership_capture_scoped_v1
 }
 
 fn package_policy_test_text() -> text:
@@ -79,6 +79,26 @@ describe "frozen cold package ownership":
         expect(result.members_by_source["src/os/boot.spl"].manifest_source_identity).to_equal("")
         expect(result.members_by_source["src/lib/std.spl"].manifest_digest).to_equal(
             sha256_text("project:\n  name: simple-std\n"))
+
+    it "captures an entry-scoped source from the full frozen inventory":
+        val policy = package_policy_test_text()
+        val inventory = package_policy_test_inventory(policy)
+        val sources = NativeFullInventorySourcesV1(
+            ["/snapshot/src/lib/std.spl"], ["src/lib/std.spl"],
+            [sha256_text("std-source")], [10], 1,
+            sha256_text("snapshot"),
+            compile_source_inventory_digest_v1(inventory),
+            sha256_text("receipt"))
+        val manifest = [package_policy_test_manifests()[0]]
+        val captured = cold_package_ownership_capture_scoped_v1(
+            inventory, sources, policy, manifest)
+        expect(captured.is_ok()).to_equal(true)
+        expect(captured.unwrap().members.len()).to_equal(1)
+        expect(captured.unwrap().members_by_source["src/lib/std.spl"].package_identity).to_equal("simple.std")
+        expect(cold_package_ownership_capture_v1(
+            inventory, sources, policy, manifest).is_err()).to_equal(true)
+        expect(cold_package_ownership_capture_scoped_v1(
+            inventory, sources, policy, []).is_err()).to_equal(true)
 
     it "rejects policy drift, unowned source, and changed manifest bytes":
         val policy = package_policy_test_text()

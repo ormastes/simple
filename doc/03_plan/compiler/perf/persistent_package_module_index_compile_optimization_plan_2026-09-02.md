@@ -545,3 +545,14 @@ An indexed Huffman-length loop removes the native MIR non-array iteration diagno
 ### 2026-10-11 gzip return ABI follow-up
 
 Explicit dynamic-block and Huffman-table return shapes advance the focused three-module compile past their LLVM ptr-to-void failures; the same failure now appears in the stored-block helper. The bounded three-cycle verification limit is exhausted, with no SMF output or full Item 6 native PASS. See [the report](../../../09_report/compiler/target6_gzip_mir_unblock_llvm_failure_2026-10-11.md).
+
+### 2026-10-11 Entry-scoped package ownership projection
+
+The cold ownership capture now has an explicit scoped entry point. It authenticates
+each reached source against the full frozen SCV inventory and the checked-in
+ownership policy and nearest manifest. The existing full-inventory entry point
+continues to require every source and its runtime/std/OS membership. A focused
+unit scenario covers a one-source scoped projection, full-mode rejection of
+that subset, and rejection when its required manifest is absent. This is a
+producer prerequisite; ordinary CLI HIR/MIR artifact emission, V3 publication,
+and measured warm-build qualification remain open. A no-stub Stage 2 direct compile parsed and lowered HIR for the 216-module spec closure, then timed out during MIR after an unrelated unsupported lambda diagnostic; the unit scenario has no executable PASS.

@@ -168,11 +168,12 @@ fn _cold_package_rule_for_source_v1(
 # Every supplied manifest and the policy are exact SCV records. The caller
 # supplies bytes from its admitted frozen snapshot; this owner never reopens a
 # source or consults an ambient project manifest.
-fn cold_package_ownership_capture_v1(
+fn _cold_package_ownership_capture_v1(
     inventory: CompileSourceInventoryV1,
     sources: NativeFullInventorySourcesV1,
     policy_content: text,
-    manifests: [ColdPackageOwnershipManifestV1]
+    manifests: [ColdPackageOwnershipManifestV1],
+    full_inventory: bool
 ) -> Result<ColdPackageOwnershipCaptureV1, text>:
     if sources.source_count < 1 or
             sources.source_count > NATIVE_FULL_INVENTORY_MAX_SOURCES_V1 or
@@ -204,7 +205,8 @@ fn cold_package_ownership_capture_v1(
         elif entry.source_identity.ends_with("/simple.sdn"):
             manifest_paths = manifest_paths.push(entry.source_identity)
         index = index + 1
-    if spl_count != sources.source_count or manifest_paths.len() >
+    if (full_inventory and spl_count != sources.source_count) or
+            sources.source_count > spl_count or manifest_paths.len() >
             COLD_PACKAGE_OWNERSHIP_MAX_MANIFESTS_V1 or
             not records.has(COLD_PACKAGE_OWNERSHIP_POLICY_IDENTITY_V1):
         return Err("cold-package-inventory-coverage-invalid")
@@ -278,12 +280,32 @@ fn cold_package_ownership_capture_v1(
     val membership = RuntimeStdPackageMembershipV1(
         sources.snapshot_inventory_digest, sources.source_inventory_digest,
         sources.scv_receipt_digest, membership_members)
-    val verdict = runtime_std_package_membership_validate_v1(
-        membership, sources)
-    if verdict != "ok":
-        return Err("cold-package-membership-invalid:{verdict}")
+    if full_inventory:
+        val verdict = runtime_std_package_membership_validate_v1(
+            membership, sources)
+        if verdict != "ok":
+            return Err("cold-package-membership-invalid:{verdict}")
     Ok(ColdPackageOwnershipCaptureV1(
         policy_digest, membership, members, by_source))
+
+fn cold_package_ownership_capture_v1(
+    inventory: CompileSourceInventoryV1,
+    sources: NativeFullInventorySourcesV1,
+    policy_content: text,
+    manifests: [ColdPackageOwnershipManifestV1]
+) -> Result<ColdPackageOwnershipCaptureV1, text>:
+    _cold_package_ownership_capture_v1(
+        inventory, sources, policy_content, manifests, true)
+
+fn cold_package_ownership_capture_scoped_v1(
+    inventory: CompileSourceInventoryV1,
+    sources: NativeFullInventorySourcesV1,
+    policy_content: text,
+    manifests: [ColdPackageOwnershipManifestV1]
+) -> Result<ColdPackageOwnershipCaptureV1, text>:
+    # The full frozen inventory authenticates selected rows and nearest manifests.
+    _cold_package_ownership_capture_v1(
+        inventory, sources, policy_content, manifests, false)
 
 export ColdPackageOwnershipManifestV1
 export ColdPackageOwnershipRuleV1
@@ -291,4 +313,4 @@ export ColdPackageOwnershipMemberV1
 export ColdPackageOwnershipCaptureV1
 export COLD_PACKAGE_OWNERSHIP_POLICY_IDENTITY_V1
 export cold_package_ownership_rules_parse_v1
-export cold_package_ownership_capture_v1
+export cold_package_ownership_capture_v1, cold_package_ownership_capture_scoped_v1
