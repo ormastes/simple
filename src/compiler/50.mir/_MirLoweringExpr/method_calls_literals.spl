@@ -1535,6 +1535,34 @@ impl MirLowering:
                 case _: ()
         -1
 
+    me fn_field_declared_owner(receiver: HirExpr, receiver_local: LocalId) -> text:
+        # Declared-type owner recovery for the fn-field callee fallback: only
+        # consulted when struct_value_syms has no entry for the receiver.
+        # Tried in the same order the surrounding recovery paths trust:
+        # remembered HIR type on the lowered local, then the receiver
+        # expression's declared type (param/local annotation). Returns the
+        # bare struct/class name (class identity for classes), "" otherwise.
+        var owner_sym = SymbolId(id: -1)
+        if val remembered = self.find_local_hir_type(receiver_local.id):
+            match remembered.kind:
+                case HirTypeKind.Named(sym, _):
+                    owner_sym = sym
+                case _: ()
+        if owner_sym.id < 0:
+            if val declared = self.receiver_declared_type(receiver):
+                match declared.kind:
+                    case HirTypeKind.Named(sym, _):
+                        owner_sym = sym
+                    case _: ()
+        if owner_sym.id < 0:
+            return ""
+        if val owner_symbol = self.symbols.get_symbol_raw(owner_sym.id):
+            if owner_symbol.kind == SymbolKind.Class:
+                return mir_class_identity(owner_symbol)
+            if owner_symbol.name != "":
+                return owner_symbol.name
+        ""
+
     me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution, static_receiver_name_hint: text, static_receiver_symbol_hint: i64) -> LocalId:
         """Lower method call based on resolution.
 
@@ -4323,8 +4351,19 @@ impl MirLowering:
                 # a method: re-dispatch as a call of the field value (the same
                 # closure/raw indirect-call diamond `(h.f)(4)` already takes).
                 # Bug native_capturing_lambda_closure_conversion_2026-08-22.
-                if unresolved_struct_name != nil:
-                    val field_owner = unresolved_struct_name ?? ""
+                var field_owner = unresolved_struct_name ?? ""
+                if field_owner == "":
+                    # Defensive fallback (seed-native registry miss documented
+                    # in doc/08_tracking/bug/seed_codegen_interp_native_divergence
+                    # _2026-10-12.md): the struct_value_syms entry for the
+                    # receiver local is absent on the native lane, but the
+                    # owner is recoverable from the receiver's DECLARED type
+                    # (an annotated param like `arena: RtHalTaskArenaPort` --
+                    # the same declared-type evidence param setup used to
+                    # compute the missing entry). Registry path stays primary;
+                    # this fires only on a miss with a declared owner.
+                    field_owner = self.fn_field_declared_owner(receiver, unresolved_receiver_local)
+                if field_owner != "":
                     if self.struct_field_order.has(field_owner) and self.struct_field_order[field_owner].contains(method):
                         val field_callee = HirExpr(kind: HirExprKind.Field(receiver, method, nil), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: receiver.span), span: receiver.span)
                         return self.lower_call(field_callee, args)
