@@ -49,6 +49,8 @@ val ext_source = "use lib.dep.\{Reg, Box\}\n\nimpl Reg:\n    fn ext_go(x: i64) -
 
 val ext2_source = "use lib.dep.\{Reg\}\n\nimpl Reg:\n    fn dup() -> i64:\n        2\n"
 
+val other_source = "pub struct Reg:\n    count: i64\n\nimpl Reg:\n    fn ext_go(x: i64) -> bool:\n        x > self.count\n"
+
 var _last_mir: MirModule? = nil
 
 # Provider surfaces dominate this fixture's cost (module_surfaces_from_modules
@@ -60,6 +62,7 @@ var _surfaces: ModuleSurfacesByName? = nil
 var _dep_hir: HirModule? = nil
 var _ext_hir: HirModule? = nil
 var _ext2_hir: HirModule? = nil
+var _other_hir: HirModule? = nil
 
 fn ensure_providers():
     if _providers_ready:
@@ -68,19 +71,23 @@ fn ensure_providers():
     val dep_ast = parse_full_frontend(dep_source, "lib/dep.spl", "lib.dep", log)
     val ext_ast = parse_full_frontend(ext_source, "lib/ext.spl", "lib.ext", log)
     val ext2_ast = parse_full_frontend(ext2_source, "lib/ext2.spl", "lib.ext2", log)
+    val other_ast = parse_full_frontend(other_source, "lib/other.spl", "lib.other", log)
     var modules: Dict<text, Module> = {}
     modules["lib.dep"] = dep_ast
     modules["lib.ext"] = ext_ast
     modules["lib.ext2"] = ext2_ast
-    val sources = [SourceFile(path: "lib/dep.spl", content: dep_source, module_name: "lib.dep"), SourceFile(path: "lib/ext.spl", content: ext_source, module_name: "lib.ext"), SourceFile(path: "lib/ext2.spl", content: ext2_source, module_name: "lib.ext2")]
+    modules["lib.other"] = other_ast
+    val sources = [SourceFile(path: "lib/dep.spl", content: dep_source, module_name: "lib.dep"), SourceFile(path: "lib/ext.spl", content: ext_source, module_name: "lib.ext"), SourceFile(path: "lib/ext2.spl", content: ext2_source, module_name: "lib.ext2"), SourceFile(path: "lib/other.spl", content: other_source, module_name: "lib.other")]
     val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
     _surfaces = Some(surfaces)
     var dep_lowering = hirlowering_for_module("lib.dep", surfaces)
     var ext_lowering = hirlowering_for_module("lib.ext", surfaces)
     var ext2_lowering = hirlowering_for_module("lib.ext2", surfaces)
+    var other_lowering = hirlowering_for_module("lib.other", surfaces)
     _dep_hir = Some(dep_lowering.lower_module(dep_ast))
     _ext_hir = Some(ext_lowering.lower_module(ext_ast))
     _ext2_hir = Some(ext2_lowering.lower_module(ext2_ast))
+    _other_hir = Some(other_lowering.lower_module(other_ast))
     _providers_ready = true
 
 fn lower_consumer(consumer_source: text, with_ext2: bool) -> MirLowering:
@@ -88,13 +95,15 @@ fn lower_consumer(consumer_source: text, with_ext2: bool) -> MirLowering:
     val dep_hir: HirModule = _dep_hir.unwrap()
     val ext_hir: HirModule = _ext_hir.unwrap()
     val ext2_hir: HirModule = _ext2_hir.unwrap()
+    val other_hir: HirModule = _other_hir.unwrap()
     val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", Logger(level: 0))
     var consumer_lowering = hirlowering_for_module("app.main", _surfaces.unwrap())
     val consumer_hir = consumer_lowering.lower_module(consumer_ast)
-    var providers = [dep_hir, ext_hir]
+    var providers = [dep_hir, ext_hir, other_hir]
     var mir_lowering = MirLowering.new(consumer_hir.symbols)
     mir_lowering.prescan_module_struct_names(dep_hir)
     mir_lowering.prescan_module_struct_names(ext_hir)
+    mir_lowering.prescan_module_struct_names(other_hir)
     if with_ext2:
         mir_lowering.prescan_module_struct_names(ext2_hir)
         providers.push(ext2_hir)
@@ -171,6 +180,22 @@ describe "extension impl declared in another module":
                 to_decoy = true
         expect(to_reg).to_equal(true)
         expect(to_decoy).to_equal(false)
+
+    it "keeps same-basename class and struct extension calls on their exact owners":
+        val source = "use lib.dep.\{Reg\}\nuse lib.other.\{Reg as OtherReg\}\nuse lib.ext\n\nfn f() -> bool:\n    val dep_direct = Reg(count: 1).ext_go(2)\n    val other_direct = OtherReg(count: 3).ext_go(4)\n    val dep_bound: Reg = Reg(count: 1)\n    val other_bound: OtherReg = OtherReg(count: 5)\n    val dep_call = dep_bound.ext_go(6)\n    val other_call = other_bound.ext_go(7)\n    dep_direct and other_direct and dep_call and other_call\n"
+        val errs = errors_for("same_basename_owner_dispatch", source)
+        expect(errs.contains("unresolved method call")).to_equal(false)
+        val callees = direct_callees("f")
+        var dep_calls = 0
+        var other_calls = 0
+        var decoy_calls = 0
+        for callee in callees:
+            if callee == "lib.dep.Reg.ext_go": dep_calls = dep_calls + 1
+            if callee == "lib.other.Reg.ext_go": other_calls = other_calls + 1
+            if callee == "lib.dep.Decoy.ext_go": decoy_calls = decoy_calls + 1
+        expect(dep_calls).to_equal(2)
+        expect(other_calls).to_equal(2)
+        expect(decoy_calls).to_equal(0)
 
     it "keys an extension of a generic class by the class identity, without type arguments":
         val lowering = lower_consumer("use lib.dep.\{Box\}\nuse lib.ext\n\nfn f() -> i64:\n    1\n", false)
