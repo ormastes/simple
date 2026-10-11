@@ -6,7 +6,8 @@ use compiler.common.driver_core_types.{CompileMode}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable, sosix_cwd}
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{
-    cold_hir_typed_receipts_from_lowered_sources_v1
+    cold_hir_typed_receipts_from_lowered_sources_v1,
+    cold_hir_source_mismatch_evidence_v1
 }
 use compiler.driver.smf.runtime_std_hir_emission_v1.{
     RuntimeStdHirModuleEmissionV1, runtime_std_hir_emit_module_v1
@@ -72,7 +73,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_last_warnings, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
-use compiler.driver.driver_hir_cache.{hir_cache_store_in_owned_scope, hir_cache_clear_last_warnings}
+use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_in_owned_scope, hir_cache_clear_last_warnings}
 use compiler.driver.driver_hir_cache.{hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block, hir_shard_inventory}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
 use compiler.common.cache.reverse_reference_facts.{
@@ -268,18 +269,15 @@ impl CompilerDriver:
                         self.ctx.source_module_names_owner,
                         self.ctx.hir_modules):
                     case Err(reason):
-                        if reason == "cold-hir-module-source-mismatch" and
-                                self.ctx.source_paths_owner.len() > 0:
-                            val source_path = self.ctx.source_paths_owner[0]
-                            val hir_path = if self.ctx.hir_modules.len() > 0:
-                                self.ctx.hir_modules[0].path
-                            else:
-                                ""
-                            val bounded_root = if source_root.len() > 256: source_root[:256] else: source_root
-                            val bounded_source = if source_path.len() > 256: source_path[:256] else: source_path
-                            val bounded_hir = if hir_path.len() > 256: hir_path[:256] else: hir_path
-                            self.ctx.add_error(
-                                "cold HIR path evidence: root='{bounded_root}' source='{bounded_source}' hir='{bounded_hir}'")
+                        if reason == "cold-hir-module-source-mismatch":
+                            # Guarded evidence construction lives in
+                            # cold_hir_source_mismatch_evidence_v1 (bounds-checked
+                            # source/module iteration, hir_modules.has(name)
+                            # before any dict index, 256-char bounding).
+                            self.ctx.add_error(cold_hir_source_mismatch_evidence_v1(
+                                source_root, self.ctx.source_paths_owner,
+                                self.ctx.source_module_names_owner,
+                                self.ctx.hir_modules))
                         self.ctx.add_error("cold HIR receipt capture failed: {reason}")
                         return false
                     case Ok(receipts):
@@ -488,7 +486,7 @@ impl CompilerDriver:
         var abi_receipt: (text, Result<text, text>) = ("", Err(""))
         var errors: [text] = []
         var warnings: [text] = []
-        val cache_result = hir_cache_load(cache_key)
+        val cache_result = hir_cache_load_in_owned_scope(cache_key)
         if val found = cache_result:
             module = found
             cached = true

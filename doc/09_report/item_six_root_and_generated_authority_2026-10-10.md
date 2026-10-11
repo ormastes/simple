@@ -57,7 +57,7 @@ admission receipts. No ready compiled SSpec runner was found in those two trees.
 
 An isolated diagnostic with the archived pure-Simple compiler, bounded to 60
 seconds, exited 1: `error: unknown command 'check'`. Its log and process receipt
-are retained in `build/native_probe/item6-completion/root-check.*`. No seed was
+were recorded in `build/native_probe/item6-completion/root-check.*`. No seed was
 substituted and no admission claim was made from that diagnostic.
 
 A second isolated diagnostic invoked the same compiler with `native-build` on
@@ -123,3 +123,84 @@ that gap without treating it as generator execution. The domain research records
 the separate declaration, action execution, frozen byte admission and semantic
 projection requirements. Full runtime qualification and the original 44-scenario
 contract remain open.
+
+Artifact retention correction: after updating the sparse source checkout, the
+ignored `build/native_probe/item6-completion/` directory was no longer present.
+The diagnostic results and hashes above remain recorded historical evidence,
+but the original local logs, receipts and cache are not currently available for
+replay. Do not claim those files are retained or treat the recorded timeout as
+current-source verification. Future diagnostic artifacts must live in an owned
+directory outside paths subject to sparse-checkout pruning.
+
+## Schema migration implementation candidate
+
+Schema 4 now carries the TLDR generated-source digest through full/scoped
+index encoding, action identity, semantic invalidation and grouped worker route
+serialization. Legacy index bytes remain readable without inventing a witness;
+legacy worker routes are inspectable but cannot execute archive reuse. Bootstrap
+configuration explicitly requests V4. Publication, preparation, SCC inventory
+and runtime/std membership consumers preserve their complete-graph checks.
+Primary review found and corrected the missed SCC consumer gate.
+
+Regression specs cover generated-only reverse invalidation, stable-witness
+private edits, legacy migration, worker-route preservation/rejection and typed
+bootstrap configuration. These are authored tests, not executed acceptance.
+Independent declaration selection and actual generated producer execution are
+still unfinished; schema projection does not supply either authority.
+
+Remote concurrency observation: PR 2860 acquired merge commit
+`07ca2ab702e57043ddc89a500cf689813a4d5a66` and was marked ready by another
+actor while the local schema work was unpushed. Its body still records blocked
+verification. This session preserves that remote history and does not interpret
+ready status or structural CI as runtime admission.
+
+## Follow-up verification checkpoint
+
+The remaining work is isolated on `work/item6-schema4-followup-20261010`,
+rebased onto `d71b8bcf76d` on `release/1.0`. The tracked-file increase from
+142941 to 143023 matches exactly the 82 upstream additions; no upstream files
+were deleted by the rebase. This follow-up includes the prior unlanded item-six
+commits and must be reconciled with PR 2860 before eventual merge.
+
+Primary review accepted the smaller-model schema review and additional scoped
+roundtrip/reachability and malformed-witness regression specs as source work.
+Working and staged direct-environment guards passed, the numbered-artifact guard
+passed, and whitespace checks passed. These checks do not execute Simple code.
+
+The bounded bootstrap audit found the preserved `frozen-old-49cbd005/simple.exe`
+candidate with matching historical admission, sanity and receiver evidence, but
+its compiler-test log contains only the missing MC/DC waiver gate. The newer
+`5d97a3dc` candidate has sanity/receiver evidence but no matching admission;
+the current phase-two verification owner is still running. Neither result
+supplies the required full-CLI check/test, MCP/native-smoke or acceptance results.
+Other sessions' binaries and processes were left untouched.
+
+STATUS: WARN — implementation candidate only; release admission not established.
+Pending execution: changed unit/integration specs and their manual generation,
+all 44 package-index system scenarios, compiler/lib/MCP/LSP checks, MCP stdio
+integration, runtime and MCP native smokes, coverage and performance targets.
+Pending implementation: independently selected generated-plan authority and real
+producer execution. Do not merge or publish this follow-up as completed item six.
+
+## Continued review: fallback scope and generator ordering
+
+The next source audit found a regression in the schema candidate: absent or
+corrupt transition evidence invalidated every V4 module, contradicting the
+existing hinted reverse-closure tests. The fallback now preserves current-schema
+hint scope and unknown-hint rejection; legacy generations still migrate by
+invalidating all entries. This is a source-review finding and fix, not an
+executed red/green result.
+
+The sidecar then found a production bypass: the route wrapper only invoked
+invalidation for nonempty hints. It now invokes conservative legacy migration
+before archive lookup even with no events, through both routing entrypoints.
+Primary test review also corrected a missing-transition fixture that attempted
+to delete a nonexistent first-publication transition file.
+
+Separate-worktree research traced the production publication seam and the
+process-observation contracts. Primary review corrected the proposed ordering:
+generator execution must precede HIR in a derived immutable snapshot, and expected
+declaration authority must be separate from artifact receipts. The design now
+records this lifecycle and explicit success/refusal cases. No claim is made that
+existing process lifecycle evidence enforces filesystem access or that these
+planned generator stages are implemented.

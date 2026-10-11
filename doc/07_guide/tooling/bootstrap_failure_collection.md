@@ -49,6 +49,23 @@ production orchestration with failing/passing fake commands and inventory rows;
 it also checks policy inheritance, ordered overrides, cache preservation, and
 fatal snapshot admission. Other runners may still need their own policy wiring.
 
+## Phase verification campaign bounds
+
+The phase verifier has a single 7200-second campaign deadline, separate from
+`--timeout-seconds` for each row. Set `--campaign-timeout-seconds` or
+`BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS` to select another positive budget.
+The owner reaps its job/process tree on expiry or interruption and retains
+partial rows, incomplete counts, caches and a nonpassing campaign receipt.
+Nested row RSS enforcement remains unchanged.
+
+If mandatory fullCLI or test-runner construction fails, independent module
+diagnostics default to 8 deterministic entries. Configure the nonnegative
+`BOOTSTRAP_VERIFY_FAILED_TOOL_MODULE_LIMIT` for another finite sample. The full
+inventory remains retained; excluded entries are explicitly unexecuted/BLOCKED.
+Healthy prerequisites retain the complete inventory. This sample cannot admit
+missing tools or replace test-suite evidence. Regression:
+`sh scripts/bootstrap/tests/verification-campaign-test.shs`.
+
 ## Agent continuation and explicit diagnostic exceptions
 
 Always finish the finite inventory of independently runnable modules, binary
@@ -489,3 +506,16 @@ measured Linux/WSL cache-parent staging path, launch-interrupt ownership and ato
 terminal receipts. Preserve the exact source/runtime boundaries and the campaign
 Phase 3/full-CLI gates; neither a progress marker nor a partial object inventory
 is a completed producer.
+
+For a Windows durable-flush stall, retain the native stack and compare a bounded
+independent file-sync probe on the affected volume and NTFS. The
+[ReFS incident](../../08_tracking/bug/windows_refs_durable_flush_stall_2026-10-11.md)
+required an NTFS source copy as well as output, CAS and temporary roots: compile
+SCV writes remain under `<checkout>/build/scv`. Keep durability enabled and
+preserve failed receipts; storage relocation does not admit the candidate.
+
+The provisional Hello owner scopes `SIMPLE_SCV_INVENTORY_COLD_INIT=1` to its
+first compile only when both current and legacy inventory publication paths
+are absent. Existing publications use warm admission, including malformed
+ones; preserve their failures. Do not export cold initialization across an
+entire phase campaign. See the [first-build fix](../../08_tracking/bug/provisional_hello_missing_inventory_init_2026-10-11.md).

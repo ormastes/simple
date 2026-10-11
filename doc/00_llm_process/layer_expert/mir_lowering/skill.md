@@ -16,6 +16,8 @@ handling, struct construction, and intrinsic dispatch.
 
 ## Layer Links
 
+- [Tuple owner preservation](../../../08_tracking/bug/enumerate_native_tuple_owner_loss_2026-10-11.md): preserve known record owner when an indexed I64 handle enters an ordinary tuple, then recover it at native projection. Do not rebox handle fields. MIR regressions and native oracle are pending qualified execution.
+
 - HIR→MIR lowering: [src/compiler/50.mir/_MirLowering/](../../../../src/compiler/50.mir/_MirLowering/)
   (expr/stmt/item lowering).
 - Method calls & literals: [src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl](../../../../src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl)

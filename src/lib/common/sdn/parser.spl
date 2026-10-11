@@ -2,7 +2,8 @@
 #
 # Provides: parse, parse_with_spans, parse_with_issues, parse_untrusted.
 
-use std.common.sdn.structural_scalar_value_v1.{sdn_unescape_scalar_v1}
+use std.common.sdn.structural_scalar_value_v1.{
+    sdn_unescape_scalar_v1, sdn_integer_from_span_v1, sdn_decode_quoted_scalar_v1}
 use std.common.sdn.value.{SdnValue, SdnSpan}
 
 # A non-fatal problem found while parsing (e.g. a duplicate dict key).
@@ -37,8 +38,9 @@ fn parse(source: text) -> Result<SdnValue, text>:
         return Ok(SdnValue.Bool(false))
     # Quoted string (escape sequences \\ \" \n \t \r are decoded)
     if trimmed.starts_with("\""):
-        val inner = trimmed.slice(1, trimmed.len() - 1)
-        return Ok(SdnValue.String(sdn_unescape_scalar_v1(inner)))
+        match sdn_decode_quoted_scalar_v1(trimmed):
+            case Ok(inner): return Ok(SdnValue.String(inner))
+            case Err(reason): return Err(reason)
     # Inline array: [a, b, c]
     if trimmed.starts_with("["):
         return Ok(_sdn_parse_inline_array(trimmed))
@@ -62,7 +64,10 @@ fn parse(source: text) -> Result<SdnValue, text>:
         return _sdn_parse_mapping(trimmed)
     # Integer
     if _looks_like_int(trimmed):
-        return Ok(SdnValue.Int(trimmed.to_int()))
+        val bytes = trimmed.bytes()
+        match sdn_integer_from_span_v1(bytes, 0, bytes.len()):
+            case Ok(value): return Ok(SdnValue.Int(value))
+            case Err(reason): return Err(reason)
     # Float
     if _looks_like_float(trimmed):
         return Ok(SdnValue.Float(trimmed.to_float()))

@@ -12,6 +12,7 @@ native_sanity_helper=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/run-reviewe
 . "$(dirname -- "$0")/bootstrap-phase-toolchain.shs"
 . "$(dirname -- "$0")/bootstrap-cache-policy.shs"
 . "$(dirname -- "$0")/bootstrap-module-collection.shs"
+. "$(dirname -- "$0")/bootstrap-verification-campaign.shs"
 . "$(dirname -- "$0")/bootstrap-scv-prime.shs"
 . "$(dirname -- "$0")/phase-c-backend-commands.shs"
 . "$(dirname -- "$0")/bootstrap-verification-resource-policy.shs"
@@ -179,6 +180,8 @@ runtime_path=${SIMPLE_RUNTIME_PATH:-}
 runtime_path_explicit=0
 source_root=$(pwd -P)
 timeout_seconds=${BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:-1800}
+campaign_timeout_seconds=${BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS:-7200}
+failed_tool_module_limit=${BOOTSTRAP_VERIFY_FAILED_TOOL_MODULE_LIMIT:-8}
 spec_timeout_seconds=${BOOTSTRAP_VERIFY_SPEC_TIMEOUT_SECONDS:-120}
 native_internal_timeout=${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:-600}
 build_threads=${BOOTSTRAP_VERIFY_BUILD_THREADS:-4}
@@ -216,6 +219,7 @@ for arg in "$@"; do
     --runtime-path=*) runtime_path=${arg#*=}; runtime_path_explicit=1 ;;
     --source-root=*) source_root=${arg#*=} ;;
     --timeout-seconds=*) timeout_seconds=${arg#*=} ;;
+    --campaign-timeout-seconds=*) campaign_timeout_seconds=${arg#*=} ;;
     *) die "unknown option: $arg" ;;
   esac
 done
@@ -242,6 +246,8 @@ bootstrap_verification_resource_policy "$phase" "$verification_diagnostic" \
   "$timeout_seconds" "$spec_timeout_seconds" "$native_internal_timeout" \
   "$build_threads" "$module_workers" "$test_workers" ||
   die "invalid verification resource policy (zero deadlines require BOOTSTRAP_VERIFY_DIAGNOSTIC=1; worker pools remain bounded)"
+bootstrap_verification_campaign_policy "$campaign_timeout_seconds" "$failed_tool_module_limit" ||
+  die "campaign deadline must be positive and failed-tool module limit nonnegative"
 test_mode_flag=--sequential
 test_worker_flag=
 if [ "$test_workers" -gt 1 ]; then
@@ -290,6 +296,13 @@ outputs="$work_root/outputs"
 logs="$work_root/logs"
 summary="$work_root/summary.env"
 mkdir -p "$home" "$tmp" "$cache" "$outputs" "$logs" || die "cannot isolate verification state"
+if [ -z "${BOOTSTRAP_VERIFY_CAMPAIGN_TOKEN:-}" ]; then
+  campaign_status=0
+  bootstrap_verification_campaign_run "$campaign_timeout_seconds" "$work_root" "$0" "$(dirname -- "$0")" "$@" || campaign_status=$?
+  exit "$campaign_status"
+fi
+bootstrap_verification_campaign_child "$work_root" || die "invalid campaign deadline owner"
+
 server_outputs="$outputs"
 mcp_build_ready=0
 lsp_build_ready=0
@@ -504,6 +517,9 @@ stage2_row_delegation_env() {
   echo "hash_policy=$hash_policy"
   echo "diagnostic_execution=$verification_diagnostic"
   echo "task_timeout_seconds=$timeout_seconds"
+  echo "campaign_timeout_seconds=$campaign_timeout_seconds"
+  echo "campaign_deadline_epoch=$BOOTSTRAP_VERIFY_CAMPAIGN_DEADLINE"
+  echo "failed_tool_module_limit=$failed_tool_module_limit"
   echo "spec_timeout_seconds=$spec_timeout_seconds"
   echo "build_threads=$build_threads"
   echo "module_workers=$module_workers"
@@ -1322,6 +1338,15 @@ prepare_phase_c_tool_binding() {
   esac
   [ "${#target_c_source_sha}" -eq 64 ] || return 1
   target_c_binding="$work_root/target-c-inputs.env"
+  # A prior run seals this file (chmod 400 below) as hash-bound evidence.
+  # It is rebound and re-sealed within THIS run, so a stale sealed copy must
+  # be unsealed first -- otherwise every run after the first in a worktree
+  # dies with "Permission denied" writing the binding (observed on all lanes
+  # r4-r8 of the phase-3 worktree, 2026-10-12). Integrity is preserved: the
+  # fresh content is re-hashed into target_c_identity and re-sealed below.
+  if [ -f "$target_c_binding" ] && [ ! -L "$target_c_binding" ]; then
+    chmod u+w "$target_c_binding" 2>/dev/null || true
+  fi
   snapshot_target_c_inputs "$target_c_binding" || return 1
   target_c_identity=$(hash_file "$target_c_binding") || return 1
   chmod 400 "$target_c_binding" || return 1
@@ -1475,6 +1500,14 @@ run_failed_binary_module_inventory() {
   (cd "$source_root" && find src/compositions/kernel_llvm_cranelift src/compiler src/app src/lib \
       -type f -name '*.spl' -print) >"$module_manifest.unsorted" || return 1
   LC_ALL=C sort -u "$module_manifest.unsorted" >"$module_manifest" || return 1
+  module_selected="$work_root/module-compile-selected.txt"
+  bootstrap_verification_select_modules "$module_manifest" "$module_selected" \
+    "${compiler_cli_ready:-0}" "${test_runner_ready:-0}" "$failed_tool_module_limit" "$summary" || return 1
+  if [ ! -s "$module_selected" ]; then
+    matrix_failed=1
+    return 0
+  fi
+
   module_effective_workers=$module_workers
   [ "$module_effective_workers" -le "$build_threads" ] || module_effective_workers=$build_threads
   module_threads=$((build_threads / module_effective_workers))
@@ -1490,7 +1523,7 @@ run_failed_binary_module_inventory() {
   if ! MODULE_COMPILE_VALIDATE_FULL=1 validate_module_compile_prerequisites >"$work_root/module-prerequisite.log" 2>&1; then
     MODULE_COMPILE_PREREQUISITE_BLOCKED=1
   fi
-  if ! run_module_compile_inventory "$module_manifest" "$work_root/module-diagnostics" "$module_cache" \
+  if ! run_module_compile_inventory "$module_selected" "$work_root/module-diagnostics" "$module_cache" \
       "$module_effective_workers" "$module_threads" run_module_compile_command \
       validate_module_compile_prerequisites "$summary"; then
     matrix_failed=1

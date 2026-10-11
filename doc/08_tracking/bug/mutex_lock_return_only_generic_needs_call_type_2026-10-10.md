@@ -194,3 +194,7 @@ eight mutex errors are cleared. The closure then fails MIR lowering on
 payloads. Evidence: `build/native_probe/explicit-call-types/mcdc-arm.log` in
 the isolated repair worktree. No MC/DC native execution or Stage 2 test-gate
 PASS is claimed.
+
+## Dynamic-library exclusion gate callers (2026-10-11)
+
+The Caret build on release `f689e209d` reports six additional E-MONO-032 call sites in `dynlib_lifetime_owner_v1.spl` and `dynlib_snapshot_registry_v1.spl`. All discard the protected value and unlock with integer sentinel `0`; they therefore use the existing runtime-equivalent `mutex_lock_gate` entry. This repair preserves Simple-owned state, the same native lock handle, and the same unlock calls. Execution and full compiler/lib/MCP gates remain pending; source review and whitespace checks alone are not qualification.

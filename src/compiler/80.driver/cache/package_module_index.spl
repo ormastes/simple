@@ -31,6 +31,7 @@ extern fn rt_dir_create_all(path: text) -> bool
 val PACKAGE_MODULE_INDEX_SCHEMA_V1: i64 = 1
 val PACKAGE_MODULE_INDEX_SCHEMA_V2: i64 = 2
 val PACKAGE_MODULE_INDEX_SCHEMA_V3: i64 = 3
+val PACKAGE_MODULE_INDEX_SCHEMA_V4: i64 = 4
 val PACKAGE_MODULE_INDEX_MAX_BYTES_V1: i64 = 256 * 1024 * 1024
 
 struct PackageModuleIndexEntryV1:
@@ -48,6 +49,9 @@ struct PackageModuleIndexEntryV1:
     scc_identity: text
     direct_imports: [text]
     reverse_dependents: [text]
+    # V4 binds cache reuse to the generated source bytes recorded in TLDR.
+    # Empty only on V1-V3 rows decoded for conservative migration.
+    generated_source_digest: text = ""
 
 struct PackageModuleIndexGenerationV1:
     schema_version: i64
@@ -85,6 +89,7 @@ struct PackageModuleChangeV1:
     abi_changed: bool
     initializer_changed: bool
     provider_changed: bool
+    generated_changed: bool = false
 
 type PackageTldrHeaderV1 = PackageModuleIndexEntryV1
 type PersistentSmfPackageIndexV1 = PackageModuleIndexGenerationV1
@@ -192,7 +197,15 @@ fn package_module_index_list_decode_v1(value: text) -> [text]?:
         position = position + 1
     Some(result)
 
-fn package_module_index_entry_encode_v1(entry: PackageModuleIndexEntryV1) -> text:
+fn _package_module_index_entry_encode_v1(
+    entry: PackageModuleIndexEntryV1, include_generated: bool
+) -> text:
+    if include_generated:
+        if not package_module_index_digest_valid_v1(
+                entry.generated_source_digest):
+            return ""
+    elif entry.generated_source_digest != "":
+        return ""
     val imports = package_module_index_list_encode_v1(entry.direct_imports)
     val dependents = package_module_index_list_encode_v1(entry.reverse_dependents)
     if imports == "" or dependents == "":
@@ -213,6 +226,8 @@ fn package_module_index_entry_encode_v1(entry: PackageModuleIndexEntryV1) -> tex
         imports,
         dependents
     ]
+    if include_generated:
+        fields.push(entry.generated_source_digest)
     var encoded = ""
     for field in fields:
         if not package_module_index_text_valid_v1(field):
@@ -220,11 +235,20 @@ fn package_module_index_entry_encode_v1(entry: PackageModuleIndexEntryV1) -> tex
         encoded = encoded + package_module_index_frame_v1(field)
     encoded
 
-fn package_module_index_entry_decode_v1(line: text) -> PackageModuleIndexEntryV1?:
+fn package_module_index_entry_encode_v1(entry: PackageModuleIndexEntryV1) -> text:
+    _package_module_index_entry_encode_v1(entry, false)
+
+fn package_module_index_entry_encode_v4(entry: PackageModuleIndexEntryV1) -> text:
+    _package_module_index_entry_encode_v1(entry, true)
+
+fn _package_module_index_entry_decode(
+    line: text, include_generated: bool
+) -> PackageModuleIndexEntryV1?:
     var fields: [text] = []
     var cursor = 0
     var index = 0
-    while index < 14:
+    val expected_fields = if include_generated: 15 else: 14
+    while index < expected_fields:
         val field = package_module_index_frame_read_v1(line, cursor)
         if field == nil:
             return nil
@@ -251,8 +275,15 @@ fn package_module_index_entry_decode_v1(line: text) -> PackageModuleIndexEntryV1
         manifest_digest: fields[10],
         scc_identity: fields[11],
         direct_imports: imports!,
-        reverse_dependents: dependents!
+        reverse_dependents: dependents!,
+        generated_source_digest: if include_generated: fields[14] else: ""
     ))
+
+fn package_module_index_entry_decode_v1(line: text) -> PackageModuleIndexEntryV1?:
+    _package_module_index_entry_decode(line, false)
+
+fn package_module_index_entry_decode_v4(line: text) -> PackageModuleIndexEntryV1?:
+    _package_module_index_entry_decode(line, true)
 
 fn package_module_index_entry_valid_v1(entry: PackageModuleIndexEntryV1) -> bool:
     if (not package_module_index_text_valid_v1(entry.package_identity) or
@@ -341,6 +372,13 @@ fn package_module_index_entry_action_digest_v1(
     if generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V3:
         encoded = encoded + package_module_index_frame_v1(
             generation.scope_entry_source_identity)
+    elif (generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V4 and
+            generation.scope_entry_source_identity != ""):
+        encoded = encoded + package_module_index_frame_v1(
+            generation.scope_entry_source_identity)
+    if generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V4:
+        encoded = encoded + package_module_index_frame_v1(
+            entry.generated_source_digest)
     for part in parts:
         encoded = encoded + package_module_index_frame_v1(part)
     sha256_text(encoded)
@@ -348,7 +386,8 @@ fn package_module_index_entry_action_digest_v1(
 fn package_module_index_validate_v1(generation: PackageModuleIndexGenerationV1) -> text:
     if generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V1 and
             generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2 and
-            generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V3:
+            generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V3 and
+            generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V4:
         return "unsupported-schema"
     if generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V1:
         if generation.variant_digest != "" or
@@ -364,6 +403,12 @@ fn package_module_index_validate_v1(generation: PackageModuleIndexGenerationV1) 
                 generation.scope_entry_source_identity) or
                 not generation.scope_entry_source_identity.ends_with(".spl")):
         return "scope-entry-invalid"
+    if (generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V4 and
+            generation.scope_entry_source_identity != "" and
+            (not compile_source_inventory_path_valid_v1(
+                generation.scope_entry_source_identity) or
+                not generation.scope_entry_source_identity.ends_with(".spl"))):
+        return "scope-entry-invalid"
     if not package_module_index_digest_valid_v1(generation.producer_digest):
         return "producer-digest-invalid"
     if not package_module_index_text_valid_v1(generation.root_generation):
@@ -377,6 +422,12 @@ fn package_module_index_validate_v1(generation: PackageModuleIndexGenerationV1) 
     for entry in generation.entries:
         if not package_module_index_entry_valid_v1(entry):
             return "entry-invalid:{entry.module_identity}"
+        if generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V4:
+            if not package_module_index_digest_valid_v1(
+                    entry.generated_source_digest):
+                return "generated-source-digest-invalid:{entry.module_identity}"
+        elif entry.generated_source_digest != "":
+            return "legacy-generated-source-digest-unexpected:{entry.module_identity}"
         if entry.action_digest != package_module_index_entry_action_digest_v1(
                 generation, entry):
             return "action-snapshot-binding-mismatch:{entry.module_identity}"
@@ -396,7 +447,10 @@ fn package_module_index_validate_v1(generation: PackageModuleIndexGenerationV1) 
                     return "direct-edge-missing:{entry.module_identity}:{dependent}"
             else:
                 return "reverse-dependent-missing:{entry.module_identity}:{dependent}"
-    if generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V3:
+    val scoped = generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V3 or
+        (generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V4 and
+            generation.scope_entry_source_identity != "")
+    if scoped:
         var by_module: Dict<text, i64> = {}
         var root_module = ""
         var index = 0
@@ -429,11 +483,15 @@ fn package_module_index_encode_v1(generation: PackageModuleIndexGenerationV1) ->
     if package_module_index_validate_v1(generation) != "ok":
         return ""
     val graph = generation.schema_version >= PACKAGE_MODULE_INDEX_SCHEMA_V2
-    val scoped = generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V3
+    val v4 = generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V4
+    val scoped = generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V3 or
+        (v4 and generation.scope_entry_source_identity != "")
     var lines: [text] = [
-        if scoped: "simple-package-module-index-v3" else:
-            if graph: "simple-package-module-index-v2" else: "simple-package-module-index-v1",
-        if scoped: "schema=3" else: if graph: "schema=2" else: "schema=1",
+        if v4: "simple-package-module-index-v4" else:
+            if scoped: "simple-package-module-index-v3" else:
+                if graph: "simple-package-module-index-v2" else: "simple-package-module-index-v1",
+        if v4: "schema=4" else:
+            if scoped: "schema=3" else: if graph: "schema=2" else: "schema=1",
         "producer={generation.producer_digest}",
         "root={generation.root_generation}",
         "scv-revision={generation.scv_revision_id}",
@@ -447,7 +505,8 @@ fn package_module_index_encode_v1(generation: PackageModuleIndexGenerationV1) ->
         lines.push("scope-entry={generation.scope_entry_source_identity}")
     lines.push("count={generation.entries.len()}")
     for entry in generation.entries:
-        val encoded = package_module_index_entry_encode_v1(entry)
+        val encoded = if v4: package_module_index_entry_encode_v4(entry) else:
+            package_module_index_entry_encode_v1(entry)
         if encoded == "":
             return ""
         lines = lines.push(encoded)
@@ -457,12 +516,16 @@ fn package_module_index_decode_v1(content: text) -> PackageModuleIndexReadV1:
     val lines = content.split("\n")
     if lines.len() < 9 or (lines[0] != "simple-package-module-index-v1" and
             lines[0] != "simple-package-module-index-v2" and
-            lines[0] != "simple-package-module-index-v3"):
+            lines[0] != "simple-package-module-index-v3" and
+            lines[0] != "simple-package-module-index-v4"):
         return PackageModuleIndexReadV1(false, "corrupt-header", "", nil)
-    val scoped = lines[0] == "simple-package-module-index-v3"
-    val graph = scoped or lines[0] == "simple-package-module-index-v2"
-    if (scoped and lines[1] != "schema=3") or
-            (graph and not scoped and lines[1] != "schema=2") or
+    val v4 = lines[0] == "simple-package-module-index-v4"
+    val scoped = lines[0] == "simple-package-module-index-v3" or
+        (v4 and lines.len() > 9 and lines[9].starts_with("scope-entry="))
+    val graph = v4 or scoped or lines[0] == "simple-package-module-index-v2"
+    if (v4 and lines[1] != "schema=4") or
+            (scoped and not v4 and lines[1] != "schema=3") or
+            (graph and not scoped and not v4 and lines[1] != "schema=2") or
             (not graph and lines[1] != "schema=1"):
         return PackageModuleIndexReadV1(false, "unsupported-schema", "", nil)
     if not lines[2].starts_with("producer=") or not lines[3].starts_with("root="):
@@ -494,13 +557,14 @@ fn package_module_index_decode_v1(content: text) -> PackageModuleIndexReadV1:
     var entries: [PackageModuleIndexEntryV1] = []
     var index = entry_row
     while index < lines.len():
-        val entry = package_module_index_entry_decode_v1(lines[index])
+        val entry = if v4: package_module_index_entry_decode_v4(lines[index]) else:
+            package_module_index_entry_decode_v1(lines[index])
         if entry == nil:
             return PackageModuleIndexReadV1(false, "corrupt-entry", "", nil)
         entries = entries.push(entry!)
         index = index + 1
     val generation = PackageModuleIndexGenerationV1(
-        schema_version: if scoped: 3 else: if graph: 2 else: 1,
+        schema_version: if v4: 4 else: if scoped: 3 else: if graph: 2 else: 1,
         producer_digest: producer,
         root_generation: root,
         scv_revision_id: scv_revision,
@@ -788,10 +852,12 @@ fn package_module_index_invalidate_changes_v1(
             return PackageModuleInvalidationV1(
                 false, "changed-module-invalid", [], [], [])
         if (change.content_changed or change.export_changed or change.abi_changed or
-                change.initializer_changed or change.provider_changed):
+                change.initializer_changed or change.provider_changed or
+                change.generated_changed):
             roots = roots.push(change.module_identity)
         if (change.export_changed or change.abi_changed or
-                change.initializer_changed or change.provider_changed):
+                change.initializer_changed or change.provider_changed or
+                change.generated_changed):
             semantic_roots = semantic_roots.push(change.module_identity)
     # Content-only changes still reparse/recompile their owning package, but do
     # not invalidate dependents when exported semantic metadata is unchanged.
@@ -817,11 +883,13 @@ fn package_module_index_invalidate_changes_v1(
 export PACKAGE_MODULE_INDEX_SCHEMA_V1
 export PACKAGE_MODULE_INDEX_SCHEMA_V2
 export PACKAGE_MODULE_INDEX_SCHEMA_V3
+export PACKAGE_MODULE_INDEX_SCHEMA_V4
 export PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1
 export PackageTldrHeaderV1, PersistentSmfPackageIndexV1
 export PackageModuleIndexReadV1, PackageModuleInvalidationV1
 export PackageModuleChangeV1
 export package_module_index_entry_encode_v1, package_module_index_entry_decode_v1
+export package_module_index_entry_encode_v4, package_module_index_entry_decode_v4
 export package_module_index_validate_v1, package_module_index_encode_v1
 export package_module_index_decode_v1, package_module_index_digest_v1
 export package_module_index_entry_action_digest_v1

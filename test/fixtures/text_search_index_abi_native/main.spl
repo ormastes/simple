@@ -1,0 +1,65 @@
+# Native regression: text search uses raw indices at the runtime boundary.
+# Build with the corrected Pure-Simple producer, execute on ARM, then compile
+# with genuine LLVM 18 for riscv64-unknown-linux-gnu (ELF machine 243).
+
+class CursorSearchOwner:
+    answer: i64
+
+    fn index_of(needle: text, start: i64) -> i64:
+        self.answer + start
+
+fn typed_search(source: text, start: i64) -> i64:
+    source.index_of("abc", start)
+
+fn erased_search(source: text, start: any) -> i64:
+    source.index_of("abc", start)
+
+fn erased_slice(source: text, start: any, finish: any) -> text:
+    source.substring(start, finish)
+
+fn erased_range(source: text, start: any, finish: any) -> text:
+    source[start:finish]
+
+fn main() -> i64:
+    val source = "abcabc"
+    val first = source.index_of("abc")
+    val next = first + 1
+    val second = source.index_of("abc", next)
+    if first != 0: return 1
+    if second != 3: return 2
+    if source.substring(first, second) != "abc": return 3
+    if typed_search(source, next) != 3: return 4
+    if erased_search(source, next) != 3: return 5
+    if erased_search(source, 3) != 3: return 6
+    if erased_search(source, -3) != 0: return 7
+    if source.index_of("missing", next) != -1: return 8
+    if source.index_of("abc", 99) != -1: return 9
+    if source.index_of("", 3) != 3: return 10
+    if source.index_of("", 99) != 6: return 11
+    if source.index_of("", -3) != 0: return 12
+    if source.find("abc", next) != 3: return 13
+    if source.find_str("abc", next) != 3: return 14
+    if source.find("abc") != 0: return 15
+    if source.rfind("abc") != 3: return 16
+    if source.last_index_of("abc") != 3: return 17
+    if erased_slice(source, first, second) != "abc": return 18
+    if erased_slice(source, second, 6) != "abc": return 19
+    if erased_range(source, second, 6) != "abc": return 20
+    val owner = CursorSearchOwner(answer: 17)
+    if owner.index_of("abc", next) != 18: return 21
+
+    # Same computed cursor shape as the persisted HIR warning frame.
+    # Header newline=286, start=287, warning newline=288. The long tail
+    # ensures a wrongly tagged start can still find a plausible later line.
+    val frame = "h".repeat(286) + "\nW\n0\nspl-hirc\n" + "x".repeat(2400) + "\n"
+    val header_end = frame.index_of("\n")
+    var cursor = header_end + 1
+    val warning_end = frame.index_of("\n", cursor)
+    if header_end != 286: return 22
+    if warning_end != 288: return 23
+    if frame.substring(cursor, warning_end) != "W": return 24
+    cursor = warning_end + 1
+    val count_end = frame.index_of("\n", cursor)
+    if frame.substring(cursor, count_end) != "0": return 25
+    print "text-search-index-abi: pass"
+    0
