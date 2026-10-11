@@ -83,3 +83,18 @@ adapter consumes the retained selection. It does not select the bounded loop.
 Generated runtime objects (`runtime_path=none`) retain their distinct existing
 object-compilation authority and are not reclassified as archive providers.
 Warm RuntimeStd and live environment publication handoffs remain outstanding.
+
+Cold owner initialization must precede the projection scratch lease. The actual
+core-C runtime accepts heap promotion only while the owning scope is paused.
+Tool admission now builds its complete projection in an owned lease, promotes
+the full result after pause, closes, then publishes global bindings/identity and
+environment. Runtime snapshot and late selected-file admissions follow the same
+protocol with newly built replacement arrays; they cannot mutate a persistent
+registry with unpromoted aliases. First admission inside a foreign active or
+paused lease is refused. Generated-object binding uses its own identical
+pause/promote/close-before-publication protocol. Ownership failure panics rather
+than publishing partially retained roots. The fresh-process
+`hir_managed_runtime_cold/main.spl` control has seven guards for genuinely cold
+owners, active/paused refusals, actual file admission, post-close revalidation and
+stable repeated selection. The generated runtime mutation control also checks
+occupied-lease refusal and ownership release. These controls are not executed.

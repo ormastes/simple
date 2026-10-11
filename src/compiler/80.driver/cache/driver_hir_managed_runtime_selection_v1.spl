@@ -2,6 +2,7 @@
 # existing policy; authority is projected from its real pinned snapshot owner.
 use std.nogc_sync_mut.io.native_runtime_authority_v1.{
     NativeRuntimeProviderSelectionV1, native_runtime_strict_root_v1,
+    native_runtime_strict_archives_v1,
     native_runtime_strict_provider_selection_v1,
     native_runtime_strict_provider_selection_revalidate_v1}
 use compiler.backend.linker.linker_wrapper.{native_runtime_archive_inputs_for_platform,
@@ -54,6 +55,13 @@ fn driver_hir_capture_managed_runtime_selection_v1(
     # Capture provenance for the retained route even when HIR caching is off.
     # An archived consumer subsequently requires the actual nonempty header.
     val header = if hir_cache_enabled(): hir_cache_header() else: ""
+    # Cold tool -> runtime snapshot -> selected file-pin owners each complete
+    # their real owned admission before our borrowed projection may open.
+    # No presumed warm memo and no promotion while scratch is unpaused.
+    val admitted_root = native_runtime_strict_root_v1()?
+    val msvc = target.contains("msvc") or (target == "" and host_os() == "windows")
+    val admitted_inputs = native_runtime_archive_inputs_for_platform(admitted_root, runtime_bundle, msvc)
+    val _admitted_files = native_runtime_strict_archives_v1(admitted_root, admitted_inputs)?
     if not transient_scope_begin(): return Err("HIR managed runtime selection lease unavailable")
     val result = driver_hir_capture_managed_runtime_selection_in_owned_scope_v1(
         backend, target, runtime_bundle, header)
