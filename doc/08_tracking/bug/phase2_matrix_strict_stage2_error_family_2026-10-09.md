@@ -186,3 +186,73 @@ clean parse (2204/2454 files, zero module errors) — same family as the wrapper
 receiver-proof `cannot establish invocation ledger` failures on 2026-10-11
 runs 2-4. Nondeterministic shard-owner startup under multi-lane host load;
 needs compiler-lane diagnosis of the shard owner startup/claim path.
+
+## 2026-10-12 addendum 4: C7 — shard-path module-registry doubled-key + app-layer surface errors (full-CLI build)
+
+Manual full-CLI build of the `src/app/cli/_CliMain/main_and_help.spl` closure
+(2456 files, scv snapshot `scv-revision-v1-ac0b26f5`) failed HIR with 333
+`module X has no exported item Y` lines across ~124 modules. Evidence log:
+`/tmp/manual-cli-build2.log`; full 173-pair (module, item) inventory:
+`/tmp/c7_pairs.txt` (regenerate: `grep 'has no exported item'
+/tmp/manual-cli-build2.log | sed -E 's/.*module ([a-z0-9_.]+) has no exported
+item ([A-Za-z0-9_]+).*/\1 \2/' | sort -u`).
+
+**Root cause (compiler lane, NOT source):** the shard-path module surface
+registry keys leaves by `module_logical_name_from_path`, which keeps the inner
+directory segment of tier dirs that repeat their own name — leaves under
+`src/compiler/70.backend/backend/` register as `compiler.backend.backend.*`
+and under `15.blocks/blocks/` as `compiler.blocks.blocks.*` (doubled inner
+segment), while the whole tree imports single-segment names
+(`compiler.backend.native.mach_inst`, `compiler.blocks.builtin`). The
+sequential path resolves both spellings via fallback, so only the
+`--low-memory` HIR-shard path fails: module lookup is bridged to a surface
+that does not carry the requested items. Corroborating evidence:
+
+- The landed mach_inst wildcard fix (44e170a1c19,
+  `export use compiler.backend.native.mach_inst.*` in
+  `native/__init__.spl`) IS present in the failing snapshot, yet all 18
+  mach_inst items still error — facade wildcarding does not clear this
+  family.
+- Failing items include `pub class`/`pub enum`/`trait` declarations in the
+  very module named by the error (e.g. `compiler.backend.codegen_types`
+  `CodegenOutput`/`CodegenOutputKind` at
+  `70.backend/backend/codegen_types.spl:23,30`; `GpuCodegen`/`HardwareCodegen`
+  traits) — no facade is even involved.
+- Every failing importing module reports exactly the first 10 items of its
+  first `use` list (regalloc, isel_*, encode_x86_64, formula.spl) — a
+  per-module 10-error diagnostic cap hides the true volume; whole surfaces
+  are empty, not partially enumerated.
+- The `app.ui.*` failures all involve dot-named source directories
+  (`src/app/ui.browser/`, `ui.render/`, `ui.tui/`, `ui.test_api/`) whose
+  surface keys are likely sanitized differently (cf. the hyphen→`_` key
+  sanitization note in `module_import_resolution.spl`); `common.string_builder`
+  and `app.t32_cli.mod` fail with no naming anomaly at all.
+
+**Fix direction:** the shard registry must key surfaces by the sequential
+path's logical-name derivation (same fold for doubled tier-inner segments and
+dotted directory names), and the per-module error cap should be lifted or
+summarized for diagnostics. Do NOT chase this family with more facade
+wildcard edits.
+
+**Genuine source gaps fixed in the C7 commit (independent of the registry
+bug; verified declared-elsewhere items never surfaced by their module):**
+`codegen.spl` re-exports `CodegenTarget` from `backend/backend_types.spl`;
+`hardware_codegen_types.spl` now `export use`s `VhdlProcessKind` from
+`compiler.mir.mir_data` (was `use`-only); `elf_writer.spl` routes
+`write_elf64`/`align_offset` via `export use` from `elf_writer_serialize.spl`
+(bare `export` of undeclared names drops them from the shard index);
+`blocks/builtin.spl` wildcard-re-exports `builtin_blocks_math/data/shell`;
+`blocks/registry.spl` re-exports `init_blocks` from `blocks/mod.spl`;
+`bidirectional_checking.spl` re-exports `TypeInferencer` from
+`bidirectional_inferencer.spl`; `driver_core_types.spl` re-exports
+`BackendCompileOptions` from `backend/backend_types.spl`;
+`build_native.spl`/`build_native_pipeline.spl` import `compile_to_smf` from
+`compiler.driver.driver_api_compile_single` (module `driver` never existed);
+missing `std.math.{special,financial,distributions,statistics}` and
+`std.math.bignum.{bignat,limb}` leaves added as `src/lib/math/*.spl`
+re-export facades + `mod math.*` entries in `src/lib/math.spl` (C6
+addendum-3 idiom; only modules with real importers; `std.math.math`/`bignum.fixed`
+are comment-only, skipped). NOT fixed here: the `src/lib/compiler/mir_opt/*`
+stub facades self-reference their own module name (duplicate module-name
+collision with the `60.mir_opt` canonical files) — needs a compiler-lane
+dedup decision.

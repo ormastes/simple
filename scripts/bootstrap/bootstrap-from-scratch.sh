@@ -31,7 +31,7 @@ while [ "${bootstrap_argc}" -gt 0 ]; do
     --backend|--output|--bootstrap-receipt|--produce-stage3-receipt|--produce-managed-receipt|\
     --strategy|--resume-stage3-from-admitted|--resume-stage4-from-admitted|\
     --resume-managed-from-admitted|\
-    --mode|--diagnostic-root|--diagnostic-child-compiler|--target|--jobs|\
+    --mode|--diagnostic-root|--diagnostic-child-compiler|--target|--jobs|--jobs-memory-policy|\
     --progress-interval|--invalidate-cache|--refresh-stage2-source-cache)
       bootstrap_value_missing=1
       if [ "${bootstrap_argc}" -gt 0 ]; then
@@ -321,11 +321,11 @@ Options:
                      (supported on native Linux and macOS hosts).
                      Implied by --deploy and one-binary mode.
   --clean-rebuild    Explicitly clear caches for the build phases requested
-  --invalidate-cache=PHASE
+  --invalidate-cache=<phase>
                      Explicitly invalidate only PHASE's selected entry cache
                      (stage2, stage3, stage4, stage4b-ui-backend, stage5N).
   --fresh-cache      Compatibility alias for --clean-rebuild
-  --refresh-stage2-source-cache=DIR
+  --refresh-stage2-source-cache=<dir>
                      Explicit source-only refresh from retained predecessor
                      source/runtime/tool snapshots; verified Rust producer only.
                      Retain objects for real dependency-key validation.
@@ -2437,23 +2437,6 @@ bootstrap_stage_sanity() (
         frontend_log_durable="${evidence_path}.frontend-failure.log"
         cp -f "${frontend_log}" "${frontend_log_durable}" 2>/dev/null &&
           echo "bootstrap-sanity-error: full frontend smoke log preserved at ${frontend_log_durable}" >&2
-      fi
-    else
-      echo "bootstrap-sanity-error: frontend smoke log is empty (${frontend_log})" >&2
-    fi
-  fi
-  if [ "${sanity_status}" != pass ]; then
-    if [ -s "${frontend_log}" ]; then
-      echo "bootstrap-sanity-error: frontend smoke log follows (first 65536 bytes):" >&2
-      head -c 65536 "${frontend_log}" >&2
-      echo "" >&2
-      if [ -n "${evidence_path}" ]; then
-        frontend_log_durable="${evidence_path}.frontend-failure.log"
-        if cp -f "${frontend_log}" "${frontend_log_durable}"; then
-          echo "bootstrap-sanity-error: full frontend smoke log preserved at ${frontend_log_durable}" >&2
-        else
-          echo "bootstrap-sanity-error: preserving original frontend smoke log at ${frontend_log}" >&2
-        fi
       fi
     else
       echo "bootstrap-sanity-error: frontend smoke log is empty (${frontend_log})" >&2
