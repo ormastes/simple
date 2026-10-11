@@ -25,6 +25,13 @@ different-source build is not candidate test evidence; it was not restarted.
 
 ## Blocking findings
 
+- The newly authored 40-criterion and seven-self-traceability scenario inventory
+  is planned coverage, not executed acceptance coverage. Independent review
+  found typed placeholders using `std.spec.fail`, which records failure and
+  returns Unit rather than aborting control flow. These adapters require
+  fallible return types and explicit caller handling. Generic self-reported
+  obligation satisfaction also needs independent criterion-specific behavioral
+  oracles before the inventory can qualify this feature.
 - Shared test-runner JSON serializers are removed in authored source. Format
   validation admits text, doc and SDN; SDN summaries use the canonical envelope.
   Native caller and fixture execution remain unverified. Void human-printer
