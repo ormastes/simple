@@ -66,6 +66,14 @@ val MONO_MAX_TYPE_DEPTH: i64 = 16
 #      pass, not just past the ones this module owns.
 val MONO_SYMBOL_BASE: i64 = 1125899906842624
 
+# Nominal ids are local to a symbol table. Inference between a template and
+# its caller compares declaration owners, including nested type arguments.
+struct NominalBindingContext:
+    pattern_symbols: SymbolTable
+    argument_symbols: SymbolTable
+    pattern_module: text
+    argument_module: text
+
 # ============================================================================
 # Monomorphization Pass
 # ============================================================================
@@ -994,7 +1002,8 @@ impl MonomorphizationPass:
                                     case _:
                                         pattern = payload
                             case _: ()
-                        if not bind_type_params(pattern, att, bindings):
+                        val field_module: text = self.generic_type_modules[identity]
+                        if not bind_type_params(pattern, att, bindings, self.nominal_binding_context(field_module)):
                             return nil
                     i = i + 1
                 var targs: [HirType] = []
@@ -1192,6 +1201,15 @@ impl MonomorphizationPass:
             file = sp_file
         "{file}:{sp.line}:{sp.col}"
 
+    fn nominal_binding_context(pattern_module: text) -> NominalBindingContext?:
+        if not self.module_symbols.has(pattern_module) or not self.module_symbols.has(self.current_module):
+            return nil
+        NominalBindingContext(
+            pattern_symbols: self.module_symbols[pattern_module],
+            argument_symbols: self.module_symbols[self.current_module],
+            pattern_module: pattern_module,
+            argument_module: self.current_module)
+
     me infer_call_type_args(template: HirFunction, args: [HirCallArg], expected_result: HirType? = nil) -> [HirType]:
         self.infer_call_type_args_signature_v1(mono_template_signature_v1(template), args, expected_result)
 
@@ -1206,6 +1224,8 @@ impl MonomorphizationPass:
         var bindings: Dict<text, HirType> = {}
         var i = 0
         val params: [HirType] = template.param_types
+        val owner_module: text = self.template_module[template.name] ?? self.current_module
+        val nominal_context = self.nominal_binding_context(owner_module)
         while i < params.len() and i < args.len():
             val pt: HirType = params[i]
             val at: HirCallArg = args[i]
@@ -1216,13 +1236,13 @@ impl MonomorphizationPass:
                 if arg_ty == nil:
                     eprint("[mono-diag] infer `{template.name}` arg {i}: no local type for {mono_arg_value(at).kind}")
             if arg_ty != nil:
-                if not bind_type_params(pt, arg_ty, bindings):
+                if not bind_type_params(pt, arg_ty, bindings, nominal_context):
                     return []
             i = i + 1
         if expected_result != nil:
             val expected: HirType = expected_result
             if hir_type_is_concrete(expected):
-                if not bind_type_params(template.return_type, expected, bindings):
+                if not bind_type_params(template.return_type, expected, bindings, nominal_context):
                     return []
         var out: [HirType] = []
         for tp in template.type_params:
@@ -2946,7 +2966,7 @@ fn hir_type_keys(types: [HirType]) -> text:
         parts = parts.push(hir_type_key(t))
     parts.join(",")
 
-fn bind_type_params(param_ty: HirType, arg_ty: HirType, bindings: Dict<text, HirType>) -> bool:
+fn bind_type_params(param_ty: HirType, arg_ty: HirType, bindings: Dict<text, HirType>, nominal_context: NominalBindingContext? = nil) -> bool:
     """Structurally unify a declared parameter type against an argument type,
     binding every `TypeParam` met on the parameter side.
 
@@ -2969,44 +2989,44 @@ fn bind_type_params(param_ty: HirType, arg_ty: HirType, bindings: Dict<text, Hir
             true
         case Array(pe, _):
             match arg_ty.kind:
-                case Array(ae, _): bind_type_params(pe, ae, bindings)
+                case Array(ae, _): bind_type_params(pe, ae, bindings, nominal_context)
                 case _: false
         case Slice(pe):
             match arg_ty.kind:
-                case Slice(ae): bind_type_params(pe, ae, bindings)
-                case Array(ae2, _): bind_type_params(pe, ae2, bindings)
+                case Slice(ae): bind_type_params(pe, ae, bindings, nominal_context)
+                case Array(ae2, _): bind_type_params(pe, ae2, bindings, nominal_context)
                 case _: false
         case Optional(pi):
             match arg_ty.kind:
-                case Optional(ai): bind_type_params(pi, ai, bindings)
+                case Optional(ai): bind_type_params(pi, ai, bindings, nominal_context)
                 case _: false
         case Isolated(pi):
             match arg_ty.kind:
-                case Isolated(ai): bind_type_params(pi, ai, bindings)
+                case Isolated(ai): bind_type_params(pi, ai, bindings, nominal_context)
                 case _: false
         case Ref(pi, _):
             match arg_ty.kind:
-                case Ref(ai, _): bind_type_params(pi, ai, bindings)
+                case Ref(ai, _): bind_type_params(pi, ai, bindings, nominal_context)
                 case _: false
         case Ptr(pi, _):
             match arg_ty.kind:
-                case Ptr(ai, _): bind_type_params(pi, ai, bindings)
+                case Ptr(ai, _): bind_type_params(pi, ai, bindings, nominal_context)
                 case _: false
         case Dict(pk, pv):
             match arg_ty.kind:
-                case Dict(ak, av): bind_type_params(pk, ak, bindings) and bind_type_params(pv, av, bindings)
+                case Dict(ak, av): bind_type_params(pk, ak, bindings, nominal_context) and bind_type_params(pv, av, bindings, nominal_context)
                 case _: false
         case Result(po, pe2):
             match arg_ty.kind:
-                case Result(ao, ae3): bind_type_params(po, ao, bindings) and bind_type_params(pe2, ae3, bindings)
+                case Result(ao, ae3): bind_type_params(po, ao, bindings, nominal_context) and bind_type_params(pe2, ae3, bindings, nominal_context)
                 case _: false
         case Tuple(pes):
             match arg_ty.kind:
-                case Tuple(aes): bind_type_lists(pes, aes, bindings)
+                case Tuple(aes): bind_type_lists(pes, aes, bindings, nominal_context)
                 case _: false
         case Union(pms):
             match arg_ty.kind:
-                case Union(ams): bind_type_lists(pms, ams, bindings)
+                case Union(ams): bind_type_lists(pms, ams, bindings, nominal_context)
                 case _: false
         case Named(psym, pargs):
             # A fixed nominal parameter binds no generics. Its local SymbolId
@@ -3015,26 +3035,31 @@ fn bind_type_params(param_ty: HirType, arg_ty: HirType, bindings: Dict<text, Hir
                 return true
             match arg_ty.kind:
                 case Named(asym, aargs):
-                    if psym.id != asym.id:
+                    if val context = nominal_context:
+                        val pattern_identity = mono_type_identity(context.pattern_symbols, psym, context.pattern_module)
+                        val argument_identity = mono_type_identity(context.argument_symbols, asym, context.argument_module)
+                        if pattern_identity == "" or argument_identity == "" or pattern_identity != argument_identity:
+                            return false
+                    elif psym.id != asym.id:
                         return false
-                    bind_type_lists(pargs, aargs, bindings)
+                    bind_type_lists(pargs, aargs, bindings, nominal_context)
                 case _: false
         case Function(pps, pr, _):
             match arg_ty.kind:
-                case Function(aps, ar, _): bind_type_lists(pps, aps, bindings) and bind_type_params(pr, ar, bindings)
+                case Function(aps, ar, _): bind_type_lists(pps, aps, bindings, nominal_context) and bind_type_params(pr, ar, bindings, nominal_context)
                 case _: false
         case Projection(pb, _):
             match arg_ty.kind:
-                case Projection(ab, _): bind_type_params(pb, ab, bindings)
+                case Projection(ab, _): bind_type_params(pb, ab, bindings, nominal_context)
                 case _: false
         case Tensor(pe3, _, _):
             match arg_ty.kind:
-                case Tensor(ae4, _, _): bind_type_params(pe3, ae4, bindings)
+                case Tensor(ae4, _, _): bind_type_params(pe3, ae4, bindings, nominal_context)
                 case _: false
         case _:
             true
 
-fn bind_type_lists(ps: [HirType], as_: [HirType], bindings: Dict<text, HirType>) -> bool:
+fn bind_type_lists(ps: [HirType], as_: [HirType], bindings: Dict<text, HirType>, nominal_context: NominalBindingContext? = nil) -> bool:
     if ps == nil or as_ == nil:
         return true
     if ps.len() != as_.len():
@@ -3043,7 +3068,7 @@ fn bind_type_lists(ps: [HirType], as_: [HirType], bindings: Dict<text, HirType>)
     while i < ps.len():
         val p: HirType = ps[i]
         val a: HirType = as_[i]
-        if not bind_type_params(p, a, bindings):
+        if not bind_type_params(p, a, bindings, nominal_context):
             return false
         i = i + 1
     true
