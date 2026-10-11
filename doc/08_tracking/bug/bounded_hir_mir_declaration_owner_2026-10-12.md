@@ -194,3 +194,24 @@ actual HIR tail to8 and requires refusal while leaving the caller's scope active
 The diagnostic identity explicitly grants no final policy/prerequisite admission.
 These two cases, the three lifecycle refusals, and all actual native controls
 remain UNRUN; emitted MIR graph checks do not qualify executable semantics.
+
+
+The post-HIR borrowed fact readers previously used current parser registry
+claim counts to select effect size/name measurement, effect body walks, RT
+graph extraction and forward join points. Replaying an actual archive after
+registry reset could silently lose captured policy validation inputs. Shared
+selected readers now accept explicit effect/aspect/RT selection flags. The real
+immutable policy owner must derive flags from actual captured claims; the flags
+themselves grant no admission. Ordinary wrappers retain current selection and
+original scope refusals. Global/local HAL declarations still activate the full
+RT graph with RT selection false. Layer last-name winner traversal and complete
+body/archive/warning custody are unchanged. No-claim selection still excludes
+effect layout measurement; value/layout validation retains its original route.
+
+The managed parse/archive fixture extends14 to26 checks: explicit flags false
+with populated registries, real registry reset, preserved transitive24-byte
+effect diagnostics/RT allocation graphs/forward identities with captured
+selection, and ordinary wrappers following the new empty state. A genuinely
+parsed and archived HAL source tests global/local HAL activation with flags
+false. Warning/body identity and scope closure remain checked. All26 native
+controls are UNRUN. There is no final/executable/RSS qualification claim.
