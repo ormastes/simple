@@ -81,6 +81,17 @@ EV_TRANSCRIPT=""
 # the guard's actual reason text; warnings and bare receipt status are not it.
 diag_pattern='error:|\[hir-fatal\]|\[hir-poisoned\]|\[collect-all\]|panicked|segmentation fault|sigsegv|assertion|fatal|memory allocation of [0-9]+ bytes failed|undefined reference|cannot find|no space left|failed files|build failed|unsupported .*construct|rss-guard: session installation failed: [^[:space:]]'
 
+# SCV diagnostics have a canonical anchored owner. Parser/source text containing
+# its code must not pass via the broad legacy `error:` alternative above.
+. "$(dirname -- "$0")/../bootstrap/bootstrap-scv-prime.shs"
+diagnostic_lines() {
+    # The owner recognizes the code alone too; this guard requires reason text.
+    LC_ALL=C grep -E 'SCV-E-ADMISSION:[[:space:]]*[^[:space:]]' "$1" 2>/dev/null |
+        bootstrap_scv_admission_diagnostic /dev/stdin || :
+    LC_ALL=C grep -i -v -F 'SCV-E-ADMISSION' "$1" 2>/dev/null |
+        grep -i -E "${diag_pattern}"
+}
+
 usage() {
     echo "usage: $0 --log PATH [--log PATH...] --status N [--stage NAME] [--transcript PATH]"
     echo "       $0 --selftest"
@@ -136,7 +147,7 @@ scan_secondary_logs() {
         if [ "${_found}" -eq 0 ] && resource_policy_diagnosis "${_cand}" "${EV_STATUS}"; then
             return 0
         fi
-        _chits=$(grep -c -i -E "${diag_pattern}" "${_cand}" 2>/dev/null)
+        _chits=$(diagnostic_lines "${_cand}" | wc -l | tr -d ' ')
         [ -n "${_chits}" ] || _chits=0
         if [ "${_chits}" -gt 0 ] && [ "${_found}" -eq 0 ]; then
             _found=1
@@ -152,7 +163,7 @@ EOF
     echo "             not fail where the primary log was produced."
     echo "  real log:  ${_found_log}"
     echo "  ${_found_hits} diagnostic line(s) found there. First 5:"
-    grep -i -E "${diag_pattern}" "${_found_log}" 2>/dev/null | head -5 | sed 's/^/    | /'
+    diagnostic_lines "${_found_log}" | head -5 | sed 's/^/    | /'
     return 0
 }
 
@@ -207,7 +218,7 @@ classify_failure() {
     # numeric test blow up with "Illegal number" and — because the comparison
     # errored rather than being false — reported an undiagnosable log as
     # diagnosable. The counts-without-text fixture caught exactly that.
-    _hits=$(grep -c -i -E "${diag_pattern}" "${_log}" 2>/dev/null)
+    _hits=$(diagnostic_lines "${_log}" | wc -l | tr -d ' ')
     if [ -z "${_hits}" ]; then
         _hits=0
     fi
@@ -225,7 +236,7 @@ classify_failure() {
     fi
 
     echo "  diagnosis: ${_hits} diagnostic line(s) found. First 5:"
-    grep -i -E "${diag_pattern}" "${_log}" 2>/dev/null | head -5 | sed 's/^/    | /'
+    diagnostic_lines "${_log}" | head -5 | sed 's/^/    | /'
     return 0
 }
 
