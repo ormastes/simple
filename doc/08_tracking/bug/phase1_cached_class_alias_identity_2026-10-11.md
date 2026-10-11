@@ -48,10 +48,13 @@ These are diagnostic source owners, not source changes in this lane.
 
 ## Pure interpreter ownership analysis
 
-At the current release source head, both pure `eval_function_call` owners
-(`eval_calls.spl` and `_EvalOps/call_method_eval.spl`) distinguish value structs
-from classes via `interp_struct_is_value_type`. Class values retain the same
-arena ID. `val_struct_deep_copy` retains class field and array IDs when copying
+At the current release source head, `eval_calls.spl` distinguishes value structs
+from classes via `interp_struct_is_value_type` during function binding; class
+values retain the same arena ID. The duplicate function binder in
+`_EvalOps/call_method_eval.spl` binds the raw argument value ID directly, so it
+also preserves class identity, although its value-copy behavior is a separate
+concern covered by interpreter draft 2991. `val_struct_deep_copy` retains class
+field and array IDs when copying
 an outer value struct. Local bindings in `eval_stmts.spl` use the same class
 preserving gate. `eval_method_with_args` binds self to the existing value ID;
 field assignment in `eval_access.spl` writes the global arena's field slot
