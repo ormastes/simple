@@ -1,6 +1,7 @@
 # CompilerDriver HIR resolution, type checking, and monomorphization passes.
 
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.hir_typecheck_consumer_v1.{HirTypecheckReceiptV1, collect_module_typecheck_receipt_v1}
 use compiler.driver.driver_collection_planner.*
 use std.env.{env_get}
 use compiler.driver.driver_types.{CompileContext}
@@ -17,20 +18,16 @@ use compiler.driver.driver_typecheck_severity.{
     TypecheckPassSeverity,
     typecheck_pass_severity
 }
-use compiler.types.type_infer_types.{HmInferContext}
-use compiler.semantics.visibility_integration.{check_module_visibility}
 use compiler.semantics.safety_checker.{
     SafetyChecker,
     safetychecker_check_module,
     safetychecker_check_transfer_module_with_policy
 }
 use compiler.common.parallel_policy.policy_schema.{ResolvedParallelPolicyV1}
-use compiler.driver.driver_source_loading.{_format_type_infer_error}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use compiler.driver.driver_pass_receipt.{PassReceipt, record_pass_receipt}
 use compiler.semantics.any_escape.{AnyEscapeProfile, any_escape_check}
 use compiler.semantics.enum_contract.{enum_contract_check}
-use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnostics, frontend_diag_enabled}
 use compiler.mono.verify.post_mono_verify.{
     post_mono_verify_modules,
     post_mono_report_total,
@@ -190,6 +187,14 @@ impl CompilerDriver:
             return false
         true
 
+export publish_module_typecheck_receipt_v1
+
+pub fn publish_module_typecheck_receipt_v1(ctx: CompileContext, receipt: HirTypecheckReceiptV1):
+    for message in receipt.warnings:
+        ctx.add_warning(message)
+    for message in receipt.errors:
+        ctx.add_error(message)
+
 pub fn run_typecheck_warn_pass(
     ctx: CompileContext,
     hir_modules: Dict<text, HirModule>
@@ -216,58 +221,14 @@ pub fn run_typecheck_warn_pass(
     measured — see the bug doc's step 2. Promote via SIMPLE_TYPECHECK_PROFILE
     only after a census.
     """
+    # Keep module iteration, severity, diagnostic order, and feature policy.
     val severity = typecheck_pass_severity()
     var out: [text] = []
     for name in hir_modules.keys():
-        val m = hir_modules[name]
-        # Type inference diagnostics (unification / occurs-check / mismatch),
-        # including declared-vs-actual return type mismatches.
-        var ictx = HmInferContext.with_builtins()
-        ictx.infer_module(m)
-        var e_idx = 0
-        while e_idx < ictx.errors.len():
-            val msg = "[typecheck] {name}: " +
-                _format_type_infer_error(ictx.errors[e_idx])
-            out = out.push(msg)
-            # E-TYPE-NIL-COMPARE rides this list at the pass's own severity:
-            # a non-optional-vs-nil comparison was a unification ERROR here
-            # before the rule named it, so under Deny it stays an error (an
-            # existing check is never loosened by naming it).
-            match severity:
-                case TypecheckPassSeverity.Advisory:
-                    val _ = 0
-                case TypecheckPassSeverity.Warn:
-                    ctx.add_warning(msg)
-                case TypecheckPassSeverity.Deny:
-                    ctx.add_error(msg)
-            e_idx = e_idx + 1
-        # HIR frontend rules (MEXH007/008/009, W-HIR-INFER-00x): read-only over
-        # the lowered module, always warn-first -> never add_error.
-        # SIMPLE_FRONTEND_DIAG=0 is the kill switch.
-        if frontend_diag_enabled():
-            for finding in run_hir_frontend_diagnostics(m):
-                val fmsg = "[frontend {finding.code}] {name}: {finding.line}:{finding.col}: in `{finding.function_name}`: {finding.message}"
-                out = out.push(fmsg)
-                match severity:
-                    case TypecheckPassSeverity.Advisory:
-                        val _ = 0
-                    case _:
-                        ctx.add_warning(fmsg)
-        # Visibility diagnostics (cross-module private/friend/package access).
-        val vwarnings = check_module_visibility(m, name)
-        var v_idx = 0
-        while v_idx < vwarnings.len():
-            val vw = vwarnings[v_idx]
-            val vmsg = "[visibility {vw.code}] {name}: {vw.message}"
-            out = out.push(vmsg)
-            match severity:
-                case TypecheckPassSeverity.Advisory:
-                    val _ = 0
-                case TypecheckPassSeverity.Warn:
-                    ctx.add_warning(vmsg)
-                case TypecheckPassSeverity.Deny:
-                    ctx.add_error(vmsg)
-            v_idx = v_idx + 1
+        val receipt = collect_module_typecheck_receipt_v1(name, hir_modules[name], severity)
+        for message in receipt.messages:
+            out = out.push(message)
+        publish_module_typecheck_receipt_v1(ctx, receipt)
     out
 
 pub fn run_safety_warn_pass(
