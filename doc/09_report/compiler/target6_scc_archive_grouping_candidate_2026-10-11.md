@@ -27,3 +27,12 @@ Next evidence: a current-source native compiler must build and run the
 multi-package fixture, then a paired realistic SCC archive cohort must
 measure p95 and peak RSS and apply the shared normalized-sum rule. Full
 production Item 6 cutover and warm compiler cohorts remain open.
+
+## MIR follow-up
+
+The three-file source repair eliminated the original tuple unwrap,
+method-resolution, and borrowed-field iteration diagnostics in the
+focused closure. The final no-stub native build again completed HIR
+69/69 and failed MIR with six emitted errors at two loops over decoded
+Result payload arrays. No executable or paired p95/RSS result exists.
+See the updated archive MIR bug.

@@ -699,3 +699,9 @@ no-stub Stage 2 build passed HIR but failed native MIR lowering in archive
 and CAS dependencies, so no executable or paired p95/RSS sum result exists.
 See the SCC grouping report and archive MIR bug. This is a source candidate,
 not Item 6 completion or release qualification.
+
+The SCC archive MIR follow-up reduced its focused emitted error count
+from 45 to 6; two Result-decoded array loops remain, so there is
+still no native executable or paired p95/RSS cohort. The bounded
+three-cycle gate is exhausted for this session. See the updated
+archive MIR bug and grouping report.

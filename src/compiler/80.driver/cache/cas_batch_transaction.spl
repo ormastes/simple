@@ -2,6 +2,7 @@
 
 use std.common.crypto.sha256.{sha256_text}
 use compiler.driver.cache.cache_text_join.{cache_text_join_v1}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use std.nogc_sync_mut.io_runtime.{dir_list}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
@@ -45,7 +46,7 @@ struct CasBatchTransactionV1:
 
 fn cas_batch_sorted_unique_v1(values: [text]) -> [text]:
     var result: [text] = []
-    for value in values.sorted():
+    for value in canonical_identity_sort_texts(values):
         if value == "" or value.contains("\n") or value.contains("|"):
             return []
         if result.len() > 0 and result[result.len() - 1] == value:
@@ -154,8 +155,8 @@ fn cas_batch_lookup_receipt_digest_v1(
             found = Some(fields[2])
     found
 
-# @workaround bug=mono_return_context_and_fixed_nominal_binding_2026-10-05
 # Callers spell their Result success type until contextual mono inference is proven.
+# @workaround bug=mono_return_context_and_fixed_nominal_binding_2026-10-05
 fn cas_batch_error_v1<T>(error: CasBatchTransactionErrorV1) -> Result<T, CasBatchTransactionErrorV1>:
     Err(error)
 
@@ -274,9 +275,9 @@ fn cas_batch_publish_v1(
             parent_mappings = parent_mappings.push(parent_lines[index])
         val inherited = cas_batch_inherit_mappings_v1(
             parent_mappings, mappings)
-        if inherited.is_err():
-            return cas_batch_error_v1<text>(inherited.unwrap_err())
-        inherited_mappings = inherited.unwrap()
+        match inherited:
+            case Err(reason): return cas_batch_error_v1<text>(reason)
+            case Ok(rows): inherited_mappings = rows
     var generation_lines = [CAS_BATCH_SCHEMA_V1,
         "generation={transaction.next_generation}",
         "parent={transaction.expected_current_generation}",

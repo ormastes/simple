@@ -17,3 +17,21 @@ Reproduction log: build/mini_builds/item6_archive_grouped_publish_native.log.
 Expected: MIR lowers the same typed HIR without placeholder method calls,
 the native fixture links, and its multi-package SCC publish/load assertions
 pass. Do not infer a runtime or performance PASS from HIR completion.
+
+## Focused repair result (2026-10-11)
+
+Canonical identity sorting, explicit borrowed-owner array reads, direct
+dependency appends, and Result variant branches removed the initial
+sorted/contains/concat/unwrap MIR diagnostics in this closure. The first
+retry stopped at workaround annotation placement; that marker now directly
+precedes its affected function. The final bounded retry completed HIR
+69/69 and reduced 45 emitted MIR errors to 6 repeated errors at only two
+source locations: interface_action_archive.spl lines 219 and 221. Both
+iterate arrays obtained from Result Ok payloads; this Stage 2 MIR sees
+their collection type as I64 and refuses for-in. No native executable
+was produced. Log: build/mini_builds/item6_archive_grouped_publish_mir_final.log.
+
+The three-cycle cap is exhausted for this feature in this session. Next
+work should preserve payload validation and use an explicitly indexed
+array shape at those two loops, then rerun the focused native fixture
+before any performance or release claim.
