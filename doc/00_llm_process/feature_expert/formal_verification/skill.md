@@ -39,3 +39,11 @@ and is not injective for arbitrary names. The executable candidate has focused
 delimiter and constructor-collision regressions; require an admitted runtime
 test result before accepting it. Model substitution proofs alone do not prove
 key-encoding correctness or exact production/model key-string agreement.
+
+`GenericSubstModel` is an additional manual default target with the actual
+three-constructor MType shape, arbitrary application lists and `con "?"` unknown.
+Its composition law is unconditional; idempotence needs a closed substitution
+range and result closedness additionally needs supported input (all variables
+bound, no unknown constant). Dict/list, executable Simple and HIR `by_symbol`
+refinement remain unproved. Do not infer key injectivity from display rendering:
+closed `Con("Box<i64>")` and `App("Box", [Con("i64")])` collide.

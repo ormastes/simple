@@ -16035,6 +16035,10 @@ int64_t rt_io_tcp_bind(int64_t addr_val) {
     int opt = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     if (bind(fd, (struct sockaddr*)&sa, sizeof(sa)) < 0) { close(fd); return -1; }
+    /* Bug: redis_tagged_text_runtime_abi_2026_10_11. Match the canonical
+     * rt_io_tcp_bind listener contract (also used by the Rust provider).
+     * bind_fd remains the separate pre-listen socket operation. */
+    if (listen(fd, 128) < 0) { close(fd); return -1; }
     return (int64_t)fd;
 }
 

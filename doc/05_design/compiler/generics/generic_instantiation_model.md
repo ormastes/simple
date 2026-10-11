@@ -151,10 +151,11 @@ of `generic_struct_field_instance_paths_spec` is green there).
 
 ## 7. Evidence — what is proven, what is only checked
 
-- **Proven (machine-checked proof): nothing.** The repository's proof lane is Lean 4
-  (`src/verification/*`, `simple verify check` → gen-lean). Lean is not installed on the
-  development host and no Lean statement was written for this model. `in:`/`out:` contracts
-  are not discharged by any tool that runs on the seed.
+- **Machine-checked model laws:** the manual `GenericSubstModel` Lean target now
+  proves substitution laws for the three-constructor `MType` shape, arbitrary
+  argument lists and the unknown sentinel (section 11). This is not a proof of
+  executable Simple code or HIR refinement. Earlier bounded sweeps below remain
+  finite evidence; `in:`/`out:` contracts are not discharged by running the seed.
 - **Bounded-exhaustive (Simple code enumerates a finite universe; a claim holds for every
   element of it and for nothing else).** Universe: atoms {i64, text, bool, 'T, 'U}; depth ≤ 1
   = atoms + Array/Optional/Box of an atom + Tuple/Fn/Dict of two atoms (95); plus
@@ -286,6 +287,61 @@ Verification entry point: `lake build` in that project using its pinned
 `leanprover/lean4:v4.30.0` toolchain, followed by the repository proof-integrity
 gate. Proof outputs report kernel axiom dependencies. No model result grants
 native, cross-target, release or whole-compiler verification authority.
+
+## 11. Structural MType substitution proofs (2026-10-11)
+
+`src/verification/type_inference_compile/src/GenericSubstModel.lean` is a manual
+default Lake target. Its `MType.var`, `con` and `app String (List MType)` match
+the Simple model's constructors. Applications have arbitrary finite arity;
+`unknown = con "?"` is not closed, including inside another application.
+Unlike the smaller `Generics.Ty` proof, this model includes both features.
+
+`Subst = String -> Option MType` abstracts dictionary lookup. It admits infinite
+domains, so the theorems apply to finite dictionaries as a special case, provided
+their lookup and update semantics are shown to correspond. `apply` performs one
+replacement at a variable and recursively maps application children;
+`compose outer inner` rewrites each inner binding with outer, using outer only
+where inner is absent. Replacement values are not recursively normalized.
+
+| Law | Proved statement and precondition |
+|---|---|
+| Empty substitution | Identity for every finite MType term |
+| Closed invariance | A type with neither variables nor unknown is unchanged |
+| S2 composition | Applying composed maps equals inner then outer, with no closed-range assumption |
+| S1 idempotence | Requires every value returned by lookup to be closed |
+| S3 result closedness | Requires closed range, every input variable bound, and no unknown input constant |
+| Unknown behavior | Unknown remains unknown under every substitution and is never closed |
+| Constructor preservation | Application name and child-list arity are preserved |
+
+The checked counterexample `T -> U, U -> i64` refutes unconditional idempotence.
+The checked nested-unknown example prevents conflating absence of variables with
+concreteness. Constructor spelling, builtin arity validity and qualified nominal
+ownership are inputs; substitution does not validate them.
+
+### Remaining refinement obligations
+
+| Boundary | Required evidence; current status |
+|---|---|
+| Simple Dict/array to Lean lookup/list | Lookup, missing-key, overwrite, iteration and order correspondence; **not proved** |
+| `ms_apply`, `ms_compose`, `mt_is_closed` to Lean functions | Executable semantic translation/refinement; **not proved** (structural correspondence and finite differential checks only) |
+| `substitute_type` TypeParam and bare Named parameter | Relate name and `by_symbol` lookup without owner aliasing; **not proved** |
+| HIR constructors to MType applications | Preserve children and distinguish Error/Any/Infer from concrete atoms; **not proved** |
+| HIR metadata | Spans, array sizes, function effects, tensor dimensions/device and symbol authority need an explicit relation; **not represented here** |
+| Matching, expression inference and specialization keys | Not substitution theorems; existing finite tests and independent repair lanes remain required |
+| Native binaries and bootstrap | Exact compiler/runtime admission and execution evidence remain required; **no authority supplied by these proofs** |
+
+Unrestricted display rendering is not injective: closed `Con("Box<i64>")`
+and `App("Box", [Con("i64")])` both render `Box<i64>`. Likewise raw owner/name
+delimiters can collide. K2 therefore needs a separately verified structural key
+encoding, not an assumption that display text is an identity. This counterexample
+is outside the bounded identifier universe in section 7; it does not contradict
+the reported finite pair counts. No key-injectivity theorem is claimed here.
+
+Validation: pinned Lean 4.30.0 `lake build` checked all 13 jobs, including this
+default target. Each theorem prints its kernel dependencies. Dependencies include
+Lean's standard `propext` and `Quot.sound`; the open-range counterexample also uses
+`Classical.choice`. There are no added axioms, admitted proofs or native-evaluation
+proof shortcuts. These model results do not close the refinement obligations.
 
 Executed on Windows on 2026-10-11: the pinned Lean 4.30.0 default build
 completed all 11 jobs, including `GenericsConstraints`. The repository guard's

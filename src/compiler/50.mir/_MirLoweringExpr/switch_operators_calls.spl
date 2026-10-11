@@ -1,6 +1,8 @@
+use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
 use compiler.hir.hir_types.{SymbolKind}
 # Part of src/compiler/50.mir/mir_lowering_expr.spl: switch/if-chain dispatch, binary/unary operators, call lowering
+use compiler.mir._MirLoweringExpr.result_tuple_payload.*
 use compiler.mir._MirLoweringExpr.expr_dispatch.*
 use compiler.mir._MirLowering.native_trait_conversion.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
@@ -3704,7 +3706,10 @@ impl MirLowering:
                     # struct/class, that name is authoritative and takes
                     # precedence over the global map below.
                     var scrutinee_payload_struct = ""
-                    if val safe_payload_name = self.result_variant_payload_struct_name(scrutinee, enum_variants[ci]):
+                    val exact_err_record = enum_name == "Result" and enum_variants[ci] == "Err" and self.result_err_record_owners.contains(scrut_local.id)
+                    if exact_err_record:
+                        scrutinee_payload_struct = self.checked_result_err_record_owner(scrut_local.id, scrutinee.span)
+                    elif val safe_payload_name = self.result_variant_payload_struct_name(scrutinee, enum_variants[ci]):
                         # Cross-module-safe: resolved by NAME
                         # (bootstrap_fn_ret_ok_shape_*), never by dereferencing
                         # a possibly-foreign-module SymbolId. See
@@ -3749,14 +3754,18 @@ impl MirLowering:
                                 case HirTypeKind.Float(_):
                                     effective_payload_type = Some(option_inner)
                                 case _: ()
-                    val bound_payload = match effective_payload_type:
-                        case Some(found_payload_type): self.decode_declared_enum_payload_slot(pl, found_payload_type)
-                        case _: pl
+                    val bound_payload = if exact_err_record:
+                        self.materialize_result_err_record_payload(pl, scrutinee_payload_struct, scrutinee.span)
+                    else:
+                        match effective_payload_type:
+                            case Some(found_payload_type): self.decode_declared_enum_payload_slot(pl, found_payload_type)
+                            case _: pl
                     # Preserve the declaration on the extracted local as well
                     # as using it for decoding. In particular, an enum payload
                     # has no struct layout from which to recover its methods.
-                    if val bound_payload_type = effective_payload_type:
-                        self.remember_local_hir_type(bound_payload.id, bound_payload_type, 0, 0)
+                    if not exact_err_record:
+                        if val bound_payload_type = effective_payload_type:
+                            self.remember_local_hir_type(bound_payload.id, bound_payload_type, 0, 0)
                     if result_match_candidate:
                         if enum_variants[ci] == "Ok": result_ok_payload = bound_payload
                         elif enum_variants[ci] == "Err": result_err_payload = bound_payload
@@ -3780,7 +3789,7 @@ impl MirLowering:
                             case HirTypeKind.Str:
                                 result_payload_is_text = true
                             case _: ()
-                    if result_payload_is_text or (result_payload_type == nil and payload_struct != nil and payload_struct == enum_text_payload_marker()):
+                    if not exact_err_record and (result_payload_is_text or (result_payload_type == nil and payload_struct != nil and payload_struct == enum_text_payload_marker())):
                         # Enum-text bug: this variant's single-field payload
                         # was observed to be TEXT at the construction site
                         # (see lower_enum_lit/lower_enum_construct_named).
@@ -3811,6 +3820,12 @@ impl MirLowering:
                         if val text_local = text_res:
                             self.local_map[bind_syms[0].id] = text_local
                             self.bind_local(bind_syms[0].id, text_local)
+                    elif exact_err_record:
+                        # The provider's declaration, never a consumer's numeric
+                        # Named ID or the closure-global Result::Err slot.
+                        self.result_err_record_owners[bound_payload.id] = scrutinee_payload_struct
+                        if scrutinee_payload_struct != "":
+                            self.struct_value_syms[bound_payload.id] = scrutinee_payload_struct
                     elif scrutinee_payload_struct != "":
                         # Scrutinee-instantiation-derived name: immune to the
                         # global-map collision above.
@@ -4520,7 +4535,9 @@ impl MirLowering:
                 case Some(base_type):
                     match base_type.kind:
                         case HirTypeKind.Result(ok_type, _):
-                            self.decode_declared_enum_payload_slot(pl, ok_type)
+                            match ok_type.kind:
+                                case HirTypeKind.Tuple(_): self.decode_result_tuple_payload(pl, ok_type)
+                                case _: self.decode_declared_enum_payload_slot(pl, ok_type)
                         case _: pl
                 case _: pl
             return payload_local
@@ -5296,6 +5313,16 @@ impl MirLowering:
                     self.collect_free_var_syms(block.value, bound, acc1)
                 else:
                     acc1
+            case While(condition, loop_body, _):
+                val condition_acc = self.collect_free_var_syms(condition, param_syms, acc)
+                # A loop body's declarations are bound only inside that body;
+                # they must not hide a capture read by the condition.
+                val loop_bound = self.hir_block_bound_syms(loop_body.stmts, param_syms)
+                val body_acc = self.hir_block_stmts_free_syms(loop_body.stmts, loop_bound, condition_acc)
+                if loop_body.has:
+                    self.collect_free_var_syms(loop_body.value, loop_bound, body_acc)
+                else:
+                    body_acc
             case Lambda(nested_params, nested_body, _):
                 var combined = param_syms
                 var nlpi = 0
@@ -5596,6 +5623,16 @@ impl MirLowering:
                     self.lambda_body_captures(block.value, bound)
                 else:
                     false
+            case While(condition, loop_body, _):
+                val loop_bound = self.hir_block_bound_syms(loop_body.stmts, param_syms)
+                if self.lambda_body_captures(condition, param_syms):
+                    true
+                elif self.hir_block_stmts_capture(loop_body.stmts, loop_bound):
+                    true
+                elif loop_body.has:
+                    self.lambda_body_captures(loop_body.value, loop_bound)
+                else:
+                    false
             case Lambda(nested_params, nested_body, _):
                 # A lambda literal nested inside another lambda's body (e.g. an
                 # inline lambda arg passed to a call made from within the outer
@@ -5704,6 +5741,8 @@ impl MirLowering:
                 self.lambda_capture_scan_supported(receiver) and self.call_args_capture_scan_supported(call_args)
             case Block(block):
                 self.hir_block_stmts_scan_supported(block.stmts) and (not block.has or self.lambda_capture_scan_supported(block.value))
+            case While(condition, loop_body, _):
+                self.lambda_capture_scan_supported(condition) and self.hir_block_stmts_scan_supported(loop_body.stmts) and (not loop_body.has or self.lambda_capture_scan_supported(loop_body.value))
             case Lambda(_, nested_body, _):
                 self.lambda_capture_scan_supported(nested_body)
             case _: false
