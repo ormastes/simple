@@ -216,3 +216,9 @@ K0-to-OS imports, and zero unclassified files. The remaining OS edges are
 module-loader release paths requiring a typed port. Native and performance
 qualification remain open; see
 doc/09_report/compiler/item5_linker_pack_plugin_owner_2026-10-11.md.
+
+The 2026-10-11 typed-port prototype closed the structural count but allowed
+an ordinary importer to install fake callbacks through a non-`pub` function.
+It was removed before commit. The two K0-to-OS edges remain open pending a
+language-enforced issuer and a hostile-importer negative fixture; see
+doc/09_report/compiler/target5_dynsmf_loader_port_authority_diagnostic_2026-10-11.md.

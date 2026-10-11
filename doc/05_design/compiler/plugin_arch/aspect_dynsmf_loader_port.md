@@ -1,6 +1,6 @@
 # Aspect dynSMF loader port V1
 
-Status: DESIGN CANDIDATE. The kernel closure audit still reports two K0-to-OS imports in `src/compiler/99.loader/module_loader_compat.spl`. This document is a repair plan, not an implementation or verification claim.
+Status: DESIGN CANDIDATE. The kernel closure audit still reports two K0-to-OS imports in `src/compiler/99.loader/module_loader_compat.spl`. This document is a repair plan, not an implementation or verification claim. A 2026-10-11 native probe showed that an ordinary importer can install arbitrary callbacks through a non-`pub` port function; that draft was removed. See `doc/09_report/compiler/target5_dynsmf_loader_port_authority_diagnostic_2026-10-11.md`.
 
 ## Current owner and boundary
 

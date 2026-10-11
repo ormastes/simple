@@ -96,6 +96,12 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
 
 ## Target 5 — kernel and extension demand loading
 
+- [ ] Replace the two K0-to-OS dynSMF loader imports only after proving a
+  language-enforced issuer with a hostile-importer negative fixture. A public
+  callback port prototype was rejected because a non-`pub` installer remained
+  callable by an ordinary importer. See
+  `doc/09_report/compiler/target5_dynsmf_loader_port_authority_diagnostic_2026-10-11.md`.
+
 - Produce an ABI-matched current-source pure-Simple Stage4 compiler and runtime
   authority. Resolve the bootstrap failures in the blocker report without
   treating the historical Stage2 binary as release evidence.
