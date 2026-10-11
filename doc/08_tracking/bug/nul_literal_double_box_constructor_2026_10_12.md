@@ -82,3 +82,22 @@ source overlay of its compiler. Actual candidate producer qualification and real
 frontend regression execution are required before marking fixed or landing.
 Separate existing counted-text slicing through strlen and JSON control escaping
 remain outside this literal repair.
+
+## Next qualification inputs (2026-10-12)
+
+Latest duplicate check: release_phase3 `3e6da6a19a3a3ad0f11e2d6419dcd1dcdc06d5ba`
+still has the defective branch; both reviewed backend owners are unchanged from
+this candidate base. No new admitted producer is available. Linux CI38169694975
+(source27b236a51c20dbb43765740c05d8d94d45f36a7e) and Windows CI38169498820
+(source67698a03ae2d3fdbe82a575a91504956b9d8d660) were still live when inspected
+by the coordinating agent; neither is candidate qualification evidence.
+
+At the next causally required build restart, include this reviewed source patch
+in the frozen compiler source and preserve its manifest. First qualify the new
+producer with real Hello compile/link/run. Then compile the standalone byte probe
+with that producer and paired runtime, execute all eight cases, and run the real
+frontend-MIR spec. Inspect output/disassembly to ensure one counted constructor
+receives raw rodata rather than a prior boxed handle. Repeat on the other backend
+or label it unexecuted. Source-only overlays with d356, stale cached providers,
+renamed ABI symbols or fabricated cache admissions cannot qualify this repair.
+No extra build was started merely to wait for those existing CI jobs.
