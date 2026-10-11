@@ -1,3 +1,66 @@
+# Validate either exact legacy rows or the Windows materialization inventory.
+# Keep the receipt bytes intact: before/after comparison must still detect drift.
+bootstrap_stage3_git_state_schema_valid() {
+    perl - "$1" <<'BOOTSTRAP_GIT_STATE_SCHEMA_PL'
+use strict;
+use warnings;
+use utf8;
+use Digest::SHA qw(sha256_hex);
+use Encode qw(decode FB_CROAK LEAVE_SRC);
+use Fcntl qw(S_ISREG);
+use Time::HiRes qw(stat);
+
+eval {
+    open my $receipt, '<:raw', $ARGV[0] or die "open receipt: $!";
+    my @before = stat($receipt);
+    S_ISREG($before[2]) && $before[7] <= 1048576 or die "bounded regular receipt required";
+    my $data = '';
+    while (1) {
+        my $read = sysread($receipt, my $part, 65536);
+        defined $read or die "read receipt: $!";
+        last if $read == 0;
+        $data .= $part;
+        length($data) <= 1048576 or die "receipt exceeds bound";
+    }
+    my @after = stat($receipt);
+    join(':', @before[0,1,2,7,9,10]) eq join(':', @after[0,1,2,7,9,10]) or die "receipt changed while reading";
+    close $receipt or die "close receipt: $!";
+    my @rows = split /(?<=\n)/, $data;
+    @rows >= 2 && $rows[0] =~ /\Ahead=(?:[0-9a-f]{40}|[0-9a-f]{64})\n\z/ &&
+        $rows[1] =~ /\Adirty_fingerprint=[0-9a-f]{64}\n\z/ or die "invalid common fields";
+    if (@rows != 2) {
+        @rows >= 4 or die "missing alias fields";
+        my ($count) = $rows[2] =~ /\Aalias_collapse_count=(0|[1-9][0-9]*)\n\z/;
+        my ($digest) = $rows[3] =~ /\Aalias_collapse_sha256=([0-9a-f]{64})\n\z/;
+        defined($count) && defined($digest) && $count eq ''.(@rows - 4) or die "invalid alias count or digest";
+        my @aliases = @rows > 4 ? @rows[4..$#rows] : ();
+        sha256_hex(join('', @aliases)) eq $digest or die "alias digest mismatch";
+        my $previous;
+        for my $row (@aliases) {
+            my ($size, $hex) = $row =~ /\Aalias-collapse-directory:([1-9][0-9]*):([0-9a-f]+)\n\z/;
+            defined($hex) && length($hex) % 2 == 0 or die "invalid alias row";
+            my $path = pack('H*', $hex);
+            $size eq ''.length($path) && length($path) <= 131068 or die "alias byte length mismatch";
+            my $name = decode('UTF-8', $path, FB_CROAK | LEAVE_SRC);
+            $name !~ /[\\:*?"<>|\p{Cc}]/ or die "noncanonical relative alias";
+            for my $part (split m{/}, $name, -1) {
+                length($part) && $part ne '.' && $part ne '..' && $part !~ /[. ]\z/ &&
+                    $part !~ /\A(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|\z)/i or die "noncanonical relative alias component";
+            }
+            !defined($previous) || $path gt $previous or die "unsorted or duplicate alias";
+            # Byte order/duplicates are schema properties. Native receipt
+            # validation owns Windows OrdinalIgnoreCase identity semantics.
+            $previous = $path;
+        }
+    }
+    1;
+} or do {
+    print STDERR "invalid git state schema: $@\n";
+    exit 1;
+};
+BOOTSTRAP_GIT_STATE_SCHEMA_PL
+}
+
 # Positioned reads never reopen a pathname or change the inherited offset.
 # Keep this implementation in the byte-bound verifier module. Python is included
 # in tool authority on hosts without procfs; -I excludes ambient Python inputs.
@@ -1446,18 +1509,14 @@ bootstrap_stage3_verify_manifest_impl() {
     }
     if [ "${BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE:-0}" = 1 ]; then
         bootstrap_stage3_captured_git=$(bootstrap_stage3_map_value git_state_authority) || { bootstrap_stage3_provenance_fail "manifest-stage-parent-git-map"; return 1; }
-        [ "$(wc -l <"$bootstrap_stage3_captured_git" | tr -d ' ')" = 2 ] || { bootstrap_stage3_provenance_fail "manifest-stage-parent-git-map-shape"; return 1; }
-        [ "$(sed 's/=.*//' "$bootstrap_stage3_captured_git" | tr '\n' ' ')" = \
-            'head dirty_fingerprint ' ] || { bootstrap_stage3_provenance_fail "manifest-stage-parent-git-map-schema"; return 1; }
+        bootstrap_stage3_git_state_schema_valid "$bootstrap_stage3_captured_git" || { bootstrap_stage3_provenance_fail "manifest-stage-parent-git-map-schema"; return 1; }
         bootstrap_stage3_current_git_sha=$(bootstrap_stage3_hash_file \
             "$bootstrap_stage3_captured_git") || return 1
         [ "$bootstrap_stage3_current_git_sha" = \
             "$(bootstrap_stage3_map_value git_state_sha256)" ] || { bootstrap_stage3_provenance_fail "manifest-stage-parent-git-map-hash"; return 1; }
         [ "$bootstrap_stage3_current_git_sha" = \
             "$(bootstrap_stage3_hash_file "$bootstrap_stage3_parent_git")" ] || { bootstrap_stage3_provenance_fail "manifest-stage-parent-git-external-hash"; return 1; }
-        [ "$(wc -l <"$bootstrap_stage3_parent_git" | tr -d ' ')" = 2 ] || { bootstrap_stage3_provenance_fail "manifest-stage-parent-git-external-shape"; return 1; }
-        [ "$(sed 's/=.*//' "$bootstrap_stage3_parent_git" | tr '\n' ' ')" = \
-            'head dirty_fingerprint ' ] || { bootstrap_stage3_provenance_fail "manifest-stage-parent-git-external-schema"; return 1; }
+        bootstrap_stage3_git_state_schema_valid "$bootstrap_stage3_parent_git" || { bootstrap_stage3_provenance_fail "manifest-stage-parent-git-external-schema"; return 1; }
         bootstrap_stage3_current_git_head=$(bootstrap_stage3_verify_value \
             head "$bootstrap_stage3_captured_git") || return 1
         bootstrap_stage3_current_git_dirty=$(bootstrap_stage3_verify_value \
