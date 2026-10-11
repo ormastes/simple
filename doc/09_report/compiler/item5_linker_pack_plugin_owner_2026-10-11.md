@@ -15,9 +15,9 @@ Status: PARTIAL. Structural kernel closure improved; native and performance admi
 - Before: check-kernel-closure reported 3 kernel-to-app/OS imports, including the linker-pack provider-loader import.
 - After: the same checker reports 2240 classified files, 0 unclassified, 0 K0-to-P, 0 K1-to-P, 2 K0-to-OS, 0 unresolved. The remaining imports are module_loader_compat to dynsmf_owned_v2 and smf_dynlib. The gate remains FAIL.
 - The first no-stub pure-Simple Stage 2 native build (old temporary OS owner) reached 577 MIR units after HIR/monomorphization reported 0 unresolved generic calls. Its worker terminated with signal 11 before producing a binary. Log: build/mini_builds/item5_linker_pack_os_owner_native.log.
-- The first corrected-plugin build stopped at SCV snapshot admission before parsing: snapshot-read-failed for the moved src/os/smf/linker_lifecycle.spl. The inventory CURRENT still used the previous Git HEAD and listed that removed tracked path. The isolated owner move is committed before the next bounded retry.
+- The first corrected-plugin build stopped at SCV snapshot admission before parsing: snapshot-read-failed for the moved src/os/smf/linker_lifecycle.spl. The inventory listed that removed tracked path. A retry after commit still failed at the same path: CURRENT advanced to c7c4db75056 but its generation retained both the old and new paths. This is an SCV inventory invalidation bug, not a plugin typecheck result.
 - git diff --check, direct-env-runtime-guard --working, numbered-artifact-guard --working passed; doc/06_spec contains 0 executable .spl specs.
 
 ## Remaining gates
 
-The two K0 module-loader OS imports need a typed release port preserving final-unpin and retry semantics. The corrected plugin fixture must build and run; Item 5 then still needs default-demand loading and paired executable size/startup/RSS evidence. Item 6 compile work is separate and not qualified by this ownership move.
+The two K0 module-loader OS imports need a typed release port preserving final-unpin and retry semantics. The corrected plugin fixture must build and run after the SCV deletion bug is repaired; Item 5 then still needs default-demand loading and paired executable size/startup/RSS evidence. Item 6 compile work is separate and not qualified by this ownership move.

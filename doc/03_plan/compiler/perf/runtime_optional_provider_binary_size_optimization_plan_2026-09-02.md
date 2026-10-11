@@ -468,3 +468,8 @@ zero unresolved generic calls, then the compiler worker crashed with signal
 relocation has source-level closure evidence only; native runtime behavior
 and matched size/startup/RSS remain unqualified. See the Item 5 MIR worker
 bug and the linker-pack ownership report.
+
+The committed plugin-owner retry still fails SCV snapshot admission before
+parse because the source inventory retains the deleted intermediate OS path
+alongside the new plugin path. The three-build cycle is exhausted; see
+doc/08_tracking/bug/scv_inventory_retains_deleted_source_after_move_2026-10-11.md.
