@@ -52,3 +52,8 @@ Coordinate target-local changes with the MIR-lowering, backend, compiler-driver,
 bootstrap, or hardware-RTL layer expert as appropriate. The FV2 merge owner
 resolves cross-layer interface changes; the independent final reviewer accepts
 done marks.
+
+When reviewing generic proofs, verify that manual constraints are actual Lake
+build targets. The `GenericsConstraints` target covers reduced-model closed
+substitution and nominal constructor laws; it does not close the compiler or
+bootstrap artifact refinement arrows above.
