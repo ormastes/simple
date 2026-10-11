@@ -27,6 +27,10 @@ Historical Phase 2 probes do not qualify the Phase 3 candidate.
   frozen plan before marking execution complete. Parent pre-dispatch selection,
   acknowledgement verification, full input/shard/attempt provenance and all
   worker routes remain incomplete.
+  Parent CLI trace-event dispatch is deliberately refused before executing
+  specs until source bytes and effective options bind to durable preparation.
+  Owner/child APIs remain authored capabilities, not an enabled end-to-end
+  feature run. Ordinary test execution does not produce qualified trace runs.
 - Contract review found that the legacy database table codec does not safely
   round-trip nested quotes and commas. New frozen-plan and v2 observation rows
   now use reversible owner-safe scalar storage. Authored specs cover real

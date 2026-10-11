@@ -375,6 +375,10 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         print "No test files found in {options.path}"
         return TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
 
+    # Freeze the admitted file set. The daemon retains its existing option
+    # semantics; direct worker dispatch captures its effective options below.
+    val admitted_paths = files
+
     if options.coverage:
         setup_coverage()
 
@@ -400,11 +404,11 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         val daemon_ok = test_daemon_ensure_responsive(daemon_config)
         if daemon_ok:
             if show_session_debug:
-                print "  [session] Routing {files.len()} test(s) through daemon"
-            val daemon_results = run_tests_via_daemon(files, updated_options, daemon_config)
+                print "  [session] Routing {admitted_paths.len()} test(s) through daemon"
+            val daemon_results = run_tests_via_daemon(admitted_paths, updated_options, daemon_config)
             for dr in daemon_results:
                 print_result(dr, updated_options.format)
-            return cover_append_failures(reconcile_discovered_vs_executed(files, summarize_test_results(daemon_results), false), missing_covers)
+            return cover_append_failures(reconcile_discovered_vs_executed(admitted_paths, summarize_test_results(daemon_results), false), missing_covers)
         else:
             # Daemon could not start/respond (e.g. stale pidfile, light_daemon
             # IPC mismatch). Fall back to direct execution instead of failing the
@@ -412,41 +416,46 @@ fn run_tests(options: TestOptions) -> TestRunResult:
             # governor. Mirrors test_runner_client.spl's "running directly".
             print "WARNING: test daemon unavailable; running directly [fallback]"
 
-    # Sequential flag overrides parallel
-    if updated_options.sequential:
-        updated_options.parallel = false
-
     # Windows async capture uses the pure-Simple owned JobObject facade.
     # Preserve explicit parallel/worker requests; admission failures remain
     # failed test rows rather than a silent switch to sequential execution.
 
+    # Sequential flag overrides parallel for direct dispatch, as before.
+    if updated_options.sequential:
+        updated_options.parallel = false
+    # All direct execution lanes consume this same immutable run-level pair.
+    # Per-file timeout, cache, and feature-gate decisions are still worker
+    # behavior and are not represented as frozen trace evidence.
+    val execution_paths = admitted_paths
+    val execution_options = updated_options
+
     # Parallel execution with resource governor
-    if updated_options.parallel:
+    if execution_options.parallel:
         if not is_linux():
             print "WARNING: --parallel is experimental on non-Linux platforms. Attempting with graceful fallback."
         val parallel_result = run_tests_parallel_mode(
-            files,
-            updated_options,
+            execution_paths,
+            execution_options,
             ckpt_passed: ckpt_passed,
             ckpt_failed: ckpt_failed,
             ckpt_skipped: ckpt_skipped
         )
-        return cover_append_failures(reconcile_discovered_vs_executed(files, parallel_result, false), missing_covers)
+        return cover_append_failures(reconcile_discovered_vs_executed(execution_paths, parallel_result, false), missing_covers)
 
     report_free_mem("BEFORE_TEST_LOOP")
-    val mode_name = mode_to_str(updated_options.mode)
+    val mode_name = mode_to_str(execution_options.mode)
     var fork_label = ""
-    if updated_options.fork_mode:
+    if execution_options.fork_mode:
         fork_label = ", fork"
-    print "Running {files.len()} test file(s) [mode: {mode_name}{fork_label}]..."
-    if updated_options.seed_set:
-        print "Seed: {updated_options.seed}"
-    if updated_options.self_protect:
-        val free_cpu = 100.0 - updated_options.cpu_threshold
-        val free_mem = 100.0 - updated_options.mem_threshold
+    print "Running {execution_paths.len()} test file(s) [mode: {mode_name}{fork_label}]..."
+    if execution_options.seed_set:
+        print "Seed: {execution_options.seed}"
+    if execution_options.self_protect:
+        val free_cpu = 100.0 - execution_options.cpu_threshold
+        val free_mem = 100.0 - execution_options.mem_threshold
         print "Self-protection enabled (stops when free CPU < {free_cpu}% AND free RAM < {free_mem}%)"
-    if updated_options.max_mem_gb > 0 and not updated_options.no_limits:
-        print "  Max memory per test: {updated_options.max_mem_gb}GB"
+    if execution_options.max_mem_gb > 0 and not execution_options.no_limits:
+        print "  Max memory per test: {execution_options.max_mem_gb}GB"
 
     # Load change-detection cache (skip if --clean)
     val cache_path = ".simple/test-result-cache.sdn"
@@ -482,7 +491,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     var tests_run = 0
     var stopped_early = false
 
-    for file_path in files:
+    for file_path in execution_paths:
         # Only check system thresholds every 20 tests (avoids 100ms CPU sleep per check)
         # `tests_run > 0` is load-bearing, not a micro-optimisation. Without it
         # the very first iteration checks, and a violation there shuts the run
@@ -528,7 +537,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
                     timed_out: false,
                     cached: true
                 )
-                print_result(cached_result, updated_options.format)
+                print_result(cached_result, execution_options.format)
                 total_passed = total_passed + cached_result.passed
                 total_failed = total_failed + cached_result.failed
                 total_skipped = total_skipped + cached_result.skipped
@@ -540,8 +549,8 @@ fn run_tests(options: TestOptions) -> TestRunResult:
                 continue
 
         # Run test (or report it feature-gated without running it)
-        val result = if gate.off.len() > 0: feature_gated_result(file_path, gate.off) else: run_single_test(file_path, updated_options)
-        print_result(result, updated_options.format)
+        val result = if gate.off.len() > 0: feature_gated_result(file_path, gate.off) else: run_single_test(file_path, execution_options)
+        print_result(result, execution_options.format)
 
         # Record result in cache (system specs skip the cache entirely so
         # a stale interpreter-mode load never replays as a silent 0ms pass)
@@ -560,7 +569,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         completed_files.push(file_path)
         tests_run = tests_run + 1
 
-        if updated_options.fail_fast and (result.failed > 0 or result.timed_out):
+        if execution_options.fail_fast and (result.failed > 0 or result.timed_out):
             print ""
             print "Stopping early (--fail-fast)"
             stopped_early = true
@@ -1406,10 +1415,15 @@ fn run_test_cli() -> i64:
 
     propagate_env_vars(options)
 
-    # Refuse an explicitly incompatible trace mode before executing candidate
-    # tests. A post-run warning cannot recover observations never persisted.
-    if run_spec and not options.list and options.no_db and (env_get("SIMPLE_TRACE_CASE_EVENTS") ?? "") == "1":
-        eprint "ERROR: trace event mode requires database persistence; remove --no-db"
+    # Deliberate fail-closed gate: the current runner does not execute the
+    # frozen source bytes or bind all worker options to the preparation receipt.
+    # Do not run candidates in trace mode until that complete input contract is
+    # connected. A post-run warning cannot recover observations never persisted.
+    if run_spec and not options.list and (env_get("SIMPLE_TRACE_CASE_EVENTS") ?? "") == "1":
+        if options.no_db:
+            eprint "ERROR: trace event mode requires database persistence; remove --no-db"
+        else:
+            eprint "ERROR: trace event mode is not admitted: frozen source bytes and effective execution options are not yet bound to preparation"
         return 2
 
     var exit_code = 0
