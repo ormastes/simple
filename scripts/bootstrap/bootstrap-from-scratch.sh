@@ -2737,6 +2737,23 @@ if [ "${os}" = windows ] && [ "${PLATFORM_ABI}" = gnu ]; then
   CC=${mingw_cc}
   export CC
 fi
+# Bind the Windows MSVC Stage 2 C compiler and SDK environment in both normal
+# and full bootstrap modes. The stage 2 argument list carries each assignment
+# as one quoted word: CC commonly contains `C:/Program Files/...`, and the
+# admitted environment contract requires INCLUDE, LIB, and LIBPATH by name
+# even when LIBPATH is empty.
+if [ "${os}" = windows ] && [ "${PLATFORM_ABI}" = msvc ]; then
+  cc_abs=$(bootstrap_stage3_target_c_compiler "${PLATFORM}") || {
+    echo "error: no C compiler found for bootstrap target ${PLATFORM}" >&2
+    exit 1
+  }
+  bootstrap_windows_cc_env="CC=${cc_abs}"
+  bootstrap_windows_include_env="INCLUDE=${INCLUDE:-}"
+  bootstrap_windows_lib_env="LIB=${LIB:-}"
+  bootstrap_windows_libpath_env="LIBPATH=${LIBPATH:-}"
+  CC=${cc_abs}
+  export CC
+fi
 seed_inputs_fingerprint=not-used-by-admitted-stage4-resume
 if [ -z "${resume_stage4_output}" ] && [ -z "${bootstrap_stage2_parent_runtime}" ]; then
   bootstrap_progress_mark fingerprint ""
@@ -2813,29 +2830,6 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     mingw_ar="${AR_x86_64_pc_windows_gnu:-llvm-ar}"
     mingw_cflags="${CFLAGS_x86_64_pc_windows_gnu:-}"
     mingw_rustflags="${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS:-}"
-  fi
-  if [ "${os}" = windows ] && [ "${PLATFORM_ABI}" = msvc ]; then
-    # Stage 2/3 must use the compiler admitted above by exact path. Leaving CC
-    # unset makes the Rust seed perform a second PATH search; on hosts
-    # with MSYS2 before LLVM that selects an unauthorised clang-cl which may
-    # also fail native CreateProcess with STATUS_DLL_NOT_FOUND (0xc0000135).
-    # Kept OUT of bootstrap_windows_abi_env: that variable is expanded
-    # UNQUOTED at every use site so its two space-free assignments become
-    # separate arguments, but cc_abs routinely contains spaces (the stock MSVC
-    # location is C:/Program Files/Microsoft Visual Studio/...). Appending it
-    # there word-split "CC=C:/Program Files/.../cl.exe" into "CC=C:/Program"
-    # and "Files/.../cl.exe", and the latter fails the NAME=value check in
-    # bootstrap_stage3_env_assignment_names -- a pre-exec refusal that produced
-    # no build log at all. Carry them as single quoted words instead.
-    bootstrap_windows_cc_env="CC=${cc_abs}"
-    # Same sandbox reason as CC, and each may legitimately contain spaces and
-    # is therefore carried as its own single quoted word. LIBPATH is often
-    # empty; it is still passed so the assignment-name list is stable.
-    bootstrap_windows_include_env="INCLUDE=${INCLUDE:-}"
-    bootstrap_windows_lib_env="LIB=${LIB:-}"
-    bootstrap_windows_libpath_env="LIBPATH=${LIBPATH:-}"
-    CC=${cc_abs}
-    export CC
   fi
   windows_include="${INCLUDE:-}"
   windows_lib="${LIB:-}"
