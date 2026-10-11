@@ -14147,25 +14147,55 @@ int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t 
     return (int64_t)bytes_written;
 }
 
-/* SOSIX staged binary writer: Simple lowers text here to a C path pointer.
- * The caller owns and bounds the raw byte buffer for the duration of this call. */
-int64_t rt_file_write_raw_at(const char* path, int64_t offset, int64_t data_ptr, int64_t data_len) {
-    if (!path || !path[0] || offset < 0 || data_ptr <= 0 ||
-        data_len <= 0 || data_len > 1048576) return -1;
-    int flags = O_WRONLY | O_CREAT;
-    if (offset == 0) flags |= O_EXCL;
+/* SOSIX staged binary writer: Simple lowers the path to a C string and
+ * passes the array handle. Packed bytes write directly; boxed byte arrays
+ * narrow into a bounded buffer. The caller removes the private stage on error. */
+int64_t rt_file_write_array_new(const char* path, int64_t bytes_value) {
+    RtCoreArray* array = rt_core_as_registered_array(bytes_value);
+    if (!path || !path[0] || !array || !array->data || array->len <= 0 ||
+        array->len > 1073741824 ||
+        (array->flags & (RT_CORE_ARRAY_FLAG_U64_PACKED | RT_CORE_ARRAY_FLAG_TUPLE))) return -1;
+    int packed = (array->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+    size_t capacity = (size_t)(array->len < 1048576 ? array->len : 1048576);
+    uint8_t* buffer = packed ? NULL : (uint8_t*)malloc(capacity);
+    if (!packed && !buffer) return -1;
+    int flags = O_WRONLY | O_CREAT | O_EXCL;
 #ifdef O_NOFOLLOW
     flags |= O_NOFOLLOW;
+#endif
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
 #endif
 #ifdef _WIN32
     flags |= _O_BINARY;
 #endif
     int fd = open(path, flags, 0600);
-    if (fd < 0) return -1;
-    ssize_t written = rt_file_write_at_fd(fd, (const void*)(uintptr_t)data_ptr,
-                                          (size_t)data_len, offset);
+    if (fd < 0) { free(buffer); return -1; }
+    int64_t offset = 0;
+    while (offset < array->len) {
+        size_t count = (size_t)(array->len - offset);
+        if (count > 1048576) count = 1048576;
+        const uint8_t* source = NULL;
+        if (packed) {
+            source = (const uint8_t*)array->data + offset;
+        } else {
+            const int64_t* items = (const int64_t*)array->data;
+            for (size_t i = 0; i < count; ++i) {
+                int64_t item = items[offset + (int64_t)i];
+                if (!rt_core_is_int(item)) { close(fd); free(buffer); return -1; }
+                int64_t byte = rt_core_as_int(item);
+                if (byte < 0 || byte > 255) { close(fd); free(buffer); return -1; }
+                buffer[i] = (uint8_t)byte;
+            }
+            source = buffer;
+        }
+        ssize_t written = rt_file_write_at_fd(fd, source, count, offset);
+        if (written != (ssize_t)count) { close(fd); free(buffer); return -1; }
+        offset += (int64_t)count;
+    }
     close(fd);
-    return (int64_t)written;
+    free(buffer);
+    return offset;
 }
 
 /* NOTE (2026-08-10, rt_extern_abi_divergence_family): this is a stdio FILE*

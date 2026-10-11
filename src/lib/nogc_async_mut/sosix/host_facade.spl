@@ -17,9 +17,10 @@ The host path adds no facade call frame where the underlying primitive has
 the exact signature: braced `export use module.{source as sosix_name}` binds the
 same declaration under the SOSIX name. The unbraced
 `export use module.source as sosix_name` form is still an open module-versus-
-symbol resolution gap. Only `sosix_run`, `sosix_platform` and
-`sosix_proc_usage` carry adapter bodies because their signature or value
-domain differs. Native POSIX raw-alias qualification remains separate.
+symbol resolution gap. The byte-stage adapter checks fresh-path and exact-byte
+contracts. `sosix_run`, `sosix_platform`, and `sosix_proc_usage` carry
+process/platform adapters because their signature or value domain differs.
+Native POSIX raw-alias qualification remains separate.
 
 ## Why no `variants/` overlay
 
@@ -72,43 +73,18 @@ export use std.nogc_async_mut.io.process_ops.{eprint as sosix_eprint}
 export use std.nogc_sync_mut.sffi.diag.{print_raw as sosix_print_raw}
 
 
-# Stage binary bytes in a private file using a bounded raw buffer.
-# The hosted writer creates the first chunk exclusively and writes later
-# chunks at exact offsets; callers remove the staged file on failure.
-@unsafe(reason: "allocate a bounded host byte buffer", capabilities: [ffi, raw_ptr])
-extern fn rt_alloc(size: i64) -> i64
-@unsafe(reason: "release the owned host byte buffer", capabilities: [ffi, raw_ptr])
-extern fn rt_free(ptr: i64)
-@unsafe(reason: "write a byte within the bounded host buffer", capabilities: [ffi, raw_ptr])
-extern fn rt_ptr_write_u8(ptr: i64, offset: i64, value: i64)
-@unsafe(reason: "write a bounded raw buffer to a private staged file", capabilities: [ffi, raw_ptr])
-extern fn rt_file_write_raw_at(path: text, offset: i64, ptr: i64, count: i64) -> i64
+# Stage a fresh binary file through the array-aware hosted writer.
+# Packed bytes are borrowed directly; boxed bytes use at most 1 MiB scratch.
+@unsafe(reason: "borrow typed bytes for a bounded exclusive hosted write", capabilities: [ffi])
+extern fn rt_file_write_array_new(path: text, bytes: [u8]) -> i64
 use std.nogc_sync_mut.fs.host_path.{host_path_native}
 
 fn sosix_file_write_new_bytes_v1(path: text, bytes: [u8]) -> bool:
     if path == "" or bytes.len() == 0 or sosix_file_exists(path):
         return false
-    var offset: i64 = 0
-    while offset < bytes.len():
-        val remaining = bytes.len() - offset
-        val count = if remaining < 1048576: remaining else: 1048576
-        val ptr = unsafe(capabilities: [ffi, raw_ptr]):
-            rt_alloc(count)
-        if ptr == 0:
-            return false
-        var index: i64 = 0
-        while index < count:
-            unsafe(capabilities: [ffi, raw_ptr]):
-                rt_ptr_write_u8(ptr, index, bytes[offset + index] as i64)
-            index = index + 1
-        val written = unsafe(capabilities: [ffi, raw_ptr]):
-            rt_file_write_raw_at(host_path_native(path), offset, ptr, count)
-        unsafe(capabilities: [ffi, raw_ptr]):
-            rt_free(ptr)
-        if written != count:
-            return false
-        offset = offset + count
-    true
+    val written = unsafe(capabilities: [ffi]):
+        rt_file_write_array_new(host_path_native(path), bytes)
+    written == bytes.len()
 
 struct SosixRun:
     stdout: text

@@ -1,5 +1,7 @@
 # Target 6 native CAS byte-write repair (2026-10-11)
 
+The initial raw-buffer repair below was later replaced by the [array-aware SOSIX writer](target6_cas_array_writer_perf_2026-10-11.md), which keeps the same facade and passed a fresh-root native fixture with pushed arrays.
+
 ## Cause
 
 The admitted Stage2 LLVM build lowered `rt_file_write_bytes(path: text, data: [u8])` to an incompatible raw call: the eight-byte ELF probe wrote 255 bytes of array metadata. Two array-to-text/array-aware variants also failed. Disassembly of the raw-pointer probe showed that a `text` argument to the new extern is passed through `rt_interp_cstr` as a C string. Its first C implementation expected a tagged Simple text value, so it rejected the path before opening the staged file.
