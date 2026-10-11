@@ -90,11 +90,32 @@ pub fn layer_eq_struct_declaration_v1(struct_: HirStruct) -> LayerEqType:
     layer_eq_type_from_layout(struct_.name, layer_eq_layout_of(struct_), [])
 
 pub fn layer_eq_required_declaration_names_v1(module_ids: [text], available_names: [text]) -> [text]:
-    var required: [text] = []
+    layer_eq_required_claim_declaration_names_v1(module_ids, available_names, layer_eq_contract_claims_v1())
+
+# Body-free replay inputs derived from the actual ordered parser registry.
+# Only a genuine driver source/policy owner can admit these editable rows.
+struct LayerEqContractClaimV1:
+    registry_key: text
+    path: text
+    view: text
+    target: text
+    renames: [text]
+
+pub fn layer_eq_contract_claims_v1() -> [LayerEqContractClaimV1]:
+    var claims: [LayerEqContractClaimV1] = []
     for key in layer_eq_registry_claim_keys():
-        val view = layer_eq_claim_view(key)
-        val target = layer_eq_registry_target_of_key(key)
-        if view == "" or target == "" or not module_ids.contains(layer_eq_claim_path(key)) or
+        claims.push(LayerEqContractClaimV1(registry_key: key, path: layer_eq_claim_path(key),
+            view: layer_eq_claim_view(key), target: layer_eq_registry_target_of_key(key),
+            renames: layer_eq_registry_renames_of_key(key)))
+    claims
+
+pub fn layer_eq_required_claim_declaration_names_v1(module_ids: [text], available_names: [text],
+        claims: [LayerEqContractClaimV1]) -> [text]:
+    var required: [text] = []
+    for claim in claims:
+        val view = claim.view
+        val target = claim.target
+        if view == "" or target == "" or not module_ids.contains(claim.path) or
                 not available_names.contains(view) or not available_names.contains(target): continue
         if not required.contains(view): required.push(view)
         if not required.contains(target): required.push(target)
@@ -137,14 +158,18 @@ fn validate_layer_eq_types(modules: Dict<text, HirModule>) -> [text]:
 
 pub fn validate_layer_eq_selected_declarations_v1(module_ids: [text],
         available_names: [text], declarations: [LayerEqType]) -> [text]:
+    validate_layer_eq_claim_declarations_v1(module_ids, available_names, declarations, layer_eq_contract_claims_v1())
+
+pub fn validate_layer_eq_claim_declarations_v1(module_ids: [text],
+        available_names: [text], declarations: [LayerEqType], claims: [LayerEqContractClaimV1]) -> [text]:
     var errors: [text] = []
     var measured: Dict<text, LayerEqType> = {}
     for declaration in declarations: measured[declaration.name] = declaration
-    for key in layer_eq_registry_claim_keys():
-        val view_name = layer_eq_claim_view(key)
-        val target_name = layer_eq_registry_target_of_key(key)
+    for claim in claims:
+        val view_name = claim.view
+        val target_name = claim.target
         if view_name == "" or target_name == "" or
-                not module_ids.contains(layer_eq_claim_path(key)): continue
+                not module_ids.contains(claim.path): continue
         if not available_names.contains(view_name): continue
         if not available_names.contains(target_name):
             errors.push("error[layer_eq]: '" + view_name + "' declares @layer_eq("
@@ -154,7 +179,7 @@ pub fn validate_layer_eq_selected_declarations_v1(module_ids: [text],
         if not measured.has(view_name) or not measured.has(target_name):
             errors.push("internal error: selected layer-equivalence declaration was not measured")
             continue
-        val view = layer_eq_declaration_renames_v1(measured[view_name], layer_eq_registry_renames_of_key(key))
+        val view = layer_eq_declaration_renames_v1(measured[view_name], claim.renames)
         val verdict = check_layer_eq(view, measured[target_name])
         if not verdict.ok: errors.push(verdict.diagnostic)
     errors
@@ -163,4 +188,6 @@ export validate_layer_eq_types, layer_eq_index_structs, layer_eq_layout_of
 export layer_eq_module_declarations_v1, validate_layer_eq_declarations_v1
 export layer_eq_struct_declaration_v1, layer_eq_required_declaration_names_v1
 export validate_layer_eq_selected_declarations_v1
+export LayerEqContractClaimV1, layer_eq_contract_claims_v1
+export layer_eq_required_claim_declaration_names_v1, validate_layer_eq_claim_declarations_v1
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
