@@ -81,4 +81,59 @@ Require ($excludedRows.Count -eq 1) 'excluded supervisor job was queried'
 $supervisor.CommandLine = 'bootstrap-session-exec.exe --exec'
 $plainRows = @(ConvertTo-BootstrapProgressRows $jobFixture 100 604 '' { throw 'non-supervisor queried' })
 Require ($plainRows.Count -eq 2) 'non-supervisor helper job was queried'
-Write-Output 'PASS windows process observer: 21 checks'
+
+$supervisor.CommandLine = 'bootstrap-session-exec.exe --supervise --spec fixture'
+$state = [pscustomobject]@{Initialized=$false; Snapshots=0; Jobs=0}
+$raceRows = @(Get-BootstrapProgressRows 100 604 '' {
+    Require $state.Initialized 'interop initialization must precede process snapshot'
+    $state.Snapshots++
+    if ($state.Snapshots -eq 1) { @($jobFixture | Where-Object ProcessId -ne 603) }
+    else { $jobFixture }
+} { param($OwnerId)
+    $state.Jobs++; @(602,603,604,605)
+} { $state.Initialized = $true })
+Require ($state.Snapshots -eq 2 -and $state.Jobs -eq 2) 'new member race did not refresh both authoritative inputs'
+Require ($raceRows.Count -eq 4 -and @($raceRows -match '^603 602 603 ').Count -eq 1) 'new live member was dropped instead of observed'
+
+$state = [pscustomobject]@{Snapshots=0; Jobs=0}
+$retiredRows = @(Get-BootstrapProgressRows 100 604 '' {
+    $state.Snapshots++; $jobFixture
+} { param($OwnerId)
+    $state.Jobs++
+    if ($state.Jobs -eq 1) { @(602,603,604,605,9999) }
+    else { @(602,603,604,605) }
+} {})
+Require ($state.Snapshots -eq 2 -and $state.Jobs -eq 2) 'retired member race did not refresh native snapshot and job ownership'
+Require ($retiredRows.Count -eq 4) 'retired member race lost active owned processes'
+
+$state = [pscustomobject]@{Snapshots=0; Jobs=0}
+$partial = @(); $failed = $false
+try {
+    $partial = @(Get-BootstrapProgressRows 100 604 '' {
+        $state.Snapshots++; $jobFixture
+    } { param($OwnerId) $state.Jobs++; @(602,9999) } {})
+} catch { $failed = $true }
+Require ($failed -and $partial.Count -eq 0) 'persistent missing owned member escaped as a healthy partial tree'
+Require ($state.Snapshots -eq 3 -and $state.Jobs -eq 3) 'missing-member resnapshot budget was not bounded to three attempts'
+
+$state = [pscustomobject]@{Snapshots=0; Jobs=0}
+$partial = @(); $failed = $false
+try {
+    $partial = @(Get-BootstrapProgressRows 100 604 '' {
+        $state.Snapshots++; $jobFixture
+    } { param($OwnerId) $state.Jobs++; throw 'job query unavailable' } {})
+} catch { $failed = $true }
+Require ($failed -and $partial.Count -eq 0 -and $state.Snapshots -eq 1 -and $state.Jobs -eq 1) 'non-race ownership failure was retried or published'
+
+$metricFixture = @((Entry 100 1 'sh.exe' 0 1024), $supervisor,
+    (Entry 602 777 'sh.exe' 0 1024))
+$metricFixture[2].WorkingSetSize = $null
+$state = [pscustomobject]@{Snapshots=0}
+$partial = @(); $failed = $false
+try {
+    $partial = @(Get-BootstrapProgressRows 100 0 '' {
+        $state.Snapshots++; $metricFixture
+    } { @(602) } {})
+} catch { $failed = $true }
+Require ($failed -and $partial.Count -eq 0 -and $state.Snapshots -eq 1) 'missing metrics were downgraded to a retryable membership race'
+Write-Output 'PASS windows process observer: 31 checks'
