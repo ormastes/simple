@@ -114,3 +114,28 @@ owned product files byte-identical (AstraPASS P0=0/P1=0). New canonical Stage2
 qualification stopped before compilation at its10GB disk-space guard. Logs are
 retained; no admission was emitted. Continue implementation independently while
 build storage is unavailable; broad runtime and protected admission remain open.
+
+## Conventional association kernel increment — 2026-10-11
+
+Full20REQ/40AC/WP0–WP7 remain unchanged. Root owns implementation and merge;
+sidecarsN/A; Astra is final reviewer. New pure-Simple convention owners validate
+bounded supplied graph/policy facts and resolve exact registered unit, integration,
+component and manual associations. They preserve corroborating origins, roles,
+parameter identities, explicit exclusions and positive/negative membership.
+Generator-manifest bindings are required before manual candidate recognition;
+source-kind/group indexes and every node/group traversal are charged. Structural
+association confers no requirement satisfaction, execution proof or eligibility.
+
+Construction RED is an actual missing-module failure with zero executed examples.
+Initial native6/0 was followed by Astra causal RED8/2 and grouped cycle2 GREEN26/0.
+Astra final component/source/oracle/evidence review PASS P0=0/P1=0; no unchanged
+green tests were rerun after convergence. See the conventions design, executable
+modern SSpec, its host-extracted manual and TDD report. Ambiguous-input permutation
+coverage validates diagnostics/lookups, not claim or generator/exclusion ordering.
+
+Next WP2 work: actual graph extraction/byte binding, complete policy ownership,
+explicit operation precedence/authority/stale rules and CLI integration. WP3
+incremental/full equivalence must consume both positive and negative dependencies.
+All execution evidence, qualifications, Slop surfaces and remaining plan gates
+continue separately. Coverage/NFR/full core/MCP/LSP checks and admitted SPipe
+manual generation remain open; no full AC/REQ done mark or runtime admission.
