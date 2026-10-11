@@ -1796,6 +1796,11 @@ impl MirLowering:
             match declared_text_type.kind:
                 case HirTypeKind.Str: declared_text_receiver = true
                 case _: ()
+        if not declared_text_receiver:
+            if val recovered_text_type = trait_receiver_type:
+                match recovered_text_type.kind:
+                    case HirTypeKind.Str: declared_text_receiver = true
+                    case _: ()
         val primitive_text_method_shape =
             method == "trim" or method == "strip" or method == "lower" or
             method == "to_lower" or method == "to_upper" or method == "split" or
@@ -3980,6 +3985,17 @@ impl MirLowering:
                 # (4294967296 -> 0). Both match the interpreter oracle, which is
                 # the reference engine for these methods.
                 if args.len() == 0:
+                    # Scalar aliases preserve the numeric representation; text
+                    # parsing and custom methods retain their earlier owners.
+                    if method == "to_int" or method == "to_i64":
+                        if val numeric_receiver_type = self.option_map_value_hir_type(unresolved_receiver_local, receiver.span):
+                            match numeric_receiver_type.kind:
+                                case HirTypeKind.Float(_):
+                                    var numeric_builder = self.builder
+                                    val integer_value = numeric_builder.emit_cast(mir_operand_copy(unresolved_receiver_local), MirType.i64())
+                                    self.builder = numeric_builder
+                                    return integer_value
+                                case _: ()
                     var conv_narrow = MirType.i64()
                     var conv_is_int = false
                     if method == "to_u8":
@@ -4247,7 +4263,7 @@ impl MirLowering:
                     return self.lower_unresolved_array_push(
                         unresolved_receiver_local, args[0].value,
                         wb_kind, wb_base, wb_index, wb_field_idx)
-                if method == "merge" and args.len() == 1:
+                if (method == "merge" or method == "concat" or method == "extend") and args.len() == 1:
                     return self.lower_unresolved_array_merge(
                         unresolved_receiver_local, args[0].value,
                         wb_kind, wb_base, wb_index, wb_field_idx)

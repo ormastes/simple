@@ -2321,6 +2321,9 @@ impl MirLowering:
         2026-08-09 (6th/7th layer)."""
         val sym = self.symbols.get_symbol_raw(symbol.id)
         if val found_sym = sym:
+            val provider_name = self.provider_callable_symbol_name(symbol, found_sym.name)
+            if val provider_shape = bootstrap_fn_ret_ok_shape_lookup(provider_name):
+                return Some(provider_shape)
             if val shape = bootstrap_fn_ret_ok_shape_lookup(found_sym.name):
                 return Some(shape)
         nil
@@ -2332,6 +2335,9 @@ impl MirLowering:
         fills at the same point and for the same reason."""
         val sym = self.symbols.get_symbol_raw(symbol.id)
         if val found_sym = sym:
+            val provider_name = self.provider_callable_symbol_name(symbol, found_sym.name)
+            if val provider_shape = bootstrap_fn_ret_opt_shape_lookup(provider_name):
+                return Some(provider_shape)
             if val shape = bootstrap_fn_ret_opt_shape_lookup(found_sym.name):
                 return Some(shape)
         nil
@@ -6018,8 +6024,17 @@ impl MirLowering:
             case StaticCall(_, _, _, _):
                 self.unsupported_expr_kind("E-MIR-EXPR-StaticCall", "static/associated method call (`Type::method(..)`)", expr_value.span)
 
-            case StructLit(_, _):
-                self.unsupported_expr_kind("E-MIR-EXPR-StructLit", "struct literal", expr_value.span)
+            case StructLit(struct_type, fields):
+                match struct_type.kind:
+                    case HirTypeKind.Named(struct_symbol, _):
+                        val struct_name = self.symbols.symbol_name_scalar_raw(struct_symbol.id)
+                        if self.struct_field_order.has(struct_name):
+                            var literal_args: [HirCallArg] = []
+                            for field in fields:
+                                literal_args.push(HirCallArg(has_name: true, name: field.0, value: field.1, span: field.1.span))
+                            return self.lower_struct_construct(struct_symbol, struct_name, literal_args)
+                    case _: ()
+                self.unsupported_expr_kind("E-MIR-EXPR-StructLit", "struct literal with unknown record owner", expr_value.span)
 
             case Throw(throw_value):
                 # Evaluate before abandoning the path, then close any active
