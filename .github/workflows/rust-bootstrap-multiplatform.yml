@@ -177,6 +177,10 @@ on:
       - '.github/workflows/rust-bootstrap-multiplatform.yml'
   workflow_dispatch:
     inputs:
+      diagnose_windows_collector:
+        description: Diagnostic-only native Windows collector launch; no seed build
+        type: boolean
+        default: false
       native_lane:
         description: Native bootstrap lane (all preserves the full platform matrix)
         type: choice
@@ -211,7 +215,7 @@ jobs:
   # jobs so x86_64, cross, and VM builds cannot land on those runners.
   # Native builds — compile and test on each platform
   native:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    if: (!inputs.diagnose_windows_collector) && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     strategy:
       fail-fast: false
       matrix:
@@ -445,6 +449,7 @@ jobs:
         with:
           name: bootstrap-diagnostic-UNADMITTED-${{ matrix.name }}-${{ matrix.backend }}-${{ github.sha }}
           path: ${{ runner.temp }}/bootstrap-diagnostic-continuation
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
 
@@ -502,6 +507,7 @@ jobs:
             build/bootstrap/lib/libspl_fonts.so
             src/compiler_rust/target/bootstrap/deps/libsimple_runtime.so
             src/runtime/spl_winit/target/release/libspl_winit.so
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
 
@@ -763,7 +769,7 @@ jobs:
           exit 1
 
   native-architectures:
-    if: (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == '')
+    if: (!inputs.diagnose_windows_collector) && ((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == ''))
     name: Pure Simple — ARM32/RV32 LLVM objects + x86_64/AArch64/RISC-V64 dual backend
     runs-on: ubuntu-24.04
     needs: native
@@ -825,7 +831,7 @@ jobs:
 
   # Cross-compilation builds from Linux x86_64
   cross:
-    if: (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == '')
+    if: (!inputs.diagnose_windows_collector) && ((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == ''))
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -875,7 +881,7 @@ jobs:
 
   # FreeBSD build (VM-based)
   freebsd:
-    if: (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == '')
+    if: (!inputs.diagnose_windows_collector) && ((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == ''))
     runs-on: ubuntu-24.04
     name: Native — FreeBSD x86_64
     steps:
@@ -919,7 +925,7 @@ jobs:
   # from the Rust seed build above: it exercises the canonical receipt-free
   # Stage 2 trust root and the tracked Stage 3 resume interface in the guest.
   freebsd-selfhost:
-    if: (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == '')
+    if: (!inputs.diagnose_windows_collector) && ((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == ''))
     runs-on: ubuntu-24.04
     name: Self-host — FreeBSD Stage 3
     timeout-minutes: 180
@@ -957,3 +963,107 @@ jobs:
           path: build/bootstrap-freebsd-ci
           if-no-files-found: warn
           retention-days: 14
+
+  windows-retained-stage2-diagnostic:
+    if: github.event_name == 'workflow_dispatch' && inputs.diagnose_windows_collector
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Validate diagnostic selector
+        shell: bash
+        run: test '${{ inputs.native_lane }}' = windows-cranelift
+      - name: Select placeholder checkout
+        shell: bash
+        run: git config --global core.symlinks false
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 38174655243
+          name: bootstrap-diagnostic-UNADMITTED-Windows x86_64-cranelift-82bba68602c2cff2b87f42b0f5ae8a54f1d14b8b
+          path: ${{ runner.temp }}/retained-windows-seed
+      - name: Verify retained bytes and actual native tools
+        shell: bash
+        run: |
+          set -eu
+          out="$RUNNER_TEMP/windows-retained-stage2"
+          mkdir -p "$out"
+          export CONTINUATION_DIR="$out" RETAINED_DIR="$RUNNER_TEMP/retained-windows-seed"
+          python - <<'PYRECEIPT'
+          import hashlib,json,os,shutil,subprocess
+          from pathlib import Path
+          out=Path(os.environ['CONTINUATION_DIR']); root=Path(os.environ['RETAINED_DIR'])
+          inputs=[('files/src/compiler_rust/target/bootstrap/simple.exe',17156096,'c37ff8271281431a46f55a5413df45b9e8ef00deff55e3467b6a817319695531'),('files/src/compiler_rust/target/bootstrap/simple_native_all.lib',97443374,'19960cf36d947e7b9989f62f84898716a4038461033a526eee51c621674467b0')]
+          result={'admission':'UNADMITTED_DIAGNOSTIC','retained_run':38174655243,'source_sha':os.environ['GITHUB_SHA'],'inputs':[],'tools':[]}
+          try:
+              for rel,size,expected in inputs:
+                  f=root/rel; actual=hashlib.file_digest(f.open('rb'),'sha256').hexdigest()
+                  result['inputs'].append({'path':rel,'size':f.stat().st_size,'sha256':actual})
+                  if actual!=expected or f.stat().st_size!=size: raise RuntimeError('retained input mismatch')
+              for name in ('clang-cl.exe','lib.exe','llvm-objcopy.exe','llvm-nm.exe'):
+                  found=shutil.which(name)
+                  result['tools'].append({'name':name,'path':found,'sha256':hashlib.file_digest(open(found,'rb'),'sha256').hexdigest() if found else None})
+                  if not found: raise RuntimeError('missing native tool '+name)
+              actual_link=Path(os.environ['VCToolsInstallDir'])/'bin/Hostx64/x64/link.exe'
+              result['tools'].append({'name':'MSVC link.exe','path':str(actual_link),'sha256':hashlib.file_digest(actual_link.open('rb'),'sha256').hexdigest()})
+              for key in ('INCLUDE','LIB','SystemRoot'):
+                  value=os.environ.get(key) or os.environ.get(key.upper())
+                  result[key+'_present']=bool(value)
+                  if not value: raise RuntimeError('missing SDK environment '+key)
+              result['status']='complete'
+          finally:
+              (out/'inputs-tools.json').write_text(json.dumps(result,indent=2)+'\n')
+          PYRECEIPT
+      - name: Compile retained-seed Stage2 archive with cache preservation
+        shell: bash
+        run: |
+          set -eu
+          out="$RUNNER_TEMP/windows-retained-stage2"
+          root=$(python -c 'import os; print(os.getcwd(), end="")')
+          seed="$RUNNER_TEMP/retained-windows-seed/files/src/compiler_rust/target/bootstrap/simple.exe"
+          runtime="$RUNNER_TEMP/retained-windows-seed/files/src/compiler_rust/target/bootstrap"
+          export STAGE2_OUT="$out"
+          python - <<'PYCOMPOSITION'
+          import hashlib,json,os,shutil,re
+          from pathlib import Path
+          out=Path(os.environ['STAGE2_OUT']); manifest=Path('src/compiler/simple.sdn'); text=manifest.read_text()
+          match=re.search(r'compiler_backends:\s*\n\s+cuda:\s*\n\s+enabled: (true|false)\s*\n\s+placement: (static|dynamic)',text)
+          if not match: raise RuntimeError('canonical CUDA selection missing')
+          enabled,placement=match.groups()
+          selected=Path('src/plugins/backend_registry/selected_cuda_backend.spl') if enabled=='true' and placement=='static' else Path('src/compositions/cuda_'+('dynamic' if enabled=='true' else 'disabled')+'/plugins/backend_registry/selected_cuda_backend.spl')
+          target=out/'cuda-composition/plugins/backend_registry/selected_cuda_backend.spl';target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(selected,target)
+          authority={'enabled':enabled,'placement':placement,'manifest_sha256':hashlib.sha256(manifest.read_bytes()).hexdigest(),'selected_path':str(selected),'selected_sha256':hashlib.sha256(selected.read_bytes()).hexdigest(),'copy_sha256':hashlib.sha256(target.read_bytes()).hexdigest(),'k1':'llvm-cranelift','entry':'src/app/cli/bootstrap_main.spl'}
+          if authority['selected_sha256']!=authority['copy_sha256']:raise RuntimeError('composition mismatch')
+          (out/'composition.json').write_text(json.dumps(authority,indent=2)+'\n')
+          PYCOMPOSITION
+          source scripts/bootstrap/bootstrap-logged-process.shs
+          export BOOTSTRAP_LOGGED_PROCESS_TIMEOUT_SECONDS=1200 BOOTSTRAP_LOGGED_PROCESS_MAX_BYTES=67108864
+          SYSTEMROOT=${SYSTEMROOT:-${SystemRoot:-}}
+          COMSPEC=${COMSPEC:-${ComSpec:-}}
+          status=0
+          bootstrap_logged_windows_cargo "$root" "$out/native-build.log" env -i "SYSTEMROOT=$SYSTEMROOT" "COMSPEC=$COMSPEC" "PATH=$PATH" "INCLUDE=$INCLUDE" "LIB=$LIB" "LIBPATH=${LIBPATH:-}" "TMP=$RUNNER_TEMP" "TEMP=$RUNNER_TEMP" SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_KERNEL_K1_POLICY=llvm-cranelift SIMPLE_LINKER_FLAVOR=msvc SIMPLE_WINDOWS_ABI=msvc CC=clang-cl CXX=clang-cl "$seed" native-build --target x86_64-pc-windows-msvc --backend cranelift --runtime-bundle core-c-bootstrap --source src/compositions/kernel_llvm_cranelift --source "$out/cuda-composition" --source src/compiler --source src/app --source src/lib --source src/os --source src/plugins --entry-closure --threads 1 --low-memory --cache-dir "$out/native-cache" --mode one-binary --entry src/app/cli/bootstrap_main.spl --runtime-path "$runtime" --emit-archive -o "$out/stage2.lib" || status=$?
+          printf 'native_build_status=%s\n' "$status" >"$out/result.env"
+          test "$status" = 0
+          python - <<'PYARCHIVE'
+          import hashlib,json,os
+          from pathlib import Path
+          out=Path(os.environ['STAGE2_OUT']); f=out/'stage2.lib'
+          with f.open('rb') as stream:
+              if stream.read(8)!=b'!<arch>\n':raise RuntimeError('not native archive')
+          (out/'archive.json').write_text(json.dumps({'size':f.stat().st_size,'sha256':hashlib.file_digest(f.open('rb'),'sha256').hexdigest(),'status':'archive_only_unadmitted','full_provider_link':'UNEXECUTED'},indent=2)+'\n')
+          PYARCHIVE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-retained-stage2-UNADMITTED-${{ github.sha }}
+          path: ${{ runner.temp }}/windows-retained-stage2/
+          include-hidden-files: true
+          if-no-files-found: error
