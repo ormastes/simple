@@ -269,9 +269,12 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   graph authority fails closed; V1 binding and explicit cold rebuild retain
   the frozen-source scan. The indexed closure now passes its authenticated
   source digests to the warm candidate writer, removing that writer's extra
-  read/hash pass over every selected source. The receipt promotion and hit
-  validators still hash source files; ordinary CLI V3 publication and the
-  current-source output, zero-open, p95 time, and peak RSS proof remain open.
+  read/hash pass over every selected source. A direct 142-module admitted
+  Stage-2 compile reached MIR but failed with 16 errors in the dependency
+  closure; see `doc/09_report/compiler/target6_pinned_warm_candidate_2026-10-11.md`.
+  The receipt promotion and hit validators still hash source files; ordinary
+  CLI V3 publication and the current-source output, zero-open, p95 time, and
+  peak RSS proof remain open.
   Do not call Item 6 cutover complete from the graph route alone.
 
 - Cold refresh now derives the inventory and untracked membership cursor from
