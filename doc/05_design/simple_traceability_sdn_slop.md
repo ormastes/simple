@@ -191,3 +191,95 @@ only its typed contracts when executed. It does not claim complete production
 extractor/runner/reporting SSpec, remote provenance admission, DB crash safety,
 performance budgets, or host qualification. Automatic feature SDN/Markdown,
 runner recovery, native end-to-end manuals and release readiness stay active.
+
+## Phase 3 corrective interfaces — 2026-10-11
+
+This appendix corrects the recovered-source checkpoint at
+`cabd1dd91f42ecd6e0a5daa2abac8937aebb03e2`. Earlier claims that plan/final APIs
+already exist and that persistence precedes docgen are not true on this
+baseline. The existing common model/resolver names remain authoritative.
+The following additions are implementation contracts, not claims that their
+code or acceptance evidence already exists. The merge owner freezes any final
+spelling before dependent lanes consume it. Runtime qualification requires the
+user-requested admitted, source-matched Phase 3 compiler.
+
+### Snapshot-to-graph composition
+
+Root owns `app.traceability.extract.snapshot_pipeline::build_snapshot_trace_graph`.
+Its inputs are `SnapshotInput`, `TracePolicy`, registered declaration paths,
+extractor version, and an explicit selected-scope descriptor. A minimal
+`TraceSnapshotScope` contains `selected_roots`, `authority_id`, `closure_kind`.
+The first supported closure kind is `selected_scope`; `policy_closure` requires
+independent policy-owner admission, never a candidate-supplied boolean or ID.
+Authority identity identifies provenance but cannot authenticate itself.
+
+Roots must be nonempty, normalized, unique repository-relative files/directories.
+Every artifact and registered declaration must belong to the declared scope;
+the snapshot adapter must establish that its inventory covers those roots.
+Empty/unknown scope, unsupported closure or missing inventory yields an explicit
+incomplete diagnostic. Graph `complete` means complete within that retained
+scope; it must not imply repository-wide coverage or admission eligibility.
+Preview callers can use unauthenticated selected scope but cannot grant admission.
+
+Canonical structural input identity binds sorted path/blob/visibility records,
+scope, all policy/convention/authority records, declaration registration,
+schema identity and extractor version. Reject duplicate or contradictory
+inputs before hashing. Revision/tree identity belongs to generation and exact
+subject, not the stable structural digest; generated outputs are excluded only
+by named policy so regeneration can stabilize without a self-hash loop.
+An arbitrary caller-provided digest is not accepted as computed identity.
+
+### Case planning and execution bindings
+
+The shared kernel owns a pure `build_trace_case_plan` operation and a pure
+`reconcile_trace_case_events` operation; final signatures and record spelling
+belong to the assigned run-plan lane. A plan binds graph-defined case identity,
+definition and parameter digests, pinned test file, runner selector, shard and
+attempt. It also binds the immutable run inputs already present in `TraceRun`.
+Plan construction must validate graph/definition closure and unique selectors.
+Until semantic extraction proves the selector corresponds to a discovered case,
+an owned SDN declaration remains an authored plan, not an execution observation.
+
+Current v1 events are untrusted transport. They may map to a plan only when the
+owner independently binds file, shard and attempt and the case name is unique
+within that binding. Unknown/duplicate/ambiguous, finish-without-start,
+conflicting outcome or truncated events are diagnostics; missing expected
+cases/shards leave the run incomplete. Retrying requires an explicit new
+attempt; two indistinguishable events cannot be guessed into two attempts.
+Parameterized cases require a unique planned selector and parameter digest.
+These pure operations never construct `AdmissionContext` from event claims.
+
+### Durable runner owner and publication
+
+Preserve `test_db_lane_main.spl` and `RunnerTestDb` as the sole database owner.
+Proposed owner methods are `persist_trace_plan(run: TraceRun) -> Result<(), text>`
+and `persist_trace_final(run: TraceRun) -> Result<(), text>`; they are absent at
+this baseline. The first freezes immutable bindings before dispatch and persists
+an incomplete run with planned cases/shards. The second preserves those bindings,
+retains attempts, validates expected shard closure and writes terminal state.
+Repeated identical finalization is idempotent; conflicting finalization fails.
+Recovery finalizes an orphaned admitted plan as incomplete/crashed, never passed.
+One final call alone does not prove durable crash recovery or concurrency safety.
+
+The live app must receive an error result from DB-lane persistence and retain
+an infrastructure failure exit. Persistence precedes docgen and reporting;
+report failure cannot discard observations. Automatic run-scoped SDN+Markdown
+includes failures and zero-discovery against a nonempty plan. Durable plan/final
+protocol, artifact/provenance verification and recovery remain separate gates.
+No new graph-owned writer or direct database import into the live runner is
+introduced merely to bypass the existing child-owner boundary.
+
+### Incremental implementation boundary
+
+Keep `plan_trace_invalidation` as the planner rather than relabeling it an
+implemented update API. The next store layer must retain per-file facts,
+extractor/schema/policy identities and positive, missing, unique and membership
+dependencies. It applies deletions/replacements, resolves the full resulting
+fact universe and publishes a validated generation atomically. Incomplete
+dependency inventory forces full rebuild; budget exhaustion is incomplete.
+Only independent cold-rebuild equality fixtures can qualify incremental results.
+
+All forty original ACs remain active. Source-authored scenarios, documentation
+and declaration ledgers establish implementation progress only; production
+execution, manual quality, cross-host/UI/gate evidence and release admission
+remain separately unverified until their real receipts exist.

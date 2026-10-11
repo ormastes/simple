@@ -78,3 +78,29 @@ source-matched Phase 3 compiler remains unavailable.
 Resolve a source-bound admitted Phase 3 compiler/provider before running the
 feature scope. All 20 requirements, 40 acceptance criteria and NFRs remain
 required; implementation and evidence gaps from verification_status.md remain.
+
+## Current unqualified continuation
+
+The source CLI now accepts exact index/Git selection with explicit paths and
+uses the shared extractor/resolver through snapshot_pipeline. The scoped SDN
+preview retains its roots and explicitly refuses admission eligibility. Trusted
+commit/push/remote/audit profiles remain unavailable and return infrastructure
+failure. This route has not been compiled or executed with the admitted target.
+
+Structural identity binds actual content hashes, blob references, visibility,
+registered paths and every policy record; candidate identity separately binds
+generation. Empty selected roots and unsupported closure claims are rejected.
+The Git provider keeps path whitespace and hashes its local repository identity
+so spaced/Unicode checkout paths do not become invalid graph IDs.
+
+New pure run-plan reconciliation rejects empty feature plans and matches actual
+file/case observations to independent intent. Runner transport checks now cover
+zero-result, partial and cached rows; persistence precedes document generation.
+No pre-dispatch durable plan or provenance admission exists yet. New source and
+regression specs remain authored/unexecuted. Astra reviewed these seams and found
+the identity/empty-plan/partial-transport issues that were corrected in source.
+
+The feature-owned SDN declaration now records the 20 requirements, 40 planned
+criteria and current source/document responsibilities. It has no test definitions
+or execution records; native parser verification and policy registration remain
+mandatory. No full system criterion, NFR or release-readiness PASS is claimed.

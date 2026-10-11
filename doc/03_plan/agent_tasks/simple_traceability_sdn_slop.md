@@ -11,7 +11,10 @@ Shared interfaces: `doc/05_design/simple_traceability_sdn_slop.md`.
 | Viewer | viewer_design | src/app/slop; Slop unit specs and UI design | Shared query contract; root central CLI registration |
 | Integration | root | snapshots, gates, extraction, incremental store, runner registration, CLI routing, self-trace records, requirements/architecture/detail docs | Consume reviewed lane APIs; serial runtime checks |
 
-Lower-model sidecars: N/A; no broad findings accepted without root/Astra review.
+Current lower-model sidecar: GPT-6 Luna owns frozen-plan reconciliation and
+runner transport integration; root reviews and integrates, with Astra's
+independent source review. Historical lane assignments above describe the
+original checkpoint and do not claim those sessions are currently live.
 Merge owner: root. Final architecture/contract reviewer: Astra. Generated-manual
 review: acceptance lane plus root operator reading. Runtime execution: root only,
 serialized to protect the test DB. Branch landing: root only.
@@ -46,3 +49,18 @@ wrapper can select Rust; it is not a permitted verifier. Source implementation
 may proceed, but compilation/test/docgen/benchmark PASS and release admission
 remain unproven until exact runtime provenance is supplied or built by its
 authorized owner. No other agent's build is restarted or claimed as this lane.
+
+## 2026-10-11 current assignments and handoff
+
+Root owns scoped snapshot composition, exact-snapshot CLI preview, input
+identity, self-trace declarations and integration. Luna implemented the pure
+run-plan reconciler, transport-presence helper and runner persistence ordering.
+Astra appended current research/design corrections and reviewed those source
+changes. Its content-collision, empty-plan/scope and missing-transport findings
+were fixed. A later selector review found `git:index` confused with staged
+selection; explicit snapshot kind now distinguishes them, with an authored
+production parser regression.
+
+Resource cleanup was a separate read-only ownership audit; no unsafe cache or
+active build deletion was used to unblock qualification. All new native specs,
+the SDN declaration parse and complete feature acceptance remain unexecuted.

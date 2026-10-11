@@ -172,3 +172,29 @@ including a not-applicable entry; an empty-ID exemption is also rejected.
 Added three in-development regression scenarios for duplicate required entries,
 both required/exempt orderings, and empty-ID exemption. These are authored
 regressions from a source-level finding, NOT RUN against an admitted runtime.
+
+## 2026-10-11 scoped continuation on release_phase3
+
+Draft PR #3083 retains commits through cabd1dd91f4. The full goal is active;
+the previous resource audit changed the prerequisite evidence but did not
+qualify or land any feature. All 40 system criteria remain not_run.
+
+Astra re-reviewed the current source and appended research/design corrections:
+selected scope needs a retained contract; previous persist_trace_plan/final API
+claims were inaccurate; runner persistence actually followed docgen; the pure
+invalidation planner is not a persistent incremental graph store. Those older
+claims do not establish implementation.
+
+Current source adds scope-bound graph composition and an exact-snapshot local
+preview route, a pure frozen-plan/event reconciler, and missing/partial/cached
+runner-transport rejection. Results persist before docgen. Astra found and root
+fixed a content-identity collision, unsupported empty scope roots and empty
+feature plans. New regression scenarios are authored, not executed.
+
+The self-trace declaration described in the old checkpoint was absent from the
+recovered release branch. It is now explicitly authored with all 20 requirements
+and 40 planned criteria and current artifact links. Native parsing, case-level
+SSpec bindings and declaration authority are still pending; no history or PASS
+was reconstructed. Stage 3 build qualification and the full runner/manual
+runtime remain absent. Storage cleanup found no safely disposable large cache;
+active build and recovery data were preserved.

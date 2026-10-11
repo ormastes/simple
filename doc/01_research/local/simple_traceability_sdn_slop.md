@@ -92,3 +92,88 @@ The current typed-evidence design at `doc/05_design/infra/sspec/modern_sspec_typ
 ## Research status
 
 Source audit and primary-source re-research complete. Implementation verification: **NOT RUN**. Performance: **NOT MEASURED**. Remote settings/admission: **NOT VERIFIED**. Requirements and NFR selection: full saved report, selected by the user's implementation instruction and retained by parent coordination. No readiness PASS is asserted.
+
+## Phase 3 corrective source review — 2026-10-11
+
+<!-- codex-research: source-contract correction, 2026-10-11 -->
+
+Reviewed HEAD `cabd1dd91f42ecd6e0a5daa2abac8937aebb03e2` in the isolated
+`work/traceability-release_phase3-20261011` lane. This appendix supersedes
+as-built assertions above where the recovered Phase 3 source differs. It
+does not replace the selected 20 requirements, 40 acceptance criteria or NFRs.
+No executable, tests, remote settings or external research were invoked: the
+existing domain research answers the design questions; the defects here are
+observable local integration gaps. The current runtime prerequisite is the
+user-requested admitted, source-matched **Phase 3** compiler, not an automatic
+upgrade to the older document's Stage 4 target.
+
+The retained knowledge receipt names layer guides absent from this checkout.
+The `.spipe/spipe` directory exists but its `wiki/index.md` is absent. These
+are stale/unavailable guidance inputs to repair through the merge owner, not
+evidence that common guidance was consumed at this revision. Canonical research
+and design skills were read from `C:/dev/simple/.codex/skills`; their worktree
+copies and context-mode tools were unavailable. Only assigned documents are
+edited by this review lane.
+
+### Four blocking contract gaps, in implementation order
+
+1. **Snapshot identity is pinned; scope and graph assembly are not yet bound.**
+   `snapshot/git_provider.spl::snapshot_git_inputs` verifies Git blob bytes and
+   freezes index/commit trees, but marks `complete` relative to the caller's
+   selected paths. `SnapshotInput` does not retain those roots or a closure
+   receipt. `extract/snapshot_facts.spl::extract_snapshot_trace_facts` accepts
+   externally supplied manifest/generation strings. `main.spl` still invokes
+   `analyze_repo_traceability`, the worktree warning collector, rather than the
+   snapshot/extractor/resolver pipeline. Bind selected scope and exact policy
+   records into a canonical structural manifest, bind subject into generation,
+   and expose selected-scope preview honestly. Trusted admission requires its
+   separate policy-closure check (AC-010–020,029–030); a hash alone is not that
+   check.
+2. **Authored graph declarations do not establish executable scenario identity.**
+   The extractor accepts registered SDN declarations and file inventory only;
+   it explicitly rejects every non-file locator as requiring an admitted
+   symbol/section extractor. It neither parses scenario `@req` metadata nor
+   proves a declared case corresponds to an actual discovered SSpec case.
+   `TraceCaseEvent` carries only `case_name`, `phase`, `outcome`, so duplicate
+   display names, parameter instances, retries and shards cannot be mapped
+   unambiguously without a pre-dispatch binding. Freeze a case plan and reject
+   ambiguous event mapping; do not use declaration presence as execution proof
+   (AC-007,021–025 and self-traceability).
+3. **The recovered runner lacks the transaction described by the old checkpoint.**
+   `RunnerTestDb.record_trace_case_events` exists; `persist_trace_plan` and
+   `persist_trace_final` do not exist in the reviewed runner/database sources.
+   `update_test_database_from_record` starts and completes a run after execution.
+   The live app delegates persistence to `test_db_lane_main.spl` to keep database
+   modules out of the runner's static closure. Its docgen call precedes that
+   delegation and returns early on failure; the delegation itself returns void
+   and prints warnings for failed writes/child exit. Preserve the existing
+   child-owner boundary, persist observations before rendering and propagate
+   infrastructure failure. Then add durable plan/final/recovery transactions;
+   ordering alone does not solve crash, zero-discovery or migration safety
+   (AC-021–022,027).
+4. **Invalidation planning is not an incremental graph store.**
+   `incremental.spl::plan_trace_invalidation` is a bounded dependency-closure
+   planner. There is no implemented `TraceIndex`/`SnapshotDelta`/`TraceUpdate`
+   workflow in that module, and extraction does not emit its dependency records.
+   Retain full rebuild as the authority until file-fact ownership, dependency
+   capture, removal/replacement and atomic generation publication are connected.
+   Planner unit cases alone cannot establish full/incremental equivalence or
+   performance budgets (AC-005,008–009,028,038).
+
+The shared resolver, codecs, query and evidence records are useful existing
+building blocks. They do not close the independent trusted remote gate,
+visibility/source owner, native viewer, recovery or host qualification work.
+Parallel implementations after this HEAD must receive exact-diff source review;
+this appendix is not their execution receipt. Review status: **SOURCE GAPS
+IDENTIFIED; IMPLEMENTATION INCOMPLETE; EXECUTION NOT RUN**.
+# 2026-10-11 Git-object guidance correction
+
+The sparse-worktree observation of absent layer guidance does not establish
+absence from this source revision. `git show HEAD:` successfully read both
+`doc/00_llm_process/layer_base/app_editor_tooling/skill.md` and
+`doc/00_llm_process/layer_base/runtime_memory_io/skill.md`. The registered
+longest-prefix routes therefore resolve in the Git tree and their owning-layer
+guidance was read. `.spipe/spipe` is a pinned gitlink at
+`0a00354eeea87ab7a74ef6e1aa3b8d5756bc1b75`; an uninitialized local directory does
+not prove that `wiki/index.md` is absent from that submodule revision. Common
+wiki materialization and provenance inspection remain separate prerequisites.

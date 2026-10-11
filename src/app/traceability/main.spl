@@ -6,6 +6,7 @@ use std.log.{error}
 use app.traceability.core.{load_traceability_config, analyze_repo_traceability, traceability_report_to_sdn}
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
+use app.traceability.snapshot_preview.{inspect_trace_snapshot, parse_trace_snapshot_selection}
 
 fn traceability_cli_failure(code: text, reason: text) -> i64:
     var fields: Dict<text, SdnValue> = {}
@@ -25,7 +26,11 @@ fn print_help():
     print "Options:"
     print "  --scope=<name>    all (default), src, spec, doc"
     print "  --format=sdn      SDN output (default and only structured format)"
-    print "  This collector previews the worktree; it does not certify admission."
+    print "  --snapshot=index|git:<revision>  Inspect exact selected inputs as a typed graph"
+    print "  --declarations=<path>  Register one selected SDN declaration for inspection"
+    print "  --profile=preview  Local inspection only; admission profiles are not yet available"
+    print "  Default collection previews the worktree; exact snapshots preview selected scope."
+    print "  Neither preview certifies admission or runtime qualification."
     print "  --quiet           Suppress progress; retain the SDN result"
     print "  -h, --help        Show this help"
 
@@ -46,6 +51,10 @@ fn main() -> i64:
     var scope = "all"
     var format = "sdn"
     var paths: [text] = []
+    var snapshot = ""
+    var snapshot_requested = false
+    var profile = "preview"
+    var declarations: [text] = []
 
     var i = 0
     while i < args.len():
@@ -60,6 +69,13 @@ fn main() -> i64:
             scope = args[i]
         elif arg.starts_with("--format="):
             format = arg[9:]
+        elif arg.starts_with("--snapshot="):
+            snapshot = arg[11:]
+            snapshot_requested = true
+        elif arg.starts_with("--profile="):
+            profile = arg[10:]
+        elif arg.starts_with("--declarations="):
+            declarations.push(arg[15:])
         elif arg == "--format" and i + 1 < args.len():
             i = i + 1
             format = args[i]
@@ -79,6 +95,21 @@ fn main() -> i64:
         return traceability_cli_failure("TRACE-CLI-INPUT", "Unknown scope: " + scope)
     if format != "sdn" or log_opts.log_mode == "json":
         return traceability_cli_failure("TRACE-UNSUPPORTED-FORMAT", "Use SDN; legacy structured formats are unsupported")
+    if profile != "preview":
+        return traceability_cli_failure("TRACE-SNAPSHOT-INCOMPLETE", "Trusted admission profile is not yet available: " + profile)
+    if snapshot_requested:
+        val selected = match parse_trace_snapshot_selection(snapshot):
+            case Ok(value): value
+            case Err(reason): return traceability_cli_failure("TRACE-CLI-INPUT", reason)
+        if scope != "all":
+            return traceability_cli_failure("TRACE-CLI-INPUT", "Exact snapshot inspection uses explicit paths instead of legacy scopes")
+        match inspect_trace_snapshot(".", selected.kind, selected.selector, paths, declarations):
+            case Err(reason): return traceability_cli_failure("TRACE-SNAPSHOT-INCOMPLETE", reason)
+            case Ok(result):
+                print result.document
+                return if result.complete: 0 else: 1
+    if declarations.len() > 0:
+        return traceability_cli_failure("TRACE-CLI-INPUT", "Declaration registration requires an exact snapshot")
     val warnings = analyze_repo_traceability(paths, scope, load_traceability_config(), true)
     print traceability_report_to_sdn(warnings)
 

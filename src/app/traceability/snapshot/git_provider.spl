@@ -17,6 +17,7 @@ pub struct GitSnapshotRequest:
     max_entries: i64
     max_blob_bytes: i64
     max_total_bytes: i64
+    snapshot_kind: text = "git_commit"
 
 fn git_u8_text(value: text) -> [u8]:
     var bytes: [u8] = []
@@ -97,6 +98,14 @@ fn git_capture(repository: text, args: [text], input: [u8], limit: i64) -> Resul
 fn git_capture_text(repository: text, args: [text]) -> Result<text, text>:
     git_text_bytes(git_capture(repository, args, [], 4096)?)
 
+fn git_protocol_path_line(source: text) -> Result<text, text>:
+    var path = source
+    if path.ends_with("\n"): path = path.substring(0, path.len() - 1)
+    if path.ends_with("\r"): path = path.substring(0, path.len() - 1)
+    if path == "" or path.contains("\n") or path.contains("\r"):
+        return Err("TRACE-SNAPSHOT-INCOMPLETE: ambiguous Git repository path response")
+    Ok(path)
+
 fn git_oid_valid(value: text, width: i64) -> bool:
     if value.len() != width: return false
     for ch in value.bytes():
@@ -117,6 +126,8 @@ fn git_find_entry(entries: [TraceGitTreeEntry], path: text) -> TraceGitTreeEntry
     nil
 
 pub fn snapshot_git_inputs(request: GitSnapshotRequest) -> Result<SnapshotInput, text>:
+    if request.snapshot_kind != "git_commit" and request.snapshot_kind != "git_index":
+        return Err("TRACE-SNAPSHOT-INCOMPLETE: unsupported Git snapshot kind")
     if request.repository == "" or request.selector == "" or request.paths.len() == 0 or request.paths.len() > 256 or request.max_entries < 1 or request.max_entries > 40000 or request.max_blob_bytes < 1 or request.max_blob_bytes > 4194304 or request.max_total_bytes < 1 or request.max_total_bytes > 4194304:
         return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid snapshot scope")
     var seen: Dict<text, bool> = {}
@@ -124,15 +135,15 @@ pub fn snapshot_git_inputs(request: GitSnapshotRequest) -> Result<SnapshotInput,
         if not git_path_valid(path) or seen.contains_key(path):
             return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid or duplicate selected path")
         seen[path] = true
-    val root = git_capture_text(request.repository, ["rev-parse", "--show-toplevel"])?.trim()
+    val root = git_protocol_path_line(git_capture_text(request.repository, ["rev-parse", "--show-toplevel"])?)?
     val object_format = git_capture_text(root, ["rev-parse", "--show-object-format"])?.trim()
     if object_format != "sha1" and object_format != "sha256":
         return Err("TRACE-SNAPSHOT-INCOMPLETE: unsupported Git object format")
     val width = if object_format == "sha1": 40 else: 64
     var revision = ""
     var tree = ""
-    var kind = "git_commit"
-    if request.selector == "index":
+    var kind = request.snapshot_kind
+    if request.snapshot_kind == "git_index":
         # Freeze the selected Git index, including an inherited alternate index.
         # write-tree refuses unresolved entries and never reads worktree bytes.
         kind = "git_index"
@@ -187,7 +198,10 @@ pub fn snapshot_git_inputs(request: GitSnapshotRequest) -> Result<SnapshotInput,
         if calculated != blob.oid:
             return Err("TRACE-SNAPSHOT-INCOMPLETE: Git blob identity verification failed")
         artifacts.push(SnapshotArtifact(path: paths[i], blob_id: blob.oid, content: blob.content, visibility: "selected_content"))
-    val repository_id = root
+    # This is a local repository-instance identity, not a global SCV identity.
+    # Hashing keeps space/Unicode checkout paths valid and avoids exposing them
+    # in exported subject IDs. Actual path bytes remain unchanged for Git reads.
+    val repository_id = "repository:local:" + sha256_u8_hex(git_u8_text(root))
     # `complete` is relative only to the caller-declared selected path scope.
     Ok(SnapshotInput(
         subject: SnapshotSubject(repository_id: repository_id, snapshot_id: "{repository_id}:{kind}:{object_format}:{tree}", kind: kind, revision_id: revision, tree_id: tree, object_format: object_format),

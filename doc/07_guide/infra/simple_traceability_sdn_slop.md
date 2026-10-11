@@ -27,3 +27,32 @@ Runtime verification is currently blocked by the absence of an admitted Stage 4
 CLI; see [runtime prerequisite](../../08_tracking/bug/traceability_runtime_admission_2026-10-03.md).
 The Windows wrapper's Rust fallback is not qualification evidence. Source
 implementation continues in parallel, but there are no new runtime PASS claims.
+
+## Current source integration on release_phase3
+
+The draft source now routes `traceability-check --snapshot=index` and
+`--snapshot=git:<revision>` through the Git object adapter, extractor and shared
+resolver. Supply explicit repository-relative paths. The source recognizes
+`--declarations=<path>` for an owned SDN input within those selected paths. The
+local preview policy has no authored declaration authorities, so semantic claims
+remain unresolved until a registered policy owner admits them. This is source
+integration, not verified availability in a deployed binary.
+
+The response retains selected roots, exact subject and content-derived input
+identity, with `admission_eligible=false` and `qualification=unverified`. It is
+complete only within the selected scope. `--profile=commit`, `push`, `remote`
+and `audit` currently fail explicitly; no hook or remote gate may treat this
+preview as an admission receipt. The structural input identity excludes its
+containing tree; the separate generation identity binds the candidate subject.
+
+Opt-in framework events use `SIMPLE_TRACE_CASE_EVENTS=1`. The runner persists
+observed data through its existing DB child before document generation and
+reports missing, partial or cached transport as incomplete. These events are
+unverified history. The new pure run-plan reconciler is not yet connected to a
+pre-dispatch persistent plan, build/config provenance or required run reports.
+
+Development intent is authored in
+`doc/08_tracking/trace/features/simple_traceability_sdn_slop.sdn`: all 20
+requirements and 40 planned criteria, with explicit current artifact links.
+It contains no execution records. Native parser admission and registered
+authority remain pending; file presence is not traceability qualification.

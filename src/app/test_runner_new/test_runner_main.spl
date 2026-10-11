@@ -39,6 +39,7 @@ use std.test_runner.test_runner_coverage.{setup_coverage, collect_coverage, prin
 # (test_db_lane_main.spl) so the database modules stay out of this closure.
 use std.nogc_sync_mut.test_runner.test_db_record.{test_db_run_record_from_result, test_db_run_record_encode}
 use std.nogc_sync_mut.test_runner.test_db_trace_record.{TestDbTraceFile, TestDbTraceRecord, test_db_trace_record_encode}
+use std.nogc_sync_mut.test_runner.trace_transport.{validate_requested_trace_transport}
 use std.nogc_sync_mut.test_runner.test_executor_parsing.{find_simple_binary}
 # use test_db_types.*
 # use std.database.feature.{FeatureDatabase, load_feature_database, create_feature_database, FeatureStatus}
@@ -87,15 +88,29 @@ use app.test_daemon.session_types.{TestSessionMeta, meta_needs_session, meta_to_
 
 val TEST_DB_LANE_ENTRY = "src/app/test_runner_new/test_db_lane_main.spl"
 
-fn record_test_run_via_db_lane(result: TestRunResult, run_start: i64, run_end: i64):
+fn trace_events_requested(result: TestRunResult) -> bool:
+    if (env_get("SIMPLE_TRACE_CASE_EVENTS") ?? "") == "1":
+        return true
+    for file_result in result.files:
+        if not file_result.cached and file_result.trace_case_events_sdn != "":
+            return true
+    false
+
+fn record_test_run_via_db_lane(result: TestRunResult, run_start: i64, run_end: i64) -> Result<(), text>:
     """Persist summary and optional SDN trace transport in the DB child."""
+    val trace_requested = trace_events_requested(result)
+    var trace_validation_error = ""
+    if trace_requested:
+        match validate_requested_trace_transport(result.files):
+            case Ok(_): pass
+            case Err(reason): trace_validation_error = reason
     val record_dir = "build/test_runner"
     dir_create_all(record_dir)
     val record_path = "{record_dir}/test_db_record_{run_start}.txt"
     val trace_path = "{record_path}.trace.sdn"
     var trace_rows: [TestDbTraceFile] = []
     for file_result in result.files:
-        if file_result.trace_case_events_sdn != "":
+        if not file_result.cached and file_result.trace_case_events_sdn != "":
             trace_rows.push(TestDbTraceFile(path: file_result.path, events_sdn: file_result.trace_case_events_sdn))
     var child_args: [text] = ["run", TEST_DB_LANE_ENTRY, "--record={record_path}"]
     if trace_rows.len() > 0:
@@ -112,7 +127,9 @@ fn record_test_run_via_db_lane(result: TestRunResult, run_start: i64, run_end: i
     if not file_write(record_path, test_db_run_record_encode(test_db_run_record_from_result(result, run_start, run_end))):
         print "Warning: test database not updated: could not write {record_path}"
         file_remove(trace_path)
-        return
+        if trace_requested:
+            return Err("trace and summary records could not be written")
+        return Ok(())
     val (stdout, stderr, code) = process_run_bounded(find_simple_binary(), child_args, 600000, TEST_OUTPUT_CAPTURE_BYTES)
     file_remove(record_path)
     file_remove(trace_path)
@@ -122,7 +139,11 @@ fn record_test_run_via_db_lane(result: TestRunResult, run_start: i64, run_end: i
             print stdout.trim()
         if stderr.trim() != "":
             print stderr.trim()
-
+        if trace_requested:
+            return Err("test-db lane failed to persist requested trace observations (exit {code})")
+    if trace_validation_error != "":
+        return Err(trace_validation_error)
+    Ok(())
 pub fn generate_spipe_docs_for_results(results: [TestFileResult], options: TestOptions, binary: text = "bin/simple") -> i64:
     if options.format != "doc" or options.list or options.list_ignored:
         return 0
@@ -1386,6 +1407,7 @@ fn run_test_cli() -> i64:
     propagate_env_vars(options)
 
     var exit_code = 0
+    var trace_infra_failed = false
 
     # Run spec tests with self-protection enabled in run_tests()
     if run_spec:
@@ -1399,8 +1421,17 @@ fn run_test_cli() -> i64:
 
         val result_files = spec_result.files
         report_free_mem("AFTER_RUN_{result_files.len()}_files")
+        if not options.list and options.no_db and trace_events_requested(spec_result):
+            print "ERROR: trace event mode requested but database persistence is disabled"
+            trace_infra_failed = true
+        if not options.list and not options.no_db and (result_files.len() > 0 or trace_events_requested(spec_result)):
+            match record_test_run_via_db_lane(spec_result, run_start, run_end):
+                case Ok(_): pass
+                case Err(reason):
+                    print "ERROR: trace event persistence is incomplete: {reason}"
+                    trace_infra_failed = true
         if generate_spipe_docs_for_results(result_files, options, find_simple_binary()) != 0:
-            return 3
+            if exit_code == 0: exit_code = 3
         if not json_worker:
             emit_spec_file_verdicts(result_files)
             print_summary(spec_result, options.format)
@@ -1424,10 +1455,6 @@ fn run_test_cli() -> i64:
                 coverage_test_files.push(result_file.path)
             if not options.no_cover_check and not check_cover_annotation_thresholds(coverage, coverage_test_files):
                 exit_code = 1
-
-        # Persist test results to database and regenerate test_result.md
-        if result_files.len() > 0 and not options.list and not options.no_db:
-            record_test_run_via_db_lane(spec_result, run_start, run_end)
 
         # Name every spec that produced no verdict. Absence of a result must
         # never read as success, and an unnamed non-zero exit is nearly as hard
@@ -1470,6 +1497,9 @@ fn run_test_cli() -> i64:
         print_sdoctest_summary(sdoctest_result)
         if not sdoctest_result.is_ok():
             exit_code = 1
+
+    if trace_infra_failed and exit_code == 0:
+        exit_code = 1
 
     if json_worker:
         print combined_test_run_json(
