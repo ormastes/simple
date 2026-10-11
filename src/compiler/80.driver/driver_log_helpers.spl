@@ -8,6 +8,7 @@ use std.nogc_sync_mut.io.file_ops.{file_append}
 use std.nogc_sync_mut.build_progress.{publish_build_progress}
 use std.common.build_progress.{BUILD_PROGRESS_SCHEMA_V1, BuildProgressSnapshot,
     BuildProgressState, BuildLinkState, build_progress_state_text}
+use compiler.common.build_phase_accounting.{build_phase_succeeded_units_v1, build_phase_terminal_failures_v1}
 use std.env.{env_get, env_get_or}
 use std.io_runtime.{time_now_monotonic_ms}
 
@@ -47,6 +48,12 @@ var _g_progress_snapshot_seq: i64 = 0
 # with `date`. `dt=` makes each file self-timing, which is the input any
 # front-end caching/sharding work has to be judged against.
 var _g_progress_prev_ms: i64 = -1
+# Parent-owned latest progress row, reset by every phase-start row.
+var _g_progress_last_phase: text = ""
+var _g_progress_last_done: i64 = -1
+var _g_progress_last_total: i64 = -1
+var _g_progress_last_failed: i64 = -1
+var _g_progress_last_cached: i64 = -1
 var _g_phase_profile_fd: i64 = -2
 var _g_phase_profile_seq: i64 = 0
 var _g_execution_metrics_path: text = ""
@@ -197,12 +204,8 @@ fn _build_progress_number(value: i64) -> text:
 fn _build_progress_token(value: text) -> text:
     value.replace("%", "%25").replace(" ", "%20").replace("=", "%3D").replace("\n", "%0A")
 
-pub fn build_progress_succeeded_units(done: i64, cached: i64) -> i64:
-    if done < 0 or cached < 0:
-        -1
-    else:
-        val succeeded = done - cached
-        if succeeded > 0: succeeded else: 0
+pub fn build_progress_succeeded_units(done: i64, cached: i64, failed: i64 = 0) -> i64:
+    build_phase_succeeded_units_v1(done, cached, failed)
 
 pub fn build_progress_remaining_units(done: i64, total: i64) -> i64:
     if done < 0 or total < 0:
@@ -261,7 +264,10 @@ fn _append_execution_metric(
 fn _log_build_progress_event(path: text, phase: text, unit_kind: text, done: i64,
         total: i64, current: text, tasks_done: i64, tasks_total: i64,
         failed: i64, cached: i64, terminal: text, now_ms: i64, dt_ms: i64):
-    val succeeded = build_progress_succeeded_units(done, cached)
+    # MIR done counts every processed module, including failed modules.
+    # Other legacy stages already exclude failures from their done argument.
+    val failed_in_done = if phase == "mir": failed else: 0
+    val succeeded = build_progress_succeeded_units(done, cached, failed_in_done)
     val remaining = build_progress_remaining_units(done, total)
     val tasks_remaining = if tasks_done >= 0 and tasks_total >= 0:
         val delta = tasks_total - tasks_done
@@ -283,6 +289,11 @@ pub fn log_build_progress(
     cached: i64,
     terminal: text
 ):
+    _g_progress_last_phase = phase
+    _g_progress_last_done = done
+    _g_progress_last_total = total
+    _g_progress_last_failed = failed
+    _g_progress_last_cached = cached
     val path = _build_progress_path()
     # Stdout twin, same reasoning as _append_phase_profile above: the events
     # file is opt-in via SIMPLE_BUILD_PROGRESS_EVENTS, so without this every
@@ -295,7 +306,10 @@ pub fn log_build_progress(
     _g_progress_prev_ms = now_ms
     _publish_progress_snapshot(phase, unit_kind, done, total, current,
         tasks_done, tasks_total, failed, cached, terminal, now_ms)
-    val succeeded = build_progress_succeeded_units(done, cached)
+    # MIR done counts every processed module, including failed modules.
+    # Other legacy stages already exclude failures from their done argument.
+    val failed_in_done = if phase == "mir": failed else: 0
+    val succeeded = build_progress_succeeded_units(done, cached, failed_in_done)
     val remaining = build_progress_remaining_units(done, total)
     _append_execution_metric(phase, unit_kind, done, total, current, failed, cached, terminal, now_ms, dt_ms)
     print "[build] phase={phase} state={terminal} unit_kind={unit_kind} done={_build_progress_number(done)} total={_build_progress_number(total)} remaining={_build_progress_number(remaining)} succeeded={_build_progress_number(succeeded)} cached={_build_progress_number(cached)} failed={_build_progress_number(failed)} task_done={_build_progress_number(tasks_done)} task_total={_build_progress_number(tasks_total)} elapsed_ms={now_ms} dt_ms={dt_ms} current={current}"
@@ -311,6 +325,16 @@ pub fn log_build_progress(
     if path != "":
         _log_build_progress_event(path, phase, unit_kind, done, total, current,
             tasks_done, tasks_total, failed, cached, terminal, now_ms, dt_ms)
+
+pub fn log_build_progress_failure(phase: text, unit_kind: text, current: text,
+        tasks_done: i64, tasks_total: i64):
+    if _g_progress_last_phase == phase:
+        log_build_progress(phase, unit_kind, _g_progress_last_done,
+            _g_progress_last_total, current, tasks_done, tasks_total,
+            build_phase_terminal_failures_v1(_g_progress_last_failed), _g_progress_last_cached, "failed")
+    else:
+        log_build_progress(phase, unit_kind, -1, -1, current,
+            tasks_done, tasks_total, -1, 0, "failed")
 
 pub fn log_module_surface_released(path: text, seq: i64):
     eprint("phase2:surface:file:released path={path} seq={seq}\n")
