@@ -1,0 +1,44 @@
+describe "Typed block parser and highlighting boundaries":
+    it "keeps parsing results typed through the trait and full-context builder":
+        val definition = file_read("src/compiler/15.blocks/blocks/definition.spl")
+        val builder = file_read("src/compiler/15.blocks/blocks/builder.spl")
+        expect(definition).to_contain("fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:")
+        expect(definition).to_contain("fn parse_full(payload: text, pre_lex: PreLexInfo, ctx: BlockContext) -> Result<BlockValue, BlockError>:")
+        expect(builder).to_contain("_parser: fn(text, BlockContext) -> Result<BlockValue, BlockError>")
+        expect(builder).to_contain("case Err(message): Err(BlockError.parse(message))")
+
+    it "converts simple callback text errors into BlockError without erasing success":
+        for path in ["easy", "testing"]:
+            val source = file_read("src/compiler/15.blocks/blocks/{path}.spl")
+            expect(source).to_contain("_parser: fn(text) -> Result<BlockValue, text>")
+            expect(source).to_contain("fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:")
+            expect(source).to_contain("case Ok(value):")
+            expect(source).to_contain("Err(blockerror_parse(")
+
+    it "uses the actual optional registry result and retains parse-error diagnostics":
+        val registry = file_read("src/compiler/15.blocks/blocks/registry.spl")
+        val testing = file_read("src/compiler/15.blocks/blocks/testing.spl")
+        expect(registry).to_contain("fn get_block(kind: text) -> BlockDefinition?:")
+        expect(testing).to_contain("case Some(blk): blk")
+        expect(testing).to_contain("case None: panic(")
+        expect(testing).to_contain("panic(\"Parse failed: {error.message}\")")
+        expect(testing).to_contain("if not error.message.contains(expected_message):")
+
+    it "checks missing keyword positions before projecting token boundaries":
+        val source = file_read("src/compiler/15.blocks/blocks/highlighting.spl")
+        expect(source).to_contain("val index = text.index_of(keyword, search_pos)")
+        expect(source).to_contain("if index < 0:")
+        expect(source).to_contain("search_pos = index + 1")
+        expect(source).to_contain("if val Some((block_start, block_end)) = block_comment:")
+        expect(source).to_contain("text.len()")
+        expect(source.contains("has_index")).to_equal(false)
+        expect(source.contains("has_block_comment")).to_equal(false)
+        expect(source.contains("block_comment_value")).to_equal(false)
+        expect(source.contains("text_len(")).to_equal(false)
+        expect(source.contains("text_index_of(")).to_equal(false)
+
+    it "adapts native plugin text to the typed block-parser contract":
+        val source = file_read("src/compiler/15.blocks/plugin_startup.spl")
+        expect(source).to_contain("fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:")
+        expect(source).to_contain("Ok(BlockValue.Raw(text.from_handle(result_handle)))")
+        expect(source).to_contain("panic(\"E-SFFI-009: plugin parse returned a null text handle\")")
