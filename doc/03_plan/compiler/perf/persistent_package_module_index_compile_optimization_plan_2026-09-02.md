@@ -529,3 +529,7 @@ This only unblocks receipt emission; ordinary CLI artifact attachment and V3
 publication remain open. The admitted Stage 2 binary has no `test` command.
 A single bounded focused native-build parsed 452/532 files before its 100 s
 timeout, so no executable unit PASS or full runtime qualification is claimed.
+
+### 2026-10-11 shared compiler MIR blocker reduction
+
+The admitted Stage 2 compiler has no `test` command, and the focused cold semantic action spec native-build timed out during parse at 452/532 modules. A smaller 90-module direct compiler closure supplied structural progress: MIR diagnostics fell from 55 to 54 to 14 to six through typed optional payload binding, qualified tuple enum patterns, and narrow source repairs. Two remaining direct `SymbolId` patterns were edited after the third bounded cycle and remain unverified. See [the compiler blocker](../../../08_tracking/bug/item5_vhdl_port_stage2_hir_collection_plan_owner_2026-10-11.md). This is no executable unit PASS, no ordinary CLI V3 graph publication, and no warm/cold time/RSS qualification.

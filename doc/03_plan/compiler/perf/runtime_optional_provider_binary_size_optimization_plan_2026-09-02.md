@@ -387,7 +387,7 @@ owner mismatch and error-recovery pattern. The focused spec has not executed.
 A focused explicit owner binding in `collection_plan.spl` now lets a
 90-module direct compile complete HIR. Removing redundant whole-HIR-expression
 comparisons cleared all collection-plan MIR diagnostics; the same bounded
-closure still fails MIR with 55 errors in other modules. See [the exact compiler blocker](../../../08_tracking/bug/item5_vhdl_port_stage2_hir_collection_plan_owner_2026-10-11.md).
+closure failed MIR with 55 errors in other modules at that point. A later bounded sequence reduced the diagnostic count to six; the final two `SymbolId` pattern edits are not yet recompiled. See [the exact compiler blocker](../../../08_tracking/bug/item5_vhdl_port_stage2_hir_collection_plan_owner_2026-10-11.md).
 This is structural evidence only: admitted native port dispatch, optional
 demand loading, and matched size/startup/RSS remain open.
 

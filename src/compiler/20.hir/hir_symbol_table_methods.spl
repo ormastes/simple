@@ -231,22 +231,13 @@ impl SymbolTable:
         lets Dict.get resolve correctly. See driver.spl lower_and_check_impl.
 
         Bug 2026-07-29 (hir_get_symbol_id_zero_returns_nil): a naked
-        `case SymbolId(raw):` pattern matched directly against the `SymbolId?`
-        (Option-wrapped) parameter ALWAYS falls through to the wildcard arm on
-        this interpreter -- for every id, not just 0 -- because a struct
-        constructor pattern cannot destructure through the implicit Option
-        layer in one step; only `case Some(SymbolId(raw)):` reliably unwraps
-        it (proven by isolated probe: `case PId(raw):` against a `PId?`
-        returned from a helper fell to wildcard for raw=0 AND raw=1, while
-        `case Some(PId(raw)):` matched both correctly). id 0 is a completely
-        ordinary, validly-allocated id (`is_valid()` already treats it as
-        such) -- the fix is this match shape, not the id allocator."""
-        match id:
-            case Some(SymbolId(raw)):
-                val found: HirSymbol? = self.symbols[raw]
-                found
-            case _:
-                nil
+        `case SymbolId(raw):` cannot destructure through the optional wrapper.
+        Unwrap with `if val` before indexing so id 0 remains a valid symbol
+        and native MIR never treats the nested struct pattern as an enum."""
+        if val unwrapped = id:
+            val found: HirSymbol? = self.symbols[unwrapped.id]
+            return found
+        nil
 
     fn get_symbol_raw(raw: i64) -> HirSymbol?:
         """Raw-i64 form of get_symbol: passing a flat optional OR a struct
@@ -332,14 +323,10 @@ impl SymbolTable:
         silently returns false for the garbage-typed key, and every call
         returns nil regardless of whether the id is actually present (bug
         bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
-        match id:
-            case SymbolId(raw):
-                val found: HirSymbol? = self.symbols[raw]
-                if val sym = found:
-                    return sym.name
-                fallback
-            case _:
-                fallback
+        val found: HirSymbol? = self.symbols[id.id]
+        if val sym = found:
+            return sym.name
+        fallback
 
     me rename_symbol(id: SymbolId, new_name: text):
         """Overwrite a symbol's stored `.name` in place, WITHOUT touching its
@@ -349,37 +336,35 @@ impl SymbolTable:
         alias-local name) while `compute_a`/`compute_b` etc. still resolve
         via the original scope entry created by `define()` (bug
         bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
-        match id:
-            case SymbolId(raw):
-                val found: HirSymbol? = self.symbols[raw]
-                if val sym = found:
-                    val renamed = HirSymbol(
-                        id: sym.id,
-                        name: new_name,
-                        kind: sym.kind,
-                        type_: sym.type_,
-                        scope: sym.scope,
-                        span: sym.span,
-                        visibility: sym.visibility,
-                        is_public: sym.is_public,
-                        is_mutable: sym.is_mutable,
-                        defining_module: sym.defining_module,
-                        builtin_method_tag: hir_builtin_method_tag(new_name)
-                    )
-                    self.symbols[raw] = renamed
-                    if not self.exact_symbols.has(new_name):
-                        self.exact_symbols[new_name] = raw
-                    # MODCALLIDX: the rename changes the name the sweep in
-                    # field_module_callable would have matched on, so the
-                    # index must follow it. The pre-rename row is left in
-                    # place: the old sweep saw only the CURRENT name, but a
-                    # stale row can only be reached by a field spelling that
-                    # no symbol answers, and dropping it would need a reverse
-                    # index for no behavioural gain.
-                    if val renamed_module = sym.defining_module:
-                        self.index_module_callable(renamed_module, new_name, raw)
-            case _:
-                pass
+        val raw = id.id
+        val found: HirSymbol? = self.symbols[raw]
+        if val sym = found:
+            val renamed = HirSymbol(
+                id: sym.id,
+                name: new_name,
+                kind: sym.kind,
+                type_: sym.type_,
+                scope: sym.scope,
+                span: sym.span,
+                visibility: sym.visibility,
+                is_public: sym.is_public,
+                is_mutable: sym.is_mutable,
+                defining_module: sym.defining_module,
+                builtin_method_tag: hir_builtin_method_tag(new_name)
+            )
+            self.symbols[raw] = renamed
+            if not self.exact_symbols.has(new_name):
+                self.exact_symbols[new_name] = raw
+            # MODCALLIDX: the rename changes the name the sweep in
+            # field_module_callable would have matched on, so the
+            # index must follow it. The pre-rename row is left in
+            # place: the old sweep saw only the CURRENT name, but a
+            # stale row can only be reached by a field spelling that
+            # no symbol answers, and dropping it would need a reverse
+            # index for no behavioural gain.
+            if val renamed_module = sym.defining_module:
+                self.index_module_callable(renamed_module, new_name, raw)
+
 
     # ========================================================================
     # Method Resolution Helpers (for UFCS support)
