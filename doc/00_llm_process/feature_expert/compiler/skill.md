@@ -14,7 +14,7 @@ Maintain feature-specific process knowledge for Compiler. Use this skill when wo
 
 ## Feature Links
 
-- [Generated wrapper traversal candidate](../../../09_report/generated_wrapper_visitor_candidate_2026-10-11.md): only carrier structs may skip their kind field; four fold wrappers corrected manually pending generator regeneration and execution.
+- [Generated wrapper traversal candidate](../../../09_report/generated_wrapper_visitor_candidate_2026-10-11.md): only carrier structs may skip their kind field; five fold wrappers corrected manually pending generator regeneration and execution.
 
 - [Tuple record ownership candidate](../../../08_tracking/bug/enumerate_native_tuple_owner_loss_2026-10-11.md): runtime/native tuple conversion and ordinary tuple record provenance require qualified native execution; current source and fixture changes remain unqualified.
 - [Windows text-hash lowering and native evidence](../../../07_guide/tooling/windows_phase2_runtime_capsule.md#text-hashing-across-runtime-providers):
