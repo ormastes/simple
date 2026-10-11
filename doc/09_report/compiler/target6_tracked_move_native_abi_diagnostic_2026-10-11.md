@@ -44,3 +44,28 @@ open-tail text slices, and the path validator no longer allocates a split
 array to reject `..` segments. These final source changes remain unexecuted
 under the three-cycle cap. See
 `doc/08_tracking/bug/native_text_open_tail_slice_truncates_final_byte_2026-10-11.md`.
+
+## Membership publication and event payload follow-up
+
+Three bounded no-stub Stage 2 native builds of the same 66-module fixture
+linked successfully. With the open-tail `substring(start)` repair, execution
+advanced to `untracked-membership-publish-failed`. GDB showed a valid encoded
+membership record but a malformed digest path after `sha256_text`. The bridge
+now hashes `value.bytes()` with `sha256_u8_hex`, preserving the encoded UTF-8
+byte stream. The next executable had a valid 64-character digest path, but
+`file_atomic_write` returned false, matching the separate native facade bug.
+
+Membership records use immutable content-addressed paths. The bridge now
+creates a missing record exclusively and verifies its readback before any
+CURRENT pointer can name it. The third executable passed that publication
+boundary and stopped at `observed-event-apply:event-entry-invalid`. GDB saw
+the constructed event's `byte_count` as `-1`. The checked text read or its
+optional default in the native event constructor is suspect, but the exact
+ABI defect has not been isolated. See
+`doc/08_tracking/bug/native_scv_event_content_length_invalid_2026-10-11.md`.
+
+Build logs: `build/mini_builds/target6_tracked_move_refresh_probe/build_v4_substring.log`,
+`build_v4_byte_hash.log`, and `build_v4_exclusive_membership.log`. Each linked;
+each run exited 2 at the successive boundaries above. The three-cycle limit
+is reached. There is still no cold or warm V4 admission PASS, current-source
+worker, or matched time/RSS qualification.

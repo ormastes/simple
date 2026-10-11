@@ -110,3 +110,11 @@ row, so the path validator filtered it. The bridge's four open-tail text
 slices now use `substring(start)`, but that candidate has not been rebuilt
 after the three-cycle cap. See
 `native_text_open_tail_slice_truncates_final_byte_2026-10-11.md`.
+
+The next three 66-module native builds linked. The open-tail repair reached
+membership publication; byte hashing fixed a malformed native digest path;
+exclusive creation plus readback advanced past the known native atomic-write
+failure. The fixture now stops at `observed-event-apply:event-entry-invalid`,
+with GDB showing event `byte_count=-1`. See the updated native ABI diagnostic
+and `native_scv_event_content_length_invalid_2026-10-11.md`. No cold or warm
+inventory generation has passed, so this bug remains OPEN.

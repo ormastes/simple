@@ -763,3 +763,12 @@ four open-tail text slices, and the shared source-path validator replaces a
 split-array `..` check with allocation-free segment tests. This final source
 candidate is unexecuted under the same cycle cap; the compiler slice bug and
 full V4 warm proof remain open.
+
+The subsequent bounded fixture cycle compiled and linked three 66-module
+executables. It passed source listing and immutable membership publication
+after native byte hashing and exclusive-create/readback repairs, then rejected
+the first observed event with `byte_count=-1`. The checked native text read
+and optional default boundary needs isolation before a V4 cold/warm claim.
+See the updated tracked-move native ABI diagnostic. The three-cycle gate for
+this attempt is exhausted; full Item 6 cutover and matched time/RSS remain
+open.
