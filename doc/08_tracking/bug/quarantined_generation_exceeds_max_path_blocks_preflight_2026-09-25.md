@@ -185,3 +185,56 @@ all, since no quarantine is involved.
 
 Workaround, verified: run the bootstrap from a short checkout path. `C:\p1`
 buys 29 characters of headroom and got past this point.
+
+## 2026-10-11: Reproduced at a 3-char root (`C:\q`); retained `stage2-home` dirs and `noop-v1` generation receipts fail later-run audits at ANY root
+
+Host: Windows 11 dev host, Git Bash, worktree at `C:\q` (3-char root,
+`x86_64-pc-windows-msvc`), wrapper lane
+`bootstrap-windows.sh --strategy=adhoc --incremental-unlimited --full-bootstrap
+--stop-after-stage2 --output=build/bootstrap`.
+
+A FIRST run in a clean `C:\q` tree passed every materialized-consumer audit and
+admitted Stage 2. Every defect below was measured on the SECOND and later runs,
+with paths measured from the wrapper's own error text and `find | awk` length
+counts (MSYS reaches these files; the consumer cannot).
+
+1. **Re-run retention defeats any root.** Each run renames the prior
+   `stage2-home` to `stage2-home.working-attempt-<UTC>-<pid>` (+41 chars over
+   the 11-char final leaf; bootstrap-from-scratch.sh ~line 3485). A populated
+   home contains
+   `.cache\simple\v1\projects\<64 hex>\native-build\noop-v1\<64 hex>\generations\<64 hex>.receipt`:
+   measured **323 chars at `C:\q` with the final leaf** and **363 chars
+   retained** — over `MAX_PATH` at any root. The next run's `git-state-before`
+   consumer walk dies in plain .NET `Directory.EnumerateFileSystemEntries`
+   ("could not find part of the path", the 280-char `noop-v1\<64 hex>`
+   DIRECTORY) inside `AuditTree` (authority.shs ~line 4989). Consequence: on
+   Windows the lane is currently **single-shot per clean tree** — the first run
+   audits before these directories exist; every later run fails before any
+   stage starts until a human deletes the retained homes.
+
+2. **`Open()` is long-path-correct now; directories are not.** Current
+   `authority.shs` `Open()` calls `CreateFileW(NativePath(p), …)` (~line 4417),
+   so 277-char FILE paths are tolerated — e.g.
+   `bootstrap.generations\<64>-<64>\deps\libspl_hosted_runtime-<64 hex>.rlib`,
+   which the wrapper's content-hash "freezing" of package outputs produces
+   (16-hex cargo suffixes only appear in older/direct cargo builds). A first
+   run coexists with those files fine. The remaining failure class is .NET
+   DIRECTORY APIs (`EnumerateFileSystemEntries`, `Directory.CreateDirectory`)
+   on directories deeper than 260 chars. Proposed fix 1 should be scoped
+   accordingly: `\?\`-prefix directory enumeration/creation (or the
+   manifest/opt-in), not just file opens.
+
+3. **Verified workaround (this host, twice):** before each run,
+   `rm -rf build/bootstrap/stage3/<platform>/stage2-home*` (mutable working
+   state only — receipts, snapshots and admitted dirs are untouched and the
+   audit still binds them). With homes purged, a re-run passes the consumer
+   walk. Not a fix: it destroys wrapper-retained state and must be repeated
+   before every run.
+
+Adjacent observation (not this defect): Stage-2 `native-build` output is not
+byte-reproducible run-over-run with a warm module cache — "rebuilt 2" modules
+change `simple.exe`'s sha256 each run (observed `82ffe1fd…`, `a11aba47…`,
+`0dcd79a5…`). The differing binaries perform identical manual smoke work in
+~8 s, so the delta appears to be embedded build metadata, not codegen.
+Recorded here so the next investigator does not re-derive it; split into its
+own record if it ever gates admission.
