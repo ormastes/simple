@@ -7,10 +7,10 @@
 use app.traceability.extract.sspec_inventory.{TraceSspecCase, TraceSspecInventory, extract_sspec_inventory_single_owner}
 use std.common.traceability.run_plan.{TracePlannedCase}
 use std.common.traceability.run_request.{TraceRunRequest, validate_trace_run_request}
-use std.common.traceability.run_request_codec.{encode_trace_run_request}
 use std.common.traceability.run_selection.{validate_trace_request_selection}
-use std.common.sdn.value.{SdnValue}
-use std.common.sdn.encode.{sdn_encode_canonical}
+export use std.common.traceability.sspec_inventory.{TraceSspecPlannedDefinition, TraceSspecPlannedRequest}
+use std.common.traceability.sspec_inventory.{trace_sspec_definition_id, trace_sspec_planned_case_id, trace_sspec_inventory_digest}
+use std.common.traceability.sspec_inventory_codec.{encode_trace_sspec_planned_request}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 
@@ -31,31 +31,10 @@ pub struct TraceSspecPlanningInput:
     source: TraceSspecSource
     inventory: TraceSspecInventory
 
-pub struct TraceSspecPlannedDefinition:
-    case_id: text
-    test_definition_id: text
-    source_sha256: text
-    extractor_version: text
-    definition: TraceSspecCase
-
-pub struct TraceSspecPlannedRequest:
-    request: TraceRunRequest
-    definitions: [TraceSspecPlannedDefinition]
-    inventory_digest: text
-    evidence_validity: text
-
 fn sspec_planner_bytes(value: text) -> [u8]:
     var bytes: [u8] = []
     for byte in value.bytes(): bytes.push(byte)
     bytes
-
-fn sspec_planner_hash(value: SdnValue) -> text:
-    "sha256:" + sha256_u8_hex(sspec_planner_bytes(sdn_encode_canonical(value)))
-
-fn sspec_planner_texts(values: [text]) -> SdnValue:
-    var result: [SdnValue] = []
-    for value in values: result.push(SdnValue.String(value))
-    SdnValue.Array(result)
 
 fn sspec_planner_sources(context: TraceSspecPlanningContext, sources: [TraceSspecSource]) -> Result<(), text>:
     for value in [context.subject_id, context.configuration_id, context.expectation_id, context.binary_id, context.lane_id]:
@@ -111,34 +90,6 @@ fn sspec_planner_inventory_budget(inputs: [TraceSspecPlanningInput]) -> Result<(
                 metadata_bytes += value.len()
     Ok(())
 
-fn sspec_definition_record(source: TraceSspecSource, inventory: TraceSspecInventory, item: TraceSspecCase) -> SdnValue:
-    var fields: Dict<text, SdnValue> = {}
-    fields["schema"] = SdnValue.String("simple.trace.sspec-definition/v1")
-    fields["extractor_version"] = SdnValue.String(inventory.extractor_version)
-    fields["source_sha256"] = SdnValue.String(source.source_sha256)
-    fields["test_path"] = SdnValue.String(item.test_path)
-    fields["case_name"] = SdnValue.String(item.case_name)
-    fields["leaf_name"] = SdnValue.String(item.leaf_name)
-    fields["kind"] = SdnValue.String(item.kind)
-    fields["suite_path"] = sspec_planner_texts(item.suite_path)
-    fields["context_path"] = sspec_planner_texts(item.context_path)
-    fields["start_byte"] = SdnValue.Int(item.start_byte)
-    fields["end_byte"] = SdnValue.Int(item.end_byte)
-    fields["line"] = SdnValue.Int(item.line)
-    fields["column"] = SdnValue.Int(item.column)
-    SdnValue.Dict(fields)
-
-fn sspec_planned_case_id(context: TraceSspecPlanningContext, definition_id: text) -> text:
-    var fields: Dict<text, SdnValue> = {}
-    fields["schema"] = SdnValue.String("simple.trace.sspec-planned-case/v1")
-    fields["subject_id"] = SdnValue.String(context.subject_id)
-    fields["configuration_id"] = SdnValue.String(context.configuration_id)
-    fields["expectation_id"] = SdnValue.String(context.expectation_id)
-    fields["binary_id"] = SdnValue.String(context.binary_id)
-    fields["lane_id"] = SdnValue.String(context.lane_id)
-    fields["test_definition_id"] = SdnValue.String(definition_id)
-    "trace-case:" + sspec_planner_hash(SdnValue.Dict(fields))
-
 # Pure consistency adapter for explicit frozen inventory records. It does not
 # authenticate a supplied AST inventory. Use the native owner entry below to
 # derive those records from the actual production parser in this process.
@@ -152,7 +103,6 @@ pub fn plan_sspec_inventories(context: TraceSspecPlanningContext, inputs: [Trace
     sspec_planner_inventory_budget(inputs)?
     var cases: [TracePlannedCase] = []
     var definitions: [TraceSspecPlannedDefinition] = []
-    var definition_ids: [text] = []
     var paths: [text] = []
     for input in inputs:
         val source = input.source
@@ -185,26 +135,23 @@ pub fn plan_sspec_inventories(context: TraceSspecPlanningContext, inputs: [Trace
             selector += item.leaf_name
             if item.case_name != selector:
                 return Err("SSPEC-PLAN: runtime selector differs from literal scopes")
-            val definition_id = "trace-definition:" + sspec_planner_hash(sspec_definition_record(source, inventory, item))
-            val case_id = sspec_planned_case_id(context, definition_id)
+            val definition_id = trace_sspec_definition_id(source.source_sha256, inventory.extractor_version, item)
+            val case_id = trace_sspec_planned_case_id(context.subject_id, context.configuration_id,
+                context.expectation_id, context.binary_id, context.lane_id, definition_id)
             cases.push(TracePlannedCase(case_id: case_id, test_path: item.test_path, case_name: item.case_name,
                 test_definition_id: definition_id, lane_id: context.lane_id))
             definitions.push(TraceSspecPlannedDefinition(case_id: case_id, test_definition_id: definition_id,
                 source_sha256: source.source_sha256, extractor_version: inventory.extractor_version, definition: item))
-            definition_ids.push(definition_id)
     val request = TraceRunRequest(subject_id: context.subject_id, configuration_id: context.configuration_id,
         expectation_id: context.expectation_id, binary_id: context.binary_id, cases: cases)
     validate_trace_run_request(request)?
     validate_trace_request_selection(request, paths)?
-    # Encoding also enforces the existing owner's 1 MiB native request budget.
-    val request_source = encode_trace_run_request(request)?
-    var manifest: Dict<text, SdnValue> = {}
-    manifest["schema"] = SdnValue.String("simple.trace.sspec-planned-inventory/v1")
-    manifest["request_sdn"] = SdnValue.String(request_source)
-    manifest["definition_ids"] = sspec_planner_texts(definition_ids)
-    manifest["evidence_validity"] = SdnValue.String("unverified")
-    Ok(TraceSspecPlannedRequest(request: request, definitions: definitions,
-        inventory_digest: sspec_planner_hash(SdnValue.Dict(manifest)), evidence_validity: "unverified"))
+    val result = TraceSspecPlannedRequest(request: request, definitions: definitions,
+        inventory_digest: trace_sspec_inventory_digest(request, definitions)?, evidence_validity: "unverified")
+    # Validate complete metadata/request projection and the bounded native wire
+    # representation before returning. No database persistence is implied.
+    encode_trace_sspec_planned_request(result)?
+    Ok(result)
 
 # Destructively uses the native frontend's single-owner arena, serially. No
 # candidate module is imported/evaluated. The caller must retain exclusive
