@@ -2,14 +2,16 @@
 # compact declarations and complete-body artifact descriptors, never HirModule.
 use compiler.mono.mono_archive_registration_v1.{MonoArchiveRegistrationOwnerV1,
     MonoArchiveRootOrderV1, mono_archive_registration_schedule_digest_v1}
-use compiler.mono.mono_archive_state_v1.{mono_archive_state_digest_v1}
+use compiler.mono.mono_archive_state_v1.{mono_archive_state_digest_v1, mono_archive_delta_digest_v1}
 use compiler.mono.monomorphize_integration.{mono_sym_key}
 use compiler.driver.cache.hir_mono_archive_consumer_v1.{MonoArchiveAdmissionV1,
     MonoArchiveRepositoryV1, MonoArchivePublicationV1, mono_archive_repository_authority_v1,
-    mono_archive_rewrite_root_v1, mono_archive_drain_one_v1, mono_archive_apply_v1}
+    mono_archive_rewrite_root_v1, mono_archive_drain_one_v1, mono_archive_apply_v1,
+    mono_archive_output_key_v1, mono_archive_function_record_key_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_last_warnings,
     hir_cache_promote_diagnostic_owner_v1, hir_cache_clear_last_warnings}
 use std.io_runtime.{env_get}
+use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
     transient_scope_end, transient_promote}
 
@@ -22,6 +24,8 @@ class MonoArchiveExecutionV1:
     expected_epoch: i64
     root_records: Dict<text, MonoArchivePublicationV1>
     specialization_records: [MonoArchivePublicationV1]
+    # Captured only when an exact produced publication is actually applied.
+    publication_ledger_digest: text
     diagnostics: [text]
     warnings: [text]
     generic_functions: i64
@@ -33,6 +37,50 @@ class MonoArchiveExecutionV1:
 
 fn mono_archive_root_schedule_digest_v1(roots: [MonoArchiveRootOrderV1]) -> text:
     mono_archive_registration_schedule_digest_v1(roots)
+
+fn mono_archive_execution_ledger_extend_v1(previous: text, receipt: MonoArchivePublicationV1, kind: text) -> text:
+    if previous.len() != 64 or (kind != "root" and kind != "fifo") or
+            receipt.stage != "mono-function-rewrite-v1" or
+            receipt.function_archive_key != mono_archive_function_record_key_v1(receipt) or
+            receipt.output_archive_key != mono_archive_output_key_v1(receipt) or
+            receipt.delta_digest != mono_archive_delta_digest_v1(receipt.delta): return ""
+    sha256_text("mono-applied-publication-ledger-v1\n" + previous + "\n" + kind + "\n" + receipt.output_archive_key)
+
+fn mono_archive_execution_ledger_digest_v1(owner: MonoArchiveExecutionV1) -> text:
+    var digest = sha256_text("mono-applied-publication-ledger-empty-v1")
+    var epoch = 0
+    var missing = false
+    for module in owner.roots:
+        for symbol in module.symbols:
+            val key = mono_sym_key(module.module_name, symbol)
+            if not owner.root_records.has(key):
+                missing = true
+                continue
+            val receipt = owner.root_records[key]
+            if missing or receipt.delta.base_epoch != epoch or receipt.delta.advance_cursor: return ""
+            digest = mono_archive_execution_ledger_extend_v1(digest, receipt, "root")
+            if digest == "": return ""
+            epoch = epoch + 1
+    if missing and owner.specialization_records.len() != 0: return ""
+    for receipt in owner.specialization_records:
+        if receipt.delta.base_epoch != epoch or not receipt.delta.advance_cursor: return ""
+        digest = mono_archive_execution_ledger_extend_v1(digest, receipt, "fifo")
+        if digest == "": return ""
+        epoch = epoch + 1
+    if epoch != owner.expected_epoch: return ""
+    digest
+
+fn mono_archive_execution_append_seal_v1(owner: MonoArchiveExecutionV1,
+        receipt: MonoArchivePublicationV1, kind: text) -> Result<text, text>:
+    if receipt.delta.base_epoch != owner.expected_epoch: return Err("mono publication base epoch differs")
+    if not transient_scope_begin(): return Err("mono publication seal scope unavailable")
+    val digest = mono_archive_execution_ledger_extend_v1(owner.publication_ledger_digest, receipt, kind)
+    val valid = digest != ""
+    val paused = transient_scope_pause()
+    val owned = if paused and valid: transient_promote(digest) else: false
+    mono_archive_execution_close_v1(paused, valid, owned)
+    if valid: return Ok(digest)
+    Err("mono publication complete seal refused")
 
 fn mono_archive_execution_close_v1(paused: bool, admitted: bool, owned: bool):
     val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
@@ -78,7 +126,8 @@ fn mono_archive_execution_create_v1(owner: MonoArchiveRegistrationOwnerV1,
             authority: owner.state.facts.body_authority), state: owner.state),
         roots: owner.roots, schedule_digest: schedule, root_module_cursor: 0,
         root_function_cursor: 0, expected_epoch: 0, root_records: {},
-        specialization_records: [], diagnostics: [], warnings: [],
+        specialization_records: [], publication_ledger_digest: sha256_text("mono-applied-publication-ledger-empty-v1"),
+        diagnostics: [], warnings: [],
         generic_functions: owner.generic_functions, generic_structs: owner.generic_structs,
         generic_classes: owner.generic_classes, call_sites_found: 0,
         specializations_created: 0, unresolved_generic_calls: 0))
@@ -92,7 +141,8 @@ fn mono_archive_execution_preflight_v1(owner: MonoArchiveExecutionV1) -> bool:
         owner.admission.state.epoch == owner.expected_epoch and
         owner.expected_epoch == owner.root_records.len() + owner.specialization_records.len() and
         owner.admission.state.facts.feature_policy == env_get("SIMPLE_MONO_LEVELS") and
-        mono_archive_root_schedule_digest_v1(owner.roots) == owner.schedule_digest
+        mono_archive_root_schedule_digest_v1(owner.roots) == owner.schedule_digest and
+        mono_archive_execution_ledger_digest_v1(owner) == owner.publication_ledger_digest
     val paused = transient_scope_pause()
     mono_archive_execution_close_v1(paused, false, false)
     valid
@@ -130,9 +180,12 @@ fn mono_archive_execute_next_root_v1(owner: MonoArchiveExecutionV1) -> Result<Mo
     val produced = mono_archive_rewrite_root_v1(owner.admission, root.module_name, symbol)
     if produced.is_err(): return Err("mono root complete body refused")
     val receipt = produced.unwrap()
+    val captured = mono_archive_execution_append_seal_v1(owner, receipt, "root")
+    if captured.is_err(): return Err("mono root publication seal refused")
     if receipt.delta.advance_cursor or mono_archive_apply_v1(owner.admission, receipt).is_err():
         return Err("mono root publication refused")
     owner.root_records[key] = receipt
+    owner.publication_ledger_digest = captured.unwrap()
     owner.root_module_cursor = module_index
     owner.root_function_cursor = function_index + 1
     mono_archive_execution_accumulate_v1(owner, receipt)
@@ -146,9 +199,12 @@ fn mono_archive_execute_next_specialization_v1(owner: MonoArchiveExecutionV1) ->
     val produced = mono_archive_drain_one_v1(owner.admission)
     if produced.is_err(): return Err("mono FIFO complete body refused")
     val receipt = produced.unwrap()
+    val captured = mono_archive_execution_append_seal_v1(owner, receipt, "fifo")
+    if captured.is_err(): return Err("mono FIFO publication seal refused")
     if not receipt.delta.advance_cursor or mono_archive_apply_v1(owner.admission, receipt).is_err():
         return Err("mono FIFO publication refused")
     owner.specialization_records = owner.specialization_records.push(receipt)
+    owner.publication_ledger_digest = captured.unwrap()
     mono_archive_execution_accumulate_v1(owner, receipt)
     Ok(receipt)
 
