@@ -39,6 +39,7 @@ SH
 cat >"$tmp/producer space" <<'SH'
 #!/bin/sh
 printf '%s\n' "$@" >"$TEST_CAPTURE"
+[ "${SIMPLE_SCV_INVENTORY_COLD_INIT:-missing}" = "$TEST_EXPECT_COLD" ] || exit 91
 while [ "$#" -gt 0 ]; do
   if [ "$1" = -o ]; then shift; output=$1; break; fi
   shift
@@ -52,6 +53,7 @@ chmod +x "$output"
 SH
 chmod +x "$tmp/producer space" "$tmp/repo/scripts/bootstrap/run-process-group-timeout.shs" "$tmp/bin/df"
 export TEST_SOURCE_SNAPSHOT="$tmp/source.snapshot" TEST_CAPTURE="$tmp/capture"
+TEST_EXPECT_COLD=1; export TEST_EXPECT_COLD
 export TEST_RUNTIME_FILE="$tmp/runtime space/sub/provider.lib"
 PATH="$tmp/bin:$PATH"; export PATH
 producer_sha=$(sha256sum "$tmp/producer space" | cut -d ' ' -f 1)
@@ -78,10 +80,26 @@ grep -Fx "arg_24=$tmp/runtime space" "$tmp/output/accepted/compile.argv" >/dev/n
 sed -n 's/^arg_[0-9]*=//p' "$tmp/output/accepted/compile.argv" | sed '1d' >"$tmp/transcribed"
 cmp "$tmp/capture" "$tmp/transcribed"
 test -s "$tmp/output/accepted/hello.receipt"
+grep -qx 'inventory_cold_init=1' "$tmp/output/accepted/compile.argv"
+# Existing publication must use warm admission even if inherited cold-init is
+# set. The fixture deliberately uses malformed content: do not erase evidence.
+mkdir -p "$tmp/source/build/scv/source-inventory"
+printf 'malformed publication retained\n' >"$tmp/source/build/scv/source-inventory/CURRENT"
+TEST_EXPECT_COLD=0
+SIMPLE_SCV_INVENTORY_COLD_INIT=1; export SIMPLE_SCV_INVENTORY_COLD_INIT
+run_profile warm >"$tmp/warm.log" 2>&1
+grep -qx 'inventory_cold_init=0' "$tmp/output/warm/compile.argv"
+grep -qx 'malformed publication retained' "$tmp/source/build/scv/source-inventory/CURRENT"
+rm "$tmp/source/build/scv/source-inventory/CURRENT"
+mkdir -p "$tmp/source/build/scv/compile-events"
+printf 'legacy publication retained\n' >"$tmp/source/build/scv/compile-events/CURRENT"
+run_profile legacy >"$tmp/legacy.log" 2>&1
+grep -qx 'inventory_cold_init=0' "$tmp/output/legacy/compile.argv"
+unset SIMPLE_SCV_INVENTORY_COLD_INIT
 TEST_MUTATE_RUNTIME=1; export TEST_MUTATE_RUNTIME
 if run_profile changed >"$tmp/changed.log" 2>&1; then echo 'FAIL runtime drift accepted' >&2; exit 1; fi
 grep -q 'runtime inputs changed' "$tmp/changed.log"
 test ! -e "$tmp/output/changed/hello.receipt"
 unset TEST_MUTATE_RUNTIME
-echo 'PASS: profile argv equals actual worker args; runtime drift rejects without receipt'
+echo 'PASS: profile argv and scoped first-build initialization; existing cursors retained; runtime drift rejects without receipt'
 check_runtime_links
