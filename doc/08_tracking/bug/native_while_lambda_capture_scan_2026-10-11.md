@@ -18,9 +18,31 @@ the condition or enclosing scope. It extends the existing conversion only.
 MIR regressions cover a no-capture callback preserving the outer `shadow = 99`
 and a callback capturing `limit` in the condition plus `step` in its body,
 where a body-local `limit` shadows the capture. The standalone native fixture
-checks the observable results 101 and 10. Runtime verification is pending a
-rebuilt native producer; the current frozen experimental producer is unchanged.
+checks the observable results 101 and 10. At initial authoring, runtime
+verification was pending a rebuilt native producer; the original experimental
+producer was retained unchanged.
 
 Evidence: `/home/yoon/dev/phase2-six-results-20261011/permanent-repair/normal-firstfile/llvm-positive/`.
 The original std.spec positive and intentional negative must pass before the
 restricted adapter can be removed. Full compiler/core checks remain pending.
+
+## Native fixture evidence
+
+The rebuilt experimental compiler
+`54f23cb2274e43f781138a7c110ebcd3a421fb958337e5624d615af6a7fe9da3`
+(source `6bffb3135df3e938a39f5e3dba13e62cde297ce1`) builds the unchanged
+standalone fixture with both LLVM and Cranelift. Each executable checks the
+callback results 101 and 10, exits 0, emits exactly `native-while-lambda-ok\n`,
+and has empty stderr. The source owner and native fixture are byte-identical
+to that frozen candidate. The pre-fix source owner also matches the release
+owner before this isolated change; no framework or provider-map dependency is
+introduced by this patch.
+
+Receipts under
+`/home/yoon/dev/phase2-six-results-20261011/permanent-repair/normal-firstfile-cycle3/`:
+`llvm/while-fixture/result.json` and `cranelift/while-fixture/result.json`.
+These are explicitly experimental native-fixture observations. The new MIR
+unit scenarios have not separately run, the original std.spec wrapper remains
+blocked by independent framework issues, and full-group/runtime admission is
+not claimed. The restricted adapter must remain until that separate original
+std.spec positive/negative acceptance succeeds.
