@@ -136,6 +136,17 @@ retained. Direct diagnostic pass-through compatibility also passed. Primary
 review checked the implementation and sidecar assertions; these remain
 compiler-free orchestration tests.
 
+A clean, 180-second-bounded static retry-readiness invocation passed at
+`51cef235f21`, with source snapshot
+`d57812ff9622aef60fca65e68f8dcd88b828cdc339df107ae5aa734045dbf409`.
+Its verdict was `static-root-cause-and-route-proven`; it did not run a compiler
+or qualify a Phase 3 executable. The branch was then rebased onto
+`release_phase3` commit `4c324a98215`. That base update changes CI/review
+admission, a release helper, a bug report and Rust-seed LLVM dependency metadata;
+it does not change the tested focused command/verifier implementation. The
+unchanged green route checks were retained rather than repeated. Full bootstrap
+admission must still bind the final source and tool identities.
+
 The Windows handoff self-test rejected missing evidence and tampered executable
 content, then failed its symlink case. A separate host probe established that
 Git Bash `ln -s` creates a regular copy here (`native_symlink=false`), so that
