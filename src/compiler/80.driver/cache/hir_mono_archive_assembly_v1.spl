@@ -1,17 +1,16 @@
+use compiler.driver.cache.hir_mono_archive_consumer_v1.{mono_archive_selected_function_v1}
+use compiler.driver.cache.hir_mono_replay_selection_v1.{MonoArchiveSelectedFunctionV1,
+    mono_archive_reassemble_selected_module_in_owned_scope_v1}
 # Complete module assembly is explicitly unverified until aggregate post-mono
 # validators and the driver's existing diagnostic policy admit it.
-use compiler.hir.hir_types.{HirModule, SymbolId, HirSymbol, SymbolKind, ScopeId, BUILTIN_METHOD_NONE}
-use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_codec.{hir_module_encode}
 use compiler.hir.hir_codec_support.{HirCodecWriter}
-use compiler.common.dependency.visibility.{Visibility}
-use compiler.mono.monomorphize_integration.{is_generic_function, mono_sym_key, sorted_function_indices}
-use compiler.mono.mono_archive_state_v1.{mono_archive_state_digest_v1, mono_archive_scratch_pass_v1}
+use compiler.mono.monomorphize_integration.{mono_sym_key}
+use compiler.mono.mono_archive_state_v1.{mono_archive_state_digest_v1}
 use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveV1,
-    hir_body_archive_matches_v1, hir_body_archive_warnings_digest_v1,
-    hir_body_archive_load_in_owned_scope_v1}
-use compiler.driver.cache.hir_mono_archive_consumer_v1.{MonoArchivePublicationV1,
-    mono_archive_load_function_in_owned_scope_v1}
+    hir_body_archive_matches_v1, hir_body_archive_warnings_digest_v1}
+use compiler.driver.cache.hir_mono_archive_consumer_v1.{MonoArchivePublicationV1}
 use compiler.driver.cache.hir_mono_archive_execution_v1.{MonoArchiveExecutionV1,
     mono_archive_execution_complete_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_in_owned_scope,
@@ -92,54 +91,24 @@ fn mono_archive_assemble_module_v1(owner: MonoArchiveExecutionV1,
     val coverage = mono_archive_module_coverage_v1(owner, name)
     var descriptor: MonoArchiveAssembledModuleV1? = nil
     if state_digest != "" and coverage != "" and hir_body_archive_matches_v1(archive, archive.input):
-        val original_loaded = hir_body_archive_load_in_owned_scope_v1(archive, archive.input)
-        if original_loaded.is_ok():
-            val original = original_loaded.unwrap()
-            var valid = original.name == name
-            var output = original
-            var functions: Dict<SymbolId, HirFunction> = {}
-            val function_values: [HirFunction] = original.functions.values()
-            for function_index in sorted_function_indices(function_values):
-                val function: HirFunction = function_values[function_index]
-                if is_generic_function(function) or function.is_generic_template:
-                    functions[function.symbol] = function
-                    continue
-                val key = mono_sym_key(name, function.symbol.id)
-                if not owner.root_records.has(key):
-                    valid = false
-                    continue
-                val receipt = owner.root_records[key]
-                val record = mono_archive_load_function_in_owned_scope_v1(receipt)
-                if not mono_archive_assembly_record_matches_v1(receipt, archive) or record.is_err():
-                    valid = false
-                    continue
-                val complete = record.unwrap()
-                if complete.name != function.name or complete.symbol.id != function.symbol.id:
-                    valid = false
-                    continue
-                functions[complete.symbol] = complete
-            var owns_specialization = false
-            for receipt in owner.specialization_records:
-                if receipt.module_name != name: continue
-                val record = mono_archive_load_function_in_owned_scope_v1(receipt)
-                if not mono_archive_assembly_record_matches_v1(receipt, archive) or record.is_err():
-                    valid = false
-                    continue
-                val complete = record.unwrap()
-                functions[complete.symbol] = complete
-                output.symbols.register_preserved_symbol(HirSymbol(id: complete.symbol,
-                    name: complete.name, kind: SymbolKind.Function, type_: nil, scope: ScopeId(id: 0),
-                    span: complete.span, visibility: Visibility.Private, is_public: false, is_mutable: false,
-                    defining_module: name, builtin_method_tag: BUILTIN_METHOD_NONE))
-                owns_specialization = true
-            if owns_specialization and output.symbols.next_symbol_id < owner.admission.state.next_symbol:
-                output.symbols.next_symbol_id = owner.admission.state.next_symbol
-            output.functions = functions
-            val worker = mono_archive_scratch_pass_v1(owner.admission.state)
-            for item in owner.admission.state.queue:
-                if owner.admission.state.emitted.has(item.mangled_name):
-                    worker.archive_emitted_templates[item.mangled_name] = item.template_name
-            output = worker.prune_consumed_templates(output)
+        var roots: [MonoArchiveSelectedFunctionV1] = []
+        for module in owner.roots:
+            if module.module_name != name: continue
+            for symbol in module.symbols:
+                roots = roots.push(mono_archive_selected_function_v1(owner.root_records[mono_sym_key(name, symbol)]))
+        var specializations: [MonoArchiveSelectedFunctionV1] = []
+        for receipt in owner.specialization_records:
+            if receipt.module_name == name: specializations = specializations.push(mono_archive_selected_function_v1(receipt))
+        var unresolved: [text] = []
+        for template in owner.admission.state.unresolved_templates.keys(): unresolved = unresolved.push(template)
+        var emitted: [text] = []
+        for item in owner.admission.state.queue:
+            if owner.admission.state.emitted.has(item.mangled_name): emitted = emitted.push(item.template_name)
+        val reassembled = mono_archive_reassemble_selected_module_in_owned_scope_v1(archive,
+            roots, specializations, unresolved, emitted, owner.admission.state.next_symbol)
+        if reassembled.is_ok():
+            val output = reassembled.unwrap()
+            val valid = true
             if valid:
                 var assembled = MonoArchiveAssembledModuleV1(input_archive: archive,
                     archive_key: "", body_digest: sha256_text(hir_module_encode(output)),

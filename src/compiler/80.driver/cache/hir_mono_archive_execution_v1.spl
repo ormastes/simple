@@ -12,6 +12,7 @@ use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_last_warnings
     hir_cache_promote_diagnostic_owner_v1, hir_cache_clear_last_warnings}
 use std.io_runtime.{env_get}
 use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
     transient_scope_end, transient_promote}
 
@@ -132,9 +133,8 @@ fn mono_archive_execution_create_v1(owner: MonoArchiveRegistrationOwnerV1,
         generic_classes: owner.generic_classes, call_sites_found: 0,
         specializations_created: 0, unresolved_generic_calls: 0))
 
-fn mono_archive_execution_preflight_v1(owner: MonoArchiveExecutionV1) -> bool:
-    if not hir_cache_enabled() or hir_cache_last_warnings().len() != 0: return false
-    if not transient_scope_begin(): return false
+fn mono_archive_execution_preflight_in_owned_scope_v1(owner: MonoArchiveExecutionV1) -> bool:
+    if transient_array_scope_state_v1() != 1 or not hir_cache_enabled() or hir_cache_last_warnings().len() != 0: return false
     val authority = mono_archive_repository_authority_v1(owner.admission.repository.modules)
     val valid = authority != "" and authority == owner.admission.repository.authority and
         authority == owner.admission.state.facts.body_authority and
@@ -143,6 +143,12 @@ fn mono_archive_execution_preflight_v1(owner: MonoArchiveExecutionV1) -> bool:
         owner.admission.state.facts.feature_policy == env_get("SIMPLE_MONO_LEVELS") and
         mono_archive_root_schedule_digest_v1(owner.roots) == owner.schedule_digest and
         mono_archive_execution_ledger_digest_v1(owner) == owner.publication_ledger_digest
+    valid
+
+fn mono_archive_execution_preflight_v1(owner: MonoArchiveExecutionV1) -> bool:
+    if not hir_cache_enabled() or hir_cache_last_warnings().len() != 0: return false
+    if not transient_scope_begin(): return false
+    val valid = mono_archive_execution_preflight_in_owned_scope_v1(owner)
     val paused = transient_scope_pause()
     mono_archive_execution_close_v1(paused, false, false)
     valid
@@ -208,8 +214,8 @@ fn mono_archive_execute_next_specialization_v1(owner: MonoArchiveExecutionV1) ->
     mono_archive_execution_accumulate_v1(owner, receipt)
     Ok(receipt)
 
-fn mono_archive_execution_complete_v1(owner: MonoArchiveExecutionV1) -> bool:
-    if not mono_archive_execution_preflight_v1(owner) or not mono_archive_roots_complete_v1(owner): return false
+fn mono_archive_execution_complete_in_owned_scope_v1(owner: MonoArchiveExecutionV1) -> bool:
+    if not mono_archive_execution_preflight_in_owned_scope_v1(owner) or not mono_archive_roots_complete_v1(owner): return false
     val state = owner.admission.state
     if state.cursor != state.queue.len() or state.emitted.len() != state.queue.len() or
             owner.specialization_records.len() != state.queue.len(): return false
@@ -233,7 +239,17 @@ fn mono_archive_execution_complete_v1(owner: MonoArchiveExecutionV1) -> bool:
         index = index + 1
     true
 
+fn mono_archive_execution_complete_v1(owner: MonoArchiveExecutionV1) -> bool:
+    if not hir_cache_enabled() or hir_cache_last_warnings().len() != 0: return false
+    if not transient_scope_begin(): return false
+    val valid = mono_archive_execution_complete_in_owned_scope_v1(owner)
+    val paused = transient_scope_pause()
+    mono_archive_execution_close_v1(paused, false, false)
+    valid
+
 export MonoArchiveExecutionV1
 export mono_archive_execution_create_v1, mono_archive_roots_complete_v1
 export mono_archive_execute_next_root_v1, mono_archive_execute_next_specialization_v1
 export mono_archive_execution_complete_v1
+
+export mono_archive_execution_complete_in_owned_scope_v1
