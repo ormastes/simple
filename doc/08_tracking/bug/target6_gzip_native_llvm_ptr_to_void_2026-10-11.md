@@ -9,3 +9,5 @@ Reproduce with the admitted pure-Simple Stage 2 compiler and `SIMPLE_NO_STUB_FAL
 After the 3-module closure completes MIR and AOP, SMF packaging reports `unsupported LLVM value conversion from ptr to void function=lib.nogc_sync_mut.compression.gzip.inflate._inflate_block_dynamic_bounded value=%l100` and aborts. The output file is absent. HIR warns about `Any` escaping around `inflate.spl:268`; the causal link is unverified.
 
 Expected: a typed source diagnostic or valid LLVM conversion, never a compiler abort. Inspect the `%l100` value owner and the heterogeneous bitstream return shape before changing gzip data representation. See `doc/09_report/compiler/target6_gzip_mir_unblock_llvm_failure_2026-10-11.md` and its retained build log.
+
+Follow-up: explicit `[Any]` return on dynamic inflate and `[[i64]]` return on `huffman_build` advance the same focused compile to the stored-block helper before the identical ptr-to-void error. See the retained cycle-2 and cycle-3 logs in the report. The scope is a family of untyped gzip helper returns, not one LLVM local.
