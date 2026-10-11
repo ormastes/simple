@@ -92,3 +92,9 @@ contract. A distinct woven-body descriptor supplies actual cold capture before
 optional quiet resolution, with strict stage/domain separation and the unchanged
 8 MiB raw envelope bound. The `weave-cold` fixture requires 14 native checks,
 still unrun; its diagnostic boundary labels grant no production or final trust.
+
+Post-HIR selected fact readers now take captured-policy selection inputs rather
+than consulting another compilation's ambient claims. Ordinary wrappers keep
+their original selection. Global/local HAL still enables the full graph, while
+no-claim effect layouts remain unmeasured. The real managed archive fixture now
+requires 26 checks (including the separately archived HAL source), all unrun.

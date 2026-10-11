@@ -171,6 +171,12 @@ without changing their resolved-stage bytes/key/API. The `weave-cold` selector
 requires 14 actual-body native checks, unrun. The real driver prerequisite owner
 must authenticate both stage boundaries and the original returned cold capture.
 
+The post-HIR `*_selected_in_owned_scope_v1` readers accept actual captured-policy
+walker selection. Ambient wrappers remain unchanged, and global/local HAL
+overrides remain mandatory. The `postfacts` selector now hashes all three real
+fixture source files and requires 26 native checks, still unrun. Selection flags
+alone grant no accepted policy or stage ownership.
+
 ## 2026-09-26 — `native-build` restored: backend table in the interpreted worker, entry-file hashing, module-init reads
 
 - **The interpreted native-build worker never installed the static backend
