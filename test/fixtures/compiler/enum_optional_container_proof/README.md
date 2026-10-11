@@ -9,7 +9,7 @@ integers and malformed presence slots. Alias IDs are allocated through the actua
 SymbolTable and preserve exact defining-owner metadata; no foreign table IDs are
 used. The fixture is compiler API diagnostic evidence, not a production admission.
 
-`positive.spl` must compile and exit0 with nonempty/nil and empty declared optional
-record arrays. `wrong_record.spl` and `wrong_integer.spl` must be rejected with an
+`positive.spl` must compile, execute two assertions on nonempty/nil and empty
+declared optional record arrays, and print its two-guard receipt. `wrong_record.spl` and `wrong_integer.spl` must be rejected with an
 enum payload type mismatch; a compiled executable or unrelated compiler crash is
 not a successful negative result. Root owns future bounded native execution.
