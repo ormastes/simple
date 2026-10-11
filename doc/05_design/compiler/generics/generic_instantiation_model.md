@@ -83,6 +83,26 @@ nested positions, which spells `Result`/`Slice`/`Ref`/a function type `unknown`,
 
 ## 4. Specialization identity
 
+### Executable model key encoding
+
+The model's `mk_key` uses a separate structural encoding rather than
+`mt_render` display text. A text component is its decimal length, `:` and its
+unchanged contents. Types start with `v` (variable), `c` (constant), or `a`
+(application); applications include a framed constructor name followed by
+`l<arity>:` and recursively encoded children. The complete key frames module
+and function names independently, then includes the encoded type-argument list.
+This disambiguates delimiter-bearing names, empty applications, nesting and
+argument boundaries. For example, `m::f<i64>` has model key `m1:mf1:fl1:c3:i64`.
+
+The motivating counterexample is closed `Con("Box<i64>")` versus
+`App("Box", [Con("i64")])`: their display text is identical. Owner `a::b` with
+function `c` also shared the old key with owner `a` and function `b::c`.
+The law spec now compares structural keys in the finite universe and adds
+explicit adversarial regressions. These are pending executable validation on an
+admitted self-hosted runner; no arbitrary-term key proof is claimed. Production
+key encodings remain separate: differential assertions compare identity
+equivalence or distinctness, not byte-for-byte equality with model key text.
+
 - One specialization per (template, structural `type_key` of the type arguments). The display
   (symbol) name is the old mangling; when two different instantiations mangle alike
   (`keep<Result<i64, E>>` / `keep<Result<bool, E>>` are both `keep$unknown`) the later one is
