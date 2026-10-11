@@ -1,5 +1,5 @@
 use compiler.mir.mir_lowering_types.MirLowering
-use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolTable, SymbolId, SymbolKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolTable, SymbolId, SymbolKind, Effect, EffectKind}
 use compiler.hir.hir_symbol_table_methods.*
 use compiler.mir._MirLowering.provider_metadata.mir_class_identity
 use compiler.mir._MirLowering.module_lowering.*
@@ -18,7 +18,15 @@ fn function_signature_children(type_: HirType) -> [HirType]?:
              HirTypeKind.Ref(inner, _) | HirTypeKind.Ptr(inner, _) |
              HirTypeKind.Optional(inner) | HirTypeKind.Isolated(inner): return Some([inner])
         case HirTypeKind.Dict(left, right) | HirTypeKind.Result(left, right): return Some([left, right])
-        case HirTypeKind.Function(params, ret, _): return Some(params + [ret])
+        case HirTypeKind.Function(params, ret, effects):
+            var children = params + [ret]
+            for effect in effects:
+                match effect.kind:
+                    case EffectKind.Throws(payload): children = children.push(payload)
+                    case EffectKind.Pure | EffectKind.IO | EffectKind.Async |
+                         EffectKind.Mutates | EffectKind.Allocates | EffectKind.Custom(_): ()
+                    case _: return nil
+            return Some(children)
         case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool |
              HirTypeKind.Char | HirTypeKind.Str | HirTypeKind.Unit |
              HirTypeKind.Never | HirTypeKind.Any: return Some([])
@@ -108,7 +116,18 @@ impl MirLowering:
                 while index < params.len():
                     rebuilt_params = rebuilt_params.push(rebound_children[index])
                     index = index + 1
-                HirTypeKind.Function(rebuilt_params, rebound_children[index], effects)
+                val rebuilt_return = rebound_children[index]
+                index = index + 1
+                var rebuilt_effects: [Effect] = []
+                for effect in effects:
+                    val rebuilt_effect = match effect.kind:
+                        case EffectKind.Throws(_):
+                            val payload = rebound_children[index]
+                            index = index + 1
+                            Effect(kind: EffectKind.Throws(payload), span: effect.span)
+                        case _: effect
+                    rebuilt_effects = rebuilt_effects.push(rebuilt_effect)
+                HirTypeKind.Function(rebuilt_params, rebuilt_return, rebuilt_effects)
             case _: type_.kind
         FunctionSignatureRebinding(type_: HirType(kind: kind, span: type_.span), consumed: cursor, valid: true)
 
