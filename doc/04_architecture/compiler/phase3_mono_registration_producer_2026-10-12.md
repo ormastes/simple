@@ -125,3 +125,13 @@ and runtime digest. Repository v2 binds both selection and receipt path. Per-sou
 authored/content identities remain distinct, covered by each archive input key;
 they must never be compared globally. Native dependency fixtures cover changed
 provider keys and descriptor/source mismatches; execution is still pending.
+
+Two further actual mono fixture controls independently store complete archives
+with different selection digests, or the same digest and a distinct receipt path
+containing the actual canonical receipt's exact bytes. Each descriptor must pass
+individual source/body/input validation before the cross-module registration and
+repository refusal is tested. Both refusals preserve the first module's published
+epoch and coverage. The selection strings are explicit consistency controls, not
+fabricated production admission; the real canonical capsule remains bound and
+verified by the launcher. Combined with the ordered execution controls the mono
+launcher includes these two consistency checks. With the subsequent schedule-proof controls it requires 71 checks. Native compilation/execution remain pending.

@@ -52,3 +52,15 @@ input key (`f7c60c79a8dc8187121c4f6357559c75e218eba1`) plus repository selection
 binding (`232164581470b4ab94bb5add066164b59017f63c`). The private historical
 branch does not contain the entire latest driver authority chain; it must be
 integrated in dependency order before an admitted producer can execute this fixture.
+
+Independent static review found that recomputing a schedule digest at execution
+creation could accept root symbols removed after registration sealing. Registration
+now records a promoted complete schedule digest after every validated actual body
+publication. Capture/publication and seal compare current module/SymbolId rows to
+that proof. Seal preserves the digest; execution creation compares to the preserved
+sealed digest, not merely a new hash of mutable rows. Preflight continues checking
+the same digest after creation. Three actual native controls remove root IDs before
+seal, after seal and after execution creation, requiring refusal with unchanged
+phase state and no FIFO creation. Combined with cross-module provider consistency
+controls, the mono launcher requires 71 checks. All remain unexecuted pending the
+root-owned native slot.

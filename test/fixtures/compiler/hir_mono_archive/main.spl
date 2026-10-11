@@ -21,6 +21,7 @@ use compiler.mono.mono_archive_types_v1.{MonoTemplateSignatureV1, mono_template_
 use compiler.mono.mono_archive_state_v1.{mono_archive_state_create_v1, mono_archive_state_digest_v1}
 use compiler.mono.mono_archive_registration_v1.*
 use compiler.common.config.{Logger}
+use compiler.common.driver_source_file.{source_file_coverage_identity}
 use compiler.common.diagnostics.span.{Span}
 use std.env.{env_get}
 use std.nogc_sync_mut.io_runtime.{file_read_nullable}
@@ -136,6 +137,22 @@ fn archive_fixture(module: HirModule) -> Result<HirBodyArchiveV1, text>:
         runtime_provider_digest: env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_DIGEST"),
         runtime_provider_receipt_path: env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_RECEIPT"),
         producer_header: hir_cache_header(), stage: "lowered-unresolved-v1"), module, [])
+
+fn archive_fixture_selected_control(module: HirModule, selection: text,
+        receipt_path: text) -> Result<HirBodyArchiveV1, text>:
+    # Explicit consistency controls, not new admission authority. The launcher
+    # has already verified the actual selected canonical capsule. Its exact
+    # receipt bytes and physical fixture source remain the authority inputs.
+    val physical = file_read_nullable(module.path) ?? ""
+    val (authored, content) = source_file_coverage_identity(module.path, physical)
+    hir_body_archive_store_v1(HirBodyArchiveInputV1(source_path: module.path,
+        module_name: module.name, is_entry: false,
+        closure_digest: env_get("SIMPLE_HIR_LEASE_CLOSURE_DIGEST"),
+        runtime_provider_digest: env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_DIGEST"),
+        runtime_provider_receipt_path: receipt_path,
+        producer_header: hir_cache_header(), stage: "lowered-unresolved-v1",
+        provider_selection_digest: selection, source_content_digest: sha256_text(content),
+        source_authored_path: authored), module, [])
 
 fn collector(modules: Dict<text, HirModule>) -> MonomorphizationPass:
     var pass_ = MonomorphizationPass.create()
@@ -525,7 +542,23 @@ fn main() -> i64:
     for name in admitted_order:
         val rows = capture_registration(execution_registration, admission.repository.modules[name])
         if rows.is_err() or mono_archive_publish_registration_v1(execution_registration, rows.unwrap()).is_err(): return 132
+    val actual_registered_roots = execution_registration.roots
+    val omitted_roots = [MonoArchiveRootOrderV1(module_name: root.name, symbols: []),
+        MonoArchiveRootOrderV1(module_name: provider.name, symbols: [])]
+    execution_registration.roots = omitted_roots
+    if not mono_archive_registration_seal_v1(execution_registration, inventory, admitted_order).is_err() or
+            execution_registration.sealed or execution_registration.epoch != 2 or
+            execution_registration.state.epoch != 0: return 157
+    execution_registration.roots = actual_registered_roots
+    checks = checks + 1
     if mono_archive_registration_seal_v1(execution_registration, inventory, admitted_order).is_err(): return 133
+    val sealed_schedule = execution_registration.sealed_schedule_digest
+    execution_registration.roots = omitted_roots
+    if not mono_archive_execution_create_v1(execution_registration, inventory, admitted_order).is_err() or
+            execution_registration.sealed_schedule_digest != sealed_schedule or
+            execution_registration.state.epoch != 0 or execution_registration.state.queue.len() != 0: return 158
+    execution_registration.roots = actual_registered_roots
+    checks = checks + 1
     if not mono_archive_execution_create_v1(execution_registration, inventory, [provider.name, root.name]).is_err(): return 134
     checks = checks + 1
     if not transient_scope_begin(): return 135
@@ -535,6 +568,11 @@ fn main() -> i64:
     val execution_result = mono_archive_execution_create_v1(execution_registration, inventory, admitted_order)
     if execution_result.is_err(): return 137
     val execution = execution_result.unwrap()
+    execution.roots = omitted_roots
+    if mono_archive_execution_complete_v1(execution) or
+            not mono_archive_execute_next_root_v1(execution).is_err() or execution.expected_epoch != 0: return 159
+    execution.roots = actual_registered_roots
+    checks = checks + 1
     if not mono_archive_execute_next_specialization_v1(execution).is_err() or
             mono_archive_execution_complete_v1(execution) or execution.expected_epoch != 0: return 138
     checks = checks + 1
@@ -577,6 +615,47 @@ fn main() -> i64:
     if mono_archive_execution_complete_v1(execution) or not mono_archive_execute_next_root_v1(execution).is_err(): return 147
     execution.admission.state.epoch = completion_epoch
     checks = checks + 1
-    if checks != 66: return 52
+    # Each alternate descriptor is individually valid against real stored HIR,
+    # physical source and the launcher's actual canonical receipt bytes. The
+    # rejection must therefore reach the cross-module consistency boundary.
+    val capsule_path = env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_RECEIPT")
+    val selection_a = sha256_text("explicit selection consistency control A")
+    val selection_b = sha256_text("explicit selection consistency control B")
+    val selected_root_result = archive_fixture_selected_control(root, selection_a, capsule_path)
+    val selected_provider_result = archive_fixture_selected_control(provider, selection_b, capsule_path)
+    if selected_root_result.is_err() or selected_provider_result.is_err(): return 148
+    val selected_root = selected_root_result.unwrap()
+    val selected_provider = selected_provider_result.unwrap()
+    if not hir_body_archive_matches_v1(selected_root, selected_root.input) or
+            not hir_body_archive_matches_v1(selected_provider, selected_provider.input): return 149
+    val selected_owner_result = mono_archive_registration_create_v1()
+    if selected_owner_result.is_err(): return 150
+    val selected_owner = selected_owner_result.unwrap()
+    val selected_root_rows = capture_registration(selected_owner, selected_root)
+    if selected_root_rows.is_err() or mono_archive_publish_registration_v1(selected_owner, selected_root_rows.unwrap()).is_err(): return 151
+    var selected_mismatch_modules: Dict<text, HirBodyArchiveV1> = {}
+    selected_mismatch_modules[root.name] = selected_root
+    selected_mismatch_modules[provider.name] = selected_provider
+    if not capture_registration(selected_owner, selected_provider).is_err() or
+            not mono_archive_admit_v1(selected_mismatch_modules, collector(modules)).is_err() or
+            selected_owner.epoch != 1 or selected_owner.archives.len() != 1: return 152
+    checks = checks + 1
+    val receipt_copy_path = hir_cache_path(sha256_text("explicit receipt path consistency control")) + ".receipt"
+    val capsule_bytes = file_read_nullable(capsule_path) ?? ""
+    if capsule_bytes == "" or not file_write(receipt_copy_path, capsule_bytes): return 153
+    val path_provider_result = archive_fixture_selected_control(provider, selection_a, receipt_copy_path)
+    if path_provider_result.is_err(): return 154
+    val path_provider = path_provider_result.unwrap()
+    if not hir_body_archive_matches_v1(path_provider, path_provider.input) or
+            path_provider.input.runtime_provider_digest != selected_root.input.runtime_provider_digest or
+            path_provider.input.provider_selection_digest != selected_root.input.provider_selection_digest: return 155
+    var path_mismatch_modules: Dict<text, HirBodyArchiveV1> = {}
+    path_mismatch_modules[root.name] = selected_root
+    path_mismatch_modules[provider.name] = path_provider
+    if not capture_registration(selected_owner, path_provider).is_err() or
+            not mono_archive_admit_v1(path_mismatch_modules, collector(modules)).is_err() or
+            selected_owner.epoch != 1 or selected_owner.archives.len() != 1: return 156
+    checks = checks + 1
+    if checks != 71: return 52
     print "HIR mono archive consumer: {checks} checks passed"
     0

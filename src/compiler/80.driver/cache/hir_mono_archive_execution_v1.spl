@@ -1,17 +1,15 @@
 # Actual ordered root barrier and FIFO consumer. Persistent owners contain
 # compact declarations and complete-body artifact descriptors, never HirModule.
 use compiler.mono.mono_archive_registration_v1.{MonoArchiveRegistrationOwnerV1,
-    MonoArchiveRootOrderV1}
+    MonoArchiveRootOrderV1, mono_archive_registration_schedule_digest_v1}
 use compiler.mono.mono_archive_state_v1.{mono_archive_state_digest_v1}
 use compiler.mono.monomorphize_integration.{mono_sym_key}
-use compiler.hir.hir_codec_support.{HirCodecWriter}
 use compiler.driver.cache.hir_mono_archive_consumer_v1.{MonoArchiveAdmissionV1,
     MonoArchiveRepositoryV1, MonoArchivePublicationV1, mono_archive_repository_authority_v1,
     mono_archive_rewrite_root_v1, mono_archive_drain_one_v1, mono_archive_apply_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_last_warnings,
     hir_cache_promote_diagnostic_owner_v1, hir_cache_clear_last_warnings}
 use std.io_runtime.{env_get}
-use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
     transient_scope_end, transient_promote}
 
@@ -34,21 +32,7 @@ class MonoArchiveExecutionV1:
     unresolved_generic_calls: i64
 
 fn mono_archive_root_schedule_digest_v1(roots: [MonoArchiveRootOrderV1]) -> text:
-    var writer = HirCodecWriter.create()
-    writer.put_i64(roots.len())
-    var seen: Dict<text, bool> = {}
-    for module in roots:
-        if seen.has(module.module_name): return ""
-        seen[module.module_name] = true
-        writer.put_text(module.module_name)
-        writer.put_i64(module.symbols.len())
-        var previous = -1
-        for symbol in module.symbols:
-            if symbol < 0 or symbol <= previous: return ""
-            previous = symbol
-            writer.put_i64(symbol)
-    if not writer.ok: return ""
-    sha256_text("mono-ordered-root-schedule-v1\n" + writer.finish())
+    mono_archive_registration_schedule_digest_v1(roots)
 
 fn mono_archive_execution_close_v1(paused: bool, admitted: bool, owned: bool):
     val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
@@ -82,7 +66,8 @@ fn mono_archive_execution_create_v1(owner: MonoArchiveRegistrationOwnerV1,
             if owner.roots[index].module_name != name: valid = false
         index = index + 1
     val authority = if valid: mono_archive_repository_authority_v1(owner.archives) else: ""
-    valid = valid and schedule != "" and authority != "" and
+    valid = valid and schedule != "" and schedule == owner.sealed_schedule_digest and
+        schedule == owner.published_schedule_digest and authority != "" and
         authority == owner.state.facts.body_authority and mono_archive_state_digest_v1(owner.state) != ""
     val paused = transient_scope_pause()
     val owned = if paused and valid: transient_promote(schedule) else: false

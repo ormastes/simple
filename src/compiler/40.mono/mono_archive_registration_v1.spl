@@ -61,6 +61,8 @@ class MonoArchiveRegistrationOwnerV1:
     generic_classes: i64
     epoch: i64
     sealed: bool
+    published_schedule_digest: text
+    sealed_schedule_digest: text
 
 struct MonoArchiveRegistrationReceiptV1:
     archive: HirBodyArchiveV1
@@ -104,15 +106,41 @@ fn mono_archive_registration_create_v1() -> Result<MonoArchiveRegistrationOwnerV
         symbol_identities: {})
     Ok(MonoArchiveRegistrationOwnerV1(state: mono_archive_state_create_v1(facts),
         archives: {}, roots: [], generic_functions: 0, generic_structs: 0,
-        generic_classes: 0, epoch: 0, sealed: false))
+        generic_classes: 0, epoch: 0, sealed: false,
+        published_schedule_digest: "", sealed_schedule_digest: ""))
+
+fn mono_archive_registration_schedule_digest_v1(roots: [MonoArchiveRootOrderV1]) -> text:
+    var writer = HirCodecWriter.create()
+    writer.put_i64(roots.len())
+    var seen: Dict<text, bool> = {}
+    for module in roots:
+        if seen.has(module.module_name): return ""
+        seen[module.module_name] = true
+        writer.put_text(module.module_name)
+        writer.put_i64(module.symbols.len())
+        var previous = -1
+        for symbol in module.symbols:
+            if symbol < 0 or symbol <= previous: return ""
+            previous = symbol
+            writer.put_i64(symbol)
+    if not writer.ok: return ""
+    sha256_text("mono-ordered-root-schedule-v1\n" + writer.finish())
 
 fn mono_archive_registration_owner_digest_v1(owner: MonoArchiveRegistrationOwnerV1) -> text:
     val state_digest = mono_archive_state_digest_v1(owner.state)
     if state_digest == "" or owner.archives.len() != owner.roots.len(): return ""
+    if owner.roots.len() == 0:
+        if owner.published_schedule_digest != "": return ""
+    else:
+        if owner.published_schedule_digest == "" or
+                mono_archive_registration_schedule_digest_v1(owner.roots) != owner.published_schedule_digest: return ""
+    if owner.sealed and owner.sealed_schedule_digest != owner.published_schedule_digest: return ""
     var w = HirCodecWriter.create()
     w.put_text(state_digest)
     w.put_i64(owner.epoch)
     w.put_bool(owner.sealed)
+    w.put_text(owner.published_schedule_digest)
+    w.put_text(owner.sealed_schedule_digest)
     w.put_i64(owner.generic_functions)
     w.put_i64(owner.generic_structs)
     w.put_i64(owner.generic_classes)
@@ -130,7 +158,7 @@ fn mono_archive_registration_owner_digest_v1(owner: MonoArchiveRegistrationOwner
         w.put_text(archive.body_digest)
         w.put_text(archive.lowering_warnings_digest)
     if not w.ok: return ""
-    sha256_text("mono-registration-owner-v1\n" + w.finish())
+    sha256_text("mono-registration-owner-v2\n" + w.finish())
 
 fn mono_archive_registration_row_digest_v1(row: MonoArchiveRegistrationRowV1) -> text:
     var w = HirCodecWriter.create()
@@ -458,12 +486,13 @@ fn mono_archive_collect_registration_in_owned_scope_v1(owner: MonoArchiveRegistr
     if receipt.seal == "": return Err("registration publication unavailable")
     Ok(receipt)
 
-fn mono_archive_registration_close_v1():
+fn mono_archive_registration_close_v1(schedule: text, admitted: bool):
     val paused = transient_scope_pause()
+    val schedule_owned = if paused and admitted: transient_promote(schedule) else: false
     val owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
     if paused: hir_cache_clear_last_warnings()
     val ended = transient_scope_end()
-    if not paused or not owned or not ended: panic("registration verification ownership")
+    if not paused or not owned or not ended or (admitted and not schedule_owned): panic("registration verification ownership")
 
 fn mono_archive_publish_registration_v1(owner: MonoArchiveRegistrationOwnerV1,
         receipt: MonoArchiveRegistrationReceiptV1) -> Result<bool, text>:
@@ -484,7 +513,10 @@ fn mono_archive_publish_registration_v1(owner: MonoArchiveRegistrationOwnerV1,
                 val exact = mono_archive_collect_registration_in_owned_scope_v1(owner,
                     decoded, receipt.archive.input.module_name, receipt.archive)
                 valid = exact.is_ok() and exact.unwrap().seal == receipt.seal
-    mono_archive_registration_close_v1()
+    val schedule = if valid: mono_archive_registration_schedule_digest_v1(owner.roots +
+        [MonoArchiveRootOrderV1(module_name: receipt.archive.input.module_name, symbols: receipt.roots)]) else: ""
+    valid = valid and schedule != ""
+    mono_archive_registration_close_v1(schedule, valid)
     if not valid: return Err("registration predecessor, body, rows, or order refused")
     # Only promoted typed row payloads enter existing resident indexes, AFTER
     # scratch ends. There is no worker/facts/full-index clone promotion.
@@ -522,6 +554,7 @@ fn mono_archive_publish_registration_v1(owner: MonoArchiveRegistrationOwnerV1,
     owner.generic_structs = owner.generic_structs + receipt.generic_structs
     owner.generic_classes = owner.generic_classes + receipt.generic_classes
     owner.epoch = owner.epoch + 1
+    owner.published_schedule_digest = schedule
     Ok(true)
 
 fn mono_archive_registration_seal_v1(owner: MonoArchiveRegistrationOwnerV1,
@@ -550,10 +583,12 @@ fn mono_archive_registration_seal_v1(owner: MonoArchiveRegistrationOwnerV1,
     for name in expected_inventory.keys():
         if not owner.archives.has(name) or
                 owner.archives[name].input.source_path != expected_inventory[name]: valid = false
+    val schedule = mono_archive_registration_schedule_digest_v1(owner.roots)
+    valid = valid and schedule != "" and schedule == owner.published_schedule_digest
     val authority = if valid: mono_archive_repository_authority_v1(owner.archives) else: ""
     valid = valid and authority != ""
     val paused = transient_scope_pause()
-    val owned = if paused and valid: transient_promote(authority) else: false
+    val owned = if paused and valid: transient_promote(authority) and transient_promote(schedule) else: false
     val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
     if paused: hir_cache_clear_last_warnings()
     val ended = transient_scope_end()
@@ -564,6 +599,7 @@ fn mono_archive_registration_seal_v1(owner: MonoArchiveRegistrationOwnerV1,
     facts.body_authority = authority
     owner.state.facts = facts
     owner.sealed = true
+    owner.sealed_schedule_digest = schedule
     Ok(MonoArchiveAdmissionV1(repository: MonoArchiveRepositoryV1(
         modules: owner.archives, authority: authority), state: owner.state))
 
@@ -571,3 +607,4 @@ export MonoArchiveRegistrationRowV1, MonoArchiveRootOrderV1
 export MonoArchiveRegistrationOwnerV1, MonoArchiveRegistrationReceiptV1
 export mono_archive_registration_create_v1, mono_archive_collect_registration_in_owned_scope_v1
 export mono_archive_publish_registration_v1, mono_archive_registration_seal_v1
+export mono_archive_registration_schedule_digest_v1
