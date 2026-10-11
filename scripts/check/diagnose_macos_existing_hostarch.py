@@ -9,23 +9,38 @@ PREFIX = "src__lib__nogc_sync_mut__io_runtime__"
 def run(debugger):
     target = debugger.GetSelectedTarget()
     process = target.GetProcess()
-    evidence = {"qualification": "UNADMITTED", "checkpoints": {}}
+    evidence = {"qualification": "UNADMITTED", "capture": "INCOMPLETE", "checkpoints": {}}
     debugger.SetAsync(True)
+    def persist():
+        with open(os.environ["HOSTARCH_DIAGNOSTIC_RECEIPT"], "w") as output:
+            json.dump(evidence, output, indent=2)
     def bounded_continue(seconds=30):
+        listener = lldb.SBListener("hostarch-state")
+        process.GetBroadcaster().AddListener(listener, lldb.SBProcess.eBroadcastBitStateChanged)
+        prior_stop = process.GetStopID()
         error = process.Continue()
         if error.Fail():
             raise RuntimeError("debugger continue failed")
         deadline = time.monotonic() + seconds
-        while process.GetState() in [lldb.eStateRunning, lldb.eStateStepping, lldb.eStateLaunching] and time.monotonic() < deadline:
+        while time.monotonic() < deadline:
+            event = lldb.SBEvent()
+            if listener.WaitForEvent(1, event):
+                state = lldb.SBProcess.GetStateFromEvent(event)
+                if state == lldb.eStateStopped and process.GetStopID() != prior_stop:
+                    return state
+                if state in [lldb.eStateExited, lldb.eStateDetached]:
+                    return state
+        process.Stop()
+        stop_deadline = time.monotonic() + 3
+        while time.monotonic() < stop_deadline:
+            if process.GetState() == lldb.eStateStopped and process.GetStopID() != prior_stop:
+                evidence["timeout_stack"] = [[str(frame) for frame in list(thread)[:12]] for thread in process]
+                persist()
+                raise RuntimeError("bounded debugger timeout before requested boundary")
             time.sleep(0.1)
-        if process.GetState() in [lldb.eStateRunning, lldb.eStateStepping, lldb.eStateLaunching]:
-            process.Stop()
-            stop_deadline = time.monotonic() + 3
-            while process.GetState() != lldb.eStateStopped and time.monotonic() < stop_deadline:
-                time.sleep(0.1)
-            evidence["timeout_stack"] = [[str(frame) for frame in list(thread)[:12]] for thread in process]
-            raise RuntimeError("bounded debugger timeout before requested boundary")
-        return process.GetState()
+        evidence["timeout_stack_unavailable"] = "process did not confirm a new stop"
+        persist()
+        raise RuntimeError("bounded debugger timeout; interrupt failed")
     def symbol(name):
         contexts = target.FindFunctions(name)
         if contexts.GetSize() != 1:
@@ -77,7 +92,7 @@ def run(debugger):
         target.BreakpointDelete(breakpoint.GetID())
         return frame
     try:
-        # Workflow launches already stopped at the exact host_arch owner.
+        # Workflow launches stopped at executable entry; wait for the actual host owner.
         host = target.FindBreakpointByID(1)
         bounded_continue(70)
         if process.GetState() != lldb.eStateStopped or host.GetHitCount() != 1:
@@ -87,6 +102,7 @@ def run(debugger):
         frame = stop_at(shell)
         command = text(frame, frame.FindRegister("x0").GetValueAsUnsigned())
         evidence["command"] = command
+        persist()
         if bytes.fromhex(command["hex"]) != b"uname -m":
             raise RuntimeError("host_arch did not call exact uname -m")
         # Offsets bound to verified SHA404042 disassembly, after actual getters.
@@ -94,6 +110,7 @@ def run(debugger):
             frame = stop_at(shell + offset)
             raw = frame.FindRegister("x0").GetValueAsUnsigned()
             evidence["checkpoints"][label] = frame.FindRegister("x0").GetValueAsSigned() if label == "exit_code" else text(frame, raw)
+            persist()
         # Return from actual shell_output, recording post-trim text.
         thread = process.GetSelectedThread()
         debugger.SetAsync(False)
@@ -103,6 +120,7 @@ def run(debugger):
             raise RuntimeError("shell_output return not observed")
         frame = thread.GetFrameAtIndex(0)
         evidence["trimmed"] = text(frame, frame.FindRegister("x0").GetValueAsUnsigned())
+        persist()
         debugger.SetAsync(False)
         thread.StepOut()
         debugger.SetAsync(True)
