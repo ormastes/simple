@@ -1,0 +1,37 @@
+"""
+HIR cache keys preserve the source identity carried by serialized HIR.
+Byte-identical modules in different configured families remain separate.
+"""
+
+use std.spec.*
+use compiler.driver.driver_hir_cache.{hir_cache_key}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+
+describe "HIR cache source identity":
+    it "separates identical modules and invalidates changed content at one identity":
+        val root = "build/hir_cache_source_identity_{rt_getpid()}"
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val sync_path = root + "/sync_mod.spl"
+        val async_path = root + "/async_mod.spl"
+        val content = "pub fn answer() -> i64:\n    1\n"
+        expect(rt_file_write_text(sync_path, content)).to_equal(true)
+        expect(rt_file_write_text(async_path, content)).to_equal(true)
+        val sync_key = hir_cache_key(sync_path, "same-admitted-closure", false)
+        val async_key = hir_cache_key(async_path, "same-admitted-closure", false)
+        expect(sync_key.len()).to_equal(64)
+        expect(async_key.len()).to_equal(64)
+        expect(sync_key == async_key).to_equal(false)
+        expect(hir_cache_key(sync_path, "same-admitted-closure", false)).to_equal(sync_key)
+        expect(hir_cache_key(sync_path, "same-admitted-closure", true) == sync_key).to_equal(false)
+        expect(hir_cache_key(sync_path, "another-admitted-closure", false) == sync_key).to_equal(false)
+        expect(rt_file_write_text(sync_path, "pub fn answer() -> i64:\n    2\n")).to_equal(true)
+        expect(hir_cache_key(sync_path, "same-admitted-closure", false) == sync_key).to_equal(false)
+        expect(hir_cache_key(async_path, "same-admitted-closure", false)).to_equal(async_key)
+        expect(rt_file_delete(sync_path)).to_equal(true)
+        expect(rt_file_delete(async_path)).to_equal(true)
+        expect(rt_dir_remove_all(root)).to_equal(true)
