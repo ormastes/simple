@@ -123,7 +123,7 @@ fn _sffi_env_get(key: text) -> text?:
         rt_env_get(key)
 
 @always_inline
-fn _sffi_enum_discriminant(value: MirInstKind) -> i64:
+fn _llvm_inst_discriminant(value: MirInstKind) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(value)
 
@@ -895,14 +895,14 @@ impl MirTextCodegen for MirToLlvm:
     me first_unemitted_call_destination(body: MirBody) -> i64:
         """Return the first MIR Call destination without an emitted LLVM SSA
         definition, or -1 when every value-producing Call was emitted."""
-        val call_disc = _sffi_enum_discriminant(MirInstKind.Call(nil, mir_operand_const_int(0), []))
+        val call_disc = _llvm_inst_discriminant(MirInstKind.Call(nil, mir_operand_const_int(0), []))
         var block_i = 0
         while block_i < body.blocks.len():
             val instructions = body.blocks[block_i].instructions
             var instruction_i = 0
             while instruction_i < instructions.len():
                 val inst = instructions[instruction_i]
-                if _sffi_enum_discriminant(inst.kind) == call_disc:
+                if _llvm_inst_discriminant(inst.kind) == call_disc:
                     # Typed accessor, not raw payload/tuple decoding -- see
                     # MirInst.bootstrap_call_dest_local_id. -1 covers both a
                     # void Call and a non-Call, so nothing to account for.
@@ -946,14 +946,14 @@ impl MirTextCodegen for MirToLlvm:
         val inst_kind = inst.kind
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:kind index={index}"
-        val const_disc = _sffi_enum_discriminant(MirInstKind.Const(LocalId(id: 0), MirConstValue.Zero, MirType.i64()))
+        val const_disc = _llvm_inst_discriminant(MirInstKind.Const(LocalId(id: 0), MirConstValue.Zero, MirType.i64()))
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:const-discriminant index={index}"
-        if _sffi_enum_discriminant(inst_kind) == const_disc:
+        if _llvm_inst_discriminant(inst_kind) == const_disc:
             val payload = _sffi_enum_payload(inst_kind)
-            val dest: LocalId = _sffi_tuple_get(payload, 0)
-            val value: MirConstValue = _sffi_tuple_get(payload, 1)
-            val ty: MirType = _sffi_tuple_get(payload, 2)
+            val dest: LocalId = _sffi_tuple_get<LocalId>(payload, 0)
+            val value: MirConstValue = _sffi_tuple_get<MirConstValue>(payload, 1)
+            val ty: MirType = _sffi_tuple_get<MirType>(payload, 2)
             self.translate_const(dest, value, ty)
             # Fast paths must perform the SAME trailing bookkeeping the
             # fall-through dispatch does. Skipping this call is exactly how the
@@ -971,18 +971,18 @@ impl MirTextCodegen for MirToLlvm:
         # MIR module assembly and backend dispatch; if BOTH fire, it reaches the
         # backend and is lost inside translation.
         if mir_trace_enabled():
-            val agg_bk_disc = _sffi_enum_discriminant(
+            val agg_bk_disc = _llvm_inst_discriminant(
                 MirInstKind.Aggregate(LocalId(id: 0), AggregateKind.Array(MirType.i64()), []))
-            if _sffi_enum_discriminant(inst_kind) == agg_bk_disc:
+            if _llvm_inst_discriminant(inst_kind) == agg_bk_disc:
                 # Print the fast-path discriminants alongside the Aggregate's.
                 # translate_aggregate is NEVER entered (four probes inside it,
                 # all silent) even though the instruction reaches here, so one
                 # of the fast paths below must be matching it and returning.
                 # A COLLISION between these values is the mechanism; this line
                 # shows it directly instead of costing a build per suspect.
-                val d_copy = _sffi_enum_discriminant(MirInstKind.Copy(LocalId(id: 0), LocalId(id: 0)))
-                val d_const = _sffi_enum_discriminant(MirInstKind.Const(LocalId(id: 0), MirConstValue.Zero, MirType.i64()))
-                eprint("MIRB-AGG discs agg={agg_bk_disc} copy={d_copy} const={d_const} inst={_sffi_enum_discriminant(inst_kind)} index={index}\n")
+                val d_copy = _llvm_inst_discriminant(MirInstKind.Copy(LocalId(id: 0), LocalId(id: 0)))
+                val d_const = _llvm_inst_discriminant(MirInstKind.Const(LocalId(id: 0), MirConstValue.Zero, MirType.i64()))
+                eprint("MIRB-AGG discs agg={agg_bk_disc} copy={d_copy} const={d_const} inst={_llvm_inst_discriminant(inst_kind)} index={index}\n")
 
         # AGGREGATE FAST PATH (2026-08-31). Same mechanism, and the same reason,
         # as the Const/Copy/GlobalAddr fast paths around it: on the staged lane
@@ -998,13 +998,13 @@ impl MirTextCodegen for MirToLlvm:
         #     "use of undefined value".
         # Dispatching on the discriminant bypasses the arm binding, exactly as
         # the neighbouring fast paths do for the same reason.
-        val aggregate_disc = _sffi_enum_discriminant(
+        val aggregate_disc = _llvm_inst_discriminant(
             MirInstKind.Aggregate(LocalId(id: 0), AggregateKind.Array(MirType.i64()), []))
-        if _sffi_enum_discriminant(inst_kind) == aggregate_disc:
+        if _llvm_inst_discriminant(inst_kind) == aggregate_disc:
             val agg_payload = _sffi_enum_payload(inst_kind)
-            val agg_dest: LocalId = _sffi_tuple_get(agg_payload, 0)
-            val agg_kind: AggregateKind = _sffi_tuple_get(agg_payload, 1)
-            val agg_operands: [MirOperand] = _sffi_tuple_get(agg_payload, 2)
+            val agg_dest: LocalId = _sffi_tuple_get<LocalId>(agg_payload, 0)
+            val agg_kind: AggregateKind = _sffi_tuple_get<AggregateKind>(agg_payload, 1)
+            val agg_operands: [MirOperand] = _sffi_tuple_get<[MirOperand]>(agg_payload, 2)
             if mir_trace_enabled():
                 eprint("MIRB-AGG fastpath-fired dest={agg_dest.id} operands={agg_operands.len()}\n")
             # Call the uniquely-named impl, NOT the trait name: the trait
@@ -1016,30 +1016,30 @@ impl MirTextCodegen for MirToLlvm:
             self.mark_instruction_dest_defined_at(instructions, index)
             return
 
-        val copy_disc = _sffi_enum_discriminant(MirInstKind.Copy(LocalId(id: 0), LocalId(id: 0)))
+        val copy_disc = _llvm_inst_discriminant(MirInstKind.Copy(LocalId(id: 0), LocalId(id: 0)))
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:copy-discriminant index={index}"
-        if _sffi_enum_discriminant(inst_kind) == copy_disc:
+        if _llvm_inst_discriminant(inst_kind) == copy_disc:
             val payload = _sffi_enum_payload(inst_kind)
-            val dest: LocalId = _sffi_tuple_get(payload, 0)
-            val src: LocalId = _sffi_tuple_get(payload, 1)
+            val dest: LocalId = _sffi_tuple_get<LocalId>(payload, 0)
+            val src: LocalId = _sffi_tuple_get<LocalId>(payload, 1)
             self.translate_copy_move(dest, src, false)
             # Same invariant as the Const fast path above: mirror the trailing
             # bookkeeping of the fall-through dispatch before returning.
             self.mark_instruction_dest_defined_at(instructions, index)
             return
 
-        val store_global_disc = _sffi_enum_discriminant(MirInstKind.StoreGlobal(SymbolId(id: 0), mir_operand_const_int(0)))
+        val store_global_disc = _llvm_inst_discriminant(MirInstKind.StoreGlobal(SymbolId(id: 0), mir_operand_const_int(0)))
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:store-global-discriminant index={index}"
-        if _sffi_enum_discriminant(inst_kind) == store_global_disc:
+        if _llvm_inst_discriminant(inst_kind) == store_global_disc:
             self.translate_store_global_at(instructions, index, module_index, ir_handle)
             return
 
-        val load_global_disc = _sffi_enum_discriminant(MirInstKind.LoadGlobal(LocalId(id: 0), SymbolId(id: 0)))
+        val load_global_disc = _llvm_inst_discriminant(MirInstKind.LoadGlobal(LocalId(id: 0), SymbolId(id: 0)))
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:load-global-discriminant index={index}"
-        if _sffi_enum_discriminant(inst_kind) == load_global_disc:
+        if _llvm_inst_discriminant(inst_kind) == load_global_disc:
             # Read both payload slots through the typed MirInst accessors, the
             # same shape translate_store_global_at has always used for
             # StoreGlobal. The previous raw decode here
@@ -1091,8 +1091,8 @@ impl MirTextCodegen for MirToLlvm:
         # MIR inventory, which would defeat the emission receipt in
         # `translate_call_at` and make both this panic and
         # `first_unemitted_call_destination` vacuous.
-        val call_disc = _sffi_enum_discriminant(MirInstKind.Call(nil, mir_operand_const_int(0), []))
-        if _sffi_enum_discriminant(inst_kind) == call_disc:
+        val call_disc = _llvm_inst_discriminant(MirInstKind.Call(nil, mir_operand_const_int(0), []))
+        if _llvm_inst_discriminant(inst_kind) == call_disc:
             if bootstrap_debug:
                 print "[mir-to-llvm] instruction:call-discriminant index={index}"
             self.translate_call_at(instructions, index, ir_handle)
@@ -1294,7 +1294,7 @@ impl MirTextCodegen for MirToLlvm:
                 # Not a variant: every MirInstKind now has an arm above, so this
                 # is reachable only by a NEW upstream variant with no arm here,
                 # or by a mis-decoded enum handle. It used to be a silent `()`.
-                val unknown_llvm_inst_disc = _sffi_enum_discriminant(inst_kind)
+                val unknown_llvm_inst_disc = _llvm_inst_discriminant(inst_kind)
                 eprint("[mir-to-llvm] E-BACKEND-LLVM-INST-Unknown disc={unknown_llvm_inst_disc} at={llvm_format_span(inst.span)}")
                 self.emit_unsupported_panic("E-BACKEND-LLVM-INST-Unknown: no LLVM backend arm for MIR instruction kind (discriminant {unknown_llvm_inst_disc}) at {llvm_format_span(inst.span)}")
         self.mark_instruction_dest_defined_at(instructions, index)

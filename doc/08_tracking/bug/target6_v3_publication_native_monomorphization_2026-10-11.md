@@ -1,4 +1,4 @@
-# V3 publication fixture blocked in native monomorphization
+# V3 publication native monomorphization repair and MIR timeout
 
 ## Reproduction
 
@@ -11,3 +11,26 @@ The build selected 525 modules. After two HIR passes, the native-build worker re
 ## Required repair
 
 Resolve the monomorphization inference failure or reduce the publisher's transitive native closure while preserving the real publication path. Then build and run the fixture with `SIMPLE_NO_STUB_FALLBACK=1`; require V3 CURRENT readback before claiming Item 6 graph publication. A subsequent full CLI warm route and matched p95/RSS cohorts remain separate gates.
+
+## Bounded repair result
+
+A grouped source repair added explicit type arguments at the failing SFFI,
+promotion, and recursive sort call sites; made the outline's ignored handler
+type concrete; and gave the LLVM MIR instruction discriminant helper a local
+unique name. The second no-stub Stage2 LLVM attempt reduced unresolved
+generic calls from 33 to 2. Its remaining diagnostics were the LLVM helper
+name collision and the `identity` promotion call on a shared source line.
+
+The third and final bounded attempt used both corrections. It reported
+`[mono] generic_fns=71 call_sites=438 specializations=134 unresolved=0`
+and entered `phase=mir` with 525 modules. The 600-second limit ended before
+the first MIR module completed; no executable was produced. Evidence:
+`build/mini_builds/target6_v3_mono_cycle2.log` and
+`build/mini_builds/target6_v3_mono_cycle3.log` in the isolated worktree.
+The three-cycle verification cap is reached for this fixture in this session.
+
+The E-MONO-033 blocker is resolved for this exact source closure. The
+remaining gate is a bounded build that reaches MIR, native link, fixture
+execution, and V3 CURRENT readback. Preserve the frozen source revision and
+cache lineage for that follow-up; do not infer a publication PASS from
+`unresolved=0`.

@@ -677,3 +677,15 @@ Next: resolve or narrow that native closure, run the fixture to a V3 CURRENT
 readback, then exercise the full CLI warm path and matched p95/RSS cohorts.
 Item 6 remains open; this failure does not qualify a publication or performance
 claim.
+
+### 2026-10-11 V3 native monomorphization repair
+
+The first native fixture build's 33 unresolved generic calls were grouped by
+source and repaired. The second bounded attempt reduced the count to two; the
+third reached `unresolved=0` and entered MIR lowering for 525 selected
+modules before its 600-second limit. It produced no executable. The exact
+source changes and three-cycle boundary are recorded in
+[the blocker report](../../../08_tracking/bug/target6_v3_publication_native_monomorphization_2026-10-11.md).
+The next verification must finish MIR/link, run the fixture, and read back a
+V3 CURRENT generation. Full CLI warm reuse, native p95/RSS cohorts, and Item 6
+cutover remain open.
