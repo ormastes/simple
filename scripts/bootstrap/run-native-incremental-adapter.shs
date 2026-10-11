@@ -22,6 +22,7 @@ capsule=$(field capsule_path "$binding")
 runtime=$(field runtime_authority_path "$admission")
 [ "$(field source_authority_path "$capsule/phase2-runtime-capsule.env")" = "$runtime" ]
 sh "$tools/scripts/bootstrap/phase2-runtime-capsule.shs" verify "$capsule" >/dev/null
+runtime_capsule_sha=$(hash "$capsule/phase2-runtime-capsule.env")
 mkdir -p "$lane"
 mkdir "$lane/writer.lock" || { echo 'lane has another writer' >&2; exit 2; }
 printf '%s\n' "$$" >"$lane/writer.lock/pid"
@@ -46,6 +47,9 @@ if [ -e "$lane/binding.env" ]; then
     [ "$(cat "$lane/binding.env")" = "$expected_binding" ] || { echo 'cache lineage changed' >&2; exit 2; }
 else printf '%s\n' "$expected_binding" >"$lane/binding.env"; fi
 [ ! -e "$evidence/build.env" ] && [ ! -e "$evidence/result.json" ] && [ ! -e "$evidence/terminal.env" ] || { echo 'prefix already attempted; retain evidence' >&2; exit 2; }
+previous_build_sha=$(perl -I"$tools/scripts/bootstrap/lib" -MNativeAdapterEvidence=previous_build_evidence -e '
+my $b=previous_build_evidence(@ARGV);print $b->{build_sha256};
+' "$previous_green" "$workspace" "$sha" "$backend" "$runtime_capsule_sha")
 perl -MJSON::PP -MDigest::SHA=sha256_hex -MFile::Basename=dirname -e '
 sub read_bytes {open my $f,"<:raw",$_[0] or die $!;local $/;return <$f>;}
 my($root,$workspace,$green)=@ARGV;my $p=decode_json(read_bytes("$root/manifest.json"));
@@ -72,6 +76,8 @@ trap finish EXIT
     printf '%s\n' 'schema=simple-restricted-prefix-build-v1' 'formal_product_pass=0' "$expected_binding"
     printf '%s\n' "runtime=$runtime" "runtime_cwd=$workspace" "manifest_sha256=$(hash "$evidence/manifest.json")"
     printf '%s\n' "previous_green_path=$previous_green" "previous_green_sha256=$(hash "$previous_green")"
+    printf '%s\n' "previous_build_sha256=$previous_build_sha"
+    printf '%s\n' "runtime_capsule_sha256=$runtime_capsule_sha"
     printf '%s\n' 'SIMPLE_HIR_CACHE=0' 'SIMPLE_SCV_INVENTORY_COLD_INIT=1' 'SIMPLE_NO_STUB_FALLBACK=1' "threads=$threads" 'rss_cap_kib=6835937' "observation_budget_ms=$observation_budget"
 } >"$evidence/build.env"
 mkdir -p "$lane/tmp" "$lane/user-storage" "$lane/worktree-storage"

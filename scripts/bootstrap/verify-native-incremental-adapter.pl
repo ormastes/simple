@@ -1,12 +1,17 @@
 #!/usr/bin/env perl
 use strict;
 use warnings;
+use FindBin;
+use lib "$FindBin::Bin/lib";
+use NativeAdapterEvidence qw(build_evidence);
 use Digest::SHA qw(sha256_hex);
 use JSON::PP;
 @ARGV==2 or die "expected prefix evidence directory and live binary directory\n";
 my ($root,$binary_root)=@ARGV;
 sub bytes {my ($name)=@_;-f "$root/$name" && !-l "$root/$name" or die "missing/linked $name\n";open my $f,'<:raw',"$root/$name" or die $!;local $/;return <$f>;}
 my $p=decode_json(bytes('manifest.json'));
+my $build_evidence=build_evidence($root,0);
+$build_evidence->{workspace} eq $p->{source_root} or die "build source workspace differs\n";
 $p->{schema} eq 'simple-restricted-prefix-v1' && !$p->{formal_product_pass} && $p->{negative_control_available}
     or die "prefix has no positive/negative native authority\n";
 sha256_hex(bytes('canonical-inventory.tsv')) eq $p->{canonical_inventory_sha256} &&
@@ -14,7 +19,8 @@ sha256_hex(bytes('canonical-inventory.tsv')) eq $p->{canonical_inventory_sha256}
 for my $owner (@{$p->{owners}}) {sha256_hex(bytes("sources/$owner->{path}")) eq $owner->{source_sha256} or die "original source changed\n";}
 my $result={schema=>'simple-restricted-prefix-result-v1',status=>'RESTRICTED_PREFIX_GATE_PASS',formal_product_pass=>JSON::PP::false,
     manifest_sha256=>sha256_hex(bytes('manifest.json')),selected_owners=>$p->{selected_owners},attached_owners=>$p->{attached_owners},
-    compiled_owners=>$p->{attached_owners},executed_owners=>$p->{attached_owners},detached_owners=>$p->{detached_owners},quarantined_assertions=>0};
+    compiled_owners=>$p->{attached_owners},executed_owners=>$p->{attached_owners},detached_owners=>$p->{detached_owners},quarantined_assertions=>0,
+    %$build_evidence};
 for my $variant (qw(positive negative)) {
     my $v=$p->{variants}{$variant};sha256_hex(bytes("$variant-entry.spl")) eq $v->{entry_sha256} or die "entry changed\n";
     my $prefix='';
