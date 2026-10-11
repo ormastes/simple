@@ -20,6 +20,8 @@ use compiler.mir.mir_types.{LocalId}
 use compiler.mir._MirLoweringExpr.expr_dispatch.*
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.hir.hir_types.{SymbolKind}
+use compiler.mir._MirLowering.provider_metadata.{mir_class_identity}
 
 fn builtin_extra_rt_operand(name: text, params: [MirType], return_type: MirType) -> MirOperand:
     MirOperand(kind: MirOperandKind.Const(
@@ -796,8 +798,8 @@ impl MirLowering:
         Some(int_result)
 
     me builtin_result_payload_mir(payload_hir: HirType) -> MirType?:
-        """Result payload types the combinators carry: the same scalar/text
-        set lower_result_unwrap supports with a default."""
+        """Decode proven scalar/text payloads or retain a nominal record's
+        runtime handle. A raw I64 is never proof of a nominal payload."""
         match payload_hir.kind:
             case HirTypeKind.Bool: return Some(MirType.bool())
             case HirTypeKind.Int(bits, signed):
@@ -809,9 +811,16 @@ impl MirLowering:
                     return Some(MirType.f64())
                 return nil
             case HirTypeKind.Str: return Some(self.bootstrap_text_type())
+            case HirTypeKind.Named(owner, _):
+                if val declaration = self.symbols.get_symbol_raw(owner.id):
+                    match declaration.kind:
+                        case SymbolKind.Struct | SymbolKind.Class:
+                            return Some(MirType.i64())
+                        case _: ()
+                return nil
             case _: return nil
 
-    me builtin_result_payload(receiver_local: LocalId, payload_hir: HirType, payload_mir: MirType) -> LocalId:
+    me builtin_result_payload(receiver_local: LocalId, payload_hir: HirType, payload_mir: MirType, nominal_owner: text) -> LocalId:
         """Read and decode the active payload of a Result handle."""
         var b_payload = self.builder
         val payload_word = b_payload.emit_call_value(
@@ -829,8 +838,30 @@ impl MirLowering:
                 builtin_extra_rt_operand("rt_interp_cstr", [MirType.i64()], payload_mir),
                 [mir_operand_copy(payload_value)], payload_mir)
             self.builder = b_text
+        if nominal_owner != "":
+            self.struct_value_syms[payload_value.id] = nominal_owner
+        else:
+            match payload_hir.kind:
+                case HirTypeKind.Named(owner, _):
+                    if val declaration = self.symbols.get_symbol_raw(owner.id):
+                        match declaration.kind:
+                            case SymbolKind.Struct:
+                                self.struct_value_syms[payload_value.id] = declaration.name
+                            case SymbolKind.Class:
+                                self.struct_value_syms[payload_value.id] = mir_class_identity(declaration)
+                            case _: ()
+                case _: ()
         self.remember_local_hir_type(payload_value.id, payload_hir, 0, 0)
         payload_value
+
+    me builtin_result_mapper_hir_type(local: LocalId, span: Span) -> HirType?:
+        # Option.map's helper deliberately accepts primitive results only.
+        # Result.map additionally carries nominal records, but only when the
+        # mapper retained a declared HIR owner (never by guessing from I64).
+        if val known = self.find_local_hir_type(local.id):
+            if self.builtin_result_payload_mir(known) != nil:
+                return Some(known)
+        self.option_map_value_hir_type(local, span)
 
     me lower_result_combinator(receiver: HirExpr, method: text, args: [HirCallArg], result_type: HirType, prelowered: LocalId, has_prelowered: bool) -> LocalId:
         """Result.map / map_err / ok, plus unwrap / unwrap_or / unwrap_err on
@@ -866,9 +897,12 @@ impl MirLowering:
             return pred_result
         val maps_err = method == "map_err"
         val source_hir = if maps_err: err_hir else: ok_hir
-        val source_mir_opt = self.builtin_result_payload_mir(source_hir)
+        # Call-return SymbolIds may belong to the provider's symbol table.
+        # Its retained name registry is authoritative for that payload owner.
+        val source_owner = self.result_variant_payload_struct_name(receiver, if maps_err: "Err" else: "Ok") ?? ""
+        val source_mir_opt = if source_owner != "": Some(MirType.i64()) else: self.builtin_result_payload_mir(source_hir)
         if source_mir_opt == nil:
-            return self.builtin_extra_fail_closed("unsupported in stage2: Result.{method}() over a payload type that is not i64, f64, bool or text; use match", Some(receiver.span))
+            return self.builtin_extra_fail_closed("unsupported Result.{method}() payload type: expected a proven scalar, text or nominal record", Some(receiver.span))
         val source_mir = source_mir_opt ?? MirType.i64()
 
         var b_disc = self.builder
@@ -887,7 +921,7 @@ impl MirLowering:
 
         if method == "ok":
             val option_type = HirType(kind: HirTypeKind.Optional(ok_hir), span: receiver.span)
-            val ok_payload = self.builtin_result_payload(receiver_local, ok_hir, source_mir)
+            val ok_payload = self.builtin_result_payload(receiver_local, ok_hir, source_mir, source_owner)
             val some_handle = self.ensure_option_handle(ok_payload, option_type)
             var b_some = self.builder
             b_some.emit_copy(result_local, some_handle)
@@ -914,7 +948,7 @@ impl MirLowering:
         match args[0].value.kind:
             case Lambda(mapper_params, mapper_body, _):
                 if mapper_params.len() == 1:
-                    val active_payload = self.builtin_result_payload(receiver_local, source_hir, source_mir)
+                    val active_payload = self.builtin_result_payload(receiver_local, source_hir, source_mir, source_owner)
                     mapped = self.lower_inline_lambda_with_locals(mapper_params, mapper_body, [active_payload])
                     mapper_ok = true
             case _: ()
@@ -922,12 +956,12 @@ impl MirLowering:
             mapped = self.builtin_extra_fail_closed("unsupported in stage2: Result.{method}(f) with a mapper that is not a one-parameter lambda literal; pass `\\x: ...` or use match", Some(receiver.span))
         var mapped_hir_opt: HirType? = nil
         if mapper_ok:
-            mapped_hir_opt = self.option_map_value_hir_type(mapped, receiver.span)
+            mapped_hir_opt = self.builtin_result_mapper_hir_type(mapped, receiver.span)
             if mapped_hir_opt != nil:
                 if self.builtin_result_payload_mir(mapped_hir_opt ?? HirType(kind: HirTypeKind.Error, span: receiver.span)) == nil:
                     mapped_hir_opt = nil
             if mapped_hir_opt == nil:
-                mapped = self.builtin_extra_fail_closed("unsupported in stage2: Result.{method}(f) whose mapper result is not i64, f64, bool or text; use match", Some(receiver.span))
+                mapped = self.builtin_extra_fail_closed("unsupported Result.{method}(f) mapper result: expected a proven scalar, text or nominal record", Some(receiver.span))
         val mapped_hir = mapped_hir_opt ?? source_hir
         val new_result_type = if maps_err:
             HirType(kind: HirTypeKind.Result(ok_hir, mapped_hir), span: receiver.span)
