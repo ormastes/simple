@@ -17,11 +17,14 @@
 #               (base_mib + jobs * per_job_mib) * 1024)
 #     cap = min(cap, host_total_kib * host_pct / 100)   when host RAM is known
 #     cap = min(cap, hard ceiling)
-# Hard ceiling (NOT tunable; process-tree-rss-watchdog.pl recomputes the same
+# Default hard ceiling (process-tree-rss-watchdog.pl recomputes the same
 # value from --compiler-jobs and refuses anything above it):
 #     ceiling = max(6835937, min(3145728 + jobs * 262144, host_total_kib * 3/4))
 # With no worker count, or with host RAM unreadable, the ceiling stays at the
 # historical 6835937 KiB: the policy widens only on positive evidence.
+# Explicit SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB is a separate compiler-only
+# opt-in, admitted by both owners under 75% of fresh real total AND available
+# memory. It requires enforced scope, declared workers and an explicit cap.
 #
 # Precedence per knob: SIMPLE_BOOTSTRAP_TREE_RSS_<KNOB> > SIMPLE_HOST_TREE_RSS_
 # <KNOB> / host config (scripts/setup/host-env.shs --get) > built-in default.
@@ -129,6 +132,80 @@ bootstrap_tree_rss_ceiling_kib() {
   printf '%s\n' "$btr_c"
 }
 
+# Strict facts for an explicit elevated budget. This parser is also exercised
+# with inert text fixtures; admission itself always reads the real /proc file.
+bootstrap_tree_rss_headroom_facts() {
+  awk '
+    /^Mem(Total|Available|Free):/ {
+      key=$1
+      if (++seen[key] != 1 || NF != 3 || $3 != "kB" ||
+          $2 !~ /^[1-9][0-9]*$/ || length($2) > 15) bad=1
+      value[key]=$2
+    }
+    END {
+      source=seen["MemAvailable:"] ? "MemAvailable:" : "MemFree:"
+      total=value["MemTotal:"]; available=value[source]
+      if (bad || seen["MemTotal:"] != 1 || seen[source] != 1 ||
+          available+0 > total+0 || available+0 <= 0 || total+0 <= 0 ||
+          (seen["MemFree:"] && value["MemFree:"]+0 > total+0)) exit 1
+      printf "%s %s %s\n", total, available, source
+    }' "$1"
+}
+
+bootstrap_tree_rss_admit_ceiling() {
+  bootstrap_tree_rss_ceiling_request_kib=0
+  bootstrap_tree_rss_ceiling_previous_kib=$bootstrap_tree_rss_ceiling_kib
+  bootstrap_tree_rss_available_kib=0
+  bootstrap_tree_rss_available_source=unknown
+  bootstrap_tree_rss_ceiling_admission=default
+  [ -n "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB+x}" ] || return 0
+  bootstrap_tree_rss_ceiling_admission=refused
+  btr_requested=$SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+  case "$btr_requested" in ''|0*|*[!0-9]*)
+    bootstrap_tree_rss_refusal='tree RSS policy: compiler ceiling must be canonical positive decimal'; return 1 ;;
+  esac
+  [ "${#btr_requested}" -le 15 ] || {
+    bootstrap_tree_rss_refusal='tree RSS policy: compiler ceiling is oversized'; return 1;
+  }
+  bootstrap_tree_rss_ceiling_request_kib=$btr_requested
+  case "$btr_explicit" in ''|0*|*[!0-9]*)
+    bootstrap_tree_rss_refusal='tree RSS policy: elevated ceiling requires an explicit canonical positive cap'; return 1 ;;
+  esac
+  [ "${#btr_explicit}" -le 15 ] && [ "$btr_jobs" -gt 0 ] &&
+    [ "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" = enforce ] &&
+    [ -z "${BOOTSTRAP_TREE_RSS_MEMINFO_PATH+x}" ] &&
+    [ -z "${BOOTSTRAP_TREE_RSS_TEST_FIXTURE+x}" ] &&
+    [ -z "${SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH+x}" ] &&
+    [ -z "${SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE+x}" ] || {
+      bootstrap_tree_rss_refusal='tree RSS policy: elevated ceiling requires real host memory, explicit workers and enforced compiler scope'; return 1;
+    }
+  btr_facts=$(bootstrap_tree_rss_headroom_facts /proc/meminfo) || {
+    bootstrap_tree_rss_refusal='tree RSS policy: real host headroom is unavailable or contradictory'; return 1;
+  }
+  read -r bootstrap_tree_rss_host_total_kib bootstrap_tree_rss_available_kib bootstrap_tree_rss_available_source <<EOF
+$btr_facts
+EOF
+  bootstrap_tree_rss_host_total_source=proc-meminfo
+  btr_total_bound=$((bootstrap_tree_rss_host_total_kib / 4 * 3))
+  btr_available_bound=$((bootstrap_tree_rss_available_kib / 4 * 3))
+  [ "$btr_requested" -gt "$bootstrap_tree_rss_ceiling_previous_kib" ] &&
+    [ "$btr_requested" -le "$btr_total_bound" ] &&
+    [ "$btr_requested" -le "$btr_available_bound" ] &&
+    [ "$btr_explicit" -le "$btr_requested" ] || {
+      bootstrap_tree_rss_refusal="tree RSS policy: compiler ceiling $btr_requested refused (previous=$bootstrap_tree_rss_ceiling_previous_kib total_bound=$btr_total_bound available_bound=$btr_available_bound cap=$btr_explicit)"; return 1;
+    }
+  bootstrap_tree_rss_ceiling_kib=$btr_requested
+  bootstrap_tree_rss_ceiling_admission=elevated
+}
+
+bootstrap_tree_rss_ceiling_metadata() {
+  printf 'compiler_ceiling_request_kib=%s\ncompiler_ceiling_previous_kib=%s\ncompiler_ceiling_admitted_kib=%s\ncompiler_available_kib=%s\ncompiler_available_source=%s\ncompiler_ceiling_admission=%s\n' \
+    "${bootstrap_tree_rss_ceiling_request_kib:-0}" "${bootstrap_tree_rss_ceiling_previous_kib:-0}" \
+    "$(if [ "${bootstrap_tree_rss_ceiling_admission:-refused}" = refused ]; then printf 0; else printf '%s' "${bootstrap_tree_rss_ceiling_kib:-0}"; fi)" \
+    "${bootstrap_tree_rss_available_kib:-0}" "${bootstrap_tree_rss_available_source:-unknown}" \
+    "${bootstrap_tree_rss_ceiling_admission:-refused}"
+}
+
 # One knob: specific env > SIMPLE_HOST_* env > host config file > default.
 # An invalid value at any layer is a refusal, not a silent fallback: a typo in
 # a memory budget must not quietly become a different budget.
@@ -178,6 +255,19 @@ bootstrap_tree_rss_resolve() {
   btr_jobs=${1:-0}
   btr_root=${2:-}
   bootstrap_tree_rss_refusal=
+  # A failure before the host probe must not publish a previous invocation's
+  # successful admission metadata when this sourced owner is called again.
+  bootstrap_tree_rss_ceiling_request_kib=0
+  bootstrap_tree_rss_ceiling_previous_kib=0
+  bootstrap_tree_rss_available_kib=0
+  bootstrap_tree_rss_available_source=unknown
+  bootstrap_tree_rss_ceiling_admission=refused
+  if [ -n "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB+x}" ]; then
+    case "$SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB" in ''|0*|*[!0-9]*) ;;
+      *) [ "${#SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB}" -gt 15 ] ||
+           bootstrap_tree_rss_ceiling_request_kib=$SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB ;;
+    esac
+  fi
   btr_jobs=$(bootstrap_tree_rss_canonical_uint "$btr_jobs" 3)
   [ -n "$btr_jobs" ] && [ "$btr_jobs" -le 128 ] || {
     bootstrap_tree_rss_refusal="tree RSS policy: worker count must be a decimal 0..128, got '${1:-}'"
@@ -186,6 +276,7 @@ bootstrap_tree_rss_resolve() {
   bootstrap_tree_rss_probe_host || return 1
   bootstrap_tree_rss_ceiling_kib=$(bootstrap_tree_rss_ceiling_kib "$btr_jobs" "$bootstrap_tree_rss_host_total_kib")
   btr_explicit=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-}
+  bootstrap_tree_rss_admit_ceiling || return 1
   if [ -n "$btr_explicit" ]; then
     bootstrap_tree_rss_is_uint "$btr_explicit" 15 || {
       bootstrap_tree_rss_refusal="tree RSS policy: invalid SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$btr_explicit"
@@ -230,7 +321,7 @@ bootstrap_tree_rss_resolve() {
     fi
     bootstrap_tree_rss_cap_kib=$btr_cap
   fi
-  bootstrap_tree_rss_summary="cap ${bootstrap_tree_rss_cap_kib} KiB (source: ${bootstrap_tree_rss_source}, bound: ${bootstrap_tree_rss_bound}, workers: ${btr_jobs}, hard ceiling: ${bootstrap_tree_rss_ceiling_kib} KiB, host RAM: ${bootstrap_tree_rss_host_total_kib:-unknown} KiB via ${bootstrap_tree_rss_host_total_source})"
+  bootstrap_tree_rss_summary="cap ${bootstrap_tree_rss_cap_kib} KiB (source: ${bootstrap_tree_rss_source}, bound: ${bootstrap_tree_rss_bound}, workers: ${btr_jobs}, hard ceiling: ${bootstrap_tree_rss_ceiling_kib} KiB, host RAM: ${bootstrap_tree_rss_host_total_kib:-unknown} KiB via ${bootstrap_tree_rss_host_total_source}; compiler ceiling admission: ${bootstrap_tree_rss_ceiling_admission}, requested: ${bootstrap_tree_rss_ceiling_request_kib}, previous: ${bootstrap_tree_rss_ceiling_previous_kib}, available: ${bootstrap_tree_rss_available_kib} via ${bootstrap_tree_rss_available_source})"
 }
 
 # Worker count of a compiler command line: the value of the last --threads /

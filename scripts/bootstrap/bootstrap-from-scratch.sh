@@ -3912,6 +3912,9 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     *) stage2_timeout_args="--timeout ${SIMPLE_NATIVE_FILE_TIMEOUT}" ;;
   esac
   stage2_cold_init_env=
+  compiler_ceiling_env=$(bootstrap_stage3_compiler_ceiling_environment) || {
+    echo 'error: invalid SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB' >&2; exit 1;
+  }
   case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
     '') ;;
     1) stage2_cold_init_env=SIMPLE_SCV_INVENTORY_COLD_INIT=1 ;;
@@ -3959,6 +3962,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
       ${stage2_cold_init_env:+"${stage2_cold_init_env}"} \
+      ${compiler_ceiling_env:+"${compiler_ceiling_env}"} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
       ${k1_composition_source_args} --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib \
@@ -4040,6 +4044,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
       "SIMPLE_BINARY=${stage2_admitted_absolute}" \
       ${stage3_diagnostic_env} \
+      ${compiler_ceiling_env:+"${compiler_ceiling_env}"} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
       ${k1_composition_source_args} --source "${cuda_composition_source_root}" \
@@ -4108,7 +4113,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=${stage2_compatibility_manifest_absolute}" \
       "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
-      ${stage2_cold_init_env:+"${stage2_cold_init_env}"}
+      ${stage2_cold_init_env:+"${stage2_cold_init_env}"} \
+      ${compiler_ceiling_env:+"${compiler_ceiling_env}"}
     # These three guards are the ONLY pre-exec refusal on this path, and they
     # used to be bare `|| return 1`. A mismatch therefore produced no build log
     # and no reason anywhere, and the script's own failure diagnosis correctly
@@ -4125,7 +4131,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       cat "${stage2_refusal_log}" >&2
       return 1
     }
-    stage2_expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "${PLATFORM}" "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}") || {
+    stage2_expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "${PLATFORM}" "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-}") || {
       echo "error: stage2 pre-exec refusal: no canonical stage2 env name list for ${PLATFORM}" \
         > "${stage2_refusal_log}"
       cat "${stage2_refusal_log}" >&2
@@ -5046,7 +5052,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
     ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
     SIMPLE_BINARY="${stage2_admitted_absolute}" \
-    ${stage3_diagnostic_env} -- \
+    ${stage3_diagnostic_env} ${compiler_ceiling_env:+"${compiler_ceiling_env}"} -- \
     "${stage2_admitted_absolute}" native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
