@@ -537,3 +537,7 @@ The admitted Stage 2 compiler has no `test` command, and the focused cold semant
 ### 2026-10-11 SCV snapshot MIR row typing
 
 Explicit `[text]` and `[SdnRow]` bindings remove two SCV-specific MIR diagnostics from a bounded 122-module snapshot compile. Thirteen unrelated MIR errors remain and the three-cycle cap is exhausted. This is no native or warm compilation PASS, and the ordinary CLI V3 publisher and matched p95/RSS qualification remain open. See [the focused report](../../../09_report/compiler/target6_scv_snapshot_mir_row_types_2026-10-11.md).
+
+### 2026-10-11 gzip MIR dependency unblock
+
+An indexed Huffman-length loop removes the native MIR non-array iteration diagnostic from the Item 6 dependency closure. A focused three-module admitted Stage 2 compile completes MIR and AOP, then aborts at SMF packaging on an LLVM ptr-to-void conversion in dynamic inflate. See [the report](../../../09_report/compiler/target6_gzip_mir_unblock_llvm_failure_2026-10-11.md) and [the bug](../../../08_tracking/bug/target6_gzip_native_llvm_ptr_to_void_2026-10-11.md). This is no full native or performance PASS.
