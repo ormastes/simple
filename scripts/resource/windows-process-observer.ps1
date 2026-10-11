@@ -7,7 +7,7 @@ param(
 # Native children of MSYS processes are absent from MSYS /proc. Emit the
 # existing progress watcher's portable process-table format from one native
 # snapshot. No process control or repository/cache writes occur here.
-function Get-BootstrapSessionJobMembers([int]$SessionOwnerId) {
+function Initialize-BootstrapJobObserver {
     if (-not ('BootstrapJobObserver' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
@@ -47,6 +47,10 @@ public static class BootstrapJobObserver {
 }
 '@
     }
+}
+
+function Get-BootstrapSessionJobMembers([int]$SessionOwnerId) {
+    Initialize-BootstrapJobObserver
     return [BootstrapJobObserver]::Members($SessionOwnerId)
 }
 
@@ -98,7 +102,10 @@ function ConvertTo-BootstrapProgressRows {
             foreach ($member in $members) {
                 $memberId = [int]$member
                 if (-not $byId.ContainsKey($memberId)) {
-                    throw "session job member absent from native snapshot: $current/$memberId"
+                    $race = [InvalidOperationException]::new(
+                        "session job member absent from native snapshot: $current/$memberId")
+                    $race.Data['BootstrapSnapshotRace'] = $true
+                    throw $race
                 }
                 if ([datetime]$byId[$memberId].CreationDate -lt [datetime]$entry.CreationDate) {
                     throw "session job member predates supervisor: $current/$memberId"
@@ -139,12 +146,36 @@ function ConvertTo-BootstrapProgressRows {
     return $rows.ToArray()
 }
 
+function Get-BootstrapProgressRows {
+    param([int]$RootProcessId, [int]$ExcludedProcessId,
+        [string]$BridgeParents = '',
+        [scriptblock]$SnapshotQuery = { @(Get-CimInstance Win32_Process -OperationTimeoutSec 5) },
+        [scriptblock]$SessionMemberQuery = { param($OwnerId) Get-BootstrapSessionJobMembers $OwnerId },
+        [scriptblock]$ObserverInitialize = { Initialize-BootstrapJobObserver },
+        [ValidateRange(1, 3)][int]$MaxSnapshots = 3)
+    # Add-Type can spawn csc inside the observed job. Initialize before the
+    # process snapshot so our own interop compilation cannot create a member
+    # between that snapshot and the authoritative job query.
+    & $ObserverInitialize
+    for ($attempt = 0; $attempt -lt $MaxSnapshots; $attempt++) {
+        try {
+            $snapshot = @(& $SnapshotQuery)
+            return @(ConvertTo-BootstrapProgressRows $snapshot $RootProcessId $ExcludedProcessId $BridgeParents $SessionMemberQuery)
+        } catch {
+            # A child can start or exit between these two read-only APIs. Take
+            # a fresh complete snapshot AND job query; never omit a missing
+            # member from an owned job or treat Get-Process absence as proof.
+            if (-not $_.Exception.Data.Contains('BootstrapSnapshotRace') -or
+                $attempt + 1 -ge $MaxSnapshots) { throw }
+        }
+    }
+}
+
 if ($MyInvocation.InvocationName -ne '.') {
     $ErrorActionPreference = 'Stop'
     try {
         if ($RootPid -le 0) { throw 'positive RootPid required' }
-        $snapshot = @(Get-CimInstance Win32_Process -OperationTimeoutSec 5)
-        ConvertTo-BootstrapProgressRows $snapshot $RootPid $ExcludePid $Bridge
+        Get-BootstrapProgressRows $RootPid $ExcludePid $Bridge
     } catch {
         [Console]::Error.WriteLine('windows-process-observer: ' + $_.Exception.Message)
         exit 1
