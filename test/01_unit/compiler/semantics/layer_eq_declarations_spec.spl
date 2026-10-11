@@ -5,7 +5,10 @@ use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_types.{HirModule}
 use compiler.common.config.{Logger}
 use compiler.semantics.layer_eq_validation.{layer_eq_module_declarations_v1,
-    validate_layer_eq_declarations_v1, validate_layer_eq_types}
+    validate_layer_eq_declarations_v1, validate_layer_eq_types,
+    layer_eq_required_declaration_names_v1, validate_layer_eq_selected_declarations_v1,
+    layer_eq_index_structs, layer_eq_struct_declaration_v1}
+use compiler.semantics.layer_eq_checker.{LayerEqType}
 
 fn lowered(src: text, path: text, name: text) -> HirModule:
     val parsed = parse_full_frontend(src, path, name, Logger(level: 0))
@@ -47,3 +50,28 @@ describe "actual physical layer-equivalence declaration projection":
         expect(rejected.len()).to_equal(1)
         expect(rejected[0]).to_contain("NoSuchType")
         expect(validate_layer_eq_declarations_v1(["unrelated_module.spl"], declarations).len()).to_equal(0)
+
+    it "does not measure a view whose real target is absent":
+        val hir = lowered("@layer_eq(AbsentDevice)\nstruct UnmeasuredView:\n    x: i64\n", "leq_selection_missing.spl", "leq_selection_missing")
+        val ids = ["leq_selection_missing.spl"]
+        val names = ["UnmeasuredView"]
+        expect(layer_eq_required_declaration_names_v1(ids, names).len()).to_equal(0)
+        val errors = validate_layer_eq_selected_declarations_v1(ids, names, [])
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_contain("AbsentDevice")
+        expect(errors).to_equal(validate_layer_eq_types({"leq_selection_missing": hir}))
+
+    it "selects only the claimed pair and rejects missing measured facts":
+        val hir = lowered("@layer_eq(SelectedDevice)\nstruct SelectedView:\n    x: i64\n\nstruct UnrelatedLayout:\n    spare: text\n\nstruct SelectedDevice:\n    x: i64\n", "leq_selection_pair.spl", "leq_selection_pair")
+        val ids = ["leq_selection_pair.spl"]
+        val names = ["SelectedView", "UnrelatedLayout", "SelectedDevice"]
+        val required = layer_eq_required_declaration_names_v1(ids, names)
+        expect(required).to_equal(["SelectedView", "SelectedDevice"])
+        val by_name = layer_eq_index_structs({"leq_selection_pair": hir})
+        var selected: [LayerEqType] = []
+        for name in required: selected.push(layer_eq_struct_declaration_v1(by_name[name]))
+        expect(validate_layer_eq_selected_declarations_v1(ids, names, selected).len()).to_equal(0)
+        expect(validate_layer_eq_types({"leq_selection_pair": hir}).len()).to_equal(0)
+        val missing = validate_layer_eq_selected_declarations_v1(ids, names, [])
+        expect(missing.len()).to_equal(1)
+        expect(missing[0]).to_contain("was not measured")

@@ -83,8 +83,22 @@ pub fn layer_eq_module_declarations_v1(module: HirModule) -> [LayerEqType]:
     var declarations: [LayerEqType] = []
     for struct_ in module.structs.values():
         if struct_.type_params.len() > 0 or struct_.is_generic_template: continue
-        declarations.push(layer_eq_type_from_layout(struct_.name, layer_eq_layout_of(struct_), []))
+        declarations.push(layer_eq_struct_declaration_v1(struct_))
     declarations
+
+pub fn layer_eq_struct_declaration_v1(struct_: HirStruct) -> LayerEqType:
+    layer_eq_type_from_layout(struct_.name, layer_eq_layout_of(struct_), [])
+
+pub fn layer_eq_required_declaration_names_v1(module_ids: [text], available_names: [text]) -> [text]:
+    var required: [text] = []
+    for key in layer_eq_registry_claim_keys():
+        val view = layer_eq_claim_view(key)
+        val target = layer_eq_registry_target_of_key(key)
+        if view == "" or target == "" or not module_ids.contains(layer_eq_claim_path(key)) or
+                not available_names.contains(view) or not available_names.contains(target): continue
+        if not required.contains(view): required.push(view)
+        if not required.contains(target): required.push(target)
+    required
 
 fn layer_eq_declaration_renames_v1(declaration: LayerEqType, renames: [text]) -> LayerEqType:
     var fields: [LayerEqField] = []
@@ -100,57 +114,53 @@ fn layer_eq_declaration_renames_v1(declaration: LayerEqType, renames: [text]) ->
 # promoted to driver admission without replay against the admitted archive.
 pub fn validate_layer_eq_declarations_v1(module_ids: [text],
         declarations: [LayerEqType]) -> [text]:
-    var errors: [text] = []
-    val claim_keys = layer_eq_registry_claim_keys()
-    if claim_keys.len() == 0:
-        return errors
-    var by_name: Dict<text, LayerEqType> = {}
-    for declaration in declarations: by_name[declaration.name] = declaration
-
-    for key in claim_keys:
-        val claim_path = layer_eq_claim_path(key)
-        val view_name = layer_eq_claim_view(key)
-        val target_name = layer_eq_registry_target_of_key(key)
-        if view_name == "" or target_name == "":
-            continue
-        # Out-of-scope claim: it was recorded for a module that is not part of
-        # this compilation. Skipping is correct and is NOT a fail-open -- the
-        # module that owns the claim carries it again when it is compiled, and
-        # the specs assert that in-scope claims really do produce diagnostics,
-        # so a scoping bug that silenced everything would turn them red.
-        if not module_ids.contains(claim_path):
-            continue
-        # A claim whose view type never reached HIR (e.g. it was lowered away
-        # or is generic) cannot be measured.
-        if not by_name.contains_key(view_name):
-            continue
-        # The TARGET, however, must resolve: an `@layer_eq` naming a type this
-        # compilation cannot see is an unprovable claim, and reporting it as
-        # proven is exactly the fail-open this pass exists to prevent.
-        if not by_name.contains_key(target_name):
-            errors.push("error[layer_eq]: '" + view_name + "' declares @layer_eq("
-                + target_name + ") but '" + target_name
-                + "' is not a non-generic struct visible in this compilation")
-            continue
-        val renames = layer_eq_registry_renames_of_key(key)
-        val view_eq = layer_eq_declaration_renames_v1(by_name[view_name], renames)
-        val target_eq = by_name[target_name]
-        val verdict = check_layer_eq(view_eq, target_eq)
-        if not verdict.ok:
-            errors.push(verdict.diagnostic)
-    errors
-
+    var names: [text] = []
+    for declaration in declarations:
+        if not names.contains(declaration.name): names.push(declaration.name)
+    validate_layer_eq_selected_declarations_v1(module_ids, names, declarations)
 fn validate_layer_eq_types(modules: Dict<text, HirModule>) -> [text]:
     """Prove every recorded `@layer_eq(Target)` claim; return one diagnostic per
     unproven claim (empty list = every claim proven)."""
     if layer_eq_registry_claim_keys().len() == 0: return []
     val module_ids = layer_eq_module_identities(modules)
+    # Preserve the original selection boundary: unrelated and unresolved
+    # missing-target declarations never reach the physical layout engine.
+    # Duplicate names still use the original last-module declaration winner.
+    val by_name = layer_eq_index_structs(modules)
     var declarations: [LayerEqType] = []
-    for module_key in modules.keys():
-        for declaration in layer_eq_module_declarations_v1(modules[module_key]):
-            declarations.push(declaration)
-    validate_layer_eq_declarations_v1(module_ids, declarations)
+    val required = layer_eq_required_declaration_names_v1(module_ids, by_name.keys())
+    for name in required: declarations.push(layer_eq_struct_declaration_v1(by_name[name]))
+    # The gate also needs membership for missing-target diagnostics and the
+    # old absent-view exclusion. Supply names separately; never synthesize a
+    # physical layout for a declaration that was not measured.
+    validate_layer_eq_selected_declarations_v1(module_ids, by_name.keys(), declarations)
+
+pub fn validate_layer_eq_selected_declarations_v1(module_ids: [text],
+        available_names: [text], declarations: [LayerEqType]) -> [text]:
+    var errors: [text] = []
+    var measured: Dict<text, LayerEqType> = {}
+    for declaration in declarations: measured[declaration.name] = declaration
+    for key in layer_eq_registry_claim_keys():
+        val view_name = layer_eq_claim_view(key)
+        val target_name = layer_eq_registry_target_of_key(key)
+        if view_name == "" or target_name == "" or
+                not module_ids.contains(layer_eq_claim_path(key)): continue
+        if not available_names.contains(view_name): continue
+        if not available_names.contains(target_name):
+            errors.push("error[layer_eq]: '" + view_name + "' declares @layer_eq("
+                + target_name + ") but '" + target_name
+                + "' is not a non-generic struct visible in this compilation")
+            continue
+        if not measured.has(view_name) or not measured.has(target_name):
+            errors.push("internal error: selected layer-equivalence declaration was not measured")
+            continue
+        val view = layer_eq_declaration_renames_v1(measured[view_name], layer_eq_registry_renames_of_key(key))
+        val verdict = check_layer_eq(view, measured[target_name])
+        if not verdict.ok: errors.push(verdict.diagnostic)
+    errors
 
 export validate_layer_eq_types, layer_eq_index_structs, layer_eq_layout_of
 export layer_eq_module_declarations_v1, validate_layer_eq_declarations_v1
+export layer_eq_struct_declaration_v1, layer_eq_required_declaration_names_v1
+export validate_layer_eq_selected_declarations_v1
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
