@@ -25,3 +25,10 @@ lowering path currently rejects `verified` with
 `FV2-E-CALL-MANIFEST-PRODUCER` until it records resolver decisions during
 lowering and finalizes the manifest post-MIR/pre-VIR. Runtime/generated calls
 need an explicit external-boundary contract instead of an internal binding.
+
+Generic substitution: `src/verification/type_inference_compile` must build the
+manual `GenericsConstraints` target along with generated `Generics`. Its closed
+substitution laws concern the reduced `Ty` model only; the production `MType`
+model, generic annotation preservation, owner resolution and native behavior
+need independent refinement and execution evidence. See the generics model
+design's reduced Lean proof boundary.

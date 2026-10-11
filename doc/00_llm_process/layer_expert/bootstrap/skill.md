@@ -828,6 +828,16 @@ on `Err(_)` (var UNSET); `Ok("")` goes to `parse_str_checked`, which rejects
 the empty spelling and hard-exits 2. Use `env -u SIMPLE_EXECUTION_MODE ...` or
 a scoped `unset`. The same rule applies to every fail-closed selector variable.
 
+## Restricted native prefix evidence (2026-10-11)
+
+Restricted native prefix evidence must bind the original `build.env` digest,
+workspace, compiler digest, backend and frozen runtime-capsule receipt digest.
+`NativeAdapterEvidence.pm` checks those identities before accepting prior green
+evidence. The legacy one-file adapter requires its matching original build
+receipt; older prefix results without bindings are not upgraded retrospectively.
+This remains local evidence integrity, not signed provenance, whole-bootstrap
+qualification or formal proof. See `doc/07_guide/tooling/native_incremental_adapter.md`.
+
 ## Host config feeds the job ceiling (2026-10-09)
 
 `bootstrap_build_jobs_resolve` ceiling: explicit arg > `SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS`
