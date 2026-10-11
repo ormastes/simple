@@ -6,6 +6,9 @@ use compiler.hir.hir_definitions.{HirFunction}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_codec.{hir_module_encode}
 use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.mono.mono_archive_current_body_v1.{MonoArchiveCurrentBodyV1, MonoArchiveCurrentBodyLoadV1, mono_archive_current_body_digest_v1}
+use compiler.mono.mono_archive_body_input_v1.*
+use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{HirOwnedArtifactContextV1}
 use compiler.driver.cache.hir_mono_function_record_v1.{mono_complete_function_digest_v1,
     mono_function_record_store_in_owned_scope_v1, mono_function_record_load_in_owned_scope_v1}
 use compiler.monomorphize.engine.{specialize_function_with_types}
@@ -24,12 +27,17 @@ use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_load_in_owned
     hir_cache_promote_diagnostic_owner_v1}
 use std.io_runtime.{env_get}
 use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
     transient_scope_end, transient_promote}
 
 struct MonoArchiveRepositoryV1:
     modules: Dict<text, HirBodyArchiveV1>
     authority: text
+    current_bodies: Dict<text, MonoArchiveCurrentBodyV1> = {}
+    current_cache: HirOwnedArtifactContextV1? = nil
+    current_order: [text] = []
+    current_mode: bool = false
 
 struct MonoArchiveAdmissionV1:
     repository: MonoArchiveRepositoryV1
@@ -83,6 +91,46 @@ fn mono_archive_repository_authority_v1(modules: Dict<text, HirBodyArchiveV1>) -
         w.put_text(archive.input.runtime_provider_receipt_path)
     if not w.ok: return ""
     sha256_text("mono-archive-repository-v2\n" + w.finish())
+
+fn mono_archive_repository_input_v1(repository: MonoArchiveRepositoryV1,
+        name: text) -> Result<MonoArchiveBodyInputV1, text>:
+    if not repository.modules.has(name): return Err("mono input module unavailable")
+    if repository.current_mode:
+        if not repository.current_bodies.has(name) or repository.current_cache == nil:
+            return Err("mono current input missing; unresolved fallback refused")
+        return Ok(MonoArchiveBodyInputV1(original_parent: repository.modules[name],
+            current_body: Some(repository.current_bodies[name]), current_cache: repository.current_cache))
+    if repository.current_bodies.len() != 0 or repository.current_cache != nil or repository.current_order.len() != 0:
+        return Err("mono unresolved repository carries ambiguous current inputs")
+    Ok(MonoArchiveBodyInputV1(original_parent: repository.modules[name]))
+
+fn mono_archive_repository_digest_v1(repository: MonoArchiveRepositoryV1) -> text:
+    if repository.current_mode and transient_array_scope_state_v1() != 1: return ""
+    val original = mono_archive_repository_authority_v1(repository.modules)
+    if original == "": return ""
+    if not repository.current_mode:
+        if repository.current_bodies.len() != 0 or repository.current_cache != nil or repository.current_order.len() != 0: return ""
+        return original
+    if repository.current_bodies.len() != repository.modules.len() or
+            repository.current_order.len() != repository.modules.len(): return ""
+    if val cache = repository.current_cache:
+        var writer = HirCodecWriter.create()
+        writer.put_text(original)
+        writer.put_text(cache.directory)
+        writer.put_text(cache.producer_header)
+        writer.put_bool(cache.enabled)
+        var seen: Dict<text, bool> = {}
+        for name in repository.current_order:
+            if seen.has(name): return ""
+            seen[name] = true
+            val input = mono_archive_repository_input_v1(repository, name)
+            if input.is_err() or not mono_archive_body_input_matches_v1(input.unwrap()): return ""
+            val body: MonoArchiveCurrentBodyV1 = repository.current_bodies[name]
+            writer.put_text(name)
+            writer.put_text(mono_archive_current_body_digest_v1(body))
+        if not writer.ok: return ""
+        return sha256_text("mono-current-repository-mechanical-v1\n" + writer.finish())
+    ""
 
 fn mono_archive_admit_v1(modules: Dict<text, HirBodyArchiveV1>, collector: MonomorphizationPass) -> Result<MonoArchiveAdmissionV1, text>:
     # Existing actual collector is a compatibility input, not a fake body graph.
@@ -161,7 +209,7 @@ fn mono_archive_visit_v1(admission: MonoArchiveAdmissionV1, module_name: text, r
         return Err("mono archive FIFO empty")
     if not transient_scope_begin(): return Err("mono archive consumer scope unavailable")
     val state = admission.state
-    val authority = mono_archive_repository_authority_v1(admission.repository.modules)
+    val authority = mono_archive_repository_digest_v1(admission.repository)
     val base = mono_archive_state_digest_v1(state)
     var publication: MonoArchivePublicationV1? = nil
     var selected_module = module_name
@@ -179,10 +227,16 @@ fn mono_archive_visit_v1(admission: MonoArchiveAdmissionV1, module_name: text, r
             base != "" and state.facts.feature_policy == env_get("SIMPLE_MONO_LEVELS") and
             admission.repository.modules.has(selected_module):
         val archive: HirBodyArchiveV1 = admission.repository.modules[selected_module]
-        if val decoded = hir_cache_load_in_owned_scope(archive.archive_key):
+        val input_result = mono_archive_repository_input_v1(admission.repository, selected_module)
+        val loaded: Result<MonoArchiveCurrentBodyLoadV1, text> = if input_result.is_ok():
+            mono_archive_body_input_load_in_owned_scope_v1(input_result.unwrap()) else: Err("mono selected input unavailable")
+        if loaded.is_ok():
+            val input = input_result.unwrap()
+            val decoded = loaded.unwrap().module
+            val warnings = loaded.unwrap().warnings
             if decoded.name == selected_module and decoded.path == archive.input.source_path and
-                    sha256_text(hir_module_encode(decoded)) == archive.body_digest and
-                    hir_body_archive_warnings_digest_v1(hir_cache_last_warnings()) == archive.lowering_warnings_digest:
+                    sha256_text(hir_module_encode(decoded)) == mono_archive_body_input_digest_v1(input) and
+                    hir_body_archive_warnings_digest_v1(warnings) == mono_archive_body_input_warnings_digest_v1(input):
                 if val original = mono_archive_find_function_v1(decoded, selected_symbol):
                     var function = original
                     var valid = not queued and not is_generic_function(function) and not function.is_generic_template
@@ -220,7 +274,7 @@ fn mono_archive_visit_v1(admission: MonoArchiveAdmissionV1, module_name: text, r
                         val function_digest = mono_archive_function_digest_v1(rewritten)
                         val delta_digest = mono_archive_delta_digest_v1(delta)
                         var receipt = MonoArchivePublicationV1(module_name: selected_module,
-                            input_archive_key: archive.archive_key, input_body_digest: archive.body_digest,
+                            input_archive_key: mono_archive_body_input_key_v1(input), input_body_digest: mono_archive_body_input_digest_v1(input),
                             output_archive_key: "", output_body_digest: body_digest,
                             output_function_digest: function_digest, target_symbol: rewritten.symbol.id,
                             target_name: rewritten.name, stage: "mono-function-rewrite-v1", delta: delta,
@@ -230,7 +284,7 @@ fn mono_archive_visit_v1(admission: MonoArchiveAdmissionV1, module_name: text, r
                         if body_digest.len() == 64 and function_digest != "" and delta_digest != "" and
                                 receipt.output_archive_key != "" and
                                 mono_function_record_store_in_owned_scope_v1(receipt.function_archive_key, rewritten).is_ok() and
-                                hir_cache_store_in_owned_scope(receipt.output_archive_key, output, hir_cache_last_warnings()):
+                                hir_cache_store_in_owned_scope(receipt.output_archive_key, output, warnings):
                             publication = Some(receipt)
     val admitted = publication != nil
     val paused = transient_scope_pause()
@@ -261,7 +315,10 @@ fn mono_archive_publication_matches_v1(admission: MonoArchiveAdmissionV1, receip
             receipt.output_archive_key != mono_archive_output_key_v1(receipt) or
             not admission.repository.modules.has(receipt.module_name): return false
     val archive: HirBodyArchiveV1 = admission.repository.modules[receipt.module_name]
-    if receipt.input_archive_key != archive.archive_key or receipt.input_body_digest != archive.body_digest: return false
+    val input_result = mono_archive_repository_input_v1(admission.repository, receipt.module_name)
+    if input_result.is_err(): return false
+    val input = input_result.unwrap()
+    if receipt.input_archive_key != mono_archive_body_input_key_v1(input) or receipt.input_body_digest != mono_archive_body_input_digest_v1(input): return false
     # Replay the same actual request allocator against scratch indexes. Merely
     # checking sequential IDs cannot prove structural mangling/display collision
     # policy, concrete-type depth, or defining-module selection.
@@ -301,7 +358,7 @@ fn mono_archive_publication_matches_v1(admission: MonoArchiveAdmissionV1, receip
     if val output = hir_cache_load_in_owned_scope(receipt.output_archive_key):
         if output.name != receipt.module_name or output.path != archive.input.source_path or
                 sha256_text(hir_module_encode(output)) != receipt.output_body_digest or
-                hir_body_archive_warnings_digest_v1(hir_cache_last_warnings()) != archive.lowering_warnings_digest: return false
+                hir_body_archive_warnings_digest_v1(hir_cache_last_warnings()) != mono_archive_body_input_warnings_digest_v1(input): return false
         if val function = mono_archive_find_function_v1(output, receipt.target_symbol):
             return mono_archive_load_function_in_owned_scope_v1(receipt).is_ok() and
                 function.name == receipt.target_name and
@@ -314,7 +371,7 @@ fn mono_archive_apply_v1(admission: MonoArchiveAdmissionV1, receipt: MonoArchive
     if not hir_cache_enabled() or hir_cache_last_warnings().len() != 0:
         return Err("mono archive publication cache owner unavailable")
     if not transient_scope_begin(): return Err("mono archive publication scope unavailable")
-    val authority = mono_archive_repository_authority_v1(admission.repository.modules)
+    val authority = mono_archive_repository_digest_v1(admission.repository)
     val valid = authority != "" and authority == admission.repository.authority and
         authority == admission.state.facts.body_authority and
         admission.state.facts.feature_policy == env_get("SIMPLE_MONO_LEVELS") and
@@ -348,6 +405,7 @@ export MonoArchiveRepositoryV1, MonoArchiveAdmissionV1, MonoArchivePublicationV1
 export mono_archive_admit_v1, mono_archive_function_digest_v1
 export mono_archive_rewrite_root_v1, mono_archive_drain_one_v1
 export mono_archive_apply_v1
+export mono_archive_repository_input_v1, mono_archive_repository_digest_v1
 export mono_archive_repository_authority_v1
 export mono_archive_load_function_in_owned_scope_v1
 

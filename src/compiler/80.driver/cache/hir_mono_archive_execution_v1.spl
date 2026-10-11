@@ -1,11 +1,11 @@
 # Actual ordered root barrier and FIFO consumer. Persistent owners contain
 # compact declarations and complete-body artifact descriptors, never HirModule.
 use compiler.mono.mono_archive_registration_v1.{MonoArchiveRegistrationOwnerV1,
-    MonoArchiveRootOrderV1, mono_archive_registration_schedule_digest_v1}
+    MonoArchiveCurrentRegistrationOwnerV1, MonoArchiveRootOrderV1, mono_archive_registration_schedule_digest_v1}
 use compiler.mono.mono_archive_state_v1.{mono_archive_state_digest_v1, mono_archive_delta_digest_v1}
 use compiler.mono.monomorphize_integration.{mono_sym_key}
 use compiler.driver.cache.hir_mono_archive_consumer_v1.{MonoArchiveAdmissionV1,
-    MonoArchiveRepositoryV1, MonoArchivePublicationV1, mono_archive_repository_authority_v1,
+    MonoArchiveRepositoryV1, MonoArchivePublicationV1, mono_archive_repository_digest_v1,
     mono_archive_rewrite_root_v1, mono_archive_drain_one_v1, mono_archive_apply_v1,
     mono_archive_output_key_v1, mono_archive_function_record_key_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_last_warnings,
@@ -92,6 +92,21 @@ fn mono_archive_execution_close_v1(paused: bool, admitted: bool, owned: bool):
 
 fn mono_archive_execution_create_v1(owner: MonoArchiveRegistrationOwnerV1,
         expected_inventory: Dict<text, text>, expected_order: [text]) -> Result<MonoArchiveExecutionV1, text>:
+    mono_archive_execution_create_repository_v1(owner,
+        MonoArchiveRepositoryV1(modules: owner.archives, authority: owner.state.facts.body_authority),
+        expected_inventory, expected_order, "", "")
+
+fn mono_archive_current_execution_create_v1(current: MonoArchiveCurrentRegistrationOwnerV1,
+        expected_inventory: Dict<text, text>, expected_order: [text]) -> Result<MonoArchiveExecutionV1, text>:
+    val owner = current.registration
+    mono_archive_execution_create_repository_v1(owner,
+        MonoArchiveRepositoryV1(modules: owner.archives, authority: owner.state.facts.body_authority,
+            current_bodies: current.bodies, current_cache: Some(current.cache), current_order: expected_order, current_mode: true),
+        expected_inventory, expected_order, current.published_digest, current.sealed_digest)
+
+fn mono_archive_execution_create_repository_v1(owner: MonoArchiveRegistrationOwnerV1,
+        repository: MonoArchiveRepositoryV1, expected_inventory: Dict<text, text>, expected_order: [text],
+        published_current_digest: text, sealed_current_digest: text) -> Result<MonoArchiveExecutionV1, text>:
     # Recheck the admitted schedule at the handoff; sealing does not authorize
     # another caller to reorder the mutable root descriptor array afterwards.
     if not owner.sealed or not hir_cache_enabled() or hir_cache_last_warnings().len() != 0:
@@ -114,17 +129,21 @@ fn mono_archive_execution_create_v1(owner: MonoArchiveRegistrationOwnerV1,
         else:
             if owner.roots[index].module_name != name: valid = false
         index = index + 1
-    val authority = if valid: mono_archive_repository_authority_v1(owner.archives) else: ""
+    val authority = if valid: mono_archive_repository_digest_v1(repository) else: ""
     valid = valid and schedule != "" and schedule == owner.sealed_schedule_digest and
         schedule == owner.published_schedule_digest and authority != "" and
         authority == owner.state.facts.body_authority and mono_archive_state_digest_v1(owner.state) != ""
+    if repository.current_mode:
+        valid = valid and sealed_current_digest != "" and published_current_digest != "" and
+            repository.current_order == expected_order and sealed_current_digest ==
+                sha256_text("mono-current-registration-sealed-v1\n" + authority + "\n" +
+                    mono_archive_state_digest_v1(owner.state) + "\n" + schedule + "\n" + published_current_digest + "\n{owner.epoch}")
     val paused = transient_scope_pause()
     val owned = if paused and valid: transient_promote(schedule) else: false
     mono_archive_execution_close_v1(paused, valid, owned)
     if not valid: return Err("mono execution admitted schedule or initial state refused")
     Ok(MonoArchiveExecutionV1(admission: MonoArchiveAdmissionV1(
-        repository: MonoArchiveRepositoryV1(modules: owner.archives,
-            authority: owner.state.facts.body_authority), state: owner.state),
+        repository: repository, state: owner.state),
         roots: owner.roots, schedule_digest: schedule, root_module_cursor: 0,
         root_function_cursor: 0, expected_epoch: 0, root_records: {},
         specialization_records: [], publication_ledger_digest: sha256_text("mono-applied-publication-ledger-empty-v1"),
@@ -135,7 +154,7 @@ fn mono_archive_execution_create_v1(owner: MonoArchiveRegistrationOwnerV1,
 
 fn mono_archive_execution_preflight_in_owned_scope_v1(owner: MonoArchiveExecutionV1) -> bool:
     if transient_array_scope_state_v1() != 1 or not hir_cache_enabled() or hir_cache_last_warnings().len() != 0: return false
-    val authority = mono_archive_repository_authority_v1(owner.admission.repository.modules)
+    val authority = mono_archive_repository_digest_v1(owner.admission.repository)
     val valid = authority != "" and authority == owner.admission.repository.authority and
         authority == owner.admission.state.facts.body_authority and
         owner.admission.state.epoch == owner.expected_epoch and
@@ -248,6 +267,7 @@ fn mono_archive_execution_complete_v1(owner: MonoArchiveExecutionV1) -> bool:
     valid
 
 export MonoArchiveExecutionV1
+export mono_archive_current_execution_create_v1
 export mono_archive_execution_create_v1, mono_archive_roots_complete_v1
 export mono_archive_execute_next_root_v1, mono_archive_execute_next_specialization_v1
 export mono_archive_execution_complete_v1
