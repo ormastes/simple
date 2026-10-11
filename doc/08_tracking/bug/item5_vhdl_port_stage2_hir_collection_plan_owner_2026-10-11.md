@@ -107,3 +107,18 @@ an admitted current-source compiler, rerun one focused closure, and use its
 location-rich message to identify the actual HIR arm producer before editing
 match lowering or source patterns. Item 5/6 behavior and performance gates
 remain unqualified.
+
+## 2026-10-11 source-scan correction and qualified-owner candidate
+
+The earlier static scan excluded expression-form `val ... = match` blocks.
+A corrected scan of the same 87 parsed modules found ten blocks where a bare
+enum arm is followed by `case _`: `MethodResolution.Unresolved` in
+`hir_types.spl` and nine `SymbolKind.Method`/`Function` blocks in
+`hir_symbol_table_methods.spl`. MIR can see an unresolved bare variant as
+a Binding, making a later wildcard look like a duplicate default. The branch
+now qualifies the two `Unresolved` and ten `Method`/`Function` pattern
+occurrences with their declared enum owners. Existing generated HIR codec
+patterns use the same qualified syntax. This is a source-level repair
+candidate, not a compile or behavior PASS. The next bounded verification
+cycle should compile the 87-module closure once and inspect any remaining
+location-rich B5b diagnostic before claiming the blocker closed.
