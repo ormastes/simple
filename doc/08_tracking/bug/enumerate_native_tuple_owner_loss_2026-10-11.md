@@ -28,12 +28,21 @@ No new mutable provenance map is introduced: the tuple's existing MIR field
 types carry the owner, and established per-local maps are populated at the
 projection. Their current function reset/transient ownership lifecycle applies.
 
+Ordinary tuple literals must also preserve this contract. Array/dictionary
+record indexing can return an I64 local with its nominal owner in
+struct_value_syms. lower_tuple_lit promotes only those known record handles
+to Opaque(owner) field types; scalar I64 locals and already typed fields keep
+their existing representation. The value is neither copied nor boxed again.
+
 ## Required evidence
 
 The updated MIR spec requires zero fatal diagnostics, field indices [0,1,1]
 for enumerated and dictionary-valued two-field records, and runtime-array
 dispatch for nested arrays. It replaces the unsupported-struct expectation;
 rejecting legitimate records no longer counts as passing.
+Ordinary tuples containing array/dictionary indexed records require field
+indices [1,1]. The native fixture additionally reads second fields and invokes
+a record method after ordinary tuple destructuring (ordinary=71).
 
 Native fixture: test/fixtures/bootstrap/enumerate_record_owners/main.spl.
 Expected stdout is the adjacent main.expected and exit must be zero. The
