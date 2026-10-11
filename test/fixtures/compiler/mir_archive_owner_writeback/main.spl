@@ -1,0 +1,41 @@
+# Native regression: real MirLowering struct writeback across a free-function
+# boundary, including actual module lowering and dictionary replacement.
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_instructions.{MirModule}
+
+fn lower_into_owner(mut owner: MirLowering, module: HirModule) -> MirModule:
+    owner.lower_module(module)
+
+fn replace_owner_fields(mut owner: MirLowering):
+    owner.current_module_id = "write-through"
+    owner.composite_layout_digests = {"replacement": "owned"}
+
+fn replace_copy_fields(owner: MirLowering):
+    owner.current_module_id = "private-copy"
+    owner.composite_layout_digests = {"copy": "private"}
+
+fn main() -> i64:
+    val ast = parse_full_frontend("fn evaluate(value: i64) -> i64:\n    value + 3\n",
+        "writeback.spl", "writeback", Logger(level: 0))
+    var frontend = HirLowering.with_filename("writeback.spl")
+    val module: HirModule = frontend.lower_module(ast)
+    if frontend.errors.len() != 0: return 1
+    var owner = MirLowering.new(module.symbols)
+    val emitted: MirModule = lower_into_owner(owner, module)
+    if owner.errors.len() != 0 or emitted.functions.len() != 1: return 2
+    if owner.current_module_id != module.name: return 3
+    replace_owner_fields(owner)
+    if owner.current_module_id != "write-through": return 4
+    if owner.composite_layout_digests.len() != 1 or
+            owner.composite_layout_digests.get("replacement") != Some("owned"): return 5
+    replace_copy_fields(owner)
+    if owner.current_module_id != "write-through" or
+            owner.composite_layout_digests.get("replacement") != Some("owned") or
+            owner.composite_layout_digests.has("copy"): return 6
+    print "mir archive owner writeback: 6 guards passed"
+    0

@@ -227,6 +227,15 @@ impl MirLowering:
 
     me lower_function_with_gpu_metadata(fn_: HirFunction, is_gpu_kernel: bool, gpu_target: text, gpu_backend_order: text) -> MirFunction:
         """Lower HIR function to MIR."""
+        # Lambda bindings contain HIR expression bodies, not module metadata.
+        # A nested lowering must restore its caller's bindings; a completed
+        # top-level function must leave no body graph in the retained owner.
+        # Lifted lambdas use a fresh MirLowering, while inlined lambdas stay
+        # inside this function and therefore keep these bindings until exit.
+        val caller_lambda_bindings: Dict<i64, HirExpr> = self.lambda_bindings
+        val caller_lambda_snapshots: Dict<i64, Dict<i64, LocalId>> = self.lambda_capture_snapshot
+        self.lambda_bindings = {}
+        self.lambda_capture_snapshot = {}
         self.unsafe_depth = 0
         self.mir_tag_probe_active_function = fn_.name + ""
         self.type_transport_owner = fn_.name + ""
@@ -864,6 +873,8 @@ impl MirLowering:
 
         self.unsafe_depth = 0
         self.mir_tag_probe_active_function = ""
+        self.lambda_bindings = caller_lambda_bindings
+        self.lambda_capture_snapshot = caller_lambda_snapshots
         fn_result
 
     me lower_vulkan_kernel_param_type(param: HirParam) -> MirType:
