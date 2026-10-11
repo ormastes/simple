@@ -10,6 +10,9 @@
 # Contract: exit 0 after the run was recorded and test_result.md rewritten;
 # otherwise a non-zero exit with the named reason on
 # stderr as `test-db lane error: <reason>`.
+# Preparation mode instead accepts --prepare-request=<SDN path>, persists
+# immutable intent and emits a strict SDN acknowledgement of reloaded intent.
+# It does not execute tests, render reports or qualify evidence.
 
 use std.sffi.cli_args.{cli_get_args}
 use std.nogc_sync_mut.io.file_ops.{file_read, file_exists, file_size, file_atomic_write}
@@ -17,6 +20,9 @@ use std.nogc_sync_mut.test_runner.test_db_record.{test_db_run_record_decode, tes
 use std.nogc_sync_mut.test_runner.test_db_trace_record.{test_db_trace_record_decode}
 use std.nogc_sync_mut.test_runner.test_runner_helpers.{update_test_database_from_record}
 use std.test_runner.doc_generator.{generate_test_result_md}
+use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
+use std.common.traceability.run_request_codec.{decode_trace_run_request}
+use std.common.traceability.run_preparation.{build_trace_run_preparation, encode_trace_run_preparation}
 
 val TEST_RESULT_MD_PATH = "doc/08_tracking/test/test_result.md"
 
@@ -29,6 +35,32 @@ fn _lane_arg(args: [text], key: text) -> text:
 
 fn main() -> i64:
     val args = cli_get_args()
+    # Empty or repeated protocol values must not silently select a different
+    # run. Prepare and result submission are separate owner operations.
+    for key in ["record", "trace-record", "trace-run", "prepare-request"]:
+        val prefix = "--{key}="
+        var count = 0
+        for arg in args:
+            if arg.starts_with(prefix):
+                count += 1
+                if arg.len() == prefix.len():
+                    eprint "test-db lane error: empty --{key}="
+                    return 2
+        if count > 1:
+            eprint "test-db lane error: repeated --{key}="
+            return 2
+    val prepare_path = _lane_arg(args, "prepare-request")
+    if prepare_path != "":
+        if _lane_arg(args, "record") != "" or _lane_arg(args, "trace-record") != "" or _lane_arg(args, "trace-run") != "":
+            eprint "test-db lane error: preparation cannot include result submission"
+            return 2
+        match _prepare_trace_request(prepare_path):
+            case Ok(acknowledgement):
+                print acknowledgement
+                return 0
+            case Err(reason):
+                eprint "test-db lane error: {reason}"
+                return 2
     val record_path = _lane_arg(args, "record")
     if record_path == "":
         eprint "test-db lane error: missing --record="
@@ -74,3 +106,22 @@ fn main() -> i64:
         case Err(reason):
             eprint "test-db lane error: {reason}"
             1
+
+# The acknowledgement describes reloaded persisted intent, not authentication
+# or complete execution provenance. The parent must verify it before dispatch.
+fn _prepare_trace_request(path: text) -> Result<text, text>:
+    if not file_exists(path):
+        return Err("trace request file is missing")
+    val size = file_size(path)
+    if size < 0 or size > 1048576:
+        return Err("trace request size unavailable or exceeds 1 MiB")
+    val request = decode_trace_run_request(file_read(path))?
+    var owner = RunnerTestDb.load()?
+    val prepared = owner.prepare_trace_request(request)?
+    val persisted = RunnerTestDb.resume_trace_run(prepared.run_id)?
+    match persisted.db.get_trace_run_plan(prepared.run_id)?:
+        case Some(plan):
+            val acknowledgement = build_trace_run_preparation(request, plan)?
+            encode_trace_run_preparation(acknowledgement)
+        case nil:
+            Err("saved trace intent disappeared before acknowledgement")
