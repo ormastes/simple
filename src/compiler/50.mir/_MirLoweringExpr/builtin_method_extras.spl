@@ -951,13 +951,24 @@ impl MirLowering:
         var mapped_hir_opt: HirType? = nil
         if mapper_ok:
             # Field projections/constructors retain the declared nominal HIR
-            # type. Require the existing single-word record carrier as well;
+            # type. Require the established word or canonical record carrier;
             # never reinterpret an arbitrary tuple or untyped i64 as a record.
             if val mapped_declared = self.find_local_hir_type(mapped.id):
                 if self.builtin_result_record_owner(mapped_declared) != "":
                     if val mapped_mir = self.local_mir_type_of(mapped):
                         match mapped_mir.kind:
                             case MirTypeKind.I64: mapped_hir_opt = Some(mapped_declared)
+                            case MirTypeKind.Struct(actual_symbol):
+                                # Constructors and nested fields retain MIR
+                                # Struct identity. The established enum call
+                                # boundary coerces that record pointer to its
+                                # i64 slot; require the exact canonical owner.
+                                match mapped_declared.kind:
+                                    case HirTypeKind.Named(declared_symbol, _):
+                                        val canonical_symbol = self.canonical_mir_type_symbol(declared_symbol)
+                                        if actual_symbol.id == canonical_symbol.id:
+                                            mapped_hir_opt = Some(mapped_declared)
+                                    case _: ()
                             case _: ()
             if mapped_hir_opt == nil:
                 mapped_hir_opt = self.option_map_value_hir_type(mapped, receiver.span)
