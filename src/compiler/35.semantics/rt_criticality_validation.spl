@@ -377,8 +377,11 @@ pub fn rt_unambiguous_declaration_names_v1(
     names
 
 fn rt_admit_with_manifest(root_id: text, facts: [RtCriticalFact]) -> [text]:
+    rt_admit_with_capabilities_v1(root_id, facts, rt_bound_manifest_capabilities())
+
+fn rt_admit_with_capabilities_v1(root_id: text, facts: [RtCriticalFact],
+        capabilities: [RtBoundCapability]) -> [text]:
     val digest = rt_closure_digest(root_id, facts)
-    val capabilities = rt_bound_manifest_capabilities()
     var adjusted: [RtCriticalFact] = []
     for fact in facts:
         val reviewed = rt_reviewed_bound_mask(fact.name, digest,
@@ -509,13 +512,24 @@ fn rt_declaration_matches_v1(declaration: RtCriticalFunctionDeclarationV1,
 # complete admitted bodies before using them as driver admission evidence.
 pub fn validate_rt_criticality_facts_v1(module_ids: [text],
         functions: [RtCriticalFunctionFactsV1]) -> [RtCriticalDiagnostic]:
+    # The retained owner consumes the actual one-compilation manifest once.
+    val diagnostics = validate_rt_criticality_facts_with_capabilities_v1(module_ids,
+        functions, rt_bound_manifest_capabilities())
+    rt_bound_manifest_clear()
+    diagnostics
+
+# Policy replay only. An explicit list is NOT capability admission; archive
+# publication must obtain it from the actual owner's immutable parent record.
+# Replay never installs a manifest or consumes a later compilation's grants.
+pub fn validate_rt_criticality_facts_with_capabilities_v1(module_ids: [text],
+        functions: [RtCriticalFunctionFactsV1],
+        capabilities: [RtBoundCapability]) -> [RtCriticalDiagnostic]:
     var diagnostics: [RtCriticalDiagnostic] = []
     val claims = rt_criticality_claim_keys()
     var has_rt_hal = false
     for fn_ in functions:
         if fn_.declaration.is_rt_hal: has_rt_hal = true
     if claims.len() == 0 and not has_rt_hal:
-        rt_bound_manifest_clear()
         return diagnostics
     # Bare names are translated only when unique. Duplicate unqualified names
     # never alias silently: their edges become unknown and fail closed.
@@ -602,19 +616,19 @@ pub fn validate_rt_criticality_facts_v1(module_ids: [text],
         if effective_rank >= 3:
             if rt_criticality_is_hal(key):
                 val hal_facts = rt_hal_facts_with_reviewed_intrinsic(root_id, facts)
-                for d in rt_admit_with_manifest(root_id, hal_facts):
+                for d in rt_admit_with_capabilities_v1(root_id, hal_facts, capabilities):
                     diagnostics.push(RtCriticalDiagnostic(
                         severity: RtCriticalDiagnosticSeverity.Error, message: d))
             else:
                 # Ordinary roots retain the exact compiler fact graph used by
                 # the reviewed digest. A HAL-only synthetic edge would change
                 # that digest and silently discard valid allocation authority.
-                for d in rt_admit_with_manifest(admission_root, facts):
+                for d in rt_admit_with_capabilities_v1(admission_root, facts, capabilities):
                     diagnostics.push(RtCriticalDiagnostic(
                         severity: RtCriticalDiagnosticSeverity.Error, message: d))
             admitted_roots[admission_identity] = true
         elif fact_positions.contains_key(root_id):
-            for d in rt_admit_with_manifest(root_id, facts):
+            for d in rt_admit_with_capabilities_v1(root_id, facts, capabilities):
                 if d.starts_with("error[RT-E-UNBOUNDED-ALLOCATION]"):
                     val level = if rt_implicit_profile_is_error(): "error" else: "warning"
                     val code = if rt_implicit_profile_is_error():
@@ -638,14 +652,11 @@ pub fn validate_rt_criticality_facts_v1(module_ids: [text],
         val root_id = rt_stable_fn_id(declaration.module_key, declaration.symbol_id)
         if admitted_roots.contains_key(root_id): continue
         val hal_facts = rt_hal_facts_with_reviewed_intrinsic(root_id, facts)
-        for d in rt_admit_with_manifest(root_id, hal_facts):
+        for d in rt_admit_with_capabilities_v1(root_id, hal_facts, capabilities):
             diagnostics.push(RtCriticalDiagnostic(
                 severity: RtCriticalDiagnosticSeverity.Error, message: d))
         admitted_roots[root_id] = true
     val ordered = rt_sort_criticality_diagnostics(diagnostics)
-    # A config owner must seal a fresh manifest for every compilation. Never
-    # let reviewed authority leak into a later long-lived compiler request.
-    rt_bound_manifest_clear()
     ordered
 
 fn validate_rt_criticality_diagnostics(modules: Dict<text, HirModule>) -> [RtCriticalDiagnostic]:
@@ -686,3 +697,4 @@ export rt_annotation_bound_diagnostic
 export RtCriticalFunctionDeclarationV1, RtCriticalFunctionFactsV1
 export rt_module_function_declarations_v1, rt_unambiguous_declaration_names_v1
 export rt_function_facts_v1, validate_rt_criticality_facts_v1
+export validate_rt_criticality_facts_with_capabilities_v1

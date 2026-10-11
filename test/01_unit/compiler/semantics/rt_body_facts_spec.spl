@@ -7,7 +7,8 @@ use compiler.hir.hir_types.{HirModule}
 use compiler.common.config.{Logger}
 use compiler.semantics.rt_criticality_validation.*
 use compiler.semantics.rt_criticality.{RT_EFFECT_ALLOC, RT_EFFECT_LOOP,
-    RtCriticalDiagnostic, RtCriticalDiagnosticSeverity, rt_bound_manifest_capabilities}
+    RtCriticalDiagnostic, RtCriticalDiagnosticSeverity, rt_bound_manifest_capabilities,
+    RtCriticalFact, RtBoundCapability, rt_closure_digest, rt_bound_manifest_replace, rt_bound_manifest_clear}
 use compiler.frontend.rt_criticality_registry.{rt_criticality_reset, rt_criticality_declare}
 
 fn lowered(src: text, path: text, name: text) -> HirModule:
@@ -93,3 +94,33 @@ describe "RT shared actual body facts and aggregate policy":
             expect(declaration.module_key).to_equal("rt_facts_hal")
         expect(tagged).to_equal(true)
         expect(plain).to_equal(false)
+
+    it "replays the consumed actual capability without installing stale grants":
+        rt_criticality_reset()
+        rt_bound_manifest_clear()
+        val hir = lowered("fn bounded_array() -> [i64]:\n    [1, 2]\n", "rt_facts_manifest.spl", "rt_facts_manifest")
+        rt_criticality_declare("rt_facts_manifest.spl", "bounded_array", "critical")
+        val rows = body_facts({"rt_facts_manifest": hir})
+        expect(rows.len()).to_equal(1)
+        val row = rows[0]
+        val root = rt_stable_fn_id(row.declaration.module_key, row.declaration.symbol_id)
+        val facts = [RtCriticalFact(name: root, own_effects: row.own_effects,
+            bounded_effects: 0, callees: [], line: row.declaration.line, effect_units: row.effect_units)]
+        val capability = RtBoundCapability(subject_id: root, closure_digest: rt_closure_digest(root, facts),
+            effect: RT_EFFECT_ALLOC, max_units: 1, review_id: "FIXTURE-ACTUAL-ALLOC-ONE")
+        rt_bound_manifest_replace([capability])
+        val actual = rt_bound_manifest_capabilities()
+        val ids = ["rt_facts_manifest.spl", "rt_facts_manifest"]
+        expect(validate_rt_criticality_facts_v1(ids, rows).len()).to_equal(0)
+        expect(rt_bound_manifest_capabilities().len()).to_equal(0)
+        expect(validate_rt_criticality_facts_with_capabilities_v1(ids, rows, actual).len()).to_equal(0)
+        expect(rt_bound_manifest_capabilities().len()).to_equal(0)
+        val changed = RtBoundCapability(..capability, max_units: 0)
+        val denied = validate_rt_criticality_facts_with_capabilities_v1(ids, rows, [changed])
+        expect(messages(denied).join("\n")).to_contain("RT-E-UNBOUNDED-ALLOCATION")
+        rt_bound_manifest_replace([changed])
+        expect(validate_rt_criticality_facts_with_capabilities_v1(ids, rows, actual).len()).to_equal(0)
+        # Pure replay must not clear a manifest owned by the next compilation.
+        expect(rt_bound_manifest_capabilities()[0].max_units).to_equal(0)
+        rt_bound_manifest_clear()
+        rt_criticality_reset()
