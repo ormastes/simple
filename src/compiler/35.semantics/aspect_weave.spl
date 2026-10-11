@@ -49,12 +49,9 @@ use compiler.semantics.join_point_model.{
     JoinPoint, forward_join_points, join_points_matching, join_point_is_forwarder,
     join_point_kind_is_measurable, join_point_mode_is_implemented
 }
-use compiler.semantics.aspect_validation.{aspect_module_identity_index}
-use compiler.frontend.aspect_registry.{
-    aspect_registry_claim_keys, aspect_claim_path, aspect_claim_fn,
-    aspect_registry_kind_of_key, aspect_registry_selector_of_key,
-    aspect_registry_mode_of_key
-}
+use compiler.semantics.aspect_validation.{aspect_module_identity_index,
+    AspectContractClaimV1, aspect_contract_claims_v1}
+use compiler.frontend.aspect_registry.{aspect_registry_claim_keys}
 
 fn _advice_call_expr(advice_fn_name: text, span: Span) -> HirExpr:
     val unit_type = HirType(kind: HirTypeKind.Unit, span: span)
@@ -117,31 +114,34 @@ struct AspectForwardWeaveClaimV1:
 # and bind/replay the recipe at the archive publication boundary.
 pub fn aspect_forward_weave_claims_v1(module_ids: Dict<text, bool>,
         forwards: [JoinPoint]) -> [AspectForwardWeaveClaimV1]:
+    aspect_forward_weave_contract_claims_v1(module_ids, forwards, aspect_contract_claims_v1())
+
+pub fn aspect_forward_weave_contract_claims_v1(module_ids: Dict<text, bool>,
+        forwards: [JoinPoint], contracts: [AspectContractClaimV1]) -> [AspectForwardWeaveClaimV1]:
     var claims: [AspectForwardWeaveClaimV1] = []
-    val claim_keys = aspect_registry_claim_keys()
-    if claim_keys.len() == 0:
+    if contracts.len() == 0:
         return claims
 
-    for key in claim_keys:
-        val claim_path = aspect_claim_path(key)
-        val advice_fn = aspect_claim_fn(key)
+    for contract in contracts:
+        val claim_path = contract.path
+        val advice_fn = contract.advice_fn
         if advice_fn == "":
             continue
         if not module_ids.contains_key(claim_path):
             continue
-        val kind = aspect_registry_kind_of_key(key)
+        val kind = contract.kind
         if kind != "forward" or not join_point_kind_is_measurable(kind):
             continue
-        val mode = aspect_registry_mode_of_key(key)
+        val mode = contract.mode
         if not join_point_mode_is_implemented(mode):
             continue
-        val selector = aspect_registry_selector_of_key(key)
+        val selector = contract.selector
         if selector == "":
             continue
         val matched = join_points_matching(forwards, kind, selector)
         if matched.len() == 0:
             continue
-        claims.push(AspectForwardWeaveClaimV1(registry_key: key,
+        claims.push(AspectForwardWeaveClaimV1(registry_key: contract.registry_key,
             selector: selector, advice_fn: advice_fn))
     claims
 
@@ -192,4 +192,5 @@ fn weave_forward_advice(modules: Dict<text, HirModule>) -> i64:
 export weave_forward_advice
 export AspectForwardWeaveClaimV1, aspect_forward_weave_claims_v1
 export weave_forward_advice_claim_in_module_v1
+export aspect_forward_weave_contract_claims_v1
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
