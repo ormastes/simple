@@ -551,51 +551,59 @@ jobs:
             > convergence-receipt/forward-port-evidence.json
           rm convergence-receipt/forward-port-evidence.jsonl
 
-          backports='[]'
+          # Accumulate via streamed JSONL, not `--argjson rows "$rows"` append:
+          # a large release line (hundreds of classifications) exceeds the
+          # kernel single-argument limit (MAX_ARG_STRLEN) and dies with
+          # "Argument list too long" (observed 2026-10-10, manifest _43).
+          : > convergence-receipt/backports.enriched.jsonl
           while IFS= read -r evidence; do
             receipt_sha256=$(printf '%s\n' "$evidence" | sha256sum | awk '{print $1}')
-            backports=$(jq -cn --argjson rows "$backports" \
-              --argjson evidence "$evidence" --arg receipt "$receipt_sha256" \
-              '$rows + [{source_commit_sha:$evidence.source_commit_sha,
-                         result_commit_sha:$evidence.result_commit_sha,
-                         target_ref:$evidence.target_ref,
-                         stable_patch_id:$evidence.source_patch_id,
-                         receipt_sha256:$receipt}]')
+            jq -cn --argjson evidence "$evidence" --arg receipt "$receipt_sha256" \
+              '{source_commit_sha:$evidence.source_commit_sha,
+                result_commit_sha:$evidence.result_commit_sha,
+                target_ref:$evidence.target_ref,
+                stable_patch_id:$evidence.source_patch_id,
+                receipt_sha256:$receipt}' >> convergence-receipt/backports.enriched.jsonl
           done < <(jq -cS '.[]' convergence-receipt/backport-evidence.json)
+          jq -sS . convergence-receipt/backports.enriched.jsonl > convergence-receipt/backports.json
+          rm convergence-receipt/backports.enriched.jsonl
 
-          classifications='[]'
+          : > convergence-receipt/classifications.enriched.jsonl
           while IFS= read -r evidence; do
             classification_receipt_sha256=$(printf '%s\n' "$evidence" | sha256sum | awk '{print $1}')
-            classifications=$(jq -cn --argjson rows "$classifications" \
-              --argjson evidence "$evidence" --arg receipt "$classification_receipt_sha256" \
-              '$rows + [{commit_sha:$evidence.commit_sha,kind:$evidence.kind,
-                         reason:$evidence.reason,owner:$evidence.owner,
-                         expires_at:$evidence.expires_at,
-                         classification_receipt_sha256:$receipt}]')
+            jq -cn --argjson evidence "$evidence" --arg receipt "$classification_receipt_sha256" \
+              '{commit_sha:$evidence.commit_sha,kind:$evidence.kind,
+                reason:$evidence.reason,owner:$evidence.owner,
+                expires_at:$evidence.expires_at,
+                classification_receipt_sha256:$receipt}' >> convergence-receipt/classifications.enriched.jsonl
           done < <(jq -cS '.[]' convergence-receipt/classification-evidence.json)
+          jq -sS . convergence-receipt/classifications.enriched.jsonl > convergence-receipt/classifications.json
+          rm convergence-receipt/classifications.enriched.jsonl
 
-          forward_ports='[]'
+          : > convergence-receipt/forward-ports.enriched.jsonl
           while IFS= read -r evidence; do
             receipt_sha256=$(printf '%s\n' "$evidence" | sha256sum | awk '{print $1}')
-            forward_ports=$(jq -cn --argjson rows "$forward_ports" \
-              --argjson evidence "$evidence" --arg receipt "$receipt_sha256" \
-              '$rows + [{source_commit_sha:$evidence.source_commit_sha,
-                         result_commit_sha:$evidence.result_commit_sha,
-                         target_ref:$evidence.target_ref,
-                         stable_patch_id:$evidence.source_patch_id,
-                         receipt_sha256:$receipt}]')
+            jq -cn --argjson evidence "$evidence" --arg receipt "$receipt_sha256" \
+              '{source_commit_sha:$evidence.source_commit_sha,
+                result_commit_sha:$evidence.result_commit_sha,
+                target_ref:$evidence.target_ref,
+                stable_patch_id:$evidence.source_patch_id,
+                receipt_sha256:$receipt}' >> convergence-receipt/forward-ports.enriched.jsonl
           done < <(jq -cS '.[]' convergence-receipt/forward-port-evidence.json)
-          fix_sources=$(jq -c '[.[] | select(.kind == "fix") | .commit_sha]' <<<"$classifications")
-          forward_sources=$(jq -c '[.[].source_commit_sha]' <<<"$forward_ports")
+          jq -sS . convergence-receipt/forward-ports.enriched.jsonl > convergence-receipt/forward-ports.json
+          rm convergence-receipt/forward-ports.enriched.jsonl
+
+          fix_sources=$(jq -c '[.[] | select(.kind == "fix") | .commit_sha]' convergence-receipt/classifications.json)
+          forward_sources=$(jq -c '[.[].source_commit_sha]' convergence-receipt/forward-ports.json)
           test "$(jq -cS 'sort' <<<"$fix_sources")" = "$(jq -cS 'sort' <<<"$forward_sources")"
           file_array() {
             jq -Rsc 'split("\n") | map(select(length > 0))' "$1"
           }
           file_array convergence-receipt/main.inventory > convergence-receipt/main.inventory.json
           file_array convergence-receipt/release.inventory > convergence-receipt/release.inventory.json
-          main_selected=$(jq -c '.main_to_release.selected_shas' "$manifest")
-          backport_sources=$(jq -c '[.[].source_commit_sha]' <<<"$backports")
-          test "$(jq -cS 'sort' <<<"$main_selected")" = "$(jq -cS 'sort' <<<"$backport_sources")"
+          jq -c '.main_to_release.selected_shas' "$manifest" > convergence-receipt/main-selected.json
+          backport_sources=$(jq -c '[.[].source_commit_sha]' convergence-receipt/backports.json)
+          test "$(jq -cS 'sort' convergence-receipt/main-selected.json)" = "$(jq -cS 'sort' <<<"$backport_sources")"
           authority_class=$(jq -er '.authority_class' convergence-receipt/review-evidence.json)
           verification_performed=$(jq -r '.verification_performed' convergence-receipt/review-evidence.json)
           github_pr_approval_claimed=$(jq -r '.github_pr_approval_claimed' convergence-receipt/review-evidence.json)
@@ -611,10 +619,10 @@ jobs:
             --arg integration_base_sha "$BASE_SHA" --arg integration_head_sha "$HEAD_SHA" \
             --arg release_inventory_head_sha "$inventory_head" \
             --arg manifest_blob_sha "$manifest_blob_sha" --arg manifest_sha256 "$manifest_sha256" \
-            --slurpfile main_inventory convergence-receipt/main.inventory.json --argjson main_selected "$main_selected" \
-            --argjson backports "$backports" --argjson backport_sources "$backport_sources" \
-            --slurpfile release_inventory convergence-receipt/release.inventory.json --argjson classifications "$classifications" \
-            --argjson forward_ports "$forward_ports" --argjson fix_sources "$fix_sources" \
+            --slurpfile main_inventory convergence-receipt/main.inventory.json --slurpfile main_selected convergence-receipt/main-selected.json \
+            --slurpfile backports convergence-receipt/backports.json --argjson backport_sources "$backport_sources" \
+            --slurpfile release_inventory convergence-receipt/release.inventory.json --slurpfile classifications convergence-receipt/classifications.json \
+            --slurpfile forward_ports convergence-receipt/forward-ports.json --argjson fix_sources "$fix_sources" \
             --argjson forward_sources "$forward_sources" \
             --arg authority_class "$authority_class" \
             --argjson verification_performed "$verification_performed" \
