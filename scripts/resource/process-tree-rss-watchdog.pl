@@ -203,7 +203,7 @@ sub resolve_observation_budget_ms {
 }
 my $observation_budget_ms = resolve_observation_budget_ms(
     $^O, $ENV{SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS});
-my ($sample_duration_max_ms, $sample_overruns) = (0, 0);
+my ($sample_duration_max_ms, $sample_overruns, $sample_budget_exceeded) = (0, 0, 0);
 my ($observer_path, $observer_fd, $observer_sha, $observer_source_sha);
 my ($observer_read, $observer_write, $observer_pid);
 my $observer_buffer = '';
@@ -823,9 +823,7 @@ sub reaper_snapshot {
     verify_session_helper();
     ++$samples;
     my $duration = (time - $sample_started_at) * 1000;
-    $duration <= $observation_budget_ms or die "reaper observation exceeded budget";
-    $sample_duration_max_ms = $duration if $duration > $sample_duration_max_ms;
-    ++$sample_overruns if $duration > $opt{'interval-ms'};
+    record_sample_duration($duration, "reaper observation exceeded budget");
     return \%all;
 }
 
@@ -891,6 +889,21 @@ sub parse_proc_stat_record {
              identity => "t$start" };
 }
 
+# A completed, validated sample may be slow on a busy host. Monitor mode
+# records the measurement gap without converting telemetry into cancellation.
+# Broken/incomplete observations still fail at their original validation sites.
+sub record_sample_duration {
+    my ($duration_ms, $failure) = @_;
+    $sample_duration_max_ms = $duration_ms if $duration_ms > $sample_duration_max_ms;
+    ++$sample_overruns if $duration_ms > $opt{'interval-ms'};
+    if ($duration_ms > $observation_budget_ms) {
+        ++$sample_budget_exceeded;
+        die $failure unless $opt{'rss-cap-mode'} eq 'monitor';
+        warn "rss-guard: $failure; monitor measurement incomplete, workload continues\n"
+            if $sample_budget_exceeded == 1;
+    }
+}
+
 sub snapshot {
     my ($metadata_only) = @_;
     $sample_started_at = time;
@@ -906,9 +919,7 @@ sub snapshot {
         }
         ++$samples;
         my $duration_ms = (time - $sample_started_at) * 1000;
-        $duration_ms <= $observation_budget_ms or die "process observation exceeded observation budget";
-        $sample_duration_max_ms = $duration_ms if $duration_ms > $sample_duration_max_ms;
-        ++$sample_overruns if $duration_ms > $opt{'interval-ms'};
+        record_sample_duration($duration_ms, "process observation exceeded observation budget");
         return $all;
     }
     if ($observer_backend eq 'linux-proc') {
@@ -976,9 +987,7 @@ sub finish_snapshot {
         }
     }
     my $duration_ms = (time - $sample_started_at) * 1000;
-    $duration_ms <= $observation_budget_ms or die "process observation exceeded observation budget";
-    $sample_duration_max_ms = $duration_ms if $duration_ms > $sample_duration_max_ms;
-    ++$sample_overruns if $duration_ms > $opt{'interval-ms'};
+    record_sample_duration($duration_ms, "process observation exceeded observation budget");
     return $all;
 }
 
@@ -1104,6 +1113,8 @@ sub receipt {
         "interval_ms=$opt{'interval-ms'}\nsample_gap_max_ms=$sample_gap_max_ms\n" .
         "observation_budget_ms=$observation_budget_ms\n" .
         "sample_duration_max_ms=$sample_duration_max_ms\nsample_overruns=$sample_overruns\n" .
+        "sample_budget_exceeded=$sample_budget_exceeded\nmeasurement_budget_complete=" .
+        ($sample_budget_exceeded ? 0 : 1) . "\n" .
         "observer_backend=$observer_backend\nobserver_path=" . ($observer_path // '') . "\n" .
         "observer_sha256=" . ($observer_sha // '') . "\n" .
         "observer_source_sha256=" . ($observer_source_sha // '') . "\n" .
