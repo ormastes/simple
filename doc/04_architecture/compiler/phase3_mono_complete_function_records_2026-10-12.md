@@ -39,7 +39,7 @@ function record and checks its complete digest against the compatibility module
 and retained specialization. Seven added controls cover inactive and paused
 leases, identical republishing, immutable-byte mismatch with unchanged original,
 wrong body digest, wrong name/SymbolId, and publication-owner mismatch without
-epoch mutation. The launcher requires 54 checks. Native compilation/execution
+epoch mutation. The original record patch requires 54 checks. Native compilation/execution
 remain pending the root-owned slot; static guards are not native evidence.
 
 This is a prerequisite for final assembly: decode the original complete module
@@ -50,3 +50,13 @@ for current validation and are not the final module stage. Ordered root barrier,
 FIFO completion, final assembly and every post-mono validator still need their
 actual consumer transactions before production driver activation. No original
 promoted HIR reclamation, bounded full route or RSS improvement is claimed.
+
+The shared byte owner and unchanged envelope parser now live in
+`compiler.common.cache_contract`, with compatibility delegates under the original
+driver paths. There is one storage implementation and one envelope parser. MIR
+imports the lower owner with `HirOwnedArtifactContextV1` supplied by the driver's
+`hir_owned_artifact_context_v1` factory. The context has directory, producer header
+and enabled fields; it grants byte access only. No lower owner imports the driver.
+The driver factory preserves the actual current cache selection. Two extra native
+guards refuse a changed producer header and disabled context; the updated launcher
+requires 56 checks, still unexecuted pending the root-owned slot.

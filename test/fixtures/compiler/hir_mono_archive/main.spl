@@ -3,7 +3,9 @@ use provider.{outer}
 use compiler.driver.cache.hir_body_typecheck_lease_v1.*
 use compiler.driver.cache.hir_mono_archive_consumer_v1.*
 use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_store_blob_v1,
-    hir_owned_artifact_load_blob_v1}
+    hir_owned_artifact_load_blob_v1, hir_owned_artifact_context_v1}
+use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{
+    hir_owned_artifact_load_blob_v1 as common_artifact_load_v1}
 use compiler.driver.cache.hir_mono_function_record_v1.{mono_function_record_load_in_owned_scope_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_header, hir_cache_load_in_owned_scope,
     hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1, hir_cache_path}
@@ -88,6 +90,14 @@ fn record_controls(receipt: MonoArchivePublicationV1) -> i64:
     if not transient_scope_begin(): return 0
     var checks = 0
     val loaded = hir_owned_artifact_load_blob_v1(receipt.function_archive_key)
+    var wrong_context = hir_owned_artifact_context_v1()
+    wrong_context.producer_header = wrong_context.producer_header + "wrong-producer"
+    if common_artifact_load_v1(wrong_context, receipt.function_archive_key).is_err():
+        checks = checks + 1
+    var disabled_context = hir_owned_artifact_context_v1()
+    disabled_context.enabled = false
+    if common_artifact_load_v1(disabled_context, receipt.function_archive_key).is_err():
+        checks = checks + 1
     if loaded.is_ok():
         val bytes = loaded.unwrap()
         if hir_owned_artifact_store_blob_v1(receipt.function_archive_key, bytes).is_ok():
@@ -499,13 +509,13 @@ fn main() -> i64:
     checks = checks + 1
     if not hir_owned_artifact_load_blob_v1(current.unwrap().function_archive_key).is_err(): return 127
     checks = checks + 1
-    if record_controls(current.unwrap()) != 5: return 128
-    checks = checks + 5
+    if record_controls(current.unwrap()) != 7: return 128
+    checks = checks + 7
     var wrong_record = current.unwrap()
     wrong_record.function_archive_key = sha256_text("wrong record owner")
     val record_epoch = admission.state.epoch
     if not mono_archive_apply_v1(admission, wrong_record).is_err() or admission.state.epoch != record_epoch: return 129
     checks = checks + 1
-    if checks != 54: return 52
+    if checks != 56: return 52
     print "HIR mono archive consumer: {checks} checks passed"
     0
