@@ -150,11 +150,32 @@ def run(debugger):
         child = target.Launch(launch, error)
         if error.Fail() or not child.IsValid():
             raise RuntimeError("captured child launch failed")
-        return child
+        # Async Launch may return before its stop-at-entry event is published.
+        # Consume that initial stop before bounded_continue records its stop ID.
+        launch_listener = lldb.SBListener("hostarch-child-launch")
+        child.GetBroadcaster().AddListener(launch_listener, lldb.SBProcess.eBroadcastBitStateChanged)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            state = child.GetState()
+            if state == lldb.eStateStopped and child.GetStopID() > 0:
+                evidence["child_launch"] = {"state": "stopped-at-entry", "stop_id": child.GetStopID()}
+                persist()
+                return child
+            if state in [lldb.eStateExited, lldb.eStateDetached]:
+                raise RuntimeError("captured child terminated before entry stop")
+            event = lldb.SBEvent()
+            launch_listener.WaitForEvent(1, event)
+        child.Kill()
+        raise RuntimeError("captured child entry stop not confirmed")
     try:
         # Capture actual coordinator handoff, then debug its native child directly.
         process = capture_child()
         host = target.FindBreakpointByID(1)
+        host_address = symbol(PREFIX + "host_arch")
+        if not host.IsValid() or host.GetNumResolvedLocations() != 1 or host.GetLocationAtIndex(0).GetAddress().GetLoadAddress(target) != host_address:
+            raise RuntimeError("child host breakpoint relocation not confirmed")
+        evidence["child_launch"]["host_breakpoint_load_address"] = host_address
+        persist()
         bounded_continue(70)
         if process.GetState() != lldb.eStateStopped or host.GetHitCount() != 1:
             raise RuntimeError("host_arch breakpoint not reached")
