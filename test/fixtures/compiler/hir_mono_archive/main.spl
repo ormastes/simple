@@ -12,6 +12,8 @@ use compiler.hir.hir_definitions.{HirFunction, HirParam, HirExpr, HirExprKind, H
 use compiler.hir.hir_codec.{hir_module_encode}
 use compiler.mono.monomorphize_integration.{MonomorphizationPass, mono_sym_key, mono_type_identity}
 use compiler.mono.mono_archive_types_v1.{MonoTemplateSignatureV1, mono_template_signature_v1}
+use compiler.mono.mono_archive_state_v1.{mono_archive_state_create_v1, mono_archive_state_digest_v1}
+use compiler.mono.mono_archive_registration_v1.*
 use compiler.common.config.{Logger}
 use compiler.common.diagnostics.span.{Span}
 use std.env.{env_get}
@@ -165,6 +167,19 @@ fn signature_after_scope(function: HirFunction) -> MonoTemplateSignatureV1:
     if not paused or not owned or not ended: panic("signature ownership")
     signature
 
+fn capture_registration(owner: MonoArchiveRegistrationOwnerV1, archive: HirBodyArchiveV1) -> Result<MonoArchiveRegistrationReceiptV1, text>:
+    if not transient_scope_begin(): return Err("capture fixture scope unavailable")
+    var captured: Result<MonoArchiveRegistrationReceiptV1, text> = Err("complete input unavailable")
+    if val module = hir_cache_load_in_owned_scope(archive.archive_key):
+        captured = mono_archive_collect_registration_in_owned_scope_v1(owner, module, module.name, archive)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(captured) else: false
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not cache_owned or not ended: panic("registration fixture ownership")
+    captured
+
 fn main() -> i64:
     if env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_DIGEST").len() != 64 or env_get("SIMPLE_HIR_LEASE_CLOSURE_DIGEST").len() != 64: return 1
     var checks = 1
@@ -297,6 +312,7 @@ fn main() -> i64:
     var collision_modules: Dict<text, HirModule> = {}
     collision_modules[root.name] = root
     collision_modules[provider.name] = provider
+    collision_modules[recursive.name] = recursive
     collision_modules[alternate.name] = alternate
     var collision_archives: Dict<text, HirBodyArchiveV1> = {}
     for name in collision_modules.keys():
@@ -343,6 +359,91 @@ fn main() -> i64:
     val before_altered = admission.state.epoch
     if not mono_archive_apply_v1(admission, altered).is_err() or admission.state.epoch != before_altered: return 50
     checks = checks + 1
+    # This owner is produced by complete body collection, without a persistent
+    # original collector or projected empty provider module graph.
+    val created = mono_archive_registration_create_v1()
+    if created.is_err(): return 100
+    val registered = created.unwrap()
+    val root_archive: HirBodyArchiveV1 = admission.repository.modules[root.name]
+    val provider_archive: HirBodyArchiveV1 = admission.repository.modules[provider.name]
+    if not mono_archive_collect_registration_in_owned_scope_v1(registered, root, root.name, root_archive).is_err(): return 101
+    checks = checks + 1
+    val root_registration = capture_registration(registered, root_archive)
+    if root_registration.is_err() or registered.epoch != 0 or root_registration.unwrap().roots != [root_function.symbol.id]: return 102
+    checks = checks + 1
+    val root_rows = root_registration.unwrap()
+    if mono_archive_publish_registration_v1(registered, root_rows).is_err() or registered.epoch != 1 or registered.archives.len() != 1: return 103
+    checks = checks + 1
+    if not mono_archive_publish_registration_v1(registered, root_rows).is_err() or registered.epoch != 1 or not capture_registration(registered, root_archive).is_err(): return 104
+    checks = checks + 1
+    var inventory: Dict<text, text> = {}
+    inventory[root.name] = root.path
+    inventory[provider.name] = provider.path
+    if not mono_archive_registration_seal_v1(registered, inventory).is_err() or registered.sealed: return 105
+    checks = checks + 1
+    val provider_registration = capture_registration(registered, provider_archive)
+    if provider_registration.is_err() or not transient_scope_begin(): return 106
+    val nested_registration_refused = mono_archive_publish_registration_v1(registered, provider_registration.unwrap()).is_err()
+    if not transient_scope_end() or not nested_registration_refused or registered.epoch != 1: return 107
+    checks = checks + 1
+    if mono_archive_publish_registration_v1(registered, provider_registration.unwrap()).is_err() or registered.epoch != 2: return 108
+    checks = checks + 1
+    val sealed = mono_archive_registration_seal_v1(registered, inventory)
+    if sealed.is_err() or not registered.sealed or sealed.unwrap().repository.authority != admission.repository.authority: return 109
+    checks = checks + 1
+    val registered_admission = sealed.unwrap()
+    val fresh_facts_state = mono_archive_state_create_v1(admission.state.facts)
+    if mono_archive_state_digest_v1(registered_admission.state) != mono_archive_state_digest_v1(fresh_facts_state) or
+            registered.generic_functions != reference.stats.generic_functions_found or
+            registered.generic_structs != reference.stats.generic_structs_found or
+            registered.generic_classes != reference.stats.generic_classes_found: return 110
+    checks = checks + 1
+    if registered.roots.len() != 2 or registered.roots[0].module_name != root.name or
+            registered.roots[1].module_name != provider.name or registered.roots[1].symbols.len() != 0 or
+            root_rows.rows.len() == 0 or provider_registration.unwrap().rows.len() == 0 or
+            registered_admission.state.facts.templates["outer"].param_types.len() != 1: return 111
+    checks = checks + 1
+    val registered_root = mono_archive_rewrite_root_v1(registered_admission, root.name, root_function.symbol.id)
+    if registered_root.is_err() or mono_archive_apply_v1(registered_admission, registered_root.unwrap()).is_err(): return 112
+    var registered_emitted = 0
+    while registered_admission.state.cursor < registered_admission.state.queue.len():
+        val body = mono_archive_drain_one_v1(registered_admission)
+        if body.is_err(): return 113
+        val actual_body = observe_body(body.unwrap())
+        if actual_body.is_err() or actual_body.unwrap().digest != mono_archive_function_digest_v1(reference.specialized_functions[body.unwrap().target_name]): return 114
+        if mono_archive_apply_v1(registered_admission, body.unwrap()).is_err(): return 115
+        registered_emitted = registered_emitted + 1
+    if registered_emitted != 4: return 116
+    checks = checks + 1
+    if not capture_registration(registered, provider_archive).is_err(): return 117
+    checks = checks + 1
+    val collision_owner_result = mono_archive_registration_create_v1()
+    if collision_owner_result.is_err(): return 118
+    val collision_owner = collision_owner_result.unwrap()
+    for name in collision_modules.keys():
+        val rows = capture_registration(collision_owner, collision_archives[name])
+        if rows.is_err() or mono_archive_publish_registration_v1(collision_owner, rows.unwrap()).is_err(): return 119
+    if collision_owner.state.facts.template_module["outer"] != alternate.name or
+            not collision_owner.state.facts.symbol_identities.has(provider_key) or
+            not collision_owner.state.facts.symbol_identities.has(alternate_key) or
+            not collision_owner.state.facts.named_ambiguous.has("Shared") or
+            not collision_owner.state.facts.named_ambiguous["Shared"] or
+            collision_owner.generic_functions != collision_reference.stats.generic_functions_found: return 120
+    checks = checks + 1
+    val forged_owner_result = mono_archive_registration_create_v1()
+    if forged_owner_result.is_err(): return 121
+    val forged_owner = forged_owner_result.unwrap()
+    val forge_capture = capture_registration(forged_owner, root_archive)
+    if forge_capture.is_err(): return 122
+    var forged_rows = forge_capture.unwrap()
+    forged_rows.next_symbol = forged_rows.next_symbol + 1
+    if not mono_archive_publish_registration_v1(forged_owner, forged_rows).is_err() or forged_owner.epoch != 0 or forged_owner.archives.len() != 0: return 123
+    checks = checks + 1
+    if not transient_scope_begin(): return 124
+    if not transient_scope_pause(): return 125
+    val paused_capture_refused = mono_archive_collect_registration_in_owned_scope_v1(forged_owner, root, root.name, root_archive).is_err()
+    if not transient_scope_end() or not paused_capture_refused or forged_owner.epoch != 0: return 126
+    checks = checks + 1
     var wrong_archive = admission.repository.modules[provider.name]
     wrong_archive.input.closure_digest = sha256_text("explicit invalid closure control")
     var wrong_archives: Dict<text, HirBodyArchiveV1> = {}
@@ -350,6 +451,6 @@ fn main() -> i64:
     wrong_archives[provider.name] = wrong_archive
     if not mono_archive_admit_v1(wrong_archives, collector(modules)).is_err(): return 51
     checks = checks + 1
-    if checks != 29: return 52
+    if checks != 44: return 52
     print "HIR mono archive consumer: {checks} checks passed"
     0

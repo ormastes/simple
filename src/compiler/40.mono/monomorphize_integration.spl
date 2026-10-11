@@ -395,10 +395,15 @@ impl MonomorphizationPass:
                     original_symbol: func.symbol, template_name: func.name,
                     canonical_type_params: func.type_params,
                     bound_type_params: func.type_params, inherent_method: false)
-                self.generic_functions[func.name] = mono_apply_template_recipe_v1(func, recipe)
+                val canonical = mono_apply_template_recipe_v1(func, recipe)
+                if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
+                    self.archive_template_signatures[func.name] = mono_template_signature_v1(canonical)
+                else:
+                    self.generic_functions[func.name] = canonical
                 self.template_recipes[func.name] = recipe
                 self.template_module[func.name] = module_name
-                self.monomorphizer.register_generic_function(func.name, func)
+                if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
+                    self.monomorphizer.register_generic_function(func.name, func)
                 self.stats.generic_functions_found = self.stats.generic_functions_found + 1
             else:
                 self.fn_returns[mono_sym_key(module_name, fsym.id)] = func.return_type
@@ -418,8 +423,9 @@ impl MonomorphizationPass:
                 self.record_field_types(module_name, s.name, s.fields)
             if is_generic_struct(s):
                 self.record_generic_type(module, module_name, s.symbol, s.type_params, s.fields)
-                self.generic_structs[s.name] = s
-                self.monomorphizer.register_generic_struct(s.name, s)
+                if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
+                    self.generic_structs[s.name] = s
+                    self.monomorphizer.register_generic_struct(s.name, s)
                 self.stats.generic_structs_found = self.stats.generic_structs_found + 1
 
         # Collect enum variant payload types. Enums were not collected at all
@@ -459,11 +465,18 @@ impl MonomorphizationPass:
                 self.record_field_types(module_name, c.name, c.fields)
             if is_generic_class(c):
                 self.record_generic_type(module, module_name, c.symbol, c.type_params, c.fields)
-                self.generic_classes[c.name] = c
-                self.monomorphizer.register_generic_class(c.name, c)
+                if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
+                    self.generic_classes[c.name] = c
+                    self.monomorphizer.register_generic_class(c.name, c)
                 self.stats.generic_classes_found = self.stats.generic_classes_found + 1
 
-        self.module_symbols[module_name] = module.symbols
+        if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
+            for raw_id in module.symbols.symbols.keys():
+                val symbol: HirSymbol = module.symbols.symbols[raw_id]
+                self.archive_symbol_identities[mono_sym_key(module_name, symbol.id.id)] =
+                    mono_type_identity(module.symbols, symbol.id, module_name)
+        else:
+            self.module_symbols[module_name] = module.symbols
         self.collect_generic_impl_methods(module, module_name)
 
     me collect_generic_impl_methods(module: HirModule, module_name: text):
@@ -554,10 +567,14 @@ impl MonomorphizationPass:
                     inherent_method: true)
                 val canonical_fn = mono_apply_template_recipe_v1(template, recipe)
                 as_fn.type_params = bound_tps
-                self.generic_functions[gname] = canonical_fn
+                if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
+                    self.archive_template_signatures[gname] = mono_template_signature_v1(canonical_fn)
+                else:
+                    self.generic_functions[gname] = canonical_fn
                 self.template_recipes[gname] = recipe
                 self.template_module[gname] = module_name
-                self.monomorphizer.register_generic_function(gname, as_fn)
+                if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
+                    self.monomorphizer.register_generic_function(gname, as_fn)
                 self.generic_methods[method_key] = gname
 
     # ========================================================================
