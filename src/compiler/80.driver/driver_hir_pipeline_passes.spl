@@ -25,6 +25,7 @@ use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use compiler.driver.driver_pass_receipt.{PassReceipt, record_pass_receipt}
 use compiler.mono.verify.post_mono_verify.{post_mono_verify_modules}
 use compiler.driver.driver_post_mono_publication_v1.{driver_publish_post_mono_report_v1}
+use compiler.driver.driver_mono_publication_v1.{driver_publish_mono_warnings_and_stats_v1, driver_publish_mono_diagnostics_v1}
 
 
 impl CompilerDriver:
@@ -115,35 +116,9 @@ impl CompilerDriver:
             return true
         val (mono_modules, mono_stats, mono_diags, mono_warnings) =
             run_monomorphization_with_report(self.ctx.hir_modules)
-        # Leveled diagnostics that resolved to `warning` (SIMPLE_MONO_LEVELS).
-        for mw in mono_warnings:
-            self.ctx.add_warning(mw)
-        # Phase B receipt: printed so a stage log proves the pass ran and what
-        # it did (the pass was a no-op for months while looking wired).
-        print "[mono] generic_fns={mono_stats.generic_functions_found} call_sites={mono_stats.call_sites_found} specializations={mono_stats.specializations_created} unresolved={mono_stats.unresolved_generic_calls}"
-        # BUG-001 diagnostic: verify module count survives monomorphization
-        log_debug("monomorphization output ready")
+        driver_publish_mono_warnings_and_stats_v1(self.ctx, mono_stats, mono_warnings)
         self.ctx.hir_modules = mono_modules
-        # Phase 3 (critical_hardening_plan_2026-08-21): the mono pass emits a
-        # loud, coded diagnostic (E-MONO-030 / E-MONO-032) for every generic
-        # call site it could NOT rewrite. Those used to be dropped on the floor
-        # by `run_monomorphization`, so a non-monomorphic HIR reached MIR at
-        # rc=0. They are errors now: an unspecialized generic call is not a
-        # style nit, it is a program the backend cannot lower correctly.
-        var mono_pass_errors = 0
-        for md in mono_diags:
-            mono_pass_errors = mono_pass_errors + 1
-            self.ctx.add_error(md)
-        val _mono_pass_receipt = record_pass_receipt(PassReceipt(
-            pass_name: "monomorphize",
-            profile: self.ctx.assurance_policy.strictness.name(),
-            executed: true,
-            modules_checked: self.ctx.hir_modules.len(),
-            diagnostics: mono_diags.len(),
-            errors_raised: mono_pass_errors
-        ))
-        if mono_pass_errors > 0:
-            print "error[E-MONO-033]: monomorphization left {mono_pass_errors} generic call site(s) unspecialized; refusing to lower non-monomorphic HIR to MIR"
+        if not driver_publish_mono_diagnostics_v1(self.ctx, mono_diags, self.ctx.hir_modules.len()):
             return false
         # Section 9.5 post-monomorphization invariants (E-MONO-031). Runs on
         # the MONOMORPHIZED modules -- the whole point is that nothing generic,
