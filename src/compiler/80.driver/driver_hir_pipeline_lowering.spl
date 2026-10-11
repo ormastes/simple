@@ -9,6 +9,8 @@ use compiler.mono.mono_archive_registration_v1.{
     MonoArchiveRegistrationOwnerV1, MonoArchiveRegistrationReceiptV1,
     mono_archive_collect_registration_in_owned_scope_v1}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use compiler.driver.cache.driver_hir_managed_runtime_selection_v1.{
+    DriverHirManagedRuntimeSelectionV1, driver_hir_archive_input_from_managed_runtime_selection_v1}
 use std.io_runtime.{exit, hash_text}
 use std.env.{env_get}
 use compiler.driver.driver_types.{CompileContext}
@@ -507,15 +509,50 @@ impl CompilerDriver:
         # order only AFTER this returned, closed transaction. No body escapes.
         Ok(receipt)
 
+    me lower_streaming_hir_selected_archived_shard_transaction_v1(
+        lowering: HirLowering, source: SourceFile, source_index: i64, is_entry: bool,
+        registration_owner: MonoArchiveRegistrationOwnerV1
+    ) -> Result<DriverHirShardTransactionReceiptV1, text>:
+        if transient_array_scope_state_v1() != 0:
+            return Err("HIR archive driver lease already occupied")
+        if not self.streaming_surface_owner_ready:
+            return Err("HIR archive driver frozen surface owner unavailable")
+        if val Some(selected) = self.hir_archive_managed_runtime_selection:
+            Ok(self.lower_streaming_hir_shard_receipt_transaction_v1(
+                lowering, source, is_entry, "", nil, Some(registration_owner), source_index, Some(selected)))
+        else:
+            Err("HIR archive selected production provider owner unavailable")
+
     me lower_streaming_hir_shard_receipt_transaction_v1(
         lowering: HirLowering, source: SourceFile, is_entry: bool, cache_key: text,
         archive_selection: DriverHirRuntimeStdArchiveSelectionV1?,
-        registration_owner: MonoArchiveRegistrationOwnerV1?, source_index: i64
+        registration_owner: MonoArchiveRegistrationOwnerV1?, source_index: i64,
+        managed_selection: DriverHirManagedRuntimeSelectionV1? = nil
     ) -> DriverHirShardTransactionReceiptV1:
         # 0 = validated cache hit, 1 = published full HIR, 2 = source diagnostic,
         # -1 = infrastructure/ownership failure. No HirModule escapes this scope.
         var archive_input: HirBodyArchiveInputV1? = nil
         var transaction_cache_key = cache_key
+        if archive_selection != nil and managed_selection != nil:
+            self.ctx.add_error("HIR shard archive selected provider ambiguous")
+            return driver_hir_failed_shard_receipt_v1(-1)
+        if val Some(selection) = managed_selection:
+            if not self.streaming_surface_owner_ready:
+                self.ctx.add_error("HIR archive driver frozen surface owner unavailable")
+                return driver_hir_failed_shard_receipt_v1(-1)
+            val selected = driver_hir_archive_input_from_managed_runtime_selection_v1(
+                selection, source, self.streaming_module_surfaces_owner, source_index, is_entry,
+                get_effective_backend_name(self.ctx.options.backend, self.ctx.options.release),
+                self.ctx.native_target, env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? "")
+            if selected.is_err():
+                self.ctx.add_error(selected.unwrap_err())
+                return driver_hir_failed_shard_receipt_v1(-1)
+            val input = selected.unwrap()
+            transaction_cache_key = hir_cache_key(input.source_path, input.closure_digest, input.is_entry)
+            if transaction_cache_key == "":
+                self.ctx.add_error("HIR archive driver source key unavailable")
+                return driver_hir_failed_shard_receipt_v1(-1)
+            archive_input = Some(input)
         if val Some(selection) = archive_selection:
             if not self.streaming_surface_owner_ready:
                 self.ctx.add_error("HIR archive driver frozen surface owner unavailable")

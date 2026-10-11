@@ -14,6 +14,14 @@ pub struct NativeRuntimePinV1:
     relative: text
     digest: text
 
+# Compact projection of the actual managed owner. Compiler bundle selection
+# supplies the ordered inputs; this owner admits each selected file. This is
+# provider provenance, not a promise that generated objects have been compiled.
+pub struct NativeRuntimeProviderSelectionV1:
+    root: text
+    snapshot: NativePinnedArtifactV1
+    pins: [NativeRuntimePinV1]
+
 struct NativeRuntimeAuthorityV1:
     identity: text
     root: text
@@ -201,6 +209,44 @@ pub fn native_runtime_strict_archives_v1(runtime_dir: text, inputs: [text]) -> R
     for pin in selected:
         val _path = native_runtime_pin_v1(authority, pin.relative)?
     Ok(inputs)
+
+pub fn native_runtime_strict_provider_selection_v1(
+    runtime_dir: text, inputs: [text]
+) -> Result<NativeRuntimeProviderSelectionV1, text>:
+    native_runtime_provider_selection_from_owner_v1(runtime_dir, inputs, true)
+
+fn native_runtime_provider_selection_from_owner_v1(
+    runtime_dir: text, inputs: [text], hash_bytes: bool
+) -> Result<NativeRuntimeProviderSelectionV1, text>:
+    val authority = native_runtime_authority_v1(false)?
+    val selected = native_runtime_provider_pins_v1(
+        authority.root, runtime_dir, inputs, authority.pins)?
+    var seen: Dict<text, bool> = {}
+    for pin in selected:
+        if seen.has(pin.relative):
+            return Err("managed runtime selected provider duplicated")
+        seen[pin.relative] = true
+        val _path = native_runtime_pin_v1(authority, pin.relative)?
+    val _unchanged = native_runtime_strict_revalidate_v1(hash_bytes)?
+    Ok(NativeRuntimeProviderSelectionV1(authority.root, authority.snapshot, selected))
+
+pub fn native_runtime_strict_provider_selection_revalidate_v1(
+    selection: NativeRuntimeProviderSelectionV1, inputs: [text], hash_bytes: bool = false
+) -> Result<bool, text>:
+    # Re-project from the live owner and compiler's current ordered selection.
+    # Caller-created rows cannot grant an input absent from this owner.
+    val current = native_runtime_provider_selection_from_owner_v1(selection.root, inputs, hash_bytes)?
+    if current.snapshot.path != selection.snapshot.path or
+            current.snapshot.digest != selection.snapshot.digest or
+            current.pins.len() != selection.pins.len():
+        return Err("managed runtime provider selection changed")
+    var index = 0
+    while index < current.pins.len():
+        if current.pins[index].relative != selection.pins[index].relative or
+                current.pins[index].digest != selection.pins[index].digest:
+            return Err("managed runtime selected provider changed")
+        index = index + 1
+    Ok(true)
 
 pub fn native_runtime_strict_generated_bind_v1(paths: [text]) -> Result<bool, text>:
     if _native_runtime_failed_v1: return Err("managed runtime authority previously invalidated")

@@ -66,3 +66,20 @@ the archive input key rechecks that binding. Four further native guards preserve
 the original 43 and require distinct provider selection keys, exact descriptor
 matching, and refusal of altered source-body identity (47 total). They remain
 unexecuted until the actual native launcher is authorized.
+
+The managed cold native path now captures a compact selection from
+`native_runtime_authority_v1`, the existing linker authority. It admits the
+canonical managed tool owner, snapshot `NativePinnedArtifactV1`, and every
+archive chosen by the unchanged central bundle/platform selector. This snapshot
+owner already decodes at most 64 MiB; its admitted snapshot is the archive's
+runtime authority file, which explains that separate receipt read bound.
+RuntimeStd V2 retains its canonical owner's independent 4096-byte bound.
+The selection seals the actual compiler, backend, target or host default,
+platform archive format, explicit bundle, snapshot path/digest and ordered pins.
+Per-module admission re-projects the current exact set from that live owner;
+terminal hashing remains available through the existing runtime validator.
+Production native orchestration captures this before HIR and a selected shard
+adapter consumes the retained selection. It does not select the bounded loop.
+Generated runtime objects (`runtime_path=none`) retain their distinct existing
+object-compilation authority and are not reclassified as archive providers.
+Warm RuntimeStd and live environment publication handoffs remain outstanding.
