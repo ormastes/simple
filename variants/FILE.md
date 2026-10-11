@@ -18,6 +18,8 @@ target-specific implementation. Current configuration/manifest machinery also su
 |---|---|
 | `__init__.spl` | Package marker |
 | `platform` | Platform build-extension overlays (`linux`/`mac`/`windows`) for `nogc_sync_mut/target_ext.spl` |
+| `os` | Planned independent OS service adapter slots; see `os/FILE.md`. Existing `platform` selection remains compatible pending resolver migration. |
+| `filesystem` | Planned independent filesystem provider slots, shared across OS providers; see `filesystem/FILE.md`. Documentation is not selector registration. |
 | `ui` | UI renderer-selection overlays (`cpu`/`metal`/`vulkan`/`webgpu`) for `gpu/engine2d/renderer_select.spl` |
 | `hw` | Hardware-specific overlays listed by the current manifest; selection does not itself prove execution support |
 | `lib.crypto` | Crypto variation group in the current manifest/configuration; retain its existing resolver identity |

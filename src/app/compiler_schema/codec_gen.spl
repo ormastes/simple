@@ -22,8 +22,9 @@
 # FORMAT: one scalar per line (flat_pool_codec escaping), a list is its length
 # then its elements, an optional is 0 or 1 then the value, an enum is its
 # declaration index then its payload, a dict is its length then key/value
-# pairs in `.keys()` order -- insertion order, so a decoded module iterates in
-# the same order the lowered one did and MIR sees identical sequences.
+# pairs in stable typed key order. Native `.keys()` follows hash buckets, so
+# copying a dictionary during decode does not preserve its enumeration order.
+# Sorting snapshots leaves the live dictionaries and symbol IDs unchanged.
 
 use std.io_runtime.{read_file_text, file_exists, file_write, dir_create_all, exit}
 use app.compiler_schema.extract.{VariantRow, extract_enum_variants}
@@ -73,6 +74,7 @@ fn codec_use_lines() -> text:
     out = out + "use compiler.frontend.parser_types_expr.{{AsmTargetSpec, AsmConstraintKind, AsmLocation, Type, TypeKind, Expr}}\n"
     out = out + "use compiler.frontend.core.flat_pool_codec.{{FlatPoolReader, flat_pool_parse_i64, flat_pool_unescape}}\n"
     out = out + "use compiler.hir.hir_codec_support.{{HirCodecWriter, hc_enc_opaque_expr, hc_dec_opaque_expr, hc_enc_opaque_block_value, hc_dec_opaque_block_value, hc_bad_tag, hc_read_f64}}\n"
+    out = out + "use compiler.hir.hir_codec_key_order.{{hc_order_i64_keys_v1, hc_order_text_keys_v1, hc_order_symbol_id_keys_v1}}\n"
     out
 
 # ============================================================================
@@ -442,6 +444,13 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
         var out = indent + "var ks{k}: [" + s.a + "] = []\n"
         out = out + indent + "if " + v + " != nil:\n"
         out = out + indent + "    ks{k} = " + v + ".keys()\n"
+        val order_fn = if s.a == "i64": "hc_order_i64_keys_v1"
+            elif s.a == "text": "hc_order_text_keys_v1"
+            elif s.a == "SymbolId": "hc_order_symbol_id_keys_v1"
+            else: ""
+        if order_fn == "":
+            _codec_fail("hir codec generator: unsupported dictionary key order " + s.a)
+        out = out + indent + "ks{k} = " + order_fn + "(ks{k})\n"
         out = out + indent + "w.put_i64(ks{k}.len())\n"
         out = out + indent + "for dk{k} in ks{k}:\n"
         out = out + _emit_enc(u, s.a, "dk{k}", indent + "    ", c)

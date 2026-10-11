@@ -256,21 +256,29 @@ build_binary() {
   job_root="$root/$task_phase/binaries/$backend/$id"
   mkdir -p "$job_root/bin" "$job_root/cache" "$job_root/state" || die "job directories unavailable"
   verify_shared_source
+  bootstrap_managed_cuda_record "$job_root" || die "$id CUDA selection differs from retained job"
   disk_preflight "$job_root"
-  if [ ! -f "$job_root/manifest.sdn" ]; then
+  pending_manifest="$job_root/manifest.sdn.pending.$$"
+  [ ! -e "$pending_manifest" ] && [ ! -L "$pending_manifest" ] || die "task manifest scratch already exists"
     verify_image_set
     "$manifest_program" --job-from-inventory "$template" "$producer" "$source_root" \
       "$task_id" "$task_phase" "$output" "$source_inventory_relative" \
       --memory-limit-bytes "$memory_bytes" --links-inventory "$source_links_relative" \
       --work-timeout-ms "$lifetime_ms" \
       --memory-policy "$memory_policy" \
-      --manifest "$job_root/manifest.sdn" -- \
+      --manifest "$pending_manifest" -- \
       native-build --target "$target" --backend "$backend" \
-      --source src/compositions/kernel_llvm_cranelift --source src/compiler --source src/app --source src/lib \
+      --source "$cuda_selected_root" --source src/compositions/kernel_llvm_cranelift --source src/compiler --source src/app --source src/lib \
       --source src/os --source src/plugins --source src/package_ownership --source src/compositions \
       --entry-closure --entry "$entry" --threads "$threads" --mode dynload \
-      --cache-dir "cache/$task_id" "$@" --output "$output" \
+      --cache-dir "cache/$task_id/$cuda_selection_identity" "$@" --output "$output" \
       || die "$id manifest blocked"
+  if [ -e "$job_root/manifest.sdn" ] || [ -L "$job_root/manifest.sdn" ]; then
+    regular "$job_root/manifest.sdn" && cmp -s "$pending_manifest" "$job_root/manifest.sdn" \
+      || die "$id retained task manifest differs; use a new job root"
+    rm -f "$pending_manifest"
+  else
+    mv "$pending_manifest" "$job_root/manifest.sdn" || die "$id manifest publication failed"
   fi
   require_current_manifest "$job_root/manifest.sdn"
   verify_image_set
@@ -535,6 +543,9 @@ cmp -s "$expected_inventory" "$source_inventory" \
   || die "binary source inventory differs from complete admitted Stage 2 regular paths"
 rm -f "$expected_inventory"
 verify_shared_source
+. "$repo_root/scripts/bootstrap/lib/managed-cuda-selection.shs" || die "managed CUDA selector unavailable"
+bootstrap_managed_cuda_select "$source_root" "$source_inventory" \
+  || die "CUDA manifest/template absent or invalid in admitted source inventory"
 
 hashes="$scratch/verified-hashes.tmp.$$"
 trap 'rm -f "$hashes"' EXIT HUP INT TERM

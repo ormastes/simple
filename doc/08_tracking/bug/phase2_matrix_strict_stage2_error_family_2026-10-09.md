@@ -118,3 +118,141 @@ needs a compiler-lane fix (cap/dedup), not a source change.
   `enum match: unsupported arm pattern` masses in the same logs were not
   bisected in this batch; several are likely C1/C2 cascades but that is
   unproven.
+
+## 2026-10-11 addendum: valid_rows / for-in I64 family bisected (release-llvm-20261011 lane)
+
+The previously unbisected `for-in over non-array iterables (collection mir type:
+I64)` + `unresolved method call: valid_rows` family is a C1 receiver-identity
+cascade: in `database_queries.spl` and `factory.spl` the table receiver is a
+`case Some(table):` match-arm binding from `SdnTable?`. Strict HIR fails to
+propagate the arm payload type, `SdnTable.valid_rows() -> [SdnRow]`
+(core.spl:408) fails to resolve, and the fallback names a same-shaped `i64`
+symbol — the unrelated `valid_rows: i64` parameter in
+`src/lib/gc_async_mut/slang/model_executor/backend.spl:742,767` — so the for-in
+collection lowers as I64. Paired `enum match: unsupported arm pattern` is the
+same arm-pattern typing failure.
+
+Workaround landed on `work/release-llvm-fixes-20261011` (PR #2999): bind match
+results and arm payloads to explicitly annotated `SdnTable` locals before
+calling `valid_rows()`. Probes for re-verification:
+`build/matrix-probes/dbq/` (minimal MiniDb repro + annotated-local variant) and
+`build/matrix-probes/c4_backendkind/`. Compiler-side fix still required for the
+receiver-identity family itself; PR #2967 (HIR cache/receiver identity,
+e650ad19d67) may cover part of it.
+
+## 2026-10-11 addendum 2: std.crypto.sha3 module-index registration gap (C6, release-llvm-20261011 lane)
+
+Stage-2 matrix `test_runner_build` (admitted compiler 85fc943a, post-PR-#2967)
+fails in `src/lib/common/crypto/hmac.spl`:
+
+    module std.crypto.sha3 has no exported item sha3_384_bytes
+    module std.crypto.sha3 has no exported item sha3_512_bytes
+    unresolved name: sha3_256_bytes / sha3_384_bytes / sha3_512_bytes
+    (12 errors; module lib.common.crypto.hmac poisoned)
+
+The functions ARE declared in `src/lib/common/crypto/sha3.spl:341,347,353` with
+the same plain `fn` style as `sha1.spl:251` (`sha1_bytes`), which imports fine.
+So the compiler's module-index registration silently drops std.crypto.sha3's
+exports. Same family PR #2967 chased ("failed one HMAC module importing SHA3
+functions; module-index registration under investigation") but the failure
+persists WITH #2967 merged (e650ad19d67 in tree). Suspect visit/declaration
+order sensitivity (cf. robust-5a test 2b284af6820 pinning module typing
+against declaration/name/visit order). Needs a compiler-lane fix; probes under
+`build/matrix-probes/sha3reg/`.
+
+## 2026-10-11 addendum 3: C6 root cause — missing std.crypto.sha3 facade (source gap, not a registration bug)
+
+Bisect (probes `build/matrix-probes/sha3reg/`, minimal-shard-repro) corrected
+addendum 2: `std.crypto.sha3`'s exports are NOT dropped by a registration bug.
+`src/lib/crypto.spl` declares `mod crypto.types/sha256/sha512/hmac/legacy_hash/
+sha1` but no `mod crypto.sha3`, and `src/lib/crypto/sha3.spl` did not exist —
+sha3 was the only `common/crypto` module missing its `src/lib/crypto/*`
+re-export facade. The sequential compile path falls back to the real file, so
+only the `--low-memory` HIR-shard path (used by the stage-2 matrix builds)
+fails: item lookup chases facade `lib.crypto`, which declares no sha3 names.
+
+Fix (PR on work/rel-c6-sha3-facade-20261011): add `src/lib/crypto/sha3.spl`
+re-export facade + `mod crypto.sha3` in src/lib/crypto.spl (matches the
+`crypto/hmac.spl` idiom; validated 0 hir-fatal on a 256-module shard repro).
+
+Latent same-family gaps (NOT in today's closures; fix when imported):
+`std.crypto.md5` (src/os/crypto/pbkdf1.spl:15) and
+`std.crypto.entropy_platform` (src/os/crypto/entropy.spl:5) also lack
+`src/lib/crypto/*` facades.
+
+Related open infra failure (NOT source): `compiler_cli_build` shard owner went
+`status=BLOCKED exit=-2 claimed=0 sealed=-1 inventory incomplete rows=-1` after
+clean parse (2204/2454 files, zero module errors) — same family as the wrapper
+receiver-proof `cannot establish invocation ledger` failures on 2026-10-11
+runs 2-4. Nondeterministic shard-owner startup under multi-lane host load;
+needs compiler-lane diagnosis of the shard owner startup/claim path.
+
+## 2026-10-12 addendum 4: C7 — shard-path module-registry doubled-key + app-layer surface errors (full-CLI build)
+
+Manual full-CLI build of the `src/app/cli/_CliMain/main_and_help.spl` closure
+(2456 files, scv snapshot `scv-revision-v1-ac0b26f5`) failed HIR with 333
+`module X has no exported item Y` lines across ~124 modules. Evidence log:
+`/tmp/manual-cli-build2.log`; full 173-pair (module, item) inventory:
+`/tmp/c7_pairs.txt` (regenerate: `grep 'has no exported item'
+/tmp/manual-cli-build2.log | sed -E 's/.*module ([a-z0-9_.]+) has no exported
+item ([A-Za-z0-9_]+).*/\1 \2/' | sort -u`).
+
+**Root cause (compiler lane, NOT source):** the shard-path module surface
+registry keys leaves by `module_logical_name_from_path`, which keeps the inner
+directory segment of tier dirs that repeat their own name — leaves under
+`src/compiler/70.backend/backend/` register as `compiler.backend.backend.*`
+and under `15.blocks/blocks/` as `compiler.blocks.blocks.*` (doubled inner
+segment), while the whole tree imports single-segment names
+(`compiler.backend.native.mach_inst`, `compiler.blocks.builtin`). The
+sequential path resolves both spellings via fallback, so only the
+`--low-memory` HIR-shard path fails: module lookup is bridged to a surface
+that does not carry the requested items. Corroborating evidence:
+
+- The landed mach_inst wildcard fix (44e170a1c19,
+  `export use compiler.backend.native.mach_inst.*` in
+  `native/__init__.spl`) IS present in the failing snapshot, yet all 18
+  mach_inst items still error — facade wildcarding does not clear this
+  family.
+- Failing items include `pub class`/`pub enum`/`trait` declarations in the
+  very module named by the error (e.g. `compiler.backend.codegen_types`
+  `CodegenOutput`/`CodegenOutputKind` at
+  `70.backend/backend/codegen_types.spl:23,30`; `GpuCodegen`/`HardwareCodegen`
+  traits) — no facade is even involved.
+- Every failing importing module reports exactly the first 10 items of its
+  first `use` list (regalloc, isel_*, encode_x86_64, formula.spl) — a
+  per-module 10-error diagnostic cap hides the true volume; whole surfaces
+  are empty, not partially enumerated.
+- The `app.ui.*` failures all involve dot-named source directories
+  (`src/app/ui.browser/`, `ui.render/`, `ui.tui/`, `ui.test_api/`) whose
+  surface keys are likely sanitized differently (cf. the hyphen→`_` key
+  sanitization note in `module_import_resolution.spl`); `common.string_builder`
+  and `app.t32_cli.mod` fail with no naming anomaly at all.
+
+**Fix direction:** the shard registry must key surfaces by the sequential
+path's logical-name derivation (same fold for doubled tier-inner segments and
+dotted directory names), and the per-module error cap should be lifted or
+summarized for diagnostics. Do NOT chase this family with more facade
+wildcard edits.
+
+**Genuine source gaps fixed in the C7 commit (independent of the registry
+bug; verified declared-elsewhere items never surfaced by their module):**
+`codegen.spl` re-exports `CodegenTarget` from `backend/backend_types.spl`;
+`hardware_codegen_types.spl` now `export use`s `VhdlProcessKind` from
+`compiler.mir.mir_data` (was `use`-only); `elf_writer.spl` routes
+`write_elf64`/`align_offset` via `export use` from `elf_writer_serialize.spl`
+(bare `export` of undeclared names drops them from the shard index);
+`blocks/builtin.spl` wildcard-re-exports `builtin_blocks_math/data/shell`;
+`blocks/registry.spl` re-exports `init_blocks` from `blocks/mod.spl`;
+`bidirectional_checking.spl` re-exports `TypeInferencer` from
+`bidirectional_inferencer.spl`; `driver_core_types.spl` re-exports
+`BackendCompileOptions` from `backend/backend_types.spl`;
+`build_native.spl`/`build_native_pipeline.spl` import `compile_to_smf` from
+`compiler.driver.driver_api_compile_single` (module `driver` never existed);
+missing `std.math.{special,financial,distributions,statistics}` and
+`std.math.bignum.{bignat,limb}` leaves added as `src/lib/math/*.spl`
+re-export facades + `mod math.*` entries in `src/lib/math.spl` (C6
+addendum-3 idiom; only modules with real importers; `std.math.math`/`bignum.fixed`
+are comment-only, skipped). NOT fixed here: the `src/lib/compiler/mir_opt/*`
+stub facades self-reference their own module name (duplicate module-name
+collision with the `60.mir_opt` canonical files) — needs a compiler-lane
+dedup decision.
