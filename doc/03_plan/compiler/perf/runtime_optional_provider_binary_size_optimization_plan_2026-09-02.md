@@ -412,3 +412,15 @@ The strict LLVM Stage4 path now rejects caller libraries, library paths, and lin
 ## 2026-10-11 Stage4 strip identity binding
 
 `strip_output` now participates in the Stage4 link-profile input, separating stripped and unstripped image receipts. A focused two-object no-stub native probe passes, and a unit case checks the profile-input distinction. This is receipt correctness for the size gate, not the matched 15 KiB/1.05x hello or startup/RSS qualification. See [the focused report](../../../09_report/compiler/target5_stage4_strip_profile_identity_2026-10-11.md).
+
+2026-10-11 strict Linux Stage4 link update: the linked image is now scanned
+for `DT_NEEDED` through the compiler-owned process/tool facade before its
+receipt is written. A fixed host ABI list admits libc, math/thread/dl/rt
+compatibility libraries, libgcc_s, and known Linux ELF interpreters; an
+optional or malformed dependency fails closed and removes the output. The
+receipt records the admitted names. Focused readelf/objdump parser and
+source-order cases were added. The self-hosted closure module completed
+parse/HIR, then failed MIR on pre-existing non-array iteration and `contains`
+lowering; the standalone spec compile failed HIR with unresolved `symbol`.
+No executable PASS, admitted full-CLI Stage4 image, matched size/startup/RSS
+cohort, or Phase 7 demand-load cutover is claimed by this update.

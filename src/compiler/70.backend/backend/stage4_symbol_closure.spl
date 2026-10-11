@@ -844,6 +844,44 @@ pub fn stage4_validate_candidate_archive_inputs_for_platform(archive_labels: [te
 pub fn stage4_validate_candidate_archive_inputs(archive_labels: [text], archive_paths: [text]) -> Result<(), text>:
     stage4_validate_candidate_archive_inputs_for_platform(archive_labels, archive_paths, false)
 
+pub fn stage4_linux_dynamic_dependencies(tool_output: text) -> Result<[text], text>:
+    """Admit only the declared Linux host ABI in a strict Stage4 image.
+
+    Accept readelf -d and objdump -p output. Optional providers must remain
+    absent from DT_NEEDED until an explicit demand-load path selects them.
+    """
+    if tool_output.trim() == "":
+        return Err("Stage4 Linux dynamic dependency scan is empty")
+    if not tool_output.contains("Dynamic section") and not tool_output.contains("Dynamic Section") and not tool_output.contains("There is no dynamic section"):
+        return Err("Stage4 Linux dynamic dependency scan has no dynamic-section header")
+    # Some Linux toolchains record the ELF interpreter as DT_NEEDED as well.
+    val admitted = [
+        "libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2",
+        "librt.so.1", "libgcc_s.so.1", "ld-linux-aarch64.so.1",
+        "ld-linux-x86-64.so.2", "ld-linux.so.2", "ld-linux-armhf.so.3",
+        "ld-linux-riscv64-lp64d.so.1"
+    ]
+    var seen: Dict<text, bool> = {}
+    for line in tool_output.split("\n"):
+        val trimmed = line.trim()
+        var needed = ""
+        if trimmed.contains("(NEEDED)"):
+            val opening = trimmed.index_of("[")
+            val closing = trimmed.last_index_of("]")
+            if opening < 0 or closing <= opening + 1:
+                return Err("Stage4 Linux dynamic dependency scan has malformed NEEDED entry")
+            needed = trimmed.substring(opening + 1, closing)
+        elif trimmed.starts_with("NEEDED"):
+            val parts = stage4_split_whitespace(trimmed)
+            if parts.len() != 2:
+                return Err("Stage4 Linux dynamic dependency scan has malformed NEEDED entry")
+            needed = parts[1]
+        if needed != "":
+            if not admitted.contains(needed):
+                return Err("Stage4 Linux image has undeclared dynamic dependency '" + needed + "'")
+            seen[needed] = true
+    Ok(stage4_sorted_text(seen.keys()))
+
 pub fn stage4_forbidden_archive_sections(section_headers: text) -> [text]:
     """Return initializer/finalizer section families forbidden in Stage4 providers."""
     var found: [text] = []

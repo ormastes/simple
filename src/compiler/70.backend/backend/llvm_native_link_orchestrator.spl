@@ -21,7 +21,7 @@ use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
 use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_strict_archives_v1}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error, native_linker_abi_for_target}
-use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_linux_dynamic_dependencies, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use compiler.common.assurance.policy.{strictness_for_profile_name}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
@@ -101,6 +101,18 @@ fn _llvm_darwin_snapshot_link_inputs(
     if snapshots.len() != inputs.len():
         return Err("darwin-link-input-snapshot-count-mismatch")
     Ok(snapshots)
+
+fn _llvm_stage4_linux_dynamic_dependencies(output: text, hosted_os: text) -> Result<[text], text>:
+    if hosted_os != "linux":
+        return Ok([])
+    val inspector = find_objdump_portable()
+    if inspector == "":
+        return Err("Stage4 Linux image dependency scan requires readelf or objdump")
+    val flag = if inspector.lower().contains("readelf"): "-d" else: "-p"
+    val (scan_out, scan_err, scan_code) = process_run(inspector, [flag, output])
+    if scan_code != 0 or scan_err.trim() != "":
+        return Err("Stage4 Linux image dependency scan failed: " + scan_err.trim())
+    stage4_linux_dynamic_dependencies(scan_out)
 
 fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptions) -> Result<text, text>:
     compiler_work_link_schedule_v1(user_objects.len())
@@ -646,10 +658,13 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                     return Err("Stage4 selected-archive projection cleanup failed after linking; output cleanup also failed")
                 return Err("Stage4 selected-archive projection cleanup failed after linking")
             if stage4_requested:
+                val dynamic_dependencies = match _llvm_stage4_linux_dynamic_dependencies(path, hosted_os):
+                    case Ok(names): names
+                    case Err(err): return llvm_stage4_receipt_failure(path, "", "", false, false, err)
                 val output_hash = file_hash_sha256(path)
                 if output_hash.len() != 64:
                     return llvm_stage4_receipt_failure(path, "", "", false, false, "Stage4 link-profile output hash failed")
-                val receipt = "stage4-link-profile-receipt-v1\nprofile=" + stage4_profile_hash + "\noutput=" + output_hash + "\n"
+                val receipt = "stage4-link-profile-receipt-v1\nprofile=" + stage4_profile_hash + "\noutput=" + output_hash + "\nneeded=" + dynamic_dependencies.join(",") + "\n"
                 val profile_input_path = stage4_profile_dir + "/profile.input"
                 val profile_dir_existed = dir_exists(stage4_profile_dir)
                 if stage4_profile_dir == "" or stage4_profile_receipt_path == "" or not dir_create_all(stage4_profile_dir):
