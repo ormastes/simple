@@ -112,3 +112,103 @@ invalid middle members and resource limits. Earlier and final source snapshots
 are retained separately, not combined as final-source coverage. Full qualification
 records/remaining families and real production CLI still need acceptance evidence.
 The complete forty-case matrix is unchanged.
+
+## CLI capture private increment — 2026-10-11
+
+Full20REQ/40AC and WP0–WP7 remain authoritative. The production SDN command
+SSpec passed7/0 at its initial native source stage. Capture controls remain6/1
+after the three-cycle cap; Unicode/NUL acceptance is unresolved. CLI/capture
+work stays private and must not be counted as release-qualified or full AC002/015
+completion. Follow doc/09_report/traceability_cli_tdd_2026-10-11.md and the
+tracked native Unicode capture bug before resuming a fresh bounded investigation.
+
+## Fixture transport / actual provider evidence update
+
+The prior6/1 positive control was malformed: nil-coalescing Result does not
+extract a text payload. The corrected helper explicitly matches Ok and asserts
+len1/bytes[0]. No original capped suite was rerun or retroactively validated.
+New native fixture regression3/0 and actual provider legacy6/5 -> current6/0
+qualify concrete worktree-provider properties. See the CLI TDD report for
+source-stage boundaries, owned inputs and P2 oracle limitations. Direct Unicode
+selection is proven; find transport of that filename remains open. All20REQ/40AC
+remain required; no full runtime or protected admission PASS is claimed.
+
+## Typed graph component evidence — 2026-10-11
+
+The selected20REQ/40AC scope is unchanged. Corrected strict-valid missing-family
+baseline3/3 became initial graph3/0. Broader native acceptance14/10 exposed shared
+escaping-size mismatch; Astra exposed allocation order before output limits.
+Grouped fixes enforce exact size-only preflight before indexes/rows/keys and
+explicit escape-byte comparisons. Final modern system SSpec14/0 inspects actual
+typed payloads, reference closure, roles, parameter identity, cycle policy,
+deterministic output and resource boundaries. Astra reconciled11source/16artifact
+hashes and final log: scopedPASS P0=0/P1=0, fullverificationWARN.
+
+These component examples contribute evidence; they do not mark any whole AC done.
+All other families/dispatcher, extractors/resolver, snapshot/hook/admission,
+execution/DB, projections/Slop/extensions, coverage/runtime/NFR/manual evidence
+remain required. See doc/09_report/traceability_graph_codec_tdd_2026-10-11.md.
+
+## Document/declarations component evidence — 2026-10-11
+
+The full40-case matrix is unchanged. Strict-valid dispatcher baseline4/4 became
+initial typed4/0; broader final-source native acceptance12/0 covers the three
+supported family payloads, four declaration tables, retained conflicts, exception
+calendar facts, exact budgets and independently bounded constructed-value APIs.
+Because common owners changed, graph14/0, qualification15/0 and budget/order11/0
+were renewed once at this source stage. Report and authored manual distinguish
+component evidence from whole AC001/002 completion and generated evidence.
+See doc/09_report/traceability_document_declarations_tdd_2026-10-11.md.
+
+Review-derived raw-boundary repair adds verified dictionary cardinality before
+keys and source-less cumulative key/header/string byte limits. Earlier12/0
+acceptance and regressions remain pre-repair evidence; final raw controls5/0,
+acceptance13/0 and affected graph14/0, qualification15/0, budget/order11/0
+match the changed source. No whole AC, broad runtime or admission PASS follows.
+
+## Targeted operation contract increment — 2026-10-11
+
+Full20REQ/40AC/WP0–WP7 are unchanged. Root owns implementation/merge; sidecarsN/A;
+Astra is final reviewer. Declarations major2 supplies explicit add/replace/suppress
+without reinterpreting major1. Desired replacement and exact original tuple are
+separate, and provenance/applicability references remain untrusted data. Native
+strict-valid baseline3/3 -> initial typed3/0 and broader12/0 are distinct stages.
+Actual policy authorization/stale-rule resolution AC006 remains required.
+See doc/05_design/infra/traceability_link_operations_v2.md and its TDD report.
+
+The unpublished work branch was rebased onto releasee2d56c2 with all89 prior
+owned product files byte-identical (AstraPASS P0=0/P1=0). New canonical Stage2
+qualification stopped before compilation at its10GB disk-space guard. Logs are
+retained; no admission was emitted. Continue implementation independently while
+build storage is unavailable; broad runtime and protected admission remain open.
+
+Final operation component native acceptance14/0, affected major1 declarations13/0
+and qualification15/0 match the new dispatcher stage. Empty63-node shape and
+exact aggregate text boundaries are covered. This remains component evidence,
+not real resolver AC006 or whole20/40 completion. Source/oracle AstraPASS P0=0/P1=0;
+final evidence review PASS (10source/36artifacts reconciled).
+
+## Conventional association kernel increment — 2026-10-11
+
+Full20REQ/40AC/WP0–WP7 remain unchanged. Root owns implementation and merge;
+sidecarsN/A; Astra is final reviewer. New pure-Simple convention owners validate
+bounded supplied graph/policy facts and resolve exact registered unit, integration,
+component and manual associations. They preserve corroborating origins, roles,
+parameter identities, explicit exclusions and positive/negative membership.
+Generator-manifest bindings are required before manual candidate recognition;
+source-kind/group indexes and every node/group traversal are charged. Structural
+association confers no requirement satisfaction, execution proof or eligibility.
+
+Construction RED is an actual missing-module failure with zero executed examples.
+Initial native6/0 was followed by Astra causal RED8/2 and grouped cycle2 GREEN26/0.
+Astra final component/source/oracle/evidence review PASS P0=0/P1=0; no unchanged
+green tests were rerun after convergence. See the conventions design, executable
+modern SSpec, its host-extracted manual and TDD report. Ambiguous-input permutation
+coverage validates diagnostics/lookups, not claim or generator/exclusion ordering.
+
+Next WP2 work: actual graph extraction/byte binding, complete policy ownership,
+explicit operation precedence/authority/stale rules and CLI integration. WP3
+incremental/full equivalence must consume both positive and negative dependencies.
+All execution evidence, qualifications, Slop surfaces and remaining plan gates
+continue separately. Coverage/NFR/full core/MCP/LSP checks and admitted SPipe
+manual generation remain open; no full AC/REQ done mark or runtime admission.

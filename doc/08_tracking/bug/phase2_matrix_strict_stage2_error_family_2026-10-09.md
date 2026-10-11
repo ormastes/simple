@@ -118,3 +118,24 @@ needs a compiler-lane fix (cap/dedup), not a source change.
   `enum match: unsupported arm pattern` masses in the same logs were not
   bisected in this batch; several are likely C1/C2 cascades but that is
   unproven.
+
+## 2026-10-11 addendum: valid_rows / for-in I64 family bisected (release-llvm-20261011 lane)
+
+The previously unbisected `for-in over non-array iterables (collection mir type:
+I64)` + `unresolved method call: valid_rows` family is a C1 receiver-identity
+cascade: in `database_queries.spl` and `factory.spl` the table receiver is a
+`case Some(table):` match-arm binding from `SdnTable?`. Strict HIR fails to
+propagate the arm payload type, `SdnTable.valid_rows() -> [SdnRow]`
+(core.spl:408) fails to resolve, and the fallback names a same-shaped `i64`
+symbol — the unrelated `valid_rows: i64` parameter in
+`src/lib/gc_async_mut/slang/model_executor/backend.spl:742,767` — so the for-in
+collection lowers as I64. Paired `enum match: unsupported arm pattern` is the
+same arm-pattern typing failure.
+
+Workaround landed on `work/release-llvm-fixes-20261011` (PR #2999): bind match
+results and arm payloads to explicitly annotated `SdnTable` locals before
+calling `valid_rows()`. Probes for re-verification:
+`build/matrix-probes/dbq/` (minimal MiniDb repro + annotated-local variant) and
+`build/matrix-probes/c4_backendkind/`. Compiler-side fix still required for the
+receiver-identity family itself; PR #2967 (HIR cache/receiver identity,
+e650ad19d67) may cover part of it.
