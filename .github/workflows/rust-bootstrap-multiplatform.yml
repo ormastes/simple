@@ -1005,11 +1005,19 @@ jobs:
           probe='#include <stdint.h>\n#include <stdio.h>\n#include <windows.h>\nint64_t spl_thread_current_id(void);\nvoid spl_thread_sleep(int64_t millis);\nint32_t rt_term_flush(void);\nint main(void) {\n    LARGE_INTEGER frequency, start, stop;\n    if (!QueryPerformanceFrequency(&frequency)) return 1;\n    if (spl_thread_current_id() != (int64_t)GetCurrentThreadId()) return 2;\n    QueryPerformanceCounter(&start);\n    spl_thread_sleep(-1); spl_thread_sleep(0);\n    QueryPerformanceCounter(&stop);\n    if ((double)(stop.QuadPart-start.QuadPart)/frequency.QuadPart > 1.0) return 3;\n    QueryPerformanceCounter(&start); spl_thread_sleep(30); QueryPerformanceCounter(&stop);\n    double elapsed = (double)(stop.QuadPart-start.QuadPart)/frequency.QuadPart;\n    if (elapsed < 0.010 || elapsed > 1.0) return 4;\n    static char buffer[4096];\n    if (setvbuf(stdout, buffer, _IOFBF, sizeof(buffer)) != 0) return 5;\n    if (fputs("Windows raw provider three contracts PASS\\n", stdout) < 0) return 6;\n    if (rt_term_flush() != 0) return 7;\n    /* Parent must observe flushed stdout while this process still waits. */\n    if (getchar() != \'\\n\') return 8;\n    return 0;\n}\n'
           (out/'provider.c').write_text(provider,newline='');(out/'probe.c').write_text(probe,newline='')
           expected={'spl_thread_current_id','spl_thread_sleep','rt_term_flush'}
+          headers=[Path(part)/'stdio.h' for part in os.environ['INCLUDE'].split(';') if (Path(part)/'stdio.h').is_file()]
+          assert headers, 'actual SDK stdio.h missing'
+          header=headers[0]; header_bytes=header.read_bytes(); header_text=header_bytes.decode(errors='replace')
+          lines=header_text.splitlines(); guard_lines=[(i+1,l) for i,l in enumerate(lines) if '_NO_CRT_STDIO_INLINE' in l]
+          header_receipt={'path':str(header),'sha256':hashlib.sha256(header_bytes).hexdigest(),'SDK':os.environ.get('WindowsSDKVersion'),'guards':guard_lines,'snippets':['\n'.join(lines[max(0,i-3):min(len(lines),i+8)]) for i,_ in guard_lines]}
+          (out/'SDK-stdio-guard.json').write_text(json.dumps(header_receipt,indent=2)+'\n')
+          assert any(l.lstrip().startswith(('#if','#else','#elif')) for _,l in guard_lines), 'SDK guard not proven; refuse macro'
+          
           runtime=Path(os.environ['RETAINED_RUNTIME']);assert hashlib.sha256(runtime.read_bytes()).hexdigest()=='19960cf36d947e7b9989f62f84898716a4038461033a526eee51c621674467b0'
           def run(name,args):
            r=subprocess.run(args,capture_output=True,timeout=60);(out/(name+'.stdout')).write_bytes(r.stdout);(out/(name+'.stderr')).write_bytes(r.stderr);assert r.returncode==0,(name,r.returncode);return r.stdout.decode(errors='replace')
-          run('compile-provider',['clang-cl.exe','/nologo','/c',str(out/'provider.c'),'/Fo'+str(out/'provider.obj')])
-          run('compile-probe',['clang-cl.exe','/nologo','/c',str(out/'probe.c'),'/Fo'+str(out/'probe.obj')])
+          run('compile-provider',['clang-cl.exe','/nologo','/D_NO_CRT_STDIO_INLINE=1','/c',str(out/'provider.c'),'/Fo'+str(out/'provider.obj')])
+          run('compile-probe',['clang-cl.exe','/nologo','/D_NO_CRT_STDIO_INLINE=1','/c',str(out/'probe.c'),'/Fo'+str(out/'probe.obj')])
           nm=run('provider-defs',['llvm-nm.exe','--defined-only','--extern-only',str(out/'provider.obj')]);defined={l.split()[-1] for l in nm.splitlines() if len(l.split())>=3 and l.split()[-2]=='T'};assert defined==expected
           rtdefs=run('runtime-defs',['llvm-nm.exe','--defined-only','--extern-only',str(runtime)]);existing={l.split()[-1] for l in rtdefs.splitlines() if len(l.split())>=3};assert not expected.intersection(existing)
           run('provider-imports',['llvm-nm.exe','--undefined-only',str(out/'provider.obj')])
@@ -1020,7 +1028,7 @@ jobs:
            proc.stdin.write(b'\n');proc.stdin.flush();remaining,stderr=proc.communicate(timeout=10);assert proc.returncode==0 and remaining==b'' and stderr==b'',(proc.returncode,remaining,stderr)
           except BaseException:
            proc.kill();proc.communicate();raise
-          receipt={'scope':'THREE_RAW_OS_CRT_ONLY; not full compiler/runtime admission','source_sha':'82bba68602c2cff2b87f42b0f5ae8a54f1d14b8b','provider_sha256':hashlib.sha256(provider.encode()).hexdigest(),'probe_sha256':hashlib.sha256(probe.encode()).hexdigest(),'runtime_sha256':hashlib.sha256(runtime.read_bytes()).hexdigest(),'strong_unique_providers':sorted(defined),'retained_overlap':[],'flush_observed_before_exit':True,'run_exit':0,'stdout':line.decode(),'exe_size':exe.stat().st_size,'exe_sha256':hashlib.sha256(exe.read_bytes()).hexdigest(),'tools':{name:{'path':shutil.which(name),'sha256':hashlib.sha256(Path(shutil.which(name)).read_bytes()).hexdigest()} for name in ['clang-cl.exe','llvm-nm.exe']},'SDK':os.environ.get('WindowsSDKVersion'),'VCTools':os.environ.get('VCToolsVersion')}
+          receipt={'scope':'THREE_RAW_OS_CRT_ONLY; not full compiler/runtime admission','source_sha':'82bba68602c2cff2b87f42b0f5ae8a54f1d14b8b','provider_sha256':hashlib.sha256(provider.encode()).hexdigest(),'probe_sha256':hashlib.sha256(probe.encode()).hexdigest(),'runtime_sha256':hashlib.sha256(runtime.read_bytes()).hexdigest(),'strong_unique_providers':sorted(defined),'retained_overlap':[],'flush_observed_before_exit':True,'run_exit':0,'stdout':line.decode(),'exe_size':exe.stat().st_size,'exe_sha256':hashlib.sha256(exe.read_bytes()).hexdigest(),'tools':{name:{'path':shutil.which(name),'sha256':hashlib.sha256(Path(shutil.which(name)).read_bytes()).hexdigest()} for name in ['clang-cl.exe','llvm-nm.exe']},'SDK_stdio_guard':header_receipt,'SDK':os.environ.get('WindowsSDKVersion'),'VCTools':os.environ.get('VCToolsVersion')}
           (out/'qualification.json').write_text(json.dumps(receipt,indent=2)+'\n');print(json.dumps({'run_exit':0,'exe_size':receipt['exe_size'],'providers':sorted(defined),'flush_observed_before_exit':True}))
           PYSTRICT
       - uses: actions/upload-artifact@v4
