@@ -533,3 +533,7 @@ timeout, so no executable unit PASS or full runtime qualification is claimed.
 ### 2026-10-11 shared compiler MIR blocker reduction
 
 The admitted Stage 2 compiler has no `test` command, and the focused cold semantic action spec native-build timed out during parse at 452/532 modules. A smaller 90-module direct compiler closure supplied structural progress: MIR diagnostics fell from 55 to 54 to 14 to six through typed optional payload binding, qualified tuple enum patterns, and narrow source repairs. Two remaining direct `SymbolId` patterns were edited after the third bounded cycle and remain unverified. See [the compiler blocker](../../../08_tracking/bug/item5_vhdl_port_stage2_hir_collection_plan_owner_2026-10-11.md). This is no executable unit PASS, no ordinary CLI V3 graph publication, and no warm/cold time/RSS qualification.
+
+### 2026-10-11 SCV snapshot MIR row typing
+
+Explicit `[text]` and `[SdnRow]` bindings remove two SCV-specific MIR diagnostics from a bounded 122-module snapshot compile. Thirteen unrelated MIR errors remain and the three-cycle cap is exhausted. This is no native or warm compilation PASS, and the ordinary CLI V3 publisher and matched p95/RSS qualification remain open. See [the focused report](../../../09_report/compiler/target6_scv_snapshot_mir_row_types_2026-10-11.md).
