@@ -20,8 +20,15 @@ before count refusal or any SMF emission. The second body pass preserves
 per-receipt CFG, owner, emission and witness order. Only compact
 `DriverColdHirModuleInputV1` rows and selected digest/generation metadata escape
 through a freshly allocated Result carrier. Inventory text, complete decoded
-generation and source indexes remain scratch. The wrapper refuses active or
+generation and source lookup tables remain scratch. The wrapper refuses active or
 paused parent ownership and closes only its own scope.
+
+Each selected input retains its original scalar phase-1 `source_index`. The
+accepted woven-body consumer checks that exact ordered inventory row, including
+logical identity, physical path, full source digest, byte count and parent key.
+It does not search all logical rows for every physical module. Existing
+single-module callers default this field to -1 and do not consume it; the
+real source-plan factory supplies the actual index for the production handoff.
 
 This plan is source authority input, not a transformed-stage token. A public
 plan constructor, replacement row or copied digest does not authenticate a HIR
