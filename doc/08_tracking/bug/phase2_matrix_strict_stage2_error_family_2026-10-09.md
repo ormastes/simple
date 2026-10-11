@@ -139,3 +139,23 @@ calling `valid_rows()`. Probes for re-verification:
 `build/matrix-probes/c4_backendkind/`. Compiler-side fix still required for the
 receiver-identity family itself; PR #2967 (HIR cache/receiver identity,
 e650ad19d67) may cover part of it.
+
+## 2026-10-11 addendum 2: std.crypto.sha3 module-index registration gap (C6, release-llvm-20261011 lane)
+
+Stage-2 matrix `test_runner_build` (admitted compiler 85fc943a, post-PR-#2967)
+fails in `src/lib/common/crypto/hmac.spl`:
+
+    module std.crypto.sha3 has no exported item sha3_384_bytes
+    module std.crypto.sha3 has no exported item sha3_512_bytes
+    unresolved name: sha3_256_bytes / sha3_384_bytes / sha3_512_bytes
+    (12 errors; module lib.common.crypto.hmac poisoned)
+
+The functions ARE declared in `src/lib/common/crypto/sha3.spl:341,347,353` with
+the same plain `fn` style as `sha1.spl:251` (`sha1_bytes`), which imports fine.
+So the compiler's module-index registration silently drops std.crypto.sha3's
+exports. Same family PR #2967 chased ("failed one HMAC module importing SHA3
+functions; module-index registration under investigation") but the failure
+persists WITH #2967 merged (e650ad19d67 in tree). Suspect visit/declaration
+order sensitivity (cf. robust-5a test 2b284af6820 pinning module typing
+against declaration/name/visit order). Needs a compiler-lane fix; probes under
+`build/matrix-probes/sha3reg/`.
