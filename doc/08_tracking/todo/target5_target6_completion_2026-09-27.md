@@ -325,3 +325,10 @@ Isolate the checked text read/optional default ABI, rerun the full tracked-move
 fixture, then require cold, staged-intermediate, final-plugin, and unchanged
 warm admissions. Item 5 kernel closure and Item 6 matched time/RSS and full
 verification remain open.
+
+The newer Item 6 executable has `byte_count=24` at entry validation and
+rejects its first 64-character digest. A direct-byte validator candidate is
+unbuilt after three bounded builds, one of which exposed a diagnostic fixture
+path mistake. Next: verify the digest validator, then the complete V4 sequence
+and native warning-free behavior. Item 5 and all broad Item 6 gates remain
+open.

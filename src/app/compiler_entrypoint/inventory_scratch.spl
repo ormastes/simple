@@ -1,10 +1,9 @@
 # One file's canonicalization and hashing scratch belongs to that file. Keep
 # only its event alive; promoting the accumulated event array each time would
 # walk every earlier event again and turn cold admission quadratic.
-# rt_fs_read_text is C-only by design (rt_dual_implementation_baseline.txt),
-# which made cold SCV inventory init impossible on every Rust-lane binary
-# since 966bc0159ed. Read through the Rust-backed checked text reader instead.
-use std.nogc_sync_mut.sffi.fs.{file_read_text_at_checked}
+# The hosted SOSIX facade owns the bounded, no-follow read and its native
+# nullable-text transport. A failed read must not become an empty source.
+use std.nogc_async_mut.sosix.host_facade.{sosix_file_read_regular_no_follow_bounded}
 use std.scv.compile_source_inventory_core.{CompileSourceEventV1, compile_source_inventory_git_event_v1}
 use compiler.mir._MirLowering.transient_owner_sffi.{transient_array_scope_begin_v1, transient_array_scope_pause_v1, transient_array_scope_end_v1, transient_heap_promote_v1}
 
@@ -13,8 +12,14 @@ fn compiler_inventory_file_event_v1(
 ) -> CompileSourceEventV1?:
     if not transient_array_scope_begin_v1():
         return nil
+    val content = match sosix_file_read_regular_no_follow_bounded(
+        absolute, 1073741824):
+        case Err(_):
+            transient_array_scope_end_v1()
+            return nil
+        case Ok(value): value
     val event = compile_source_inventory_git_event_v1(
-        operation, identity, file_read_text_at_checked(absolute, 0, 1073741824) ?? "")
+        operation, identity, content)
     if not transient_array_scope_pause_v1():
         transient_array_scope_end_v1()
         return nil

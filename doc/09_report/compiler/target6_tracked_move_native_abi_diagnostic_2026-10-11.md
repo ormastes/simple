@@ -69,3 +69,31 @@ Build logs: `build/mini_builds/target6_tracked_move_refresh_probe/build_v4_subst
 each run exited 2 at the successive boundaries above. The three-cycle limit
 is reached. There is still no cold or warm V4 admission PASS, current-source
 worker, or matched time/RSS qualification.
+
+## SOSIX read and digest-validation isolation
+
+The next bounded cycle routed the scratch read through the hosted SOSIX
+bounded no-follow facade and rejected a failed read explicitly. The 66-module
+fixture linked, but still exited 2 at `observed-event-apply:event-entry-invalid`.
+A focused 46-module read/event probe first used a path that exists only inside
+the temporary Git fixture, so that run correctly reported read failure. The
+corrected probe read a real tracked source and reported matching positive
+content and event byte counts (`1634`), although the runtime still emitted an
+invalid-array-handle warning. This proves neither the complete event payload
+nor the larger fixture is valid.
+
+GDB on the 66-module executable found the first entry's `byte_count=24`,
+then saw its first digest validation return false. The digest text reported
+length 64; the validator calls `text_to_utf8_bytes(value)` before `rt_len`
+and byte checks. This is stronger evidence than the previous `byte_count=-1`
+snapshot for the new executable: the rejection is at least reproducible at
+the digest-validation boundary. The shared validator now uses `value.bytes()`
+for the same UTF-8 bytes, but that source change has **not** been built or
+executed because this cycle's three-build limit is reached. The exact reason
+the runtime warning appears before validation remains open.
+
+Logs: `build_v4_sosix_read.log`, `run_v4_sosix_read.log`,
+`build_sosix_event_read_abi_real.log`, `run_sosix_event_read_abi_real.log`,
+and `gdb_v4_sosix_first_digest.log` under the same mini-build directory.
+Next verify the direct-byte validator in a fresh bounded cycle, then require
+all four V4 cold/staged/committed/unchanged admissions.

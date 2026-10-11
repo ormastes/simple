@@ -21,3 +21,14 @@ checked facade and asserts text content and length, then inspect the event
 constructor in the same native call graph. Repair the failing edge through
 the app/SOSIX facade boundary and rerun the complete V4 fixture in a fresh
 bounded cycle. Do not claim warm deletion or Item 6 cutover from this failure.
+
+## Follow-up
+
+The scratch read now goes through the hosted SOSIX bounded no-follow facade
+and fails closed. A focused native probe read a real tracked source and built
+an event with matching positive byte counts, while the full 66-module
+fixture still rejected the first event. GDB on that newer executable saw
+`byte_count=24`, not `-1`, and its first digest validator returned false.
+The earlier `-1` remains a valid observation for the prior executable but
+does not identify the current failing field. See the tracked-move ABI report
+and `native_scv_digest_validation_invalid_array_2026-10-11.md`.

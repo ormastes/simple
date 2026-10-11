@@ -772,3 +772,11 @@ and optional default boundary needs isolation before a V4 cold/warm claim.
 See the updated tracked-move native ABI diagnostic. The three-cycle gate for
 this attempt is exhausted; full Item 6 cutover and matched time/RSS remain
 open.
+
+The newer native cycle routed the scratch source read through the hosted SOSIX
+bounded no-follow facade. A focused probe confirmed positive read and event
+byte counts, but the full fixture still rejected the first event. GDB found
+the first 64-character digest failing validation; a direct UTF-8 byte-view
+candidate replaces the validator's native array conversion. It remains
+unbuilt under the three-cycle cap. Full V4 admission and matched perf/RSS
+qualification remain open; see the tracked-move native ABI report.
