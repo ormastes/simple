@@ -1162,6 +1162,17 @@ pub extern "C" fn rt_array_data_ptr_text(array: RuntimeValue) -> i64 {
     rt_array_data_ptr(array)
 }
 
+/// Borrowed boxed-array predicate for dynamic library boundaries.
+/// Validate registration and read flags under the same registry lock. Rust
+/// tuples have a distinct heap type; gc_flags bit 1 is not the C tuple flag.
+#[no_mangle]
+pub extern "C" fn rt_array_value_is_boxed_array(value: RuntimeValue) -> bool {
+    super::heap::with_typed_ptr::<RuntimeArray, _>(value, HeapObjectType::Array, |array| unsafe {
+        !(*array).is_byte_packed() && !(*array).is_u64_packed()
+    })
+    .unwrap_or(false)
+}
+
 /// Return the stable array header pointer for proven native fast paths.
 #[no_mangle]
 pub extern "C" fn rt_array_header_ptr(array: RuntimeValue) -> i64 {

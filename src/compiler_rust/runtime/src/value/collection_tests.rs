@@ -2858,3 +2858,47 @@ fn rt_clear_empties_arrays_in_place_and_copies_text() {
     assert_text_eq(rt_clear(t), "", "clear on text yields the empty text");
     assert_text_eq(t, "abc", "text receiver must NOT be mutated");
 }
+
+#[test]
+fn boxed_array_payload_predicate_respects_rust_owner_layout() {
+    use super::{rt_array_value_is_boxed_array as boxed, rt_tuple_free, rt_tuple_get, rt_tuple_new, rt_tuple_set};
+    use crate::value::heap::{gc_flags, get_typed_ptr_mut, HeapObjectType};
+
+    let predicate: extern "C" fn(RuntimeValue) -> bool = boxed;
+    for value in [RuntimeValue::NIL, RuntimeValue::from_int(9), RuntimeValue::from_int(-7),
+                  RuntimeValue::from_raw(0x1_0000_0001)] {
+        assert!(!predicate(value));
+    }
+    let unregistered = [0u64; 4];
+    assert!(!predicate(RuntimeValue::from_raw(unregistered.as_ptr() as u64 | 1)));
+    let array = rt_array_new(2);
+    assert!(predicate(array));
+    assert!(rt_array_push(array, RuntimeValue::from_int(42)));
+    assert!(predicate(array));
+    let ptr = get_typed_ptr_mut::<super::RuntimeArray>(array, HeapObjectType::Array).unwrap();
+    let original_flags = unsafe { (*ptr).header.gc_flags };
+    // Rust GC bit 1 must not be confused with C/Pure-Simple tuple identity.
+    for mark in [0u8, 1u8] {
+        for packed in [0, gc_flags::BYTE_PACKED, gc_flags::U64_PACKED,
+                       gc_flags::BYTE_PACKED | gc_flags::U64_PACKED] {
+            unsafe { (*ptr).header.gc_flags = mark | packed; }
+            assert_eq!(predicate(array), packed == 0);
+        }
+    }
+    unsafe { (*ptr).header.gc_flags = original_flags; }
+    assert_eq!(rt_array_get(array, 0), RuntimeValue::from_int(42));
+    rt_array_free(array);
+    assert!(!predicate(array));
+    let bytes = rt_byte_array_new(2);
+    assert!(!predicate(bytes));
+    rt_array_free(bytes);
+    let words = super::rt_array_new_with_cap_u64(2);
+    assert!(!predicate(words));
+    rt_array_free(words);
+    let tuple = rt_tuple_new(2);
+    assert!(!predicate(tuple));
+    assert!(rt_tuple_set(tuple, 0, RuntimeValue::from_int(7)));
+    assert_eq!(rt_tuple_get(tuple, 0), RuntimeValue::from_int(7));
+    rt_tuple_free(tuple);
+    assert!(!predicate(tuple));
+}

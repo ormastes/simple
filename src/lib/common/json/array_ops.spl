@@ -12,6 +12,7 @@
 use std.common.json.types.{json_array, json_is_array, json_number, json_object,
     json_string, json_to_array, json_to_number, json_to_string}
 use std.common.json.object_ops.{json_object_get, json_object_set}
+use std.sffi.runtime.array_value_is_boxed_array
 
 fn json_deep_equals(left: any, right: any) -> bool:
     json_to_string(left) == json_to_string(right)
@@ -457,6 +458,17 @@ fn json_array_reduce(arr: any, initial: any, reducer: fn(any, any) -> any) -> an
         acc = reducer(acc, elem)
     acc
 
+fn json_array_flatten_items(value: any) -> [any]?:
+    # Preserve json_to_array's public dynamic contract. Only this checked
+    # boundary publishes boxed-array metadata to the native iterator.
+    if not json_is_array(value):
+        return nil
+    val payload = value.1
+    if not array_value_is_boxed_array(payload):
+        return nil
+    val items: [any] = payload
+    Some(items)
+
 fn json_array_flatten(arr: any) -> any:
     """Flatten nested JSON arrays (one level).
 
@@ -464,23 +476,30 @@ fn json_array_flatten(arr: any) -> any:
         arr: JSON array possibly containing nested arrays
 
     Returns:
-        Flattened JSON array
+        Flattened JSON array. Non-array input yields an empty JSON array.
+        Malformed array-tagged payloads yield nil, including nested ones.
 
     Example:
         json_array_flatten(json_array([json_array([json_number(1)]), json_number(2)]))
     """
-    val list: [any] = json_to_array(arr)
-    if list == nil:
+    if not json_is_array(arr):
         return json_array([])
-    var result: [any] = []
-    for elem in list:
-        if json_is_array(elem):
-            val nested = json_to_array(elem)
-            for item in nested:
-                result.push(item)
-        else:
-            result.push(elem)
-    json_array(result)
+    if val list = json_array_flatten_items(arr):
+        var result: [any] = []
+        for elem in list:
+            if json_is_array(elem):
+                if val nested = json_array_flatten_items(elem):
+                    for item in nested:
+                        result.push(item)
+                else:
+                    return nil
+            else:
+                result.push(elem)
+        return json_array(result)
+    # A forged array tag with scalar/tuple/packed storage is malformed JSON.
+    # Reject the entire operation instead of dropping an element or reading
+    # non-boxed storage as tagged values.
+    nil
 
 fn json_array_unique(arr: any) -> any:
     """Remove duplicate values from array.

@@ -9134,6 +9134,15 @@ int64_t spl_wffi_try_call_i64_out(int64_t fptr, int64_t args_value,
     return SPL_WFFI_OK;
 }
 
+/* A borrowed dynamic payload can enter [any] iteration only when its
+ * registered storage contains boxed values, not tuple/packed slots. */
+bool rt_array_value_is_boxed_array(int64_t value) {
+    RtCoreArray* array = rt_core_as_registered_array(value);
+    if (!array) return false;
+    return (array->flags & (RT_CORE_ARRAY_FLAG_TUPLE |
+            RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) == 0;
+}
+
 int64_t rt_array_header_ptr(SplArray* a) {
     RtCoreArray* array = rt_core_array_ptr(a);
     return array ? (int64_t)(uintptr_t)array : 0;

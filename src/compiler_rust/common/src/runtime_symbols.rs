@@ -1509,6 +1509,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_array_write_span",
     "rt_array_free",
     "rt_array_header_ptr",
+    "rt_array_value_is_boxed_array",
     "rt_string_free",
     "rt_array_index_of",
     // Receiver-polymorphic index_of (array or text). Codegen emits this name
