@@ -7,11 +7,20 @@ use compiler.blocks.definition.{BlockDefinition, ConstValue}
 use compiler.blocks.value.{BlockValue}
 use compiler.blocks.context.{BlockContext, BlockError}
 use compiler.blocks.registry.{register_block, unregister_block, is_block_registered, with_block}
-use compiler.blocks.modes.{Span}
+use compiler.common.diagnostics.span.{Span}
 
 # ============================================================================
 # Test Helpers
 # ============================================================================
+
+fn _testing_context(payload: text) -> BlockContext:
+    """Minimal parse context for tests."""
+    BlockContext(
+        source: payload,
+        block_kind: "",
+        span: Span.empty(),
+        payload_span: Span.empty()
+    )
 
 fn test_parse(
     block_kind: text,
@@ -39,7 +48,7 @@ fn test_parse(
     val block_def = get_block_or_panic(block_kind)
 
     # Create test context
-    val ctx = blockcontext_test(payload)
+    val ctx = _testing_context(payload)
 
     # Parse
     val result = block_def.parse_payload(payload, ctx)
@@ -73,7 +82,7 @@ fn test_parse_error(
     ```
     """
     val block_def = get_block_or_panic(block_kind)
-    val ctx = blockcontext_test(payload)
+    val ctx = _testing_context(payload)
 
     val result = block_def.parse_payload(payload, ctx)
 
@@ -171,8 +180,10 @@ fn test_no_const_eval(
 
     val result = block_def.eval_const(value)
 
-    if has_result:
-        panic("Expected no const eval, but got: {const_value_to_string(result_value)}")
+    if result != nil:
+        match result:
+            case some_val:
+                panic("Expected no const eval, but got: {const_value_to_string(some_val)}")
 
 # ============================================================================
 # Block Mocking
@@ -203,21 +214,19 @@ fn mock_block(
     )
     ```
     """
-    MockBlockDef(kind: kind, parser: parser)
+    MockBlockDef(_kind: kind, _parser: parser)
 
 struct MockBlockDef(BlockDefinition):
     """Simple mock block for testing."""
 
     _kind: text
-    _parser: fn(text) -> text
+    _parser: fn(text) -> Result<BlockValue, BlockError>
 
     fn kind() -> text:
         self._kind
 
-    fn parse_payload(payload: text, ctx: BlockContext) -> text:
-        match (self._parser)(payload):
-            case Ok(value): Ok(value)
-            case Err(msg): Err(blockerror_parse(msg))
+    fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        (self._parser)(payload)
 
 # ============================================================================
 # Assertion Helpers
@@ -255,7 +264,7 @@ fn assert_parse_succeeds(block_kind: text, payload: text) -> BlockValue:
         If parsing fails
     """
     val block_def = get_block_or_panic(block_kind)
-    val ctx = blockcontext_test(payload)
+    val ctx = _testing_context(payload)
 
     match block_def.parse_payload(payload, ctx):
         case Ok(value): value
@@ -275,7 +284,7 @@ fn assert_parse_fails(block_kind: text, payload: text) -> BlockError:
         If parsing succeeds
     """
     val block_def = get_block_or_panic(block_kind)
-    val ctx = blockcontext_test(payload)
+    val ctx = _testing_context(payload)
 
     match block_def.parse_payload(payload, ctx):
         case Ok(_): panic("Expected parse to fail, but it succeeded")
