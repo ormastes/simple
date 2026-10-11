@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+exec python3 - "$root" <<'PYTEST'
+from pathlib import Path
+import hashlib, subprocess, sys, tempfile
+repo=Path(sys.argv[1])
+def digest(value): return hashlib.sha256(value).hexdigest()
+with tempfile.TemporaryDirectory(prefix='product-scv-aux-') as temporary:
+    root=Path(temporary)
+    def put(path, data):
+        p=root/path; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(data); return p
+    payload=b'fn main():\n    0\n'
+    sha=digest(payload)
+    put('src/app/example.spl',payload)
+    chunk=put('build/scv/objects/chunks/sha256_'+sha+'.blob',payload)
+    generation=('simple-compile-source-inventory-v1\ngeneration=1\ncount=1\nsrc/app/example.spl|'+('|'.join([sha]*5))+'|'+str(len(payload))).encode()
+    generation_sha=digest(generation)
+    generation_file=put('build/scv/source-inventory/generations/'+generation_sha+'.inventory',generation)
+    membership=b'simple-compile-untracked-membership-v1\ncount=1\nsrc/app/example.spl'
+    membership_sha=digest(membership)
+    membership_file=put('build/scv/compile-events/untracked/'+membership_sha+'.paths',membership)
+    current=(generation_sha+'\nsimple-compile-event-cursor-v3\ngit_head='+'a'*40+'\nfilesystem_rows=0\nfilesystem_digest='+digest(b'')+'\ninventory_digest='+generation_sha+'\ninventory_generation=1\nuntracked_src_digest='+sha+'\nuntracked_test_digest='+digest(b'')+'\nuntracked_membership_digest='+membership_sha).encode()
+    current_file=put('build/scv/source-inventory/CURRENT',current)
+    lock=put('build/scv/compile-events/refresh.lock',b'')
+    put('build/scv/source-inventory/publication.lock',b'')
+    script=r'use BootstrapProductScv; my %a; my %c=($ARGV[1]=>$ARGV[2]); BootstrapProductScv::admit_auxiliary($ARGV[0],\%a,\%c); print scalar(keys %a), "\n";'
+    def run(): return subprocess.run(['perl','-I'+str(repo/'scripts/bootstrap/lib'),'-e',script,str(root),'sha256_'+sha,str(len(payload))],capture_output=True,text=True)
+    good=run(); assert good.returncode==0 and good.stdout=='6\n',good.stderr
+    checks=1
+    for path,bad in [(chunk,b'corrupt'),(generation_file,generation+b'evil'),(membership_file,membership+b'/../evil'),(current_file,current.replace(generation_sha.encode(),b'f'*64)),(lock,b'unbound')]:
+        original=path.read_bytes(); path.write_bytes(bad)
+        result=run(); assert result.returncode!=0,str(path)
+        path.write_bytes(original); checks+=1
+    stray=put('build/scv/objects/chunks/sha256_'+digest(b'unbound')+'.blob',b'unbound')
+    assert run().returncode!=0; stray.unlink(); checks+=1
+    original=chunk.read_bytes(); chunk.unlink(); chunk.symlink_to(root/'src/app/example.spl')
+    assert run().returncode!=0; checks+=1
+    print('PASS: '+str(checks)+' authenticated SCV auxiliary acceptance/rejection checks')
+PYTEST
