@@ -18,6 +18,12 @@ Historical Phase 2 probes do not qualify the Phase 3 candidate.
 
 ## Blocking findings
 
+- Public SDN output now routes through one bounded wrapper and the obsolete
+  unreferenced JSON wrapper is removed. Native V4 currently lacks the required
+  descendant-group retirement contract even on Linux; Windows additionally
+  reports an unsupported provider. The new wrapper cannot yet execute public
+  requests successfully. Its pure fixtures remain unrun. See
+  `doc/08_tracking/bug/test_sdn_scoped_process_provider_platform_gap_2026-10-11.md`.
 - No admitted source-matched Phase 3 runtime has executed this feature's
   build, CLI, SDN parser or SSpec acceptance checks.
 - Native SDN case-event transport is wired into the runner's database child.
