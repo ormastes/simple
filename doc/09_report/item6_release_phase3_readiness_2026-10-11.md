@@ -94,3 +94,58 @@ including independently bound K1/CUDA composition authority. The existing
 compiler-only capsule still cannot perform `check`; no exact-source qualified
 full CLI was found. The local code is therefore suitable only for a draft PR
 targeting `release_phase3`, with no admission, merge or completion claim.
+
+## Focused invocation provenance contract
+
+Full-bootstrap producers now emit provenance v5 with the explicit
+`full-bootstrap-focused-v1` invocation contract. Existing descriptor candidate
+producers continue to emit v4 and use its unchanged reconstruction path. The
+new route is not inferred from arbitrary transcript arguments and is not
+accepted through the descriptor-capsule route.
+
+Admission reconstructs both Stage 2 and Stage 3 environment/argument vectors
+from singular bound metadata and the established artifact map. It binds K1
+policy to its canonical composition, derives CUDA selection from `simple.sdn`,
+and verifies the selected template, generated overlay and K1 receipt hashes.
+The generated CUDA root must contain exactly its selected source file; extra
+modules are rejected. The K1 receipt must identify successful selection and
+the same Stage 2/3 transcript and log hashes as the artifact map. Existing
+source/runtime/tool snapshots, executable identities, sanity evidence and
+exact transcript checks remain required. No artifact-map role is removed.
+
+The focused vector includes retained frontend/HIR caches, compatibility
+manifest paths, platform tool environments, explicit entry and compositions,
+mission-critical selection and low-memory options. MIR tag diagnostics are
+recorded once rather than duplicated through the diagnostic pass-through.
+Deploy/handoff/oracle consumers recognize v5 while retaining v4 support.
+
+Eight real-file binding cases passed, covering valid authority, changed K1,
+changed generated CUDA, changed compiler manifest, malformed hash, forged
+receipt status/transcript and duplicate policy. A subsequent targeted case
+passed for an injected sibling module; only the changed closure's valid case
+was rechecked. These tests do not establish executable/bootstrap equivalence.
+
+The smaller-model sidecar's independent producer/verifier comparison passed
+all six Linux, Windows MSVC and Darwin Stage 2/3 cases, including exact
+length-prefixed transcripts. It covers selected low-memory, diagnostic/MIR,
+cold-index and mission-critical settings. Darwin Stage 2 initially exceeded
+the fixture's 15-second subprocess limit; only that failed case was retried at
+45 seconds and passed in 39.9 seconds. Windows Stage 3 was checked after its
+diagnostic fixture changed and passed in 33.3 seconds. Other green cases were
+retained. Direct diagnostic pass-through compatibility also passed. Primary
+review checked the implementation and sidecar assertions; these remain
+compiler-free orchestration tests.
+
+The Windows handoff self-test rejected missing evidence and tampered executable
+content, then failed its symlink case. A separate host probe established that
+Git Bash `ln -s` creates a regular copy here (`native_symlink=false`), so that
+fixture did not exercise a symlink. Its result remains FAIL, not a platform
+acceptance PASS. The deploy guard self-test also cannot select this Windows
+host through its Linux/macOS-only platform probe. Neither check was looped.
+
+PR [3098](https://github.com/ormastes/simple/pull/3098) contains the earlier
+tested fixes on `release_phase3`; it remains draft. This continuation repairs
+orchestration authority and does not claim full Item 6 acceptance. An admitted
+full CLI, source-bound Phase 3 bootstrap and the canonical clean/warm/no-op/edit,
+semantic invalidation, corruption recovery, behavioral equivalence and
+compiler/core/MCP/LSP runtime evidence are still required before landing.
