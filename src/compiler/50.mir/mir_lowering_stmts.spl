@@ -1925,6 +1925,7 @@ impl MirLowering:
             var b = self.builder
             val field_local = b.emit_get_field(mir_operand_copy(value_local), element_index, element_type)
             self.builder = b
+            self.mark_native_tuple_projection(field_local, element_type)
             self.lower_assign(target_element, nil, field_local, target_element.kind)
             element_index = element_index + 1
 
@@ -3611,11 +3612,13 @@ impl MirLowering:
         # there -- which is why `[i64]` for-in was the one case that worked.
         var element_type_from_hir = false
         var collection_hir_is_text = false
-        var dict_entry_hir: HirType? = nil
+        var dict_key_hir: HirType? = nil
+        var dict_value_hir: HirType? = nil
         if val collection_hir_type = self.for_collection_declared_type(collection_local, iter):
             match collection_hir_type.kind:
                 case HirTypeKind.Dict(dict_key_t, dict_value_t):
-                    dict_entry_hir = Some(HirType(kind: HirTypeKind.Tuple([dict_key_t, dict_value_t]), span: collection_hir_type.span))
+                    dict_key_hir = Some(dict_key_t)
+                    dict_value_hir = Some(dict_value_t)
                 case HirTypeKind.Array(elem_t, _) | HirTypeKind.Slice(elem_t):
                     # `[Any]` / `[Infer]` / `[Error]` name NO element type. An
                     # untyped array literal (`val words = ["alpha", "beta"]`)
@@ -3720,13 +3723,13 @@ impl MirLowering:
         # interpreter sorts entries by key (dict_entries_sorted); code that
         # depends on iteration order already diverges via rt_for_iterable.
         if self.local_is_runtime_dict(collection_local):
-            var entry_type = MirType.i64()
-            if val entry_hir = dict_entry_hir:
-                entry_type = self.lower_type(entry_hir)
-            elif val dict_mir_type = self.local_mir_type_of(collection_local):
+            var entry_key_mir = MirType.i64()
+            var entry_value_mir = MirType.i64()
+            if val dict_mir_type = self.local_mir_type_of(collection_local):
                 match dict_mir_type.kind:
                     case MirTypeKind.Dict(dict_key_mir, dict_value_mir):
-                        entry_type = MirType(kind: MirTypeKind.Tuple([dict_key_mir, dict_value_mir]))
+                        entry_key_mir = dict_key_mir
+                        entry_value_mir = dict_value_mir
                     case _: ()
             val entries_func = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_dict_entries"),
@@ -3738,7 +3741,17 @@ impl MirLowering:
             if val entries_local = entries_call:
                 self.runtime_array_locals[entries_local.id] = true
                 self.mark_runtime_value_local(entries_local.id)
-                return self.lower_for_array_indexed(var_, entries_local, entry_type, body, source_span)
+                # rt_dict_entries yields RUNTIME tuples (heap objects with a
+                # header); the `(k, v)` destructure reads its variable with
+                # GetField, valid only on a NATIVE tuple. Rebuild each entry
+                # as a native tuple first -- see builtin_runtime_tuples_to_native
+                # (the same defect printed `258:2` for enumerate()).
+                val entry_fields = [
+                    self.builtin_dict_entry_field_type(dict_key_hir, entry_key_mir),
+                    self.builtin_dict_entry_field_type(dict_value_hir, entry_value_mir)
+                ]
+                val native_entries = self.builtin_runtime_tuples_to_native(entries_local, entry_fields)
+                return self.lower_for_array_indexed(var_, native_entries, MirType(kind: MirTypeKind.Tuple(entry_fields)), body, source_span)
 
         # Non-array iterable: no supported lowering (#143). Fail loudly.
         # Diagnostics: `body.span` is frequently (0,0) on this pipeline, which
