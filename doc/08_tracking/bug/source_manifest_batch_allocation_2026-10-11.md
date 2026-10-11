@@ -1,0 +1,14 @@
+# Source manifest batch membership allocation
+
+Date: 2026-10-11. Requirement: REQ-MEMBERSHIP-ORDERED-001.
+Authoritative bug database reconciliation: pending; no qualified full CLI is available.
+
+The native-build coordinator validates the immutable snapshot against its admitted source inventory in `source_authority.spl`, then warm-receipt preparation opens and validates the published authority again. For a large selected snapshot, `source_manifest_membership.spl` renders every inventory row into a dictionary before checking selected rows. The native C bootstrap dictionary is hashed; this report does not claim quadratic lookup or a hash ABI defect.
+
+The repair retains the existing tiny-selection binary path and adds a guarded merge for strictly ordered, unique inventory identities and nondecreasing selected identities. It compares each selected complete row, including digest and byte count. Unordered, duplicate-identity, delimiter-containing and malformed caller inputs retain the existing dictionary semantics. Source ownership, immutable generation, manifest digest/count and snapshot publication checks remain in their original owners.
+
+Regression spec: `test/01_unit/app/compiler_entrypoint/source_manifest_ordered_merge_spec.spl` (six cases). Native diagnostic fixture: `test/fixtures/source_manifest_ordered_merge/native_owner_probe.spl` (fifteen criteria, including explicit ordered/fallback eligibility).
+
+Observed context: the fifth grouped build of source `28f3dc8f389aea1c5325cf8e728b562faa20c387`, using pure compiler `b580919372e209ea2a10e6d8e919b0f90c5dc3100e76f958f584c5db0ace4778`, timed out after 1801.807 seconds without a worker-spawn trace or candidate executable. Peak aggregate RSS was 1,747,584 KiB. Its request forced cold inventory initialization, recomputing all `src` and `test` entries. No parent phase measurements establish which operation consumed the time; this allocation repair is not a proven fix for that timeout.
+
+Verification: exact-source review found no P0/P1; both environment audits and executable-spec layout check passed. The separately bounded pure-compiler positional build of the imported-owner fixture timed out during runtime compilation: exit 124, wall 182.597 seconds, peak aggregate RSS 2,548,100 KiB, no executable, no runtime criteria executed. Input pins remained unchanged; cleanup reaped the job with zero active descendants. Logs and its private cache are preserved at `C:/dev/simple/build/phase3-grouped-candidate-plan-20261011/focused-merge-compile1`. This was a small bootstrap diagnostic, not a sixth full grouped compiler build. Full compiler rebuild, six BDD cases, paired performance measurements, Phase 3, Hello World, and core/MCP/LSP admission are pending. This change must not be landed on the strength of static review or the earlier producer's Hello World output.
