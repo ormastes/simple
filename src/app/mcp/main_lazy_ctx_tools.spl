@@ -53,7 +53,7 @@ use .main_lazy_telemetry.{tok_record, tok_rollup, tok_load_events, TOK_FEATURE_C
 use .main_lazy_log_opt.{log_opt_optimize, log_opt_optimize_recorded, log_opt_plugins_text, LOG_OPT_FEATURE}
 
 use std.io_runtime.{env_get, file_read, file_write, file_append_text, file_exists, file_delete, file_move_cross_device, dir_create, time_now_unix_micros}
-use std.database.core.{parse_sdn_table}
+use std.database.core.{parse_sdn_table, SdnTable, SdnRow}
 use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, execution_resource_scope, run_in_execution_resource_scope}
 use std.nogc_sync_mut.io.process_ops.{resolve_shell_argv, is_posix_shell_argv}
 use std.nogc_sync_mut.io.http_get_core.{http_get_raw}
@@ -346,7 +346,11 @@ fn _ctx_load_stats() -> Dict<text, i64>:
     val table = parse_sdn_table(file_read(path))
     match table:
         Some(t):
-            for row in t.rows:
+            # WORKAROUND(mcp-mir-array-field-erasure-20261012): preserve imported table/row types.
+            val typed_table: SdnTable = t
+            val typed_rows: [SdnRow] = typed_table.rows
+            for untyped_row in typed_rows:
+                val row: SdnRow = untyped_row
                 val k = row.get("key") ?? ""
                 val v = (row.get("value") ?? "0").to_int() ?? 0
                 if k != "":
@@ -594,7 +598,8 @@ fn ctx_bm25_search(chunks: [CtxChunk], query: text, source_prefix: text, limit: 
     ctx_bm25_search_index(ctx_prepare_index(chunks, source_prefix), query, limit)
 
 fn _ctx_fmt_score(score: f64) -> text:
-    val milli = (score * 1000.0).to_int()
+    # WORKAROUND(mcp-f64-to-int-20261012): native method lowering is unresolved.
+    val milli = (score * 1000.0) as i64
     val whole = milli / 1000
     var frac = milli - whole * 1000
     if frac < 0:
