@@ -167,3 +167,18 @@ lifetime controls check type metadata survives and ordinary registration remains
 usable after detachment. Both are UNRUN. The final orchestration remains a draft
 until the genuine driver prerequisite and mono final policy/read owners exist;
 no placeholder reader, production activation, or RSS claim is supplied.
+
+
+The actual lower-level borrowed module consumer now lives in 50.mir without
+any driver import. It requires real active/unpaused scope state, installed
+complete native declarations, unoccupied lambda/finally scratch, exact retained
+module/table declarations, and actual complete encoded body equality. It calls
+the existing `lower_module` with no body providers and retains all real MIR
+output, errors, advisories and counters. It clears only expression/lambda
+scratch and compatibility-default roots after all body consumers finish. It
+never begins, pauses, promotes or ends a scope and grants no final admission.
+The driver still must supply the body through its genuine final reader and
+promote the actual output/diagnostics/reverse-reference batch. Three real
+inactive/active/paused lifecycle refusal cases are authored, UNRUN. Successful
+final admission and executable semantics remain unqualified, pending the real
+final driver and mono owners; no RSS reduction is claimed.
