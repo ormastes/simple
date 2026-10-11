@@ -14,6 +14,12 @@ Maintain feature-specific process knowledge for Compiler. Use this skill when wo
 
 ## Feature Links
 
+- [Windows text-hash lowering and native evidence](../../../07_guide/tooling/windows_phase2_runtime_capsule.md#text-hashing-across-runtime-providers):
+  typed `text.hash()` uses tagged `rt_hash_text`; preserve user-method dispatch
+  and raw `rt_str_hash` callers. MIR regressions and the native fixture cover
+  distinct boundaries; authored assertions do not establish executed SPipe or
+  Phase4 qualification.
+
 - [Source](../../../src/compiler/)
 - [Shared compiler source](../../../src/compiler_shared/)
 - [Architecture](../../04_architecture/architecture_modules.md)
