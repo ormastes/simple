@@ -4,13 +4,17 @@ use compiler.driver.cache.hir_body_typecheck_lease_v1.*
 use compiler.driver.cache.hir_mono_archive_consumer_v1.*
 use compiler.driver.cache.hir_mono_archive_execution_v1.*
 use compiler.driver.cache.hir_mono_archive_assembly_v1.*
+use compiler.driver.cache.hir_mono_archive_verify_v1.*
+use compiler.mono.verify.post_mono_verify.{post_mono_verify_modules,
+    post_mono_report_diagnostics, post_mono_report_total}
 use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_store_blob_v1,
     hir_owned_artifact_load_blob_v1, hir_owned_artifact_context_v1}
 use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{
     hir_owned_artifact_load_blob_v1 as common_artifact_load_v1}
 use compiler.driver.cache.hir_mono_function_record_v1.{mono_function_record_load_in_owned_scope_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_header, hir_cache_load_in_owned_scope,
-    hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1, hir_cache_path}
+    hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1, hir_cache_path,
+    hir_cache_store_in_owned_scope}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
@@ -137,6 +141,23 @@ fn observe_assembled(descriptor: MonoArchiveAssembledModuleV1) -> Result<text, t
     if not paused or not ended or not cache_owned or (admitted and not owned): panic("assembled observation ownership")
     if admitted: return Ok(digest)
     Err("complete assembled body unavailable")
+
+# Publish a genuine complete unverified fixture body, not a fabricated clean
+# verification receipt. This control introduces a cross-module duplicate key.
+fn assembled_duplicate_control(module: HirModule, descriptor: MonoArchiveAssembledModuleV1) -> Result<MonoArchiveAssembledModuleV1, text>:
+    if not transient_scope_begin(): return Err("duplicate control scope unavailable")
+    var changed = descriptor
+    changed.body_digest = sha256_text(hir_module_encode(module))
+    changed.archive_key = mono_archive_assembled_key_v1(changed)
+    val stored = hir_cache_store_in_owned_scope(changed.archive_key, module, [])
+    val paused = transient_scope_pause()
+    val owned = if paused and stored: transient_promote(changed) else: false
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not ended or not cache_owned or (stored and not owned): panic("duplicate control ownership")
+    if stored: return Ok(changed)
+    Err("duplicate control publication refused")
 
 fn lower_fixture(file: text, name: text) -> HirModule:
     val path = "test/fixtures/compiler/hir_mono_archive/" + file
@@ -656,6 +677,52 @@ fn main() -> i64:
     val nested_assembly_refused = mono_archive_assemble_module_v1(execution, root.name).is_err()
     if not transient_scope_end() or not nested_assembly_refused or execution.expected_epoch != completion_epoch: return 166
     checks = checks + 1
+    var assembled_modules: Dict<text, MonoArchiveAssembledModuleV1> = {}
+    assembled_modules[root.name] = assembled_root
+    assembled_modules[provider.name] = assembled_provider
+    val archived_report_result = mono_archive_verify_assembled_modules_v1(assembled_modules, modules.keys())
+    if archived_report_result.is_err(): return 167
+    val archived_report = archived_report_result.unwrap()
+    val retained_report = post_mono_verify_modules(retained_modules)
+    if mono_archive_post_mono_report_digest_v1(archived_report) != mono_archive_post_mono_report_digest_v1(retained_report) or
+            post_mono_report_diagnostics(archived_report) != post_mono_report_diagnostics(retained_report) or
+            post_mono_report_total(archived_report) != post_mono_report_total(retained_report): return 168
+    checks = checks + 1
+    if not mono_archive_verify_assembled_modules_v1(assembled_modules, [root.name]).is_err() or
+            not mono_archive_verify_assembled_modules_v1(assembled_modules, [root.name, root.name]).is_err(): return 169
+    checks = checks + 1
+    var invalid_verify_modules: Dict<text, MonoArchiveAssembledModuleV1> = {}
+    for name in assembled_modules.keys(): invalid_verify_modules[name] = assembled_modules[name]
+    invalid_verify_modules[root.name] = wrong_assembly_stage
+    if not mono_archive_verify_assembled_modules_v1(invalid_verify_modules, modules.keys()).is_err(): return 170
+    checks = checks + 1
+    if not transient_scope_begin(): return 171
+    val nested_verifier_refused = mono_archive_verify_assembled_modules_v1(assembled_modules, modules.keys()).is_err()
+    if not transient_scope_end() or not nested_verifier_refused: return 172
+    checks = checks + 1
+    var duplicate_root = retained_modules[root.name]
+    var duplicate_functions: Dict<SymbolId, HirFunction> = {}
+    for key in duplicate_root.functions.keys(): duplicate_functions[key] = duplicate_root.functions[key]
+    val duplicate_function = reference.specialized_functions.keys()[0]
+    val duplicate_body = reference.specialized_functions[duplicate_function]
+    duplicate_functions[duplicate_body.symbol] = duplicate_body
+    duplicate_root.functions = duplicate_functions
+    val duplicate_descriptor = assembled_duplicate_control(duplicate_root, assembled_root)
+    if duplicate_descriptor.is_err(): return 173
+    var duplicate_archives: Dict<text, MonoArchiveAssembledModuleV1> = {}
+    duplicate_archives[root.name] = duplicate_descriptor.unwrap()
+    duplicate_archives[provider.name] = assembled_provider
+    var duplicate_retained: Dict<text, HirModule> = {}
+    duplicate_retained[root.name] = duplicate_root
+    duplicate_retained[provider.name] = retained_modules[provider.name]
+    val duplicate_report_result = mono_archive_verify_assembled_modules_v1(duplicate_archives, modules.keys())
+    if duplicate_report_result.is_err(): return 174
+    val duplicate_report = duplicate_report_result.unwrap()
+    val duplicate_reference = post_mono_verify_modules(duplicate_retained)
+    if duplicate_report.duplicate_specialization_key != 1 or
+            mono_archive_post_mono_report_digest_v1(duplicate_report) != mono_archive_post_mono_report_digest_v1(duplicate_reference) or
+            post_mono_report_diagnostics(duplicate_report) != post_mono_report_diagnostics(duplicate_reference): return 175
+    checks = checks + 1
     # Each alternate descriptor is individually valid against real stored HIR,
     # physical source and the launcher's actual canonical receipt bytes. The
     # rejection must therefore reach the cross-module consistency boundary.
@@ -697,6 +764,6 @@ fn main() -> i64:
             not mono_archive_admit_v1(path_mismatch_modules, collector(modules)).is_err() or
             selected_owner.epoch != 1 or selected_owner.archives.len() != 1: return 156
     checks = checks + 1
-    if checks != 75: return 52
+    if checks != 80: return 52
     print "HIR mono archive consumer: {checks} checks passed"
     0
