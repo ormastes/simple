@@ -19,6 +19,11 @@ case "$fixture_kind" in
         fixture_files='main.spl provider.spl root.spl recursive.spl growing.spl alternate.spl'
         fixture_receipt='HIR mono archive consumer: 71 checks passed'
         fixture_checks=71 ;;
+    cold)
+        fixture_dir=test/fixtures/compiler/hir_managed_runtime_cold
+        fixture_files='main.spl'
+        fixture_receipt='HIR managed runtime cold owner: 7 checks passed'
+        fixture_checks=7 ;;
     *) die unsupported-fixture-kind ;;
 esac
 canonical_root=$(cd "$2" && pwd -P)
@@ -69,6 +74,20 @@ cp "$capsule" "$evidence/input-runtime-capsule.env"
 admission_sha=$(bootstrap_stage3_hash_file "$admission")
 binding_sha=$(bootstrap_stage3_hash_file "$lane/stage2-admitted/runtime-capsule.env")
 
+# The cold control consumes the very same tool/runtime authorities that the
+# full admission owner just replayed. No ambient selector may replace them.
+# Old unprojected tool snapshots cannot qualify this control.
+if [ "$fixture_kind" = cold ]; then
+    [ "$(bootstrap_stage3_manifest_value tool_authority_path "$admission")" = "$tool_snapshot" ] || die cold-tool-owner-differs
+    [ "$(bootstrap_stage3_manifest_value runtime_snapshot_path "$admission")" = "$runtime_snapshot" ] || die cold-runtime-snapshot-owner-differs
+    [ "$(bootstrap_stage3_manifest_value runtime_authority_path "$admission")" = "$runtime_authority" ] || die cold-runtime-root-owner-differs
+    cold_tool_sha=$(bootstrap_stage3_manifest_value tool_authority_sha256 "$admission") || die cold-tool-digest-absent
+    cold_runtime_sha=$(bootstrap_stage3_manifest_value runtime_snapshot_sha256 "$admission") || die cold-runtime-digest-absent
+    [ "$(bootstrap_stage3_hash_file "$tool_snapshot")" = "$cold_tool_sha" ] || die cold-tool-bytes-differ
+    [ "$(bootstrap_stage3_hash_file "$runtime_snapshot")" = "$cold_runtime_sha" ] || die cold-runtime-bytes-differ
+    [ "$(grep -Fxc 'managed-native-tools-format=1' "$tool_snapshot")" = 1 ] || die cold-tool-projection-unavailable
+fi
+
 cd "$fixture_root"
 . "$harness_dir/../hir-body-lease-fixture-git-gate.shs"
 harness_sha=$(bootstrap_stage3_hash_file "$harness_dir/hir-body-typecheck-lease-native.shs")
@@ -117,6 +136,10 @@ closure_sha=${closure_sha%% *}
     printf 'runtime_receipt_path=%s\nruntime_receipt_sha256=%s\n' "$capsule" "$capsule_sha"
     printf 'source_snapshot_sha256=%s\nfixture_snapshot_sha256=%s\nclosure_sha256=%s\n' "$source_sha" "$fixture_source_sha" "$closure_sha"
     printf 'harness_sha256=%s\nfixture_git_gate_sha256=%s\n' "$harness_sha" "$git_gate_sha"
+    if [ "$fixture_kind" = cold ]; then
+        printf 'managed_tool_authority_path=%s\nmanaged_tool_authority_sha256=%s\n' "$tool_snapshot" "$cold_tool_sha"
+        printf 'managed_runtime_authority_path=%s\nmanaged_runtime_snapshot_path=%s\nmanaged_runtime_snapshot_sha256=%s\n' "$runtime_authority" "$runtime_snapshot" "$cold_runtime_sha"
+    fi
     printf 'target=x86_64-pc-windows-msvc\nbackend=llvm\nrss_cap_kib=5859375\ncompile_timeout_seconds=600\n'
 } > "$evidence/input.env"
 [ "$mode" = --run ] || { printf 'hir-body-lease-fixture: PREFLIGHT PASS (no Simple compiler/fixture jobs)\n'; exit 0; }
@@ -182,6 +205,34 @@ export SIMPLE_FRONTEND_CACHE_SCOPE="hir-body-lease-v1|frontend-exe=$fixture_sha|
 export SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_RECEIPT="$capsule"
 export SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_DIGEST="$capsule_sha"
 export SIMPLE_HIR_LEASE_CLOSURE_DIGEST="$closure_sha"
+if [ "$fixture_kind" = cold ]; then
+    # Replay the six sealed assignments as data; never eval shell text. The
+    # native owner will independently decode the full projection, admit the
+    # eight exact tool files and validate this environment in a fresh process.
+    cold_env_names=' '
+    cold_env_count=0
+    while IFS= read -r cold_row; do
+        case "$cold_row" in managed-tool-env=*) ;; *) continue ;; esac
+        cold_assignment=${cold_row#managed-tool-env=}
+        case "$cold_assignment" in *'|value='*) ;; *) die cold-tool-environment-framing ;; esac
+        cold_name=${cold_assignment%%|value=*}
+        cold_value=${cold_assignment#*|value=}
+        case "$cold_name" in INCLUDE|LIB|LIBPATH|LIBRARY_PATH|SIMPLE_WINDOWS_ABI|SIMPLE_LINKER_FLAVOR) ;; *) die cold-tool-environment-name ;; esac
+        case "$cold_env_names" in *" $cold_name "*) die cold-tool-environment-duplicate ;; esac
+        case "$cold_value" in *'|'*|*$'\r'*) die cold-tool-environment-value ;; esac
+        cold_env_names="$cold_env_names$cold_name "
+        cold_env_count=$((cold_env_count + 1))
+        export "$cold_name=$cold_value"
+    done < "$tool_snapshot"
+    [ "$cold_env_count" = 6 ] || die cold-tool-environment-incomplete
+    export SIMPLE_RUNTIME_PATH="$runtime_authority"
+    export SIMPLE_MANAGED_NATIVE_TOOLS=1
+    export SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH="$tool_snapshot"
+    export SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256="$cold_tool_sha"
+    export SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH="$runtime_authority"
+    export SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH="$runtime_snapshot"
+    export SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256="$cold_runtime_sha"
+fi
 set +e
 perl "$watchdog" --session-mode=new --rss-cap-mode=enforce --max-rss-kib=5859375 \
     --timeout-seconds=60 --receipt="$evidence/execution.rss.env" -- "$fixture" \
@@ -191,5 +242,9 @@ set -e
 printf '%s\n' "$execution_rc" > "$evidence/execution.exit.txt"
 [ "$execution_rc" = 0 ] || exit "$execution_rc"
 [ "$(bootstrap_stage3_hash_file "$fixture")" = "$fixture_sha" ] || die fixture-executable-mutated
+if [ "$fixture_kind" = cold ]; then
+    [ "$(bootstrap_stage3_hash_file "$tool_snapshot")" = "$cold_tool_sha" ] || die cold-tool-owner-mutated
+    [ "$(bootstrap_stage3_hash_file "$runtime_snapshot")" = "$cold_runtime_sha" ] || die cold-runtime-owner-mutated
+fi
 grep -Fqx "$fixture_receipt" "$evidence/execution.log" || die missing-positive-receipt
 printf 'hir-body-lease-fixture: PASS (%s native checks, %s)\n' "$fixture_checks" "$fixture_kind"
