@@ -14,6 +14,7 @@ resume=0 resume_reused= selected_product= qualification_mode=qualified rss_mode=
 product_phase=phase4
 product_operation=all phase1_terminal= phase1_terminal_sha=
 product_defer_full=0 phase1_request_sha= phase1_python=
+spec_list= canonical_inventory=
 source_root= output_root= compiler_llvm= compiler_cranelift=
 producer_receipt_llvm= producer_receipt_cranelift=
 threads=80 rss_cap_kib=6835937 build_timeout=1800 test_timeout=7200
@@ -28,6 +29,7 @@ for arg in "$@"; do
     --phase1-request-sha256=*) phase1_request_sha=${arg#*=} ;;
     --phase1-python=*) phase1_python=${arg#*=} ;;
     --manager-work) [ "$manager_work" = 0 ] || die 'duplicate manager work option'; manager_work=1 ;;
+    --spec-list=*) spec_list=${arg#*=} ;;
     --product=*) selected_product=${arg#*=} ;;
     --producer-phase=*) product_phase=${arg#*=} ;;
     --qualification-mode=*) qualification_mode=${arg#*=} ;;
@@ -51,6 +53,11 @@ case "$selected_product" in
   ''|llvm:compiler|llvm:interpreter|llvm:loader|cranelift:compiler|cranelift:interpreter|cranelift:loader) ;;
   *) die 'invalid product selector' ;;
 esac
+if [ -n "$spec_list" ]; then
+  [ -n "$selected_product" ] && [ "$resume" = 0 ] && [ "$product_operation" = all ] ||
+    die 'spec-list requires one fresh selected product'
+  absolute "$spec_list" && regular "$spec_list" || die 'absolute regular spec-list required'
+fi
 case "$product_phase" in phase2|phase3|phase4) ;; *) die 'invalid product producer phase' ;; esac
 if [ "$product_defer_full" = 1 ]; then
   [ "$product_phase" = phase2 ] && [ "$product_operation" = all ] && [ -z "$selected_product" ] &&
@@ -196,6 +203,9 @@ verify_base() {
   job=$(job_for "$backend" "$suite")
   compiler=$(compiler_for "$backend")
   producer_receipt=$(receipt_for "$backend")
+  if [ -n "$spec_list" ]; then
+    set -- "--spec-list=$spec_list" "--canonical-inventory=$canonical_inventory" "$@"
+  fi
   perl "$verifier" --phase="$phase" --source-root="$source_root" \
     --inventory="$inventory" --backend="$backend" --subsystem="$suite" \
     --compiler="$compiler" --binary="$job/product" \
@@ -214,6 +224,10 @@ build_test_product() {
   producer_receipt=$(receipt_for "$backend")
   compiler_sha=$(hash_file "$compiler") || return 2
   code=0
+  set --
+  if [ -n "$spec_list" ]; then
+    set -- "--spec-list=$spec_list" "--canonical-inventory=$canonical_inventory"
+  fi
   SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$rss_cap_kib" \
   SIMPLE_BOOTSTRAP_RSS_CAP_MODE="$rss_mode" TMPDIR="$job/tmp-build" \
     sh "$builder" --source-root="$source_root" --compiler="$compiler" \
@@ -224,7 +238,7 @@ build_test_product() {
       --backend="$backend" --subsystem="$suite" --inventory="$inventory" \
       --threads="$threads" --rss-cap-kib="$rss_cap_kib" \
       --build-timeout-seconds="$build_timeout" \
-      --output="$job/product" --receipt="$job/build.env" \
+      --output="$job/product" --receipt="$job/build.env" "$@" \
       >"$job/build.stdout.log" 2>"$job/build.stderr.log" || code=$?
   printf '%s\n' "$code" >"$job/build.exit"
   [ "$code" -eq 0 ] || return "$code"
@@ -349,6 +363,14 @@ else
   else
     sh "$inventory_program" "$source_root" >"$inventory" || die "source inventory failed"
   fi
+  if [ -n "$spec_list" ]; then
+    canonical_inventory="$output_root/canonical-source-specs.tsv"
+    mv "$inventory" "$canonical_inventory" || die 'canonical inventory retention failed'
+    cp "$spec_list" "$output_root/spec-list.txt" || die 'spec-list snapshot failed'
+    spec_list="$output_root/spec-list.txt"
+    perl "$script_root/product-spec-selection.pl" render "$canonical_inventory" "$spec_list" \
+      "${selected_product#*:}" >"$inventory" || die 'spec-list selection rejected'
+  fi
   regular "$inventory" || die "source inventory absent"
   : >"$statuses" || die "status journal unavailable"
   printf '%s\n' 'format=SIMPLE-SUBSYSTEM-TEST-MATRIX-1' 'status=INCOMPLETE' \
@@ -420,7 +442,11 @@ if [ -n "$selected_product" ]; then
   selected_status=$(awk -F= '$1=="status" {n++; s=$2} END {if(n!=1)exit 2; print s}' "$selected_receipt") || die 'product result has no unique status'
   grep -qx 'status=PASS' "$(job_for "$selected_backend" "$selected_suite")/first-case.env" || exit 1
   printf '%s\n' "$selected_receipt"
-  if [ "$qualification_mode" = diagnostic ]; then
+  if [ -n "$spec_list" ]; then
+    expected_status=SUBSET_PASS
+    [ "$qualification_mode" != diagnostic ] || expected_status=SUBSET_DIAGNOSTIC_PASS
+    [ "$selected_status" = "$expected_status" ] || exit 1
+  elif [ "$qualification_mode" = diagnostic ]; then
     [ "$selected_status" = DIAGNOSTIC_PASS ] || exit 1
   else
     [ "$selected_status" = PASS ] || exit 1

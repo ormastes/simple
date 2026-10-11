@@ -14,6 +14,7 @@ Maintain feature-specific process knowledge for Compiler. Use this skill when wo
 
 ## Feature Links
 
+- [Tuple record ownership candidate](../../../08_tracking/bug/enumerate_native_tuple_owner_loss_2026-10-11.md): runtime/native tuple conversion and ordinary tuple record provenance require qualified native execution; current source and fixture changes remain unqualified.
 - [Windows text-hash lowering and native evidence](../../../07_guide/tooling/windows_phase2_runtime_capsule.md#text-hashing-across-runtime-providers):
   typed `text.hash()` uses tagged `rt_hash_text`; preserve user-method dispatch
   and raw `rt_str_hash` callers. MIR regressions and the native fixture cover

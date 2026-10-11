@@ -124,3 +124,41 @@ failure is recorded in
 Three bounded attempts are exhausted; the source correction and executable
 regressions are reviewable, but filesystem specs, native owner admission and
 integrated disabled closure/symbol gates remain pending. No full rebuild ran.
+
+## Changed candidate: loader callback crash
+
+The changed integrated producer SHA256
+`fcdb2397a1a681c2b6fe32ada16585b4e24afc37f6397a34db55a183dffb73c2`
+attempted the unchanged tri-state native fixture once. It failed during source
+closure: the worker exited -139 with zero claimed/sealed modules, and the
+outer command exited 1. No fixture assertions ran. Log:
+`build/cuda-policy/source-root-fcdb-build.log`. The disabled full closure was
+not attempted after this central loader failure; no symbol receipt exists.
+
+A separate unchanged fixture backtrace identifies PC 0 in
+`source_root_resolution_with_fallback_v1`, called by the pipeline loader.
+The correction removes that callback API and matches the tri-state result
+directly in the pipeline. Only `Missing` directly invokes canonical checkout
+resolution; `Ambiguous` still adds an error and returns failure. Exact and
+relative resolution are unchanged. The four obsolete callback-API probe cases
+were removed; the eight numbered/enum assertions, including failing case 7,
+remain. Filesystem specs retain both ambiguous overlays with valid defaults.
+This source correction requires a new producer; it has no native PASS yet.
+
+## Final integrated scoped cycle
+
+Producer `e9e8762c79e47d1c0db418d2a8ff5d5eda7b1ef8744ccff32227ae7463926491`
+clears the loader callback crash: actual relative-import Missing fallback
+builds and runs successfully, printing `SOURCE_ROOT_MISSING_FALLBACK_PASS`.
+The tri-state owner also builds, but runtime assertion 7 still fails with a
+numeric ambiguity payload. No repeated passing check or private compiler
+construction was performed.
+
+Actual ambiguous-overlay and disabled-selection closures both admit the
+default selected module plus all four CUDA implementation files. Their later
+120/180-second timeouts do not obscure the already-observed source-admission
+failures. No native CUDA exclusion or symbol PASS is claimed. See
+`doc/08_tracking/bug/source_root_worker_authority_gap_2026-10-11.md` for exact
+root order, fixtures, logs, self-caused rejected snapshot attempt and the
+outer-scanner/worker-authority/loaded-name diagnosis. The callback repair is
+qualified narrowly; CUDA composition remains **FAIL** end to end.

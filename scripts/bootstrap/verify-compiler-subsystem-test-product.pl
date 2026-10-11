@@ -8,12 +8,14 @@ use POSIX qw(uname);
 use File::Find qw(find);
 use FindBin;
 use lib "$FindBin::Bin/lib";
+use BootstrapProductSelection qw(product_selection selection_fields);
 use BootstrapNativeImage qw(verify_native_image);
 use BootstrapProductOverlay qw(verify_product_overlay verify_product_source);
 use BootstrapProductProducer qw(read_product_producer validate_product_resources product_resource_profile validate_product_resource_profile);
 
 my %arg;
 GetOptions(
+  'spec-list=s' => \$arg{spec_list}, 'canonical-inventory=s' => \$arg{canonical_inventory},
   'phase=s' => \$arg{phase},
   'source-root=s' => \$arg{source_root}, 'inventory=s' => \$arg{inventory},
   'backend=s' => \$arg{backend}, 'subsystem=s' => \$arg{subsystem},
@@ -112,7 +114,13 @@ $actual_head =~ /\A[0-9a-f]{40}\z/ or die "pinned source HEAD invalid\n";
 verify_product_source($arg{source_root});
 my $inventory_bytes = regular_bytes($arg{inventory});
 my $whole_sha = sha256_hex($inventory_bytes);
-my @inventory_lines = split /\n/, $inventory_bytes, -1;
+my $selection;
+if (defined($arg{spec_list}) || defined($arg{canonical_inventory})) {
+  defined($arg{spec_list}) && defined($arg{canonical_inventory}) or die "selection authority incomplete\n";
+  $selection = product_selection($arg{canonical_inventory}, $arg{spec_list}, $arg{subsystem});
+  $inventory_bytes eq $selection->{inventory_bytes} or die "selected inventory differs from spec list\n";
+}
+my @inventory_lines = split /\n/, ($selection ? regular_bytes($arg{canonical_inventory}) : $inventory_bytes), -1;
 pop @inventory_lines if @inventory_lines && $inventory_lines[-1] eq '';
 shift(@inventory_lines) eq "subsystem\tlevel\tpath\tsha256" or die "invalid inventory header\n";
 my (@owners, @subset_lines);
@@ -152,6 +160,10 @@ for my $path (split /\0/, $tracked) {
 }
 join("\n", sort keys %tracked_owner) eq join("\n", sort keys %seen_source)
   or die "inventory omits tracked subsystem owner or includes extra source\n";
+if ($selection) {
+  @subset_lines = @{$selection->{rows}};
+  @owners = map { my @f = split /\t/; [$f[2], $f[3]] } @subset_lines;
+}
 @owners or die "empty product source subset\n";
 my $subset_sha = sha256_hex("subsystem\tlevel\tpath\tsha256\n" . join('', map { "$_\n" } @subset_lines));
 my @digest_keys = qw(compiler binary compiler_producer_receipt build_receipt);
@@ -199,6 +211,15 @@ $build{schema} && $build{schema} eq 'simple-subsystem-product-v1' &&
   $build{generated_tree_sha256} && $build{generated_tree_sha256} =~ /\A[0-9a-f]{64}\z/ &&
   defined($build{generated_owner_count}) && $build{generated_owner_count} eq scalar(@owners)
   or die "product build receipt authority differs\n";
+if ($selection) {
+  for my $field (split /\n/, selection_fields($selection)) {
+    my ($key, $value) = split /=/, $field, 2;
+    defined($build{$key}) && $build{$key} eq $value or die "product selection receipt differs: $key\n";
+  }
+} else {
+  !exists($build{selection_scope}) && !exists($build{spec_list_sha256})
+    or die "subset receipt requires explicit selection authority\n";
+}
 validate_product_resource_profile($build{resource_profile}, @resource_policy);
 my $generated_manifest = $build{generated_manifest_path} // '';
 my $binary_dir = $arg{binary};
@@ -323,7 +344,7 @@ $overlay_manifest eq "$binary_dir/logs/source-overlay-inputs.tsv" &&
   sha_file($overlay_manifest) eq $build{source_overlay_input_sha256}
   or die "source overlay input manifest differs\n";
 no_link_components($overlay_manifest);
-verify_product_overlay($arg{source_root}, $overlay, $overlay_manifest);
+verify_product_overlay($arg{source_root}, $overlay, $overlay_manifest, 1);
 for my $pair (['source_spans_path','source_spans_sha256'],
               ['main_policy_path','main_policy_sha256'],
               ['main_verdicts_path','main_verdicts_sha256'],
@@ -637,6 +658,7 @@ my $ok = eval {
 if ($ok) {
   $status = $count{skipped} ? 'PASS_WITH_SKIPS' : 'PASS';
   $status = "DIAGNOSTIC_$status" if $arg{qualification_mode} eq 'diagnostic';
+  $status = "SUBSET_$status" if $selection;
   $reason = 'none';
 }
 else {
@@ -651,6 +673,7 @@ my $receipt = join('',
   "rss_mode=$arg{rss_mode}\n", "resource_profile=$resource_profile\n",
   "threads=$arg{threads}\n",
   "backend=$arg{backend}\n", "subsystem=$arg{subsystem}\n",
+  ($selection ? selection_fields($selection) : ""),
   "inventory_sha256=$whole_sha\n", "subset_sha256=$subset_sha\n",
   "source_head=$build{source_head}\n", "actual_backend=$build{actual_backend}\n",
   "producer_source_snapshot_sha256=$build{producer_source_snapshot_sha256}\n",
@@ -676,4 +699,4 @@ my $receipt = join('',
 open my $out, '>:raw', $arg{output} or die "cannot write product receipt\n";
 print {$out} $receipt or die "cannot write product receipt\n";
 close $out or die "cannot close product receipt\n";
-exit($status =~ /\A(?:DIAGNOSTIC_)?PASS(?:_WITH_SKIPS)?\z/ ? 0 : 1);
+exit($status =~ /\A(?:SUBSET_)?(?:DIAGNOSTIC_)?PASS(?:_WITH_SKIPS)?\z/ ? 0 : 1);
