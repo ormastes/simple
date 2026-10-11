@@ -5331,6 +5331,16 @@ impl MirLowering:
                     self.collect_free_var_syms(block.value, bound, acc1)
                 else:
                     acc1
+            case While(condition, loop_body, _):
+                val condition_acc = self.collect_free_var_syms(condition, param_syms, acc)
+                # A loop body's declarations are bound only inside that body;
+                # they must not hide a capture read by the condition.
+                val loop_bound = self.hir_block_bound_syms(loop_body.stmts, param_syms)
+                val body_acc = self.hir_block_stmts_free_syms(loop_body.stmts, loop_bound, condition_acc)
+                if loop_body.has:
+                    self.collect_free_var_syms(loop_body.value, loop_bound, body_acc)
+                else:
+                    body_acc
             case Lambda(nested_params, nested_body, _):
                 var combined = param_syms
                 var nlpi = 0
@@ -5631,6 +5641,16 @@ impl MirLowering:
                     self.lambda_body_captures(block.value, bound)
                 else:
                     false
+            case While(condition, loop_body, _):
+                val loop_bound = self.hir_block_bound_syms(loop_body.stmts, param_syms)
+                if self.lambda_body_captures(condition, param_syms):
+                    true
+                elif self.hir_block_stmts_capture(loop_body.stmts, loop_bound):
+                    true
+                elif loop_body.has:
+                    self.lambda_body_captures(loop_body.value, loop_bound)
+                else:
+                    false
             case Lambda(nested_params, nested_body, _):
                 # A lambda literal nested inside another lambda's body (e.g. an
                 # inline lambda arg passed to a call made from within the outer
@@ -5739,6 +5759,8 @@ impl MirLowering:
                 self.lambda_capture_scan_supported(receiver) and self.call_args_capture_scan_supported(call_args)
             case Block(block):
                 self.hir_block_stmts_scan_supported(block.stmts) and (not block.has or self.lambda_capture_scan_supported(block.value))
+            case While(condition, loop_body, _):
+                self.lambda_capture_scan_supported(condition) and self.hir_block_stmts_scan_supported(loop_body.stmts) and (not loop_body.has or self.lambda_capture_scan_supported(loop_body.value))
             case Lambda(_, nested_body, _):
                 self.lambda_capture_scan_supported(nested_body)
             case _: false

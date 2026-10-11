@@ -5,12 +5,29 @@ The canonical release coordinator is `.github/workflows/release.yml`.
 ## Local preparation
 
 1. Keep unrelated dirty work out of the release change.
-2. Run one strict local Linux bootstrap:
+2. Run one strict local Linux bootstrap. Since the planner-admission-v2 gate
+   (doc/08_tracking/bug/bootstrap_planner_v1_unbound_authorization_2026-08-14.md)
+   a bare multi-stage run exits 64 (`reason-receipt-required`); use the
+   receipt-chain flow. First the receipt-free Stage 2 trust-root lane, which
+   also produces the Stage 3 planner receipt:
 
    ```bash
    SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh \
-     --full-bootstrap --backend=cranelift --jobs=2 --no-mcp
+     --full-bootstrap --stop-after-stage2 --backend=cranelift --jobs=2 --no-mcp \
+     --produce-stage3-receipt=<stage3-typed-reason>
    ```
+
+   (`<stage3-typed-reason>` must be allow-listed for `//bootstrap:stage3`, e.g.
+   `seed-missing` on a fresh checkout; see
+   `bootstrap_planner_v2_reason_allowed` in
+   `scripts/check/lib/bootstrap-planner-admission-bound.shs`.)
+
+   Then execute the exact `--resume-stage3-from-admitted=... --bootstrap-receipt=...`
+   command the lane prints (Stage 3/4 resume pins one thread; do not pass a
+   higher `--jobs`), and follow the admitted continuation it emits into Stage 4.
+   For a Stage 4 admission, produce a `//bootstrap:stage4` receipt with reason
+   `release-trust-verification` (see
+   doc/03_plan/release/release_1_0_0_rc1_handover_2026-09-07.md §4).
 
 3. Run the stage-4 memory gates:
 
