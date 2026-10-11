@@ -67,7 +67,21 @@ fn join_names(names: Names) -> text:
     out
 """
 
-describe "for-in over a struct field declared as an array":
+val RESULT_MATCH_ARRAY_SRC = """
+fn result_rows() -> Result<[i64], text>:
+    Ok([1, 2, 3])
+
+fn sum_result_rows() -> i64:
+    val rows: [i64] = match result_rows():
+        case Err(_): return 0
+        case Ok(found): found
+    var total: i64 = 0
+    for row in rows:
+        total = total + row
+    total
+"""
+
+describe "for-in over declared arrays":
     it "lowers a parameter-held [i64] field to the counted runtime-array loop":
         val mir = lower_function(PARAM_FIELD_SRC, "sum_field_array")
         expect(mir.contains("MIR_ERROR:")).to_be(false)
@@ -86,5 +100,13 @@ describe "for-in over a struct field declared as an array":
     it "keeps text elements of a [text] field on the text decode path":
         val mir = lower_function(TEXT_FIELD_SRC, "join_names")
         expect(mir.contains("non-array iterables")).to_be(false)
+        expect(mir).to_contain("rt_array_get")
+        expect(mir.contains("rt_panic")).to_be(false)
+
+    it "retains a declared array after Result match payload extraction":
+        val mir = lower_function(RESULT_MATCH_ARRAY_SRC, "sum_result_rows")
+        expect(mir.contains("HIR_ERROR:")).to_be(false)
+        expect(mir.contains("MIR_ERROR:")).to_be(false)
+        expect(mir).to_contain("rt_array_len")
         expect(mir).to_contain("rt_array_get")
         expect(mir.contains("rt_panic")).to_be(false)

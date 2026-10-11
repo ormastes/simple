@@ -43,3 +43,12 @@ action arrays. This preserves the duplicate-symbol and target-membership
 validation while avoiding the two MIR sites reported in the final log. This is
 source-only progress under the session's three-cycle cap: the candidate has
 not been rebuilt or run, and the native/runtime verdict remains open.
+
+## Compiler provenance candidate
+
+The MIR iterator lowering now falls back to the existing `enum_match_expr_type`
+lookup when an erased collection local has no usable HIR type. That lookup can
+recover the declared array type of a `Result` match binding from its exact
+source symbol. A focused MIR regression case covers a declared array populated
+by `match Result.Ok` and then iterated. This compiler change is unexecuted
+under the same session retry cap; it does not establish a native PASS.

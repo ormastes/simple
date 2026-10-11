@@ -3420,11 +3420,15 @@ impl MirLowering:
         for_result
 
     me for_collection_declared_type(collection_local: LocalId, iter: HirExpr) -> HirType?:
-        # Function-local provenance wins. Expression metadata is a fallback
-        # only; the caller still admits Array/Slice/Str, never arbitrary I64.
+        # Function-local provenance wins. An uninferred match binding can leave
+        # the MIR local as an erased i64 even when its source symbol declares an
+        # array. Reuse the enum-match type lookup, which checks expression
+        # metadata and the exact bound/raw symbol before admitting a container.
         if val local_type = self.find_local_hir_type(collection_local.id):
-            return Some(local_type)
-        iter.type_
+            match local_type.kind:
+                case HirTypeKind.Infer(_, _) | HirTypeKind.Error: ()
+                case _: return Some(local_type)
+        self.enum_match_expr_type(iter)
 
     me lower_for_iterator(var_: SymbolId, iter: HirExpr, body: HirBlock, source_span: Span) -> LocalId:
         """Lower `for x in collection` for non-range iterables.
