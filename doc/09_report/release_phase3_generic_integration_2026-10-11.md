@@ -1,8 +1,8 @@
 # release_phase3 generic integration inventory
 
-Target base: `0c7bb72f83663c4407e694af1388109be25d7ac3` (`origin/release_phase3`).
+Original target base: `0c7bb72f83663c4407e694af1388109be25d7ac3` (`origin/release_phase3`).
 Work branch: `work/rel-phase3-generics-integrated-20261011`.
-Source integration head before this inventory: `fa0cf1e022d54daea2b3b13521ea0898984612a6`.
+Source integration head before final inventory: `6b690035900aaa5de790253eb645165a96d8d13a`.
 The separate release/1.0 successor at `80485d40aed` remains preserved.
 
 Each commit below was applied individually, then its scope, conflict state and
@@ -40,9 +40,13 @@ not Phase 3, native execution, or full-generics acceptance evidence.
 | d1b0d602d13 | bf6d5f1cd23 | Lambda-local collection and scope isolation |
 | 17e3b19ec89 | d79c836b6a1 | Typed optional payload binding |
 | 8ed48e9a392 | fa0cf1e022d | Explicit whole-native-build timeout forwarding |
+| 61d53aa756ff | 96105b66905 | Symbolic optional binding provenance; symmetric effect guard |
+| c05c7204ed3 | 9dd5186ba51 | Newly landed target Windows contract harness fixes |
+| 2adf22a2fb2 | 6b690035900 | Stage3 reviewed-repair intent; identity binding unchanged |
 
 ## Overlap and conflict decisions
 
+- Target advanced to `ae9f45d465fdfa772bbcc5c9b4ce833b1b58b9c2` (PR #3064). Its sole substantive commit `c05c7204ed3` was individually applied with identical patch ID; no merge or blanket rebase was used.
 - Local target commit `a7eea68a563` was already semantically present: its
   cherry-pick was empty and skipped after inspection. No duplicate commit.
 - Keep target `19d98c49928`, `83d8a5ac7cb` and `0c7bb72f836` repairs. The
@@ -71,7 +75,9 @@ passing suite was rerun. Later commits leave these tested files unchanged.
 
 Range whitespace checks passed. Source comparisons confirm the monomorphization
 integration, annotation lowering and nominal-key files match reviewed
-`17e3b19ec89`. No Simple executable regression was run on this candidate.
+`17e3b19ec89` before the final reviewed provenance patch. The final monomorphization integration matches `61d53aa756ff`. No Simple executable regression was run on this candidate.
+
+The reviewed-repair shell policy regression passed in its owning lane. Stage4 and unknown reasons are rejected; receipt identity validation is unchanged. Its typed Simple spec and actual standalone planner receipt generation remain UNRUN and required. The final optional producer fixture expects `text=ab int=5 absent=none ordinary=z`; both symmetric and asymmetric effect-bearing provenance negatives remain UNRUN.
 
 Before merge to `release_phase3`, require actual Phase 3 PASS and a compiled,
 runnable Hello World from the same frozen source lineage. Also execute the
