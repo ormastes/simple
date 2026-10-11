@@ -1,3 +1,4 @@
+use compiler.mir._MirLoweringExpr.optional_record_owner.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use compiler.mir._MirLoweringExpr.lambda_abi.{lambda_abi_type_resolved}
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
@@ -1260,6 +1261,7 @@ impl MirLowering:
             val dest = b.new_temp(effective_return_type)
             b.emit(MirInst(kind: MirInstKind.Call(dest, effective_func, args), span: nil))
             self.builder = b
+            self.remember_optional_record_owner(dest, self.direct_call_extern_name(func))
             match effective_return_type.kind:
                 case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
                     self.runtime_array_locals[dest.id] = true
@@ -3708,7 +3710,12 @@ impl MirLowering:
                     # precedence over the global map below.
                     var scrutinee_payload_struct = ""
                     val exact_err_record = enum_name == "Result" and enum_variants[ci] == "Err" and self.result_err_record_owners.contains(scrut_local.id)
-                    if exact_err_record:
+                    val exact_optional_record = enum_name == "Option" and enum_variants[ci] == "Some" and self.optional_record_owners.contains(scrut_local.id)
+                    var optional_record_type = HirType(kind: HirTypeKind.Error, span: scrutinee.span)
+                    if exact_optional_record:
+                        optional_record_type = self.checked_optional_record_type(scrut_local.id, scrutinee.span)
+                        scrutinee_payload_struct = self.optional_record_owners.get(scrut_local.id) ?? ""
+                    elif exact_err_record:
                         scrutinee_payload_struct = self.checked_result_err_record_owner(scrut_local.id, scrutinee.span)
                     elif val safe_payload_name = self.result_variant_payload_struct_name(scrutinee, enum_variants[ci]):
                         # Cross-module-safe: resolved by NAME
@@ -3752,7 +3759,11 @@ impl MirLowering:
                     if effective_payload_type == nil:
                         if val option_inner = self.option_inner_hir_type_for_local(scrutinee, scrut_local):
                             effective_payload_type = Some(option_inner)
-                    val bound_payload = if exact_err_record:
+                    val bound_payload = if exact_optional_record:
+                        match optional_record_type.kind:
+                            case HirTypeKind.Error: pl
+                            case _: self.materialize_optional_record_payload(pl, scrutinee_payload_struct, optional_record_type)
+                    elif exact_err_record:
                         self.materialize_result_err_record_payload(pl, scrutinee_payload_struct, scrutinee.span)
                     else:
                         match effective_payload_type:
@@ -3761,7 +3772,7 @@ impl MirLowering:
                     # Preserve the declaration on the extracted local as well
                     # as using it for decoding. In particular, an enum payload
                     # has no struct layout from which to recover its methods.
-                    if not exact_err_record:
+                    if not exact_err_record and not exact_optional_record:
                         if val bound_payload_type = effective_payload_type:
                             self.remember_local_hir_type(bound_payload.id, bound_payload_type, 0, 0)
                     if result_match_candidate:
@@ -3787,7 +3798,7 @@ impl MirLowering:
                             case HirTypeKind.Str:
                                 result_payload_is_text = true
                             case _: ()
-                    if not exact_err_record and (result_payload_is_text or (result_payload_type == nil and payload_struct != nil and payload_struct == enum_text_payload_marker())):
+                    if not exact_err_record and not exact_optional_record and (result_payload_is_text or (result_payload_type == nil and payload_struct != nil and payload_struct == enum_text_payload_marker())):
                         # Enum-text bug: this variant's single-field payload
                         # was observed to be TEXT at the construction site
                         # (see lower_enum_lit/lower_enum_construct_named).
@@ -3818,6 +3829,11 @@ impl MirLowering:
                         if val text_local = text_res:
                             self.local_map[bind_syms[0].id] = text_local
                             self.bind_local(bind_syms[0].id, text_local)
+                    elif exact_optional_record:
+                        # A failed exact-owner check already recorded a fatal
+                        # diagnostic. Never fall through to Optional::Some.
+                        if optional_record_type.kind != HirTypeKind.Error:
+                            self.struct_value_syms[bound_payload.id] = scrutinee_payload_struct
                     elif exact_err_record:
                         # The provider's declaration, never a consumer's numeric
                         # Named ID or the closure-global Result::Err slot.
