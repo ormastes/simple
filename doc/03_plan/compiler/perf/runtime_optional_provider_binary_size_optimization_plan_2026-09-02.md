@@ -480,3 +480,19 @@ for 577/577 modules. The 600-second wrapper timed out later; its worker
 exited without an executable. This is no native PASS or size/startup/RSS
 qualification. A current-source V4 producer still needs warm staged-path
 deletion proof; see the updated SCV inventory bug and Item 5 report.
+
+## 2026-10-11 explicit core-C Vulkan root cut
+
+The native-all linker support table previously injected `-u
+rt_vulkan_provider_is_available` (with the Mach-O spelling where needed)
+whenever the aggregate archive was present, including the explicit
+`core-c-bootstrap` bundle. The GNU native and shared link paths now pass
+the selected bundle to that table. Core-C skips only the forced Vulkan root;
+other bundles retain the existing strong-provider extraction behavior and the
+hosted support-library flags are unchanged. A focused contract checks the
+core-C omission and host-GPU retention across target spellings.
+
+This is a source candidate. The session's Item 5 native retry cap is already
+exhausted, so the new contract and a current-source core-C hello have not run.
+No byte reduction, startup/RSS improvement, provider demand-load parity, or
+Phase 7 PASS is claimed until the actual link map and paired cohorts prove it.
