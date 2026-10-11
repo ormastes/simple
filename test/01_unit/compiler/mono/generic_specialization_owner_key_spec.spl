@@ -1,0 +1,92 @@
+# @req REQ-GENERIC-NOMINAL-IDENTITY
+# @tag: unit, compiler, mono, generics
+use std.spec
+use compiler.hir.hir_types.*
+use compiler.common.diagnostics.span.Span
+use compiler.mono.monomorphize_integration.MonomorphizationPass
+
+fn owner_key_type(id: i64) -> HirType:
+    HirType(kind: HirTypeKind.Named(SymbolId(id: id), []), span: Span.empty())
+
+fn owner_key_table(declaration_owner: text, padding: i64) -> SymbolTable:
+    var table = SymbolTable.new()
+    for i in 0..padding:
+        table.define("padding_{i}", SymbolKind.Variable, nil, Span.empty(), Visibility.Private, false, nil)
+    val id = table.define("Packet", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, declaration_owner)
+    expect(id.id).to_equal(padding)
+    table
+
+fn owner_key_pass(left_owner: text, right_owner: text, right_padding: i64 = 0) -> MonomorphizationPass:
+    var pass_ = MonomorphizationPass.create()
+    pass_.module_symbols["left"] = owner_key_table(left_owner, 0)
+    pass_.module_symbols["right"] = owner_key_table(right_owner, right_padding)
+    pass_.named_symbol_names["left#0"] = "Packet"
+    pass_.named_symbol_names["right#{right_padding}"] = "Packet"
+    pass_
+
+describe "specialization keys carry nominal declaration ownership":
+    it "keeps different modules' same-name types separate despite colliding ids":
+        var pass_ = owner_key_pass("lib.left", "lib.right")
+        val left_id = 0
+        val right_id = 0
+        pass_.current_module = "left"
+        val first = pass_.type_key(owner_key_type(left_id))
+        pass_.current_module = "right"
+        val second = pass_.type_key(owner_key_type(right_id))
+        expect(first.len()).to_be_greater_than(0)
+        expect(second.len()).to_be_greater_than(0)
+        expect(first == second).to_be(false)
+
+    it "reuses one owner's key through two different import tables":
+        var pass_ = owner_key_pass("lib.packet", "lib.packet", 4)
+        val left_id = 0
+        val right_id = 4
+        pass_.current_module = "left"
+        val first = pass_.type_key(owner_key_type(left_id))
+        pass_.current_module = "right"
+        expect(first.len()).to_be_greater_than(0)
+        expect(pass_.type_key(owner_key_type(right_id))).to_equal(first)
+
+    it "retains owner distinctions inside arrays and function return types":
+        var pass_ = owner_key_pass("lib.left", "lib.right")
+        val left_id = 0
+        val right_id = 0
+        val left_array = HirType(kind: HirTypeKind.Array(owner_key_type(left_id), nil), span: Span.empty())
+        val right_array = HirType(kind: HirTypeKind.Array(owner_key_type(right_id), nil), span: Span.empty())
+        pass_.current_module = "left"
+        val first = pass_.type_key(HirType(kind: HirTypeKind.Function([], left_array, []), span: Span.empty()))
+        pass_.current_module = "right"
+        val second = pass_.type_key(HirType(kind: HirTypeKind.Function([], right_array, []), span: Span.empty()))
+        expect(first.len()).to_be_greater_than(0)
+        expect(second.len()).to_be_greater_than(0)
+        expect(first == second).to_be(false)
+
+    it "keeps the display collision suffix while separating specialization identity":
+        var pass_ = owner_key_pass("lib.left", "lib.right")
+        val left_id = 0
+        val right_id = 0
+        pass_.current_module = "left"
+        val first = pass_.mangled_name("identity", [owner_key_type(left_id)])
+        pass_.spec_symbols[first] = 1
+        pass_.current_module = "right"
+        val second = pass_.mangled_name("identity", [owner_key_type(right_id)])
+        expect(first).to_equal("identity$Packet")
+        expect(second).to_equal("identity$Packet_k1")
+        pass_.current_module = "left"
+        expect(pass_.mangled_name("identity", [owner_key_type(left_id)])).to_equal(first)
+
+    it "refuses a missing nominal owner instead of using a raw id as identity":
+        var pass_ = MonomorphizationPass.create()
+        pass_.current_module = "missing"
+        val missing = owner_key_type(7)
+        expect(pass_.type_key(missing)).to_equal("")
+        expect(pass_.same_type_key(missing, missing)).to_be(false)
+        expect(pass_.request_specialization("identity", [missing])).to_equal(-1)
+        expect(pass_.diagnostics.len()).to_equal(1)
+        expect(pass_.diagnostics[0]).to_contain("E-MONO-041")
+        expect(pass_.spec_symbols.len()).to_equal(0)
+
+    it "does not resolve a nominal id through an unrelated value symbol":
+        var pass_ = owner_key_pass("lib.packet", "lib.packet", 1)
+        pass_.current_module = "right"
+        expect(pass_.type_key(owner_key_type(0))).to_equal("")

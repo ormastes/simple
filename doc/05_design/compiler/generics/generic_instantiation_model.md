@@ -354,3 +354,19 @@ receiver. This supersedes the intended H-ANNOT behavior in section 8, but **does
 not yet supersede its verified status**: the candidate has not run on an admitted
 self-hosted test runtime or rebuilt native compiler. No formal proof of this
 parser-to-native path is claimed.
+
+## H-NAMED key repair candidate, 2026-10-11 — verification pending
+
+Specialization identity now includes each nominal type's canonical declaration
+module and original name, with length-delimited boundaries. Display mangling is
+unchanged; different identities that display alike still receive `_k<n>`.
+Unknown ownership propagates failure through nested types and produces
+E-MONO-041 instead of registering a specialization by raw symbol id or short
+name. Context-bearing inference validates fixed nominal parameters too.
+
+Requirements and execution limits are recorded in
+`doc/02_requirements/feature/generic_nominal_identity.md` and
+`doc/09_report/generic_nominal_identity_candidate_2026-10-11.md`.
+These source changes are not yet an executed acceptance of H-NAMED. They also
+do not relocate caller/provider nominal ids across specialization bodies or
+return signatures; H-XMOD/H-RET32 remain separate obligations.
