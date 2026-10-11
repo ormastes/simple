@@ -30,6 +30,13 @@ or release admission. Cached Stage 1 producer SHA256:
 15102d32226b3fbead63d3c63e33e99a6f0e9ffcddea06080fb65872445cbafb.
 Two bounded cycles were used; no compiler rebuild or cache invalidation occurred.
 
+Independent parent review found no P0/P1 issue in the selector/encoder pairing.
+A separate pinned llvm-mc 23 AArch64 assembler oracle emitted fd 7b bf a9 for
+the preindexed STP, fd 7b c1 a8 for postindexed LDP, fd 7b 00 a9 for offset STP,
+and fd 7b 40 a9 for offset LDP. All four match the regression expectations.
+This oracle was separate from the passing Simple diagnostic and does not
+replace admitted runtime/native/compiler qualification gates.
+
 The retained global_addr spec also has an independent source-text ELF layout
 failure. No full invocation PASS is claimed. The SP MOV repair in PR #2990 is
 also required for correct frame setup/restore; it is independent of this panic.
