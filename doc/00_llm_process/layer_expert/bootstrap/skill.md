@@ -33,6 +33,17 @@ worktrees and must not be restored during bootstrap setup.
 
 ## Pipeline Links
 
+### Windows harness owner contracts (2026-10-11)
+
+Use the [Windows harness prerequisites](../../../07_guide/tooling/bootstrap_failure_collection.md#windows-bootstrap-harness-prerequisites)
+when shell discovery or Cargo fixture setup fails before compiler execution.
+The PATH fixture discovers Git Bash or accepts `--shell`; it must not assume a
+Program Files installation or automatically select Windows ambient Bash.
+Cargo environment tests must extract both `run_rust_authority_cargo` and
+`run_rust_authority_command`, bind `PLATFORM_RUST_TRIPLE`, and assert the
+forwarded target arguments. A fixture PASS qualifies these owner boundaries,
+not bootstrap, self-hosting, or Phase4 admission.
+
 ### Phase live checks (2026-09-08)
 
 The full SIMD/bootstrap lane requires actual same-phase launches in addition to

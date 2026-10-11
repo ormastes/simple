@@ -1,3 +1,4 @@
+use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
 use compiler.hir.hir_operators.{HirBinOp}
 # Part of src/compiler/50.mir/mir_lowering.spl: module/struct/class type lowering, asm target-spec accessors
@@ -478,6 +479,8 @@ impl MirLowering:
             struct_field_array_element_type_name: {},
             struct_field_array_elem_type: {},
             struct_value_syms: {},
+            result_err_record_owners: {},
+            result_err_layout_types: {},
             struct_method_syms: {},
             struct_method_ambiguous: {},
             struct_method_return_names: {},
@@ -1174,6 +1177,7 @@ impl MirLowering:
 
     me register_composite_field_metadata(name: text, fields: [HirField], symbols: SymbolTable, overwrite: bool):
         """Register name-keyed struct/class field metadata."""
+        self.register_result_err_layout_types(name, fields, symbols)
         var field_names: [text] = []
         var field_type_names: [text] = []
         var field_type_ownership_keys: [text] = []
@@ -1373,6 +1377,7 @@ impl MirLowering:
             val struct_symbol = module.symbols.get_symbol_raw(struct_def.symbol.id)
             if struct_symbol != nil:
                 val struct_key = self.composite_layout_key(struct_symbol)
+                self.register_result_err_layout_types(struct_key, struct_def.fields, module.symbols)
                 if bare_layout_was_free:
                     self.struct_bare_layout_owner[struct_def.name] = struct_key
                 if struct_key != struct_def.name:
@@ -1391,6 +1396,7 @@ impl MirLowering:
                 # Types/defaults are relocated after each consumer installs
                 # its own SymbolTable. This prepass only records ID-free layout.
                 val class_attr = if class_def.has_layout_attr: class_def.layout_attr else: layoutattr_default_()
+                self.register_result_err_layout_types(mir_class_identity(class_symbol), class_def.fields, module.symbols)
                 self.register_composite_layout_identity(class_symbol, class_def.fields, class_attr)
             psi = psi + 1
         # Same ordering gap for CALL RETURN TYPES: the entry module lowers
@@ -1440,7 +1446,17 @@ impl MirLowering:
                         bootstrap_fn_ret_array_element_shape_register(
                             array_return_name, prescan_element_shape, prescan_element_identity)
                         bootstrap_fn_ret_shape_register(array_return_name, "__runtime_array__")
-                case Result(prescan_ok_type, _):
+                case Result(prescan_ok_type, prescan_err_type):
+                    match prescan_err_type.kind:
+                        case Named(err_symbol_id, _):
+                            if val err_symbol = module.symbols.get_symbol_raw(err_symbol_id.id):
+                                match err_symbol.kind:
+                                    case Class:
+                                        bootstrap_fn_ret_err_shape_register(prescan_call_name, mir_class_identity(err_symbol))
+                                    case Struct:
+                                        bootstrap_fn_ret_err_shape_register(prescan_call_name, self.composite_layout_key(err_symbol))
+                                    case _: ()
+                        case _: ()
                     # Ok-payload struct/class layout key, resolved HERE while
                     # `module.symbols` is still the DEFINING module's own
                     # self-consistent table (see bootstrap_fn_ret_ok_shape_
