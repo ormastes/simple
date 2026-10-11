@@ -47,6 +47,16 @@ The previous green result must be either the canonical one-file adapter gate
 receipt or a prior restricted prefix gate whose proven attached source owners
 match. Merely generating the preceding manifest is insufficient. For Cranelift,
 replace `llvm` and use its own physical workspace, lane and receipt. The runner
+also requires the preceding `build.env` to match the current workspace, compiler
+SHA-256, backend and frozen runtime-capsule receipt SHA-256. Prefix results
+hash-bind that build receipt and repeat those identities; missing or altered
+bindings fail before compilation. Legacy
+one-file migration requires its original matching build receipt. Older prefix
+results without a build binding require a fresh evidence attempt; they are not
+silently upgraded into producer-bound evidence. New build receipts retain the
+previous build receipt hash as well as the previous result hash. These local
+hash bindings detect mixed evidence, not maliciously rewritten receipt chains.
+The runner
 validates admission and the frozen runtime capsule. Native builds keep no-stub
 fallback, cold source inventory initialization, HIR cache disabled, 6,835,937 KiB
 enforced RSS and 1,800 second deadlines. `NATIVE_ADAPTER_THREADS` and
