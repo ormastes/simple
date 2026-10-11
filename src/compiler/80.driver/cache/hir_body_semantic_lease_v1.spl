@@ -1,0 +1,142 @@
+# Inactive adapter. One complete body is consumed in scratch; only diagnostics
+# escape. Value-layout/collection/mono/MIR admission remains separate mandatory
+# work. Publication follows passes first, then the admitted module order.
+use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveV1,
+    HirBodyArchiveInputV1, hir_body_archive_load_in_owned_scope_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_last_warnings,
+    hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1}
+use compiler.driver.hir_typecheck_consumer_v1.{HirTypecheckReceiptV1,
+    collect_module_typecheck_receipt_v1}
+use compiler.driver.hir_semantic_consumer_v1.{collect_module_safety_receipt_v1,
+    collect_module_any_escape_receipt_v1, collect_module_enum_contract_receipt_v1}
+use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity, typecheck_pass_severity}
+use compiler.driver.driver_safety_severity.{SafetyPassSeverity, safety_pass_severity_phased}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.common.parallel_policy.policy_schema.{ResolvedParallelPolicyV1}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_pass_receipt.{PassReceipt, record_pass_receipt}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+
+struct HirBodySemanticPolicyV1:
+    strictness: AssuranceStrictness
+    typecheck: TypecheckPassSeverity
+    safety: SafetyPassSeverity
+    typecheck_enabled: bool
+    safety_enabled: bool
+    key: text
+
+struct HirBodySemanticReceiptV1:
+    module_name: text
+    archive_key: text
+    body_digest: text
+    policy_key: text
+    typecheck: HirTypecheckReceiptV1
+    safety: HirTypecheckReceiptV1
+    any_escape: HirTypecheckReceiptV1
+    enum_contract: HirTypecheckReceiptV1
+    lowering_warnings: [text]
+    functions_checked: i64
+
+pub fn hir_body_semantic_policy_v1(strictness: AssuranceStrictness) -> HirBodySemanticPolicyV1:
+    val tc = typecheck_pass_severity()
+    val safety = safety_pass_severity_phased()
+    val tc_name = match tc:
+        case TypecheckPassSeverity.Advisory: "advisory"
+        case TypecheckPassSeverity.Warn: "warn"
+        case TypecheckPassSeverity.Deny: "deny"
+    val safety_name = match safety:
+        case SafetyPassSeverity.Advisory: "advisory"
+        case SafetyPassSeverity.Warn: "warn"
+        case SafetyPassSeverity.Deny: "deny"
+    val tc_enabled = env_get("SIMPLE_TYPECHECK_WARN") == "1" or tc_name != "advisory"
+    val safety_enabled = env_get("SIMPLE_SAFETY_WARN") == "1" or safety_name != "advisory"
+    val key = sha256_text("hir-body-semantic-policy-v1\n" + strictness.name() + "\n" +
+        tc_name + "\n" + safety_name + "\n{tc_enabled}\n{safety_enabled}\n" +
+        sha256_text(env_get("SIMPLE_FRONTEND_DIAG")) + "\n")
+    HirBodySemanticPolicyV1(strictness, tc, safety, tc_enabled, safety_enabled, key)
+
+fn hir_body_semantic_collect_in_owned_scope_v1(archive: HirBodyArchiveV1,
+        expected: HirBodyArchiveInputV1, policy: HirBodySemanticPolicyV1) -> Result<HirBodySemanticReceiptV1, text>:
+    # Real borrowed reader owns the sole archive envelope validation.
+    val module = hir_body_archive_load_in_owned_scope_v1(archive, expected)?
+    val empty = HirTypecheckReceiptV1(messages: [], warnings: [], errors: [])
+    val tc = if policy.typecheck_enabled:
+        collect_module_typecheck_receipt_v1(module.name, module, policy.typecheck)
+    else: empty
+    val safety = if policy.safety_enabled:
+        collect_module_safety_receipt_v1(module.name, module, policy.safety,
+            ResolvedParallelPolicyV1.for_assurance(policy.strictness))
+    else: empty
+    # These two mandatory passes have no opt-out or advisory-only rung.
+    val any_escape = collect_module_any_escape_receipt_v1(module.name, module, policy.strictness)
+    val enum_contract = collect_module_enum_contract_receipt_v1(module.name, module, policy.strictness)
+    Ok(HirBodySemanticReceiptV1(module.name, archive.archive_key, archive.body_digest,
+        policy.key, tc, safety, any_escape, enum_contract, hir_cache_last_warnings(), module.functions.len()))
+
+pub fn hir_body_archive_semantic_lease_v1(archive: HirBodyArchiveV1,
+        expected: HirBodyArchiveInputV1, strictness: AssuranceStrictness) -> Result<HirBodySemanticReceiptV1, text>:
+    if transient_array_scope_state_v1() != 0:
+        return Err("semantic archive lease already occupied")
+    if not hir_cache_enabled(): return Err("semantic archive cache identity unavailable")
+    if hir_cache_last_warnings().len() != 0: return Err("semantic archive warning owner occupied")
+    val policy = hir_body_semantic_policy_v1(strictness)
+    if not transient_scope_begin(): return Err("semantic archive scope unavailable")
+    val result = hir_body_semantic_collect_in_owned_scope_v1(archive, expected, policy)
+    val paused = transient_scope_pause()
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    # Includes every success array, descriptor string and dynamic Err reason.
+    val owned = if paused: transient_promote(result) else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not cache_owned or not owned or not ended:
+        panic("semantic archive lease ownership failed")
+    result
+
+pub fn hir_body_semantic_publish_pass_major_v1(ctx: CompileContext,
+        ordered_archives: [HirBodyArchiveV1], receipts: [HirBodySemanticReceiptV1]) -> Result<[text], text>:
+    if transient_array_scope_state_v1() != 0:
+        return Err("semantic archive publication requires closed leases")
+    if ordered_archives.len() != receipts.len(): return Err("semantic archive coverage differs")
+    val policy = hir_body_semantic_policy_v1(ctx.assurance_policy.strictness)
+    var seen: Dict<text, bool> = {}
+    var index = 0
+    # Validate the entire schedule before any diagnostic or receipt publication.
+    while index < receipts.len():
+        val receipt = receipts[index]
+        val archive = ordered_archives[index]
+        if receipt.module_name != archive.input.module_name or
+                receipt.archive_key != archive.archive_key or receipt.body_digest != archive.body_digest or
+                receipt.policy_key != policy.key or seen.has(receipt.module_name):
+            return Err("semantic archive order, body or policy differs")
+        seen[receipt.module_name] = true
+        index = index + 1
+    var out: [text] = []
+    var pass = 0
+    while pass < 4:
+        var diagnostics = 0
+        var errors = 0
+        for receipt in receipts:
+            val selected = if pass == 0: receipt.typecheck
+                elif pass == 1: receipt.safety
+                elif pass == 2: receipt.any_escape
+                else: receipt.enum_contract
+            for message in selected.messages: out.push(message)
+            for message in selected.warnings: ctx.add_warning(message)
+            for message in selected.errors: ctx.add_error(message)
+            diagnostics = diagnostics + selected.messages.len()
+            errors = errors + selected.errors.len()
+        if pass >= 2:
+            val _receipt = record_pass_receipt(PassReceipt(
+                pass_name: if pass == 2: "any_escape" else: "enum_contract",
+                profile: ctx.assurance_policy.strictness.name(), executed: true,
+                modules_checked: receipts.len(), diagnostics: diagnostics, errors_raised: errors))
+        pass = pass + 1
+    Ok(out)
+
+export HirBodySemanticPolicyV1, HirBodySemanticReceiptV1
+export hir_body_semantic_policy_v1, hir_body_archive_semantic_lease_v1
+export hir_body_semantic_publish_pass_major_v1

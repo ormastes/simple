@@ -98,3 +98,31 @@ than publishing partially retained roots. The fresh-process
 owners, active/paused refusals, actual file admission, post-close revalidation and
 stable repeated selection. The generated runtime mutation control also checks
 occupied-lease refusal and ownership release. These controls are not executed.
+
+The native fixture launcher's `cold` selector requires a replayed canonical
+Stage2 admission whose tool snapshot already contains the actual managed-tool
+projection. It replays the six sealed tool environment assignments as data and
+hands the exact admitted tool/snapshot paths and digests to the fresh fixture.
+Compilation retains the published capsule; cold selection consumes the distinct
+original runtime root and snapshot named by that admission. Both authorities
+remain in the evidence. The old frozen producer and attempt7 tool snapshots do
+not contain a managed projection, so they cannot qualify the seven-check cold
+control. Refusal is pending evidence, not a zero-check success.
+
+The original archive now has one guarded complete-body borrowed reader shared
+by the typecheck and semantic adapters. Four appended native guards preserve
+the original 47 and exercise inactive/paused refusal, actual decoded body and
+function contents, and a forged body seal (51 total). These guards remain
+unexecuted. The semantic adapter extracts the existing safety, Any-origin and
+enum-declaration checks into read-only per-module diagnostic collectors;
+retained wrappers keep the same module iteration and aggregate pass receipts.
+Actual checker implementation files have no module-level mutable memo roots;
+only rendered text, cache diagnostic ownership and scalar/archive identity
+escape the semantic lease. The native semantic control has 19 guards including
+actual unsafe assembly/Any/duplicate-discriminant findings, clean neighbors,
+advisory/warn/deny behavior, two-module pass-major publication, reversed-order
+refusal before publication, foreign scope refusal, and a failed-stage replay.
+No native result has been collected. Semantic publication does not admit value
+layouts, collection analysis, quiet resolution, cold publication witnesses,
+monomorphization/post-mono validation or MIR. Those owner adapters remain
+mandatory before the bounded production loop can be selected.
