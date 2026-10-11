@@ -47,3 +47,33 @@ retained under `C:/dev/simple-phase3-hir-memory-evidence/policy-probe*`, with
 600 seconds and 5859375 KiB enforced. This confirms the policy helper's native
 behavior. It does not execute a rebuilt driver, the SSpec suite or the full CLI,
 and no comparable baseline establishes a memory improvement yet.
+
+## Current-producer streaming diagnostics
+
+Two separately retained positional full-CLI attempts used the admitted producer
+above, explicit `SIMPLE_STAGE3_STREAMING_SURFACES=1`, private caches/storage and
+the original CLI entry. Both enforced 600 seconds and 5859375 KiB; neither
+compiled a rebuilt driver.
+
+The first attempt retained only 2409 closure sources and exited 1 during source
+loading because sparse checkout omitted the backend registry/VHDL plugin source
+owners. Its peak was 537560 KiB. It is missing-input evidence, not a memory
+result. Evidence: `C:/dev/simple-phase3-hir-memory-evidence/full-cli-streaming/`.
+
+After materializing all `src`, the fresh second attempt selected streaming
+ownership and parsed, promoted and released all 2517 physical source surfaces.
+It then timed out with exit 124 at the export-origin/freeze boundary, before HIR
+opened its durable snapshot or an executable existed. Its enforced resource
+receipt reports peak RSS 1506780 KiB. Exact source HEAD/tree/status/patch,
+producer/script hashes and the SIMPLE environment are retained in
+`C:/dev/simple-phase3-hir-memory-evidence/full-cli-streaming-attempt2/`.
+
+The original retained-route log contains 2545 distinct parsed source paths.
+The second streaming log contains 2517. Comparing those observed paths finds
+29 original-only paths in `src/app/cmm_lsp` (8), `src/app/mcp_t32` (13) and
+`src/app/t32_cli` (8), and one streaming-only path `src/app/__init__.spl`.
+This is consistent with differing configured alias materialization; observed
+path lists do not establish source-byte or SCV manifest equivalence. The
+diagnostic cannot prove improvement on the identical required inventory or
+admit the full CLI. No third automatic rerun was performed. A corrected source
+snapshot must materialize and bind the configured aliases before qualification.
