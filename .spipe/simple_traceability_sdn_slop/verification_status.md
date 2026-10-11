@@ -16,6 +16,13 @@ existing database owner, and independent frozen-plan reconciliation. These
 sources and their fixtures have not passed native Phase 3 execution.
 Historical Phase 2 probes do not qualify the Phase 3 candidate.
 
+The adjacent `rp3h-20261011` bootstrap is terminal according to
+`attempt-08.status`: exit 88, source revision `26a5cb014d4bc61c8657f08799160f9f17834379`.
+Its log reports the RSS cap exceeded (6,308,768 KiB peak against 6,291,456 KiB).
+The known Stage 2 and Stage 3 executable paths are absent, and the previously
+observed process IDs 32908 and 59416 are no longer present. This failed,
+different-source build is not candidate test evidence; it was not restarted.
+
 ## Blocking findings
 
 - Shared test-runner JSON serializers are removed in authored source. Format
