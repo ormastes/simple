@@ -455,3 +455,30 @@ durable storage and child verification before full provenance admission; they
 cannot be discarded at the database request boundary. Complete import/input
 closure, dynamic registration and parameter expansion remain separate required
 contracts, not implied by the literal grammar slice.
+
+### Worker result framing
+
+The legacy worker writes progress and its final structured result to the same
+stdout stream. Selecting the last nonempty line is not the target SDN protocol.
+Public structured execution shall use a parent-owned result-file boundary:
+the private worker writes one canonical `simple.test-runner.output/v1` SDN
+document to an exclusively reserved result path in a private directory, while
+its stdout/stderr contain diagnostics only. The parent captures both streams
+with bounded process ownership, routes diagnostics to stderr, and reads the
+result using a bounded regular-file, no-follow facade after terminal cleanup.
+It validates the complete document before emitting it as the public stdout
+message. Missing files, output limits, timeout, cleanup failure, malformed SDN,
+and exit/result disagreement produce explicit non-green failure messages.
+
+The result path is a transport capability, not a free-form candidate output
+attribute. Directory ownership and exclusive reservation must prevent another
+writer replacing it; a random-looking filename alone does not establish that
+boundary. Only owned files are removed during cleanup. Authentication markers
+and recursion guards must be child-scoped process settings, not leaked global
+environment state. The wrapper executes an admitted cached binary rather than
+compiling a source entrypoint as part of the operation.
+
+The v1 producer and consumer share a 1 MiB document limit, matching the bounded
+SDN parser contract. Larger observations require an explicit shard/artifact
+contract or a separately verified larger parser policy. They are never silently
+truncated, converted to JSON, or treated as a successful partial result.
