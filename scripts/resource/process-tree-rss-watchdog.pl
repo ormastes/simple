@@ -5,7 +5,11 @@
 use strict;
 use warnings;
 use POSIX qw(setsid setpgid WNOHANG);
-use Time::HiRes qw(time sleep alarm);
+use Time::HiRes qw(sleep alarm clock_gettime CLOCK_MONOTONIC);
+
+# @workaround bug=bootstrap_watchdog_wall_clock_budget_2026_10_11
+# Elapsed budgets must not follow civil-clock steps; require a monotonic host clock.
+sub monotonic_time { return clock_gettime(CLOCK_MONOTONIC); }
 use Cwd qw(abs_path);
 use File::Basename qw(dirname);
 use File::Temp qw(tempdir);
@@ -177,7 +181,7 @@ my %groups;
 my $identity_lost = 0;
 my ($peak, $samples, $child_status, $interrupted);
 $peak = $samples = $interrupted = 0;
-my $started = time;
+my $started = monotonic_time();
 my $last = {};
 my $ps_pid = 0;
 my ($previous_sample, $sample_gap_max_ms) = (0, 0);
@@ -292,11 +296,11 @@ sub install_observer {
         setpgid(0, 0) == 0 or POSIX::_exit(89);
         exec {$compiler} $compiler, '-O2', $source, '-o', $observer_path or POSIX::_exit(127);
     }
-    my $deadline = time + 30;
+    my $deadline = monotonic_time() + 30;
     while (1) {
         my $done = waitpid($builder, WNOHANG);
         if ($done == $builder) { $? == 0 or die "process observer compilation failed"; last }
-        if (time >= $deadline) {
+        if (monotonic_time() >= $deadline) {
             kill 'KILL', -$builder; kill 'KILL', $builder; waitpid($builder, 0);
             die "process observer compilation timed out";
         }
@@ -471,11 +475,11 @@ sub run_compiler {
         setpgid(0, 0) == 0 or POSIX::_exit(89);
         exec {$compile[0]} @compile or POSIX::_exit(127);
     }
-    my $deadline = time + 30;
+    my $deadline = monotonic_time() + 30;
     while (1) {
         my $done = waitpid($builder, WNOHANG);
         if ($done == $builder) { $? == 0 or die "session helper compilation failed"; last }
-        if (time >= $deadline) {
+        if (monotonic_time() >= $deadline) {
             # The direct compiler child is still unreaped and anchors its group.
             kill 'KILL', -$builder;
             kill 'KILL', $builder;
@@ -674,9 +678,9 @@ sub windows_job_workload {
         if ($interrupted && !$stop_at) {
             # The helper polls this each sample and terminates the whole job.
             if (open(my $stop, '>', "$stats.stop")) { close($stop) }
-            $stop_at = time;
+            $stop_at = monotonic_time();
         }
-        if ($stop_at && time - $stop_at > 5) {
+        if ($stop_at && monotonic_time() - $stop_at > 5) {
             kill 'KILL', $supervisor; waitpid($supervisor, 0); $forced = 1; last;
         }
         sleep 0.05;
@@ -763,7 +767,7 @@ sub reaper_line {
             return $line;
         }
         length($reaper_buffer) <= 256 or die "oversized reaper line";
-        my $remaining = $deadline - time;
+        my $remaining = $deadline - monotonic_time();
         $remaining > 0 or die "reaper protocol deadline exceeded";
         my $ready = '';
         vec($ready, fileno($reaper_read), 1) = 1;
@@ -785,7 +789,7 @@ sub reaper_command {
 
 sub reaper_snapshot {
     verify_session_helper();
-    my $deadline = time + $observation_budget_ms / 1000;
+    my $deadline = monotonic_time() + $observation_budget_ms / 1000;
     reaper_command('S');
     my $header = reaper_line($deadline);
     $header =~ /\ASAMPLE 1 ([1-9][0-9]*) ([1-9][0-9]*) (-1|[0-9]+) ([1-9][0-9]*)\n\z/
@@ -822,7 +826,7 @@ sub reaper_snapshot {
     } elsif (defined $child_status) { die "reaper payload became live after completion" }
     verify_session_helper();
     ++$samples;
-    my $duration = (time - $sample_started_at) * 1000;
+    my $duration = (monotonic_time() - $sample_started_at) * 1000;
     record_sample_duration($duration, "reaper observation exceeded budget");
     return \%all;
 }
@@ -830,7 +834,7 @@ sub reaper_snapshot {
 sub reaper_quiesce {
     my $quiet = eval {
         reaper_command('Q');
-        my $line = reaper_line(time + 3);
+        my $line = reaper_line(monotonic_time() + 3);
         $line =~ /\AQUIET ([01]) (-1|[0-9]+) ([1-9][0-9]*) ([0-9]+) ([0-9]+)\n\z/
             or die "invalid reaper cleanup response";
         my ($clean, $raw, $owner, $seconds, $micros) = ($1, $2, $3, $4, $5);
@@ -845,9 +849,9 @@ sub reaper_quiesce {
     warn "rss-guard: reaper cleanup failed: $@\n" if $@;
     close($reaper_write) if $reaper_write; # EOF also requests native cleanup
     close($reaper_read) if $reaper_read;
-    my $until = time + 3;
+    my $until = monotonic_time() + 3;
     my $reaped = 0;
-    while (time < $until) {
+    while (monotonic_time() < $until) {
         my $got = waitpid($leader, WNOHANG);
         if ($got == $leader) {
             $reaper_owner_wait_status = $?;
@@ -906,7 +910,7 @@ sub record_sample_duration {
 
 sub snapshot {
     my ($metadata_only) = @_;
-    $sample_started_at = time;
+    $sample_started_at = monotonic_time();
     return reaper_snapshot() if $freebsd;
     if ($^O eq 'darwin') {
         my $all = eval { native_snapshot($metadata_only) };
@@ -918,7 +922,7 @@ sub snapshot {
             die $failure;
         }
         ++$samples;
-        my $duration_ms = (time - $sample_started_at) * 1000;
+        my $duration_ms = (monotonic_time() - $sample_started_at) * 1000;
         record_sample_duration($duration_ms, "process observation exceeded observation budget");
         return $all;
     }
@@ -972,7 +976,7 @@ sub finish_snapshot {
     if ($leader && defined($session_helper) && !$helper_failed &&
         ($session_root_confirmed || (exists($all->{$leader}) && $all->{$leader}{group} == $leader))) {
         my @live = members($all);
-        my $remaining = $observation_budget_ms / 1000 - (time - $sample_started_at);
+        my $remaining = $observation_budget_ms / 1000 - (monotonic_time() - $sample_started_at);
         # /proc already carries each PID's session (stat field 6): spawning the
         # getsid helper per sample is what cost ~1s per sample under TCG.
         # The helper's integrity is still verified every sample: swapping the
@@ -986,7 +990,7 @@ sub finish_snapshot {
             $unexpected_sid{$id} = $sids->{$id} if $sids->{$id} && $sids->{$id} != $session_id;
         }
     }
-    my $duration_ms = (time - $sample_started_at) * 1000;
+    my $duration_ms = (monotonic_time() - $sample_started_at) * 1000;
     record_sample_duration($duration_ms, "process observation exceeded observation budget");
     return $all;
 }
@@ -1043,7 +1047,7 @@ sub signal_verified {
     if ($freebsd) {
         $signal eq 'TERM' or die "unsupported reaper signal operation";
         reaper_command('T');
-        reaper_line(time + $observation_budget_ms / 1000) eq "TERM 1\n"
+        reaper_line(monotonic_time() + $observation_budget_ms / 1000) eq "TERM 1\n"
             or die "reaper TERM failed";
         return members($all);
     }
@@ -1167,7 +1171,7 @@ if (getppid() != $controller_pid) {
     receipt('controller-exited', 143, 1);
     exit 143;
 }
-$started = time;
+$started = monotonic_time();
 pipe(my $gate_read, my $gate_write) or die "rss-guard: pipe failed\n";
 my $reaper_reply_write;
 if ($freebsd) {
@@ -1212,7 +1216,7 @@ $SIG{PIPE} = 'IGNORE';
 my ($status, $code) = ('complete', 0);
 my $released = 0;
 while (1) {
-    my $sample_started = time;
+    my $sample_started = monotonic_time();
     my $gap = $previous_sample ? ($sample_started - $previous_sample) * 1000 : 0;
     $sample_gap_max_ms = $gap if $gap > $sample_gap_max_ms;
     $previous_sample = $sample_started;
@@ -1247,12 +1251,12 @@ while (1) {
             };
             close $gate_write unless $freebsd;
             $released = 1;
-        } elsif (time - $started >= 2) {
+        } elsif (monotonic_time() - $started >= 2) {
             ($status, $code) = ('rss-startup-failed', 89); last;
         }
     }
     if ($interrupted) { ($status, $code) = ('interrupted', $interrupted); last }
-    if ($opt{'timeout-seconds'} && time - $started >= $opt{'timeout-seconds'}) {
+    if ($opt{'timeout-seconds'} && monotonic_time() - $started >= $opt{'timeout-seconds'}) {
         ($status, $code) = ('timeout', 124); last;
     }
     # Keep the direct child unreaped as the root PGID identity anchor. A
@@ -1265,7 +1269,7 @@ while (1) {
         $interrupted = 143;
         ($status, $code) = ('controller-exited', 143); last;
     }
-    my $remaining = $opt{'interval-ms'} / 1000 - (time - $sample_started);
+    my $remaining = $opt{'interval-ms'} / 1000 - (monotonic_time() - $sample_started);
     sleep($remaining) if $remaining > 0;
 }
 close $gate_write unless $released || $freebsd;
@@ -1275,8 +1279,8 @@ if ($code == 124 || $interrupted) {
     my $term_snapshot = eval { snapshot() };
     if ($term_snapshot && eval { signal_verified('TERM', $term_snapshot); 1 }) { }
     else { alarm 0; ($status, $code) = ('rss-measurement-failed', 89) }
-    my $grace_end = time + $opt{'term-grace-seconds'};
-    while (time < $grace_end) {
+    my $grace_end = monotonic_time() + $opt{'term-grace-seconds'};
+    while (monotonic_time() < $grace_end) {
         my $all = eval { snapshot() };
         if (!$all) { alarm 0; ($status, $code) = ('rss-measurement-failed', 89); last }
         my @live = members($all);

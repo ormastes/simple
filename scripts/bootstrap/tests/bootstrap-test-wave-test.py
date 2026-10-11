@@ -81,7 +81,12 @@ class WaveTests(unittest.TestCase):
             for name in ('config/simple.test.sdn', 'config/sdoctest.sdn',
                          'src/app/test_runner_new/main.spl',
                          'src/app/test_runner_new/test_runner_main.spl',
-                         'src/lib/nogc_sync_mut/test_runner/test_runner_files.spl'):
+                         'src/lib/nogc_sync_mut/test_runner/test_runner_files.spl',
+                         'src/lib/nogc_sync_mut/test_runner/test_runner_args.spl',
+                         'src/lib/nogc_sync_mut/test_runner/test_runner_types.spl',
+                         'src/lib/nogc_sync_mut/test_runner/test_runner_async.spl',
+                         'src/lib/nogc_sync_mut/test_runner/worker_memory.spl',
+                         'src/lib/common/convert.spl'):
                 path = source / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('test fixture; not native source')
@@ -95,6 +100,16 @@ class WaveTests(unittest.TestCase):
                 child.assert_not_called()
             self.assertFalse((output / 'result.json').exists())
             request = json.loads((output / 'request.json').read_text())
+            memory_policy = source / 'src/lib/nogc_sync_mut/test_runner/worker_memory.spl'
+            self.assertEqual(request['input_hashes'][memory_policy.relative_to(source).as_posix()],
+                             GATE.digest(memory_policy))
+            original_policy = memory_policy.read_bytes()
+            memory_policy.write_bytes(b'changed memory policy')
+            with patch('sys.argv', argv + ['--resume-prepared']), patch.object(PHASE1.subprocess, 'run') as child:
+                with self.assertRaises(SystemExit):
+                    PHASE1.main()
+                child.assert_not_called()
+            memory_policy.write_bytes(original_policy)
             request['jobs'] = 10
             (output / 'request.json').write_text(json.dumps(request))
             with patch('sys.argv', argv + ['--resume-prepared']), patch.object(PHASE1.subprocess, 'run') as child:
