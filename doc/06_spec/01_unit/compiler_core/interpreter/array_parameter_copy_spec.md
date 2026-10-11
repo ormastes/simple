@@ -9,11 +9,14 @@ The remaining cases call `val_copy_for_parameter` and the real value arena.
 It verifies independent array
 storage after append and replacement, independent nested arrays, shared
 registered class identities, copied registered value structs with array fields,
-and unchanged scalar identities plus independent empty arrays.
+unchanged scalar identities plus independent empty arrays, self cycles,
+mutual cycles, and repeated child identities.
 
 Parameter binding in `eval_function_call` calls this helper. Value structs
 recursively use it for their fields, preserving class references while copying
-array storage. The helper does not replace the general struct copy gate.
+array storage. A reference-owned memo context registers array/struct copies
+before visiting their children, preserving cycles and shared subgraphs.
+The helper does not replace the general struct copy gate.
 
 ## Verification evidence
 
@@ -21,7 +24,7 @@ Release base: `c4cd4530c1d4e61d74ce669d54b9e26c0d625a44`.
 Stage 1 cached bootstrap producer SHA-256:
 `6b133a15211e2ffb7c8c289a151400dc9a173e70b72e1c9f2feb6589e5dd0e0e`.
 
-Diagnostic status: **BLOCKED**, declared 5 / executed 0. The explicit AST
+Diagnostic status: **BLOCKED**, declared 7 / executed 0. The explicit AST
 owner import encounters the existing `windows_redirected_process.spl`
 `Unexpected token: expected Fn, found Colon` parse failure. No assertion
 is marked passed, skipped, or weakened. Zero compiler rebuilds.
