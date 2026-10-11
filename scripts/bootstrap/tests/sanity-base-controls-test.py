@@ -75,7 +75,12 @@ class ControlTests(unittest.TestCase):
                 m.verify_actual_writer(changed)
 
     def test_shell_dispatch_gates(self):
-        bash = 'C:/Program Files/Git/bin/bash.exe' if os.name=='nt' else shutil.which('bash')
+        if os.name == 'nt':
+            git = shutil.which('git')
+            bash = pathlib.Path(git).resolve().parent.parent / 'bin/bash.exe' if git else None
+            self.assertTrue(bash and bash.is_file(), 'Git Bash must accompany the Git executable')
+        else:
+            bash = shutil.which('bash')
         self.assertTrue(bash)
         facade = HELPER.parent.parent/'bootstrap-stage3-provenance.shs'
         def shellpath(p):
