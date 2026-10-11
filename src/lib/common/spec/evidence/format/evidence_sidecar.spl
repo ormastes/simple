@@ -18,20 +18,23 @@
 #     writing into the tracked spec tree. Parent directories are created as
 #     needed.
 #
-# File format: the line-based convention documented in
-# `evidence_loader.spl`'s module docstring (`key=value` manifest header, then
-# `---`-delimited `ManualBlock` records). `emit_evidence` writes exactly one
-# block per call, of kind `table`, audience `qa` — a caller passing already
-# pipe-table-shaped lines (e.g. `stacked_md_table(...)`) gets a real rendered
-# Markdown table in the generated manual, not re-emitted source.
+# File format: canonical schema-versioned SDN from `sidecar_sdn.spl`.
+# `emit_evidence` appends one typed block per call. Historical v1 key/value
+# sidecars are displayed only through the explicit versioned importer; the
+# writer refuses to append to v1 or final v2 records.
 #
-# Additive and append-only: repeated calls for the same spec append further
-# `---`-delimited blocks rather than overwriting earlier evidence from the
-# same run.
+# Additive and append-only: repeated calls for the same spec append blocks to
+# the SDN array while preserving existing manifest data.
 
 use std.nogc_sync_mut.io.file_ops.{file_read, file_atomic_write, file_exists}
 use std.nogc_sync_mut.io.dir_ops.{dir_create}
 use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.common.spec.evidence.model.{EvidenceStatus, ManualBlockKind, EvidenceAudience, evidence_manifest, manual_block_for}
+use std.common.spec.evidence.format.sidecar_sdn.{
+    EvidenceSidecar, EvidenceSidecarSource, decode_evidence_sidecar_v2,
+    encode_evidence_sidecar_v2, validate_evidence_sidecar_append,
+    EVIDENCE_SIDECAR_V1_SCHEMA
+}
 
 pub val EVIDENCE_DIR_ENV: text = "SIMPLE_SPEC_EVIDENCE_DIR"
 
@@ -57,26 +60,14 @@ fn dirname(path: text) -> text:
         i = i + 1
     out
 
-fn kv_line(key: text, value: text) -> text:
-    key + "=" + value
-
-fn block_lines(section_title: text, md_lines: [text]) -> [text]:
-    var out: [text] = []
-    out.push("kind=table")
-    out.push(kv_line("title", section_title))
-    out.push("audience=qa")
-    for line in md_lines:
-        out.push(kv_line("line", line))
-    out
-
-fn manifest_header(spec_path: text) -> [text]:
-    [
-        "schema=simple.sspec.evidence.v1",
-        kv_line("evidence_id", "emit_evidence"),
-        kv_line("profile_id", "binary_layout"),
-        kv_line("spec_path", spec_path),
-        "status=passed"
-    ]
+fn new_unverified_sidecar(spec_path: text) -> EvidenceSidecar:
+    EvidenceSidecar(
+        source: EvidenceSidecarSource.SchemaV2,
+        manifest: evidence_manifest(
+            "emit_evidence", "binary_layout", spec_path,
+            "", "", "", "", "", "", EvidenceStatus.pending_review),
+        subject_id: "", definition_sha256: "", expectation_sha256: "",
+        blocks: [])
 
 # Appends one rendered evidence block (already-formatted Markdown pipe-table
 # lines, e.g. from `binary_layout.stacked_md_table`) to the sidecar file for
@@ -91,15 +82,29 @@ pub fn emit_evidence(spec_path: text, section_title: text, md_lines: [text]) -> 
     var existing = ""
     if file_exists(target):
         val read = file_read(target)
+        if read == nil:
+            return false
         existing = read ?? ""
+        if existing.trim() == "":
+            return false
 
-    var content = existing
-    if content.trim() == "":
-        for line in manifest_header(spec_path):
-            content = content + line + "\n"
+    var sidecar = new_unverified_sidecar(spec_path)
+    if existing.trim() != "":
+        if existing.trim().starts_with("schema=" + EVIDENCE_SIDECAR_V1_SCHEMA):
+            return false
+        sidecar = match decode_evidence_sidecar_v2(existing):
+            case Ok(value):
+                value
+            case Err(_): return false
 
-    content = content + "---\n"
-    for line in block_lines(section_title, md_lines):
-        content = content + line + "\n"
+    match validate_evidence_sidecar_append(sidecar, spec_path):
+        case Ok(()): ()
+        case Err(_): return false
 
+    sidecar.blocks.push(manual_block_for(
+        ManualBlockKind.table, section_title, EvidenceAudience.qa, md_lines))
+    val encoded = encode_evidence_sidecar_v2(sidecar)
+    val content = match encoded:
+        case Ok(value): value
+        case Err(_): return false
     file_atomic_write(target, content)
