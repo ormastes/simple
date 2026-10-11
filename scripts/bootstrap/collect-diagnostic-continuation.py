@@ -24,7 +24,8 @@ for rel in roots:
     rejected.append({'path':relative,'reason':str(error)});continue
    binary=name in ['simple','simple.exe','simple.rejected','simple.exe.rejected']
    archive=name in ['libsimple_native_all.a','libsimple_compiler_backfill.a','simple_native_all.lib','simple_compiler_backfill.lib']
-   cache='/native_cache/' in relative and p.suffix in ['.o','.obj','.env','.json','.sdn','.manifest']
+   cache_owner=any(part in ['native_cache','stage2-native-cache','stage3-native-cache'] for part in pathlib.PurePosixPath(relative).parts)
+   cache=cache_owner and (p.suffix in ['.o','.obj','.env','.json','.sdn','.manifest'] or name in ['.cache_scope','incremental_manifest.txt'])
    metadata=not relative.startswith('src/compiler_rust/target/') and p.suffix in ['.env','.json','.manifest','.sdn']
    if binary or archive or cache or metadata:candidates.append((0 if binary else 1 if archive else 2 if metadata else 3,p,relative))
 for _,p,relative in sorted(candidates,key=lambda x:(x[0],x[2])):
