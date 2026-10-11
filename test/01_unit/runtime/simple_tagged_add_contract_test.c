@@ -1,4 +1,4 @@
-/* Link ONLY the actual Simple-owned core_values/core_string/core_memory
+/* Link ONLY the actual Simple-owned core_values/core_string/core_memory/core_array_query
  * objects, their real Simple array/dict/enum/closure provider closure, and
  * selected host primitives. No C runtime_native, mocked transient API or tags.
  * Negative modes require exit1 AND exact stderr; any crash/return fails. */
@@ -8,9 +8,19 @@
  * Declare the actual Simple signatures rather than calling mismatched types. */
 #define __simple_runtime_init core_c_runtime_init_declaration
 #define __simple_runtime_shutdown core_c_runtime_shutdown_declaration
+#define rt_array_new core_c_array_new_declaration
+#define rt_array_len core_c_array_len_declaration
+#define rt_array_get core_c_array_get_declaration
+#define rt_array_push core_c_array_push_declaration
+#define rt_array_free core_c_array_free_declaration
 #include "runtime.h"
 #undef __simple_runtime_init
 #undef __simple_runtime_shutdown
+#undef rt_array_new
+#undef rt_array_len
+#undef rt_array_get
+#undef rt_array_push
+#undef rt_array_free
 
 /* These are real --no-mangle Simple core_values exports, not test helpers. */
 extern int64_t numeric_box_kind(int64_t value);
@@ -18,6 +28,20 @@ extern int64_t float_is_valid(int64_t value);
 extern void float_reclaim_transient(int64_t pointer);
 extern int64_t __simple_runtime_init(void);
 extern int64_t __simple_runtime_shutdown(void);
+extern int64_t rt_array_new(int64_t capacity);
+extern int64_t rt_array_len(int64_t array);
+extern int64_t rt_array_get(int64_t array, int64_t index);
+extern int8_t rt_array_push(int64_t array, int64_t value);
+extern void rt_array_free(int64_t array);
+extern int64_t rt_array_sum(int64_t array);
+extern int64_t rt_array_min(int64_t array);
+extern int64_t rt_array_max(int64_t array);
+extern int64_t rt_array_index_of(int64_t array, int64_t value);
+extern int64_t rt_array_last_index_of(int64_t array, int64_t value);
+extern int64_t rt_array_count(int64_t array, int64_t value);
+extern int64_t rt_array_unique(int64_t array);
+extern int8_t rt_array_sort(int64_t array);
+extern int64_t rt_array_all_truthy(int64_t array);
 
 static int text_equal(int64_t value, const char* expected) {
     size_t length = strlen(expected);
@@ -153,6 +177,39 @@ int main(int argc, char** argv) {
      * without a speculative header read or access violation. */
     if (!text_equal(rt_to_string(INT64_C(4096) | 1), "") ||
         !text_equal(rt_value_to_string(INT64_C(4096) | 1), "")) return 45;
+    /* Ordinary Simple legacy Add must consume the new default INT1 boxes. */
+    if (rt_value_as_int_wide(rt_any_add(text_max, rt_value_int(1))) != INT64_MIN) return 46;
+    if (rt_value_as_int_wide(rt_any_add(text_min, rt_value_int(-1))) != INT64_MAX) return 47;
+    if (rt_value_as_int_wide(rt_any_add(text_boundary, rt_value_int(5))) != INT64_C(1152921504606846981)) return 48;
+    if (rt_value_as_int_wide(rt_any_add(rt_value_int(5), text_boundary)) != INT64_C(1152921504606846981)) return 49;
+    if (!text_equal(rt_any_add(rt_string_new((const uint8_t*)"n=", 2), text_min), "n=-9223372036854775808")) return 50;
+
+    int64_t array = rt_array_new(4);
+    if (array == 0 || rt_array_push(array, text_max) != 1 ||
+        rt_array_push(array, text_min) != 1 ||
+        rt_array_push(array, rt_value_int(INT64_MAX)) != 1 ||
+        rt_array_push(array, rt_value_int(5)) != 1) return 51;
+    if (rt_value_as_int_wide(rt_array_sum(array)) != INT64_MIN + 3) return 52;
+    if (rt_value_as_int_wide(rt_array_min(array)) != INT64_MIN) return 53;
+    if (rt_value_as_int_wide(rt_array_max(array)) != INT64_MAX) return 54;
+    /* Fresh equal boxes must compare by signed value, not pointer identity. */
+    if (rt_array_index_of(array, rt_value_int(INT64_MAX)) != 0) return 55;
+    if (rt_array_last_index_of(array, rt_value_int(INT64_MAX)) != 2) return 56;
+    if (rt_array_count(array, rt_value_int(INT64_MAX)) != 2) return 57;
+    int64_t unique = rt_array_unique(array);
+    if (rt_array_len(unique) != 3 || rt_value_as_int_wide(rt_array_get(unique, 0)) != INT64_MAX ||
+        rt_value_as_int_wide(rt_array_get(unique, 1)) != INT64_MIN ||
+        rt_value_as_int_wide(rt_array_get(unique, 2)) != 5) return 58;
+    if (rt_array_sort(array) != 1 || rt_value_as_int_wide(rt_array_get(array, 0)) != INT64_MIN ||
+        rt_value_as_int_wide(rt_array_get(array, 1)) != 5 ||
+        rt_value_as_int_wide(rt_array_get(array, 2)) != INT64_MAX ||
+        rt_value_as_int_wide(rt_array_get(array, 3)) != INT64_MAX) return 59;
+    int64_t zero_array = rt_array_new(1);
+    if (zero_array == 0 || rt_array_push(zero_array, rt_value_int_wide(0)) != 1) return 60;
+    if (rt_array_index_of(zero_array, rt_value_int(0)) != 0 || rt_array_all_truthy(zero_array) != 0) return 61;
+    rt_array_free(zero_array);
+    rt_array_free(unique);
+    rt_array_free(array);
     __simple_runtime_shutdown();
     return 0;
 }
