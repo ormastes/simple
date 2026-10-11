@@ -558,6 +558,19 @@ V4 warm deletion behavior is still unverified. See the
 [inventory regression](../../../08_tracking/bug/scv_inventory_retains_deleted_source_after_move_2026-10-11.md)
 and [native link blocker](../../../08_tracking/bug/scv_native_reexported_constants_undefined_2026-10-11.md).
 
+The re-exported constants now link after their definitions became public.
+The executable exposed a typed Option `None != nil` guard panic; switching
+the optional trace guards to `.?` advanced to a native exit 139 during the
+first cold refresh, before any inventory generation was published. The
+three-cycle fixture limit is exhausted. See the updated
+[inventory regression](../../../08_tracking/bug/scv_inventory_retains_deleted_source_after_move_2026-10-11.md)
+and [Option equality bug](../../../08_tracking/bug/native_typed_option_none_not_equal_nil_2026-10-11.md).
+The isolated Stage 2 binary lacks `check` and `test` commands and rejects
+`-c`, so the required compiler/lib/MCP checks and core eval smoke cannot be
+claimed from it. The MCP native smoke also has no server binaries in this
+worktree. Static working-tree guards passed; release verification remains
+open.
+
 ### 2026-10-11 Entry-scoped package ownership projection
 
 The cold ownership capture now has an explicit scoped entry point. It authenticates

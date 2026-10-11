@@ -1,6 +1,7 @@
 # SCV native closure leaves re-exported constants undefined
 
-Status: OPEN (2026-10-11). Blocks the focused V4 warm tracked-move regression.
+Status: FIXED for the focused native link (2026-10-11); the V4 runtime
+regression remains open.
 
 The no-stub, core-C Stage 2 native build of
 `test/fixtures/compiler/target6_tracked_move_refresh_probe.spl` selected 66
@@ -28,3 +29,14 @@ Expected: link succeeds, then the fixture exits 0 after asserting the final
 plugin path is the only selected source. Actual: link fails before runtime.
 Three bounded fixture build attempts were used this session; do not repeat
 the same check without a concrete linker or lowering repair.
+
+## Repair evidence
+
+Both declarations in `compile_source_inventory_core.spl` are now `pub val`.
+The literal private declaration was folded away; the expression private
+declaration produced a local `b` symbol, while the facade object referenced
+an external definition. A subsequent no-stub Stage 2 build compiled and
+linked all 66 selected modules. The corrected fixture then reached SCV
+refresh and exposed a separate typed Option guard panic, tracked in
+`native_typed_option_none_not_equal_nil_2026-10-11.md`. A complete warm
+tracked-move PASS is still required.

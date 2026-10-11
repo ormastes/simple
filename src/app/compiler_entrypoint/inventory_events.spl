@@ -159,7 +159,7 @@ fn _compiler_inventory_git_lines_traced_v1(root: text, args: [text],
         # 10s was too short: cold-init `ls-files` over ~60k files takes ~23s on
         # Windows and timed out, failing every refresh with git-event-refresh-failed.
         "git", ["-C", root, "--no-optional-locks"] + args, 300000, 16 * 1024 * 1024)
-    if trace != nil: trace!.captured_query(query_kind, status, stdout)
+    if trace.?: trace!.captured_query(query_kind, status, stdout)
     if status != 0:
         return nil
     Some(stdout)
@@ -669,7 +669,7 @@ fn _compiler_inventory_refresh_locked_v1(
     # union of src and test before calling this function.
     val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
     val cursor = compiler_inventory_cursor_read_v1(cache_root, pointer_content)
-    if trace != nil:
+    if trace.?:
         trace!.captured_pointer(pointer_content, cursor.inventory_digest,
             cursor.inventory_generation, cursor.untracked_membership_digest)
     if not cursor.valid and not cold_init:
@@ -708,7 +708,7 @@ fn _compiler_inventory_refresh_locked_v1(
             source_roots, cold_init, trace):
         case Some(batch): batch
         case _: return compiler_inventory_invalid_v1("git-event-refresh-failed")
-    if trace != nil:
+    if trace.?:
         trace!.observed(observed.events.len(), observed.untracked_paths.len(),
             observed.untracked_src_digest, observed.untracked_test_digest)
     # A cold init that listed NO compilable source is never a legitimate state
@@ -750,7 +750,7 @@ fn _compiler_inventory_refresh_locked_v1(
             root, previous!, observed.untracked_paths, source_roots)
         if deleted == nil:
             return compiler_inventory_invalid_v1("untracked-membership-reconcile-failed")
-        if trace != nil: diagnostic_deleted = deleted!.len()
+        if trace.?: diagnostic_deleted = deleted!.len()
         for event in deleted!:
             git_events.push(event)
         next_membership_paths = compiler_inventory_membership_merge_v1(
@@ -861,7 +861,7 @@ fn _compiler_inventory_refresh_locked_v1(
                 cache_root, pointer_content, cursor.inventory_digest)
             if reason != "":
                 return compiler_inventory_invalid_v1("observed-event-apply:" + reason)
-            if trace != nil: trace!.prepared(0, -1, membership_digest)
+            if trace.?: trace!.prepared(0, -1, membership_digest)
             return CompilerInventoryRefreshV1(
                 true, "ok", cursor.inventory_digest, cursor.inventory_generation, false)
     # Publish both immutable membership records before CURRENT can name them.
@@ -885,7 +885,7 @@ fn _compiler_inventory_refresh_locked_v1(
             return compiler_inventory_invalid_v1(
                 "untracked-membership-cleanup-failed:tracked-membership-publish-failed")
         return compiler_inventory_invalid_v1("tracked-membership-publish-failed")
-    if trace != nil:
+    if trace.?:
         val diagnostic_paths = if cold_init or membership_changed: next_membership_paths.len() else: -1
         trace!.prepared(diagnostic_deleted, diagnostic_paths, membership_digest)
     val inventory = compile_source_inventory_apply_observed_events_v1(
@@ -904,7 +904,7 @@ fn _compiler_inventory_refresh_locked_v1(
                 "untracked-membership-cleanup-failed:" + inventory.reason)
         return compiler_inventory_invalid_v1(
             "observed-event-apply:" + inventory.reason)
-    if trace != nil: trace!.published(inventory.digest, inventory.inventory!.generation)
+    if trace.?: trace!.published(inventory.digest, inventory.inventory!.generation)
     # Retire old immutable records only after CURRENT admits the new cursor.
     if cursor.valid and cursor.untracked_membership_digest != "" and
             cursor.untracked_membership_digest != membership_digest:
@@ -933,12 +933,12 @@ fn _compiler_inventory_refresh_owned_v1(
     val refresh_lock = file_lock("{event_root}/refresh.lock", 300)
     if refresh_lock < 0:
         return compiler_inventory_invalid_v1("compile-event-refresh-lock-unavailable")
-    if trace != nil: trace!.lock_released = false
+    if trace.?: trace!.lock_released = false
     val result = _compiler_inventory_refresh_locked_v1(
         root, cache_root, source_roots, cold_init, trace)
     if not file_unlock(refresh_lock):
         return compiler_inventory_invalid_v1("compile-event-refresh-unlock-failed")
-    if trace != nil: trace!.lock_released = true
+    if trace.?: trace!.lock_released = true
     result
 
 # Explicit token seam is diagnostic-only. Tokens never enter an admission key.
@@ -946,10 +946,10 @@ fn compiler_inventory_refresh_traced_v1(
     root: text, cache_root: text, source_roots: [text], cold_init: bool, token: text
 ) -> CompilerInventoryRefreshV1:
     val trace = inventory_trace_create_v1(token)
-    if trace != nil: trace!.begin(root, source_roots, cold_init)
+    if trace.?: trace!.begin(root, source_roots, cold_init)
     val result = _compiler_inventory_refresh_owned_v1(
         root, cache_root, source_roots, cold_init, trace)
-    if trace != nil:
+    if trace.?:
         if trace!.lock_released:
             trace!.finish(result.valid, result.reason, result.inventory_digest, result.inventory_generation)
             trace!.emit()

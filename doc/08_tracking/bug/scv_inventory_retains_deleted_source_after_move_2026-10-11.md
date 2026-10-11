@@ -54,7 +54,7 @@ native fixture also needs a separate completed build and runtime result.
 the exact staged intermediate path: admit the original, stage and admit the
 OS path, remove it before committing the final plugin path, then warm refresh.
 The fixture checks that only the final path remains and repeats the warm read.
-It has **not** executed. Its third bounded no-stub Stage 2 native build
+It had **not** executed at that point. Its initial bounded no-stub Stage 2 native build
 compiled 66 selected modules but failed while linking two undefined globals
 from `compile_source_inventory_core.spl`. See
 `scv_native_reexported_constants_undefined_2026-10-11.md`.
@@ -64,4 +64,25 @@ process facades instead of the broad `app.io.mod` hub. With the same source
 roots, the selected closure fell from 110 to 66 modules; this is a closure
 count, not a measured startup, p95, or RSS result. The previous broad-closure
 build failed at MIR in unrelated environment and SDN modules. This regression
-still needs an executable native PASS after the linker blocker is repaired.
+still needs an executable native PASS after the linker and runtime blockers
+are repaired.
+
+## Native runtime follow-up (2026-10-11)
+
+Making the two SCV core constants public resolved the native link. The first
+executable attempt exposed an omitted `-c` in the fixture's Git commit
+arguments; correcting it reached the cold refresh, where a typed `None`
+entered an `if trace != nil` branch and `trace!` panicked. GDB and object
+disassembly identify that separate compiler/runtime equality defect in
+`native_typed_option_none_not_equal_nil_2026-10-11.md`. The bridge now guards
+its optional trace with `trace.?`.
+
+The third bounded build linked, but the fixture exited 139 during its first
+cold refresh (`timeout: the monitored command dumped core`). Its temporary
+Git repository has the seed commit, and the SCV cache contains only
+`compile-events/refresh.lock`; no inventory generation or cursor was
+published. No core file or `coredumpctl` was available on this host. The
+three-cycle fixture limit is reached for this session. This is **not** a V4
+warm deletion PASS or Item 6 cutover evidence. The next session needs a
+captured native crash stack from a repaired candidate before another warm
+refresh claim.

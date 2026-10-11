@@ -128,11 +128,11 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
 
 ## Target 6 — persistent compile index
 
-- [ ] Repair native linking of the two SCV core constants, then execute the
+- [ ] Capture and repair the native cold-refresh exit 139, then execute the
   staged tracked-move V4 warm-refresh fixture and confirm the deleted
-  intermediate path is absent. The bounded 66-module native build reached
-  link but did not run; see
-  `doc/08_tracking/bug/scv_native_reexported_constants_undefined_2026-10-11.md`.
+  intermediate path is absent. The two SCV core constants now link; the
+  fixture has not reached warm refresh. See
+  `doc/08_tracking/bug/scv_inventory_retains_deleted_source_after_move_2026-10-11.md`.
 - [x] Reject persisted archives that pass hashes/manifest checks but cannot
   populate warm symbol/action owners. Cold publication now shares the warm
   payload parser and leaves `CURRENT` unchanged on malformed content. Focused
