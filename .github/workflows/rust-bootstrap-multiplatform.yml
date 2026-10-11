@@ -967,7 +967,7 @@ jobs:
   windows-retained-stage2-diagnostic:
     if: github.event_name == 'workflow_dispatch' && inputs.diagnose_windows_collector
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     permissions:
       contents: read
       actions: read
@@ -991,73 +991,42 @@ jobs:
           run-id: 38174655243
           name: bootstrap-diagnostic-UNADMITTED-Windows x86_64-cranelift-82bba68602c2cff2b87f42b0f5ae8a54f1d14b8b
           path: ${{ runner.temp }}/retained-windows-seed
-      - uses: actions/download-artifact@v4
-        with:
-          github-token: ${{ github.token }}
-          run-id: 38181216807
-          name: windows-retained-stage2-UNADMITTED-5686ba52a9d0961c3c7c31d5711d3fcc5db51a42
-          path: ${{ runner.temp }}/ready-windows-stage2
-      - name: Strict canonical startup and link only
+      - name: Qualify three raw Windows providers only
         shell: bash
         run: |
           set -eu
-          export LINK_OUT="$RUNNER_TEMP/windows-strict-link"
-          export READY_OBJECTS="$RUNNER_TEMP/ready-windows-stage2/native-objects-JhCjVy"
+          export LINK_OUT="$RUNNER_TEMP/windows-raw-three"
           export RETAINED_RUNTIME="$RUNNER_TEMP/retained-windows-seed/files/src/compiler_rust/target/bootstrap/simple_native_all.lib"
           python - <<'PYSTRICT'
-          import hashlib, json, os, re, subprocess, time
+          import hashlib,json,os,queue,subprocess,threading,time,shutil
           from pathlib import Path
-          
-          out = Path(os.environ['LINK_OUT']); out.mkdir(parents=True, exist_ok=True)
-          ready = Path(os.environ['READY_OBJECTS'])
-          runtime = Path(os.environ['RETAINED_RUNTIME'])
-          objects = [ready / ('mod_%d.o' % i) for i in range(1238)] + [ready / '_init_all.o']
-          assert len(list(ready.glob('*.o'))) == 1239
-          rows = [(f.name, f.stat().st_size, hashlib.sha256(f.read_bytes()).hexdigest()) for f in objects]
-          tree = hashlib.sha256(''.join('%s %d %s\n' % row for row in rows).encode()).hexdigest()
-          assert tree == 'b09288bf5987b0e3f7ab8bd82a97f00255a5a7d58e54af744393f7d483630f2e'
-          assert hashlib.sha256(runtime.read_bytes()).hexdigest() == '19960cf36d947e7b9989f62f84898716a4038461033a526eee51c621674467b0'
-          def run(name, argv, deadline=180):
-              started = time.monotonic()
-              try:
-                  r = subprocess.run(argv, capture_output=True, timeout=deadline)
-                  code, stdout, stderr = r.returncode, r.stdout, r.stderr
-              except subprocess.TimeoutExpired as e:
-                  code, stdout, stderr = 124, e.stdout or b'', e.stderr or b''
-              (out / (name+'.stdout')).write_bytes(stdout); (out / (name+'.stderr')).write_bytes(stderr)
-              item = {'argv':argv, 'exit':code, 'seconds':time.monotonic()-started}
-              (out / (name+'.json')).write_text(json.dumps(item, indent=2)+'\n')
-              return code, stdout+stderr
-          rsp = out/'objects.rsp'; rsp.write_text(''.join('"'+str(f).replace('\\','/')+'"\n' for f in objects))
-          archive = out/'stage2-ready.lib'
-          code, _ = run('archive', ['llvm-ar.exe','rcs',str(archive),'@'+str(rsp)])
-          assert code == 0
-          owner = subprocess.check_output(['git','show','82bba68602c2cff2b87f42b0f5ae8a54f1d14b8b:src/compiler_rust/compiler/src/pipeline/native_project/linker.rs'], text=True)
-          start = owner.index('let stub_code = if is_msvc'); a = owner.index('r#"',start)+3; b = owner.index('"#',a)
-          startup = owner[a:b]
-          assert hashlib.sha256(startup.encode()).hexdigest() == '5764ac81376ef2583c37e24b806dc89a3e985072cc1e406a9a41814f118accea'
-          (out/'canonical-main-msvc.c').write_text(startup, newline='')
-          defs = subprocess.check_output(['llvm-nm.exe','--defined-only','--extern-only',str(runtime)],text=True)
-          lifecycle_kinds = {name: [l.split()[-2] for l in defs.splitlines() if len(l.split()) >= 2 and l.split()[-1] == name] for name in ['__simple_runtime_init','__simple_runtime_shutdown','rt_set_args_wide']}
-          lifecycle = {name: 'T' in kinds for name, kinds in lifecycle_kinds.items()}
-          code, _ = run('startup', ['clang-cl.exe','/nologo','/c',str(out/'canonical-main-msvc.c'),'/Fo'+str(out/'startup.obj')])
-          assert code == 0
-          config = subprocess.check_output(['git','show','82bba68602c2cff2b87f42b0f5ae8a54f1d14b8b:src/compiler_rust/common/src/platform/link_config.rs'],text=True)
-          block = config.split('fn windows() -> Self {',1)[1].split('library_search_paths:',1)[0]
-          libs = [name+'.lib' for name in re.findall(r'"([A-Za-z0-9_]+)"', block)]
-          exe = out/'simple-stage2.exe'
-          code, log = run('strict-link', ['clang-cl.exe','/nologo',str(out/'startup.obj'),str(archive),str(runtime),'/Fe'+str(exe),'/link','/SUBSYSTEM:CONSOLE','/OPT:REF,ICF']+libs)
-          unresolved = sorted(set(re.findall(rb'unresolved external symbol ([^\r\n]+)',log)))
-          receipt = {'admission':'UNADMITTED_DIAGNOSTIC','object_count':1239,'module_count':1238,'object_tree_sha256':tree,'runtime_sha256':hashlib.sha256(runtime.read_bytes()).hexdigest(),'archive_size':archive.stat().st_size,'archive_sha256':hashlib.sha256(archive.read_bytes()).hexdigest(),'link_exit':code,'lifecycle_strong_definitions':lifecycle,'lifecycle_matched_nm_kinds':lifecycle_kinds,'unresolved_unique':[s.decode(errors='replace') for s in unresolved],'runtime_execution_permitted':code == 0 and all(lifecycle.values())}
-          (out/'link-receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
-          if code == 0 and all(lifecycle.values()):
-              run('compiler-version',[str(exe),'--version'],30)
-          print(json.dumps({'link_exit':code,'unresolved_unique_count':len(unresolved),'lifecycle':lifecycle,'execution_permitted':receipt['runtime_execution_permitted']}))
+          out=Path(os.environ['LINK_OUT']);out.mkdir(parents=True,exist_ok=True)
+          provider='#include <stdint.h>\n#include <stdio.h>\n#if !defined(_WIN32)\n#error This projection is Windows-only\n#endif\n#include <windows.h>\n#ifdef SPL_THREAD_PTHREAD\n#error This projection requires the canonical Windows thread branch\n#endif\n\nint64_t spl_thread_current_id(void) {\n#ifdef SPL_THREAD_PTHREAD\n    return (int64_t)pthread_self();\n#else\n    return (int64_t)GetCurrentThreadId();\n#endif\n}\n\nvoid spl_thread_sleep(int64_t millis) {\n    if (millis <= 0) {\n        return;\n    }\n\n#ifdef SPL_THREAD_PTHREAD\n    struct timespec ts;\n    ts.tv_sec = millis / 1000;\n    ts.tv_nsec = (millis % 1000) * 1000000;\n    nanosleep(&ts, NULL);\n#else\n    Sleep((DWORD)millis);\n#endif\n}\n\nint32_t rt_term_flush(void) {\n    return fflush(stdout) == 0 ? 0 : -1;\n}\n'
+          probe='#include <stdint.h>\n#include <stdio.h>\n#include <windows.h>\nint64_t spl_thread_current_id(void);\nvoid spl_thread_sleep(int64_t millis);\nint32_t rt_term_flush(void);\nint main(void) {\n    LARGE_INTEGER frequency, start, stop;\n    if (!QueryPerformanceFrequency(&frequency)) return 1;\n    if (spl_thread_current_id() != (int64_t)GetCurrentThreadId()) return 2;\n    QueryPerformanceCounter(&start);\n    spl_thread_sleep(-1); spl_thread_sleep(0);\n    QueryPerformanceCounter(&stop);\n    if ((double)(stop.QuadPart-start.QuadPart)/frequency.QuadPart > 1.0) return 3;\n    QueryPerformanceCounter(&start); spl_thread_sleep(30); QueryPerformanceCounter(&stop);\n    double elapsed = (double)(stop.QuadPart-start.QuadPart)/frequency.QuadPart;\n    if (elapsed < 0.010 || elapsed > 1.0) return 4;\n    static char buffer[4096];\n    if (setvbuf(stdout, buffer, _IOFBF, sizeof(buffer)) != 0) return 5;\n    if (fputs("Windows raw provider three contracts PASS\\n", stdout) < 0) return 6;\n    if (rt_term_flush() != 0) return 7;\n    /* Parent must observe flushed stdout while this process still waits. */\n    if (getchar() != \'\\n\') return 8;\n    return 0;\n}\n'
+          (out/'provider.c').write_text(provider,newline='');(out/'probe.c').write_text(probe,newline='')
+          expected={'spl_thread_current_id','spl_thread_sleep','rt_term_flush'}
+          runtime=Path(os.environ['RETAINED_RUNTIME']);assert hashlib.sha256(runtime.read_bytes()).hexdigest()=='19960cf36d947e7b9989f62f84898716a4038461033a526eee51c621674467b0'
+          def run(name,args):
+           r=subprocess.run(args,capture_output=True,timeout=60);(out/(name+'.stdout')).write_bytes(r.stdout);(out/(name+'.stderr')).write_bytes(r.stderr);assert r.returncode==0,(name,r.returncode);return r.stdout.decode(errors='replace')
+          run('compile-provider',['clang-cl.exe','/nologo','/c',str(out/'provider.c'),'/Fo'+str(out/'provider.obj')])
+          run('compile-probe',['clang-cl.exe','/nologo','/c',str(out/'probe.c'),'/Fo'+str(out/'probe.obj')])
+          nm=run('provider-defs',['llvm-nm.exe','--defined-only','--extern-only',str(out/'provider.obj')]);defined={l.split()[-1] for l in nm.splitlines() if len(l.split())>=3 and l.split()[-2]=='T'};assert defined==expected
+          rtdefs=run('runtime-defs',['llvm-nm.exe','--defined-only','--extern-only',str(runtime)]);existing={l.split()[-1] for l in rtdefs.splitlines() if len(l.split())>=3};assert not expected.intersection(existing)
+          run('provider-imports',['llvm-nm.exe','--undefined-only',str(out/'provider.obj')])
+          exe=out/'raw-provider-probe.exe';run('link',['clang-cl.exe','/nologo',str(out/'probe.obj'),str(out/'provider.obj'),str(runtime),'/Fe'+str(exe),'/link','/SUBSYSTEM:CONSOLE','kernel32.lib'])
+          proc=subprocess.Popen([str(exe)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE);q=queue.Queue();threading.Thread(target=lambda:q.put(proc.stdout.readline()),daemon=True).start()
+          try:
+           line=q.get(timeout=10);assert line==b'Windows raw provider three contracts PASS\r\n',line;assert proc.poll() is None,'flush must be observed before childexit'
+           proc.stdin.write(b'\n');proc.stdin.flush();remaining,stderr=proc.communicate(timeout=10);assert proc.returncode==0 and remaining==b'' and stderr==b'',(proc.returncode,remaining,stderr)
+          except BaseException:
+           proc.kill();proc.communicate();raise
+          receipt={'scope':'THREE_RAW_OS_CRT_ONLY; not full compiler/runtime admission','source_sha':'82bba68602c2cff2b87f42b0f5ae8a54f1d14b8b','provider_sha256':hashlib.sha256(provider.encode()).hexdigest(),'probe_sha256':hashlib.sha256(probe.encode()).hexdigest(),'runtime_sha256':hashlib.sha256(runtime.read_bytes()).hexdigest(),'strong_unique_providers':sorted(defined),'retained_overlap':[],'flush_observed_before_exit':True,'run_exit':0,'stdout':line.decode(),'exe_size':exe.stat().st_size,'exe_sha256':hashlib.sha256(exe.read_bytes()).hexdigest(),'tools':{name:{'path':shutil.which(name),'sha256':hashlib.sha256(Path(shutil.which(name)).read_bytes()).hexdigest()} for name in ['clang-cl.exe','llvm-nm.exe']},'SDK':os.environ.get('WindowsSDKVersion'),'VCTools':os.environ.get('VCToolsVersion')}
+          (out/'qualification.json').write_text(json.dumps(receipt,indent=2)+'\n');print(json.dumps({'run_exit':0,'exe_size':receipt['exe_size'],'providers':sorted(defined),'flush_observed_before_exit':True}))
           PYSTRICT
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-strict-link-UNADMITTED-${{ github.sha }}
-          path: ${{ runner.temp }}/windows-strict-link/
+          name: windows-raw-three-UNADMITTED-${{ github.sha }}
+          path: ${{ runner.temp }}/windows-raw-three/
           if-no-files-found: error
           retention-days: 7
