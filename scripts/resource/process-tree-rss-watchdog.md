@@ -307,3 +307,15 @@ when the inherited managed session authority is valid: current/live-root SID,
 same-owner regular no-symlink read-only admission, and pinned helper digest.
 The process-tree guard remains enforcing; malformed or missing authority retains
 ordinary monitor behavior. This applies only to bootstrap seed test dispatch.
+
+## Completed observation budget overruns in monitor mode
+
+A completed, validated sample exceeding its observation budget still fails with
+exit 89 in enforce mode. Monitor mode continues with a warning emitted once,
+`sample_budget_exceeded` counting overruns and `measurement_budget_complete=0`
+qualifying the measured peak as incomplete budget evidence. The counter includes
+cleanup samples. This does not relax missing/malformed observation failures,
+observer protocol deadlines, identity/session validation, explicit timeout or
+cancellation, or cleanup. No retries or additional sleeps are introduced.
+Regression: `test/01_unit/scripts/process_tree_rss_monitor_budget_test.shs`;
+defect: https://github.com/ormastes/simple/issues/3002.
