@@ -1,5 +1,7 @@
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use compiler.mir._MirLoweringExpr.lambda_abi.{lambda_abi_type_resolved}
+use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
 # MIR Lowering - Statement and Control Flow Lowering
 #
 # Statement and control flow lowering from HIR to MIR:
@@ -1773,6 +1775,7 @@ impl MirLowering:
                 b.emit_copy(local, result)
                 self.builder = b
                 self.unmark_runtime_value_local(local.id)
+                self.exists_collection_locals = marker_map_without(self.exists_collection_locals, local.id)
                 self.option_value_locals = marker_map_without(self.option_value_locals, local.id)
                 self.nil_locals = marker_map_without(self.nil_locals, local.id)
                 self.runtime_array_locals = marker_map_without(self.runtime_array_locals, local.id)
@@ -1821,6 +1824,10 @@ impl MirLowering:
                     self.mark_tagged_text_local(local.id)
                 else:
                     self.tagged_text_locals = marker_map_without(self.tagged_text_locals, local.id)
+                if self.exists_collection_locals.contains(assigned_value.id):
+                    self.exists_collection_locals[local.id] = true
+                else:
+                    self.exists_collection_locals = marker_map_without(self.exists_collection_locals, local.id)
                 if self.option_value_locals.contains(assigned_value.id):
                     self.option_value_locals[local.id] = true
                 else:
@@ -2966,6 +2973,47 @@ impl MirLowering:
         if all_typed and self.find_local_hir_type(dest.id) == nil:
             self.copy_local_hir_type_metadata(arm_locals[0].id, dest.id)
 
+    fn present_collection_binding(cond: HirExpr) -> (i64, LocalId):
+        """Recognize the existing desugared present test, using declared payload
+        provenance rather than the MIR Tuple shape of an Optional value."""
+        val missing = (-1, LocalId(id: -1))
+        match cond.kind:
+            case HirExprKind.Binary(HirBinOp.NotEq, left, right):
+                match right.kind:
+                    case HirExprKind.NilLit: ()
+                    case _: return missing
+                match left.kind:
+                    case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                        val raw = self.find_local(symbol.id)
+                        if raw.id < 0 or not self.exists_collection_locals.contains(raw.id): return missing
+                        if val declared = self.find_local_hir_type(raw.id):
+                            match declared.kind:
+                                case HirTypeKind.Optional(payload):
+                                    match payload.kind:
+                                        case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                                            return (symbol.id, raw)
+                                        case _: ()
+                                case _: ()
+                    case _: ()
+            case _: ()
+        missing
+
+    me decode_present_collection(raw: LocalId) -> LocalId:
+        # The present edge already proved this is not nil. Extract into a NEW
+        # local before marking it: neither Optional's original MIR/HIR type
+        # nor its mutable storage may acquire payload collection metadata.
+        if val declared = self.find_local_hir_type(raw.id):
+            match declared.kind:
+                case HirTypeKind.Optional(payload):
+                    match payload.kind:
+                        case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                            val extracted = self.option_payload_or_self(raw)
+                            return self.decode_declared_enum_payload_slot(extracted, payload)
+                        case _: ()
+                case _: ()
+        self.error_fatal("present collection binding lost declared optional payload", nil)
+        raw
+
     me lower_if(cond: HirExpr, then_: HirBlock, else_: HirBlock?, expected_type: HirType?) -> LocalId:
         """Lower if expression."""
         # The If dispatcher decodes and validates its mandatory payloads, but
@@ -2979,6 +3027,7 @@ impl MirLowering:
             self.builder = b_bad_cond
             return bad_cond
         val cond_local = self.lower_mcdc_decision(cond)
+        val collection_binding = self.present_collection_binding(cond)
 
         # `if val v = option.?:` is parser-desugared to a raw binding followed
         # by `v != nil`. Float/bool payloads must stay in that raw i64 binding
@@ -3043,7 +3092,12 @@ impl MirLowering:
         if has_if_val_scalar_binding:
             val decoded_if_val = self.enum_payload_value(if_val_raw_local, if_val_payload_type)
             self.bind_local(if_val_symbol_id, decoded_if_val)
+        if collection_binding.0 >= 0:
+            val decoded_collection = self.decode_present_collection(collection_binding.1)
+            self.bind_local(collection_binding.0, decoded_collection)
         val then_result = self.lower_block_expected(then_, expected_type)
+        if collection_binding.0 >= 0:
+            self.bind_local(collection_binding.0, collection_binding.1)
         if has_if_val_scalar_binding:
             self.bind_local(if_val_symbol_id, if_val_raw_local)
         var b3 = self.builder
@@ -3161,6 +3215,7 @@ impl MirLowering:
             # the previous arm.  Lowering here preserves source-order and
             # short-circuit behavior for condition side effects.
             val cond_local = self.lower_mcdc_decision(arm.cond)
+            val collection_binding = self.present_collection_binding(arm.cond)
 
             # Preserve `if val`'s raw optional-scalar binding contract for each
             # arm.  The condition compares the encoded value with nil; only
@@ -3210,7 +3265,12 @@ impl MirLowering:
             if has_if_val_scalar_binding:
                 val decoded_if_val = self.enum_payload_value(if_val_raw_local, if_val_payload_type)
                 self.bind_local(if_val_symbol_id, decoded_if_val)
+            if collection_binding.0 >= 0:
+                val decoded_collection = self.decode_present_collection(collection_binding.1)
+                self.bind_local(collection_binding.0, decoded_collection)
             val arm_result = self.lower_block_expected(arm.then_, expected_type)
+            if collection_binding.0 >= 0:
+                self.bind_local(collection_binding.0, collection_binding.1)
             if has_if_val_scalar_binding:
                 self.bind_local(if_val_symbol_id, if_val_raw_local)
             var b_then = self.builder
