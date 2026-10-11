@@ -148,14 +148,50 @@ impl Lowerer {
         Self::declared_type_struct_name(declared).map(|(name, _)| name)
     }
 
-    /// Like `static_call_return_type_name`, but also reports whether the
-    /// declared return type WRAPPED the struct (`-> T?`, `-> mut T`, `-> *T`).
-    ///
-    /// The distinction is load-bearing and the caller must honour it: for an
-    /// unwrapped `-> T` the binding's TypeId may be upgraded to T outright, but
-    /// for `-> T?` the VALUE is an optional, so typing the local as bare `T`
-    /// makes every field read address the payload's slots through the wrapper
-    /// and return garbage. A wrapped return therefore contributes the NAME only.
+    /// Preserve only an exact declared trait identity for a local receiver.
+    /// This does not change the runtime value or DI/security type-name hints.
+    pub(super) fn declared_trait_dispatch(&self, declared: &ast::Type) -> Option<HirTraitDispatch> {
+        let ast::Type::Simple(name) = declared else { return None; };
+        self.trait_declaration_for_current_owner(name)
+    }
+
+    pub(super) fn trait_declaration_for_current_owner(&self, authored_name: &str) -> Option<HirTraitDispatch> {
+        self.trait_declaration_in_file(authored_name, self.current_file.as_deref())
+    }
+
+    pub(super) fn trait_declaration_in_file(&self, authored_name: &str, file: Option<&std::path::Path>) -> Option<HirTraitDispatch> {
+        let owner = file.map(crate::interpreter::normalize_path_key)
+            .unwrap_or_else(|| std::path::PathBuf::from("<local-module>"));
+        self.trait_declared_owners.get(&owner)?.get(authored_name).cloned()
+    }
+
+    fn declared_local_trait_owner(
+        &self, annotation: Option<&ast::Type>, init: Option<&Expr>, ctx: &FunctionContext,
+    ) -> Option<HirTraitDispatch> {
+        if let Some(annotation) = annotation {
+            return self.declared_trait_dispatch(annotation);
+        }
+        let key = match init? {
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::Identifier(name) if ctx.lookup(name).is_none() => name.clone(),
+                Expr::Path(parts) => parts.join("."),
+                _ => return None,
+            },
+            Expr::MethodCall { receiver, method, .. } => match receiver.as_ref() {
+                Expr::Identifier(name) if ctx.lookup(name).is_none() => format!("{}.{}", name, method),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        // A local declaration (including a None tombstone) wins over an alias.
+        // Unknown global-return strings lack owner identity and are not trusted.
+        self.declared_function_returns.get(&key).or_else(|| {
+            self.resolve_import_alias(&key).and_then(|resolved| self.declared_function_returns.get(resolved))
+        }).cloned().flatten()
+    }
+
+    /// Like `static_call_return_type_name`, also reports return wrappers.
+    /// Wrapped returns contribute a name only, never a bare payload TypeId.
     fn static_call_return_type_name_parts(&self, init: &Expr) -> Option<(String, bool)> {
         let (type_name, method) = match init {
             Expr::Call { callee, .. } => match callee.as_ref() {
@@ -538,7 +574,11 @@ impl Lowerer {
                         }
                     }
                 }
+                let trait_dispatch_owner = self.declared_local_trait_owner(
+                    let_stmt.ty.as_ref().or(pattern_type), let_stmt.value.as_ref(), ctx,
+                );
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
+                ctx.locals[local_index].trait_dispatch_owner = trait_dispatch_owner;
                 if let Some(result_payload_types) = result_projection_type {
                     ctx.result_projection_types.insert(local_index, result_payload_types);
                 }
