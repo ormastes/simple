@@ -1,0 +1,90 @@
+#!/bin/sh
+# Bounded shell contracts only. No compiler, watchdog workload or memory load.
+# @req BOOTSTRAP-COMPILER-HEADROOM-001
+set -eu
+# Keep clean-env child probes on the same POSIX runtime (MSYS and Git Bash
+# have different /tmp and facade canonical paths on a Windows developer host).
+PATH=/usr/bin:/bin
+export PATH
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/compiler-ceiling-transport.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+checks=0
+accept() { "$@" >"$scratch/last.out" 2>"$scratch/last.err" || { cat "$scratch/last.err" >&2; exit 1; }; checks=$((checks + 1)); }
+reject() { if ( "$@" ) >"$scratch/last.out" 2>"$scratch/last.err"; then echo "unexpected acceptance: $*" >&2; exit 1; fi; checks=$((checks + 1)); }
+equal() { [ "$1" = "$2" ] || { echo "mismatch: $1 != $2" >&2; exit 1; }; checks=$((checks + 1)); }
+
+accept bootstrap_stage3_compiler_ceiling_valid 12582912
+for invalid in '' 0 01 -1 1x 1000000000000000; do reject bootstrap_stage3_compiler_ceiling_valid "$invalid"; done
+equal "$(bootstrap_stage3_compiler_ceiling_environment)" ''
+reject sh -c '. "$1"; SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=; bootstrap_stage3_compiler_ceiling_environment' sh "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+
+: >"$scratch/absent"
+row=SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=12582912
+printf 'explicit-env:%s:%s\n' "${#row}" "$row" >"$scratch/valid"
+accept bootstrap_stage3_transcript_compiler_ceiling "$scratch/valid"
+equal "$(cat "$scratch/last.out")" 12582912
+cat "$scratch/valid" "$scratch/valid" >"$scratch/duplicate"
+reject bootstrap_stage3_transcript_compiler_ceiling "$scratch/duplicate"
+sed 's/explicit-env:[0-9]*/explicit-env:1/' "$scratch/valid" >"$scratch/length"
+reject bootstrap_stage3_transcript_compiler_ceiling "$scratch/length"
+tr '[:upper:]' '[:lower:]' <"$scratch/valid" >"$scratch/case"
+reject bootstrap_stage3_transcript_compiler_ceiling "$scratch/case"
+cat "$scratch/valid" "$scratch/case" >"$scratch/mixed"
+reject bootstrap_stage3_transcript_compiler_ceiling "$scratch/mixed"
+# Historical parent reconstruction never imports a new invocation's budget.
+historical_hash=$(bootstrap_stage3_args_sha256 native-build --threads 8)
+SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=12582912
+export SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+recorded=$(bootstrap_stage3_transcript_compiler_ceiling "$scratch/absent")
+equal "$recorded" ''
+equal "$(bootstrap_stage3_args_sha256 ${recorded:+"SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$recorded"} native-build --threads 8)" "$historical_hash"
+recorded=$(bootstrap_stage3_transcript_compiler_ceiling "$scratch/valid")
+new_hash=$(bootstrap_stage3_args_sha256 "$row" native-build --threads 8)
+[ "$new_hash" != "$historical_hash" ]; checks=$((checks + 1))
+equal "$(bootstrap_stage3_args_sha256 ${recorded:+"SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$recorded"} native-build --threads 8)" "$new_hash"
+names=$(bootstrap_stage3_stage2_canonical_env_names x86_64-pc-windows-msvc 1 12582912)
+case "$names" in *'SIMPLE_SCV_INVENTORY_COLD_INIT SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB') checks=$((checks + 1));; *) exit 1;; esac
+
+# Execute the ACTUAL run_transcribed pre-admission prefix, stopping before
+# policy probing/process creation. This tests duplicate/conflict/missing rows.
+awk '/^bootstrap_stage3_run_transcribed\(\)/ { copying=1 }
+     copying && /# The same finite cap/ { print "    return 0\n}"; exit }
+     copying { print }' "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs" >"$scratch/transcribed-prefix.sh"
+. "$scratch/transcribed-prefix.sh"
+accept bootstrap_stage3_run_transcribed t c l h m p "$row" -- child
+reject bootstrap_stage3_run_transcribed t c l h m p -- child
+reject bootstrap_stage3_run_transcribed t c l h m p "$row" "$row" -- child
+reject bootstrap_stage3_run_transcribed t c l h m p SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=12000000 -- child
+reject bootstrap_stage3_run_transcribed t c l h m p simple_bootstrap_compiler_rss_ceiling_kib=12582912 -- child
+unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+accept bootstrap_stage3_run_transcribed t c l h m p -- child
+reject bootstrap_stage3_run_transcribed t c l h m p "$row" -- child
+
+# Actual worker handoff prefix stops before ABI validation or process work.
+# env -i reproduces systemd's loss of the invoking shell's exports.
+awk '/^# The caller fully verified/ { exit } { print }' \
+    "$root/scripts/bootstrap/lib/stage3-native-build-worker.sh" >"$scratch/worker-prefix.sh"
+printf '\nprintf "ceiling=%%s cap=%%s\\n" "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB-unset}" "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB-unset}"\n' >>"$scratch/worker-prefix.sh"
+set -- x "$root"
+while [ "$#" -lt 28 ]; do set -- "$@" x; done
+accept env -i PATH="$PATH" sh "$scratch/worker-prefix.sh" "$@" "$row" 10000000
+equal "$(cat "$scratch/last.out")" 'ceiling=12582912 cap=10000000'
+accept env -i PATH="$PATH" sh "$scratch/worker-prefix.sh" "$@"
+equal "$(cat "$scratch/last.out")" 'ceiling=unset cap=unset'
+reject env -i PATH="$PATH" sh "$scratch/worker-prefix.sh" "$@" "$row"
+reject env -i PATH="$PATH" sh "$scratch/worker-prefix.sh" "$@" "$row" ''
+reject env -i PATH="$PATH" sh "$scratch/worker-prefix.sh" "$@" "$row" 13000000
+reject env -i PATH="$PATH" SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=9000000 sh "$scratch/worker-prefix.sh" "$@" "$row" 10000000
+reject env -i PATH="$PATH" SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=12000000 sh "$scratch/worker-prefix.sh" "$@" "$row" 10000000
+reject env -i PATH="$PATH" SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=12582912 sh "$scratch/worker-prefix.sh" "$@"
+
+# The launcher must reject a forbidden caller mode before systemd can lose it.
+awk '/^stage3_compiler_cap=$/ { copying=1 }
+     copying && /^stage3_args=/ { exit }
+     copying { print }' "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" >"$scratch/launcher-prefix.sh"
+reject sh -c 'root=$1; stage3_threads=8; stage3_compiler_ceiling_env=$2; bootstrap_stage3_error() { echo "$*" >&2; exit 1; }; SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=12582912; SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=10000000; SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor; . "$3"' sh "$root" "$row" "$scratch/launcher-prefix.sh"
+printf 'PASS: %s compiler ceiling transport contracts; no product execution\n' "$checks"
