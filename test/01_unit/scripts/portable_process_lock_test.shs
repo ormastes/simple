@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-case "${1:-}" in ''|--from-alias) ;; *) exit 64 ;; esac
+case "${1:-}" in ''|--from-alias|--from-pid-reuse) ;; *) exit 64 ;; esac
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 PORTABLE_LOCK_ATOMIC_HELPER_PATH="$root/scripts/check/lib/portable-hardlink-lock.pl"
@@ -65,7 +65,7 @@ trap 'portable_lock_release_all >/dev/null 2>&1 || :; rm -rf "$tmp"' \
   0 HUP INT TERM
 
 # The bootstrap readiness variable is evidence, not an authority bypass.
-if [ "${1:-}" != --from-alias ]; then
+if [ -z "${1:-}" ]; then
 if SIMPLE_BOOTSTRAP_SESSION_READY=1 \
   sh "$root/scripts/bootstrap/bootstrap-from-scratch.sh" --help \
   >"$tmp/session-bypass.out" 2>&1; then
@@ -160,6 +160,7 @@ portable_lock_release_all || fail "aggregate multi-lock release failed"
 
 # Canonical aliases must address one lock lane, and traversal is rejected.
 fi
+if [ "${1:-}" != --from-pid-reuse ]; then
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     # Git Bash's default ln -s copies directories. Use a genuine junction so
@@ -257,6 +258,7 @@ portable_lock_release "$contention_handle" || fail "contention release failed"
 )
 
 # Simulate PID reuse: the PID is live, but its claim start identity is wrong.
+fi
 ROOT_PATH=$root LOCK_ROOT="$tmp/real" READY="$tmp/pid-reuse.ready" \
   HANDLE_FILE="$tmp/pid-reuse.handle" \
   PORTABLE_LOCK_ATOMIC_HELPER_PATH=$PORTABLE_LOCK_ATOMIC_HELPER_PATH \
@@ -523,8 +525,8 @@ foreground_successor=$PORTABLE_LOCK_HANDLE
 portable_lock_release "$foreground_successor" ||
   fail "foreground successor release failed"
 
-if [ "${1:-}" = --from-alias ]; then
-  printf 'portable process lock behavioral tests passed (alias through cleanup; earlier rows not rerun)\n'
+if [ -n "${1:-}" ]; then
+  printf 'portable process lock behavioral tests passed (%s through cleanup; earlier rows not rerun)\n' "$1"
 else
   printf 'portable process lock behavioral tests passed\n'
 fi
