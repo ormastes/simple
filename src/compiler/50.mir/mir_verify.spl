@@ -121,6 +121,19 @@ fn mir_verify_type_class(t: MirType) -> i64:
         case MirTypeKind.Never: MVT_NEVER
         case _: MVT_AGG
 
+fn mir_verify_projection_target(t: MirType) -> MirType:
+    """One level of indirection: project a field access through a pointer/ref."""
+    match t.kind:
+        case MirTypeKind.Ptr(pointee, _): pointee
+        case MirTypeKind.Ref(referent, _): referent
+        case _: t
+
+fn mir_verify_type_def_of(module: MirModule, symbol: SymbolId) -> MirTypeDef?:
+    module.types[symbol]
+
+fn mir_verify_function_named(fn_by_name: Dict<text, MirFunction>, name: text) -> MirFunction?:
+    fn_by_name[name]
+
 fn mir_verify_type_bits(t: MirType) -> i64:
     """Bit width of a scalar; 0 when not a fixed-width scalar."""
     match t.kind:
@@ -428,28 +441,25 @@ impl MirFnVerifier:
         val base_opt = self.operand_type(base)
         if base_opt == nil:
             return
-        var bt: MirType = base_opt!
-        # One level of indirection is a projection through a pointer/ref.
-        match bt.kind:
-            case MirTypeKind.Ptr(pointee, _): bt = pointee
-            case MirTypeKind.Ref(referent, _): bt = referent
-            case _: ()
+        val base_t = base_opt!
+        val bt = mir_verify_projection_target(base_t)
         val op_name = if write: "SetField" else: "GetField"
         match bt.kind:
             case MirTypeKind.Tuple(elements):
                 if field < 0 or field >= elements.len():
                     self.report("MIRV-006", "{op_name} index {field} outside tuple layout of {elements.len()} element(s)")
             case MirTypeKind.Struct(symbol):
-                val def_opt = module.types[symbol]
+                val def_opt = mir_verify_type_def_of(module, symbol)
                 if def_opt == nil:
                     self.report("MIRV-006b", "{op_name} index {field} on struct#{symbol.id} whose layout owner is not resolved in this module")
                     return
-                match def_opt!.kind:
+                val def = def_opt!
+                match def.kind:
                     case MirTypeDefKind.Struct(fields):
                         if field < 0 or field >= fields.len():
-                            self.report("MIRV-006", "{op_name} index {field} outside struct '{def_opt!.name}' layout of {fields.len()} field(s)")
+                            self.report("MIRV-006", "{op_name} index {field} outside struct '{def.name}' layout of {fields.len()} field(s)")
                     case _:
-                        self.report("MIRV-006", "{op_name} on '{def_opt!.name}', which is not a struct layout")
+                        self.report("MIRV-006", "{op_name} on '{def.name}', which is not a struct layout")
             case _:
                 ()
 
@@ -462,9 +472,10 @@ impl MirFnVerifier:
         if cached != -2:
             return cached
         var slot = -1
-        val def_opt = module.types[symbol]
+        val def_opt = mir_verify_type_def_of(module, symbol)
         if def_opt != nil:
-            match def_opt!.kind:
+            val def = def_opt!
+            match def.kind:
                 case MirTypeDefKind.Enum(variants):
                     var in_range = true
                     for v in variants:
@@ -474,7 +485,7 @@ impl MirFnVerifier:
                         slot = self.enum_names.len()
                         for v in variants:
                             self.variant_keys[slot * MV_VARIANT_KEY_SPAN + v.discriminant] = true
-                        self.enum_names = self.enum_names.push(def_opt!.name)
+                        self.enum_names = self.enum_names.push(def.name)
                         self.enum_counts = self.enum_counts.push(variants.len())
                 case _: ()
         self.enum_slot[symbol.id] = slot
@@ -500,20 +511,21 @@ impl MirFnVerifier:
             return
         # Uncached path: unresolved owner, not an enum, or discriminants
         # outside the key span (one linear scan).
-        val def_opt = module.types[symbol]
+        val def_opt = mir_verify_type_def_of(module, symbol)
         if def_opt == nil:
             self.report("MIRV-006b", "{what} references enum#{symbol.id} whose definition is not resolved in this module")
             return
-        match def_opt!.kind:
+        val def = def_opt!
+        match def.kind:
             case MirTypeDefKind.Enum(variants):
                 var found = false
                 for v in variants:
                     if v.discriminant == variant:
                         found = true
                 if not found:
-                    self.report("MIRV-005d", "{what} references variant {variant}, which is not a variant of enum '{def_opt!.name}' ({variants.len()} variant(s))")
+                    self.report("MIRV-005d", "{what} references variant {variant}, which is not a variant of enum '{def.name}' ({variants.len()} variant(s))")
             case _:
-                self.report("MIRV-005d", "{what} references '{def_opt!.name}', which is not an enum")
+                self.report("MIRV-005d", "{what} references '{def.name}', which is not an enum")
 
     me check_call(dest: LocalId?, func: MirOperand, args: [MirOperand], module: MirModule, fn_by_name: Dict<text, MirFunction>):
         self.def_local_opt(dest)
@@ -527,7 +539,7 @@ impl MirFnVerifier:
                     case _: ()
                 if callee_name == "":
                     return
-                val callee_opt = fn_by_name[callee_name]
+                val callee_opt = mir_verify_function_named(fn_by_name, callee_name)
                 if callee_opt == nil:
                     # Extern / cross-module callee: identity is resolved at
                     # link time; nothing to compare against here.
