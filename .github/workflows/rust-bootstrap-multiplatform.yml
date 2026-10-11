@@ -177,6 +177,10 @@ on:
       - '.github/workflows/rust-bootstrap-multiplatform.yml'
   workflow_dispatch:
     inputs:
+      diagnose_windows_collector:
+        description: Diagnostic-only native Windows collector launch; no seed build
+        type: boolean
+        default: false
       native_lane:
         description: Native bootstrap lane (all preserves the full platform matrix)
         type: choice
@@ -211,7 +215,7 @@ jobs:
   # jobs so x86_64, cross, and VM builds cannot land on those runners.
   # Native builds — compile and test on each platform
   native:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    if: (!inputs.diagnose_windows_collector) && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     strategy:
       fail-fast: false
       matrix:
@@ -763,7 +767,7 @@ jobs:
           exit 1
 
   native-architectures:
-    if: (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == '')
+    if: (!inputs.diagnose_windows_collector) && ((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == ''))
     name: Pure Simple — ARM32/RV32 LLVM objects + x86_64/AArch64/RISC-V64 dual backend
     runs-on: ubuntu-24.04
     needs: native
@@ -825,7 +829,7 @@ jobs:
 
   # Cross-compilation builds from Linux x86_64
   cross:
-    if: (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == '')
+    if: (!inputs.diagnose_windows_collector) && ((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == ''))
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -875,7 +879,7 @@ jobs:
 
   # FreeBSD build (VM-based)
   freebsd:
-    if: (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == '')
+    if: (!inputs.diagnose_windows_collector) && ((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == ''))
     runs-on: ubuntu-24.04
     name: Native — FreeBSD x86_64
     steps:
@@ -919,7 +923,7 @@ jobs:
   # from the Rust seed build above: it exercises the canonical receipt-free
   # Stage 2 trust root and the tracked Stage 3 resume interface in the guest.
   freebsd-selfhost:
-    if: (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == '')
+    if: (!inputs.diagnose_windows_collector) && ((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == ''))
     runs-on: ubuntu-24.04
     name: Self-host — FreeBSD Stage 3
     timeout-minutes: 180
@@ -957,3 +961,69 @@ jobs:
           path: build/bootstrap-freebsd-ci
           if-no-files-found: warn
           retention-days: 14
+
+  windows-collector-diagnostic:
+    if: github.event_name == 'workflow_dispatch' && inputs.diagnose_windows_collector
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Validate diagnostic selector
+        shell: bash
+        run: test '${{ inputs.native_lane }}' = windows-cranelift
+      - name: Select placeholder checkout
+        shell: bash
+        run: git config --global core.symlinks false
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Invoke real Windows bounded supervisor without rebuilding
+        shell: bash
+        run: |
+          set -eu
+          out="$RUNNER_TEMP/windows-collector-diagnostic"
+          mkdir -p "$out"
+          root=$(python -c 'import os; print(os.getcwd(), end="")')
+          case "$root" in *\\*) ;; *) echo "diagnostic requires native Windows backslash root" >&2; exit 1 ;; esac
+          SYSTEMROOT=${SYSTEMROOT:-${SystemRoot:-}}
+          COMSPEC=${COMSPEC:-${ComSpec:-}}
+          test -n "$SYSTEMROOT" && test -n "$COMSPEC"
+          helper="$root/scripts/bootstrap/run-process-group-bounded-log-windows.py"
+          supplied=$(sha256sum <"$helper" | awk '{print $1}')
+          {
+            printf 'qualification=DIAGNOSTIC_UNADMITTED\nsource_sha=%s\nroot=%s\nhelper_path=%s\nhelper_sha256=%s\n' "$(git rev-parse HEAD)" "$root" "$helper" "$supplied"
+            printf 'wrapper_sha256=%s\n' "$(sha256sum <scripts/bootstrap/bootstrap-logged-process.shs | awk '{print $1}')"
+          } >"$out/source.env"
+          source scripts/bootstrap/bootstrap-logged-process.shs
+          export BOOTSTRAP_LOGGED_PROCESS_TIMEOUT_SECONDS=30
+          export BOOTSTRAP_LOGGED_PROCESS_MAX_BYTES=1048576
+          export MSYS2_ARG_CONV_EXCL='/d;/c'
+          status=0
+          bootstrap_logged_windows_cargo "$root" "$out/launch.log" env -i "SYSTEMROOT=$SYSTEMROOT" "PATH=$PATH" "COMSPEC=$COMSPEC" "$COMSPEC" /d /c "echo WINDOWS_COLLECTOR_NATIVE_MARKER & exit /b 0" || status=$?
+          printf 'wrapper_status=%s\n' "$status" >>"$out/source.env"
+          test "$status" = 0
+          grep -F WINDOWS_COLLECTOR_NATIVE_MARKER "$out/launch.log"
+          receipt=$(sed -n 's/^process_receipt=//p' "$out/launch.log")
+          test -f "$receipt"
+          grep -Fx schema=simple-bounded-process-log-v1 "$receipt"
+          grep -Fx raw_status=0 "$receipt"
+          grep -Fx reason=child-exit "$receipt"
+          grep -Fx root_exit_policy=terminate-job "$receipt"
+          grep -Fx command_environment=clean-prefix "$receipt"
+          grep -Fx native_exit_status=0 "$receipt"
+          grep -Fx process_group=windows-job "$receipt"
+          grep -Fx status=complete "$receipt"
+          grep -Fx "helper_sha256=$supplied" "$receipt"
+          expected_log=$(sha256sum <"${receipt%/*}/command.log" | awk '{print $1}')
+          grep -Fx "log_sha256=$expected_log" "$receipt"
+          negative=0
+          python "$helper" --command-environment=clean-prefix --root-exit-policy=terminate-job --helper-sha256=$(printf '%064d' 0) --output-parent="$out" --log-leaf=wrong.log --receipt-leaf=wrong.env --max-bytes=1048576 --timeout-seconds=30 --term-grace-seconds=0 -- env -i "SYSTEMROOT=$SYSTEMROOT" "PATH=$PATH" "COMSPEC=$COMSPEC" "$COMSPEC" /d /c "exit /b 0" >"$out/wrong-hash.stdout" 2>"$out/wrong-hash.stderr" || negative=$?
+          printf 'wrong_hash_status=%s\n' "$negative" >>"$out/source.env"
+          test "$negative" = 126
+          grep -F 'collector helper hash mismatch' "$out/wrong-hash.stderr"
+          test ! -f "$out/wrong.env"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-collector-diagnostic-UNADMITTED-${{ github.sha }}
+          path: ${{ runner.temp }}/windows-collector-diagnostic/
+          if-no-files-found: error
