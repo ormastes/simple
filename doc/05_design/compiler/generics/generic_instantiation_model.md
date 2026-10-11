@@ -242,3 +242,35 @@ in this harness) — not investigated further.
 
 Cache: the flat-pool label is `spl-flatpool-v6`. Development builds of this lane wrote the
 instance-registry layout under the v4 and the v5 label; purge dev caches from that lineage.
+
+## 10. Reduced Lean substitution proof boundary (2026-10-11)
+
+The separate `src/verification/type_inference_compile` Lake project now includes
+the manual `GenericsConstraints` library in its default build. Previously that
+file was outside the build roots and duplicated the generated model's
+`apply_single_subst_var` declaration, so building `Generics` alone did not check
+the manual constraints.
+
+The manual file states closed-type substitution invariance, substitution
+idempotence when every replacement is closed, preservation of a unary nominal
+constructor, and separation of distinct nominal constructor names. A concrete
+counterexample rejects unconditional idempotence when replacement types still
+contain variables. These statements quantify over the reduced `Generics.Ty`
+model; they do not prove the `MType` model above, the parser, HIR owner resolution,
+MIR, code generation, or any bootstrap binary. `Ty` has no unknown-type sentinel
+and supports only zero-, one-, and two-argument nominal constructors. A canonical
+module-qualified owner name is an input requirement, not something the proof
+establishes. H-ANNOT, H-NAMED and H-RET32 still need implementation evidence.
+
+Verification entry point: `lake build` in that project using its pinned
+`leanprover/lean4:v4.30.0` toolchain, followed by the repository proof-integrity
+gate. Proof outputs report kernel axiom dependencies. No model result grants
+native, cross-target, release or whole-compiler verification authority.
+
+Executed on Windows on 2026-10-11: the pinned Lean 4.30.0 default build
+completed all 11 jobs, including `GenericsConstraints`. The repository guard's
+comment-stripping trust scan examined all seven project source files and found
+zero bypasses. An independent project copy with `example : False := by decide`
+appended to the manual file failed the default build at `GenericsConstraints`.
+The empty-substitution, closed-type and idempotence proofs use Lean's `propext`;
+the distinct-owner proof reports no axioms. This is reduced-model evidence only.
