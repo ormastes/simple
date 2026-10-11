@@ -38,6 +38,11 @@ Historical Phase 2 probes do not qualify the Phase 3 candidate.
   implementation work. All 40 acceptance criteria remain unexecuted.
 - Generated-manual completeness and NFR measurements have no accepted
   execution evidence. No verification PASS is claimed.
+- The optional native AST inventory provider and compiler SSpec span repair
+  are authored with production-parser fixtures. They have not compiled or run.
+  The provider requires exclusive ownership of the destructive frontend arena;
+  it is not an interpreter or concurrent parsing API. Required compiler/lib,
+  MCP/LSP checks, runtime smoke and MCP native smoke remain unexecuted.
 
 The initial missing process/hash source finding was a sparse-checkout error:
 the exact release Git inventory contains those APIs. It is not a remaining
