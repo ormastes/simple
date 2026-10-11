@@ -1557,6 +1557,7 @@ int main(int argc, char** argv) {
             Some(build_bootstrap_mutex_runtime_capsule_archive(
                 &core,
                 &temp_dir.join("bootstrap_mutex_runtime_capsule"),
+                Some(&selected_runtime.as_ref().expect("selected native-all authority").0),
             )?)
         } else {
             None
@@ -2192,6 +2193,15 @@ int main(int argc, char** argv) {
                                 // private there, and SOSIX path checks must
                                 // use the Rust `[u8]` array representation.
                                 let owned = Self::read_defined_symbol_set(runtime_lib)?;
+                                // Force the actual native-all member before weak
+                                // fallback definitions arrive in the supplement.
+                                // Without these roots, weak copies can satisfy
+                                // references and prevent authoritative extraction.
+                                for symbol in super::tools::bootstrap_mutex_runtime_requested_symbols() {
+                                    if owned.contains(&symbol) {
+                                        roots.push(symbol);
+                                    }
+                                }
                                 for symbol in [
                                     "rt_fd_stat_snapshot_v1",
                                     "rt_array_bytes_validate",
