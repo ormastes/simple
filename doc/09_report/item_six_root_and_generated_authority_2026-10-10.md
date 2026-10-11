@@ -239,3 +239,26 @@ source changes therefore require a qualified successor producer first.
 
 STATUS: IN PROGRESS. Neither a Phase-3 PASS nor release admission is claimed.
 The original generated-execution and runtime acceptance gaps remain open.
+
+### Phase-3-target review: dependency route admission
+
+Canonical parent-only validation passed using admitted compiler SHA-256
+`1d18beed32d7156d9dc0ed2025ed6da77af289778f97632b8f57e07e5a7137b8`.
+Working/staged environment and numbered-artifact guards passed; the executable
+spec count under `doc/06_spec` was zero. These are not runtime test results.
+
+A smaller-model source review found that scheduler readiness and worker
+dependency loading could consume legacy routes without the existing archive
+reuse gate. Primary review confirmed the bypass and stopped the owned successor
+coordinator before compilation. The fix adds one canonical operational
+admission function, used by file-backed route reads and the worker payload
+consumer; legacy decoding remains available for inspection. Regression
+assertions cover V4 admission, malformed input, legacy rejection, and actual
+current/legacy route file reads. Follow-up source review confirmed reachability
+before dependency SMF consumption. These assertions have not yet executed.
+
+The cancelled attempt and verification plan are retained outside sparse source
+paths at `C:/dev/simple-bootstrap-storage/item6-release-phase3-20261011/`.
+PR 3072 remains a draft targeting `release_phase3`; no Phase-3 PASS or merge is
+claimed. The corrected source requires a new frozen candidate and runtime
+qualification, preserving the original attempt's evidence.
