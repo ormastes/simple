@@ -336,6 +336,87 @@ can support the initial path, with source bindings validated independently.
 It does not replace the required automatic semantic extraction in the final
 feature. Unsupported dynamic or parameterized discovery must stay explicit.
 
+### 2026-10-11 static SSpec extraction interface review
+
+The production compiler parser and AST are present in the tracked tree under
+`src/compiler/10.frontend/core`. `parser.spl` parses source into the arena AST
+owned by `ast_expr.spl`, `ast_stmt.spl` and `_Ast/decl_nodes.spl`. Nodes retain
+source-span IDs; the span pool exposes byte start/end and line/column accessors.
+The parser module has `parse_module(source, path)`,
+`parse_module_silent_checked(source, path) -> bool`, and
+`parse_module_file(source, path)` entrypoints. They are module-level functions
+used by internal compiler modules; the checked entrypoint returns a reliable
+parse-failure boolean but populates module-global parser/AST state rather than
+returning an isolated syntax-tree value. The grammar frontend is therefore
+available, but not yet exposed as a safe immutable-source extraction API. A
+separate `std.gc_async_mut.pure.parser` also exists; it is a small experimental
+parser and should not replace the production grammar.
+
+The production `compiler.frontend.parser.test_analyzer` defines `TestMeta`,
+`TestGroupMeta` and `FileTestMeta`, but its `extract_tests_from_source` and
+`extract_file_test_meta` functions are private line-by-line scanners, not AST
+walks. The live runner's `list_tests_static` is another line scanner: it
+recognizes a few test-call prefixes and returns file/name strings. Neither
+extractor provides spans, exact selectors or dynamic-construction
+diagnostics. The gap is not a missing compiler parser; it is a missing public,
+isolated AST parse result and a sound AST-based SSpec extractor.
+
+The SSpec API itself is executable registration code. `describe(name, block)`
+and `context(name, block)` invoke user callbacks. The opt-in aggregate registry
+in `std.nogc_sync_mut.spec` declares cases while the module runs: IDs hash the
+owner path, source hash, current suite/context names, case name, kind, and
+ordinal. Enumeration avoids the case body but still imports/evaluates the
+candidate module and invokes describe/context callbacks. Thus it is not an
+immutable-source static inventory and its digest-derived IDs are ordering and
+source sensitive. Current `TestManifestEntry` records paths, level, tags,
+platform and a few file classifications; it has no case names or stable
+case-level metadata. In-development is currently read as a whole-file source
+classification after execution, not attached to each declared case.
+
+The narrow extraction API should expose the production parser through an
+isolated service that returns a syntax tree with byte spans and explicit parse
+diagnostics for the exact immutable source bytes, without leaking or reusing
+mutable global parser state across files. Its output should be a typed
+`TraceCaseDefinition` containing exact source path and span, ordered literal
+suite/context components, literal case name, declaration kind, source digest,
+and an optional explicit stable-case key. A separate selector value should
+retain the exact path plus suite/context/name and, when available, the stable
+key. No adapter should import a candidate module or call its describe/context
+functions to produce these values.
+
+The first supported grammar slice can recognize direct SSpec calls with
+literal text arguments and statically nested `describe`/`context` blocks. A
+callback's body may be traversed only as syntax; arbitrary callback execution
+is forbidden. Static `it`, `test`, `example`, `specify`, `slow_it`, and
+`skip_it` declarations can be emitted with distinct kinds. Calls whose name or
+block is computed, declarations produced by loops/helpers/macros, parameterized
+case generators, malformed syntax, unresolved aliases, and unsupported
+conditional registration must return an explicit unsupported/incomplete
+diagnostic. They must never be guessed from regex matches or silently omitted.
+Feature gates and environment selectors need typed dispositions that bind the
+selected environment/options; absent that contract, mark the inventory
+incomplete instead of treating a declaration as selected or excluded.
+
+Case identity should bind the immutable source blob, exact source span, typed
+selector and declaration kind. An explicit stable-case key may replace the
+span-derived portion only after the parser can validate uniqueness and bind
+the key to that same source declaration. The current tree has no such
+case-level stable metadata syntax or parser support, so the initial design
+must not claim reorder-stable identity. A source insertion/reorder may change
+the identity and must produce a new plan. Dynamic or parameterized cases stay
+unsupported until their expansion inputs and deterministic ordering are
+captured in the plan.
+
+Implementation prerequisite: expose the existing production parser as a
+read-only library API over caller-supplied immutable source bytes, returning
+source spans, parse errors and access to the corresponding AST generation.
+Add an AST-based SSpec extractor with fixtures for nested literal declarations, escaped and
+Unicode names, aliases, conditional and dynamic declarations, parameterized
+cases, and syntax errors before wiring it to `TraceRunRequest`. Until that API
+and its fixtures exist, `validate_trace_request_selection` checks only exact
+file-path set equality; its success is not proof that planned cases exhaust the
+selected files.
+
 Legacy runner JSON worker producers and consumers must be inventoried and
 migrated to native SDN for this feature's full interchange contract. Neither
 new SDN sidecars nor passing ordinary worker execution prove that migration.
