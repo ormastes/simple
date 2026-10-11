@@ -6,7 +6,7 @@ use std.common.sdn.encode.{sdn_encode_canonical}
 use std.test_runner.test_runner_types.{TestFileResult, TestRunResult}
 use std.common.perf.execution_metrics.{ResourceUsage, ResourceEvidenceQuality, TerminationCause}
 use std.nogc_sync_mut.io.process_completion.{ProcessCompletionV1}
-use std.test_runner.sdoctest.types.{SdoctestRunResult}
+use std.test_runner.sdoctest.types.{SdoctestBlock, BlockResult, BlockStatus, SdoctestFileResult, SdoctestRunResult, SdoctestModifier}
 use std.test_runner.test_runner_output.{combined_test_run_sdn}
 use app.test_runner_new.sdn_worker_protocol.{TestRunnerSdnMessage, validate_test_runner_sdn_message}
 
@@ -40,6 +40,20 @@ fn _with_field(value: SdnValue, name: text, replacement: SdnValue) -> SdnValue:
             fields[name] = replacement
             SdnValue.Dict(fields)
         case _: value
+
+fn _protocol_fields(value: SdnValue) -> Dict<text, SdnValue>:
+    match value:
+        case SdnValue.Dict(fields): fields
+        case _:
+            fail("expected SDN record")
+            {}
+
+fn _protocol_items(value: SdnValue) -> [SdnValue]:
+    match value:
+        case SdnValue.Array(items): items
+        case _:
+            fail("expected SDN array")
+            []
 
 describe "strict SDN worker protocol consumer":
     it "accepts only canonical output v1 and a single optional terminal newline":
@@ -112,6 +126,81 @@ describe "strict SDN worker protocol consumer":
                             match message:
                                 case TestRunnerSdnMessage.Output(output): expect(output.success).to_equal(true)
                                 case _: fail("producer edge-case output was classified as worker failure")
+
+    it "roundtrips nonempty producer documentation blocks and all modifier variants":
+        val resource = Some(ResourceUsage(
+            wall_ms: 19, user_cpu_ms: 8, system_cpu_ms: 2, peak_tree_charge_bytes: 1500,
+            peak_direct_child_rss_bytes: 1200, heap_live_end_bytes: 400, heap_peak_bytes: 600,
+            io_read_bytes: 31, io_write_bytes: 17, pids_peak: 3,
+            evidence_quality: ResourceEvidenceQuality.SampledTree, termination: TerminationCause.Exited,
+            signal: 0, exit_code: 0))
+        val process = Some(ProcessCompletionV1(
+            pid: 73, process_generation: 5, exit_code: 0, signal_number: 0, tree_reaped: true,
+            timed_out: false, cancelled: false, stdout_digest: "sha256:doc-out",
+            stderr_digest: "sha256:doc-err", transport_execution_digest: "sha256:doc-run"))
+        val file_result = TestFileResult(
+            path: "test/runner_evidence_spec.spl", passed: 2, failed: 0, skipped: 0, pending: 0,
+            duration_ms: 19, setup_ms: 3, error: "", timed_out: false, cached: false,
+            resource_usage: resource, resource_class: "sampled", cohort_id: "cohort-doc",
+            budget_status: "within", anomaly_status: "clean", process_completion: process)
+        val spec = TestRunResult(files: [file_result], total_passed: 2, total_failed: 0,
+            total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 19,
+            total_setup_ms: 3, total_cached: 0)
+        val modifiers = [
+            SdoctestModifier.Skip, SdoctestModifier.Ignore, SdoctestModifier.ShouldFail,
+            SdoctestModifier.FailAsSuccess, SdoctestModifier.IgnoreOutput,
+            SdoctestModifier.Init("setup-name"), SdoctestModifier.Env("docs-env"),
+            SdoctestModifier.Tag("trace-docs"), SdoctestModifier.RunConfig("strict")]
+        val source_block = SdoctestBlock(source_file: "doc/指南.md", line_number: 27,
+            code: "print(1)", language: "simple", modifiers: modifiers, transcript: "1\n")
+        val block_result = BlockResult(block: source_block, status: BlockStatus.Skipped,
+            duration_ms: 6, stdout: "", stderr: "", error: "")
+        val doc_file = SdoctestFileResult(source_file: "doc/指南.md", blocks: [block_result],
+            total: 1, passed: 0, failed: 0, skipped: 1, errors: 0, accepted: 0, duration_ms: 6)
+        val docs = SdoctestRunResult(files: [doc_file], total: 1, passed: 0, failed: 0,
+            skipped: 1, errors: 0, accepted: 0, duration_ms: 6)
+        match combined_test_run_sdn(true, true, spec, false, docs, true, docs):
+            case Err(reason): fail("producer refused complete result fixture: {reason}")
+            case Ok(source):
+                match validate_test_runner_sdn_message(source):
+                    case Err(reason): fail("consumer rejected producer's complete result: {reason}")
+                    case Ok(message):
+                        match message:
+                            case TestRunnerSdnMessage.Output(output):
+                                expect(output.success).to_equal(true)
+                                val result_file = _protocol_items(_protocol_fields(output.spec)["files"])[0]
+                                val result_fields = _protocol_fields(result_file)
+                                expect(result_fields["resource_class"]).to_equal(SdnValue.String("sampled"))
+                                expect(result_fields["cohort_id"]).to_equal(SdnValue.String("cohort-doc"))
+                                expect(_protocol_fields(result_fields["resource_usage"])["evidence_quality"]).to_equal(SdnValue.String("sampled_tree"))
+                                expect(_protocol_fields(result_fields["process_completion"])["transport_execution_digest"]).to_equal(SdnValue.String("sha256:doc-run"))
+                                val doc_fields = _protocol_fields(output.sdoctest)
+                                expect(doc_fields["total"]).to_equal(SdnValue.Int(1))
+                                val emitted_file = _protocol_items(doc_fields["files"])[0]
+                                val emitted_block = _protocol_items(_protocol_fields(emitted_file)["blocks"])[0]
+                                val block_fields = _protocol_fields(emitted_block)
+                                expect(block_fields["status"]).to_equal(SdnValue.String("skipped"))
+                                expect(block_fields["duration_ms"]).to_equal(SdnValue.Int(6))
+                                val block = _protocol_fields(block_fields["block"])
+                                expect(block["source_file"]).to_equal(SdnValue.String("doc/指南.md"))
+                                expect(block["line_number"]).to_equal(SdnValue.Int(27))
+                                expect(block["transcript"]).to_equal(SdnValue.String("1\n"))
+                                val emitted_modifiers = _protocol_items(block["modifiers"])
+                                expect(emitted_modifiers.len()).to_equal(9)
+                                expect(_protocol_fields(emitted_modifiers[0])["kind"]).to_equal(SdnValue.String("skip"))
+                                expect(_protocol_fields(emitted_modifiers[1])["kind"]).to_equal(SdnValue.String("ignore"))
+                                expect(_protocol_fields(emitted_modifiers[2])["kind"]).to_equal(SdnValue.String("should_fail"))
+                                expect(_protocol_fields(emitted_modifiers[3])["kind"]).to_equal(SdnValue.String("fail_as_success"))
+                                expect(_protocol_fields(emitted_modifiers[4])["kind"]).to_equal(SdnValue.String("ignore_output"))
+                                expect(_protocol_fields(emitted_modifiers[5])["kind"]).to_equal(SdnValue.String("init"))
+                                expect(_protocol_fields(emitted_modifiers[6])["kind"]).to_equal(SdnValue.String("env"))
+                                expect(_protocol_fields(emitted_modifiers[7])["kind"]).to_equal(SdnValue.String("tag"))
+                                expect(_protocol_fields(emitted_modifiers[8])["kind"]).to_equal(SdnValue.String("run_config"))
+                                expect(_protocol_fields(emitted_modifiers[5])["value"]).to_equal(SdnValue.String("setup-name"))
+                                expect(_protocol_fields(emitted_modifiers[6])["value"]).to_equal(SdnValue.String("docs-env"))
+                                expect(_protocol_fields(emitted_modifiers[7])["value"]).to_equal(SdnValue.String("trace-docs"))
+                                expect(_protocol_fields(emitted_modifiers[8])["value"]).to_equal(SdnValue.String("strict"))
+                            case _: fail("producer payload was classified as worker failure")
 
     it "rejects noncanonical, duplicate, unknown, and JSON-shaped documents":
         val source = _encode(_valid_output())
