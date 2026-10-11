@@ -36,6 +36,13 @@ resolution, native execution, or release admission.
 - Repaired encoder SHA256:
   b7e4874d6f20a8489d244f052e49bb29fc273d4972e250f7ce6c166313d0cf99.
 
+Independent parent review found no P0/P1 issue and ran an llvm-mc 23 AArch64
+assembler oracle, without replaying the Simple diagnostics. Its bytes were
+MOV x29,sp = fd 03 00 91; MOV sp,x29 = bf 03 00 91;
+MOV sp,sp = ff 03 00 91; MOV x0,x1 = e0 03 01 aa.
+These independently confirm the ADD-immediate SP alias and ordinary ORR alias.
+Assembler evidence does not replace admitted runtime or native execution gates.
+
 The retained global_addr_aarch64_riscv64_contract failure is still unresolved:
 its wrong memory-operand refusal is a distinct cause, and the repair does not
 claim that invocation passed. AVX2's retained instruction-count oracle also
