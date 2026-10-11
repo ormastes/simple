@@ -2208,13 +2208,20 @@ impl MirLowering:
                 case HirTypeKind.Function(_, _, _):
                     match value.kind:
                         case HirExprKind.Lambda(_, _, _):
-                            if not lambda_abi_type_resolved(declared):
-                                self.error_fatal("lambda function slot has an unresolved ABI type", Some(value.span))
-                                return self.builder.emit_const_int(0)
-                            var typed_lambda = value
-                            typed_lambda.has_type_ = true
-                            typed_lambda.type_ = declared
-                            return self.lower_expr(typed_lambda)
+                            if val lifted = self.lower_lambda_value_for_type(value, Some(declared)):
+                                match lifted.kind:
+                                    case MirOperandKind.Const(_, lambda_type):
+                                        var lambda_builder = self.builder
+                                        val local = lambda_builder.emit_cast(lifted, lambda_type)
+                                        self.builder = lambda_builder
+                                        self.remember_local_hir_type(local.id, declared, 0, 0)
+                                        return local
+                                    case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                                        self.remember_local_hir_type(local.id, declared, 0, 0)
+                                        return local
+                                    case _: ()
+                            self.error_fatal("cannot materialize lambda for its declared function slot", Some(value.span))
+                            return self.builder.emit_const_int(0)
                         case _: ()
                 case _: ()
         var scalar_optional_slot = false
