@@ -1,0 +1,47 @@
+#!/bin/sh
+# Test the native binary directly: wrappers can hide output ABI regressions.
+set -eu
+if [ "$#" -ne 1 ]; then
+    echo "usage: $0 /absolute/path/to/simple_lsp_mcp_server" >&2
+    exit 2
+fi
+python3 - "$1" <<'PYTHON'
+import json, pathlib, subprocess, sys
+binary = pathlib.Path(sys.argv[1]).resolve()
+requests = [
+    {"jsonrpc": "2.0", "id": "init-regression", "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "native-regression", "version": "1"}}},
+    {"jsonrpc": "2.0", "id": "tools-regression", "method": "tools/list", "params": {}},
+]
+bodies = [json.dumps(x, separators=(",", ":")).encode() for x in requests]
+results = []
+for mode in ("jsonl", "framed"):
+    data = b"".join(body + b"\n" if mode == "jsonl" else b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body for body in bodies)
+    responses = []
+    code = None
+    stdout = b""
+    stderr = b""
+    error = None
+    try:
+        run = subprocess.run([str(binary)], input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+        code, stdout, stderr = run.returncode, run.stdout, run.stderr
+        if mode == "jsonl":
+            responses = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+        else:
+            remaining = stdout
+            while remaining:
+                header, remaining = remaining.split(b"\r\n\r\n", 1)
+                assert header.startswith(b"Content-Length: "), "invalid framing header"
+                count = int(header.split(b":", 1)[1])
+                assert count >= 0 and len(remaining) >= count, "truncated frame"
+                responses.append(json.loads(remaining[:count]))
+                remaining = remaining[count:]
+        assert code == 0, "server exit was not zero"
+        assert len(responses) == 2, "expected initialize and tools/list responses"
+        assert responses[0]["id"] == "init-regression" and "serverInfo" in responses[0]["result"]
+        assert responses[1]["id"] == "tools-regression" and isinstance(responses[1]["result"]["tools"], list)
+    except Exception as exc:
+        error = str(exc)
+    results.append({"mode": mode, "exit": code, "stdout_bytes": len(stdout), "stderr_bytes": len(stderr), "responses": len(responses), "pass": error is None, "error": error})
+print(json.dumps(results))
+sys.exit(0 if all(result["pass"] for result in results) else 1)
+PYTHON
