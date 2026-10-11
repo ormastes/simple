@@ -30,3 +30,7 @@ design-documented; requirement selection and implementation NOT_RUN; documentati
 User steering requires MDSOC++ compliance. Read SPipe arch agent/diagram rules, architecture and tree-visibility skills, local MDSOC++ definition and real lib/mdsocpp model/sealer. Architecture now defines L0–L4, common-node visibility matrix, required/provided facets, acyclic graph, sealed composition, generations and rollback. Detail design defines bounded immutable command/query/event interactions and MD-01–07 rejection gates. Proposed API: submit_build(OperationEnvelope, BuildRequestV2) -> AdmissionResultV2; query_build(BuildIdentityV2, CallerContextV2) -> BuildViewV2. Actual module plan is in the linked architecture document. Diagrams are authored previews; deployed diagram generator unavailable in this worktree. Runtime qualification NOT_RUN.
 
 AC-7: architecture/detail design contain the complete MDSOC++ contract and MD-01–07 traceability.
+
+## Implementation continuation — 2026-10-12
+
+User selected full feature implementation and landing. Isolated branch based on current remote c5f33e7b0 excludes shared dirty work. Selected requirements written; common V2 scope/environment contracts and eleven negative/positive unit scenarios authored. M0 runtime inventory found no deployed bin/simple or bin/release in shared workspaces; test execution remains NOT_RUN. F01 incomplete, F02–F16 OPEN. Progress ledger: doc/03_plan/app/llm_caret/dist_build_and_caret_suite_control_implementation_progress.md. Goal remains active.
