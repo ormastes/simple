@@ -10,8 +10,16 @@ extern fn rt_get_args() -> [text]
 # current general file facade because that module contains the folded constants
 # this planner exists to replace. Keep the two canonical runtime operations
 # local and bounded; no process execution or arbitrary file reads are exposed.
+# rt_file_write_text (not rt_file_write_text_at): the (ptr, len) text-extern
+# ABI for both text args is registered in
+# src/compiler/50.mir/text_extern_abi.spl, matching the C/pure-Simple runtime
+# ABI. rt_file_write_text_at has a boxed-handle runtime ABI
+# (runtime_native.c / file_ops.rs tagged_text_to_str) and is absent from that
+# registry, so cranelift-direct lowering bridges its text args through
+# rt_interp_cstr and the strict-handle runtime rejects the raw cstr, returning
+# -1 without any syscall. See doc/08_tracking/bug/cranelift_extern_text_cstr_bridge_vs_handle_abi_2026-10-10.md
 extern fn rt_file_remove(path: text) -> bool
-extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
+extern fn rt_file_write_text(path: text, data: text) -> bool
 
 fn planner_reason_allowed(target: text, reason: text) -> bool:
     (target == "//bootstrap:stage3" and (reason == "seed-missing" or
@@ -47,7 +55,7 @@ fn planner_arg_value(args: [text], prefix: text) -> text:
 
 fn planner_file_write(path: text, content: text) -> bool:
     rt_file_remove(path)
-    rt_file_write_text_at(path, 0, content) >= 0
+    rt_file_write_text(path, content)
 
 fn main() -> i64:
     val args = rt_get_args()
