@@ -22,3 +22,5 @@ Status: PARTIAL. Structural kernel closure improved; native and performance admi
 ## Remaining gates
 
 The two K0 module-loader OS imports need a typed release port preserving final-unpin and retry semantics. The corrected plugin fixture must finish native build and run; Item 5 then still needs default-demand loading and paired executable size/startup/RSS evidence. Item 6 compile work is separate and not qualified by this ownership move.
+
+The remaining K0 host/OS seam is specified in `doc/05_design/compiler/plugin_arch/aspect_dynsmf_loader_port.md`. The compatibility loader is the active aspect host, so moving it wholesale to a plugin or changing its classification would not close the architecture defect. The issuer gate and final-unpin authority fixture must pass before replacing these imports.

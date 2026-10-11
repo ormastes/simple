@@ -36,3 +36,7 @@ focused closure. The final no-stub native build again completed HIR
 69/69 and failed MIR with six emitted errors at two loops over decoded
 Result payload arrays. No executable or paired p95/RSS result exists.
 See the updated archive MIR bug.
+
+The two remaining collection loops have an indexed-loop source candidate.
+The three-cycle cap prevents another native fixture attempt in this session;
+no MIR, runtime, or performance PASS is inferred from that edit.

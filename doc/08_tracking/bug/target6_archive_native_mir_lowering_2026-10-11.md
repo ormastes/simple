@@ -35,3 +35,11 @@ The three-cycle cap is exhausted for this feature in this session. Next
 work should preserve payload validation and use an explicitly indexed
 array shape at those two loops, then rerun the focused native fixture
 before any performance or release claim.
+
+## Indexed-loop candidate
+
+The two `for-in` loops now use explicit indexes over the decoded symbol and
+action arrays. This preserves the duplicate-symbol and target-membership
+validation while avoiding the two MIR sites reported in the final log. This is
+source-only progress under the session's three-cycle cap: the candidate has
+not been rebuilt or run, and the native/runtime verdict remains open.
