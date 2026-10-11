@@ -41,3 +41,18 @@ start ticks in a private helper copy while retaining the real native owner,
 then verifies ownership, changed-birth rejection and foreign-release rejection.
 The Windows observer and existing EXIT-trap lock contracts also require PASS.
 Passing these focused checks alone does not prove bootstrap or Phase3 success.
+
+Concurrent recovery fixture correction: contenders must check acquisition and
+ownership before entering the protected section. Failed acquisition previously
+continued into that section, causing false overlap diagnostics. Failure traces
+are now retained, and a contender that did not create the section marker cannot
+remove another contender's marker during cleanup.
+
+Performance follow-up: four simultaneous native-identity contenders on this
+host exceeded the old 15-second acquisition budget. One acquired after 18
+seconds; three returned timeout (75) after 24–25 seconds, without admission.
+Evidence: `/tmp/portable-process-lock-test.4027779/recovery.*.trace`.
+Windows recovery tests now allow a bounded 120 seconds; other hosts keep 15.
+This is a test scheduling budget, not a claim of improved lock latency.
+The owner of `windows-process-observer.ps1` should investigate avoiding repeated
+PowerShell startup while preserving birth checks and fail-closed behavior.
