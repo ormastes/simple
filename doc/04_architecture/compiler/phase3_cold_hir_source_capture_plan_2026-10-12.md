@@ -33,3 +33,15 @@ physical alias byte binding and a coherent snapshot hash whose row contradicts
 the pinned generation. Existing retained cold-receipt examples exercise the
 shared delegation. Compilation/execution and full SCV/native integration are
 pending. Source review and owned scope structure establish no RSS improvement.
+
+The retained production full-inventory emission loop now delegates SMF file
+publication and live native-witness capture to `driver_cold_hir_emit_v1` in a
+per-module scope. Complete typed ABI receipt collection remains before that
+loop, and ctx emission/receipt publication remains after all captures succeed.
+Original owner/emission/witness failure messages are preserved. The archived
+module helper calls the same borrowed implementation without opening a nested
+scope. Two additional compiled-spec examples compare complete real emitted
+payloads/files/witnesses and check parent-scope plus post-publication refusal
+lifetime. These examples remain unrun. The full HIR graph still follows the
+retained route here; this scoped emission change does not activate the complete
+bounded pipeline or prove a memory reduction.

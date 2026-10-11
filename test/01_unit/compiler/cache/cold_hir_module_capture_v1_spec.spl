@@ -5,6 +5,7 @@ use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_types.{HirModule}
 use compiler.common.config.{Logger}
 use compiler.driver.cache.driver_cold_hir_module_capture_v1.*
+use compiler.driver.cache.driver_cold_hir_emission_lease_v1.{driver_cold_hir_emit_v1}
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{cold_hir_typed_receipt_from_admitted_digest_v1}
 use compiler.driver.smf.runtime_std_native_emit_witness_v1.{runtime_std_live_hir_semantic_digest_v1,
     runtime_std_native_emit_witness_valid_v1, runtime_std_native_emit_counts_v1}
@@ -34,6 +35,56 @@ fn capture_input() -> DriverColdHirModuleInputV1:
         target_triple: "x86_64-pc-windows-msvc", backend: "llvm")
 
 describe "actual cold HIR module capture mechanics", tag: ["only-compiled"]:
+    it "preserves real retained emission and witness bytes across its own scope":
+        val module = capture_module()
+        var input = capture_input()
+        input.full_inventory = true
+        input.artifact_root = "build/test/cold-hir-emission-lease-v1"
+        expect(dir_create_all(input.artifact_root)).to_equal(true)
+        val complete = driver_cold_hir_capture_module_v1(module, input)
+        val retained = driver_cold_hir_emit_v1(module, input.module_identity,
+            input.source_identity, input.source_digest, input.artifact_root,
+            input.target_triple, input.backend)
+        expect(complete.is_ok()).to_equal(true)
+        expect(retained.is_ok()).to_equal(true)
+        val expected = complete.unwrap().emission!
+        val actual = retained.unwrap()
+        expect(actual.module_identity).to_equal(expected.module_identity)
+        expect(actual.artifact_identity).to_equal(expected.artifact_identity)
+        expect(actual.semantic_payloads).to_equal(expected.semantic_payloads)
+        expect(actual.semantic_sections).to_equal(expected.semantic_sections)
+        expect(actual.native_emit_witness).to_equal(expected.native_emit_witness)
+        expect(actual.export_file).to_equal(expected.export_file)
+        expect(actual.initializer_file).to_equal(expected.initializer_file)
+        expect(actual.provider_file).to_equal(expected.provider_file)
+        expect(actual.generated_source_file).to_equal(expected.generated_source_file)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+
+    it "preserves parent leases and escapes a real owner failure after artifact emission":
+        val module = capture_module()
+        var input = capture_input()
+        input.artifact_root = "build/test/cold-hir-emission-owner-refusal-v1"
+        expect(dir_create_all(input.artifact_root)).to_equal(true)
+        if not transient_scope_begin(): panic("test emission scope unavailable")
+        val occupied = driver_cold_hir_emit_v1(module, input.module_identity,
+            input.source_identity, input.source_digest, input.artifact_root,
+            input.target_triple, input.backend).is_err()
+        val active = transient_array_scope_state_v1() == 1
+        if not transient_scope_pause(): panic("test emission pause unavailable")
+        val refused = driver_cold_hir_emit_v1(module, input.module_identity,
+            input.source_identity, input.source_digest, input.artifact_root,
+            input.target_triple, input.backend).is_err()
+        val paused = transient_array_scope_state_v1() == 2
+        if not transient_scope_end(): panic("test emission close unavailable")
+        expect(occupied and active and refused and paused).to_equal(true)
+        val failed = driver_cold_hir_emit_v1(module, "foreign.module",
+            input.source_identity, input.source_digest, input.artifact_root,
+            input.target_triple, input.backend)
+        expect(failed.is_err()).to_equal(true)
+        expect(failed.unwrap_err().kind).to_equal("owner")
+        expect(failed.unwrap_err().reason).to_equal("cold HIR typed emission module identity changed")
+        expect(transient_array_scope_state_v1()).to_equal(0)
+
     it "matches the actual typed ABI consumer after scope closure":
         val module = capture_module()
         val input = capture_input()

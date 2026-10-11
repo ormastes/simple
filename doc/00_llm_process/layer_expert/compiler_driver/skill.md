@@ -136,6 +136,15 @@ deduplication and independent ABI failure collection. The new source factory is
 inactive and does not publish ctx receipts or admit transformed bodies; four
 new boundary examples and full SCV/native integration remain unrun.
 
+The retained full-inventory emission loop now calls
+`cache/driver_cold_hir_emission_lease_v1.spl` after complete typed ABI receipt
+collection. Its owned wrapper promotes the fresh emission/failure Result and
+cache diagnostic owner; it preserves the prior cache warning alias and never
+promotes the input HIR. The archive module helper
+uses the same actual borrowed emitter/witness implementation. All-success ctx
+publication and original error categories remain; two new compiled examples
+are unrun. This is scoped retained-path emission, not full pipeline activation.
+
 ## 2026-09-26 — `native-build` restored: backend table in the interpreted worker, entry-file hashing, module-init reads
 
 - **The interpreted native-build worker never installed the static backend

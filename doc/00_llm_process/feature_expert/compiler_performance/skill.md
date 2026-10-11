@@ -60,3 +60,9 @@ Cold SCV source admission now has a separate owned source-capture-plan factory:
 it admits the pinned generation/snapshot and returns selected input rows without
 HIR. Four new ownership/alias/snapshot boundary examples are unrun. This source
 plan cannot authenticate the later transformed body.
+
+Retained full-inventory SMF/witness emission now uses a per-module owned scope,
+sharing its actual implementation with borrowed archive capture. It retains all
+real emitted payload/file/witness outputs and original error categories; two
+additional compiled-spec examples remain unrun. Full HIR graph retention and
+the required cap qualification are still unresolved by this local change.
