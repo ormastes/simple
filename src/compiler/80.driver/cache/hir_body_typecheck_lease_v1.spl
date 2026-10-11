@@ -158,6 +158,22 @@ fn hir_body_archive_store_v1(input: HirBodyArchiveInputV1, module: HirModule, wa
 # The shared consumer is read-only over complete HIR, with no CompileContext
 # mutation or unrestricted callback while scratch is alive. Publish the receipt
 # only after this function returns. A miss is an error, never a partial success.
+fn hir_body_archive_load_in_owned_scope_v1(
+    archive: HirBodyArchiveV1, expected: HirBodyArchiveInputV1
+) -> Result<HirModule, text>:
+    if transient_array_scope_state_v1() != 1:
+        return Err("body archive borrowed reader requires active unpaused scope")
+    if hir_cache_last_warnings().len() != 0:
+        return Err("body archive warning owner occupied")
+    if not hir_body_archive_matches_v1(archive, expected):
+        return Err("body archive identity mismatch")
+    if val module = hir_cache_load_in_owned_scope(archive.archive_key):
+        if module.name == expected.module_name and module.path == expected.source_path and
+                sha256_text(hir_module_encode(module)) == archive.body_digest and
+                hir_body_archive_warnings_digest_v1(hir_cache_last_warnings()) == archive.lowering_warnings_digest:
+            return Ok(module)
+    Err("body archive absent, corrupt, or module identity mismatch")
+
 fn hir_body_archive_typecheck_lease_v1(
     archive: HirBodyArchiveV1, expected: HirBodyArchiveInputV1,
     severity: TypecheckPassSeverity
@@ -178,14 +194,13 @@ fn hir_body_archive_typecheck_lease_v1(
     var functions = 0
     var admitted = false
     if identity_matches:
-        if val module = hir_cache_load_in_owned_scope(archive.archive_key):
-            if module.name == expected.module_name and module.path == expected.source_path and
-                    sha256_text(hir_module_encode(module)) == archive.body_digest and
-                    hir_body_archive_warnings_digest_v1(hir_cache_last_warnings()) == archive.lowering_warnings_digest:
-                diagnostics = collect_module_typecheck_receipt_v1(module.name, module, severity)
-                warnings = hir_cache_last_warnings()
-                functions = module.functions.len()
-                admitted = true
+        val loaded = hir_body_archive_load_in_owned_scope_v1(archive, expected)
+        if loaded.is_ok():
+            val module = loaded.unwrap()
+            diagnostics = collect_module_typecheck_receipt_v1(module.name, module, severity)
+            warnings = hir_cache_last_warnings()
+            functions = module.functions.len()
+            admitted = true
     val paused = transient_scope_pause()
     var owned = false
     var cache_owner_owned = false
@@ -214,3 +229,4 @@ export HirBodyArchiveInputV1, HirBodyArchiveV1, HirBodyTypecheckLeaseReceiptV1
 export hir_body_archive_input_key_v1, hir_body_archive_matches_v1
 export hir_body_archive_content_key_v1, hir_body_archive_warnings_digest_v1
 export hir_body_archive_store_v1, hir_body_archive_store_in_owned_scope_v1, hir_body_archive_typecheck_lease_v1
+export hir_body_archive_load_in_owned_scope_v1
