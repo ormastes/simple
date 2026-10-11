@@ -8,7 +8,8 @@ use std.database.test_extended.database.{TestDatabaseExtended, load_test_databas
 use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
 use std.common.traceability.case_events.{TraceCaseEvent}
 use std.common.traceability.run_plan.{TracePlannedCase, TraceRunPlan}
-use std.common.traceability.storage_scalar.{TRACE_STORAGE_SCALAR_PREFIX, encode_trace_storage_scalar}
+use std.common.traceability.run_request.{TraceRunRequest}
+use std.common.traceability.storage_scalar.{encode_trace_storage_scalar}
 
 fn _preparation_fixture_dir(label: text) -> text:
     val dir = "build/test_fixtures/trace_run_preparation_{label}_{getpid()}_{time_now_unix_micros()}"
@@ -51,6 +52,21 @@ fn _trace_scalar(value: text) -> text:
         case Err(reason): fail("fixture scalar encoding failed: {reason}")
 
 describe "runner frozen trace preparation":
+    it "allocates and persists the identity for a request without a caller run id":
+        val path = _preparation_fixture_dir("request") + "/test_db.sdn"
+        val template = _preparation_plan("unused-template-id")
+        val request = TraceRunRequest(subject_id: template.subject_id,
+            configuration_id: template.configuration_id, expectation_id: template.expectation_id,
+            binary_id: template.binary_id, cases: template.cases)
+        var owner = RunnerTestDb(db: TestDatabaseExtended.create(path), current_run_id: "")
+        match owner.prepare_trace_request(request):
+            case Err(reason): fail("valid owner request failed: {reason}")
+            case Ok(plan):
+                expect(plan.run_id != "").to_equal(true)
+                expect(plan.run_id == "unused-template-id").to_equal(false)
+                expect(owner.trace_run_is_prepared(plan.run_id)).to_equal(true)
+                expect(owner.prepare_trace_request(request).is_err()).to_equal(true)
+
     it "rejects missing, wrong, and ambiguous active run identities":
         var db = TestDatabaseExtended.create("unused-trace-preparation-memory")
         val run_id = db.start_run()
@@ -183,7 +199,7 @@ describe "trace event storage versions":
         val name = "case"
         val event_id = "{run_id.len()}:{run_id}{test_path.len()}:{test_path}:0"
         var malformed = _trace_event_table()
-        malformed.add_row(_trace_event_row("simple.trace.case-event-storage/v2", TRACE_STORAGE_SCALAR_PREFIX + "GG", _trace_scalar(run_id), _trace_scalar(test_path), "0", _trace_scalar(name), "started", "not_finished"))
+        malformed.add_row(_trace_event_row("simple.trace.case-event-storage/v2", "trace-utf8-hex/v1:GG", _trace_scalar(run_id), _trace_scalar(test_path), "0", _trace_scalar(name), "started", "not_finished"))
         var db = TestDatabaseExtended.create("unused-malformed-event-memory")
         db.db.set_table("trace_case_events", malformed)
         expect(db.get_trace_case_events(run_id, test_path).is_err()).to_equal(true)

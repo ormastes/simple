@@ -20,6 +20,7 @@ use std.test_runner.test_db_core.{parse_rfc3339_to_micros}
 use std.nogc_sync_mut.test_runner.test_db_record.{TestDbFileRow}
 use std.common.traceability.case_events.{decode_trace_case_events}
 use std.common.traceability.run_plan.{TraceRunPlan}
+use std.common.traceability.run_request.{TraceRunRequest, validate_trace_run_request, materialize_trace_run_plan}
 use std.nogc_sync_mut.io.time_ops.{timestamp_year, timestamp_month, timestamp_day, timestamp_hour, timestamp_minute, timestamp_second}
 
 # ============================================================================
@@ -31,6 +32,17 @@ class RunnerTestDb:
     current_run_id: text
     _trace_prepare_failed: bool = false
     _trace_prepared_run_id: text = ""
+
+    # The owner allocates the run identity; callers supply only frozen intent.
+    # A returned plan means save succeeded, not that evidence is qualified.
+    me prepare_trace_request(request: TraceRunRequest) -> Result<TraceRunPlan, text>:
+        if self._trace_prepare_failed or self.current_run_id != "":
+            return Err("trace request requires a fresh database owner")
+        validate_trace_run_request(request)?
+        val run_id = self.start_run()
+        val plan = materialize_trace_run_plan(request, run_id)?
+        self.prepare_trace_run(plan)?
+        Ok(plan)
 
     # Persist immutable execution intent before dispatch. A failed save poisons
     # this wrapper: callers must discard it and reload the persisted owner.
