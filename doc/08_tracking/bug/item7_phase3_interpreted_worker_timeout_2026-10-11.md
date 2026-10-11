@@ -149,3 +149,83 @@ The three-attempt session limit is reached. No probe executable or new compiler
 was produced, no helper assertion ran, and the prepared positional bootstrap
 build was not launched because its prerequisite probe failed. STATUS: FAIL.
 The full-CLI routing fix remains unverified and is not Phase3 admission evidence.
+
+## Runtime-source repair and renewed Phase3 diagnostics
+
+Source: `901d84fc04a591c828ec3e4e1029c5e4f7bd5c81`. Producer: the same
+`80030...28071` bootstrap compiler from source `1aff093...`.
+
+The runtime-source cause is confirmed: `find_runtime_source_dir()` reads
+`SIMPLE_PROJECT_ROOT/src/runtime`, whereas `SIMPLE_RUNTIME_PATH` selects
+archives. The repaired launcher sets the project root to the frozen capture
+AFTER MSVC setup, retaining target cwd and `SIMPLE_LIB` for source imports.
+Logger/watchdog environment rewriting was not the cause. The first repaired
+compile then exposed an omitted sparse SDK dependency. Materializing the
+existing `tools/counterpart/sdk/c` directory from the SAME capture commit fixed
+that missing input without changing the runtime source tree. Header blob:
+`7c65a95fa19c854efedd48ac0bab902fb0656ce4`; SHA-256:
+`E1013C9B5F3DBC4AFC8AF728FE0CCEF1A4745F9C346CAC97A8919949AA17FFDD`.
+Target runtime tree remains `808d12b3`; the frozen runtime retains its documented
+header-only raw-u32 compatibility TU. Plugin ABI headers match across both roots.
+
+### Confirmed executed passes
+
+- `probe-compile-runtime-sdk-complete`: exit 0, build elapsed 199343 ms,
+  peak 354124 KiB. Direct run: exit 0, `PASS: native worker routing checks=16`.
+  Executable SHA-256:
+  `d0fe9319291f046050aac5c7b9c0933b1184b8caac1da4ef5cd75a9cf7772915`.
+  Complete 11951-byte compile log SHA-256:
+  `5821596950946c27053f78b6dc153b7eca0d00dcc2d4bd1dbe23648c5b82eeaf`.
+- Exact producer Hello World sanity: first 180-second diagnostic timed out
+  at linking, exit 124, peak 231232 KiB. The observed successful 199-second
+  probe justified a 300-second diagnostic retry. Retry: exit 0, elapsed
+  222365 ms, peak 244052 KiB. Direct executable printed `hello`, exit 0.
+  Artifact SHA-256:
+  `D4750424B94DBBF33DAA57F26394CE898016B221A9596FD9624F992E10227243`.
+
+Successful compile/run receipts are quiescent, enforce 5242880 KiB and report
+no unexpected session PIDs. These passes do not execute SSpec, verify full-CLI
+interception, or constitute formal Stage2/Stage3 admission. The Windows C-object
+cache is distinct from the Simple module cache; timing alone cannot establish
+C-cache hit counts. Module summaries report zero reused modules. Preserve the
+completed runtime cache and all failed attempt evidence; do not rerun these
+successful checks unchanged or claim unmeasured speedups.
+
+### Provisional Phase3 build: FAIL
+
+After Hello World passed, the supported positional direct-driver route attempted
+`src/app/cli/bootstrap_main.spl`: LLVM, one thread, no stub fallback,
+900-second watchdog, 5242880 KiB cap, rebased source and frozen runtime/SDK.
+Packet: `C:/dev/simple-item7-worker-route-fix-20261011/bootstrap-main-build`.
+
+The build discovered 1195 files and stopped with `rss-cap-exceeded`, exit 88,
+peak 5245800 KiB. Its final receipt is quiescent with no unexpected session PIDs.
+No executable was produced. Last retained HIR marker: 951/1195,
+`compiler.frontend.core.capture_write_check`, elapsed 861305 ms.
+
+The logger received 42411967 bytes, retained 16777216 and dropped 25634751.
+Full received-stream SHA-256:
+`a59214541177d1b1a545a52c25473e2d086b67046c675b8c7ce53db7e881c5e7`.
+Retained log SHA-256:
+`1f7cf4a770c457817c5b0b980e70f38322b044998e20e2147f5b11aae8a318b7`.
+The live observer reports `PermissionError`; its stale 94/1195 marker does NOT
+establish a several-minute single-module stall. Retained output confirms later
+progress. Truncated retention and observer failure limit diagnosis, not the
+nonzero memory-cap verdict. They cannot be promoted to PASS evidence.
+
+The retained log names the canonical fail-closed K1 stub and does not name the
+selected composition owner. The positional closure omits explicit composition
+roots. Formal Phase3 must use the transcribed composition-root route and an
+admitted parent; a positional artifact would not establish correct K1 admission.
+
+The old producer generates extensive primitive re-export diagnostics. Its
+re-export walk already has depth/cycle bounds and negative-result memoization;
+recursive nonconvergence is not established. Target source already contains a
+lowercase-builtin field-dependency guard in `module_import_registration.spl`
+that is absent from the producer. Capitalized `Dict` must preserve user-type
+precedence; globally suppressing it would hide unresolved ownership. Refresh
+Phase2 and use correct composition roots before the next qualification attempt.
+Memory growth and diagnostic volume are concrete failures of this producer.
+
+Overall Phase3 STATUS: FAIL. Native helper and Hello World PASS remain valid;
+compiler artifact, source-matched full tools and Phase3 admission remain missing.

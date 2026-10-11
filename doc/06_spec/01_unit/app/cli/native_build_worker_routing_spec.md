@@ -27,3 +27,11 @@ The producer requested the absent legacy `runtime_raw_u32.c` in the working
 checkout despite the frozen runtime override. Its log also reports a rejected
 array handle and possible compiler/FFI ABI mismatch. Neither the probe nor these
 seven SSpec scenarios has run; this diagnostic is FAIL, not assertion evidence.
+
+Follow-up native evidence (2026-10-11): the byte-identical standalone probe
+compiled and ran after correcting the C-runtime source root and materializing
+the pinned SDK header. It printed `PASS: native worker routing checks=16` and
+exited 0. Both receipts are quiescent with the 5 GiB cap enforced. The imported
+routing helper blob is unchanged across the rebase. These are executed helper
+checks; the seven SSpec scenarios and end-to-end full-CLI dispatch remain UNRUN.
+Phase3 admission remains blocked by the subsequent compiler build failure.
