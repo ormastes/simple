@@ -3814,7 +3814,19 @@ impl MirLowering:
                         self.materialize_result_err_record_payload(pl, scrutinee_payload_struct, scrutinee.span)
                     else:
                         match effective_payload_type:
-                            case Some(found_payload_type): self.decode_declared_enum_payload_slot(pl, found_payload_type)
+                            case Some(found_payload_type):
+                                val declared_tuple = match found_payload_type.kind:
+                                    case HirTypeKind.Tuple(_): true
+                                    case _: false
+                                if result_payload_type != nil and declared_tuple:
+                                    if val native_tuple = wrapper_native_tuple_payload_type(found_payload_type):
+                                        self.recover_result_tuple_payload(pl, native_tuple)
+                                    else:
+                                        # No new admission for text/record/erased
+                                        # extras: preserve the existing decoder.
+                                        self.decode_declared_enum_payload_slot(pl, found_payload_type)
+                                else:
+                                    self.decode_declared_enum_payload_slot(pl, found_payload_type)
                             case _: pl
                     # Preserve the declaration on the extracted local as well
                     # as using it for decoding. In particular, an enum payload
@@ -3894,9 +3906,24 @@ impl MirLowering:
                     elif payload_struct != nil and payload_struct != "":
                         self.struct_value_syms[bound_payload.id] = payload_struct ?? ""
             elif bind_syms.len() >= 1:
-                # #164 multi-field payload: the scalar payload slot holds a
-                # boxed rt_tuple (see box_tuple_payload); unbox each field by
-                # index via rt_tuple_get.
+                # Result/Optional each declare ONE payload field. If that
+                # exact instantiated field is Tuple, its storage is the raw
+                # native N-word tuple, even when the pattern binds N fields.
+                # Ordinary enum constructors with N separate args keep their
+                # headered rt_tuple carrier and rt_tuple_get access below.
+                var native_tuple_type: MirType? = nil
+                var native_tuple_fields: [HirType] = []
+                if val wrapper_payload = self.result_variant_payload_type(scrutinee, enum_variants[ci]):
+                    match wrapper_payload.kind:
+                        case HirTypeKind.Tuple(fields):
+                            if val admitted_tuple = wrapper_native_tuple_payload_type(wrapper_payload):
+                                native_tuple_type = Some(admitted_tuple)
+                                native_tuple_fields = fields
+                            else:
+                                # Unadmitted extras retain the previous match
+                                # representation route, without a new error.
+                                ()
+                        case _: ()
                 var bp = self.builder
                 val pf = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_enum_payload"),
@@ -3907,6 +3934,8 @@ impl MirLowering:
                 var tuple_local = LocalId(id: 0)
                 if val pl = pr:
                     tuple_local = pl
+                if val native_tuple = native_tuple_type:
+                    tuple_local = self.recover_result_tuple_payload(tuple_local, native_tuple)
                 var fi = 0
                 while fi < bind_syms.len():
                     var bg = self.builder
@@ -3918,13 +3947,30 @@ impl MirLowering:
                         MirConstValue.Str("rt_tuple_get"),
                         MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
                     ))
-                    val gr = bget.emit_call(gf, [mir_operand_copy(tuple_local), mir_operand_copy(idx_local)], MirType.i64())
+                    val slot_index = bind_pos_row[fi]
+                    var gr: LocalId? = nil
+                    if native_tuple_type != nil:
+                        if slot_index < 0 or slot_index >= native_tuple_fields.len():
+                            self.error_fatal("declared wrapper tuple pattern slot out of bounds", Some(scrutinee.span))
+                        else:
+                            val field_type = self.lower_type(native_tuple_fields[slot_index])
+                            gr = Some(bget.emit_get_field(mir_operand_copy(tuple_local), slot_index, field_type))
+                    else:
+                        gr = bget.emit_call(gf, [mir_operand_copy(tuple_local), mir_operand_copy(idx_local)], MirType.i64())
                     self.builder = bget
                     if val gl = gr:
                         val tuple_owner_key = if enum_key != "": enum_key else: enum_name
                         val tuple_payload_key = "{tuple_owner_key}::{enum_variants[ci]}"
                         var bound_slot = gl
-                        if self.enum_payload_key_uses_declared_slots(tuple_payload_key):
+                        if native_tuple_type != nil:
+                            val declared_field = native_tuple_fields[slot_index]
+                            self.remember_local_hir_type(gl.id, declared_field, 0, 0)
+                            self.mark_native_tuple_projection(gl, self.lower_type(declared_field))
+                            match declared_field.kind:
+                                case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
+                                    self.runtime_elem_value_type[gl.id] = self.lower_type(element)
+                                case _: ()
+                        elif self.enum_payload_key_uses_declared_slots(tuple_payload_key):
                             if val slot_types = self.enum_variant_payload_types.get(tuple_payload_key):
                                 val slot_index = bind_pos_row[fi]
                                 if slot_index >= 0 and slot_index < slot_types.len():
@@ -3935,7 +3981,7 @@ impl MirLowering:
                         # Opaque("str")-typed local (see the long comment in
                         # the single-field arm for why relabel-in-place fails).
                         val tuple_text_key = "{tuple_owner_key}::{enum_variants[ci]}::{bind_pos_row[fi]}"
-                        if self.enum_tuple_text_slots.has(tuple_text_key):
+                        if native_tuple_type == nil and self.enum_tuple_text_slots.has(tuple_text_key):
                             var bp_ttext = self.builder
                             val ttext_op = MirOperand(kind: MirOperandKind.Const(
                                 MirConstValue.Str("rt_interp_cstr"),
