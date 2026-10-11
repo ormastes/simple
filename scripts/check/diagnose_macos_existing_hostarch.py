@@ -14,8 +14,24 @@ def run(debugger):
         if contexts.GetSize() != 1:
             raise RuntimeError("unresolved/ambiguous symbol: " + name)
         context = contexts.GetContextAtIndex(0)
-        return context.GetSymbol().GetStartAddress().GetLoadAddress(target)
+        owner = context.GetFunction()
+        address = owner.GetStartAddress() if owner.IsValid() else context.GetSymbol().GetStartAddress()
+        loaded = address.GetLoadAddress(target)
+        if not address.IsValid() or loaded == lldb.LLDB_INVALID_ADDRESS:
+            raise RuntimeError("invalid symbol load address: " + name)
+        return loaded
     def text(frame, raw):
+        # Frozen5e repr: TAG_HEAP=1/mask7, HeapHeader8B, Stringtype1.
+        if raw & 7 != 1 or (raw & ~7) < 4096:
+            raise RuntimeError("value is not a tagged heap string")
+        header_error = lldb.SBError()
+        header = process.ReadMemory(raw & ~7, 24, header_error)
+        if header_error.Fail() or len(header) != 24 or header[0] != 1:
+            raise RuntimeError("invalid runtime string header")
+        declared_length = int.from_bytes(header[8:16], "little")
+        object_size = int.from_bytes(header[4:8], "little")
+        if declared_length > 4096 or object_size < 24 + declared_length:
+            raise RuntimeError("invalid bounded runtime string extent")
         options = lldb.SBExpressionOptions()
         options.SetTimeoutInMicroSeconds(2000000)
         options.SetIgnoreBreakpoints(True)
@@ -27,7 +43,7 @@ def run(debugger):
             raise RuntimeError("runtime string getter unavailable")
         length = length_value.GetValueAsSigned()
         address = data_value.GetValueAsUnsigned()
-        if not 0 <= length <= 4096 or (length and not address):
+        if length != declared_length or address != (raw & ~7) + 24:
             raise RuntimeError("invalid or unbounded runtime string")
         error = lldb.SBError()
         data = process.ReadMemory(address, length, error) if length else b""
