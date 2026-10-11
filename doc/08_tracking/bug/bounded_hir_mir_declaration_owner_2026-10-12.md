@@ -182,3 +182,15 @@ promote the actual output/diagnostics/reverse-reference batch. Three real
 inactive/active/paused lifecycle refusal cases are authored, UNRUN. Successful
 final admission and executable semantics remain unqualified, pending the real
 final driver and mono owners; no RSS reduction is claimed.
+
+
+Borrowed lifecycle and positive mechanics specs are tagged `only-compiled`
+because their real SFFI scope transitions cannot be qualified by interpreter
+stubs. A source-only positive mechanical control projects actual frontend
+bytes, installs diagnostic declarations without a final owner, lowers the
+complete body, promotes real output/owner/registries, closes the scope, and
+requires its actual typed return operand to contain7. A paired case changes the
+actual HIR tail to8 and requires refusal while leaving the caller's scope active.
+The diagnostic identity explicitly grants no final policy/prerequisite admission.
+These two cases, the three lifecycle refusals, and all actual native controls
+remain UNRUN; emitted MIR graph checks do not qualify executable semantics.
