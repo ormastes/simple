@@ -77,7 +77,7 @@ if ($opt{'budget-scope'} eq 'aggregate-tests') {
 # Ordinary host-config tree_rss_* knobs still fit under the default ceiling.
 my $compiler_jobs = 0;
 my $jobs_reserve_kib = 3145728;
-my $jobs_per_job_ceiling_kib = 262144;
+my $jobs_per_job_ceiling_kib = 1048576;
 my $host_total_kib = 0;
 # Where host_total_kib came from: undeclared (no worker count, never read),
 # proc-meminfo, sysctl, unknown (unreadable: the ceiling does not move) or
