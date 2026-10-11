@@ -258,6 +258,7 @@ fn driver_collect_mir_advisories(ctx: CompileContext, advisories: [MirError]):
     (`mir_verify_warning_cap()` lines, then one count line); the full count
     goes to the `mir_lowering_advisory` pass receipt."""
     val cap = mir_verify_warning_cap()
+    log_phase("mir_advisories:scan:start")
     var codes: [text] = []
     var counts: Dict<text, i64> = {}
     for advisory in advisories:
@@ -272,6 +273,8 @@ fn driver_collect_mir_advisories(ctx: CompileContext, advisories: [MirError]):
         val total = counts[code] ?? 0
         if total > cap:
             ctx.add_warning("MIR lowering advisory {code}: {total} in this build; first {cap} shown, {total - cap} more not shown (SIMPLE_MIR_VERIFY_LEVELS={code}=off silences, {code}=error makes them fatal)")
+    log_phase("mir_advisories:scan:done")
+    log_phase("mir_advisories:receipt:start")
     val _advisory_receipt = record_pass_receipt(PassReceipt(
         pass_name: "mir_lowering_advisory",
         profile: ctx.assurance_policy.strictness.name(),
@@ -280,6 +283,7 @@ fn driver_collect_mir_advisories(ctx: CompileContext, advisories: [MirError]):
         diagnostics: advisories.len(),
         errors_raised: 0
     ))
+    log_phase("mir_advisories:receipt:done")
 
 impl CompilerDriver:
     # --------------------------------------------------------------------------
@@ -294,12 +298,14 @@ impl CompilerDriver:
         # stack a second error on top (e.g. a malformed level spec).
         if not lowered:
             return false
+        log_phase("aot:verify_lowered_mir:start")
         self.verify_lowered_mir_v1()
 
     me lower_to_mir_for_explicit_target(target_context: MirTargetContext) -> bool:
         val lowered = self.lower_to_mir_with_target_context(target_context, true, false)
         if not lowered:
             return false
+        log_phase("aot:verify_lowered_mir_explicit_target:start")
         self.verify_lowered_mir_v1()
 
     me verify_lowered_mir_v1() -> bool:
@@ -318,7 +324,9 @@ impl CompilerDriver:
         is a build error (fail closed), and when every rule is `off` the
         walk itself is skipped (receipt state=skipped). Warning lines are
         capped per rule per build; errors are never capped."""
+        log_phase("mir_verify:levels:start")
         val levels = mir_verify_levels_from_env()
+        log_phase("mir_verify:levels:done")
         if levels.config_error != "":
             self.ctx.add_error("MIR verify: invalid SIMPLE_MIR_VERIFY_LEVELS ({levels.config_error}); refusing to guess a level. Valid: <MIRV-id|E-MIR-TYPE-Error|E-MIR-MATCH-GUARD|*>=<error|warning|off>, comma separated")
             return false
@@ -358,7 +366,9 @@ impl CompilerDriver:
             else:
                 bootstrap_only[idx - mir_module_names.len()]
             idx = idx + 1
+            log_phase("mir_verify:module:start idx={idx} module={module.name}")
             val report = mir_verify_module(module)
+            log_phase("mir_verify:module:done idx={idx} module={module.name}")
             modules_checked = modules_checked + 1
             functions_total = functions_total + report.functions_checked
             instructions_total = instructions_total + report.instructions_checked
@@ -689,8 +699,12 @@ impl CompilerDriver:
                     log_build_progress("mir", "modules", direct_idx,
                         self.ctx.sources.len(), name_direct,
                         4, 6, 0, 0, "running")
+            log_phase("aot:mir_diagnostics:errors:start")
             _driver_collect_mir_errors(self.ctx, direct_lowering.errors)
+            log_phase("aot:mir_diagnostics:errors:done")
+            log_phase("aot:mir_diagnostics:advisories:start")
             driver_collect_mir_advisories(self.ctx, direct_lowering.mir_advisories)
+            log_phase("aot:mir_diagnostics:advisories:done")
             if self.ctx.error_count_value != 0:
                 return false
             if self.ctx.runtime_std_full_inventory_selection != nil:
