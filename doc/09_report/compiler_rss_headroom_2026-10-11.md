@@ -30,3 +30,18 @@ remains SHA256
 No nested green controls were rerun. New compiler/Phase3/product qualification
 is pending on the final integrated source, with the genuinely admitted old
 parent; failed attempt08 must not be used as a parent.
+
+## Generic timeout-owner followup
+
+The separate `run-process-group-timeout.shs` owner also needs explicit native
+ceiling forwarding. Normal Phase3 verification uses this owner for arbitrary
+helpers, so the compiler-only ceiling and paired compiler cap must be removed
+for those helper processes after syntax/pair validation. The generic helper
+override and default policy remain unchanged; absence of the new ceiling
+preserves legacy cap precedence. A nested compiler needs its own explicit
+invocation rather than inherited elevation through a helper.
+
+Nine new wrapper controls passed with the actual wrapper and real policy,
+using an inert watchdog recorder to inspect argv/environment. They cover native
+forwarding, helper stripping/default, generic helper override, unchanged legacy
+cap, missing workers and invalid pairs. No workload or prior green test was run.
