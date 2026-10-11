@@ -1022,11 +1022,19 @@ fn convert_flat_expr(idx: i64) -> Expr:
         # (.pop()/.first()/.last()) instead of crashing at runtime.
         val slice_obj = convert_flat_expr(expr_get_left(idx))
         val slice_start = convert_flat_expr(expr_get_right(idx))
-        val slice_end = convert_flat_expr(expr_get_extra(idx))
-        val slice_call_args: [CallArg] = [
-            CallArg(has_name: false, name: "", value: slice_start, span: span),
-            CallArg(has_name: false, name: "", value: slice_end, span: span)
+        val end_idx = expr_get_extra(idx)
+        var slice_call_args: [CallArg] = [
+            CallArg(has_name: false, name: "", value: slice_start, span: span)
         ]
+        # The flat parser uses a synthetic IntLit(-1) for an omitted end.
+        # Preserve that omission: one-argument slice lowering obtains the
+        # receiver length. Passing -1 as an explicit endpoint loses this
+        # distinction and can produce an empty or truncated native result.
+        # A source negative endpoint remains a Unary expression, not this
+        # parser-created sentinel, and keeps the ordinary two-bound path.
+        if expr_get_tag(end_idx) != EXPR_INT_LIT or expr_get_int(end_idx) != -1:
+            val slice_end = convert_flat_expr(end_idx)
+            slice_call_args.push(CallArg(has_name: false, name: "", value: slice_end, span: span))
         return Expr(kind: ExprKind.MethodCall(slice_obj, "slice", slice_call_args), span: span)
     if tag == EXPR_ARRAY_LIT:
         val elem_indices = expr_get_args(idx)
