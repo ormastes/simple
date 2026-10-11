@@ -22,6 +22,7 @@ use compiler.hir.hir_definitions.{HirFunction, HirConst}
 use compiler.monomorphize.engine.*
 use compiler.monomorphize.types.ConcreteType
 use compiler.monomorphize.type_subst.*
+use compiler.mono.nominal_type_identity.{mono_owned_type_key, mono_owned_type_keys}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
 use std.io_runtime.{env_get}
@@ -668,7 +669,12 @@ impl MonomorphizationPass:
         one gets a `_k<n>` suffix instead of silently sharing its body."""
         if type_args.len() == 0:
             return func_name
-        val key = "{func_name}${self.type_keys(type_args)}"
+        val argument_key = self.type_keys(type_args)
+        if argument_key == "":
+            self.diagnostics = self.diagnostics.push(
+                "E-MONO-041: instantiation of `{func_name}` has a nominal type with no proven declaration owner in `{self.current_module}`; not specialized")
+            return ""
+        val key = "{func_name}${argument_key}"
         if self.spec_display.has(key):
             return self.spec_display[key]
         var display = "{func_name}${self.mangle_type_args(type_args)}"
@@ -683,42 +689,17 @@ impl MonomorphizationPass:
         display
 
     me type_keys(types: [HirType]) -> text:
-        var parts: [text] = []
-        for raw in types:
-            val t: HirType = raw
-            parts = parts.push(self.type_key(t))
-        parts.join(",")
+        val symbols: SymbolTable? = self.module_symbols[self.current_module] ?? nil
+        mono_owned_type_keys(types, symbols, self.current_module)
+
+    me same_type_key(left: HirType, right: HirType) -> bool:
+        val left_key = self.type_key(left)
+        left_key != "" and left_key == self.type_key(right)
 
     me type_key(t: HirType) -> text:
-        """Structural key of a type: every constructor is named and delimited,
-        so it is injective up to the spelling of a declared type, which is
-        its NAME exactly as in the mangling (a type argument's SymbolId is
-        local to whichever module first wrote it, so the name is the only
-        spelling stable across the modules a specialization is requested
-        from). Array sizes and function effects are not part of it."""
-        if t == nil:
-            return "<nil>"
-        match t.kind:
-            case HirTypeKind.Named(sym, args):
-                val base = self.named_type_name(sym, t)
-                if args.len() == 0:
-                    return base
-                "{base}<{self.type_keys(args)}>"
-            case HirTypeKind.Array(elem, _): "[{self.type_key(elem)}]"
-            case HirTypeKind.Slice(elem): "slice<{self.type_key(elem)}>"
-            case HirTypeKind.Optional(inner): "opt<{self.type_key(inner)}>"
-            case HirTypeKind.Isolated(inner): "iso<{self.type_key(inner)}>"
-            case HirTypeKind.Ref(inner, m): "ref{m}<{self.type_key(inner)}>"
-            case HirTypeKind.Ptr(inner, m): "ptr{m}<{self.type_key(inner)}>"
-            case HirTypeKind.Dict(k, v): "dict<{self.type_key(k)},{self.type_key(v)}>"
-            case HirTypeKind.Result(ok, err): "res<{self.type_key(ok)},{self.type_key(err)}>"
-            case HirTypeKind.Tuple(elems): "({self.type_keys(elems)})"
-            case HirTypeKind.Union(members): "union<{self.type_keys(members)}>"
-            case HirTypeKind.Function(params, ret, _): "fn({self.type_keys(params)})->{self.type_key(ret)}"
-            case HirTypeKind.Projection(base_ty, assoc): "proj<{self.type_key(base_ty)}>::{assoc}"
-            case HirTypeKind.Tensor(elem, dims, _): "tensor<{self.type_key(elem)};{dims.len()}>"
-            case HirTypeKind.DynTrait(trait_sym): "dyn#{self.current_module}#{trait_sym.id}"
-            case _: mangle_type(t)
+        """Owner-qualified structural identity, or empty if ownership is unknown."""
+        val symbols: SymbolTable? = self.module_symbols[self.current_module] ?? nil
+        mono_owned_type_key(t, symbols, self.current_module)
 
     me request_specialization(func_name: text, type_args: [HirType]) -> i64:
         """Specialize `func_name` at `type_args` (deduplicated) and return the
@@ -731,6 +712,8 @@ impl MonomorphizationPass:
                     "E-MONO-030: instantiation of `{func_name}` exceeds depth {MONO_MAX_TYPE_DEPTH} (polymorphic recursion); not specialized")
                 return -1
         val mangled = self.mangled_name(func_name, type_args)
+        if mangled == "":
+            return -1
         if self.spec_symbols.has(mangled):
             return self.spec_symbols[mangled]
         val sym = self.next_symbol
@@ -1003,7 +986,10 @@ impl MonomorphizationPass:
                                         pattern = payload
                             case _: ()
                         val field_module: text = self.generic_type_modules[identity]
-                        if not bind_type_params(pattern, att, bindings, self.nominal_binding_context(field_module)):
+                        val context = self.nominal_binding_context(field_module)
+                        if context == nil and (hir_type_has_nominal(pattern) or hir_type_has_nominal(att)):
+                            return nil
+                        if not bind_type_params(pattern, att, bindings, context):
                             return nil
                     i = i + 1
                 var targs: [HirType] = []
@@ -1081,12 +1067,16 @@ impl MonomorphizationPass:
             case HirExprKind.NamedVar(sym_id, name):
                 if self.fn_return_of(sym_id) != nil:
                     return nil
-                val n: text = mono_last_segment(name)
-                if self.named_ambiguous.has(n):
+                if not self.module_symbols.has(self.current_module):
                     return nil
-                if self.named_types.has(n):
-                    val t: HirType = self.named_types[n]
-                    return t
+                if self.generic_type_identity(self.current_module, sym_id) != "":
+                    return nil
+                val symbols: SymbolTable = self.module_symbols[self.current_module]
+                if val info = symbols.get_symbol_raw(sym_id.id):
+                    match info.kind:
+                        case SymbolKind.Struct | SymbolKind.Class | SymbolKind.Enum:
+                            return HirType(kind: HirTypeKind.Named(sym_id, []), span: callee.span)
+                        case _: ()
                 nil
             case _:
                 not_a_constructor_call()
@@ -1236,12 +1226,16 @@ impl MonomorphizationPass:
                 if arg_ty == nil:
                     eprint("[mono-diag] infer `{template.name}` arg {i}: no local type for {mono_arg_value(at).kind}")
             if arg_ty != nil:
+                if nominal_context == nil and (hir_type_has_nominal(pt) or hir_type_has_nominal(arg_ty)):
+                    return []
                 if not bind_type_params(pt, arg_ty, bindings, nominal_context):
                     return []
             i = i + 1
         if expected_result != nil:
             val expected: HirType = expected_result
             if hir_type_is_concrete(expected):
+                if nominal_context == nil and (hir_type_has_nominal(template.return_type) or hir_type_has_nominal(expected)):
+                    return []
                 if not bind_type_params(template.return_type, expected, bindings, nominal_context):
                     return []
         var out: [HirType] = []
@@ -1409,7 +1403,7 @@ impl MonomorphizationPass:
                             return nil
                         val tt2: HirType = then_ty
                         val et3: HirType = else_ty
-                        if self.type_key(tt2) == self.type_key(et3):
+                        if self.same_type_key(tt2, et3):
                             return tt2
                         nil
                     nil: nil
@@ -1427,7 +1421,7 @@ impl MonomorphizationPass:
                             if arm_ty == nil:
                                 return nil
                             val aty: HirType = arm_ty
-                            if self.type_key(aty) != self.type_key(cty):
+                            if not self.same_type_key(aty, cty):
                                 return nil
                         cty
                     nil: nil
@@ -1461,7 +1455,7 @@ impl MonomorphizationPass:
                     case HirTypeKind.Dict(dk, dv):
                         val dkt: HirType = dk
                         val dvt: HirType = dv
-                        if self.type_key(dkt) == self.type_key(ity) and hir_type_is_concrete(dvt):
+                        if self.same_type_key(dkt, ity) and hir_type_is_concrete(dvt):
                             return dvt
                         nil
                     case _: nil
@@ -1496,9 +1490,9 @@ impl MonomorphizationPass:
                 if payload == nil:
                     return nil
                 val pty: HirType = payload
-                if self.type_key(pty) == self.type_key(rty):
+                if self.same_type_key(pty, rty):
                     return pty
-                if self.type_key(lty) == self.type_key(rty):
+                if self.same_type_key(lty, rty):
                     return lty
                 nil
             case HirExprKind.Binary(op, left, right):
@@ -1541,7 +1535,7 @@ impl MonomorphizationPass:
                     else:
                         val pk: HirType = key_ty
                         val pv: HirType = value_ty
-                        if self.type_key(pk) != self.type_key(ktt) or self.type_key(pv) != self.type_key(vtt):
+                        if not self.same_type_key(pk, ktt) or not self.same_type_key(pv, vtt):
                             return nil
                 val fk: HirType = key_ty
                 val fv: HirType = value_ty
@@ -2982,8 +2976,16 @@ fn bind_type_params(param_ty: HirType, arg_ty: HirType, bindings: Dict<text, Hir
             # than poison the binding and reject a later concrete witness.
             if not hir_type_is_concrete(arg_ty):
                 return true
+            var argument_key = ""
+            if val context = nominal_context:
+                argument_key = mono_owned_type_key(arg_ty, context.argument_symbols, context.argument_module)
+                if argument_key == "":
+                    return false
             if bindings.has(name):
                 val prev: HirType = bindings[name]
+                if val context = nominal_context:
+                    val previous_key = mono_owned_type_key(prev, context.argument_symbols, context.argument_module)
+                    return previous_key != "" and previous_key == argument_key
                 return hir_type_key(prev) == hir_type_key(arg_ty)
             bindings[name] = arg_ty
             true
@@ -3029,9 +3031,9 @@ fn bind_type_params(param_ty: HirType, arg_ty: HirType, bindings: Dict<text, Hir
                 case Union(ams): bind_type_lists(pms, ams, bindings, nominal_context)
                 case _: false
         case Named(psym, pargs):
-            # A fixed nominal parameter binds no generics. Its local SymbolId
-            # cannot be compared with the caller table's ID; HIR checked it.
-            if pargs.len() == 0:
+            # The context-free API is for a single-table model. Production
+            # also validates the declaration owner of fixed nominal types.
+            if pargs.len() == 0 and nominal_context == nil:
                 return true
             match arg_ty.kind:
                 case Named(asym, aargs):
@@ -3042,6 +3044,8 @@ fn bind_type_params(param_ty: HirType, arg_ty: HirType, bindings: Dict<text, Hir
                             return false
                     elif psym.id != asym.id:
                         return false
+                    if pargs.len() == 0:
+                        return true
                     bind_type_lists(pargs, aargs, bindings, nominal_context)
                 case _: false
         case Function(pps, pr, _):
