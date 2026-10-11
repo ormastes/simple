@@ -138,3 +138,63 @@ codec findings. This scoped PASS does not qualify item7. General typed/profile
 lowering, joins, the other missing applicable P6 observations, grouped receipts
 and full source provenance remain incomplete. No full-feature release push or
 merge has been made.
+
+## Retargeting to release_phase3 (2026-10-11)
+
+The user explicitly selected GitHub `release_phase3`. Its fetched base is
+`20f619fe31baa4decbe40f6d367fb5e4f115bbd8`. Recovered all 42 local commits
+from `aadc8b216b0` into the isolated, locked worktree
+`C:/dev/simple-item7-phase3-20261011`, branch
+`work/item7-release-phase3-20261011`, and rebased them onto that base.
+The old `work/item7-sync-20261009` branch remains a recovery reference.
+No unrelated changes from the shared checkout were included.
+
+Conflicts were reconciled to retain Phase 3 imported-generic parsing, explicit
+call type arguments, and builtin MIR method lowering alongside the item7
+adaptive type and membership paths. The combined serialized pool schema is
+`spl-flatpool-v7`; neither upstream v6 nor the old feature v4 has this layout.
+Cache fixture payloads now use v7. Imported types take precedence over the
+unimported AdaptiveMap/AdaptiveSet fallback. Both paths consume the same parsed
+argument list. Further integration validation and source tests remain required.
+
+Executed the canonical artifact gate from the isolated checkout:
+
+```sh
+sh scripts/check/check-bootstrap-stage3-selfverify.shs \
+  --output-dir /c/dev/simple/build/bootstrap --full-provenance
+```
+
+Its seven internal adversarial fixtures behaved as specified, but the actual
+artifact check reported `stage3_selfverify_reason=no_stage3_provenance_manifest_found`
+and `ERROR — nothing was checked` (wrapper exit 1). The gate source is unchanged
+between the old base and the selected Phase 3 base. This establishes missing
+admission evidence, not a compiler or feature PASS. The shared checkout's
+nearby Stage 2 candidate is tied to an older source and failed its frontend
+sanity check; it cannot substitute for a source-matched admitted compiler.
+
+STATUS: BLOCKED for Phase 3 admission and full item7 verification. The remaining
+implementation gaps described above also remain open. Push this work only as
+an unfinished PR targeting `release_phase3`; merge requires passing admission
+and the required source acceptance checks. Do not relabel gate self-tests,
+static source checks, or a narrow native capture selfcheck as Phase 3 PASS.
+
+The native capture selfcheck compiled with assertions enabled against this
+worktree's runtime. An initial shell wrapper lost the exit-status fields;
+its result was not accepted as PASS. One corrective direct WSL invocation of
+the already-built binary returned tool exit 0, without recompilation. Logs:
+`build/item7-phase3-capture-20261011/`. The only compile diagnostic was an
+unrelated ignored `write()` return value in the HTTP probe. Binary SHA-256:
+`4e2321d1eb7e4cc72d5c6322e7950ce2f752bcb96e24c14e00fb1d82d99b9f65`;
+capture owner header SHA-256:
+`daac21a7e97e2dc68344ff2609dd8a0805de7a890a332103a31d96ba902ae594`.
+This scoped native runtime result does not execute the Simple wrappers or
+qualify the compiler.
+
+Final source integration check: `check-flat-ast-codec-complete.shs` returned
+exit 0, `PASS — 184 pool(s) checked, all encoded and decoded`, within its
+120-second bound. Working environment and numbered-artifact guards passed.
+The tracked file count increased from the target's 143288 to 143323 (35 feature
+additions), with no target-relative file deletions; tracked executable specs
+under `doc/06_spec` remain zero. Imported-registry graph and roundtrip tests
+are authored, not executed. These source checks do not change the admission
+BLOCKED status.

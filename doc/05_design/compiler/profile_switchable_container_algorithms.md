@@ -121,3 +121,22 @@ row serialization and rejection of the next event. The Simple wrapper scenario
 is authored but unrun. This implementation covers only the explicit observed
 filter API; generic loop trips, join output, allocation bytes, and early-exit
 position remain unmeasured.
+
+### Phase 3 parser integration (2026-10-11)
+
+The `release_phase3` imported-generic registry and adaptive named-type registry
+coexist in flat-pool schema v7. Imported names resolve first; unimported
+AdaptiveMap/AdaptiveSet annotations retain the existing adaptive fallback.
+Both paths use a single parsed generic-argument list. The AST bridge converts
+an imported instance before the general named-type conversion.
+
+Imported registry IDs, base names, and argument lists are promoted with the
+HIR-owned type metadata. Cache restoration validates parallel shapes, ID
+bounds/uniqueness, canonical synthetic names, and layout ownership before
+following any imported argument. A per-restore index maps named IDs to imported
+rows in constant time during the existing depth-128/4096-edge traversal; no
+linear registry search is added per graph node. Forward, self, and wrapper
+cycles are rejected before recursive AST conversion. New regression cases are
+authored but UNRUN pending an admitted Simple test runner; v6 snapshots are
+explicitly rejected. See the item7 release/bootstrap blocker report for the
+failed Phase 3 admission check and the separately passing native capture check.
