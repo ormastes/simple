@@ -1,0 +1,102 @@
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_async_mut.sosix.host_facade.{sosix_dir_create_all, sosix_file_atomic_write}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryEntryV1, CompileSourceInventoryV1,
+    compile_source_inventory_digest_v1
+}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{
+    ColdHirSemanticSeedV1, ColdHirTypedReceiptV1
+}
+use compiler.driver.cache.cold_hir_native_object_persistence_v1.{
+    ColdHirNativeObjectArtifactV1
+}
+use compiler.driver.cache.cold_hir_compiled_package_outputs_v1.{
+    ColdHirCompiledPayloadFileV1, ColdHirCompiledPackageArtifactV1,
+    cold_hir_package_publish_from_driver_v1
+}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+use compiler.driver.cache.package_module_index_builder.{
+    PackageModuleIndexBuildAuthorityV1
+}
+use compiler.mir.mir_instruction_graph.{MirModule}
+use compiler.driver.smf.runtime_std_native_sections_v1.{
+    runtime_std_mir_body_payload_v1
+}
+use compiler.driver.cache.package_module_index.{package_module_index_read_current_v1, package_module_index_digest_v1}
+
+fn fixture_file(root: text, name: text, content: text) -> ColdHirCompiledPayloadFileV1:
+    val path = "{root}/{name}"
+    if not sosix_file_atomic_write(path, content):
+        print "FAIL write {name}"
+    ColdHirCompiledPayloadFileV1(path, sha256_text(content), content.len())
+
+fn main() -> i64:
+    val root = "build/test/cold-hir-v3-publish-native"
+    val files = "{root}/files"
+    val cache = "{root}/cache"
+    if not sosix_dir_create_all(files) or not sosix_dir_create_all(cache):
+        return 2
+    val source_content = "source-a"
+    val source_digest = sha256_text(source_content)
+    val source = CompileSourceInventoryEntryV1(
+        "src/a.spl", source_digest, source_digest, source_digest,
+        source_digest, source_digest, source_content.len())
+    val extra_digest = sha256_text("source-b")
+    val extra = CompileSourceInventoryEntryV1("src/b.spl",
+        extra_digest, extra_digest, extra_digest, extra_digest, extra_digest, 8)
+    val inventory = CompileSourceInventoryV1(1, 1, [source, extra])
+    val inventory_digest = compile_source_inventory_digest_v1(inventory)
+    var authority = PackageModuleIndexBuildAuthorityV1(
+        sha256_text("producer"), "root", "revision", "commit", "tree",
+        inventory_digest, ConfigVariantKeyV1(
+            "aarch64-unknown-linux-gnu", "llvm", [], "debug", "abi-v1", [], []))
+    authority.scope_entry_source_identity = "src/a.spl"
+    val abi = "typed-abi-a"
+    val abi_digest = sha256_text(abi)
+    val seed = ColdHirSemanticSeedV1("a", "src/a.spl", source_digest,
+        inventory_digest, abi_digest, [])
+    val interface_content = "symbol|a|module|{abi_digest}|{abi_digest}"
+    val typed = ColdHirTypedReceiptV1(seed, abi, interface_content)
+    val objectless = ColdHirNativeObjectArtifactV1(
+        "a", "", 0, "none", "", "")
+    val export_file = fixture_file(files, "export", "export-a")
+    val initializer_file = fixture_file(files, "initializer", "init-a")
+    val provider_file = fixture_file(files, "provider", "provider-a")
+    val generated_file = fixture_file(files, "generated", "")
+    val mir_content = runtime_std_mir_body_payload_v1(
+        MirModule("a", {}, {}, {}, {}), "src/a.spl",
+        source_digest).unwrap().content
+    val mir_file = fixture_file(files, "mir", mir_content)
+    val witness = sha256_text("simple-cold-hir-source-witness-v1|" +
+        "{inventory_digest}|revision|commit|tree|9:src/a.spl|" +
+        "{source_digest}|{source_content.len()}")
+    val action_key = sha256_text("simple-cold-hir-semantic-action-v1|" +
+        "{abi_digest}|{witness}|{mir_file.digest}")
+    val action_text = "action|{action_key}|compile-semantic|a|{mir_file.digest}"
+    val action_file = fixture_file(files, "action", action_text)
+    val artifact = ColdHirCompiledPackageArtifactV1(
+        "a", "package-a", export_file, initializer_file, provider_file,
+        generated_file, mir_file, action_file, "")
+    val published = cold_hir_package_publish_from_driver_v1(
+        cache, "", [typed], [objectless], inventory, authority, [artifact])
+    if published.is_err():
+        print "FAIL publication: {published.unwrap_err()}"
+        return 10
+    val generation = published.unwrap()
+    if generation.schema_version != 3 or
+            generation.scope_entry_source_identity != "src/a.spl" or
+            generation.entries.len() != 1 or
+            generation.inventory_digest != inventory_digest:
+        return 11
+    val current = package_module_index_read_current_v1(cache)
+    if not current.valid or current.generation == nil or current.digest != package_module_index_digest_v1(generation):
+        print "FAIL CURRENT readback: {current.reason}"
+        return 12
+    val restored = current.generation.unwrap()
+    if restored.schema_version != 3 or
+            restored.scope_entry_source_identity != "src/a.spl" or
+            restored.entries.len() != 1 or
+            restored.inventory_digest != inventory_digest:
+        return 13
+    print "PASS V3 scoped graph publication and CURRENT readback"
+    0

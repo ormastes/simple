@@ -661,3 +661,19 @@ The array-aware SOSIX writer replaces per-byte FFI staging. A focused 30-pair na
 ### 2026-10-11 native action receipt follow-up
 
 The first no-stub native receipt fixture exposed a temporary-text `rt_len` ABI failure in action digest calculation. Hashing the canonical encoded bytes through `sha256_u8_hex` lets the 48-module Stage2 LLVM fixture publish and read back a receipt, converge an identical publisher, reject a conflicting object and missing CAS authority, preserve the original receipt, and compare the shadow result. See [the native evidence](../../../09_report/compiler/target6_action_receipt_native_2026-10-11.md) and [the general ABI bug](../../../08_tracking/bug/target6_action_digest_temporary_text_len_abi_2026-10-11.md). This closes a focused action-receipt gate, not full V3 graph publication or native performance qualification.
+
+### 2026-10-11 first V3 publication native fixture attempt
+
+The compiled package output owner now routes bounded emitted-file reads through
+the SOSIX host facade. A focused native fixture builds a two-source frozen
+inventory, one reached V3 entry, emitted facet/MIR/action files, and checks
+CURRENT readback after `cold_hir_package_publish_from_driver_v1`. The
+fixture is authored but has no executable PASS: the admitted Stage2 no-stub LLVM
+build selected 525 modules and failed before MIR lowering with `E-MONO-033`
+(33 unspecialized generic call sites in the transitive compiler closure).
+See [the blocker](../../../08_tracking/bug/target6_v3_publication_native_monomorphization_2026-10-11.md).
+
+Next: resolve or narrow that native closure, run the fixture to a V3 CURRENT
+readback, then exercise the full CLI warm path and matched p95/RSS cohorts.
+Item 6 remains open; this failure does not qualify a publication or performance
+claim.
