@@ -967,19 +967,20 @@ jobs:
   windows-retained-stage2-diagnostic:
     if: github.event_name == 'workflow_dispatch' && inputs.diagnose_windows_collector
     runs-on: windows-latest
-    timeout-minutes: 65
+    timeout-minutes: 15
     permissions:
       contents: read
       actions: read
     steps:
-      - name: Validate diagnostic selector
+      - name: Validate strict-link diagnostic selector
         shell: bash
         run: test '${{ inputs.native_lane }}' = windows-cranelift
-      - name: Select placeholder checkout
+      - name: Configure placeholder checkout
         shell: bash
         run: git config --global core.symlinks false
       - uses: actions/checkout@v4
         with:
+          ref: 82bba68602c2cff2b87f42b0f5ae8a54f1d14b8b
           persist-credentials: false
       - uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -993,113 +994,70 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
-          run-id: 38179137633
-          name: windows-retained-stage2-UNADMITTED-285800bb04e9f3d16c3658beb60cb02643f1e45a
-          path: ${{ runner.temp }}/previous-windows-stage2
-      - name: Restore actual producer cache and select bounded workers
+          run-id: 38181216807
+          name: windows-retained-stage2-UNADMITTED-5686ba52a9d0961c3c7c31d5711d3fcc5db51a42
+          path: ${{ runner.temp }}/ready-windows-stage2
+      - name: Strict canonical startup and link only
         shell: bash
         run: |
           set -eu
-          export STAGE2_OUT="$RUNNER_TEMP/windows-retained-stage2" PREVIOUS_STAGE2="$RUNNER_TEMP/previous-windows-stage2"
-          python - <<'PYCACHE'
-          import ctypes as c,hashlib,json,os,shutil,struct
+          export LINK_OUT="$RUNNER_TEMP/windows-strict-link"
+          export READY_OBJECTS="$RUNNER_TEMP/ready-windows-stage2/native-objects-JhCjVy"
+          export RETAINED_RUNTIME="$RUNNER_TEMP/retained-windows-seed/files/src/compiler_rust/target/bootstrap/simple_native_all.lib"
+          python - <<'PYSTRICT'
+          import hashlib, json, os, re, subprocess, time
           from pathlib import Path
-          out=Path(os.environ['STAGE2_OUT']); old=Path(os.environ['PREVIOUS_STAGE2']);out.mkdir(parents=True,exist_ok=True)
-          src=old/'native-cache'; files=sorted(src.rglob('*.o')); rows=[]
-          for f in files:
-              data=f.read_bytes()
-              if len(data)<20 or struct.unpack_from('<H',data)[0]!=0x8664:raise RuntimeError('not retained x64 COFF cache')
-              rows.append((str(f.relative_to(old)).replace('\\','/'),hashlib.sha256(data).hexdigest()))
-          tree=hashlib.sha256(''.join(path+' '+sha+'\n' for path,sha in rows).encode()).hexdigest()
-          if len(rows)!=578 or tree!='597f3b4ae5410ea92e4e45d4999a7cae1670a75ec6c780557757a467a5fe0d5e':raise RuntimeError('original cache hash/count mismatch')
-          if (src/'scope-6ddd52833de1cbde/.cache_scope').read_text().strip()!='lane=default':raise RuntimeError('cache lane changed')
-          shutil.copytree(src,out/'native-cache')
-          class Memory(c.Structure):
-              _fields_=[('length',c.c_uint32),('load',c.c_uint32)]+[(name,c.c_uint64) for name in ('total','available','page_total','page_available','virtual_total','virtual_available','extended')]
-          m=Memory();m.length=c.sizeof(m)
-          if not c.windll.kernel32.GlobalMemoryStatusEx(c.byref(m)):raise RuntimeError('RAM receipt unavailable')
-          cpu=os.cpu_count() or 1;workers=2 if cpu>=2 and m.available>=12*1024**3 else 1
-          (out/'workers.txt').write_text(str(workers))
-          receipt={'restored_run':38179137633,'cache_entries':len(rows),'cache_tree_sha256':tree,'cpu':cpu,'total_ram':m.total,'available_ram':m.available,'workers':workers,'low_memory':workers==1,'admission':'producer_revalidates_expected_source_target_layout_keys; not synthesized'}
-          (out/'cache-resource.json').write_text(json.dumps(receipt,indent=2)+'\n')
-          PYCACHE
-      - name: Verify retained bytes and actual native tools
-        shell: bash
-        run: |
-          set -eu
-          out="$RUNNER_TEMP/windows-retained-stage2"
-          mkdir -p "$out"
-          export CONTINUATION_DIR="$out" RETAINED_DIR="$RUNNER_TEMP/retained-windows-seed"
-          python - <<'PYRECEIPT'
-          import hashlib,json,os,shutil,subprocess
-          from pathlib import Path
-          out=Path(os.environ['CONTINUATION_DIR']); root=Path(os.environ['RETAINED_DIR'])
-          inputs=[('files/src/compiler_rust/target/bootstrap/simple.exe',17156096,'c37ff8271281431a46f55a5413df45b9e8ef00deff55e3467b6a817319695531'),('files/src/compiler_rust/target/bootstrap/simple_native_all.lib',97443374,'19960cf36d947e7b9989f62f84898716a4038461033a526eee51c621674467b0')]
-          result={'admission':'UNADMITTED_DIAGNOSTIC','retained_run':38174655243,'source_sha':os.environ['GITHUB_SHA'],'inputs':[],'tools':[]}
-          try:
-              for rel,size,expected in inputs:
-                  f=root/rel; actual=hashlib.file_digest(f.open('rb'),'sha256').hexdigest()
-                  result['inputs'].append({'path':rel,'size':f.stat().st_size,'sha256':actual})
-                  if actual!=expected or f.stat().st_size!=size: raise RuntimeError('retained input mismatch')
-              for name in ('clang-cl.exe','lib.exe','llvm-objcopy.exe','llvm-nm.exe'):
-                  found=shutil.which(name)
-                  result['tools'].append({'name':name,'path':found,'sha256':hashlib.file_digest(open(found,'rb'),'sha256').hexdigest() if found else None})
-                  if not found: raise RuntimeError('missing native tool '+name)
-              actual_link=Path(os.environ['VCToolsInstallDir'])/'bin/Hostx64/x64/link.exe'
-              result['tools'].append({'name':'MSVC link.exe','path':str(actual_link),'sha256':hashlib.file_digest(actual_link.open('rb'),'sha256').hexdigest()})
-              for key in ('INCLUDE','LIB','SystemRoot'):
-                  value=os.environ.get(key) or os.environ.get(key.upper())
-                  result[key+'_present']=bool(value)
-                  if not value: raise RuntimeError('missing SDK environment '+key)
-              result['status']='complete'
-          finally:
-              (out/'inputs-tools.json').write_text(json.dumps(result,indent=2)+'\n')
-          PYRECEIPT
-      - name: Compile retained-seed Stage2 archive with cache preservation
-        shell: bash
-        run: |
-          set -eu
-          out="$RUNNER_TEMP/windows-retained-stage2"
-          root=$(python -c 'import os; print(os.getcwd(), end="")')
-          seed="$RUNNER_TEMP/retained-windows-seed/files/src/compiler_rust/target/bootstrap/simple.exe"
-          runtime="$RUNNER_TEMP/retained-windows-seed/files/src/compiler_rust/target/bootstrap"
-          export STAGE2_OUT="$out"
-          python - <<'PYCOMPOSITION'
-          import hashlib,json,os,shutil,re
-          from pathlib import Path
-          out=Path(os.environ['STAGE2_OUT']); manifest=Path('src/compiler/simple.sdn'); text=manifest.read_text()
-          match=re.search(r'compiler_backends:\s*\n\s+cuda:\s*\n\s+enabled: (true|false)\s*\n\s+placement: (static|dynamic)',text)
-          if not match: raise RuntimeError('canonical CUDA selection missing')
-          enabled,placement=match.groups()
-          selected=Path('src/plugins/backend_registry/selected_cuda_backend.spl') if enabled=='true' and placement=='static' else Path('src/compositions/cuda_'+('dynamic' if enabled=='true' else 'disabled')+'/plugins/backend_registry/selected_cuda_backend.spl')
-          target=out/'cuda-composition/plugins/backend_registry/selected_cuda_backend.spl';target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(selected,target)
-          authority={'enabled':enabled,'placement':placement,'manifest_sha256':hashlib.sha256(manifest.read_bytes()).hexdigest(),'selected_path':str(selected),'selected_sha256':hashlib.sha256(selected.read_bytes()).hexdigest(),'copy_sha256':hashlib.sha256(target.read_bytes()).hexdigest(),'k1':'llvm-cranelift','entry':'src/app/cli/bootstrap_main.spl'}
-          if authority['selected_sha256']!=authority['copy_sha256']:raise RuntimeError('composition mismatch')
-          (out/'composition.json').write_text(json.dumps(authority,indent=2)+'\n')
-          PYCOMPOSITION
-          source scripts/bootstrap/bootstrap-logged-process.shs
-          workers=$(cat "$out/workers.txt")
-          memory_args=()
-          if [ "$workers" = 1 ]; then memory_args=(--low-memory); fi
-          export BOOTSTRAP_LOGGED_PROCESS_TIMEOUT_SECONDS=3600 BOOTSTRAP_LOGGED_PROCESS_MAX_BYTES=67108864
-          SYSTEMROOT=${SYSTEMROOT:-${SystemRoot:-}}
-          COMSPEC=${COMSPEC:-${ComSpec:-}}
-          status=0
-          bootstrap_logged_windows_cargo "$root" "$out/native-build.log" env -i "SYSTEMROOT=$SYSTEMROOT" "COMSPEC=$COMSPEC" "PATH=$PATH" "INCLUDE=$INCLUDE" "LIB=$LIB" "LIBPATH=${LIBPATH:-}" "TMP=$RUNNER_TEMP" "TEMP=$RUNNER_TEMP" SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_KERNEL_K1_POLICY=llvm-cranelift SIMPLE_LINKER_FLAVOR=msvc SIMPLE_WINDOWS_ABI=msvc CC=clang-cl CXX=clang-cl "$seed" native-build --target x86_64-pc-windows-msvc --backend cranelift --runtime-bundle core-c-bootstrap --source src/compositions/kernel_llvm_cranelift --source "$out/cuda-composition" --source src/compiler --source src/app --source src/lib --source src/os --source src/plugins --entry-closure --threads "$workers" "${memory_args[@]}" --cache-dir "$out/native-cache" --mode one-binary --entry src/app/cli/bootstrap_main.spl --runtime-path "$runtime" --emit-archive -o "$out/stage2.lib" || status=$?
-          printf 'native_build_status=%s\n' "$status" >"$out/result.env"
-          test "$status" = 0
-          python - <<'PYARCHIVE'
-          import hashlib,json,os
-          from pathlib import Path
-          out=Path(os.environ['STAGE2_OUT']); f=out/'stage2.lib'
-          with f.open('rb') as stream:
-              if stream.read(8)!=b'!<arch>\n':raise RuntimeError('not native archive')
-          (out/'archive.json').write_text(json.dumps({'size':f.stat().st_size,'sha256':hashlib.file_digest(f.open('rb'),'sha256').hexdigest(),'status':'archive_only_unadmitted','full_provider_link':'UNEXECUTED'},indent=2)+'\n')
-          PYARCHIVE
+          
+          out = Path(os.environ['LINK_OUT']); out.mkdir(parents=True, exist_ok=True)
+          ready = Path(os.environ['READY_OBJECTS'])
+          runtime = Path(os.environ['RETAINED_RUNTIME'])
+          objects = [ready / ('mod_%d.o' % i) for i in range(1238)] + [ready / '_init_all.o']
+          assert len(list(ready.glob('*.o'))) == 1239
+          rows = [(f.name, f.stat().st_size, hashlib.sha256(f.read_bytes()).hexdigest()) for f in objects]
+          tree = hashlib.sha256(''.join('%s %d %s\n' % row for row in rows).encode()).hexdigest()
+          assert tree == 'b09288bf5987b0e3f7ab8bd82a97f00255a5a7d58e54af744393f7d483630f2e'
+          assert hashlib.sha256(runtime.read_bytes()).hexdigest() == '19960cf36d947e7b9989f62f84898716a4038461033a526eee51c621674467b0'
+          def run(name, argv, deadline=180):
+              started = time.monotonic()
+              try:
+                  r = subprocess.run(argv, capture_output=True, timeout=deadline)
+                  code, stdout, stderr = r.returncode, r.stdout, r.stderr
+              except subprocess.TimeoutExpired as e:
+                  code, stdout, stderr = 124, e.stdout or b'', e.stderr or b''
+              (out / (name+'.stdout')).write_bytes(stdout); (out / (name+'.stderr')).write_bytes(stderr)
+              item = {'argv':argv, 'exit':code, 'seconds':time.monotonic()-started}
+              (out / (name+'.json')).write_text(json.dumps(item, indent=2)+'\n')
+              return code, stdout+stderr
+          rsp = out/'objects.rsp'; rsp.write_text(''.join('"'+str(f).replace('\\','/')+'"\n' for f in objects))
+          archive = out/'stage2-ready.lib'
+          code, _ = run('archive', ['llvm-ar.exe','rcs',str(archive),'@'+str(rsp)])
+          assert code == 0
+          owner = subprocess.check_output(['git','show','82bba68602c2cff2b87f42b0f5ae8a54f1d14b8b:src/compiler_rust/compiler/src/pipeline/native_project/linker.rs'], text=True)
+          start = owner.index('let stub_code = if is_msvc'); a = owner.index('r#"',start)+3; b = owner.index('"#',a)
+          startup = owner[a:b]
+          assert hashlib.sha256(startup.encode()).hexdigest() == '5764ac81376ef2583c37e24b806dc89a3e985072cc1e406a9a41814f118accea'
+          (out/'canonical-main-msvc.c').write_text(startup, newline='')
+          defs = subprocess.check_output(['llvm-nm.exe','--defined-only','--extern-only',str(runtime)],text=True)
+          lifecycle_kinds = {name: [l.split()[-2] for l in defs.splitlines() if len(l.split()) >= 2 and l.split()[-1] == name] for name in ['__simple_runtime_init','__simple_runtime_shutdown','rt_set_args_wide']}
+          lifecycle = {name: 'T' in kinds for name, kinds in lifecycle_kinds.items()}
+          code, _ = run('startup', ['clang-cl.exe','/nologo','/c',str(out/'canonical-main-msvc.c'),'/Fo'+str(out/'startup.obj')])
+          assert code == 0
+          config = subprocess.check_output(['git','show','82bba68602c2cff2b87f42b0f5ae8a54f1d14b8b:src/compiler_rust/common/src/platform/link_config.rs'],text=True)
+          block = config.split('fn windows() -> Self {',1)[1].split('library_search_paths:',1)[0]
+          libs = [name+'.lib' for name in re.findall(r'"([A-Za-z0-9_]+)"', block)]
+          exe = out/'simple-stage2.exe'
+          code, log = run('strict-link', ['clang-cl.exe','/nologo',str(out/'startup.obj'),str(archive),str(runtime),'/Fe'+str(exe),'/link','/SUBSYSTEM:CONSOLE','/OPT:REF,ICF']+libs)
+          unresolved = sorted(set(re.findall(rb'unresolved external symbol ([^\r\n]+)',log)))
+          receipt = {'admission':'UNADMITTED_DIAGNOSTIC','object_count':1239,'module_count':1238,'object_tree_sha256':tree,'runtime_sha256':hashlib.sha256(runtime.read_bytes()).hexdigest(),'archive_size':archive.stat().st_size,'archive_sha256':hashlib.sha256(archive.read_bytes()).hexdigest(),'link_exit':code,'lifecycle_strong_definitions':lifecycle,'lifecycle_matched_nm_kinds':lifecycle_kinds,'unresolved_unique':[s.decode(errors='replace') for s in unresolved],'runtime_execution_permitted':code == 0 and all(lifecycle.values())}
+          (out/'link-receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          if code == 0 and all(lifecycle.values()):
+              run('compiler-version',[str(exe),'--version'],30)
+          print(json.dumps({'link_exit':code,'unresolved_unique_count':len(unresolved),'lifecycle':lifecycle,'execution_permitted':receipt['runtime_execution_permitted']}))
+          PYSTRICT
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-retained-stage2-UNADMITTED-${{ github.sha }}
-          path: ${{ runner.temp }}/windows-retained-stage2/
-          include-hidden-files: true
+          name: windows-strict-link-UNADMITTED-${{ github.sha }}
+          path: ${{ runner.temp }}/windows-strict-link/
           if-no-files-found: error
+          retention-days: 7
