@@ -1,0 +1,136 @@
+# Real managed admission + actual archive/codec + original body walkers.
+use compiler.driver.cache.driver_hir_post_validation_fact_lease_v1.*
+use compiler.driver.cache.driver_hir_managed_runtime_selection_v1.*
+use compiler.driver.cache.hir_body_typecheck_lease_v1.*
+use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1, hir_cache_clear_last_warnings}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.common.config.{Logger}
+use compiler.semantics.layer_eq_validation.{validate_layer_eq_selected_declarations_v1}
+use compiler.semantics.effect_validation.{validate_effect_contract_facts_v1}
+use compiler.semantics.rt_criticality_validation.{validate_rt_criticality_facts_v1}
+use compiler.semantics.rt_criticality.{RT_EFFECT_ALLOC}
+use compiler.semantics.aspect_validation.{validate_aspect_join_points_v1}
+use compiler.frontend.rt_criticality_registry.{rt_criticality_declare}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use std.common.crypto.sha256.{sha256_text}
+use std.env.{env_get}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+fn declarations(archive: HirBodyArchiveV1) -> Result<DriverHirPostValidationDeclarationsV1, text>:
+    if not transient_scope_begin(): return Err("fixture declaration lease unavailable")
+    val result = driver_hir_post_validation_declarations_in_owned_scope_v1(archive.input.module_name, archive)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not cache_owned or not ended: panic("fixture declaration ownership")
+    result
+
+fn bodies(archive: HirBodyArchiveV1, declared: DriverHirPostValidationDeclarationsV1,
+        selected: [text]) -> Result<DriverHirPostValidationBodyFactsV1, text>:
+    if not transient_scope_begin(): return Err("fixture body lease unavailable")
+    val result = driver_hir_post_validation_body_facts_in_owned_scope_v1(archive.input.module_name,
+        archive, selected, declared.effect_struct_sizes, declared.effect_fn_names, declared.rt_declarations, 9)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not cache_owned or not ended: panic("fixture body ownership")
+    result
+
+fn main() -> i64:
+    val selection_result = driver_hir_capture_managed_runtime_selection_v1("llvm",
+        env_get("SIMPLE_NATIVE_BUILD_TARGET"), env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE"))
+    if selection_result.is_err(): return 1
+    val selection = selection_result.unwrap()
+    val path = "test/fixtures/compiler/hir_post_validation_facts/provider.spl"
+    val name = "hir_post_validation_facts.provider"
+    val source = file_read_nullable(path) ?? ""
+    if source == "" or selection.producer_header == "" or env_get("SIMPLE_HIR_LEASE_CLOSURE_DIGEST").len() != 64: return 2
+    val parsed = parse_full_frontend(source, path, name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    val module = lowering.lower_parser_module_unstub(parsed, false)
+    rt_criticality_declare(path, "array_value", "critical")
+    val input = HirBodyArchiveInputV1(source_path: path, module_name: name, is_entry: false,
+        closure_digest: env_get("SIMPLE_HIR_LEASE_CLOSURE_DIGEST"),
+        runtime_provider_receipt_path: selection.provider.snapshot.path,
+        runtime_provider_digest: selection.provider.snapshot.digest,
+        producer_header: selection.producer_header, stage: "lowered-unresolved-v1",
+        provider_selection_digest: selection.selection_digest,
+        source_content_digest: sha256_text(source), source_authored_path: path)
+    val archived = hir_body_archive_store_v1(input, module, ["real post-HIR lowering warning"])
+    if archived.is_err(): return 3
+    val archive = archived.unwrap()
+    val declared_result = declarations(archive)
+    if declared_result.is_err(): return 4
+    val declared = declared_result.unwrap()
+    var checks = 1
+    if declared.value_layout.structs.len() != 3 or not declared.module_identities.contains(path) or
+            declared.archive_key != archive.archive_key or declared.body_digest != archive.body_digest: return 5
+    checks = checks + 1
+    if not declared.layer_names.contains("View") or not declared.layer_names.contains("Device") or
+            not declared.layer_names.contains("Blob"): return 6
+    checks = checks + 1
+    var blob_size = 0
+    for struct_ in module.structs.values():
+        if struct_.name == "Blob": blob_size = declared.effect_struct_sizes[struct_.symbol.id] ?? 0
+    if blob_size != 24: return 7
+    checks = checks + 1
+    if declared.lowering_warnings != ["real post-HIR lowering warning"] or transient_array_scope_state_v1() != 0: return 8
+    checks = checks + 1
+    val rows_result = bodies(archive, declared, ["View", "Device"])
+    if rows_result.is_err(): return 9
+    val rows = rows_result.unwrap()
+    if rows.layer_layouts.len() != 2: return 10
+    for layout in rows.layer_layouts:
+        if layout.total_size != 8 or layout.fields.len() != 1 or layout.fields[0].offset != 0: return 11
+    if validate_layer_eq_selected_declarations_v1(declared.module_identities, declared.layer_names, rows.layer_layouts).len() != 0: return 12
+    checks = checks + 1
+    val effects = validate_effect_contract_facts_v1(declared.module_identities, rows.effect_functions)
+    if effects.len() != 1 or not effects[0].contains("24 bytes (24 from callees)"): return 13
+    checks = checks + 1
+    var allocation_units = 0
+    for row in rows.rt_functions:
+        if row.declaration.name == "array_value": allocation_units = row.effect_units[RT_EFFECT_ALLOC] ?? 0
+    val rt = validate_rt_criticality_facts_v1(declared.module_identities, rows.rt_functions)
+    if allocation_units != 1 or rt.len() != 1 or not rt[0].message.contains("RT-E-UNBOUNDED-ALLOCATION"): return 14
+    checks = checks + 1
+    var ids: Dict<text, bool> = {}
+    for identity in declared.module_identities: ids[identity] = true
+    if rows.forwards.len() < 1 or validate_aspect_join_points_v1(ids, rows.forwards).len() != 0: return 15
+    var found = false
+    var point_id = 9
+    for point in rows.forwards:
+        if point.logical_join_point_id != point_id: return 16
+        if point.source_symbol == "submit_view": found = true
+        point_id = point_id + 1
+    if not found: return 17
+    checks = checks + 1
+    if rows.lowering_warnings != declared.lowering_warnings or rows.archive_key != archive.archive_key or
+            transient_array_scope_state_v1() != 0: return 18
+    checks = checks + 1
+    if not bodies(archive, declared, ["AbsentMeasuredType"]).is_err() or transient_array_scope_state_v1() != 0: return 19
+    checks = checks + 1
+    if not transient_scope_begin() or not transient_scope_pause(): return 20
+    val refused = driver_hir_post_validation_declarations_in_owned_scope_v1(name, archive).is_err()
+    if not refused or transient_array_scope_state_v1() != 2 or not transient_scope_end(): return 21
+    checks = checks + 1
+    var edited = archive
+    var edited_input = input
+    edited_input.producer_header = "unadmitted producer"
+    edited.input = edited_input
+    if not declarations(edited).is_err() or transient_array_scope_state_v1() != 0: return 22
+    checks = checks + 1
+    var default_present = false
+    for struct_ in module.structs.values():
+        if struct_.name == "View": default_present = struct_.fields[0].has_default
+    if not default_present: return 23
+    checks = checks + 1
+    if checks != 14: return 24
+    print "HIR post-validation fact leases: {checks} checks passed"
+    0
