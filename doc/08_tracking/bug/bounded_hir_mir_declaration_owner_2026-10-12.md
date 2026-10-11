@@ -155,3 +155,15 @@ no longer go through the limited legacy field relocator. The unchanged ordinary
 route remains the control. Native guard17 constructs an imported class while
 omitting its typed callable field, then invokes the real captured-global default
 and requires12. Seventeen native guards and nine unit cases are authored, UNRUN.
+
+
+The complete declaration handoff must detach the two body-bearing legacy
+parameter-default registry roots before MIR publication promotes global
+registries. The selected consumer uses immutable expression descriptors; prior
+compatibility HirParam.default rows are not needed there. The narrow detach API
+preserves all return/type/link registries and does not run on the ordinary route.
+It does not claim reclamation of previously promoted objects. Two actual-frontend
+lifetime controls check type metadata survives and ordinary registration remains
+usable after detachment. Both are UNRUN. The final orchestration remains a draft
+until the genuine driver prerequisite and mono final policy/read owners exist;
+no placeholder reader, production activation, or RSS claim is supplied.
