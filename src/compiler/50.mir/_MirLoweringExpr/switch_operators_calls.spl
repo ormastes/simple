@@ -5972,12 +5972,139 @@ impl MirLowering:
                 return true
         false
 
-    me lower_lambda_value(lam: HirExpr) -> MirOperand?:
-        # Inferred HIR function annotations do not select a physical ABI.
-        # Builtin callbacks still call this entry with their word signatures.
-        self.lower_lambda_value_for_type(lam, nil)
+    me callable_has_any_word_abi(type_: HirType) -> bool:
+        match type_.kind:
+            case HirTypeKind.Function(params, result, effects):
+                if effects.len() != 0: return false
+                if result.kind != HirTypeKind.Any: return false
+                for param in params:
+                    if param.kind != HirTypeKind.Any: return false
+                return true
+            case _: return false
 
-    me lower_lambda_value_for_type(lam: HirExpr, declared: HirType?) -> MirOperand?:
+    me any_callable_scalar_type_supported(type_: HirType) -> bool:
+        match type_.kind:
+            case HirTypeKind.Int(64, true) | HirTypeKind.Float(64) | HirTypeKind.Bool | HirTypeKind.Any: true
+            case _: false
+
+    me any_callable_lambda_body_supported(body: HirExpr) -> bool:
+        # Admit the scalar expression forms used by the contextual lambda
+        # bridge, including calls with a proven scalar signature and no
+        # effects. Throws/await/assignments need separate protocol admission.
+        match body.kind:
+            case HirExprKind.IntLit(_, _) | HirExprKind.FloatLit(_, _) | HirExprKind.BoolLit(_) | HirExprKind.NilLit:
+                true
+            case HirExprKind.Var(_) | HirExprKind.NamedVar(_, _):
+                if val type_ = self.enum_match_expr_type(body):
+                    match type_.kind:
+                        case HirTypeKind.Function(_, _, _): return false
+                        case _: ()
+                true
+            case HirExprKind.StringLit(_, interps):
+                if val interpolation_items = interps:
+                    for item in interpolation_items:
+                        if not self.any_callable_lambda_body_supported(item.expr): return false
+                true
+            case HirExprKind.Binary(op, left, right):
+                match op:
+                    case Add | Eq | NotEq:
+                        self.any_callable_lambda_body_supported(left) and self.any_callable_lambda_body_supported(right)
+                    case _: false
+            case HirExprKind.Call(callee, args):
+                if val callable = self.enum_match_expr_type(callee):
+                    match callable.kind:
+                        case HirTypeKind.Function(params, result, effects):
+                            if effects.len() != 0 or params.len() != args.len(): return false
+                            if not self.any_callable_scalar_type_supported(result): return false
+                            for param in params:
+                                if not self.any_callable_scalar_type_supported(param): return false
+                            for arg in args:
+                                if arg.has_name or not self.any_callable_lambda_body_supported(arg.value): return false
+                            return true
+                        case _: ()
+                false
+            case _: false
+
+    me lower_any_callable_argument(value: HirExpr, expected: HirType) -> MirOperand?:
+        # The expected callable supplies static arity authority. Never invoke
+        # an arbitrary Any/raw pointer as if it used this tagged ABI.
+        var expected_arity = -1
+        match expected.kind:
+            case HirTypeKind.Function(params, _, _): expected_arity = params.len()
+            case _: return nil
+        match value.kind:
+            case HirExprKind.Lambda(params, body, _):
+                if params.len() != expected_arity:
+                    self.error_fatal("dynamic callback arity differs from its inferred callable slot", Some(value.span))
+                    return nil
+                if value.has_type_:
+                    match value.type_.kind:
+                        case HirTypeKind.Function(_, _, effects):
+                            if effects.len() != 0:
+                                self.error_fatal("dynamic callback effect protocol has no admitted adapter", Some(value.span))
+                                return nil
+                        case _: ()
+                if not self.any_callable_lambda_body_supported(body):
+                    self.error_fatal("dynamic callback lambda body has no admitted scalar effect adapter", Some(value.span))
+                    return nil
+                for param in params:
+                    match param.type_.kind:
+                        case HirTypeKind.Infer(_, _): ()
+                        case _:
+                            if not self.any_callable_scalar_type_supported(param.type_):
+                                self.error_fatal("dynamic callback parameter type has no admitted tagged scalar adapter", Some(value.span))
+                                return nil
+                return self.lower_lambda_value(value, true)
+            case _: ()
+        val actual_type = self.enum_match_expr_type(value)
+        if val callable_type = actual_type:
+            match callable_type.kind:
+                case HirTypeKind.Function(params, result, effects):
+                    if effects.len() != 0:
+                        self.error_fatal("dynamic callback effect protocol has no admitted adapter", Some(value.span))
+                        return nil
+                    if params.len() != expected_arity:
+                        self.error_fatal("dynamic callback arity differs from its inferred callable slot", Some(value.span))
+                        return nil
+                    if self.callable_has_any_word_abi(callable_type):
+                        val existing = self.lower_expr(value)
+                        return mir_operand_copy(existing)
+                    if not self.any_callable_scalar_type_supported(result):
+                        self.error_fatal("dynamic callback result type has no admitted tagged scalar adapter", Some(value.span))
+                        return nil
+                    var adapter_params: [HirParam] = []
+                    var adapter_args: [HirCallArg] = []
+                    var index = 0
+                    while index < params.len():
+                        if not self.any_callable_scalar_type_supported(params[index]):
+                            self.error_fatal("dynamic callback parameter type has no admitted tagged scalar adapter", Some(value.span))
+                            return nil
+                        val symbol = SymbolId(id: 1060000000 + _mir_lambda_lift_counter * 1024 + index)
+                        val arg_expr = HirExpr(kind: HirExprKind.Var(symbol), has_type_: true, type_: params[index], span: value.span)
+                        adapter_params = adapter_params.push(HirParam(symbol: symbol, name: "__any_arg_{index}", type_: params[index], has_default: false, default: arg_expr, span: value.span, is_mutable: false))
+                        adapter_args = adapter_args.push(HirCallArg(has_name: false, name: "", value: arg_expr, span: value.span))
+                        index = index + 1
+                    val body = HirExpr(kind: HirExprKind.Call(value, adapter_args), has_type_: true, type_: result, span: value.span)
+                    val adapter = HirExpr(kind: HirExprKind.Lambda(adapter_params, body, []), has_type_: false, type_: expected, span: value.span)
+                    return self.lower_lambda_value(adapter, true)
+                case _: ()
+        self.error_fatal("dynamic callback requires a callable with proven arity and tagged ABI", Some(value.span))
+        nil
+
+    me lower_lambda_value(lam: HirExpr, runtime_any_abi: bool = false) -> MirOperand?:
+        # Builtin word callbacks and contextual tagged callbacks have distinct
+        # boundaries. Declaration-owned slots use the typed entry below.
+        self.lower_lambda_value_for_type(lam, nil, runtime_any_abi)
+
+    me lower_lambda_value_for_type(lam: HirExpr, declared: HirType?, runtime_any_abi: bool = false) -> MirOperand?:
+        if runtime_any_abi and declared != nil:
+            self.error_fatal("lambda cannot combine declared and contextual tagged ABI authority", Some(lam.span))
+            return nil
+        if runtime_any_abi:
+            val runtime_bundle = mir_expr_env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
+            if runtime_bundle != "core-c-bootstrap" and runtime_bundle != "core_c_bootstrap" and runtime_bundle != "core-c" and runtime_bundle != "core_c":
+                self.error_fatal("tagged callback adapter requires the admitted core-c-bootstrap runtime owner", Some(lam.span))
+                return nil
         """Materialize a `Lambda` used as a first-class value.
 
         Lifts the lambda to a synthesized top-level MIR function
@@ -6012,10 +6139,16 @@ impl MirLowering:
                     if capture_live.id >= 0:
                         val capture_ty = self.lookup_local_type(capture_live)
                         match capture_ty.kind:
-                            case MirTypeKind.F32 | MirTypeKind.F64:
-                                # Closure slots are raw native words. Float
-                                # captures need a bitcast ABI, not numeric cast.
+                            case MirTypeKind.F64:
+                                if not runtime_any_abi: return nil
+                                capture_syms = capture_syms.push(fsid)
+                            case MirTypeKind.F32:
+                                # No Float32 boxing/environment decoder has
+                                # been admitted for this closure protocol.
                                 return nil
+                            case MirTypeKind.U64:
+                                if runtime_any_abi: return nil
+                                capture_syms = capture_syms.push(fsid)
                             case _:
                                 capture_syms = capture_syms.push(fsid)
                     elif not self.global_symbol_ids.has(fsid):
@@ -6125,10 +6258,20 @@ impl MirLowering:
                 while qi < arity:
                     val psym = param_syms[qi]
                     if psym >= 0:
-                        val parameter_local = LocalId(id: qi + offset)
-                        lw.bind_local(psym, parameter_local)
-                        if declared_return != nil:
-                            lw.remember_local_hir_type(parameter_local.id, declared_params[qi], 0, 0)
+                        var argument_local = LocalId(id: qi + offset)
+                        if runtime_any_abi:
+                            lw.mark_runtime_value_local(argument_local.id)
+                            var argument_hir = params[qi].type_
+                            match argument_hir.kind:
+                                case HirTypeKind.Infer(_, _):
+                                    argument_hir = HirType(kind: HirTypeKind.Any, span: params[qi].span)
+                                case HirTypeKind.Any: ()
+                                case _:
+                                    argument_local = lw.decode_runtime_value(argument_local, lw.lower_type(argument_hir))
+                            lw.remember_local_hir_type(argument_local.id, argument_hir, 0, 0)
+                        elif declared_return != nil:
+                            lw.remember_local_hir_type(argument_local.id, declared_params[qi], 0, 0)
+                        lw.bind_local(psym, argument_local)
                     qi = qi + 1
                 if capture_syms.len() > 0:
                     val env_local = LocalId(id: offset - 1)
@@ -6144,10 +6287,21 @@ impl MirLowering:
                         lw.builder = lb
                         if loaded == nil:
                             return nil
-                        val loaded_local = loaded.unwrap()
+                        var loaded_local = loaded.unwrap()
                         val capture_sid = capture_syms[cap_i]
-                        lw.bind_local(capture_sid, loaded_local)
                         val source_local = self.lambda_binding_local(capture_sid)
+                        if runtime_any_abi and self.lookup_local_type(source_local).kind == MirTypeKind.F64:
+                            lw.mark_runtime_value_local(loaded_local.id)
+                            loaded_local = lw.decode_runtime_value(loaded_local, MirType.f64())
+                        if runtime_any_abi and self.lookup_local_type(source_local).kind == MirTypeKind.Bool:
+                            var capture_builder = lw.builder
+                            loaded_local = capture_builder.emit_cast(mir_operand_copy(loaded_local), MirType.bool())
+                            lw.builder = capture_builder
+                        lw.bind_local(capture_sid, loaded_local)
+                        if val capture_hir = self.find_local_hir_type(source_local.id):
+                            lw.remember_local_hir_type(loaded_local.id, capture_hir, 0, 0)
+                        if self.is_runtime_value_local(source_local.id) and not (runtime_any_abi and self.lookup_local_type(source_local).kind == MirTypeKind.F64):
+                            lw.mark_runtime_value_local(loaded_local.id)
                         val capture_struct = self.struct_value_syms.get(source_local.id)
                         if capture_struct != nil:
                             lw.struct_value_syms[loaded_local.id] = capture_struct ?? ""
@@ -6162,6 +6316,8 @@ impl MirLowering:
                         case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
                             result = lw.option_scalar_payload_of(result)
                         case _: ()
+                elif runtime_any_abi:
+                    result = lw.box_runtime_value(result)
                 self.canonical_type_symbols = lw.canonical_type_symbols
                 self.next_canonical_type_symbol = lw.next_canonical_type_symbol
                 var b2 = lw.builder
@@ -6234,11 +6390,14 @@ impl MirLowering:
                         MirConstValue.Str("rt_closure_set_capture"),
                         MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
                     ))
+                    var capture_value = self.lambda_binding_local(capture_syms[set_i])
+                    if runtime_any_abi and self.lookup_local_type(capture_value).kind == MirTypeKind.F64:
+                        capture_value = self.box_runtime_value(capture_value)
                     var set_b = self.builder
                     val index_local = set_b.emit_const_int(set_i)
                     set_b.emit_call(
                         closure_set,
-                        [mir_operand_copy(closure_local), mir_operand_copy(index_local), mir_operand_copy(self.lambda_binding_local(capture_syms[set_i]))],
+                        [mir_operand_copy(closure_local), mir_operand_copy(index_local), mir_operand_copy(capture_value)],
                         MirType.i64()
                     )
                     self.builder = set_b
@@ -6569,6 +6728,22 @@ impl MirLowering:
                         call_param_types = typed_params
                         indirect_return = Some(typed_return)
                     case _: ()
+        if not is_direct and indirect_return == nil:
+            if val callable_type = self.enum_match_expr_type(callee):
+                match callable_type.kind:
+                    case HirTypeKind.Function(typed_params, typed_return, _):
+                        if not lambda_abi_type_resolved(callable_type):
+                            self.error_fatal("indirect function call has an unresolved ABI type", Some(callee.span))
+                            return self.builder.emit_const_int(0)
+                        if typed_params.len() != args.len():
+                            self.error_fatal("indirect callable argument count differs from declared signature", Some(callee.span))
+                            return self.builder.emit_const_int(0)
+                        call_param_types = typed_params
+                        indirect_return = Some(typed_return)
+                    case HirTypeKind.Any:
+                        self.error_fatal("dynamic callable requires proven arity before indirect emission", Some(callee.span))
+                        return self.builder.emit_const_int(0)
+                    case _: ()
         var direct_text_pointer_bridge = false
         var direct_pair_text_indices: [i64] = []
         var direct_boxed_text_indices: [i64] = []
@@ -6594,6 +6769,12 @@ impl MirLowering:
             direct_arg_index = direct_arg_index + 1
             val arg_value: HirExpr = arg.value
             val arg_kind: HirExprKind = arg_value.kind
+            if current_arg_index < call_param_types.len() and self.callable_has_any_word_abi(call_param_types[current_arg_index]):
+                if val adapted = self.lower_any_callable_argument(arg_value, call_param_types[current_arg_index]):
+                    arg_operands = arg_operands.push(adapted)
+                    continue
+                self.error_fatal("unable to materialize admitted dynamic callback adapter", Some(arg_value.span))
+                return self.lower_expr(HirExpr(kind: HirExprKind.IntLit(0, nil), has_type_: true, type_: HirType(kind: HirTypeKind.Int(64, true), span: arg_value.span), span: arg_value.span))
             val fallback_arg_symbol = SymbolId(id: -1)
             val named_var_disc = _sffi_enum_discriminant(HirExprKind.NamedVar(fallback_arg_symbol, ""))
             var emitted_function = false
@@ -6635,6 +6816,9 @@ impl MirLowering:
                 # the Option handle.
                 if hir_type_is_plain_scalar(declared_param_type):
                     arg_local = self.option_scalar_payload_of(arg_local)
+                    if val argument_hir = self.find_local_hir_type(arg_local.id):
+                        if argument_hir.kind == HirTypeKind.Any and self.is_runtime_value_local(arg_local.id):
+                            arg_local = self.decode_runtime_value(arg_local, self.lower_type(declared_param_type))
                 # Internal Simple text parameters accept the complete text
                 # value. Unwrapping a tagged handle here discards its length.
                 # Keep the existing pointer bridge at extern/unknown owners;
@@ -6867,12 +7051,29 @@ impl MirLowering:
             param_types.push(if indirect_return != nil: self.lower_type(call_param_types[indirect_param_index]) else: MirType.i64())
             indirect_param_index = indirect_param_index + 1
         var ret_type = MirType.i64()
+        var indirect_hir_return: HirType? = indirect_return
+        var indirect_signature_proven = indirect_return != nil
         if val typed_return = indirect_return:
             ret_type = self.lower_type(typed_return)
-        elif callee.has_type_:
-            ret_type = self.lower_type(callee.type_)
+        if not indirect_signature_proven:
+            if val callee_mir = self.local_mir_type_of(callee_local):
+                match callee_mir.kind:
+                    case MirTypeKind.FuncPtr(legacy_signature):
+                        if legacy_signature.params.len() == args.len() and not legacy_signature.is_variadic:
+                            param_types = legacy_signature.params
+                            ret_type = legacy_signature.return_type
+                            indirect_signature_proven = true
+                    case _: ()
+        if not indirect_signature_proven:
+            self.error_fatal("indirect callable lacks a proven function signature", Some(callee.span))
+            return self.lower_expr(HirExpr(kind: HirExprKind.IntLit(0, nil), has_type_: true, type_: HirType(kind: HirTypeKind.Int(64, true), span: callee.span), span: callee.span))
         val sig = MirSignature(params: param_types, return_type: ret_type, is_variadic: false)
-        self.emit_function_value_call(callee_local, arg_operands, sig, ret_type)
+        val indirect_result = self.emit_function_value_call(callee_local, arg_operands, sig, ret_type)
+        if val result_hir = indirect_hir_return:
+            self.remember_local_hir_type(indirect_result.id, result_hir, 0, 0)
+            if result_hir.kind == HirTypeKind.Any:
+                self.mark_runtime_value_local(indirect_result.id)
+        indirect_result
 
     me emit_function_value_call(callee_local: LocalId, arg_operands: [MirOperand], sig: MirSignature, ret_type: MirType) -> LocalId:
         """Call a function-typed VALUE (a local holding either a raw function

@@ -2631,6 +2631,9 @@ impl MirLowering:
                         # `return v` with `v: i64?` from a `-> i64` function
                         # returns the payload, not the Option handle.
                         result = self.option_scalar_payload_of(result)
+                        if val result_hir = self.find_local_hir_type(result.id):
+                            if result_hir.kind == HirTypeKind.Any and self.is_runtime_value_local(result.id):
+                                result = self.decode_runtime_value(result, self.lower_type(found_return))
                     case _:
                         ()
             br = self.builder
@@ -4076,6 +4079,39 @@ impl MirLowering:
                             if les != "":
                                 self.array_element_struct_syms[array_cat_local.id] = les
                         return array_cat_local
+
+                # Only authoritative Any + tagged provenance admits dynamic
+                # arithmetic. Array/text handles alone are not Any evidence.
+                var tagged_any_add = false
+                match op:
+                    case Add:
+                        if val left_hir = self.find_local_hir_type(left_local.id):
+                            if left_hir.kind == HirTypeKind.Any and self.is_runtime_value_local(left_local.id):
+                                tagged_any_add = true
+                        if val right_hir = self.find_local_hir_type(right_local.id):
+                            if right_hir.kind == HirTypeKind.Any and self.is_runtime_value_local(right_local.id):
+                                tagged_any_add = true
+                    case _: ()
+                if tagged_any_add:
+                    val runtime_bundle = mir_expr_env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
+                    if runtime_bundle != "core-c-bootstrap" and runtime_bundle != "core_c_bootstrap" and runtime_bundle != "core-c" and runtime_bundle != "core_c":
+                        self.error_fatal("tagged Any addition requires the admitted core-c-bootstrap runtime owner", Some(expr.span))
+                        return left_local
+                    val tagged_left = self.box_runtime_value(left_local)
+                    val tagged_right = self.box_runtime_value(right_local)
+                    val tagged_add_fn = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_tagged_add"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var tagged_builder = self.builder
+                    val tagged_result = tagged_builder.emit_call(tagged_add_fn, [mir_operand_copy(tagged_left), mir_operand_copy(tagged_right)], MirType.i64())
+                    self.builder = tagged_builder
+                    if val added = tagged_result:
+                        self.mark_runtime_value_local(added.id)
+                        self.remember_local_hir_type(added.id, HirType(kind: HirTypeKind.Any, span: expr.span), 0, 0)
+                        return added
+                    self.error_fatal("unable to emit admitted tagged Any addition", Some(expr.span))
+                    return left_local
 
                 var bin_is_str_concat = false
                 match op:
