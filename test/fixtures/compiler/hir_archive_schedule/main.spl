@@ -30,8 +30,10 @@ fn main() -> i64:
         content: consumer_text, module_name: "schedule_consumer")
     val provider = SourceFile(path: provider_path, authored_path: provider_path,
         content: provider_text, module_name: "schedule_provider")
-    val alias = SourceFile(path: provider_path, authored_path: provider_path,
-        content: provider_text, module_name: "schedule_alias")
+    val alias_loaded = SourceFile.load("./" + provider_path)
+    if alias_loaded.is_err(): return 22
+    val alias = SourceFile(..alias_loaded.unwrap(), module_name: "schedule_alias")
+    if alias.authored_path == provider.authored_path or alias.content != provider_text: return 23
     val builder = ModuleSurfaceBuilder.new()
     if builder.add_parsed(parse_full_frontend(consumer_text, consumer_path, "schedule_consumer", Logger(level: 0)), consumer, 0).is_err(): return 2
     if builder.add_parsed(parse_full_frontend(provider_text, provider_path, "schedule_provider", Logger(level: 0)), provider, 1).is_err(): return 3
@@ -39,8 +41,8 @@ fn main() -> i64:
     val surfaces = ModuleSurfacesByName.empty()
     if builder.finish_into(surfaces) != "": return 5
     val driver = CompilerDriver.create(driver_core_compile_options_default())
-    driver.ctx.source_paths_owner = [consumer_path, provider_path, provider_path]
-    driver.ctx.source_authored_paths_owner = [consumer_path, provider_path, provider_path]
+    driver.ctx.source_paths_owner = [consumer_path, provider_path, alias.path]
+    driver.ctx.source_authored_paths_owner = [consumer_path, provider_path, alias.authored_path]
     driver.ctx.source_module_names_owner = ["schedule_consumer", "schedule_provider", "schedule_alias"]
     driver.ctx.source_identities_owner = [sha256_text(consumer_text), sha256_text(provider_text), sha256_text(provider_text)]
     driver.ctx.source_byte_lengths_owner = [consumer_text.len(), provider_text.len(), provider_text.len()]
@@ -56,6 +58,9 @@ fn main() -> i64:
     if captured.source_to_surface != [0, 1, 1] or captured.entry_source_index != 0 or
             captured.source_binding.len() != 64 or captured.closure_digest.len() != 64 or
             captured.schedule_digest.len() != 64 or captured.surface_generation != surfaces.generation: return 8
+    checks = checks + 1
+    val full_publication = driver.verify_hir_archive_full_publication_schedule_v1()
+    if full_publication.is_err() != hir_shard_active(): return 24
     checks = checks + 1
     val expected_visits: [i64] = if hir_shard_active(): [1, 2, 0] else: [0, 1, 2]
     val expected_first: [i64] = if hir_shard_active(): [1, 1, 0] else: [0, 1, 1]
@@ -103,6 +108,6 @@ fn main() -> i64:
         if driver.verify_hir_archive_streaming_schedule_v1().is_err() or transient_array_scope_state_v1() != 0: return 20
         repeat = repeat + 1
     checks = checks + 1
-    if checks != 12: return 21
+    if checks != 13: return 21
     print "HIR archive streaming schedule: {checks} checks passed shard={hir_shard_active()}"
     0
