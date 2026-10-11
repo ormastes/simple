@@ -179,3 +179,24 @@ The [integration architecture](../dynamic_runtime_kernel_provider_composition_20
 defines exact cdylib authority, Cocoa artifact-only ownership, provider ABI,
 admission/cache/lifecycle and pending aspect-policy boundaries. It is additive
 design, not evidence that any implementation or bootstrap gate has passed.
+
+## Linker-pack execution ownership (2026-10-11)
+
+<!-- codex-architecture -->
+
+The optional linker-pack session uses the OS provider loader for dynamic
+mapping, callable-symbol admission, pin release, and close. Its execution
+and generation-pinned lifecycle reside in plugins.linker_pack, a static
+composition owner. That owner may import the compiler linker wire format and
+NativeLinkConfig while calling the OS provider loader. The dependency
+direction is plugin to compiler/OS; OS modules do not import compiler modules.
+
+The old compiler.backend.linker.linker_pack and
+compiler.backend.linker.linker_lifecycle paths remain P_STATIC compatibility
+facades exporting the public types and functions. No K0/K1 source imports
+those facades; focused Item 4 specs retain their old paths.
+
+This removes one K1-to-OS import from the compiler kernel closure. It does not
+change provider load policy or qualify demand loading, size, startup, or RSS.
+The K0 module loader still has two direct os.smf release imports; a typed
+release port must preserve final-unpin and retry authority.

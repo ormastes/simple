@@ -1,0 +1,50 @@
+use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.common.kernel_plugin.schema_header.{
+    KpfSchemaHeaderV1, KpfSchemaRequirementV1
+}
+use std.common.linker.link_request_v1.{LinkTargetV1}
+use os.smf.provider_loader.{ProviderAdmissionRequestV1}
+use compiler.backend.linker.linker_pack.{
+    LinkerPackConfigV1, LinkerPackV1, linker_pack_config_validate
+}
+use compiler.backend.linker.linker_lifecycle.{LinkerLifecycleV1}
+
+fn lifecycle_absent(value: LinkerLifecycleV1?) -> bool:
+    value == nil
+
+fn main() -> i64:
+    val zero = KpfDigest256(w0: 0, w1: 0, w2: 0, w3: 0)
+    val header = KpfSchemaHeaderV1(
+        abi_version: 1, struct_size: 72, schema_id: KpfId128(hi: 1, lo: 3),
+        schema_major: 1, schema_minor: 0, schema_digest: zero, reserved0: 0)
+    val requirement = KpfSchemaRequirementV1(
+        schema_id: KpfId128(hi: 1, lo: 3), schema_major: 1,
+        minimum_minor: 0, minimum_struct_size: 72, schema_digest: zero)
+    val loader = ProviderAdmissionRequestV1(
+        artifact_path: "build/providers/unavailable.so", artifact_kind: "native",
+        expected_artifact_digest: "", granted_capability_bits: 0,
+        required_capability_bits: 0, host_abi: 1, minimum_host_abi: 1,
+        maximum_host_abi: 1, requested_interface_major: 1,
+        requested_interface_minor: 0, provided_interface_major: 1,
+        provided_interface_minor: 0)
+    val target = LinkTargetV1(
+        arch: 0, os: 0, abi: 0, object_format: 0, endian: 0,
+        address_width: 64)
+    val config = LinkerPackConfigV1(
+        header: header, provider_id: KpfId128(hi: 0, lo: 0),
+        composition_digest: zero, engine_id: "",
+        loader: loader, interface_abi_digest: "",
+        request_requirement: requirement, policy_requirement: requirement,
+        receipt_requirement: requirement, host: target, policy_digest: zero)
+    if linker_pack_config_validate(config) != "pack identity missing":
+        print "FAIL old linker-pack facade validation"
+        return 11
+    val pack = LinkerPackV1.load(config)
+    if pack.ready or pack.diagnostic != "pack identity missing":
+        print "FAIL plugin-owned linker-pack rejection"
+        return 12
+    if not lifecycle_absent(nil):
+        print "FAIL linker lifecycle facade"
+        return 13
+    print "PASS linker-pack plugin owner and compiler facades"
+    0

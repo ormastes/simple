@@ -208,3 +208,11 @@ and K1-to-P imports, three kernel-to-app/OS imports, and zero unclassified
 compiler files; the Phase 5 dispatch checker passes. The port still needs
 admitted native runtime proof, and demand-load plus size/startup gates remain
 open.
+
+The 2026-10-11 linker-pack session/lifecycle move places the optional host
+under plugins.linker_pack, with P_STATIC compiler compatibility facades.
+The structural kernel closure now has zero K0-to-P, zero K1-to-P, two
+K0-to-OS imports, and zero unclassified files. The remaining OS edges are
+module-loader release paths requiring a typed port. Native and performance
+qualification remain open; see
+doc/09_report/compiler/item5_linker_pack_plugin_owner_2026-10-11.md.

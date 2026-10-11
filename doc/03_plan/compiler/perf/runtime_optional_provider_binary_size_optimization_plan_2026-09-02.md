@@ -451,3 +451,20 @@ provider, or release-small qualification. The LLVM run used the pre-fix
 snapshot of the cross-module CAS constant; a separate focused fixture
 subsequently found and repaired that undefined-link input. The bounded
 three-cycle gate is exhausted for this Stage4 attempt.
+
+## 2026-10-11 linker-pack plugin owner cut
+
+The optional linker-pack session and generation-pinned lifecycle moved from
+K1 into plugins.linker_pack; old compiler paths are P_STATIC compatibility
+facades. The plugin retains its compiler linker wire/config dependencies and
+uses the canonical OS provider loader and SOSIX file-hash facade. The kernel
+closure audit improved from three to two kernel-to-app/OS imports, with zero
+K0-to-P, zero K1-to-P, and zero unclassified files. The two remaining edges
+are K0 module-loader release imports.
+
+A no-stub current-source native fixture reached HIR and monomorphization with
+zero unresolved generic calls, then the compiler worker crashed with signal
+11 during MIR lowering before producing an executable. The later plugin-owner
+relocation has source-level closure evidence only; native runtime behavior
+and matched size/startup/RSS remain unqualified. See the Item 5 MIR worker
+bug and the linker-pack ownership report.
