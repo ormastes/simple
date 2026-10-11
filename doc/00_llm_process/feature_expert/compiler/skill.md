@@ -14,6 +14,8 @@ Maintain feature-specific process knowledge for Compiler. Use this skill when wo
 
 ## Feature Links
 
+- [Tuple record ownership candidate](../../../08_tracking/bug/enumerate_native_tuple_owner_loss_2026-10-11.md): runtime/native tuple conversion and ordinary tuple record provenance require qualified native execution; current source and fixture changes remain unqualified.
+
 - [Source](../../../src/compiler/)
 - [Shared compiler source](../../../src/compiler_shared/)
 - [Architecture](../../04_architecture/architecture_modules.md)
