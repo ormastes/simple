@@ -7,7 +7,6 @@ use compiler.driver.cache.driver_cold_hir_module_capture_v1.{DriverColdHirModule
 use compiler.driver.cache.cold_hir_source_inventory_admission_v1.{
     cold_hir_source_inventory_admit_v1, cold_hir_source_inventory_row_v1}
 use compiler.backend.backend_helpers.{get_effective_backend_name}
-use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_read_at_pointer_v1,
     CompileSourceInventoryBindingV1, compile_source_inventory_binding_reason_v1,
     compile_source_inventory_snapshot_cache_root_v1}
@@ -108,17 +107,11 @@ fn driver_cold_hir_source_capture_plan_in_owned_scope_v1(ctx: CompileContext
                 target_triple: ctx.native_target, backend: backend))
             produced[row.source_identity] = true
         source_index = source_index + 1
-    if full:
-        val expected = (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_EXPECTED_SOURCE_COUNT") ?? "").to_i64() ?? -1
-        if expected < 1 or ctx.source_paths_owner.len() != expected or inputs.len() != expected:
-            return Err("full inventory cold HIR receipt count mismatch: expected={expected} sources={ctx.source_paths_owner.len()} receipts={inputs.len()}")
-        # The retained owner checks full physical coverage before inspecting
-        # the per-source target CFG receipts. Keep that refusal precedence.
-        for input in inputs:
-            if not ctx.runtime_std_cfg_decisions.has(input.source_identity) or
-                    not frontend_cfg_receipt_valid_v1(ctx.runtime_std_cfg_decisions[input.source_identity],
-                        input.source_identity, input.source_digest, ctx.native_target):
-                return Err("full inventory target cfg HIR source receipt mismatch: {input.source_identity}")
+    # The retained production owner captures every typed ABI first. Its full
+    # expected-count check and per-receipt CFG/owner/emission/witness checks
+    # therefore belong to the accepted woven-body consumer after ABI capture,
+    # not this pre-body source plan. Do not hide an ABI failure with a CFG or
+    # expected-count refusal, or emit a module before another ABI is checked.
     Ok(DriverColdHirSourceCapturePlanV1(enabled: true, full_inventory: full,
         source_root: sources.normalized_root, source_inventory_digest: binding.source_inventory_digest,
         snapshot_inventory_digest: binding.snapshot_manifest_digest, inventory_generation: inventory.generation,

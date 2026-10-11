@@ -13,8 +13,11 @@ check points. Physical alias byte checks, first-physical body lookup and
 independent ABI failure collection keep their original order and behavior.
 
 The new factory selects the first row for each physical source, while validating
-every later logical alias's bytes. Full-inventory source/physical counts are
-checked before the per-source target CFG receipts. Only compact
+every later logical alias's bytes. Full-inventory expected-count and target CFG
+checks belong to the production consumer after complete typed ABI capture,
+matching the retained path. All independent ABI failures must be collected
+before count refusal or any SMF emission. The second body pass preserves
+per-receipt CFG, owner, emission and witness order. Only compact
 `DriverColdHirModuleInputV1` rows and selected digest/generation metadata escape
 through a freshly allocated Result carrier. Inventory text, complete decoded
 generation and source indexes remain scratch. The wrapper refuses active or
