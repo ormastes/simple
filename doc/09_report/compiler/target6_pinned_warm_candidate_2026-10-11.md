@@ -19,6 +19,8 @@ p95/RSS result is claimed.
 - Result: exit 1 after 117.796 s. Parse, HIR, and monomorphization completed for 142 modules; MIR reached 142/142 then reported 16 errors. The log is retained at `build/mini_builds/item56_warm_candidate_module.log`.
 - The errors include unsupported Result unwrap payload, unresolved methods in SCV/environment/database dependencies, enum payload mismatches, unsupported non-array iteration, and one `B5b: match has multiple wildcard arms`. No error names the changed warm candidate source, but the build is not a PASS. Placeholder MIR warnings for unresolved `split`, `substring`, and `release` also prohibit treating a successful exit as sufficient.
 
+A follow-up source edit now appends the current MIR module to the unsupported Result unwrap diagnostic when the HIR span lacks a file. It has not been rebuilt or run, so the payload type and failing owner remain unverified.
+
 The focused unit assertions are authored but have no executable PASS on this
 runtime. The next qualification requires an admitted current-source compiler,
 the focused unit spec, and a matched native cold/warm cohort measuring p95 time
