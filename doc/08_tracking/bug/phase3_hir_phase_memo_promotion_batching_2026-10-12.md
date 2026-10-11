@@ -46,10 +46,26 @@ and no collection owner is missing or duplicated. The collection call budget
 is 49 to 1, with scalar behavior unchanged. Working and staged direct-env
 guards and `git diff --check` are required before exporting the patch.
 
-The source regression pins owners, root counts, exclusions, scalar guard,
-carrier cleanup and failure propagation. The native lifecycle regression tests
-all seven payload families, repeated aliases, reads after scope release,
-second-scope dictionary growth and refusal without an active scope. Neither
-Simple spec has been executed for this patch. Both require validation on a
-real Pure-Simple producer; interpreter extern stubs are not acceptable evidence.
+The enum and promotion helper live in the dependency-free
+`compiler.hir.hir_lowering.phase_memo_ownership` module. `types.spl` imports
+that module, preserving the root set and driver failure behavior. The lifetime
+spec imports the small helper directly, rather than importing `HirLowering`
+and the parser/provider graph. Its boolean checks use the allowed
+`to_equal(true/false)` matchers.
+
+The source regression pins original owners, exclusions, scalar guard and
+failure propagation. The native lifetime spec covers all seven payload families,
+repeated aliases, reads after scope release, second-scope dictionary growth and
+refusal without an active scope. The standalone fixture
+`test/fixtures/compiler/phase_memo_ownership/main.spl` covers those contracts
+without SSpec allocations inside active transient scopes. It includes shared
+array payloads, a dynamically allocated string, 64 new dictionary keys in the
+second scope, and refusal before and after the active scopes. Its 25 positive
+guards increment a receipt counter and emit
+`phase memo ownership: 25 checks passed` only after all succeed; each failure
+has a distinct nonzero exit code.
+
+Neither Simple spec nor the fixture has been executed for this patch. Native
+execution must use a real Pure-Simple producer and bind runtime/provider and
+source identities; interpreter extern stubs are not acceptable evidence.
 No native job was launched while the frozen compiler matrix remained active.
