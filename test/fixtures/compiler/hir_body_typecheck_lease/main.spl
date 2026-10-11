@@ -218,6 +218,32 @@ fn main() -> i64:
             borrowed_consumer.unwrap().body_digest != provider_digest or
             borrowed_consumer.unwrap().lowering_warnings[0] != "borrowed warning": return 43
     checks = checks + 1
-    if checks != 43: return 44
+    # One sealed runtime snapshot can admit different provider selections.
+    # Their archive identities must remain distinct even for identical HIR.
+    var selected_a = fixture_input(provider_path, provider_name, runtime)
+    selected_a.provider_selection_digest = sha256_text("selected-provider-a")
+    selected_a.source_content_digest = sha256_text(file_read_nullable(provider_path) ?? "")
+    selected_a.source_authored_path = provider_path
+    val selected_a_key = hir_body_archive_input_key_v1(selected_a)
+    if selected_a_key == "": return 47
+    checks = checks + 1
+    var selected_b = fixture_input(provider_path, provider_name, runtime)
+    selected_b.provider_selection_digest = sha256_text("selected-provider-b")
+    selected_b.source_content_digest = selected_a.source_content_digest
+    selected_b.source_authored_path = provider_path
+    if hir_body_archive_input_key_v1(selected_b) == "" or
+            hir_body_archive_input_key_v1(selected_b) == selected_a_key: return 48
+    checks = checks + 1
+    val selected_stored = hir_body_archive_store_v1(selected_a, provider_module, [])
+    if selected_stored.is_err() or not hir_body_archive_matches_v1(selected_stored.unwrap(), selected_a) or
+            hir_body_archive_matches_v1(selected_stored.unwrap(), selected_b): return 49
+    checks = checks + 1
+    var changed_content = fixture_input(provider_path, provider_name, runtime)
+    changed_content.provider_selection_digest = selected_a.provider_selection_digest
+    changed_content.source_content_digest = sha256_text("wrong rewritten body")
+    changed_content.source_authored_path = provider_path
+    if hir_body_archive_input_key_v1(changed_content) != "": return 50
+    checks = checks + 1
+    if checks != 47: return 44
     print "HIR body typecheck lease: {checks} checks passed"
     0

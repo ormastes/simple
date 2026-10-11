@@ -57,3 +57,12 @@ Environment variants need their real selected BuildPlan/publication through
 cannot replace that missing typed authority handoff. Coverage-rewritten source
 content also needs its actual physical-source authority before this byte-exact
 adapter can be selected.
+
+Follow-up source authority binds the selected provider independently of its
+runtime snapshot/receipt bytes. Additive strict fields carry the actual normalized
+source body digest and authored path. The driver replays the same reserved
+coverage-wrapper owner as source loading against the real physical file, and
+the archive input key rechecks that binding. Four further native guards preserve
+the original 43 and require distinct provider selection keys, exact descriptor
+matching, and refusal of altered source-body identity (47 total). They remain
+unexecuted until the actual native launcher is authorized.

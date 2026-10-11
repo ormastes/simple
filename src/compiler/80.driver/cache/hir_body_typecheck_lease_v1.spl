@@ -19,6 +19,7 @@ use std.nogc_sync_mut.sffi.transient.{
     transient_promote
 }
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use compiler.common.driver_source_file.{source_file_coverage_identity}
 
 struct HirBodyArchiveInputV1:
     source_path: text
@@ -33,6 +34,11 @@ struct HirBodyArchiveInputV1:
     # Current producer + compiler sources + codec, captured outside scratch.
     producer_header: text
     stage: text
+    # Additive strict driver bindings. Legacy explicit consumers leave these
+    # empty; selected production owners populate all three fields together.
+    provider_selection_digest: text = ""
+    source_content_digest: text = ""
+    source_authored_path: text = ""
 
 struct HirBodyArchiveV1:
     input: HirBodyArchiveInputV1
@@ -54,21 +60,31 @@ fn hir_body_archive_input_key_v1(input: HirBodyArchiveInputV1) -> text:
         return ""
     if input.runtime_provider_receipt_path == "":
         return ""
-    val authority = file_read_regular_no_follow_bounded(input.runtime_provider_receipt_path, 65536)
+    val authority = file_read_regular_no_follow_bounded(input.runtime_provider_receipt_path, 67108864)
     if authority.is_err():
         return ""
     if sha256_text(authority.unwrap()) != input.runtime_provider_digest:
         return ""
     if input.producer_header == "" or input.producer_header != hir_cache_header():
         return ""
+    if input.provider_selection_digest != "" or input.source_content_digest != "" or input.source_authored_path != "":
+        if input.provider_selection_digest.len() != 64 or input.source_content_digest.len() != 64 or input.source_authored_path == "":
+            return ""
+        val physical = file_read_regular_no_follow_bounded(input.source_path, 67108864)
+        if physical.is_err(): return ""
+        val (authored_path, source_content) = source_file_coverage_identity(input.source_path, physical.unwrap())
+        if authored_path != input.source_authored_path or sha256_text(source_content) != input.source_content_digest:
+            return ""
     val source_key = hir_cache_key(input.source_path, input.closure_digest, input.is_entry)
     if source_key == "":
         return ""
     # Independently hash arbitrary text fields, so line delimiters cannot alias.
-    sha256_text("owned-hir-body-v1\n" + source_key + "\n" +
+    sha256_text("owned-hir-body-v2\n" + source_key + "\n" +
         sha256_text(input.module_name) + "\n" +
         sha256_text(input.producer_header) + "\n" +
-        input.runtime_provider_digest + "\n" + sha256_text(input.stage) + "\n")
+        input.runtime_provider_digest + "\n" + sha256_text(input.stage) + "\n" +
+        sha256_text(input.provider_selection_digest) + "\n" +
+        sha256_text(input.source_content_digest) + "\n" + sha256_text(input.source_authored_path) + "\n")
 
 fn hir_body_archive_matches_v1(archive: HirBodyArchiveV1, expected: HirBodyArchiveInputV1) -> bool:
     val current = hir_body_archive_input_key_v1(expected)
