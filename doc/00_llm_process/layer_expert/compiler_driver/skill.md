@@ -154,6 +154,16 @@ process; both remain unrun. Aspect policy replay now accepts explicit actual
 ordered claim DTOs without registry mutation. Genuine source/policy and
 transformed-body ownership remains required before production activation.
 
+Distinct `mono_archive_current_body_v1` frames and fresh current registration
+preserve the unresolved original parent instead of reusing stale declarations.
+The actual publisher rereads full current bodies and recollects their rows.
+The `current-registration` selector requires 13 native checks, still unrun.
+Explicit aspect/layer/effect/RT claim replay avoids installing another
+compilation's registries; the real driver still must capture and bind all actual
+source/policy inputs. Borrowed MIR lowering uses the existing complete lowering
+implementation and leaves scope/output promotion to its caller. These are
+inactive mechanical prerequisites, not a final repository or admission token.
+
 ## 2026-09-26 — `native-build` restored: backend table in the interpreted worker, entry-file hashing, module-init reads
 
 - **The interpreted native-build worker never installed the static backend

@@ -76,3 +76,13 @@ registry inputs without installing another compilation's claims. These controls
 are unrun and still need the genuine transformed-stage prerequisite owner.
 The narrow MIR compatibility-default detach API removes only default/ambiguity
 roots and preserves return/type/link metadata; two frontend examples are unrun.
+
+Current-body registration now uses a distinct complete post-HIR frame and fresh
+collector, rereading the body and recollecting its rows before publication
+(`current-registration`, 13 native checks pending). The borrowed MIR module
+consumer requires an active lease and exact complete body/declarations; three
+lifecycle controls and two real emitted-graph controls are pending. Explicit
+layer/effect/RT claim replay complements aspect replay; each adds two unrun
+source controls. These mechanical consumers and editable claim DTOs grant no
+final authority. Real current-backed mono readers and the driver prerequisite
+owner must bind the actual validator/weave/cold/quiet sequence before activation.
