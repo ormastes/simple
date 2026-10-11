@@ -2,6 +2,8 @@ use compiler.mir._MirLoweringExpr.optional_record_owner.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use compiler.mir._MirLoweringExpr.lambda_abi.{lambda_abi_type_resolved}
 use compiler.mir.nominal_owner_diagnostics.{mir_nominal_profile_take_receipt}
+use compiler.mir._MirLoweringExpr.function_signature_owner.*
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
 use compiler.hir.hir_types.{SymbolKind}
 # Part of src/compiler/50.mir/mir_lowering_expr.spl: switch/if-chain dispatch, binary/unary operators, call lowering
@@ -2524,9 +2526,46 @@ impl MirLowering:
             case _: ()
         "subject {expression_hint} at {scrutinee.span.file}:{scrutinee.span.line}:{scrutinee.span.col} has type {type_hint}"
 
-    me result_variant_payload_type(scrutinee: HirExpr, variant: text) -> HirType?:
+    me enum_match_subject_type(scrutinee: HirExpr, lowered_local_id: i64) -> HirType?:
+        """Retain a declared Result/Optional on an already evaluated subject.
+        Function-field MethodCalls can have no expression-type answer while
+        their checked call result already carries its declaration. Never
+        reevaluate the subject or infer a payload from its physical word."""
+        val expression_type = self.enum_match_expr_type(scrutinee)
+        if lowered_local_id < 0: return expression_type
+        if val retained = self.find_local_hir_type(lowered_local_id):
+            if retained != nil:
+                match retained.kind:
+                    case HirTypeKind.Result(_, _) | HirTypeKind.Optional(_):
+                        val retained_key = result_err_field_type_key(retained, self.symbols)
+                        if retained_key == "":
+                            # The record-field formatter is intentionally
+                            # partial. Preserve an agreeing authoritative
+                            # expression declaration outside its vocabulary.
+                            if val declared = expression_type:
+                                if declared != nil and hir_types_equal(declared, retained):
+                                    return expression_type
+                            # A checked function signature also proves nested
+                            # function payload owners without a record key.
+                            val retained_proof = self.function_signature_ownership_proof(retained, self.symbols)
+                            if expression_type == nil and not retained_proof.contains("!unknown"):
+                                return Some(retained)
+                            self.error_fatal("enum match retained Result/Optional has no complete declaration ownership", Some(scrutinee.span))
+                            return nil
+                        if val declared = expression_type:
+                            if declared != nil:
+                                val expression_key = result_err_field_type_key(declared, self.symbols)
+                                if expression_key == "" or expression_key != retained_key:
+                                    self.error_fatal("enum match expression and retained Result/Optional declarations conflict", Some(scrutinee.span))
+                                    return nil
+                                return expression_type
+                        return Some(retained)
+                    case _: ()
+        expression_type
+
+    me result_variant_payload_type(scrutinee: HirExpr, variant: text, lowered_local_id: i64 = -1) -> HirType?:
         """Recover the selected payload from an instantiated Result/Optional type."""
-        val scrutinee_type = self.enum_match_expr_type(scrutinee)
+        val scrutinee_type = self.enum_match_subject_type(scrutinee, lowered_local_id)
         if scrutinee_type != nil:
             val found_type = scrutinee_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
             match found_type.kind:
@@ -3201,7 +3240,7 @@ impl MirLowering:
         # scrut_enum_* fallback; arm selection below owns enum_key/name.
         # Method results and the built-in Result/Option shapes use the same
         # path as named enum parameters and locals.
-        val scrutinee_enum_type = self.enum_match_expr_type(scrutinee)
+        val scrutinee_enum_type = self.enum_match_subject_type(scrutinee, scrut_local.id)
         if mir_nominal_profile_take_receipt():
             val local_hir_receipt = self.find_local_hir_type(scrut_local.id)
             var expression_disc: i64 = -1
@@ -3736,7 +3775,7 @@ impl MirLowering:
                     val payload_owner_key = if enum_key != "": enum_key else: enum_name
                     val payload_key = "{payload_owner_key}::{enum_variants[ci]}"
                     val payload_struct = self.enum_payload_struct_names.get(payload_key)
-                    val result_payload_type = self.result_variant_payload_type(scrutinee, enum_variants[ci])
+                    val result_payload_type = self.result_variant_payload_type(scrutinee, enum_variants[ci], scrut_local.id)
                     if mir_nominal_profile_take_receipt():
                         var payload_disc: i64 = -1
                         if val payload_hir = result_payload_type:
