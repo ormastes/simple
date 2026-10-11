@@ -46,3 +46,7 @@ criteria. No full-suite rerun or native qualification is claimed.
 The other nine consumer workarounds and genuine coverage, MIR trace, performance
 lint, and raw-SFFI snapshot defects remain open in the broader draft PR3015.
 The direct matcher grammar defect remains OPEN.
+
+The completed slice merged through PR3023
+(`f3eb9e8a4c8a35f1de265062c3e804dd08a666f0`). The broader PR3015
+preserves the remaining workarounds and ten open product-contract failures.

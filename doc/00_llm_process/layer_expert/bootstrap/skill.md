@@ -33,6 +33,23 @@ worktrees and must not be restored during bootstrap setup.
 
 ## Pipeline Links
 
+### Windows harness owner contracts (2026-10-11)
+
+Use the [Windows harness prerequisites](../../../07_guide/tooling/bootstrap_failure_collection.md#windows-bootstrap-harness-prerequisites)
+when shell discovery or Cargo fixture setup fails before compiler execution.
+The PATH fixture discovers Git Bash or accepts `--shell`; it must not assume a
+Program Files installation or automatically select Windows ambient Bash.
+Cargo environment tests must extract both `run_rust_authority_cargo` and
+`run_rust_authority_command`, bind `PLATFORM_RUST_TRIPLE`, and assert the
+forwarded target arguments. A fixture PASS qualifies these owner boundaries,
+not bootstrap, self-hosting, or Phase4 admission.
+
+SDK discovery also runs under the caller's strict shell options: a trailing
+`Include/wdf` without `ucrt` must be skipped with no pipeline failure. Preserve
+the explicit missing-SDK diagnostic and real tool failures. The focused
+`scripts/check/check-windows-msvc-sdk-discovery.shs` covers both boundaries;
+see the [SDK pipefail investigation](../../../08_tracking/bug/windows_msvc_sdk_discovery_pipefail_2026-10-11.md).
+
 ### Phase live checks (2026-09-08)
 
 The full SIMD/bootstrap lane requires actual same-phase launches in addition to
@@ -827,6 +844,16 @@ Phase-1 entrypoint traps (`1b66acd7379`, `6870c4a6039`):
 on `Err(_)` (var UNSET); `Ok("")` goes to `parse_str_checked`, which rejects
 the empty spelling and hard-exits 2. Use `env -u SIMPLE_EXECUTION_MODE ...` or
 a scoped `unset`. The same rule applies to every fail-closed selector variable.
+
+## Restricted native prefix evidence (2026-10-11)
+
+Restricted native prefix evidence must bind the original `build.env` digest,
+workspace, compiler digest, backend and frozen runtime-capsule receipt digest.
+`NativeAdapterEvidence.pm` checks those identities before accepting prior green
+evidence. The legacy one-file adapter requires its matching original build
+receipt; older prefix results without bindings are not upgraded retrospectively.
+This remains local evidence integrity, not signed provenance, whole-bootstrap
+qualification or formal proof. See `doc/07_guide/tooling/native_incremental_adapter.md`.
 
 ## Host config feeds the job ceiling (2026-10-09)
 

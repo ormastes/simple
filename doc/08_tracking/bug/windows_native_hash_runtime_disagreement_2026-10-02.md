@@ -1,6 +1,53 @@
 # Windows native hash target and text-method disagreement
 
-Status: OPEN. Independent of the repaired pure-Simple public hash alias link.
+Status: typed native text `.hash()` ABI mismatch FIXED in the 2026-10-11
+candidate and verified with both backends. Mixed-import alias resolution and
+literal-receiver interpolation remain OPEN; full bootstrap remains separate.
+
+## 2026-10-11 owner claim and reproduced boundary
+
+Windows bootstrap repair lane owns the typed text method lowering correction.
+The newly built Rust seed from `release_phase3` reproduced the failure with a
+single no-import module, Cranelift, one worker, and `core-c-bootstrap` runtime.
+Direct `rt_hash_text` returned the expected empty/hello FNV values, while both
+named receivers' `.hash()` calls returned `538079189680823091`. Build succeeded
+in 11.6 seconds; execution failed. Evidence is retained under
+`build/windows-phase4-logs/hash-seed-probe/` in the phase4 worktree.
+
+Typed Rust MIR lowering selects `rt_str_hash`, whose C provider accepts a raw
+C-string pointer. Its text receiver is a tagged runtime value. The correct
+tagged ABI is `rt_hash_text`, also selected by the dynamic method backend.
+The Rust runtime alias had masked this representation mismatch. Preserve raw
+`rt_str_hash` callers and change only the typed text method lowering owner.
+Pure-Simple MIR/backend sources contain no direct `rt_str_hash` dispatch.
+This is seed bootstrap diagnosis, not Stage2/Phase4 qualification.
+
+The corrected seed SHA-256 is
+`b6ba9c9513f3e90e73bc4fdafbbe30329d785a8689aceec0ffa8d2455593d69b`.
+The native fixture `test/fixtures/compiler/native_text_hash_method_abi_main.spl`
+passed 14 outcomes through each of Cranelift and LLVM: direct runtime, named
+method, and typed forwarding for empty/ASCII/embedded-NUL/UTF-8 text, plus a
+literal receiver and an unrelated user-defined `HashBox.hash()` returning 73.
+Both executables returned zero and printed `Results: 14 passed, 0 failed`.
+Each backend compiled one module with one worker, in 8.5/8.3 seconds including
+the C bootstrap runtime link. Evidence and exact commands are retained under
+`C:/dev/simple-hash-verification/` (`probe-inputs.txt`, `verify-native.sh`,
+`native-cranelift/`, and `native-llvm/`).
+
+Both focused Rust MIR regressions also passed independently: one executed test,
+zero failures each, with 4,416 unrelated cases filtered out. They verify the
+typed text/ord shared-runtime targets, literal text dispatch, preservation of
+the user-defined `HashBox.hash` static call, and absence of `rt_str_hash` calls.
+Commands and complete logs are retained in the same evidence directory as
+`verify-mir.sh`, `string_ord_and_hash_lower_to_shared_runtime_calls.log`, and
+`string_literal_hash_uses_tagged_runtime_but_user_hash_keeps_static_dispatch.log`.
+
+Verification was moved to C/NTFS after the private D/ReFS seed build stalled
+in `File.sync_data -> FlushFileBuffers -> NtFlushBuffersFile`. The independent
+host flush failure is not a hash/compiler defect. Synchronization was retained.
+The old D worker remained pending kernel termination after cancellation; only
+pre-worker stable cache files were copied with before/after SHA/size/mtime
+validation. No later-phase admission is inferred from this diagnostic seed.
 
 The focused Cranelift native executable built with the frozen bootstrap seed
 and LLVM 23.1.1 MSVC tools returned these values for `hello`:

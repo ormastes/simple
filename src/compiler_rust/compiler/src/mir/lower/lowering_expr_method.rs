@@ -263,7 +263,10 @@ impl<'a> MirLowerer<'a> {
                     return self.lower_builtin_call_expr("rt_string_char_code_at", &args, TypeId::I64);
                 }
                 "hash" if effective_ty == TypeId::STRING => {
-                    return self.lower_builtin_call_expr("rt_str_hash", std::slice::from_ref(receiver), TypeId::I64);
+                    // Text receivers are tagged RuntimeValues. rt_str_hash also
+                    // names the raw C-string ABI in core-c-bootstrap, so using
+                    // it hashes object metadata instead of the text bytes.
+                    return self.lower_builtin_call_expr("rt_hash_text", std::slice::from_ref(receiver), TypeId::I64);
                 }
                 "unwrap" => {
                     if let Some(payload_ty) = self
