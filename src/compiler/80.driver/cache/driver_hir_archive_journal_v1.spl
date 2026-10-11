@@ -1,5 +1,9 @@
 # Ordered publication journal, not semantic or final-stage admission. The
 # production loop remains retained until every body consumer is admitted.
+# Events record the actual publisher's invocation order, not a guessed phase-1
+# prefix. Production admission still needs the genuine surface/topological and
+# alias insertion schedule. Mutable event/key lists plus immutable byte storage
+# alone do not authenticate that schedule or grant semantic/final authority.
 use compiler.driver.driver_types.{CompileContext}
 use compiler.driver.driver_source_loading.{_driver_physical_source_key}
 use compiler.driver.cache.driver_hir_managed_runtime_selection_v1.{DriverHirManagedRuntimeSelectionV1,
@@ -31,6 +35,10 @@ struct DriverHirArchivePublicationEventV1:
     previous_key: text
     key: text
 
+struct DriverHirArchiveJournalStoredEventV1:
+    event: DriverHirArchivePublicationEventV1
+    reason: text
+
 class DriverHirArchiveJournalV1:
     registration: MonoArchiveRegistrationOwnerV1
     selection: DriverHirManagedRuntimeSelectionV1
@@ -45,6 +53,7 @@ class DriverHirArchiveJournalV1:
     last_key: text
     failed_reason: text
     failed_event_key: text
+    failed_event: DriverHirArchivePublicationEventV1? = nil
 
 fn driver_hir_archive_journal_sources_v1(ctx: CompileContext) -> text:
     val count = ctx.source_module_names_owner.len()
@@ -114,8 +123,7 @@ fn driver_hir_archive_journal_same_archive_v1(a: HirBodyArchiveV1, b: HirBodyArc
 # acceptance boolean. Only the result (including dynamic refusal text) escapes.
 fn driver_hir_archive_journal_bytes_v1(owner: DriverHirArchiveJournalV1,
         event: DriverHirArchivePublicationEventV1, write: bool) -> Result<bool, text>:
-    if transient_array_scope_state_v1() != 0: return Err("HIR journal byte lease occupied")
-    if not transient_scope_begin(): return Err("HIR journal byte lease unavailable")
+    if transient_array_scope_state_v1() != 1: return Err("HIR journal borrowed byte lease unavailable")
     val bytes = driver_hir_archive_journal_event_bytes_v1(owner, event)
     var result: Result<bool, text> = Err("HIR journal event key refused")
     if event.key == sha256_text(bytes):
@@ -125,10 +133,20 @@ fn driver_hir_archive_journal_bytes_v1(owner: DriverHirArchiveJournalV1,
             val loaded = hir_owned_artifact_load_blob_v1(owner.artifacts, event.key)
             result = if loaded.is_err(): Err(loaded.unwrap_err()) else:
                 if loaded.unwrap() == bytes: Ok(true) else: Err("HIR journal event bytes differ")
+    result
+
+fn driver_hir_archive_journal_initial_metadata_v1(ctx: CompileContext,
+        registration: MonoArchiveRegistrationOwnerV1) -> Result<(text, text), text>:
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        return Err("HIR journal metadata lease unavailable")
+    val binding = driver_hir_archive_journal_sources_v1(ctx)
+    val digest = mono_archive_registration_owner_digest_v1(registration)
+    val result: Result<(text, text), text> = if binding == "" or digest == "":
+        Err("HIR journal retained source or registration predecessor incomplete") else: Ok((binding, digest))
     val paused = transient_scope_pause()
     val owned = if paused: transient_promote(result) else: false
     val ended = transient_scope_end()
-    if not paused or not owned or not ended: panic("HIR journal byte ownership failed")
+    if not paused or not owned or not ended: panic("HIR journal metadata ownership failed")
     result
 
 fn driver_hir_archive_journal_row_v1(owner: DriverHirArchiveJournalV1, ctx: CompileContext,
@@ -147,8 +165,6 @@ fn driver_hir_archive_journal_row_v1(owner: DriverHirArchiveJournalV1, ctx: Comp
 pub fn driver_hir_archive_journal_create_v1(ctx: CompileContext,
         selection: DriverHirManagedRuntimeSelectionV1) -> Result<DriverHirArchiveJournalV1, text>:
     if transient_array_scope_state_v1() != 0: return Err("HIR journal creation lease occupied")
-    val binding = driver_hir_archive_journal_sources_v1(ctx)
-    if binding == "": return Err("HIR journal retained phase-1 owner incomplete")
     val actual = driver_hir_capture_managed_runtime_selection_v1(selection.backend, selection.target, selection.runtime_bundle)?
     if selection.selection_digest != driver_hir_managed_runtime_selection_digest_v1(selection) or
             selection.selection_digest != actual.selection_digest or selection.producer_header != actual.producer_header:
@@ -157,8 +173,9 @@ pub fn driver_hir_archive_journal_create_v1(ctx: CompileContext,
     if not artifacts.enabled or artifacts.producer_header != actual.producer_header:
         return Err("HIR journal immutable cache owner unavailable")
     val registration = mono_archive_registration_create_v1()?
-    val digest = mono_archive_registration_owner_digest_v1(registration)
-    if digest == "": return Err("HIR journal registration predecessor unavailable")
+    val metadata = driver_hir_archive_journal_initial_metadata_v1(ctx, registration)?
+    val binding = metadata.0
+    val digest = metadata.1
     Ok(DriverHirArchiveJournalV1(registration: registration, selection: actual,
         source_binding: binding, artifacts: artifacts, events: [], logical_archives: {}, logical_order: [],
         registration_digest: digest, initial_registration_digest: digest,
@@ -167,6 +184,16 @@ pub fn driver_hir_archive_journal_create_v1(ctx: CompileContext,
 pub fn driver_hir_archive_journal_verify_v1(owner: DriverHirArchiveJournalV1,
         ctx: CompileContext) -> Result<bool, text>:
     if transient_array_scope_state_v1() != 0: return Err("HIR journal verification lease occupied")
+    if not transient_scope_begin(): return Err("HIR journal verification lease unavailable")
+    val result = driver_hir_archive_journal_verify_in_owned_scope_v1(owner, ctx)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: panic("HIR journal verification ownership failed")
+    result
+
+fn driver_hir_archive_journal_verify_in_owned_scope_v1(owner: DriverHirArchiveJournalV1,
+        ctx: CompileContext) -> Result<bool, text>:
     if owner.failed_reason != "" or owner.failed_event_key != "": return Err("HIR journal poisoned: " + owner.failed_reason)
     if owner.source_binding == "" or owner.source_binding != driver_hir_archive_journal_sources_v1(ctx) or
             owner.registration.sealed or owner.registration.epoch != owner.registration_epoch or
@@ -210,14 +237,38 @@ pub fn driver_hir_archive_journal_verify_v1(owner: DriverHirArchiveJournalV1,
         index = index + 1
     Ok(true)
 
-fn driver_hir_archive_journal_append_v1(owner: DriverHirArchiveJournalV1,
-        event: DriverHirArchivePublicationEventV1) -> Result<bool, text>:
+fn driver_hir_archive_journal_store_event_v1(owner: DriverHirArchiveJournalV1,
+        logical_name: text, source_index: i64, archive: HirBodyArchiveV1,
+        before: text, epoch_before: i64, alias: bool) -> DriverHirArchiveJournalStoredEventV1:
+    # This compact pending descriptor is an intended durable refusal root as
+    # well as the successful event. No cumulative encoding happens here.
+    var event = DriverHirArchivePublicationEventV1(logical_name: logical_name, source_index: source_index,
+        archive: archive, registration_before: before, registration_after: "",
+        epoch_before: epoch_before, epoch_after: owner.registration.epoch, alias: alias,
+        previous_key: owner.last_key, key: "")
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        return DriverHirArchiveJournalStoredEventV1(event: event,
+            reason: "HIR journal event lease unavailable after publication")
+    event.registration_after = mono_archive_registration_owner_digest_v1(owner.registration)
+    event.key = sha256_text(driver_hir_archive_journal_event_bytes_v1(owner, event))
     val stored = driver_hir_archive_journal_bytes_v1(owner, event, true)
-    if stored.is_err():
+    val result = DriverHirArchiveJournalStoredEventV1(event: event,
+        reason: if stored.is_err(): stored.unwrap_err() else: "")
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: panic("HIR journal event ownership failed")
+    result
+
+fn driver_hir_archive_journal_append_v1(owner: DriverHirArchiveJournalV1,
+        stored: DriverHirArchiveJournalStoredEventV1) -> Result<bool, text>:
+    val event = stored.event
+    if stored.reason != "":
         # Registration already happened. Do not rewind its collision effects.
         # Keeping the old journal fingerprint also refuses a cleared poison.
-        owner.failed_reason = stored.unwrap_err()
+        owner.failed_reason = stored.reason
         owner.failed_event_key = event.key
+        owner.failed_event = Some(event)
         # Close the shared declaration publisher as well. This is a refusal,
         # not successful registration admission: no sealed schedule is minted.
         # It covers alias-event failure even when the epoch did not advance.
@@ -242,12 +293,9 @@ pub fn driver_hir_archive_journal_publish_v1(owner: DriverHirArchiveJournalV1,
     # Actual publisher re-decodes full HIR and re-runs the ordered declaration
     # collector; no caller accepted flag can append an event.
     val _published = mono_archive_publish_registration_v1(owner.registration, receipt)?
-    var event = DriverHirArchivePublicationEventV1(logical_name: logical_name, source_index: source_index,
-        archive: receipt.archive, registration_before: before,
-        registration_after: mono_archive_registration_owner_digest_v1(owner.registration),
-        epoch_before: epoch, epoch_after: owner.registration.epoch, alias: false, previous_key: owner.last_key, key: "")
-    event.key = sha256_text(driver_hir_archive_journal_event_bytes_v1(owner, event))
-    driver_hir_archive_journal_append_v1(owner, event)
+    val stored = driver_hir_archive_journal_store_event_v1(owner, logical_name, source_index,
+        receipt.archive, before, epoch, false)
+    driver_hir_archive_journal_append_v1(owner, stored)
 
 pub fn driver_hir_archive_journal_alias_v1(owner: DriverHirArchiveJournalV1,
         ctx: CompileContext, source_index: i64, logical_name: text,
@@ -257,12 +305,9 @@ pub fn driver_hir_archive_journal_alias_v1(owner: DriverHirArchiveJournalV1,
     val archive = owner.registration.archives[canonical_name]
     if not driver_hir_archive_journal_row_v1(owner, ctx, source_index, logical_name, archive):
         return Err("HIR journal alias source binding refused")
-    var event = DriverHirArchivePublicationEventV1(logical_name: logical_name, source_index: source_index,
-        archive: archive, registration_before: owner.registration_digest, registration_after: owner.registration_digest,
-        epoch_before: owner.registration_epoch, epoch_after: owner.registration_epoch, alias: true,
-        previous_key: owner.last_key, key: "")
-    event.key = sha256_text(driver_hir_archive_journal_event_bytes_v1(owner, event))
-    driver_hir_archive_journal_append_v1(owner, event)
+    val stored = driver_hir_archive_journal_store_event_v1(owner, logical_name, source_index,
+        archive, owner.registration_digest, owner.registration_epoch, true)
+    driver_hir_archive_journal_append_v1(owner, stored)
 
 pub fn driver_hir_archive_journal_inventory_v1(owner: DriverHirArchiveJournalV1,
         ctx: CompileContext) -> Result<DriverHirArchiveInventoryV1, text>:
