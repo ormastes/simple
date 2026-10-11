@@ -3994,6 +3994,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_K1_COMPOSITION_SHA256_BEFORE=${k1_composition_sha256_before}" \
       "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
       "SIMPLE_STAGE3_STREAMING_SURFACES=1" \
+      "SIMPLE_KEEP_SOURCE_CONTENTS=${SIMPLE_KEEP_SOURCE_CONTENTS:-}" \
+      "SIMPLE_MIR_TAG_PROBE=${SIMPLE_MIR_TAG_PROBE:-}" \
       "SIMPLE_FRONTEND_CACHE=1" \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage3_cache_absolute}/frontend" \
       "SIMPLE_HIR_CACHE=1" \
@@ -5040,6 +5042,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     --threads "${selfhost_jobs}" \
     --cache-dir "${stage3_cache_absolute}" \
     --mode "${bootstrap_mode}" \
+    $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory) \
     --runtime-path "${stage_runtime_absolute}" \
     --entry src/app/cli/bootstrap_main.spl \
     -o "${stage3_bin}"

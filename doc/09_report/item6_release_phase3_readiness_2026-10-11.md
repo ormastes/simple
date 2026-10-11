@@ -62,3 +62,35 @@ No new fix was pushed or merged, and no tags/publication were performed.
 
 Local bounded process evidence is retained under
 `C:/dev/simple-bootstrap-storage/item6-phase3-validation-20261011/`.
+
+## Bounded continuation: invocation integrity and Stage 2 layout
+
+The next focused defect pass rebased the owned branch onto `3aa33b9f8de`, which
+integrates the bounded-bootstrap campaign and shared MSVC environment fixes.
+
+The Stage 3 hash vector omitted `SIMPLE_KEEP_SOURCE_CONTENTS` and
+`SIMPLE_MIR_TAG_PROBE`, although the executed command passed both. It also
+hashed `--low-memory` without passing that option to the executed Stage 3
+command. The producer now uses matching values and options in both paths.
+
+The verifier additionally required every Stage 2 path to contain a historical
+`/output/stage2/` transaction component. Current producers write directly to
+the manifest output root's `stage2/` directory. It now accepts that exact root
+and the previously supported transaction `*/output` donor form, rejects other
+roots, and derives admission/transcript/sanity/receiver paths from the selected
+Stage 2 output root. Artifact-map identities and exact transcript checks remain.
+
+`stage3-invocation-consistency-test.py` expands the independently written hash
+and execution recipes with argument collectors, without running a compiler.
+All four Windows/POSIX and low-memory combinations first failed, exposing the
+omissions; all four passed after the producer fix. A separate six-case layout
+check passed for current roots, legacy donors, and unrelated-root rejection on
+Linux and Windows platform suffixes. Already-green cases were not rerun when
+the independent layout check was added.
+
+These are orchestration regression checks, not Phase 3 bootstrap acceptance.
+The verifier's old full Stage 2/3 argument reconstruction still requires repair,
+including independently bound K1/CUDA composition authority. The existing
+compiler-only capsule still cannot perform `check`; no exact-source qualified
+full CLI was found. The local code is therefore suitable only for a draft PR
+targeting `release_phase3`, with no admission, merge or completion claim.
