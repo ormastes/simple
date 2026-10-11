@@ -162,6 +162,38 @@ fn driver_hir_archive_journal_row_v1(owner: DriverHirArchiveJournalV1, ctx: Comp
         input.runtime_provider_digest == owner.selection.provider.snapshot.digest and
         input.producer_header == owner.selection.producer_header and input.stage == "lowered-unresolved-v1"
 
+# An alias keeps its own phase-1 authored spelling. Its complete canonical
+# archive must already have been published by a genuine non-alias transaction.
+fn driver_hir_archive_journal_alias_row_in_owned_scope_v1(owner: DriverHirArchiveJournalV1,
+        ctx: CompileContext, source_index: i64, logical_name: text, archive: HirBodyArchiveV1,
+        prior_events: i64) -> bool:
+    if transient_array_scope_state_v1() != 1 or source_index < 0 or
+            source_index >= ctx.source_module_names_owner.len() or
+            logical_name != ctx.source_module_names_owner[source_index] or
+            ctx.source_authored_paths_owner[source_index] == "": return false
+    var index = 0
+    while index < prior_events:
+        val canonical = owner.events[index]
+        if not canonical.alias and driver_hir_archive_journal_same_archive_v1(canonical.archive, archive) and
+                driver_hir_archive_journal_row_v1(owner, ctx, canonical.source_index, canonical.logical_name, archive):
+            val source = canonical.source_index
+            return _driver_physical_source_key(ctx.source_paths_owner[source]) ==
+                    _driver_physical_source_key(ctx.source_paths_owner[source_index]) and
+                ctx.source_identities_owner[source] == ctx.source_identities_owner[source_index] and
+                ctx.source_byte_lengths_owner[source] == ctx.source_byte_lengths_owner[source_index]
+        index = index + 1
+    false
+
+fn driver_hir_archive_journal_alias_row_v1(owner: DriverHirArchiveJournalV1,
+        ctx: CompileContext, source_index: i64, logical_name: text, archive: HirBodyArchiveV1) -> bool:
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin(): return false
+    val result = driver_hir_archive_journal_alias_row_in_owned_scope_v1(owner, ctx,
+        source_index, logical_name, archive, owner.events.len())
+    val paused = transient_scope_pause()
+    val ended = transient_scope_end()
+    if not paused or not ended: panic("HIR journal alias proof ownership failed")
+    result
+
 pub fn driver_hir_archive_journal_create_v1(ctx: CompileContext,
         selection: DriverHirManagedRuntimeSelectionV1) -> Result<DriverHirArchiveJournalV1, text>:
     if transient_array_scope_state_v1() != 0: return Err("HIR journal creation lease occupied")
@@ -205,10 +237,15 @@ fn driver_hir_archive_journal_verify_in_owned_scope_v1(owner: DriverHirArchiveJo
     if digest == "": return Err("HIR journal initial registration identity absent")
     var names: [text] = []
     var canonical: [text] = []
+    var event_index = 0
     for event in owner.events:
+        val row_valid = if event.alias:
+            driver_hir_archive_journal_alias_row_in_owned_scope_v1(owner, ctx, event.source_index,
+                event.logical_name, event.archive, event_index)
+        else: driver_hir_archive_journal_row_v1(owner, ctx, event.source_index, event.logical_name, event.archive)
         if event.previous_key != previous or event.epoch_before != epoch or
                 event.registration_before != digest or
-                not driver_hir_archive_journal_row_v1(owner, ctx, event.source_index, event.logical_name, event.archive):
+                not row_valid:
             return Err("HIR journal event order or source binding changed")
         val name = event.archive.input.module_name
         if not owner.registration.archives.has(name) or
@@ -228,6 +265,7 @@ fn driver_hir_archive_journal_verify_in_owned_scope_v1(owner: DriverHirArchiveJo
         previous = event.key
         epoch = event.epoch_after
         digest = event.registration_after
+        event_index = event_index + 1
     if previous != owner.last_key or epoch != owner.registration_epoch or names != owner.logical_order or
             names.len() != owner.logical_archives.len() or canonical.len() != owner.registration.roots.len() or
             digest != owner.registration_digest: return Err("HIR journal publication summary differs")
@@ -310,7 +348,7 @@ pub fn driver_hir_archive_journal_alias_v1(owner: DriverHirArchiveJournalV1,
     val _verified = driver_hir_archive_journal_verify_v1(owner, ctx)?
     if not owner.registration.archives.has(canonical_name): return Err("HIR journal alias canonical owner absent")
     val archive = owner.registration.archives[canonical_name]
-    if not driver_hir_archive_journal_row_v1(owner, ctx, source_index, logical_name, archive):
+    if not driver_hir_archive_journal_alias_row_v1(owner, ctx, source_index, logical_name, archive):
         return Err("HIR journal alias source binding refused")
     val stored = driver_hir_archive_journal_store_event_v1(owner, logical_name, source_index,
         archive, owner.registration_digest, owner.registration_epoch, true)

@@ -64,6 +64,7 @@ pub fn driver_hir_archive_inventory_from_context_v1(ctx: CompileContext,
     var owners: [text] = []
     var rows: [DriverHirArchiveInventoryRowV1] = []
     var archives: [HirBodyArchiveV1] = []
+    var canonical_author_by_path: Dict<text, i64> = {}
     var index = 0
     while index < count:
         val name = ctx.source_module_names_owner[index]
@@ -76,9 +77,11 @@ pub fn driver_hir_archive_inventory_from_context_v1(ctx: CompileContext,
         val authored = ctx.source_authored_paths_owner[index]
         if physical == "" or _driver_physical_source_key(input.source_path) != physical or
                 input.source_content_digest != ctx.source_identities_owner[index] or
-                input.source_authored_path != authored or authored == "" or
+                authored == "" or
                 ctx.source_byte_lengths_owner[index] < 0 or input.provider_selection_digest.len() != 64:
             return Err("HIR archive inventory differs from admitted physical source row")
+        if input.source_authored_path == authored:
+            canonical_author_by_path[physical] = index
         if ctx.sources.len() != 0:
             if ctx.sources[index].module_name != name or
                     _driver_physical_source_key(ctx.sources[index].path) != physical:
@@ -97,6 +100,20 @@ pub fn driver_hir_archive_inventory_from_context_v1(ctx: CompileContext,
             authored_path: authored, source_digest: ctx.source_identities_owner[index],
             source_bytes: ctx.source_byte_lengths_owner[index], module_owner: input.module_name,
             archive_key: archive.archive_key))
+        index = index + 1
+    # Independently authored aliases keep their own spelling in the rows, but
+    # cannot invent a canonical parent. Require that parent's admitted row and
+    # exact physical byte length and full SHA for every alias.
+    index = 0
+    while index < count:
+        val physical = paths[index]
+        if not canonical_author_by_path.has(physical):
+            return Err("HIR archive inventory canonical authored source row absent")
+        val canonical = canonical_author_by_path[physical]
+        if archives[canonical].input.source_authored_path != archives[index].input.source_authored_path or
+                ctx.source_identities_owner[canonical] != ctx.source_identities_owner[index] or
+                ctx.source_byte_lengths_owner[canonical] != ctx.source_byte_lengths_owner[index]:
+            return Err("HIR archive inventory alias differs from canonical authored source")
         index = index + 1
     val representatives = driver_mir_physical_source_indices_v1(paths, ctx.source_identities_owner, owners)?
     var selected: [HirBodyArchiveV1] = []

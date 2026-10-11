@@ -132,15 +132,19 @@ fn main() -> i64:
     val loaded_source = SourceFile.load(path)
     if loaded_source.is_err(): return 2
     val source = SourceFile(..loaded_source.unwrap(), module_name: name)
+    val alternate_source = SourceFile.load("./" + path)
+    if alternate_source.is_err(): return 29
+    val alias = SourceFile(..alternate_source.unwrap(), module_name: "policy.logical_alias")
+    if alias.authored_path == source.authored_path or alias.content != source.content: return 30
     val parsed = parse_full_frontend(source.content, path, name, Logger(level: 0))
     val builder = ModuleSurfaceBuilder.new()
     if builder.add_parsed(parsed, source, 0).is_err() or
-            builder.add_alias(SourceFile(..source, module_name: "policy.logical_alias")).is_err(): return 3
+            builder.add_alias(alias).is_err(): return 3
     val surfaces = ModuleSurfacesByName.empty()
     if builder.finish_into(surfaces) != "": return 4
     val driver = CompilerDriver.create(driver_core_compile_options_default())
-    driver.ctx.source_paths_owner = [path, path]
-    driver.ctx.source_authored_paths_owner = [source.authored_path, source.authored_path]
+    driver.ctx.source_paths_owner = [source.path, alias.path]
+    driver.ctx.source_authored_paths_owner = [source.authored_path, alias.authored_path]
     driver.ctx.source_module_names_owner = [name, "policy.logical_alias"]
     driver.ctx.source_identities_owner = [sha256_text(source.content), sha256_text(source.content)]
     driver.ctx.source_byte_lengths_owner = [source.content.len(), source.content.len()]
@@ -220,6 +224,22 @@ fn main() -> i64:
     if trailing.is_err(): return 26
     if not observe(trailing.unwrap(), archive).is_err(): return 27
     checks = checks + 1
-    if checks != 12: return 28
+    val inventory = driver_hir_archive_journal_inventory_v1(journal, driver.ctx)
+    if inventory.is_err(): return 31
+    if inventory.unwrap().logical_rows[1].authored_path != alias.authored_path or
+            inventory.unwrap().ordered_archives.len() != 1 or
+            inventory.unwrap().ordered_archives[0].input.source_authored_path != source.authored_path: return 32
+    checks = checks + 1
+    driver.ctx.source_authored_paths_owner[1] = source.authored_path
+    val altered_author_refused = driver_hir_archive_journal_verify_v1(journal, driver.ctx).is_err()
+    driver.ctx.source_authored_paths_owner[1] = alias.authored_path
+    if not altered_author_refused or driver_hir_archive_journal_verify_v1(journal, driver.ctx).is_err(): return 33
+    checks = checks + 1
+    driver.ctx.source_identities_owner[1] = sha256_text("different physical alias bytes")
+    val altered_source_refused = driver_hir_archive_journal_verify_v1(journal, driver.ctx).is_err()
+    driver.ctx.source_identities_owner[1] = sha256_text(source.content)
+    if not altered_source_refused or driver_hir_archive_journal_verify_v1(journal, driver.ctx).is_err(): return 34
+    checks = checks + 1
+    if checks != 15: return 28
     print "HIR post-validation policy: {checks} checks passed"
     0

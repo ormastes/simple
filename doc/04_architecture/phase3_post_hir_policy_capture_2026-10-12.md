@@ -31,8 +31,9 @@ Immutable bytes alone do not authenticate caller-created recipes or permit
 missing diagnostics, supplied clean booleans or skipped validators.
 
 The native fixture `test/fixtures/compiler/hir_post_validation_policy/main.spl`
-has twelve guards. It parses a real provider file and freezes a real physical
-surface plus alias; its archive uses that actual surface closure. The actual
+has fifteen guards. It parses a real provider file and freezes a real physical
+surface plus an independently loaded `./provider` alias with a distinct
+authored spelling; its archive uses that actual surface closure. The actual
 journal publisher registers declarations and publishes the alias before policy
 capture. Actual body walkers then prove a 24-byte transitive copy failure and a
 critical allocation failure, with clean real layer mappings/aspect obligations.
@@ -42,6 +43,11 @@ reads refuse; post-close replay remains available. A separately stored raw
 envelope with valid checksum/key and extra policy payload bytes must refuse.
 Canonical exhaustion accepts the writer's final newline across split
 implementations while exact re-encoding and trailing-data refusal remain mandatory.
+The journal proves each alias against an earlier genuine canonical publication:
+the canonical archive and its authored spelling remain unchanged, while both
+retained phase-1 rows must agree on physical path, full SHA and byte length.
+Inventory retains the alias's own authored spelling and one canonical body.
+Changed alias author/source identity must refuse journal replay.
 The fixture does not claim
 full driver admission, native qualification or bounded full-CLI memory. Native
 execution remains pending a serialized root-owned slot and exact new producer.
