@@ -185,6 +185,11 @@ on:
           - all
           - linux-llvm
           - linux-cranelift
+          - windows-cranelift
+      defer_portability_verdict:
+        description: Diagnostic Linux LLVM collection; failed portability remains an unadmitted final failure
+        type: boolean
+        default: false
 
 # main must reach a verdict: before 2026-09-28 every main run was cancelled by
 # the next main push (874/1000 runs cancelled, 0 completed on main). With
@@ -210,7 +215,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.native_lane == 'linux-llvm' && '[{"os":"ubuntu-24.04","name":"Linux x86_64","backend":"llvm"}]' || github.event_name == 'workflow_dispatch' && inputs.native_lane == 'linux-cranelift' && '[{"os":"ubuntu-24.04","name":"Linux x86_64","backend":"cranelift"}]' || '[{"os":"ubuntu-24.04","name":"Linux x86_64","backend":"llvm"},{"os":"ubuntu-24.04","name":"Linux x86_64","backend":"cranelift"},{"os":"macos-latest","name":"macOS aarch64","backend":"llvm"},{"os":"macos-latest","name":"macOS aarch64","backend":"cranelift"},{"os":"macos-15-intel","name":"macOS x86_64","backend":"llvm"},{"os":"macos-15-intel","name":"macOS x86_64","backend":"cranelift"},{"os":"windows-latest","name":"Windows x86_64","backend":"cranelift"}]') }}
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.native_lane == 'linux-llvm' && '[{"os":"ubuntu-24.04","name":"Linux x86_64","backend":"llvm"}]' || github.event_name == 'workflow_dispatch' && inputs.native_lane == 'linux-cranelift' && '[{"os":"ubuntu-24.04","name":"Linux x86_64","backend":"cranelift"}]' || github.event_name == 'workflow_dispatch' && inputs.native_lane == 'windows-cranelift' && '[{"os":"windows-latest","name":"Windows x86_64","backend":"cranelift"}]' || '[{"os":"ubuntu-24.04","name":"Linux x86_64","backend":"llvm"},{"os":"ubuntu-24.04","name":"Linux x86_64","backend":"cranelift"},{"os":"macos-latest","name":"macOS aarch64","backend":"llvm"},{"os":"macos-latest","name":"macOS aarch64","backend":"cranelift"},{"os":"macos-15-intel","name":"macOS x86_64","backend":"llvm"},{"os":"macos-15-intel","name":"macOS x86_64","backend":"cranelift"},{"os":"windows-latest","name":"Windows x86_64","backend":"cranelift"}]') }}
     runs-on: ${{ matrix.os }}
     name: Native — ${{ matrix.name }} (${{ matrix.backend }})
     steps:
@@ -224,8 +229,21 @@ jobs:
         run: sh scripts/check/check-seed-parse-superset.shs
 
       - name: Validate bootstrap portability contracts
+        id: portability_contract
         if: runner.os == 'Linux' && matrix.backend == 'llvm'
+        continue-on-error: ${{ github.event_name == 'workflow_dispatch' && inputs.native_lane == 'linux-llvm' && inputs.defer_portability_verdict }}
         run: sh scripts/check/check-bootstrap-portability.shs
+
+      - name: Record unadmitted diagnostic collection
+        if: ${{ steps.portability_contract.outcome == 'failure' && github.event_name == 'workflow_dispatch' && inputs.native_lane == 'linux-llvm' && inputs.defer_portability_verdict }}
+        env:
+          DIAGNOSTIC_SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          mkdir -p build/bootstrap
+          printf '%s\n' 'schema=simple-bootstrap-portability-diagnostic-v1' \
+            'tag=WORKAROUND_DEFER_PORTABILITY_VERDICT' 'qualification=UNADMITTED' \
+            'portability_result=FAIL' "source_revision=${DIAGNOSTIC_SOURCE_REVISION}" \
+            > build/bootstrap/portability-diagnostic.env
 
       - name: Validate bootstrap capacity and Windows authority contracts
         if: runner.os == 'Linux' && matrix.backend == 'llvm'
@@ -313,6 +331,7 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-bootstrap-
 
       - name: Build seed and native_all library
+        id: diagnostic_seed
         shell: bash
         working-directory: src/compiler_rust
         run: |
@@ -408,6 +427,22 @@ jobs:
               --resume-stage3-from-admitted=build/bootstrap \
               --output=build/bootstrap
           fi
+
+      - name: Preserve diagnostic continuation inputs
+        if: always() && steps.diagnostic_seed.outcome != '' && steps.diagnostic_seed.outcome != 'skipped'
+        shell: bash
+        run: |
+          python3 scripts/bootstrap/collect-diagnostic-continuation.py \
+            "$GITHUB_WORKSPACE" "$RUNNER_TEMP/bootstrap-diagnostic-continuation" 1073741824
+
+      - name: Upload unadmitted diagnostic continuation inputs
+        if: always() && steps.diagnostic_seed.outcome != '' && steps.diagnostic_seed.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-diagnostic-UNADMITTED-${{ matrix.name }}-${{ matrix.backend }}-${{ github.sha }}
+          path: ${{ runner.temp }}/bootstrap-diagnostic-continuation
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload pure-Simple bootstrap failure logs
         if: failure() && steps.pure_simple_bootstrap.outcome == 'failure'
@@ -710,11 +745,18 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: bootstrap-${{ matrix.name }}-${{ matrix.backend }}-${{ github.sha }}
+          name: ${{ steps.portability_contract.outcome == 'failure' && 'unadmitted-' || '' }}bootstrap-${{ matrix.name }}-${{ matrix.backend }}-${{ github.sha }}
           path: |
             build/bootstrap/stage2/**/simple*
             build/bootstrap/stage3/**/simple*
+            build/bootstrap/portability-diagnostic.env
           retention-days: 7
+
+      - name: Enforce portability verdict after diagnostic collection
+        if: ${{ always() && steps.portability_contract.outcome == 'failure' }}
+        run: |
+          echo '::error::Portability contracts failed; collected bootstrap artifacts are UNADMITTED.'
+          exit 1
 
   native-architectures:
     if: (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == '')
