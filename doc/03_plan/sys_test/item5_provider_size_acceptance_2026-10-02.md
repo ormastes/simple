@@ -1,5 +1,23 @@
 # Item 5 concrete runtime acceptance and TDD plan
 
+## Independent OS/filesystem acceptance — 2026-10-11
+
+These user-selected extensions are **planned and unexecuted**.
+
+| Case | Requirement | Required observable assertion |
+|---|---|---|
+| I5-V09 | REQ-024 | Independent `os` and `filesystem` selection in the existing resolver; legacy `platform` alias parity and conflict rejection; filesystem provider reuse across two admitted OS providers and two simultaneous filesystem mounts under one OS; open handles retain their mount/provider generation when defaults change. |
+| I5-V10 | REQ-025 | Real client -> SOSIX operation/dispatch -> selected provider -> completion for statfs, truncate and positioned I/O. Verify byte content/counts, EOF and growth visibility, defined cursor semantics, permissions, stale handles, injected failures and unsupported capabilities. Record each OS/filesystem/operation combination independently. |
+
+Filesystem overlay selection controls available provider implementations; mount
+binding selects runtime instances. Neither implies that every OS/backend pair
+works. FAT32 allocation/geometry tests are backend evidence only. The private
+registry in `positioned_acceptance_route_v1.spl` is component evidence, not a
+live syscall installation. Reuse the [existing live-route plan](../os/simpleos_sosix_positioned_live_route_2026-09-27.md)
+for production registration; missing SOSIX statfs/truncate contracts and routing
+remain open. Define neutral cursor and durability semantics before reusing
+backend-specific assertions. Evidence uses SDN by default; JSON export is explicit.
+
 ## Variation acceptance extension — 2026-10-11
 
 Retain I5-01..I5-14 unchanged. The following rows extend their production scenarios for selected REQ-016..023; **new or extended executable coverage is pending**, not PASS. Add cases under the existing canonical test owners, with generated manuals under `doc/06_spec`; never place executable specs in that documentation tree.

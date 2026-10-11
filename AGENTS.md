@@ -321,6 +321,7 @@ MCP server available via npm: `@simple-lang/mcp-server`
 
 ## Critical Rules
 
+- **SDN by default; JSON for explicit interoperability.** Use SDN for new configuration, data, diagnostic records, manifests, and structured output. Offer JSON as an explicit format/export option when exchanging data with non-Simple tools; do not silently make JSON the default. Preserve required JSON wire protocols and immutable historical evidence.
 - **Finish = merged PR.** Push a `work/*` branch, open the PR, review it, and land it yourself with `gh pr merge <n> --admin --merge` (Step 5). Never leave a finished change as a draft or `awaiting-*` PR; never push `main`/`release/*` directly.
 - **Default tooling = pure-Simple self-hosted binary, not the Rust seed.** `test`/`lint`/`fmt`/`build`/`run`/MCP/LSP all run on `bin/release/<triple>/simple` (built via bootstrap). The seed (`src/compiler_rust/target/bootstrap/simple`) is bootstrap-only. If the self-hosted binary is slow/unstable, fix it in pure-Simple (`src/compiler`/`src/lib`/`src/app`) and re-deploy or file a bug — don't fall back to the seed. See `.claude/rules/bootstrap.md`
 - **Self-sufficient**: never fail because another LLM didn't do its step — do it yourself
