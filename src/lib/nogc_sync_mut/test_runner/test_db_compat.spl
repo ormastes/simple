@@ -18,6 +18,7 @@ use std.test_runner.test_db_types.{TestStatus, status_to_str}
 use std.common.perf.execution_metrics.{ResourceUsage, resource_evidence_quality_name, termination_cause_name}
 use std.test_runner.test_db_core.{parse_rfc3339_to_micros}
 use std.nogc_sync_mut.test_runner.test_db_record.{TestDbFileRow}
+use std.common.traceability.case_events.{decode_trace_case_events}
 use std.nogc_sync_mut.io.time_ops.{timestamp_year, timestamp_month, timestamp_day, timestamp_hour, timestamp_minute, timestamp_second}
 
 # ============================================================================
@@ -50,6 +51,16 @@ class RunnerTestDb:
             Ok(())
         else:
             Err("Failed to save database")
+
+    # Framework observations are persisted by the same database writer as
+    # summary rows. Their presence never establishes admitted provenance.
+    me record_trace_case_events(run_id: text, test_file: text, events_sdn: text) -> Result<(), text>:
+        if run_id == "" or run_id != self.current_run_id or test_file == "":
+            return Err("trace events must belong to this database owner's active run")
+        val events = decode_trace_case_events(events_sdn)?
+        if events.len() == 0:
+            return Err("trace events cannot be an empty execution claim")
+        self.db.record_trace_case_events(run_id, test_file, events)
 
     # Update test result (custom API)
     me update_test_result(

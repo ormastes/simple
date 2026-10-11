@@ -12,8 +12,9 @@
 # stderr as `test-db lane error: <reason>`.
 
 use std.sffi.cli_args.{cli_get_args}
-use std.nogc_sync_mut.io.file_ops.{file_read, file_exists, file_atomic_write}
-use std.nogc_sync_mut.test_runner.test_db_record.{test_db_run_record_decode}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists, file_size, file_atomic_write}
+use std.nogc_sync_mut.test_runner.test_db_record.{test_db_run_record_decode, test_db_run_record_attach_trace_events}
+use std.nogc_sync_mut.test_runner.test_db_trace_record.{test_db_trace_record_decode}
 use std.nogc_sync_mut.test_runner.test_runner_helpers.{update_test_database_from_record}
 use std.test_runner.doc_generator.{generate_test_result_md}
 
@@ -36,15 +37,34 @@ fn main() -> i64:
         eprint "test-db lane error: record file not found: {record_path}"
         return 2
     val decoded = test_db_run_record_decode(file_read(record_path))
-    val record = match decoded:
+    var record = match decoded:
         case Ok(value): value
         case Err(reason):
             eprint "test-db lane error: {reason}"
             return 2
+    var trace_error = ""
+    val trace_path = _lane_arg(args, "trace-record")
+    if trace_path != "":
+        if not file_exists(trace_path):
+            trace_error = "trace record file not found: {trace_path}"
+        else:
+            val trace_size = file_size(trace_path)
+            if trace_size < 0 or trace_size > 16777216:
+                trace_error = "trace record size unavailable or exceeds 16 MiB"
+            else:
+                match test_db_trace_record_decode(file_read(trace_path)):
+                    case Ok(trace_record):
+                        match test_db_run_record_attach_trace_events(record, trace_record.files):
+                            case Ok(attached): record = attached
+                            case Err(reason): trace_error = reason
+                    case Err(reason): trace_error = reason
     match update_test_database_from_record(record):
         case Ok(database):
             file_atomic_write(TEST_RESULT_MD_PATH, generate_test_result_md(database))
             print "test-db lane: recorded {record.files.len()} file(s)"
+            if trace_error != "":
+                eprint "test-db lane error: {trace_error}"
+                return 1
             0
         case Err(reason):
             eprint "test-db lane error: {reason}"

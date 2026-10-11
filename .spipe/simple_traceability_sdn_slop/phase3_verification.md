@@ -10,9 +10,9 @@ its recovered files are now on a GitHub work branch.
 The requested compiler stage is now Phase 3. Local work branch
 `work/traceability-release_phase3-20261011` is based on fetched GitHub release_phase3
 revision `20f619fe31baa4decbe40f6d367fb5e4f115bbd8`. The existing isolated
-worktree path retains its historical phase2 name. Recovered source remains
-uncommitted; staged runner candidates remain outside the worktree pending
-completion of their SDN-only transport.
+worktree path retains its historical phase2 name. Recovered source is preserved
+in the draft PR. The runner bridge was reconciled directly against this branch;
+the old conflict-staging candidates were not copied into the worktree.
 
 The user corrected the exact GitHub destination to `release_phase3`; its branch
 API confirmed the revision above. The earlier inventory only matched release/
@@ -43,19 +43,32 @@ It stopped before producing the required compiler. This is a bootstrap
 prerequisite failure, not a failed feature test or evidence that feature source
 cannot compile. That separate lane's files and processes were not modified.
 
+The same compiler lane's attempt 02 stopped at disk preflight before Cargo:
+`FAIL — disk-space(18GiB<20)`. Current C: free space is approximately 13.6 GiB.
+No other build volume is mounted. The user was asked to free at least 6 GiB or
+provide a build volume. No unrelated build outputs were deleted. An admitted
+source-matched Phase 3 compiler remains unavailable.
+
 ## Source checkpoint after continuation
 
 - Git provider now captures immutable tree/blob bytes, resolves the tree from
   a frozen commit identity, validates budgets and hashes exact Git blob frames
-  using shared SHA-1/SHA-256 implementations. Its process lifecycle still
+  using shared SHA-1/SHA-256 implementations. Selector `index` freezes the
+  selected index with `write-tree`, records a git_index subject without a fake
+  commit identity, and reads blobs from that frozen tree. Aggregate blob content
+  is checked against the caller's byte budget. Its process lifecycle still
   requires real failure-path execution tests before admission.
 - Existing CLI structured reports now use the native SDN codec; JSON modes
   are rejected. Legacy worktree discovery is explicitly labeled unverified
   and admission-ineligible. Exact-snapshot graph CLI wiring remains unfinished.
-- The SDN-only trace-batch codec is present with bounded decoding and duplicate
-  path/missing-field rejection. Runner transport wiring remains unfinished;
-  seven runner staging candidates retain unresolved three-way conflicts and
-  were not copied into this worktree.
+- The SDN-only trace-batch codec is connected to opt-in framework events,
+  structured sidecar ingestion, exact-path runner record attachment and the
+  existing test database writer. Trace events share the owner's summary save,
+  retain actual failed/pending outcomes and are stored as unverified. Invalid
+  batches and replayed file scopes are rejected. Started-only prefixes remain
+  interrupted observations rather than disappearing from history. Frozen run
+  planning, source/binary/config provenance, mandatory feature SDN/Markdown
+  reports and aggregate command failure handling remain unfinished.
 - `direct-env-runtime-guard.shs --working` and `--staged` each passed once;
   the candidate diff passed whitespace checks. Exact Git inventory found zero
   executable `_spec.spl` files under `doc/06_spec`. These are static checks,

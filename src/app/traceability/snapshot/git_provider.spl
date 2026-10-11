@@ -129,9 +129,18 @@ pub fn snapshot_git_inputs(request: GitSnapshotRequest) -> Result<SnapshotInput,
     if object_format != "sha1" and object_format != "sha256":
         return Err("TRACE-SNAPSHOT-INCOMPLETE: unsupported Git object format")
     val width = if object_format == "sha1": 40 else: 64
-    val revision = git_capture_text(root, ["rev-parse", "--verify", "--end-of-options", "{request.selector}^{commit}"])?.trim()
-    if not git_oid_valid(revision, width): return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid revision identity")
-    val tree = git_capture_text(root, ["rev-parse", "--verify", "--end-of-options", "{revision}^{tree}"])?.trim()
+    var revision = ""
+    var tree = ""
+    var kind = "git_commit"
+    if request.selector == "index":
+        # Freeze the selected Git index, including an inherited alternate index.
+        # write-tree refuses unresolved entries and never reads worktree bytes.
+        kind = "git_index"
+        tree = git_capture_text(root, ["write-tree"])?.trim()
+    else:
+        revision = git_capture_text(root, ["rev-parse", "--verify", "--end-of-options", "{request.selector}^{commit}"])?.trim()
+        if not git_oid_valid(revision, width): return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid revision identity")
+        tree = git_capture_text(root, ["rev-parse", "--verify", "--end-of-options", "{revision}^{tree}"])?.trim()
     if not git_oid_valid(tree, width): return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid tree identity")
     var inventory_args = ["ls-tree", "-r", "-z", "--full-tree", tree, "--"]
     for path in request.paths: inventory_args.push(":(literal){path}")
@@ -147,9 +156,8 @@ pub fn snapshot_git_inputs(request: GitSnapshotRequest) -> Result<SnapshotInput,
     var expected: [text] = []
     var paths: [text] = []
     for entry in entries:
-        if not paths.contains(entry.path):
-            paths.push(entry.path)
-            expected.push(entry.oid)
+        paths.push(entry.path)
+        expected.push(entry.oid)
     if expected.len() == 0: return Err("TRACE-SNAPSHOT-INCOMPLETE: selected scope contains no supported blobs")
     var batch_input: [u8] = []
     for oid in expected:
@@ -159,6 +167,11 @@ pub fn snapshot_git_inputs(request: GitSnapshotRequest) -> Result<SnapshotInput,
         return Err("TRACE-SNAPSHOT-INCOMPLETE: selected batch exceeds output budget")
     val batch = git_capture(root, ["cat-file", "--batch"], batch_input, batch_limit)?
     val blobs = decode_trace_git_batch(batch, expected, request.max_blob_bytes, batch.len())?
+    var content_bytes: i64 = 0
+    for blob in blobs:
+        content_bytes += blob.byte_size
+        if content_bytes > request.max_total_bytes:
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: selected blob content exceeds scope budget")
     var artifacts: [SnapshotArtifact] = []
     for i in 0..blobs.len():
         val blob = blobs[i]
@@ -177,5 +190,5 @@ pub fn snapshot_git_inputs(request: GitSnapshotRequest) -> Result<SnapshotInput,
     val repository_id = root
     # `complete` is relative only to the caller-declared selected path scope.
     Ok(SnapshotInput(
-        subject: SnapshotSubject(repository_id: repository_id, snapshot_id: "{repository_id}:{object_format}:{tree}", kind: "git_commit", revision_id: revision, tree_id: tree, object_format: object_format),
+        subject: SnapshotSubject(repository_id: repository_id, snapshot_id: "{repository_id}:{kind}:{object_format}:{tree}", kind: kind, revision_id: revision, tree_id: tree, object_format: object_format),
         artifacts: artifacts, complete: true))

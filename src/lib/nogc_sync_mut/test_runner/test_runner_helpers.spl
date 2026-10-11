@@ -247,8 +247,13 @@ fn update_test_database_from_record(record: TestDbRunRecord) -> Result<RunnerTes
             print "Warning: Could not load test database: {reason}"
             return Err(reason)
     val run_id = db.start_run()
+    var trace_errors: [text] = []
 
     for row in record.files:
+        if row.trace_case_events_sdn != "":
+            match db.record_trace_case_events(run_id, row.path, row.trace_case_events_sdn):
+                case Ok(_): pass
+                case Err(reason): trace_errors.push("{row.path}: {reason}")
         val status = if row.status == "in_development":
             TestStatus.InDevelopment
         elif row.status == "feature_gated":
@@ -273,7 +278,10 @@ fn update_test_database_from_record(record: TestDbRunRecord) -> Result<RunnerTes
     db.cleanup_stale_runs(48)
     val save_result = db.save()
     match save_result:
-        case Ok(_): Ok(db)
+        case Ok(_):
+            if trace_errors.len() > 0:
+                return Err("trace event persistence failed after summary save: " + trace_errors.join("; "))
+            Ok(db)
         case Err(reason):
             print "Warning: Could not save test database: {reason}"
             Err(reason)

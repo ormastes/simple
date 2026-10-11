@@ -11,7 +11,7 @@
 use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
-use std.nogc_sync_mut.io.file_ops.{file_write, file_read, file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read, file_exists, file_atomic_write}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.io_runtime.{get_args}
 
@@ -38,6 +38,7 @@ use std.test_runner.test_runner_coverage.{setup_coverage, collect_coverage, prin
 # GROUP 4: Database & feature tracking -- recorded by the test-db lane child
 # (test_db_lane_main.spl) so the database modules stay out of this closure.
 use std.nogc_sync_mut.test_runner.test_db_record.{test_db_run_record_from_result, test_db_run_record_encode}
+use std.nogc_sync_mut.test_runner.test_db_trace_record.{TestDbTraceFile, TestDbTraceRecord, test_db_trace_record_encode}
 use std.nogc_sync_mut.test_runner.test_executor_parsing.{find_simple_binary}
 # use test_db_types.*
 # use std.database.feature.{FeatureDatabase, load_feature_database, create_feature_database, FeatureStatus}
@@ -87,19 +88,36 @@ use app.test_daemon.session_types.{TestSessionMeta, meta_needs_session, meta_to_
 val TEST_DB_LANE_ENTRY = "src/app/test_runner_new/test_db_lane_main.spl"
 
 fn record_test_run_via_db_lane(result: TestRunResult, run_start: i64, run_end: i64):
-    """Record the run in the test database and regenerate test_result.md in a
-    child interpreter (test_db_lane_main.spl). A failure is reported with the
-    child's named reason; it never fails the test run itself."""
+    """Persist summary and optional SDN trace transport in the DB child."""
     val record_dir = "build/test_runner"
     dir_create_all(record_dir)
     val record_path = "{record_dir}/test_db_record_{run_start}.txt"
+    val trace_path = "{record_path}.trace.sdn"
+    var trace_rows: [TestDbTraceFile] = []
+    for file_result in result.files:
+        if file_result.trace_case_events_sdn != "":
+            trace_rows.push(TestDbTraceFile(path: file_result.path, events_sdn: file_result.trace_case_events_sdn))
+    var child_args: [text] = ["run", TEST_DB_LANE_ENTRY, "--record={record_path}"]
+    if trace_rows.len() > 0:
+        file_remove(trace_path)
+        # Always pass the expected path when events exist. A codec/write failure
+        # then becomes an explicit child-lane error after summary persistence.
+        child_args.push("--trace-record={trace_path}")
+        match test_db_trace_record_encode(TestDbTraceRecord(files: trace_rows)):
+            case Ok(encoded):
+                if not file_atomic_write(trace_path, encoded):
+                    print "Warning: could not write trace event transport {trace_path}"
+            case Err(reason):
+                print "Warning: could not encode trace event transport: {reason}"
     if not file_write(record_path, test_db_run_record_encode(test_db_run_record_from_result(result, run_start, run_end))):
         print "Warning: test database not updated: could not write {record_path}"
+        file_remove(trace_path)
         return
-    val (stdout, stderr, code) = process_run_bounded(find_simple_binary(), ["run", TEST_DB_LANE_ENTRY, "--record={record_path}"], 600000, TEST_OUTPUT_CAPTURE_BYTES)
+    val (stdout, stderr, code) = process_run_bounded(find_simple_binary(), child_args, 600000, TEST_OUTPUT_CAPTURE_BYTES)
     file_remove(record_path)
+    file_remove(trace_path)
     if code != 0:
-        print "Warning: test database not updated (test-db lane exit {code})"
+        print "Warning: test-db lane reported an error (exit {code})"
         if stdout.trim() != "":
             print stdout.trim()
         if stderr.trim() != "":
@@ -136,6 +154,7 @@ pub fn generate_spipe_docs_for_results(results: [TestFileResult], options: TestO
             print stderr
         return 3
     0
+
 
 # Discover test files across EVERY requested target, not just the first.
 #

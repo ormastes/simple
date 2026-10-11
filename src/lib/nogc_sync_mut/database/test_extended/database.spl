@@ -5,6 +5,7 @@
 # (bootstrap runtime cannot resolve impl block methods from separate modules)
 
 use std.database.core.{SdnDatabase, SdnTable, SdnRow, StringInterner}
+use std.common.traceability.case_events.{TraceCaseEvent}
 use std.database.stats.{Stats, stats_from_values, is_flaky}
 use std.database.test_extended.stubs.{timestamp_now, process_id, host_name}
 use std.database.test_extended.types.{
@@ -64,6 +65,88 @@ fn ensure_timing_baseline_schema(input: SdnTable) -> SdnTable:
 
 class TestDatabaseExtended:
     db: SdnDatabase
+    _trace_event_indexed: bool = false
+    _trace_event_ids: Dict<text, bool> = {}
+
+    # Append observed framework events under the existing run identity. This
+    # table shares the owner's single SDN save with summary/resource records.
+    # It is diagnostic history until a frozen plan and provenance admit it.
+    me record_trace_case_events(run_id: text, test_path: text, events: [TraceCaseEvent]) -> Result<(), text>:
+        if run_id == "" or test_path == "" or events.len() == 0 or events.len() > 65536:
+            return Err("invalid trace event append scope")
+        val columns = ["event_id", "schema", "run_id", "test_path", "ordinal", "case_name", "phase", "outcome", "evidence_validity"]
+        var table = match self.db.get_table("trace_case_events"):
+            case Some(existing): existing
+            case nil: SdnTable.new("trace_case_events", columns)
+        if table.columns.len() != columns.len():
+            return Err("incompatible trace event table schema")
+        for i in 0..columns.len():
+            if table.columns[i] != columns[i]:
+                return Err("incompatible trace event table columns")
+        val prefix = "{run_id.len()}:{run_id}{test_path.len()}:{test_path}:"
+        if not self._trace_event_indexed:
+            var ids: Dict<text, bool> = {}
+            for row in table.rows:
+                val event_id = row.get("event_id") ?? ""
+                if event_id == "" or ids.contains_key(event_id):
+                    return Err("trace table contains missing or duplicate event identities")
+                ids[event_id] = true
+            self._trace_event_ids = ids
+            self._trace_event_indexed = true
+        if self._trace_event_ids.contains_key(prefix + "0"):
+            return Err("trace event scope was already recorded; replay requires an explicit attempt identity")
+        for i in 0..events.len():
+            val event = events[i]
+            if event.case_name == "" or (event.phase != "started" and event.phase != "finished"):
+                return Err("invalid framework event")
+            if event.phase == "started" and event.outcome != "not_finished":
+                return Err("started event cannot claim an outcome")
+            if event.phase == "finished" and event.outcome != "passed" and event.outcome != "failed" and event.outcome != "pending":
+                return Err("invalid terminal framework outcome")
+        for i in 0..events.len():
+            val event = events[i]
+            val row = SdnRow.empty()
+            row.set("event_id", prefix + "{i}")
+            row.set("schema", "simple.trace.case-event/v1")
+            row.set("run_id", run_id)
+            row.set("test_path", test_path)
+            row.set("ordinal", "{i}")
+            row.set("case_name", event.case_name)
+            row.set("phase", event.phase)
+            row.set("outcome", event.outcome)
+            row.set("evidence_validity", "unverified")
+            table.add_row(row)
+            self._trace_event_ids[prefix + "{i}"] = true
+        self.db.set_table("trace_case_events", table)
+        Ok(())
+
+    # Read framework observations without upgrading their evidence validity.
+    fn get_trace_case_events(run_id: text, test_path: text) -> Result<[TraceCaseEvent], text>:
+        var events: [TraceCaseEvent] = []
+        val table = match self.db.get_table("trace_case_events"):
+            case Some(existing): existing
+            case nil: return Ok(events)
+        for row in table.rows:
+            if (row.get("run_id") ?? "") != run_id or (row.get("test_path") ?? "") != test_path:
+                continue
+            if (row.get("schema") ?? "") != "simple.trace.case-event/v1" or (row.get("evidence_validity") ?? "") != "unverified":
+                return Err("unsupported stored framework evidence")
+            if (row.get("ordinal") ?? "") != "{events.len()}":
+                return Err("stored framework event order is incomplete")
+            if events.len() >= 65536:
+                return Err("stored framework event scope exceeds its limit")
+            val name = row.get("case_name") ?? ""
+            val phase = row.get("phase") ?? ""
+            val outcome = row.get("outcome") ?? ""
+            if name == "" or (phase != "started" and phase != "finished"):
+                return Err("invalid stored framework event")
+            if phase == "started" and outcome != "not_finished":
+                return Err("stored start event cannot claim an outcome")
+            if phase == "finished" and outcome != "passed" and outcome != "failed" and outcome != "pending":
+                return Err("invalid stored framework outcome")
+            events.push(TraceCaseEvent(
+                case_name: name, phase: phase, outcome: outcome))
+        Ok(events)
     interner: StringInterner
     next_file_id: i64
     next_suite_id: i64
