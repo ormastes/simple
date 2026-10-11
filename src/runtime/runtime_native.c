@@ -5030,23 +5030,46 @@ int64_t rt_string_join(int64_t array_value, int64_t separator) {
     return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
 }
 
-/* Join for entry-closure natives (native `[text].join(sep)` lowering):
- * elements pushed at runtime are RAW i64 words — a string literal element is
- * a raw char* GEP, a concat result is a TAGGED handle — so rt_string_join's
- * rt_core_as_string-per-element silently skips raw words (join returned ""
- * and rendered as 0; W100 / "tools":[0]). Normalize each element AND the
- * separator via rt_interp_cstr's tagged-or-raw autodetection instead. */
+/* Native joins accept registered counted strings and borrowed NUL-terminated
+ * C strings. Raw literal addresses need not be aligned, so their low bits alone
+ * cannot distinguish them from tagged handles. Small non-text values are empty,
+ * as in rt_interp_cstr; arbitrary non-text heap values are not accepted inputs. */
+static int8_t core_join_text_view(int64_t value, const char** data, size_t* len) {
+    RtCoreString* string = rt_core_as_string(value);
+    if (string) {
+        if (string->len > SIZE_MAX - sizeof(RtCoreString) - 1) return 0;
+        *data = string->data;
+        *len = (size_t)string->len;
+    } else if (value < 0x10000) {
+        *data = NULL;
+        *len = 0;
+    } else {
+        *data = (const char*)(uintptr_t)value;
+        *len = strlen(*data);
+    }
+    return 1;
+}
+
+/* Join runtime array elements without discarding counted-string NUL bytes.
+ * Keep the two passes and one result allocation; inputs stay borrowed. */
 int64_t rt_array_join_any(int64_t array_value, int64_t separator) {
     RtCoreArray* array = rt_core_as_array(array_value);
-    const char* sep = rt_interp_cstr(separator);
-    if (!sep) sep = "";
     if (!array) return rt_string_new(NULL, 0);
-    size_t sep_len = strlen(sep);
+    const char* sep;
+    size_t sep_len;
+    if (!core_join_text_view(separator, &sep, &sep_len)) return rt_string_new(NULL, 0);
+    const size_t limit = SIZE_MAX - sizeof(RtCoreString) - 1;
     size_t total = 0;
     for (int64_t i = 0; i < array->len; i++) {
-        const char* item = rt_interp_cstr(((int64_t*)array->data)[i]);
-        if (item) total += strlen(item);
-        if (i + 1 < array->len) total += sep_len;
+        const char* item;
+        size_t item_len;
+        if (!core_join_text_view(((int64_t*)array->data)[i], &item, &item_len)
+            || item_len > limit - total) return rt_string_new(NULL, 0);
+        total += item_len;
+        if (i + 1 < array->len) {
+            if (sep_len > limit - total) return rt_string_new(NULL, 0);
+            total += sep_len;
+        }
     }
     RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + total + 1);
     if (!out) return rt_string_new(NULL, 0);
@@ -5055,12 +5078,16 @@ int64_t rt_array_join_any(int64_t array_value, int64_t separator) {
     out->len = (uint64_t)total;
     size_t pos = 0;
     for (int64_t i = 0; i < array->len; i++) {
-        const char* item = rt_interp_cstr(((int64_t*)array->data)[i]);
-        if (item) {
-            size_t il = strlen(item);
-            if (il > 0) { memcpy(out->data + pos, item, il); pos += il; }
+        const char* item;
+        size_t item_len;
+        if (!core_join_text_view(((int64_t*)array->data)[i], &item, &item_len)
+            || item_len > total - pos) {
+            free(out);
+            return rt_string_new(NULL, 0);
         }
+        if (item_len > 0) { memcpy(out->data + pos, item, item_len); pos += item_len; }
         if (i + 1 < array->len && sep_len > 0) {
+            if (sep_len > total - pos) { free(out); return rt_string_new(NULL, 0); }
             memcpy(out->data + pos, sep, sep_len);
             pos += sep_len;
         }
