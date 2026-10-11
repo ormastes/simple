@@ -420,3 +420,38 @@ selected files.
 Legacy runner JSON worker producers and consumers must be inventoried and
 migrated to native SDN for this feature's full interchange contract. Neither
 new SDN sidecars nor passing ordinary worker execution prove that migration.
+
+### Frozen execution binding after the literal AST slice
+
+The authored `extract_sspec_inventory_single_owner` now uses the resetting
+production parser entry and returns copied literal definitions with UTF-8 byte
+spans. It requires exclusive frontend ownership. This source implementation is
+not the isolated concurrent parser API above and remains native-unverified.
+The sequential-snapshot fixture checks both removal of prior declarations and
+preservation of previously returned values; it must execute on Phase 3 before
+that behavior is accepted.
+
+Run preparation must freeze more than a selected path list. The runner shall
+capture one selection generation after discovery and coverage admission and
+reuse it for every worker route. Its manifest binds exact source bytes, case
+definitions, effective backend/mode, timeout policy, slow-case disposition,
+feature gates, shard membership, execution lane, fixtures and configuration.
+An opaque configuration ID supplied by a caller is intent until its relation
+to these values is validated. Inventory hashes similarly prove byte equality,
+not the source's membership in an authenticated candidate snapshot.
+
+Separate the operations into selection/preparation and execution. Preparation
+must not dispatch candidate callbacks. Execution must consume the frozen
+selection without rediscovery and either read immutable staged inputs or
+validate the exact frozen bytes before dispatch under a binding that prevents
+subsequent mutation. A check followed by an unrestricted mutable file read is
+insufficient. Per-file directives currently applied during execution belong
+in preparation; unsupported directives or worker modes must return an explicit
+incomplete error before allocating or executing a trace run.
+
+The initial planner envelope can retain declaration kind, source digest and
+span alongside the existing v1 planned-case projection. These values require
+durable storage and child verification before full provenance admission; they
+cannot be discarded at the database request boundary. Complete import/input
+closure, dynamic registration and parameter expansion remain separate required
+contracts, not implied by the literal grammar slice.
