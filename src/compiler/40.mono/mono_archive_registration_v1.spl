@@ -1,4 +1,9 @@
 # Ordered actual collection publication. No production ownership switch.
+use compiler.mono.mono_archive_registration_types_v1.{MonoArchiveRegistrationRowV1,
+    MonoArchiveRootOrderV1, MonoArchiveRegistrationOwnerV1, MonoArchiveRegistrationReceiptV1,
+    MonoArchiveCurrentRegistrationOwnerV1, MonoArchiveCurrentRegistrationReceiptV1}
+use compiler.mono.mono_archive_registration_identity_v1.{mono_archive_registration_schedule_digest_v1,
+    mono_archive_registration_owner_digest_v1, mono_archive_current_registration_digest_v1}
 use compiler.hir.hir_types.{HirModule, HirType}
 use compiler.hir.hir_definitions.{HirFunction, HirTypeParam}
 use compiler.hir.hir_codec.{hir_module_encode}
@@ -13,13 +18,11 @@ use compiler.mono.mono_archive_state_v1.{MonoArchiveFactsV1, MonoArchiveStateV1,
     mono_archive_state_create_v1, mono_archive_state_digest_v1}
 use compiler.mono.mono_archive_current_body_v1.{MonoArchiveCurrentBodyV1,
     mono_archive_current_body_digest_v1, mono_archive_current_body_load_in_owned_scope_v1}
-use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{HirOwnedArtifactContextV1}
 use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_context_v1}
 use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveV1,
     hir_body_archive_matches_v1, hir_body_archive_warnings_digest_v1}
 use compiler.driver.cache.hir_mono_archive_consumer_v1.{MonoArchiveAdmissionV1,
     MonoArchiveRepositoryV1, mono_archive_repository_authority_v1}
-use compiler.driver.cache.hir_mono_archive_consumer_v1.{mono_archive_repository_digest_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_load_in_owned_scope,
     hir_cache_last_warnings, hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
@@ -27,101 +30,6 @@ use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pau
     transient_scope_end, transient_promote}
 use std.io_runtime.{env_get}
 use std.common.crypto.sha256.{sha256_text}
-
-# Each variant owns exactly one declaration row family; expression defaults,
-# full functions/structs/classes and symbol tables cannot occur in its schema.
-enum MonoArchiveRegistrationRowV1:
-    SymbolName(key: text, value: text)
-    FunctionReturn(key: text, value: HirType)
-    FunctionSignature(key: text, value: HirType)
-    NamedType(key: text, value: HirType)
-    NamedAmbiguous(key: text, value: bool)
-    NamedSymbolName(key: text, value: text)
-    FieldType(key: text, value: HirType)
-    FieldOwner(key: text, value: text)
-    EnumPayloadType(key: text, value: HirType)
-    ModulePath(key: text, value: text)
-    TemplateModule(key: text, value: text)
-    GenericMethod(key: text, value: text)
-    RejectedMethod(key: text, value: text)
-    GenericTypeParams(key: text, value: [HirTypeParam])
-    GenericTypeModule(key: text, value: text)
-    GenericFieldNames(key: text, value: [text])
-    GenericFieldType(key: text, value: HirType)
-    DeclaredGlobalType(key: text, value: HirType)
-    TemplateSignature(key: text, value: MonoTemplateSignatureV1)
-    TemplateRecipe(key: text, value: MonoTemplateRecipeV1)
-    SymbolIdentity(key: text, value: text)
-
-struct MonoArchiveRootOrderV1:
-    module_name: text
-    symbols: [i64]
-
-class MonoArchiveRegistrationOwnerV1:
-    state: MonoArchiveStateV1
-    archives: Dict<text, HirBodyArchiveV1>
-    roots: [MonoArchiveRootOrderV1]
-    generic_functions: i64
-    generic_structs: i64
-    generic_classes: i64
-    epoch: i64
-    sealed: bool
-    published_schedule_digest: text
-    sealed_schedule_digest: text
-
-struct MonoArchiveRegistrationReceiptV1:
-    archive: HirBodyArchiveV1
-    base_digest: text
-    base_epoch: i64
-    rows: [MonoArchiveRegistrationRowV1]
-    roots: [i64]
-    next_symbol: i64
-    generic_functions: i64
-    generic_structs: i64
-    generic_classes: i64
-    seal: text
-
-# The original publisher cannot accept this typed receipt. Its current body
-# and boundary remain distinct from the original unresolved parent.
-struct MonoArchiveCurrentRegistrationReceiptV1:
-    current_body: MonoArchiveCurrentBodyV1
-    registration: MonoArchiveRegistrationReceiptV1
-    base_current_digest: text
-    seal: text
-
-class MonoArchiveCurrentRegistrationOwnerV1:
-    registration: MonoArchiveRegistrationOwnerV1
-    cache: HirOwnedArtifactContextV1
-    bodies: Dict<text, MonoArchiveCurrentBodyV1>
-    published_digest: text
-    sealed_digest: text = ""
-
-fn mono_archive_current_registration_digest_v1(current: MonoArchiveCurrentRegistrationOwnerV1) -> text:
-    val owner = current.registration
-    # Only the empty factory digest may allocate outside scratch.
-    if (owner.roots.len() > 0 and transient_array_scope_state_v1() != 1) or
-            owner.state.epoch != 0 or owner.state.cursor != 0 or owner.state.queue.len() != 0 or
-            owner.state.spec_symbols.len() != 0 or owner.state.spec_display.len() != 0 or
-            owner.state.spec_signatures.len() != 0 or owner.state.reported_once.len() != 0 or
-            owner.state.unresolved_templates.len() != 0 or owner.state.emitted.len() != 0 or
-            owner.state.fn_returns.len() != 0 or owner.state.sym_names.len() != 0:
-        return ""
-    val prior = mono_archive_registration_owner_digest_v1(owner)
-    if prior == "" or owner.sealed or current.bodies.len() != owner.roots.len(): return ""
-    var writer = HirCodecWriter.create()
-    writer.put_text(prior)
-    writer.put_text(current.cache.directory)
-    writer.put_text(current.cache.producer_header)
-    writer.put_bool(current.cache.enabled)
-    for root in owner.roots:
-        if not current.bodies.has(root.module_name): return ""
-        val body = current.bodies[root.module_name]
-        val digest = mono_archive_current_body_digest_v1(body)
-        if digest == "" or body.original_parent.archive_key != owner.archives[root.module_name].archive_key: return ""
-        writer.put_text(root.module_name)
-        writer.put_text(digest)
-    if not writer.ok: return ""
-    sha256_text("mono-current-registration-owner-v1\n" + writer.finish())
 
 fn mono_archive_current_registration_create_v1() -> Result<MonoArchiveCurrentRegistrationOwnerV1, text>:
     # A fresh actual collector, never the journal's unresolved registration.
@@ -199,57 +107,6 @@ fn mono_archive_registration_create_v1() -> Result<MonoArchiveRegistrationOwnerV
         archives: {}, roots: [], generic_functions: 0, generic_structs: 0,
         generic_classes: 0, epoch: 0, sealed: false,
         published_schedule_digest: "", sealed_schedule_digest: ""))
-
-fn mono_archive_registration_schedule_digest_v1(roots: [MonoArchiveRootOrderV1]) -> text:
-    var writer = HirCodecWriter.create()
-    writer.put_i64(roots.len())
-    var seen: Dict<text, bool> = {}
-    for module in roots:
-        if seen.has(module.module_name): return ""
-        seen[module.module_name] = true
-        writer.put_text(module.module_name)
-        writer.put_i64(module.symbols.len())
-        var previous = -1
-        for symbol in module.symbols:
-            if symbol < 0 or symbol <= previous: return ""
-            previous = symbol
-            writer.put_i64(symbol)
-    if not writer.ok: return ""
-    sha256_text("mono-ordered-root-schedule-v1\n" + writer.finish())
-
-fn mono_archive_registration_owner_digest_v1(owner: MonoArchiveRegistrationOwnerV1) -> text:
-    val state_digest = mono_archive_state_digest_v1(owner.state)
-    if state_digest == "" or owner.archives.len() != owner.roots.len(): return ""
-    if owner.roots.len() == 0:
-        if owner.published_schedule_digest != "": return ""
-    else:
-        if owner.published_schedule_digest == "" or
-                mono_archive_registration_schedule_digest_v1(owner.roots) != owner.published_schedule_digest: return ""
-    if owner.sealed and owner.sealed_schedule_digest != owner.published_schedule_digest: return ""
-    var w = HirCodecWriter.create()
-    w.put_text(state_digest)
-    w.put_i64(owner.epoch)
-    w.put_bool(owner.sealed)
-    w.put_text(owner.published_schedule_digest)
-    w.put_text(owner.sealed_schedule_digest)
-    w.put_i64(owner.generic_functions)
-    w.put_i64(owner.generic_structs)
-    w.put_i64(owner.generic_classes)
-    w.put_i64(owner.roots.len())
-    var seen: Dict<text, bool> = {}
-    for root in owner.roots:
-        if seen.has(root.module_name): return ""
-        seen[root.module_name] = true
-        w.put_text(root.module_name)
-        w.put_i64(root.symbols.len())
-        for symbol in root.symbols: w.put_i64(symbol)
-        if not owner.archives.has(root.module_name): return ""
-        val archive: HirBodyArchiveV1 = owner.archives[root.module_name]
-        w.put_text(archive.archive_key)
-        w.put_text(archive.body_digest)
-        w.put_text(archive.lowering_warnings_digest)
-    if not w.ok: return ""
-    sha256_text("mono-registration-owner-v2\n" + w.finish())
 
 fn mono_archive_registration_row_digest_v1(row: MonoArchiveRegistrationRowV1) -> text:
     var w = HirCodecWriter.create()
@@ -777,65 +634,14 @@ fn mono_archive_registration_seal_v1(owner: MonoArchiveRegistrationOwnerV1,
     Ok(MonoArchiveAdmissionV1(repository: MonoArchiveRepositoryV1(
         modules: owner.archives, authority: authority), state: owner.state))
 
-fn mono_archive_current_registration_seal_v1(current: MonoArchiveCurrentRegistrationOwnerV1,
-        expected_inventory: Dict<text, text>, expected_order: [text]) -> Result<MonoArchiveAdmissionV1, text>:
-    # Mechanical completion only. Actual driver prerequisite acceptance must
-    # still authorize these exact current bodies and fresh state.
-    if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0 or current.registration.sealed:
-        return Err("current registration seal requires closed unsealed owner")
-    if not transient_scope_begin(): return Err("current registration seal scope unavailable")
-    val owner = current.registration
-    var valid = current.published_digest != "" and
-        mono_archive_current_registration_digest_v1(current) == current.published_digest and
-        owner.state.facts.feature_policy == env_get("SIMPLE_MONO_LEVELS") and
-        expected_inventory.len() != 0 and expected_order.len() == expected_inventory.len() and
-        owner.roots.len() == expected_order.len()
-    var seen: Dict<text, bool> = {}
-    var index = 0
-    for name in expected_order:
-        if seen.has(name) or not expected_inventory.has(name) or not owner.archives.has(name):
-            valid = false
-        else:
-            if owner.archives[name].input.source_path != expected_inventory[name]: valid = false
-        seen[name] = true
-        if index >= owner.roots.len():
-            valid = false
-        else:
-            if owner.roots[index].module_name != name: valid = false
-        index = index + 1
-    val repository = MonoArchiveRepositoryV1(modules: owner.archives, authority: "",
-        current_bodies: current.bodies, current_cache: Some(current.cache), current_order: expected_order, current_mode: true)
-    val authority = if valid: mono_archive_repository_digest_v1(repository) else: ""
-    val schedule = mono_archive_registration_schedule_digest_v1(owner.roots)
-    valid = valid and authority != "" and schedule == owner.published_schedule_digest
-    var facts = owner.state.facts
-    facts.body_authority = authority
-    val sealed_state = mono_archive_state_create_v1(facts)
-    val proof = if valid: sha256_text("mono-current-registration-sealed-v1\n" + authority + "\n" +
-        mono_archive_state_digest_v1(sealed_state) + "\n" + schedule + "\n" + current.published_digest + "\n{owner.epoch}") else: ""
-    val paused = transient_scope_pause()
-    val owned = if paused and valid: transient_promote(authority) and transient_promote(schedule) and transient_promote(proof) else: false
-    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
-    if paused: hir_cache_clear_last_warnings()
-    val ended = transient_scope_end()
-    if not paused or not ended or not cache_owned or (valid and not owned): panic("current registration seal ownership")
-    if not valid: return Err("current registration ordered inventory refused")
-    var published_facts = owner.state.facts
-    published_facts.body_authority = authority
-    owner.state.facts = published_facts
-    owner.sealed = true
-    owner.sealed_schedule_digest = schedule
-    current.sealed_digest = proof
-    Ok(MonoArchiveAdmissionV1(repository: MonoArchiveRepositoryV1(modules: owner.archives, authority: authority,
-        current_bodies: current.bodies, current_cache: Some(current.cache), current_order: expected_order, current_mode: true), state: owner.state))
-
-export MonoArchiveRegistrationRowV1, MonoArchiveRootOrderV1
-export MonoArchiveRegistrationOwnerV1, MonoArchiveRegistrationReceiptV1
 export mono_archive_registration_create_v1, mono_archive_collect_registration_in_owned_scope_v1
 export mono_archive_publish_registration_v1, mono_archive_registration_seal_v1
-export mono_archive_registration_schedule_digest_v1
-export mono_archive_registration_owner_digest_v1
-export MonoArchiveCurrentRegistrationReceiptV1, mono_archive_collect_current_registration_in_owned_scope_v1
-export MonoArchiveCurrentRegistrationOwnerV1, mono_archive_current_registration_create_v1
-export mono_archive_publish_current_registration_v1, mono_archive_current_registration_digest_v1
-export mono_archive_current_registration_seal_v1
+export mono_archive_collect_current_registration_in_owned_scope_v1
+export mono_archive_current_registration_create_v1
+export mono_archive_publish_current_registration_v1
+export use compiler.mono.mono_archive_registration_types_v1.{MonoArchiveRegistrationRowV1,
+    MonoArchiveRootOrderV1, MonoArchiveRegistrationOwnerV1, MonoArchiveRegistrationReceiptV1,
+    MonoArchiveCurrentRegistrationOwnerV1, MonoArchiveCurrentRegistrationReceiptV1}
+export use compiler.mono.mono_archive_registration_identity_v1.{mono_archive_registration_schedule_digest_v1,
+    mono_archive_registration_owner_digest_v1, mono_archive_current_registration_digest_v1}
+export use compiler.mono.mono_archive_current_registration_seal_v1.{mono_archive_current_registration_seal_v1}

@@ -4,6 +4,16 @@ This adds complete current-body input mechanics to the existing mono consumers.
 It does not establish driver prerequisite/final admission, activate production
 archiving, reclaim previously promoted HIR, or qualify the full CLI RSS limit.
 
+The registration compatibility module reexports its unchanged public API from
+three lower leaves: body-free registration schemas, actual schedule/state
+identity functions, and the current seal. These leaves do not import the
+compatibility parent, avoiding a reexport cycle. The complete collector and
+unchecked installer remain private implementation in the parent; splitting
+does not expose an alternate path that skips body replay. Parent and leaves
+remain below the 800-line owned-source limit. Moved function and retained
+collector/install/seal bodies are exact source extractions; native 13/20 guard
+fixtures remain unchanged and unrun.
+
 `MonoArchiveBodyInputV1` separates an original unresolved parent from an optional
 complete `post-hir-resolved-v1` body and raw-cache context. Current mode requires
 both fields. It cannot substitute the original archive when the current body
