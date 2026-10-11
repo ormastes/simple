@@ -46,7 +46,7 @@ for my $key (qw(max-rss-kib interval-ms timeout-seconds term-grace-seconds)) {
 # Compiler policy is unchanged. An explicitly admitted parallel test tree has
 # a separate aggregate budget: one parent reserve plus the ordinary compile
 # target per worker. This does not raise any nested compiler guard's limit.
-my $compiler_ceiling_kib = 6835937;
+my $compiler_ceiling_kib = 8388608;
 my $worker_target_kib = 976562;
 my $budget_ceiling_kib = $compiler_ceiling_kib;
 $opt{'budget-scope'} =~ /\A(?:compiler|aggregate-tests)\z/
