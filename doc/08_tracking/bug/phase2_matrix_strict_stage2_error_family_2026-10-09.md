@@ -159,3 +159,30 @@ persists WITH #2967 merged (e650ad19d67 in tree). Suspect visit/declaration
 order sensitivity (cf. robust-5a test 2b284af6820 pinning module typing
 against declaration/name/visit order). Needs a compiler-lane fix; probes under
 `build/matrix-probes/sha3reg/`.
+
+## 2026-10-11 addendum 3: C6 root cause — missing std.crypto.sha3 facade (source gap, not a registration bug)
+
+Bisect (probes `build/matrix-probes/sha3reg/`, minimal-shard-repro) corrected
+addendum 2: `std.crypto.sha3`'s exports are NOT dropped by a registration bug.
+`src/lib/crypto.spl` declares `mod crypto.types/sha256/sha512/hmac/legacy_hash/
+sha1` but no `mod crypto.sha3`, and `src/lib/crypto/sha3.spl` did not exist —
+sha3 was the only `common/crypto` module missing its `src/lib/crypto/*`
+re-export facade. The sequential compile path falls back to the real file, so
+only the `--low-memory` HIR-shard path (used by the stage-2 matrix builds)
+fails: item lookup chases facade `lib.crypto`, which declares no sha3 names.
+
+Fix (PR on work/rel-c6-sha3-facade-20261011): add `src/lib/crypto/sha3.spl`
+re-export facade + `mod crypto.sha3` in src/lib/crypto.spl (matches the
+`crypto/hmac.spl` idiom; validated 0 hir-fatal on a 256-module shard repro).
+
+Latent same-family gaps (NOT in today's closures; fix when imported):
+`std.crypto.md5` (src/os/crypto/pbkdf1.spl:15) and
+`std.crypto.entropy_platform` (src/os/crypto/entropy.spl:5) also lack
+`src/lib/crypto/*` facades.
+
+Related open infra failure (NOT source): `compiler_cli_build` shard owner went
+`status=BLOCKED exit=-2 claimed=0 sealed=-1 inventory incomplete rows=-1` after
+clean parse (2204/2454 files, zero module errors) — same family as the wrapper
+receiver-proof `cannot establish invocation ledger` failures on 2026-10-11
+runs 2-4. Nondeterministic shard-owner startup under multi-lane host load;
+needs compiler-lane diagnosis of the shard owner startup/claim path.
