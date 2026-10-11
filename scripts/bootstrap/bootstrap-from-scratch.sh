@@ -1350,6 +1350,12 @@ case "$(uname -s)" in
     ;;
 esac
 
+# Explicit llvm uses llc CLI; the native Linux/FreeBSD Rust binding is static.
+# llvm-lib and all other hosts retain the shared-provider requirement.
+LLVM_PROVIDER_REQUIREMENT=shared
+case "$(uname -s):${backend}" in
+  Linux:llvm|FreeBSD:llvm) LLVM_PROVIDER_REQUIREMENT=static-cli ;;
+esac
 # Shared platform detection
 . "${repo_root}/scripts/setup/platform-detect.shs"
 PLATFORM="${PLATFORM_TRIPLE}"
@@ -2442,23 +2448,6 @@ bootstrap_stage_sanity() (
       echo "bootstrap-sanity-error: frontend smoke log is empty (${frontend_log})" >&2
     fi
   fi
-  if [ "${sanity_status}" != pass ]; then
-    if [ -s "${frontend_log}" ]; then
-      echo "bootstrap-sanity-error: frontend smoke log follows (first 65536 bytes):" >&2
-      head -c 65536 "${frontend_log}" >&2
-      echo "" >&2
-      if [ -n "${evidence_path}" ]; then
-        frontend_log_durable="${evidence_path}.frontend-failure.log"
-        if cp -f "${frontend_log}" "${frontend_log_durable}"; then
-          echo "bootstrap-sanity-error: full frontend smoke log preserved at ${frontend_log_durable}" >&2
-        else
-          echo "bootstrap-sanity-error: preserving original frontend smoke log at ${frontend_log}" >&2
-        fi
-      fi
-    else
-      echo "bootstrap-sanity-error: frontend smoke log is empty (${frontend_log})" >&2
-    fi
-  fi
   # A durable sanity receipt binds this original log on both pass and fail.
   # Cleanup only scratch evidence that has no published receipt.
   if [ -z "${evidence_path}" ]; then
@@ -2663,7 +2652,7 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
       echo "error: LLVM backend requires admitted LLVM 23.1, found LLVM ${LLVM_VERSION}" >&2
       exit 1
     fi
-    echo "LLVM ${LLVM_VERSION} found: ${LLVM_PREFIX} (lib: ${LLVM_LIB})"
+    echo "LLVM ${LLVM_VERSION} found: ${LLVM_PREFIX} (provider: ${LLVM_PROVIDER_KIND:-shared}, lib: ${LLVM_LIB})"
     # The Rust seed's llvm-sys pins one LLVM major (180 -> LLVM 18), while the
     # pure-Simple llvm backend loads LLVM-C.dll directly and tolerates any
     # recent C API. On hosts whose LLVM major differs from the llvm-sys pin,
