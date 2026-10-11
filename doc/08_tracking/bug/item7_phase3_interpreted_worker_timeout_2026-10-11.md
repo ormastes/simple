@@ -113,3 +113,39 @@ compiler are required before claiming the repair verified. The next bounded
 bootstrap diagnostic can use the supported single positional native-build route
 to avoid retaining a coordinator and compiler worker simultaneously, without
 injecting an internal marker or relaxing the memory limit.
+
+## Routing probe diagnostics after the source repair
+
+Source commit `e6693cd4baaf989519e26e652108177040d0dfe8` contains the
+compiled full-CLI dispatch repair and shared worker owner. The private packet
+`C:/dev/simple-item7-worker-route-fix-20261011` retains three changed attempts:
+
+1. `probe-compile`: MSYS entry path, exit 1 before source loading.
+2. `probe-compile-path-fixed`: Windows absolute entry path, exit 1 with zero
+   sources. The entry collector excludes paths containing `/test/`, including
+   this explicitly requested tracked fixture.
+3. `probe-compile-explicit-copy`: a byte-identical copy outside the test tree,
+   SHA-256 `C5D5062DAAEFA7237795AFFE00C43E9706A00198FEB3B6FDF97488DB9710CED7`.
+   Both modules reached native code generation, then LLVM linking failed:
+   `Required runtime source not found: C:/dev/simple-item7-phase3-20261011/src/runtime/runtime_raw_u32.c`.
+
+The final receipt records exit 1, peak RSS 173592 KiB, enforced 5242880 KiB
+limit, quiescent process tree and no unexpected session PIDs. Its complete
+11885-byte log has zero dropped bytes and SHA-256
+`4adfbc76cab16aebbe30dd08d75faff5b43d7c6ac0dc6076b1b2b04cb3760414`.
+It also reports `rejected invalid array handle before dereference; probable
+compiler/FFI ABI mismatch`; that diagnostic remains unresolved. MIR lowering
+for two modules took 22038 ms, a concrete small-input performance concern.
+
+The request set `SIMPLE_RUNTIME_PATH` to the frozen runtime capture containing
+the documented header-only compatibility TU. The actual linker instead selected
+the worktree runtime. Source inspection suggests the environment override is
+supported, but these execution results do not establish why it was lost.
+Repair runtime selection/compiled transport and explicit-entry test filtering
+before the next verification cycle; do not add a shim to the user's checkout
+or use the Rust seed to report a test PASS.
+
+The three-attempt session limit is reached. No probe executable or new compiler
+was produced, no helper assertion ran, and the prepared positional bootstrap
+build was not launched because its prerequisite probe failed. STATUS: FAIL.
+The full-CLI routing fix remains unverified and is not Phase3 admission evidence.

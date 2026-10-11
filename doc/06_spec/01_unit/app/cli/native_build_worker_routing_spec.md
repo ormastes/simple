@@ -20,3 +20,10 @@ filtering so worker flags retain their meaning.
 
 The helper scenarios do not establish end-to-end compiled dispatch, bootstrap
 resource behavior or Phase3 admission. These require rebuilt executable evidence.
+
+The standalone 16-check native probe reached LLVM code generation for both
+modules on 2026-10-11, but linking failed before an executable was produced.
+The producer requested the absent legacy `runtime_raw_u32.c` in the working
+checkout despite the frozen runtime override. Its log also reports a rejected
+array handle and possible compiler/FFI ABI mismatch. Neither the probe nor these
+seven SSpec scenarios has run; this diagnostic is FAIL, not assertion evidence.
