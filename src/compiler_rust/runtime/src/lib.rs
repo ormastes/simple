@@ -1035,6 +1035,7 @@ pub use value::{
     // String operations
     rt_any_add,
     rt_tagged_add,
+    rt_transient_array_scope_state_v1,
     rt_cstring_to_text,
     rt_string_byte_at,
     rt_string_char_code_at,

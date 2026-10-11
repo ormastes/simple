@@ -2140,6 +2140,20 @@ pub extern "C" fn rt_transient_array_scope_begin() -> bool {
     })
 }
 
+/// Read this thread's actual scope; no mutation, allocation or lease grant.
+#[no_mangle]
+pub extern "C" fn rt_transient_array_scope_state_v1() -> i64 {
+    TRANSIENT_HEAP_SCOPE.with(|slot| match slot.borrow().as_ref() {
+        None => 0,
+        Some(scope) if scope.paused => 2,
+        Some(_) => 1,
+    })
+}
+
+#[cfg(test)]
+#[path = "transient_scope_state_tests.rs"]
+mod transient_scope_state_tests;
+
 #[no_mangle]
 pub extern "C" fn rt_transient_array_scope_pause() -> bool {
     TRANSIENT_HEAP_SCOPE.with(|slot| {

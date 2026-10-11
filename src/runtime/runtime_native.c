@@ -1734,6 +1734,15 @@ int64_t rt_heap_registry_count(void) {
     return (int64_t)atomic_load_explicit(&rt_core_heap_registry_count, memory_order_relaxed);
 }
 
+/* Current owner's context only. Observation neither opens a scope nor grants
+ * a borrowed lease; foreign threads must not observe a global owner's scope. */
+int64_t rt_transient_array_scope_state_v1(void) {
+    if (!rt_core_transient_array_scope_active ||
+            atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
+                (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
+    return rt_core_transient_array_scope_paused ? 2 : 1;
+}
+
 int8_t rt_transient_array_scope_begin(void) {
     if (rt_core_transient_array_scope_active || rt_core_transient_heap_scope_object_len != 0 ||
         rt_core_transient_raw_alloc_len != 0) return 0;

@@ -466,6 +466,8 @@ void     rt_exit(int64_t code);
 void     rt_cli_exit(int64_t code);
 int64_t  rt_heap_registry_count(void);
 int8_t rt_transient_array_scope_begin(void);
+/* Read current scope:0 inactive,1 active/unpaused,2 active/paused. No lease. */
+int64_t rt_transient_array_scope_state_v1(void);
 int8_t rt_transient_array_scope_pause(void);
 int8_t rt_transient_array_scope_end(void);
 /* Graph-operation success for a supported root in an active paused scope,
