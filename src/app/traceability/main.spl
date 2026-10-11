@@ -1,9 +1,21 @@
 # Traceability Checker CLI
 
 use std.cli.cli_util (get_cli_args)
-use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.cli.log_modes.{parse_log_options}
 use std.log.{error}
-use app.traceability.core.{load_traceability_config, analyze_repo_traceability, format_traceability_warning, traceability_report_to_json}
+use app.traceability.core.{load_traceability_config, analyze_repo_traceability, traceability_report_to_sdn}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+
+fn traceability_cli_failure(code: text, reason: text) -> i64:
+    var fields: Dict<text, SdnValue> = {}
+    fields["schema"] = SdnValue.String("simple.trace.diagnostic/v1")
+    fields["code"] = SdnValue.String(code)
+    fields["reason"] = SdnValue.String(reason)
+    fields["complete"] = SdnValue.Bool(false)
+    fields["admission_eligible"] = SdnValue.Bool(false)
+    print sdn_encode_canonical(SdnValue.Dict(fields))
+    2
 
 fn print_help():
     print "Usage: simple traceability-check [options] [paths...]"
@@ -12,9 +24,9 @@ fn print_help():
     print ""
     print "Options:"
     print "  --scope=<name>    all (default), src, spec, doc"
-    print "  --format=<name>   text (default), json"
-    for line in log_options_help():
-        print "  {line}"
+    print "  --format=sdn      SDN output (default and only structured format)"
+    print "  This collector previews the worktree; it does not certify admission."
+    print "  --quiet           Suppress progress; retain the SDN result"
     print "  -h, --help        Show this help"
 
 fn _is_log_option(arg: text) -> bool:
@@ -29,11 +41,10 @@ fn main() -> i64:
     val args = get_cli_args()
     val log_opts = parse_log_options(args)
     if not log_opts.valid:
-        error("traceability", log_opts.error)
-        return 1
+        return traceability_cli_failure("TRACE-CLI-INPUT", log_opts.error)
 
     var scope = "all"
-    var format = if log_opts.log_mode == "json": "json" else: "text"
+    var format = "sdn"
     var paths: [text] = []
 
     var i = 0
@@ -60,23 +71,16 @@ fn main() -> i64:
             pass
         elif not arg.starts_with("-"):
             paths.push(arg)
+        else:
+            return traceability_cli_failure("TRACE-CLI-INPUT", "Unsupported option: " + arg)
         i = i + 1
 
+    if scope != "all" and scope != "src" and scope != "spec" and scope != "doc":
+        return traceability_cli_failure("TRACE-CLI-INPUT", "Unknown scope: " + scope)
+    if format != "sdn" or log_opts.log_mode == "json":
+        return traceability_cli_failure("TRACE-UNSUPPORTED-FORMAT", "Use SDN; legacy structured formats are unsupported")
     val warnings = analyze_repo_traceability(paths, scope, load_traceability_config(), true)
-    if log_opts.progress != "summary" and format != "json":
-        val progress_line = render_progress(log_opts.progress, paths.len(), if paths.len() > 0: paths.len() else: 1, "traceability")
-        if progress_line != "":
-            print progress_line
-    if format == "json":
-        print traceability_report_to_json(warnings)
-    else:
-        if warnings.len() == 0:
-            print "traceability: clean"
-        else:
-            for warning in warnings:
-                print format_traceability_warning(warning)
-            print ""
-            print "traceability: {warnings.len()} warning(s)"
+    print traceability_report_to_sdn(warnings)
 
     if warnings.len() > 0:
         return 1
