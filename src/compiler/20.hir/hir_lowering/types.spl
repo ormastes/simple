@@ -1139,56 +1139,22 @@ impl HirLowering:
     me lower_named_instance_kind(name: text, args: [Type], span: Span) -> HirTypeKind:
         """`Name<args>` annotation of a user type.
 
-        Until the parser learned to keep `Name<args>` for a name imported by
-        an explicit `use` item, every such annotation reached HIR as `Any`:
-        neither the base nor its ARGUMENTS were ever resolved, so a file
-        could spell one whose base is not resolvable here (a re-export chain
-        this module cannot follow) or whose argument is not in scope, and
-        still compile. Keeping the instance must not turn such a file into
-        an error: when the annotation does not lower cleanly, every
-        diagnostic it raised is withdrawn and it stays `Any`, as before.
-        The builtin generics (`Option`, `Result`, `Dict`) always reached HIR
-        with their arguments and keep their own diagnostics."""
+        Resolve the base and arguments without erasing ownership or hiding
+        invalid arguments. Imported declarations follow the same rule as
+        local declarations; an unresolved surface remains a diagnostic."""
         val errors_before = self.errors.len()
         self.named_instance_kind_or_any(name, self.lower_type_list(args), span, errors_before)
 
     me named_instance_kind_or_any(name: text, hir_args: [HirType], span: Span, errors_before: i64) -> HirTypeKind:
         """`lower_named_kind` for an annotation whose arguments were lowered
         after `errors_before` diagnostics; see `lower_named_instance_kind`."""
-        val kind = self.lower_named_kind(name, hir_args, span)
-        if hir_args.len() == 0 or name == "Option" or name == "Result" or name == "Dict":
-            return kind
-        if self.errors.len() == errors_before:
-            return kind
-        var kept_errors: [LoweringError] = []
-        var kept_messages: [text] = []
-        var kept_recovered: [bool] = []
-        var i = 0
-        while i < errors_before:
-            kept_errors = kept_errors.push(self.errors[i])
-            kept_messages = kept_messages.push(self.diagnostic_messages[i])
-            kept_recovered = kept_recovered.push(self.diagnostic_recovered[i])
-            i = i + 1
-        self.errors = kept_errors
-        self.diagnostic_messages = kept_messages
-        self.diagnostic_recovered = kept_recovered
-        HirTypeKind.Any
+        self.lower_named_kind(name, hir_args, span)
 
     me lower_resolved_named_kind(symbol_id: SymbolId, hir_args: [HirType], span: Span) -> HirTypeKind:
         """Named type whose base resolved to `symbol_id`.
 
-        The parser keeps `Name<args>` for ANY name a file imports by an
-        explicit `use` item -- it cannot know the kind of an imported name.
-        Only an imported class or struct (or an alias, expanded below) is an
-        instantiation whose identity and arguments carry on; an imported
-        trait or enum applied to arguments keeps the erased `Any` it had
-        before that parser rule existed."""
-        if hir_args.len() > 0 and self.type_alias_position(symbol_id) < 0:
-            if val named_info = self.symbols.get_symbol_raw(symbol_id.id):
-                val named_owner = named_info.defining_module ?? ""
-                if named_owner != "" and named_owner != self.module_filename:
-                    if named_info.kind == SymbolKind.Trait or named_info.kind == SymbolKind.Enum:
-                        return HirTypeKind.Any
+        Imported enum and trait instances retain their arguments just like
+        local ones. Type aliases expand through the common named path."""
         self.lower_named_symbol_kind(symbol_id, hir_args, span)
 
     me lower_named_kind(name: text, hir_args: [HirType], span: Span) -> HirTypeKind:

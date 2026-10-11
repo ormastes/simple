@@ -264,6 +264,46 @@ in this harness) — not investigated further.
 Cache: the flat-pool label is `spl-flatpool-v6`. Development builds of this lane wrote the
 instance-registry layout under the v4 and the v5 label; purge dev caches from that lineage.
 
+## H-ANNOT repair candidate, 2026-10-11 — verification pending
+
+The implementation candidate retains `Name<args>` for registered local names
+and forward references, using the existing named-instance flat-pool layout.
+The `List<T>` array alias and explicitly imported class precedence remain in the
+parser. HIR preserves diagnostics for locally resolved declarations; unresolved
+import surfaces retain their existing recovery rule.
+
+Preserving those arguments exposes module-local symbol ids to inference.
+`NominalBindingContext` carries the template and caller symbol tables and owner
+names. Recursive matching resolves each nominal base through its own table and
+compares the declaration's module and name before matching its arguments. It
+does not equate nominal bases merely because their raw ids or display names
+agree. Existing context-free model tests retain their single-table API.
+
+Acceptance is specified in
+`doc/02_requirements/feature/generic_annotation_preservation.md`. The field-path
+specs now require concatenation for annotated text instances, integer addition
+for annotated integer instances, and refusal only for a genuinely argumentless
+receiver. This supersedes the intended H-ANNOT behavior in section 8, but **does
+not yet supersede its verified status**: the candidate has not run on an admitted
+self-hosted test runtime or rebuilt native compiler. No formal proof of this
+parser-to-native path is claimed.
+
+## H-NAMED key repair candidate, 2026-10-11 — verification pending
+
+Specialization identity now includes each nominal type's canonical declaration
+module and original name, with length-delimited boundaries. Display mangling is
+unchanged; different identities that display alike still receive `_k<n>`.
+Unknown ownership propagates failure through nested types and produces
+E-MONO-041 instead of registering a specialization by raw symbol id or short
+name. Context-bearing inference validates fixed nominal parameters too.
+
+Requirements and execution limits are recorded in
+`doc/02_requirements/feature/generic_nominal_identity.md` and
+`doc/09_report/generic_nominal_identity_candidate_2026-10-11.md`.
+These source changes are not yet an executed acceptance of H-NAMED. They also
+do not relocate caller/provider nominal ids across specialization bodies or
+return signatures; H-XMOD/H-RET32 remain separate obligations.
+
 ## 10. Reduced Lean substitution proof boundary (2026-10-11)
 
 The separate `src/verification/type_inference_compile` Lake project now includes
