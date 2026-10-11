@@ -286,14 +286,41 @@ jobs:
           fi
 
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-09-15
 
       - name: Install FreeType (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y clang-18 lld-18 llvm-18-dev libfreetype6-dev libunwind-dev
+        run: sudo apt-get update && sudo apt-get install -y libfreetype6-dev libunwind-dev
 
-      - name: Install Polly (Linux LLVM)
+      - name: Install C tools (Linux Cranelift)
+        if: runner.os == 'Linux' && matrix.backend == 'cranelift'
+        run: sudo apt-get install -y clang-18 lld-18 llvm-18-dev
+
+      - name: Restore immutable Linux LLVM archive
         if: runner.os == 'Linux' && matrix.backend == 'llvm'
-        run: sudo apt-get install -y libpolly-18-dev
+        id: linux_llvm_archive
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/simple-llvm-release/LLVM-23.1.1-Linux-X64.tar.xz
+          key: linux-llvm-sha256-832aeb58d105de1cabc7b982dd2c65de0610f7377df48ae8fc2dd8e97420a15c
+
+      - name: Install exact LLVM authority (Linux LLVM)
+        if: runner.os == 'Linux' && matrix.backend == 'llvm'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIMPLE_LINUX_PHASE23_LLVM_PREFIX: ${{ github.workspace }}/build/toolchains/llvm-23.1.1
+          SIMPLE_LLVM23_ARCHIVE_CACHE: ${{ github.workspace }}/.cache/simple-llvm-release
+        run: |
+          sh scripts/setup/install-linux-phase23-llvm23.shs
+          sh scripts/check/pin-linux-phase23-llvm23.shs
+
+      - name: Save verified Linux LLVM archive
+        if: runner.os == 'Linux' && matrix.backend == 'llvm' && steps.linux_llvm_archive.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/simple-llvm-release/LLVM-23.1.1-Linux-X64.tar.xz
+          key: linux-llvm-sha256-832aeb58d105de1cabc7b982dd2c65de0610f7377df48ae8fc2dd8e97420a15c
 
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
@@ -379,6 +406,14 @@ jobs:
             --jobs=2
           stage2="$(find build/bootstrap/stage2 -type f \( -name simple -o -name simple.exe \) -print -quit)"
           test -n "$stage2"
+          if [ "$RUNNER_OS" = Linux ] && [ "${{ matrix.backend }}" = llvm ]; then
+            # The completed Stage2 bootstrap includes actual Hello/sanity. This
+            # probe compiles through that new producer's positional route.
+            stage2_triple=$(basename "$(dirname "$stage2")")
+            sh scripts/check/check-stage2-nul-literal-native.shs \
+              "$PWD" "build/bootstrap/stage3/$stage2_triple" \
+              "build/bootstrap/nul-literal-probe"
+          fi
           stage3_receipt="$PWD/build/bootstrap/multiplatform-stage3-planner-admission-v2.env"
           sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
             --target=//bootstrap:stage3 \
@@ -442,6 +477,21 @@ jobs:
           name: bootstrap-diagnostic-UNADMITTED-${{ matrix.name }}-${{ matrix.backend }}-${{ github.sha }}
           path: ${{ runner.temp }}/bootstrap-diagnostic-continuation
           if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload NUL literal native qualification evidence
+        if: always() && runner.os == 'Linux' && matrix.backend == 'llvm'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nul-literal-unadmitted-evidence-${{ github.sha }}
+          path: |
+            build/bootstrap/nul-literal-probe/*.env
+            build/bootstrap/nul-literal-probe/*.sha*
+            build/bootstrap/nul-literal-probe/*.argv
+            build/bootstrap/nul-literal-probe/*.log
+            build/bootstrap/nul-literal-probe/run/**
+            build/bootstrap/nul-literal-probe/project/src/app/main.spl
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Upload pure-Simple bootstrap failure logs

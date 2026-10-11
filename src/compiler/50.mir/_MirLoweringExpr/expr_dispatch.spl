@@ -4999,14 +4999,8 @@ impl MirLowering:
                 if has_interps:
                     self.lower_string_interpolation(value, interp_list)
                 else:
-                    # Store string as constant; runtime resolves pointer
-                    var b = self.builder
-                    val dest = b.new_temp(MirType(kind: MirTypeKind.Opaque("str")))
-                    b.emit_const(dest, MirConstValue.Str(value), MirType(kind: MirTypeKind.Opaque("str")))
-                    self.builder = b
-                    # A C-string pointer cannot retain an embedded NUL byte.
-                    # Materialize those literals with the authored byte count
-                    # before any text operation or parameter transport.
+                    # NUL literals need a counted constructor. Its input must
+                    # be raw bytes: backends already box Opaque("str") constants.
                     var literal_has_nul = false
                     var literal_byte = 0
                     val literal_byte_length = value.len()
@@ -5015,13 +5009,18 @@ impl MirLowering:
                             literal_has_nul = true
                             break
                         literal_byte = literal_byte + 1
+                    val literal_type = if literal_has_nul: MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)) else: MirType(kind: MirTypeKind.Opaque("str"))
+                    var b = self.builder
+                    val dest = b.new_temp(literal_type)
+                    b.emit_const(dest, MirConstValue.Str(value), literal_type)
+                    self.builder = b
                     if literal_has_nul:
                         var b_nul = self.builder
                         val literal_length = b_nul.new_temp(MirType.i64())
                         b_nul.emit_const(literal_length, MirConstValue.Int(literal_byte_length), MirType.i64())
                         val literal_new = MirOperand(kind: MirOperandKind.Const(
                             MirConstValue.Str("rt_string_new"),
-                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [literal_type, MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
                         ))
                         val literal_tagged = b_nul.emit_call(literal_new, [mir_operand_copy(dest), mir_operand_copy(literal_length)], MirType.i64())
                         self.builder = b_nul

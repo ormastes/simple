@@ -1,0 +1,169 @@
+#!/bin/sh
+# Integration-only qualifier: actual freshly built compiler, strict paired link.
+set -eu
+[ "$#" = 3 ] || { echo 'usage: check-stage2-nul-literal-native.shs REPO STAGE3_PROVENANCE OUTPUT'; exit 2; }
+repo=$(CDPATH= cd -- "$1" && pwd -P)
+provenance=$(CDPATH= cd -- "$2" && pwd -P)
+out=$3
+[ "$(uname -s):$(uname -m)" = Linux:x86_64 ] || exit 2
+refuse() { echo "NUL probe authority refused: $*" >&2; exit 2; }
+# Only the canonical copied compiler and paired frozen authority are eligible.
+compiler="$provenance/stage2-admitted/simple"
+admission="$provenance/stage2-admitted/admission.env"
+runtime="$provenance/stage2-runtime-authority"
+native="$runtime/libsimple_native_all.a"
+backfill="$runtime/libsimple_compiler_backfill.a"
+source_snapshot="$provenance/source-inputs-before.txt"
+runtime_snapshot="$provenance/runtime-admitted.txt"
+tool_snapshot="$provenance/tool-authority-before.txt"
+sanity="$provenance/stage2-sanity.env"
+receiver="$provenance/stage2-receiver.env"
+receiver_log="$provenance/stage2-receiver.log"
+for authority in "$compiler" "$admission" "$native" "$backfill" \
+    "$source_snapshot" "$runtime_snapshot" "$tool_snapshot" "$sanity" \
+    "$receiver" "$receiver_log"; do
+  [ -f "$authority" ] && [ ! -L "$authority" ] && [ -s "$authority" ] ||
+    refuse "missing or indirect file: $authority"
+done
+[ -x "$compiler" ] || refuse 'compiler is not executable'
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_VERSION_ROOT="$repo"
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+export SIMPLE_ABI_POLICY=v1
+bootstrap_stage3_compare_bind || refuse 'canonical comparator unavailable'
+[ "$(bootstrap_stage3_manifest_value candidate_sha256 "$admission")" = \
+  "$(bootstrap_stage3_hash_file "$compiler")" ] || refuse 'stale compiler digest'
+[ "$(bootstrap_stage3_manifest_value runtime_snapshot_sha256 "$admission")" = \
+  "$(bootstrap_stage3_hash_file "$runtime_snapshot")" ] || refuse 'stale runtime snapshot digest'
+mkdir "$out"
+out=$(CDPATH= cd -- "$out" && pwd -P)
+bootstrap_stage3_directory_snapshot "$out/runtime.observed.txt" "$runtime" ||
+  refuse 'runtime snapshot failed'
+cmp -s "$runtime_snapshot" "$out/runtime.observed.txt" || refuse 'stale runtime bytes'
+args_sha=$(bootstrap_stage3_manifest_value build_args_sha256 "$admission")
+bootstrap_stage3_verify_stage2_admission_receipt \
+  "$admission" "$admission" "$compiler" "$compiler" \
+  "$source_snapshot" "$source_snapshot" "$runtime_snapshot" "$runtime_snapshot" \
+  "$runtime" "$runtime" "$tool_snapshot" "$tool_snapshot" "$args_sha" \
+  "$sanity" "$sanity" "$provenance" "$receiver" "$receiver" \
+  "$receiver_log" "$receiver_log" "$repo" || refuse 'canonical Stage 2 admission verification'
+# The admitted clang driver is also the strict linker; never choose ambient CXX.
+# Verify every recorded tool still has the admitted bytes before native work.
+python3 - "$tool_snapshot" "$out/linker.path" <<'TOOLS'
+import hashlib, pathlib, sys
+rows = pathlib.Path(sys.argv[1]).read_text().splitlines()
+clang = []
+for row in rows:
+    if not row.startswith('tool='):
+        continue
+    fields = dict(part.split('=', 1) for part in row.split('|'))
+    requested = pathlib.Path(fields['requested'])
+    canonical = pathlib.Path(fields['canonical'])
+    if requested.resolve(strict=True) != canonical or hashlib.sha256(canonical.read_bytes()).hexdigest() != fields['sha256']:
+        raise SystemExit('stale admitted tool: ' + fields['tool'])
+    if fields['tool'].startswith('clang'):
+        clang.append(str(requested))
+if len(clang) != 1:
+    raise SystemExit('one admitted clang driver required')
+pathlib.Path(sys.argv[2]).write_text(clang[0] + '\n')
+TOOLS
+IFS= read -r linker <"$out/linker.path"
+printf 'status=PASS\ncompiler=%s\nadmission=%s\nruntime=%s\nsanity=%s\ntools=%s\n' \
+  "$compiler" "$admission" "$runtime" "$sanity" "$tool_snapshot" >"$out/authority.env"
+fixture="$repo/test/02_integration/compiler/nul_literal_raw_constructor_native_probe.spl"
+[ -s "$fixture" ] || exit 2
+mkdir -p "$out/project/src/app" "$out/tmp" "$out/cache"
+export TMPDIR="$out/tmp" XDG_CACHE_HOME="$out/cache"
+export SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_BOOTSTRAP=1
+export SIMPLE_BINARY="$compiler" SIMPLE_RUNTIME_PATH="$runtime" SIMPLE_LIB="$repo/src"
+export SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=direct SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE=none
+export SIMPLE_NATIVE_BUILD_THREADS=1 SIMPLE_NATIVE_BUILD_TARGET=x86_64-unknown-linux-gnu
+export SIMPLE_NATIVE_BUILD_CACHE_DIR="$out/cache" SIMPLE_PACKAGE_INDEX_COLD_INIT=1
+export SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap
+unset SIMPLE_NATIVE_BUILD_RUST
+export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=2097152
+unset SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_STAGE4
+owner="$repo/scripts/bootstrap/run-process-group-timeout.shs"
+sha256sum "$compiler" "$native" "$backfill" "$fixture" "$admission" "$sanity" "$source_snapshot" "$runtime_snapshot" "$tool_snapshot" "$receiver" "$receiver_log" "$linker" >"$out/authority.before.sha256"
+git -C "$repo" rev-parse HEAD >"$out/source.sha"
+cp "$fixture" "$out/project/src/app/main.spl"
+cmp -s "$fixture" "$out/project/src/app/main.spl"
+git -C "$out/project" init -q
+git -C "$out/project" add src/app/main.spl
+git -C "$out/project" -c user.name=BootstrapProbe -c user.email=probe@invalid commit -qm 'Exact reviewed NUL literal native byte fixture'
+git -C "$out/project" rev-parse HEAD >"$out/fixture.sha"
+phase=compile
+status=FAIL
+finish() {
+  code=$?
+  trap - EXIT
+  sha256sum "$compiler" "$native" "$backfill" "$fixture" "$admission" "$sanity" "$source_snapshot" "$runtime_snapshot" "$tool_snapshot" "$receiver" "$receiver_log" "$linker" >"$out/authority.after.sha256"
+  if ! cmp -s "$out/authority.before.sha256" "$out/authority.after.sha256"; then status=FAIL; phase=authority-drift; code=1; fi
+  bytes=0; [ ! -f "$out/probe.o" ] || bytes=$(wc -c <"$out/probe.o" | tr -d ' ')
+  printf 'schema=nul-literal-native-v1\nstatus=%s\nphase=%s\nexit=%s\nobject_bytes=%s\nfrontend_mir_spec=UNEXECUTED\nfull_compiler_admission=0\n' "$status" "$phase" "$code" "$bytes" >"$out/receipt.env"
+  exit "$code"
+}
+trap finish EXIT
+export SIMPLE_PROCESS_TREE_RSS_RECEIPT="$out/compile-process.env"
+(
+  cd "$out/project"
+  printf '%s\n' "$compiler" native-build src/app/main.spl --source src/app --backend=llvm --emit-object --jobs=1 --runtime-bundle core-c-bootstrap --runtime-path "$runtime" --output "$out/probe.o" >"$out/compile.argv"
+  sh "$owner" 120 2 "$compiler" native-build src/app/main.spl \
+    --source src/app --backend=llvm --emit-object --jobs=1 \
+    --runtime-bundle core-c-bootstrap --runtime-path "$runtime" --output "$out/probe.o"
+) >"$out/compile.log" 2>&1
+[ -s "$out/probe.o" ]
+phase=link
+# Extract the literal C template from its canonical Simple owner. Preserve
+# argument setup, startup interception, runtime init/shutdown and module inits.
+entry_owner="$repo/src/compiler/70.backend/backend/llvm_native_link_hosted_support.spl"
+sha256sum "$entry_owner" >"$out/entry-owner.sha256"
+nm --defined-only "$out/probe.o" >"$out/probe.symbols"
+python3 - "$entry_owner" "$out/probe.symbols" "$out/main.c" <<'ENTRY'
+import json, pathlib, re, sys
+source = pathlib.Path(sys.argv[1]).read_text()
+start = source.index('    var c_source = ', source.index('fn compile_entry_point_c('))
+end = source.index('    file_write(entry_c, c_source)', start)
+names = set()
+for line in pathlib.Path(sys.argv[2]).read_text().splitlines():
+    parts = line.split()
+    if len(parts) != 3 or parts[1] in 'UuWwVv':
+        continue
+    name = parts[2]
+    if name.startswith('___module_init'):
+        name = name[1:]
+    if name == '__module_init' or name.startswith('__module_init_'):
+        if not re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', name):
+            raise SystemExit('unsupported initializer symbol')
+        names.add(name)
+fragments = []
+for line in source[start:end].splitlines():
+    line = line.strip()
+    if line.startswith(('var c_source = ', 'c_source = ')):
+        match = re.fullmatch(r'(?:var c_source = |c_source = c_source \+ )(".*")', line)
+        if not match:
+            raise SystemExit('canonical entry template changed')
+        fragment = json.loads(match[1])
+        if '{name}' in fragment:
+            fragments.extend(fragment.replace('{name}', name) for name in sorted(names))
+        else:
+            fragments.append(fragment)
+result = ''.join(fragments)
+if not all(call in result for call in ['spl_init_args(argc, argv);', '__simple_runtime_init();', '__simple_runtime_shutdown();']):
+    raise SystemExit('canonical entry lifecycle incomplete')
+pathlib.Path(sys.argv[3]).write_text(result)
+ENTRY
+sha256sum "$linker" >"$out/linker.sha256"
+printf '%s\n' "$linker" -no-pie -x c "$out/main.c" -x none "$out/probe.o" -Wl,--start-group "$native" "$backfill" -Wl,--end-group -lstdc++ -lpthread -ldl -lm -lsqlite3 -lz -lzstd -ltinfo -o "$out/probe" >"$out/link.argv"
+export SIMPLE_PROCESS_TREE_RSS_RECEIPT="$out/link-process.env"
+sh "$owner" 60 2 "$linker" -no-pie -x c "$out/main.c" -x none "$out/probe.o" \
+  -Wl,--start-group "$native" "$backfill" -Wl,--end-group \
+  -lstdc++ -lpthread -ldl -lm -lsqlite3 -lz -lzstd -ltinfo -o "$out/probe" >"$out/link.log" 2>&1
+[ -x "$out/probe" ]
+sha256sum "$out/probe.o" "$out/probe" >"$out/artifacts.sha256"
+phase=execute
+printf 'NUL literal constructor probe: PASS\n' >"$out/expected.stdout"
+: >"$out/expected.stderr"
+sh "$repo/scripts/bootstrap/run-native-sanity.shs" "$repo" "$out/run" "$out/expected.stdout" "$out/expected.stderr" 0 "$out/probe"
+status=PASS
+phase=complete
