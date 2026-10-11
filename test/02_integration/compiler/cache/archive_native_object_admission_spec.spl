@@ -1,7 +1,7 @@
 # @cover src/compiler/80.driver/cache/archive_native_object_admission_v1.spl
 use std.spec.{describe, it, expect}
 use std.spec.step
-use compiler.driver.cache.binary_object_cas.{binary_object_cas_put}
+use compiler.driver.cache.binary_object_cas.{binary_object_cas_put, binary_object_cas_read_full}
 use compiler.driver.cache.archive_native_object_admission_v1.{
     ArchiveNativeObjectActionV1, archive_native_object_paths_v1,
     archive_native_object_format_v1}
@@ -26,6 +26,21 @@ describe "archived native object admission":
         expect(result.is_ok()).to_equal(true)
         if result.is_ok():
             expect(result.unwrap().len()).to_equal(1)
+
+    it "preserves NUL and high bytes through the binary CAS":
+        step("Publish a binary object whose payload is not UTF-8 text")
+        val object: [u8] = [127u8, 69u8, 76u8, 70u8, 0u8, 255u8, 254u8, 128u8]
+        val digest = binary_object_cas_put(ARCHIVE_NATIVE_TEST_ROOT, object)
+        expect(digest.len()).to_equal(64)
+        val readback = binary_object_cas_read_full(ARCHIVE_NATIVE_TEST_ROOT, digest)
+        expect(readback.is_some()).to_equal(true)
+        if readback.is_some():
+            val bytes = readback.unwrap()
+            expect(bytes.len()).to_equal(8)
+            expect(bytes[4]).to_equal(0u8)
+            expect(bytes[5]).to_equal(255u8)
+            expect(bytes[6]).to_equal(254u8)
+            expect(bytes[7]).to_equal(128u8)
 
     it "rejects semantic only and missing native objects":
         val missing = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"

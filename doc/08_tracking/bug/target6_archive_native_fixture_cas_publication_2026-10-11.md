@@ -45,3 +45,8 @@ Three bounded write-path probes were built and run in the isolated worktree:
 - An explicit 1 MiB raw-buffer SOSIX/C writer also returned before opening the staged file.
 
 Trace artifacts: `/tmp/simple-target6-cas-read.trace`, `/tmp/simple-target6-cas-sosix-trace2`, `/tmp/simple-target6-cas-array-trace`, and `/tmp/simple-target6-cas-raw-trace`. Build logs are `/tmp/simple-target6-cas-sosix-fixture-build-20261011.log`, `/tmp/simple-target6-cas-array-fixture-build-20261011.log`, and `/tmp/simple-target6-cas-raw-fixture-build-20261011.log`. The final write-path probe was reverted after the third failed fixture cycle; no writer change is qualified or published. Next investigation should inspect generated LLVM call operands and the runtime argument decoding before another implementation attempt. The CAS publication gate and Item 6 remain open.
+
+## 2026-10-11 native resolution
+
+Generated AArch64 disassembly exposed the path ABI mismatch: the compiler passed a C string through `rt_interp_cstr`, while the first raw writer expected tagged text. The corrected SOSIX/C boundary and binary/chunk fixture now pass. See the [native repair report](../../09_report/compiler/target6_archive_native_cas_sosix_2026-10-11.md). The interpreter/SPipe and production gates remain open.
+The final SOSIX alias routing also passed a no-stub native rebuild and fresh-root executable fixture; details and limits are in the linked repair report.

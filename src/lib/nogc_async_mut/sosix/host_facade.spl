@@ -50,6 +50,13 @@ export use std.nogc_sync_mut.io.file_ops.{
     file_atomic_write as sosix_file_atomic_write
 }
 export use std.nogc_sync_mut.io.dir_ops.{dir_create_all as sosix_dir_create_all}
+export use std.nogc_sync_mut.io.file_ops.{
+    file_read_regular_no_follow_bounded as sosix_file_read_regular_no_follow_bounded,
+    file_read_regular_no_follow_bounded_bytes as sosix_file_read_regular_no_follow_bounded_bytes,
+    file_publish_noreplace_raw as sosix_file_publish_noreplace_raw,
+    secure_temp_dir_raw as sosix_secure_temp_dir_raw
+}
+export use std.nogc_sync_mut.io.dir_ops.{dir_remove as sosix_dir_remove}
 export use std.nogc_sync_mut.io_runtime.{
     is_dir as sosix_dir_exists,
     dir_list as sosix_dir_list
@@ -64,6 +71,44 @@ export use std.nogc_sync_mut.io_runtime.{
 export use std.nogc_async_mut.io.process_ops.{eprint as sosix_eprint}
 export use std.nogc_sync_mut.sffi.diag.{print_raw as sosix_print_raw}
 
+
+# Stage binary bytes in a private file using a bounded raw buffer.
+# The hosted writer creates the first chunk exclusively and writes later
+# chunks at exact offsets; callers remove the staged file on failure.
+@unsafe(reason: "allocate a bounded host byte buffer", capabilities: [ffi, raw_ptr])
+extern fn rt_alloc(size: i64) -> i64
+@unsafe(reason: "release the owned host byte buffer", capabilities: [ffi, raw_ptr])
+extern fn rt_free(ptr: i64)
+@unsafe(reason: "write a byte within the bounded host buffer", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_u8(ptr: i64, offset: i64, value: i64)
+@unsafe(reason: "write a bounded raw buffer to a private staged file", capabilities: [ffi, raw_ptr])
+extern fn rt_file_write_raw_at(path: text, offset: i64, ptr: i64, count: i64) -> i64
+use std.nogc_sync_mut.fs.host_path.{host_path_native}
+
+fn sosix_file_write_new_bytes_v1(path: text, bytes: [u8]) -> bool:
+    if path == "" or bytes.len() == 0 or sosix_file_exists(path):
+        return false
+    var offset: i64 = 0
+    while offset < bytes.len():
+        val remaining = bytes.len() - offset
+        val count = if remaining < 1048576: remaining else: 1048576
+        val ptr = unsafe(capabilities: [ffi, raw_ptr]):
+            rt_alloc(count)
+        if ptr == 0:
+            return false
+        var index: i64 = 0
+        while index < count:
+            unsafe(capabilities: [ffi, raw_ptr]):
+                rt_ptr_write_u8(ptr, index, bytes[offset + index] as i64)
+            index = index + 1
+        val written = unsafe(capabilities: [ffi, raw_ptr]):
+            rt_file_write_raw_at(host_path_native(path), offset, ptr, count)
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_free(ptr)
+        if written != count:
+            return false
+        offset = offset + count
+    true
 
 struct SosixRun:
     stdout: text
@@ -148,3 +193,4 @@ fn _parse_pct(raw: text) -> f64:
 
 export SosixRun, SosixProcUsage
 export sosix_platform, sosix_run, sosix_proc_usage
+export sosix_file_write_new_bytes_v1

@@ -647,3 +647,7 @@ After these three bounded attempts, archive object consumption has no
 executable PASS. The broad package-index system spec now routes its process
 calls through SOSIX, but the compiled acceptance owner and end-to-end warm
 route remain unqualified. No p95/RSS claim follows from this fixture.
+
+### 2026-10-11 archived native CAS byte-write follow-up
+
+The first archived native object publication now passes the admitted Stage2 no-stub LLVM executable fixture after a SOSIX byte-write ABI repair. The fixture covers binary NUL/high bytes and a 1,048,583-byte object across the 1 MiB write boundary; see [the repair evidence](../../../09_report/compiler/target6_archive_native_cas_sosix_2026-10-11.md). This is a focused native gate, not a full Item 6 cutover or performance qualification. Interpreter SPipe execution, broader archive/action receipt binding, realistic native cohorts, and full compiler/core/MCP checks remain open.

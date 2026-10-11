@@ -14147,6 +14147,27 @@ int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t 
     return (int64_t)bytes_written;
 }
 
+/* SOSIX staged binary writer: Simple lowers text here to a C path pointer.
+ * The caller owns and bounds the raw byte buffer for the duration of this call. */
+int64_t rt_file_write_raw_at(const char* path, int64_t offset, int64_t data_ptr, int64_t data_len) {
+    if (!path || !path[0] || offset < 0 || data_ptr <= 0 ||
+        data_len <= 0 || data_len > 1048576) return -1;
+    int flags = O_WRONLY | O_CREAT;
+    if (offset == 0) flags |= O_EXCL;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+#ifdef _WIN32
+    flags |= _O_BINARY;
+#endif
+    int fd = open(path, flags, 0600);
+    if (fd < 0) return -1;
+    ssize_t written = rt_file_write_at_fd(fd, (const void*)(uintptr_t)data_ptr,
+                                          (size_t)data_len, offset);
+    close(fd);
+    return (int64_t)written;
+}
+
 /* NOTE (2026-08-10, rt_extern_abi_divergence_family): this is a stdio FILE*
  * helper, NOT the compiler's rt_file_open. The compiler declares
  * `i32 rt_file_open(const uint8_t* path, uint64_t path_len, i32 mode)` and the
