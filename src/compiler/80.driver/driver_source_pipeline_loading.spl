@@ -11,8 +11,9 @@ use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_active_v1,
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{SourceFile}
-use compiler.common.source_root_resolution.{SourceRootResolutionV1,
-    source_root_resolution_with_fallback_v1}
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
+use compiler.driver.driver_build.native_source_root_handoff.{
+    native_source_root_paths_v1, native_source_root_loaded_owner_error_v1}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.driver.driver_source_loading.{
@@ -224,7 +225,16 @@ impl CompilerDriver:
                 driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_5]
         else:
             driver_inputs = self.ctx.options.input_files
-        val closure_source_roots = driver_inputs
+        var closure_source_roots = driver_inputs
+        if self.ctx.options.native_source_roots.len() > 0 or
+                self.ctx.options.native_source_snapshot_root != "":
+            match native_source_root_paths_v1(self.ctx.options.native_source_roots,
+                    self.ctx.options.native_source_snapshot_root):
+                case Ok(roots): closure_source_roots = roots
+                case Err(reason):
+                    self.ctx.add_error(reason)
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
         var admitted_preclosed: NativeEntryClosureSelectionV1? = nil
         var preclosed_snapshot_root = ""
         var preclosed_row_by_identity: Dict<text, i64> = {}
@@ -924,10 +934,12 @@ impl CompilerDriver:
             # This preserves custom source layouts without parsing every file in
             # each root before the entry's transitive imports are known.
             var closure_loaded_mods = _driver_text_bucket_set_new(512)
+            var closure_loaded_paths: Dict<text, text> = {}
             var closure_preidx = 0
             while closure_preidx < all_sources.len():
                 val loaded_module_name = all_sources[closure_preidx].module_name
                 closure_loaded_mods[loaded_module_name] = true
+                closure_loaded_paths[loaded_module_name] = all_sources[closure_preidx].path
                 closure_preidx = closure_preidx + 1
             var closure_seen_mods = _driver_text_bucket_set_new(512)
             var closure_scan_sources = _driver_unique_physical_sources(all_sources)
@@ -1016,23 +1028,29 @@ impl CompilerDriver:
                     if closure_seen_mods.contains_key(closure_mp):
                         continue
                     closure_seen_mods[closure_mp] = true
+                    val selected_source = _driver_resolve_source_root_entry_import_v1(
+                        closure_mp_input, closure_source_roots)
+                    val loaded_path = closure_loaded_paths.get(closure_mp) ?? ""
+                    val owner_selection = match selected_source:
+                        case SourceRootResolutionV1.Found(path):
+                            SourceRootResolutionV1.Found(_driver_physical_source_key(path))
+                        case _: selected_source
+                    val loaded_key = if loaded_path == "": "" else: _driver_physical_source_key(loaded_path)
+                    val owner_error = native_source_root_loaded_owner_error_v1(
+                        owner_selection, loaded_key)
+                    if owner_error != "":
+                        self.ctx.add_error(owner_error)
+                        log_phase(owner_error)
+                        driver_entry_scan_cache_release()
+                        return (self.ctx, false)
                     if closure_loaded_mods.contains_key(closure_mp):
-                        # Already satisfied by an explicit --source root (or an
-                        # earlier closure step): nothing to resolve, not an error.
-                        # Traced anyway: this branch and the unresolved branch
-                        # above are the only two ways a module can leave the
-                        # closure, so a silent one costs a full bootstrap cycle
-                        # to tell apart. Same bug record as above.
                         log_phase(
                             "phase1:load_sources:closure:already-loaded module={closure_mp} used_in={closure_src.path}")
                         continue
-                    val selected_source = _driver_resolve_source_root_entry_import_v1(
-                        closure_mp_input, closure_source_roots)
-                    val resolved_source = source_root_resolution_with_fallback_v1(
-                        selected_source, closure_mp_input, closure_dir, _driver_resolve_entry_import)
-                    val closure_file = match resolved_source:
+                    val closure_file = match selected_source:
                         case SourceRootResolutionV1.Found(path): path
-                        case SourceRootResolutionV1.Missing: ""
+                        case SourceRootResolutionV1.Missing:
+                            _driver_resolve_entry_import(closure_mp_input, closure_dir)
                         case SourceRootResolutionV1.Ambiguous(directory):
                             val reason = "SOURCE_ROOT_AMBIGUOUS: import '{closure_mp}' has competing numbered directories under '{directory}'"
                             self.ctx.add_error(reason)
@@ -1079,6 +1097,7 @@ impl CompilerDriver:
                             seen_sources[closure_key] = true
                             all_sources.append(cs)
                             closure_loaded_mods[cs.module_name] = true
+                            closure_loaded_paths[cs.module_name] = cs.path
                         val closure_physical_key = _driver_physical_source_key(cs.path)
                         if not closure_queued_paths.contains_key(closure_physical_key):
                             closure_queued_paths[closure_physical_key] = true
@@ -1093,6 +1112,7 @@ impl CompilerDriver:
                             seen_sources[closure_alias_key] = true
                             all_sources.append(SourceFile(path: closure_file, content: closure_content, module_name: closure_mp))
                             closure_loaded_mods[closure_mp] = true
+                            closure_loaded_paths[closure_mp] = closure_file
                 closure_idx = closure_idx + 1
             log_phase(
                 "phase1:load_sources:closure:done scanned={closure_idx} logical={all_sources.len()}")

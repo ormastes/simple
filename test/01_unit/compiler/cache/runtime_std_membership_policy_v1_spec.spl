@@ -1,4 +1,4 @@
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, step}
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_snapshot.{ScvCompileSnapshotV1}
 use compiler.driver.driver_build.native_full_inventory_sources.{
@@ -50,10 +50,10 @@ fn runtime_std_policy_entry_v1(module_identity: text,
         direct_imports: [], reverse_dependents: [])
 
 fn runtime_std_policy_index_v1(
-    sources: NativeFullInventorySourcesV1
+    sources: NativeFullInventorySourcesV1, schema_version: i64 = 2
 ) -> PackageModuleIndexGenerationV1:
     var generation = PackageModuleIndexGenerationV1(
-        schema_version: 2,
+        schema_version: schema_version,
         producer_digest: sha256_text("compiler"),
         root_generation: "root",
         scv_revision_id: "revision",
@@ -70,13 +70,44 @@ fn runtime_std_policy_index_v1(
         variant_digest: sha256_text("variant"))
     var index = 0
     while index < generation.entries.len():
+        if schema_version == 4:
+            generation.entries[index].generated_source_digest = sha256_text("")
         generation.entries[index].action_digest =
             package_module_index_entry_action_digest_v1(
                 generation, generation.entries[index])
         index = index + 1
     generation
 
-describe "runtime and std membership from a pinned compiler V2 graph":
+describe "runtime and std membership from a pinned complete compiler graph":
+    it "admits complete generated-witness graphs without admitting scoped coverage":
+        step("Bind membership to a complete schema-4 graph")
+        val sources = runtime_std_policy_sources_v1()
+        val snapshot = runtime_std_policy_snapshot_v1(sources)
+        val generation = runtime_std_policy_index_v1(sources, 4)
+        val encoded = package_module_index_encode_v1(generation)
+        expect(encoded == "").to_equal(false)
+        val digest = sha256_text(encoded)
+        val result = runtime_std_membership_policy_from_index_v1(
+            sources, snapshot, generation, digest,
+            generation.producer_digest, generation.variant_digest)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().membership.members.len()).to_equal(3)
+        expect(result.unwrap().index_digest).to_equal(digest)
+        step("A schema-4 entry scope cannot stand for complete inventory")
+        var scoped = generation
+        scoped.scope_entry_source_identity = "src/lib/std.spl"
+        expect(runtime_std_membership_policy_from_index_v1(
+            sources, snapshot, scoped, digest,
+            generation.producer_digest, generation.variant_digest).unwrap_err()).to_equal(
+                "runtime-std-membership-policy-authority-mismatch")
+        step("Missing generated authority cannot be repaired with an implicit empty facet")
+        var missing = generation
+        missing.entries[0].generated_source_digest = ""
+        expect(runtime_std_membership_policy_from_index_v1(
+            sources, snapshot, missing, digest,
+            generation.producer_digest, generation.variant_digest).unwrap_err()).to_equal(
+                "runtime-std-membership-policy-graph-invalid")
+
     it "authors every SCV row from actual graph package identities":
         val sources = runtime_std_policy_sources_v1()
         val snapshot = runtime_std_policy_snapshot_v1(sources)
