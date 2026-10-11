@@ -19,10 +19,14 @@ use compiler.driver.driver_ice_boundary.{
 use compiler.driver.perf.compiler_work_counters.{compiler_work_mir_schedule_v1}
 use compiler.driver.driver_log_helpers.{log_debug, log_phase, log_build_progress, log_bootstrap_flat_warning}
 use compiler.driver.driver_phase_gates.{
-    driver_source_entry_closure_enabled, driver_source_matches_entry
+    driver_source_entry_closure_enabled, driver_source_matches_entry,
+    driver_source_entry_request
 }
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
 use compiler.driver.driver_mir_error_owner.{driver_trace_module_mir_errors}
+use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1}
+use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
+use compiler.driver.driver_source_loading.{_driver_physical_source_key}
 use compiler.common.mir_target_context.{MirTargetContext}
 use std.common.convert.{try_parse_int}
 use compiler.driver.demand_mir_integration.{demand_mir_integrate_measured_v1}
@@ -420,8 +424,73 @@ impl CompilerDriver:
         force_all_sources: bool,
         allow_bootstrap_shortcuts: bool
     ) -> bool:
-        compiler_work_mir_schedule_v1(self.ctx.sources.len())
         self.ctx.runtime_std_mir_emissions = {}
+        var mir_provider_modules = self.ctx.hir_modules.values()
+        var mir_physical_ownership_active = false
+        var mir_source_indices: [i64] = []
+        var source_index = 0
+        while source_index < self.ctx.sources.len():
+            mir_source_indices = mir_source_indices.push(source_index)
+            source_index = source_index + 1
+        # Phase 2's documented entry/closure route projects the phase-1
+        # inventory to unique_entry_sources. Its parser already owns physical
+        # deduplication; do not reinterpret unchanged phase-1 receipt rows.
+        val mir_phase2_projected_inventory = self.ctx.sources.len() > 0 and
+            self.ctx.sources.len() != self.ctx.source_paths_owner.len() and
+            (driver_source_entry_closure_enabled(self.ctx) or
+                driver_source_entry_request(self.ctx) != "")
+        if mir_phase2_projected_inventory:
+            log_phase("aot:mir_physical_owners route=phase2-entry-projection retained={self.ctx.source_paths_owner.len()} selected={self.ctx.sources.len()} existing_schedule=1")
+        # Normal native entry/full-tool compilation owns physical outputs.
+        # Cold archive receipts and demand publication retain their existing
+        # logical-row authority; bootstrap-flat publication is also separate.
+        if self.ctx.source_paths_owner.len() > 0 and not mir_phase2_projected_inventory and
+                (force_all_sources or self.ctx.options.cli_mode_text == "aot" or
+                    driver_source_entry_closure_enabled(self.ctx)) and
+                self.ctx.runtime_std_full_inventory_selection == nil and
+                self.ctx.demand_compile_execution == nil and
+                not (allow_bootstrap_shortcuts and
+                    (sosix_env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1"):
+            var admitted_physical_paths: [text] = []
+            for retained_path in self.ctx.source_paths_owner:
+                # Use the same platform source identity as phase-1 admission.
+                admitted_physical_paths = admitted_physical_paths.push(_driver_physical_source_key(retained_path))
+            var physical_owners: [text] = []
+            for logical_name in self.ctx.source_module_names_owner:
+                if not self.ctx.hir_modules.contains_key(logical_name):
+                    self.ctx.add_error("MIR physical ownership missing HIR for {logical_name}")
+                    return false
+                physical_owners = physical_owners.push(self.ctx.hir_modules[logical_name].name)
+            val admitted_indices = driver_mir_physical_source_indices_v1(
+                admitted_physical_paths, self.ctx.source_identities_owner,
+                physical_owners)
+            if admitted_indices.is_err():
+                self.ctx.add_error(admitted_indices.unwrap_err())
+                return false
+            val physical_indices = admitted_indices.unwrap()
+            mir_provider_modules = []
+            for physical_index in physical_indices:
+                val logical_name = self.ctx.source_module_names_owner[physical_index]
+                mir_provider_modules = mir_provider_modules.push(self.ctx.hir_modules[logical_name])
+            if self.ctx.sources.len() > 0:
+                if self.ctx.sources.len() != self.ctx.source_paths_owner.len():
+                    self.ctx.add_error("MIR source scheduling differs from admitted inventory")
+                    return false
+                var inventory_source_index = 0
+                while inventory_source_index < self.ctx.sources.len():
+                    if self.ctx.sources[inventory_source_index].module_name != self.ctx.source_module_names_owner[inventory_source_index] or
+                            _driver_physical_source_key(self.ctx.sources[inventory_source_index].path) != admitted_physical_paths[inventory_source_index]:
+                        self.ctx.add_error("MIR source scheduling order differs from admitted inventory")
+                        return false
+                    inventory_source_index = inventory_source_index + 1
+                mir_source_indices = physical_indices
+            mir_physical_ownership_active = true
+            log_phase("aot:mir_physical_owners logical={physical_owners.len()} physical={mir_provider_modules.len()}")
+        val mir_scheduled_count = if mir_physical_ownership_active:
+            mir_provider_modules.len()
+        else:
+            self.ctx.sources.len()
+        compiler_work_mir_schedule_v1(mir_scheduled_count)
         if self.ctx.runtime_std_full_inventory_selection != nil and
                 (self.ctx.sources.len() == 0 or
                  self.ctx.cold_hir_typed_receipts.len() != self.ctx.sources.len() or
@@ -540,7 +609,7 @@ impl CompilerDriver:
             # to trait-implementor registration only, so trait-object calls
             # devirtualize exactly as on the direct path; lower_module's own
             # provider registration stays empty as before.
-            bootstrap_lowering.trait_impl_provider_modules = self.ctx.hir_modules.values()
+            bootstrap_lowering.trait_impl_provider_modules = mir_provider_modules
             bootstrap_lowering.trait_impl_closure_complete = driver_trait_devirtualization_allowed_v1(
                 driver_source_entry_closure_enabled(self.ctx),
                 self.ctx.runtime_std_full_inventory_selection != nil,
@@ -573,7 +642,7 @@ impl CompilerDriver:
                 self.ctx.runtime_std_full_inventory_selection != nil or
                 self.ctx.options.cli_mode_text == "aot" or
                 driver_source_entry_closure_enabled(self.ctx)
-            var direct_idx = 0
+            var direct_pos = 0
             # Canonical constructor — do NOT hand-duplicate MirLowering(...) here.
             # A duplicated copy drifted 8 fields behind the class and the seed
             # interpreter silently nil-fills omitted struct-init fields, which
@@ -625,19 +694,28 @@ impl CompilerDriver:
             # entry and resolve_field_index silently defaulted to index 0
             # (SEGV on `state.driver.width` across modules). Register every
             # module's name-keyed struct layout before lowering any module.
-            var direct_prescan_idx = 0
-            while direct_prescan_idx < self.ctx.sources.len():
-                val src_prescan = self.ctx.sources[direct_prescan_idx]
-                val prescan_hir = self.ctx.hir_modules[src_prescan.module_name]
-                if prescan_hir != nil:
+            if mir_physical_ownership_active:
+                for prescan_hir in mir_provider_modules:
                     direct_lowering.prescan_module_struct_names(prescan_hir)
-                direct_prescan_idx = direct_prescan_idx + 1
-            while direct_idx < self.ctx.sources.len():
+            else:
+                var direct_prescan_idx = 0
+                while direct_prescan_idx < self.ctx.sources.len():
+                    val src_prescan = self.ctx.sources[direct_prescan_idx]
+                    val prescan_hir = self.ctx.hir_modules[src_prescan.module_name]
+                    if prescan_hir != nil:
+                        direct_lowering.prescan_module_struct_names(prescan_hir)
+                    direct_prescan_idx = direct_prescan_idx + 1
+            while direct_pos < mir_source_indices.len():
+                val direct_idx = mir_source_indices[direct_pos]
                 val src_direct = self.ctx.sources[direct_idx]
-                val name_direct = src_direct.module_name
+                val source_lookup_name = src_direct.module_name
+                val name_direct = if mir_physical_ownership_active:
+                    mir_layout_canonical_module_name(self.ctx.hir_modules[source_lookup_name].name)
+                else:
+                    source_lookup_name
                 var mir_direct = if native_entry_closure_mir or driver_source_matches_entry(self.ctx, src_direct.path, name_direct) or (sosix_env_get_nullable("SIMPLE_UNSTUB_HIR") ?? "") == "1":
                     log_phase("aot:lower_to_mir:module:start idx={direct_idx} module={name_direct} path={src_direct.path}")
-                    val direct_hir = self.ctx.hir_modules[name_direct]
+                    val direct_hir = self.ctx.hir_modules[source_lookup_name]
                     # ICE boundary: a module with no HIR is recorded and the loop
                     # goes on to its siblings (driver_ice_boundary.spl).
                     var ice_message = ice_boundary_module_start(name_direct, src_direct.path, "mir_lower", "")
@@ -656,7 +734,7 @@ impl CompilerDriver:
                         # process (the compiler's own immortal heap). See
                         # lower_module_transient_scoped for the enumerated escape
                         # set and why ambient bootstrap is excluded.
-                        val scoped_entry = direct_lowering.lower_module_transient_scoped(direct_hir, self.ctx.hir_modules.values(), direct_idx == 0)
+                        val scoped_entry = direct_lowering.lower_module_transient_scoped(direct_hir, mir_provider_modules, direct_pos == 0)
                         driver_trace_module_mir_errors(name_direct, src_direct.path,
                             direct_lowering.errors, module_errors_before)
                         if scoped_entry.is_err():
@@ -697,13 +775,15 @@ impl CompilerDriver:
                         constants: {},
                         types: {}
                     )
+                if mir_physical_ownership_active:
+                    mir_direct.name = name_direct
                 self.ctx.mir_modules[name_direct] = mir_direct
                 if name_direct == "app.cli.bootstrap_main":
                     self.ctx.set_bootstrap_entry_mir(name_direct, mir_direct)
-                direct_idx = direct_idx + 1
-                if direct_idx % 64 == 0 or direct_idx == self.ctx.sources.len():
-                    log_build_progress("mir", "modules", direct_idx,
-                        self.ctx.sources.len(), name_direct,
+                direct_pos = direct_pos + 1
+                if direct_pos % 64 == 0 or direct_pos == mir_source_indices.len():
+                    log_build_progress("mir", "modules", direct_pos,
+                        mir_source_indices.len(), name_direct,
                         4, 6, 0, 0, "running")
             log_phase("aot:mir_diagnostics:errors:start")
             _driver_collect_mir_errors(self.ctx, direct_lowering.errors)
@@ -778,11 +858,14 @@ impl CompilerDriver:
             # Same crossmodule struct prepass as the --entry-closure loop
             # above: register all modules' struct layouts before lowering
             # any module on the shared MirLowering instance.
-            for prescan_module in self.ctx.hir_modules:
+            for prescan_module in mir_provider_modules:
                 lowering.prescan_module_struct_names(prescan_module)
-            for hir_module in self.ctx.hir_modules:
+            for hir_module in mir_provider_modules:
                 val typed_hir_module: HirModule = hir_module
-                val name = typed_hir_module.name
+                val name = if mir_physical_ownership_active:
+                    mir_layout_canonical_module_name(typed_hir_module.name)
+                else:
+                    typed_hir_module.name
                 # Per-module transient scope -- same mechanism and escape-set
                 # proof as the --entry-closure loop above
                 # (lower_module_transient_scoped, module_lowering.spl:1213).
@@ -800,7 +883,7 @@ impl CompilerDriver:
                     continue
                 val fallback_devirt_before: i64 = lowering.devirtualized_calls
                 val module_errors_before = lowering.errors.len()
-                val scoped_fallback = lowering.lower_module_transient_scoped(hir_module, self.ctx.hir_modules.values())
+                val scoped_fallback = lowering.lower_module_transient_scoped(hir_module, mir_provider_modules)
                 driver_trace_module_mir_errors(name, typed_hir_module.path,
                     lowering.errors, module_errors_before)
                 if scoped_fallback.is_err():
