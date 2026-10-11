@@ -738,3 +738,13 @@ from 45 to 6; two Result-decoded array loops remain, so there is
 still no native executable or paired p95/RSS cohort. The bounded
 three-cycle gate is exhausted for this session. See the updated
 archive MIR bug and grouping report.
+
+### 2026-10-11 V4 tracked-move native boundary
+
+The 66-module no-stub tracked-move fixture links, but three bounded native
+executions fail before the first cold inventory publication with an invalid
+array handle and `cold-init-listed-no-sources`, despite a valid tracked Git
+source. Source-only trace and Git-listing rewrites did not improve the result
+and were removed. The focused process-output ABI probe is the next gate;
+see [the diagnostic](../../../09_report/compiler/target6_tracked_move_native_abi_diagnostic_2026-10-11.md).
+V4 warm deletion, full CLI cutover, and matched p95/RSS remain open.

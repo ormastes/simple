@@ -86,3 +86,13 @@ three-cycle fixture limit is reached for this session. This is **not** a V4
 warm deletion PASS or Item 6 cutover evidence. The next session needs a
 captured native crash stack from a repaired candidate before another warm
 refresh claim.
+
+## Later native cold-refresh diagnostic (2026-10-11)
+
+Three further bounded no-stub builds linked the 66-module fixture, but each
+executable failed before cold publication with an invalid array handle and
+`cold-init-listed-no-sources`. The temporary Git repository did contain the
+tracked source. Optional-trace and Git-listing return rewrites did not change
+the result and were removed. A focused process-output ABI probe is authored
+but unexecuted; see
+`doc/09_report/compiler/target6_tracked_move_native_abi_diagnostic_2026-10-11.md`.
