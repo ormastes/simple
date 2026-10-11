@@ -473,3 +473,10 @@ The committed plugin-owner retry still fails SCV snapshot admission before
 parse because the source inventory retains the deleted intermediate OS path
 alongside the new plugin path. The three-build cycle is exhausted; see
 doc/08_tracking/bug/scv_inventory_retains_deleted_source_after_move_2026-10-11.md.
+
+An explicit cold-inventory retry with the Stage 2 V3 producer removed the
+deleted intermediate OS path, admitted the plugin path, and completed HIR
+for 577/577 modules. The 600-second wrapper timed out later; its worker
+exited without an executable. This is no native PASS or size/startup/RSS
+qualification. A current-source V4 producer still needs warm staged-path
+deletion proof; see the updated SCV inventory bug and Item 5 report.
