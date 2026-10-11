@@ -102,9 +102,17 @@ requires 26 checks (including the separately archived HAL source), all unrun.
 The once-only policy capture now pins actual ordered claim rows and
 pre-consumption RT capabilities to the real source/schedule/journal/provider
 recipe. Canonical newline and independent authored-alias proof are checked.
-`postpolicy` requires 17 native checks, including a real stable graph allocation
+`postpolicy` requires 22 native checks, including a real stable graph allocation
 capability, retained manifest consumption and replay preserving the next grant.
 All are unrun; immutable capture alone is not accepted full-gate admission.
+
+Source-claim replay now reads the exact frozen physical bytes and runs the
+selected frontend in a file lease with isolated claim registries. Constant-size
+snapshots restore the old roots before closing scratch, preserving the next RT
+capability grant. Five added controls cover actual source-produced claims,
+registry-reset replay, missing obligations, alignment and foreign ownership.
+These controls remain unrun. Actual full-gate, weave and final ownership are
+still required before production admission.
 
 Current-body inputs now flow through the existing root/FIFO execution, complete
 assembly and exhaustive verification replay. Original-body recipes retain their

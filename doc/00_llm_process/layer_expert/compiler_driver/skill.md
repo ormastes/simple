@@ -181,9 +181,16 @@ alone grant no accepted policy or stage ownership.
 bridge capture actual ordered claims and pre-consumption capabilities under the
 verified full schedule/journal. Aliases retain their independent authored paths
 while proving the genuine earlier canonical body and physical bytes. The
-`postpolicy` selector requires 17 checks and the exact managed tool/runtime
+`postpolicy` selector requires 22 checks and the exact managed tool/runtime
 handoff, still unrun. Actual complete gates, weave and cold/quiet stage use must
 be independently replayed before production or final admission.
+
+`cache/driver_hir_weave_source_policy_v1.spl` replays actual frozen physical
+source through the selected frontend with fresh isolated claim registries,
+then restores the original registry roots before scratch closes. It checks
+complete source-produced rows and retains only actual frontend/CFG metadata;
+it does not consume or reinstall the next RT capability manifest. The five
+added source/custody controls are unrun and grant no final admission.
 
 The complete current-body input now reaches the shared mono root/FIFO,
 assembly and immutable full-verification recipe consumers. Current-mode inputs
