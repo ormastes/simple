@@ -1030,6 +1030,25 @@ impl MirLowering:
         if val base_type = self.find_local_hir_type(base_local.id):
             match base_type.kind:
                 case HirTypeKind.Array(element_type, _) | HirTypeKind.Slice(element_type):
+                    if val stable_owner = self.array_element_struct_syms.get(base_local.id):
+                        val stable_identity = result_err_layout_identity(stable_owner)
+                        if stable_identity != "":
+                            # Stable return metadata wins over a Named ID from
+                            # another table. Only a consumer-owned declaration
+                            # with that exact identity may supply an HIR note.
+                            val checked_owner = self.checked_array_record_layout(stable_owner)
+                            if checked_owner != "": self.struct_value_syms[result.id] = checked_owner
+                            match element_type.kind:
+                                case HirTypeKind.Named(symbol, args):
+                                    if args.len() == 0:
+                                        if val declaration = self.symbols.get_symbol_raw(symbol.id):
+                                            match declaration.kind:
+                                                case SymbolKind.Struct | SymbolKind.Class:
+                                                    if result_err_layout_identity(mir_class_identity(declaration)) == stable_identity:
+                                                        self.remember_local_hir_type(result.id, element_type, 0, 0)
+                                                case _: ()
+                                case _: ()
+                            return
                     # Indexing retains the declared element owner as well as
                     # its storage representation. Imported record methods
                     # resolve through this consumer-owned Named type; a bare

@@ -1242,13 +1242,36 @@ impl MirLowering:
             eprint("[mir-default-pad] callee={callee_name} given={args_in.len()} arity={params.len()}\n")
         result
 
+    me checked_array_record_layout(shape: text) -> text:
+        val owner = self.declared_struct_layout_key(shape)
+        val identity = result_err_layout_identity(owner)
+        if identity == "" or not self.composite_layout_digests.contains(identity) or (self.composite_layout_owner_counts.get(identity) ?? 0) != 1 or not self.struct_field_order.contains(owner) or not self.struct_field_hir_type.contains(owner):
+            self.error_fatal("array return record element has no unique provider layout", nil)
+            return ""
+        owner
+
+    me canonical_array_record_element_type(owner: text) -> MirType:
+        # This symbol belongs to the MIR module's canonical namespace, not a
+        # provider or consumer HIR SymbolTable. The exact layout was checked
+        # before its owner was attached to the array return value.
+        val checked = self.checked_array_record_layout(owner)
+        if checked == "": return MirType.unit()
+        val key = result_err_layout_identity(checked).replace("::", ".")
+        if val id = self.canonical_type_symbols.get(key):
+            return MirType(kind: MirTypeKind.Struct(SymbolId(id: id)))
+        val id = self.next_canonical_type_symbol
+        self.next_canonical_type_symbol = id + 1
+        self.canonical_type_symbols[key] = id
+        MirType(kind: MirTypeKind.Struct(SymbolId(id: id)))
+
     me remember_direct_array_return_element(local: LocalId, call_name: text):
         # The return's MIR Array type preserves storage, but field projection
         # also needs the defining module's element layout name. Do not resolve
         # its SymbolId against the caller's unrelated symbol table.
         if val element_shape = bootstrap_fn_ret_array_element_shape_lookup(call_name):
             if element_shape != "__no_struct_element__":
-                self.array_element_struct_syms[local.id] = element_shape
+                val owner = self.checked_array_record_layout(element_shape)
+                if owner != "": self.array_element_struct_syms[local.id] = owner
 
     me emit_resolved_direct_call(func: MirOperand, args_in_raw: [MirOperand], return_type: MirType) -> LocalId:
         val args_in = self.pad_trailing_default_args(func, args_in_raw)
