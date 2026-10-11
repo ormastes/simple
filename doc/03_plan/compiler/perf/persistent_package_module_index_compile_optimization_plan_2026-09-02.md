@@ -755,3 +755,11 @@ Git-event batch candidate links in the 66-module fixture but its execution
 crashes in the optional trace's `captured_pointer` before inventory
 publication. See the updated diagnostic. The source candidate has no V4
 runtime PASS, and the session's three-cycle limit is reached.
+
+GDB then found the cold parser's open-tail `line[2:]` truncating the final
+byte of a tracked `.spl` path in the Stage 2 native executable. That explains
+the valid empty event batch. The bridge now uses `substring(start)` for all
+four open-tail text slices, and the shared source-path validator replaces a
+split-array `..` check with allocation-free segment tests. This final source
+candidate is unexecuted under the same cycle cap; the compiler slice bug and
+full V4 warm proof remain open.

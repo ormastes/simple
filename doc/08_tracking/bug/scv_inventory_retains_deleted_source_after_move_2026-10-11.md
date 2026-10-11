@@ -103,3 +103,10 @@ candidate linked in the 66-module fixture, which then crashed in
 `CompilerInventoryTraceV1.captured_pointer` before publication. The next
 bounded run must resolve that trace boundary and still prove the full V4
 tracked-move sequence; the direct Git output test does not prove it.
+
+GDB later identified the exact cold source-path loss in the Stage 2 native
+fixture: `line[2:]` produced a 32-byte `.sp` path from Git's 33-byte `.spl`
+row, so the path validator filtered it. The bridge's four open-tail text
+slices now use `substring(start)`, but that candidate has not been rebuilt
+after the three-cycle cap. See
+`native_text_open_tail_slice_truncates_final_byte_2026-10-11.md`.

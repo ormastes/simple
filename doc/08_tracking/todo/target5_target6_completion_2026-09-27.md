@@ -93,8 +93,10 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
 - [x] Run the focused process-output ABI probe against Git stdout and the exact
   cold `ls-files` request; both pass in the 44-module native closure.
 - [ ] Repair the optional trace boundary and finish the V4 tracked-move native
-  fixture. Its explicit-batch candidate links but crashes before cold
-  publication; see
+  fixture. GDB attributes the latest cold zero-event result to an open-tail
+  text slice dropping the final byte of a `.spl` path; the `substring` bridge
+  candidate still needs a bounded native run. Fix and test the compiler's
+  open-tail slice semantics before Item 6 cutover; see
   `doc/09_report/compiler/target6_tracked_move_native_abi_diagnostic_2026-10-11.md`.
 - [ ] Run the full Target 5 demand-load/Phase 7 matrix and Target 6 verification
   gates. Close the technical TODO only after a `STATUS: PASS` report; the user's

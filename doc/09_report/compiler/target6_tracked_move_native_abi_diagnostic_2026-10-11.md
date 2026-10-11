@@ -28,3 +28,19 @@ recorded optional-trace forwarding defect. The batch change is a source
 candidate, not an executable V4 PASS. This turn's third build/run cycle is
 complete; further repair and rerun belong to the next bounded cycle. The
 new build log is `build/mini_builds/target6_tracked_move_refresh_probe/build_v4_batch_result.log`.
+
+## Open-tail slice attribution
+
+The next bounded attempt used a fresh concrete diagnostic trace and an
+explicit event-push result. The 66-module native fixture still refused cold
+publication. GDB then identified the source-path loss: the cold parser's
+`line[2:]` handed `compile_source_inventory_path_valid_v1` the 32-byte
+`src/compiler/linker_lifecycle.sp`, while Git had listed the complete 33-byte
+`.spl` path. The validator returned false, so event-push returned a valid
+empty array and the batch had zero source events. The earlier explicit
+event-push wrapper was removed because it added per-path work without
+addressing this cause. The bridge now uses `substring(start)` at its four
+open-tail text slices, and the path validator no longer allocates a split
+array to reject `..` segments. These final source changes remain unexecuted
+under the three-cycle cap. See
+`doc/08_tracking/bug/native_text_open_tail_slice_truncates_final_byte_2026-10-11.md`.
