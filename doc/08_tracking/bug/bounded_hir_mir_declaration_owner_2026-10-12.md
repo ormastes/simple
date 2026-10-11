@@ -137,3 +137,12 @@ actual-frontend mechanics cases cover nil-owner/stale-Unit predeclarations,
 record-name conflicts, and a nested unresolved inference variable. They are
 UNRUN. The current authored total is seven unit cases and sixteen native guards;
 there is no native execution, final-route activation, or measured RSS result.
+
+
+The recursive ABI helper intentionally ignores Function effects. A separate
+scoped traversal now visits actual Throws types inside every nested Function,
+using `lower_type` diagnostics and the resolved ABI contract on each thrown
+type. This preserves effect records while rejecting unavailable provider
+nominals even when Error advisories are configured permissively. Two additional
+actual-frontend mechanics cases cover a missing nested Throws owner and a real
+retained nominal owner. The authored total is nine unit cases, all UNRUN.

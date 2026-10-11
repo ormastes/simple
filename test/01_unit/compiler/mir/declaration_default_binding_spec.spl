@@ -166,3 +166,60 @@ describe "foreign callable records retain actual declaration ownership":
         expect(frame.failed).to_equal(true)
         expect(lowering.errors.len() > 0).to_equal(true)
         expect(frame.declaration_ids.len()).to_equal(0)
+
+    it "rejects a missing provider nominal inside a nested callable Throws effect":
+        val actual = default_binding_actual_module("provider")
+        val consumer = default_binding_actual_module("consumer")
+        val function: HirFunction = actual.functions.values()[0]
+        var provider = default_binding_provider(actual)
+        var record = default_binding_actual_callable(function)
+        val missing = HirType(kind: HirTypeKind.Named(SymbolId(id: actual.symbols.next_symbol_id), []), span: function.span)
+        record.return_type = HirType(kind: HirTypeKind.Function([], function.return_type,
+            [Effect(kind: EffectKind.Throws(missing), span: function.span)]), span: function.span)
+        provider.functions = [record]
+        var lowering = MirLowering.new(consumer.symbols)
+        val frame = MirHirDefaultBindingFrameV1(provider: provider,
+            links: {}, lexical_ids: {}, declaration_ids: {}, failed: false)
+        expect(lowering.declaration_default_reference_v1(function.symbol, frame).id).to_equal(-1)
+        expect(frame.failed).to_equal(true)
+        expect(lowering.errors.len() > 0).to_equal(true)
+        expect(frame.declaration_ids.len()).to_equal(0)
+
+    it "retains a real nominal Throws owner through a nested callable signature":
+        val source = "class DefaultFailure:\n    code: i64\n\nfn evaluate(base: i64) -> i64:\n    base\n"
+        val ast = parse_full_frontend(source, "effect_provider.spl", "effect_provider", Logger(level: 0))
+        var frontend = HirLowering.with_filename("effect_provider.spl")
+        val actual = frontend.lower_module(ast)
+        expect(frontend.errors.len()).to_equal(0)
+        val function: HirFunction = actual.functions.values()[0]
+        val class_: HirClass = actual.classes.values()[0]
+        var provider = default_binding_provider(actual)
+        var record = default_binding_actual_callable(function)
+        val thrown = HirType(kind: HirTypeKind.Named(class_.symbol, []), span: function.span)
+        record.return_type = HirType(kind: HirTypeKind.Function([], function.return_type,
+            [Effect(kind: EffectKind.Throws(thrown), span: function.span)]), span: function.span)
+        provider.functions = [record]
+        val consumer = default_binding_actual_module("consumer")
+        var lowering = MirLowering.new(consumer.symbols)
+        val frame = MirHirDefaultBindingFrameV1(provider: provider,
+            links: {}, lexical_ids: {}, declaration_ids: {}, failed: false)
+        val mapped = lowering.declaration_default_reference_v1(function.symbol, frame)
+        expect(mapped.id >= 0).to_equal(true)
+        expect(frame.failed).to_equal(false)
+        val target: HirSymbol = lowering.symbols.symbols[mapped.id]
+        match target.type_.unwrap().kind:
+            case HirTypeKind.Function(_, result, _):
+                match result.kind:
+                    case HirTypeKind.Function(_, _, effects):
+                        expect(effects.len()).to_equal(1)
+                        match effects[0].kind:
+                            case EffectKind.Throws(type_):
+                                match type_.kind:
+                                    case HirTypeKind.Named(owner, _):
+                                        val definition: HirSymbol = lowering.symbols.symbols[owner.id]
+                                        expect(definition.name).to_equal("DefaultFailure")
+                                        expect(definition.kind).to_equal(SymbolKind.Class)
+                                    case _: panic("lost the real nominal Throws owner")
+                            case _: panic("discarded the actual Throws effect")
+                    case _: panic("lost the nested callable signature")
+            case _: panic("lost the callable signature")
