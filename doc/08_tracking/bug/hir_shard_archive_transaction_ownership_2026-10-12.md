@@ -118,7 +118,7 @@ enum-declaration checks into read-only per-module diagnostic collectors;
 retained wrappers keep the same module iteration and aggregate pass receipts.
 Actual checker implementation files have no module-level mutable memo roots;
 only rendered text, cache diagnostic ownership and scalar/archive identity
-escape the semantic lease. The native semantic control has 19 guards including
+escape the semantic lease. The native semantic control has 21 guards including
 actual unsafe assembly/Any/duplicate-discriminant findings, clean neighbors,
 advisory/warn/deny behavior, two-module pass-major publication, reversed-order
 refusal before publication, foreign scope refusal, and a failed-stage replay.
@@ -126,3 +126,13 @@ No native result has been collected. Semantic publication does not admit value
 layouts, collection analysis, quiet resolution, cold publication witnesses,
 monomorphization/post-mono validation or MIR. Those owner adapters remain
 mandatory before the bounded production loop can be selected.
+
+Publication now verifies the complete captured output seal and re-executes the
+actual archived semantic consumers before accepting any diagnostics. A caller
+cannot clear deny-channel errors or construct a forged clean receipt with a
+new self-consistent digest: both are compared against independently recollected
+actual output before any context mutation. The two new native guards reach
+publication with those corruptions, require untouched context warnings/errors,
+and preserve closed scope ownership. The shared read-only verifier is available
+to the eventual final repository owner; it grants only semantic output parity,
+not the missing driver prerequisite and post-mono admission.

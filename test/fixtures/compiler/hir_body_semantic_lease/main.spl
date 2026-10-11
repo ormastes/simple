@@ -88,7 +88,7 @@ fn main() -> i64:
     checks = checks + 1
     val retained = bad_lease.unwrap()
     val tc = collect_module_typecheck_receipt_v1(name, bad, policy.typecheck)
-    if tc.messages.len() == 0 or retained.typecheck.messages != tc.messages or
+    if tc.errors.len() == 0 or retained.typecheck.messages != tc.messages or
             retained.typecheck.warnings != tc.warnings or retained.typecheck.errors != tc.errors: return 13
     checks = checks + 1
     if retained.safety.messages != deny.messages or retained.any_escape.messages != any_warn.messages or
@@ -116,6 +116,33 @@ fn main() -> i64:
     if not hir_body_semantic_publish_pass_major_v1(refused_ctx, archives, [second_lease.unwrap(), retained]).is_err() or
             refused_ctx.errors.len() != 0 or refused_ctx.warnings.len() != 0: return 19
     checks = checks + 1
+    val edited_ctx = CompileContext.create(driver_core_compile_options_default())
+    var edited = retained
+    var edited_typecheck = retained.typecheck
+    edited_typecheck.errors = []
+    edited.typecheck = edited_typecheck
+    var edited_any = retained.any_escape
+    edited_any.errors = []
+    edited_any.warnings = []
+    edited.any_escape = edited_any
+    if not hir_body_semantic_publish_pass_major_v1(edited_ctx, archives, [edited, second_lease.unwrap()]).is_err() or
+            edited_ctx.errors.len() != 0 or edited_ctx.warnings.len() != 0: return 26
+    checks = checks + 1
+    val forged_ctx = CompileContext.create(driver_core_compile_options_default())
+    var empty = retained.typecheck
+    empty.messages = []
+    empty.warnings = []
+    empty.errors = []
+    var forged = HirBodySemanticReceiptV1(module_name: retained.module_name,
+        archive_key: retained.archive_key, body_digest: retained.body_digest,
+        policy_key: retained.policy_key, typecheck: empty, safety: empty,
+        any_escape: empty, enum_contract: empty, lowering_warnings: retained.lowering_warnings,
+        functions_checked: retained.functions_checked)
+    forged.capture_digest = hir_body_semantic_receipt_digest_v1(forged)
+    if not hir_body_semantic_publish_pass_major_v1(forged_ctx, archives, [forged, second_lease.unwrap()]).is_err() or
+            forged_ctx.errors.len() != 0 or forged_ctx.warnings.len() != 0 or
+            transient_array_scope_state_v1() != 0: return 27
+    checks = checks + 1
     val published = hir_body_semantic_publish_pass_major_v1(ctx, archives, [retained, second_lease.unwrap()])
     if published.is_err(): return 20
     var expected_messages: [text] = []
@@ -131,6 +158,6 @@ fn main() -> i64:
         second_lease.unwrap().any_escape.errors.len() + second_lease.unwrap().enum_contract.errors.len()
     if ctx.errors.len() != expected_errors: return 22
     checks = checks + 1
-    if checks != 19: return 23
+    if checks != 21: return 23
     print "HIR body semantic lease: {checks} checks passed"
     0
