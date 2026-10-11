@@ -524,15 +524,28 @@ fn mono_archive_publish_registration_v1(owner: MonoArchiveRegistrationOwnerV1,
     Ok(true)
 
 fn mono_archive_registration_seal_v1(owner: MonoArchiveRegistrationOwnerV1,
-        expected_inventory: Dict<text, text>) -> Result<MonoArchiveAdmissionV1, text>:
-    # Expected names/paths MUST come from the already admitted driver inventory.
-    # This method verifies coverage; it does not manufacture inventory authority.
+        expected_inventory: Dict<text, text>,
+        expected_order: [text]) -> Result<MonoArchiveAdmissionV1, text>:
+    # Names, paths and order MUST come from the already admitted driver inventory.
+    # Collision winners depend on collection order; a sorted repository digest
+    # alone cannot establish that the admitted schedule was followed.
     if owner.sealed or not hir_cache_enabled() or hir_cache_last_warnings().len() != 0:
         return Err("registration seal owner unavailable")
     if not transient_scope_begin(): return Err("registration seal scope unavailable")
     var valid = owner.state.facts.feature_policy == env_get("SIMPLE_MONO_LEVELS") and
         owner.archives.len() == expected_inventory.len() and
-        owner.roots.len() == expected_inventory.len()
+        owner.roots.len() == expected_inventory.len() and
+        expected_order.len() == expected_inventory.len()
+    var seen: Dict<text, bool> = {}
+    var index = 0
+    for name in expected_order:
+        if seen.has(name) or not expected_inventory.has(name): valid = false
+        seen[name] = true
+        if index >= owner.roots.len():
+            valid = false
+        else:
+            if owner.roots[index].module_name != name: valid = false
+        index = index + 1
     for name in expected_inventory.keys():
         if not owner.archives.has(name) or
                 owner.archives[name].input.source_path != expected_inventory[name]: valid = false

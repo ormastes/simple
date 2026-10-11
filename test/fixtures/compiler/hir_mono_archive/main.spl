@@ -379,7 +379,8 @@ fn main() -> i64:
     var inventory: Dict<text, text> = {}
     inventory[root.name] = root.path
     inventory[provider.name] = provider.path
-    if not mono_archive_registration_seal_v1(registered, inventory).is_err() or registered.sealed: return 105
+    val admitted_order = [root.name, provider.name]
+    if not mono_archive_registration_seal_v1(registered, inventory, admitted_order).is_err() or registered.sealed: return 105
     checks = checks + 1
     val provider_registration = capture_registration(registered, provider_archive)
     if provider_registration.is_err() or not transient_scope_begin(): return 106
@@ -388,7 +389,19 @@ fn main() -> i64:
     checks = checks + 1
     if mono_archive_publish_registration_v1(registered, provider_registration.unwrap()).is_err() or registered.epoch != 2: return 108
     checks = checks + 1
-    val sealed = mono_archive_registration_seal_v1(registered, inventory)
+    # Same complete names/paths and sorted repository authority, wrong collision
+    # schedule: sealing must refuse without publishing or advancing the owner.
+    val ordered_epoch = registered.epoch
+    if not mono_archive_registration_seal_v1(registered, inventory, [provider.name, root.name]).is_err() or
+            registered.sealed or registered.epoch != ordered_epoch: return 124
+    checks = checks + 1
+    if not mono_archive_registration_seal_v1(registered, inventory, [root.name, root.name]).is_err() or
+            registered.sealed or registered.epoch != ordered_epoch: return 125
+    checks = checks + 1
+    if not mono_archive_registration_seal_v1(registered, inventory, [root.name]).is_err() or
+            registered.sealed or registered.epoch != ordered_epoch: return 126
+    checks = checks + 1
+    val sealed = mono_archive_registration_seal_v1(registered, inventory, admitted_order)
     if sealed.is_err() or not registered.sealed or sealed.unwrap().repository.authority != admission.repository.authority: return 109
     checks = checks + 1
     val registered_admission = sealed.unwrap()
@@ -451,6 +464,6 @@ fn main() -> i64:
     wrong_archives[provider.name] = wrong_archive
     if not mono_archive_admit_v1(wrong_archives, collector(modules)).is_err(): return 51
     checks = checks + 1
-    if checks != 44: return 52
+    if checks != 47: return 52
     print "HIR mono archive consumer: {checks} checks passed"
     0

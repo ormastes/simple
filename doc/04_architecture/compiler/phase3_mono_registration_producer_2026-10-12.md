@@ -86,14 +86,14 @@ without changing it and does not grant ownership of another caller's lease.
 
 ## Acceptance and remaining limits
 
-The actual native mono fixture now has **44** guarded checks. Its original 29
-consumer controls remain, with 15 registration controls for inactive and paused
+The actual native mono fixture now has **47** guarded checks. Its original 29
+consumer controls remain, with 18 registration controls for inactive and paused
 capture, nested publication, stable receipt reads after close, stale/duplicate
 publication, forged row metadata, incomplete inventory, exact produced facts and
 statistics versus the retained collector, ordered roots, cross-module collisions
 and nominal ambiguity, sealed refusal, and real FIFO body parity using the new
 producer. The clean or exactly receipted canonical launcher `mono` selector now
-requires the 44-check output; its `typecheck` branch remains independent.
+requires the 47-check output; its `typecheck` branch remains independent.
 
 Native compilation/execution are pending root serialization. Source contracts,
 guard count, working/staged direct-env checks, diff and launcher syntax can be
@@ -109,3 +109,10 @@ complete MIR provider body leases. Only after those owners are sound may the
 driver remove full HIR promotion and resident body maps and qualify the unchanged
 full CLI inventory under the original cap. Existing already-promoted HIR cannot
 be reclaimed by clearing its references.
+
+The seal requires expected_order: [text] from the admitted driver schedule,
+including exact length, membership, absence of duplicates and equality with the
+owner's published root-module sequence. Complete names/paths alone cannot prove
+collision precedence. Native negative guards now cover reversed full order,
+a duplicate-name order and a truncated order; all refuse without sealing or
+advancing the owner. These guards remain unexecuted pending the native slot.
