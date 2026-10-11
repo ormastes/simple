@@ -12,6 +12,10 @@ function = source[start:end]
 harness = r'''
 repo_root=$1
 backend=llvm
+os=linux
+llvm_features=llvm
+bootstrap_stage2_sanity_output_preflight() { return 0; }
+candidate_frontend_capture_setup() { CANDIDATE_FRONTEND_CAPTURE_PARENT=$1; }
 probe_mode=$2
 bootstrap_stage3_hash_file() { shasum -a 256 "$1" | cut -d ' ' -f 1; }
 bootstrap_stage3_hash_stream() { shasum -a 256 | cut -d ' ' -f 1; }
@@ -24,11 +28,17 @@ run_timeout() {
     esac
     return 2
 }
-candidate_frontend_smoke() {
+candidate_frontend_pinned_smoke() {
+    driver_log=$2
     case "$probe_mode" in
-      long) head -c 70000 /dev/zero | tr '\000' x; return 1;;
-      empty) return 1;;
-      success) printf 'frontend passed\n'; return 0;;
+      long) head -c 70000 /dev/zero | tr '\000' x >"$driver_log"; return 1;;
+      empty) : >"$driver_log"; return 1;;
+      success) printf 'frontend passed\n' >"$driver_log"; return 0;;
+      second-fail)
+        if [ "$CANDIDATE_FRONTEND_BOOTSTRAP" = 1 ]; then
+          printf 'bootstrap mode failed\n' >"$driver_log"; return 1
+        fi
+        printf 'frontend passed\n' >"$driver_log"; return 0;;
     esac
 }
 SIMPLE_RT_OBJ_CACHE_DIR= bootstrap_stage_sanity "$3" "$4" "$5" "$5" /usr/bin:/bin
@@ -39,7 +49,7 @@ with tempfile.TemporaryDirectory(prefix='sanity-log-retention-') as tmp:
     script.write_text(function + harness)
     candidate = work / 'candidate'
     candidate.write_text('fixture identity')
-    for mode in ('long', 'empty', 'success'):
+    for mode in ('long', 'empty', 'success', 'second-fail'):
         receipt = work / (mode + '.env')
         result = subprocess.run(['sh', str(script), str(root), mode, str(candidate), str(receipt), str(work)], capture_output=True)
         assert result.returncode == (0 if mode == 'success' else 1), (mode, result.returncode, result.stderr)
@@ -51,8 +61,11 @@ with tempfile.TemporaryDirectory(prefix='sanity-log-retention-') as tmp:
             assert b'x' * 65537 not in result.stderr
         elif mode == 'empty':
             assert b'frontend smoke log is empty' in result.stderr
+        elif mode == 'second-fail':
+            assert durable.read_text() == 'bootstrap mode failed\n'
+            assert 'frontend_smoke_bootstrap1_ran=true' in receipt.read_text()
         else:
             assert not durable.exists()
             assert not list(work.glob('success.env.tmp.*.frontend'))
-print('PASS: long failure retained with bounded stderr; empty failure diagnosed; success cleaned')
+print('PASS: production long/empty failures, clean success, and second-pass failure retain truthful receipts and one bounded excerpt')
 PY
