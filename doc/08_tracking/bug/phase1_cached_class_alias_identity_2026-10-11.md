@@ -67,3 +67,22 @@ class identity limitation. Pure interpreter reference checks should be qualified
 on an admitted cached runtime separately. No seed source edits, compiler rebuild,
 authentication weakening, artificial dispatch, global backlog closure, or
 production loader draft changes were made.
+
+## Cached pure candidate comparison route
+
+The alternative `build/phase2-candidate-103af-20261011/corrected/simple.exe`
+hash was verified as
+`b580919372e209ea2a10e6d8e919b0f90c5dc3100e76f958f584c5db0ace4778`.
+Its CAPTURE remains `CAPTURED_CORRECTED_COMPOSITION_NOT_QUALIFIED`, with six
+products unqualified. Build evidence names `src/app/cli/bootstrap_main.spl` as
+the entry and capture source head `990fb41d98e2143e22f0dfda11178e0b458efdd4`.
+
+The exact entry source at that head supports `compile --format=smf`,
+`native-build`, help/version and two allowlisted internal coordinator worker
+entries. It provides no general `run`, `test` or source-file interpretation;
+those commands reach the unknown-command refusal. Therefore a direct comparison
+of only the three failed class criteria is unavailable through this candidate
+without compiling another executable/product. The candidate was not launched,
+no native-build or hello cycle was started, and the passing direct class case
+was not replayed. This is a concrete command-surface limitation, not a new
+compiler admission result.
