@@ -424,3 +424,10 @@ parse/HIR, then failed MIR on pre-existing non-array iteration and `contains`
 lowering; the standalone spec compile failed HIR with unresolved `symbol`.
 No executable PASS, admitted full-CLI Stage4 image, matched size/startup/RSS
 cohort, or Phase 7 demand-load cutover is claimed by this update.
+
+2026-10-11 follow-up: five Stage4 closure iterations that the deployed
+self-hosted MIR lowered as unsupported were expressed as indexed `while`
+loops, preserving order and duplicate-owner rejection. The isolated
+`stage4_symbol_closure.spl` module completed parse, HIR, MIR, borrow check,
+and SMF packaging after this repair. This is a focused compiler PASS, not a
+full CLI/native hello or size/startup qualification.
