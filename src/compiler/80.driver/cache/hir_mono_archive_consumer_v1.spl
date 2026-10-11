@@ -4,7 +4,8 @@ use compiler.hir.hir_definitions.{HirFunction}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_codec.{hir_module_encode}
 use compiler.hir.hir_codec_support.{HirCodecWriter}
-use compiler.hir.generated.hir_codec.{hc_enc_hir_function}
+use compiler.driver.cache.hir_mono_function_record_v1.{mono_complete_function_digest_v1,
+    mono_function_record_store_in_owned_scope_v1, mono_function_record_load_in_owned_scope_v1}
 use compiler.monomorphize.engine.{specialize_function_with_types}
 use compiler.mono.monomorphize_integration.{MonomorphizationPass, mono_sym_key, is_generic_function, hir_type_is_concrete}
 use compiler.mono.mono_archive_types_v1.{MonoSpecializationRequestV1, MonoTemplateRecipeV1,
@@ -46,6 +47,7 @@ struct MonoArchivePublicationV1:
     stage: text
     delta: MonoArchiveDeltaV1
     delta_digest: text
+    function_archive_key: text
 
 fn mono_archive_repository_authority_v1(modules: Dict<text, HirBodyArchiveV1>) -> text:
     if modules.len() == 0: return ""
@@ -100,10 +102,7 @@ fn mono_archive_admit_v1(modules: Dict<text, HirBodyArchiveV1>, collector: Monom
         authority: facts.body_authority), state: mono_archive_state_create_v1(facts)))
 
 fn mono_archive_function_digest_v1(function: HirFunction) -> text:
-    var writer = HirCodecWriter.create()
-    hc_enc_hir_function(writer, function)
-    if not writer.ok: return ""
-    sha256_text("mono-complete-function-v1\n" + writer.finish())
+    mono_complete_function_digest_v1(function)
 
 fn mono_archive_find_function_v1(module: HirModule, symbol: i64) -> HirFunction?:
     for raw in module.functions.values():
@@ -122,8 +121,32 @@ fn mono_archive_output_key_v1(publication: MonoArchivePublicationV1) -> text:
     w.put_text(publication.target_name)
     w.put_text(publication.stage)
     w.put_text(publication.delta_digest)
+    w.put_text(publication.function_archive_key)
     if not w.ok: return ""
     sha256_text("mono-function-artifact-v1\n" + w.finish())
+
+fn mono_archive_function_record_key_v1(publication: MonoArchivePublicationV1) -> text:
+    var writer = HirCodecWriter.create()
+    writer.put_text(publication.module_name)
+    writer.put_text(publication.input_archive_key)
+    writer.put_text(publication.input_body_digest)
+    writer.put_text(publication.output_body_digest)
+    writer.put_text(publication.output_function_digest)
+    writer.put_i64(publication.target_symbol)
+    writer.put_text(publication.target_name)
+    writer.put_text(publication.stage)
+    writer.put_text(publication.delta_digest)
+    if not writer.ok: return ""
+    sha256_text("mono-function-record-key-v1\n" + writer.finish())
+
+fn mono_archive_load_function_in_owned_scope_v1(publication: MonoArchivePublicationV1) -> Result<HirFunction, text>:
+    if publication.stage != "mono-function-rewrite-v1" or
+            publication.function_archive_key != mono_archive_function_record_key_v1(publication) or
+            publication.output_archive_key != mono_archive_output_key_v1(publication) or
+            publication.delta_digest != mono_archive_delta_digest_v1(publication.delta):
+        return Err("mono function record publication identity refused")
+    mono_function_record_load_in_owned_scope_v1(publication.function_archive_key,
+        publication.output_function_digest, publication.target_symbol, publication.target_name)
 
 fn mono_archive_close_v1(paused: bool, promoted: bool, admitted: bool):
     # Dynamic cache I/O reason is the only persistent cache diagnostic owner.
@@ -205,10 +228,12 @@ fn mono_archive_visit_v1(admission: MonoArchiveAdmissionV1, module_name: text, r
                             output_archive_key: "", output_body_digest: body_digest,
                             output_function_digest: function_digest, target_symbol: rewritten.symbol.id,
                             target_name: rewritten.name, stage: "mono-function-rewrite-v1", delta: delta,
-                            delta_digest: delta_digest)
+                            delta_digest: delta_digest, function_archive_key: "")
+                        receipt.function_archive_key = mono_archive_function_record_key_v1(receipt)
                         receipt.output_archive_key = mono_archive_output_key_v1(receipt)
                         if body_digest.len() == 64 and function_digest != "" and delta_digest != "" and
                                 receipt.output_archive_key != "" and
+                                mono_function_record_store_in_owned_scope_v1(receipt.function_archive_key, rewritten).is_ok() and
                                 hir_cache_store_in_owned_scope(receipt.output_archive_key, output, hir_cache_last_warnings()):
                             publication = Some(receipt)
     val admitted = publication != nil
@@ -236,6 +261,7 @@ fn mono_archive_publication_matches_v1(admission: MonoArchiveAdmissionV1, receip
             delta.specializations_created != delta.requests.len() or
             delta.signatures.len() != delta.requests.len() or
             receipt.delta_digest == "" or receipt.delta_digest != mono_archive_delta_digest_v1(delta) or
+            receipt.function_archive_key != mono_archive_function_record_key_v1(receipt) or
             receipt.output_archive_key != mono_archive_output_key_v1(receipt) or
             not admission.repository.modules.has(receipt.module_name): return false
     val archive: HirBodyArchiveV1 = admission.repository.modules[receipt.module_name]
@@ -281,7 +307,8 @@ fn mono_archive_publication_matches_v1(admission: MonoArchiveAdmissionV1, receip
                 sha256_text(hir_module_encode(output)) != receipt.output_body_digest or
                 hir_body_archive_warnings_digest_v1(hir_cache_last_warnings()) != archive.lowering_warnings_digest: return false
         if val function = mono_archive_find_function_v1(output, receipt.target_symbol):
-            return function.name == receipt.target_name and
+            return mono_archive_load_function_in_owned_scope_v1(receipt).is_ok() and
+                function.name == receipt.target_name and
                 mono_archive_function_digest_v1(function) == receipt.output_function_digest
     false
 
@@ -326,3 +353,4 @@ export mono_archive_admit_v1, mono_archive_function_digest_v1
 export mono_archive_rewrite_root_v1, mono_archive_drain_one_v1
 export mono_archive_apply_v1
 export mono_archive_repository_authority_v1
+export mono_archive_load_function_in_owned_scope_v1
