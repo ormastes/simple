@@ -1,0 +1,46 @@
+#!/bin/sh
+# Classification only: never invoke a compiler or retry the failed stage.
+set -eu
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+guard="$here/../../check/check-stage-log-diagnosable.shs"
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+count=0
+check() {
+    expected=$1
+    shift
+    status=0
+    sh "$guard" "$@" --status 1 --stage scv-fixture >"$scratch/result" 2>&1 || status=$?
+    [ "$status" = "$expected" ] || { cat "$scratch/result" >&2; exit 1; }
+    count=$((count + 1))
+}
+# Shared owner fixtures include parser text containing the legacy error: token.
+while IFS='|' read -r diagnosed line; do
+    printf '%s\n' "$line" >"$scratch/line.log"
+    expected=1
+    [ "$diagnosed" != 1 ] || expected=0
+    # The shared owner allows the bare code; this stage guard needs a reason.
+    [ "$line" != 'SCV-E-ADMISSION:' ] || expected=1
+    check "$expected" --log "$scratch/line.log"
+done <"$here/fixtures/scv-admission-lines.tsv"
+# The actual attempt07 diagnostic, with Windows CRLF retained by printf.
+printf '%s\r\n' \
+    'workarounds: incomplete coverage; run simple check-dbs --fullscan bugs' \
+    'SCV-E-ADMISSION: compile-event-journal-missing (first build in this checkout: rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)' >"$scratch/attempt07.log"
+check 0 --log "$scratch/attempt07.log"
+grep -Fq 'compile-event-journal-missing (first build in this checkout:' "$scratch/result"
+printf 'progress only\n' >"$scratch/quiet.log"
+check 0 --log "$scratch/quiet.log" --log "$scratch/attempt07.log"
+grep -Fq "real log:  $scratch/attempt07.log" "$scratch/result"
+printf 'eprint "error: SCV-E-ADMISSION: quoted"\n' >"$scratch/quoted.log"
+check 1 --log "$scratch/quiet.log" --log "$scratch/quoted.log"
+printf 'error: unrelated real failure\n' >>"$scratch/quoted.log"
+check 0 --log "$scratch/quoted.log"
+grep -Fq 'error: unrelated real failure' "$scratch/result"
+if grep -Fq 'eprint' "$scratch/result"; then exit 1; fi
+check 1 --log "$scratch/missing.log"
+printf 'SCV-E-ADMISSION:   \r\n' >"$scratch/bare.log"
+check 1 --log "$scratch/bare.log"
+cat "$scratch/attempt07.log" >>"$scratch/bare.log"
+check 0 --log "$scratch/bare.log"
+printf 'PASS: %s stage-log SCV cases (primary, sibling, CRLF, quoted/parser negatives, mixed, missing)\n' "$count"
