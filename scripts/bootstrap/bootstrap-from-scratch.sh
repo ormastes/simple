@@ -1636,9 +1636,14 @@ case "${cuda_enabled}:${cuda_placement}" in
   *) echo 'error: CUDA enabled must be true|false and placement static|dynamic' >&2; exit 1 ;;
 esac
 case "${cuda_mode}" in
-  static) cuda_composition_template="${repo_root}/src/plugins/backend_registry/selected_cuda_backend.spl" ;;
-  *) cuda_composition_template="${repo_root}/src/compositions/cuda_${cuda_mode}/plugins/backend_registry/selected_cuda_backend.spl" ;;
+  static) cuda_composition_source_root=src ;;
+  dynamic|disabled) cuda_composition_source_root="src/compositions/cuda_${cuda_mode}" ;;
+  *) echo 'error: unsupported CUDA composition mode' >&2; exit 1 ;;
 esac
+cuda_composition_template="${repo_root}/${cuda_composition_source_root}/plugins/backend_registry/selected_cuda_backend.spl"
+[ -f "${cuda_composition_template}" ] && [ ! -L "${cuda_composition_template}" ] || {
+  echo 'error: selected CUDA template must be a regular checkout source' >&2; exit 1;
+}
 cuda_manifest_sha256=$(bootstrap_stage3_hash_file "${compiler_backend_manifest}") || exit 1
 cuda_template_sha256=$(bootstrap_stage3_hash_file "${cuda_composition_template}") || exit 1
 cuda_composition_root="${output_dir}/compositions/cuda-${cuda_manifest_sha256}-${cuda_template_sha256}"
@@ -1649,6 +1654,11 @@ if [ ! -f "${cuda_composition_file}" ]; then
 fi
 [ "$(bootstrap_stage3_hash_file "${cuda_composition_file}")" = "${cuda_template_sha256}" ] || {
   echo 'error: selected CUDA composition content differs from its identity' >&2; exit 1;
+}
+# SCV admits checkout src/test selectors, not generated output directories.
+# Keep the publication copy and its identity, but compile the same tracked bytes.
+[ "$(bootstrap_stage3_hash_file "${cuda_composition_template}")" = "${cuda_template_sha256}" ] || {
+  echo 'error: selected CUDA template changed during publication' >&2; exit 1;
 }
 case "${SIMPLE_KERNEL_K1_POLICY:-unselected}" in
   llvm-cranelift)
@@ -1673,7 +1683,8 @@ export SIMPLE_KERNEL_K1_POLICY
 # seed, which has no log_phase instrumentation and cannot emit those lines;
 # the receipt gate falls back to transcript-level source binding for Stage 2
 # and keeps content-level closure verification for Stage 3.
-k1_composition_source_args="--source ${k1_composition_root}"
+k1_composition_source_root=${k1_composition_root#"${repo_root}/"}
+k1_composition_source_args="--source ${k1_composition_source_root}"
 k1_composition_file="${k1_composition_root}/compiler/driver/bootstrap_k1_selected.spl"
 [ -f "${k1_composition_file}" ] && [ ! -L "${k1_composition_file}" ] || {
   echo "error: selected K1 composition is missing or a symlink: ${k1_composition_file}" >&2
@@ -2474,7 +2485,7 @@ bootstrap_native_build_main() {
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    --source "${cuda_composition_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" --source examples/10_tooling \
+    --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" --source examples/10_tooling \
     --entry-closure \
     --timeout "${NATIVE_FILE_TIMEOUT_SECONDS}" \
     $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory)
@@ -3950,7 +3961,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ${stage2_cold_init_env:+"${stage2_cold_init_env}"} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
-      ${k1_composition_source_args} --source "${cuda_composition_root}" --source src/compiler --source src/app --source src/lib \
+      ${k1_composition_source_args} --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib \
       --entry-closure --threads "${jobs}" \
       ${native_verbose_arg} \
       ${stage2_timeout_args} \
@@ -4031,7 +4042,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ${stage3_diagnostic_env} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
-      ${k1_composition_source_args} --source "${cuda_composition_root}" \
+      ${k1_composition_source_args} --source "${cuda_composition_source_root}" \
       --source src/compiler --source src/app --source src/lib \
       --entry-closure --threads "${selfhost_jobs}" \
       --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
@@ -4152,7 +4163,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    ${k1_composition_source_args} --source "${cuda_composition_root}" --source src/compiler --source src/app --source src/lib \
+    ${k1_composition_source_args} --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${jobs}" \
     ${native_verbose_arg} \
@@ -5040,7 +5051,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    ${k1_composition_source_args} --source "${cuda_composition_root}" \
+    ${k1_composition_source_args} --source "${cuda_composition_source_root}" \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${selfhost_jobs}" \
@@ -5576,7 +5587,7 @@ run_logged stage4b-ui-backend env RUST_LOG="${RUST_LOG:-error}" \
   SIMPLE_BINARY="$(absolute_path "${full_bin}")" \
   "${full_bin}" native-build \
     --backend "${backend}" \
-  --source "${cuda_composition_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
+  --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
   --entry-closure --threads "${jobs}" --cache-dir "${native_cache_dir}" \
   --mode "${bootstrap_mode}" --entry src/app/ui/main.spl \
   --runtime-path "${stage_runtime_absolute}" \
@@ -5619,7 +5630,7 @@ if [ "${build_mcp}" -eq 1 ]; then
       SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
       "${stage_for_build}" native-build \
       --backend "${backend}" \
-      --source "${cuda_composition_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
+      --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
       --entry-closure \
       --threads "${jobs}" \
       --cache-dir "${native_cache_dir}" \
