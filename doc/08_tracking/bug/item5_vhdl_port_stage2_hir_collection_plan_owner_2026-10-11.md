@@ -82,3 +82,28 @@ spec and native size/startup cohort remain unrun.
 Three bounded 90-module direct compiles with the same admitted pure-Simple Stage 2 binary followed the previous 55-error baseline. Their full failing logs are retained at `build/mini_builds/item56_dimexpr_optional_binding_90module.log`, `item56_qualified_patterns_90module.log`, and `item56_symbol_span_90module.log`. An explicit `i64?` binding in `DimExpr.named_range` cleared the first direct-`Some` payload error (54 MIR errors, 94.175 s). Qualifying tuple-pattern variants in `hir_lowering/type_equality.spl` cleared 40 ambiguous bare-owner and missing-identity diagnostics (14 errors, 93.747 s). Early float returns, direct `SymbolId.id` access in `get_symbol`, and an explicit `Span` binding reduced the remaining set to six (89.899 s). The six were two pairs of `unknown variant SymbolId`/missing runtime identity plus two multiple-wildcard diagnostics. The other two direct `SymbolId` struct patterns in `symbol_display_name` and `rename_symbol` have since been replaced by field reads, but no fourth broad compile was run: the mandatory three-cycle cap is exhausted for this session.
 
 The direct `Some(i64)` failure and typed-local control are retained as fixtures and detailed in [the optional payload bug](enum_optional_payload_context_lost_2026-10-11.md). The 90-module compile still has no terminal PASS, the current-source compiler is not admitted, and the VHDL/Item 5/Item 6 system tests and performance gates remain unqualified. The next session should first verify the final `SymbolId` edit once; if it passes, proceed to the actual target entrypoints, not another diagnostic-only count loop.
+
+## 2026-10-11 shared MIR default-arm blocker
+
+A follow-up direct compile of `collection_plan.spl` after the final `SymbolId`
+field-access edits reached MIR 90/90 and reduced six errors to two. Both are
+`B5b: match has multiple wildcard arms`; the full failing log is
+`build/mini_builds/item56_symbolid_after_patch.log`. Separate direct compiles of
+`hir_lowering/type_equality.spl` (88 modules) and `hir_types.spl` (87
+modules) reached MIR and reported the same two errors. Their logs are
+`build/mini_builds/item56_type_equality_isolate.log` and
+`build/mini_builds/item56_hir_types_isolate.log`. Thus the errors occur in
+the shared 87-module closure and are not specific to the collection plan.
+These three failing direct compiles exhaust this session's bounded
+verify/fix cycle.
+
+A static scan of the 87 parsed source files found no `match` block with
+two same-level wildcard or bare-binding defaults. This does not prove a
+compiler bug: HIR normalization or array handling could differ from source.
+The wildcard error now includes function/module names and both arm spans,
+matching the already detailed Binding duplicate diagnostic. That diagnostic
+edit is uncompiled in this session. In the next fresh bounded cycle, build
+an admitted current-source compiler, rerun one focused closure, and use its
+location-rich message to identify the actual HIR arm producer before editing
+match lowering or source patterns. Item 5/6 behavior and performance gates
+remain unqualified.
