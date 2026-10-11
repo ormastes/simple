@@ -6,6 +6,9 @@
 
 use std.database.core.{SdnDatabase, SdnTable, SdnRow, StringInterner}
 use std.common.traceability.case_events.{TraceCaseEvent}
+use std.common.traceability.run_plan.{TraceRunPlan}
+use std.common.traceability.run_plan_codec.{encode_trace_run_plan, decode_trace_run_plan}
+use std.common.traceability.storage_scalar.{encode_trace_storage_scalar, decode_trace_storage_scalar}
 use std.database.stats.{Stats, stats_from_values, is_flaky}
 use std.database.test_extended.stubs.{timestamp_now, process_id, host_name}
 use std.database.test_extended.types.{
@@ -67,6 +70,114 @@ class TestDatabaseExtended:
     db: SdnDatabase
     _trace_event_indexed: bool = false
     _trace_event_ids: Dict<text, bool> = {}
+
+    # This is an identity/state check, not an ownership lease. A caller that
+    # resumes work must load a fresh persisted owner before using this method.
+    fn validate_trace_run_active(run_id: text) -> Result<(), text>:
+        if run_id == "":
+            return Err("trace run identity is empty")
+        val runs = match self.db.get_table("test_runs"):
+            case Some(table): table
+            case nil: return Err("trace plan requires an existing run table")
+        if runs.name != "test_runs":
+            return Err("trace plan run table identity is invalid")
+        for column in ["run_id", "status", "valid", "end_time"]:
+            if not runs.columns.contains(column):
+                return Err("trace plan run table lacks required state columns")
+        var matching = 0
+        var active = false
+        for row in runs.rows:
+            if (row.get("run_id") ?? "") == run_id:
+                matching += 1
+                if not row.fields.contains_key("end_time"):
+                    return Err("trace run row is missing its terminal state field")
+                active = (row.get("status") ?? "") == "running" and (row.get("valid") ?? "") == "true" and (row.get("end_time") ?? "") == ""
+        if matching != 1:
+            return Err("trace plan requires exactly one existing run row")
+        if not active:
+            return Err("trace plan requires a valid running run without terminal state")
+        Ok(())
+
+    # Validate the entire intent table before returning a historical
+    # plan. Completion of the run does not erase its original frozen intent.
+    # Only scalar-encoded storage is supported: raw nested SDN is unsafe in
+    # the owner's legacy table quoting. Unknown storage versions fail closed.
+    fn get_trace_run_plan(run_id: text) -> Result<Option<TraceRunPlan>, text>:
+        if run_id == "":
+            return Err("trace run plan lookup identity is empty")
+        val table = match self.db.get_table("trace_run_plans"):
+            case Some(existing): existing
+            case nil: return Ok(nil)
+        val columns = ["run_id", "schema", "plan_sdn", "evidence_validity"]
+        if table.name != "trace_run_plans" or table.columns.len() != columns.len():
+            return Err("incompatible trace run plan table schema")
+        for i in 0..columns.len():
+            if table.columns[i] != columns[i]:
+                return Err("incompatible trace run plan table columns")
+        var seen: Dict<text, bool> = {}
+        var found: TraceRunPlan? = nil
+        for row in table.rows:
+            if row.fields.len() != columns.len():
+                return Err("unexpected or missing trace run plan row fields")
+            if (row.get("schema") ?? "") != "simple.trace.run-plan-storage/v1" or (row.get("evidence_validity") ?? "") != "unverified":
+                return Err("unsupported stored trace run plan or evidence validity")
+            val stored_run_id = decode_trace_storage_scalar(row.get("run_id") ?? "")?
+            if stored_run_id == "" or seen.contains_key(stored_run_id):
+                return Err("missing or duplicate stored trace run plan identity")
+            seen[stored_run_id] = true
+            val source = decode_trace_storage_scalar(row.get("plan_sdn") ?? "")?
+            val plan = decode_trace_run_plan(source)?
+            if plan.run_id != stored_run_id:
+                return Err("stored trace run plan identity differs from its row")
+            if encode_trace_run_plan(plan)? != source:
+                return Err("stored trace run plan is not canonical SDN")
+            if stored_run_id == run_id:
+                found = Some(plan)
+        Ok(found)
+
+    # Append immutable execution intent before any observations. This method
+    # mutates memory only; the existing owner must save successfully before
+    # dispatch. It does not authenticate inputs, implement a lease, recover
+    # missing historical rows, or assert complete TraceRun provenance.
+    me record_trace_run_plan(plan: TraceRunPlan) -> Result<(), text>:
+        val canonical = encode_trace_run_plan(plan)?
+        val stored_run_id = encode_trace_storage_scalar(plan.run_id)?
+        val stored_plan = encode_trace_storage_scalar(canonical)?
+        self.validate_trace_run_active(plan.run_id)?
+        match self.get_trace_run_plan(plan.run_id)?:
+            case Some(_): return Err("trace run plan already exists; replacement is forbidden")
+            case nil: pass
+        match self.db.get_table("trace_case_events"):
+            case Some(events):
+                val event_columns = ["event_id", "schema", "run_id", "test_path", "ordinal", "case_name", "phase", "outcome", "evidence_validity"]
+                if events.name != "trace_case_events" or events.columns.len() != event_columns.len():
+                    return Err("cannot freeze a plan against an incompatible event table")
+                for i in 0..event_columns.len():
+                    if events.columns[i] != event_columns[i]:
+                        return Err("cannot freeze a plan against incompatible event columns")
+                for row in events.rows:
+                    # The v2 event-storage migration must decode run_id here
+                    # before comparing it; unknown versions cannot look empty.
+                    if (row.get("schema") ?? "") != "simple.trace.case-event/v1" or (row.get("evidence_validity") ?? "") != "unverified":
+                        return Err("cannot establish plan ordering from unsupported stored events")
+                    val observed_run_id = row.get("run_id") ?? ""
+                    if observed_run_id == "":
+                        return Err("stored event has no run identity")
+                    if observed_run_id == plan.run_id:
+                        return Err("trace plan cannot be recorded after run observations")
+            case nil: pass
+        # All validation and encoding precede the single table replacement.
+        var table = match self.db.get_table("trace_run_plans"):
+            case Some(existing): existing
+            case nil: SdnTable.new("trace_run_plans", ["run_id", "schema", "plan_sdn", "evidence_validity"])
+        val row = SdnRow.empty()
+        row.set("run_id", stored_run_id)
+        row.set("schema", "simple.trace.run-plan-storage/v1")
+        row.set("plan_sdn", stored_plan)
+        row.set("evidence_validity", "unverified")
+        table.add_row(row)
+        self.db.set_table("trace_run_plans", table)
+        Ok(())
 
     # Append observed framework events under the existing run identity. This
     # table shares the owner's single SDN save with summary/resource records.

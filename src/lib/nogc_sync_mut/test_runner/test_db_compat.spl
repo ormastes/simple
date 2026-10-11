@@ -19,6 +19,7 @@ use std.common.perf.execution_metrics.{ResourceUsage, resource_evidence_quality_
 use std.test_runner.test_db_core.{parse_rfc3339_to_micros}
 use std.nogc_sync_mut.test_runner.test_db_record.{TestDbFileRow}
 use std.common.traceability.case_events.{decode_trace_case_events}
+use std.common.traceability.run_plan.{TraceRunPlan}
 use std.nogc_sync_mut.io.time_ops.{timestamp_year, timestamp_month, timestamp_day, timestamp_hour, timestamp_minute, timestamp_second}
 
 # ============================================================================
@@ -28,6 +29,47 @@ use std.nogc_sync_mut.io.time_ops.{timestamp_year, timestamp_month, timestamp_da
 class RunnerTestDb:
     db: TestDatabaseExtended
     current_run_id: text
+    _trace_prepare_failed: bool = false
+    _trace_prepared_run_id: text = ""
+
+    # Persist immutable execution intent before dispatch. A failed save poisons
+    # this wrapper: callers must discard it and reload the persisted owner.
+    # Preparation does not admit evidence or establish a concurrent run lease.
+    me prepare_trace_run(plan: TraceRunPlan) -> Result<(), text>:
+        if self._trace_prepare_failed:
+            return Err("trace preparation previously failed; reload the database owner")
+        if self.current_run_id == "" or plan.run_id != self.current_run_id:
+            return Err("trace plan must belong to this database owner's active run")
+        if self._trace_prepared_run_id != "":
+            return Err("trace run intent is already prepared")
+        self.db.record_trace_run_plan(plan)?
+        match self.save():
+            case Ok(_):
+                self._trace_prepared_run_id = plan.run_id
+                Ok(())
+            case Err(reason):
+                self._trace_prepare_failed = true
+                Err("trace intent was not durably prepared: " + reason)
+
+    fn trace_run_is_prepared(run_id: text) -> bool:
+        if self._trace_prepare_failed or run_id == "" or self.current_run_id != run_id or self._trace_prepared_run_id != run_id:
+            return false
+        match self.db.validate_trace_run_active(run_id):
+            case Ok(_): true
+            case Err(_): false
+
+    # Resume attaches only freshly loaded persisted intent. It cannot attach
+    # unsaved in-memory rows and does not grant a concurrent writer lease.
+    static fn resume_trace_run(run_id: text) -> Result<RunnerTestDb, text>:
+        var owner = RunnerTestDb.load()?
+        owner.db.validate_trace_run_active(run_id)?
+        match owner.db.get_trace_run_plan(run_id)? :
+            case Some(_):
+                owner.current_run_id = run_id
+                owner._trace_prepared_run_id = run_id
+                Ok(owner)
+            case nil:
+                Err("persisted trace run intent is missing")
 
     # Load from default path with auto-migration
     static fn load() -> Result<RunnerTestDb, text>:
@@ -55,6 +97,8 @@ class RunnerTestDb:
     # Framework observations are persisted by the same database writer as
     # summary rows. Their presence never establishes admitted provenance.
     me record_trace_case_events(run_id: text, test_file: text, events_sdn: text) -> Result<(), text>:
+        if self._trace_prepare_failed:
+            return Err("trace preparation failed; observations require a reloaded owner")
         if run_id == "" or run_id != self.current_run_id or test_file == "":
             return Err("trace events must belong to this database owner's active run")
         val events = decode_trace_case_events(events_sdn)?
@@ -91,6 +135,8 @@ class RunnerTestDb:
 
     # Start run tracking
     me start_run() -> text:
+        if self._trace_prepare_failed or self._trace_prepared_run_id != "":
+            return ""
         val run_id = self.db.start_run()
         self.current_run_id = run_id
         run_id
