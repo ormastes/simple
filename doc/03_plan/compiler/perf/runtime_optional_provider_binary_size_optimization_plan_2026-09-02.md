@@ -404,3 +404,7 @@ This does not qualify Stage 4, matched C size, startup/RSS, or provider demand
 loading. Removing mmap from hello is unsupported by this image; the next cut
 is admitted aspect-pack production plus an exact startup/runtime retention
 contract.
+
+## 2026-10-11 Stage4 caller link-input closure
+
+The strict LLVM Stage4 path now rejects caller libraries, library paths, and linker flags before archive projection, closing a post-profile input route alongside the earlier `SIMPLE_LINK_OBJECTS` rejection. A two-object no-stub native probe passes all three rejection families. This is one exact-closure admission repair; `RuntimeFeatureClosureV1`, provider demand loading, full Stage4 CLI qualification, and matched size/startup/RSS remain open. See [the focused report](../../../09_report/compiler/target5_stage4_explicit_link_inputs_2026-10-11.md).
