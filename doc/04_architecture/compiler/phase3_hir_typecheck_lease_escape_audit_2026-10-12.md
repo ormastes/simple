@@ -87,7 +87,8 @@ lifetime acceptance, rather than inferred from this static audit.
 `scripts/bootstrap/tests/hir-body-typecheck-lease-native.shs` accepts
 `--preflight` or `--run` followed by canonical producer source root, frozen
 fixture source root, exact owned Stage3 lane, and a fresh external evidence
-directory. Preflight starts no compiler/program. It derives the admitted
+directory. Preflight starts no Simple compiler/fixture; optional materialized
+owner validation uses the existing PowerShell/native interop owner. It derives the admitted
 candidate, admission receipt, source/runtime/tool snapshots, sanity/receiver
 receipts/log and runtime authority from that lane and invokes the existing
 full 21-argument Stage2 admission verifier. Status/SHA-shaped environment values
@@ -102,10 +103,29 @@ arbitrary runtime path or mutable target directory. The selected sealed capsule
 is reverified by the canonical capsule verifier and its producer/layout must
 match the exact admitted Windows MSVC compiler.
 
-The fixture tree must be Git-clean, using a separate clean private owner when
-the canonical producer tree has materialized tracked Windows aliases. The
-canonical tree is verified by its existing admission/source authority rather
-than subjected to this fixture-only Git cleanliness gate. Its canonical owned-source snapshot and
+The fixture tree defaults to Git-clean. An explicit
+`SIMPLE_HIR_LEASE_FIXTURE_LINKS_RECEIPT` enables the canonical materialized owner
+mode: staged changes are refused, every changed tracked path must be an exact
+HEAD mode-120000 alias, and every untracked path must lie under such an alias.
+The existing native `bootstrap_stage3_materialized_git_state` then validates
+the exact fixture root and supplied receipt. The Git gate alone cannot prove
+alias targets; a plain directory or copy that passes that delta gate still
+requires canonical filesystem/receipt authority. General dirty fingerprints
+from the native owner are insufficient without the additional alias-only gate.
+Before/after HEAD, Git deltas, receipt bytes and native owner snapshots must
+match. This permits receipted canonical materialization without accepting
+source edits, and never materializes or mutates a live frozen fixture tree.
+
+The current revision has three source aliases, all under `src/app` for Trace32
+tools, and none are imported by the lease fixture or compiler/lib sources.
+Compiler/std imports use numbered-directory resolution, not these Git aliases.
+A separate clean fixture owner with whole `src`, `config`, required scripts and
+the three committed fixture files is therefore a valid default candidate;
+actual native dependency closure still must pass. A sparse tree missing
+`config/var.sdn` is not ready. This harness hashes that actual committed selected
+configuration alongside the fixture files and refuses its absence.
+
+The fixture's canonical owned-source snapshot and
 the actual main/provider/mismatch fixture files produce the closure digest;
 the digest is not a hash of a label or only a Git revision. Canonical snapshots
 exclude vendor/target caches. Evidence retains these bytes plus the actual
@@ -123,6 +143,15 @@ supplied SHA-shaped runtime/closure environment values and an unproved
 admission packet; the actual admission replay refused it with exit 96 before
 any compiler or program started. Evidence is retained under
 `C:/dev/simple-phase3-hir-memory-evidence/body-typecheck-lease/authority-gate-negative/`.
+
+The actual shared Git gate passed eight controls: clean owner, non-alias source
+edit refusal, arbitrary new source refusal, admitted alias-only Git delta,
+alias delta refusal in default clean mode, staged alias refusal, descendant
+delta under a HEAD alias, and refusal of unrelated source alongside that
+descendant. Those PASS controls qualify the Git filter only; they never call or
+substitute the materialized owner validator. Evidence is retained under
+`C:/dev/simple-phase3-hir-memory-evidence/body-typecheck-lease/fixture-git-gate-regression/`.
+Positive canonical materialized receipt acceptance remains pending.
 
 No preflight or native PASS for a real new producer is claimed here. A missing
 canonical binding is a concrete prerequisite for the campaign owner to resolve

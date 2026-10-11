@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Serialized native fixture owner. Preflight never starts a compiler/program.
+# Serialized native fixture owner. Preflight starts no Simple compiler/fixture.
 # Run only after the campaign owner has assigned the memory slot.
 set -euo pipefail
+harness_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 die() { echo "hir-body-lease-fixture: $*" >&2; exit 96; }
 [ "$#" = 5 ] || die 'usage: --preflight|--run CANONICAL_ROOT FIXTURE_ROOT STAGE3_LANE FRESH_EVIDENCE_DIR'
 mode=$1
@@ -55,8 +56,26 @@ admission_sha=$(bootstrap_stage3_hash_file "$admission")
 binding_sha=$(bootstrap_stage3_hash_file "$lane/stage2-admitted/runtime-capsule.env")
 
 cd "$fixture_root"
-[ -z "$(git status --porcelain --untracked-files=normal)" ] || die fixture-source-not-frozen
+. "$harness_dir/../hir-body-lease-fixture-git-gate.shs"
+harness_sha=$(bootstrap_stage3_hash_file "$harness_dir/hir-body-typecheck-lease-native.shs")
+git_gate_sha=$(bootstrap_stage3_hash_file "$harness_dir/../hir-body-lease-fixture-git-gate.shs")
+fixture_links_receipt=${SIMPLE_HIR_LEASE_FIXTURE_LINKS_RECEIPT:-}
+fixture_git_gate() {
+    gate_epoch=$1
+    allow_aliases=0
+    [ -z "$fixture_links_receipt" ] || allow_aliases=1
+    hir_body_lease_fixture_git_gate_v1 "$fixture_root" "$evidence/fixture-git-$gate_epoch" "$allow_aliases" || die fixture-source-not-frozen
+    if [ "$allow_aliases" = 1 ]; then
+        bootstrap_stage3_materialized_git_state "$fixture_root" \
+            "$evidence/fixture-materialized-$gate_epoch.env" "$fixture_links_receipt" || die fixture-materialization-refused
+    fi
+}
+fixture_git_gate before
 git rev-parse HEAD > "$evidence/source.head"
+if [ -n "$fixture_links_receipt" ]; then
+    fixture_links_sha=$(bootstrap_stage3_hash_file "$fixture_links_receipt")
+    cp "$fixture_links_receipt" "$evidence/input-fixture-materialization.env"
+fi
 # Canonical snapshot owns src and its normal source/tool roots, excluding
 # vendor/target caches. The three actual lease fixture files are added below;
 # the canonical bootstrap snapshot intentionally does not include these tests.
@@ -67,6 +86,10 @@ fixture_snapshot() {
         [ -f "$path" ] && [ ! -L "$path" ] || return 1
         printf '%s %s\n' "$(bootstrap_stage3_hash_file "$path")" "$path"
     done
+    # Selected variant configuration is committed authority too; the canonical
+    # source snapshot's root list does not stand in for this exact config file.
+    [ -f config/var.sdn ] && [ ! -L config/var.sdn ] || return 1
+    printf '%s config/var.sdn\n' "$(bootstrap_stage3_hash_file config/var.sdn)"
 }
 fixture_snapshot > "$evidence/fixture.before.txt" || die fixture-snapshot-refused
 source_sha=$(bootstrap_stage3_hash_file "$evidence/source.before.txt")
@@ -78,9 +101,10 @@ closure_sha=${closure_sha%% *}
     printf 'producer_path=%s\nproducer_sha256=%s\n' "$producer" "$producer_sha"
     printf 'runtime_receipt_path=%s\nruntime_receipt_sha256=%s\n' "$capsule" "$capsule_sha"
     printf 'source_snapshot_sha256=%s\nfixture_snapshot_sha256=%s\nclosure_sha256=%s\n' "$source_sha" "$fixture_source_sha" "$closure_sha"
+    printf 'harness_sha256=%s\nfixture_git_gate_sha256=%s\n' "$harness_sha" "$git_gate_sha"
     printf 'target=x86_64-pc-windows-msvc\nbackend=llvm\nrss_cap_kib=5859375\ncompile_timeout_seconds=600\n'
 } > "$evidence/input.env"
-[ "$mode" = --run ] || { printf 'hir-body-lease-fixture: PREFLIGHT PASS (no native jobs)\n'; exit 0; }
+[ "$mode" = --run ] || { printf 'hir-body-lease-fixture: PREFLIGHT PASS (no Simple compiler/fixture jobs)\n'; exit 0; }
 
 unset SIMPLE_BINARY SIMPLE_BIN SIMPLE_RUNTIME SIMPLE_LIB SIMPLE_NATIVE_BUILD_RUST
 unset SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC SIMPLE_BOOTSTRAP_SESSION_READY
@@ -113,6 +137,14 @@ set -e
 printf '%s\n' "$compile_rc" > "$evidence/compile.exit.txt"
 [ "$compile_rc" = 0 ] || exit "$compile_rc"
 [ -s "$fixture" ] || die missing-native-fixture
+fixture_git_gate after
+cmp -s "$evidence/source.head" "$evidence/fixture-git-after.head" || die fixture-head-mutated
+cmp -s "$evidence/fixture-git-before.changed" "$evidence/fixture-git-after.changed" || die fixture-git-delta-mutated
+cmp -s "$evidence/fixture-git-before.untracked" "$evidence/fixture-git-after.untracked" || die fixture-untracked-mutated
+if [ -n "$fixture_links_receipt" ]; then
+    [ "$(bootstrap_stage3_hash_file "$fixture_links_receipt")" = "$fixture_links_sha" ] || die fixture-links-receipt-mutated
+    cmp -s "$evidence/fixture-materialized-before.env" "$evidence/fixture-materialized-after.env" || die fixture-materialization-mutated
+fi
 bootstrap_stage3_source_snapshot "$evidence/source.after.txt" "$fixture_root" || die source-after-refused
 fixture_snapshot > "$evidence/fixture.after.txt" || die fixture-after-refused
 cmp -s "$evidence/source.before.txt" "$evidence/source.after.txt" || die source-mutated
@@ -123,6 +155,8 @@ cmp -s "$evidence/fixture.before.txt" "$evidence/fixture.after.txt" || die fixtu
 "$canonical_root/scripts/bootstrap/phase2-runtime-capsule.shs" verify "$runtime" \
     > "$evidence/runtime-capsule-after.log" 2>&1 || die capsule-mutated
 [ "$(bootstrap_stage3_hash_file "$capsule")" = "$capsule_sha" ] || die receipt-mutated
+[ "$(bootstrap_stage3_hash_file "$harness_dir/hir-body-typecheck-lease-native.shs")" = "$harness_sha" ] || die harness-mutated
+[ "$(bootstrap_stage3_hash_file "$harness_dir/../hir-body-lease-fixture-git-gate.shs")" = "$git_gate_sha" ] || die fixture-git-gate-mutated
 fixture_sha=$(bootstrap_stage3_hash_file "$fixture")
 printf '%s\n' "$fixture_sha" > "$evidence/executable.sha256"
 # The executing checker implementation is now this native fixture, built by
