@@ -47,7 +47,7 @@ the final MIR input. No memory improvement is established by source review.
 Immutable mono replay now captures the actual applied root/FIFO selection and
 reconstructs complete bodies before the shared exhaustive verifier. The
 `verification` fixture requires 18 checks. Borrowed post-HIR declaration/body
-readers return only scalar/layout/RT/join-point DTOs; `postfacts` requires 14
+readers return only scalar/layout/RT/join-point DTOs; `postfacts` requires 26
 checks and the managed handoff. Both fixtures remain unrun. Their public pins
 and editable fact rows need genuine driver prerequisite ownership before final
 admission.
@@ -105,3 +105,11 @@ recipe. Canonical newline and independent authored-alias proof are checked.
 `postpolicy` requires 17 native checks, including a real stable graph allocation
 capability, retained manifest consumption and replay preserving the next grant.
 All are unrun; immutable capture alone is not accepted full-gate admission.
+
+Current-body inputs now flow through the existing root/FIFO execution, complete
+assembly and exhaustive verification replay. Original-body recipes retain their
+byte contract; current recipes explicitly carry the strict resolved frame and
+cache identity. The `current-mono` selector requires 20 native checks, unrun.
+The registration facade and extracted schema/identity/seal leaves remain below
+800 lines with unchanged APIs and private unchecked installation. Genuine driver
+prerequisite and final repository admission remain required.

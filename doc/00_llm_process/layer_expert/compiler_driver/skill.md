@@ -123,7 +123,7 @@ prerequisites.
 applied selections and produces a fresh real verifier report (`verification`,
 18 native checks pending). `cache/driver_hir_post_validation_fact_lease_v1.spl`
 reads full original bodies inside borrowed leases, yielding body-free DTOs
-(`postfacts`, 14 native checks pending). Production owners must bind actual
+(`postfacts`, 26 native checks pending). Production owners must bind actual
 ordered indexes, RT capabilities and transformed parents; these helpers alone
 do not activate the pipeline or grant final admission.
 
@@ -184,6 +184,15 @@ while proving the genuine earlier canonical body and physical bytes. The
 `postpolicy` selector requires 17 checks and the exact managed tool/runtime
 handoff, still unrun. Actual complete gates, weave and cold/quiet stage use must
 be independently replayed before production or final admission.
+
+The complete current-body input now reaches the shared mono root/FIFO,
+assembly and immutable full-verification recipe consumers. Current-mode inputs
+refuse missing frames/cache or stale original-body publication identities;
+original-mode recipes keep their existing bytes. `current-mono` requires 20
+native checks, unrun. Registration schemas, identity and current seal are
+extracted below the 800-line limit; the facade preserves its public API and
+the unchecked installer stays private. This mechanical replay still requires
+the genuine driver prerequisite and final repository owner before MIR use.
 
 ## 2026-09-26 — `native-build` restored: backend table in the interpreted worker, entry-file hashing, module-init reads
 
