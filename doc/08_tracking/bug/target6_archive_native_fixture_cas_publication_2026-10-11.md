@@ -33,3 +33,15 @@ absolute-root fixture in a fresh scoped session, then require a real
 publish/readback and all four fixture assertions to pass. Do not treat the
 successful link alone as archive admission evidence. Run the full package
 route and paired warm time/RSS cohorts separately.
+
+## 2026-10-11 staged-byte ABI investigation
+
+The admitted Stage2 LLVM fixture still exits 11 (`FAIL CAS publication`) before publishing the first eight-byte ELF object. `strace` shows the old `file_write_bytes` call writes 255 bytes of packed-array metadata, then CAS readback rejects the SHA-256 mismatch. The intended object is `7f 45 4c 46 01 02 03 04` and its digest is `1ce1805693fc7e6df020e40f78385981789a078c681dbbcbd1551be1c3939a3e`.
+
+Three bounded write-path probes were built and run in the isolated worktree:
+
+- `rt_bytes_to_text([u8])` plus positioned text write emitted only `f8 03` (two bytes), then CAS rejected the object.
+- Existing `rt_file_write_bytes_array` returned before opening the staged file.
+- An explicit 1 MiB raw-buffer SOSIX/C writer also returned before opening the staged file.
+
+Trace artifacts: `/tmp/simple-target6-cas-read.trace`, `/tmp/simple-target6-cas-sosix-trace2`, `/tmp/simple-target6-cas-array-trace`, and `/tmp/simple-target6-cas-raw-trace`. Build logs are `/tmp/simple-target6-cas-sosix-fixture-build-20261011.log`, `/tmp/simple-target6-cas-array-fixture-build-20261011.log`, and `/tmp/simple-target6-cas-raw-fixture-build-20261011.log`. The final write-path probe was reverted after the third failed fixture cycle; no writer change is qualified or published. Next investigation should inspect generated LLVM call operands and the runtime argument decoding before another implementation attempt. The CAS publication gate and Item 6 remain open.
