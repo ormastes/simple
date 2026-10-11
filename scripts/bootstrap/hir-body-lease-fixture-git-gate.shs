@@ -13,10 +13,21 @@ hir_body_lease_fixture_git_gate_v1() (
         [ ! -s "$output.changed" ] && [ ! -s "$output.untracked" ] || exit 1
         exit 0
     fi
-    # Pathspecs are literal: metacharacters in a path never select another row.
+    # One exact NUL-framed HEAD snapshot replaces per-path Git process spawns.
+    # No filesystem walk or shell pattern matching supplies alias authority.
+    git ls-tree -rz --full-tree HEAD > "$output.head-tree" || exit 1
+    declare -A head_aliases=()
+    while IFS= read -r -d '' row; do
+        case "$row" in
+            '120000 blob '*)
+                alias_path=${row#*$'\t'}
+                [ "$alias_path" != "$row" ] || exit 1
+                head_aliases["$alias_path"]=1
+                ;;
+        esac
+    done < "$output.head-tree"
     is_head_alias() {
-        row=$(git --literal-pathspecs ls-tree HEAD -- "$1") || return 1
-        case "$row" in '120000 blob '*) return 0 ;; *) return 1 ;; esac
+        [ "${head_aliases["$1"]+present}" = present ]
     }
     while IFS= read -r -d '' changed; do
         is_head_alias "$changed" || exit 1
