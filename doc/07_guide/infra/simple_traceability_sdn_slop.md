@@ -48,8 +48,21 @@ containing tree; the separate generation identity binds the candidate subject.
 Opt-in framework events use `SIMPLE_TRACE_CASE_EVENTS=1`. The runner persists
 observed data through its existing DB child before document generation and
 reports missing, partial or cached transport as incomplete. These events are
-unverified history. The new pure run-plan reconciler is not yet connected to a
-pre-dispatch persistent plan, build/config provenance or required run reports.
+unverified history. The DB owner now accepts strict run requests, allocates
+and saves immutable intent, and reloads that intent before acknowledging it.
+The internal child operation is `--prepare-request=<SDN file>`; result
+submission uses `--trace-run=<allocated ID>` to reconcile against that plan.
+These are authored source interfaces, not commands qualified in a deployed
+Phase 3 binary. The parent has not yet integrated preparation before dispatch.
+Build/config/input provenance and required run reports remain incomplete.
+
+Preparation acknowledgements use `simple.trace.run-preparation/v1` SDN and
+bind the exact canonical request, allocated run ID and persisted plan. They
+remain unverified intent and cannot qualify evidence. A consumer must reject
+nonzero exits, missing or malformed output, mismatched digests and extra output
+instead of extracting a convenient acknowledgement from noisy text. Selected
+file inventories must match planned paths exactly and satisfy byte/count bounds.
+This structural check does not prove semantic case discovery.
 
 Development intent is authored in
 `doc/08_tracking/trace/features/simple_traceability_sdn_slop.sdn`: all 20
