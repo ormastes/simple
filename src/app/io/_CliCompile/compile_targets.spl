@@ -21,6 +21,8 @@ use compiler.driver.driver (
     compiler_driver_run_compile, aot_file, aot_c_file, aot_cuda_file,
     aot_opencl_file, aot_vhdl_file, compile_to_smf)
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_types.{ColdHirScopedSelectionV1}
+use compiler.frontend.frontend_advisory_preprocess_port_v1.{FrontendAdvisoryPreprocessPolicyV1}
 use compiler.common.structural_contracts.environment_variant_policy_collection_v1.{
     EnvironmentVariantPolicyCollectionV1}
 use app.io._CliCompile.native_build_closure.{_native_build_entry_closure, _nb_scv_snapshot_path_v1}
@@ -694,6 +696,44 @@ fn _cli_native_build_create_driver_with_environment_variant_policy_v1(
         case None:
             Ok(compiler_driver_create(options))
 
+fn _cli_native_build_prepare_scoped_facets_v1(
+    driver: CompilerDriver, entry_point: text, native_inputs: [text],
+    staged_output: text, cache_dir: text, entry_closure: bool,
+    collection: EnvironmentVariantPolicyCollectionV1?
+) -> bool:
+    # Until V3 publication is wired, capture is explicit and leaves the
+    # ordinary CLI cost unchanged. Only a frozen cold entry closure can own it.
+    if (env_get("SIMPLE_PACKAGE_INDEX_SCOPED_CAPTURE") ?? "") != "1":
+        return true
+    val snapshot_root = env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
+    val manifest_digest = env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? ""
+    val source_digest = env_get("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? ""
+    val frozen_entry = _nb_scv_snapshot_path_v1(entry_point)
+    if not entry_closure or collection != nil or
+            driver.ctx.frontend_advisory_policy !=
+                FrontendAdvisoryPreprocessPolicyV1.Reference or
+            (env_get("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "") != "" or
+            snapshot_root == "" or manifest_digest == "" or
+            source_digest == "" or native_inputs.len() == 0 or
+            not frozen_entry.starts_with(snapshot_root + "/") or
+            not native_inputs.contains(frozen_entry):
+        _cli_eprint("Error: scoped cold facets require one frozen entry closure")
+        return false
+    for source in native_inputs:
+        if not source.starts_with(snapshot_root + "/"):
+            _cli_eprint("Error: scoped cold source escaped the frozen snapshot")
+            return false
+    val artifact_root = cache_dir + "/scoped-index-" +
+        sha256_text(staged_output)
+    if not _cli_dir_create_impl(artifact_root, true):
+        _cli_eprint("Error: scoped cold artifact directory unavailable")
+        return false
+    driver.ctx.cold_hir_scoped_selection = Some(
+        ColdHirScopedSelectionV1(artifact_root, manifest_digest,
+            source_digest, frozen_entry.substring(
+                snapshot_root.len() + 1, frozen_entry.len())))
+    true
+
 fn _cli_native_build(
     args: [text], collection: EnvironmentVariantPolicyCollectionV1?
 ) -> i64:
@@ -1340,11 +1380,18 @@ fn _cli_native_build(
                 case Err(reason):
                     _cli_eprint("Error: invalid environment variant policy: {reason}")
                     return 1
+            val scoped_capture_ready = _cli_native_build_prepare_scoped_facets_v1(
+                driver, entry_point, native_inputs, staged_output, cache_dir,
+                effective_entry_closure and not native_group_requested,
+                collection)
             if verbose:
                 _cli_eprint("[native-build] Driver start: inputs={native_inputs.len()} backend={backend} mode={build_mode}")
-            val driver_result = native_build_compile_with_collection_profile(
-                driver, entry_point, collection_profile_path,
-                collection_workload, collection_target, collection_profile_digest)
+            val driver_result = if scoped_capture_ready:
+                native_build_compile_with_collection_profile(
+                    driver, entry_point, collection_profile_path,
+                    collection_workload, collection_target, collection_profile_digest)
+            else:
+                CompileResult.CodegenError("scoped cold capture admission failed")
             if verbose:
                 _cli_eprint("[native-build] Driver finished")
             driver_result
@@ -1390,11 +1437,18 @@ fn _cli_native_build(
                 case Err(reason):
                     _cli_eprint("Error: invalid environment variant policy: {reason}")
                     return 1
+            val scoped_capture_ready = _cli_native_build_prepare_scoped_facets_v1(
+                driver, entry_point, native_inputs, staged_output, cache_dir,
+                effective_entry_closure and not native_group_requested,
+                collection)
             if verbose:
                 _cli_eprint("[native-build] Driver start: inputs={native_inputs.len()} backend={backend} mode={build_mode}")
-            val driver_result = native_build_compile_with_collection_profile(
-                driver, entry_point, collection_profile_path,
-                collection_workload, collection_target, collection_profile_digest)
+            val driver_result = if scoped_capture_ready:
+                native_build_compile_with_collection_profile(
+                    driver, entry_point, collection_profile_path,
+                    collection_workload, collection_target, collection_profile_digest)
+            else:
+                CompileResult.CodegenError("scoped cold capture admission failed")
             if verbose:
                 _cli_eprint("[native-build] Driver finished")
             driver_result

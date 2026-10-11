@@ -556,3 +556,15 @@ unit scenario covers a one-source scoped projection, full-mode rejection of
 that subset, and rejection when its required manifest is absent. This is a
 producer prerequisite; ordinary CLI HIR/MIR artifact emission, V3 publication,
 and measured warm-build qualification remain open. A no-stub Stage 2 direct compile parsed and lowered HIR for the 216-module spec closure, then timed out during MIR after an unrelated unsupported lambda diagnostic; the unit scenario has no executable PASS.
+
+### 2026-10-11 Scoped cold HIR/MIR capture lane
+
+The ordinary native-build driver now has a distinct scoped selection for a
+frozen entry closure. With SIMPLE_PACKAGE_INDEX_SCOPED_CAPTURE=1, the CLI
+pins the snapshot and a private artifact root, maps already-loaded source
+bytes to target-cfg receipts, emits typed HIR/MIR facets, and requires every
+compiled source plus the entry to have matching receipts before backend output.
+The full-inventory semantic-only AOT exit remains separate. This diagnostic
+capture is opt-in until the CLI can publish the resulting complete V3 graph
+and remove private artifacts after readback. It is not a warm-build or
+performance qualification. A no-stub Stage 2 direct compile of the driver HIR module parsed all 952 source units, then timed out at 180 seconds in HIR before this lane had a type or executable PASS.

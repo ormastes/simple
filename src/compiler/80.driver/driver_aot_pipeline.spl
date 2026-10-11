@@ -209,6 +209,37 @@ impl CompilerDriver:
             log_phase("aot:cold_full_index_semantics:done modules={expected}")
             return CompileResult.Success(nil)
 
+        if self.ctx.cold_hir_scoped_selection != nil:
+            val selected = self.ctx.cold_hir_scoped_selection!
+            val expected = self.ctx.source_paths_owner.len()
+            if expected == 0 or
+                    self.ctx.cold_hir_typed_receipts.len() != expected or
+                    self.ctx.runtime_std_hir_emissions.len() != expected or
+                    self.ctx.runtime_std_mir_emissions.len() != expected:
+                return CompileResult.CodegenError(
+                    "scoped cold HIR/MIR artifact count differs")
+            var entry_seen = false
+            for receipt in self.ctx.cold_hir_typed_receipts:
+                val seed = receipt.seed
+                if seed.source_identity == selected.entry_source_identity:
+                    entry_seen = true
+                if seed.inventory_digest != selected.source_inventory_digest or
+                        not self.ctx.runtime_std_hir_emissions.has(seed.source_identity) or
+                        not self.ctx.runtime_std_mir_emissions.has(seed.source_identity):
+                    return CompileResult.CodegenError(
+                        "scoped cold source artifact missing")
+                val hir = self.ctx.runtime_std_hir_emissions[seed.source_identity]
+                val mir = self.ctx.runtime_std_mir_emissions[seed.source_identity]
+                if hir.module_identity != seed.module_identity or
+                        hir.source_digest != seed.source_digest or
+                        mir.module_identity != seed.module_identity or
+                        mir.source_digest != seed.source_digest:
+                    return CompileResult.CodegenError(
+                        "scoped cold source artifact differs")
+            if not entry_seen:
+                return CompileResult.CodegenError(
+                    "scoped cold entry artifact missing")
+
         log_phase("aot:output:start")
         val output = self.ctx.options.output_file ?? _driver_default_output(self.ctx.options.input_files)
         log_phase("aot:output:done")

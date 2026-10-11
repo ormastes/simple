@@ -182,6 +182,10 @@ impl CompilerDriver:
         val cold_init = full_inventory_cold or
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1" or
             not compatibility_markers_present
+        val scoped_cold = self.ctx.cold_hir_scoped_selection != nil
+        if scoped_cold and (not cold_init or full_inventory_cold):
+            self.ctx.add_error("scoped cold HIR selection conflicts with compiler mode")
+            return false
         if not cold_init:
             return true
         if full_inventory_cold and self.ctx.runtime_std_full_inventory_selection == nil:
@@ -200,9 +204,18 @@ impl CompilerDriver:
                     selection.source_inventory_digest != inventory_binding.source_inventory_digest:
                 self.ctx.add_error("full inventory typed HIR selection differs from SCV binding")
                 return false
+        elif scoped_cold:
+            val selection = self.ctx.cold_hir_scoped_selection!
+            typed_hir_artifact_root = selection.artifact_root
+            if typed_hir_artifact_root == "" or
+                    selection.entry_source_identity == "" or
+                    selection.snapshot_manifest_digest != inventory_binding.snapshot_manifest_digest or
+                    selection.source_inventory_digest != inventory_binding.source_inventory_digest:
+                self.ctx.add_error("scoped cold HIR selection differs from SCV binding")
+                return false
         if source_root == "" and inventory_binding.snapshot_manifest_digest == "" and inventory_binding.source_inventory_digest == "":
-            if full_inventory_cold:
-                self.ctx.add_error("full inventory cold HIR authority missing")
+            if full_inventory_cold or scoped_cold:
+                self.ctx.add_error("cold HIR artifact authority missing")
                 return false
             return true
         if source_root == "" or inventory_binding.snapshot_manifest_digest == "" or inventory_binding.source_inventory_digest == "":
@@ -283,11 +296,13 @@ impl CompilerDriver:
                         self.ctx.add_error("cold HIR receipt capture failed: {reason}")
                         return false
                     case Ok(receipts):
-                        if full_inventory_cold:
-                            val expected_count = (
-                                sosix_env_get_nullable(
+                        if full_inventory_cold or scoped_cold:
+                            val expected_count = if full_inventory_cold:
+                                (sosix_env_get_nullable(
                                     "SIMPLE_PACKAGE_INDEX_EXPECTED_SOURCE_COUNT") ??
                                 "").to_i64() ?? -1
+                            else:
+                                self.ctx.source_paths_owner.len()
                             if expected_count < 1 or
                                     self.ctx.source_paths_owner.len() !=
                                         expected_count or
@@ -295,6 +310,15 @@ impl CompilerDriver:
                                 self.ctx.add_error(
                                     "full inventory cold HIR receipt count mismatch: expected={expected_count} sources={self.ctx.source_paths_owner.len()} receipts={receipts.len()}")
                                 return false
+                            if scoped_cold:
+                                var entry_seen = false
+                                for receipt in receipts:
+                                    if receipt.seed.source_identity ==
+                                            self.ctx.cold_hir_scoped_selection!.entry_source_identity:
+                                        entry_seen = true
+                                if not entry_seen:
+                                    self.ctx.add_error("scoped cold HIR entry missing from receipts")
+                                    return false
                             var emitted: Dict<text, RuntimeStdHirModuleEmissionV1> = {}
                             for receipt in receipts:
                                 val seed = receipt.seed

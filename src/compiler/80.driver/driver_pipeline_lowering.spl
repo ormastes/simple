@@ -236,7 +236,14 @@ impl CompilerDriver:
     ) -> bool:
         compiler_work_mir_schedule_v1(self.ctx.sources.len())
         self.ctx.runtime_std_mir_emissions = {}
+        val cold_facets_requested =
+            self.ctx.runtime_std_full_inventory_selection != nil or
+            self.ctx.cold_hir_scoped_selection != nil
         if self.ctx.runtime_std_full_inventory_selection != nil and
+                self.ctx.cold_hir_scoped_selection != nil:
+            self.ctx.add_error("cold MIR facet modes conflict")
+            return false
+        if cold_facets_requested and
                 (self.ctx.sources.len() == 0 or
                  self.ctx.cold_hir_typed_receipts.len() != self.ctx.sources.len() or
                  self.ctx.runtime_std_hir_emissions.len() != self.ctx.sources.len()):
@@ -299,8 +306,8 @@ impl CompilerDriver:
         else:
             ""
         if allow_bootstrap_shortcuts and skip_mir_lower == "1":
-            if self.ctx.runtime_std_full_inventory_selection != nil:
-                self.ctx.add_error("full inventory cold MIR cannot skip lowering")
+            if cold_facets_requested:
+                self.ctx.add_error("cold MIR facets cannot skip lowering")
                 return false
             print "[bootstrap] skipping MIR lowering"
             var skip_idx = 0
@@ -339,7 +346,7 @@ impl CompilerDriver:
             if self.ctx.sources[bootstrap_entry_idx].module_name == "app.cli.bootstrap_main":
                 bootstrap_entry_requested = true
             bootstrap_entry_idx = bootstrap_entry_idx + 1
-        if self.ctx.runtime_std_full_inventory_selection == nil and allow_bootstrap_shortcuts and bootstrap_entry_requested and (sosix_env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1" and (sosix_env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
+        if not cold_facets_requested and allow_bootstrap_shortcuts and bootstrap_entry_requested and (sosix_env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1" and (sosix_env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
             val bootstrap_hir = self.ctx.hir_modules["app.cli.bootstrap_main"]
             if bootstrap_hir == nil:
                 self.ctx.add_error("MIR lowering missing HIR module for app.cli.bootstrap_main during bootstrap")
@@ -377,7 +384,7 @@ impl CompilerDriver:
             # entry environment. Its positional sources are still real AOT
             # inputs and must not become empty MIR stubs.
             val native_entry_closure_mir = force_all_sources or
-                self.ctx.runtime_std_full_inventory_selection != nil or
+                cold_facets_requested or
                 self.ctx.options.cli_mode_text == "aot" or
                 driver_source_entry_closure_enabled(self.ctx)
             var direct_idx = 0
@@ -487,8 +494,17 @@ impl CompilerDriver:
             _driver_collect_mir_errors(self.ctx, direct_lowering.errors)
             if self.ctx.error_count_value != 0:
                 return false
-            if self.ctx.runtime_std_full_inventory_selection != nil:
-                val selection = self.ctx.runtime_std_full_inventory_selection!
+            if cold_facets_requested:
+                var artifact_root = ""
+                var source_inventory_digest = ""
+                if self.ctx.runtime_std_full_inventory_selection != nil:
+                    artifact_root = self.ctx.runtime_std_full_inventory_selection!.artifact_root
+                    source_inventory_digest =
+                        self.ctx.runtime_std_full_inventory_selection!.source_inventory_digest
+                else:
+                    artifact_root = self.ctx.cold_hir_scoped_selection!.artifact_root
+                    source_inventory_digest =
+                        self.ctx.cold_hir_scoped_selection!.source_inventory_digest
                 var emissions: Dict<text, RuntimeStdMirModuleEmissionV1> = {}
                 for source in self.ctx.sources:
                     val name = source.module_name
@@ -513,7 +529,7 @@ impl CompilerDriver:
                                 self.ctx.native_target):
                         self.ctx.add_error("full inventory target cfg MIR source receipt mismatch: {name}")
                         return false
-                    if seed.inventory_digest != selection.source_inventory_digest or
+                    if seed.inventory_digest != source_inventory_digest or
                             emissions.contains_key(seed.source_identity) or
                             not self.ctx.runtime_std_hir_emissions.contains_key(seed.source_identity):
                         self.ctx.add_error("full inventory cold MIR source authority mismatch: {name}")
@@ -524,7 +540,7 @@ impl CompilerDriver:
                         self.ctx.add_error("full inventory cold MIR typed HIR mismatch: {name}")
                         return false
                     val emitted = runtime_std_mir_emit_module_v1(
-                        self.ctx.mir_modules[name], receipt, selection.artifact_root)
+                        self.ctx.mir_modules[name], receipt, artifact_root)
                     if emitted.is_err():
                         self.ctx.add_error("full inventory cold MIR emission failed for {name}: {emitted.unwrap_err()}")
                         return false
