@@ -7,6 +7,7 @@ use compiler.hir.hir_definitions.{HirExpr, HirCallArg}
 use compiler.hir.hir_types.{HirTypeKind, SymbolKind}
 use compiler.mir._MirLoweringExpr.expr_dispatch.*
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir.mir_lowering_stmts.*
 use compiler.mir._MirLowering.provider_metadata.mir_class_identity
 
 impl MirLowering:
@@ -39,18 +40,20 @@ impl MirLowering:
                     case _: ()
                 var operands: [MirOperand] = []
                 var parameter_types: [MirType] = []
+                # Capture the callable before argument side effects can replace
+                # the field on this receiver.
+                var builder = self.builder
+                val callee = builder.emit_get_field(mir_operand_copy(receiver_local), field_index, MirType.i64())
+                self.builder = builder
                 var index = 0
                 while index < args.len():
                     if args[index].has_name:
                         self.error_fatal("function field call requires positional arguments", Some(args[index].span))
                         return nil
-                    val argument = self.lower_expr_for_slot(args[index].value, params[index])
+                    val argument = self.lower_method_call_arg(args[index], params, index)
                     operands = operands.push(mir_operand_copy(argument))
                     parameter_types = parameter_types.push(self.lower_type(params[index]))
                     index = index + 1
-                var builder = self.builder
-                val callee = builder.emit_get_field(mir_operand_copy(receiver_local), field_index, MirType.i64())
-                self.builder = builder
                 val return_type = self.lower_type(ret)
                 val signature = MirSignature(params: parameter_types, return_type: return_type, is_variadic: false)
                 val result = self.emit_function_value_call(callee, operands, signature, return_type)
