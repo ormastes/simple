@@ -21,3 +21,5 @@ The real-runtime Simple fixture passes with guard sampling disabled and enabled:
 ## Scope and remaining qualification
 
 The optimization is appropriate for the measured owner1 archive. The no-memory-owner build and Windows/macOS/BSD/SimpleOS have not executed. No full compiler, Phase1 suite or MCP end-to-end latency PASS is claimed. Parent owns cached-object manual relink, real Hello and test-owner qualification before deployment. Main checkout and existing runtime archives remain untouched; user owns cherry-pick/integration. One runtime fix cycle was used. Do not repeat passing focused checks unchanged.
+
+Additional qualification: the changed runtime translation unit also compiles with `SIMPLE_RUNTIME_MEMORY_OWNER=0` using the frozen ABI1 flags (exit 0, object 681,680 bytes). This is a Linux compile-only result; owner0 execution and all non-Linux execution remain unqualified. The manually relinked cached Phase 3 compiler compiled and executed fresh Hello successfully; the full test owner still fails an independently confirmed null callback.
