@@ -31,12 +31,18 @@ Immutable bytes alone do not authenticate caller-created recipes or permit
 missing diagnostics, supplied clean booleans or skipped validators.
 
 The native fixture `test/fixtures/compiler/hir_post_validation_policy/main.spl`
-has fifteen guards. It parses a real provider file and freezes a real physical
+has seventeen guards. It parses a real provider file and freezes a real physical
 surface plus an independently loaded `./provider` alias with a distinct
 authored spelling; its archive uses that actual surface closure. The actual
 journal publisher registers declarations and publishes the alias before policy
 capture. Actual body walkers then prove a 24-byte transitive copy failure and a
-critical allocation failure, with clean real layer mappings/aspect obligations.
+critical allocation failure when no capability is supplied, with clean real
+layer mappings/aspect obligations. A nonempty capability is derived from the
+actual allocation root and the same stable fact graph used by the RT validator;
+its one-unit bound permits the real allocation and all five captured fields are
+checked. Retained validation consumes the actual manifest. Explicit replay
+keeps the captured grant after that consumption, and leaves a separately
+installed next-compilation manifest unchanged.
 After all four ambient claim registries are reset, the pinned policy produces
 the same diagnostics and weave recipe. Altered digest/source pins and paused
 reads refuse; post-close replay remains available. A separately stored raw

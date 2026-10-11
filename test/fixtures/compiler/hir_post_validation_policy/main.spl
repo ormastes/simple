@@ -14,6 +14,7 @@ use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_d
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder, ModuleSurfacesByName}
 use compiler.hir.hir_lowering.module_surface_registry.*
 use compiler.common.config.{Logger}
@@ -21,7 +22,8 @@ use compiler.semantics.layer_eq_validation.*
 use compiler.semantics.layer_eq_checker.{LayerEqType}
 use compiler.semantics.effect_validation.*
 use compiler.semantics.rt_criticality_validation.*
-use compiler.semantics.rt_criticality.{RtCriticalDiagnosticSeverity}
+use compiler.semantics.rt_criticality.{RtCriticalDiagnosticSeverity, RtBoundCapability, RT_EFFECT_ALLOC,
+    rt_closure_digest, rt_bound_manifest_replace, rt_bound_manifest_clear, rt_bound_manifest_capabilities}
 use compiler.semantics.aspect_validation.*
 use compiler.semantics.aspect_weave.{aspect_forward_weave_contract_claims_v1}
 use compiler.semantics.join_point_model.{forward_join_points_for_module_v1}
@@ -40,6 +42,7 @@ struct PolicyObservedV1:
     layer_errors: [text]
     effect_errors: [text]
     rt_errors: [text]
+    rt_denied_errors: [text]
     aspect_errors: [text]
     weave_claims: i64
     layer_claims: i64
@@ -47,10 +50,26 @@ struct PolicyObservedV1:
     rt_claims: i64
     aspect_claims: i64
     capability_count: i64
+    capability: RtBoundCapability
+
+fn actual_array_capability(module: HirModule) -> Result<RtBoundCapability, text>:
+    val declarations = rt_module_function_declarations_v1(module.name, module)
+    val names = rt_unambiguous_declaration_names_v1(declarations)
+    var rows: [RtCriticalFunctionFactsV1] = []
+    var root = ""
+    for func in module.functions.values():
+        val row = rt_function_facts_v1(module.name, module, func, names)
+        rows.push(row)
+        if row.declaration.name == "array_value":
+            root = rt_stable_fn_id(row.declaration.module_key, row.declaration.symbol_id)
+    if root == "": return Err("fixture actual allocation root absent")
+    Ok(RtBoundCapability(subject_id: root, closure_digest: rt_closure_digest(root, rt_criticality_graph_facts_v1(rows)),
+        effect: RT_EFFECT_ALLOC, max_units: 1, review_id: "FIXTURE-ACTUAL-POLICY-ALLOC-ONE"))
 
 fn observe_in_scope(owner: DriverHirPostValidationPolicyOwnerV1,
         archive: HirBodyArchiveV1) -> Result<PolicyObservedV1, text>:
     val policy = driver_hir_post_validation_policy_load_in_owned_scope_v1(owner)?
+    if policy.capabilities.len() != 1: return Err("fixture actual bound capability missing")
     val module = hir_body_archive_load_in_owned_scope_v1(archive, archive.input)?
     val ids = [module.path, module.name, "policy.logical_alias"]
     val identity_index = {module.path: true, module.name: true, "policy.logical_alias": true}
@@ -69,14 +88,18 @@ fn observe_in_scope(owner: DriverHirPostValidationPolicyOwnerV1,
     var rt_errors: [text] = []
     for diagnostic in validate_rt_criticality_claim_facts_v1(ids, rt_rows, policy.capabilities, policy.rt, policy.implicit_rt_error):
         if diagnostic.severity == RtCriticalDiagnosticSeverity.Error: rt_errors.push(diagnostic.message)
+    var rt_denied: [text] = []
+    for diagnostic in validate_rt_criticality_claim_facts_v1(ids, rt_rows, [], policy.rt, policy.implicit_rt_error):
+        if diagnostic.severity == RtCriticalDiagnosticSeverity.Error: rt_denied.push(diagnostic.message)
     val forwards = forward_join_points_for_module_v1(module, 0)
     Ok(PolicyObservedV1(
         layer_errors: validate_layer_eq_claim_declarations_v1(ids, by_name.keys(), layouts, policy.layer),
         effect_errors: validate_effect_claim_facts_v1(ids, effect_rows, policy.effects), rt_errors: rt_errors,
+        rt_denied_errors: rt_denied,
         aspect_errors: validate_aspect_claim_join_points_v1(identity_index, forwards, policy.aspects),
         weave_claims: aspect_forward_weave_contract_claims_v1(identity_index, forwards, policy.aspects).len(),
         layer_claims: policy.layer.len(), effect_claims: policy.effects.len(), rt_claims: policy.rt.len(),
-        aspect_claims: policy.aspects.len(), capability_count: policy.capabilities.len()))
+        aspect_claims: policy.aspects.len(), capability_count: policy.capabilities.len(), capability: policy.capabilities[0]))
 
 fn observe(owner: DriverHirPostValidationPolicyOwnerV1, archive: HirBodyArchiveV1) -> Result<PolicyObservedV1, text>:
     if not transient_scope_begin(): return Err("fixture observation lease refused")
@@ -159,6 +182,10 @@ fn main() -> i64:
     val schedule = schedule_result.unwrap()
     var lowering = HirLowering.with_filename(path)
     val module = lowering.lower_parser_module_unstub(parsed, false)
+    val actual_capability = actual_array_capability(module)
+    if actual_capability.is_err(): return 35
+    val capability = actual_capability.unwrap()
+    rt_bound_manifest_replace([capability])
     val input = HirBodyArchiveInputV1(source_path: path, module_name: name, is_entry: false,
         closure_digest: schedule.closure_digest, runtime_provider_receipt_path: selected.provider.snapshot.path,
         runtime_provider_digest: selected.provider.snapshot.digest, producer_header: selected.producer_header,
@@ -189,11 +216,19 @@ fn main() -> i64:
     if first_result.is_err(): return 14
     val first = first_result.unwrap()
     if first.layer_claims != 1 or first.effect_claims != 1 or first.rt_claims != 1 or first.aspect_claims != 1 or
-            first.capability_count != 0 or first.layer_errors.len() != 0 or first.aspect_errors.len() != 0 or first.weave_claims != 1: return 15
+            first.capability_count != 1 or first.capability.subject_id != capability.subject_id or
+            first.capability.closure_digest != capability.closure_digest or first.capability.effect != capability.effect or
+            first.capability.max_units != capability.max_units or first.capability.review_id != capability.review_id or
+            first.layer_errors.len() != 0 or first.aspect_errors.len() != 0 or first.weave_claims != 1: return 15
     checks = checks + 1
     if first.effect_errors.len() != 1 or not first.effect_errors[0].contains("24 bytes (24 from callees)"): return 16
     checks = checks + 1
-    if first.rt_errors.len() != 1 or not first.rt_errors[0].contains("RT-E-UNBOUNDED-ALLOCATION"): return 17
+    if first.rt_errors.len() != 0 or first.rt_denied_errors.len() != 1 or
+            not first.rt_denied_errors[0].contains("RT-E-UNBOUNDED-ALLOCATION"): return 17
+    checks = checks + 1
+    if rt_bound_manifest_capabilities().len() != 1 or
+            validate_rt_criticality_diagnostics({module.name: module}).len() != 0 or
+            rt_bound_manifest_capabilities().len() != 0: return 36
     checks = checks + 1
     layer_eq_registry_reset()
     effect_registry_reset()
@@ -203,7 +238,17 @@ fn main() -> i64:
     if replay_result.is_err(): return 18
     val replay = replay_result.unwrap()
     if replay.effect_errors != first.effect_errors or replay.rt_errors != first.rt_errors or
+            replay.rt_denied_errors != first.rt_denied_errors or replay.capability.closure_digest != capability.closure_digest or
             replay.layer_errors != first.layer_errors or replay.aspect_errors != first.aspect_errors or replay.weave_claims != 1: return 19
+    checks = checks + 1
+    val next_capability = RtBoundCapability(..capability, max_units: 0, review_id: "FIXTURE-NEXT-COMPILATION")
+    rt_bound_manifest_replace([next_capability])
+    val next_replay = observe(owner, archive)
+    if next_replay.is_err() or next_replay.unwrap().rt_errors.len() != 0 or
+            rt_bound_manifest_capabilities().len() != 1 or
+            rt_bound_manifest_capabilities()[0].max_units != 0 or
+            rt_bound_manifest_capabilities()[0].review_id != next_capability.review_id: return 37
+    rt_bound_manifest_clear()
     checks = checks + 1
     var changed = owner
     changed.artifact_digest = sha256_text("cleared diagnostic policy")
@@ -240,6 +285,6 @@ fn main() -> i64:
     driver.ctx.source_identities_owner[1] = sha256_text(source.content)
     if not altered_source_refused or driver_hir_archive_journal_verify_v1(journal, driver.ctx).is_err(): return 34
     checks = checks + 1
-    if checks != 15: return 28
+    if checks != 17: return 28
     print "HIR post-validation policy: {checks} checks passed"
     0
