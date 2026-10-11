@@ -2,6 +2,11 @@
 
 Status: BLOCKED QUALIFICATION; INCOMPLETE IMPLEMENTATION; NOT LANDED.
 
+Review checkpoint: draft PR https://github.com/ormastes/simple/pull/3083 targets
+release_phase3. Initial work commit is `4daae8a1315`; it preserves source drafts,
+not a verified release candidate. The feature is not complete merely because
+its recovered files are now on a GitHub work branch.
+
 The requested compiler stage is now Phase 3. Local work branch
 `work/traceability-release_phase3-20261011` is based on fetched GitHub release_phase3
 revision `20f619fe31baa4decbe40f6d367fb5e4f115bbd8`. The existing isolated
