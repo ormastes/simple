@@ -34,3 +34,7 @@ AC-7: architecture/detail design contain the complete MDSOC++ contract and MD-01
 ## Implementation continuation — 2026-10-12
 
 User selected full feature implementation and landing. Isolated branch based on current remote c5f33e7b0 excludes shared dirty work. Selected requirements written; common V2 scope/environment contracts and eleven negative/positive unit scenarios authored. M0 runtime inventory found no deployed bin/simple or bin/release in shared workspaces; test execution remains NOT_RUN. F01 incomplete, F02–F16 OPEN. Progress ledger: doc/03_plan/app/llm_caret/dist_build_and_caret_suite_control_implementation_progress.md. Goal remains active.
+
+## M1 composition progress
+
+Added seven static capsule descriptors with declared required/provided facets and common sealer delegation; four acceptance/rejection tests authored. No runtime test execution, activation, release qualification or landing claimed. Full feature scope remains active.
