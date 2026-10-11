@@ -6,6 +6,7 @@ use compiler.driver.driver_hir_post_validation_policy_owner_v1.*
 use compiler.driver.cache.driver_hir_post_validation_policy_v1.*
 use compiler.driver.cache.driver_hir_managed_runtime_selection_v1.*
 use compiler.driver.cache.driver_hir_archive_journal_v1.*
+use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{hir_owned_artifact_load_blob_v1, hir_owned_artifact_store_blob_v1}
 use compiler.driver.cache.hir_body_typecheck_lease_v1.*
 use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1, hir_cache_clear_last_warnings}
 use compiler.mono.mono_archive_registration_v1.*
@@ -99,6 +100,26 @@ fn registration(journal: DriverHirArchiveJournalV1, archive: HirBodyArchiveV1) -
     hir_cache_clear_last_warnings()
     val ended = transient_scope_end()
     if not paused or not owned or not memo or not ended: panic("fixture declaration ownership")
+    result
+
+# Store an integrity-valid envelope with extra payload bytes. The policy reader
+# must reject framing independently of the raw owner's checksum and key checks.
+fn trailing_frame_in_scope(owner: DriverHirPostValidationPolicyOwnerV1) -> Result<DriverHirPostValidationPolicyOwnerV1, text>:
+    val frame = hir_owned_artifact_load_blob_v1(owner.cache, owner.artifact_key)? + "trailing-policy-data\n"
+    val digest = sha256_text(frame)
+    val key = sha256_text("driver-hir-post-validation-policy-artifact-v1\n" + digest + "\n" +
+        owner.schedule_digest + "\n" + owner.journal_key + "\n" + owner.cache.producer_header)
+    val stored = hir_owned_artifact_store_blob_v1(owner.cache, key, frame)?
+    if not stored: return Err("fixture trailing frame store refused")
+    Ok(DriverHirPostValidationPolicyOwnerV1(..owner, artifact_key: key, artifact_digest: digest))
+
+fn trailing_frame(owner: DriverHirPostValidationPolicyOwnerV1) -> Result<DriverHirPostValidationPolicyOwnerV1, text>:
+    if not transient_scope_begin(): return Err("fixture trailing frame lease refused")
+    val result = trailing_frame_in_scope(owner)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: panic("fixture trailing frame ownership")
     result
 
 fn main() -> i64:
@@ -195,6 +216,10 @@ fn main() -> i64:
     checks = checks + 1
     if observe(owner, archive).is_err() or transient_array_scope_state_v1() != 0: return 25
     checks = checks + 1
-    if checks != 11: return 26
+    val trailing = trailing_frame(owner)
+    if trailing.is_err(): return 26
+    if not observe(trailing.unwrap(), archive).is_err(): return 27
+    checks = checks + 1
+    if checks != 12: return 28
     print "HIR post-validation policy: {checks} checks passed"
     0

@@ -31,13 +31,17 @@ Immutable bytes alone do not authenticate caller-created recipes or permit
 missing diagnostics, supplied clean booleans or skipped validators.
 
 The native fixture `test/fixtures/compiler/hir_post_validation_policy/main.spl`
-has eleven guards. It parses a real provider file and freezes a real physical
+has twelve guards. It parses a real provider file and freezes a real physical
 surface plus alias; its archive uses that actual surface closure. The actual
 journal publisher registers declarations and publishes the alias before policy
 capture. Actual body walkers then prove a 24-byte transitive copy failure and a
 critical allocation failure, with clean real layer mappings/aspect obligations.
 After all four ambient claim registries are reset, the pinned policy produces
 the same diagnostics and weave recipe. Altered digest/source pins and paused
-reads refuse; post-close replay remains available. The fixture does not claim
+reads refuse; post-close replay remains available. A separately stored raw
+envelope with valid checksum/key and extra policy payload bytes must refuse.
+Canonical exhaustion accepts the writer's final newline across split
+implementations while exact re-encoding and trailing-data refusal remain mandatory.
+The fixture does not claim
 full driver admission, native qualification or bounded full-CLI memory. Native
 execution remains pending a serialized root-owned slot and exact new producer.
