@@ -24,6 +24,24 @@ struct RtCriticalFact:
     line: i64
     effect_units: Dict<i64, i64> = {}
 
+enum RtCriticalDiagnosticSeverity:
+    Warning
+    Error
+
+struct RtCriticalDiagnostic:
+    severity: RtCriticalDiagnosticSeverity
+    message: text
+
+fn rt_profile_assurance_rank(profile: text) -> i64:
+    """Return the RT declaration's assurance rank independently of global policy."""
+    if profile == "": return 3
+    val normalized = normalize_profile_name(profile)
+    if normalized == "verified": return 4
+    if normalized == "critical": return 3
+    if normalized == "robust": return 2
+    if normalized == "strict": return 1
+    0
+
 struct RtBoundCapability:
     subject_id: text
     closure_digest: text
@@ -116,7 +134,7 @@ fn rt_effect_name(bit: i64) -> text:
     "unknown"
 
 fn rt_critical_profile(profile: text) -> bool:
-    profile == "" or normalize_profile_name(profile) == "critical"
+    rt_profile_assurance_rank(profile) >= 3
 
 fn rt_critical_profile_diagnostics(fn_name: text, profile: text, reason: text, implicit_as_error: bool) -> [text]:
     var out: [text] = []
@@ -131,7 +149,7 @@ fn rt_critical_profile_diagnostics(fn_name: text, profile: text, reason: text, i
         out.push("error[RT-E-UNKNOWN-PROFILE]: @rt declaration '" + fn_name +
             "' has unknown criticality profile '" + profile + "'")
         return out
-    if normalized != "critical" and reason == "":
+    if rt_profile_assurance_rank(normalized) < 3 and reason == "":
         out.push("error[RT-E-LOWER-TIER-REASON]: @rt declaration '" + fn_name +
             "' lowers criticality to '" + profile + "' without reason")
     out
@@ -210,6 +228,43 @@ fn rt_critical_closure(facts: [RtCriticalFact]) -> [i64]:
                     queued[caller] = 1
     masks
 
+fn rt_effective_assurance_closure(facts: [RtCriticalFact],
+    declared_ranks: Dict<text, i64>) -> [i64]:
+    """Propagate each callee's strongest declaration rank to its callers."""
+    val index = rt_fact_index(facts)
+    var reverse: [[i64]] = []
+    var ranks: [i64] = []
+    var queued: [i64] = []
+    var queue: [i64] = []
+    var i = 0
+    while i < facts.len():
+        reverse.push([])
+        ranks.push(declared_ranks[facts[i].name] ?? 0)
+        queued.push(1)
+        queue.push(i)
+        i = i + 1
+    i = 0
+    while i < facts.len():
+        for callee in facts[i].callees:
+            if index.contains_key(callee):
+                val ci = index[callee]
+                reverse[ci] = reverse[ci].push(i)
+        i = i + 1
+    # A scalar rank rises at most four times in the fixed assurance lattice.
+    # Reverse edges and queue flags bound propagation to O(V + E).
+    var head = 0
+    while head < queue.len():
+        val done = queue[head]
+        head = head + 1
+        queued[done] = 0
+        for caller in reverse[done]:
+            if ranks[done] > ranks[caller]:
+                ranks[caller] = ranks[done]
+                if queued[caller] == 0:
+                    queue.push(caller)
+                    queued[caller] = 1
+    ranks
+
 fn rt_critical_admit(root_name: text, facts: [RtCriticalFact]) -> [text]:
     var out: [text] = []
     val index = rt_fact_index(facts)
@@ -229,6 +284,8 @@ fn rt_critical_admit(root_name: text, facts: [RtCriticalFact]) -> [text]:
 export RT_EFFECT_ALLOC, RT_EFFECT_BLOCKING, RT_EFFECT_LOOP, RT_EFFECT_RECURSION
 export RT_EFFECT_DISPATCH, RT_EFFECT_LOGGING, RT_EFFECT_SYNC, RT_EFFECT_LOADER, RT_EFFECT_UNKNOWN
 export RtCriticalFact, rt_critical_profile, rt_critical_profile_diagnostics
+export RtCriticalDiagnosticSeverity, RtCriticalDiagnostic
+export rt_profile_assurance_rank, rt_effective_assurance_closure
 export RtBoundCapability, rt_reviewed_bound_mask, rt_effect_is_single
 export rt_bound_manifest_replace, rt_bound_manifest_clear, rt_bound_manifest_capabilities
 export rt_closure_digest, rt_observed_effect_units, rt_sort_text

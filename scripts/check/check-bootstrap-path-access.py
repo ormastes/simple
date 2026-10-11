@@ -7,14 +7,38 @@ all other directory traversal uses builtin cd. No caller environment is changed.
 import argparse
 import json
 import pathlib
+import os
+import shutil
 import subprocess
+
+
+def resolve_shell(explicit=None):
+    if explicit:
+        return explicit
+    if os.name != 'nt':
+        shell = shutil.which('bash')
+        if shell:
+            return shell
+    else:
+        # Discover Git Bash beside Git, including non-default installations.
+        # Ambient bash.exe can be the WSL launcher and cannot run native paths.
+        git = shutil.which('git')
+        if git:
+            git_dir = pathlib.Path(git).parent
+            for candidate in (git_dir/'bash.exe', git_dir.parent/'bin/bash.exe',
+                              git_dir.parent/'usr/bin/bash.exe'):
+                if candidate.is_file():
+                    return str(candidate)
+    raise RuntimeError('native Bash not found; supply --shell with Git Bash or MSYS2 bash.exe')
 
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument('--shell', help='Native Bash executable; defaults to Git Bash on Windows')
     ap.add_argument('--script', required=True, type=pathlib.Path)
     ap.add_argument('--output', required=True, type=pathlib.Path)
     args = ap.parse_args()
+    shell = resolve_shell(args.shell)
     args.output.mkdir(parents=True, exist_ok=False)
     source = args.script.read_text(encoding='utf-8')
     start = source.index('bootstrap_canonical_path=\n')
@@ -32,7 +56,6 @@ def main():
 
     readable, spaced, denied, missing = map(path, ('readable', 'space directory', 'denied', 'missing'))
     # Preserve exact expected path spelling from pwd -P, not Python normalization.
-    shell = 'C:/Program Files/Git/bin/bash.exe'
     canonical = {}
     for value in (readable, spaced):
         r = subprocess.run([shell, '-c', 'CDPATH= builtin cd -- "$1" && pwd -P', 'test', value], capture_output=True, check=True)

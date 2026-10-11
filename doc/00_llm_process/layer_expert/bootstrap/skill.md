@@ -33,6 +33,23 @@ worktrees and must not be restored during bootstrap setup.
 
 ## Pipeline Links
 
+### Windows harness owner contracts (2026-10-11)
+
+Use the [Windows harness prerequisites](../../../07_guide/tooling/bootstrap_failure_collection.md#windows-bootstrap-harness-prerequisites)
+when shell discovery or Cargo fixture setup fails before compiler execution.
+The PATH fixture discovers Git Bash or accepts `--shell`; it must not assume a
+Program Files installation or automatically select Windows ambient Bash.
+Cargo environment tests must extract both `run_rust_authority_cargo` and
+`run_rust_authority_command`, bind `PLATFORM_RUST_TRIPLE`, and assert the
+forwarded target arguments. A fixture PASS qualifies these owner boundaries,
+not bootstrap, self-hosting, or Phase4 admission.
+
+SDK discovery also runs under the caller's strict shell options: a trailing
+`Include/wdf` without `ucrt` must be skipped with no pipeline failure. Preserve
+the explicit missing-SDK diagnostic and real tool failures. The focused
+`scripts/check/check-windows-msvc-sdk-discovery.shs` covers both boundaries;
+see the [SDK pipefail investigation](../../../08_tracking/bug/windows_msvc_sdk_discovery_pipefail_2026-10-11.md).
+
 ### Phase live checks (2026-09-08)
 
 The full SIMD/bootstrap lane requires actual same-phase launches in addition to

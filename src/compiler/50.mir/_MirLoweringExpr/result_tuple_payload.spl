@@ -1,0 +1,53 @@
+# Result tuple payloads use the ordinary raw heap tuple, not rt_tuple_new's
+# multi-argument enum container. Keep unsupported element representations loud.
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.asm_and_targets.*
+
+fn result_tuple_payload_type(type_: HirType) -> MirType?:
+    match type_.kind:
+        case HirTypeKind.Tuple(elements):
+            if elements.len() == 0:
+                return nil
+            var fields: [MirType] = []
+            for element in elements:
+                match element.kind:
+                    case HirTypeKind.Int(64, true): fields.push(MirType.i64())
+                    case HirTypeKind.Bool: fields.push(MirType.bool())
+                    case HirTypeKind.Float(64): fields.push(MirType.f64())
+                    case HirTypeKind.Tuple(_):
+                        if val nested = result_tuple_payload_type(element):
+                            fields.push(nested)
+                        else:
+                            return nil
+                    case _: return nil
+            Some(MirType(kind: MirTypeKind.Tuple(fields)))
+        case _: nil
+
+impl MirLowering:
+    me decode_result_tuple_payload(raw: LocalId, expected: HirType) -> LocalId:
+        # Invoked only by lower_try_expr's proven Result success branch.
+        # Custom enum/Option payload decoding keeps its separate contract.
+        if val tuple_type = result_tuple_payload_type(expected):
+            val value = self.recover_result_tuple_payload(raw, tuple_type)
+            self.remember_local_hir_type(value.id, expected, 0, 0)
+            return value
+        self.error_fatal("unsupported Result tuple payload element type", Some(expected.span))
+        return self.builder.emit_const_int(0)
+
+    me recover_result_tuple_payload(raw: LocalId, tuple_type: MirType) -> LocalId:
+        # Cast the runtime's i64 payload WORD to a pointer, then copy that
+        # pointer into a fresh local with the exact tuple field types. A direct
+        # i64 -> Tuple cast would use tuple.size_bytes() in Cranelift's numeric
+        # cast path (invalid for e.g. (bool, bool)); a Ptr cast is word-sized.
+        # Both native tuple constructors allocate raw N-word heap storage.
+        # No dereference, reallocation, runtime-tuple header or field erasure.
+        var builder = self.builder
+        val address = builder.emit_cast(mir_operand_copy(raw), MirType.ptr(tuple_type, false))
+        val result = builder.new_temp(tuple_type)
+        builder.emit_copy(result, address)
+        self.builder = builder
+        result
+
+export result_tuple_payload_type
