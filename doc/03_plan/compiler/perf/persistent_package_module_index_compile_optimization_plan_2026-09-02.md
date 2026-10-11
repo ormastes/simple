@@ -657,3 +657,7 @@ The first archived native object publication now passes the admitted Stage2 no-s
 
 
 The array-aware SOSIX writer replaces per-byte FFI staging. A focused 30-pair native cohort improved p95 from 579.113 to 572.402 ms while peak RSS rose from 13,968 to 14,004 KiB; the normalized sum is 1.990988 with a paired bootstrap interval below 2. The executable is 2,288 bytes smaller. See [the cohort report](../../../09_report/compiler/target6_cas_array_writer_perf_2026-10-11.md). This remains a focused CAS gate, not full native compilation performance or Item 6 closure.
+
+### 2026-10-11 native action receipt follow-up
+
+The first no-stub native receipt fixture exposed a temporary-text `rt_len` ABI failure in action digest calculation. Hashing the canonical encoded bytes through `sha256_u8_hex` lets the 48-module Stage2 LLVM fixture publish and read back a receipt, converge an identical publisher, reject a conflicting object and missing CAS authority, preserve the original receipt, and compare the shadow result. See [the native evidence](../../../09_report/compiler/target6_action_receipt_native_2026-10-11.md) and [the general ABI bug](../../../08_tracking/bug/target6_action_digest_temporary_text_len_abi_2026-10-11.md). This closes a focused action-receipt gate, not full V3 graph publication or native performance qualification.

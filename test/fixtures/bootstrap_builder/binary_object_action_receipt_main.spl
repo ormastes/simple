@@ -1,0 +1,70 @@
+use compiler.driver.cache.binary_object_cas.{binary_object_cas_put}
+use compiler.driver.cache.binary_object_action.{
+    BinaryObjectDependencyV1, BinaryObjectActionV1,
+    binary_object_action_digest_v1, binary_object_action_receipt_publish,
+    binary_object_action_receipt_read, binary_object_shadow_compare
+}
+
+fn fixture_action() -> BinaryObjectActionV1:
+    val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    BinaryObjectActionV1(
+        source_digest: digest, mir_digest: digest,
+        dependencies: [BinaryObjectDependencyV1(module_id: "fixture.dep", interface_digest: digest)],
+        name_resolution_digest: digest, type_layout_digest: digest,
+        target_triple: "aarch64-unknown-linux-gnu", cpu_features: ["baseline"],
+        storage_abi_mode: "nogc_sync_mut", optimization_config_digest: digest,
+        debug_config_digest: digest, object_format: "elf",
+        compiler_executable_sha256: digest, compiler_implementation_digest: digest,
+        lowering_owner_digests: [digest], codegen_owner_digests: [digest],
+        backend_role: "llvm-aot", provider_abi_version: "1",
+        provider_capabilities: ["object"], provider_content_sha256: digest,
+        provider_configuration_digest: digest, runtime_abi_declaration_digest: digest,
+        link_runtime_artifact_digests: [digest], cache_schema_version: 1,
+        action_key_version: 1, fixed_point_identity: digest)
+
+fn main() -> i64:
+    val root = "build/test/binary-object-action-receipt-fixture"
+    val object: [u8] = [127u8, 69u8, 76u8, 70u8, 0u8, 255u8, 254u8, 129u8]
+    val object_digest = binary_object_cas_put(root, object)
+    if object_digest.len() != 64:
+        print "FAIL receipt fixture CAS object"
+        return 11
+    val action = fixture_action()
+    val action_digest = binary_object_action_digest_v1(action)
+    if binary_object_action_receipt_publish(root, action, object_digest) != "published":
+        print "FAIL action receipt publication"
+        return 12
+    match binary_object_action_receipt_read(root, action_digest):
+        case nil:
+            print "FAIL action receipt readback"
+            return 13
+        case Some(receipt):
+            if receipt.action_digest != action_digest or receipt.object_digest != object_digest:
+                print "FAIL action receipt binding"
+                return 14
+    if binary_object_action_receipt_publish(root, action, object_digest) != "race_equal":
+        print "FAIL equal action publisher"
+        return 15
+    val other: [u8] = [127u8, 69u8, 76u8, 70u8, 0u8, 255u8, 254u8, 130u8]
+    val other_digest = binary_object_cas_put(root, other)
+    if other_digest.len() != 64 or binary_object_action_receipt_publish(
+            root, action, other_digest) != "race_conflict":
+        print "FAIL conflicting action publisher"
+        return 17
+    val missing = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    if binary_object_action_receipt_publish(root, action, missing) != "object_missing":
+        print "FAIL missing object authority"
+        return 18
+    match binary_object_action_receipt_read(root, action_digest):
+        case nil:
+            print "FAIL original receipt lost"
+            return 19
+        case Some(original):
+            if original.object_digest != object_digest:
+                print "FAIL original receipt replaced"
+                return 20
+    if binary_object_shadow_compare(root, action, object).reason != "shadow_equal":
+        print "FAIL action shadow comparison"
+        return 16
+    print "PASS binary object action receipt"
+    0
