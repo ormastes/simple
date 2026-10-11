@@ -300,8 +300,7 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
             # types (class/actor) keep sharing the same value_id — mutations
             # through them are meant to be visible to the caller. See
             # decl_set_is_value_type / interp_struct_is_value_type (#108).
-            if val_is_struct(pval) and interp_struct_is_value_type(pval):
-                pval = val_struct_deep_copy(pval)
+            pval = val_copy_for_parameter(pval)
         env_define(pname, pval)
         # LOAD_FAST: set fast local for non-shadowed params
         if local_count > 0:
@@ -379,8 +378,7 @@ fn interp_struct_is_value_type(vid: i64) -> bool:
 
 fn val_struct_deep_copy(vid: i64) -> i64:
     """Deep-copy a struct value for value-type param binding. Nested fields
-    that are themselves value-type structs are copied recursively (struct-in-
-    struct). Class-typed (reference) fields and all other value kinds keep
+    and arrays are copied recursively. Class-typed (reference) fields keep
     the same value_id, so a class field embedded in a struct still shares its
     identity with the caller after the struct itself is copied."""
     val name = val_get_struct_name(vid)
@@ -388,11 +386,21 @@ fn val_struct_deep_copy(vid: i64) -> i64:
     val values = val_get_struct_values(vid)
     var new_values: [i64] = []
     for fv in values:
-        if val_is_struct(fv) and interp_struct_is_value_type(fv):
-            new_values.push(val_struct_deep_copy(fv))
-        else:
-            new_values.push(fv)
+        new_values.push(val_copy_for_parameter(fv))
     val_make_struct(name, fields, new_values)
+
+fn val_copy_for_parameter(vid: i64) -> i64:
+    """Copy array storage and value structs across a parameter binding.
+    Array elements follow their own value/reference semantics, so nested
+    arrays and structs are copied while class and actor identities are shared.
+    Scalar values are immutable arena entries and keep their identity."""
+    if vid < 0: return vid
+    if val_is_array(vid):
+        var elements: [i64] = []
+        for element in val_get_array(vid):
+            elements.push(val_copy_for_parameter(element))
+        return val_make_array(elements)
+    val_copy_if_value_struct(vid)
 
 fn val_copy_if_value_struct(vid: i64) -> i64:
     """The shared value-type copy gate for every identity-contract copy site

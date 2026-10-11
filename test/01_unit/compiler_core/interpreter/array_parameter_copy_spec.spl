@@ -1,0 +1,68 @@
+# @req REQ-INTERP-ARRAY-PARAM-VALUE
+# Arrays passed to functions have independent storage; class elements retain identity.
+use compiler.core.interpreter.value.*
+use compiler.core.interpreter.eval_calls.{val_copy_for_parameter}
+use compiler.core.interpreter.eval_tables.{struct_table_reset, struct_table_register}
+use compiler.core.ast.{ast_reset, decl_struct_def, decl_set_is_value_type}
+
+describe "Interpreter array parameter values":
+    before_each:
+        val_reset()
+        ast_reset()
+        struct_table_reset()
+
+    it "isolates append and element replacement from the caller":
+        val original = val_make_array([val_make_int(1), val_make_int(2)])
+        val copied = val_copy_for_parameter(original)
+        expect(copied != original).to_equal(true)
+        expect(val_array_push(copied, val_make_int(3))).to_equal(true)
+        expect(val_array_set(copied, 0, val_make_int(9))).to_equal(true)
+        expect(val_get_array(original).len()).to_equal(2)
+        expect(val_get_int(val_get_array(original)[0])).to_equal(1)
+        expect(val_get_array(copied).len()).to_equal(3)
+        expect(val_get_int(val_get_array(copied)[0])).to_equal(9)
+
+    it "isolates nested array mutation":
+        val inner = val_make_array([val_make_int(5)])
+        val original = val_make_array([inner])
+        val copied = val_copy_for_parameter(original)
+        val copied_inner = val_get_array(copied)[0]
+        expect(copied_inner != inner).to_equal(true)
+        expect(val_array_push(copied_inner, val_make_int(6))).to_equal(true)
+        expect(val_get_array(inner).len()).to_equal(1)
+        expect(val_get_array(copied_inner).len()).to_equal(2)
+
+    it "keeps class element identity shared through an independent array":
+        val declaration = decl_struct_def("ArrayParamCell", ["value"], [0], [], [], 0)
+        decl_set_is_value_type(declaration, 0)
+        struct_table_register("ArrayParamCell", declaration)
+        val cell = val_make_struct("ArrayParamCell", ["value"], [val_make_int(42)])
+        val original = val_make_array([cell])
+        val copied = val_copy_for_parameter(original)
+        val copied_cell = val_get_array(copied)[0]
+        expect(copied != original).to_equal(true)
+        expect(copied_cell).to_equal(cell)
+        val_struct_set_field(copied_cell, "value", val_make_int(777))
+        expect(val_get_int(val_struct_get_field(val_get_array(original)[0], "value"))).to_equal(777)
+
+    it "copies value struct elements and their array fields":
+        val declaration = decl_struct_def("ArrayParamPoint", ["items"], [0], [], [], 0)
+        decl_set_is_value_type(declaration, 1)
+        struct_table_register("ArrayParamPoint", declaration)
+        val inner = val_make_array([val_make_int(7)])
+        val point = val_make_struct("ArrayParamPoint", ["items"], [inner])
+        val copied = val_copy_for_parameter(val_make_array([point]))
+        val copied_point = val_get_array(copied)[0]
+        val copied_inner = val_struct_get_field(copied_point, "items")
+        expect(copied_point != point).to_equal(true)
+        expect(copied_inner != inner).to_equal(true)
+        expect(val_array_push(copied_inner, val_make_int(8))).to_equal(true)
+        expect(val_get_array(inner).len()).to_equal(1)
+
+    it "keeps scalar identities and handles empty arrays":
+        val scalar = val_make_int(23)
+        expect(val_copy_for_parameter(scalar)).to_equal(scalar)
+        val empty = val_make_array([])
+        val copied = val_copy_for_parameter(empty)
+        expect(copied != empty).to_equal(true)
+        expect(val_get_array(copied).len()).to_equal(0)
