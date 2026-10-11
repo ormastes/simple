@@ -6,10 +6,12 @@ schema and migration; they must never silently extend this exact-field major.
 """
 
 use std.common.sdn.value.{SdnValue}
+use std.common.sdn.value_limits_v1.{sdn_validate_value_limits_v1}
 use std.common.sdn.strict_v1.{sdn_parse_strict_v1, sdn_strict_limits_valid_v1}
 use std.common.sdn.encode.{sdn_encode_canonical}
 use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
-use std.common.traceability.types_v1.*
+use std.common.traceability.qualification_types_v1.*
+use std.common.traceability.envelope_types_v1.*
 
 fn trace_qualification_limits_valid_v1(limits: TraceQualificationCodecLimitsV1) -> bool:
     (sdn_strict_limits_valid_v1(limits.sdn) and
@@ -196,6 +198,15 @@ fn trace_qualification_value_decode_v1(value: SdnValue, limits: TraceQualificati
     trace_qualification_consistency_v1(document)?
     Ok(document)
 
+pub fn trace_qualification_from_value_v1(value: SdnValue, limits: TraceQualificationCodecLimitsV1) -> Result<TraceQualificationV1, TraceCodecIssueV1>:
+    if not trace_qualification_limits_valid_v1(limits): return Err(trace_codec_issue_v1("invalid_limits", "", "Codec limits outside hard bounds"))
+    match sdn_validate_value_limits_v1(value, limits.sdn):
+        case Ok(_): ()
+        case Err(issue): return Err(trace_codec_issue_v1(issue.code, "", issue.message))
+    val document = trace_qualification_value_decode_v1(value, limits)?
+    trace_qualification_preflight_v1(document, limits, false)?
+    Ok(document)
+
 pub fn trace_qualification_decode_v1(source: text, limits: TraceQualificationCodecLimitsV1) -> Result<TraceQualificationV1, TraceCodecIssueV1>:
     if not trace_qualification_limits_valid_v1(limits):
         return Err(trace_codec_issue_v1("invalid_limits", "", "Codec limits are outside hard bounds"))
@@ -207,9 +218,7 @@ pub fn trace_qualification_decode_v1(source: text, limits: TraceQualificationCod
             return Err(TraceCodecIssueV1(code: issue.code, path: "", message: issue.message,
                 location_available: located, offset: issue.offset,
                 line: if located: issue.line else: 0, column: if located: issue.column else: 0))
-    val document = trace_qualification_value_decode_v1(value, limits)?
-    trace_qualification_preflight_v1(document, limits, false)?
-    Ok(document)
+    trace_qualification_from_value_v1(value, limits)
 
 fn trace_diagnostic_value_v1(item: TraceDiagnosticV1) -> SdnValue:
     SdnValue.Dict({"code": SdnValue.String(item.code), "severity": SdnValue.String(item.severity),
@@ -358,4 +367,4 @@ pub fn trace_qualification_encode_v1(document: TraceQualificationV1, limits: Tra
         return Err(trace_codec_issue_v1("output_limit", "", "Qualification output exceeds byte budget"))
     Ok(output)
 
-export trace_qualification_decode_v1, trace_qualification_encode_v1
+export trace_qualification_decode_v1, trace_qualification_encode_v1, trace_qualification_from_value_v1
