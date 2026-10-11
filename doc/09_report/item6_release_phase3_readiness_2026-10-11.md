@@ -160,3 +160,35 @@ orchestration authority and does not claim full Item 6 acceptance. An admitted
 full CLI, source-bound Phase 3 bootstrap and the canonical clean/warm/no-op/edit,
 semantic invalidation, corruption recovery, behavioral equivalence and
 compiler/core/MCP/LSP runtime evidence are still required before landing.
+
+## Located Item 6 migration lane and diagnostic runtime attempt
+
+Revalidation located draft [PR 3072](https://github.com/ormastes/simple/pull/3072),
+head `1d874f127a662f8044b44e57aa3f8100fcd86f15`, for the generated-source/index
+migration on `release_phase3`. Its worktree and Windows materialization are
+preserved. The handoff records a terminal Stage 2 cache-identity refusal before
+compiler execution and an explicit three-cycle stop. Its prepared invalidation
+launcher was not executed. It also records missing independent generated-plan
+selection, enforced producer execution and derived-snapshot consumption.
+The current source still rejects generated facets with
+`cold-compiled-generated-authority-unavailable`; this is an implementation gap,
+not merely a missing test result.
+
+A new isolated diagnostic native build targeted
+`src/app/test/package_index_acceptance.spl` using immutable pure-Simple producer
+`b580919372e209ea2a10e6d8e919b0f90c5dc3100e76f958f584c5db0ace4778`.
+It used this clean worktree's source/runtime, a separate acceptance-entry cache,
+two workers and enforced limits. Two controller-envelope refusals occurred
+before spawn; the corrected third invocation timed out at 240 seconds, native
+status 124. The collector reaped all descendants, reported peak 440008 KiB and
+no RSS observer error. No executable or acceptance scenario was produced.
+Compiler bytes matched before and after. This stopped cycle was not restarted.
+The producer is unqualified and other bootstrap processes were active; no
+Phase 3 or performance PASS follows from this diagnostic.
+
+See the [concrete timeout blocker](../08_tracking/bug/item6_acceptance_driver_native_build_timeout_2026-10-11.md)
+and external `acceptance-probe/request.json`, `logs/build.log` and
+`logs/receipt.env` under the evidence directory above. The acceptance driver
+itself explicitly reports owner-only results as incomplete until actual
+compiler completion and production filesystem observations exist. Compiling
+it successfully would therefore still not close the full 44-scenario contract.
