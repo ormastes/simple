@@ -376,16 +376,24 @@ jobs:
           ls -la .github/release-convergence-manifest.json >&2 || true
           manifest=.github/release-convergence-manifest.json
           test -f "$manifest"
-          jq -e --arg release_ref "$RELEASE_REF" --arg main "$MAIN_SHA" '
+          # The manifest binds main_head_sha at manifest-build time; main may
+          # advance before this verification runs, so require ancestry rather
+          # than exact equality (exact equality fails silently via jq -e).
+          jq -e --arg release_ref "$RELEASE_REF" '
             .schema == "simple-release-convergence-manifest/2" and
             .release_ref == $release_ref and
-            .main_head_sha == $main and
+            (.main_head_sha | test("^[0-9a-f]{40}$")) and
             (.release_inventory_head_sha | test("^[0-9a-f]{40}$")) and
             (.main_to_release.selected_shas | type == "array") and
             (.main_to_release.backports | type == "array") and
             (.release_to_main.classifications | type == "array") and
             (.release_to_main.forward_ports | type == "array")' \
             "$manifest" >/dev/null
+          manifest_main_head=$(jq -r '.main_head_sha' "$manifest")
+          git merge-base --is-ancestor "$manifest_main_head" "$MAIN_SHA" || {
+            echo "manifest main_head_sha is not an ancestor of the verified main tip" >&2
+            exit 1
+          }
           inventory_head=$(jq -r '.release_inventory_head_sha' "$manifest")
           test "$inventory_head" != "$HEAD_SHA"
           git merge-base --is-ancestor "$BASE_SHA" "$inventory_head"
