@@ -78,6 +78,77 @@ Focused generator regression:
 perl scripts/bootstrap/tests/native-incremental-adapter-test.pl
 ```
 
+## Batch probes and verified survivor unions
+
+`scripts/bootstrap/native-batch-bisect.pl` coordinates immutable selections
+around a verified native starter. It does not compile tests or grant support
+for unsupported syntax. Use the complete ordered inventory and set batch size
+to the remaining owner count to try the whole remainder first.
+
+```sh
+perl scripts/bootstrap/native-batch-bisect.pl init "$SOURCE" "$CANONICAL" "$ORDERED" interpreter "$REMAINING" "$NEW_STATE" "$STARTER_RESULT" llvm "$REVIEWED_NATIVE_AUTHORITY"
+perl scripts/bootstrap/native-batch-bisect.pl next "$NEW_STATE"
+perl scripts/bootstrap/native-batch-bisect.pl record "$NEW_STATE" "$OUTCOME_JSON"
+```
+
+The v2 controller distinguishes two operations:
+
+- A **probe** builds a new subset with its original proven baseline. Failed
+  probes split only the added files. A singleton probe failure retains the
+  original file, diagnostics, a separate `assert(false)` marker and SKIP ledger.
+- A **merge** builds independently passing files with the latest accepted
+  survivors. The new files count as accepted only after this cumulative union
+  passes. Failed unions split their new candidates. A singleton union failure
+  records the full interaction without declaring one file the sole cause;
+  unrelated pending batches continue.
+
+For example, when A,B,C,D fails, A,B fails, A passes, B fails, and C,D passes
+against the original baseline, the next request is A,C,D with the baseline.
+C,D are not discarded or counted accepted before that union executes. The old
+flat complementary-half controller could lose this progress; v1 states require
+migration and are not accepted by v2.
+
+Exact prior selection decisions are reused through their immutable outcome
+hashes, without rerunning native work. Failure reuse additionally checks the
+original diagnostic hash. Accepted unions always refer to a native result;
+manifest-only attachment never counts as compilation or execution. Infrastructure
+and unsupported-adapter failures are BLOCKED and do not become failed assertions.
+Quarantine currently excludes a whole file. Reattaching a file with a particular
+assertion commented requires a separately reviewed case/line ledger and an
+actual native rerun; that operation is not implemented by this coordinator.
+
+## Native authority and backend isolation
+
+The initial migration requires an explicit reviewed authority file, schema
+`simple-reviewed-native-authority-v1`, containing backend, compiler path/SHA-256,
+starter result SHA-256, positive/negative binary paths/SHA-256, `reviewed_by`, and
+review evidence path/SHA-256. This is needed because older starter receipts do
+not consistently contain a backend binding. A supplied backend label alone is
+insufficient; the migration mapping must be reviewed against retained build
+commands and artifacts. The controller verifies the mapped ELF artifacts and
+hashes but cannot independently establish the human review's correctness.
+
+Every subsequent PASS binds `build.env` backend, compiler SHA, workspace and
+manifest hash, plus both retained ELF hashes, to the strict native result. LLVM
+receipts cannot satisfy Cranelift state. Both backends may receive the same
+canonical source/problem list, but their native outcomes remain independent.
+Currently the strict result validator admits only the restricted prefix schema.
+A normal-framework validator must be reviewed against real canonical registry
+ledgers before this coordinator can admit full-group results. It must not be
+bypassed by generating a synthetic restricted receipt.
+
+Changed-behavior regressions:
+
+```sh
+perl scripts/bootstrap/tests/native-batch-union-test.pl
+perl scripts/bootstrap/tests/native-batch-union-cli-test.pl
+```
+
+These tests use explicit coordinator fixtures, not native product evidence.
+They cover the nested survivor counterexample, independently failing-file
+combinations, failed unions, exact-decision reuse, independent backend authority,
+and stale diagnostic rejection.
+
 ## Evidence preservation
 
 The runner records the writer PID and terminal phase/exit on ordinary exits and signals. SIGKILL cannot write a receipt; absence remains interrupted with unknown outcome. An existing build, result, or terminal receipt is rejected before installing the receipt-writing trap, preserving prior evidence.
