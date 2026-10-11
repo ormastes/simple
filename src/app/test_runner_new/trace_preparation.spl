@@ -8,6 +8,9 @@ use std.common.traceability.run_request_codec.{encode_trace_run_request}
 use std.common.traceability.run_selection.{validate_trace_request_selection}
 use std.common.traceability.run_preparation.{decode_trace_run_preparation,
     encode_trace_run_preparation, validate_trace_run_preparation}
+use std.common.traceability.sspec_inventory.{TraceSspecPlannedRequest}
+use std.common.traceability.sspec_inventory_codec.{encode_trace_sspec_planned_request}
+use std.common.traceability.sspec_preparation.{verify_trace_sspec_preparation}
 use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_create_exclusive, file_atomic_write, file_remove}
 use std.nogc_sync_mut.io.process_ops.{OwnedProcessLease}
@@ -32,8 +35,8 @@ pub fn verify_trace_preparation_output(request: TraceRunRequest, stdout: text, e
 
 # Retain byte output until explicit UTF-8 validation. Terminal process state
 # alone is insufficient: drain all retained stdout/stderr before collection.
-fn preparation_child_output(binary: text, request_path: text) -> Result<text, text>:
-    val args = ["run", "src/app/test_runner_new/test_db_lane_main.spl", "--prepare-request=" + request_path]
+fn preparation_child_output(binary: text, request_path: text, option: text) -> Result<text, text>:
+    val args = ["run", "src/app/test_runner_new/test_db_lane_main.spl", option + request_path]
     val started = OwnedProcessLease.start(binary, args, [], TRACE_PREPARATION_TIMEOUT_MS, 1000, TRACE_PREPARATION_OUTPUT_MAX)?
     var lease = started.lease()
     var output: [u8] = []
@@ -101,6 +104,19 @@ fn preparation_child_output(binary: text, request_path: text) -> Result<text, te
 pub fn prepare_trace_run_via_db_lane(request: TraceRunRequest, selected_paths: [text], binary: text, request_path: text) -> Result<TraceRunPlan, text>:
     validate_trace_request_selection(request, selected_paths)?
     val source = encode_trace_run_request(request)?
+    val stdout = prepare_trace_payload(binary, request_path, source, "--prepare-request=")?
+    verify_trace_preparation_output(request, stdout, 0)
+
+# The full metadata acknowledgement is required for this path. This persists
+# declared intent only; it does not resolve configuration or admit a binary.
+pub fn prepare_trace_sspec_run_via_db_lane(metadata: TraceSspecPlannedRequest, selected_paths: [text], binary: text, request_path: text) -> Result<TraceRunPlan, text>:
+    validate_trace_request_selection(metadata.request, selected_paths)?
+    val source = encode_trace_sspec_planned_request(metadata)?
+    val stdout = prepare_trace_payload(binary, request_path, source, "--prepare-sspec-request=")?
+    verify_trace_sspec_preparation(metadata, stdout, 0)
+
+# Shared reservation, process lifetime and cleanup for both typed payloads.
+fn prepare_trace_payload(binary: text, request_path: text, source: text, option: text) -> Result<text, text>:
     if binary == "" or request_path == "":
         return Err("trace preparation requires a binary and owned temporary request path")
     for value in [binary, request_path]:
@@ -115,8 +131,7 @@ pub fn prepare_trace_run_via_db_lane(request: TraceRunRequest, selected_paths: [
         if not file_remove(request_path):
             return Err("trace preparation write failed and owned request cleanup failed")
         return Err("trace preparation request atomic write failed")
-    val captured = preparation_child_output(binary, request_path)
+    val captured = preparation_child_output(binary, request_path, option)
     if not file_remove(request_path):
         return Err("trace preparation owned request cleanup failed")
-    val stdout = captured?
-    verify_trace_preparation_output(request, stdout, 0)
+    captured
