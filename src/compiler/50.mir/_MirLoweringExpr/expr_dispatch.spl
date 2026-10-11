@@ -8,6 +8,7 @@ use compiler.mir._MirLoweringExpr.static_enum_receiver_owner.*
 use compiler.mir._MirLowering.global_initializer_guard.*
 use compiler.mir._MirLowering.provider_globals.mir_global_storage_name
 use compiler.mir._MirLowering.provider_metadata.{mir_class_identity, mir_nominal_owner_matches}
+use compiler.mir.nominal_owner_diagnostics.{mir_nominal_profile_take_receipt}
 use compiler.mir._MirLoweringExpr.text_index_ranges.*
 # MIR Lowering - Expression Lowering
 #
@@ -896,6 +897,9 @@ impl MirLowering:
         bare name when ownerless) or `mir_class_identity` for classes."""
         val name = self.symbols.symbol_name_scalar_raw(raw)
         val defining_module = self.symbols.symbol_defining_module_scalar_raw(raw)
+        if mir_nominal_profile_take_receipt():
+            val agrees = mir_nominal_owner_matches(name, defining_module, owner_key)
+            eprint("[nominal-owner] compare symbol={raw} name={name} module={defining_module} expected={owner_key} agrees={agrees}\n")
         mir_nominal_owner_matches(name, defining_module, owner_key)
 
     me remember_field_projection_provenance(base: HirExpr, base_local: LocalId, field_idx: i64, result: LocalId):
@@ -4735,6 +4739,11 @@ impl MirLowering:
                     var field_builder = self.builder
                     val field_result = field_builder.emit_get_field(mir_operand_copy(base_local), field_idx, field_type)
                     self.builder = field_builder
+                    if (field_name == "stdout" or field_name == "roots") and mir_nominal_profile_take_receipt():
+                        val field_owner_receipt = projected_struct_name ?? ""
+                        val declared_receipt = self.struct_field_hir_type.has(field_owner_receipt)
+                        val field_text_receipt = self.local_is_str(field_result)
+                        eprint("[nominal-owner] field base={base_local.id} owner={field_owner_receipt} field={field_name} index={field_idx} local={field_result.id} declared={declared_receipt} mir_text={field_text_receipt}\n")
                     if generic_field_resolved:
                         if generic_field_nested_name != "":
                             self.struct_value_syms[field_result.id] = generic_field_nested_name

@@ -8,6 +8,7 @@ use compiler.mir.mir_types.*
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir.nominal_owner_diagnostics.{mir_nominal_profile_take_receipt}
 
 fn result_err_layout_identity(owner: text) -> text:
     var separator = owner.rfind("::")
@@ -202,5 +203,18 @@ impl MirLowering:
                 builder.emit_copy(value, address)
                 self.builder = builder
                 return value
+        if mir_nominal_profile_take_receipt():
+            val expected_identity = result_err_layout_identity(owner)
+            eprint("[nominal-owner] result-err-missing local={raw.id} expected={owner} identity={expected_identity}\n")
+            val separator = owner.rfind("::")
+            val leaf = if separator >= 0: owner.substring(separator + 2) else: owner.substring(owner.rfind(".") + 1)
+            var candidate_count = 0
+            for candidate_id in self.symbols.symbols.keys():
+                if candidate_count < 8 and self.symbols.symbol_name_scalar_raw(candidate_id) == leaf:
+                    val candidate_module = self.symbols.symbol_defining_module_scalar_raw(candidate_id)
+                    val candidate_identity = self.symbols.record_owner_identity_scalar_raw(candidate_id)
+                    val candidate_layout = self.declared_struct_layout_key(if candidate_module == "": leaf else: "{candidate_module}::{leaf}")
+                    eprint("[nominal-owner] result-err-candidate symbol={candidate_id} name={leaf} module={candidate_module} identity={candidate_identity} layout={candidate_layout}\n")
+                    candidate_count = candidate_count + 1
         self.error_fatal("Result Err struct has no current declaration for its exact provider", Some(span))
         raw
