@@ -26,7 +26,12 @@ class DispatchTests(unittest.TestCase):
             for name in ('config/simple.test.sdn', 'config/sdoctest.sdn',
                          'src/app/test_runner_new/main.spl',
                          'src/app/test_runner_new/test_runner_main.spl',
-                         'src/lib/nogc_sync_mut/test_runner/test_runner_files.spl'):
+                         'src/lib/nogc_sync_mut/test_runner/test_runner_files.spl',
+                         'src/lib/nogc_sync_mut/test_runner/test_runner_args.spl',
+                         'src/lib/nogc_sync_mut/test_runner/test_runner_types.spl',
+                         'src/lib/nogc_sync_mut/test_runner/test_runner_async.spl',
+                         'src/lib/nogc_sync_mut/test_runner/worker_memory.spl',
+                         'src/lib/common/convert.spl'):
                 target = root / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text('fixture input', encoding='utf-8')
