@@ -6,9 +6,12 @@ set -eu
 source_root= compiler= compiler_sha256= compiler_producer_receipt=
 qualification_mode=qualified rss_mode=enforce
 backend= subsystem= inventory= threads= rss_cap_kib=
+spec_list= canonical_inventory= selection_metadata=
 build_timeout_seconds= output= receipt=
 for arg do
   case "$arg" in
+    --spec-list=*) spec_list=${arg#*=} ;;
+    --canonical-inventory=*) canonical_inventory=${arg#*=} ;;
     --source-root=*) source_root=${arg#*=} ;;
     --compiler=*) compiler=${arg#*=} ;;
     --compiler-sha256=*) compiler_sha256=${arg#*=} ;;
@@ -80,6 +83,11 @@ fail() {
 physical_file "$compiler" || fail 'admitted compiler missing or linked'
 physical_file "$compiler_producer_receipt" || fail 'admission receipt missing or linked'
 physical_file "$inventory" || fail 'inventory missing or linked'
+if [ -n "$spec_list$canonical_inventory" ]; then
+  [ -n "$spec_list" ] && [ -n "$canonical_inventory" ] || fail 'selection authority incomplete'
+  selection_metadata=$(perl "$tool_root/scripts/bootstrap/product-spec-selection.pl" verify \
+    "$canonical_inventory" "$spec_list" "$subsystem" "$inventory") || fail 'selection authority differs'
+fi
 [ "$(hash_file "$compiler")" = "$compiler_sha256" ] || fail 'compiler SHA differs'
 # The diagnostic binding is produced by the actual provisional authority
 # owner after Hello and capsule verification. It never pretends to be the
@@ -165,7 +173,13 @@ bootstrap_stage3_source_snapshot "$product_source_snapshot" "$source_root" || fa
 product_source_snapshot_sha256=$(hash_file "$product_source_snapshot")
 inventory_current="$job_root/inventory-current.tsv"
 sh "$tool_root/scripts/bootstrap/compiler-subsystem-test-inventory.shs" "$source_root" >"$inventory_current" || fail 'inventory regeneration failed'
-cmp -s "$inventory" "$inventory_current" || fail 'inventory differs from current source'
+canonical_authority=${canonical_inventory:-$inventory}
+cmp -s "$canonical_authority" "$inventory_current" || fail 'inventory differs from current source'
+if [ -n "$spec_list" ]; then
+  current_selection=$(perl "$tool_root/scripts/bootstrap/product-spec-selection.pl" verify \
+    "$canonical_inventory" "$spec_list" "$subsystem" "$inventory") || fail 'selected inventory changed'
+  [ "$current_selection" = "$selection_metadata" ] || fail 'selection authority changed'
+fi
 inventory_sha256=$(hash_file "$inventory")
 watchdog="$tool_root/scripts/bootstrap/run-process-group-timeout.shs"
 physical_file "$watchdog" || fail 'process watchdog missing'
@@ -350,6 +364,7 @@ bootstrap_product_tool_verify || fail 'tool authority changed during build'
   printf '%s\n' 'provider_kind=builtin' "provider_receipt_hash=$provider_identity"
   printf '%s\n' 'provider_path=none' 'provider_sha256=none'
   printf '%s\n' "subsystem=$subsystem" "inventory_path=$inventory" "inventory_sha256=$inventory_sha256"
+  [ -z "$selection_metadata" ] || printf '%s\n' "$selection_metadata"
   printf '%s\n' "subset_sha256=$subset_sha256" "generated_manifest_path=$manifest"
   printf '%s\n' "generated_tree_sha256=$generated_tree_sha256"
   printf '%s\n' "generated_snapshot_proof_path=$generated_snapshot_proof"

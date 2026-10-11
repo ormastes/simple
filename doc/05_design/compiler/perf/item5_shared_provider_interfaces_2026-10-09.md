@@ -1,5 +1,59 @@
 # Item 5 shared provider interfaces and release compatibility
 
+## 2026-10-11 selected OS and filesystem separation
+
+The user selected independent OS and filesystem variations. Application and
+shared library filesystem operations go through the common SOSIX contract.
+Windows, Linux, BSD (with concrete BSD providers such as FreeBSD), and SimpleOS
+must be able to reuse filesystem implementations, including FAT32, NVFS and
+DBFS, when the required provider capabilities are available.
+
+The planned sparse overlay groups are siblings under the existing resolver root:
+
+```text
+variants/
+  os/          # OS service adapters and selection seams
+  filesystem/  # filesystem provider selection seams
+```
+
+An OS folder must not own a copied filesystem implementation. Filesystem source
+stays with its current layer owner; OS adapters supply native handles, block or
+file transport, waiting and lifecycle integration through explicit contracts.
+The existing `variants/platform/` configuration remains compatible until an
+implemented resolver migration normalizes it to the OS selection. These new
+folders document planned slots; their presence does not register a working
+selector or establish platform support.
+
+Filesystem overlays select available provider implementations; runtime filesystem
+selection is per mount/resource, not an OS-wide singleton: one OS may use several
+filesystem providers at once. The composition root binds the
+OS transport and filesystem provider independently, preserving mount identity,
+resource generation, permissions and completion/retirement semantics. An
+already-open handle retains its binding; changing the default never redirects
+it. A hosted OS-managed filesystem can be opaque to the application; do not
+require detection of its on-disk format. Missing capabilities return an explicit
+unsupported result rather than silently selecting FAT32 or host filesystem I/O.
+
+Reuse `std.common.contracts.sosix` and the existing SOSIX dispatch owners. Source
+inspection finds positioned read/write contracts and FAT32/NVFS/DBFS composition
+in `src/os/sosix/fs/positioned_backend_composition_v1.spl`; it does not establish
+all OS/backend combinations or a live user route. The acceptance helper uses a
+private registry; production shim registration remains tracked by the
+[existing live-route plan](../../../03_plan/os/simpleos_sosix_positioned_live_route_2026-09-27.md).
+Common `VfsOperationV1` currently covers Open,
+Stat, ReadDirectory and PollWatch, and the positioned operation contract covers
+read/write. SOSIX statfs, path truncate and handle truncate routing is still
+missing. Extend the canonical operation/service contracts and their existing
+adapters, with version negotiation, rather than add an application-facing FAT32
+API or a second filesystem framework. The existing FAT32 default is a migration
+compatibility behavior, not the neutral contract.
+
+Backend-private allocation and corruption tests remain legitimate driver tests.
+Shared acceptance tests must invoke the production SOSIX route with independent
+OS and filesystem fixtures. Record support separately for each tested operation
+and combination; direct driver success cannot close a SOSIX acceptance row.
+Use SDN for selection and evidence by default, with explicit JSON interoperability.
+
 ## 2026-10-11 variation and SOSIX integration
 
 The user selected the [integrated variation proposal](../simd_gpu_sosix_variation_final_2026-10-10.md) for research, plan and design incorporation. Current comparison baseline: release `02b150b385013d21bc408b45244431de85d391de`. Earlier dated observations below remain historical. This addendum takes precedence where their ownership or PR status differs; it does not certify implementation or native support.

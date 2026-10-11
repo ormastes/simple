@@ -173,7 +173,12 @@ sub materialize_product_overlay {
     verify_product_overlay($source, $overlay, $manifest);
 }
 sub verify_product_overlay {
-    my ($source, $overlay, $manifest) = @_;
+    my ($source, $overlay, $manifest, $completed_scv) = @_;
+    my $scv_members = {};
+    if ($completed_scv) {
+        require BootstrapProductScv;
+        $scv_members = BootstrapProductScv::verified_product_scv_members($overlay);
+    }
     my $plan = plan($source);
     bytes($manifest) eq encoded($plan) or die "overlay catalog/source binding differs\n";
     my %expected;
@@ -182,6 +187,7 @@ sub verify_product_overlay {
         digest("$overlay/$row->[1]") eq $row->[3] or die "overlay member differs\n";
         $expected{$row->[1]} = 1;
     }
+    $expected{$_} = 1 for keys %$scv_members;
     my %actual;
     find({no_chdir => 1, wanted => sub {
         my $p = $File::Find::name; return if $p eq $overlay;
