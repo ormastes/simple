@@ -255,3 +255,44 @@ describe "builtin method extras: for-in and comprehensions":
             "    a.len()\n")
         expect(extra_message_with(low, "E-MIR-EXPR-Comprehension")).to_equal(true)
         expect(extra_message_with(low, "not a typed array or an integer range")).to_equal(true)
+
+# Declared record Result mapping must share unwrap's word/provenance contract.
+describe "Result map declared record payloads":
+    it "preserves nested record field provenance through shorthand mapping":
+        val low = extra_clean("struct Roots:\n    path: text\n\n" +
+            "struct Resolution:\n    roots: Roots\n\n" +
+            "fn f(r: Result<Resolution, text>) -> text:\n" +
+            "    r.map(_.roots).unwrap().path\n")
+        expect(extra_has(low.labels, "result_map_active")).to_equal(true)
+        expect(extra_has(low.callees, "rt_enum_payload")).to_equal(true)
+        expect(extra_has(low.callees, "rt_enum_new")).to_equal(true)
+
+    it "maps a declared record into a primitive without treating its handle as an integer":
+        val low = extra_clean("struct Packet:\n    number: i64\n\n" +
+            "fn f(r: Result<Packet, text>) -> i64:\n" +
+            "    r.map(\\p: p.number + 1).unwrap_or(0)\n")
+        expect(extra_has(low.labels, "result_map_active")).to_equal(true)
+
+    it "retains record error provenance through map_err and unwrap_err":
+        val low = extra_clean("struct Failure:\n    code: i64\n\n" +
+            "struct PublicError:\n    reason: i64\n\n" +
+            "fn f(r: Result<i64, Failure>) -> i64:\n" +
+            "    r.map_err(\\e: PublicError(reason: e.code + 1)).unwrap_err().reason\n")
+        expect(extra_has(low.labels, "result_map_err_active")).to_equal(true)
+
+    it "keeps primitive Result mapping on the existing path":
+        val low = extra_clean("fn f(r: Result<i64, text>) -> i64:\n" +
+            "    r.map(\\x: x + 2).unwrap_or(0)\n")
+        expect(extra_has(low.labels, "result_map_active")).to_equal(true)
+
+    it "still refuses a tuple source payload":
+        val low = extra_lower("fn f(r: Result<(i64, i64), text>) -> i64:\n" +
+            "    r.map(\\p: p.0).unwrap_or(0)\n")
+        expect(extra_message_with(low, "unsupported payload type")).to_equal(true)
+        expect(extra_has(low.callees, "rt_panic")).to_equal(true)
+
+    it "still refuses a tuple mapper result":
+        val low = extra_lower("fn f(r: Result<i64, text>) -> Result<(i64, i64), text>:\n" +
+            "    r.map(\\x: (x, x + 1))\n")
+        expect(extra_message_with(low, "mapper result is not")).to_equal(true)
+        expect(extra_has(low.callees, "rt_panic")).to_equal(true)

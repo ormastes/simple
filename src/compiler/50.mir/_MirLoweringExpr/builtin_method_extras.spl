@@ -17,6 +17,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir.mir_types.{MirType}
 use compiler.mir.mir_types.{LocalId}
+use compiler.mir._MirLowering.provider_metadata.{mir_class_identity}
 use compiler.mir._MirLoweringExpr.expr_dispatch.*
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
@@ -795,6 +796,24 @@ impl MirLowering:
             self.remember_local_hir_type(int_result.id, HirType(kind: HirTypeKind.Int(64, true), span: receiver.span), 0, 0)
         Some(int_result)
 
+    me builtin_result_record_owner(payload_hir: HirType) -> text:
+        # Match the record-handle contract used by Result.unwrap. A Named
+        # spelling alone never admits an enum, unresolved type or raw any.
+        match payload_hir.kind:
+            case HirTypeKind.Named(symbol, _):
+                if val declaration = self.symbols.get_symbol_raw(symbol.id):
+                    match declaration.kind:
+                        case Struct: return declaration.name
+                        case Class: return mir_class_identity(declaration)
+                        case _: ()
+            case _: ()
+        ""
+
+    me builtin_result_map_payload_mir(payload_hir: HirType) -> MirType?:
+        if self.builtin_result_record_owner(payload_hir) != "":
+            return Some(MirType.i64())
+        self.builtin_result_payload_mir(payload_hir)
+
     me builtin_result_payload_mir(payload_hir: HirType) -> MirType?:
         """Result payload types the combinators carry: the same scalar/text
         set lower_result_unwrap supports with a default."""
@@ -830,6 +849,9 @@ impl MirLowering:
                 [mir_operand_copy(payload_value)], payload_mir)
             self.builder = b_text
         self.remember_local_hir_type(payload_value.id, payload_hir, 0, 0)
+        val record_owner = self.builtin_result_record_owner(payload_hir)
+        if record_owner != "":
+            self.struct_value_syms[payload_value.id] = record_owner
         payload_value
 
     me lower_result_combinator(receiver: HirExpr, method: text, args: [HirCallArg], result_type: HirType, prelowered: LocalId, has_prelowered: bool) -> LocalId:
@@ -866,9 +888,15 @@ impl MirLowering:
             return pred_result
         val maps_err = method == "map_err"
         val source_hir = if maps_err: err_hir else: ok_hir
-        val source_mir_opt = self.builtin_result_payload_mir(source_hir)
+        # Extend only map/map_err. The existing ok() projection admission
+        # remains scalar/text until its Option record boundary is qualified.
+        val maps_payload = method == "map" or method == "map_err"
+        val source_mir_opt = if maps_payload:
+            self.builtin_result_map_payload_mir(source_hir)
+        else:
+            self.builtin_result_payload_mir(source_hir)
         if source_mir_opt == nil:
-            return self.builtin_extra_fail_closed("unsupported in stage2: Result.{method}() over a payload type that is not i64, f64, bool or text; use match", Some(receiver.span))
+            return self.builtin_extra_fail_closed("unsupported in stage2: Result.{method}() over an unsupported payload type; map/map_err support i64, f64, bool, text and declared records; use match", Some(receiver.span))
         val source_mir = source_mir_opt ?? MirType.i64()
 
         var b_disc = self.builder
@@ -922,12 +950,22 @@ impl MirLowering:
             mapped = self.builtin_extra_fail_closed("unsupported in stage2: Result.{method}(f) with a mapper that is not a one-parameter lambda literal; pass `\\x: ...` or use match", Some(receiver.span))
         var mapped_hir_opt: HirType? = nil
         if mapper_ok:
-            mapped_hir_opt = self.option_map_value_hir_type(mapped, receiver.span)
+            # Field projections/constructors retain the declared nominal HIR
+            # type. Require the existing single-word record carrier as well;
+            # never reinterpret an arbitrary tuple or untyped i64 as a record.
+            if val mapped_declared = self.find_local_hir_type(mapped.id):
+                if self.builtin_result_record_owner(mapped_declared) != "":
+                    if val mapped_mir = self.local_mir_type_of(mapped):
+                        match mapped_mir.kind:
+                            case MirTypeKind.I64: mapped_hir_opt = Some(mapped_declared)
+                            case _: ()
+            if mapped_hir_opt == nil:
+                mapped_hir_opt = self.option_map_value_hir_type(mapped, receiver.span)
             if mapped_hir_opt != nil:
-                if self.builtin_result_payload_mir(mapped_hir_opt ?? HirType(kind: HirTypeKind.Error, span: receiver.span)) == nil:
+                if self.builtin_result_map_payload_mir(mapped_hir_opt ?? HirType(kind: HirTypeKind.Error, span: receiver.span)) == nil:
                     mapped_hir_opt = nil
             if mapped_hir_opt == nil:
-                mapped = self.builtin_extra_fail_closed("unsupported in stage2: Result.{method}(f) whose mapper result is not i64, f64, bool or text; use match", Some(receiver.span))
+                mapped = self.builtin_extra_fail_closed("unsupported in stage2: Result.{method}(f) whose mapper result is not i64, f64, bool, text or a declared record; use match", Some(receiver.span))
         val mapped_hir = mapped_hir_opt ?? source_hir
         val new_result_type = if maps_err:
             HirType(kind: HirTypeKind.Result(ok_hir, mapped_hir), span: receiver.span)
