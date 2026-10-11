@@ -116,3 +116,12 @@ owner's published root-module sequence. Complete names/paths alone cannot prove
 collision precedence. Native negative guards now cover reversed full order,
 a duplicate-name order and a truncated order; all refuse without sealing or
 advancing the owner. These guards remain unexecuted pending the native slot.
+
+Selected-provider input dependency `f7c60c79a8dc8187121c4f6357559c75e218eba1`
+adds the actual admitted bundle/target/backend selection digest and exact per-source
+authored/content identity. Registration and repository formation require identical
+provider selection and receipt path across modules, alongside closure, producer
+and runtime digest. Repository v2 binds both selection and receipt path. Per-source
+authored/content identities remain distinct, covered by each archive input key;
+they must never be compared globally. Native dependency fixtures cover changed
+provider keys and descriptor/source mismatches; execution is still pending.
