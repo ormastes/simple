@@ -3,23 +3,29 @@
 Executable: `test/03_system/tools/test_daemon/test_daemon_multi_session_system_spec.spl`.
 Requirement: `REQ-SSPEC-SYSTEM`.
 
-Status: **Focused capacity PASS; fresh identity remains FAIL / OPEN**. Evidence
-comes from two source snapshots, not a complete rerun of the revised seven-case
-file. Baseline cycle one passed scenarios 1–2 and failed scenarios 3–4. After
-the broker repair, cycle two ran only scenario 4 plus new scenarios 5–7:
-**4 passed, 0 failed, 435 ms**, process exit zero. Scenarios 1–2 retain their
-baseline PASS; scenario 3 retains its unchanged baseline FAIL. No whole-file
-or whole-suite PASS is claimed. This manual is maintained by hand; docgen
-remains pending.
+Status: **All eleven scenarios have focused passing evidence across three source
+snapshots**: two baseline cases, four capacity cases, and five identity cases.
+This is not one complete-file run, a current-tree full PASS, a native-product
+PASS, or live-environment qualification. Docgen remains pending; this guide is
+maintained by hand.
 
-Baseline log:
-`build/phase-one-ui-diagnostic/test_daemon_multi_session_system_spec/cycle-one.log`.
-Focused repair log:
-`build/phase-one-ui-diagnostic/daemon-capacity-cycle-two_spec/cycle-two.log`.
+| Cycle | Selected scenarios | Result | Source scope |
+|---|---|---|---|
+| One | Original four | 2 PASS, 2 FAIL | Baseline; retain kind/architecture and shared-reuse PASS |
+| Two | Original capacity + three added capacity edges | 4 PASS, 0 FAIL; 435 ms | Capacity repair snapshot |
+| Three | Original fresh identity + four added identity contracts | 5 PASS, 0 FAIL; 895 ms | Identity repair snapshot; exit 0, quiescent 1 |
+
+Retained logs under `build/phase-one-ui-diagnostic/`:
+`test_daemon_multi_session_system_spec/cycle-one.log`,
+`daemon-capacity-cycle-two_spec/cycle-two.log`, and
+`daemon-identity-cycle-three_spec/cycle-three.log`.
 Each has adjacent `.rss.env`, `.exit`, and `.command.json` receipts.
-`build/phase-one-ui-diagnostic/platform-daemon-inputs.json` binds the baseline;
-`build/phase-one-ui-diagnostic/platform-daemon-cycle-two-inputs.json` binds the
-repair production source, canonical spec, and extracted exact scenario blocks.
+The corresponding manifests are `platform-daemon-inputs.json`,
+`platform-daemon-cycle-two-inputs.json`, and
+`daemon-identity-cycle-three-inputs.json`; the final source patch is
+`daemon-identity-cycle-three.patch`. These bind the selected exact scenario
+blocks and source identities; earlier passing cases were not rerun. The final
+review reported zero new P0/P1 findings. No fourth daemon cycle was performed.
 
 1. Register the production default adapter descriptors and acquire QEMU-kind
    leases for ARM64, RISC-V, and x86-64, plus a container-kind ARM64 lease.
@@ -53,13 +59,32 @@ repeated fresh requests received identical session IDs. The broker repair now
 skips only idle reuse for fresh requests and applies the normal capacity gate.
 Zero capacity refuses admission; an already-over-limit pool also refuses new
 admission without destroying existing leases. The four capacity checks passed in the focused second cycle described above.
-The identity regression remains unresolved: stopping
-one duplicate ID removes both leases. See
+The baseline identity regression showed that stopping
+one duplicate ID removed both leases. The repaired regression passed in cycle three. See
 [identity and admission follow-up](../../../../08_tracking/bug/test_daemon_fresh_instance_identity_and_admission_2026-10-11.md).
 
-A refused acquisition still uses the existing untracked default lease shape;
-this repair does not claim an explicit pending protocol or adapter lifecycle
-fix. Live resource admission remains unqualified.
+The identity follow-up allocates a compact process-owner namespace plus a serial
+allocation sequence in the descriptor before startup. Shared grouping keys stay
+unchanged; broker code preserves adapter-returned resource identities. Capacity
+refusals now use an empty-ID `LEASE_PENDING`, which cannot address a tracked
+lease. The daemon response and concrete adapter dispatch remain unqualified.
+
+Four added identity contracts passed in cycle three: descriptor IDs differ for
+matching keys and survive default-adapter startup; independent brokers allocate
+distinct instances; pending handles cannot release or stop an occupied lease;
+incomplete descriptors fail closed. Together with the original fresh-instance
+regression, these account for the five selected cycle-three cases.
+
+A P2 follow-up remains at `src/app/test_daemon/daemon.spl:352–357`:
+`handle_session_acquire` returns `TRESP_COMPLETED` even for an empty-ID
+`LEASE_PENDING` handle. Queue/retry or explicit refusal semantics must be wired
+at that response boundary; broker pending safety alone does not close it.
+
+QEMU socket and container adapter resource names consume descriptor identity;
+service, hardware, remote-PC, and native/headless GUI leases do as well. GUI
+container mode remains explicitly excluded: its fixed resource name and missing
+container lifecycle dispatch require a separate repair. Headless GUI display
+allocation, hardware port isolation, and live resource admission are unverified.
 
 The legacy `test/system/test_daemon/test_daemon_multi_session_system_spec.spl`
 constant-only duplicate is removed. Architecture, kind, and reuse-policy intent
