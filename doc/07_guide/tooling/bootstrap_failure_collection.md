@@ -49,6 +49,23 @@ production orchestration with failing/passing fake commands and inventory rows;
 it also checks policy inheritance, ordered overrides, cache preservation, and
 fatal snapshot admission. Other runners may still need their own policy wiring.
 
+## Phase verification campaign bounds
+
+The phase verifier has a single 7200-second campaign deadline, separate from
+`--timeout-seconds` for each row. Set `--campaign-timeout-seconds` or
+`BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS` to select another positive budget.
+The owner reaps its job/process tree on expiry or interruption and retains
+partial rows, incomplete counts, caches and a nonpassing campaign receipt.
+Nested row RSS enforcement remains unchanged.
+
+If mandatory fullCLI or test-runner construction fails, independent module
+diagnostics default to 8 deterministic entries. Configure the nonnegative
+`BOOTSTRAP_VERIFY_FAILED_TOOL_MODULE_LIMIT` for another finite sample. The full
+inventory remains retained; excluded entries are explicitly unexecuted/BLOCKED.
+Healthy prerequisites retain the complete inventory. This sample cannot admit
+missing tools or replace test-suite evidence. Regression:
+`sh scripts/bootstrap/tests/verification-campaign-test.shs`.
+
 ## Agent continuation and explicit diagnostic exceptions
 
 Always finish the finite inventory of independently runnable modules, binary
