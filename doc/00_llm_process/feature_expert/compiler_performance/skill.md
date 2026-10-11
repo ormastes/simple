@@ -43,3 +43,11 @@ compact results escape. Native qualification uses the `journal` selector in
 checks plus the canonical managed tool/runtime handoff. Execution is pending.
 Journal integrity alone does not admit production order, transformed bodies or
 the final MIR input. No memory improvement is established by source review.
+
+Immutable mono replay now captures the actual applied root/FIFO selection and
+reconstructs complete bodies before the shared exhaustive verifier. The
+`verification` fixture requires 18 checks. Borrowed post-HIR declaration/body
+readers return only scalar/layout/RT/join-point DTOs; `postfacts` requires 14
+checks and the managed handoff. Both fixtures remain unrun. Their public pins
+and editable fact rows need genuine driver prerequisite ownership before final
+admission.

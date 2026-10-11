@@ -119,6 +119,14 @@ authority. These checks remain unrun; production admission still requires the
 actual surface visit order, distinct layout order and post-HIR transformed-body
 prerequisites.
 
+`cache/hir_mono_verification_use_v1.spl` independently replays immutable actual
+applied selections and produces a fresh real verifier report (`verification`,
+18 native checks pending). `cache/driver_hir_post_validation_fact_lease_v1.spl`
+reads full original bodies inside borrowed leases, yielding body-free DTOs
+(`postfacts`, 14 native checks pending). Production owners must bind actual
+ordered indexes, RT capabilities and transformed parents; these helpers alone
+do not activate the pipeline or grant final admission.
+
 ## 2026-09-26 — `native-build` restored: backend table in the interpreted worker, entry-file hashing, module-init reads
 
 - **The interpreted native-build worker never installed the static backend
