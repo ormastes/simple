@@ -53,4 +53,28 @@ with tempfile.TemporaryDirectory(prefix="simple-hash-contract-") as directory:
     assert eol != authored, "EOL distinction must not be hidden"
     assert not admit(path, authored), "authored digest must reject changed CRLF bytes"
     assert admit(path, eol), "producer and actual consumer must hash the same CRLF bytes"
-print("Windows collector actual hash contract: 7 assertions PASS; native launch UNEXECUTED")
+# Separate receipt-log criterion: execute the production comparison itself.
+receipt_line = next(line.strip() for line in wrapper.splitlines() if 'sha256sum' in line and '$blwc_parent/$blwc_leaf.log' in line)
+assert 'sha256sum <"$blwc_parent/$blwc_leaf.log"' in receipt_line
+# Preserve the exact two-line production comparison, dropping only its && continuation.
+lines = wrapper.splitlines()
+index = next(i for i, line in enumerate(lines) if 's/^log_sha256=' in line)
+comparison = '\n'.join(lines[index:index+2]).strip().removesuffix(' || {').replace(' &&', '')
+comparison = comparison.replace('] =', '] =')
+with tempfile.TemporaryDirectory(prefix="simple-log-contract-") as directory:
+    parent = Path(directory) / "receipt\\windows"
+    parent.mkdir()
+    log = parent / 'command.log'
+    receipt = parent / 'command.env'
+    log.write_bytes(b'actual native child output\n')
+    receipt.write_text('log_sha256=' + hashlib.sha256(log.read_bytes()).hexdigest() + '\n')
+    def compare(expression):
+        return subprocess.run(['sh', '-c', 'blwc_parent=$1; blwc_leaf=command; ' + expression, 'probe', str(parent)], capture_output=True).returncode
+    old = comparison.replace('sha256sum <', 'sha256sum ')
+    assert compare(old) != 0, 'legacy escaped log digest must reject matching receipt'
+    assert compare(comparison) == 0, 'actual production log comparison must admit matching bytes'
+    log.write_bytes(b'changed output\n')
+    assert compare(comparison) != 0, 'changed log bytes must remain rejected'
+    receipt.write_text('log_sha256=bad\n')
+    assert compare(comparison) != 0, 'malformed receipt digest must remain rejected'
+print("Windows collector helper and receipt-log contract: 11 checks PASS; native launch UNEXECUTED")
