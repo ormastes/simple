@@ -2,6 +2,12 @@
 
 ## Windows bootstrap harness prerequisites
 
+The MSVC setup helper supports callers using `set -euo pipefail`. SDK discovery
+must skip non-SDK Include children such as `wdf` without turning the final
+directory predicate into a pipeline failure. Keep missing-SDK and tool failures
+visible. `bash scripts/check/check-windows-msvc-sdk-discovery.shs` checks that
+boundary; see the [SDK discovery bug](../../08_tracking/bug/windows_msvc_sdk_discovery_pipefail_2026-10-11.md).
+
 Run the PATH fixture with
 `python scripts/check/check-bootstrap-path-access.py --script scripts/bootstrap/bootstrap-from-scratch.sh --output <fresh-private-directory>`.
 On Windows it discovers native Bash beside Git on PATH; for MSYS2 or a custom
