@@ -77,10 +77,6 @@ use compiler.mir_opt.mir_opt.typed_storage_view_producer.{
 use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type,
     serialize_const_value}
 use std.common.crypto.sha256.{sha256_text}
-# `hash_text` / `file_read_nullable` are uniquely named and rt-backed (no
-# co-compiled duplicate signatures), which is why the native output lane
-# already routes its disk reads through them.
-use std.io_runtime.{file_read_nullable, hash_text}
 use std.common.mcdc.model.{McdcMode, mcdc_mode_from_text, mcdc_mode_name}
 use std.common.structural.storage_layout.storage_layout_contracts.{
     storage_layout_kind_to_u8, storage_conversion_policy_to_u8
@@ -1139,55 +1135,64 @@ class CompileContext:
     # SIMPLE_STAGE3_STREAMING_SURFACES=0 emits no reclaim line and links.
     # doc/08_tracking/bug/stage2_capsule_source_identity_is_sha256_of_empty_2026-09-13.md
     #
-    # Recovery is fail-closed and keeps the mutated-source detector
-    # load-bearing: the bytes on disk are admitted as the compiled bytes ONLY
-    # when they still hash to the content hash captured at LOAD time
-    # (source_content_hashes_owner, driver_source_pipeline_loading.spl:845),
-    # under an index-alignment check against source_module_names_owner. A file
-    # edited since parse, a missing capture, a misaligned projection or an
-    # unreadable path all yield "" -- the capsule is then rejected by
-    # identity_valid()/driver_native_collect_capsule_result_v1, never admitted
-    # on a laundered digest. Contents that are still held hash exactly as
-    # before, so the non-streaming path is unchanged byte for byte.
-    fn frozen_native_source_identity_at_v1(index: i64) -> text:
-        val source = self.sources[index]
-        if source.content != "":
-            return sha256_text(source.content)
-        if self.source_content_hashes_owner.len() != self.sources.len():
-            return ""
-        if self.source_module_names_owner.len() != self.sources.len():
-            return ""
-        if self.source_module_names_owner[index] != source.module_name:
-            return ""
-        val captured_hash = self.source_content_hashes_owner[index]
-        if captured_hash == 0: return ""
-        if source.path == "": return ""
-        val disk_content = file_read_nullable(source.path) ?? ""
-        if disk_content == "": return ""
-        val raw_disk_hash = hash_text(disk_content)
-        val disk_hash = if raw_disk_hash == 0: 1 else: raw_disk_hash
-        if disk_hash != captured_hash: return ""
-        sha256_text(disk_content)
-
+    # Bind capsule identity to the uniquely selected source's loaded bytes or
+    # its exact phase-1 full-inventory owner row. Never reread mutable disk
+    # content here: the identity must describe the bytes actually compiled.
     fn frozen_native_cache_source_identity_v1(module_name: text) -> text:
-        # Read the phase-1 identity owner, NOT `sources[].content`: by the time
-        # capsules are frozen the content has been reclaimed and blanked, so
-        # hashing it returns sha256("") for every module. See the field comment
-        # on `source_identities_owner`.
-        var found_identity = ""
-        var found_count = 0
-        var index = 0
-        while index < self.sources.len():
-            if self.sources[index].module_name == module_name:
-                found_identity = self.frozen_native_source_identity_at_v1(index)
-                found_count = found_count + 1
-            index = index + 1
-        if found_count != 1: return ""
-        # Fail closed rather than publish the digest of nothing: an empty
-        # identity (or the digest of the empty string) means the capture never
-        # saw content and the disk re-read could not be verified against it.
-        if found_identity == "" or found_identity == sha256_text(""): return ""
-        found_identity
+        var cache_source = ""
+        var selected_content = ""
+        var source_module_matches = 0
+        var source_path_matches = 0
+        for source in self.sources:
+            if source.module_name == module_name:
+                source_module_matches = source_module_matches + 1
+                cache_source = source.path
+                selected_content = source.content
+        if source_module_matches == 1 and cache_source != "":
+            for source in self.sources:
+                if source.path == cache_source:
+                    source_path_matches = source_path_matches + 1
+        if source_module_matches == 1 and source_path_matches == 1:
+            # Held source bytes are authoritative when the short-lived parse
+            # context does not carry full-inventory phase-1 owner vectors.
+            if selected_content != "": return sha256_text(selected_content)
+
+        val owners_aligned =
+            self.source_paths_owner.len() == self.source_identities_owner.len() and
+            self.source_paths_owner.len() == self.source_module_names_owner.len()
+        var owner_module_matches = 0
+        var owner_path_matches = 0
+        var owner_alias_hashes_consistent = true
+        var owner_path = ""
+        var owner_identity = ""
+        if owners_aligned:
+            var index = 0
+            while index < self.source_module_names_owner.len():
+                if self.source_module_names_owner[index] == module_name:
+                    owner_module_matches = owner_module_matches + 1
+                    owner_path = self.source_paths_owner[index]
+                    owner_identity = self.source_identities_owner[index]
+                index = index + 1
+            index = 0
+            while index < self.source_paths_owner.len():
+                if self.source_paths_owner[index] == cache_source and
+                        cache_source != "":
+                    owner_path_matches = owner_path_matches + 1
+                    val alias_identity = self.source_identities_owner[index]
+                    if alias_identity == "" or
+                            alias_identity == sha256_text("") or
+                            alias_identity != owner_identity:
+                        owner_alias_hashes_consistent = false
+                index = index + 1
+        if owners_aligned and source_module_matches == 1 and
+                source_path_matches == 1 and owner_module_matches == 1 and
+                owner_path == cache_source and owner_path_matches >= 1 and
+                owner_alias_hashes_consistent and
+                owner_identity != "" and owner_identity != sha256_text(""):
+            # Full-inventory rows may alias this physical path only when their
+            # captured SHA agrees with the exact selected-module owner row.
+            return owner_identity
+        ""
 
     fn freeze_native_module_capsules_v1(
         module_names: [text], object_base: text, backend_name: text,
