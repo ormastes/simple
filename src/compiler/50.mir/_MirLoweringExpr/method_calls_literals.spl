@@ -1552,6 +1552,13 @@ impl MirLowering:
         """
         if val text_static = self.try_lower_text_static_builtin(receiver, method, args):
             return text_static
+        # A declared native trait value carries its own runtime implementation
+        # table. Select that ABI before the legacy whole-closure direct-call
+        # path, which cannot preserve distinct implementations or overrides.
+        if val native_receiver_type = self.enum_match_expr_type(receiver):
+            val native_owner = self.native_trait_owner_for_type(native_receiver_type)
+            if native_owner != "":
+                return self.lower_native_trait_method(receiver, native_owner, method, args)
         var resolution_admits_trait_dispatch = false
         match resolution:
             case Unresolved: resolution_admits_trait_dispatch = true
@@ -1684,10 +1691,6 @@ impl MirLowering:
         var has_prelowered_method_receiver = false
         var option_method_receiver = false
         val trait_receiver_type = self.enum_match_expr_type(receiver)
-        if val declared_trait_receiver = trait_receiver_type:
-            val trait_owner = self.native_trait_owner_for_type(declared_trait_receiver)
-            if trait_owner != "":
-                return self.lower_native_trait_method(receiver, trait_owner, method, args)
         val declared_option_receiver = self.option_inner_hir_type(receiver) != nil
         val option_method_shape =
             (method == "is_some" and args.len() == 0) or
