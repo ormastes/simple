@@ -240,15 +240,22 @@ fn driver_hir_archive_journal_verify_in_owned_scope_v1(owner: DriverHirArchiveJo
 fn driver_hir_archive_journal_store_event_v1(owner: DriverHirArchiveJournalV1,
         logical_name: text, source_index: i64, archive: HirBodyArchiveV1,
         before: text, epoch_before: i64, alias: bool) -> DriverHirArchiveJournalStoredEventV1:
-    # This compact pending descriptor is an intended durable refusal root as
-    # well as the successful event. No cumulative encoding happens here.
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        # This separate fallback contains only already-retained inputs/scalars.
+        # Never put new scratch hash children into this older carrier.
+        val pending = DriverHirArchivePublicationEventV1(logical_name: logical_name, source_index: source_index,
+            archive: archive, registration_before: before, registration_after: "",
+            epoch_before: epoch_before, epoch_after: owner.registration.epoch, alias: alias,
+            previous_key: owner.last_key, key: "")
+        return DriverHirArchiveJournalStoredEventV1(event: pending,
+            reason: "HIR journal event lease unavailable after publication")
+    # The successful carrier belongs to this active scope, so promotion walks
+    # its newly encoded fingerprint/key children rather than skipping an older
+    # aggregate that acquired scratch references after it was allocated.
     var event = DriverHirArchivePublicationEventV1(logical_name: logical_name, source_index: source_index,
         archive: archive, registration_before: before, registration_after: "",
         epoch_before: epoch_before, epoch_after: owner.registration.epoch, alias: alias,
         previous_key: owner.last_key, key: "")
-    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
-        return DriverHirArchiveJournalStoredEventV1(event: event,
-            reason: "HIR journal event lease unavailable after publication")
     event.registration_after = mono_archive_registration_owner_digest_v1(owner.registration)
     event.key = sha256_text(driver_hir_archive_journal_event_bytes_v1(owner, event))
     val stored = driver_hir_archive_journal_bytes_v1(owner, event, true)
