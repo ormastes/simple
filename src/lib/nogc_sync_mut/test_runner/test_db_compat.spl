@@ -21,6 +21,7 @@ use std.nogc_sync_mut.test_runner.test_db_record.{TestDbFileRow}
 use std.common.traceability.case_events.{decode_trace_case_events}
 use std.common.traceability.run_plan.{TraceRunPlan}
 use std.common.traceability.run_request.{TraceRunRequest, validate_trace_run_request, materialize_trace_run_plan}
+use std.common.traceability.run_request_codec.{encode_trace_run_request}
 use std.nogc_sync_mut.io.time_ops.{timestamp_year, timestamp_month, timestamp_day, timestamp_hour, timestamp_minute, timestamp_second}
 
 # ============================================================================
@@ -39,10 +40,19 @@ class RunnerTestDb:
         if self._trace_prepare_failed or self.current_run_id != "":
             return Err("trace request requires a fresh database owner")
         validate_trace_run_request(request)?
+        # Enforce transport bounds before allocating any mutable run state.
+        encode_trace_run_request(request)?
         val run_id = self.start_run()
-        val plan = materialize_trace_run_plan(request, run_id)?
-        self.prepare_trace_run(plan)?
-        Ok(plan)
+        match materialize_trace_run_plan(request, run_id):
+            case Err(reason):
+                self._trace_prepare_failed = true
+                Err(reason)
+            case Ok(plan):
+                match self.prepare_trace_run(plan):
+                    case Ok(_): Ok(plan)
+                    case Err(reason):
+                        self._trace_prepare_failed = true
+                        Err(reason)
 
     # Persist immutable execution intent before dispatch. A failed save poisons
     # this wrapper: callers must discard it and reload the persisted owner.
@@ -100,6 +110,8 @@ class RunnerTestDb:
 
     # Save database
     fn save() -> Result<(), text>:
+        if self._trace_prepare_failed:
+            return Err("trace preparation failed; discard and reload this database owner")
         val success = self.db.save()
         if success:
             Ok(())
