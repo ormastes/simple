@@ -39,6 +39,25 @@ fi
 grep -F 'secure_temp_dir_raw(' "$driver" >/dev/null
 grep -F 'file_read_regular_no_follow_bounded(' "$driver" >/dev/null
 grep -F 'file_atomic_write(path, bounded)' "$diagnostic" >/dev/null
+# Failed diagnostic transport must retain the original bounded message on an
+# unconditional stderr facade, without importing the higher driver layer.
+grep -F 'use std.nogc_sync_mut.io.process_ops.{eprint}' "$diagnostic" >/dev/null
+sed -n '/if path == "":/,/return false/p' "$diagnostic" \
+    | grep -F 'eprint("error: backend AOT diagnostic path is empty: {bounded}")' >/dev/null
+sed -n '/if not written:/,/^    written/p' "$diagnostic" \
+    | grep -F 'eprint("error: backend AOT diagnostic write failed: {bounded}")' >/dev/null
+grep -F 'eprint("error: backend AOT diagnostic readback length mismatch: {bounded}")' "$diagnostic" >/dev/null
+grep -F 'eprint("error: backend AOT diagnostic readback failed: {bounded}")' "$diagnostic" >/dev/null
+if grep -E 'use compiler\.driver|eprint\(.*\{message\}' "$diagnostic"; then
+    echo 'diagnostic fallback imports the driver or emits unbounded text' >&2
+    exit 1
+fi
+awk '
+    /val bounded =/ { bounded = NR }
+    /if path == "":/ { empty = NR }
+    /^    written$/ { retained_status = 1 }
+    END { exit !(bounded > 0 && empty > bounded && retained_status) }
+' "$diagnostic"
 grep -F 'print "warning: backend AOT:' "$driver" >/dev/null
 grep -F 'print "warning: published object; diagnostic staging cleanup failed:' "$driver" >/dev/null
 grep -F 'if not dir_remove(diagnostic_dir, true):' "$driver" >/dev/null
