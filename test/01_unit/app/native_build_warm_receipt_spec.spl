@@ -9,6 +9,7 @@ use app.io.env_ops.{env_get, env_set}
 use std.common.crypto.sha256.{sha256_text}
 use app.cli.native_build_warm_receipt.{
     NATIVE_BUILD_WARM_CANDIDATE_ENV, native_build_warm_candidate_publish,
+    native_build_warm_candidate_publish_indexed,
     native_build_warm_artifact_restore,
     native_build_warm_output_complete, native_build_warm_receipt_finish,
     native_build_warm_receipt_prepare
@@ -283,7 +284,7 @@ describe "native-build exact final-artifact receipt":
         expect(receipt).to_contain('_warm_arg_value(args, "--backend-plugin")')
         expect(receipt).to_contain('arg.starts_with("--backend-plugin=")')
         expect(receipt).to_contain('paths.push(backend_plugin)')
-        expect(receipt).to_contain("simple-native-warm-receipt-v4")
+        expect(receipt).to_contain("simple-native-warm-receipt-v5")
         expect(receipt).to_contain('"scv=" + scv_binding')
         expect(receipt).to_contain(
             "for entry in _warm_sort_text(dir_list(runtime) ?? [])")
@@ -291,3 +292,31 @@ describe "native-build exact final-artifact receipt":
         expect(receipt).to_contain("normalized = _warm_sort_text(normalized)")
         expect(receipt).to_contain("source_path + \"\\t\" + digest")
         expect(closure).to_contain("native_build_warm_candidate_publish(result)")
+        expect(closure).to_contain("native_build_warm_candidate_publish_indexed(")
+
+    it "writes a pinned candidate without reopening source files":
+        val root = "build/test_tmp/native-warm-indexed-" + getpid().to_text()
+        expect(dir_create_all(root)).to_equal(true)
+        val source_path = root + "/absent.spl"
+        val candidate = root + "/candidate.receipt"
+        val digest = sha256_text("frozen source")
+        val old_candidate = env_get(NATIVE_BUILD_WARM_CANDIDATE_ENV) ?? ""
+        val old_parse_shard = env_get("SIMPLE_PARSE_SHARD") ?? ""
+        val old_hir_shard = env_get("SIMPLE_HIR_SHARD") ?? ""
+        env_set("SIMPLE_PARSE_SHARD", "")
+        env_set("SIMPLE_HIR_SHARD", "")
+        env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, candidate)
+        expect(file_exists(source_path)).to_equal(false)
+        expect(native_build_warm_candidate_publish_indexed(
+            [source_path], [digest])).to_equal(true)
+        expect(file_read(candidate)).to_contain(source_path + "\t" + digest)
+        expect(native_build_warm_candidate_publish_indexed(
+            [source_path], [])).to_equal(false)
+        expect(native_build_warm_candidate_publish_indexed(
+            [source_path], ["invalid"])).to_equal(false)
+        expect(native_build_warm_candidate_publish_indexed(
+            [source_path, source_path], [digest, digest])).to_equal(false)
+        env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_candidate)
+        env_set("SIMPLE_PARSE_SHARD", old_parse_shard)
+        env_set("SIMPLE_HIR_SHARD", old_hir_shard)
+        val _cleaned = dir_remove_all(root)

@@ -264,15 +264,15 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   behavior, old-cursor migration, and warm p95/RSS before closing this bug.
   The existing warm `ls-files --others` traversal remains a separate Target 6
   zero-scan cutover gap.
-- The production `native-build --entry-closure` adapter still calls
-  `_driver_cached_entry_source_scan` for every reached file in
-  `src/app/io/_CliCompile/native_build_closure.spl` before the driver can use
-  `package_index_route_admitted_current_v1`. Replace that pre-route BFS with
-  an exact pinned V2/V3 graph closure for admitted warm requests; missing,
-  stale, corrupt, or cross-variant graph authority must fail closed with zero
-  source-root scan. Keep the current frozen-source BFS only for explicit cold
-  rebuild/binding-only admission. Prove matching output and diagnostics, zero
-  dependency source opens, and matched p95/RSS before calling Item 6 cutover done.
+- The production `native-build --entry-closure` adapter now selects an
+  admitted pinned V2/V3 graph before the fallback source BFS. Invalid pinned
+  graph authority fails closed; V1 binding and explicit cold rebuild retain
+  the frozen-source scan. The indexed closure now passes its authenticated
+  source digests to the warm candidate writer, removing that writer's extra
+  read/hash pass over every selected source. The receipt promotion and hit
+  validators still hash source files; ordinary CLI V3 publication and the
+  current-source output, zero-open, p95 time, and peak RSS proof remain open.
+  Do not call Item 6 cutover complete from the graph route alone.
 
 - Cold refresh now derives the inventory and untracked membership cursor from
   one tagged Git listing instead of two independently timed listings. Run the

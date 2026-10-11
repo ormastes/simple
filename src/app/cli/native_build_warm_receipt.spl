@@ -53,9 +53,13 @@ fn _warm_empty_state() -> NativeBuildWarmReceiptState:
 fn _warm_valid_digest(value: text) -> bool:
     if value.len() != 64:
         return false
-    for ch in value:
-        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+    var index = 0
+    while index < 64:
+        val code = value.byte_at(index) as i64
+        if not ((code >= 48 and code <= 57) or
+                (code >= 97 and code <= 102)):
             return false
+        index = index + 1
     true
 
 fn _warm_path_safe(path: text) -> bool:
@@ -646,6 +650,38 @@ fn _warm_runtime_and_link_inputs(args: [text]) -> ([text], bool):
         else:
             return ([], false)
     (paths, true)
+
+# A pinned V2/V3 index already authenticates each frozen source digest.
+# Promotion still rehashes every source, so an untrusted caller cannot forge a hit.
+pub fn native_build_warm_candidate_publish_indexed(
+    paths: [text], source_digests: [text]
+) -> bool:
+    if (env_get("SIMPLE_PARSE_SHARD") ?? "") != "" or
+            (env_get("SIMPLE_HIR_SHARD") ?? "") != "":
+        return false
+    val path = env_get(NATIVE_BUILD_WARM_CANDIDATE_ENV) ?? ""
+    if path == "" or paths.len() == 0 or paths.len() != source_digests.len():
+        return false
+    var rows: [text] = []
+    var index = 0
+    while index < paths.len():
+        val source_path = _warm_lexical_abs(paths[index])
+        val digest = source_digests[index]
+        if not _warm_path_safe(source_path) or not _warm_valid_digest(digest):
+            return false
+        rows.push(source_path + "\t" + digest)
+        index = index + 1
+    rows = _warm_sort_text(rows)
+    var previous = ""
+    for row in rows:
+        val at = row.last_index_of("\t")
+        val source_path = row.substring(0, at)
+        if source_path == previous:
+            return false
+        previous = source_path
+    val payload = NATIVE_BUILD_WARM_CANDIDATE_VERSION + "\ncount=" +
+        rows.len().to_text() + "\n" + rows.join("\n")
+    _warm_write_atomic(path, payload)
 
 pub fn native_build_warm_candidate_publish(paths: [text]) -> bool:
     # Shard children must never author the candidate: it is evidence from the
