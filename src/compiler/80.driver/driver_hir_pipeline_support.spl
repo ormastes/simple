@@ -24,6 +24,8 @@ use compiler.semantics.value_struct_layout.{value_struct_layout_report, value_st
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use compiler.semantics.layer_eq_validation.{validate_layer_eq_types}
 use compiler.semantics.effect_validation.{validate_effect_contracts}
+use compiler.semantics.rt_criticality_validation.{validate_rt_criticality_diagnostics}
+use compiler.semantics.rt_criticality.{RtCriticalDiagnosticSeverity}
 use compiler.semantics.aspect_validation.{validate_aspect_contracts}
 use compiler.semantics.aspect_weave.{weave_forward_advice}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -259,6 +261,17 @@ fn driver_print_post_hir_validation_fatal(errors: [text]):
     if errors.len() > 0:
         eprint("[post-hir-validation-fatal-count] count={errors.len()} shown={shown}")
 
+pub fn driver_rt_criticality_errors(modules: Dict<text, HirModule>) -> [text]:
+    """Route typed RT warnings to diagnostics and errors to the fatal driver result."""
+    var errors: [text] = []
+    for diagnostic in validate_rt_criticality_diagnostics(modules):
+        match diagnostic.severity:
+            case RtCriticalDiagnosticSeverity.Warning:
+                eprint("[post-hir-validation-warning] {diagnostic.message}")
+            case RtCriticalDiagnosticSeverity.Error:
+                errors = errors.push(diagnostic.message)
+    errors
+
 pub fn driver_validate_value_struct_layouts(
     module_keys: [text],
     module_values: [HirModule],
@@ -319,6 +332,10 @@ pub fn driver_validate_value_struct_layouts(
     for effect_error in validate_effect_contracts(hir_modules):
         errors = errors.push(effect_error)
     log_phase("phase3:hir:validate:effects:done errors={errors.len()}")
+    log_phase("phase3:hir:validate:rt_criticality:start")
+    for rt_error in driver_rt_criticality_errors(hir_modules):
+        errors = errors.push(rt_error)
+    log_phase("phase3:hir:validate:rt_criticality:done errors={errors.len()}")
     log_phase("phase3:hir:validate:aspects:start")
     val aspect_errors = validate_aspect_contracts(hir_modules)
     for aspect_error in aspect_errors:

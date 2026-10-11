@@ -1,118 +1,67 @@
 # Traceability Checker CLI
 
-use std.cli.cli_util (get_cli_args)
-use std.cli.log_modes.{parse_log_options}
-use std.log.{error}
-use app.traceability.core.{load_traceability_config, analyze_repo_traceability, traceability_report_to_sdn}
-use std.common.sdn.value.{SdnValue}
-use std.common.sdn.encode.{sdn_encode_canonical}
-use app.traceability.snapshot_preview.{inspect_trace_snapshot, parse_trace_snapshot_selection}
+use std.cli.cli_util.{get_cli_args}
+use std.cli.log_modes.{render_progress}
+use app.io.minimal_runtime_ops.{report_error, exit}
+use app.traceability.cli_options_v1.{trace_cli_options_parse_v1, trace_cli_help_v1}
+use app.traceability.capture_v1.{trace_capture_worktree_v1, TraceCaptureLimitsV1}
+use app.traceability.structural_report_v1.{trace_evaluate_captured_v1,
+    trace_qualification_from_structural_result_v1, trace_qualification_infrastructure_v1}
+use std.common.traceability.types_v1.{TraceQualificationV1, trace_qualification_codec_limits_v1}
+use std.common.traceability.qualification_v1.{trace_qualification_encode_v1}
 
-fn traceability_cli_failure(code: text, reason: text) -> i64:
-    var fields: Dict<text, SdnValue> = {}
-    fields["schema"] = SdnValue.String("simple.trace.diagnostic/v1")
-    fields["code"] = SdnValue.String(code)
-    fields["reason"] = SdnValue.String(reason)
-    fields["complete"] = SdnValue.Bool(false)
-    fields["admission_eligible"] = SdnValue.Bool(false)
-    print sdn_encode_canonical(SdnValue.Dict(fields))
-    2
-
-fn print_help():
-    print "Usage: simple traceability-check [options] [paths...]"
-    print ""
-    print "Checks source/test/doc traceability."
-    print ""
-    print "Options:"
-    print "  --scope=<name>    all (default), src, spec, doc"
-    print "  --format=sdn      SDN output (default and only structured format)"
-    print "  --snapshot=index|git:<revision>  Inspect exact selected inputs as a typed graph"
-    print "  --declarations=<path>  Register one selected SDN declaration for inspection"
-    print "  --profile=preview  Local inspection only; admission profiles are not yet available"
-    print "  Default collection previews the worktree; exact snapshots preview selected scope."
-    print "  Neither preview certifies admission or runtime qualification."
-    print "  --quiet           Suppress progress; retain the SDN result"
-    print "  -h, --help        Show this help"
-
-fn _is_log_option(arg: text) -> bool:
-    arg == "--human" or arg == "--llm" or arg == "--json" or
-        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
-        arg == "--verbose" or arg == "--dots" or arg == "--count" or
-        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
-        arg == "--progress" or arg.starts_with("--log-mode=") or
-        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+fn trace_cli_run_v1(args: [text]) -> i64:
+    val options = match trace_cli_options_parse_v1(args):
+        case Ok(value): value
+        case Err(reason):
+            report_error("traceability", reason)
+            return 2
+    if options.help:
+        val help = trace_cli_help_v1()
+        print help.substring(0, help.len() - 1)
+        return 0
+    var document: TraceQualificationV1
+    match trace_capture_worktree_v1(options, TraceCaptureLimitsV1()):
+        case Err(issue):
+            document = trace_qualification_infrastructure_v1(issue.snapshot_id, false,
+                options, issue.code, issue.path, issue.message)
+        case Ok(inputs):
+            match trace_evaluate_captured_v1(inputs, options.scope, 100000):
+                case Ok(warnings):
+                    document = trace_qualification_from_structural_result_v1(inputs.snapshot_id, options, warnings)
+                case Err(reason):
+                    document = trace_qualification_infrastructure_v1(inputs.snapshot_id, true,
+                        options, "TRC-EVALUATION-BUDGET", "", reason)
+    var code = document.evaluation.exit_code
+    var output = ""
+    match trace_qualification_encode_v1(document, trace_qualification_codec_limits_v1()):
+        case Ok(encoded): output = encoded
+        case Err(issue):
+            # Argument bytes are capped at 64 KiB before capture. Reserve the
+            # standard 1 MiB report budget for this infrastructure summary,
+            # retaining the captured snapshot and authored selection.
+            code = 2
+            val incomplete = trace_qualification_infrastructure_v1(document.snapshot.id,
+                document.snapshot.complete, options, "TRC-REPORT", "",
+                "Cannot encode the complete structural report within the codec contract")
+            match trace_qualification_encode_v1(incomplete, trace_qualification_codec_limits_v1()):
+                case Ok(encoded): output = encoded
+                case Err(_):
+                    report_error("traceability", "Infrastructure report encoding failed: " + issue.code)
+                    return 2
+    # The encoder includes one LF. The print primitive supplies that LF, so
+    # remove exactly its final byte and emit one machine document.
+    print output.substring(0, output.len() - 1)
+    if not options.quiet and (options.progress != "summary" or options.verbose):
+        val mode = if options.verbose and options.progress == "summary": "count" else: options.progress
+        val line = render_progress(mode, options.paths.len(),
+            if options.paths.len() == 0: 3 else: options.paths.len(), "traceability")
+        if line != "":
+            report_error("traceability", line)
+    code
 
 fn main() -> i64:
-    val args = get_cli_args()
-    val log_opts = parse_log_options(args)
-    if not log_opts.valid:
-        return traceability_cli_failure("TRACE-CLI-INPUT", log_opts.error)
-
-    var scope = "all"
-    var format = "sdn"
-    var paths: [text] = []
-    var snapshot = ""
-    var snapshot_requested = false
-    var profile = "preview"
-    var declarations: [text] = []
-
-    var i = 0
-    while i < args.len():
-        val arg = args[i]
-        if arg == "-h" or arg == "--help":
-            print_help()
-            return 0
-        elif arg.starts_with("--scope="):
-            scope = arg[8:]
-        elif arg == "--scope" and i + 1 < args.len():
-            i = i + 1
-            scope = args[i]
-        elif arg.starts_with("--format="):
-            format = arg[9:]
-        elif arg.starts_with("--snapshot="):
-            snapshot = arg[11:]
-            snapshot_requested = true
-        elif arg.starts_with("--profile="):
-            profile = arg[10:]
-        elif arg.starts_with("--declarations="):
-            declarations.push(arg[15:])
-        elif arg == "--format" and i + 1 < args.len():
-            i = i + 1
-            format = args[i]
-        elif arg == "--json" or arg == "--log-mode=json":
-            format = "json"
-        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
-            i = i + 1
-        elif _is_log_option(arg):
-            pass
-        elif not arg.starts_with("-"):
-            paths.push(arg)
-        else:
-            return traceability_cli_failure("TRACE-CLI-INPUT", "Unsupported option: " + arg)
-        i = i + 1
-
-    if scope != "all" and scope != "src" and scope != "spec" and scope != "doc":
-        return traceability_cli_failure("TRACE-CLI-INPUT", "Unknown scope: " + scope)
-    if format != "sdn" or log_opts.log_mode == "json":
-        return traceability_cli_failure("TRACE-UNSUPPORTED-FORMAT", "Use SDN; legacy structured formats are unsupported")
-    if profile != "preview":
-        return traceability_cli_failure("TRACE-SNAPSHOT-INCOMPLETE", "Trusted admission profile is not yet available: " + profile)
-    if snapshot_requested:
-        val selected = match parse_trace_snapshot_selection(snapshot):
-            case Ok(value): value
-            case Err(reason): return traceability_cli_failure("TRACE-CLI-INPUT", reason)
-        if scope != "all":
-            return traceability_cli_failure("TRACE-CLI-INPUT", "Exact snapshot inspection uses explicit paths instead of legacy scopes")
-        match inspect_trace_snapshot(".", selected.kind, selected.selector, paths, declarations):
-            case Err(reason): return traceability_cli_failure("TRACE-SNAPSHOT-INCOMPLETE", reason)
-            case Ok(result):
-                print result.document
-                return if result.complete: 0 else: 1
-    if declarations.len() > 0:
-        return traceability_cli_failure("TRACE-CLI-INPUT", "Declaration registration requires an exact snapshot")
-    val warnings = analyze_repo_traceability(paths, scope, load_traceability_config(), true)
-    print traceability_report_to_sdn(warnings)
-
-    if warnings.len() > 0:
-        return 1
-    0
+    # Use the canonical process boundary for explicit CLI status.
+    val code = trace_cli_run_v1(get_cli_args())
+    exit(code)
+    code

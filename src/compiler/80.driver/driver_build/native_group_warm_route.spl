@@ -3,9 +3,11 @@
 
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use compiler.driver.cache.package_module_index.{
-    PACKAGE_MODULE_INDEX_SCHEMA_V2, PackageModuleIndexEntryV1,
+    PACKAGE_MODULE_INDEX_SCHEMA_V2, PACKAGE_MODULE_INDEX_SCHEMA_V4,
+    PackageModuleIndexEntryV1,
     PackageModuleIndexGenerationV1, package_module_index_entry_encode_v1,
     package_module_index_entry_decode_v1,
+    package_module_index_entry_encode_v4, package_module_index_entry_decode_v4,
     package_module_index_entry_action_digest_v1
 }
 use compiler.driver.cache.package_archive_cache.{
@@ -70,6 +72,7 @@ struct NativeGroupWarmRouteV1:
     source_entries: [PackageModuleIndexEntryV1]
     archive_admissions: [PackageArchiveAdmissionV1]
     dependency_smf_entries: [NativeGroupDependencySmfV1]
+    index_schema_version: i64 = 2
 
 struct NativeGroupWarmRoutePublicationV1:
     path: text
@@ -270,6 +273,8 @@ fn native_group_warm_route_validate_v1(route: NativeGroupWarmRouteV1) -> text:
             route.group_scc_ids.len() > 4096 or
             route.source_entries.len() == 0 or
             route.source_entries.len() > 4096 or
+            (route.index_schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2 and
+                route.index_schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V4) or
             route.archive_admissions.len() > 4096 or
             route.dependency_smf_entries.len() >
                 NATIVE_GROUP_WARM_DEPENDENCY_MAX_V1):
@@ -329,12 +334,18 @@ fn native_group_warm_route_validate_v1(route: NativeGroupWarmRouteV1) -> text:
             if not modules.has(imported):
                 return "route-import-closure-incomplete"
     val reduced = PackageModuleIndexGenerationV1(
-        PACKAGE_MODULE_INDEX_SCHEMA_V2, route.producer_digest,
+        route.index_schema_version, route.producer_digest,
         route.root_generation, route.scv_revision_id,
         route.scv_commit_id, route.scv_tree_id,
         route.scv_source_inventory_digest, entries,
         route.variant_digest)
     for entry in entries:
+        if (route.index_schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V4 and
+                not builder_digest_valid_v1(entry.generated_source_digest)):
+            return "route-generated-source-digest-invalid"
+        if (route.index_schema_version < PACKAGE_MODULE_INDEX_SCHEMA_V4 and
+                entry.generated_source_digest != ""):
+            return "route-legacy-generated-source-digest-unexpected"
         if package_module_index_entry_action_digest_v1(reduced, entry) !=
                 entry.action_digest:
             return "route-action-binding-mismatch"
@@ -372,7 +383,9 @@ fn native_group_warm_route_build_v1(
             group_scc_ids.len() == 0 or group_scc_ids.len() > 4096:
         return Err("native-group-route-input-invalid")
     val generation = inventory.index_generation
-    if generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2 or
+    if generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V4:
+        return Err("native-group-route-generated-witness-migration-required")
+    if generation.scope_entry_source_identity != "" or
             generation.producer_digest != inventory.producer_digest or
             generation.variant_digest != inventory.variant_digest or
             generation.inventory_digest != inventory.scv_source_inventory_digest:
@@ -469,7 +482,7 @@ fn native_group_warm_route_build_v1(
         target_backend, source_entries, archives)
     if dependencies.is_err():
         return Err("native-group-route-{dependencies.unwrap_err()}")
-    Ok(NativeGroupWarmRouteV1(
+    var route = NativeGroupWarmRouteV1(
         index_read_root, inventory.index_digest, generation.producer_digest,
         generation.root_generation, generation.variant_digest,
         generation.scv_revision_id, generation.scv_commit_id,
@@ -477,13 +490,20 @@ fn native_group_warm_route_build_v1(
         inventory.source_snapshot_digest,
         inventory.full_source_authority_digest,
         group_id, 1, target_backend, group_scc_ids,
-        source_entries, archives, dependencies.unwrap()))
+        source_entries, archives, dependencies.unwrap())
+    route.index_schema_version = generation.schema_version
+    Ok(route)
 
 fn native_group_warm_route_encode_v1(route: NativeGroupWarmRouteV1) -> text:
     if native_group_warm_route_validate_v1(route) != "ok":
         return ""
-    var content = "simple-native-group-warm-route-v1\n"
-    for field in [route.index_read_root, route.index_digest,
+    val v4 = route.index_schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V4
+    var content = if v4: "simple-native-group-warm-route-v2\n" else:
+        "simple-native-group-warm-route-v1\n"
+    var header_fields = [route.index_read_root, route.index_digest]
+    if v4:
+        header_fields.push(str(route.index_schema_version))
+    header_fields = header_fields + [
             route.producer_digest, route.root_generation,
             route.variant_digest, route.scv_revision_id,
             route.scv_commit_id, route.scv_tree_id,
@@ -491,13 +511,15 @@ fn native_group_warm_route_encode_v1(route: NativeGroupWarmRouteV1) -> text:
             route.source_snapshot_digest,
             route.full_source_authority_digest, route.group_id,
             str(route.attempt), route.target_backend,
-            str(route.group_scc_ids.len())]:
+            str(route.group_scc_ids.len())]
+    for field in header_fields:
         content = content + builder_wire_line_v1(field)
     for scc_id in route.group_scc_ids:
         content = content + builder_wire_line_v1(scc_id)
     content = content + builder_wire_line_v1(str(route.source_entries.len()))
     for entry in route.source_entries:
-        val encoded = package_module_index_entry_encode_v1(entry)
+        val encoded = if v4: package_module_index_entry_encode_v4(entry) else:
+            package_module_index_entry_encode_v1(entry)
         if encoded == "": return ""
         content = content + builder_wire_line_v1(encoded)
     content = content + builder_wire_line_v1(str(route.archive_admissions.len()))
@@ -507,7 +529,8 @@ fn native_group_warm_route_encode_v1(route: NativeGroupWarmRouteV1) -> text:
         content = content + builder_wire_line_v1(admission.package_identity)
         content = content + builder_wire_line_v1(str(admission.module_entries.len()))
         for entry in admission.module_entries:
-            val encoded = package_module_index_entry_encode_v1(entry)
+            val encoded = if v4: package_module_index_entry_encode_v4(entry) else:
+                package_module_index_entry_encode_v1(entry)
             if encoded == "": return ""
             content = content + builder_wire_line_v1(encoded)
         content = content + builder_wire_line_v1(admission.archive_path)
@@ -529,14 +552,17 @@ fn native_group_warm_route_encode_v1(route: NativeGroupWarmRouteV1) -> text:
 fn native_group_warm_route_decode_v1(
     content: text
 ) -> Result<NativeGroupWarmRouteV1, text>:
+    val v4 = content.starts_with("simple-native-group-warm-route-v2\n")
     if content == "" or content.len() > NATIVE_GROUP_WARM_ROUTE_MAX_BYTES_V1 or
-            not content.starts_with("simple-native-group-warm-route-v1\n"):
+            (not v4 and not content.starts_with("simple-native-group-warm-route-v1\n")):
         return Err("native-group-route-wire-invalid")
     val body = content.substring(34)
     var reader = BuilderWireReaderV1.create(body)
     if reader.reason != "": return Err(reader.reason)
     val index_read_root = reader.scalar()
     val index_digest = reader.scalar()
+    val index_schema_version = if v4: reader.number(4, false) else:
+        PACKAGE_MODULE_INDEX_SCHEMA_V2
     val producer_digest = reader.scalar()
     val root_generation = reader.scalar()
     val variant_digest = reader.scalar()
@@ -559,7 +585,9 @@ fn native_group_warm_route_decode_v1(
     var source_entries: [PackageModuleIndexEntryV1] = []
     cursor = 0
     while cursor < source_count and reader.reason == "":
-        val entry = package_module_index_entry_decode_v1(reader.scalar())
+        val encoded_entry = reader.scalar()
+        val entry = if v4: package_module_index_entry_decode_v4(encoded_entry) else:
+            package_module_index_entry_decode_v1(encoded_entry)
         if entry == nil:
             return Err("native-group-route-source-entry-invalid")
         source_entries = source_entries.push(entry!)
@@ -574,7 +602,9 @@ fn native_group_warm_route_decode_v1(
         var module_ids: [text] = []
         var member_index = 0
         while member_index < member_count and reader.reason == "":
-            val entry = package_module_index_entry_decode_v1(reader.scalar())
+            val encoded_entry = reader.scalar()
+            val entry = if v4: package_module_index_entry_decode_v4(encoded_entry) else:
+                package_module_index_entry_decode_v1(encoded_entry)
             if entry == nil:
                 return Err("native-group-route-archive-entry-invalid")
             entries = entries.push(entry!)
@@ -609,7 +639,8 @@ fn native_group_warm_route_decode_v1(
         index_read_root, index_digest, producer_digest, root_generation,
         variant_digest, revision, commit, tree, inventory_digest,
         snapshot_digest, full_source_digest, group_id, attempt,
-        target_backend, scc_ids, source_entries, archives, dependencies)
+        target_backend, scc_ids, source_entries, archives, dependencies,
+        index_schema_version)
     if native_group_warm_route_encode_v1(route) != content:
         return Err("native-group-route-noncanonical")
     Ok(route)
@@ -665,6 +696,8 @@ fn native_group_warm_route_publish_retry_v1(
         original_route_path, original_route_digest)
     if loaded.is_err(): return Err(loaded.unwrap_err())
     val original = loaded.unwrap()
+    if original.index_schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V4:
+        return Err("native-group-route-generated-witness-migration-required")
     if next_attempt != original.attempt + 1 or next_attempt > 100 or
             failed_members.len() == 0 or
             failed_members.len() > original.source_entries.len():
@@ -762,7 +795,8 @@ fn native_group_warm_route_publish_retry_v1(
         original.source_snapshot_digest,
         original.full_source_authority_digest,
         original.group_id, next_attempt, original.target_backend,
-        scc_ids, source_entries, admissions, dependencies.unwrap())
+        scc_ids, source_entries, admissions, dependencies.unwrap(),
+        original.index_schema_version)
     _native_group_warm_route_publish_record_v1(state_root, retry)
 
 fn native_group_warm_route_read_v1(
@@ -782,6 +816,8 @@ fn native_group_warm_route_read_v1(
 fn native_group_warm_route_index_route_v1(
     route: NativeGroupWarmRouteV1, scv_snapshot_root: text
 ) -> Result<PackageIndexRouteV1, text>:
+    if route.index_schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V4:
+        return Err("native-group-route-generated-witness-migration-required")
     if scv_snapshot_root == "" or route.source_entries.len() == 0:
         return Err("native-group-route-snapshot-or-members-invalid")
     var entries = route.source_entries
@@ -801,7 +837,7 @@ fn native_group_warm_route_index_route_v1(
     for module_id in canonical_identity_sort_texts(module_ids):
         sorted_entries = sorted_entries.push(entries[by_module[module_id]])
     val reduced = PackageModuleIndexGenerationV1(
-        PACKAGE_MODULE_INDEX_SCHEMA_V2, route.producer_digest,
+        route.index_schema_version, route.producer_digest,
         route.root_generation, route.scv_revision_id, route.scv_commit_id,
         route.scv_tree_id, route.scv_source_inventory_digest,
         sorted_entries, route.variant_digest)
