@@ -146,3 +146,12 @@ type. This preserves effect records while rejecting unavailable provider
 nominals even when Error advisories are configured permissively. Two additional
 actual-frontend mechanics cases cover a missing nested Throws owner and a real
 retained nominal owner. The authored total is nine unit cases, all UNRUN.
+
+
+The selected foreign field-default artifact reader now uses the same complete
+structural binder with an empty supplied-parameter frame. It retains actual
+provider lexical, nominal, global and callable owners; Lambda/Block artifacts
+no longer go through the limited legacy field relocator. The unchanged ordinary
+route remains the control. Native guard17 constructs an imported class while
+omitting its typed callable field, then invokes the real captured-global default
+and requires12. Seventeen native guards and nine unit cases are authored, UNRUN.
