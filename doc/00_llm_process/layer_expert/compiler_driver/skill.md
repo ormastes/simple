@@ -108,6 +108,17 @@ See `doc/08_tracking/bug/simpleos_wm_vulkan_cross_arch_rows_blocked_2026-08-31.m
 
 - 2026-09-05 gpu_frontend_offload: default-off frontend offload switch (`structural_contracts/frontend_offload_switch.spl`, driver gate in `80.driver/driver_source_pipeline_parsing.spl`) — see `doc/00_llm_process/feature_expert/gpu_frontend_offload/skill.md`.
 
+## Phase 3 archive publication journal (2026-10-12)
+
+The inactive `cache/driver_hir_archive_journal_v1.spl` owner records actual
+registration calls and logical alias events. Publication failure retains the
+pending event and closes registration without minting a successful schedule.
+Owned verification scopes reclaim cumulative metadata scratch. The native
+`journal` fixture requires 13 checks and the canonical managed runtime/tool
+authority. These checks remain unrun; production admission still requires the
+actual surface visit order, distinct layout order and post-HIR transformed-body
+prerequisites.
+
 ## 2026-09-26 — `native-build` restored: backend table in the interpreted worker, entry-file hashing, module-init reads
 
 - **The interpreted native-build worker never installed the static backend

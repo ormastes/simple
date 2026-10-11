@@ -33,3 +33,13 @@ CollectionPlan decisions, symbolic summaries, and profile correlation.
 4. Are uncertainty and rejection reasons serialized?
 5. What positive and adversarial witnesses prove behavior?
 6. What before/after compile-time, runtime, allocation, copy, and RSS evidence exists?
+
+## Phase 3 archive journal (2026-10-12)
+
+`driver_hir_archive_journal_v1` records real declaration publication and logical
+aliases. Its source/history encoding and verification run in owned scopes; only
+compact results escape. Native qualification uses the `journal` selector in
+`scripts/bootstrap/tests/hir-body-typecheck-lease-native.shs` and requires 13
+checks plus the canonical managed tool/runtime handoff. Execution is pending.
+Journal integrity alone does not admit production order, transformed bodies or
+the final MIR input. No memory improvement is established by source review.
