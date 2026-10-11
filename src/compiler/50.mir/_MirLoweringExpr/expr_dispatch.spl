@@ -912,7 +912,26 @@ impl MirLowering:
             if self.struct_field_type_name.contains(name):
                 val nested_types = self.struct_field_type_name[name]
                 if field_idx >= 0 and field_idx < nested_types.len():
-                    val nested_name = nested_types[field_idx]
+                    var nested_name = nested_types[field_idx]
+                    # A struct field's bare display name is not its nominal
+                    # owner. Retain the defining declaration's layout after
+                    # exact consumer-table rebinding, so Result.map can prove
+                    # the projected record without accepting a collided name.
+                    if self.struct_field_hir_type.contains(name) and self.struct_field_type_ownership_key.contains(name):
+                        val field_types = self.struct_field_hir_type[name]
+                        val ownership_keys = self.struct_field_type_ownership_key[name]
+                        if field_types != nil and ownership_keys != nil and field_idx < field_types.len() and field_idx < ownership_keys.len():
+                            val field_hir = self.declared_field_type_in_current_table(name, field_idx, field_types[field_idx])
+                            match field_hir.kind:
+                                case HirTypeKind.Named(field_symbol, _):
+                                    if val declaration = self.symbols.get_symbol_raw(field_symbol.id):
+                                        if declaration.kind == SymbolKind.Struct:
+                                            nested_name = ""
+                                            val ownership_key = ownership_keys[field_idx]
+                                            val layout_key = self.declared_struct_layout_key(ownership_key)
+                                            if ownership_key != "" and self.symbol_matches_ownership_key(field_symbol.id, ownership_key) and self.struct_field_order.has(layout_key):
+                                                nested_name = layout_key
+                                case _: ()
                     if nested_name != "":
                         self.struct_value_syms[result.id] = nested_name
             if self.struct_field_array_element_type_name.contains(name):
