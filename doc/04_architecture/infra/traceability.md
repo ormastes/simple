@@ -75,3 +75,26 @@ Graph alias declarations preserve endpoints; this codec never folds them into
 canonical self-edges. Detailed contract and scoped14/0 evidence live in
 doc/05_design/infra/traceability_graph_codec_v1.md. Generic family dispatch and
 other required families remain pending; no whole WP1 or admission claim follows.
+
+## Common document owners — 2026-10-11
+
+The shared domain now owns envelope types, primitive validation, text budgets and
+stable byte order separately from family carriers. The legacy types barrel
+reexports existing names; internal modules import their actual owner. Generic
+dispatch supports three real families with explicit document quotas and one
+strict source parse. Public family-from-value operations perform an independently
+bounded O(nodes) structural walk before schema/preflight. This extra walk is
+required because callers can construct values without the strict parser; source
+byte/location evidence cannot be inferred from such values.
+
+Authored declarations preserve conflicting claims and aliases for the resolver.
+Exception review-state is untrusted data; calendar validation does not establish
+current policy validity. Common owners import no application IO or clock. See
+doc/05_design/infra/traceability_document_declarations_v1.md for table contracts.
+Remaining families, startup/latency/RSS qualification and full scope stay open.
+
+Review-derived raw-boundary repair adds verified dictionary cardinality before
+keys and source-less cumulative key/header/string byte limits. Earlier12/0
+acceptance and regressions remain pre-repair evidence; final raw controls5/0,
+acceptance13/0 and affected graph14/0, qualification15/0, budget/order11/0
+match the changed source. No whole AC, broad runtime or admission PASS follows.
