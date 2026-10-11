@@ -2,6 +2,7 @@
 use provider.{outer}
 use compiler.driver.cache.hir_body_typecheck_lease_v1.*
 use compiler.driver.cache.hir_mono_archive_consumer_v1.*
+use compiler.driver.cache.hir_mono_archive_execution_v1.*
 use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_store_blob_v1,
     hir_owned_artifact_load_blob_v1, hir_owned_artifact_context_v1}
 use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{
@@ -516,6 +517,66 @@ fn main() -> i64:
     val record_epoch = admission.state.epoch
     if not mono_archive_apply_v1(admission, wrong_record).is_err() or admission.state.epoch != record_epoch: return 129
     checks = checks + 1
-    if checks != 56: return 52
+    val execution_registration_result = mono_archive_registration_create_v1()
+    if execution_registration_result.is_err(): return 130
+    val execution_registration = execution_registration_result.unwrap()
+    if not mono_archive_execution_create_v1(execution_registration, inventory, admitted_order).is_err(): return 131
+    checks = checks + 1
+    for name in admitted_order:
+        val rows = capture_registration(execution_registration, admission.repository.modules[name])
+        if rows.is_err() or mono_archive_publish_registration_v1(execution_registration, rows.unwrap()).is_err(): return 132
+    if mono_archive_registration_seal_v1(execution_registration, inventory, admitted_order).is_err(): return 133
+    if not mono_archive_execution_create_v1(execution_registration, inventory, [provider.name, root.name]).is_err(): return 134
+    checks = checks + 1
+    if not transient_scope_begin(): return 135
+    val nested_execution = mono_archive_execution_create_v1(execution_registration, inventory, admitted_order).is_err()
+    if not transient_scope_end() or not nested_execution: return 136
+    checks = checks + 1
+    val execution_result = mono_archive_execution_create_v1(execution_registration, inventory, admitted_order)
+    if execution_result.is_err(): return 137
+    val execution = execution_result.unwrap()
+    if not mono_archive_execute_next_specialization_v1(execution).is_err() or
+            mono_archive_execution_complete_v1(execution) or execution.expected_epoch != 0: return 138
+    checks = checks + 1
+    val execution_root = mono_archive_execute_next_root_v1(execution)
+    if execution_root.is_err() or not mono_archive_roots_complete_v1(execution): return 139
+    val executed_observation = observe_body(execution_root.unwrap())
+    if executed_observation.is_err() or executed_observation.unwrap().digest !=
+            mono_archive_function_digest_v1(fixture_function(retained_modules[root.name], root_function.name)): return 140
+    checks = checks + 1
+    val root_barrier_epoch = execution.expected_epoch
+    if not mono_archive_execute_next_root_v1(execution).is_err() or execution.expected_epoch != root_barrier_epoch: return 141
+    checks = checks + 1
+    while execution.admission.state.cursor < execution.admission.state.queue.len():
+        val body = mono_archive_execute_next_specialization_v1(execution)
+        if body.is_err(): return 142
+        val observed = observe_body(body.unwrap())
+        if observed.is_err() or observed.unwrap().digest !=
+                mono_archive_function_digest_v1(reference.specialized_functions[body.unwrap().target_name]): return 143
+    if not mono_archive_execution_complete_v1(execution) or execution.specialization_records.len() != 4 or
+            execution.diagnostics != reference.diagnostics or execution.warnings != reference.warnings or
+            execution.generic_functions != reference.stats.generic_functions_found or
+            execution.generic_structs != reference.stats.generic_structs_found or
+            execution.generic_classes != reference.stats.generic_classes_found or
+            execution.call_sites_found != reference.stats.call_sites_found or
+            execution.specializations_created != reference.stats.specializations_created or
+            execution.unresolved_generic_calls != reference.stats.unresolved_generic_calls: return 144
+    checks = checks + 1
+    val completion_epoch = execution.expected_epoch
+    val completion_diagnostics = execution.diagnostics
+    if not mono_archive_execute_next_specialization_v1(execution).is_err() or
+            execution.expected_epoch != completion_epoch or execution.diagnostics != completion_diagnostics: return 145
+    checks = checks + 1
+    val complete_roots = execution.root_records
+    execution.root_records = {}
+    if mono_archive_execution_complete_v1(execution) or
+            not mono_archive_execute_next_specialization_v1(execution).is_err() or execution.expected_epoch != completion_epoch: return 146
+    execution.root_records = complete_roots
+    checks = checks + 1
+    execution.admission.state.epoch = execution.admission.state.epoch + 1
+    if mono_archive_execution_complete_v1(execution) or not mono_archive_execute_next_root_v1(execution).is_err(): return 147
+    execution.admission.state.epoch = completion_epoch
+    checks = checks + 1
+    if checks != 66: return 52
     print "HIR mono archive consumer: {checks} checks passed"
     0
