@@ -47,3 +47,21 @@ executable. Log: build/mini_builds/item5_linker_pack_plugin_owner_cold_native.lo
 The next validation should use a current-source V4 producer and prove
 staged intermediate path removal on warm refresh without cold init. The
 native fixture also needs a separate completed build and runtime result.
+
+## Current-source V4 regression attempt (2026-10-11)
+
+`test/fixtures/compiler/target6_tracked_move_refresh_probe.spl` now models
+the exact staged intermediate path: admit the original, stage and admit the
+OS path, remove it before committing the final plugin path, then warm refresh.
+The fixture checks that only the final path remains and repeats the warm read.
+It has **not** executed. Its third bounded no-stub Stage 2 native build
+compiled 66 selected modules but failed while linking two undefined globals
+from `compile_source_inventory_core.spl`. See
+`scv_native_reexported_constants_undefined_2026-10-11.md`.
+
+The production bridge now imports focused `app.io` directory, file, and
+process facades instead of the broad `app.io.mod` hub. With the same source
+roots, the selected closure fell from 110 to 66 modules; this is a closure
+count, not a measured startup, p95, or RSS result. The previous broad-closure
+build failed at MIR in unrelated environment and SDN modules. This regression
+still needs an executable native PASS after the linker blocker is repaired.

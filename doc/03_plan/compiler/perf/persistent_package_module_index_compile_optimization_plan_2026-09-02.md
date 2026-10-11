@@ -546,6 +546,18 @@ An indexed Huffman-length loop removes the native MIR non-array iteration diagno
 
 Explicit dynamic-block and Huffman-table return shapes advance the focused three-module compile past their LLVM ptr-to-void failures; the same failure now appears in the stored-block helper. The bounded three-cycle verification limit is exhausted, with no SMF output or full Item 6 native PASS. See [the report](../../../09_report/compiler/target6_gzip_mir_unblock_llvm_failure_2026-10-11.md).
 
+### 2026-10-11 V4 warm tracked-move regression admission
+
+The new focused fixture reproduces the staged intermediate path that the
+older V3 inventory retained after the Item 5 linker owner move. Narrowing
+the production SCV bridge from `app.io.mod` to focused app I/O facades
+reduced the fixture's selected closure from 110 to 66 modules and removed
+unrelated MIR failures. The third bounded no-stub native attempt compiled
+all 66 modules but failed at link on two re-exported SCV constants, so the
+V4 warm deletion behavior is still unverified. See the
+[inventory regression](../../../08_tracking/bug/scv_inventory_retains_deleted_source_after_move_2026-10-11.md)
+and [native link blocker](../../../08_tracking/bug/scv_native_reexported_constants_undefined_2026-10-11.md).
+
 ### 2026-10-11 Entry-scoped package ownership projection
 
 The cold ownership capture now has an explicit scoped entry point. It authenticates

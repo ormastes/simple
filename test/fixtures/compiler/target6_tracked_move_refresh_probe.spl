@@ -1,0 +1,74 @@
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+use app.io.dir_ops.{dir_create, dir_remove}
+use app.io.file_ops.{file_write}
+use app.io.process_ops.{process_run_bounded}
+use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1}
+
+extern fn rt_getpid() -> i64
+
+fn git_ok(root: text, args: [text]) -> bool:
+    val (_out, _err, status) = process_run_bounded(
+        "git", ["-C", root] + args, 10000, 1024 * 1024)
+    status == 0
+
+fn has_exact_source(cache_root: text, expected: text) -> bool:
+    val current = compile_source_inventory_read_current_v1(cache_root)
+    current.valid and current.inventory != nil and
+        current.inventory!.entries.len() == 1 and
+        current.inventory!.entries[0].source_identity == expected
+
+fn main() -> i64:
+    val root = "build/mini_builds/target6_tracked_move_refresh_probe/fixture-{rt_getpid()}"
+    val cache_root = root + "/build/scv"
+    val original = "src/compiler/linker_lifecycle.spl"
+    val intermediate = "src/os/smf/linker_lifecycle.spl"
+    val plugin = "src/plugins/linker_pack/lifecycle.spl"
+    if (not dir_create(root + "/src/compiler", true) or
+            not dir_create(root + "/src/os/smf", true) or
+            not dir_create(root + "/src/plugins/linker_pack", true) or
+            not file_write(root + "/" + original, "export fn original(): 1\n") or
+            not git_ok(root, ["init", "-q"]) or
+            not git_ok(root, ["add", original]) or
+            not git_ok(root, ["-c", "user.name=probe", "-c",
+                "user.email=probe@example.invalid", "commit.gpgsign=false",
+                "commit", "-qm", "seed"])):
+        print "tracked move fixture setup failed"
+        return 1
+    val cold = compiler_inventory_refresh_v1(root, cache_root, ["src"], true)
+    if not cold.valid or not has_exact_source(cache_root, original):
+        print "cold original admission failed: {cold.reason}"
+        return 2
+
+    # The intermediate path is staged and admitted, but never committed.
+    if (not file_write(root + "/" + intermediate,
+                "export fn intermediate(): 2\n") or
+            not git_ok(root, ["add", intermediate]) or
+            not git_ok(root, ["rm", "-q", original])):
+        print "intermediate move setup failed"
+        return 3
+    val staged = compiler_inventory_refresh_v1(root, cache_root, ["src"], false)
+    if not staged.valid or not has_exact_source(cache_root, intermediate):
+        print "staged intermediate admission failed: {staged.reason}"
+        return 4
+
+    # Commit only the final plugin path. The previous inventory still names
+    # the now-deleted staged path, which is absent from both Git revisions.
+    if (not file_write(root + "/" + plugin, "export fn plugin(): 3\n") or
+            not git_ok(root, ["add", plugin]) or
+            not git_ok(root, ["rm", "-q", "-f", intermediate]) or
+            not git_ok(root, ["-c", "user.name=probe", "-c",
+                "user.email=probe@example.invalid", "commit.gpgsign=false",
+                "commit", "-qm", "plugin owner"])):
+        print "final move commit failed"
+        return 5
+    val committed = compiler_inventory_refresh_v1(root, cache_root, ["src"], false)
+    if not committed.valid or not has_exact_source(cache_root, plugin):
+        print "warm committed move retained intermediate path: {committed.reason}"
+        return 6
+    val unchanged = compiler_inventory_refresh_v1(root, cache_root, ["src"], false)
+    if not unchanged.valid or not has_exact_source(cache_root, plugin):
+        print "second warm refresh changed final source: {unchanged.reason}"
+        return 7
+    dir_remove(root, true)
+    print "PASS target6_tracked_move_refresh_probe"
+    0
