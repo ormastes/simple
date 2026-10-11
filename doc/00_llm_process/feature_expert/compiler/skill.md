@@ -14,7 +14,7 @@ Maintain feature-specific process knowledge for Compiler. Use this skill when wo
 
 ## Feature Links
 
-- [Generated wrapper traversal candidate](../../../09_report/generated_wrapper_visitor_candidate_2026-10-11.md): only carrier structs may skip their kind field; four fold wrappers corrected manually pending generator regeneration and execution.
+- [Generated wrapper traversal candidate](../../../09_report/generated_wrapper_visitor_candidate_2026-10-11.md): only carrier structs may skip their kind field; five fold wrappers corrected manually pending generator regeneration and execution.
 
 
 - [Source](../../../src/compiler/)
