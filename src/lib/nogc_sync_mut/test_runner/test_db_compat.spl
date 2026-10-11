@@ -22,6 +22,8 @@ use std.common.traceability.case_events.{decode_trace_case_events}
 use std.common.traceability.run_plan.{TraceRunPlan}
 use std.common.traceability.run_request.{TraceRunRequest, validate_trace_run_request, materialize_trace_run_plan}
 use std.common.traceability.run_request_codec.{encode_trace_run_request}
+use std.common.traceability.sspec_inventory.{TraceSspecPlannedRequest}
+use std.common.traceability.sspec_inventory_codec.{encode_trace_sspec_planned_request}
 use std.nogc_sync_mut.io.time_ops.{timestamp_year, timestamp_month, timestamp_day, timestamp_hour, timestamp_minute, timestamp_second}
 
 # ============================================================================
@@ -33,6 +35,44 @@ class RunnerTestDb:
     current_run_id: text
     _trace_prepare_failed: bool = false
     _trace_prepared_run_id: text = ""
+
+    # Save the plan and its full definition metadata in one owner generation.
+    # This is still unverified intent; the caller must bind execution inputs.
+    me prepare_trace_sspec_request(metadata: TraceSspecPlannedRequest) -> Result<TraceRunPlan, text>:
+        if self._trace_prepare_failed or self.current_run_id != "":
+            return Err("trace SSpec request requires a fresh database owner")
+        encode_trace_sspec_planned_request(metadata)?
+        val run_id = self.start_run()
+        val plan = match materialize_trace_run_plan(metadata.request, run_id):
+            case Ok(value): value
+            case Err(reason):
+                self._trace_prepare_failed = true
+                return Err(reason)
+        match self.db.record_trace_run_plan(plan):
+            case Err(reason):
+                self._trace_prepare_failed = true
+                return Err(reason)
+            case Ok(_): pass
+        match self.db.record_trace_sspec_metadata(run_id, metadata):
+            case Err(reason):
+                self._trace_prepare_failed = true
+                return Err(reason)
+            case Ok(_): pass
+        match self.save():
+            case Err(reason):
+                self._trace_prepare_failed = true
+                Err("trace SSpec intent was not durably prepared: " + reason)
+            case Ok(_):
+                self._trace_prepared_run_id = run_id
+                Ok(plan)
+
+    # A metadata-aware child must use this entry rather than accepting a
+    # legacy plan-only run. Fresh load validates the stored envelope and plan.
+    static fn resume_trace_sspec_run(run_id: text) -> Result<RunnerTestDb, text>:
+        var owner = RunnerTestDb.resume_trace_run(run_id)?
+        match owner.db.get_trace_sspec_metadata(run_id)?:
+            case Some(_): Ok(owner)
+            case nil: Err("persisted trace SSpec metadata is missing")
 
     # The owner allocates the run identity; callers supply only frozen intent.
     # A returned plan means save succeeded, not that evidence is qualified.

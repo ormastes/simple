@@ -8,6 +8,9 @@ use std.database.core.{SdnDatabase, SdnTable, SdnRow, StringInterner}
 use std.common.traceability.case_events.{TraceCaseEvent}
 use std.common.traceability.run_plan.{TraceRunPlan}
 use std.common.traceability.run_plan_codec.{encode_trace_run_plan, decode_trace_run_plan}
+use std.common.traceability.run_request.{materialize_trace_run_plan}
+use std.common.traceability.sspec_inventory.{TraceSspecPlannedRequest}
+use std.common.traceability.sspec_inventory_codec.{encode_trace_sspec_planned_request, decode_trace_sspec_planned_request}
 use std.common.traceability.storage_scalar.{encode_trace_storage_scalar, decode_trace_storage_scalar}
 use std.database.stats.{Stats, stats_from_values, is_flaky}
 use std.database.test_extended.stubs.{timestamp_now, process_id, host_name}
@@ -254,6 +257,77 @@ class TestDatabaseExtended:
         row.set("evidence_validity", "unverified")
         table.add_row(row)
         self.db.set_table("trace_run_plans", table)
+        Ok(())
+
+    # Metadata remains unverified history. Validate every stored row and its
+    # exact plan binding before selecting a run; malformed unrelated rows cannot
+    # disappear behind a lookup filter. The existing owner controls persistence.
+    fn get_trace_sspec_metadata(run_id: text) -> Result<Option<TraceSspecPlannedRequest>, text>:
+        if run_id == "": return Err("trace SSpec metadata lookup identity is empty")
+        val table = match self.db.get_table("trace_sspec_metadata"):
+            case Some(existing): existing
+            case nil: return Ok(nil)
+        val columns = ["run_id", "schema", "metadata_sdn", "evidence_validity"]
+        if table.name != "trace_sspec_metadata" or table.columns.len() != columns.len():
+            return Err("incompatible trace SSpec metadata table schema")
+        for i in 0..columns.len():
+            if table.columns[i] != columns[i]: return Err("incompatible trace SSpec metadata table columns")
+        var seen: Dict<text, bool> = {}
+        var found: TraceSspecPlannedRequest? = nil
+        for row in table.rows:
+            if row.fields.len() != columns.len(): return Err("unexpected trace SSpec metadata row fields")
+            if (row.get("schema") ?? "") != "simple.trace.sspec-metadata-storage/v1" or (row.get("evidence_validity") ?? "") != "unverified":
+                return Err("unsupported trace SSpec metadata storage or validity")
+            val stored_id = decode_trace_storage_scalar(row.get("run_id") ?? "")?
+            if stored_id == "" or seen.contains_key(stored_id): return Err("missing or duplicate trace SSpec metadata run identity")
+            seen[stored_id] = true
+            val source = decode_trace_storage_scalar(row.get("metadata_sdn") ?? "")?
+            val metadata = decode_trace_sspec_planned_request(source)?
+            if encode_trace_sspec_planned_request(metadata)? != source:
+                return Err("stored trace SSpec metadata is not canonical SDN")
+            val plan = match self.get_trace_run_plan(stored_id)?:
+                case Some(existing): existing
+                case nil: return Err("stored trace SSpec metadata has no frozen run plan")
+            val projected = materialize_trace_run_plan(metadata.request, stored_id)?
+            if encode_trace_run_plan(projected)? != encode_trace_run_plan(plan)?:
+                return Err("stored trace SSpec metadata differs from frozen run plan")
+            if stored_id == run_id: found = Some(metadata)
+        Ok(found)
+
+    # Attach definition metadata before observations. All failure-prone work
+    # precedes the single table mutation; callers must save through this owner
+    # before dispatch. This is not a lease or provenance admission.
+    me record_trace_sspec_metadata(run_id: text, metadata: TraceSspecPlannedRequest) -> Result<(), text>:
+        val canonical = encode_trace_sspec_planned_request(metadata)?
+        val stored_id = encode_trace_storage_scalar(run_id)?
+        val stored_metadata = encode_trace_storage_scalar(canonical)?
+        self.validate_trace_run_active(run_id)?
+        val plan = match self.get_trace_run_plan(run_id)?:
+            case Some(existing): existing
+            case nil: return Err("trace SSpec metadata requires a frozen run plan")
+        val projected = materialize_trace_run_plan(metadata.request, run_id)?
+        if encode_trace_run_plan(projected)? != encode_trace_run_plan(plan)?:
+            return Err("trace SSpec metadata differs from frozen run plan")
+        match self.get_trace_sspec_metadata(run_id)?:
+            case Some(_): return Err("trace SSpec metadata already exists; replacement is forbidden")
+            case nil: pass
+        match self.db.get_table("trace_case_events"):
+            case Some(events):
+                val stored_events = decode_trace_stored_events(events)?
+                for observed in stored_events:
+                    if observed.run_id == run_id:
+                        return Err("trace SSpec metadata cannot be recorded after observations")
+            case nil: pass
+        var table = match self.db.get_table("trace_sspec_metadata"):
+            case Some(existing): existing
+            case nil: SdnTable.new("trace_sspec_metadata", ["run_id", "schema", "metadata_sdn", "evidence_validity"])
+        val row = SdnRow.empty()
+        row.set("run_id", stored_id)
+        row.set("schema", "simple.trace.sspec-metadata-storage/v1")
+        row.set("metadata_sdn", stored_metadata)
+        row.set("evidence_validity", "unverified")
+        table.add_row(row)
+        self.db.set_table("trace_sspec_metadata", table)
         Ok(())
 
     # Append observed framework events under the existing run identity. This
