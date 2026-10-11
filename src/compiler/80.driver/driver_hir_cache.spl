@@ -17,7 +17,8 @@
 # declaration. The price is that any source edit invalidates every entry --
 # acceptable, because the win this cache exists for is the repeated bootstrap
 # stages over an IDENTICAL tree.
-#   key = sha256( sha256(source file) | closure digest | is_entry
+#   key = sha256( source-key version | sha256(normalized source path)
+#                 | sha256(source file) | closure digest | is_entry
 #                 | the env switches that change what lowering emits
 #                 | codec header )
 # The compiler identity rides in the entry HEADER and the directory (the
@@ -139,7 +140,13 @@ fn hir_cache_key(source_path: text, closure_digest: text, is_entry: bool) -> tex
     if source_digest.len() != 64:
         return ""
     val entry_flag = if is_entry: "entry" else: "module"
-    sha256_text(source_digest + "\n" + closure_digest + "\n" + entry_flag + "\n" + _hir_cache_env_switches() + hir_codec_header() + "\n")
+    # Cached HIR retains the physical source path. Equal bytes at different
+    # paths are different owners even within the same frozen closure. Hash the
+    # path separately so arbitrary path bytes cannot cross field boundaries.
+    # Logical aliases share the one physical surface lowering; their registry
+    # identities already participate in the closure digest above.
+    val source_path_digest = sha256_text(source_path.replace("\\", "/"))
+    sha256_text("hir-source-key-v2\n" + source_path_digest + "\n" + source_digest + "\n" + closure_digest + "\n" + entry_flag + "\n" + _hir_cache_env_switches() + hir_codec_header() + "\n")
 
 fn hir_cache_path(key: text) -> text:
     hir_cache_dir() + "/" + key + ".hir"

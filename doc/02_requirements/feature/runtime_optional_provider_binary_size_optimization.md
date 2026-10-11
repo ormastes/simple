@@ -1,5 +1,22 @@
 # Runtime Optional Provider and Binary-Size Optimization Requirements
 
+## Selected independent OS/filesystem extension — 2026-10-11
+
+The user's explicit folder and SOSIX instructions select these requirements;
+they do not imply implementation or execution support.
+
+- **REQ-024:** Keep OS and filesystem variations independent, in sibling
+  `variants/os/` and `variants/filesystem/` groups under the existing resolver.
+  Reuse filesystem owners across admitted OS providers; preserve existing
+  `platform` selection compatibility during migration. Each mount/resource
+  selects its filesystem independently of the OS and retains its provider identity.
+- **REQ-025:** Route application/shared-library filesystem operations through
+  canonical SOSIX contracts, including statfs and truncate. Backend-specific
+  APIs remain behind the provider boundary. Qualify operation support for each
+  OS/filesystem combination and report unsupported operations explicitly.
+
+Acceptance rows I5-V09 and I5-V10 remain open in the existing Item 5 acceptance plan.
+
 ## Selected variation extension — 2026-10-11
 
 The user's instruction to apply the integrated SIMD/GPU/SOSIX proposal selects the following compatibility constraints. Existing REQ-001..015 and NFR-001..007 remain in force with unchanged budgets. These are requirements, not implementation claims.
