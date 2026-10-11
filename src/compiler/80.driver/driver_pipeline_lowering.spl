@@ -22,6 +22,7 @@ use compiler.driver.driver_phase_gates.{
     driver_source_entry_closure_enabled, driver_source_matches_entry
 }
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.driver.driver_mir_error_owner.{driver_trace_module_mir_errors}
 use compiler.common.mir_target_context.{MirTargetContext}
 use std.common.convert.{try_parse_int}
 use compiler.driver.demand_mir_integration.{demand_mir_integrate_measured_v1}
@@ -545,6 +546,8 @@ impl CompilerDriver:
                 self.ctx.runtime_std_full_inventory_selection != nil,
                 self.ctx.demand_mir_admission != nil or self.ctx.demand_dirty_modules.len() > 0)
             var bootstrap_mir = bootstrap_lowering.lower_bootstrap_entry_module(bootstrap_hir)
+            driver_trace_module_mir_errors("app.cli.bootstrap_main", bootstrap_hir.path,
+                bootstrap_lowering.errors, 0)
             self.ctx.bootstrap_entry_mir = Some(bootstrap_mir)
             _driver_collect_mir_errors(self.ctx, bootstrap_lowering.errors)
             driver_collect_mir_advisories(self.ctx, bootstrap_lowering.mir_advisories)
@@ -646,6 +649,7 @@ impl CompilerDriver:
                     if ice_message == "":
                         direct_lowering.symbols = direct_hir.symbols
                         val devirt_before: i64 = direct_lowering.devirtualized_calls
+                        val module_errors_before = direct_lowering.errors.len()
                         # Per-module transient scope. The lowering arena for one
                         # module is dead once its MirModule exists; without this
                         # every intermediate stays registered for the life of the
@@ -653,6 +657,8 @@ impl CompilerDriver:
                         # lower_module_transient_scoped for the enumerated escape
                         # set and why ambient bootstrap is excluded.
                         val scoped_entry = direct_lowering.lower_module_transient_scoped(direct_hir, self.ctx.hir_modules.values(), direct_idx == 0)
+                        driver_trace_module_mir_errors(name_direct, src_direct.path,
+                            direct_lowering.errors, module_errors_before)
                         if scoped_entry.is_err():
                             # Fail closed: the scope has already been ended, so the
                             # arena (including the module we would have returned) is
@@ -793,7 +799,10 @@ impl CompilerDriver:
                         return false
                     continue
                 val fallback_devirt_before: i64 = lowering.devirtualized_calls
+                val module_errors_before = lowering.errors.len()
                 val scoped_fallback = lowering.lower_module_transient_scoped(hir_module, self.ctx.hir_modules.values())
+                driver_trace_module_mir_errors(name, typed_hir_module.path,
+                    lowering.errors, module_errors_before)
                 if scoped_fallback.is_err():
                     # Arena already aborted: record and return, never continue.
                     log_phase("aot:lower_to_mir:transient_scope_failed module={name}")
