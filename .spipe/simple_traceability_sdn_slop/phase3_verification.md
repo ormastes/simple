@@ -104,3 +104,13 @@ The feature-owned SDN declaration now records the 20 requirements, 40 planned
 criteria and current source/document responsibilities. It has no test definitions
 or execution records; native parser verification and policy registration remain
 mandatory. No full system criterion, NFR or release-readiness PASS is claimed.
+
+## Shared build observation, 2026-10-11
+
+The previously observed unrelated grouped Phase 3 collector process (PID 27976)
+was absent on the subsequent authoritative process query. Its recorded receipt
+at `C:/dev/simple/build/phase3-grouped-candidate-plan-20261011/compile-cycle5-corrected/receipt.env`
+reports `reason=timeout`, `native_exit_status=124`, `cleanup_status=reaped`.
+The child log stops at worker-spawn startup. This observation supplies no
+runnable or source-matched compiler qualification for the traceability lane.
+The build belongs to another session and was not restarted or cleaned here.
