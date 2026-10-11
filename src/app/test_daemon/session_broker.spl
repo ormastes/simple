@@ -55,44 +55,48 @@ impl SessionBroker:
     me acquire(meta: TestSessionMeta) -> SessionLease:
         """
         Acquires a session for the given test metadata.
-        1. If fresh_per_test → always create new
-        2. Look for existing idle lease with matching key
+        1. Refuse acquisition when the kind is disabled
+        2. Unless fresh_per_test, look for an idle lease with matching key
         3. If found → mark active, return
         4. If under limit → start new via adapter
         5. If at limit → evict oldest idle, then start new
         """
         val key = meta_to_session_key(meta)
-
-        # Fresh-per-test always gets a new session
-        if meta.reuse_mode == REUSE_FRESH_PER_TEST:
-            return self.start_new_session(meta, key)
-
-        # Look for existing idle session with matching key
-        var i = 0
-        while i < self.leases.len():
-            val lease = self.leases[i]
-            if (session_key_matches(lease.key, key) and
-                    lease.status == LEASE_IDLE):
-                # Reuse this session
-                val now = rt_time_now_unix_micros()
-                self.leases[i] = SessionLease(
-                    session_id: lease.session_id,
-                    key: lease.key,
-                    pid: lease.pid,
-                    qmp_socket: lease.qmp_socket,
-                    status: LEASE_ACTIVE,
-                    snapshot_name: lease.snapshot_name,
-                    created_at: lease.created_at,
-                    last_used_at: now,
-                    test_count: lease.test_count + 1
-                )
-                return self.leases[i]
-            i = i + 1
-
-        # No matching idle session — check concurrency limit
         val kind_name = session_kind_name(key.kind)
         val max = self.max_sessions[kind_name] ?? 4
+        if max <= 0:
+            return session_lease_new(key)
+
+        # Look for existing idle session with matching key
+        if meta.reuse_mode != REUSE_FRESH_PER_TEST:
+            var i = 0
+            while i < self.leases.len():
+                val lease = self.leases[i]
+                if (session_key_matches(lease.key, key) and
+                        lease.status == LEASE_IDLE):
+                    # Reuse this session
+                    val now = rt_time_now_unix_micros()
+                    self.leases[i] = SessionLease(
+                        session_id: lease.session_id,
+                        key: lease.key,
+                        pid: lease.pid,
+                        qmp_socket: lease.qmp_socket,
+                        status: LEASE_ACTIVE,
+                        snapshot_name: lease.snapshot_name,
+                        created_at: lease.created_at,
+                        last_used_at: now,
+                        test_count: lease.test_count + 1
+                    )
+                    return self.leases[i]
+                i = i + 1
+
+        # No matching idle session — check concurrency limit
         val current = self.count_by_kind(key.kind)
+
+        # A reduced limit may leave existing leases above capacity. Do not
+        # evict one and then admit another while the pool is still over limit.
+        if current > max:
+            return session_lease_new(key)
 
         if current >= max:
             # Try to evict oldest idle of same kind
