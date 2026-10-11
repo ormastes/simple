@@ -11,8 +11,10 @@ borrow set was never compared with the consume facts at its program point.
 The original pending `Ref(l1, l0)` followed by `Drop(l0)` therefore passed.
 
 The owner now checks consumes after propagation, at statements and terminators.
-Direct reference identity follows Copy/Move aliases. A proven single-block
-scan records the last direct reference use, including synchronous call operands.
+Direct reference identity follows Copy/Move aliases. The current single-block
+scan records the last direct reference use, including synchronous call operands;
+block count does not prove an acyclic, straight-line lifetime (see the blocking
+review below).
 A previously used reference can cease preventing a later consume; a reference
 with a future use or no recorded use remains pending. Returned aliases remain
 pinned. Reference alias identities accumulate conservatively across overwrites.
@@ -53,3 +55,27 @@ Required admitted pure-runtime compiler/lib/MCP/LSP checks, integration and nati
 smokes, actual imported-owner qualification and representative CFG/caller
 regressions remain OPEN. Keep this production PR draft; no historical backlog row
 is qualified closed by cached bootstrap observations.
+
+## Blocking independent review: single-block loops can retire live references
+
+Review of source commit `db481c7d8ea` on PR3060 found that
+`BorrowChecker.check_function` enables `reference_retirement_safe` using only
+`func.blocks.len() == 1`. A sole block can terminate with a self-targeting
+`Goto`, `If`, or `Switch`. `analyze_terminator` does not disable retirement for
+these control-flow shapes. A reference use statically before a Drop can execute
+again on the next iteration; `last_use < point` therefore does not prove that
+its lifetime has ended. This is a blocking source correctness finding, without
+a newly executed regression. The current implementation is not proven
+straight-line and must not be admitted or merged.
+
+Required repair: eligibility must establish an acyclic terminal body, rather
+than count blocks alone. Conservatively disqualify control-flow/call/drop or
+unknown terminators that can continue execution, and explicitly validate the
+eligible terminal shape. Existing returned-alias escape checks must remain in
+force. A future bounded feature cycle must cover a one-block back edge and
+terminal eligibility before claiming safe retirement; callee retention and
+other OPEN gates above remain separate requirements.
+
+All three diagnostic cycles are exhausted. This checkpoint changes only this
+tracking document; no source repair, new diagnostic, verification cycle, or
+merge was performed. PR3060 remains draft.
