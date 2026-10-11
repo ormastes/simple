@@ -11,6 +11,10 @@ use compiler.mono.mono_archive_types_v1.{MonoTemplateBodyModeV1,
     mono_archive_put_type_v1}
 use compiler.mono.mono_archive_state_v1.{MonoArchiveFactsV1, MonoArchiveStateV1,
     mono_archive_state_create_v1, mono_archive_state_digest_v1}
+use compiler.mono.mono_archive_current_body_v1.{MonoArchiveCurrentBodyV1,
+    mono_archive_current_body_digest_v1, mono_archive_current_body_load_in_owned_scope_v1}
+use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{HirOwnedArtifactContextV1}
+use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_context_v1}
 use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveV1,
     hir_body_archive_matches_v1, hir_body_archive_warnings_digest_v1}
 use compiler.driver.cache.hir_mono_archive_consumer_v1.{MonoArchiveAdmissionV1,
@@ -75,6 +79,91 @@ struct MonoArchiveRegistrationReceiptV1:
     generic_structs: i64
     generic_classes: i64
     seal: text
+
+# The original publisher cannot accept this typed receipt. Its current body
+# and boundary remain distinct from the original unresolved parent.
+struct MonoArchiveCurrentRegistrationReceiptV1:
+    current_body: MonoArchiveCurrentBodyV1
+    registration: MonoArchiveRegistrationReceiptV1
+    base_current_digest: text
+    seal: text
+
+class MonoArchiveCurrentRegistrationOwnerV1:
+    registration: MonoArchiveRegistrationOwnerV1
+    cache: HirOwnedArtifactContextV1
+    bodies: Dict<text, MonoArchiveCurrentBodyV1>
+    published_digest: text
+
+fn mono_archive_current_registration_digest_v1(current: MonoArchiveCurrentRegistrationOwnerV1) -> text:
+    val owner = current.registration
+    # Only the empty factory digest may allocate outside scratch.
+    if (owner.roots.len() > 0 and transient_array_scope_state_v1() != 1) or
+            owner.state.epoch != 0 or owner.state.cursor != 0 or owner.state.queue.len() != 0 or
+            owner.state.spec_symbols.len() != 0 or owner.state.spec_display.len() != 0 or
+            owner.state.spec_signatures.len() != 0 or owner.state.reported_once.len() != 0 or
+            owner.state.unresolved_templates.len() != 0 or owner.state.emitted.len() != 0 or
+            owner.state.fn_returns.len() != 0 or owner.state.sym_names.len() != 0:
+        return ""
+    val prior = mono_archive_registration_owner_digest_v1(owner)
+    if prior == "" or owner.sealed or current.bodies.len() != owner.roots.len(): return ""
+    var writer = HirCodecWriter.create()
+    writer.put_text(prior)
+    writer.put_text(current.cache.directory)
+    writer.put_text(current.cache.producer_header)
+    writer.put_bool(current.cache.enabled)
+    for root in owner.roots:
+        if not current.bodies.has(root.module_name): return ""
+        val body = current.bodies[root.module_name]
+        val digest = mono_archive_current_body_digest_v1(body)
+        if digest == "" or body.original_parent.archive_key != owner.archives[root.module_name].archive_key: return ""
+        writer.put_text(root.module_name)
+        writer.put_text(digest)
+    if not writer.ok: return ""
+    sha256_text("mono-current-registration-owner-v1\n" + writer.finish())
+
+fn mono_archive_current_registration_create_v1() -> Result<MonoArchiveCurrentRegistrationOwnerV1, text>:
+    # A fresh actual collector, never the journal's unresolved registration.
+    val created = mono_archive_registration_create_v1()
+    if created.is_err(): return Err(created.unwrap_err())
+    val owner = MonoArchiveCurrentRegistrationOwnerV1(registration: created.unwrap(),
+        cache: hir_owned_artifact_context_v1(), bodies: {}, published_digest: "")
+    owner.published_digest = mono_archive_current_registration_digest_v1(owner)
+    if owner.published_digest == "": return Err("fresh current registration owner unavailable")
+    Ok(owner)
+
+# Build the prospective compact state in scratch so hashing it cannot retain
+# repeated persistent serializations of the growing provider tables.
+fn mono_archive_current_registration_scratch_successor_v1(current: MonoArchiveCurrentRegistrationOwnerV1,
+        receipt: MonoArchiveCurrentRegistrationReceiptV1, schedule: text) -> text:
+    val owner = current.registration
+    val worker = mono_archive_registration_scratch_collector_v1(owner)
+    val old = owner.state.facts
+    val facts = MonoArchiveFactsV1(body_authority: old.body_authority, feature_policy: old.feature_policy,
+        initial_symbol: old.initial_symbol, sym_names: worker.sym_names, fn_returns: worker.fn_returns,
+        fn_sigs: worker.fn_sigs, named_types: worker.named_types, named_ambiguous: worker.named_ambiguous,
+        named_symbol_names: worker.named_symbol_names, field_types: worker.field_types,
+        field_owner_modules: worker.field_owner_modules, enum_payload_types: worker.enum_payload_types,
+        module_paths: worker.module_paths, template_module: worker.template_module,
+        generic_methods: worker.generic_methods, generic_method_rejected: worker.generic_method_rejected,
+        generic_type_params: worker.generic_type_params, generic_type_modules: worker.generic_type_modules,
+        generic_type_field_names: worker.generic_type_field_names, generic_type_fields: worker.generic_type_fields,
+        declared_global_types: worker.declared_global_types, templates: worker.archive_template_signatures,
+        recipes: worker.template_recipes, symbol_identities: worker.archive_symbol_identities)
+    var archives: Dict<text, HirBodyArchiveV1> = {}
+    for name in owner.archives.keys(): archives[name] = owner.archives[name]
+    var roots: [MonoArchiveRootOrderV1] = []
+    for root in owner.roots: roots = roots.push(root)
+    val scratch = MonoArchiveRegistrationOwnerV1(state: mono_archive_state_create_v1(facts),
+        archives: archives, roots: roots, generic_functions: owner.generic_functions,
+        generic_structs: owner.generic_structs, generic_classes: owner.generic_classes,
+        epoch: owner.epoch, sealed: false, published_schedule_digest: owner.published_schedule_digest,
+        sealed_schedule_digest: owner.sealed_schedule_digest)
+    if mono_archive_registration_install_v1(scratch, receipt.registration, schedule).is_err(): return ""
+    var bodies: Dict<text, MonoArchiveCurrentBodyV1> = {}
+    for name in current.bodies.keys(): bodies[name] = current.bodies[name]
+    bodies[receipt.current_body.original_parent.input.module_name] = receipt.current_body
+    mono_archive_current_registration_digest_v1(MonoArchiveCurrentRegistrationOwnerV1(
+        registration: scratch, cache: current.cache, bodies: bodies, published_digest: ""))
 
 fn mono_archive_registration_create_v1() -> Result<MonoArchiveRegistrationOwnerV1, text>:
     # Cache identity initialization happens outside scratch. No fake provider
@@ -332,6 +421,85 @@ fn mono_archive_collect_registration_in_owned_scope_v1(owner: MonoArchiveRegistr
                 first.input.provider_selection_digest != archive.input.provider_selection_digest or
                 first.input.runtime_provider_receipt_path != archive.input.runtime_provider_receipt_path:
             return Err("registration selected closure, producer, or provider differs")
+    mono_archive_collect_complete_registration_v1(owner, module, module_name, archive)
+
+fn mono_archive_collect_current_registration_in_owned_scope_v1(current: MonoArchiveCurrentRegistrationOwnerV1,
+        module: HirModule, body: MonoArchiveCurrentBodyV1,
+        warnings: [text]) -> Result<MonoArchiveCurrentRegistrationReceiptV1, text>:
+    if transient_array_scope_state_v1() != 1:
+        return Err("current registration capture requires active unpaused parent scope")
+    val owner = current.registration
+    val predecessor = mono_archive_current_registration_digest_v1(current)
+    if predecessor == "" or predecessor != current.published_digest:
+        return Err("fresh current registration predecessor refused")
+    val archive = body.original_parent
+    val module_name = archive.input.module_name
+    val current_digest = mono_archive_current_body_digest_v1(body)
+    if current_digest == "" or owner.sealed or owner.state.queue.len() != 0 or
+            owner.archives.has(module_name) or module.name != module_name or
+            module.path != archive.input.source_path or
+            owner.state.facts.feature_policy != env_get("SIMPLE_MONO_LEVELS") or
+            sha256_text(hir_module_encode(module)) != body.current_body_digest or
+            hir_body_archive_warnings_digest_v1(warnings) != body.current_warnings_digest:
+        return Err("current registration module, predecessor, or body identity refused")
+    if owner.roots.len() > 0:
+        val first: HirBodyArchiveV1 = owner.archives[owner.roots[0].module_name]
+        if first.input.closure_digest != archive.input.closure_digest or
+                first.input.producer_header != archive.input.producer_header or
+                first.input.runtime_provider_digest != archive.input.runtime_provider_digest or
+                first.input.provider_selection_digest != archive.input.provider_selection_digest or
+                first.input.runtime_provider_receipt_path != archive.input.runtime_provider_receipt_path:
+            return Err("current registration selected closure, producer, or provider differs")
+    val collected = mono_archive_collect_complete_registration_v1(owner, module, module_name, archive)
+    if collected.is_err(): return Err(collected.unwrap_err())
+    val receipt = collected.unwrap()
+    Ok(MonoArchiveCurrentRegistrationReceiptV1(current_body: body, registration: receipt,
+        base_current_digest: predecessor,
+        seal: sha256_text("mono-current-registration-v1\n" + current_digest + "\n" + predecessor + "\n" + receipt.seal)))
+
+# Mechanical publication re-reads the exact complete current artifact and
+# re-collects its rows before state mutation. It is not final/prerequisite
+# admission; the driver still must replay and accept the transform owner.
+fn mono_archive_publish_current_registration_v1(current: MonoArchiveCurrentRegistrationOwnerV1,
+        receipt: MonoArchiveCurrentRegistrationReceiptV1) -> Result<bool, text>:
+    if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0:
+        return Err("current registration publication requires closed lease")
+    if not transient_scope_begin(): return Err("current registration publication scope unavailable")
+    val owner = current.registration
+    var valid = false
+    val loaded = mono_archive_current_body_load_in_owned_scope_v1(current.cache, receipt.current_body)
+    if loaded.is_ok():
+        val body = loaded.unwrap()
+        val exact = mono_archive_collect_current_registration_in_owned_scope_v1(current,
+            body.module, receipt.current_body, body.warnings)
+        valid = exact.is_ok() and exact.unwrap().seal == receipt.seal and
+            exact.unwrap().base_current_digest == receipt.base_current_digest and
+            exact.unwrap().registration.seal == receipt.registration.seal and
+            receipt.registration.seal == mono_archive_registration_receipt_seal_v1(receipt.registration)
+    val schedule = if valid: mono_archive_registration_schedule_digest_v1(owner.roots +
+        [MonoArchiveRootOrderV1(module_name: receipt.current_body.original_parent.input.module_name,
+            symbols: receipt.registration.roots)]) else: ""
+    valid = valid and schedule != ""
+    val next_digest = if valid: mono_archive_current_registration_scratch_successor_v1(current, receipt, schedule) else: ""
+    valid = valid and next_digest != ""
+    val paused = transient_scope_pause()
+    val digest_owned = if paused and valid: transient_promote(next_digest) and transient_promote(schedule) else: false
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not ended or not cache_owned or (valid and not digest_owned): panic("current registration publication ownership")
+    if not valid: return Err("current registration body, rows, or predecessor refused")
+    val installed = mono_archive_registration_install_v1(owner, receipt.registration, schedule)
+    if installed.is_err(): return installed
+    current.bodies[receipt.current_body.original_parent.input.module_name] = receipt.current_body
+    current.published_digest = next_digest
+    Ok(true)
+
+# The body walker is shared with fresh post-HIR collection. Its callers must
+# validate their distinct complete-body stage before entering here; no reader
+# or publication authority is inferred from this internal operation.
+fn mono_archive_collect_complete_registration_v1(owner: MonoArchiveRegistrationOwnerV1,
+        module: HirModule, module_name: text, archive: HirBodyArchiveV1) -> Result<MonoArchiveRegistrationReceiptV1, text>:
     val base = mono_archive_registration_owner_digest_v1(owner)
     if base == "": return Err("registration predecessor unavailable")
     val worker = mono_archive_registration_scratch_collector_v1(owner)
@@ -518,6 +686,10 @@ fn mono_archive_publish_registration_v1(owner: MonoArchiveRegistrationOwnerV1,
     valid = valid and schedule != ""
     mono_archive_registration_close_v1(schedule, valid)
     if not valid: return Err("registration predecessor, body, rows, or order refused")
+    mono_archive_registration_install_v1(owner, receipt, schedule)
+
+fn mono_archive_registration_install_v1(owner: MonoArchiveRegistrationOwnerV1,
+        receipt: MonoArchiveRegistrationReceiptV1, schedule: text) -> Result<bool, text>:
     # Only promoted typed row payloads enter existing resident indexes, AFTER
     # scratch ends. There is no worker/facts/full-index clone promotion.
     for row in receipt.rows:
@@ -609,3 +781,6 @@ export mono_archive_registration_create_v1, mono_archive_collect_registration_in
 export mono_archive_publish_registration_v1, mono_archive_registration_seal_v1
 export mono_archive_registration_schedule_digest_v1
 export mono_archive_registration_owner_digest_v1
+export MonoArchiveCurrentRegistrationReceiptV1, mono_archive_collect_current_registration_in_owned_scope_v1
+export MonoArchiveCurrentRegistrationOwnerV1, mono_archive_current_registration_create_v1
+export mono_archive_publish_current_registration_v1, mono_archive_current_registration_digest_v1
