@@ -1,3 +1,4 @@
+use compiler.mono.mono_archive_nominal_v2.{MonoArchiveNominalDeclV2, mono_archive_nominal_rows_put_v2, mono_archive_nominal_rows_get_v2}
 # Body-free, versioned replay metadata. All decoders require full consumption
 # and exact stable re-encoding of the existing legacy flat-pool byte contract.
 use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveInputV1, HirBodyArchiveV1}
@@ -16,6 +17,7 @@ struct MonoVerificationModuleRecipeV1:
     body_input: MonoArchiveBodyInputV1? = nil
 
 struct MonoVerificationGlobalRecipeV1:
+    nominal_imports: Dict<text, MonoArchiveNominalDeclV2> = {}
     unresolved_templates: [text]
     emitted_templates: [text]
     next_symbol: i64
@@ -148,7 +150,8 @@ fn mono_verification_module_decode_v1(blob: text) -> Result<MonoVerificationModu
 
 fn mono_verification_global_encode_v1(recipe: MonoVerificationGlobalRecipeV1) -> text:
     var writer = HirCodecWriter.create()
-    writer.put_text("mono-verification-global-recipe-v1")
+    writer.put_text("mono-verification-global-recipe-v2")
+    mono_archive_nominal_rows_put_v2(writer, recipe.nominal_imports)
     writer.put_i64(recipe.next_symbol)
     writer.put_i64(recipe.unresolved_templates.len())
     for name in recipe.unresolved_templates: writer.put_text(name)
@@ -159,7 +162,8 @@ fn mono_verification_global_encode_v1(recipe: MonoVerificationGlobalRecipeV1) ->
 
 fn mono_verification_global_decode_v1(blob: text) -> Result<MonoVerificationGlobalRecipeV1, text>:
     var reader = FlatPoolReader.new(blob)
-    if reader.decode_text(reader.next()) != "mono-verification-global-recipe-v1": return Err("mono global recipe stage differs")
+    if reader.decode_text(reader.next()) != "mono-verification-global-recipe-v2": return Err("mono global recipe stage differs")
+    val imports = mono_archive_nominal_rows_get_v2(reader)
     val next_symbol = reader.next_i64()
     var unresolved: [text] = []
     var count = reader.next_len()
@@ -173,7 +177,7 @@ fn mono_verification_global_decode_v1(blob: text) -> Result<MonoVerificationGlob
     while index < count and reader.ok:
         emitted = emitted.push(reader.decode_text(reader.next()))
         index = index + 1
-    val recipe = MonoVerificationGlobalRecipeV1(unresolved_templates: unresolved,
+    val recipe = MonoVerificationGlobalRecipeV1(nominal_imports: imports, unresolved_templates: unresolved,
         emitted_templates: emitted, next_symbol: next_symbol)
     if not reader.ok or reader.pos != reader.lines.len() - 1: return Err("mono global recipe framing refused")
     if reader.lines[reader.pos] != "" or mono_verification_global_encode_v1(recipe) != blob:
