@@ -20,6 +20,7 @@ Maintain feature-specific process knowledge for Compiler. Use this skill when wo
   and raw `rt_str_hash` callers. MIR regressions and the native fixture cover
   distinct boundaries; authored assertions do not establish executed SPipe or
   Phase4 qualification.
+- [Generated wrapper traversal candidate](../../../09_report/generated_wrapper_visitor_candidate_2026-10-11.md): only carrier structs may skip their kind field; five fold wrappers corrected manually pending generator regeneration and execution.
 
 - [Source](../../../src/compiler/)
 - [Shared compiler source](../../../src/compiler_shared/)
