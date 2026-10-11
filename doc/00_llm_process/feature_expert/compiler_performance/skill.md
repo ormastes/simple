@@ -86,3 +86,9 @@ layer/effect/RT claim replay complements aspect replay; each adds two unrun
 source controls. These mechanical consumers and editable claim DTOs grant no
 final authority. Real current-backed mono readers and the driver prerequisite
 owner must bind the actual validator/weave/cold/quiet sequence before activation.
+
+The shared complete-body frame leaf preserves the existing resolved bytes/key
+contract. A distinct woven-body descriptor supplies actual cold capture before
+optional quiet resolution, with strict stage/domain separation and the unchanged
+8 MiB raw envelope bound. The `weave-cold` fixture requires 14 native checks,
+still unrun; its diagnostic boundary labels grant no production or final trust.

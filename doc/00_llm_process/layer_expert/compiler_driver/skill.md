@@ -164,6 +164,13 @@ source/policy inputs. Borrowed MIR lowering uses the existing complete lowering
 implementation and leaves scope/output promotion to its caller. These are
 inactive mechanical prerequisites, not a final repository or admission token.
 
+`cache/driver_cold_hir_weave_body_v1.spl` reads a separate complete
+`post-hir-weave-v1` artifact for cold ABI/SMF/witness capture before optional
+quiet resolution. It shares the byte grammar with strict current mono bodies
+without changing their resolved-stage bytes/key/API. The `weave-cold` selector
+requires 14 actual-body native checks, unrun. The real driver prerequisite owner
+must authenticate both stage boundaries and the original returned cold capture.
+
 ## 2026-09-26 — `native-build` restored: backend table in the interpreted worker, entry-file hashing, module-init reads
 
 - **The interpreted native-build worker never installed the static backend
