@@ -482,3 +482,58 @@ The v1 producer and consumer share a 1 MiB document limit, matching the bounded
 SDN parser contract. Larger observations require an explicit shard/artifact
 contract or a separately verified larger parser policy. They are never silently
 truncated, converted to JSON, or treated as a successful partial result.
+
+### Native worker retirement prerequisite (audit 2026-10-11)
+
+The SDN wrapper must remain fail-closed until its process owner can prove the
+whole worker scope retired. The current Process Observation V4 Linux ABI has
+exact environment, pinned executable and cwd, exec confirmation, pidfd, bounded
+capture, and two-phase collect/ack. Its native capabilities advertise
+`POV4_CAP_LEADER_ONLY`; request decoding rejects any descendant policy other
+than leader-only. Frozen snapshots deliberately set `tree_empty=0` and
+`tree_empty_ns=-1`. V4 creates a process group, but deadline/cancel signaling
+uses the leader pidfd, so neither group signaling nor group emptiness is proved.
+The Windows V4 implementation reports unavailable.
+
+The V3 owned-process path is not a safe bridge. It creates a POSIX process
+group, can signal that group on timeout/cancel, and samples group members for
+resource telemetry. Its `tree_empty_ns` is assigned from the leader's wait
+timestamp, without a group-empty observation; a descendant can outlive the
+leader or escape the process group. V3 also does not accept the exact scoped
+environment carried by V4. Combining a V3 kill with a V4 receipt would split
+process authority across unrelated leases and would not repair those missing
+proofs.
+
+There is an existing Linux cgroup-v2 owner that is a credible implementation
+reference: `runtime_linux_group_owner_impl.h` pins and hashes the executable
+then executes through the same fd, passes an explicit environment, pins cwd,
+places the worker into its cgroup with `clone3(CLONE_INTO_CGROUP | CLONE_PIDFD)`,
+uses `cgroup.kill`, and reports empty only after the leader is reaped and
+`cgroup.events` reports the group unpopulated. Its `linux_process_owner` facade
+and durable `group_process_owner` protocol are separate from V4, write output
+to owned files, and require delegated cgroup-v2 memory controls plus
+`clone3`/pidfd/`execveat`. They do not supply the V4 ticket, stream, or frozen
+receipt contract directly. Reuse therefore means extending the V4 owner around
+this stronger scope or explicitly migrating the wrapper to that owner; it does
+not mean accepting V3's leader timestamp as tree proof.
+
+The next Linux owner change needs a truthful descendant-scope capability and
+request policy, atomic placement before worker execution, scope-wide cancel
+and deadline enforcement, leader reap followed by bounded wait for the scope
+to become empty, and a frozen receipt that records the observed empty state
+and time. Cgroup cleanup failure or cleanup-budget expiry stays incomplete and
+must retain cleanup authority. V4 capabilities are advertised only where this
+full contract is implemented. Native tests should hold a grandchild alive
+after the leader exits, exercise timeout/cancel and cleanup expiry, attempt
+session/process-group escape, assert no terminal success before the cgroup is
+empty, and verify unsupported hosts reject admission before spawning.
+
+Windows needs a distinct V4 provider using the existing Job Object owner
+patterns: create suspended, assign to a kill-on-close job before resume, pass
+the exact environment block, then require leader reap and zero active job
+processes before freezing. Current `windows_process_owner` has related job
+accounting but is not wired into V4's capability/receipt ABI. Its tests must
+cover leader-exits-first descendants, forced cancellation, active-process
+drain, and job cleanup uncertainty. Until the platform provider is implemented
+and its native tests pass, SDN worker wrapping remains explicitly unavailable
+on that platform.
