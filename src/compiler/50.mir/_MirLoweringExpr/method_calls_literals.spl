@@ -2338,17 +2338,24 @@ impl MirLowering:
         # an empty symbol and retain ordinary trait dispatch below.
         if (method == "len" or method == "length" or method == "is_empty") and args.len() == 0:
             var len_symbol = ""
-            if maybe_receiver_type_for_call != nil:
-                val found_receiver_type = maybe_receiver_type_for_call
-                if found_receiver_type != nil:
-                    len_symbol = self.len_runtime_symbol_for_hir_type(found_receiver_type)
+            # Recover the declaration attached to this binding or call result.
+            # Raw receiver.type_ can be absent on native entry lowering; that
+            # absence does not erase a known enum/class method owner.
+            val length_receiver_type = self.enum_match_expr_type(receiver)
+            var len_recovery_allowed = length_receiver_type == nil
+            if val found_receiver_type = length_receiver_type:
+                len_symbol = self.len_runtime_symbol_for_hir_type(found_receiver_type)
+                match found_receiver_type.kind:
+                    case HirTypeKind.Any | HirTypeKind.Infer(_, _) | HirTypeKind.Error:
+                        len_recovery_allowed = true
+                    case _: ()
             var receiver_local: LocalId = 0
             var receiver_lowered = false
             # Flat HIR can omit the annotation on `values ?? []`, while MIR
             # still proves that the resulting local is a built-in collection.
             # Recover only proven receivers: unknown/custom is_empty methods
             # must retain normal dispatch, never the generic rt_len fallback.
-            if len_symbol == "" and method == "is_empty" and resolution_is_unresolved and static_receiver_name == "":
+            if len_symbol == "" and len_recovery_allowed and method == "is_empty" and resolution_is_unresolved and static_receiver_name == "":
                 if has_prelowered_method_receiver:
                     receiver_local = prelowered_method_receiver
                 else:
@@ -2367,7 +2374,7 @@ impl MirLowering:
             # continue to its normal method-dispatch recovery below; unlike
             # built-in collection calls it cannot be inferred from a generic
             # runtime value.
-            if len_symbol == "" and method != "is_empty":
+            if len_symbol == "" and len_recovery_allowed and method != "is_empty":
                 match resolution:
                     case Unresolved:
                         # Bug #137/#138 (follow-up): an untyped receiver (no HIR
