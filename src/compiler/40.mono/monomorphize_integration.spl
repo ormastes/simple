@@ -1804,21 +1804,80 @@ impl MonomorphizationPass:
                 pass
 
     me collect_lets_expr(expr: HirExpr):
-        """Descend into the nested blocks an expression can hold, so lets in
-        `if`/`match`/loop bodies reach the environment too."""
+        """Collect this lexical function's locals through expression operands.
+        Lambda bodies are collected only when rewriting that lambda's scope."""
         if expr == nil:
             return
         match expr.kind:
+            case HirExprKind.Call(callee, args, _):
+                self.collect_lets_expr(callee)
+                self.collect_lets_args(args)
+            case HirExprKind.MethodCall(receiver, _, args, _):
+                self.collect_lets_expr(receiver)
+                self.collect_lets_args(args)
+            case HirExprKind.StaticCall(_, _, args, _):
+                self.collect_lets_args(args)
+            case HirExprKind.Binary(_, left, right):
+                self.collect_lets_expr(left)
+                self.collect_lets_expr(right)
+            case HirExprKind.NullCoalesce(left, right):
+                self.collect_lets_expr(left)
+                self.collect_lets_expr(right)
+            case HirExprKind.Index(base, index):
+                self.collect_lets_expr(base)
+                self.collect_lets_expr(index)
+            case HirExprKind.Unary(_, operand): self.collect_lets_expr(operand)
+            case HirExprKind.Field(base, _, _): self.collect_lets_expr(base)
+            case HirExprKind.TupleIndex(base, _): self.collect_lets_expr(base)
+            case HirExprKind.OptionalChain(base, _): self.collect_lets_expr(base)
+            case HirExprKind.ExistsCheck(base): self.collect_lets_expr(base)
+            case HirExprKind.Unwrap(base): self.collect_lets_expr(base)
+            case HirExprKind.Cast(inner, _): self.collect_lets_expr(inner)
+            case HirExprKind.As(inner, _): self.collect_lets_expr(inner)
+            case HirExprKind.ConvertCall(inner, _): self.collect_lets_expr(inner)
+            case HirExprKind.TypeTest(inner, _): self.collect_lets_expr(inner)
+            case HirExprKind.Throw(inner): self.collect_lets_expr(inner)
+            case HirExprKind.Try(inner): self.collect_lets_expr(inner)
+            case HirExprKind.Await(inner): self.collect_lets_expr(inner)
+            case HirExprKind.Return(value): self.collect_lets_expr_opt(value)
+            case HirExprKind.Break(_, value): self.collect_lets_expr_opt(value)
+            case HirExprKind.Yield(value): self.collect_lets_expr_opt(value)
+            case HirExprKind.ArrayLit(elements, _): self.collect_lets_exprs(elements)
+            case HirExprKind.TupleLit(elements): self.collect_lets_exprs(elements)
+            case HirExprKind.SetLit(elements, _): self.collect_lets_exprs(elements)
+            case HirExprKind.ArrayRepeat(value, count, _):
+                self.collect_lets_expr(value)
+                self.collect_lets_expr(count)
+            case HirExprKind.DictLit(entries, _, _):
+                for entry in entries:
+                    val (key, value) = entry
+                    self.collect_lets_expr(key)
+                    self.collect_lets_expr(value)
+            case HirExprKind.StructLit(_, fields): self.collect_lets_named_exprs(fields)
+            case HirExprKind.EnumLit(_, _, payload):
+                if val contents = payload:
+                    match contents:
+                        case HirEnumPayload.Tuple(values): self.collect_lets_exprs(values)
+                        case HirEnumPayload.Struct(fields): self.collect_lets_named_exprs(fields)
+            case HirExprKind.Range(start, end, _, step):
+                self.collect_lets_expr_opt(start)
+                self.collect_lets_expr_opt(end)
+                self.collect_lets_expr_opt(step)
+            case HirExprKind.HostGpuLane(_, _, marker, body):
+                self.collect_lets_expr(marker)
+                self.collect_lets_block(body)
             case HirExprKind.Block(block):
                 val bt: HirBlock = block
                 self.collect_lets_block(bt)
-            case HirExprKind.If(_, then_, else_):
+            case HirExprKind.If(cond, then_, else_):
+                self.collect_lets_expr(cond)
                 val th: HirBlock = then_
                 self.collect_lets_block(th)
                 self.collect_lets_block_opt(else_)
             case HirExprKind.IfChain(arms, else_):
                 for arm in arms:
                     val at: HirIfArm = arm
+                    self.collect_lets_expr(at.cond)
                     self.collect_lets_block(at.then_)
                 self.collect_lets_block_opt(else_)
             case HirExprKind.MatchCase(scrutinee, arms):
@@ -1827,6 +1886,7 @@ impl MonomorphizationPass:
                 # SCRUTINEE and pass it down as a hint.
                 var scrut_enum = ""
                 val sc: HirExpr = scrutinee
+                self.collect_lets_expr(sc)
                 val sct = self.infer_expr_type(sc)
                 if sct != nil:
                     val scc: HirType = sct
@@ -1835,7 +1895,7 @@ impl MonomorphizationPass:
                             scrut_enum = self.named_type_name(ssym, scc)
                         case _:
                             pass_do_nothing("not a named scrutinee")
-                self.match_enum_hint = scrut_enum
+                val previous_hint = self.match_enum_hint
                 for arm in arms:
                     val mt: HirMatchArm = arm
                     # Bind the arm's pattern variables BEFORE descending, so a
@@ -1845,12 +1905,17 @@ impl MonomorphizationPass:
                     # E-MONO-032.
                     if mono_diag_enabled():
                         eprint("[mono-diag] match arm pattern kind={mt.pattern.kind}")
+                    self.match_enum_hint = scrut_enum
                     self.collect_pattern_bindings(mt.pattern)
+                    if mt.has_guard:
+                        self.collect_lets_expr(mt.guard)
                     self.collect_lets_block(mt.body)
+                self.match_enum_hint = previous_hint
             case HirExprKind.Loop(body, _):
                 val lb: HirBlock = body
                 self.collect_lets_block(lb)
-            case HirExprKind.While(_, body, _):
+            case HirExprKind.While(cond, body, _):
+                self.collect_lets_expr(cond)
                 val wb: HirBlock = body
                 self.collect_lets_block(wb)
             case HirExprKind.Comprehension(_, cexpr, clauses):
@@ -1861,9 +1926,10 @@ impl MonomorphizationPass:
                     match cc.kind:
                         case HirCompClauseKind.For(cvar, citer):
                             val ci: HirExpr = citer
+                            self.collect_lets_expr(ci)
                             self.bind_iteration_var(cvar, ci)
-                        case _:
-                            pass_do_nothing("filter clause binds nothing")
+                        case HirCompClauseKind.If(cond):
+                            self.collect_lets_expr(cond)
                 val ce: HirExpr = cexpr
                 self.collect_lets_expr(ce)
             case HirExprKind.For(var_, iter, body, _):
@@ -1872,6 +1938,7 @@ impl MonomorphizationPass:
                 # Bound from the iterable's ELEMENT type when the iterable
                 # itself is locally inferable; unbound otherwise (fail-closed).
                 val fit: HirExpr = iter
+                self.collect_lets_expr(fit)
                 self.bind_iteration_var(var_, fit)
                 val fb: HirBlock = body
                 self.collect_lets_block(fb)
@@ -1879,6 +1946,7 @@ impl MonomorphizationPass:
                 # `with X as t:` binds `t` with no `let` either.
                 for wi in items:
                     val wit: HirWithItem = wi
+                    self.collect_lets_expr(wit.context_expr)
                     if wit.has_target:
                         val ct: HirExpr = wit.context_expr
                         val wt = self.infer_expr_type(ct)
@@ -1889,13 +1957,10 @@ impl MonomorphizationPass:
                                 self.env[ws.id] = wtt
                 val wbb: HirBlock = body
                 self.collect_lets_block(wbb)
-            case HirExprKind.Lambda(params, body, _):
-                for p in params:
-                    val pt: HirParam = p
-                    val ps: SymbolId = pt.symbol
-                    self.env[ps.id] = pt.type_
-                val lbody: HirExpr = body
-                self.collect_lets_expr(lbody)
+            case HirExprKind.Lambda(_, _, _):
+                # Never expose a nested function's bindings to its enclosing
+                # function or sibling lambdas. Rewrite enters its own scope.
+                pass
             case HirExprKind.UnsafeBlock(body):
                 val ub: HirBlock = body
                 self.collect_lets_block(ub)
@@ -1921,6 +1986,25 @@ impl MonomorphizationPass:
                 self.collect_lets_block_opt(finally_)
             case _:
                 pass
+
+    me collect_lets_expr_opt(expr: HirExpr?):
+        if val present = expr:
+            self.collect_lets_expr(present)
+
+    me collect_lets_exprs(exprs: [HirExpr]):
+        for expr in exprs:
+            val item: HirExpr = expr
+            self.collect_lets_expr(item)
+
+    me collect_lets_args(args: [HirCallArg]):
+        for arg in args:
+            val item: HirCallArg = arg
+            self.collect_lets_expr(item.value)
+
+    me collect_lets_named_exprs(fields: [(text, HirExpr)]):
+        for field in fields:
+            val (_, expr) = field
+            self.collect_lets_expr(expr)
 
     me bind_iteration_var(var_: SymbolId, iter: HirExpr):
         """Bind a `for` / comprehension-`for` variable to the ELEMENT type of
@@ -2549,6 +2633,25 @@ impl MonomorphizationPass:
             case HirExprKind.Lambda(params, body, captures):
                 val lbody: HirExpr = body
                 val previous_return_type = self.current_return_type
+                val previous_env = self.env
+                val previous_hint = self.match_enum_hint
+                # Copy the captured environment into a distinct table so a
+                # lambda's bindings cannot mutate the enclosing snapshot.
+                var lambda_env: Dict<i64, HirType> = {}
+                for raw_id in previous_env.keys():
+                    # Bootstrap dictionaries may expose decimal text keys;
+                    # preserve numeric SymbolIds under either representation.
+                    val id: i64 = i64("{raw_id}")
+                    val binding: HirType = previous_env[id]
+                    lambda_env[id] = binding
+                self.env = lambda_env
+                self.match_enum_hint = ""
+                for param in params:
+                    val p: HirParam = param
+                    if hir_type_is_concrete(p.type_):
+                        self.env[p.symbol.id] = p.type_
+                    else:
+                        self.env.remove(p.symbol.id)
                 self.current_return_type = nil
                 if expr.has_type_:
                     match expr.type_.kind:
@@ -2556,8 +2659,11 @@ impl MonomorphizationPass:
                             self.current_return_type = ret
                         case _:
                             pass
+                self.collect_lets_expr(lbody)
                 out.kind = HirExprKind.Lambda(params, self.rewrite_expr_with_context(lbody, self.current_return_type), captures)
                 self.current_return_type = previous_return_type
+                self.env = previous_env
+                self.match_enum_hint = previous_hint
             case HirExprKind.Block(block):
                 val bk: HirBlock = block
                 out.kind = HirExprKind.Block(self.rewrite_block(bk))
