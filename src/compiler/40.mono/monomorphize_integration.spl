@@ -20,6 +20,7 @@ use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_definitions.{HirFunction, HirConst}
 use compiler.hir.nominal_type_relocation.{hir_relocate_types}
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.monomorphize.engine.*
 use compiler.monomorphize.types.ConcreteType
 use compiler.monomorphize.type_subst.*
@@ -1668,16 +1669,14 @@ impl MonomorphizationPass:
                     # retains its optional value-or-nil representation. Use
                     # that binding evidence without globally unwrapping .?.
                     var it: HirType? = nil
+                    var exists_binding = false
                     if li != nil:
                         match li.kind:
                             case HirExprKind.ExistsCheck(_):
-                                if self.module_symbols.has(self.current_module):
-                                    val symbols: SymbolTable = self.module_symbols[self.current_module]
-                                    if val declared = symbols.get_symbol_type_raw(ls.id):
-                                        if hir_type_is_concrete(declared):
-                                            it = declared
+                                exists_binding = true
+                                it = self.exists_binding_type(ls, li)
                             case _: ()
-                    if it == nil:
+                    if it == nil and not exists_binding:
                         it = self.infer_expr_type(li)
                     if it != nil:
                         val itt: HirType = it
@@ -1696,6 +1695,34 @@ impl MonomorphizationPass:
                 self.collect_lets_block(bt)
             case _:
                 pass
+
+    me exists_binding_type(symbol: SymbolId, checked: HirExpr) -> HirType?:
+        if not self.module_symbols.has(self.current_module): return nil
+        val symbols: SymbolTable = self.module_symbols[self.current_module]
+        if val declared = symbols.get_symbol_type_raw(symbol.id):
+            if hir_type_is_concrete(declared): return declared
+            if not checked.has_type_ or checked.type_ == nil: return nil
+            val original: HirType = checked.type_
+            match original.kind:
+                case HirTypeKind.Optional(original_payload):
+                    if not hir_type_is_symbolic_evidence(original_payload) or not hir_type_is_symbolic_evidence(declared): return nil
+                    val binds_payload = hir_types_equal(declared, original_payload)
+                    val binds_optional = hir_types_equal(declared, original)
+                    if not binds_payload and not binds_optional: return nil
+                    match checked.kind:
+                        case HirExprKind.ExistsCheck(base):
+                            if val inferred = self.infer_expr_type(base):
+                                match inferred.kind:
+                                    case HirTypeKind.Optional(payload):
+                                        if hir_type_is_concrete(payload):
+                                            if binds_payload: return payload
+                                            return inferred
+                                    case _: ()
+                        case _: ()
+                case _: ()
+        # Without the original semantic relation, .? could be either an
+        # ordinary Optional binding or an if-val payload binding. Guess neither.
+        nil
 
     me collect_lets_expr(expr: HirExpr):
         """Collect this lexical function's locals through expression operands.
@@ -2865,6 +2892,37 @@ fn max_depth_of(types: [HirType]) -> i64:
         if d > m:
             m = d
     m
+
+fn hir_type_is_symbolic_evidence(ty: HirType) -> bool:
+    # Unlike a display key, this admits formal parameters but never erased
+    # Any/Error/Infer leaves as proof of an optional binding's provenance.
+    if ty == nil: return false
+    match ty.kind:
+        case HirTypeKind.TypeParam(_, bounds): all_symbolic_evidence(bounds)
+        case HirTypeKind.Named(_, args): all_symbolic_evidence(args)
+        case HirTypeKind.Array(inner, _): hir_type_is_symbolic_evidence(inner)
+        case HirTypeKind.Slice(inner): hir_type_is_symbolic_evidence(inner)
+        case HirTypeKind.Optional(inner): hir_type_is_symbolic_evidence(inner)
+        case HirTypeKind.Isolated(inner): hir_type_is_symbolic_evidence(inner)
+        case HirTypeKind.Ref(inner, _): hir_type_is_symbolic_evidence(inner)
+        case HirTypeKind.Ptr(inner, _): hir_type_is_symbolic_evidence(inner)
+        case HirTypeKind.Dict(key, value): hir_type_is_symbolic_evidence(key) and hir_type_is_symbolic_evidence(value)
+        case HirTypeKind.Result(ok, err): hir_type_is_symbolic_evidence(ok) and hir_type_is_symbolic_evidence(err)
+        case HirTypeKind.Tuple(items): all_symbolic_evidence(items)
+        case HirTypeKind.Union(items): all_symbolic_evidence(items)
+        case HirTypeKind.Function(params, returned, effects):
+            # The shared structural comparator does not compare effects.
+            # Such a function cannot prove this binding relation yet.
+            effects.len() == 0 and all_symbolic_evidence(params) and hir_type_is_symbolic_evidence(returned)
+        case HirTypeKind.Projection(base, _): hir_type_is_symbolic_evidence(base)
+        case HirTypeKind.Tensor(inner, _, _): hir_type_is_symbolic_evidence(inner)
+        case _: hir_type_is_concrete(ty)
+
+fn all_symbolic_evidence(types: [HirType]) -> bool:
+    for type_ in types:
+        val item: HirType = type_
+        if not hir_type_is_symbolic_evidence(item): return false
+    true
 
 fn hir_type_is_concrete(ty: HirType) -> bool:
     """True when no TypeParam / Infer / Error / Any occurs anywhere in `ty`.
