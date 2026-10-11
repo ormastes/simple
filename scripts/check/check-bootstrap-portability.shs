@@ -728,7 +728,7 @@ for required in \
   printf '%s\n' "${open_bug_repros}" | grep -Fq -- "${required}" && fail "fixed Option ABI reproduction must not remain opt-in: ${required}"
   [ "$(grep -Fc -- "${required}" scripts/check/check-native-seed-parity.shs)" -eq 1 ] || fail "mandatory Option ABI reproduction must be registered exactly once: ${required}"
 done
-grep -Fq 'val payload = value?' test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl || fail "uniform Option fixture must exercise annotated/local try lowering"
+grep -Fq 'val payload = value?' test/fixtures/compiler/native_option_try_annotated_loud.spl || fail "uniform Option fixture must exercise annotated/local try lowering"
 grep -Fq 'val payload = direct_value()?' test/fixtures/compiler/native_option_try_direct_loud.spl || fail "direct Option fixture must exercise call-result try lowering"
 grep -Fq 'return _sffi_core_string_rt_enum_new(1, 1, 3)' src/runtime/simple_core/core_string.spl || fail "text index_of absence must return canonical Option.None"
 grep -Fq 'declare i8 @rt_enum_check_discriminant(i64, i64)' src/compiler/70.backend/backend/llvm_backend.spl || fail "LLVM enum discriminant predicate ABI drift"
@@ -1195,7 +1195,7 @@ for runtime_owner in \
   examples/09_embedded/simple_os/arch/x86_32/boot/baremetal_stubs.c; do
   grep -Fq 'return (RuntimeValue)s->len;' "${runtime_owner}" || fail "baremetal string length raw ABI missing: ${runtime_owner}"
   grep -Eq 'int(32|64)_t i = \(int(32|64)_t\)idx;' "${runtime_owner}" || fail "baremetal string char index raw ABI missing: ${runtime_owner}"
-  grep -Fq 'return rt_string_new((RuntimeValue)(uintptr_t)(s->data + i), 1);' "${runtime_owner}" || fail "baremetal string char text result missing: ${runtime_owner}"
+  grep -Eq 'return rt_string_new\(\(RuntimeValue\)\(uintptr_t\)\((s->data \+ i|&s->data\[i\])\), (\(RuntimeValue\))?1\);' "${runtime_owner}" || fail "baremetal string char text result missing: ${runtime_owner}"
   grep -Fq 'return rt_string_char_at(v, (RuntimeValue)DECODE_INT(idx));' "${runtime_owner}" || fail "generic baremetal string index decode missing: ${runtime_owner}"
 done
 for required in \
@@ -1238,7 +1238,7 @@ for required in \
   grep -Fq -- "${required}" "${enum_eq_mir}" || fail "native enum equality lowering missing: ${required}"
 done
 grep -Fq 'runtime_name: text' src/compiler/20.hir/hir_definitions.spl || fail "HIR enum runtime identity missing"
-grep -Fq 'lower_enum_owners[imported_name] = hir_module_logical_name_from_path(imported_mod.name)' src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl || fail "imported enum owner identity missing"
+grep -Fq 'self.imported_enum_owners[local_name] = imported_mod.module_name' src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl || fail "imported enum owner identity missing"
 enum_identity_mir=src/compiler/50.mir/_MirLowering/module_lowering.spl
 for required in \
   'me register_enum_runtime_id(enum_def: HirEnum):' \
@@ -1247,10 +1247,14 @@ for required in \
   'self.enum_runtime_id_index[enum_name] = runtime_id'; do
   grep -Fq -- "${required}" "${enum_identity_mir}" || fail "enum runtime identity lowering missing: ${required}"
 done
-grep -Fq '_bootstrap_enum_runtime_id_names = lw.enum_runtime_id_names' src/compiler/50.mir/_MirLowering/bootstrap_globals.spl || fail "bootstrap enum collision registry sharing missing"
-grep -Fq 'error: bootstrap MIR type registration failed:' src/compiler/50.mir/_MirLowering/bootstrap_globals.spl || fail "bootstrap enum collision rejection missing"
+grep -Fq '_bootstrap_type_runtime_names = lw.enum_runtime_id_names' src/compiler/50.mir/_MirLowering/bootstrap_type_registration.spl || fail "bootstrap enum collision registry sharing missing"
+grep -Fq 'lw = bootstrap_type_registration_finish(lw, "bootstrap MIR type registration failed")' src/compiler/50.mir/_MirLowering/bootstrap_type_registration.spl || fail "bootstrap enum collision rejection missing"
 grep -Fq 'collision.Type255081' test/fixtures/compiler/enum_runtime_identity_guard.spl || fail "enum runtime ID collision regression missing"
-driver_mir_pipeline=src/compiler/80.driver/driver_pipeline.spl
+grep -Fq 'lw.enum_runtime_id_names = _bootstrap_type_runtime_names' src/compiler/50.mir/_MirLowering/bootstrap_type_registration.spl || fail "bootstrap enum collision registry restore missing"
+bootstrap_type_finish_body=$(sed -n '/^fn bootstrap_type_registration_finish(/,/^fn bootstrap_register_flat_type_defs(/p' src/compiler/50.mir/_MirLowering/bootstrap_type_registration.spl)
+printf '%s\n' "$bootstrap_type_finish_body" | grep -Fq 'if lw.errors.len() > 0:' || fail "bootstrap type registration failure detection missing"
+printf '%s\n' "$bootstrap_type_finish_body" | grep -Fq 'exit(1)' || fail "bootstrap type registration failure does not stop lowering"
+driver_mir_pipeline=src/compiler/80.driver/driver_pipeline_lowering.spl
 if grep -Ev '^[[:space:]]*#' "${driver_mir_pipeline}" | grep -Fq 'MirLowering('; then
   fail "driver bypasses canonical MIR lowering constructor"
 fi
@@ -1266,11 +1270,11 @@ grep -Fq 'self.enum_runtime_id(enum_name)' src/compiler/50.mir/_MirLoweringExpr/
 enum_eq_runtime=src/runtime/simple_core/core_string.spl
 for required in \
   'fn rt_native_eq_inner(left: i64, right: i64, depth: i64) -> i64:' \
-  'val left_disc = rt_enum_discriminant(left)' \
-  'rt_enum_id(left) != rt_enum_id(right)' \
-  'return rt_native_eq_inner(rt_enum_payload(left), rt_enum_payload(right), depth + 1)' \
+  'val left_disc = _sffi_core_string_rt_enum_discriminant(left)' \
+  '_sffi_core_string_rt_enum_id(left) != _sffi_core_string_rt_enum_id(right)' \
+  'return rt_native_eq_inner(_sffi_core_string_rt_enum_payload(left), _sffi_core_string_rt_enum_payload(right), depth + 1)' \
   'val left_ptr = registered_string_ptr(left)' \
-  'val left_array = array_is_valid(left) > 0' \
+  'val left_array = _sffi_core_string_array_is_valid(left) > 0' \
   'val left_bytes = (left_flags & 8) > 0' \
   'if left_bytes and right_bytes:' \
   'if left_u64 and right_u64:' \
