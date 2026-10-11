@@ -390,3 +390,17 @@ comparisons cleared all collection-plan MIR diagnostics; the same bounded
 closure still fails MIR with 55 errors in other modules. See [the exact compiler blocker](../../../08_tracking/bug/item5_vhdl_port_stage2_hir_collection_plan_owner_2026-10-11.md).
 This is structural evidence only: admitted native port dispatch, optional
 demand loading, and matched size/startup/RSS remain open.
+
+## 2026-10-11 Stage 2 hello loader attribution
+
+A current-source admitted Stage 2 hello links and runs with only libc and the
+ELF loader as direct dynamic dependencies. Its unstripped/diagnostically
+stripped sizes are 16,704/9,800 bytes. The linked symbol table has no
+`mmap`/`munmap` reference; it does retain startup-aspect `dlopen` code and the
+bootstrap profiler constructor. An explicitly missing startup pack rejects
+before `hello`, and default dynload native-build warns that no automatic
+aspect pack was produced. See [the exact diagnostic](../../../09_report/compiler/target5_current_stage2_hello_loader_attribution_2026-10-11.md).
+This does not qualify Stage 4, matched C size, startup/RSS, or provider demand
+loading. Removing mmap from hello is unsupported by this image; the next cut
+is admitted aspect-pack production plus an exact startup/runtime retention
+contract.
