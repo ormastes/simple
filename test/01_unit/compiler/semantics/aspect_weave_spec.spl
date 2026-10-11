@@ -54,7 +54,10 @@ use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.semantics.aspect_validation.{validate_aspect_contracts}
+use compiler.semantics.aspect_validation.{aspect_module_identity_index, validate_aspect_join_points_v1}
 use compiler.semantics.aspect_weave.{weave_forward_advice}
+use compiler.semantics.aspect_weave.{aspect_forward_weave_claims_v1, weave_forward_advice_claim_in_module_v1}
+use compiler.semantics.join_point_model.{forward_join_points, forward_join_points_for_module_v1}
 use compiler.backend.interpreter.{InterpreterBackendImpl}
 use compiler.common.config.{Logger}
 
@@ -107,6 +110,42 @@ val SRC_WRONG_KIND = FORWARDER + "\n@advice(scene_commit, submit_view)\n" + OBLI
 val SRC_UNMATCHED_SELECTOR = FORWARDER + "\n@advice(forward, no_such_forwarder)\n" + OBLIGATIONS + TRIPWIRE + "\n" + MAIN
 
 describe "C3 static-weave codegen: weave_forward_advice on real `forward` join points":
+
+    it "continues the actual join-point ids across a one-module borrowed scan":
+        val hir = wv_lower(SRC_MATCH, "wv_join_ids.spl")
+        val points = forward_join_points_for_module_v1(hir, 9)
+        expect(points.len()).to_equal(2)
+        expect(points[0].logical_join_point_id).to_equal(9)
+        expect(points[1].logical_join_point_id).to_equal(10)
+        expect(points[0].source_symbol).to_equal("submit_view")
+        expect(points[1].source_symbol).to_equal("main")
+
+    it "executes the actual advice after the shared one-module rewrite and preserves idempotence":
+        val hir = wv_lower(SRC_MATCH, "wv_borrowed_exec.spl")
+        val modules = {"wv_probe": hir}
+        val ids = aspect_module_identity_index(modules)
+        val points = forward_join_points(modules)
+        expect(validate_aspect_join_points_v1(ids, points).len()).to_equal(0)
+        val claims = aspect_forward_weave_claims_v1(ids, points)
+        expect(claims.len()).to_equal(1)
+        expect(claims[0].selector).to_equal("submit_view")
+        expect(claims[0].advice_fn).to_equal("trace_submit")
+        val (woven, count) = weave_forward_advice_claim_in_module_v1("wv_probe", hir, ids, claims[0])
+        expect(count).to_equal(1)
+        expect(wv_submit_view_stmt_count({"wv_probe": woven})).to_equal(1)
+        val backend = InterpreterBackendImpl.new()
+        expect(backend.process_module(woven).is_err()).to_equal(true)
+        val (repeated, repeated_count) = weave_forward_advice_claim_in_module_v1("wv_probe", woven, ids, claims[0])
+        expect(repeated_count).to_equal(0)
+        expect(wv_submit_view_stmt_count({"wv_probe": repeated})).to_equal(1)
+
+    it "creates no forward weave recipe for an actual unmeasured kind":
+        val hir = wv_lower(SRC_WRONG_KIND, "wv_borrowed_wrong_kind.spl")
+        val modules = {"wv_probe": hir}
+        val ids = aspect_module_identity_index(modules)
+        val points = forward_join_points(modules)
+        expect(validate_aspect_join_points_v1(ids, points).len()).to_equal(1)
+        expect(aspect_forward_weave_claims_v1(ids, points).len()).to_equal(0)
 
     it "validates clean and weaves exactly one forwarder for a real matched selector":
         step("Verify: validates clean and weaves exactly one forwarder for a real matched selector")
