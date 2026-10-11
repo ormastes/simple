@@ -8,20 +8,27 @@ not describe a completed subset as the completed feature.
 
 ## Evidence available
 
-The recovered authored implementation, design and test fixtures are preserved
-in the isolated release integration worktree. The Git tree decoder has a
-byte-framed implementation and authored rejection fixtures. Those fixtures
-have not been executed. The Phase 2 compiler identity and failed host probe
-are recorded in phase2_verification.md and the linked bug report.
+The recovered implementation and current source changes are preserved on
+work/traceability-release_phase3-20261011, with draft PR #3083 targeting
+release_phase3. Authored source includes exact-index snapshot selection,
+scoped graph construction, native SDN runner-event transport through the
+existing database owner, and independent frozen-plan reconciliation. These
+sources and their fixtures have not passed native Phase 3 execution.
+Historical Phase 2 probes do not qualify the Phase 3 candidate.
 
 ## Blocking findings
 
-- Phase 2 native-build exited 1 and did not produce a runnable probe. No
-  feature test or build/run qualification is established.
-- The staged runner merge preserves release test counters and opt-in SDN
-  case events, but the existing child DB protocol cannot carry those events.
-  A proposed tab-delimited extension was rejected under REQ-TRC-001. The
-  reviewed staging is retained outside this worktree, not admitted or landed.
+- No admitted source-matched Phase 3 runtime has executed this feature's
+  build, CLI, SDN parser or SSpec acceptance checks.
+- Native SDN case-event transport is now wired into the runner's database
+  child; the previous rejected tab-delimited proposal is not the current
+  implementation. Durable pre-dispatch frozen-plan ownership and execution
+  provenance remain incomplete.
+- Contract review found that the legacy database table codec does not safely
+  round-trip nested quotes and commas. Frozen plan and observation fields
+  require reversible owner-safe scalar storage plus real reload fixtures
+  before their persistence can be trusted. In-memory fixtures alone cannot
+  discharge this finding.
 - Production graph persistence/invalidation, trusted admission integration,
   runner plan/provenance admission and complete viewer interactions remain
   implementation work. All 40 acceptance criteria remain unexecuted.
@@ -35,7 +42,7 @@ owned process contract; its eventual runtime checks remain required.
 
 ## Landing disposition
 
-No implementation PR is merged into release/1.0. Do not merge this work while
+No implementation PR is merged into release_phase3. Do not merge this work while
 the findings above remain unresolved. The report-only historical landing is
 not evidence that the feature implementation landed. No tag or publication
 was performed.
