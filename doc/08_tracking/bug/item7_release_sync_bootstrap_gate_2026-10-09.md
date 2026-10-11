@@ -198,3 +198,26 @@ additions), with no target-relative file deletions; tracked executable specs
 under `doc/06_spec` remain zero. Imported-registry graph and roundtrip tests
 are authored, not executed. These source checks do not change the admission
 BLOCKED status.
+
+## 2026-10-11 bounded current-source compiler continuation
+
+The lane was synced onto `release_phase3` commit `9434873b8d3`, including its
+cold-HIR dictionary guard. Feature commit `33c674a55b518b20679a21acd481d5f410d0b29b`
+adds an explicit observed adaptive text-set loop API and the shared completed
+loop-trip capture ABI. Its C selfcheck compiled and ran with exit 0; the ten
+new Simple unit cases and standalone probe remain UNRUN.
+
+Two source/runtime-pinned pure-Simple LLVM compiler diagnostics were executed
+without seed fallback. The first timed out at 900 seconds (exit 124, no binary)
+after its HIR warm worker reported zero failed modules. The changed second
+attempt reused that cache, skipped HIR warm-up and reached the final worker,
+but exceeded the enforced 5 GiB process-tree cap (exit 88, no binary).
+Both receipts confirm quiescent process trees and clean frozen source.
+Exact inputs, outcomes and retained evidence are recorded in
+[the interpreted-worker timeout report](item7_phase3_interpreted_worker_timeout_2026-10-11.md).
+
+STATUS: BLOCKED for Phase3 admission and full feature acceptance. Hello World
+native sanity, the standalone loop probe and required compiler/lib/MCP checks
+cannot be marked PASS without a working source-matched runner. General compiler
+loop identity/instrumentation and broader typed joins remain implementation gaps.
+PR #3073 targets `release_phase3` and must remain unfinished/unmerged.
