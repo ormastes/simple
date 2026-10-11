@@ -127,6 +127,15 @@ reads full original bodies inside borrowed leases, yielding body-free DTOs
 ordered indexes, RT capabilities and transformed parents; these helpers alone
 do not activate the pipeline or grant final admission.
 
+`cache/driver_cold_hir_source_capture_plan_v1.spl` performs actual pinned SCV
+generation, snapshot, canonical generation text, selected-source, full-inventory
+CFG and count checks in one owned inventory scope. Only first-physical-source
+capture input rows escape. The retained cold typed-receipt helper shares the
+same source validators at its original check points, preserving first-physical
+deduplication and independent ABI failure collection. The new source factory is
+inactive and does not publish ctx receipts or admit transformed bodies; four
+new boundary examples and full SCV/native integration remain unrun.
+
 ## 2026-09-26 — `native-build` restored: backend table in the interpreted worker, entry-file hashing, module-init reads
 
 - **The interpreted native-build worker never installed the static backend

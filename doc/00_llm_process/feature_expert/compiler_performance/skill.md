@@ -51,3 +51,12 @@ readers return only scalar/layout/RT/join-point DTOs; `postfacts` requires 14
 checks and the managed handoff. Both fixtures remain unrun. Their public pins
 and editable fact rows need genuine driver prerequisite ownership before final
 admission.
+
+The reviewed MIR declaration/default stack retains complete expression
+artifacts, canonical callable/global ownership, nested `Throws` types and lifted
+closure/trait metadata. Its nine unit examples and 17 native fixture checks
+remain unrun; the real final repository and driver activation are still needed.
+Cold SCV source admission now has a separate owned source-capture-plan factory:
+it admits the pinned generation/snapshot and returns selected input rows without
+HIR. Four new ownership/alias/snapshot boundary examples are unrun. This source
+plan cannot authenticate the later transformed body.
