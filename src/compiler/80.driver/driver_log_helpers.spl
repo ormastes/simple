@@ -8,7 +8,7 @@ use std.nogc_sync_mut.io.file_ops.{file_append}
 use std.nogc_sync_mut.build_progress.{publish_build_progress}
 use std.common.build_progress.{BUILD_PROGRESS_SCHEMA_V1, BuildProgressSnapshot,
     BuildProgressState, BuildLinkState, build_progress_state_text}
-use compiler.common.build_phase_accounting.{build_phase_succeeded_units_v1, build_phase_terminal_failures_v1}
+use compiler.common.build_phase_accounting.{build_phase_succeeded_units_v1, build_phase_snapshot_compiled_units_v1, build_phase_terminal_known_failures_v1}
 use std.env.{env_get, env_get_or}
 use std.io_runtime.{time_now_monotonic_ms}
 
@@ -50,6 +50,7 @@ var _g_progress_snapshot_seq: i64 = 0
 var _g_progress_prev_ms: i64 = -1
 # Parent-owned latest progress row, reset by every phase-start row.
 var _g_progress_last_phase: text = ""
+var _g_progress_last_unit_kind: text = ""
 var _g_progress_last_done: i64 = -1
 var _g_progress_last_total: i64 = -1
 var _g_progress_last_failed: i64 = -1
@@ -170,7 +171,7 @@ fn _publish_progress_snapshot(
     val path = _build_progress_snapshot_path()
     if path == "" or _g_progress_build_id == "":
         return
-    val remaining = if done >= 0 and total >= 0 and total > done: total - done else: 0
+    val remaining = build_progress_remaining_units(done, total)
     val rate = if done > 0 and now_ms > 0: done * 1000000 / now_ms else: -1
     val eta = if remaining > 0 and rate > 0: remaining * 1000000 / rate else: -1
     val state = _snapshot_state(terminal, failed)
@@ -180,10 +181,11 @@ fn _publish_progress_snapshot(
         state: state, verdict: build_progress_state_text(state),
         total_files: total, discovered_files: total, planned_files: total,
         queued_files: remaining, compiling_files: if state == BuildProgressState.Running: 1 else: 0,
-        compiled_files: done, cached_files: cached, failed_files: failed,
+        compiled_files: build_phase_snapshot_compiled_units_v1(phase, done, cached, failed),
+        cached_files: cached, failed_files: failed,
         remaining_files: remaining, current_files: if current == "": [] else: [current],
         last_completed_file: if done > 0: current else: "",
-        error_count: failed, error_summary: if failed > 0: "build phase reported failure" else: "",
+        error_count: failed, error_summary: if state == BuildProgressState.Failed: "build phase reported failure" else: "",
         link_state: _snapshot_link_state(phase, terminal, failed),
         link_input_count: if phase == "link": total else: 0,
         link_output: if phase == "link": current else: "",
@@ -290,6 +292,7 @@ pub fn log_build_progress(
     terminal: text
 ):
     _g_progress_last_phase = phase
+    _g_progress_last_unit_kind = unit_kind
     _g_progress_last_done = done
     _g_progress_last_total = total
     _g_progress_last_failed = failed
@@ -328,10 +331,13 @@ pub fn log_build_progress(
 
 pub fn log_build_progress_failure(phase: text, unit_kind: text, current: text,
         tasks_done: i64, tasks_total: i64):
-    if _g_progress_last_phase == phase:
-        log_build_progress(phase, unit_kind, _g_progress_last_done,
+    if _g_progress_last_phase == phase and _g_progress_last_unit_kind == unit_kind:
+        val known_failed = build_phase_terminal_known_failures_v1(
+            _g_progress_last_done, _g_progress_last_total, _g_progress_last_failed)
+        log_build_progress(phase, unit_kind,
+            if known_failed < 0: -1 else: _g_progress_last_done,
             _g_progress_last_total, current, tasks_done, tasks_total,
-            build_phase_terminal_failures_v1(_g_progress_last_failed), _g_progress_last_cached, "failed")
+            known_failed, _g_progress_last_cached, "failed")
     else:
         log_build_progress(phase, unit_kind, -1, -1, current,
             tasks_done, tasks_total, -1, 0, "failed")
