@@ -1751,9 +1751,18 @@ pub fn rt_string_to_int_lenient(value: i64) -> i64:
     return _sffi_core_string_strtoll(string_data_ptr_value(ptr), 0, 10)
 
 pub fn rt_to_string(value: i64) -> i64:
-    val ptr = string_ptr(value)
+    # A heap tag alone is not readable ownership. Strings and numeric leaves
+    # establish membership in their own registries before any header access.
+    val ptr = registered_string_ptr(value)
     if ptr > 0:
         return value
+    val numeric_kind = tagged_numeric_kind(value)
+    if numeric_kind == 0x494E5431:
+        return rt_raw_i64_to_string(_sffi_core_string_rt_value_as_int(value))
+    if numeric_kind == 0x55494E54:
+        var bits: i64 = 0
+        unsafe(capabilities: [ffi]): bits = rt_value_as_u64(value)
+        return tagged_unsigned_decimal(bits)
     if value > 2 and value < 4:
         return rt_string_new(0, 0)
     if value > 10 and value < 12:
@@ -1778,6 +1787,8 @@ pub fn rt_to_string(value: i64) -> i64:
         _sffi_core_string_spl_store_u8(string_data_ptr_value(out_ptr), 4, 101)
         return out
     if (value & 7) > 0:
+        # Preserve this entry point's existing unsupported Float/aggregate
+        # result. No owned Float text formatter is qualified in this lane.
         return rt_string_new(0, 0)
 
     var n = value >> 3

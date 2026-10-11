@@ -128,5 +128,31 @@ int main(int argc, char** argv) {
         float_is_valid(float_rebuilt) != 0) return 32;
     __simple_runtime_shutdown();
     if (numeric_box_kind(wide_rebuilt) != 0 || float_is_valid(float_rebuilt) != 0) return 33;
+    /* Ordinary conversion must consume default rt_value_int's wide boxes,
+     * independently of rt_tagged_add's specialized text coercion path. */
+    __simple_runtime_init();
+    int64_t text_min = rt_value_int(INT64_MIN);
+    int64_t text_max = rt_value_int(INT64_MAX);
+    int64_t text_boundary = rt_value_int(INT64_C(1152921504606846976));
+    int64_t text_uint = rt_value_u64(-1);
+    if (!text_equal(rt_to_string(text_min), "-9223372036854775808")) return 34;
+    if (!text_equal(rt_to_string(text_max), "9223372036854775807")) return 35;
+    if (!text_equal(rt_to_string(text_boundary), "1152921504606846976")) return 36;
+    if (!text_equal(rt_value_to_string(text_min), "-9223372036854775808")) return 37;
+    if (!text_equal(rt_value_to_string(text_max), "9223372036854775807")) return 38;
+    if (!text_equal(rt_value_to_string(text_boundary), "1152921504606846976")) return 39;
+    if (!text_equal(rt_to_string(text_uint), "18446744073709551615")) return 40;
+    if (!text_equal(rt_value_to_string(text_uint), "18446744073709551615")) return 41;
+    if (!text_equal(rt_to_string(rt_value_bool(1)), "true") ||
+        !text_equal(rt_value_to_string(rt_value_bool(0)), "false")) return 42;
+    if (!text_equal(rt_to_string(rt_value_nil()), "") ||
+        !text_equal(rt_value_to_string(rt_value_nil()), "")) return 43;
+    int64_t text_owned = rt_string_new((const uint8_t*)"ok", 2);
+    if (rt_to_string(text_owned) != text_owned || rt_value_to_string(text_owned) != text_owned) return 44;
+    /* Unknown heap-tag candidates must reach the existing empty fallback
+     * without a speculative header read or access violation. */
+    if (!text_equal(rt_to_string(INT64_C(4096) | 1), "") ||
+        !text_equal(rt_value_to_string(INT64_C(4096) | 1), "")) return 45;
+    __simple_runtime_shutdown();
     return 0;
 }
