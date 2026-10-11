@@ -112,3 +112,35 @@ describe "frozen trace execution configuration codec":
                 expect(a.len()).to_equal(71)
             case (Err(reason), _): fail("valid config ID failed: {reason}")
             case (_, Err(reason)): fail("repeated config ID failed: {reason}")
+
+    it "invalidates configuration identity when effective inputs or membership change":
+        val baseline = _execution_config()
+        val baseline_id = trace_execution_configuration_id(baseline).unwrap()
+        match validate_trace_execution_configuration(baseline):
+            case Err(reason): fail("supported fixture profile was rejected: {reason}")
+            case Ok(_):
+                for dimension in ["timeout", "backend", "seed", "fail_fast", "lane", "membership"]:
+                    var changed = baseline
+                    if dimension == "timeout": changed.timeout_secs = 121
+                    elif dimension == "backend": changed.backend = "llvm"
+                    elif dimension == "seed": changed.seed = 38
+                    elif dimension == "fail_fast": changed.fail_fast = true
+                    elif dimension == "lane": changed.lane_id = "lane-other"
+                    else: changed.shard_membership = ["test/other_spec.spl", "test/日本_spec.spl"]
+                    val changed_id = trace_execution_configuration_id(changed).unwrap()
+                    expect(changed_id == baseline_id).to_equal(false)
+
+    it "rejects duplicate unresolved dimensions and oversized aggregate membership":
+        var duplicate = _execution_config()
+        duplicate.unresolved_fields = ["effective_timeout", "effective_timeout"]
+        match encode_trace_execution_configuration(duplicate):
+            case Ok(_): fail("duplicate unresolved dimension was serialized")
+            case Err(reason): expect(reason).to_contain("duplicate")
+        var oversized = _execution_config()
+        var paths: [text] = []
+        for i in 0..257:
+            paths.push("test/{i}/" + "x".repeat(4080))
+        oversized.shard_membership = paths
+        match encode_trace_execution_configuration(oversized):
+            case Ok(_): fail("oversized aggregate membership was serialized")
+            case Err(reason): expect(reason).to_contain("1 MiB")
