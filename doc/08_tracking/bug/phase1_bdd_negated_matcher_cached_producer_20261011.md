@@ -31,3 +31,10 @@ shared workspace: baseline.log, consumer-map.json, per-spec logs, results.json,
 and inversion.log. Collection is one bounded diagnostic pass per identity.
 Further source-contract failures are retained without weakening their checks.
 No compiler rebuild, direct grammar rewrite, skip, or native/JIT admission.
+
+Five stale source-owner consumers were independently corrected and merged in
+PR3023 (f3eb9e8a4c8a35f1de265062c3e804dd08a666f0): LLVM adapter/lifetime,
+MIR signature, AST projection, and closure index. Eight changed criteria passed
+without replaying prior greens. The broader PR3015 preserves the remaining
+workarounds and ten open product-contract failures. This does not close the
+canonical direct matcher grammar defect.

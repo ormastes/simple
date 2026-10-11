@@ -33,3 +33,28 @@ Stage1 Windows bootstrap only; immutable producer15102d32226b3fbead63d3c63e33e99
 Collection: one attempt per identity, no replay of passing checks. Source-contract and unresolved-owner failures remain OPEN, with exact logs retained under build/phase1-negated-matcher-20261011. Required pure-Simple verification cannot run because the release runtime is absent; draft remains necessary.
 
 Final diagnostic aggregate: 66 executed, 48 passed, 18 failed; 6 passing files and 9 failing files. All15identities executed; zero skipped/dropped. These counts include the new predicatecontrol, not the separate expected-red grammar or inversion probes.
+
+## Current source-owner corrections
+
+Independent PR3023 merged at f3eb9e8a4c8a35f1de265062c3e804dd08a666f0.
+Its five completed specs fix eight previously failing criteria: LLVM adapter3,
+LLVM lifetime1, MIR signature1, AST projection2, closure lookup1. Criteria
+were checked only after the relevant source-contract correction; all eight
+passed, with six prior unchanged passes retained. No prior green was replayed.
+MIR span ownership needed two bounded cycles; other changed criteria needed one.
+
+This provides incremental coverage of the original66 examples:56 passing and
+10 still failing. It is not a rerun of the original collection or a new native
+qualification. The direct grammar and expected-red inversion evidence remain
+unchanged. Source-contract status for the remaining four families is OPEN:
+
+| Family | Remaining cases | Proven current owner issue | Concrete next repair/gate |
+| --- | --- | --- | --- |
+| Interpreter coverage | 4 | eval.spl eval_control_condition recursively composes and/or, but unary-not reaches generic eval_expr and records the enclosing expression. Expected bounded leaf counting and legacy/vector helpers are absent. | Repair unary-not operand traversal and qualify real AST condition receipts; decide bounded current-owner contract before replacing historical helper fragments. |
+| MIR trace scope | 2 | module_lowering lower_module lacks trace_scope enter/exit; method-call/function trace gates lack the expected generation refresh although expr_dispatch has it. | Bind outer lowering to balanced trace scope and refresh persistent gates by actual generation, then qualify multiple lowering generations. |
+| Performance diagnostics | 3 | lint_checks lacks lint_rule_code_from_easyfix_id and the claimed silent-default owner; its actual result filter still allocates filtered_results and uses should_keep_lint_result plus a separate level lookup. | Implement canonical malformed-safe code extraction; reconcile actual silent-default owner; replace duplicate filter policy with the existing lint_policy_decision and validate caller behavior. |
+| Raw-SFFI snapshot | 1 | standalone snapshot behavior passes, but the Linter integration owner lacks the claimed raw_sffi_code_snapshot(content,path) combined traversal. | Wire one real snapshot into both ordered categories at the canonical lint owner and qualify call/declaration category ordering. |
+
+These production integration/performance contracts are not repaired by assertion
+weakening. Source/log identity receipts remain in residual-evidence.json and
+original evidence.json. Missing pure-Simple runtime gates remain explicit.
