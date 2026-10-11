@@ -26,9 +26,10 @@ use std.test_runner.test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, 
 use std.test_runner.test_manifest_scanner.{manifest_full_scan}
 use std.test_runner.test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_compile, run_test_file_safe_mode}
 use std.test_runner.test_executor_lanes.{run_test_file_composite}
-use std.test_runner.test_runner_output.{combined_test_run_json, print_result, print_summary}
+use std.test_runner.test_runner_output.{combined_test_run_sdn, print_result, print_summary}
 use std.test_runner.test_runner_config.{report_free_mem, mode_to_str, propagate_env_vars, get_cli_args, get_flag_value, handle_run_management, has_run_management_flag}
 use app.test_runner_new.cover_admission.{cover_admitted_files, cover_append_failures}
+use app.test_runner_new.sdn_worker_args.{parse_private_sdn_worker_args}
 use app.test_daemon.session_scheduler.{schedule_session_tests, schedule_summary, schedule_flatten, schedule_session_file_paths, schedule_local_file_paths}
 # MEMORY DEBUG: groups 3-9 commented out to isolate memory usage
 # GROUP 3: Container
@@ -1329,40 +1330,22 @@ fn summarize_test_results(results: [TestFileResult]) -> TestRunResult:
 # =========================================================================
 
 fn run_test_cli() -> i64:
-    report_free_mem("START")
-    # Start resource safeguard before any test discovery or execution.
-    ensure_kill_monitor_running()
-    val all_args = get_cli_args()
-    var args: [text] = []
-    var json_worker = false
-    var i = if all_args.len() > 0 and all_args[0] == "test": 1 else: 0
-    var marker = -1
-    var scan = 0
-    while scan < all_args.len():
-        if all_args[scan] == "--test-json-worker":
-            marker = scan
-            break
-        scan = scan + 1
-    if marker >= 0:
-        if env_get("SIMPLE_TEST_JSON_WORKER_AUTH") != "1":
-            print "ERROR: unauthorized private test JSON worker marker"
+    val parsed = match parse_private_sdn_worker_args(get_cli_args(), env_get("SIMPLE_TEST_SDN_WORKER_AUTH") == "1"):
+        case Ok(value): value
+        case Err(reason):
+            eprint "ERROR: {reason}"
             return 2
-        env_set("SIMPLE_TEST_JSON_WORKER_AUTH", "")
-        json_worker = true
-        i = marker + 1
-    while i < all_args.len():
-        # Public JSON mode: `--json` (or `--format json`) on the DIRECT
-        # dispatch path (seed `simple test`, which skips the _CliMain
-        # json_wrapper subprocess). Reuses the worker-mode emission and print
-        # suppression; only the private --test-json-worker marker needs auth.
-        if all_args[i] == "--json":
-            json_worker = true
-        else:
-            if all_args[i] == "--format" and i + 1 < all_args.len() and all_args[i + 1] == "json":
-                json_worker = true
-            args.push(all_args[i])
-        i = i + 1
-
+    if parsed.public_sdn_requested:
+        eprint "ERROR: public SDN output requires the bounded parent wrapper"
+        return 2
+    val args = parsed.forwarded_args
+    val sdn_worker = parsed.worker
+    val sdn_result_path = parsed.result_path
+    if sdn_worker:
+        env_set("SIMPLE_TEST_SDN_WORKER_AUTH", "")
+    report_free_mem("START")
+    # Argument rejection precedes resource safeguards and test side effects.
+    ensure_kill_monitor_running()
     # Handle run management commands (status/stop/etc.)
     if has_run_management_flag(args):
         return handle_run_management(args)
@@ -1409,8 +1392,15 @@ fn run_test_cli() -> i64:
         print "  run_spec_tests: {config.run_spec_tests}"
         print "  run_sdoctests: {config.run_sdoctests}"
         print "  run_spl_doctests: {config.run_spl_doctests}"
-        if json_worker:
-            print combined_test_run_json(false, false, spec_result, false, spl_doctest_result, false, sdoctest_result)
+        if sdn_worker:
+            match combined_test_run_sdn(false, false, spec_result, false, spl_doctest_result, false, sdoctest_result):
+                case Ok(document):
+                    if not file_atomic_write(sdn_result_path, document):
+                        eprint "ERROR: cannot atomically write worker SDN output"
+                        return 3
+                case Err(reason):
+                    eprint "ERROR: cannot encode worker SDN failure: {reason}"
+                    return 3
         return 1
 
     propagate_env_vars(options)
@@ -1452,7 +1442,7 @@ fn run_test_cli() -> i64:
                     trace_infra_failed = true
         if generate_spipe_docs_for_results(result_files, options, find_simple_binary()) != 0:
             if exit_code == 0: exit_code = 3
-        if not json_worker:
+        if not sdn_worker:
             emit_spec_file_verdicts(result_files)
             print_summary(spec_result, options.format)
             # In-development counts ride on the ordinary summary surface,
@@ -1463,7 +1453,7 @@ fn run_test_cli() -> i64:
 
         if options.coverage:
             val coverage = collect_coverage()
-            if not json_worker:
+            if not sdn_worker:
                 print_coverage_summary(coverage)
             generate_coverage_reports(coverage)
             print_coverage_delta(coverage)
@@ -1521,8 +1511,8 @@ fn run_test_cli() -> i64:
     if trace_infra_failed and exit_code == 0:
         exit_code = 1
 
-    if json_worker:
-        print combined_test_run_json(
+    if sdn_worker:
+        match combined_test_run_sdn(
             exit_code == 0,
             run_spec,
             spec_result,
@@ -1530,7 +1520,14 @@ fn run_test_cli() -> i64:
             spl_doctest_result,
             run_sdoc,
             sdoctest_result
-        )
+        ):
+            case Ok(document):
+                if not file_atomic_write(sdn_result_path, document):
+                    eprint "ERROR: cannot atomically write worker SDN output"
+                    if exit_code == 0: exit_code = 3
+            case Err(reason):
+                eprint "ERROR: cannot encode worker SDN output: {reason}"
+                if exit_code == 0: exit_code = 3
 
     exit_code
 
