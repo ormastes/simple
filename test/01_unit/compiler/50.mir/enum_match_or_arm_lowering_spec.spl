@@ -1,0 +1,55 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Or-arms (`case E.A | E.B:`) in an enum match lower per alternative
+
+Stage2 reported `enum match: unsupported arm pattern` when an enum match
+mixed ordinary variant arms with an or-arm: lower_match_case routes any match
+with an Enum arm to lower_enum_match, whose arm collector accepted only
+Enum / Wildcard / Binding. lower_enum_match now expands an Or arm into one
+arm per alternative sharing the same guard and body. A match whose only
+enum arms are or-arms keeps its existing (working) lowering path.
+"""
+
+# @tag: unit, compiler, mir, enum
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val mixed_source = "enum Decision:\n    Admitted\n    Rejected\n    Deferred\n\nfn code(d: Decision) -> i64:\n    match d:\n        case Decision.Admitted | Decision.Deferred:\n            1\n        case Decision.Rejected:\n            2\n        case _:\n            0\n"
+val or_only_source = "enum Decision:\n    Admitted\n    Rejected\n    Deferred\n\nfn code(d: Decision) -> i64:\n    match d:\n        case Decision.Admitted | Decision.Rejected:\n            1\n        case _:\n            0\n"
+
+fn mir_errors(src: text) -> text:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.prescan_module_struct_names(hir)
+    val mir = mir_lowering.lower_module(hir)
+    var out = ""
+    for e in mir_lowering.errors:
+        out = out + e.message + "\n"
+    out
+
+describe "enum match with or-arms":
+    it "lowers an or-arm mixed with plain variant arms":
+        val errs = mir_errors(mixed_source)
+        print "mir errors: [{errs}]"
+        expect(errs).to_equal("")
+
+    it "lowers a match whose only enum arms are or-arms":
+        val errs = mir_errors(or_only_source)
+        print "mir errors: [{errs}]"
+        expect(errs).to_equal("")

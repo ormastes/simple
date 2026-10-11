@@ -178,6 +178,122 @@ pub(crate) use special::{
     lookup_impl_method_index, resolve_object_method, ResolvedMethod,
 };
 
+/// `expect(<subject>)` with exactly one positional argument — the only
+/// receiver the BDD matcher sugar below may rewrite, so a user struct with a
+/// `not` field (or a differently-shaped user `expect`) is never captured.
+fn is_bare_expect_call(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Call { callee, args }
+            if matches!(callee.as_ref(), Expr::Identifier(n) if n == "expect")
+                && args.len() == 1
+                && args[0].name.is_none()
+    )
+}
+
+/// Peel the BDD negation link off a matcher receiver:
+/// `expect(x)` -> (expect(x), false); `expect(x).not` / `expect(x).not_()`
+/// -> (expect(x), true). `None` for anything else. Mirrors
+/// `peel_expect_matcher_receiver` in `hir/lower/stmt_lowering.rs`, so the
+/// interpreter and native lowering accept the same chain shapes.
+#[allow(clippy::borrowed_box)] // reason: evaluate_method_call takes &Box<Expr>
+pub(crate) fn peel_bdd_matcher_receiver(receiver: &Box<Expr>) -> Option<(&Box<Expr>, bool)> {
+    if is_bare_expect_call(receiver) {
+        return Some((receiver, false));
+    }
+    match receiver.as_ref() {
+        Expr::FieldAccess { receiver: inner, field } if (field == "not" || field == "not_") && is_bare_expect_call(inner) => {
+            Some((inner, true))
+        }
+        Expr::MethodCall {
+            receiver: inner,
+            method,
+            args,
+            ..
+        } if (method == "not" || method == "not_") && args.is_empty() && is_bare_expect_call(inner) => Some((inner, true)),
+        _ => None,
+    }
+}
+
+/// Arg-less matchers that may be written paren-less (`expect(x).to_be_nil`),
+/// which the parser produces as a FieldAccess rather than a MethodCall.
+pub(crate) fn is_argless_bdd_matcher(name: &str) -> bool {
+    matches!(
+        name,
+        "to_be_nil" | "to_be_none" | "to_be_truthy" | "to_be_falsy" | "to_be_true" | "to_be_false" | "to_not_be_nil"
+    )
+}
+
+/// Evaluate a matcher reached through the negation link,
+/// `expect(x).not.<matcher>(args)`. Matchers with a dedicated negated arm map
+/// onto it (so the failure message stays specific); any other `to_*` matcher
+/// is run in its positive form with its failure state suppressed, and the
+/// example fails iff the positive form MATCHED.
+#[allow(clippy::borrowed_box, clippy::too_many_arguments)] // reason: mirrors evaluate_method_call
+pub(crate) fn evaluate_negated_bdd_matcher(
+    expect_call: &Box<Expr>,
+    method: &str,
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    // `.not.to_not_x` is a double negation: the positive `to_x`.
+    if let Some(rest) = method.strip_prefix("to_not_") {
+        let positive = format!("to_{rest}");
+        return evaluate_method_call(expect_call, &positive, args, env, functions, classes, enums, impl_methods);
+    }
+    let direct = match method {
+        "to_equal" | "to_be" => Some("to_not_equal"),
+        "to_contain" => Some("to_not_contain"),
+        "to_include" => Some("to_not_include"),
+        "to_be_nil" | "to_be_none" => Some("to_not_be_nil"),
+        "to" => Some("not_to"),
+        _ => None,
+    };
+    if let Some(negated) = direct {
+        return evaluate_method_call(expect_call, negated, args, env, functions, classes, enums, impl_methods);
+    }
+    use crate::interpreter::interpreter_call::{
+        BDD_EXPECT_FAILED, BDD_EXPECT_PROVISIONAL, BDD_FAILURE_MSG, BDD_PROVISIONAL_MSG, BDD_PROVISIONAL_SEQ,
+    };
+    // The positive form's failure state is suppressed wholesale: the hard
+    // flag AND the provisional (hollow-expect) flag the re-evaluated
+    // `expect(x)` raises for a falsy subject. A positive matcher outside the
+    // provisional-clearing list would otherwise leave that provisional
+    // standing and false-fail the example at its end, even though the
+    // negation passed.
+    let saved_failed = BDD_EXPECT_FAILED.with(|cell| *cell.borrow());
+    let saved_msg = BDD_FAILURE_MSG.with(|cell| cell.borrow().clone());
+    let saved_provisional = BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow());
+    let saved_provisional_msg = BDD_PROVISIONAL_MSG.with(|cell| cell.borrow().clone());
+    let saved_provisional_seq = BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow());
+    // No `?` here: the saved state is restored before an error propagates
+    // too, so a failing positive matcher never leaks its flags.
+    let positive = evaluate_method_call(expect_call, method, args, env, functions, classes, enums, impl_methods);
+    BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = saved_failed);
+    BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = saved_msg);
+    BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = saved_provisional);
+    BDD_PROVISIONAL_MSG.with(|cell| *cell.borrow_mut() = saved_provisional_msg);
+    BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = saved_provisional_seq);
+    let positive = positive?;
+    let Value::Bool(matched) = positive else {
+        return Err(CompileError::semantic(format!(
+            "`expect(..).not.{method}` is not a BDD matcher: the positive form returned {} instead of a match result",
+            positive.to_display_string()
+        )));
+    };
+    if matched {
+        BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+        BDD_FAILURE_MSG.with(|cell| {
+            *cell.borrow_mut() = Some(format!("expected `{method}` not to match, but it did"))
+        });
+    }
+    Ok(Value::Bool(!matched))
+}
+
 fn use_bare_module_fallback(receiver_in_env: bool, receiver_is_class: bool, receiver_is_enum: bool) -> bool {
     !receiver_in_env && !receiver_is_class && !receiver_is_enum
 }

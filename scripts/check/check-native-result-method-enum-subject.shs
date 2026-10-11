@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$root"
+
+simple_bin=${SIMPLE_BIN:-bin/simple}
+fixture=test/fixtures/compiler/native_result_method_enum_subject/main.spl
+artifact_dir=build/test-artifacts/native_result_method_enum_subject
+candidate=$artifact_dir/probe
+build_log=$artifact_dir/native-build.log
+run_log=$artifact_dir/native-run.log
+
+[ -x "$simple_bin" ] || {
+  echo "STATUS: FAIL native-result-method-enum-subject reason=compiler-missing path=$simple_bin"
+  exit 1
+}
+version=$($simple_bin --version 2>&1) || {
+  echo "STATUS: FAIL native-result-method-enum-subject reason=compiler-version-failed"
+  exit 1
+}
+case "$version" in
+  *Rust-built*|*"bootstrap seed only"*)
+    echo "STATUS: FAIL native-result-method-enum-subject reason=rust-seed-forbidden"
+    exit 1
+    ;;
+esac
+
+mkdir -p "$artifact_dir"
+if ! env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH \
+  SIMPLE_NO_STUB_FALLBACK=1 "$simple_bin" compile "$fixture" --native \
+  -o "$candidate" >"$build_log" 2>&1; then
+  echo "STATUS: FAIL native-result-method-enum-subject reason=native-compile-failed log=$build_log"
+  exit 1
+fi
+[ -x "$candidate" ] || {
+  echo "STATUS: FAIL native-result-method-enum-subject reason=candidate-missing"
+  exit 1
+}
+if ! timeout 30 "$candidate" >"$run_log" 2>&1; then
+  echo "STATUS: FAIL native-result-method-enum-subject reason=native-execution-failed log=$run_log"
+  exit 1
+fi
+grep -Fq 'RESULT_METHOD_ENUM_SUBJECT_PASS instance=31 static=47' "$run_log" || {
+  echo "STATUS: FAIL native-result-method-enum-subject reason=verdict-missing log=$run_log"
+  exit 1
+}
+echo "STATUS: PASS native-result-method-enum-subject instance=31 static=47"

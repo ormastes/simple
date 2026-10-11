@@ -1,0 +1,53 @@
+#!/bin/sh
+# Test the thin platform guard and canonical argument forwarding, without a VM.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/bin" "$tmp/setup"
+cp "$root/scripts/setup/setup-freebsd-host.shs" "$tmp/setup/"
+cat >"$tmp/bin/uname" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$SETUP_TEST_OS"
+EOF
+cat >"$tmp/setup/host-env.shs" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" >"$SETUP_TEST_RECEIPT"
+EOF
+chmod +x "$tmp/bin/uname"
+SETUP_TEST_RECEIPT="$tmp/args"
+export SETUP_TEST_RECEIPT
+PATH="$tmp/bin:$PATH" SETUP_TEST_OS=FreeBSD sh "$tmp/setup/setup-freebsd-host.shs"
+printf '%s\n' --init --all-cores >"$tmp/expected"
+cmp -s "$tmp/args" "$tmp/expected"
+rm "$tmp/args"
+if PATH="$tmp/bin:$PATH" SETUP_TEST_OS=Linux sh "$tmp/setup/setup-freebsd-host.shs" 2>"$tmp/error"; then
+    echo 'FAIL non-FreeBSD host accepted' >&2; exit 1
+fi
+grep -q 'requires FreeBSD' "$tmp/error"
+[ ! -e "$tmp/args" ]
+if PATH="$tmp/bin:$PATH" SETUP_TEST_OS=FreeBSD sh "$tmp/setup/setup-freebsd-host.shs" --unknown 2>"$tmp/error"; then
+    echo 'FAIL unknown argument accepted' >&2; exit 1
+fi
+[ ! -e "$tmp/args" ]
+# Execute the wrapper's actual remote dispatch against a transport that requires
+# an explicit POSIX interpreter (FreeBSD login shells may be csh).
+awk '/^initialize_guest_host_config\(\)/ {copy=1} copy {print} copy && /^}/ {exit}' \
+    "$root/scripts/check/check-freebsd-bootstrap-qemu.shs" >"$tmp/dispatch.sh"
+. "$tmp/dispatch.sh"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+mock_ssh() {
+    [ "$1" = /bin/sh ] && [ "$2" = -s ] && [ "$3" = -- ] || return 99
+    HOME="$tmp/guest" "$@"
+}
+VM_SSH=mock_ssh
+mkdir -p "$tmp/guest"
+initialize_guest_host_config optional
+if (initialize_guest_host_config required) 2>"$tmp/error"; then
+    fail 'required missing guest source accepted'
+fi
+mkdir -p "$tmp/guest/simple/scripts/setup"
+cp "$tmp/setup/"*.shs "$tmp/guest/simple/scripts/setup/"
+PATH="$tmp/bin:$PATH" SETUP_TEST_OS=FreeBSD initialize_guest_host_config required
+cmp -s "$tmp/args" "$tmp/expected"
+echo 'PASS: FreeBSD host initializer forwards canonical options and rejects other hosts/arguments'

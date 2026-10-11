@@ -10,9 +10,11 @@ use compiler.tools.lint.main.*
 # Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
 
 # I/O imports
-use std.nogc_sync_mut.io.file_ops (file_read, file_exists, file_atomic_write)
+use std.nogc_sync_mut.io.file_ops (file_read, file_exists, file_atomic_write, file_remove)
 use std.nogc_sync_mut.io.dir_ops (is_dir)
-use app.io.cli_ops (get_args)
+use app.io.cli_ops (get_args, cli_current_exe_path, _cli_process_run)
+use std.io_runtime.{env_get, env_set_process}
+use compiler.tools.lint.any_rules.{any_rules_lint_mask, any_rules_env_var, any_rules_out_env_var, any_rules_report_path, any_rules_parse_check_output, any_rules_max_shown, any_rules_env_level}
 
 # Logging imports
 use std.log.{error, info}
@@ -115,7 +117,66 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunRes
         linter.release_combined_lint_view()
         return results
 
-    lint_cli_append_parsed_results(linter, path, content, module_get_decls(), results)
+    # Any-rule gate is read BEFORE the AST pass releases the resolved config.
+    val any_config = if linter.last_resolved_path == path and linter.last_resolved_config.?:
+        linter.last_resolved_config.unwrap()
+    else:
+        resolve_lint_config(linter.config, path, content)
+    val any_decl = lint_policy_decision(
+        any_config, "W-ANY-DECL-001", LintLevel.Allow, LintEvidenceTier.SourcePattern)
+    val any_fallback = lint_policy_decision(
+        any_config, "W-HIR-INFER-003", LintLevel.Allow, LintEvidenceTier.ParsedStructural)
+    val any_receiver = lint_policy_decision(
+        any_config, "W-ANY-USE-001", LintLevel.Allow, LintEvidenceTier.ParsedStructural)
+    var parsed_results = lint_cli_append_parsed_results(linter, path, content, module_get_decls(), results)
+    # OPT-IN: no profile turns these families on. Off (the default, also under
+    # `critical`) = empty mask = no checker process, no HIR lowering, no walk.
+    # On = SIMPLE_ANY_RULES=warn|deny, or an explicit simple.sdn family level.
+    # See any_rules.spl for why the rules run in a `check` child.
+    val any_mask = any_rules_lint_mask(
+        path, content, any_decl.keep, any_fallback.keep, any_receiver.keep)
+    if any_mask != "":
+        val any_env_level = if any_rules_env_level() == "deny": LintLevel.Deny else: LintLevel.Warn
+        # The report comes back through a file: the check entry truncates
+        # worker stdout, and a truncated report must not read as a short one.
+        val any_report = any_rules_report_path(path)
+        file_remove(any_report)
+        val any_env = any_rules_env_var()
+        val any_out_env = any_rules_out_env_var()
+        val any_env_before = env_get(any_env)
+        val any_out_before = env_get(any_out_env)
+        env_set_process(any_env, any_mask)
+        env_set_process(any_out_env, any_report)
+        val (_any_stdout, _any_stderr, any_code) = _cli_process_run(cli_current_exe_path(), ["check", path])
+        env_set_process(any_env, any_env_before)
+        env_set_process(any_out_env, any_out_before)
+        val any_text = if file_exists(any_report): file_read(any_report) else: ""
+        file_remove(any_report)
+        val any_relay = any_rules_parse_check_output(any_text)
+        if not any_relay.checked:
+            # Fail closed: a checker that crashed or predates the rules is
+            # "not checked", never a clean file. Deny, so the run exits
+            # non-zero and lint-cached.shs cannot cache it as a clean verdict.
+            val not_run = LintDiag.new("W-ANY-NOTRUN", LintLevel.Deny, LintCategory.Correctness,
+                "NOT CHECKED: the Any rules (mask `{any_mask}`) did not run on this file — `check` exited {any_code} without writing its any-rules report (no check worker? set SIMPLE_BINARY)")
+            parsed_results.push(LintRunResult.new(path, 1, 0, not_run))
+        var any_shown = 0
+        for finding in any_relay.findings:
+            if any_shown == any_rules_max_shown():
+                val capped = LintDiag.new("W-ANY-CAPPED", LintLevel.Warn, LintCategory.Correctness,
+                    "{any_relay.findings.len() - any_shown} more Any-rule finding(s) not shown (cap {any_shown} per file)")
+                parsed_results.push(LintRunResult.new(path, 1, 0, capped))
+                break
+            any_shown = any_shown + 1
+            var family = any_receiver
+            if finding.code == "W-ANY-DECL-001":
+                family = any_decl
+            elif finding.code == "W-HIR-INFER-003":
+                family = any_fallback
+            val level = if family.keep: family.level else: any_env_level
+            val lint = LintDiag.new(finding.code, level, LintCategory.Correctness, finding.message)
+            parsed_results.push(LintRunResult.new(path, finding.line, finding.col, lint))
+    parsed_results
 
 struct LintParsedRevision:
     path: text

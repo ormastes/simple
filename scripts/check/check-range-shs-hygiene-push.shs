@@ -22,6 +22,23 @@
 # scripts/check/pre-push-conflict-tree-guard.shs, scripts/check/guard_wiring_optout.txt,
 # .github/workflows/*.yml.
 #
+# ADVISORY (2026-10-10), never part of the verdict: for each script under
+# scripts/ the range touches, scripts/check/lib/shs-pipe-exit-hygiene.shs is run
+# on the tip and base blobs and any NEW exit-status hygiene finding
+# (`cmd | tail; rc=$?`, a dropped `timeout` status announced as PASS, `$?` read
+# after an echo) is printed as a NOTE on stderr. It cannot change the exit
+# code or the verdict line: the scan is a heuristic, and a required gate must
+# not fail a correct script. It is skipped during the selftest, so the fatal
+# pre-scan selftest is the same 16 fixtures as before. The library's own
+# fixtures run only under `sh scripts/check/lib/shs-pipe-exit-hygiene.shs
+# --selftest` (extended CI job).
+#
+# `--tree [--rev <rev>]` is the advisory whole-tree census of the same rules
+# against the shrink-only baseline scripts/check/shs_pipe_exit_hygiene_baseline.txt
+# (committed content of <rev>, default HEAD; a row above OR below its baseline
+# fails; `--generate-baseline` rewrites it — reviewed updates only). Not a
+# push row.
+#
 # Verdict, always the last line of stdout:
 #   PASS  — <n> file(s) in <range> examined, <s> .shs parsed, <g> new guard(s) wired   exit 0
 #   FAIL  — ... naming each unparsable file / unwired guard                           exit 1
@@ -32,6 +49,7 @@
 #
 # Usage:
 #   sh scripts/check/check-range-shs-hygiene-push.shs [--root <repo>] <base>..<tip>
+#   sh scripts/check/check-range-shs-hygiene-push.shs --tree [--rev <rev>] [--root <repo>] [--generate-baseline]
 #   sh scripts/check/check-range-shs-hygiene-push.shs --selftest
 
 set -u
@@ -39,11 +57,26 @@ set -u
 RANGE=""
 ROOT=""
 SELFTEST_ONLY=0
+TREE=0
+TREE_REV=HEAD
+GENERATE_BASELINE=0
+# Advisory exit-status hygiene scan (see header). A missing library only
+# removes the NOTE; it never affects the range verdict.
+HYG_ADVISORY=0
+HERE=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || HERE=""
+if [ -n "$HERE" ] && [ -r "$HERE/lib/shs-pipe-exit-hygiene.shs" ]; then
+    . "$HERE/lib/shs-pipe-exit-hygiene.shs"
+    HYG_ADVISORY=1
+fi
+HYG_LOADED=$HYG_ADVISORY
 while [ $# -gt 0 ]; do
     case "$1" in
         --root) ROOT=${2:-}; shift 2 ;;
         --range) RANGE=${2:-}; shift 2 ;;
         --selftest) SELFTEST_ONLY=1; shift ;;
+        --tree) TREE=1; shift ;;
+        --rev) TREE_REV=${2:-}; shift 2 ;;
+        --generate-baseline) GENERATE_BASELINE=1; shift ;;
         -*) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
         *) RANGE=$1; shift ;;
     esac
@@ -66,6 +99,49 @@ parse_script() {
         return 2
     fi
     "$_shell" -n "$1" || return 1
+}
+
+# advisory_hygiene <root> <base-oid> <tip-oid> <status.txt> <workdir>
+# stderr NOTE only. Always returns 0; never touches stdout.
+advisory_hygiene() {
+    [ "$HYG_ADVISORY" -eq 1 ] || return 0
+    _ah_n=0
+    : > "$5/hyg_tip.list"; : > "$5/hyg_base.list"
+    while IFS="$(printf '\t')" read -r _ah_st _ah_p1 _ah_p2; do
+        case "$_ah_st" in R*|C*) _ah_path=$_ah_p2 ;; *) _ah_path=$_ah_p1 ;; esac
+        case "$_ah_path" in
+            scripts/*.shs|scripts/*.sh)
+                _ah_n=$((_ah_n + 1))
+                git -C "$1" show "$3:$_ah_path" >"$5/hyg_tip.$_ah_n" 2>/dev/null || continue
+                printf '%s\t%s\n' "$5/hyg_tip.$_ah_n" "$_ah_path" >> "$5/hyg_tip.list"
+                # The base side is the same path, or the rename/copy source.
+                if git -C "$1" show "$2:$_ah_p1" >"$5/hyg_base.$_ah_n" 2>/dev/null; then
+                    printf '%s\t%s\n' "$5/hyg_base.$_ah_n" "$_ah_path" >> "$5/hyg_base.list"
+                fi
+                ;;
+        esac
+    done < "$4"
+    [ "$_ah_n" -gt 0 ] || return 0
+    if ! shs_hygiene_scan_list "$5/hyg_tip.list" > "$5/hyg_tip.out" 2>/dev/null ||
+       ! shs_hygiene_scan_list "$5/hyg_base.list" > "$5/hyg_base.out" 2>/dev/null; then
+        echo "NOTE (advisory, verdict unaffected) — exit-status hygiene scan did not run" >&2
+        return 0
+    fi
+    # New = (path, rule) whose tip count exceeds its base count.
+    awk -F '\t' '
+        $3 == "SCAN-INCOMPLETE" { next }
+        FILENAME == ARGV[1] { base[$1 SUBSEP $3]++; next }
+        { tip[$1 SUBSEP $3]++; line[$1 SUBSEP $3] = line[$1 SUBSEP $3] "  " $1 ":" $2 ": " $3 ": " $4 "\n" }
+        END { for (k in tip) if (tip[k] > base[k] + 0) printf "%s", line[k] }
+    ' "$5/hyg_base.out" "$5/hyg_tip.out" > "$5/hyg_new.txt"
+    if [ -s "$5/hyg_new.txt" ]; then
+        {
+            echo "NOTE (advisory, verdict unaffected) — exit-status read that may not be the command's own status"
+            echo "(rules and correct forms: scripts/check/lib/shs-pipe-exit-hygiene.shs; reviewed line: '# exit-hygiene-ok: <reason>'):"
+            LC_ALL=C sort "$5/hyg_new.txt"
+        } >&2
+    fi
+    return 0
 }
 
 # scan <root> <base>..<tip> -> verdict on stdout, returns 0/1/2
@@ -142,6 +218,7 @@ scan() {
                 ;;
         esac
     done < "$_work/status.txt"
+    advisory_hygiene "$_root" "$_base_oid" "$_tip_oid" "$_work/status.txt" "$_work"
     if [ -n "$_bad" ] || [ -n "$_unwired" ]; then
         if [ -n "$_bad" ]; then
             echo "touched .shs that no longer parse (declared shell -n on the committed blob):"
@@ -303,15 +380,27 @@ selftest() {
     echo "selftest: 16 fixtures passed"
 }
 
+# The advisory scan is off while the fixtures run: they assert the range
+# verdict only, and the pre-scan selftest must cost what it always did.
+HYG_ADVISORY=0
 selftest || { echo "ERROR — nothing was checked (selftest failed; the guard itself is not trustworthy)"; exit 2; }
+HYG_ADVISORY=$HYG_LOADED
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
     echo "PASS — 16 fixture(s) checked, selftest only"
     exit 0
 fi
-[ -n "$RANGE" ] || { echo "ERROR — nothing was checked (<base>..<tip> is required)"; exit 2; }
+if [ "$TREE" -eq 0 ]; then
+    [ -n "$RANGE" ] || { echo "ERROR — nothing was checked (<base>..<tip> is required)"; exit 2; }
+fi
 if [ -z "$ROOT" ]; then
     ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || ROOT=""
     [ -n "$ROOT" ] || { echo "ERROR — nothing was checked (not inside a git repository and no --root)"; exit 2; }
+fi
+if [ "$TREE" -eq 1 ]; then
+    [ "$HYG_LOADED" -eq 1 ] || { echo "ERROR — nothing was checked (scripts/check/lib/shs-pipe-exit-hygiene.shs is missing)"; exit 2; }
+    [ -n "$TREE_REV" ] || { echo "ERROR — nothing was checked (--rev needs a revision)"; exit 2; }
+    shs_hygiene_tree "$ROOT" "$TREE_REV" "$GENERATE_BASELINE"
+    exit $?
 fi
 scan "$ROOT" "$RANGE"
 exit $?

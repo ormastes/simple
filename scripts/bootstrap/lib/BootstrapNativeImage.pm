@@ -2,7 +2,7 @@ package BootstrapNativeImage;
 use strict;
 use warnings;
 use Exporter 'import';
-our @EXPORT_OK = qw(verify_native_image);
+our @EXPORT_OK = qw(verify_native_image verify_native_object);
 
 sub read_at {
     my ($fh, $size, $offset, $count) = @_;
@@ -74,6 +74,53 @@ sub verify_native_image {
         die "native product host unsupported by this gate\n";
     }
     close $fh or die "cannot close native product\n";
+    return 1;
+}
+# Diagnostic objects prove target/container identity only, never bootstrap PASS.
+# An undefined path validates the requested target before any compiler starts.
+sub verify_native_object {
+    my ($path, $target) = @_;
+    my ($arch, $format);
+    $target =~ /\A(x86_64|aarch64|i686|armv7|riscv64)-[a-z0-9_.-]+\z/
+        or die "unsupported diagnostic object target\n";
+    $arch = $1;
+    my $platform = substr($target, length($arch) + 1);
+    $format = $platform =~ /\A(?:(?:unknown-)?linux-(?:gnu|musl)(?:eabi|eabihf)?|(?:unknown-)?freebsd(?:[0-9.]+)?|(?:unknown-)?none(?:-elf|-eabi|-eabihf)?)\z/ ? 'elf' :
+        $platform =~ /\A(?:pc-)?windows-(?:gnu|msvc)\z/ ? 'coff' :
+        $platform =~ /\Aapple-(?:darwin|macos)\z/ ? 'macho' : '';
+    $format ne '' or die "unsupported diagnostic object format\n";
+    my %machines = (x86_64 => 62, aarch64 => 183, i686 => 3, armv7 => 40, riscv64 => 243);
+    my %coff = (x86_64 => 0x8664, aarch64 => 0xaa64, i686 => 0x14c, armv7 => 0x1c4);
+    my %macho = (x86_64 => 0x1000007, aarch64 => 0x100000c);
+    ($format ne 'coff' || exists $coff{$arch}) &&
+        ($format ne 'macho' || exists $macho{$arch}) or die "unsupported target architecture\n";
+    return 1 unless defined $path;
+    -f $path && !-l $path or die "diagnostic object missing or symlinked\n";
+    open my $fh, '<:raw', $path or die "cannot open diagnostic object\n";
+    my $size = -s $fh;
+    my $h = read_at($fh, $size, 0, 64);
+    if ($format eq 'elf') {
+        my $class = ($arch eq 'i686' || $arch eq 'armv7') ? 1 : 2;
+        substr($h, 0, 4) eq "\x7fELF" && ord(substr($h, 4, 1)) == $class &&
+            ord(substr($h, 5, 1)) == 1 && unpack('v', substr($h, 16, 2)) == 1 &&
+            unpack('v', substr($h, 18, 2)) == $machines{$arch}
+            or die "diagnostic object ELF type/class/machine differs from target\n";
+        my $offset = $class == 2 ? unpack('Q<', substr($h, 40, 8)) : unpack('V', substr($h, 32, 4));
+        my ($width, $count) = unpack('vv', substr($h, $class == 2 ? 58 : 46, 4));
+        $offset > 0 && $width == ($class == 2 ? 64 : 40) && $count > 1 &&
+            $offset <= $size && $count * $width <= $size - $offset
+            or die "diagnostic object ELF section table missing or truncated\n";
+    } elsif ($format eq 'coff') {
+        my ($machine, $count) = unpack('vv', $h);
+        $machine == $coff{$arch} && $count > 0 && unpack('v', substr($h, 16, 2)) == 0 &&
+            20 + 40 * $count <= $size or die "diagnostic object COFF target/table differs\n";
+    } else {
+        unpack('V', $h) == 0xfeedfacf && unpack('V', substr($h, 4, 4)) == $macho{$arch} &&
+            unpack('V', substr($h, 12, 4)) == 1 && unpack('V', substr($h, 16, 4)) > 0 &&
+            32 + unpack('V', substr($h, 20, 4)) <= $size
+            or die "diagnostic object Mach-O target/type/table differs\n";
+    }
+    close $fh or die "cannot close diagnostic object\n";
     return 1;
 }
 1;

@@ -24,7 +24,7 @@ use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete}
 use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
 use nogc_sync_mut.io.crypto_sffi.{random_hex as test_runner_random_hex}
 use std.common.crypto.sha256.{sha256_text}
-use std.common.json.{json_escape_string}
+use std.common.text.{escape_json}
 use std.io_runtime.{file_hash_sha256_or_empty, dir_create, dir_remove_all, cwd}
 use std.nogc_sync_mut.test_runner.native_test_source_stage.{NativeTestSourceStageV1,
     native_test_stage_source_v1, native_test_cleanup_source_v1}
@@ -201,6 +201,16 @@ fn limit_exceeded_message(result: ProcessResult, options: TestOptions) -> text:
 # i.e. run to the END of both lists. See
 # doc/05_design/infra/test_runner/unstable_mode_scope_finding_2026-08-17.md.
 
+# The v1 evidence file and its `.expectations` tally sidecar are one unit:
+# std.spec writes both, so every cleanup removes both.
+fn remove_structured_evidence(evidence_path: text):
+    if evidence_path == "":
+        return
+    if file_exists(evidence_path):
+        file_delete(evidence_path)
+    if file_exists(evidence_path + ".expectations"):
+        file_delete(evidence_path + ".expectations")
+
 fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileResult:
     # Coverage probes are MIR-owned. The HIR tree interpreter never executes
     # them, so route coverage runs through the real LLVM native path.
@@ -310,8 +320,7 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
         if evidence_path != "" and not env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path):
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
                 duration_ms: dur, setup_ms: setup_ms, error: "test-runner: cannot restore structured result environment", timed_out: false, cached: false)
-        if evidence_path != "" and file_exists(evidence_path):
-            file_delete(evidence_path)
+        remove_structured_evidence(evidence_path)
         return TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(result.limit_type): 0 else: 1, skipped: 0, pending: 0,
             duration_ms: dur, setup_ms: setup_ms, error: limit_exceeded_message(result, options), timed_out: result.limit_type.contains("timeout"), cached: false,
             execution_ms: dur, resource_usage: observed_usage,
@@ -347,8 +356,7 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
         )
 
     if compiler_manifest_error != "":
-        if evidence_path != "" and file_exists(evidence_path):
-            file_delete(evidence_path)
+        remove_structured_evidence(evidence_path)
         return TestFileResult(
             path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
             duration_ms: duration_ms, setup_ms: setup_ms,
@@ -356,8 +364,7 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
         )
 
     val result = make_result_from_structured_evidence(file_path, stdout, stderr, exit_code, duration_ms, options.timeout, evidence_path)
-    if evidence_path != "" and file_exists(evidence_path):
-        file_delete(evidence_path)
+    remove_structured_evidence(evidence_path)
     TestFileResult(
         path: result.path, passed: result.passed, failed: result.failed,
         skipped: result.skipped, pending: result.pending,
@@ -1112,13 +1119,13 @@ fn native_test_invocation_receipt(backend: text, producer_digest: text, spec_pat
                                   artifact_path: text, binary: text, args: [text]) -> text:
     var encoded_args: [text] = []
     for arg in args:
-        encoded_args.push("\"" + json_escape_string(arg) + "\"")
+        encoded_args.push("\"" + escape_json(arg) + "\"")
     "native-aot-invocation|" +
-        "{\"backend\":\"" + json_escape_string(backend) +
-        "\",\"producer_sha256\":\"" + json_escape_string(producer_digest) +
-        "\",\"spec\":\"" + json_escape_string(spec_path) +
-        "\",\"output\":\"" + json_escape_string(artifact_path) +
-        "\",\"compiler\":\"" + json_escape_string(binary) +
+        "{\"backend\":\"" + escape_json(backend) +
+        "\",\"producer_sha256\":\"" + escape_json(producer_digest) +
+        "\",\"spec\":\"" + escape_json(spec_path) +
+        "\",\"output\":\"" + escape_json(artifact_path) +
+        "\",\"compiler\":\"" + escape_json(binary) +
         "\",\"argv\":[" + encoded_args.join(",") + "]}"
 
 fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult:
@@ -1430,7 +1437,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         # predicting the handoff path before creation.
         var manifest_attempt = 0
         while manifest_attempt < 4 and mcdc_manifest_path == "":
-            val nonce = test_runner_random_hex(16) ?? ""
+            val nonce = test_runner_random_hex(16)
             if nonce != nil:
                 val candidate = _tp_get_temp_dir() + "/mcdc-" + nonce.unwrap() + ".obligations.sdn"
                 if rt_file_create_excl(candidate, mcdc_manifest):

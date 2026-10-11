@@ -22,7 +22,7 @@
 # canonical packed buffers. Loader-session pinning remains a separate owner
 # rule: a successful result must not outlive the DynLibKind generation.
 
-use os.posix.dynlib.{DynLibKind, dynlib_symbol}
+use os.posix.dynlib.{DynLibKind, dynlib_symbol, dynlib_symbol_is_process_callable}
 use os.smf.provider_query_wire.{
     encode_provider_query_request_v1, decode_provider_query_result_v1
 }
@@ -34,6 +34,15 @@ use std.nogc_sync_mut.composition.provider_contract.{
 use std.nogc_sync_mut.composition.cli_command_wire.{
     CliCommandResultViewV1, encode_cli_command_request_v1,
     decode_cli_command_result_v1, cli_command_result_used_length_v1
+}
+use std.nogc_sync_mut.composition.vector_kernel_contract.{
+    SIMPLE_VECTOR_KERNELS_V1_APPLY_SYMBOL,
+    SIMPLE_VECTOR_RESPONSE_V1_SIZE,
+    SIMPLE_VECTOR_STATUS_EXECUTION_FAILED,
+    SimpleVectorKernelRequestV1, SimpleVectorKernelResponseV1
+}
+use std.nogc_sync_mut.composition.vector_kernel_wire.{
+    encode_simple_vector_request_v1, decode_simple_vector_response_v1
 }
 
 # --- Scalar runtime externs ---
@@ -81,6 +90,12 @@ class CliCommandCallV1:
     result: CliCommandResultViewV1
     diagnostic: text
 
+class VectorKernelCallV1:
+    ok: bool
+    transport_status: i64
+    response: SimpleVectorKernelResponseV1
+    diagnostic: text
+
 fn _provider_query_call_error(status: i32, diagnostic: text) -> ProviderQueryCallV1:
     ProviderQueryCallV1(
         ok: false,
@@ -88,6 +103,58 @@ fn _provider_query_call_error(status: i32, diagnostic: text) -> ProviderQueryCal
         result: simple_provider_query_error_v1(status),
         diagnostic: diagnostic
     )
+
+fn _vector_kernel_call_error(status: i64, diagnostic: text) -> VectorKernelCallV1:
+    VectorKernelCallV1(
+        ok: false, transport_status: status,
+        response: SimpleVectorKernelResponseV1(
+            struct_size: SIMPLE_VECTOR_RESPONSE_V1_SIZE,
+            status: SIMPLE_VECTOR_STATUS_EXECUTION_FAILED,
+            bytes_written: 0, scalar_result: -1),
+        diagnostic: diagnostic)
+
+@unsafe(reason: "invokes the checked integer-only vector provider ABI over borrowed spans", capabilities: [ffi, raw_ptr])
+fn call_vector_kernel_v1(lib: DynLibKind, interface_handle: u64,
+        request: SimpleVectorKernelRequestV1) -> VectorKernelCallV1:
+    val encoded = encode_simple_vector_request_v1(request)
+    if not encoded.ok:
+        return _vector_kernel_call_error(-1, encoded.diagnostic)
+    if interface_handle == 0 or interface_handle > 9223372036854775807:
+        return _vector_kernel_call_error(-1, "vector-interface-handle-invalid")
+    if not dynlib_symbol_is_process_callable(lib, SIMPLE_VECTOR_KERNELS_V1_APPLY_SYMBOL):
+        return _vector_kernel_call_error(-1, "vector-apply-symbol-not-process-callable")
+
+    val request_ptr = rt_alloc(encoded.bytes.len())
+    if request_ptr <= 0:
+        return _vector_kernel_call_error(-1, "vector-request-allocation-failed")
+    val response_ptr = rt_alloc(SIMPLE_VECTOR_RESPONSE_V1_SIZE as i64)
+    if response_ptr <= 0:
+        rt_free(request_ptr)
+        return _vector_kernel_call_error(-1, "vector-response-allocation-failed")
+
+    var i = 0
+    while i < encoded.bytes.len():
+        rt_ptr_write_u8(request_ptr, i, encoded.bytes[i] as i64)
+        i = i + 1
+    rt_memset(response_ptr, 165, SIMPLE_VECTOR_RESPONSE_V1_SIZE as i64)
+    val transport_status = dynlib_call_3(
+        lib, SIMPLE_VECTOR_KERNELS_V1_APPLY_SYMBOL,
+        interface_handle as i64, request_ptr, response_ptr)
+    if transport_status != 0:
+        rt_free(response_ptr)
+        rt_free(request_ptr)
+        return _vector_kernel_call_error(
+            transport_status, "vector-provider-transport-failed")
+
+    val response_bytes = rt_bytes_from_raw(
+        response_ptr, SIMPLE_VECTOR_RESPONSE_V1_SIZE as i64)
+    rt_free(response_ptr)
+    rt_free(request_ptr)
+    val decoded = decode_simple_vector_response_v1(response_bytes, request)
+    if not decoded.ok:
+        return _vector_kernel_call_error(-1, decoded.diagnostic)
+    VectorKernelCallV1(
+        ok: true, transport_status: 0, response: decoded.value, diagnostic: "")
 
 @unsafe(reason: "invokes an unverified provider address over owned raw buffers", capabilities: [ffi, raw_ptr])
 fn call_provider_query_v1(fn_ptr: i64, request: SimpleProviderQueryV1) -> ProviderQueryCallV1:
@@ -235,3 +302,4 @@ fn dynlib_call_6(lib: DynLibKind, name: text, arg0: i64, arg1: i64, arg2: i64, a
 
 export ProviderQueryCallV1, call_provider_query_v1
 export CliCommandCallV1, call_cli_command_v1
+export VectorKernelCallV1, call_vector_kernel_v1

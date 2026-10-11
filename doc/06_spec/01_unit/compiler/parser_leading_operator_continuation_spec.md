@@ -1,27 +1,304 @@
-# Parser: leading-operator line continuation
+# Leading-operator continuation: optional-presence fixture
 
-> An expression continued onto the next line with the operator at the START of the continuation line did not parse in the self-hosted frontend. The whole file was rejected with a location-less `error[PARSE001]: Source did not parse`, so a single such line made every importer of the module unbuildable. That is what took the frozen contract `src/lib/common/ui/gpu_web_capacity_manifest.spl` off the table for the DrawIR v3 lane.
+**Documentation provenance:** Agent-authored manual correlated directly to the executable specification. This is not generated scenario coverage. The original docgen run exited successfully but omitted all eleven call-style scenarios; its rejected artifact and quality review remain in the evidence packet.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+**Source:** `test/01_unit/compiler/parser_leading_operator_continuation_spec.spl`
+
+**Requirement:** REQ-SSPEC-UNIT — preserve observable continuation semantics and short-circuiting through real assertions. The fixture repair supplies the previously missing helper; it does not change parser production code or extend the language.
+
+**Requirements / maintenance policy:** [SSpec documentation maintenance](../../../01_research/domain/sspec_documentization_maintenance.md)
+
+**Plan:** Restore the named helper, retain original assertions, and add present-zero and chained short-circuit controls.
+
+**Design:** `lead_and_after_optional_presence(value: i64?)` joins `value.?` to a leading `and value.unwrap() > 0`, returning the resulting boolean.
+
+**Research:** The retained original run executed nine scenarios: eight passed and one failed because the helper was undefined. The current candidate contains eleven scenarios after adding two controls.
+
+## Evidence scope
+
+The focused bootstrap source diagnostic executed only the first three scenarios below: **3 passed, 0 failed, 0 skipped, 0 dropped**. Actual loaded-owner hashes matched their pinned dependency manifest; receipts closed authentically. The other eight original scenario bodies remain unchanged and were **not rerun**. Eleven authored scenarios and 24 assertion lines are documentation inventory, not an eleven-case execution claim. No native, whole-parser, or release qualification is claimed.
+
+Candidate source SHA256: `40dcb5a2f4ccf0687d5bb495144fea12fc4026f42fb3d1274d9981aa4343a21d`.
+
+Evidence packet: `build/native_probe/phase1-alias-optional-fixture-repairs-20261010/` (`result.json`, `strict-loader-audit.json`, `optional/receipt.env`).
+
+## Setup and safety boundaries
+
+The source uses its existing `std.spec` setup and helper declarations. All grammar-bearing declarations are retained in the focused projection; only the eight previously passing scenario bodies are excluded from execution. A nil unwrap on the right side would fail if logical short-circuiting were lost. Zero is present, so the new zero control distinguishes presence from numeric truthiness. Existing unary-block and dedent controls are preserved rather than rewritten.
+
+## continues after postfix optional presence
+
+**Execution:** Verified in the targeted 3/3 diagnostic.
+
+**Action:** Call the restored helper with positive, zero, and absent optional values. Its leading `and` continues the presence expression and protects the unwrap.
+
+**Exact oracles:**
+
+- `assert_equal(lead_and_after_optional_presence(3), true)`
+- `assert_equal(lead_and_after_optional_presence(0), false)`
+- `assert_equal(lead_and_after_optional_presence(nil), false)`
 
 <details>
-<summary>Full Scenario Manual</summary>
+<summary>Executable scenario body — source line 252</summary>
 
+```simple
+        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-UNIT
+        assert_equal(lead_and_after_optional_presence(3), true)
+        assert_equal(lead_and_after_optional_presence(0), false)
+        assert_equal(lead_and_after_optional_presence(nil), false)
+```
+
+</details>
+
+## distinguishes present zero from absent optional in a leading-and continuation
+
+**Execution:** Verified in the targeted 3/3 diagnostic.
+
+**Action:** Compare a present zero with an absent optional; evaluate each presence check followed by a leading `and` and an unwrap equality.
+
+**Exact oracles:**
+
+- `assert_equal(zero_present, true)`
+- `assert_equal(absent, false)`
+
+<details>
+<summary>Executable scenario body — source line 259</summary>
+
+```simple
+        # @req REQ-SSPEC-UNIT
+        val present: i64? = 0
+        val missing: i64? = nil
+        val zero_present = present.?
+            and present.unwrap() == 0
+        val absent = missing.?
+            and missing.unwrap() == 0
+        assert_equal(zero_present, true)
+        assert_equal(absent, false)
+```
+
+</details>
+
+## short-circuits a multi-line chain after a missing optional
+
+**Execution:** Verified in the targeted 3/3 diagnostic.
+
+**Action:** Evaluate a three-line optional chain for increasing present values and for an absent right operand. The latter must short-circuit before unwrap.
+
+**Exact oracles:**
+
+- `assert_equal(increasing, true)`
+- `assert_equal(stopped, false)`
+
+<details>
+<summary>Executable scenario body — source line 270</summary>
+
+```simple
+        # @req REQ-SSPEC-UNIT
+        val left: i64? = 1
+        val right: i64? = 2
+        val missing: i64? = nil
+        val increasing = left.?
+            and right.?
+            and left.unwrap() < right.unwrap()
+        val stopped = left.?
+            and missing.?
+            and missing.unwrap() > left.unwrap()
+        assert_equal(increasing, true)
+        assert_equal(stopped, false)
+```
+
+</details>
+
+## continues arithmetic operators onto the next line
+
+**Execution:** Preserved prior scenario; not rerun for this repair.
+
+**Action:** Call the five arithmetic continuation helpers with fixed integer operands.
+
+**Exact oracles:**
+
+- `assert_equal(lead_plus(1, 2), 3)`
+- `assert_equal(lead_minus(5, 2), 3)`
+- `assert_equal(lead_star(3, 4), 12)`
+- `assert_equal(lead_slash(8, 2), 4)`
+- `assert_equal(lead_percent(9, 4), 1)`
+
+<details>
+<summary>Executable scenario body — source line 284</summary>
+
+```simple
+        assert_equal(lead_plus(1, 2), 3)
+        assert_equal(lead_minus(5, 2), 3)
+        assert_equal(lead_star(3, 4), 12)
+        assert_equal(lead_slash(8, 2), 4)
+        assert_equal(lead_percent(9, 4), 1)
+```
+
+</details>
+
+## continues and/or onto the next line
+
+**Execution:** Preserved prior scenario; not rerun for this repair.
+
+**Action:** Call the logical `and` and `or` continuation helpers with true and false operands.
+
+**Exact oracles:**
+
+- `assert_equal(lead_and(true, false), false)`
+- `assert_equal(lead_or(true, false), true)`
+
+<details>
+<summary>Executable scenario body — source line 291</summary>
+
+```simple
+        assert_equal(lead_and(true, false), false)
+        assert_equal(lead_or(true, false), true)
+```
+
+</details>
+
+## continues a return expression - the frozen-contract shape
+
+**Execution:** Preserved prior scenario; not rerun for this repair.
+
+**Action:** Return a text expression continued on its following line, matching the frozen-contract form.
+
+**Exact oracles:**
+
+- `assert_equal(lead_in_return("bound", "why"), "bound reason=why")`
+
+<details>
+<summary>Executable scenario body — source line 295</summary>
+
+```simple
+        assert_equal(lead_in_return("bound", "why"), "bound reason=why")
+```
+
+</details>
+
+## continues var bindings and plain reassignment
+
+**Execution:** Preserved prior scenario; not rerun for this repair.
+
+**Action:** Exercise continuation in a mutable declaration and a subsequent assignment.
+
+**Exact oracles:**
+
+- `assert_equal(lead_in_var(1), 2)`
+- `assert_equal(lead_in_reassign(1), 6)`
+
+<details>
+<summary>Executable scenario body — source line 298</summary>
+
+```simple
+        assert_equal(lead_in_var(1), 2)
+        assert_equal(lead_in_reassign(1), 6)
+```
+
+</details>
+
+## absorbs every line of a multi-line continuation, not just the first
+
+**Execution:** Preserved prior scenario; not rerun for this repair.
+
+**Action:** Evaluate a continuation spanning more than one following line.
+
+**Exact oracles:**
+
+- `assert_equal(lead_multi_line(10), 16)`
+
+<details>
+<summary>Executable scenario body — source line 302</summary>
+
+```simple
+        assert_equal(lead_multi_line(10), 16)
+```
+
+</details>
+
+## keeps bracketed and trailing-operator forms working
+
+**Execution:** Preserved prior scenario; not rerun for this repair.
+
+**Action:** Exercise the bracketed and trailing-operator forms alongside the leading form.
+
+**Exact oracles:**
+
+- `assert_equal(lead_in_call_arg(1), 202)`
+- `assert_equal(lead_in_list_elem(1), 2)`
+- `assert_equal(trailing_operator_form("bound", "why"), "bound reason=why")`
+
+<details>
+<summary>Executable scenario body — source line 305</summary>
+
+```simple
+        assert_equal(lead_in_call_arg(1), 202)
+        assert_equal(lead_in_list_elem(1), 2)
+        assert_equal(trailing_operator_form("bound", "why"), "bound reason=why")
+```
+
+</details>
+
+## does not fold a block body that begins with a unary operator
+
+**Execution:** Preserved prior scenario; not rerun for this repair.
+
+**Action:** Evaluate branches whose bodies begin with unary minus; these must remain block bodies.
+
+**Exact oracles:**
+
+- `assert_equal(block_body_starts_with_minus(true), -1)`
+- `assert_equal(block_body_starts_with_minus(false), -2)`
+
+<details>
+<summary>Executable scenario body — source line 310</summary>
+
+```simple
+        assert_equal(block_body_starts_with_minus(true), -1)
+        assert_equal(block_body_starts_with_minus(false), -2)
+```
+
+</details>
+
+## does not fold an implicit return that dedents out of a loop body
+
+**Execution:** Preserved prior scenario; not rerun for this repair.
+
+**Action:** Evaluate a dedented implicit return after a loop; it must remain outside the loop expression.
+
+**Exact oracles:**
+
+- `assert_equal(dedented_implicit_return(3), -1)`
+
+<details>
+<summary>Executable scenario body — source line 314</summary>
+
+```simple
+        assert_equal(dedented_implicit_return(3), -1)
+```
+
+</details>
+
+## Complete setup and preserved source
+
+The complete source below retains all helper declarations, original limitations, and preserved scenarios, so each visible oracle can be traced to its actual setup.
+
+<details>
+<summary>Full executable specification</summary>
+
+````simple
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+"""
 # Parser: leading-operator line continuation
 
-An expression continued onto the next line with the operator at the START of the continuation line did not parse in the self-hosted frontend. The whole file was rejected with a location-less `error[PARSE001]: Source did not parse`, so a single such line made every importer of the module unbuildable. That is what took the frozen contract `src/lib/common/ui/gpu_web_capacity_manifest.spl` off the table for the DrawIR v3 lane.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Syntax / Self-hosted frontend parity |
-| Status | Active |
-| Source | `test/01_unit/compiler/parser_leading_operator_continuation_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
+**Category:** Syntax / Self-hosted frontend parity
+**Bug:** doc/08_tracking/bug/parser_leading_operator_line_continuation_2026-08-01.md
 
 ## Overview
 
@@ -57,7 +334,7 @@ the previous line silently miscompiles working code:
    `core_process.spl`. Guarded by requiring the continuation line to be
    indented strictly deeper than the current logical line.
 
-## Coverage boundary — narrowed 2026-08-01, the seed has caught up
+## Coverage boundary — leading comparison/equality is self-hosted-only
 
 This spec previously withheld the comparison/equality/membership/coalesce
 family (`== != < > <= >= is in ??`) and the condition position,
@@ -148,322 +425,185 @@ val er = 1.0
     + r
     + r2 / 2.0
 ```
+"""
 
-## Scenarios
+use std.spec
 
-### leading-operator line continuation
+# --- Arithmetic ---------------------------------------------------------------
 
-#### continues after postfix optional presence
+fn lead_plus(a: i64, b: i64) -> i64:
+    val x = a
+        + b
+    return x
 
-<details>
-<summary>Executable SSpec</summary>
+fn lead_minus(a: i64, b: i64) -> i64:
+    val x = a
+        - b
+    return x
 
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+fn lead_star(a: i64, b: i64) -> i64:
+    val x = a
+        * b
+    return x
 
-```simple
-# @req REQ-SSPEC-UNIT
-```
+fn lead_slash(a: i64, b: i64) -> i64:
+    val x = a
+        / b
+    return x
 
-</details>
+fn lead_percent(a: i64, b: i64) -> i64:
+    val x = a
+        % b
+    return x
 
-#### continues arithmetic operators onto the next line
+# --- Logical ------------------------------------------------------------------
 
-<details>
-<summary>Executable SSpec</summary>
+fn lead_and(a: bool, b: bool) -> bool:
+    val x = a
+        and b
+    return x
 
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+fn lead_and_after_optional_presence(value: i64?) -> bool:
+    val x = value.?
+        and value.unwrap() > 0
+    return x
 
-```simple
-assert_equal(lead_plus(1, 2), 3)
-assert_equal(lead_minus(5, 2), 3)
-assert_equal(lead_star(3, 4), 12)
-assert_equal(lead_slash(8, 2), 4)
-assert_equal(lead_percent(9, 4), 1)
-```
+fn lead_or(a: bool, b: bool) -> bool:
+    val x = a
+        or b
+    return x
 
-</details>
+# --- Statement contexts -------------------------------------------------------
 
-#### continues and/or onto the next line
+# This is the exact shape of `gpu_web_capacity_breach_receipt` in the frozen
+# contract module that this bug took out of service.
+fn lead_in_return(a: text, b: text) -> text:
+    return a
+        + " reason=" + b
 
-<details>
-<summary>Executable SSpec</summary>
+fn lead_in_var(a: i64) -> i64:
+    var x = a
+        + 1
+    return x
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+fn lead_in_reassign(a: i64) -> i64:
+    var x = a
+    x = x
+        + 5
+    return x
 
-```simple
-assert_equal(lead_and(true, false), false)
-assert_equal(lead_or(true, false), true)
-```
+# A three-line chain: every continuation line after the first must also be
+# absorbed, not just the one directly after the head.
+fn lead_multi_line(a: i64) -> i64:
+    val x = a
+        + 1
+        + 2
+        + 3
+    return x
 
-</details>
+# --- Contexts that already worked, kept as parity coverage --------------------
 
-#### continues comparison and equality operators onto the next line
+fn take_two(a: i64, b: i64) -> i64:
+    return a * 100 + b
 
-<details>
-<summary>Executable SSpec</summary>
+fn lead_in_call_arg(a: i64) -> i64:
+    return take_two(a
+        + 1, 2)
 
-Runnable source: 14 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+fn lead_in_list_elem(a: i64) -> i64:
+    val xs = [a
+        + 1, 2]
+    return xs[0]
 
-```simple
-# Both truth values per operator: a form that always returned the same
-# constant would pass a one-sided check while being truncated.
-assert_equal(lead_eq(2, 2), true)
-assert_equal(lead_eq(2, 3), false)
-assert_equal(lead_ne(2, 3), true)
-assert_equal(lead_ne(2, 2), false)
-assert_equal(lead_lt(1, 2), true)
-assert_equal(lead_lt(2, 1), false)
-assert_equal(lead_gt(5, 2), true)
-assert_equal(lead_gt(2, 5), false)
-assert_equal(lead_le(2, 2), true)
-assert_equal(lead_le(3, 2), false)
-assert_equal(lead_ge(3, 2), true)
-assert_equal(lead_ge(1, 2), false)
-```
+fn trailing_operator_form(a: text, b: text) -> text:
+    return a +
+        " reason=" + b
 
-</details>
+# --- NEGATIVE: a block body may begin with a unary operator -------------------
 
-#### continues the identity operator onto the next line
+fn block_body_starts_with_minus(c: bool) -> i64:
+    if c:
+        -1
+    else:
+        -2
 
-<details>
-<summary>Executable SSpec</summary>
+# --- NEGATIVE: an implicit return that dedents out of a loop body -------------
+#
+# `-1` here is the function's result, NOT a continuation of `i = i + 1`.
+# Folding it in would return 0 instead of -1.
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+fn dedented_implicit_return(n: i64) -> i64:
+    var i = 0
+    while i < n:
+        i = i + 1
+    -1
 
-```simple
-assert_equal(lead_is(2, 2), true)
-assert_equal(lead_is(2, 3), false)
-```
+describe("leading-operator line continuation"):
+    it("continues after postfix optional presence"):
+        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-UNIT
+        assert_equal(lead_and_after_optional_presence(3), true)
+        assert_equal(lead_and_after_optional_presence(0), false)
+        assert_equal(lead_and_after_optional_presence(nil), false)
 
-</details>
+    it("distinguishes present zero from absent optional in a leading-and continuation"):
+        # @req REQ-SSPEC-UNIT
+        val present: i64? = 0
+        val missing: i64? = nil
+        val zero_present = present.?
+            and present.unwrap() == 0
+        val absent = missing.?
+            and missing.unwrap() == 0
+        assert_equal(zero_present, true)
+        assert_equal(absent, false)
 
-#### continues the membership operator identically to the one-line form
+    it("short-circuits a multi-line chain after a missing optional"):
+        # @req REQ-SSPEC-UNIT
+        val left: i64? = 1
+        val right: i64? = 2
+        val missing: i64? = nil
+        val increasing = left.?
+            and right.?
+            and left.unwrap() < right.unwrap()
+        val stopped = left.?
+            and missing.?
+            and missing.unwrap() > left.unwrap()
+        assert_equal(increasing, true)
+        assert_equal(stopped, false)
 
-<details>
-<summary>Executable SSpec</summary>
+    it("continues arithmetic operators onto the next line"):
+        assert_equal(lead_plus(1, 2), 3)
+        assert_equal(lead_minus(5, 2), 3)
+        assert_equal(lead_star(3, 4), 12)
+        assert_equal(lead_slash(8, 2), 4)
+        assert_equal(lead_percent(9, 4), 1)
 
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+    it("continues and/or onto the next line"):
+        assert_equal(lead_and(true, false), false)
+        assert_equal(lead_or(true, false), true)
 
-```simple
-# Parity, not membership truth - see the docstring: `in` is broken
-# independently of line continuation on the seed interpreter.
-assert_equal(lead_in(2, [1, 2, 3]), oneline_in(2, [1, 2, 3]))
-assert_equal(lead_in(9, [1, 2, 3]), oneline_in(9, [1, 2, 3]))
-```
+    it("continues a return expression - the frozen-contract shape"):
+        assert_equal(lead_in_return("bound", "why"), "bound reason=why")
 
-</details>
+    it("continues var bindings and plain reassignment"):
+        assert_equal(lead_in_var(1), 2)
+        assert_equal(lead_in_reassign(1), 6)
 
-#### continues the nil-coalesce operator onto the next line
+    it("absorbs every line of a multi-line continuation, not just the first"):
+        assert_equal(lead_multi_line(10), 16)
 
-<details>
-<summary>Executable SSpec</summary>
+    it("keeps bracketed and trailing-operator forms working"):
+        assert_equal(lead_in_call_arg(1), 202)
+        assert_equal(lead_in_list_elem(1), 2)
+        assert_equal(trailing_operator_form("bound", "why"), "bound reason=why")
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+    it("does not fold a block body that begins with a unary operator"):
+        assert_equal(block_body_starts_with_minus(true), -1)
+        assert_equal(block_body_starts_with_minus(false), -2)
 
-```simple
-assert_equal(lead_coalesce(nil, 7), 7)
-assert_equal(lead_coalesce(4, 7), 4)
-```
+    it("does not fold an implicit return that dedents out of a loop body"):
+        assert_equal(dedented_implicit_return(3), -1)
 
-</details>
-
-#### continues a leading operator in an if condition
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-assert_equal(lead_if_cond(5, 2), 1)
-assert_equal(lead_if_cond(1, 2), 2)
-assert_equal(lead_if_eq_cond(2, 2), 1)
-assert_equal(lead_if_eq_cond(1, 2), 2)
-```
-
-</details>
-
-#### continues a leading operator in an elif condition
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-assert_equal(lead_elif_cond(5, 2), 1)
-assert_equal(lead_elif_cond(2, 2), 0)
-assert_equal(lead_elif_cond(1, 2), -1)
-```
-
-</details>
-
-#### continues a return expression - the frozen-contract shape
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-assert_equal(lead_in_return("bound", "why"), "bound reason=why")
-```
-
-</details>
-
-#### continues var bindings and plain reassignment
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-assert_equal(lead_in_var(1), 2)
-assert_equal(lead_in_reassign(1), 6)
-```
+````
 
 </details>
-
-#### absorbs every line of a multi-line continuation, not just the first
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-assert_equal(lead_multi_line(10), 16)
-```
-
-</details>
-
-#### keeps bracketed and trailing-operator forms working
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-assert_equal(lead_in_call_arg(1), 202)
-assert_equal(lead_in_list_elem(1), 2)
-assert_equal(trailing_operator_form("bound", "why"), "bound reason=why")
-```
-
-</details>
-
-#### does not fold a block body that begins with a unary operator
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-assert_equal(block_body_starts_with_minus(true), -1)
-assert_equal(block_body_starts_with_minus(false), -2)
-```
-
-</details>
-
-<details>
-<summary>Advanced: does not fold an implicit return that dedents out of a loop body</summary>
-
-#### does not fold an implicit return that dedents out of a loop body
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-assert_equal(dedented_implicit_return(3), -1)
-```
-
-</details>
-
-
-</details>
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
-
-
-</details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `4f87aa2841056f63415684f70d0c1ed2fed585273f07d170d94a2f19249a28b6`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `4f87aa2841056f63415684f70d0c1ed2fed585273f07d170d94a2f19249a28b6`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `4f87aa2841056f63415684f70d0c1ed2fed585273f07d170d94a2f19249a28b6`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
-
-SSpec documentization score: 89/100
-source: test/01_unit/compiler/parser_leading_operator_continuation_spec.spl
-mirror: doc/06_spec/01_unit/compiler/parser_leading_operator_continuation_spec.md (current)
-findings: 7 blockers: 0
-  narrative=100 structure=60 oracle=100
-  traceability=100 evidence=100 coverage=100 maintainability=55
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/compiler/parser_leading_operator_continuation_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/parser_leading_operator_continuation_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler/parser_leading_operator_continuation_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
-  why: Long flat dumps obscure the primary workflow.
-  improve: Group secondary detail and keep the primary workflow visible.
-test/01_unit/compiler/parser_leading_operator_continuation_spec.spl:345:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'continues after postfix optional presence' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/01_unit/compiler/parser_leading_operator_continuation_spec.spl:352:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'continues arithmetic operators onto the next line' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/01_unit/compiler/parser_leading_operator_continuation_spec.spl:359:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'continues and/or onto the next line' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/01_unit/compiler/parser_leading_operator_continuation_spec.spl:363:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'continues comparison and equality operators onto the next line' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-<!-- sspec-maintain:scorecard:end -->

@@ -4,7 +4,7 @@
 # Auth is managed by acli itself
 
 use std.nogc_sync_mut.io.process_ops.{process_run}
-use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize, json_get_type}
+use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_type, json_value_has, json_value_field, json_value_len, json_value_at, json_value_serialize}
 use app.devhub.config.{ItfConfig}
 use app.devhub.errors.{ItfError}
 
@@ -74,9 +74,10 @@ fn jira_view_issue(config: ItfConfig, key: text) -> (bool, JiraIssue, text):
             return (false, empty, "acli error (trace: {trace}): {stderr}")
         return (false, empty, "acli error: {stderr}")
 
-    val parsed = json_parse(stdout)
-    if parsed == nil:
+    val parsed_opt = json_value_parse_opt(stdout)
+    if parsed_opt == nil:
         return (false, empty, "invalid JSON from acli")
+    val parsed = parsed_opt.unwrap()
 
     val issue = _parse_jira_issue(parsed)
     (true, issue, stdout)
@@ -95,29 +96,30 @@ fn jira_search(config: ItfConfig, jql: text, fields: text, limit: i64) -> (bool,
     if not ok:
         return (false, [], "acli error: {stderr}")
 
-    val parsed = json_parse(stdout)
-    if parsed == nil:
+    val parsed_opt = json_value_parse_opt(stdout)
+    if parsed_opt == nil:
         return (false, [], "invalid JSON from acli")
+    val parsed = parsed_opt.unwrap()
 
     # Parse array of issues
-    val data_type = json_get_type(parsed)
+    val data_type = json_value_type(parsed)
     var issues: [JiraIssue] = []
 
     if data_type == "array":
-        val arr_len = json_array_length(parsed)
+        val arr_len = json_value_len(parsed)
         var i = 0
         while i < arr_len:
-            val item = json_array_get(parsed, i)
+            val item = json_value_at(parsed, i)
             issues = issues + [_parse_jira_issue(item)]
             i = i + 1
     else:
         # Single result or nested
-        val results = json_object_get(parsed, "issues")
-        if results != nil:
-            val arr_len = json_array_length(results)
+        if json_value_has(parsed, "issues"):
+            val results = json_value_field(parsed, "issues")
+            val arr_len = json_value_len(results)
             var i = 0
             while i < arr_len:
-                val item = json_array_get(results, i)
+                val item = json_value_at(results, i)
                 issues = issues + [_parse_jira_issue(item)]
                 i = i + 1
 
@@ -139,11 +141,12 @@ fn jira_create_issue(config: ItfConfig, project: text, summary: text, issue_type
     if not ok:
         return (false, "", "acli error: {stderr}")
 
-    val parsed = json_parse(stdout)
-    if parsed != nil:
-        val key = json_object_get(parsed, "key")
-        if key != nil:
-            return (true, json_serialize(key).replace("\"", ""), stdout)
+    val parsed_opt = json_value_parse_opt(stdout)
+    if parsed_opt != nil:
+        val parsed = parsed_opt.unwrap()
+        if json_value_has(parsed, "key"):
+            val key = json_value_field(parsed, "key")
+            return (true, json_value_serialize(key).replace("\"", ""), stdout)
 
     (true, stdout.trim(), stdout)
 
@@ -197,37 +200,33 @@ fn jira_transition_issue(config: ItfConfig, key: text, status_or_id: text) -> (b
     (true, "")
 
 
-fn _parse_jira_issue(obj: any) -> JiraIssue:
+fn _parse_jira_issue(obj: JsonValue) -> JiraIssue:
     """Parse a Jira issue from JSON."""
     val key = _jira_str(obj, "key")
 
     # Fields may be nested under "fields" or flat
-    val fields = json_object_get(obj, "fields")
-    val source = if fields != nil: fields else: obj
+    val source = if json_value_has(obj, "fields"): json_value_field(obj, "fields") else: obj
 
     val summary = _jira_str(source, "summary")
     val description = _jira_str(source, "description")
-    val priority_obj = json_object_get(source, "priority")
-    val priority = if priority_obj != nil: _jira_str(priority_obj, "name") else: ""
-    val status_obj = json_object_get(source, "status")
-    val status = if status_obj != nil: _jira_str(status_obj, "name") else: ""
-    val type_obj = json_object_get(source, "issuetype")
-    val issue_type = if type_obj != nil: _jira_str(type_obj, "name") else: ""
-    val assignee_obj = json_object_get(source, "assignee")
-    val assignee = if assignee_obj != nil: _jira_str(assignee_obj, "displayName") else: ""
+    val priority_obj = json_value_field(source, "priority")
+    val priority = if json_value_has(source, "priority"): _jira_str(priority_obj, "name") else: ""
+    val status_obj = json_value_field(source, "status")
+    val status = if json_value_has(source, "status"): _jira_str(status_obj, "name") else: ""
+    val type_obj = json_value_field(source, "issuetype")
+    val issue_type = if json_value_has(source, "issuetype"): _jira_str(type_obj, "name") else: ""
+    val assignee_obj = json_value_field(source, "assignee")
+    val assignee = if json_value_has(source, "assignee"): _jira_str(assignee_obj, "displayName") else: ""
     val updated = _jira_str(source, "updated")
 
     JiraIssue(key: key, summary: summary, status: status, assignee: assignee, issue_type: issue_type, priority: priority, description: description, updated: updated)
 
 
-fn _jira_str(obj: any, key: text) -> text:
+fn _jira_str(obj: JsonValue, key: text) -> text:
     """Safely extract a string from JSON object."""
-    if obj == nil:
+    if not json_value_has(obj, key):
         return ""
-    val value = json_object_get(obj, key)
-    if value == nil:
-        return ""
-    val s = json_serialize(value)
+    val s = json_value_serialize(json_value_field(obj, key))
     if s.starts_with("\"") and s.ends_with("\""):
         return s[1:s.len() - 1]
     s

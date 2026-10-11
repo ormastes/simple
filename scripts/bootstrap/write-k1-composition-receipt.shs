@@ -28,6 +28,7 @@ authority_value() {
   ' "$closure_manifest"
 }
 authority_k1=$(authority_value k1_policy) || exit 2
+authority_k1_alternate=$(authority_value k1_policy_alternates) || exit 2
 authority_abi=$(authority_value simple_abi_policy) || exit 2
 authority_manifest=$(authority_value plugin_manifest_policy) || exit 2
 authority_coverage=$(authority_value coverage_cutover_policy) || exit 2
@@ -38,7 +39,8 @@ authority_performance_scope=$(authority_value performance_baseline_scope) || exi
 authority_steady_percent=$(authority_value performance_steady_rss_percent) || exit 2
 authority_growth_percent=$(authority_value performance_growth_percent) || exit 2
 authority_warm_requests=$(authority_value performance_warm_request_count) || exit 2
-[ "$authority_k1" = llvm-cranelift ] && [ "$authority_abi" = v1 ] &&
+[ "$authority_k1" = llvm-cranelift ] && [ "$authority_k1_alternate" = llvm ] &&
+  [ "$authority_abi" = v1 ] &&
   [ "$authority_manifest" = simple-sdn ] &&
   [ "$authority_coverage" = atomic-apk-only ] &&
   [ "$authority_coverage_implementation" = apk-only ] &&
@@ -50,13 +52,26 @@ authority_warm_requests=$(authority_value performance_warm_request_count) || exi
     echo "error: kernel policy authority drifted" >&2
     exit 2
   }
-[ "$policy" = "$authority_k1" ] || {
-  echo "error: K1 policy '$policy' drifts from '$authority_k1'" >&2
-  exit 2
-}
+# The receipt policy must be one the manifest pins: the canonical combined
+# kernel or the LLVM-only alternate. Each binds its own composition root and
+# its own Cranelift-presence expectation (see verify_stage_backend_closure).
+case "$policy" in
+  "$authority_k1")
+    selected_path='src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl'
+    expect_cranelift_adapter=1
+    ;;
+  "$authority_k1_alternate")
+    selected_path='src/compositions/kernel_llvm/compiler/driver/bootstrap_k1_selected.spl'
+    expect_cranelift_adapter=0
+    ;;
+  *)
+    echo "error: K1 policy '$policy' is neither canonical '$authority_k1' nor alternate '$authority_k1_alternate'" >&2
+    exit 2
+    ;;
+esac
 k1_policy=${SIMPLE_KERNEL_K1_POLICY:-unselected}
-[ "$k1_policy" = "$authority_k1" ] || {
-  echo "error: SIMPLE_KERNEL_K1_POLICY '$k1_policy' drifts from '$authority_k1'" >&2
+[ "$k1_policy" = "$policy" ] || {
+  echo "error: SIMPLE_KERNEL_K1_POLICY '$k1_policy' drifts from receipt policy '$policy'" >&2
   exit 2
 }
 case "$mode" in dynload|one-binary) ;; *) exit 2 ;; esac
@@ -292,7 +307,6 @@ else
 fi
 verify_stage_kernel_closure Stage3 "$stage3_paths" "$p_static_counts"
 compatibility_path='src/compiler/80.driver/bootstrap_k1_selected.spl'
-selected_path='src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl'
 selected_file=$repo_root/$selected_path
 [ -f "$selected_file" ] && [ ! -L "$selected_file" ] || {
   echo "error: selected K1 composition is missing or a symlink" >&2
@@ -425,13 +439,23 @@ verify_stage_backend_closure() {
   stage_name=$1
   stage_paths=$2
   llvm_paths=$(grep -Ei '/([^/]*llvm[^/]*)\.spl$|/([^/]*llvm[^/]*)/(mod|__init__)\.spl$' "$stage_paths" || true)
-  cranelift_paths=$(grep -Ei '/cranelift_codegen_adapter\.spl$' "$stage_paths" || true)
-  [ -n "$cranelift_paths" ] || {
-    echo "error: $stage_name omits the Cranelift adapter" >&2
-    exit 1
-  }
+  cranelift_paths=$(grep -Ei '/cranelift_codegen_adapter\.spl$|/sffi/codegen\.spl$|/static_backend_cranelift_jit_lane\.spl$' "$stage_paths" || true)
+  if [ "$expect_cranelift_adapter" = 1 ]; then
+    [ -n "$cranelift_paths" ] || {
+      echo "error: $stage_name omits the Cranelift adapter" >&2
+      exit 1
+    }
+  else
+    # LLVM-only policy: a Cranelift adapter, its SFFI owner or the JIT lane
+    # in the closure would reintroduce rt_cranelift_* into a link the
+    # core-c-bootstrap bundle cannot satisfy.
+    [ -z "$cranelift_paths" ] || {
+      echo "error: $stage_name closure links Cranelift under K1 policy '$policy': $cranelift_paths" >&2
+      exit 1
+    }
+  fi
   if [ -z "$llvm_paths" ]; then
-    echo "error: $stage_name LLVM+Cranelift closure omits LLVM implementation modules" >&2
+    echo "error: $stage_name K1 closure omits LLVM implementation modules" >&2
     exit 1
   fi
 }
@@ -484,7 +508,7 @@ llvm_paths=$(grep -Ei '/([^/]*llvm[^/]*)\.spl$|/([^/]*llvm[^/]*)/(mod|__init__)\
   echo "dependency_count=$(wc -l <"$paths" | tr -d ' ')"
   echo "dependency_sha256=$(shasum -a 256 "$paths" | awk '{print $1}')"
   echo "llvm_adapter_present=$([ -n "$llvm_paths" ] && echo 1 || echo 0)"
-  echo 'cranelift_adapter_present=1'
+  echo "cranelift_adapter_present=$expect_cranelift_adapter"
   echo 'status=pass'
   sed 's/^/dependency=/' "$paths"
 } >"$tmp"

@@ -1,6 +1,7 @@
 use std.spec
 use std.spec.step
-use compiler.driver.native_relocatable_link.{native_relocatable_link_plan}
+use compiler.driver.native_relocatable_link.{native_relocatable_link_plan,
+    native_relocatable_linker_version_admissible}
 
 describe "target-aware relocatable object linking":
     it "uses the COFF partial linker for a native Windows AMD64 target":
@@ -38,3 +39,19 @@ describe "target-aware relocatable object linking":
         match result:
             case Err(reason): expect(reason).to_contain("unsupported for architecture aarch64")
             case Ok(_): expect(false).to_equal(true)
+
+    it "prefers the GNU BFD spelling before the generic COFF ld name":
+        step("llvm-mingw installs LLD as plain ld")
+        val plan = native_relocatable_link_plan("", "windows", "x86_64",
+            ["one.o", "two.o"], "out.o").unwrap()
+        expect(plan.candidates).to_equal(["ld.bfd", "ld"])
+        expect(plan.requires_bfd).to_equal(true)
+
+    it "rejects an LLD-backed ld for COFF partial links":
+        step("Probe text from llvm-mingw ld --version")
+        expect(native_relocatable_linker_version_admissible(true,
+            "LLD 23.1.2 (compatible with GNU linkers)")).to_equal(false)
+        expect(native_relocatable_linker_version_admissible(true,
+            "GNU ld (GNU Binutils) 2.46")).to_equal(true)
+        expect(native_relocatable_linker_version_admissible(false,
+            "LLD 23.1.2")).to_equal(true)

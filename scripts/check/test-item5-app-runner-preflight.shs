@@ -1,0 +1,63 @@
+#!/bin/sh
+# Real runner preflight only: no compiler, provider load or app qualification.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/item5-runner-preflight.XXXXXXXX")
+trap 'rm -rf -- "$work"' EXIT HUP INT TERM
+mkdir -p "$work/tree/scripts/check" "$work/tree/scripts/resource"
+cp "$root/scripts/check/run-item5-app-vector-receipts.shs" "$work/tree/scripts/check/"
+cp -R "$root/scripts/check/lib" "$work/tree/scripts/check/"
+cp "$root/scripts/resource/process-tree-rss-watchdog.pl" "$work/tree/scripts/resource/"
+watchdog=$work/tree/scripts/resource/process-tree-rss-watchdog.pl
+chmod 0644 "$watchdog"
+[ -r "$watchdog" ] && [ ! -x "$watchdog" ]
+# Verify the real helpers were copied byte-for-byte; no watchdog/helper stub.
+for relative in scripts/check/run-item5-app-vector-receipts.shs \
+    scripts/check/lib/vector-provider-receipt.pl scripts/check/lib/stage-verified-file.shs \
+    scripts/check/lib/item5-app-build-manifest.pl scripts/check/lib/item5-qemu-guest-exec.shs \
+    scripts/resource/process-tree-rss-watchdog.pl; do
+    cmp "$root/$relative" "$work/tree/$relative"
+    sha256sum "$work/tree/$relative" >> "$work/helpers.sha256"
+done
+# A failing launch canary, never an app PASS substitute. Any launch is a failure.
+cat > "$work/launch-canary" <<'CANARY'
+#!/bin/sh
+: > "$ITEM5_PREFLIGHT_LAUNCH_MARKER"
+exit 97
+CANARY
+chmod 0755 "$work/launch-canary"
+export ITEM5_PREFLIGHT_LAUNCH_MARKER=$work/unexpected-launch
+# Oversized provenance is the bounded sentinel immediately after the helper and
+# session gates, before staging or any child launch. It is not valid evidence.
+dd if=/dev/zero of="$work/invalid-provenance.json" bs=65537 count=1 2>/dev/null
+sha=$(sha256sum "$work/launch-canary" | awk '{print $1}')
+provenance_sha=$(sha256sum "$work/invalid-provenance.json" | awk '{print $1}')
+run_case() {
+    name=$1 expected=$2; shift 2
+    result=0
+    env -u SIMPLE_BOOTSTRAP_SESSION_ID -u SIMPLE_BOOTSTRAP_SESSION_EXEC "$@" \
+        timeout 10 sh "$work/tree/scripts/check/run-item5-app-vector-receipts.shs" \
+        --output "$work/output-$name" \
+        --producer-receipt "$work/invalid-provenance.json" --producer-receipt-sha256 "$provenance_sha" \
+        --app-build-manifest "$work/invalid-provenance.json" --app-build-manifest-sha256 "$provenance_sha" \
+        --provider-dso "$work/launch-canary" --provider-sha256 "$sha" \
+        --observer "$work/launch-canary" --observer-sha256 "$sha" \
+        --provider-id 1 --implementation-id 2 \
+        --db-scalar "$work/launch-canary" --db-scalar-sha256 "$sha" \
+        --db-vector "$work/launch-canary" --db-vector-sha256 "$sha" \
+        --http-scalar "$work/launch-canary" --http-scalar-sha256 "$sha" \
+        --http-vector "$work/launch-canary" --http-vector-sha256 "$sha" \
+        > "$work/$name.log" 2>&1 || result=$?
+    [ "$result" = 1 ] || { cat "$work/$name.log" >&2; echo "unexpected status $name: $result" >&2; exit 1; }
+    grep -Fx "FAIL item5 app receipt runner: $expected" "$work/$name.log" >/dev/null
+    [ "$(wc -l < "$work/$name.log")" = 1 ]
+    [ ! -e "$work/output-$name" ] && [ ! -e "$ITEM5_PREFLIGHT_LAUNCH_MARKER" ]
+}
+run_case readable 'provenance JSON exceeds 64 KiB bound'
+inherited='launch app receipt runner directly: it owns independent child watchdog sessions'
+run_case session-id "$inherited" SIMPLE_BOOTSTRAP_SESSION_ID=123
+run_case session-id-empty "$inherited" SIMPLE_BOOTSTRAP_SESSION_ID=
+run_case session-exec "$inherited" SIMPLE_BOOTSTRAP_SESSION_EXEC=/not/a/session/helper
+run_case session-exec-empty "$inherited" SIMPLE_BOOTSTRAP_SESSION_EXEC=
+sha256sum -c "$work/helpers.sha256" >/dev/null
+printf '%s\n' 'ITEM5_APP_RUNNER_PREFLIGHT_PASS cases=5 watchdog_mode=0644 helpers=unchanged output_side_effects=0 app_launches=0'

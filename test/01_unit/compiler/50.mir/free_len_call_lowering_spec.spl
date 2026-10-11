@@ -1,0 +1,63 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Free-function `len(x)` lowers natively (UI/TUI batch, 2026-10-11)
+
+The seed accepts the free-function builtin `len(x)` and the HIR interpreter
+dispatches it by name (interpreter_calls.spl lookup_builtin_tag), but the
+self-hosted compiler rejected it twice over:
+
+1. HIR lowering: `is_interp_builtin_fn` never listed "len", so every module
+   using the free form died with "unresolved name: len"
+   (src/lib/nogc_sync_mut/tui/layout.spl, widget.spl, widgets/* — 34 sites).
+2. MIR lowering: no intercept existed for a bare `len(...)` CALL, so even
+   with the HIR symbol defined the native lane had nothing to lower it to.
+
+Fix: allow-list "len" in is_interp_builtin_fn, and re-dispatch the direct
+call as a MethodCall(receiver=x, "len") in lower_call so the call reuses the
+method arm's receiver-provenanced rt_len / rt_string_len lowering.
+
+The spec drives the real pipeline in-process (parse -> HIR -> MIR) the same
+way enum_field_eq_lowering_spec does, so a regression in either half fails
+here without a bootstrap lane.
+"""
+
+# @tag: unit, compiler, mir, builtin
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val len_source = "fn probe_arr(xs: [i64]) -> i64:\n    len(xs)\n\nfn probe_text(s: text) -> i64:\n    len(s)\n\nfn probe_loop(lines: [text]) -> i64:\n    var total = 0\n    var i = 0\n    while i < len(lines):\n        total = total + 1\n        i = i + 1\n    total\n"
+
+fn len_mir_errors() -> text:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(len_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: len_source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.prescan_module_struct_names(hir)
+    mir_lowering.lower_module(hir)
+    var out = ""
+    for e in mir_lowering.errors:
+        out = out + e.message + "\n"
+    out
+
+describe "free-function len(x) native lowering":
+    it "lowers len over an array, a text, and a loop bound with no errors":
+        val errs = len_mir_errors()
+        print "mir errors: [{errs}]"
+        expect(errs.contains("unresolved name: len")).to_equal(false)
+        expect(errs.contains("unresolved method call: len")).to_equal(false)
+        expect(errs).to_equal("")

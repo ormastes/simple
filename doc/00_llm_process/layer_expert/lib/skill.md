@@ -85,3 +85,13 @@ nothing). Sabotage the key term on its own and confirm the spec reds — a
 "simplification" of a cache key otherwise reads as a free cleanup.
 
 See `doc/08_tracking/bug/web_layout_vertical_drift_accumulates_16px_per_construct_2026-09-14.md`.
+
+## Session update 2026-10-09 — string_core search loops
+
+`str_index_of` and `str_replace_all` now jump with `text.index_of(sub, start)`
+(native `rt_text_find`) like `str_split`; the old `s[i:i + n] == sub` loops
+allocated a substring per input byte and made every typed-`text`
+`contains`/`replace` on the native lanes ~100x slower than the runtime worker
+(SCV cold init, `doc/08_tracking/bug/stage2_scv_cold_init_str_contains_per_byte_slice_2026-10-09.md`).
+Rule: never scan `text` byte-by-byte with slices in this layer; use the
+native search and slice once per match. Specs: `string_core_{ops,basic_coverage,advanced_coverage}_spec`.

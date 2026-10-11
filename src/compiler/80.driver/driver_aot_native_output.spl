@@ -33,13 +33,15 @@ use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
 use compiler.backend.backend.llvm_capability.{find_archive_portable}
 use std.platform.{get_host_os, get_host_arch}
 use std.nogc_async_mut.sosix.host_facade.{sosix_run}
-use compiler.driver.native_relocatable_link.{native_relocatable_link_plan}
+use compiler.driver.native_relocatable_link.{native_relocatable_link_plan,
+    native_relocatable_linker_version_admissible, NativeRelocatableLink}
 use compiler.driver.driver_log_helpers.{log_phase, log_error}
 use compiler.driver.native_aot_artifacts.{
     native_aot_object_path_v1, native_aot_finish_diagnostics_v1}
 use compiler.backend.backend_plugin.session_authority_v2.{BackendSessionOwnedLeaseV2, BackendSessionAuthorityErrorV2}
 use compiler.driver.driver_backend_plugin_selection.{
-    driver_aot_uses_versioned_backend, driver_aot_backend_plugin_request_v1
+    driver_aot_uses_versioned_backend, driver_aot_backend_plugin_request_v1,
+    driver_cuda_plugin_request_error_v1
 }
 use compiler.backend.linker.linker_wrapper.{
     link_to_native, link_to_shared,
@@ -213,6 +215,10 @@ use compiler.driver.driver_build.build_outcome.{BuildOutcomeKind, BuildUnitOutco
     build_outcome_retain_diagnostics, build_outcome_count_diagnostic_lines,
     build_outcome_retained_diagnostic_count}
 use compiler.driver.driver_log_helpers.{log_build_progress}
+use compiler.driver.driver_pass_receipt.{LaneReceipt, lane_receipt_enabled, record_lane_receipt}
+use compiler.driver.driver_ice_boundary.{
+    ice_boundary_module_start, ice_boundary_module_done, ice_boundary_fail,
+    ice_boundary_finalize}
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 use compiler.driver.cache.native_build_environment_identity.{native_build_environment_fingerprint_v1}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, process_run}
@@ -383,6 +389,26 @@ fn driver_native_shadow_sort(lines: [text]) -> [text]:
         if not inserted: next.push(line)
         sorted = next
     sorted
+
+# Admit the relocatable linker by probing `--version`, not by name: llvm-mingw
+# installs LLD's MinGW driver as `ld`, which rejects `-r` (measured: every
+# multi-object `--emit-object` in rc1-phase3-vertical20 failed this way with an
+# empty stderr). SIMPLE_RELOCATABLE_LD overrides the candidate list and is
+# still probed, so an LLD override fails here with a named reason.
+fn _native_relocatable_linker_resolve(plan: NativeRelocatableLink) -> Result<text, text>:
+    val configured = env_get_nullable("SIMPLE_RELOCATABLE_LD") ?? ""
+    val candidates = if configured != "": [configured] else: plan.candidates
+    if not plan.requires_bfd:
+        return Ok(candidates[0])
+    var rejected: [text] = []
+    for candidate in candidates:
+        val probe = sosix_run(candidate, ["--version"])
+        if probe.exit_code == 0 and native_relocatable_linker_version_admissible(true, probe.stdout):
+            return Ok(candidate)
+        val first_line = probe.stdout.split("\n")[0].trim()
+        rejected = rejected.push("{candidate} (exit {probe.exit_code}: {first_line})")
+    val rejected_text = rejected.join("; ")
+    Err("emit-object COFF relocatable link needs GNU BFD ld (LLD has no COFF -r); rejected: {rejected_text}; install binutils (e.g. MSYS2 mingw-w64 binutils) or set SIMPLE_RELOCATABLE_LD")
 
 # `file_write_text` / `file_read_text` are NOT usable here. `std.file_system`
 # exports argument-validating STUBS (`file_ops.spl:60` returns `true` without
@@ -1386,7 +1412,19 @@ pub fn driver_native_sources_fingerprint(sources: [SourceFile]) -> text:
     "{_sffi_hash_text(manifest)}n{sources.len()}"
 
 pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: ParserModule?) -> bool:
-    if mir.functions.keys().len() > 0 or mir.statics.keys().len() > 0 or mir.constants.keys().len() > 0 or mir.types.keys().len() > 0:
+    # Objectless = nothing for a backend to emit. Besides import/export
+    # facades this covers TYPE-ONLY modules (structs/enums/bitfields/traits/
+    # type aliases, e.g. std.nogc_sync_mut.io.process_completion or
+    # compiler.common.cache_contract.virtual_source_store_v1): their MIR
+    # carries only `types`, which the native object backends (LLVM,
+    # Cranelift) never turn into object code (emitters that do read mir.types,
+    # e.g. VHDL, are not reached from this predicate: its only callers are
+    # the native object driver paths in this file), so
+    # sending them to codegen failed the build with "MIR module has no
+    # functions or static data". They own no `__module_init_*` either (that
+    # symbol exists only for dynamic statics), so link bookkeeping is the
+    # same typed objectless outcome a facade records.
+    if mir.functions.keys().len() > 0 or mir.statics.keys().len() > 0 or mir.constants.keys().len() > 0:
         return false
     if parsed_module == nil:
         return false
@@ -1407,10 +1445,14 @@ pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: Pars
     # Export record in the flat bridge (only bare `export a, b` emits one),
     # e.g. std.nogc_async_mut.env.types — accept import-only and trait-only
     # modules too; neither has standalone code by the decl checks below.
-    ((parsed.exports.len() > 0 or parsed.imports.len() > 0 or parsed.traits.len() > 0) and parsed.domain_blocks.len() == 0 and
+    # Empty and comments-only modules have the same objectless outcome. Do not
+    # require an import/export/type declaration as a witness: env.utilities is
+    # intentionally empty and can still be reached through a facade. Parser
+    # presence and the body/data guards remain mandatory, so missing lowering
+    # output for a real definition is never silently accepted.
+    (parsed.domain_blocks.len() == 0 and
         only_extern_functions and parsed.classes.len() == 0 and parsed.actors.len() == 0 and
-        parsed.structs.len() == 0 and parsed.enums.len() == 0 and parsed.bitfields.len() == 0 and
-        parsed.impls.len() == 0 and parsed.type_aliases.len() == 0 and
+        parsed.impls.len() == 0 and
         parsed.constants.len() == 0 and parsed.static_asserts.len() == 0 and
         parsed.aop_advices.len() == 0 and parsed.di_bindings.len() == 0 and
         parsed.arch_rules.len() == 0 and parsed.mock_decls.len() == 0)
@@ -1672,6 +1714,10 @@ impl CompilerDriver:
         log_phase("aot:native_entry")
         val ctx: CompileContext = _extract_driver_ctx(self)
         val backend_name = ctx.options.backend
+        val cuda_plugin_error = driver_cuda_plugin_request_error_v1(
+            backend_name, ctx.options.backend_plugin_path)
+        if cuda_plugin_error != "":
+            return CompileResult.CodegenError(cuda_plugin_error)
         val is_release = ctx.options.release
         val driver_opt_level = driver_effective_native_opt_level(ctx, is_release)
         val native_target = ctx.native_target
@@ -1853,6 +1899,14 @@ impl CompilerDriver:
         # Compile all modules and collect object files
         var object_files: [text] = []
 
+        # Lane non-vacuity receipt (driver_pass_receipt.spl). These are counts
+        # of work this function already does; `SIMPLE_LANE_RECEIPT=off` skips
+        # the counting as well as the check.
+        val lane_receipt_on = lane_receipt_enabled()
+        var lane_functions: i64 = 0
+        var lane_statics: i64 = 0
+        var lane_objectless: i64 = 0
+
         # NOT `ctx.options.low_memory` on its own: under `--output-format both`
         # compile_to_smf runs after this function over the SAME ctx and
         # re-iterates ctx.mir_modules, so evicting here silently produced an
@@ -1933,6 +1987,9 @@ impl CompilerDriver:
             "pending", 5, 6, 0, 0, "running")
         for name in module_names:
             progress_cache_scanned = progress_cache_scanned + 1
+            if lane_receipt_on:
+                lane_functions = lane_functions + ctx.mir_modules[name].functions.keys().len()
+                lane_statics = lane_statics + ctx.mir_modules[name].statics.keys().len()
             # ParserImport/export facades contribute symbols through their imported
             # implementation modules and have no object code of their own.
             if ctx.modules.has(name) and driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name]):
@@ -1940,6 +1997,7 @@ impl CompilerDriver:
                     ctx, name)
                 if objectless_reason != "":
                     return CompileResult.CodegenError(objectless_reason)
+                lane_objectless = lane_objectless + 1
                 continue
             val cache_source = driver_native_module_cache_source(ctx, name)
             var used_cache = false
@@ -2546,6 +2604,12 @@ impl CompilerDriver:
         # linker/native_binary/stubs.rs:209-221, where fabricated zero-returning
         # stubs masked missing symbols.
         val outcome_verdict = driver_native_report_module_outcomes_v1(module_outcomes)
+        # ICE boundary: name every module that failed inside the per-module
+        # boundary. Writes and deletes nothing; the run directory is the owner's.
+        val ice_summary = ice_boundary_finalize()
+        if ice_summary != "":
+            print "error: {ice_summary}"
+            _sffi_stdout_flush()
         if outcome_verdict != "":
             return CompileResult.CodegenError(outcome_verdict)
 
@@ -2569,6 +2633,24 @@ impl CompilerDriver:
                 ""
             return CompileResult.CodegenError("native-build produced no object files{entry_hint} — no modules compiled. Try adding an import (use std.text) or using the standard entry point.")
 
+        # Non-vacuity receipt at the link boundary: every lowered module is now
+        # an OK outcome or an objectless facade (the verdict above refused
+        # anything else). A lane that got here having lowered or emitted
+        # nothing fails closed instead of linking a hollow artifact.
+        val lane_failure = record_lane_receipt(LaneReceipt(
+            lane: "native-build",
+            requires_code: not emit_object_requested and
+                not emit_archive_requested and not emit_shared_requested,
+            modules_seen: all_module_names.len(),
+            modules_lowered: total_modules,
+            modules_objectless: lane_objectless,
+            functions_emitted: lane_functions,
+            statics_emitted: lane_statics,
+            objects_written: module_outcomes.len(),
+            link_inputs: object_files.len()))
+        if lane_failure != "":
+            return CompileResult.CodegenError(lane_failure)
+
         val cold_object_reason = driver_cold_hir_persist_verified_objects_v1(
             ctx, machine_cache_root())
         if cold_object_reason != "":
@@ -2586,9 +2668,12 @@ impl CompilerDriver:
                     native_target, get_host_os(), get_host_arch(), object_files, output):
                     case Ok(value): value
                     case Err(reason): return CompileResult.CodegenError(reason)
-                val result = sosix_run(plan.program, plan.args)
+                val linker = match _native_relocatable_linker_resolve(plan):
+                    case Ok(value): value
+                    case Err(reason): return CompileResult.CodegenError(reason)
+                val result = sosix_run(linker, plan.args)
                 if result.exit_code != 0:
-                    return CompileResult.CodegenError("emit-object relocatable link failed ({plan.program}): {result.stderr}")
+                    return CompileResult.CodegenError("emit-object relocatable link failed ({linker}): {result.stderr}{result.stdout}")
             driver_log_info(log, "Native object written to {output}")
             return driver_native_success_with_launch_metadata(ctx, output)
 
@@ -3013,6 +3098,12 @@ fn _compile_frozen_module_capsule(
     # `Err("")` even though the object-path driver had read the llc diagnostic.
     if group_member_id != "":
         log_phase("native_group:codegen:start member={group_member_id} backend={backend_name}")
+    # ICE boundary: the `start` breadcrumb is what lets the parent name this
+    # module if the process dies inside its codegen (driver_ice_boundary.spl).
+    val ice_gate = ice_boundary_module_start(name, capsule.cache_source, "codegen", backend_name)
+    if ice_gate != "":
+        return _aot_compile_failure(name,
+            ice_boundary_fail(name, capsule.cache_source, "codegen", backend_name, ice_gate))
     match _compile_selected_module(backend_name, is_release, opt_level,
         capsule.output_base,
         name, capsule.mir_module, capsule.storage_snapshot,
@@ -3020,8 +3111,10 @@ fn _compile_frozen_module_capsule(
         case Err(error):
             if group_member_id != "":
                 log_phase("native_group:codegen:error member={group_member_id} backend={backend_name}")
+            val _ice_line = ice_boundary_fail(name, capsule.cache_source, "codegen", backend_name, error)
             return Err(error)
         case Ok(object_path):
+            ice_boundary_module_done(name, "codegen")
             if group_member_id != "":
                 log_phase("native_group:codegen:done member={group_member_id} backend={backend_name}")
             if not capsule.identity_valid():

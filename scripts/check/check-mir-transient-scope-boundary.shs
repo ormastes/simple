@@ -153,8 +153,8 @@ scan_tree() {
 
     # Derive the inventory from declarations, including nested carriers whose
     # raw allocation can also predate the current scope. Include scalar and
-    # optional fields: a managed array accepts them, whereas promoting nil or
-    # an integer directly fails. Requiring every field also makes new fields
+    # optional fields: a one-element managed array accepts them, whereas
+    # promoting nil or an integer directly fails. Requiring every field also makes new fields
     # fail closed instead of depending on a stale hard-coded field count.
     _field_roots() {
         awk -v owner="$2" -v prefix="$3" '
@@ -181,20 +181,20 @@ scan_tree() {
         doc || /^[[:space:]]*(#|$)/ { next }
         { sub(/^[[:space:]]*/, ""); print }
     ' "${_owner}")
-    _actual=$(printf '%s\n' "${_owner_code}" | sed -n 's/^roots\.push(\(self\.[A-Za-z_0-9.]*\))$/\1/p')
+    _actual=$(printf '%s\n' "${_owner_code}" | sed -n 's/^ok = promote_and_release_transient_owner_roots(\[\(self\.[A-Za-z_0-9.]*\)\]) and ok$/\1/p')
     _checked=$((_checked + 1))
     if [ -z "${_expected}" ] || [ "$(printf '%s\n' "${_expected}" | sort)" != "$(printf '%s\n' "${_actual}" | sort)" ]; then
         _fails="${_fails}${_fails:+; }owner-field-inventory-drift"
     fi
-    # Match a deliberately small straight-line helper grammar: allocate one
-    # managed inventory, populate it, promote it once, release only the array,
-    # and return the promotion result. Reject whole-owner promotion, early
-    # success, ignored promotion failure, and roots added after promotion.
+    # Match a deliberately small straight-line helper grammar: promote each
+    # field through a one-element managed array (released by the helper),
+    # fold every result into `ok`, and return it. Reject whole-owner
+    # promotion, early success, and ignored promotion failure.
     _checked=$((_checked + 1))
     if ! printf '%s\n' "${_owner_code}" | awk '
-        NR == 1 && $0 == "var roots: [Any] = []" { state = 1; next }
-        state == 1 && /^roots\.push\(self\.[A-Za-z_0-9.]*\)$/ { count++; next }
-        state == 1 && count > 0 && $0 == "promote_and_release_transient_owner_roots(roots)" { state = 4; next }
+        NR == 1 && $0 == "var ok = true" { state = 1; next }
+        state == 1 && /^ok = promote_and_release_transient_owner_roots\(\[self\.[A-Za-z_0-9.]*\]\) and ok$/ { count++; next }
+        state == 1 && count > 0 && $0 == "ok" { state = 4; next }
         { bad = 1 }
         END { exit (bad || state != 4) }
     '; then
@@ -217,7 +217,7 @@ scan_tree() {
         _semantic=${_pair%%:*}
         _raw=${_pair#*:}
         _semantic_body=$(awk -v name="${_semantic}" '
-            $0 ~ "^fn " name "\\(" { inbody = 1; next }
+            $0 ~ "^fn " name "[<(]" { inbody = 1; next }
             inbody && /^fn / { exit }
             inbody && /^[^ #]/ { exit }
             inbody && /^[[:space:]]*(#|$)/ { next }
@@ -231,7 +231,7 @@ scan_tree() {
 
     _checked=$((_checked + 1))
     _release_body=$(awk '
-        /^fn promote_and_release_transient_owner_roots\(/ { inbody = 1; next }
+        /^fn promote_and_release_transient_owner_roots[<(]/ { inbody = 1; next }
         inbody && /^fn / { exit }
         inbody && /^[^ #]/ { exit }
         inbody && /^[[:space:]]*(#|$)/ { next }
@@ -325,18 +325,18 @@ EOF
         cat > "${_d}/${OWNER_REL}" <<'EOF'
 impl MirLowering:
     me promote_transient_owner() -> bool:
-        var roots: [Any] = []
-        roots.push(self.builder)
-        roots.push(self.symbols)
-        roots.push(self.target_context)
-        roots.push(self.current_module_id)
-        roots.push(self.errors)
-        roots.push(self.builder.module)
-        roots.push(self.builder.locals)
-        roots.push(self.builder.module.functions)
-        roots.push(self.symbols.symbols)
-        roots.push(self.target_context.arch)
-        promote_and_release_transient_owner_roots(roots)
+        var ok = true
+        ok = promote_and_release_transient_owner_roots([self.builder]) and ok
+        ok = promote_and_release_transient_owner_roots([self.symbols]) and ok
+        ok = promote_and_release_transient_owner_roots([self.target_context]) and ok
+        ok = promote_and_release_transient_owner_roots([self.current_module_id]) and ok
+        ok = promote_and_release_transient_owner_roots([self.errors]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.module]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.locals]) and ok
+        ok = promote_and_release_transient_owner_roots([self.builder.module.functions]) and ok
+        ok = promote_and_release_transient_owner_roots([self.symbols.symbols]) and ok
+        ok = promote_and_release_transient_owner_roots([self.target_context.arch]) and ok
+        ok
 EOF
         cat > "${_d}/${SFFI_REL}" <<'EOF'
 @unsafe(reason: "fixture", capabilities: [ffi])
@@ -346,9 +346,9 @@ extern fn rt_transient_array_scope_pause() -> bool
 @unsafe(reason: "fixture", capabilities: [ffi])
 extern fn rt_transient_array_scope_end() -> bool
 @unsafe(reason: "fixture", capabilities: [ffi])
-extern fn rt_transient_heap_promote(value: Any) -> bool
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
 @unsafe(reason: "fixture", capabilities: [ffi])
-extern fn rt_array_free(array: [Any])
+extern fn rt_array_free<T>(array: [T])
 
 fn transient_array_scope_begin_v1() -> bool:
     unsafe(capabilities: [ffi]):
@@ -362,11 +362,11 @@ fn transient_array_scope_end_v1() -> bool:
     unsafe(capabilities: [ffi]):
         rt_transient_array_scope_end()
 
-fn transient_heap_promote_v1(value: Any) -> bool:
+fn transient_heap_promote_v1<T>(value: T) -> bool:
     unsafe(capabilities: [ffi]):
         rt_transient_heap_promote(value)
 
-fn promote_and_release_transient_owner_roots(roots: [Any]) -> bool:
+fn promote_and_release_transient_owner_roots<T>(roots: [T]) -> bool:
     unsafe(capabilities: [ffi]):
         val promoted = rt_transient_heap_promote(roots)
         rt_array_free(roots)
@@ -476,13 +476,13 @@ impl MirLowering:
     me promote_transient_owner() -> bool:
         transient_heap_promote_v1(self)
 EOF
-    sed '/roots.push(self.current_module_id)/d' "${_tmp}/fixed/${OWNER_REL}" > "${_tmp}/missingtext/${OWNER_REL}"
-    sed '/roots.push(self.builder.locals)/d' "${_tmp}/fixed/${OWNER_REL}" > "${_tmp}/missingnested/${OWNER_REL}"
+    sed '/roots(\[self.current_module_id\])/d' "${_tmp}/fixed/${OWNER_REL}" > "${_tmp}/missingtext/${OWNER_REL}"
+    sed '/roots(\[self.builder.locals\])/d' "${_tmp}/fixed/${OWNER_REL}" > "${_tmp}/missingnested/${OWNER_REL}"
     printf '    retained_diagnostic: text\n' >> "${_tmp}/newfield/${TYPES_REL}"
-    sed 's/promote_and_release_transient_owner_roots(roots)/true/' "${_tmp}/fixed/${OWNER_REL}" > "${_tmp}/earlysuccess/${OWNER_REL}"
+    sed 's/^        ok$/        true/' "${_tmp}/fixed/${OWNER_REL}" > "${_tmp}/earlysuccess/${OWNER_REL}"
     sed '/rt_array_free(roots)/d' "${_tmp}/fixed/${SFFI_REL}" > "${_tmp}/nofree/${SFFI_REL}"
-    sed '/roots.push(self.errors)/d; /promote_and_release_transient_owner_roots(roots)/a\
-        roots.push(self.errors)
+    sed '/roots(\[self.errors\])/d; /^        ok$/a\
+        ok = promote_and_release_transient_owner_roots([self.errors]) and ok
 ' "${_tmp}/fixed/${OWNER_REL}" > "${_tmp}/latepush/${OWNER_REL}"
     sed 's/rt_transient_array_scope_pause()/rt_transient_array_scope_end()/' \
         "${_tmp}/fixed/${SFFI_REL}" > "${_tmp}/broken_sffi/${SFFI_REL}"

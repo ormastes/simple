@@ -1,0 +1,60 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+
+"""Imported enum field subjects retain their declared owner through native lowering.
+
+The imported-enum fixture matrix distinguishes a direct typed parameter and a
+single field from nested fields, call results, and indexed collection elements.
+Every scenario uses a bare `Deref | Field(_)` mixed unit/payload pattern, then
+runs the native binary so interpreter-only correctness cannot satisfy it.
+"""
+
+# @tag:system,compiler,hir,enum,field
+
+use std.spec.*
+use std.spec.step
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn run_shell(command: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", command])
+
+fn assert_native_fixture(case_name: text, expected_stdout: text):
+    val fixture = "test/fixtures/compiler/or_variant_binding_probe/" + case_name + "/main.spl"
+    val output = "build/compiler-or-variant-subject-field/" + case_name
+    val compile = run_shell(
+        "env -u SIMPLE_BOOTSTRAP bin/simple native-build --entry " + fixture +
+        " --entry-closure --clean -o " + output
+    )
+    if compile.2 != 0:
+        print "COMPILE STDOUT: " + compile.0
+        print "COMPILE STDERR: " + compile.1
+        fail("native compilation failed for " + case_name)
+    val run = rt_process_run(output, [])
+    if run.2 != 0:
+        print "RUN STDERR: " + run.1
+        fail("native fixture exited " + run.2.to_text() + " for " + case_name)
+    expect(run.0).to_equal(expected_stdout)
+    expect(run.1).to_equal("")
+
+describe "imported enum subject owner through field expressions":
+    it "keeps the direct typed and direct-field controls working":
+        step("compile and run direct owner controls")
+        assert_native_fixture("direct_mixed", "1\n1\n0\n")
+        assert_native_fixture("property_mixed", "1\n1\n0\n")
+
+    it "recovers the enum owner through nested field access":
+        step("compile and run nested field subject")
+        assert_native_fixture("nested_field", "1\n1\n")
+
+    it "recovers the enum owner through a call result field":
+        step("compile and run call result field subject")
+        assert_native_fixture("call_field", "1\n")
+
+    it "recovers the enum owner through an indexed collection element field":
+        step("compile and run indexed field subject")
+        assert_native_fixture("index_field", "1\n")
+
+    it "propagates a homogeneous typed array literal to its foreach element":
+        step("compile and run inferred enum array foreach")
+        assert_native_fixture("untyped_foreach", "2\n")

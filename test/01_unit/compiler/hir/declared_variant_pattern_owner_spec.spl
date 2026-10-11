@@ -1,0 +1,55 @@
+# AUTHORED_UNEXECUTED: concrete-admission and ordinary-pattern prevention.
+# Actual MirInstKind backend regressions live in the adjacent native fixtures.
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types_expr.{Pattern, PatternKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirPatternKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering._Expressions.expression_components.{declared_pattern_slot_type_is_concrete}
+use compiler.hir.hir_lowering._Expressions.expression_components.*
+
+describe "declared variant pattern type authority":
+    it "rejects nested unresolved slot types instead of caching their authority":
+        step("Reject Infer Error and TypeParam under composite payload slots")
+        val span = Span.empty()
+        val infer = HirType(kind: HirTypeKind.Infer(0, 0), span: span)
+        val error = HirType(kind: HirTypeKind.Error, span: span)
+        val param = HirType(kind: HirTypeKind.TypeParam("T", []), span: span)
+        expect(declared_pattern_slot_type_is_concrete(HirType(kind: HirTypeKind.Array(infer, nil), span: span))).to_equal(false)
+        expect(declared_pattern_slot_type_is_concrete(HirType(kind: HirTypeKind.Optional(error), span: span))).to_equal(false)
+        expect(declared_pattern_slot_type_is_concrete(HirType(kind: HirTypeKind.Tuple([param]), span: span))).to_equal(false)
+        expect(declared_pattern_slot_type_is_concrete(HirType(kind: HirTypeKind.Int(64, true), span: span))).to_equal(true)
+    it "preserves a mutable ordinary binding and its exact concrete type":
+        step("Lower ordinary scalar binding without interpreting it as an enum unit")
+        var lowering = HirLowering.with_filename("ordinary_binding")
+        val span = Span.empty()
+        val integer = HirType(kind: HirTypeKind.Int(64, true), span: span)
+        val input = Pattern(kind: PatternKind.Binding("value", true), span: span)
+        val output = lowering.lower_match_pattern(input, Some(integer))
+        match output.kind:
+            case HirPatternKind.Binding(symbol, mutable):
+                expect(mutable).to_equal(true)
+                expect(lowering.symbols.symbol_name_scalar_raw(symbol.id)).to_equal("value")
+                if val stored = lowering.symbols.get_symbol_raw(symbol.id):
+                    expect(stored.type_).to_equal(Some(integer))
+                else: assert(false)
+            case _: assert(false)
+        expect(lowering.errors.len()).to_equal(0)
+    it "threads ordinary tuple slots without changing tuple pattern shape":
+        step("Keep scalar and text tuple bindings as distinct typed variables")
+        var lowering = HirLowering.with_filename("ordinary_tuple")
+        val span = Span.empty()
+        val integer = HirType(kind: HirTypeKind.Int(64, true), span: span)
+        val text_type = HirType(kind: HirTypeKind.Str, span: span)
+        val input = Pattern(kind: PatternKind.Tuple([Pattern(kind: PatternKind.Binding("number", false), span: span), Pattern(kind: PatternKind.Binding("label", false), span: span)]), span: span)
+        val output = lowering.lower_match_pattern(input, Some(HirType(kind: HirTypeKind.Tuple([integer, text_type]), span: span)))
+        match output.kind:
+            case HirPatternKind.Tuple(children):
+                expect(children.len()).to_equal(2)
+                expect(children[0].type_).to_equal(integer)
+                expect(children[1].type_).to_equal(text_type)
+                expect(children[0].has_type_).to_equal(true)
+                expect(children[1].has_type_).to_equal(true)
+            case _: assert(false)
+        expect(lowering.errors.len()).to_equal(0)

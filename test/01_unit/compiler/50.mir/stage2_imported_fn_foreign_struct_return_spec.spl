@@ -1,0 +1,180 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Stage2 MIR lowering: imported function returning a third module's struct
+
+Stage2 (the pure-Simple compiler) erased the type of an UNANNOTATED local
+bound to a call of an IMPORTED function whose declared return struct lives in
+a THIRD module:
+
+```
+# lib.nodes        struct Node: names: [text] ...
+# lib.state        use lib.nodes.{Node, make_node};  fn node_get(i) -> Node
+# app.main         use lib.state.{node_get};  val src = node_get(0)
+```
+
+`for name in src.names:` then died as `for-in over non-array iterables is not
+supported by native codegen yet (#143) ... (collection mir type: I64)` -- 58
+sites in the `test_interp` closure (`val node = expr_get(...)` /
+`stmt_get(...)` / `decl_get(...)` in 10.frontend/core).
+
+Each consumer is lowered once, with the provider modules, through HIR and MIR
+in-process -- every module passed as a provider, exactly like the driver's
+entry-closure loop -- and the examples assert on the MIR diagnostics, the
+field indices read and the direct callees. `lib.decoy` declares another
+struct also named `Node` (different layout, same method name) and owns the
+bare `Node` layout, so a bare-name capture cannot satisfy any example.
+
+Bug record:
+doc/08_tracking/bug/stage2_imported_fn_foreign_struct_return_type_erased_2026-10-10.md
+"""
+
+# @tag: unit, compiler, mir, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val nodes_source = "pub struct Leaf:\n    label: text\n    vals: [i64]\n\npub struct Node:\n    id: i64\n    names: [text]\n    leaf: Leaf\n    title: text\n\nimpl Node:\n    fn name_count() -> i64:\n        self.names.len()\n\npub fn make_node() -> Node:\n    Node(id: 7, names: [\"a\", \"b\"], leaf: Leaf(label: \"l\", vals: [1, 2]), title: \"t\")\n"
+
+val state_source = "use lib.nodes.\{Node, make_node\}\n\nvar node_pool: [Node] = []\n\npub fn node_get(idx: i64) -> Node:\n    if node_pool.len() == 0:\n        node_pool = node_pool.push(make_node())\n    node_pool[idx]\n"
+
+val decoy_source = "pub struct Node:\n    title: text\n    weight: i64\n\nimpl Node:\n    fn name_count() -> i64:\n        self.weight\n\npub fn decoy_node() -> Node:\n    Node(title: \"d\", weight: 1)\n"
+
+# One consumer that does NOT import `Node`: every function below reaches the
+# struct only through `node_get`'s declared return type.
+val transitive_source = "use lib.state.\{node_get\}\nuse lib.decoy.\{decoy_node\}\n\nfn f_forin() -> i64:\n    val src = node_get(0)\n    var n = 0\n    for name in src.names:\n        n = n + name.len()\n    n\n\nfn f_range() -> text:\n    val src = node_get(0)\n    src.title[0..1]\n\nfn f_method() -> i64:\n    val src = node_get(0)\n    src.name_count()\n\nfn f_text() -> i64:\n    val src = node_get(0)\n    src.title.last_index_of(\"t\") + src.title.repeat(2).len()\n\nfn f_nested() -> i64:\n    val src = node_get(0)\n    var n = 0\n    for v in src.leaf.vals:\n        n = n + v\n    n\n\nfn f_decoy() -> i64:\n    val d = decoy_node()\n    val src = node_get(0)\n    var n = d.weight\n    for name in src.names:\n        n = n + name.len()\n    n\n"
+
+# The bug record's exact shape: the consumer also imports the struct.
+val importing_source = "use lib.state.\{node_get\}\nuse lib.nodes.\{Node\}\n\nfn f_forin() -> i64:\n    val src = node_get(0)\n    var n = 0\n    for name in src.names:\n        n = n + name.len()\n    n\n"
+
+class Lowered:
+    errors: text
+    mir: MirModule
+
+# Interpreted HIR+MIR lowering of the four-module closure is slow, so each
+# consumer is lowered once and every example reads the cached result.
+var _transitive: Lowered? = nil
+var _importing: Lowered? = nil
+
+fn lower_consumer(name: text, consumer_source: text) -> Lowered:
+    val log = Logger(level: 0)
+    val nodes_ast = parse_full_frontend(nodes_source, "lib/nodes.spl", "lib.nodes", log)
+    val state_ast = parse_full_frontend(state_source, "lib/state.spl", "lib.state", log)
+    val decoy_ast = parse_full_frontend(decoy_source, "lib/decoy.spl", "lib.decoy", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.nodes"] = nodes_ast
+    modules["lib.state"] = state_ast
+    modules["lib.decoy"] = decoy_ast
+    val sources = [SourceFile(path: "lib/nodes.spl", content: nodes_source, module_name: "lib.nodes"), SourceFile(path: "lib/state.spl", content: state_source, module_name: "lib.state"), SourceFile(path: "lib/decoy.spl", content: decoy_source, module_name: "lib.decoy")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    # The driver (driver_hir_pipeline_lowering.spl) hands each module its
+    # SOURCE PATH, so a declaration's `defining_module` is a path while an
+    # import's is the dotted module name. The fixture keeps that asymmetry;
+    # with dotted names on both sides the bug does not reproduce.
+    var nodes_lowering = hirlowering_for_module("lib/nodes.spl", surfaces)
+    var state_lowering = hirlowering_for_module("lib/state.spl", surfaces)
+    var decoy_lowering = hirlowering_for_module("lib/decoy.spl", surfaces)
+    var consumer_lowering = hirlowering_for_module("app/main.spl", surfaces)
+    val nodes_hir = nodes_lowering.lower_module(nodes_ast)
+    val state_hir = state_lowering.lower_module(state_ast)
+    val decoy_hir = decoy_lowering.lower_module(decoy_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    # The decoy is prescanned first so it owns the bare `Node` layout.
+    mir_lowering.prescan_module_struct_names(decoy_hir)
+    mir_lowering.prescan_module_struct_names(consumer_hir)
+    mir_lowering.prescan_module_struct_names(state_hir)
+    mir_lowering.prescan_module_struct_names(nodes_hir)
+    val providers = [decoy_hir, consumer_hir, state_hir, nodes_hir]
+    val mir = mir_lowering.lower_module(consumer_hir, providers)
+    var errors = ""
+    for e in mir_lowering.errors:
+        errors = errors + e.message + "\n"
+    print "{name} mir errors: [{errors}]"
+    Lowered(errors: errors, mir: mir)
+
+fn transitive() -> Lowered:
+    if val cached = _transitive:
+        return cached
+    val lowered = lower_consumer("transitive", transitive_source)
+    _transitive = Some(lowered)
+    lowered
+
+fn importing() -> Lowered:
+    if val cached = _importing:
+        return cached
+    val lowered = lower_consumer("importing", importing_source)
+    _importing = Some(lowered)
+    lowered
+
+fn field_reads(lowered: Lowered, function_name: text) -> text:
+    """Field indices read by `function_name`, in emission order ("1,3,")."""
+    var out = ""
+    for function in lowered.mir.functions.values():
+        if function.name.ends_with(".{function_name}"):
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.GetField(_, _, field):
+                            out = out + "{field},"
+                        case _: ()
+    out
+
+fn direct_callees(lowered: Lowered, function_name: text) -> text:
+    var out = ""
+    for function in lowered.mir.functions.values():
+        if function.name.ends_with(".{function_name}"):
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, operand, _):
+                            match operand.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                    out = out + name + ","
+                                case _: ()
+                        case _: ()
+    print "{function_name} callees: {out}"
+    out
+
+describe "unannotated local bound to an imported fn returning a third module's struct":
+    it "lowers every use of the foreign struct without a MIR error":
+        expect(transitive().errors).to_equal("")
+
+    it "iterates an array field at the foreign struct's own field index":
+        expect(field_reads(transitive(), "f_forin")).to_equal("1,")
+        expect(direct_callees(transitive(), "f_forin").contains("rt_array_len")).to_equal(true)
+
+    it "range-indexes a text field":
+        expect(field_reads(transitive(), "f_range")).to_equal("3,")
+        expect(direct_callees(transitive(), "f_range").contains("spl_str_slice")).to_equal(true)
+
+    it "calls the foreign struct's method, not the same-named decoy's":
+        val callees = direct_callees(transitive(), "f_method")
+        expect(callees.contains("lib.nodes.Node.name_count")).to_equal(true)
+        expect(callees.contains("decoy")).to_equal(false)
+
+    it "lowers text methods on a field of the foreign struct":
+        val callees = direct_callees(transitive(), "f_text")
+        expect(callees.contains("rt_string_rfind")).to_equal(true)
+        expect(callees.contains("rt_string_repeat")).to_equal(true)
+
+    it "iterates an array field of a nested foreign struct field":
+        expect(field_reads(transitive(), "f_nested")).to_equal("2,1,")
+
+    it "keeps a same-named struct of another module on its own layout":
+        expect(field_reads(transitive(), "f_decoy")).to_equal("1,1,")
+
+describe "the consumer also imports the struct":
+    it "iterates an array field at the foreign struct's own field index":
+        expect(importing().errors).to_equal("")
+        expect(field_reads(importing(), "f_forin")).to_equal("1,")

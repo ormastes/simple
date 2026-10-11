@@ -1,0 +1,90 @@
+# Native-only regression: erased value structs keep concrete copy/borrow rules.
+trait NativeCounterProbe:
+    fn current_probe_v1() -> i64
+    me increment_probe_v1(amount: i64) -> i64
+
+struct NativeValueCounterProbe:
+    value: i64
+
+impl NativeCounterProbe for NativeValueCounterProbe:
+    fn current_probe_v1() -> i64:
+        self.value
+
+    me increment_probe_v1(amount: i64) -> i64:
+        self.value = self.value + amount
+        self.value
+
+class NativeCounterHolderProbe:
+    counter: NativeCounterProbe
+
+class NativeOptionalCounterHolderProbe:
+    counter: NativeCounterProbe?
+
+struct NativeValueHolderProbe:
+    counter: NativeCounterProbe
+    optional_counter: NativeCounterProbe?
+
+fn copy_counter_probe(counter: NativeCounterProbe) -> i64:
+    counter.increment_probe_v1(5)
+
+fn borrow_counter_probe(mut counter: NativeCounterProbe) -> i64:
+    counter.increment_probe_v1(3)
+
+fn copy_optional_counter_probe(counter: NativeCounterProbe?) -> i64:
+    if val present = counter:
+        return present.increment_probe_v1(5)
+    -1
+
+fn read_optional_counter_probe(counter: NativeCounterProbe?) -> i64:
+    if val present = counter:
+        return present.current_probe_v1()
+    -1
+
+fn borrow_optional_counter_probe(mut counter: NativeCounterProbe?, amount: i64) -> i64:
+    # The mut parameter retains the same envelope. Dispatch directly on its
+    # unwrapped payload, without introducing an ordinary copied binding.
+    counter.unwrap().increment_probe_v1(amount)
+
+fn main() -> i64:
+    var original = NativeValueCounterProbe(value: 7)
+    var erased: NativeCounterProbe = original
+    if erased.current_probe_v1() != 7: return 1
+    if copy_counter_probe(erased) != 12: return 2
+    if erased.current_probe_v1() != 7: return 3
+    if borrow_counter_probe(erased) != 10: return 4
+    if erased.current_probe_v1() != 10: return 5
+    if original.current_probe_v1() != 7: return 6
+    var copied: NativeCounterProbe = erased
+    if borrow_counter_probe(copied) != 13: return 7
+    if erased.current_probe_v1() != 10: return 8
+    val holder = NativeCounterHolderProbe(counter: NativeValueCounterProbe(value: 21))
+    if holder.counter.current_probe_v1() != 21: return 9
+    val place_holder = NativeCounterHolderProbe(counter: original)
+    val optional_holder = NativeOptionalCounterHolderProbe(counter: original)
+    if original.increment_probe_v1(20) != 27: return 10
+    if place_holder.counter.current_probe_v1() != 7: return 11
+    if read_optional_counter_probe(optional_holder.counter) != 7: return 12
+    var optional: NativeCounterProbe? = erased
+    if copy_optional_counter_probe(optional) != 15: return 13
+    if read_optional_counter_probe(optional) != 10: return 14
+    if borrow_counter_probe(erased) != 13: return 15
+    if read_optional_counter_probe(optional) != 10: return 16
+    val empty: NativeCounterProbe? = nil
+    if copy_optional_counter_probe(empty) != -1: return 17
+    if empty.?: return 18
+    var outer = NativeValueHolderProbe(counter: NativeValueCounterProbe(value: 31),
+        optional_counter: NativeValueCounterProbe(value: 41))
+    var outer_copy = outer
+    if outer.counter.increment_probe_v1(2) != 33: return 19
+    if outer_copy.counter.current_probe_v1() != 31: return 20
+    if borrow_optional_counter_probe(outer.optional_counter, 3) != 44: return 21
+    if read_optional_counter_probe(outer.optional_counter) != 44: return 22
+    if read_optional_counter_probe(outer_copy.optional_counter) != 41: return 23
+    # Replace the original optional field, then mutate the copy's ordinary
+    # field: both erased fields must remain owned by their respective copies.
+    outer.optional_counter = NativeValueCounterProbe(value: 51)
+    if read_optional_counter_probe(outer_copy.optional_counter) != 41: return 24
+    if outer_copy.counter.increment_probe_v1(4) != 35: return 25
+    if outer.counter.current_probe_v1() != 33: return 26
+    print "PASS native trait struct copy borrow checks=26"
+    0

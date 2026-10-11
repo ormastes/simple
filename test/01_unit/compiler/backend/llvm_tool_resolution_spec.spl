@@ -1,0 +1,160 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+#
+# Perf bug (2026-10-09): find_tool_portable spawned `where` / `command -v`
+# once per candidate name, ~1 s each on a Windows host, and
+# detect_llvm_capabilities() (28 lookups + 20 version probes) ran at the
+# start of MIR lowering just to read the llc major version -- 66-99 s of the
+# `mir` phase for a one-module hello world. The finder now walks PATH in
+# process. This spec pins that the in-process answer is the SHELL's answer
+# on a fixture PATH: versioned names preferred, PATHEXT honored on Windows
+# (an extension-less exact match still listed, the hit spelled with its
+# on-disk case), a non-executable file skipped on POSIX, absent tools stay
+# absent, and a host without PATH degrades to "not found".
+#
+# Every lookup runs with PATH pointed at the fixture; PATH is restored and
+# the fixture removed BEFORE any assertion, so a failing expect cannot leak
+# either into the rest of the run.
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_get, env_get_nullable, env_set, env_remove_process,
+    cwd, host_os, file_write, dir_create_all, dir_remove_all, process_run}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use compiler.backend.backend.io_compat.{backend_tool_on_path, backend_shell_tuple}
+use compiler.backend.backend.llvm_capability.{find_tool_portable}
+
+fn _windows() -> bool:
+    host_os() == "windows"
+
+fn _legacy_lookup(name: text) -> text:
+    # The exact shell question the finder used to spawn per candidate.
+    if _windows():
+        val (out, err, code) = backend_shell_tuple("where {name}")
+        if code == 0:
+            for line in out.split("\n"):
+                val resolved = line.trim()
+                if resolved != "":
+                    return resolved
+        return ""
+    val (out, err, code) = backend_shell_tuple("command -v {name} 2>/dev/null")
+    if code == 0:
+        return out.trim()
+    ""
+
+fn _norm(path: text) -> text:
+    # Separator- and (on Windows) directory-case-insensitive comparison:
+    # `where` prints the PATH entry as given plus `\name`, the walk joins the
+    # same way. The file name's own case is asserted separately.
+    var parts: [text] = []
+    var index = 0
+    while index < path.len():
+        val ch = path.char_at(index)
+        parts.push(if ch == "\\": "/" else: ch)
+        index = index + 1
+    val joined = parts.join("")
+    if _windows(): joined.lower() else: joined
+
+fn _basename(path: text) -> text:
+    val normalized = _norm(path)
+    val parts = normalized.split("/")
+    parts[parts.len() - 1]
+
+fn _tool(dir: text, name: text, executable: bool) -> bool:
+    val path = "{dir}/{name}"
+    if not file_write(path, "#!/bin/sh\nexit 0\n"):
+        return false
+    if _windows() or not executable:
+        return true
+    val (out, err, code) = process_run("/bin/sh", ["-c", "chmod +x '{path}'"])
+    code == 0
+
+fn _path_join(entries: [text]) -> text:
+    entries.join(if _windows(): ";" else: ":")
+
+describe "LLVM tool resolution without per-candidate spawns":
+    """backend_tool_on_path answers exactly what `where` / `command -v`
+    answered for the LLVM tool finders, without a process spawn per
+    candidate name."""
+    it "matches the shell lookup on a fixture PATH":
+        val root = "{cwd()}/build/test/llvm_tool_resolution_{getpid()}"
+        val bin1 = "{root}/bin1"
+        val bin2 = "{root}/bin2"
+        val exe = if _windows(): ".exe" else: ""
+        # Windows: mixed-case spelling on disk, `where` prints it as stored
+        # and matches case-insensitively. POSIX file systems are
+        # case-sensitive, so there the fixture carries the queried name.
+        val llc19_name = if _windows(): "LLC-19.exe" else: "llc-19"
+        var fixture_ok = dir_create_all(bin1) and dir_create_all(bin2)
+        fixture_ok = fixture_ok and _tool(dir: bin1, name: llc19_name, executable: true)
+        fixture_ok = fixture_ok and _tool(dir: bin2, name: "llc" + exe, executable: true)
+        fixture_ok = fixture_ok and _tool(dir: bin2, name: if _windows(): "opt.cmd" else: "opt", executable: true)
+        fixture_ok = fixture_ok and _tool(dir: bin1, name: "spltoolbare", executable: true)
+        fixture_ok = fixture_ok and _tool(dir: bin1, name: "spltoolnoexec", executable: false)
+        val saved_path = env_get("PATH")
+        # Fixture dirs first; the host PATH stays behind them so the shell
+        # itself (`where` lives in System32) keeps working for the comparison.
+        val path_set = env_set("PATH", _path_join([bin1, bin2, saved_path]))
+
+        val llc19_found = find_tool_portable(["llc-19", "llc"])
+        # The versioned name here must be absent from the HOST PATH too (a
+        # Linux box may carry /usr/bin/llc-18), so the fallback is the
+        # fixture's plain `llc`.
+        val llc_found = find_tool_portable(["spl-nonesuch-tool-18", "llc"])
+        val opt_found = backend_tool_on_path(["opt"])
+        val absent_found = backend_tool_on_path(["spl-nonesuch-tool-19", "spl-nonesuch-tool"])
+        val noexec_found = backend_tool_on_path(["spltoolnoexec"])
+        # `spltoolnoexec` is deliberately NOT in the shell comparison: bash's
+        # `command -v` skips a non-executable file, dash's prints it. The walk
+        # follows bash / `which`, asserted directly below.
+        val names = ["llc-19", "llc", "opt", "spltoolbare", "spl-nonesuch-tool", "llvm-config-18"]
+        var ours: [text] = []
+        var shell: [text] = []
+        for name in names:
+            ours.push(backend_tool_on_path([name]))
+            shell.push(_legacy_lookup(name))
+
+        val path_restored = env_set("PATH", saved_path)
+        val fixture_removed = dir_remove_all(root)
+
+        expect(fixture_ok).to_equal(true)
+        expect(path_set).to_equal(true)
+        expect(path_restored).to_equal(true)
+        expect(fixture_removed).to_equal(true)
+        expect(_norm(llc19_found)).to_equal(_norm("{bin1}/{llc19_name}"))
+        # Windows only: the hit carries the on-disk case (LLC-19.exe), not
+        # the queried spelling (llc-19 + .EXE from PATHEXT).
+        if _windows():
+            expect(llc19_found.ends_with(llc19_name)).to_equal(true)
+        expect(_norm(llc_found)).to_equal(_norm("{bin2}/llc{exe}"))
+        expect(_norm(opt_found)).to_equal(_norm(if _windows(): "{bin2}/opt.cmd" else: "{bin2}/opt"))
+        expect(absent_found).to_equal("")
+        # POSIX: a file without an executable bit is not a command. Windows
+        # has no such bit; `where` lists the exact name.
+        expect(_norm(noexec_found)).to_equal(if _windows(): _norm("{bin1}/spltoolnoexec") else: "")
+        var index = 0
+        while index < names.len():
+            expect(_norm(ours[index])).to_equal(_norm(shell[index]))
+            expect(_basename(ours[index])).to_equal(_basename(shell[index]))
+            index = index + 1
+
+    it "degrades to not found with an empty or absent PATH":
+        # Empty PATH is one empty entry: the working directory only (sh and
+        # `where` alike). Absent PATH searches the sh default directories on
+        # POSIX and the working directory on Windows. Neither can crash, and
+        # a name that exists nowhere stays "" in both states. A real tool is
+        # not asserted here: with PATH absent a Linux host may legitimately
+        # resolve `llc` from /usr/bin.
+        val saved_path = env_get_nullable("PATH")
+        val path_emptied = env_set("PATH", "")
+        val empty_found = backend_tool_on_path(["spl-nonesuch-tool", "spl-nonesuch-tool-19"])
+        val path_removed = env_remove_process("PATH")
+        val path_absent = env_get_nullable("PATH") == nil
+        val absent_found = backend_tool_on_path(["spl-nonesuch-tool", "spl-nonesuch-tool-19"])
+        val path_restored = env_set("PATH", saved_path ?? "")
+        expect(path_emptied).to_equal(true)
+        expect(empty_found).to_equal("")
+        expect(path_removed).to_equal(true)
+        expect(path_absent).to_equal(true)
+        expect(absent_found).to_equal("")
+        expect(path_restored).to_equal(true)

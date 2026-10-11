@@ -101,6 +101,9 @@ int64_t rt_shared_parse_cell_read_v1(const uint8_t* path_ptr, uint64_t path_len,
         rt_string_new(NULL, 0);
     free(bytes);
     return result;
+#elif !defined(O_NOFOLLOW)
+    /* No no-follow open on this libc (SimpleOS): an ordinary cache miss. */
+    return rt_string_new(NULL, 0);
 #else
     int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return rt_string_new(NULL, 0);

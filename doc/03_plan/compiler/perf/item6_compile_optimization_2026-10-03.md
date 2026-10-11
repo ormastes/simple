@@ -107,3 +107,19 @@ blocked or fail; they never use placeholder passes.
 Target `release/1.0` through a reviewed work-branch PR. Shared fixes also need
 an isolated main-targeted forward port and renewed applicable evidence. No
 release tag or publication is implied by this development request.
+
+## 2026-10-09 release-lane revalidation
+
+Continue from the retained stages above. See
+`doc/09_report/item6_compile_optimization_release_revalidation_2026-10-09.md`
+for current source ownership, the stage inventory, actual bounded gate results,
+and continuation order at release revision
+`df266ee64b5a6b8590b0f62b2624455d5e4a6236`.
+
+The acceptance checker now exists and drives a compiled owner artifact; its
+historical absence is not a current source finding. Admitted semantic-transition
+routing and publication/GC locking also exist. Their presence does not supply
+runtime acceptance. The snapshot-derived root-generation gap remains present,
+the compiled acceptance artifact is unavailable in this isolated worktree, and
+both inspected Windows binaries explicitly identify as Rust seeds. Item 6
+remains **BLOCKED / IN PROGRESS**, with no performance or qualification PASS.

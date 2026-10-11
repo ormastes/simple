@@ -1,0 +1,58 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-MC-ANY-001
+
+use std.spec.step
+
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+"""
+# Written `Any` policy
+
+The driver sets `HirLowering.forbid_written_any`
+(`driver_hir_forbids_written_any`) for compiled code under the robust or
+critical profile:
+
+| Build | Written `Any` |
+|-------|---------------|
+| script (interpreter) | allowed |
+| compiled, below robust | allowed |
+| compiled, robust / critical | allowed only inside `unsafe:` / `danger:` |
+
+A violation is `[E-ANY-COMPILE-001]`.
+"""
+
+fn lowering_errors(source: text, deny_any: bool) -> text:
+    val ast = parse_full_frontend(source, "written_any.spl", "written_any.spl", Logger(level: 0))
+    var lowering = HirLowering.with_filename("written_any.spl")
+    lowering.forbid_written_any = deny_any
+    val _hir = lowering.lower_module(ast)
+    var out = ""
+    for err in lowering.errors:
+        out = out + err.message + "\n"
+    out
+
+fn any_error_count(errors: text) -> i64:
+    errors.split("[E-ANY-COMPILE-001]").len() - 1
+
+describe "Written Any policy":
+    it "rejects Any only in robust compiled code outside an unsafe block":
+        val outside = "fn f(x: Any) -> i64:\n    val y: Any = x\n    0\n"
+        val inside = "fn g() -> i64:\n    unsafe:\n        val z: Any = 1\n    0\n"
+
+        step("Scripts and non-robust builds accept Any everywhere")
+        assert_equal(any_error_count(lowering_errors(outside, false)), 0)
+        assert_equal(any_error_count(lowering_errors(inside, false)), 0)
+
+        step("Robust compiled code rejects Any outside unsafe and accepts it inside")
+        assert_equal(any_error_count(lowering_errors(outside, true)) >= 2, true)
+        assert_equal(any_error_count(lowering_errors(inside, true)), 0)
+
+        step("Parser fallbacks (nested arrays, empty array annotation) are not written Any")
+        val nested = "fn f(rows: [[text]]) -> i64:\n    val empty: [] = []\n    rows.len()\n"
+        assert_equal(any_error_count(lowering_errors(nested, true)), 0)
+
+        step("Generic code needs no Any")
+        assert_equal(any_error_count(lowering_errors("fn id<T>(x: T) -> T:\n    x\n", true)), 0)

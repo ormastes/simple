@@ -1,0 +1,125 @@
+use os.smf.provider_loader.{
+    PROVIDER_ADMISSION_OK,
+    ProviderAdmissionRequestV1,
+    provider_admit_dynamic_v1,
+    provider_artifact_digest_v1,
+    provider_session_close_v1,
+}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
+fn _preopen_digest(path: text) -> text:
+    provider_artifact_digest_v1(rt_file_read_bytes(path) ?? [])
+
+fn _preopen_request(path: text, expected_digest: text, granted: u64,
+        host_abi: u64, interface_major: u32) -> ProviderAdmissionRequestV1:
+    ProviderAdmissionRequestV1(
+        artifact_path: path,
+        artifact_kind: "native",
+        expected_artifact_digest: expected_digest,
+        granted_capability_bits: granted,
+        required_capability_bits: 1,
+        host_abi: host_abi,
+        minimum_host_abi: 1,
+        maximum_host_abi: 3,
+        requested_interface_major: interface_major,
+        requested_interface_minor: 0,
+        provided_interface_major: 1,
+        provided_interface_minor: 1,
+    )
+
+fn _preopen_expected_digest(fixture_root: text, marker: text, digest_policy: i32) -> text:
+    if digest_policy == 0:
+        return ""
+    val actual_digest = _preopen_digest(fixture_root + "/providers/" + marker + ".so")
+    if digest_policy == 2:
+        if actual_digest == "0000000000000000000000000000000000000000000000000000000000000000":
+            return "1111111111111111111111111111111111111111111111111111111111111111"
+        return "0000000000000000000000000000000000000000000000000000000000000000"
+    actual_digest
+
+fn _preopen_refusal(fixture_root: text, path: text, marker: text, expected_status: i32,
+        granted: u64, host_abi: u64, interface_major: u32,
+        digest_policy: i32) -> bool:
+    if not rt_file_exists(fixture_root + "/providers/" + marker + ".so"):
+        return false
+    val marker_path = fixture_root + "/providers/" + marker + ".marker"
+    if rt_file_exists(marker_path):
+        return false
+    val expected_digest = _preopen_expected_digest(fixture_root, marker, digest_policy)
+    val result = provider_admit_dynamic_v1(_preopen_request(
+        path, expected_digest, granted, host_abi, interface_major,
+    ))
+    result.admission.status == expected_status and
+        not result.admission.is_admitted() and
+        not result.session.open and
+        not rt_file_exists(marker_path)
+
+fn preopen_path_refusal_case(fixture_root: text) -> bool:
+    # Keep the artifact reachable but use a path the provider policy denies.
+    # No test-side digest read occurs for this case.
+    _preopen_refusal(
+        fixture_root,
+        fixture_root + "/providers/../providers/path.so",
+        "path", 1, 1, 2, 1, 0,
+    )
+
+fn preopen_digest_refusal_case(fixture_root: text) -> bool:
+    _preopen_refusal(
+        fixture_root,
+        fixture_root + "/providers/digest.so",
+        "digest", 3, 1, 2, 1, 2,
+    )
+
+fn preopen_capability_refusal_case(fixture_root: text) -> bool:
+    _preopen_refusal(
+        fixture_root,
+        fixture_root + "/providers/capability.so",
+        "capability", 4, 0, 2, 1, 1,
+    )
+
+fn preopen_host_abi_refusal_case(fixture_root: text) -> bool:
+    _preopen_refusal(
+        fixture_root,
+        fixture_root + "/providers/host-abi.so",
+        "host-abi", 5, 1, 4, 1, 1,
+    )
+
+fn preopen_interface_refusal_case(fixture_root: text) -> bool:
+    _preopen_refusal(
+        fixture_root,
+        fixture_root + "/providers/interface.so",
+        "interface", 6, 1, 2, 2, 1,
+    )
+
+fn preopen_constructor_control_case(fixture_root: text) -> bool:
+    val path = fixture_root + "/providers/control.so"
+    val marker = fixture_root + "/providers/control.marker"
+    if not rt_file_exists(path) or rt_file_exists(marker):
+        return false
+    val result = provider_admit_dynamic_v1(_preopen_request(
+        path, _preopen_digest(path), 1, 2, 1,
+    ))
+    if result.admission.status != PROVIDER_ADMISSION_OK or
+            not result.admission.is_admitted() or not result.session.open or
+            result.admission.query_symbol_address <= 0 or
+            not result.admission.process_callable or
+            not rt_file_exists(marker):
+        return false
+    provider_session_close_v1(result.session) == 0
+
+pub fn run_preopen_case(name: text, fixture_root: text) -> bool:
+    if name == "path":
+        return preopen_path_refusal_case(fixture_root)
+    if name == "digest":
+        return preopen_digest_refusal_case(fixture_root)
+    if name == "capability":
+        return preopen_capability_refusal_case(fixture_root)
+    if name == "host-abi":
+        return preopen_host_abi_refusal_case(fixture_root)
+    if name == "interface":
+        return preopen_interface_refusal_case(fixture_root)
+    if name == "control":
+        return preopen_constructor_control_case(fixture_root)
+    false

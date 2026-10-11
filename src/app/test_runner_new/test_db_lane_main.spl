@@ -1,0 +1,51 @@
+# Test-database lane child entry.
+#
+# The core test runner records a finished spec run by writing a
+# std.nogc_sync_mut.test_runner.test_db_record file and spawning
+# `simple run <this file> --record=<path>`. Running the database
+# writer here, in a child interpreter, keeps std.database.test_extended,
+# std.database.feature, test_db_compat and doc_generator out of the core
+# runner's static closure.
+#
+# Contract: exit 0 after the run was recorded and test_result.md rewritten;
+# otherwise a non-zero exit with the named reason on
+# stderr as `test-db lane error: <reason>`.
+
+use std.sffi.cli_args.{cli_get_args}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists, file_atomic_write}
+use std.nogc_sync_mut.test_runner.test_db_record.{test_db_run_record_decode}
+use std.nogc_sync_mut.test_runner.test_runner_helpers.{update_test_database_from_record}
+use std.test_runner.doc_generator.{generate_test_result_md}
+
+val TEST_RESULT_MD_PATH = "doc/08_tracking/test/test_result.md"
+
+fn _lane_arg(args: [text], key: text) -> text:
+    val prefix = "--{key}="
+    for arg in args:
+        if arg.starts_with(prefix):
+            return arg[prefix.len():]
+    ""
+
+fn main() -> i64:
+    val args = cli_get_args()
+    val record_path = _lane_arg(args, "record")
+    if record_path == "":
+        eprint "test-db lane error: missing --record="
+        return 2
+    if not file_exists(record_path):
+        eprint "test-db lane error: record file not found: {record_path}"
+        return 2
+    val decoded = test_db_run_record_decode(file_read(record_path))
+    val record = match decoded:
+        case Ok(value): value
+        case Err(reason):
+            eprint "test-db lane error: {reason}"
+            return 2
+    match update_test_database_from_record(record):
+        case Ok(database):
+            file_atomic_write(TEST_RESULT_MD_PATH, generate_test_result_md(database))
+            print "test-db lane: recorded {record.files.len()} file(s)"
+            0
+        case Err(reason):
+            eprint "test-db lane error: {reason}"
+            1

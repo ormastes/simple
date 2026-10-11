@@ -1,0 +1,124 @@
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn contextual_payload_errors(source: text) -> [text]:
+    val filename = "contextual_enum_payload.spl"
+    val parsed = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var errors: [text] = []
+    for error in hir_lowering.errors:
+        errors.push("HIR: " + error.message)
+    for error in lowering.errors:
+        errors.push("MIR: " + error.message)
+    if mir.functions.len() == 0:
+        errors.push("no lowered functions")
+    for error in errors:
+        print "CONTEXTUAL_PAYLOAD_DIAGNOSTIC={error}"
+    errors
+
+describe "declared enum payload contextual containers":
+    it "empty recursive array":
+        val errors = contextual_payload_errors("enum Value:\n    Empty\n    Array([Value])\nfn make() -> Value:\n    Value.Array([])\n")
+        expect(errors.len()).to_equal(0)
+    it "empty recursive dictionary":
+        val errors = contextual_payload_errors("enum Value:\n    Empty\n    Dict(Dict<text, Value>)\nfn make() -> Value:\n    Value.Dict({})\n")
+        expect(errors.len()).to_equal(0)
+    it "nested empty arrays":
+        val errors = contextual_payload_errors("enum Value:\n    Empty\n    Matrix([[Value]])\nfn make() -> Value:\n    Value.Matrix([[]])\n")
+        expect(errors.len()).to_equal(0)
+    it "empty array in positional tuple":
+        val errors = contextual_payload_errors("enum Value:\n    Pair([i64], text)\nfn make() -> Value:\n    Value.Pair([], \"ok\")\n")
+        expect(errors.len()).to_equal(0)
+    it "generic empty array":
+        val errors = contextual_payload_errors("enum Box<T>:\n    Wrap([T])\nfn make() -> Box<i64>:\n    Box.Wrap([])\n")
+        expect(errors.len()).to_equal(0)
+    it "actual SDN empty constructors":
+        val errors = contextual_payload_errors("# SDN Value — Simple Data Notation value types.\n#\n# Provides: SdnValue, SdnSpan.\n\n# Source location span for error reporting.\npub class SdnSpan:\n    line: i64\n    column: i64\n    start: i64 = 0\n    end: i64 = 0\n\n    static fn empty() -> SdnSpan:\n        SdnSpan(line: 0, column: 0, start: 0, end: 0)\n\n    static fn at(line: i64, column: i64) -> SdnSpan:\n        SdnSpan(line: line, column: column, start: 0, end: 0)\n\n    fn merge(self, other: SdnSpan) -> SdnSpan:\n        var lo = self.start\n        if other.start < lo:\n            lo = other.start\n        var hi = self.end\n        if other.end > hi:\n            hi = other.end\n        SdnSpan(line: self.line, column: self.column, start: lo, end: hi)\n\n# The core SDN value type.\npub enum SdnValue:\n    Null\n    Bool(bool)\n    Int(i64)\n    Float(f64)\n    String(text)\n    Array([SdnValue])\n    Dict(Dict<text, SdnValue>)\n    Table(headers: [text], rows: [[SdnValue]])\n\n    static fn null() -> SdnValue:\n        SdnValue.Null\n\n    static fn bool(b: bool) -> SdnValue:\n        SdnValue.Bool(b)\n\n    static fn int(i: i64) -> SdnValue:\n        SdnValue.Int(i)\n\n    static fn float(f: f64) -> SdnValue:\n        SdnValue.Float(f)\n\n    static fn string(s: text) -> SdnValue:\n        SdnValue.String(s)\n\n    static fn array(items: [SdnValue]) -> SdnValue:\n        SdnValue.Array(items)\n\n    static fn empty_array() -> SdnValue:\n        SdnValue.Array([])\n\n    static fn empty_dict() -> SdnValue:\n        SdnValue.Dict({})\n\n")
+        expect(errors.len()).to_equal(0)
+    it "reject nonempty wrong element":
+        val errors = contextual_payload_errors("enum Value:\n    Empty\n    Array([Value])\nfn make() -> Value:\n    Value.Array([1])\n")
+        expect(errors.len() > 0).to_equal(true)
+    it "reject wrong following argument":
+        val errors = contextual_payload_errors("enum Value:\n    Pair([i64], text)\nfn make() -> Value:\n    Value.Pair([], 17)\n")
+        expect(errors.len() > 0).to_equal(true)
+    it "reject wrong nested element":
+        val errors = contextual_payload_errors("enum Value:\n    Matrix([[i64]])\nfn make() -> Value:\n    Value.Matrix([[\"bad\"]])\n")
+        expect(errors.len() > 0).to_equal(true)
+    it "mixed empty and nonempty nested arrays":
+        val errors = contextual_payload_errors("enum Value:\n    Matrix([[i64]])\nfn make() -> Value:\n    Value.Matrix([[], [1]])\n")
+        expect(errors.len()).to_equal(0)
+    it "dictionary with nested empty array":
+        val errors = contextual_payload_errors("enum Value:\n    Map(Dict<text, [f64]>)\nfn make() -> Value:\n    Value.Map({\"a\": []})\n")
+        expect(errors.len()).to_equal(0)
+    it "named empty payload":
+        val errors = contextual_payload_errors("enum Value:\n    Named(items: [f64])\nfn make() -> Value:\n    Value.Named(items: [])\n")
+        expect(errors.len()).to_equal(0)
+    it "reject wrong dictionary key":
+        val errors = contextual_payload_errors("enum Value:\n    Map(Dict<text, [f64]>)\nfn make() -> Value:\n    Value.Map({7: []})\n")
+        expect(errors.len() > 0).to_equal(true)
+    it "reject conflicting typed dictionary variable":
+        val errors = contextual_payload_errors("enum Value:\n    Map(Dict<text, i64>)\nfn make() -> Value:\n    val values: Dict<i64, i64> = {}\n    Value.Map(values)\n")
+        expect(errors.len() > 0).to_equal(true)
+    it "decode then insert and access float payload":
+        val errors = contextual_payload_errors("enum Value:\n    Floats([f64])\nfn probe() -> f64:\n    val value = Value.Floats([])\n    match value:\n        case Value.Floats(items):\n            items.push(1.5)\n            items[0]\n        case _: 0.0\n")
+        expect(errors.len()).to_equal(0)
+
+fn contextual_payload_mir_types(source: text) -> [text]:
+    val parsed = parse_full_frontend(source, "payload_types.spl", "payload_types", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("payload_types.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var evidence: [text] = []
+    for function in mir.functions.values():
+        for local in function.locals:
+            match local.type_.kind:
+                case MirTypeKind.Array(element, _):
+                    if element.kind == MirTypeKind.F64:
+                        evidence.push("array-f64")
+                case MirTypeKind.Dict(key, value):
+                    var text_key = false
+                    match key.kind:
+                        case MirTypeKind.Tuple(parts):
+                            if parts.len() == 2 and parts[1].kind == MirTypeKind.U64:
+                                match parts[0].kind:
+                                    case MirTypeKind.Ptr(byte_type, _):
+                                        text_key = byte_type.kind == MirTypeKind.U8
+                                    case _: ()
+                        case _: ()
+                    if text_key:
+                        match value.kind:
+                            case MirTypeKind.Array(element, _):
+                                if element.kind == MirTypeKind.F64:
+                                    evidence.push("dict-str-array-f64")
+                            case _: ()
+                case _: ()
+    if hir_lowering.errors.len() > 0 or lowering.errors.len() > 0:
+        evidence.push("errors")
+    evidence
+
+describe "declared enum collection MIR metadata":
+    it "emits an empty float array with the declared MIR element type":
+        val evidence = contextual_payload_mir_types("enum Value:\n    Floats([f64])\nfn make() -> Value:\n    Value.Floats([])\n")
+        expect(evidence).to_contain("array-f64")
+        expect(evidence.contains("errors")).to_equal(false)
+    it "emits declared dictionary key and nested value MIR types":
+        val evidence = contextual_payload_mir_types("enum Value:\n    Map(Dict<text, [f64]>)\nfn make() -> Value:\n    Value.Map({})\n")
+        expect(evidence).to_contain("dict-str-array-f64")
+        expect(evidence.contains("errors")).to_equal(false)
+
+describe "explicit payload type authority":
+    it "rejects an explicitly typed empty array variable of another element type":
+        val errors = contextual_payload_errors("enum Value:\n    Floats([f64])\nfn make() -> Value:\n    val values: [text] = []\n    Value.Floats(values)\n")
+        expect(errors.len() > 0).to_equal(true)
+    it "rejects an empty array cast to another element type":
+        val errors = contextual_payload_errors("enum Value:\n    Floats([f64])\nfn make() -> Value:\n    Value.Floats([] as [text])\n")
+        expect(errors.len() > 0).to_equal(true)

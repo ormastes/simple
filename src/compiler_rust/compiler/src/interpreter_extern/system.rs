@@ -1840,6 +1840,15 @@ pub fn rt_exit(args: &[Value]) -> Result<Value, CompileError> {
     std::process::exit(code);
 }
 
+/// `rt_debug_exit_success()`: hosted equivalent of the baremetal QEMU
+/// isa-debug-exit "success" write — flush and exit 0.
+pub fn rt_debug_exit_success(_args: &[Value]) -> Result<Value, CompileError> {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    std::process::exit(0);
+}
+
 #[cfg(unix)]
 fn shell_command(cmd: &str) -> std::process::Command {
     let mut command = std::process::Command::new(resolve_command_path("/bin/sh"));

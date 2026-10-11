@@ -1,6 +1,6 @@
 # Export-origin indexes and facade resolution.
 
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceBuilder, module_surface_name_position, ModuleSurfaceExportOriginIndex, ModuleSurfaceOriginResolution, module_surface_declaration_authority_index_put, module_surface_declaration_authority_lookup_building, module_surface_export_origin_index_lookup, module_surface_export_origin_index_position, module_surface_export_origin_index_put, module_surface_validate_owner_index}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceBuilder, module_surface_name_position, ModuleSurfaceExportOriginIndex, ModuleSurfaceOriginResolution, module_surface_declaration_authority_index_put, module_surface_declaration_authority_lookup_building, module_surface_export_origin_index_empty, module_surface_export_origin_index_lookup, module_surface_export_origin_index_position, module_surface_export_origin_index_put, module_surface_validate_owner_index}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_package_name}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
@@ -24,6 +24,26 @@ impl ModuleSurfaceBuilder:
         if origin_trace:
             module_surface_origin_trace(true,
                 "name_index built entries={name_index.len()}; step=owner_index")
+        # A `# Re-exported from X.spl` hint is provenance, not proof: it names
+        # `<facade package>.X`, which exists only when X is a child of the
+        # facade. Drop hints whose owner is not a registered module BEFORE any
+        # tier reads them, so the export falls back to its explicit route or
+        # sibling inference instead of freezing an unroutable origin that
+        # every importer then reports as `invalid export origin`.
+        var prune_index = 0
+        while prune_index < self.surfaces.len():
+            var prune_surface = self.surfaces[prune_index]
+            if module_surface_has_stale_generated_origin(
+                self.surfaces, name_index, prune_surface.export_origin_index):
+                val kept_result = module_surface_without_stale_generated_origins(
+                    self.surfaces, name_index, prune_surface.export_origin_index)
+                if kept_result.is_err():
+                    return Err(kept_result.unwrap_err())
+                val kept_origins: ModuleSurfaceExportOriginIndex = kept_result.unwrap()
+                prune_surface.export_origin_index = kept_origins
+                prune_surface.export_origins = kept_origins.origins
+                self.surfaces[prune_index] = prune_surface
+            prune_index = prune_index + 1
         var owner_by_package_name: Dict<text, i64> = {}
         # Routing and collision identity are deliberately separate. A public
         # facade remains the route used by sibling consumers, while duplicate
@@ -651,6 +671,59 @@ pub(package) fn module_surface_name_index_build(
             name_index[names[index]] = indices[index]
         index = index + 1
     name_index
+
+fn module_surface_generated_origin_is_stale(
+    surfaces: [ModuleSurface], name_index: Dict<text, i64>,
+    origins: ModuleSurfaceExportOriginIndex, position: i64) -> bool:
+    if position >= origins.resolution_kinds.len() or
+       position >= origins.owner_modules.len():
+        return false
+    if origins.resolution_kinds[position] != "generated-comment":
+        return false
+    val owner_module = origins.owner_modules[position]
+    if module_surface_index_by_name(name_index, owner_module) >= 0:
+        return false
+    # The alias index is the authority, but never discard provenance over a
+    # spelling difference alone: accept any surface carrying this name.
+    for candidate in surfaces:
+        if candidate.module_name == owner_module or
+           candidate.canonical_name == owner_module:
+            return false
+    true
+
+fn module_surface_has_stale_generated_origin(
+    surfaces: [ModuleSurface], name_index: Dict<text, i64>,
+    origins: ModuleSurfaceExportOriginIndex) -> bool:
+    var position = 0
+    while position < origins.names.len():
+        if module_surface_generated_origin_is_stale(
+            surfaces, name_index, origins, position):
+            return true
+        position = position + 1
+    false
+
+fn module_surface_without_stale_generated_origins(
+    surfaces: [ModuleSurface], name_index: Dict<text, i64>,
+    origins: ModuleSurfaceExportOriginIndex
+) -> Result<ModuleSurfaceExportOriginIndex, text>:
+    # Rebuild through the ordinary put path rather than deleting in place:
+    # the index is four aligned arrays plus two projections and has no
+    # removal operation.
+    val kept = module_surface_export_origin_index_empty()
+    var position = 0
+    while position < origins.names.len() and
+          position < origins.owner_modules.len() and
+          position < origins.source_names.len() and
+          position < origins.resolution_kinds.len():
+        if not module_surface_generated_origin_is_stale(
+            surfaces, name_index, origins, position):
+            val put_result = module_surface_export_origin_index_put(
+                kept, origins.names[position], origins.owner_modules[position],
+                origins.source_names[position], origins.resolution_kinds[position])
+            if put_result.is_err():
+                return Err(put_result.unwrap_err())
+        position = position + 1
+    Ok(kept)
 
 pub(package) fn module_surface_index_by_name(
     name_index: Dict<text, i64>, name: text) -> i64:

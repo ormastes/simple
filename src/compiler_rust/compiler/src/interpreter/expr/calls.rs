@@ -153,6 +153,24 @@ pub(super) fn eval_call_expr(
         Expr::MethodCall {
             receiver, method, args, ..
         } => {
+            // BDD negation link: `expect(x).not.to_contain(y)`. The receiver is
+            // `FieldAccess { expect(x), "not" }`, which otherwise evaluates
+            // `.not` as a field of the subject ("unknown property or method
+            // 'not' on String") and never runs the matcher.
+            if method.starts_with("to") {
+                if let Some((expect_call, true)) = super::super::peel_bdd_matcher_receiver(receiver) {
+                    return Ok(Some(super::super::evaluate_negated_bdd_matcher(
+                        expect_call,
+                        method,
+                        args,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?));
+                }
+            }
             // Check if receiver is an identifier - if so, we may need to update it
             // after calling a mutating (me) method
             if let Expr::Identifier(var_name) = receiver.as_ref() {
@@ -506,6 +524,27 @@ pub(super) fn eval_call_expr(
             }
         }
         Expr::FieldAccess { receiver, field } => {
+            // Paren-less arg-less BDD matcher: `expect(x).to_be_nil` (or
+            // `expect(x).not.to_be_nil`) parses as a FieldAccess, not a call.
+            if super::super::is_argless_bdd_matcher(field) {
+                if let Some((expect_call, negated)) = super::super::peel_bdd_matcher_receiver(receiver) {
+                    let result = if negated {
+                        super::super::evaluate_negated_bdd_matcher(
+                            expect_call,
+                            field,
+                            &[],
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?
+                    } else {
+                        evaluate_method_call(expect_call, field, &[], env, functions, classes, enums, impl_methods)?
+                    };
+                    return Ok(Some(result));
+                }
+            }
             // Support module-style access (lib.foo) by resolving directly to functions/classes
             if let Expr::Identifier(module_name) = receiver.as_ref() {
                 if env.get(module_name).is_none() {

@@ -96,6 +96,16 @@ identities. Report measurements separately from unproven improvement claims.
 
 ## Rules
 
+- Every temporary workaround requires a source `@workaround bug=<canonical-id>`
+  tag, an authoritative bug DB record, and an actual workaround commit SHA/link.
+  Record the intended-code recovery reference, original failure, affected
+  producer/source, regression tests and background fix owner. Unknown bugs must
+  be recorded first. If the qualified DB tool is unavailable, keep a dated bug
+  report with reconciliation explicitly pending. Never claim a provisional
+  workaround object fixes the bug, or remove a workaround merely after fetching
+  a fix. Follow the linked guide below for applied-fix verification and recovery.
+
+
 - Link temporary source workarounds to their owning bug using an immediately
   preceding `# @workaround bug=<canonical-id> [recover=<7..64hex>] [reason=<text>]`
   comment (`//` is also supported). Follow the accepted

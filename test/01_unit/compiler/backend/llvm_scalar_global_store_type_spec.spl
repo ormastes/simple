@@ -1,0 +1,62 @@
+use std.spec.step
+use std.io_runtime.{file_write, dir_create_all}
+use compiler.backend.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.backend.llvm_ir_builder.{llvm_ir_builder_handle, llvm_ir_builder_build}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+
+fn emit_store_case(from_ty: text, to_ty: text, direct: bool, moving: bool, stale: bool = false) -> text:
+    var owner = MirToLlvm.create("store_parity", CodegenTarget.X86_64, nil)
+    val symbol = SymbolId(id: 42)
+    val key = owner.global_static_key(symbol.id)
+    owner.global_static_names[key] = "@stored"
+    owner.global_static_types[key] = to_ty
+    owner.local_types[0] = if stale: if from_ty == "ptr": "i64" else: "ptr" else: from_ty
+    owner.value_types["%l0"] = from_ty
+    owner.defined_locals[0] = true
+    if (from_ty == "ptr" and not stale) or (from_ty == "i64" and stale): owner.ptr_locals[0] = true
+    val zero = if to_ty == "ptr": "null" else: if to_ty == "double": "0.0" else: "0"
+    owner.builder.emit("@stored = global {to_ty} {zero}")
+    owner.builder.emit("define void @set_value({from_ty} %l0) {{")
+    owner.builder.emit("entry:")
+    owner.builder.emit("  br label %write")
+    owner.builder.emit("write:")
+    val operand = if moving: MirOperand(kind: MirOperandKind.Move(LocalId(id: 0))) else: MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))
+    val instructions = [MirInst(kind: MirInstKind.StoreGlobal(symbol, operand), span: nil)]
+    val handle = if direct: llvm_ir_builder_handle(owner.builder) else: -1
+    owner.translate_instruction_at(instructions, 0, -1, handle)
+    owner.builder.emit("  ret void")
+    owner.builder.emit("}")
+    llvm_ir_builder_build(owner.builder)
+
+describe "LLVM scalar global stores preserve actual SSA types":
+    it "emits complete functions for ordinary and direct-handle Copy and Move":
+        step("Translate complete functions through both scalar dispatch modes")
+        dir_create_all("build/test/llvm-global-store-parity")
+        var missing = 0
+        var index = 0
+        for direct in [false, true]:
+            for moving in [false, true]:
+                val ptr_word = emit_store_case("ptr", "i64", direct, moving)
+                file_write("build/test/llvm-global-store-parity/store-{index}-ptr-word.ll", ptr_word)
+                if not ptr_word.contains("ptrtoint ptr %l0 to i64"): missing = missing + 1
+                val word_ptr = emit_store_case("i64", "ptr", direct, moving)
+                file_write("build/test/llvm-global-store-parity/store-{index}-word-ptr.ll", word_ptr)
+                if not word_ptr.contains("inttoptr i64 %l0 to ptr"): missing = missing + 1
+                val narrow = emit_store_case("i32", "i64", direct, moving)
+                file_write("build/test/llvm-global-store-parity/store-{index}-narrow.ll", narrow)
+                if not narrow.contains("sext i32 %l0 to i64"): missing = missing + 1
+                val real = emit_store_case("double", "double", direct, moving)
+                file_write("build/test/llvm-global-store-parity/store-{index}-real.ll", real)
+                if not real.contains("store double %l0, ptr @stored"): missing = missing + 1
+                index = index + 1
+        val stale_ptr = emit_store_case("ptr", "i64", true, false, true)
+        file_write("build/test/llvm-global-store-parity/store-stale-ptr.ll", stale_ptr)
+        expect(stale_ptr).to_contain("ptrtoint ptr %l0 to i64")
+        val stale_word = emit_store_case("i64", "ptr", true, true, true)
+        file_write("build/test/llvm-global-store-parity/store-stale-word.ll", stale_word)
+        expect(stale_word).to_contain("inttoptr i64 %l0 to ptr")
+        expect(index).to_equal(4)
+        expect(missing).to_equal(0)

@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-stage2-timeout-cascade.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# Execute the production predicate on real coordinator failure-report shapes.
+sed -n '/^bootstrap_stage2_single_timeout_cache_retry_eligible()/,/^}/p' \
+  "$root/scripts/bootstrap/bootstrap-from-scratch.sh" >"$tmp/retry.sh"
+. "$tmp/retry.sh"
+cat >"$tmp/single.log" <<'EOF'
+FAILED FILES (1):
+  - src/app/io/mod.spl => worker: timeout (300s)
+Build failed: native-build aborted: 1 file(s) failed to compile
+EOF
+bootstrap_stage2_single_timeout_cache_retry_eligible "$tmp/single.log" ||
+  fail 'single timeout was not retry eligible'
+
+cat >"$tmp/cascade.log" <<'EOF'
+FAILED FILES (3):
+  - src/app/io/cli_ops.spl => worker: NOT_ATTEMPTED: previous native worker timed out; refusing replacement admission
+  - src/app/io/mod.spl => worker: timeout (300s)
+  - src/compiler/driver.spl => worker: NOT_ATTEMPTED: previous native worker timed out; refusing replacement admission
+Build failed: native-build aborted: 3 file(s) failed to compile
+EOF
+bootstrap_stage2_single_timeout_cache_retry_eligible "$tmp/cascade.log" ||
+  fail 'timeout with deferred admission was not retry eligible'
+
+for rejection in second-timeout no-timeout other-error other-deferral header-count summary-count missing-summary duplicate-header; do
+  case "$rejection" in
+    second-timeout) sed '2s/NOT_ATTEMPTED: previous native worker timed out; refusing replacement admission/timeout (300s)/' "$tmp/cascade.log" ;;
+    no-timeout) sed '3s/timeout (300s)/NOT_ATTEMPTED: previous native worker timed out; refusing replacement admission/' "$tmp/cascade.log" ;;
+    other-error) sed '2s/NOT_ATTEMPTED: previous native worker timed out; refusing replacement admission/undefined symbol/' "$tmp/cascade.log" ;;
+    other-deferral) sed '2s/previous native worker timed out/worker memory limit exceeded/' "$tmp/cascade.log" ;;
+    header-count) sed '1s/(3)/(2)/' "$tmp/cascade.log" ;;
+    summary-count) sed '$s/3 file/2 file/' "$tmp/cascade.log" ;;
+    missing-summary) sed '$d' "$tmp/cascade.log" ;;
+    duplicate-header) sed '1p' "$tmp/cascade.log" ;;
+  esac >"$tmp/rejected.log"
+  if bootstrap_stage2_single_timeout_cache_retry_eligible "$tmp/rejected.log"; then
+    fail "$rejection was retry eligible"
+  fi
+done
+
+# Optional captured failure verifies the full report, including deferred rows
+# and diagnostics beyond the summary, without copying machine paths into tests.
+if [ "$#" -eq 1 ]; then
+  bootstrap_stage2_single_timeout_cache_retry_eligible "$1" ||
+    fail 'captured single-timeout cascade was not retry eligible'
+fi
+echo 'bootstrap_stage2_timeout_cascade_test: PASS (10 fixtures)'

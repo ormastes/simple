@@ -21,6 +21,7 @@ use std.test_runner.test_config.{TestConfig, load_test_config}
 use std.test_runner.test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_slow_test, file_has_di_test_tag, is_skip_marker_file, count_skip_marker_cases, save_manifest_from_discovery, order_tests_by_duration, validate_system_test_covers}
 use std.test_runner.mode_filter.{path_mode_matches}
 use std.spec.in_development.{source_is_in_development, in_development_explicitly_targeted, InDevelopmentOutcome, classify_in_development, in_development_skip_line, in_development_unexpected_pass_line, in_development_explicit_line, in_development_summary_line}
+use std.spec.requires_feature.{spec_required_features, feature_env_names, disabled_required_features, feature_skip_line, feature_skip_summary_line, feature_disabled_reason}
 use std.test_runner.test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh}
 use std.test_runner.test_manifest_scanner.{manifest_full_scan}
 use std.test_runner.test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_compile, run_test_file_safe_mode}
@@ -34,14 +35,14 @@ use app.test_daemon.session_scheduler.{schedule_session_tests, schedule_summary,
 # use sequential_container.{SequentialContainerConfig, sequential_container_run_all_tests}
 # use test_runner_container.container_detect_runtime
 use std.test_runner.test_runner_coverage.{setup_coverage, collect_coverage, print_coverage_summary, generate_coverage_reports, check_coverage_threshold, check_cover_annotation_thresholds, get_coverage_threshold, print_coverage_delta}
-# GROUP 4: Database & feature tracking
-use std.test_runner.test_db_compat.{RunnerTestDb, load_test_db_compat}
-use std.test_runner.test_runner_helpers.{update_test_database}
+# GROUP 4: Database & feature tracking -- recorded by the test-db lane child
+# (test_db_lane_main.spl) so the database modules stay out of this closure.
+use std.nogc_sync_mut.test_runner.test_db_record.{test_db_run_record_from_result, test_db_run_record_encode}
+use std.nogc_sync_mut.test_runner.test_executor_parsing.{find_simple_binary}
 # use test_db_types.*
 # use std.database.feature.{FeatureDatabase, load_feature_database, create_feature_database, FeatureStatus}
 # GROUP 5: Doc generation & sdoctest
-use std.test_runner.doc_generator.{generate_test_result_md}
-use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.nogc_sync_mut.io.file_ops.{file_remove}
 # use rust_test_runner.{run_rust_tests, RustTestResult}
 use std.test_runner.sdoctest.config.load_sdoctest_config
 use std.test_runner.sdoctest.runner.{run_sdoctest_mode, print_sdoctest_summary}
@@ -82,6 +83,27 @@ use app.test_daemon.session_types.{TestSessionMeta, meta_needs_session, meta_to_
 # =========================================================================
 # Runner
 # =========================================================================
+
+val TEST_DB_LANE_ENTRY = "src/app/test_runner_new/test_db_lane_main.spl"
+
+fn record_test_run_via_db_lane(result: TestRunResult, run_start: i64, run_end: i64):
+    """Record the run in the test database and regenerate test_result.md in a
+    child interpreter (test_db_lane_main.spl). A failure is reported with the
+    child's named reason; it never fails the test run itself."""
+    val record_dir = "build/test_runner"
+    dir_create_all(record_dir)
+    val record_path = "{record_dir}/test_db_record_{run_start}.txt"
+    if not file_write(record_path, test_db_run_record_encode(test_db_run_record_from_result(result, run_start, run_end))):
+        print "Warning: test database not updated: could not write {record_path}"
+        return
+    val (stdout, stderr, code) = process_run_bounded(find_simple_binary(), ["run", TEST_DB_LANE_ENTRY, "--record={record_path}"], 600000, TEST_OUTPUT_CAPTURE_BYTES)
+    file_remove(record_path)
+    if code != 0:
+        print "Warning: test database not updated (test-db lane exit {code})"
+        if stdout.trim() != "":
+            print stdout.trim()
+        if stderr.trim() != "":
+            print stderr.trim()
 
 pub fn generate_spipe_docs_for_results(results: [TestFileResult], options: TestOptions, binary: text = "bin/simple") -> i64:
     if options.format != "doc" or options.list or options.list_ignored:
@@ -447,7 +469,11 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         # real regressions. Route system specs through the real execution
         # path instead. Mirrors the Rust seed `is_system_spec` bypass in
         # src/compiler_rust/driver/src/cli/test_runner/runner.rs.
-        if use_result_cache and not file_path.contains("test/03_system/"):
+        # Feature-gated specs bypass the change-detection cache in BOTH
+        # directions: its key is content/deps only, so a cached ON-pass would
+        # replay while OFF and a cached gated skip would replay while ON.
+        val gate = feature_gate_decision(file_path)
+        if use_result_cache and not gate.declared and not file_path.contains("test/03_system/"):
             val cached_entry = incremental_state.check_freshness(file_path)
             if cached_entry.result_status != -1:
                 val cached_result = TestFileResult(
@@ -473,13 +499,13 @@ fn run_tests(options: TestOptions) -> TestRunResult:
                 tests_run = tests_run + 1
                 continue
 
-        # Run test
-        val result = run_single_test(file_path, updated_options)
+        # Run test (or report it feature-gated without running it)
+        val result = if gate.off.len() > 0: feature_gated_result(file_path, gate.off) else: run_single_test(file_path, updated_options)
         print_result(result, updated_options.format)
 
         # Record result in cache (system specs skip the cache entirely so
         # a stale interpreter-mode load never replays as a silent 0ms pass)
-        if use_result_cache and not file_path.contains("test/03_system/"):
+        if use_result_cache and not gate.declared and not file_path.contains("test/03_system/"):
             incremental_state.record_runner_result(file_path, result.passed, result.failed, result.skipped, result.duration_ms)
 
         total_passed = total_passed + result.passed
@@ -543,12 +569,26 @@ fn run_tests_parallel_mode(
     var cached_results: [TestFileResult] = []
     var uncached_files: [text] = []
 
+    # Same pre-run decision as the sequential path: gated files are reported
+    # here, in the parent, and never dispatched to a worker or the cache.
+    var gated_results: [TestFileResult] = []
+    var gate_declared_files: [text] = []
+    var runnable_files: [text] = []
+    for file_path in files:
+        val gate = feature_gate_decision(file_path)
+        if gate.declared:
+            gate_declared_files.push(file_path)
+        if gate.off.len() > 0:
+            gated_results.push(feature_gated_result(file_path, gate.off))
+        else:
+            runnable_files.push(file_path)
+
     if use_result_cache:
-        for file_path in files:
+        for file_path in runnable_files:
             # System specs (test/03_system/*) bypass the change-detection cache
             # so they always go through real execution. See the sequential
             # mode comment above for the rationale.
-            if file_path.contains("test/03_system/"):
+            if file_path.contains("test/03_system/") or gate_declared_files.contains(file_path):
                 uncached_files.push(file_path)
                 continue
             val cached_entry = incremental_state.check_freshness(file_path)
@@ -569,7 +609,7 @@ fn run_tests_parallel_mode(
             else:
                 uncached_files.push(file_path)
     else:
-        uncached_files = files
+        uncached_files = runnable_files
 
     # Smart test ordering: sort longest-first to avoid tail blockers
     if use_result_cache:
@@ -654,6 +694,11 @@ fn run_tests_parallel_mode(
     var total_duration_ms = 0
     var all_results: [TestFileResult] = []
 
+    # Feature-gated (not run): counted as skips, carried as feature_gated.
+    for gated_r in gated_results:
+        total_skipped = total_skipped + gated_r.skipped
+        all_results.push(gated_r)
+
     # Add cached results
     for cached_r in cached_results:
         total_passed = total_passed + cached_r.passed
@@ -674,7 +719,7 @@ fn run_tests_parallel_mode(
         all_results.push(result)
 
         # Record result in cache (system specs skip caching — see sequential mode)
-        if use_result_cache and not result.path.contains("test/03_system/"):
+        if use_result_cache and not gate_declared_files.contains(result.path) and not result.path.contains("test/03_system/"):
             incremental_state.record_runner_result(result.path, result.passed, result.failed, result.skipped, result.duration_ms)
 
     for result in qemu_results:
@@ -699,7 +744,7 @@ fn run_tests_parallel_mode(
         total_duration_ms = total_duration_ms + result.duration_ms
         all_results.push(result)
 
-        if use_result_cache and not result.path.contains("test/03_system/"):
+        if use_result_cache and not gate_declared_files.contains(result.path) and not result.path.contains("test/03_system/"):
             incremental_state.record_runner_result(result.path, result.passed, result.failed, result.skipped, result.duration_ms)
 
     # Save cache
@@ -928,6 +973,61 @@ fn print_in_development_summary(results: [TestFileResult]):
     val (skipped, unexpected) = in_development_totals(results)
     if skipped > 0 or unexpected > 0:
         print in_development_summary_line(skipped, unexpected)
+
+# =========================================================================
+# Build-feature switches (`# @tag:requires-<feature>`)
+# =========================================================================
+#
+# Rule, known features and defaults live in
+# src/lib/nogc_sync_mut/spec/requires_feature.spl. Only the I/O (host-config
+# documents + env) is done here.
+
+struct FeatureGateDecision:
+    declared: bool   # names a known `requires-<feature>` gate (never cached)
+    off: [text]      # required features OFF for this build ([] = run it)
+
+fn feature_gate_decision(file_path: text) -> FeatureGateDecision:
+    """The ONE pre-run decision shared by the sequential and parallel paths.
+    Reads the spec source once. Gate-declaring specs bypass the
+    change-detection cache in both directions (its key is content/deps only,
+    so a cached ON-pass would replay while OFF and vice versa).
+
+    The session daemon path (`--session-daemon`, run_tests_via_daemon) does
+    not consult this gate: there a tagged spec simply runs and reports its
+    honest verdict, never a false pass. Bootstrap uses --no-session-daemon."""
+    val source = file_read(file_path) ?? ""
+    if spec_required_features(source).len() == 0:
+        return FeatureGateDecision(declared: false, off: [])
+    val home = env_get("HOME") ?? (env_get("USERPROFILE") ?? "")
+    var user_path = env_get("SIMPLE_HOST_CONFIG") ?? ""
+    if user_path == "" and home != "":
+        user_path = home + "/.config/simple/host.sdn"
+    val user_text = if user_path != "": file_read(user_path) ?? "" else: ""
+    # The tracked defaults file ships every value commented out (it pins
+    # nothing), so reading it relative to cwd cannot change a decision; an
+    # unreadable file just means "no default layer", same as an empty one.
+    val defaults_text = file_read("config/host/host_config.sdn") ?? ""
+    var env: [(text, text)] = []
+    for name in feature_env_names():
+        env.push((name, env_get(name) ?? ""))
+    FeatureGateDecision(declared: true, off: disabled_required_features(source, defaults_text, user_text, env))
+
+fn feature_gated_result(file_path: text, off_features: [text]) -> TestFileResult:
+    """Counted, reasoned skip for a spec whose required feature is off.
+    `feature_gated` carries the reason so the DB row is "feature_gated",
+    never "passed" (is_ok() alone would read this shape as a pass)."""
+    print feature_skip_line(file_path, off_features)
+    TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 1, pending: 0, duration_ms: 0, setup_ms: 0, error: "", timed_out: false, cached: false, feature_gated: feature_disabled_reason(off_features))
+
+fn print_feature_gate_summary(results: [TestFileResult]):
+    """Count gated files (every gating path sets `feature_gated`; gated
+    files are never cached). Printed whenever non-zero, never behind --verbose."""
+    var files = 0
+    for r in results:
+        if r.feature_gated != "":
+            files = files + 1
+    if files > 0:
+        print feature_skip_summary_line(files)
 
 # =========================================================================
 # Session Config Propagation
@@ -1267,7 +1367,6 @@ fn run_test_cli() -> i64:
     propagate_env_vars(options)
 
     var exit_code = 0
-    var db: Result<RunnerTestDb, text> = Err("not_run")
 
     # Run spec tests with self-protection enabled in run_tests()
     if run_spec:
@@ -1281,7 +1380,7 @@ fn run_test_cli() -> i64:
 
         val result_files = spec_result.files
         report_free_mem("AFTER_RUN_{result_files.len()}_files")
-        if generate_spipe_docs_for_results(result_files, options) != 0:
+        if generate_spipe_docs_for_results(result_files, options, find_simple_binary()) != 0:
             return 3
         if not json_worker:
             emit_spec_file_verdicts(result_files)
@@ -1290,6 +1389,7 @@ fn run_test_cli() -> i64:
             # right after it, so they are in the block every session pastes
             # as evidence. Never hidden behind --verbose.
             print_in_development_summary(result_files)
+            print_feature_gate_summary(result_files)
 
         if options.coverage:
             val coverage = collect_coverage()
@@ -1306,9 +1406,9 @@ fn run_test_cli() -> i64:
             if not options.no_cover_check and not check_cover_annotation_thresholds(coverage, coverage_test_files):
                 exit_code = 1
 
-        # Persist test results to database and regenerate reports
+        # Persist test results to database and regenerate test_result.md
         if result_files.len() > 0 and not options.list and not options.no_db:
-            db = update_test_database(spec_result, run_start, run_end)
+            record_test_run_via_db_lane(spec_result, run_start, run_end)
 
         # Name every spec that produced no verdict. Absence of a result must
         # never read as success, and an unnamed non-zero exit is nearly as hard
@@ -1351,14 +1451,6 @@ fn run_test_cli() -> i64:
         print_sdoctest_summary(sdoctest_result)
         if not sdoctest_result.is_ok():
             exit_code = 1
-
-    # Generate test_result.md from database
-    match db:
-        Ok(database):
-            if not options.list and not options.no_db:
-                val md_content = generate_test_result_md(database)
-                file_atomic_write("doc/08_tracking/test/test_result.md", md_content)
-        Err(_): ()  # Silent failure; database may not have been attempted
 
     if json_worker:
         print combined_test_run_json(

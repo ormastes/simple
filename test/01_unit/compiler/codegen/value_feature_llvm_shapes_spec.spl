@@ -1,0 +1,207 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# LLVM codegen breadth: value-feature modules translate to well-formed IR
+
+The 50.mir breadth specs stop at MIR. The stage2 link ladder dies one layer
+later, in `MirToLlvm` (`unsupported LLVM value conversion from ptr to i8`,
+worker crash 0xC0000409 — ladder blocker A). These examples take the same
+value-feature modules through `MirToLlvm.translate_module` in-process and
+require, per module: a `define` for every MIR function, no duplicate SSA
+definition inside a function (`llvm_first_duplicate_ssa_def` == ""), and no
+`unsupported` / `compile error` text leaking into the IR. A panic from the
+emitter fails the whole file loudly, which is the intended signal.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:codegen
+# @tag:llvm
+# @tag:breadth
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.backend.mir_to_llvm.{llvm_first_duplicate_ssa_def}
+
+struct Shaped:
+    ir: text
+    fn_count: i64
+    messages: [text]
+
+fn shape(src: text) -> Shaped:
+    val file = "testdata/fixture_llvm_shapes.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_llvm_shapes", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push("hir: " + e.message)
+    for e in lowering.errors:
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        messages = messages.push("mir: " + e.message)
+    val ir = MirToLlvm.create("fixture_llvm_shapes", CodegenTarget.X86_64, nil).translate_module(mir)
+    Shaped(ir: ir, fn_count: mir.functions.len(), messages: messages)
+
+fn count_defines(ir: text) -> i64:
+    var n = 0
+    for line in ir.split("\n"):
+        if line.starts_with("define "):
+            n = n + 1
+    n
+
+fn expect_well_formed(src: text, min_fns: i64) -> Shaped:
+    val s = shape(src)
+    var all = ""
+    for m in s.messages:
+        all = all + m + "\n"
+    print "diagnostics: [{all}] fns={s.fn_count} defines={count_defines(s.ir)} ir_len={s.ir.len()}"
+    expect(s.messages.len()).to_equal(0)
+    expect(s.fn_count >= min_fns).to_equal(true)
+    expect(count_defines(s.ir) >= s.fn_count).to_equal(true)
+    expect(llvm_first_duplicate_ssa_def(s.ir)).to_equal("")
+    expect(s.ir.contains("unsupported")).to_equal(false)
+    expect(s.ir.contains("compile error")).to_equal(false)
+    s
+
+val arith_src = "fn mix(a: i64, b: f64, c: bool) -> f64:\n" +
+    "    var acc = a.to_f64() * b\n" +
+    "    var i = 0\n" +
+    "    while i < a:\n" +
+    "        acc = acc + 0.5\n" +
+    "        i = i + 1\n" +
+    "    if c and a % 2 == 0 or not c:\n" +
+    "        acc = acc - 1.0\n" +
+    "    acc / 2.0\n"
+
+val text_src = "fn greet(name: text, n: i64) -> text:\n" +
+    "    var out = \"hi \" + name\n" +
+    "    var i = 0\n" +
+    "    while i < n:\n" +
+    "        out = out + \"!\"\n" +
+    "        i = i + 1\n" +
+    "    \"\{out\} (\{out.len()\})\"\n"
+
+val enum_src = "enum Shape:\n" +
+    "    Circle(i64)\n" +
+    "    Rect(i64, i64)\n" +
+    "    Dot\n" +
+    "\n" +
+    "fn area(s: Shape) -> i64:\n" +
+    "    match s:\n" +
+    "        case Shape.Circle(r):\n" +
+    "            r * r * 3\n" +
+    "        case Shape.Rect(w, h):\n" +
+    "            w * h\n" +
+    "        case Shape.Dot:\n" +
+    "            0\n" +
+    "\n" +
+    "fn total() -> i64:\n" +
+    "    area(Shape.Circle(2)) + area(Shape.Rect(3, 4)) + area(Shape.Dot)\n"
+
+val struct_src = "struct Pt:\n" +
+    "    x: i64\n" +
+    "    y: i64\n" +
+    "\n" +
+    "impl Pt:\n" +
+    "    fn shifted(self, dx: i64) -> Pt:\n" +
+    "        Pt(x: self.x + dx, y: self.y)\n" +
+    "\n" +
+    "    fn norm1(self) -> i64:\n" +
+    "        self.x + self.y\n" +
+    "\n" +
+    "fn run() -> i64:\n" +
+    "    val p = Pt(x: 1, y: 2)\n" +
+    "    p.shifted(5).shifted(-1).norm1()\n"
+
+val closure_src = "fn make_adder(k: i64) -> fn(i64) -> i64:\n" +
+    "    \\x: x + k\n" +
+    "\n" +
+    "fn apply_twice(f: fn(i64) -> i64, v: i64) -> i64:\n" +
+    "    f(f(v))\n" +
+    "\n" +
+    "fn run() -> i64:\n" +
+    "    var acc = 0\n" +
+    "    val bump = \\n: acc = acc + n\n" +
+    "    bump(2)\n" +
+    "    apply_twice(make_adder(10), acc)\n"
+
+val option_result_src = "fn pick(flag: bool) -> i64?:\n" +
+    "    if flag:\n" +
+    "        Some(42)\n" +
+    "    else:\n" +
+    "        nil\n" +
+    "\n" +
+    "fn parse_pos(v: i64) -> Result<i64, text>:\n" +
+    "    if v < 0:\n" +
+    "        return Err(\"negative\")\n" +
+    "    Ok(v)\n" +
+    "\n" +
+    "fn run(v: i64) -> i64:\n" +
+    "    val a = pick(true) ?? -1\n" +
+    "    val b = pick(false) ?? -1\n" +
+    "    val c = parse_pos(v).unwrap_or(0)\n" +
+    "    val d = match parse_pos(-v):\n" +
+    "        case Ok(x): x\n" +
+    "        case Err(_): -2\n" +
+    "    a + b + c + d\n"
+
+val collections_src = "fn tally(words: [text]) -> i64:\n" +
+    "    var counts: Dict<text, i64> = \{\}\n" +
+    "    for w in words:\n" +
+    "        counts[w] = (counts.get(w) ?? 0) + 1\n" +
+    "    var best = 0\n" +
+    "    for k in counts.keys():\n" +
+    "        if counts[k] > best:\n" +
+    "            best = counts[k]\n" +
+    "    var xs: [i64] = []\n" +
+    "    xs.push(best)\n" +
+    "    xs.push(words.len())\n" +
+    "    xs[0] + xs[1] + xs.len()\n"
+
+val recursion_src = "fn fact(n: i64) -> i64:\n" +
+    "    if n <= 1:\n" +
+    "        return 1\n" +
+    "    n * fact(n - 1)\n" +
+    "\n" +
+    "fn fib(n: i64) -> i64:\n" +
+    "    if n < 2:\n" +
+    "        return n\n" +
+    "    fib(n - 1) + fib(n - 2)\n" +
+    "\n" +
+    "fn run() -> i64:\n" +
+    "    fact(5) + fib(10)\n"
+
+describe "LLVM codegen breadth: value features":
+    it "emits well-formed IR for integer/float/bool arithmetic and a while loop":
+        expect_well_formed(arith_src, 1)
+
+    it "emits well-formed IR for text concatenation and interpolation":
+        expect_well_formed(text_src, 1)
+
+    it "emits well-formed IR for payload enums, construction and match":
+        expect_well_formed(enum_src, 2)
+
+    it "emits well-formed IR for struct construction and chained impl methods":
+        expect_well_formed(struct_src, 3)
+
+    it "emits well-formed IR for closures capturing by value and by mutation":
+        expect_well_formed(closure_src, 3)
+
+    it "emits well-formed IR for Option/Result construction, ??, unwrap_or and match":
+        expect_well_formed(option_result_src, 3)
+
+    it "emits well-formed IR for dict/array literals, indexing, push and keys()":
+        expect_well_formed(collections_src, 1)
+
+    it "emits well-formed IR for direct and double recursion":
+        expect_well_formed(recursion_src, 3)

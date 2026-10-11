@@ -21,7 +21,7 @@
 # newline: Windows cannot pass a newline to a .cmd/.bat curl shim.
 
 use std.nogc_sync_mut.io.process_ops.{process_run}
-use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize, json_get_type}
+use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_type, json_value_has, json_value_field, json_value_len, json_value_at, json_value_serialize}
 use std.common.text_advanced.{escape_json}
 use app.devhub.adapter_jira.{JiraIssue}
 use app.devhub.retry.{ITF_RETRY_MAX_ATTEMPTS, itf_should_retry, itf_retry_wait}
@@ -256,38 +256,34 @@ fn _status_ok(code: i64) -> bool:
 # JSON helpers
 # ---------------------------------------------------------------------------
 
-fn _jstr(obj: any, key: text) -> text:
+fn _jstr(obj: JsonValue, key: text) -> text:
     """Safely extract a string field from a JSON object."""
-    if obj == nil:
+    if not json_value_has(obj, key):
         return ""
-    val v = json_object_get(obj, key)
-    if v == nil:
-        return ""
-    val s = json_serialize(v)
+    val s = json_value_serialize(json_value_field(obj, key))
     if s.starts_with("\"") and s.ends_with("\""):
         return s[1:s.len() - 1]
     s
 
 
-fn _parse_jira_issue(obj: any) -> JiraIssue:
+fn _parse_jira_issue(obj: JsonValue) -> JiraIssue:
     """Parse a Jira issue from a JSON object (REST v3 shape)."""
     val key = _jstr(obj, "key")
-    val fields = json_object_get(obj, "fields")
-    val source = if fields != nil: fields else: obj
+    val source = if json_value_has(obj, "fields"): json_value_field(obj, "fields") else: obj
 
     val summary = _jstr(source, "summary")
     # ADF -> plain text. `_adf_doc` below wraps outbound text into an
     # Atlassian Document; this is the inverse, and without it a description
     # came back as the raw `{"type":"doc",...}` JSON blob (see adf_to_plain).
-    val description = adf_to_plain(json_object_get(source, "description"))
-    val priority_obj = json_object_get(source, "priority")
-    val priority = if priority_obj != nil: _jstr(priority_obj, "name") else: ""
-    val status_obj = json_object_get(source, "status")
-    val status = if status_obj != nil: _jstr(status_obj, "name") else: ""
-    val type_obj = json_object_get(source, "issuetype")
-    val issue_type = if type_obj != nil: _jstr(type_obj, "name") else: ""
-    val assignee_obj = json_object_get(source, "assignee")
-    val assignee = if assignee_obj != nil: _jstr(assignee_obj, "displayName") else: ""
+    val description = adf_to_plain(json_value_field(source, "description"))
+    val priority_obj = json_value_field(source, "priority")
+    val priority = if json_value_has(source, "priority"): _jstr(priority_obj, "name") else: ""
+    val status_obj = json_value_field(source, "status")
+    val status = if json_value_has(source, "status"): _jstr(status_obj, "name") else: ""
+    val type_obj = json_value_field(source, "issuetype")
+    val issue_type = if json_value_has(source, "issuetype"): _jstr(type_obj, "name") else: ""
+    val assignee_obj = json_value_field(source, "assignee")
+    val assignee = if json_value_has(source, "assignee"): _jstr(assignee_obj, "displayName") else: ""
     val updated = _jstr(source, "updated")
 
     JiraIssue(
@@ -314,7 +310,7 @@ fn _json_escape(s: text) -> text:
     escape_json(s)
 
 
-fn adf_to_plain(node: any) -> text:
+fn adf_to_plain(node: JsonValue) -> text:
     """Flatten an Atlassian Document Format value to plain text.
 
     The inverse of `_adf_doc`, and the half that was missing: devhub targets
@@ -337,9 +333,7 @@ fn adf_to_plain(node: any) -> text:
     Accepts a plain JSON string too, so a v2 response (or a Server/DC
     deployment) still reads correctly through the same call site.
     """
-    if node == nil:
-        return ""
-    val raw = json_serialize(node)
+    val raw = json_value_serialize(node)
     # A v2/plain string field: already text, just unquote it.
     if raw.starts_with("\""):
         return _jstr_of(node)
@@ -348,34 +342,30 @@ fn adf_to_plain(node: any) -> text:
     _adf_walk(node).trim()
 
 
-fn _jstr_of(node: any) -> text:
+fn _jstr_of(node: JsonValue) -> text:
     """Unquote a JSON string value."""
-    val s = json_serialize(node)
+    val s = json_value_serialize(node)
     if s.starts_with("\"") and s.ends_with("\""):
         return s[1:s.len() - 1]
     s
 
 
-fn _adf_walk(node: any) -> text:
+fn _adf_walk(node: JsonValue) -> text:
     """Recursive ADF flattener. Separated from adf_to_plain so the entry point
     can handle the non-ADF cases once, rather than on every node."""
-    if node == nil:
-        return ""
     val node_type = _jstr(node, "type")
     if node_type == "text":
         return _jstr(node, "text")
     if node_type == "hardBreak":
         return "\n"
-    val content = json_object_get(node, "content")
-    if content == nil:
+    if not json_value_has(node, "content"):
         return ""
+    val content = json_value_field(node, "content")
     var out = ""
     var i: i64 = 0
-    val n = json_array_length(content)
+    val n = json_value_len(content)
     while i < n:
-        val child = json_array_get(content, i)
-        if child != nil:
-            out = out + _adf_walk(child)
+        out = out + _adf_walk(json_value_at(content, i))
         i = i + 1
     # Block-level nodes end with a newline so paragraphs do not run together.
     if node_type == "paragraph" or node_type == "heading" or node_type == "listItem" or node_type == "codeBlock":
@@ -430,9 +420,10 @@ fn jira_curl_view_issue(client: JiraClient, issue_key: text) -> (bool, JiraIssue
     if not _status_ok(code):
         return (false, empty, _status_message(code, body))
 
-    val parsed = json_parse(body)
-    if parsed == nil:
+    val parsed_opt = json_value_parse_opt(body)
+    if parsed_opt == nil:
         return (false, empty, "invalid JSON from Jira")
+    val parsed = parsed_opt.unwrap()
 
     (true, _parse_jira_issue(parsed), body)
 
@@ -478,17 +469,18 @@ fn jira_curl_search(client: JiraClient, jql: text, fields: text, limit: i64) -> 
     if not _status_ok(code):
         return (false, [], _status_message(code, resp_body))
 
-    val parsed = json_parse(resp_body)
-    if parsed == nil:
+    val parsed_opt = json_value_parse_opt(resp_body)
+    if parsed_opt == nil:
         return (false, [], "invalid JSON from Jira")
+    val parsed = parsed_opt.unwrap()
 
     var issues: [JiraIssue] = []
-    val issues_arr = json_object_get(parsed, "issues")
-    if issues_arr != nil and json_get_type(issues_arr) == "array":
-        val n = json_array_length(issues_arr)
+    val issues_arr = json_value_field(parsed, "issues")
+    if json_value_type(issues_arr) == "array":
+        val n = json_value_len(issues_arr)
         var i = 0
         while i < n:
-            val item = json_array_get(issues_arr, i)
+            val item = json_value_at(issues_arr, i)
             issues = issues + [_parse_jira_issue(item)]
             i = i + 1
 
@@ -532,9 +524,10 @@ fn jira_curl_create_issue(
     if not _status_ok(code):
         return (false, empty, _status_message(code, resp_body))
 
-    val parsed = json_parse(resp_body)
-    if parsed == nil:
+    val parsed_opt = json_value_parse_opt(resp_body)
+    if parsed_opt == nil:
         return (false, empty, "invalid JSON from Jira")
+    val parsed = parsed_opt.unwrap()
 
     val key = _jstr(parsed, "key")
     val created = JiraIssue(
@@ -572,10 +565,10 @@ fn jira_curl_get_attachment(client: JiraClient, attachment_id: text, dest_path: 
         val (meta_body, meta_code) = _split_response(meta_out)
         if not _status_ok(meta_code):
             return (false, _status_message(meta_code, meta_body))
-        val meta = json_parse(meta_body)
-        if meta == nil or _jstr(meta, "content") == "":
+        val meta_opt = json_value_parse_opt(meta_body)
+        if meta_opt == nil or _jstr(meta_opt.unwrap(), "content") == "":
             return (false, "attachment metadata has no content URL")
-        url = _jstr(meta, "content")
+        url = _jstr(meta_opt.unwrap(), "content")
 
     val (stdout, stderr, exit_code) = _jira_run_curl(client, _build_curl_argv_download(auth, url, dest_path))
 
@@ -688,17 +681,18 @@ fn jira_curl_list_transitions(client: JiraClient, issue_key: text) -> (bool, [Ji
     if not _status_ok(code):
         return (false, [], _status_message(code, body))
 
-    val parsed = json_parse(body)
-    if parsed == nil:
+    val parsed_opt = json_value_parse_opt(body)
+    if parsed_opt == nil:
         return (false, [], "invalid JSON from Jira")
+    val parsed = parsed_opt.unwrap()
 
     var out: [JiraTransition] = []
-    val arr = json_object_get(parsed, "transitions")
-    if arr != nil and json_get_type(arr) == "array":
-        val n = json_array_length(arr)
+    val arr = json_value_field(parsed, "transitions")
+    if json_value_type(arr) == "array":
+        val n = json_value_len(arr)
         var i = 0
         while i < n:
-            val item = json_array_get(arr, i)
+            val item = json_value_at(arr, i)
             out = out + [JiraTransition(id: _jstr(item, "id"), name: _jstr(item, "name"))]
             i = i + 1
     (true, out, body)

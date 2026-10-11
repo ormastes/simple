@@ -1,5 +1,16 @@
 # Runtime Optional Provider and Binary-Size Optimization Architecture
 
+## 2026-10-09 release compatibility and shared owners
+
+The [shared provider interface handoff](../../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md)
+maps this design to release `59499d74697`, separates production contracts from
+planned type names, and records the unlanded compiler/app integrations. Reuse
+the existing provider-query, metadata-admission, loader/session and environment
+owners. CPU and GPU providers share policy and evidence responsibilities while
+retaining their distinct operation ABI and lifetime rules. The core type list
+below is architectural intent, not an implementation inventory. This dated
+update preserves the selected requirements and adds no runtime completion claim.
+
 ## Decision
 
 Use a minimal base runtime plus sealed demand-loaded provider capsules. Provider registration is metadata-only. The linker consumes an exact reachability manifest, and the loader consumes a separate capability-admission manifest. Pure-Simple and foreign implementations coexist behind one typed provider slot until the pure-Simple implementation satisfies promotion gates.

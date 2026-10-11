@@ -1,6 +1,12 @@
 <!-- codex-research -->
 # SOSIX runtime unification: current local evidence
 
+## 2026-10-11 integration correction
+
+The [Item 5 reconciliation](../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration) incorporates the user's variation/SOSIX proposal against release `02b150b385013d21bc408b45244431de85d391de`. Preserve all dated findings below. Current source pairing of Promise/Future must not be described using an obsolete “never publishes” finding; pairing alone still does not prove task wake, buffer retirement or cross-runtime qualification.
+
+The selected migration reuses common service/operation and SimpleRing owners. C GPU registry execution, generated GPU code, hosted ring-shaped APIs and physical async completion are distinct evidence. Add exact caller/retirement receipts before closing distributed host-effect or GPU/SimpleOS rows. No missing historical performance baseline is replaced by an invented numeric result.
+
 **Baseline:** committed `main` at `0d94a64030378f8a25d1ffc995db633aa6d02daa`, inspected 2026-09-26. The shared root checkout was detached at `664c80efda5` with unrelated dirty work; this review used the committed tree. This is a current-state supplement to the 2026-09-05 [proposal](../runtime/sosix_unification/simple_sosix_runtime_unification_design_plan_2026-09-05.md) and [design](../../05_design/runtime/sosix_runtime_unification_design.md), not a replacement for either.
 
 ## Verified routes and gaps

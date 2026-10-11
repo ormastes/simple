@@ -1,0 +1,124 @@
+"""
+A function declared without `-> T` and with no `return <value>` returns Unit
+in every lowering mode; a genuinely missing return in a declared non-unit
+function is still E-SFFI-016 in every mode.
+
+Language rule (syntax_quick_reference.md, Functions): `fn greet(name: text):`
+is a procedure; implicit tail-value return applies to annotated functions.
+The pure-Simple HIR defaults an omitted annotation to Unit and infers a type
+only from an explicit `return <value>` (infer_untyped_return_type).
+
+Stage2 (frozen pure-Simple compiler run with `SIMPLE_BOOTSTRAP=1`) rejected
+382 unit helpers of the test runner and 63 of ui_shared_mdi with
+`E-SFFI-016: missing return in non-unit function`: the ambient-bootstrap arm
+gave every unannotated bodied function except `main` the
+`bootstrap_builtin_return_type` fallback (i64) while lowering its body as a
+unit block. Fixed in 24a01668940 (only a body with a value return takes the
+bootstrap value ABI); this spec pins it.
+
+Parsing always runs with the bootstrap env off: under SIMPLE_BOOTSTRAP=1
+`parse_full_frontend` leaves `module.functions` empty (the flat-AST bridge
+populates it only via parse_and_build_module), which would make every
+bootstrap-mode assertion vacuous. The env is switched on only around HIR and
+MIR lowering, which is where `ambient_bootstrap_enabled()` is read, and every
+case asserts that functions were actually lowered.
+"""
+# @cover src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
+# @cover src/compiler/50.mir/_MirLowering/function_lowering.spl
+
+use std.spec.*
+use std.env.variables.{env_set}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+struct LoweringOutcome:
+    function_count: i64
+    messages: [text]
+
+fn lower_to_mir(source: text, name: text, bootstrap: bool) -> LoweringOutcome:
+    val filename = "unannotated_unit_" + name + ".spl"
+    env_set("SIMPLE_BOOTSTRAP", "0")
+    val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    if bootstrap:
+        env_set("SIMPLE_BOOTSTRAP", "1")
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val _mir = mir_lowering.lower_module(hir)
+    env_set("SIMPLE_BOOTSTRAP", "0")
+    var messages: [text] = []
+    for err in mir_lowering.errors:
+        messages = messages.push(err.message)
+    LoweringOutcome(function_count: hir.functions.len(), messages: messages)
+
+fn messages_matching(messages: [text], needle: text) -> [text]:
+    var hits: [text] = []
+    for m in messages:
+        if m.contains(needle):
+            hits = hits.push(m)
+    hits
+
+val UNIT_TAIL_CALL_SOURCE = """
+extern fn rt_stdout_flush() -> i32
+
+fn emit(message: text):
+    print message
+    rt_stdout_flush()
+
+fn main():
+    emit("x")
+"""
+
+val UNANNOTATED_VALUE_RETURN_SOURCE = """
+fn pick(x: i64):
+    return x + 1
+
+fn main():
+    val v = pick(1)
+    print v
+"""
+
+val DECLARED_VALUE_MISSING_RETURN_SOURCE = """
+fn broken(x: i64) -> i64:
+    val y = x + 1
+
+fn main():
+    broken(1)
+"""
+
+val MISSING_RETURN_BROKEN = "E-SFFI-016: missing return in non-unit function 'broken'"
+
+describe "unannotated function return type":
+    it "lowers a unit helper ending in a non-unit call without E-SFFI-016 under SIMPLE_BOOTSTRAP=1":
+        val outcome = lower_to_mir(UNIT_TAIL_CALL_SOURCE, "tail_call_boot", true)
+        expect(outcome.function_count > 0).to_equal(true)
+        expect(messages_matching(outcome.messages, "E-SFFI-016").len()).to_equal(0)
+
+    it "lowers the same unit helper without E-SFFI-016 without the bootstrap env":
+        val outcome = lower_to_mir(UNIT_TAIL_CALL_SOURCE, "tail_call_plain", false)
+        expect(outcome.function_count > 0).to_equal(true)
+        expect(messages_matching(outcome.messages, "E-SFFI-016").len()).to_equal(0)
+
+    it "keeps an unannotated explicit value return non-unit under SIMPLE_BOOTSTRAP=1":
+        val outcome = lower_to_mir(UNANNOTATED_VALUE_RETURN_SOURCE, "value_boot", true)
+        expect(outcome.function_count > 0).to_equal(true)
+        expect(messages_matching(outcome.messages, "E-SFFI-016").len()).to_equal(0)
+
+    it "keeps an unannotated explicit value return non-unit without the bootstrap env":
+        val outcome = lower_to_mir(UNANNOTATED_VALUE_RETURN_SOURCE, "value_plain", false)
+        expect(outcome.function_count > 0).to_equal(true)
+        expect(messages_matching(outcome.messages, "E-SFFI-016").len()).to_equal(0)
+
+    it "still rejects a declared value function with a missing return under SIMPLE_BOOTSTRAP=1":
+        val outcome = lower_to_mir(DECLARED_VALUE_MISSING_RETURN_SOURCE, "missing_boot", true)
+        expect(outcome.function_count > 0).to_equal(true)
+        expect(messages_matching(outcome.messages, MISSING_RETURN_BROKEN).len()).to_equal(1)
+
+    it "still rejects a declared value function with a missing return without the bootstrap env":
+        val outcome = lower_to_mir(DECLARED_VALUE_MISSING_RETURN_SOURCE, "missing_plain", false)
+        expect(outcome.function_count > 0).to_equal(true)
+        expect(messages_matching(outcome.messages, MISSING_RETURN_BROKEN).len()).to_equal(1)

@@ -16,6 +16,8 @@ handling, struct construction, and intrinsic dispatch.
 
 ## Layer Links
 
+- [Tuple owner preservation](../../../08_tracking/bug/enumerate_native_tuple_owner_loss_2026-10-11.md): preserve known record owner when an indexed I64 handle enters an ordinary tuple, then recover it at native projection. Do not rebox handle fields. MIR regressions and native oracle are pending qualified execution.
+
 - HIR→MIR lowering: [src/compiler/50.mir/_MirLowering/](../../../../src/compiler/50.mir/_MirLowering/)
   (expr/stmt/item lowering).
 - Method calls & literals: [src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl](../../../../src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl)
@@ -359,3 +361,55 @@ and `_MirLoweringExpr/{method_calls_literals,switch_operators_calls}.spl` update
   `test/01_unit/compiler/backend/text_predicate_argument_shapes_native_spec.spl`.
   Rule: **never `tag_str_local_if_raw` a value whose producer may already be
   tagged; the only safe normaliser is `ensure_tagged_str`.**
+
+## 2026-10-10 — struct layout keys have two spellings; fold through `declared_struct_layout_key`
+
+`composite_layout_key(symbol)` is `{defining_module}::{Name}`, and
+`defining_module` is a SOURCE PATH on a declaration (`lib/nodes.spl`) but the
+DOTTED module name on an import (`lib.nodes`). Only the declaration's spelling
+is ever registered in `struct_field_order` / `struct_field_hir_type`. So a key
+computed from an IMPORT symbol names no layout: `resolve_field_index` then
+falls to index 0 and the field local carries no HIR type.
+
+That is what erased `val src = node_get(0)` when `node_get` (module B) returns a
+struct declared in module C: the prescan's `bootstrap_fn_ret_shape_register`
+stored B's import-spelled key, `for x in src.names:` died as `#143 ...
+collection mir type: I64`, and range-index / text methods on its fields failed
+the same way (bug `stage2_imported_fn_foreign_struct_return_type_erased_2026-10-10`).
+
+- `struct_identity_layout_key` maps the canonical identity
+  (`{mir_layout_canonical_module_name(owner)}::{Name}`) to the declared key;
+  filled by `prescan_module_struct_names` and `lower_module`'s local loop.
+- `declared_struct_layout_key(shape)` folds either spelling onto the declared
+  one. Apply it wherever a layout key arrives from ANOTHER module's symbol
+  table (currently the two `bootstrap_fn_ret_shape_lookup` consumers).
+- `struct_owner_method_key(owner, method)` bridges a qualified layout key to
+  the `{dotted module}.{Name}::{method}` row `register_provider_method`
+  publishes for struct methods.
+- In-process specs only reproduce this if `hirlowering_for_module` is given the
+  source PATH, as the driver does. With dotted names on both sides the two
+  spellings coincide and the bug is invisible
+  (`test/01_unit/compiler/50.mir/stage2_imported_fn_foreign_struct_return_spec.spl`).
+- Still bare-keyed, not changed here: Optional/Result struct payload shapes
+  (`bootstrap_fn_ret_opt_shape_*` / `ok_shape`) and
+  `optional_payload_struct_name`'s Struct arm.
+
+## 2026-10-11 — closure writes to a captured local are rejected before HIR
+
+`snapshot_lambda_capture` gives closures by-value captures, so a body
+assignment to an enclosing local lands in the snapshot copy. That is the
+language rule for reads; a WRITE is a compile error (owner ruling 2026-09-27).
+The gate is not in MIR: `core/capture_write_check.spl` runs on the flat AST in
+`parse_and_build_module_with_scope_owner`, before `desugar_collections`
+(which turns `x = x + y` into `x.merge(y)`). Do not add by-reference capture
+in MIR to "fix" a dropped write. Escape: `SIMPLE_CAPTURE_WRITE_CHECK=warning|off`. Bug:
+`doc/08_tracking/bug/stage2_closure_capture_write_silently_dropped_2026-10-11.md`.
+
+- **Match guard-count invariant (3a, advisory `E-MIR-MATCH-GUARD`).** `lower_match_case`
+  ([expr_dispatch.spl](../../../../src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl))
+  is a checking wrapper around `lower_match_case_unchecked`: guarded arms
+  received == guard branches emitted. Rule: **any site that emits a guard
+  `terminate_if` increments `self.match_guards_lowered`; any site that
+  legitimately skips or multiplies a guarded arm adjusts
+  `self.match_guards_expected` with a comment.** Guide:
+  `doc/07_guide/compiler/robustness/match-guard-invariant.md`.

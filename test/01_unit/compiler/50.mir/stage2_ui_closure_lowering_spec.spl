@@ -1,0 +1,118 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+# Stage2 MIR: ui_shared_mdi link-ladder rung
+
+Root causes behind the ui_shared_mdi rung's MIR errors, each reproduced by
+lowering through the pure-Simple frontend -> HIR -> MIR in process:
+
+- `for child in self.children(): child.find_by_id(t)` (widget_store_ops.spl):
+  a `[Record]` collection that is neither an array literal nor a typed param
+  never published its element owner, so the loop variable had no record type
+  and `child.method()` was "unresolved" (also the cascading #143 for-in over
+  `child.collect_ids()`).
+- `parse_layout_kind(name).to_wire()`: an enum method on a CALL RESULT only
+  consulted variable receivers' declared types, not the call's remembered
+  return type.
+- `use common.ui.style.{UITheme}` materialized UITheme's field dependency
+  `Spacing` (a class) under the bare name before the explicit
+  `use common.ui.design_tokens.{Spacing}` (an enum), so `Spacing.Xs` lost its
+  enum: "missing runtime identity for 'Spacing'" and ambiguous bare variants.
+  An explicit import now supersedes a transitive (field-dependency) bare
+  binding in either order, while a transitively reachable type alone keeps
+  the seed's bare usability (`use dep.{make_holder}` then `Gap(...)`).
+- Source: `char_frequency`/`multi_replace` (common.text_advanced) were
+  unannotated, so their results iterated as erased words (#143), and
+  ui.ipc/protocol.spl called the nonexistent `i64.to_text_char()`.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use std.io_runtime.{file_read}
+
+fn single_module_errors(path: text, src: text, needle: text) -> i64:
+    val ast = parse_full_frontend(src, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val _mir = mir_lowering.lower_module(hir)
+    var n = 0
+    for e in mir_lowering.errors:
+        if e.message.contains(needle):
+            n = n + 1
+    n
+
+fn two_provider_errors(provider_names: [text], provider_sources: [text], consumer: text, needle: text) -> i64:
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var i = 0
+    while i < provider_names.len():
+        val path = provider_names[i].replace(".", "/") + ".spl"
+        modules[provider_names[i]] = parse_full_frontend(provider_sources[i], path, provider_names[i], log)
+        sources.push(SourceFile(path: path, content: provider_sources[i], module_name: provider_names[i]))
+        i = i + 1
+    val consumer_ast = parse_full_frontend(consumer, "app/main.spl", "app.main", log)
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    for name in provider_names:
+        var provider_lowering = hirlowering_for_module(name, surfaces)
+        mir_lowering.prescan_module_struct_names(provider_lowering.lower_module(modules[name]))
+    mir_lowering.prescan_module_struct_names(consumer_hir)
+    val _mir = mir_lowering.lower_module(consumer_hir)
+    var n = 0
+    for he in consumer_lowering.errors:
+        if he.message.contains(needle):
+            n = n + 1
+    for e in mir_lowering.errors:
+        if e.message.contains(needle):
+            n = n + 1
+    n
+
+val node_src = "struct Node:\n    id: text\n\nimpl Node:\n    fn children() -> [Node]:\n        [Node(id: self.id + \"a\")]\n\n    fn find(t: text) -> Node?:\n        if self.id == t:\n            return Some(self)\n        for child in self.children():\n            val f = child.find(t)\n            if f.?:\n                return f\n        nil\n\n    fn ids() -> [text]:\n        var out: [text] = [self.id]\n        for child in self.children():\n            for cid in child.ids():\n                out.push(cid)\n        out\n"
+
+val enum_call_src = "enum Lk:\n    Row\n    Col\n\nimpl Lk:\n    static fn from_wire(s: text) -> Lk:\n        if s == \"row\": Lk.Row else: Lk.Col\n    fn to_wire(self) -> text:\n        match self:\n            Lk.Row => \"row\"\n            Lk.Col => \"col\"\n\nfn parse(n: text) -> Lk:\n    Lk.from_wire(n)\n\nfn wire(n: text) -> text:\n    parse(n).to_wire()\n"
+
+val style_src = "class Spacing:\n    xs: i64\n\nstruct UITheme:\n    spacing: Spacing\n"
+val tokens_src = "enum Spacing:\n    Xs\n    Sm\n"
+val spacing_consumer = "use lib.style.\{UITheme\}\nuse lib.toks.\{Spacing\}\n\nfn px(s: Spacing) -> i64:\n    match s:\n        case Spacing.Xs: return 4\n        case Spacing.Sm: return 8\n    0\n\nfn mk() -> Spacing:\n    Spacing.Sm\n"
+val spacing_consumer_explicit_first = "use lib.toks.\{Spacing\}\nuse lib.style.\{UITheme\}\n\nfn px(s: Spacing) -> i64:\n    match s:\n        case Spacing.Xs: return 4\n        case Spacing.Sm: return 8\n    0\n"
+val holder_src = "pub struct Gap:\n    n: i64\n\npub struct Holder:\n    gap: Gap\n\npub fn make_holder() -> Holder:\n    Holder(gap: Gap(n: 1))\n"
+val transitive_consumer = "use lib.dep.\{make_holder\}\n\nfn f() -> i64:\n    val g = Gap(n: 2)\n    make_holder().gap.n + g.n\n"
+
+describe "stage2 MIR ui_shared_mdi rung":
+    it "types a loop variable over a method's [Record] result":
+        expect(single_module_errors("probe.spl", node_src, "unresolved method call")).to_equal(0)
+        expect(single_module_errors("probe.spl", node_src, "for-in over non-array")).to_equal(0)
+
+    it "resolves an enum method on a call result":
+        expect(single_module_errors("probe.spl", enum_call_src, "unresolved method call")).to_equal(0)
+
+    it "keeps an explicit enum import over a same-named field dependency":
+        val names = ["lib.style", "lib.toks"]
+        val srcs = [style_src, tokens_src]
+        expect(two_provider_errors(names, srcs, spacing_consumer, "missing runtime identity")).to_equal(0)
+        expect(two_provider_errors(names, srcs, spacing_consumer, "is ambiguous")).to_equal(0)
+        expect(two_provider_errors(names, srcs, spacing_consumer_explicit_first, "missing runtime identity")).to_equal(0)
+
+    it "keeps the seed's bare use of a transitively reachable type":
+        expect(two_provider_errors(["lib.dep"], [holder_src], transitive_consumer, "Gap")).to_equal(0)
+
+    it "iterates text_advanced tuple results without #143":
+        val path = "src/lib/common/text_advanced.spl"
+        expect(single_module_errors(path, file_read(path), "for-in over non-array")).to_equal(0)
+
+    it "calls an existing int-to-char builtin in ui.ipc protocol":
+        val path = "src/app/ui.ipc/protocol.spl"
+        expect(single_module_errors(path, file_read(path), "to_text_char")).to_equal(0)

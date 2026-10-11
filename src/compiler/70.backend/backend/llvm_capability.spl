@@ -7,8 +7,9 @@
 # Replaces scattered `command -v` checks with one portable detection pass.
 # Supports Linux, macOS, FreeBSD, and Windows.
 
-use compiler.backend.backend.io_compat.{backend_shell_tuple}
+use compiler.backend.backend.io_compat.{backend_shell_tuple, backend_tool_on_path}
 use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.platform.{get_host_os}
 use std.io_runtime.{host_arch}
 use compiler.backend.llvm_version.{
@@ -175,31 +176,16 @@ fn format_tool_status(tool: LlvmToolStatus) -> text:
 # ============================================================================
 
 fn find_tool_portable(candidates: [text]) -> text:
-    """Find a tool using platform-appropriate detection.
+    """Find a tool the way the host shell resolves a bare name.
 
-    On Unix: uses `command -v`
-    On Windows: uses `where`
+    Resolved in-process by backend_tool_on_path (PATH walk; PATHEXT on
+    Windows) -- it used to spawn `where` / `command -v` once per candidate,
+    which cost ~1 s each on Windows and put detect_llvm_capabilities() at
+    66-99 s per compile (see io_compat.spl).
 
     Returns the resolved path or empty string.
     """
-    val os = get_host_os()
-    val is_windows = os == "windows"
-
-    for candidate in candidates:
-        if is_windows:
-            val (out, err, code) = backend_shell_tuple("where {candidate}")
-            if code == 0:
-                for path in out.split("\n"):
-                    val resolved = path.trim()
-                    if resolved != "":
-                        return resolved
-        else:
-            val (out, err, code) = backend_shell_tuple("command -v {candidate} 2>/dev/null")
-            if code == 0:
-                val path = out.trim()
-                if path != "":
-                    return path
-    ""
+    backend_tool_on_path(candidates)
 
 fn find_llc_portable() -> text:
     find_tool_portable(["llc-19", "llc-18", "llc-17", "llc-16", "llc"])
@@ -306,23 +292,27 @@ fn detect_libllvm_available() -> bool:
     # Method 1: llvm-config --libdir
     val config_candidates = ["llvm-config-18", "llvm-config-17", "llvm-config-16", "llvm-config-19", "llvm-config"]
     for candidate in config_candidates:
-        val (out, err, code) = backend_shell_tuple("{candidate} --libdir 2>/dev/null")
-        if code == 0:
-            val libdir = out.trim()
-            if libdir != "":
-                # Check if libLLVM exists in that directory
-                if os == "windows":
-                    val (chk_out, chk_err, chk_code) = backend_shell_tuple("dir /b \"{libdir}\\LLVM-C.dll\"")
-                    if chk_code == 0:
-                        return true
-                elif os == "macos":
-                    val (chk_out, chk_err, chk_code) = backend_shell_tuple("test -f '{libdir}/libLLVM.dylib' && echo ok")
-                    if chk_code == 0:
-                        return true
-                else:
-                    val (chk_out, chk_err, chk_code) = backend_shell_tuple("test -f '{libdir}/libLLVM.so' -o -f '{libdir}/libLLVM-18.so' -o -f '{libdir}/libLLVM-17.so' && echo ok")
-                    if chk_code == 0:
-                        return true
+        # A candidate the shell could not find exited non-zero anyway; skip
+        # the spawn (~1 s each on Windows) and keep only the real probe.
+        if backend_tool_on_path([candidate]) != "":
+            val (out, err, code) = backend_shell_tuple("{candidate} --libdir 2>/dev/null")
+            if code == 0:
+                val libdir = out.trim()
+                if libdir != "":
+                    # Check if libLLVM exists in that directory
+                    if os == "windows":
+                        # Same predicate `dir /b "<libdir>\LLVM-C.dll"` answered
+                        # (exit 0 iff the entry exists), without the cmd.exe spawn.
+                        if file_exists("{libdir}\\LLVM-C.dll"):
+                            return true
+                    elif os == "macos":
+                        val (chk_out, chk_err, chk_code) = backend_shell_tuple("test -f '{libdir}/libLLVM.dylib' && echo ok")
+                        if chk_code == 0:
+                            return true
+                    else:
+                        val (chk_out, chk_err, chk_code) = backend_shell_tuple("test -f '{libdir}/libLLVM.so' -o -f '{libdir}/libLLVM-18.so' -o -f '{libdir}/libLLVM-17.so' && echo ok")
+                        if chk_code == 0:
+                            return true
 
     # Method 2: Probe common paths
     if os == "linux":

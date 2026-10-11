@@ -1,0 +1,74 @@
+"""
+Purpose: Pin native MIR lowering of the higher-order `Array.any(closure)`
+predicate when the closure is an inline `fn` literal.
+Audience: compiler engineers maintaining array method dispatch.
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_function(src: text, target_name: text) -> text:
+    val filename = "array_any_closure_" + target_name + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var result = ""
+    for error in hir_lowering.errors:
+        result = result + "HIR_ERROR:" + error.message + "\n"
+    for error in mir_lowering.errors:
+        result = result + "MIR_ERROR:" + error.message + "\n"
+    for function in mir.functions.values():
+        if function.name == target_name or function.name.ends_with("." + target_name):
+            result = result + serialize_mir_function(function)
+    result
+
+val INT_ANY_SRC = """
+fn array_any_closure(xs: [i64], needle: i64) -> bool:
+    xs.any(fn(value: i64): value == needle)
+"""
+
+val STRUCT_ANY_SRC = """
+struct Dependency:
+    name: text
+
+struct Package:
+    deps: [Dependency]
+
+fn has_dependency(pkg: Package, name: text) -> bool:
+    pkg.deps.any(fn(d: Dependency): d.name == name)
+"""
+
+val INT_ALL_SRC = """
+fn array_all_closure(xs: [i64], limit: i64) -> bool:
+    xs.all(fn(value: i64): value < limit)
+"""
+
+describe "Array.any / Array.all with an inline closure predicate":
+    it "lowers an [i64] any(closure) to a short-circuit counted loop":
+        val mir = lower_function(INT_ANY_SRC, "array_any_closure")
+        expect(mir.contains("unresolved method call")).to_be(false)
+        expect(mir.contains("MIR_ERROR:")).to_be(false)
+        expect(mir).to_contain("rt_array_len")
+        expect(mir).to_contain("rt_array_get")
+        expect(mir).to_contain("any_all_decided")
+        expect(mir.contains("rt_panic")).to_be(false)
+
+    it "lowers an [i64] all(closure) to the same loop shape":
+        val mir = lower_function(INT_ALL_SRC, "array_all_closure")
+        expect(mir.contains("unresolved method call")).to_be(false)
+        expect(mir.contains("MIR_ERROR:")).to_be(false)
+        expect(mir).to_contain("rt_array_get")
+        expect(mir).to_contain("any_all_decided")
+
+    it "lowers a struct-array field any(closure) without an unresolved method call":
+        val mir = lower_function(STRUCT_ANY_SRC, "has_dependency")
+        expect(mir.contains("unresolved method call")).to_be(false)
+        expect(mir.contains("MIR_ERROR:")).to_be(false)
+        expect(mir).to_contain("any_all_decided")

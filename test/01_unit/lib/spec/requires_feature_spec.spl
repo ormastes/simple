@@ -1,0 +1,73 @@
+"""
+## Purpose and audience
+Pins the build-feature switch rules (`# @tag:requires-<feature>`) that the
+test runner uses to SKIP, count and explain specs whose tested surface this
+build does not ship (today: `hwir`, off by default on release/1.0).
+## Operator workflow
+Run `bin/simple test test/01_unit/lib/spec/requires_feature_spec.spl`.
+## Compatibility and limitations
+Pure layer only (`src/lib/nogc_sync_mut/spec/requires_feature.spl`). The
+runner wiring is pinned by
+test/02_integration/test_runner/requires_feature_runner_spec.spl and the
+bootstrap twin by test/01_unit/scripts/bootstrap_phase3_test_skip_policy_test.shs.
+The tag literal is assembled at runtime so this spec does not gate itself.
+"""
+# @manual: primary
+
+use std.spec.{step}
+use std.spec.requires_feature.{
+    FEATURE_SKIP_MARKER, FEATURE_SKIP_SUMMARY_MARKER,
+    spec_required_features, feature_value, feature_enabled, feature_env_names,
+    disabled_required_features, feature_skip_line, feature_skip_summary_line
+}
+
+val TAG: text = "@" + "tag:"
+val HWIR_SPEC: text = "# " + TAG + "requires-" + "hwir\nuse std.spec.*\n"
+val UNKNOWN_SPEC: text = "# " + TAG + "requires-" + "warp-drive\n"
+val NEAR_MISS_SPEC: text = "# " + TAG + "requires-" + "hwir-notes\n"
+val ON_DOC: text = "host_config:\n  schema: simple-host-config-v1\n  hwir: on\n"
+val OFF_DOC: text = "host_config:\n  schema: simple-host-config-v1\n  hwir: off\n"
+val NO_ENV: [(text, text)] = []
+
+describe "requires-<feature> tag extraction":
+    it "finds a known feature and ignores unknown or near-miss names":
+        step("Extract required features from tagged sources")
+        expect(spec_required_features(HWIR_SPEC)).to_equal(["hwir"])
+        expect(spec_required_features(UNKNOWN_SPEC).len()).to_equal(0)
+        expect(spec_required_features(NEAR_MISS_SPEC).len()).to_equal(0)
+        expect(spec_required_features("use std.spec.*\n").len()).to_equal(0)
+
+describe "hwir feature resolution":
+    it "defaults to off when nothing is configured (release/1.0 build default)":
+        expect(feature_value("hwir", "", "", NO_ENV)).to_equal("off")
+        expect(feature_enabled("hwir", "", "", NO_ENV)).to_equal(false)
+
+    it "turns on from SIMPLE_HOST_HWIR and env beats the user layer":
+        expect(feature_env_names()).to_contain("SIMPLE_HOST_HWIR")
+        expect(feature_enabled("hwir", "", "", [("SIMPLE_HOST_HWIR", "on")])).to_equal(true)
+        expect(feature_enabled("hwir", "", ON_DOC, [("SIMPLE_HOST_HWIR", "off")])).to_equal(false)
+
+    it "turns on from the user host.sdn layer and ignores an invalid env value":
+        expect(feature_enabled("hwir", "", ON_DOC, NO_ENV)).to_equal(true)
+        expect(feature_enabled("hwir", OFF_DOC, ON_DOC, NO_ENV)).to_equal(true)
+        expect(feature_enabled("hwir", "", ON_DOC, [("SIMPLE_HOST_HWIR", "maybe")])).to_equal(true)
+
+    it "never gates an unknown feature":
+        expect(feature_enabled("warp-drive", "", "", NO_ENV)).to_equal(true)
+
+describe "gate decision and reporting":
+    it "off: the spec is gated with the reason and counted":
+        step("Feature off -> gated")
+        val off = disabled_required_features(HWIR_SPEC, "", "", NO_ENV)
+        expect(off).to_equal(["hwir"])
+        val line = feature_skip_line("test/x_spec.spl", off)
+        expect(line).to_start_with(FEATURE_SKIP_MARKER)
+        expect(line).to_contain("1 skipped")
+        expect(line).to_contain("hwir feature disabled for this build")
+        val summary = feature_skip_summary_line(3)
+        expect(summary).to_start_with(FEATURE_SKIP_SUMMARY_MARKER)
+        expect(summary).to_contain("3 file(s) skipped")
+
+    it "on: the spec is not gated and runs normally":
+        expect(disabled_required_features(HWIR_SPEC, "", "", [("SIMPLE_HOST_HWIR", "on")]).len()).to_equal(0)
+        expect(disabled_required_features("use std.spec.*\n", "", "", NO_ENV).len()).to_equal(0)

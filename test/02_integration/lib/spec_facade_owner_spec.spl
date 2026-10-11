@@ -1,0 +1,73 @@
+# @req REQ-SSPEC-FACADE-001
+# plan: doc/03_plan/sys_test/spec_facade_owner.md
+# Purpose: file and package facades must bind the same stateful spec owner.
+# Requires a native facade_control fixture built from the candidate source.
+# SIMPLE_SPEC_FACADE_NATIVE_BINARY and a fresh SIMPLE_SPEC_FACADE_EVIDENCE_DIR
+# are supplied by the bounded native test harness; absence is a failure.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{env_get, process_run, file_read, file_exists}
+
+fn facade_rows(text: text, prefix: text) -> [text]:
+    var rows: [text] = []
+    for line in text.split("\n"):
+        if line.starts_with(prefix): rows.push(line)
+    rows
+
+describe "Canonical spec facade execution ownership":
+    """The native fixture registers a passing check, a failing check and a
+    compiled-only callback. Enumeration must execute none; native run must
+    execute all three and preserve both deliberate failures."""
+    it "enumerates three stable cases without body side effects":
+        step("Resolve the configured native owner fixture")
+        val binary = env_get("SIMPLE_SPEC_FACADE_NATIVE_BINARY")
+        val dir = env_get("SIMPLE_SPEC_FACADE_EVIDENCE_DIR")
+        expect(binary.len()).to_be_greater_than(0)
+        expect(dir.len()).to_be_greater_than(0)
+        val ledger = dir + "/enumerate.registry.tsv"
+        expect(file_exists(ledger)).to_equal(false)
+        val outer_mode = env_get("SIMPLE_RUNTIME_MODE")
+        step("Enumerate real registrations without invoking callbacks")
+        val result = process_run(binary, ["--enumerate", "--registry-output=" + ledger])
+        expect(env_get("SIMPLE_RUNTIME_MODE")).to_equal(outer_mode)
+        expect(result[2]).to_equal(0)
+        expect(result[0].contains("FACADE_BODY_")).to_equal(false)
+        expect(result[0].contains("FACADE_FORBIDDEN_BODY")).to_equal(false)
+        val captured = file_read(ledger)
+        expect(facade_rows(captured, "declare\t").len()).to_equal(3)
+        expect(facade_rows(captured, "result\t").len()).to_equal(0)
+        expect(captured.contains("test_callbacks_executed=0")).to_equal(true)
+    it "propagates failed checks and executes compiled-only callbacks in native mode":
+        step("Execute the same native registrations")
+        val binary = env_get("SIMPLE_SPEC_FACADE_NATIVE_BINARY")
+        val dir = env_get("SIMPLE_SPEC_FACADE_EVIDENCE_DIR")
+        val ledger = dir + "/run.registry.tsv"
+        expect(file_exists(ledger)).to_equal(false)
+        val outer_mode = env_get("SIMPLE_RUNTIME_MODE")
+        val baseline = dir + "/run-baseline.registry.tsv"
+        expect(file_exists(baseline)).to_equal(false)
+        val enumerated = process_run(binary, ["--enumerate", "--registry-output=" + baseline])
+        expect(env_get("SIMPLE_RUNTIME_MODE")).to_equal(outer_mode)
+        expect(enumerated[2]).to_equal(0)
+        expect(enumerated[0].contains("FACADE_BODY_")).to_equal(false)
+        expect(enumerated[0].contains("FACADE_FORBIDDEN_BODY")).to_equal(false)
+        expect(facade_rows(file_read(baseline), "declare\t").len()).to_equal(3)
+        val result = process_run(binary, ["--run", "--registry-output=" + ledger])
+        expect(env_get("SIMPLE_RUNTIME_MODE")).to_equal(outer_mode)
+        expect(result[2]).to_equal(1)
+        expect(result[0].contains("FACADE_BODY_PASS")).to_equal(true)
+        expect(result[0].contains("FACADE_BODY_FAIL")).to_equal(true)
+        expect(result[0].contains("FACADE_FORBIDDEN_BODY")).to_equal(true)
+        step("Join exact registry identities and actual failure receipts")
+        val captured = file_read(ledger)
+        val results = facade_rows(captured, "result\t")
+        var passed = 0
+        var failed = 0
+        for row in results:
+            if row.ends_with("\tpass"): passed = passed + 1
+            if row.ends_with("\tfail"): failed = failed + 1
+        expect(results.len()).to_equal(3)
+        expect(passed).to_equal(1)
+        expect(failed).to_equal(2)
+        expect(facade_rows(captured, "declare\t")).to_equal(facade_rows(file_read(baseline), "declare\t"))
+        expect(captured.contains("test_callbacks_executed=3")).to_equal(true)

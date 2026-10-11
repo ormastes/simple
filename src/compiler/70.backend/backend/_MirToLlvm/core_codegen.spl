@@ -31,7 +31,7 @@ use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.llvm_type_mapper.LlvmTypeMapper
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
     llvm_ir_builder_build, llvm_ir_builder_handle,
-    llvm_ir_builder_push_line}
+    llvm_ir_builder_push_line, llvm_codegen_error_module}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
 use compiler.mir.mir_coverage_probe_admission.{
@@ -109,11 +109,11 @@ fn debug_info_split_path(path: text) -> (text, text):
 @unsafe(reason: "raw nullable environment-read ABI", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text?
 @unsafe(reason: "raw tagged-value discriminant ABI", capabilities: [ffi])
-extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_enum_discriminant(value: MirInstKind) -> i64
 @unsafe(reason: "raw tagged-value payload ABI", capabilities: [ffi])
-extern fn rt_enum_payload(value: Any) -> i64
+extern fn rt_enum_payload(value: MirInstKind) -> i64
 @unsafe(reason: "raw tuple projection ABI", capabilities: [ffi])
-extern fn rt_tuple_get(tuple: i64, index: i64) -> Any
+extern fn rt_tuple_get<T>(tuple: i64, index: i64) -> T
 @unsafe(reason: "raw runtime-value integer projection ABI", capabilities: [ffi])
 extern fn rt_value_as_int(value: i64) -> i64
 
@@ -123,12 +123,12 @@ fn _sffi_env_get(key: text) -> text?:
         rt_env_get(key)
 
 @always_inline
-fn _sffi_enum_discriminant(value: Any) -> i64:
+fn _sffi_enum_discriminant(value: MirInstKind) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(value)
 
 @always_inline
-fn _sffi_enum_payload(value: Any) -> i64:
+fn _sffi_enum_payload(value: MirInstKind) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_payload(value)
 
@@ -138,7 +138,7 @@ fn _sffi_enum_payload(value: Any) -> i64:
 # `-> Any` form made every such read a hard `nil is forbidden by the
 # non-optional return contract` semantic error, so ANY `if` without an
 # `else` failed native-build in the pure-Simple MIR lowerer.
-fn _sffi_tuple_get(tuple: i64, index: i64) -> Any?:
+fn _sffi_tuple_get<T>(tuple: i64, index: i64) -> T?:
     unsafe(capabilities: [ffi]):
         rt_tuple_get(tuple, index)
 
@@ -175,7 +175,9 @@ pub fn llvm_assert_unique_ssa_defs(ir: text) -> text:
     emitted both reported duplicates."""
     val offender = llvm_first_duplicate_ssa_def(ir)
     if offender != "":
-        panic("llvm-emitter-ssa-violation:{offender} -- a value is defined twice in one function; the MIR local behind it is multi-def and was not slotted by ssa_alloca_transform_blocks")
+        val ssa_diagnostic = "compile error: llvm-emitter-ssa-violation:{offender} -- a value is defined twice in one function; the MIR local behind it is multi-def and was not slotted by ssa_alloca_transform_blocks"
+        eprint("error: {ssa_diagnostic}")
+        return llvm_codegen_error_module([ssa_diagnostic])
     ir
 
 pub fn llvm_first_duplicate_ssa_def(ir: text) -> text:
@@ -335,7 +337,7 @@ impl MirTextCodegen for MirToLlvm:
         val coverage_probe_diagnostic =
             mir_coverage_probe_admission_diagnostic_module_v1(module)
         if coverage_probe_diagnostic != "":
-            panic("compile error: {coverage_probe_diagnostic}")
+            self.codegen_error(coverage_probe_diagnostic)
         self.entry_main_symbol = is_entry_module
         self.bootstrap_string_globals_active =
             allow_bootstrap_shortcuts and self.bootstrap_mode_enabled()
@@ -456,6 +458,12 @@ impl MirTextCodegen for MirToLlvm:
                 var g_init = "zeroinitializer"
                 if static_.init.?:
                     val init_const: MirConstant = static_.init.unwrap()
+                    # This is a static LLVM constant initializer, not an
+                    # executable MIR literal site. Opaque("str") needs a
+                    # runtime box, but LLVM global initializers cannot call
+                    # rt_string_new_literal and this backend has no module
+                    # constructor owner yet. Static startup boxing remains a
+                    # separate unresolved path.
                     match init_const.value:
                         case FloatLexeme(decimal): g_init = llvm_float_lexeme_constant(decimal, g_ty)
                         case _: g_init = self.translate_const_value(init_const.value)
@@ -465,7 +473,7 @@ impl MirTextCodegen for MirToLlvm:
                     # ("constant expression type mismatch: got 'ptr' but
                     # expected 'i64'", W107). Wrap in a constant ptrtoint so
                     # the raw char* address is stored as the i64 word,
-                    # matching how a raw string literal flows everywhere else.
+                    # preserving this existing raw global initializer.
                     match init_const.value:
                         case Str(_):
                             if g_ty == "i64":
@@ -518,8 +526,10 @@ impl MirTextCodegen for MirToLlvm:
                 bootstrap_fni = bootstrap_fni + 1
         else:
             for fn_ in module.functions.values():
-                val body = MirBody.from_function(llvm_bootstrap_ssa_function(
-                    fn_, self.bootstrap_mode_enabled()))
+                # Signature discovery needs no rewritten blocks. Both SSA
+                # transforms return MirFunction.with_blocks, which preserves
+                # the signature; lower the body once in the emission loop.
+                val body = MirBody.from_function(fn_)
                 val fn_name = self.llvm_function_symbol_name(fn_.name)
                 val body_return_ty = body.bootstrap_return_type()
                 val ret_ty = self.llvm_type_text(body_return_ty)
@@ -565,6 +575,8 @@ impl MirTextCodegen for MirToLlvm:
 
         if not bootstrap_debug:
             self.builder.emit_tbaa_hierarchy()
+        if self.codegen_errors.len() > 0:
+            return llvm_codegen_error_module(self.codegen_errors)
         return llvm_assert_unique_ssa_defs(llvm_ir_builder_build(self.builder))
 
     me register_bootstrap_signatures():
@@ -609,6 +621,8 @@ impl MirTextCodegen for MirToLlvm:
                 else:
                     g_init = init_payload
             elif init_kind == 2:
+                # Bootstrap statics are also emitted as constant data. There
+                # is no LLVM module-init/constructor path here to box text.
                 g_init = self.translate_const_value(MirConstValue.Str(init_payload))
                 if g_ty == "i64":
                     g_init = "ptrtoint (ptr {g_init} to i64)"
@@ -753,7 +767,7 @@ impl MirTextCodegen for MirToLlvm:
                     case Call(_, _, _): has_call = true
                     case CallIndirect(_, _, _, _): has_call = true
                     case Intrinsic(_, _, _): has_call = true
-                    case Send(_, _): has_store = true
+                    case Send(_, _, _): has_store = true
                     case _: ()
                 scan_inst_i = scan_inst_i + 1
             scan_block_i = scan_block_i + 1
@@ -872,7 +886,7 @@ impl MirTextCodegen for MirToLlvm:
         # malformed `%lN` text.
         val missing_call_destination = self.first_unemitted_call_destination(body)
         if missing_call_destination >= 0:
-            panic("compile error: LLVM Call destination %l{missing_call_destination} was not emitted")
+            self.codegen_error("LLVM Call destination %l{missing_call_destination} was not emitted")
 
         if ir_handle >= 0:
             val closing = "\n}\n"
@@ -933,6 +947,7 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:entry index={index}"
         val inst: MirInst = instructions[index]
+        self.current_inst_span = inst.span
         val inst_kind = inst.kind
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:kind index={index}"
@@ -1088,7 +1103,7 @@ impl MirTextCodegen for MirToLlvm:
             self.translate_call_at(instructions, index, ir_handle)
             val call_dest_id = inst.bootstrap_call_dest_local_id()
             if call_dest_id >= 0 and not self.defined_locals.contains_key(call_dest_id):
-                panic("compile error: LLVM Call destination %l{call_dest_id} was not emitted")
+                self.codegen_error("LLVM Call destination %l{call_dest_id} was not emitted")
             return
 
         match inst_kind:
@@ -1133,7 +1148,7 @@ impl MirTextCodegen for MirToLlvm:
             case Await(dest, promise): self.translate_await(dest, promise)
             case Yield(value): self.translate_yield(value)
             case Spawn(dest, handler, args): self.translate_spawn(dest, handler, args)
-            case Send(target, message): self.translate_send(target, message)
+            case Send(_, target, message): self.translate_send(target, message)
             case Receive(dest, timeout): self.translate_receive(dest, timeout)
             case GpuKernelDef(name): self.translate_gpu_kernel_def(name)
             case GpuLaunch(args): self.translate_gpu_launch(args)
@@ -1191,9 +1206,9 @@ impl MirTextCodegen for MirToLlvm:
             case DebugValue(_, _): ()
             case Nop: ()
             case DecisionProbe(_, semantic_id, _, _, _, _):
-                panic("compile error: unlowered DecisionProbe '{semantic_id}' reached LLVM instruction translation")
+                self.codegen_error("unlowered DecisionProbe '{semantic_id}' reached LLVM instruction translation")
             case ConditionProbe(_, semantic_id, _, _, _, _, _, _):
-                panic("compile error: unlowered ConditionProbe '{semantic_id}' reached LLVM instruction translation")
+                self.codegen_error("unlowered ConditionProbe '{semantic_id}' reached LLVM instruction translation")
             # ----------------------------------------------------------------
             # Lane C7 (backend coverage, hardening plan 2026-08-21 sections
             # 11.3-11.6). EXPLICIT arms for the 32 MirInstKind variants that
@@ -1298,6 +1313,21 @@ impl MirTextCodegen for MirToLlvm:
         eprint("[mir-to-llvm] {code} at={llvm_format_span(span)}")
         self.emit_unsupported_panic("{code}: LLVM backend does not lower {variant} at {llvm_format_span(span)}")
 
+    me codegen_error(message: text):
+        """Record a recoverable LLVM codegen diagnostic for this module.
+
+        A `panic` here used to fail-fast the whole native-build worker
+        (Windows 0xC0000409), taking every other module of a `--keep-going`
+        build with it and naming neither module nor function. The error is
+        recorded with module + function + source span instead; translation
+        continues so further errors in the same module are reported too, and
+        translate_module returns `llvm_codegen_error_module`, which
+        compile_ir_to_object* turn into a per-module Err. Still fail-closed:
+        no object is ever produced from a module that recorded an error."""
+        val diagnostic = "compile error: {message} [module={self.builder.module_name} function={self.current_function_name} at={llvm_format_span(self.current_inst_span)}]"
+        eprint("error: {message} [module={self.builder.module_name} function={self.current_function_name} at={llvm_format_span(self.current_inst_span)}]")
+        self.codegen_errors = self.codegen_errors.push(diagnostic)
+
     me mark_instruction_dest_defined_at(instructions: [MirInst], index: i64):
         val inst: MirInst = instructions[index]
         match inst.kind:
@@ -1364,8 +1394,12 @@ impl MirTextCodegen for MirToLlvm:
         if src_unsigned and cast_inst == "sitofp":
             cast_inst = "uitofp"
         if cast_inst.len() == 0:
-            panic("compile error: unsupported LLVM value conversion from {src_ty} to {dst_ty}")
-            return value
+            # No scalar meaning (e.g. ptr -> i8 would truncate an address).
+            # Recorded, not panicked: `undef` keeps the rest of the function
+            # well-formed and translate_module poisons the module text. The
+            # message keeps fd783466423's function/value context verbatim.
+            self.codegen_error("unsupported LLVM value conversion from {src_ty} to {dst_ty} function={self.current_function_name} value={value}")
+            return "undef"
         val tmp = self.builder.fresh_local()
         self.builder.emit("  {tmp} = {cast_inst} {src_ty} {value} to {dst_ty}")
         tmp
@@ -1405,6 +1439,21 @@ impl MirTextCodegen for MirToLlvm:
                 self.is_unsigned_mir_kind(type_.kind)
             case _:
                 false
+
+    me equality_compare_type(left: MirOperand, right: MirOperand) -> text:
+        """LLVM type an Eq/Ne compare runs at. The LEFT operand's type, as
+        before, except that an i1 (Bool) left against a wider integer right
+        compares at the right's width. Narrowing the right operand to i1
+        TRUNCATED it: the raw nil sentinel 3 became 1, so a stage-2-built
+        `true == nil` (bool param on the left) answered true while
+        `nil == true` answered false. Widening the i1 (zext) is value-
+        preserving for every bool/int pairing, so the compare result is
+        exact in both operand orders."""
+        val left_ty = self.valid_llvm_type(self.get_operand_type(left))
+        val right_ty = self.valid_llvm_type(self.get_operand_type(right))
+        if left_ty == "i1" and (right_ty == "i8" or right_ty == "i16" or right_ty == "i32" or right_ty == "i64"):
+            return right_ty
+        left_ty
 
     me value_as_type(value: text, from_ty: text, to_ty: text) -> text:
         var src_ty = self.valid_llvm_type(from_ty)
@@ -1611,7 +1660,7 @@ impl MirTextCodegen for MirToLlvm:
                         # diagnostic context only: a floating value is never a
                         # legal text/pointer return and no cast is synthesized.
                         if is_float_type(self.valid_llvm_type(ret_src_ty)) and ret_ty == "ptr":
-                            panic("compile error: LLVM return type mismatch function={self.current_function_name} terminator=Ret block={block_index} local={return_local_id} value={val_str} source={ret_src_ty} target={ret_ty}")
+                            self.codegen_error("LLVM return type mismatch function={self.current_function_name} terminator=Ret block={block_index} local={return_local_id} value={val_str} source={ret_src_ty} target={ret_ty}")
                         val ret_val = self.value_as_type_signed(val_str, ret_src_ty, ret_ty, ret_src_unsigned)
                         self.builder.emit_ret(ret_ty, ret_val)
                         if bootstrap_debug:
@@ -1726,7 +1775,7 @@ impl MirTextCodegen for MirToLlvm:
                 val elf_arch_supported = unwind_arch == "x86_64" or unwind_arch == "aarch64" or unwind_arch == "riscv64"
                 val posix_elf_supported = unwind_os == "linux" or unwind_os == "freebsd"
                 if not elf_arch_supported or not posix_elf_supported:
-                    panic("E-BACKEND-LLVM-UNWIND-ABI: recoverable exceptions are supported only on POSIX ELF x86_64/AArch64/RV64")
+                    self.codegen_error("E-BACKEND-LLVM-UNWIND-ABI: recoverable exceptions are supported only on POSIX ELF x86_64/AArch64/RV64")
                 val payload_ops: [MirOperand] = [payload]
                 val tag_ops: [MirOperand] = [type_tag]
                 val payload_raw = self.translate_operand_at(payload_ops, 0)
@@ -1742,7 +1791,7 @@ impl MirTextCodegen for MirToLlvm:
                 val elf_arch_supported = unwind_arch == "x86_64" or unwind_arch == "aarch64" or unwind_arch == "riscv64"
                 val posix_elf_supported = unwind_os == "linux" or unwind_os == "freebsd"
                 if not elf_arch_supported or not posix_elf_supported:
-                    panic("E-BACKEND-LLVM-UNWIND-ABI: recoverable exceptions are supported only on POSIX ELF x86_64/AArch64/RV64")
+                    self.codegen_error("E-BACKEND-LLVM-UNWIND-ABI: recoverable exceptions are supported only on POSIX ELF x86_64/AArch64/RV64")
                 val payload_ops: [MirOperand] = [payload]
                 val tag_ops: [MirOperand] = [type_tag]
                 val payload_raw = self.translate_operand_at(payload_ops, 0)
@@ -1768,7 +1817,7 @@ impl MirTextCodegen for MirToLlvm:
                     val elf_arch_supported = unwind_arch == "x86_64" or unwind_arch == "aarch64" or unwind_arch == "riscv64"
                     val posix_elf_supported = unwind_os == "linux" or unwind_os == "freebsd"
                     if not elf_arch_supported or not posix_elf_supported:
-                        panic("E-BACKEND-LLVM-UNWIND-ABI: recoverable exceptions are supported only on POSIX ELF x86_64/AArch64/RV64")
+                        self.codegen_error("E-BACKEND-LLVM-UNWIND-ABI: recoverable exceptions are supported only on POSIX ELF x86_64/AArch64/RV64")
                 var func_val = self.translate_operand_at(func_operands, 0)
                 match func.kind:
                     case Copy(local) | Move(local):
@@ -1871,6 +1920,34 @@ impl MirTextCodegen for MirToLlvm:
 
     # === Required: per-category instruction methods ===
 
+    me is_boxed_text_literal_type(ty: MirType) -> bool:
+        match ty.kind:
+            case Opaque(name): name == "str"
+            case _: false
+
+    me emit_boxed_text_literal_into(value: text, dest_name: text, dest_ty: text):
+        # The rodata object has a trailing sentinel for C pointer consumers;
+        # the boxed RuntimeValue receives the explicit UTF-8 byte length.
+        val global_name = self.add_string_global(value)
+        val byte_len = escaped_string_byte_len(value)
+        val array_len = byte_len + 1
+        val nit = self.native_int()
+        val data_ptr = self.builder.fresh_local()
+        self.builder.emit("  {data_ptr} = getelementptr inbounds [{array_len} x i8], ptr {global_name}, {nit} 0, {nit} 0  ; text literal bytes")
+        val boxed = self.builder.fresh_local()
+        self.builder.emit("  {boxed} = call i64 @rt_string_new_literal(ptr {data_ptr}, i64 {byte_len})")
+        if dest_ty == "ptr":
+            self.builder.emit("  {dest_name} = inttoptr i64 {boxed} to ptr  ; boxed text literal")
+        elif dest_ty == "i64":
+            self.builder.emit("  {dest_name} = add i64 {boxed}, 0  ; boxed text literal")
+        else:
+            panic("LLVM text literal has unsupported result type: {dest_ty}")
+
+    me emit_boxed_text_literal_value(value: text, dest_ty: text) -> text:
+        val dest_name = self.builder.fresh_local()
+        self.emit_boxed_text_literal_into(value, dest_name, dest_ty)
+        dest_name
+
     me translate_const(dest: LocalId, value: MirConstValue, ty: MirType):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
@@ -1933,6 +2010,10 @@ impl MirTextCodegen for MirToLlvm:
                     val nit_fn = self.native_int()
                     self.mark_ptr_local(dest_id)
                     self.builder.emit("  {dest_name} = getelementptr i8, ptr {fn_ref}, {nit_fn} 0  ; fn ref")
+                elif self.is_boxed_text_literal_type(ty):
+                    if llvm_ty == "ptr":
+                        self.mark_ptr_local(dest_id)
+                    self.emit_boxed_text_literal_into(v, dest_name, llvm_ty)
                 else:
                     val global_name = self.add_string_global(v)
                     val str_len = escaped_string_byte_len(v) + 1
@@ -2208,13 +2289,13 @@ impl MirTextCodegen for MirToLlvm:
                 else:
                     self.builder.emit_ashr(dest_name, ty, left_val, shr_amount)
             case Eq:
-                val eq_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
+                val eq_cmp_ty = self.equality_compare_type(left, right)
                 val eq_pred = if is_float_type(eq_cmp_ty): "oeq" else: "eq"
                 val eq_left = self.value_as_type(left_raw, self.get_operand_type(left), eq_cmp_ty)
                 val eq_right = self.value_as_type(right_raw, self.get_operand_type(right), eq_cmp_ty)
                 self.emit_comparison(dest_name, ty, eq_pred, eq_cmp_ty, eq_left, eq_right)
             case Ne:
-                val ne_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
+                val ne_cmp_ty = self.equality_compare_type(left, right)
                 val ne_pred = if is_float_type(ne_cmp_ty): "one" else: "ne"
                 val ne_left = self.value_as_type(left_raw, self.get_operand_type(left), ne_cmp_ty)
                 val ne_right = self.value_as_type(right_raw, self.get_operand_type(right), ne_cmp_ty)
@@ -2533,17 +2614,21 @@ impl MirTextCodegen for MirToLlvm:
     me translate_const_operand_at(operands: [MirOperand], index: i64) -> text:
         val operand = operands[index]
         match operand.kind:
-            case Const(value, const_type):
+            case Const(value, const_ty):
                 match value:
                     case Int(v): "{v}"
-                    case FloatLexeme(v): llvm_float_lexeme_constant(v, self.llvm_type_text(const_type))
+                    case FloatLexeme(v): llvm_float_lexeme_constant(v, self.llvm_type_text(const_ty))
                     case Float(v): "{v}"
                     case Bool(v): if v: "1" else: "0"
                     case Str(v):
-                        val global_name = self.add_string_global(v)
-                        val str_len = v.len() + 1
-                        val nit = self.native_int()
-                        "getelementptr inbounds ([{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0)"
+                        if self.is_boxed_text_literal_type(const_ty):
+                            self.emit_boxed_text_literal_value(
+                                v, self.valid_llvm_type(self.llvm_type_text(const_ty)))
+                        else:
+                            val global_name = self.add_string_global(v)
+                            val str_len = escaped_string_byte_len(v) + 1
+                            val nit = self.native_int()
+                            "getelementptr inbounds ([{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0)"
                     case Zero: "0"
                     case Array(elements): "zeroinitializer  ; array ({elements.len()} elements)"
                     case Tuple(elements): "zeroinitializer  ; tuple ({elements.len()} elements)"
@@ -2605,11 +2690,26 @@ impl MirTextCodegen for MirToLlvm:
                                 self.unknown_func_decls[resolved] = true
                                 "@{resolved}"
                             case _: self.translate_const_value(const_val)
+                    case Opaque(name):
+                        match const_val:
+                            case Str(value):
+                                if name == "str":
+                                    self.emit_boxed_text_literal_value(
+                                        value, self.valid_llvm_type(self.llvm_type_text(const_ty)))
+                                else:
+                                    self.translate_const_value(const_val)
+                            case _: self.translate_const_value(const_val)
                     case _:
                         self.translate_const_value(const_val)
 
     me translate_const_value(value: MirConstValue) -> text:
-        """Translate MIR constant value to LLVM constant."""
+        """Translate an untyped LLVM constant.
+
+        This helper is intentionally type-erased for global initializer
+        expressions. Executable Opaque("str") values must use the typed
+        rt_string_new_literal path instead. Static text globals remain raw
+        until a startup-initialization owner can box them safely.
+        """
         match value:
             case Int(v): "{v}"
             case FloatLexeme(v): llvm_float_lexeme_constant(v, "double")
@@ -3008,6 +3108,8 @@ impl MirTextCodegen for MirToLlvm:
         if value_kind == 1 or value_kind == 2:
             val local_id = inst.bootstrap_store_global_value_local_id()
             value_text = "%l{local_id}"
+            # Match the regular StoreGlobal path using the actual SSA type.
+            value_text = self.value_as_type(value_text, self.get_local_type(local_id), g_ty)
         elif value_kind == 3:
             val const_kind = inst.bootstrap_store_global_const_kind()
             val const_text = inst.bootstrap_store_global_const_scalar_text()

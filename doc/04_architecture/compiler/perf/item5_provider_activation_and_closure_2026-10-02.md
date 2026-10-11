@@ -1,5 +1,11 @@
 # Item 5 provider activation and closure architecture
 
+## 2026-10-11 variation ownership addendum
+
+Use the [shared-interface reconciliation](../../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration) as the current owner map. The existing environment-variant catalog/admission/binding authority supplies metadata selection; existing loader/session owners supply mapping and callable lifetime. Neither duplicates the other's state machine. Output-target profiles, runtime snapshots, worker vector domains and device generations are distinct inputs.
+
+Source selection remains in the existing sparse resolver. CPU SIMD uses prepared direct calls; GPU/service operations share SOSIX/SimpleRing lease and retirement semantics without a second runtime. Compiler and kernel/driver dependency directions remain intact. No new ring hop or runtime discovery is added to arithmetic. The selected proposal is a migration design; actual closure, no-demand loading, image sizes and every claimed target still require the existing gates.
+
 Status: design update, not implemented or admitted.
 
 ## Ownership and boundaries

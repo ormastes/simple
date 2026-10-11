@@ -205,3 +205,21 @@ the soak works around it with stored blocks. Measured but deliberately NOT
 "fixed": `scv_append_bytes` alias-push 1ms vs concat 582ms.
 Regressions held: scv_mvp 11/11, scv_merge 5/5. Ledger 63/63 done (week-9 rows
 due 2026-11-24, signed step scripts SCV-IMPL-{D-08,B-06}, WOTS leaves 69..70).
+
+## Session update 2026-10-09 — compile-source inventory cold init
+
+- Cold init (`SIMPLE_SCV_INVENTORY_COLD_INIT=1`, `src/app/compiler_entrypoint/inventory_events.spl`)
+  was dominated by `std.common.string_core.str_contains`/`str_replace_all`
+  allocating one substring per input byte behind typed-`text` `contains`/`replace`
+  in `compile_source_inventory_core.spl`'s canonicalization (23 scans per file).
+  Fixed in `string_core.spl` (native `index_of(sub, start)` jumps); published
+  inventory byte-identical. Numbers and what is still open (file-read cost,
+  ~3.6 min snapshot materialization) in
+  `doc/08_tracking/bug/stage2_scv_cold_init_str_contains_per_byte_slice_2026-10-09.md`.
+- The stage-2 sanity gate now primes the inventory in its own `scv_prime`
+  step (`candidate_frontend_admission.shs`, `COMPILER_SCV_PRIME_TIMEOUT_SECONDS`)
+  instead of inside the 180 s `p2_add` bound; phase verification already primed
+  once via `scripts/bootstrap/bootstrap-scv-prime.shs`.
+- Measuring rule: a stage-2 binary runs stdlib text methods through the
+  compiled `string_core` only when `SIMPLE_LIB` does not name a checkout, so
+  time cold init both with and without it before concluding anything.

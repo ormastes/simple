@@ -1,0 +1,100 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Bare variants when two enums share a name, or two enums share a variant name
+
+Two shapes the earlier bare-variant specs did not pin:
+
+- Two enums named `Op` in different modules (`lib.data.Op`, `lib.other.Op`).
+  The "'<enum>' has no variant '<name>'" error for a bare arm must not be
+  raised from the BARE key `Op`, which may name the wrong table; valid code
+  over `lib.data.Op` must lower, and a variant no `Op` owns must still be
+  reported.
+- Two enums declaring the same payload variant name (`Inst.Bin(d, op: Op)`,
+  `Other.Bin(x, c: Cmp)`) whose slot enums both own `Eq`. The subject's enum
+  (`Inst`) decides the slot's enum; without the outer enum in the slot key
+  `Eq` had two candidates and bound, failing `Bin(_, Eq) | Bin(_, Ne)` with
+  "or-pattern alternatives must bind the same variables".
+
+Providers `lib.data` + `lib.other`, glob facade `lib.facade`, consumer
+`app.main`.
+"""
+
+# @tag: unit, compiler, mir, hir, enum, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val data_source = "pub enum Op:\n    Eq\n    Ne\n    Lt\n\npub enum Cmp:\n    Eq\n    Gt\n\npub enum Kind:\n    Var\n    Temp\n    Return\n\npub enum Inst:\n    Bin(d: i64, op: Op)\n    Nop\n\npub enum Other:\n    Bin(x: i64, c: Cmp)\n    Skip\n"
+
+val other_source = "pub enum Op:\n    Add\n    Sub\n\npub fn other_code(o: Op) -> i64:\n    match o:\n        case Op.Add:\n            1\n        case Op.Sub:\n            2\n"
+
+val facade_source = "use lib.data.*\n\nexport use lib.data.\{Op, Cmp, Kind, Inst, Other\}\n"
+
+fn lower_facade_consumer(body: text) -> text:
+    val consumer_source = "use lib.facade.*\n\n" + body
+    val log = Logger(level: 0)
+    val data_ast = parse_full_frontend(data_source, "lib/data.spl", "lib.data", log)
+    val other_ast = parse_full_frontend(other_source, "lib/other.spl", "lib.other", log)
+    val facade_ast = parse_full_frontend(facade_source, "lib/facade.spl", "lib.facade", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.data"] = data_ast
+    modules["lib.other"] = other_ast
+    modules["lib.facade"] = facade_ast
+    val sources = [SourceFile(path: "lib/data.spl", content: data_source, module_name: "lib.data"), SourceFile(path: "lib/other.spl", content: other_source, module_name: "lib.other"), SourceFile(path: "lib/facade.spl", content: facade_source, module_name: "lib.facade")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var data_lowering = hirlowering_for_module("lib.data", surfaces)
+    var other_lowering = hirlowering_for_module("lib.other", surfaces)
+    var facade_lowering = hirlowering_for_module("lib.facade", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val data_hir = data_lowering.lower_module(data_ast)
+    val other_hir = other_lowering.lower_module(other_ast)
+    val facade_hir = facade_lowering.lower_module(facade_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    mir_lowering.prescan_module_struct_names(data_hir)
+    mir_lowering.prescan_module_struct_names(other_hir)
+    mir_lowering.prescan_module_struct_names(facade_hir)
+    mir_lowering.prescan_module_struct_names(consumer_hir)
+    val mir = mir_lowering.lower_module(consumer_hir, [data_hir, other_hir, facade_hir, consumer_hir])
+    var out = ""
+    for e in consumer_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    print "errors: [{out}]"
+    out
+
+describe "two enums named Op in different modules (regression pin: passes on release/1.0 @ 2f690c30ba2)":
+    it "a valid bare arm over the imported Op is not rejected from the bare key":
+        val all = lower_facade_consumer("fn f(i: Inst) -> i64:\n    match i:\n        case Bin(d, op):\n            match op:\n                case Lt:\n                    1\n                case _:\n                    0\n        case Nop:\n            2\n")
+        expect(all.contains("has no variant")).to_equal(false)
+        expect(all.contains("unresolved")).to_equal(false)
+
+    it "a typed Op parameter: valid bare arms lower":
+        val all = lower_facade_consumer("fn g(o: Op) -> i64:\n    match o:\n        case Eq | Ne:\n            1\n        case Lt:\n            0\n")
+        expect(all.contains("has no variant")).to_equal(false)
+        expect(all.contains("must bind the same variables")).to_equal(false)
+
+describe "two enums declaring the same payload variant name (regression pin: passes on release/1.0 @ 2f690c30ba2)":
+    it "the subject's enum types the slot: Bin(_, Eq) | Bin(_, Ne) over Inst":
+        val all = lower_facade_consumer("fn h(i: Inst) -> i64:\n    match i:\n        case Bin(_, Eq) | Bin(_, Ne):\n            1\n        case _:\n            0\n")
+        expect(all.contains("must bind the same variables")).to_equal(false)
+        expect(all.contains("ambiguous")).to_equal(false)
+        expect(all.contains("no variant")).to_equal(false)
+
+    it "the other enum's slot is typed by its own enum: Bin(_, Eq) | Bin(_, Gt) over Other":
+        val all = lower_facade_consumer("fn k(o: Other) -> i64:\n    match o:\n        case Bin(_, Eq) | Bin(_, Gt):\n            1\n        case _:\n            0\n")
+        expect(all.contains("must bind the same variables")).to_equal(false)
+        expect(all.contains("ambiguous")).to_equal(false)
+        expect(all.contains("no variant")).to_equal(false)

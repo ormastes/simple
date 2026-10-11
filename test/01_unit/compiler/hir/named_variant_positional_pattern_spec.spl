@@ -1,0 +1,53 @@
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.parser_types_expr.{Pattern, PatternKind, EnumPatternPayload}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolKind}
+use compiler.hir.hir_definitions.{HirPatternKind, HirPatternPayload}
+use compiler.hir.hir_lowering.types.{HirLowering, HirDeclaredPatternEnumSlots}
+use compiler.hir.hir_lowering._Expressions.expression_components.*
+
+describe "named enum payload positional patterns":
+    it "binds named slots positionally with each declared type":
+        step("Lower named text and integer slots in declaration order")
+        var hir = HirLowering.with_filename("named_payload")
+        val span = Span.empty()
+        val owner = hir.symbols.define("Mode", SymbolKind.Enum, nil, span, Visibility.Public, false, nil)
+        val text_type = HirType(kind: HirTypeKind.Str, span: span)
+        val int_type = HirType(kind: HirTypeKind.Int(64, true), span: span)
+        hir.declared_pattern_enum_slots["{owner.id}:Composite"] = HirDeclaredPatternEnumSlots(tuple_types: [], field_names: ["spec", "count"], field_types: [text_type, int_type], is_struct: true)
+        val spec = Pattern(kind: PatternKind.Binding("spec", false), span: span)
+        val count = Pattern(kind: PatternKind.Binding("count", false), span: span)
+        val input = Pattern(kind: PatternKind.Enum("Mode", "Composite", Some(EnumPatternPayload.Tuple([spec, count]))), span: span)
+        val subject = HirType(kind: HirTypeKind.Named(owner, []), span: span)
+        val output = hir.lower_match_pattern(input, Some(subject))
+        match output.kind:
+            case HirPatternKind.Enum(_, name, payload):
+                expect(name).to_equal("Composite")
+                if val value = payload:
+                    match value:
+                        case HirPatternPayload.Tuple(children):
+                            expect(children.len()).to_equal(2)
+                            expect(children[0].type_).to_equal(text_type)
+                            expect(children[1].type_).to_equal(int_type)
+                        case _: assert(false)
+                else: assert(false)
+            case _: assert(false)
+        expect(hir.errors.len()).to_equal(0)
+
+    it "rejects positional named payloads with the wrong arity":
+        step("Retain declaration arity validation for named fields")
+        var hir = HirLowering.with_filename("named_payload_arity")
+        val span = Span.empty()
+        val owner = hir.symbols.define("Mode", SymbolKind.Enum, nil, span, Visibility.Public, false, nil)
+        val text_type = HirType(kind: HirTypeKind.Str, span: span)
+        hir.declared_pattern_enum_slots["{owner.id}:Composite"] = HirDeclaredPatternEnumSlots(tuple_types: [], field_names: ["spec"], field_types: [text_type], is_struct: true)
+        val input = Pattern(kind: PatternKind.Enum("Mode", "Composite", Some(EnumPatternPayload.Tuple([]))), span: span)
+        val subject = HirType(kind: HirTypeKind.Named(owner, []), span: span)
+        val output = hir.lower_match_pattern(input, Some(subject))
+        expect(hir.errors.len()).to_equal(1)
+        expect(hir.errors[0].message).to_contain("arity differs")
+        match output.kind:
+            case HirPatternKind.Error: ()
+            case _: assert(false)

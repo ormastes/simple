@@ -1,0 +1,206 @@
+# Item six: stable roots and generated-output authority
+
+STATUS: WARN — implementation candidate; runtime verification and landing blocked.
+
+This change targets `release/1.0` from base
+`5646a90e73ecf21eeae859e2ff3b31cf1eef4b6e`. It does not mark the seven-item plan,
+the item-six 44-scenario system contract, or generated-source support complete.
+
+## Implementation and traceability
+
+The persistent-package-index plan's invalidation rules require private source
+edits to reach semantic transition comparison and package-manifest changes to
+invalidate only the package and its exact consumers. The cold publisher formerly
+used `snapshot.tree_id` as root-generation authority, making every tree edit
+incompatible before semantic comparison. The ownership capture now derives an
+optional stable root from SCV-validated policy bytes and the policy's explicit
+project identity. Revision, commit, tree and inventory witnesses remain separate.
+The checked-in policy opts in; absent identity retains conservative legacy
+behavior, and malformed identity fails closed. Manifest digests stay per member
+so their content changes do not partition the whole project. Policy changes
+still conservatively partition the project root.
+
+The generated-source contract requires an independently selected declaration.
+The compiled-output bridge previously accepted both declaration and receipt
+from the same artifact. It now rejects nonempty generated facets before index
+publication because that boundary has no independent declaration authority.
+Ordinary source modules use an empty facet. The lower-level receipt consistency
+API remains available; this change does not add the missing generator producer.
+
+The ownership unit spec adds source edit, inventory generation, snapshot
+relocation, project and ownership-policy separation, per-package manifest
+changes, reordered manifests, legacy policy and malformed identity regressions.
+The compiled-output spec exercises ordinary output, self-consistent but
+self-authorized generated output, refusal before publication and orphan receipt
+metadata. These are executable test changes, not executed PASS claims.
+
+## Review and verification
+
+The user-requested smaller-model helper implemented the generated-source gate
+and reviewed the stable-root diff. The primary model reviewed the final source,
+tests and design, and corrected an initial manifest-inclusive root so it obeys
+the plan's exact-consumer invalidation requirement. No other session's dirty
+files, runtime processes or compiler candidates were changed.
+
+Working direct-env and numbered-artifact guards passed. The tracked
+`doc/06_spec/*_spec.spl` count is zero. The staged direct-env guard also passed.
+None of these source checks replaces
+runtime tests, branch coverage or generated-manual verification.
+
+The current `rel-p3run` Phase 2 executable hashes to `5d97a3dc...ded2`, but its
+provenance and sanity receipts bind `49cbd005...9eb7e`; its current admission
+path is missing. The matching archived `49cbd005...9eb7e` compiler-test rejection
+is a delegation configuration failure: delegation requires an explicit
+`SIMPLE_MCDC_OFF_WAIVER_REASON`, or `BOOTSTRAP_STAGE2_TEST_DELEGATE=0`. It produced
+no individual test results. The separate `rel-s2rebuild` candidate lacks matching
+admission receipts. No ready compiled SSpec runner was found in those two trees.
+
+An isolated diagnostic with the archived pure-Simple compiler, bounded to 60
+seconds, exited 1: `error: unknown command 'check'`. Its log and process receipt
+were recorded in `build/native_probe/item6-completion/root-check.*`. No seed was
+substituted and no admission claim was made from that diagnostic.
+
+A second isolated diagnostic invoked the same compiler with `native-build` on
+the absolute ownership-module entry, the compiler/app/lib source roots,
+`--entry-closure --emit-object --backend=llvm --threads 1`, and an isolated
+preserved cache. With the managed LLVM/MSVC bootstrap environment and
+`SIMPLE_NO_STUB_FALLBACK=1`, it reached surface freezing after 359 surface-alias
+rows. The 300-second process-group bound expired with status 124 and cleanup
+`reaped`; no object or test PASS was produced. The last logged compiler phase
+elapsed time was about 80.5 seconds and excludes outer startup/inventory time.
+Evidence: `build/native_probe/item6-completion/ownership-compile.log` and its
+`.receipt`; log SHA256
+`a6e90c193507eef37097f0d7787c787a42b29a5ed4006d1aa5b1da874037521f`.
+This bounded startup/compile performance blocker requires an admitted runtime
+and a cache-preserving bootstrap repair; do not relabel the timeout as success.
+The SCV snapshot captured the earlier manifest-inclusive root implementation
+before review corrected it. Its ownership source hash is
+`906bad2de2bf682f5cb456e3154251ebd9972b1155f9ccac56f5c39ce583170f`;
+the final ownership source hash is
+`e5562c25c90171511b90d73fb4fb65281c3945e941a2c7e18b3d5fb18edfdf0a`.
+The diagnostic is bootstrap failure evidence, not validation of the final diff.
+
+## Remaining release gate
+
+Provide an exact admitted pure-Simple compiler and test runner, execute the
+changed specs, generate and verify their manuals, run the required compiler,
+library, MCP and LSP checks and runtime/native smokes, and verify the item-six
+system scenarios and performance targets. Independent generated-plan authority
+and real generated producers remain unfinished. Preserve the draft until these
+requirements establish STATUS: PASS; then review its exact diff/comments and
+merge the PR into `release/1.0`.
+
+## Continuing acceptance research and implementation
+
+The next goal turn rebased the isolated integration worktree onto release commit
+`8f86655d67f3dda61677a5f3eafa32ec26a2f4a3`; this renews the candidate and does not
+carry forward runtime admission from its former base. Session owner is the
+primary item-six agent, worktree
+`C:/dev/simple-item6-phase2-verify-owner-20261010`, branch
+`work/item6-complete-release-20261010`, integration target `release/1.0`.
+Smaller-model research, SSpec and generated-projection lanes use separate
+`simple-item6-acceptance-contract-20261010`,
+`simple-item6-sspec-contract-20261010`, and
+`simple-item6-generated-index-20261010` worktrees; primary review remains required.
+
+Source review identified native text-ordering hazards in ownership identifier
+validation. The implementation now uses ASCII byte codes; regression cases cover
+all allowed character classes, whitespace and non-ASCII rejection. Inventory
+fixtures count UTF-8 bytes so non-ASCII policy tests reach the intended validator.
+
+The system spec retains all 44 names, order and original observable assertions,
+verified by comparing the before/after source. A shared invocation helper checks
+the exact scenario line and rejects the existing owner-only/incomplete markers,
+normalizing CRLF line endings. This is an evidence-substitution guard, not proof
+of compiler-origin receipts. The mirrored manual preserves that distinction.
+The actual checker probe reported that the compiled acceptance owner is absent;
+no SSpec execution or TDD red/green result is claimed.
+
+Additional research found generated-source identity is lost between the TLDR
+header and compact index entry. The detail design specifies schema-4 projection
+and conservative legacy migration; the isolated implementation lane must close
+that gap without treating it as generator execution. The domain research records
+the separate declaration, action execution, frozen byte admission and semantic
+projection requirements. Full runtime qualification and the original 44-scenario
+contract remain open.
+
+Artifact retention correction: after updating the sparse source checkout, the
+ignored `build/native_probe/item6-completion/` directory was no longer present.
+The diagnostic results and hashes above remain recorded historical evidence,
+but the original local logs, receipts and cache are not currently available for
+replay. Do not claim those files are retained or treat the recorded timeout as
+current-source verification. Future diagnostic artifacts must live in an owned
+directory outside paths subject to sparse-checkout pruning.
+
+## Schema migration implementation candidate
+
+Schema 4 now carries the TLDR generated-source digest through full/scoped
+index encoding, action identity, semantic invalidation and grouped worker route
+serialization. Legacy index bytes remain readable without inventing a witness;
+legacy worker routes are inspectable but cannot execute archive reuse. Bootstrap
+configuration explicitly requests V4. Publication, preparation, SCC inventory
+and runtime/std membership consumers preserve their complete-graph checks.
+Primary review found and corrected the missed SCC consumer gate.
+
+Regression specs cover generated-only reverse invalidation, stable-witness
+private edits, legacy migration, worker-route preservation/rejection and typed
+bootstrap configuration. These are authored tests, not executed acceptance.
+Independent declaration selection and actual generated producer execution are
+still unfinished; schema projection does not supply either authority.
+
+Remote concurrency observation: PR 2860 acquired merge commit
+`07ca2ab702e57043ddc89a500cf689813a4d5a66` and was marked ready by another
+actor while the local schema work was unpushed. Its body still records blocked
+verification. This session preserves that remote history and does not interpret
+ready status or structural CI as runtime admission.
+
+## Follow-up verification checkpoint
+
+The remaining work is isolated on `work/item6-schema4-followup-20261010`,
+rebased onto `d71b8bcf76d` on `release/1.0`. The tracked-file increase from
+142941 to 143023 matches exactly the 82 upstream additions; no upstream files
+were deleted by the rebase. This follow-up includes the prior unlanded item-six
+commits and must be reconciled with PR 2860 before eventual merge.
+
+Primary review accepted the smaller-model schema review and additional scoped
+roundtrip/reachability and malformed-witness regression specs as source work.
+Working and staged direct-environment guards passed, the numbered-artifact guard
+passed, and whitespace checks passed. These checks do not execute Simple code.
+
+The bounded bootstrap audit found the preserved `frozen-old-49cbd005/simple.exe`
+candidate with matching historical admission, sanity and receiver evidence, but
+its compiler-test log contains only the missing MC/DC waiver gate. The newer
+`5d97a3dc` candidate has sanity/receiver evidence but no matching admission;
+the current phase-two verification owner is still running. Neither result
+supplies the required full-CLI check/test, MCP/native-smoke or acceptance results.
+Other sessions' binaries and processes were left untouched.
+
+STATUS: WARN — implementation candidate only; release admission not established.
+Pending execution: changed unit/integration specs and their manual generation,
+all 44 package-index system scenarios, compiler/lib/MCP/LSP checks, MCP stdio
+integration, runtime and MCP native smokes, coverage and performance targets.
+Pending implementation: independently selected generated-plan authority and real
+producer execution. Do not merge or publish this follow-up as completed item six.
+
+## Continued review: fallback scope and generator ordering
+
+The next source audit found a regression in the schema candidate: absent or
+corrupt transition evidence invalidated every V4 module, contradicting the
+existing hinted reverse-closure tests. The fallback now preserves current-schema
+hint scope and unknown-hint rejection; legacy generations still migrate by
+invalidating all entries. This is a source-review finding and fix, not an
+executed red/green result.
+
+The sidecar then found a production bypass: the route wrapper only invoked
+invalidation for nonempty hints. It now invokes conservative legacy migration
+before archive lookup even with no events, through both routing entrypoints.
+Primary test review also corrected a missing-transition fixture that attempted
+to delete a nonexistent first-publication transition file.
+
+Separate-worktree research traced the production publication seam and the
+process-observation contracts. Primary review corrected the proposed ordering:
+generator execution must precede HIR in a derived immutable snapshot, and expected
+declaration authority must be separate from artifact receipts. The design now
+records this lifecycle and explicit success/refusal cases. No claim is made that
+existing process lifecycle evidence enforces filesystem access or that these
+planned generator stages are implemented.

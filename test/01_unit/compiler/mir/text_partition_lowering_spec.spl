@@ -1,0 +1,45 @@
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_serialization.{serialize_mir_module}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_partition_source(source: text) -> (text, [text]):
+    val parsed = parse_full_frontend(source, "text_partition.spl", "text_partition.spl", Logger(level: 0))
+    var hir_owner = HirLowering.with_filename("text_partition.spl")
+    val hir = hir_owner.lower_module(parsed)
+    expect(hir_owner.errors.len()).to_equal(0)
+    var mir_owner = MirLowering.new(hir.symbols)
+    val module = mir_owner.lower_module(hir)
+    var errors: [text] = []
+    for error in mir_owner.errors:
+        errors = errors.push(error.message)
+    (serialize_mir_module(module), errors)
+
+describe "REQ-PARTITION-001 primitive text partition MIR":
+    it "should select first and last partition providers for typed text":
+        val (mir, errors) = lower_partition_source("fn first(value: text, separator: text) -> [text]:\n    value.partition(separator)\nfn last(value: text, separator: text) -> [text]:\n    value.rpartition(separator)\n")
+        expect(errors.len()).to_equal(0)
+        expect(mir).to_contain("rt_string_partition")
+        expect(mir).to_contain("rt_string_rpartition")
+
+    it "should preserve an instance method named partition":
+        val (mir, errors) = lower_partition_source("struct LocalPartition:\n    value: i64\nimpl LocalPartition:\n    fn partition(self, separator: text) -> i64: self.value\nfn invoke(value: LocalPartition) -> i64:\n    value.partition(\"=\")\n")
+        expect(errors.len()).to_equal(0)
+        expect(mir).to_contain("LocalPartition")
+        expect(mir.contains("rt_string_partition")).to_equal(false)
+
+    it "should report a text separator diagnostic for a numeric argument":
+        val (mir, errors) = lower_partition_source("fn invalid() -> i64:\n    val result = \"a=b\".partition(1)\n    0\n")
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_contain("text.partition expects a text separator")
+        expect(mir.contains("rt_string_partition")).to_equal(false)
+
+    it "should reject a numeric receiver without choosing a text provider":
+        val (mir, errors) = lower_partition_source("fn invalid() -> i64:\n    val result = 7.partition(\"=\")\n    0\n")
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_contain("unresolved method call: partition")
+        expect(mir.contains("rt_string_partition")).to_equal(false)

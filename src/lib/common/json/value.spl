@@ -1,0 +1,457 @@
+# Typed JSON Values
+#
+# Purpose: Any-free JSON parse tree for compiled callers. The dynamic
+# std.common.json.parser keeps returning untyped ("tag", payload) values for
+# interpreted callers; this module parses the same token stream into a closed
+# JsonValue enum instead.
+#
+# Semantics match std.common.json.parser:
+# - same tokenizer (std.common.json.tokenizer) and same error messages
+# - duplicate object keys are last-value-wins (the key keeps its first position);
+#   json_parse_value_strict rejects them instead ("Duplicate object key"), like
+#   the dynamic json_parse_strict_with_error
+# - a number token without '.', 'e' or 'E' (and at most 18 digits) is Int,
+#   every other number is Float; json_value_as_number widens both to f64,
+#   which is exactly the value the dynamic parser stores
+
+use std.common.json.tokenizer.{json_tokenize, json_unescape_string}
+
+pub enum JsonValue:
+    Null
+    Bool(bool)
+    Int(i64)
+    Float(f64)
+    Str(text)
+    Array([JsonValue])
+    Object(keys: [text], values: [JsonValue])
+
+struct JsonParseStep:
+    value: JsonValue
+    next: i64
+
+fn _json_value_number(token: text) -> JsonValue:
+    var digits = token.len()
+    if digits > 0 and token.byte_at(0) == 45:
+        digits = digits - 1
+    var integral = digits <= 18
+    var i = 0
+    while integral and i < token.len():
+        val b = token.byte_at(i)
+        if b == 46 or b == 101 or b == 69:
+            integral = false
+        i = i + 1
+    if integral:
+        return JsonValue.Int(token.to_int())
+    JsonValue.Float(token.to_float())
+
+fn _json_value_key_index(keys: [text], key: text) -> i64:
+    var i = 0
+    while i < keys.len():
+        if keys[i] == key:
+            return i
+        i = i + 1
+    -1
+
+fn _json_value_at(tokens: [(text, text)], pos: i64, reject_duplicate_keys: bool) -> Result<JsonParseStep, text>:
+    if pos >= tokens.len():
+        return Err("Unexpected end of input")
+    val token = tokens[pos]
+    val token_type = token.0
+    val token_value = token.1
+    if token_type == "STRING":
+        return Ok(JsonParseStep(value: JsonValue.Str(json_unescape_string(token_value)), next: pos + 1))
+    if token_type == "NUMBER":
+        return Ok(JsonParseStep(value: _json_value_number(token_value), next: pos + 1))
+    if token_type == "TRUE":
+        return Ok(JsonParseStep(value: JsonValue.Bool(true), next: pos + 1))
+    if token_type == "FALSE":
+        return Ok(JsonParseStep(value: JsonValue.Bool(false), next: pos + 1))
+    if token_type == "NULL":
+        return Ok(JsonParseStep(value: JsonValue.Null, next: pos + 1))
+    if token_type == "LBRACKET":
+        return _json_value_array_at(tokens, pos, reject_duplicate_keys)
+    if token_type == "LBRACE":
+        return _json_value_object_at(tokens, pos, reject_duplicate_keys)
+    if token_type == "INVALID":
+        return Err("Unexpected token: {token_value}")
+    Err("Unexpected token: {token_type}")
+
+fn _json_value_array_at(tokens: [(text, text)], pos: i64, reject_duplicate_keys: bool) -> Result<JsonParseStep, text>:
+    var p = pos + 1
+    var elements: [JsonValue] = []
+    while p < tokens.len():
+        val token_type = tokens[p].0
+        if token_type == "RBRACKET":
+            return Ok(JsonParseStep(value: JsonValue.Array(elements), next: p + 1))
+        if elements.len() > 0:
+            if token_type != "COMMA":
+                return Err("Expected comma in array")
+            p = p + 1
+        val step = _json_value_at(tokens, p, reject_duplicate_keys)?
+        elements.push(step.value)
+        p = step.next
+    Err("Unclosed array")
+
+fn _json_value_object_at(tokens: [(text, text)], pos: i64, reject_duplicate_keys: bool) -> Result<JsonParseStep, text>:
+    var p = pos + 1
+    var keys: [text] = []
+    var values: [JsonValue] = []
+    var pair_count = 0
+    while p < tokens.len():
+        val token_type = tokens[p].0
+        if token_type == "RBRACE":
+            return Ok(JsonParseStep(value: JsonValue.Object(keys: keys, values: values), next: p + 1))
+        if pair_count > 0:
+            if token_type != "COMMA":
+                return Err("Expected comma in object")
+            p = p + 1
+            if p >= tokens.len():
+                return Err("Unexpected end in object")
+            if tokens[p].0 == "RBRACE":
+                return Err("Trailing comma in object")
+        if p >= tokens.len():
+            return Err("Unexpected end in object")
+        val key_token = tokens[p]
+        if key_token.0 != "STRING":
+            return Err("Expected string key in object")
+        val key = json_unescape_string(key_token.1)
+        if reject_duplicate_keys and _json_value_key_index(keys, key) >= 0:
+            return Err("Duplicate object key")
+        p = p + 1
+        if p >= tokens.len():
+            return Err("Unexpected end after key")
+        if tokens[p].0 != "COLON":
+            return Err("Expected colon after key")
+        p = p + 1
+        val step = _json_value_at(tokens, p, reject_duplicate_keys)?
+        val existing = _json_value_key_index(keys, key)
+        if existing >= 0:
+            values[existing] = step.value
+        else:
+            keys.push(key)
+            values.push(step.value)
+        pair_count = pair_count + 1
+        p = step.next
+    Err("Unclosed object")
+
+fn _json_value_parse(src: text, reject_duplicate_keys: bool) -> Result<JsonValue, text>:
+    val tokens = json_tokenize(src)
+    if tokens.len() == 0:
+        return Err("Empty input")
+    val step = _json_value_at(tokens, 0, reject_duplicate_keys)?
+    if step.next != tokens.len():
+        return Err("Unexpected trailing tokens")
+    Ok(step.value)
+
+pub fn json_parse_value(src: text) -> Result<JsonValue, text>:
+    """Parse JSON text into a typed JsonValue, or Err(message)."""
+    _json_value_parse(src, false)
+
+pub fn json_parse_value_strict(src: text) -> Result<JsonValue, text>:
+    """json_parse_value that rejects duplicate decoded object names at every
+    nesting level with Err("Duplicate object key") (the typed counterpart of
+    the dynamic json_parse_strict_with_error)."""
+    _json_value_parse(src, true)
+
+pub fn json_value_type(value: JsonValue) -> text:
+    """Dynamic-parser type tag: null, boolean, number, string, array, object."""
+    match value:
+        case Null: "null"
+        case Bool(_): "boolean"
+        case Int(_): "number"
+        case Float(_): "number"
+        case Str(_): "string"
+        case Array(_): "array"
+        case Object(_, _): "object"
+
+pub fn json_value_get(value: JsonValue, key: text) -> JsonValue?:
+    """Member `key` of an object; nil when absent or when value is no object."""
+    match value:
+        case Object(keys, values):
+            val index = _json_value_key_index(keys, key)
+            if index < 0:
+                return nil
+            Some(values[index])
+        case _:
+            nil
+
+pub fn json_value_as_text(value: JsonValue) -> text?:
+    match value:
+        case Str(s): Some(s)
+        case _: nil
+
+pub fn json_value_as_number(value: JsonValue) -> f64?:
+    match value:
+        case Int(i): Some(i as f64)
+        case Float(f): Some(f)
+        case _: nil
+
+pub fn json_value_as_array(value: JsonValue) -> [JsonValue]?:
+    match value:
+        case Array(items): Some(items)
+        case _: nil
+
+pub fn json_value_as_bool(value: JsonValue) -> bool?:
+    match value:
+        case Bool(b): Some(b)
+        case _: nil
+
+pub fn json_value_as_i64(value: JsonValue) -> i64?:
+    """Integral numbers only (an Int, or a Float with no fractional part)."""
+    match value:
+        case Int(i): Some(i)
+        case Float(f):
+            val i = f as i64
+            if (i as f64) == f:
+                return Some(i)
+            nil
+        case _: nil
+
+pub fn json_value_is_null(value: JsonValue) -> bool:
+    match value:
+        case Null: true
+        case _: false
+
+# ============================================================================
+# Lenient accessors: mirror the dynamic json_object_get / json_array_get /
+# json_array_length behaviour, where "absent" reads back as JSON null.
+# ============================================================================
+
+pub fn json_value_parse_opt(src: text) -> JsonValue?:
+    """json_parse_value without the error message: nil when `src` is invalid."""
+    val parsed = json_parse_value(src)
+    if parsed.is_err():
+        return nil
+    Some(parsed.unwrap())
+
+pub fn json_value_parse_or_null(src: text) -> JsonValue:
+    """json_parse_value collapsed to a plain value: Null when `src` is invalid
+    (the typed counterpart of the dynamic `json_parse(src) == nil` check)."""
+    val parsed = json_parse_value(src)
+    if parsed.is_err():
+        return JsonValue.Null
+    parsed.unwrap()
+
+pub fn json_value_field(value: JsonValue, key: text) -> JsonValue:
+    """Member `key` of an object, or Null when absent / value is no object."""
+    match value:
+        case Object(keys, values):
+            val index = _json_value_key_index(keys, key)
+            if index < 0:
+                return JsonValue.Null
+            values[index]
+        case _:
+            JsonValue.Null
+
+pub fn json_value_has(value: JsonValue, key: text) -> bool:
+    """True when `value` is an object with member `key` (even a null member)."""
+    match value:
+        case Object(keys, _):
+            _json_value_key_index(keys, key) >= 0
+        case _:
+            false
+
+pub fn json_value_keys(value: JsonValue) -> [text]:
+    """Object keys in document order; [] for non-objects."""
+    match value:
+        case Object(keys, _): keys
+        case _: []
+
+fn _json_value_object_values(value: JsonValue) -> [JsonValue]:
+    match value:
+        case Object(_, values): values
+        case _: []
+
+pub fn json_value_items(value: JsonValue) -> [JsonValue]:
+    """Array elements; [] for non-arrays."""
+    match value:
+        case Array(items): items
+        case _: []
+
+pub fn json_value_len(value: JsonValue) -> i64:
+    """Array length; 0 for non-arrays (dynamic json_array_length semantics)."""
+    json_value_items(value).len()
+
+pub fn json_value_at(value: JsonValue, index: i64) -> JsonValue:
+    """Array element `index`, or Null when out of range / value is no array."""
+    val items = json_value_items(value)
+    if index < 0 or index >= items.len():
+        return JsonValue.Null
+    items[index]
+
+pub fn json_value_text_or(value: JsonValue, default_value: text) -> text:
+    """String payload, or `default_value` for every non-string value."""
+    match value:
+        case Str(s): s
+        case _: default_value
+
+# ============================================================================
+# Builders
+# ============================================================================
+
+pub fn json_value_object_empty() -> JsonValue:
+    JsonValue.Object(keys: [], values: [])
+
+pub fn json_value_object_set(obj: JsonValue, key: text, value: JsonValue) -> JsonValue:
+    """Copy of `obj` with member `key` set (replaced in place, else appended).
+    A non-object `obj` is treated as an empty object."""
+    val keys = json_value_keys(obj)
+    val values = _json_value_object_values(obj)
+    var new_keys: [text] = []
+    var new_values: [JsonValue] = []
+    var replaced = false
+    var i = 0
+    while i < keys.len():
+        new_keys.push(keys[i])
+        if keys[i] == key:
+            new_values.push(value)
+            replaced = true
+        else:
+            new_values.push(values[i])
+        i = i + 1
+    if not replaced:
+        new_keys.push(key)
+        new_values.push(value)
+    JsonValue.Object(keys: new_keys, values: new_values)
+
+pub fn json_value_object_from(pairs: [(text, JsonValue)]) -> JsonValue:
+    """Object from (key, value) pairs; a repeated key keeps its first
+    position and its last value (same as a dict literal)."""
+    var obj = json_value_object_empty()
+    for pair in pairs:
+        obj = json_value_object_set(obj, pair.0, pair.1)
+    obj
+
+pub fn json_value_str_array(items: [text]) -> JsonValue:
+    """Array of strings."""
+    var out: [JsonValue] = []
+    for item in items:
+        out.push(JsonValue.Str(item))
+    JsonValue.Array(out)
+
+# ============================================================================
+# Serialization: byte-identical to std.common.json.serializer
+# (json_serialize / json_format / json_pretty) for the same data.
+# ============================================================================
+
+val _JSON_VALUE_HEX_DIGITS: text = "0123456789abcdef"
+
+fn _json_value_has_control_byte(s: text) -> bool:
+    var i = 0
+    while i < s.len():
+        if s.byte_at(i) < 32:
+            return true
+        i = i + 1
+    false
+
+fn _json_value_escape_control_chars(s: text) -> text:
+    var out = ""
+    for ch in s.chars():
+        val code = ch.ord()
+        if code >= 32:
+            out = out + ch
+        elif code == 8:
+            out = out + "\\b"
+        elif code == 12:
+            out = out + "\\f"
+        else:
+            out = out + "\\u00" + _JSON_VALUE_HEX_DIGITS[code / 16:code / 16 + 1] + _JSON_VALUE_HEX_DIGITS[code % 16:code % 16 + 1]
+    out
+
+pub fn json_value_escape_string(s: text) -> text:
+    """Escape `s` for a JSON string literal (same rules as json_escape_string)."""
+    var out = s.replace("\\", "\\\\")
+    out = out.replace("\"", "\\\"")
+    out = out.replace("\n", "\\n")
+    out = out.replace("\t", "\\t")
+    out = out.replace("\r", "\\r")
+    if _json_value_has_control_byte(out):
+        return _json_value_escape_control_chars(out)
+    out
+
+fn _json_value_join(parts: [text], sep: text) -> text:
+    var out = ""
+    var i = 0
+    while i < parts.len():
+        if i > 0:
+            out = out + sep
+        out = out + parts[i]
+        i = i + 1
+    out
+
+fn _json_value_float_text(n: f64) -> text:
+    # Same rule as the dynamic serializer: integral values print without ".0".
+    if n >= -9007199254740992.0 and n <= 9007199254740992.0:
+        val i = n as i64
+        if (i as f64) == n:
+            return "{i}"
+    "{n}"
+
+fn _json_value_indent(level: i64, size: i64) -> text:
+    if level <= 0:
+        return ""
+    var out = ""
+    var i = 0
+    val total = level * size
+    while i < total:
+        out = out + " "
+        i = i + 1
+    out
+
+pub fn json_value_serialize(value: JsonValue) -> text:
+    """Serialize to compact JSON text."""
+    match value:
+        case Null:
+            "null"
+        case Bool(b):
+            if b:
+                return "true"
+            "false"
+        case Int(i):
+            "{i}"
+        case Float(f):
+            _json_value_float_text(f)
+        case Str(s):
+            "\"" + json_value_escape_string(s) + "\""
+        case Array(items):
+            var parts: [text] = []
+            for item in items:
+                parts.push(json_value_serialize(item))
+            "[" + _json_value_join(parts, ",") + "]"
+        case Object(keys, values):
+            var parts: [text] = []
+            var i = 0
+            while i < keys.len():
+                parts.push("\"" + json_value_escape_string(keys[i]) + "\":" + json_value_serialize(values[i]))
+                i = i + 1
+            "{" + _json_value_join(parts, ",") + "}"
+
+pub fn json_value_format(value: JsonValue, level: i64, size: i64) -> text:
+    """Serialize with newline/indent formatting (json_format layout)."""
+    match value:
+        case Array(items):
+            if items.len() == 0:
+                return "[]"
+            val inner = _json_value_indent(level + 1, size)
+            val close = _json_value_indent(level, size)
+            var parts: [text] = []
+            for item in items:
+                parts.push(inner + json_value_format(item, level + 1, size))
+            "[\n" + _json_value_join(parts, ",\n") + "\n" + close + "]"
+        case Object(keys, values):
+            if keys.len() == 0:
+                return "{}"
+            val inner = _json_value_indent(level + 1, size)
+            val close = _json_value_indent(level, size)
+            var parts: [text] = []
+            var i = 0
+            while i < keys.len():
+                parts.push(inner + "\"" + json_value_escape_string(keys[i]) + "\": " + json_value_format(values[i], level + 1, size))
+                i = i + 1
+            "{\n" + _json_value_join(parts, ",\n") + "\n" + close + "}"
+        case _:
+            json_value_serialize(value)
+
+pub fn json_value_pretty(value: JsonValue) -> text:
+    """Serialize with 2-space indentation (json_pretty layout)."""
+    json_value_format(value, 0, 2)

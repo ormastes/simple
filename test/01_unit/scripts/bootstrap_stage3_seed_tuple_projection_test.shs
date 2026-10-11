@@ -232,6 +232,52 @@ cmp "$newlayout/libsimple_runtime.a" \
 [ "$(file_mode "$test_tmp/newlayout-out/deps/libsimple_runtime.a")" = 400 ] ||
     fail "new-layout runtime archive was not frozen read-only"
 
+# Explicitly selected Cargo packages publish an unhashed profile-root rlib.
+# Keep the frozen deps/ contract and exact bytes, without requiring a cached
+# metadata variant. A newer stale variant must not override selected output.
+selected="$test_tmp/selected"
+mkdir "$selected"
+cp "$newlayout/simple" "$newlayout/libsimple_native_all.a" \
+    "$newlayout/libsimple_compiler_backfill.a" "$newlayout/libsimple_runtime.a" "$selected/"
+printf 'selected-hosted-package\n' >"$selected/libspl_hosted_runtime.rlib"
+selected_relative="deps/libspl_hosted_runtime-$(bootstrap_stage3_hash_file "$selected/libspl_hosted_runtime.rlib").rlib"
+bootstrap_stage3_copy_seed_tuple "$selected" "$test_tmp/selected-out" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a ||
+    fail "selected profile-root hosted rlib was rejected"
+cmp "$selected/libspl_hosted_runtime.rlib" \
+    "$test_tmp/selected-out/$selected_relative" >/dev/null ||
+    fail "selected hosted rlib bytes changed during projection"
+[ "$(file_mode "$test_tmp/selected-out/$selected_relative")" = 400 ] ||
+    fail "selected hosted rlib was not frozen"
+[ "$(bootstrap_stage3_manifest_value relative_path "$test_tmp/selected-out/hosted-runtime.env")" = \
+    "$selected_relative" ] || fail "selected hosted receipt path differs"
+bootstrap_stage3_verify_hosted_runtime_authority "$test_tmp/selected-out" ||
+    fail "selected hosted receipt did not verify"
+mkdir "$selected/deps"
+printf 'stale-feature-variant\n' >"$selected/deps/libspl_hosted_runtime-stale.rlib"
+touch -t 202001010000 "$selected/libspl_hosted_runtime.rlib"
+touch -t 202601010000 "$selected/deps/libspl_hosted_runtime-stale.rlib"
+bootstrap_stage3_copy_seed_tuple "$selected" "$test_tmp/selected-mixed-out" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a ||
+    fail "selected output with stale metadata variant was rejected"
+cmp "$selected/libspl_hosted_runtime.rlib" \
+    "$test_tmp/selected-mixed-out/$selected_relative" >/dev/null ||
+    fail "newer cached variant overrode selected package output"
+[ ! -e "$test_tmp/selected-mixed-out/deps/libspl_hosted_runtime-stale.rlib" ] ||
+    fail "unselected cached hosted variant was projected"
+mv "$selected/libspl_hosted_runtime.rlib" "$selected/hosted.real"
+ln -s hosted.real "$selected/libspl_hosted_runtime.rlib"
+if bootstrap_stage3_copy_seed_tuple "$selected" "$test_tmp/selected-linked-out" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a; then
+    fail "linked selected hosted output fell back to cached variant"
+fi
+rm "$selected/libspl_hosted_runtime.rlib"
+ln -s missing.rlib "$selected/libspl_hosted_runtime.rlib"
+if bootstrap_stage3_copy_seed_tuple "$selected" "$test_tmp/selected-dangling-out" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a; then
+    fail "dangling selected hosted output fell back to cached variant"
+fi
+
 # Mixed layout: both spellings present; the newest candidate wins regardless
 # of which layout produced it, and only the winner is projected.
 mixed="$test_tmp/mixed"

@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/timeout-worker-policy.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+wrapper=$repo/scripts/bootstrap/run-process-group-timeout.shs
+unset SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC
+unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_PROCESS_TREE_RSS_CAP_KIB
+unset BOOTSTRAP_TREE_RSS_MEMINFO_PATH BOOTSTRAP_TREE_RSS_TEST_FIXTURE
+printf '#!/bin/sh\nexit 7\n' >"$scratch/compiler"
+chmod 700 "$scratch/compiler"
+run() {
+  name=$1; shift
+  status=0
+  env TMPDIR="$scratch" SIMPLE_PROCESS_TREE_RSS_RECEIPT="$scratch/$name.env" \
+    SIMPLE_BOOTSTRAP_TREE_RSS_BASE_MIB=5120 "$@" \
+    >"$scratch/$name.log" 2>&1 || status=$?
+}
+run parallel sh "$wrapper" 15 1 "$scratch/compiler" native-build --threads 20
+[ "$status" = 7 ]
+expected=$(SIMPLE_BOOTSTRAP_TREE_RSS_BASE_MIB=5120 \
+  sh "$repo/scripts/bootstrap/lib/tree-rss-policy.shs" --resolve 20 "$repo")
+expected_cap=$(printf '%s\n' "$expected" | sed -n 's/^cap_kib=//p')
+expected_bound=$(printf '%s\n' "$expected" | sed -n 's/^bound=//p')
+grep -qx 'compiler_jobs=20' "$scratch/parallel.env"
+grep -qx 'cap_source=env-knobs' "$scratch/parallel.env"
+grep -qx "cap_bound=$expected_bound" "$scratch/parallel.env"
+grep -qx "rss_limit_kib=$expected_cap" "$scratch/parallel.env"
+grep -qx 'rss_cap_enforced=1' "$scratch/parallel.env"
+run ordinary sh "$wrapper" 15 1 "$scratch/compiler" test --threads 20
+[ "$status" = 7 ]
+grep -qx 'compiler_jobs=0' "$scratch/ordinary.env"
+ordinary_cap=$(SIMPLE_BOOTSTRAP_TREE_RSS_BASE_MIB=5120 \
+  sh "$repo/scripts/bootstrap/lib/tree-rss-policy.shs" --resolve 0 "$repo" |
+  sed -n 's/^cap_kib=//p')
+grep -qx "rss_limit_kib=$ordinary_cap" "$scratch/ordinary.env"
+run refused env SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=999999999 \
+  sh "$wrapper" 15 1 "$scratch/compiler" native-build --threads 20
+[ "$status" = 125 ]
+grep -q 'process-timeout-policy-error:' "$scratch/refused.log"
+[ ! -e "$scratch/refused.env" ]
+printf 'PASS: native worker budget, ordinary command bound, over-ceiling refusal\n'

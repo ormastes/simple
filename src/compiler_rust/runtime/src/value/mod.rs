@@ -136,7 +136,7 @@ pub use collections::{
     rt_array_len_safe, rt_array_new, rt_array_new_with_cap_u64, rt_array_pop, rt_array_push, rt_array_push_i64_raw,
     rt_array_set, rt_array_set_len_known, rt_array_set_len_known_text, rt_array_set_text,
     rt_transient_array_scope_begin, rt_transient_array_scope_end, rt_transient_array_scope_pause,
-    rt_transient_heap_promote, rt_byte_array_new, rt_byte_array_new_len, rt_bytes_u32_le_at, rt_bytes_u64_le_at,
+    rt_transient_heap_promote, transient_heap_scope_paused, rt_byte_array_new, rt_byte_array_new_len, rt_bytes_u32_le_at, rt_bytes_u64_le_at,
     rt_bytes_u8_at, rt_bytes_u8_set, rt_collection_set, rt_contains, rt_cstring_to_text, rt_hash_text, rt_for_iterable, rt_index_get,
     rt_index_set, rt_len, rt_range, rt_range_inclusive, rt_slice, rt_string_char_at, rt_interp_cstr, rt_string_bytes,
     rt_string_chars, rt_string_lines, rt_string_byte_at, rt_string_char_code_at, rt_string_concat, rt_string_contains,
@@ -355,6 +355,7 @@ pub use sffi::{rt_clear_stdin, rt_has_mock_stdin, rt_read_stdin_char, rt_read_st
 // Re-export print SFFI functions
 pub use sffi::{
     rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_print_str, rt_print_value, rt_println_str,
+    rt_debug_exit_success, rt_perf_dump_sdn, rt_print_err,
     rt_println_value, rt_raw_i64_to_string, rt_raw_u64_to_string, rt_stderr_flush, rt_stderr_write, rt_stdout_flush,
     rt_stdout_write, rt_value_format_string, rt_value_to_string, rt_opt_bool_to_string, rt_opt_f64_to_string,
     rt_opt_i64_to_string,

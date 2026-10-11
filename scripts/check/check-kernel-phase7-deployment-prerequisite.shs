@@ -157,7 +157,24 @@ fi
 
 authority_path=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
 authority=$root/$authority_path
-require_equal policy llvm-cranelift "$receipt_real"
+authority_value() {
+  awk -v key="$1" '
+    $1 == key ":" { count++; value=$2 }
+    END { if (count != 1 || value == "") exit 1; print value }
+  ' "$authority"
+}
+authority_k1=$(authority_value k1_policy) || fail authority-k1-policy-unreadable
+authority_k1_alternate=$(authority_value k1_policy_alternates) || fail authority-k1-alternate-unreadable
+[ "$authority_k1" = llvm-cranelift ] && [ "$authority_k1_alternate" = llvm ] || fail authority-k1-policy-drift
+# The deployment receipt names the K1 policy the candidate was composed from;
+# it must be one the manifest pins (canonical or alternate), and the
+# composition receipt below must agree with it.
+deployed_policy=$(sed -n 's/^policy=//p' "$receipt_real" | head -1)
+case "$deployed_policy" in
+  "$authority_k1"|"$authority_k1_alternate") ;;
+  *) fail "policy-not-pinned-by-authority:${deployed_policy:-missing}" ;;
+esac
+require_equal policy "$deployed_policy" "$receipt_real"
 require_equal coverage_cutover atomic-apk-only "$receipt_real"
 require_equal simple_abi_policy v1 "$receipt_real"
 require_equal plugin_manifest_policy simple-sdn "$receipt_real"
@@ -186,7 +203,7 @@ require_equal composition_receipt_path "$composition_real" "$receipt_real"
 require_equal composition_receipt_sha256 "$composition_sha" "$receipt_real"
 require_equal schema simple-bootstrap-k1-composition-receipt-v1 "$composition_real"
 require_equal status pass "$composition_real"
-require_equal policy llvm-cranelift "$composition_real"
+require_equal policy "$deployed_policy" "$composition_real"
 require_equal build_mode "$expected_mode" "$composition_real"
 require_equal simple_abi_policy v1 "$composition_real"
 require_equal plugin_manifest_policy simple-sdn "$composition_real"

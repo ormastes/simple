@@ -29,7 +29,7 @@ use compiler.common.module_path_naming.{module_logical_name_from_path}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
-extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_enum_discriminant<T>(value: T) -> i64
 extern fn rt_enum_payload(value: StmtKind) -> Expr
 use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
 use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
@@ -42,13 +42,25 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.sffi_identity.{sffi_raw_callable_effects}
 
 impl HirLowering:
-    me prescan_composite_field_types(name: text, fields: [ParserField]):
+    me prescan_composite_field_types(name: text, fields: [ParserField], type_params: [ParserTypeParam]):
         """Register parser struct/class fields before function lowering."""
+        # Field annotations use the declaration's generic scope even during
+        # this early pass. Do not leak its binders into sibling declarations.
+        val saved_parameters = self.prescan_type_parameters
+        self.prescan_type_parameters = {}
+        self.symbols.push_scope(ScopeKind.Class)
+        for tp in type_params:
+            val parameter = self.lower_type_param(tp)
+            self.prescan_type_parameters[parameter.symbol.id] = HirType(
+                kind: HirTypeKind.TypeParam(parameter.name, parameter.bounds),
+                span: parameter.span)
         var field_types: Dict<text, HirType> = {}
         var field_order: [text] = []
         for field in fields:
             field_types[field.name] = self.lower_type(field.type_)
             field_order = field_order.push(field.name)
+        self.symbols.pop_scope()
+        self.prescan_type_parameters = saved_parameters
         self.struct_field_types_by_name[name] = field_types
         self.struct_field_order_by_name[name] = field_order
         # MODULE-QUALIFIED KEY (2026-08-24). The bare name is NOT a unique key:
@@ -236,9 +248,14 @@ impl HirLowering:
     me imported_surface_type(type_: Type, imported_module_name: text) -> HirType:
         val source_name = parser_type_kind_named_name(type_.kind)
         if source_name != "":
+            val instance_errors_before = self.errors.len()
             var arguments: [HirType] = []
             for argument in parser_type_kind_named_args(type_.kind):
                 arguments = arguments.push(self.imported_surface_type(argument, imported_module_name))
+            # Owner binders shadow same-spelled module declarations.
+            val parameter_symbol = self.symbols.lookup_or_invalid(source_name)
+            if parameter_symbol.is_valid() and self.prescan_type_parameters.contains_key(parameter_symbol.id):
+                return HirType(kind: self.lower_named_symbol_kind(parameter_symbol, arguments, type_.span), span: type_.span)
             val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
                 imported_module_name, source_name)
             if raw_symbol_id >= 0:
@@ -253,7 +270,7 @@ impl HirLowering:
             # LocalId produced zero probe lines of any kind.
             if hir_type_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") == "1":
                 eprint("[ist-scalar-fallthrough] name={source_name} owner={imported_module_name} lowering={self.module_filename}")
-            return HirType(kind: self.lower_named_kind(source_name, arguments, type_.span), span: type_.span)
+            return HirType(kind: self.named_instance_kind_or_any(source_name, arguments, type_.span, instance_errors_before), span: type_.span)
         # COMPOSITE shapes must be projected ELEMENTWISE.
         #
         # Only a TOP-LEVEL Named type used to be projected through the
@@ -364,9 +381,14 @@ impl HirLowering:
         # nested Dict/array boundary.  The retained Type remains the complete
         # fallback for shapes not yet affected by the staged-native ABI bug.
         if type_name != "":
+            val instance_errors_before = self.errors.len()
             var arguments: [HirType] = []
             for argument in parser_type_kind_named_args(type_.kind):
                 arguments = arguments.push(self.imported_surface_type(argument, imported_module_name))
+            # Owner binders shadow same-spelled module declarations.
+            val parameter_symbol = self.symbols.lookup_or_invalid(type_name)
+            if parameter_symbol.is_valid() and self.prescan_type_parameters.contains_key(parameter_symbol.id):
+                return HirType(kind: self.lower_named_symbol_kind(parameter_symbol, arguments, type_.span), span: type_.span)
             val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
                 imported_module_name, type_name)
             if raw_symbol_id >= 0:
@@ -379,13 +401,17 @@ impl HirLowering:
             # `unresolved type: GpuIntrinsicKind` blamed on zero-import
             # package siblings of gpu_intrinsics.spl).
             if type_name.starts_with("has_") and type_name.len() > 4:
+                val optional_parameter = self.symbols.lookup_or_invalid(type_name[4:])
+                if optional_parameter.is_valid() and self.prescan_type_parameters.contains_key(optional_parameter.id):
+                    val parameter_type = HirType(kind: self.lower_named_symbol_kind(optional_parameter, [], type_.span), span: type_.span)
+                    return HirType(kind: HirTypeKind.Optional(parameter_type), span: type_.span)
                 val has_symbol_id = self.symbols.lookup_qualified_type_raw(
                     imported_module_name, type_name[4:])
                 if has_symbol_id >= 0:
                     return HirType(kind: HirTypeKind.Optional(HirType(kind: self.lower_named_symbol_kind(SymbolId(id: has_symbol_id), [], type_.span), span: type_.span)), span: type_.span)
             if hir_type_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") == "1":
                 eprint("[ist-proj-miss] name={type_name} owner={imported_module_name} lowering={self.module_filename}")
-            return HirType(kind: self.lower_named_kind(type_name, arguments, type_.span), span: type_.span)
+            return HirType(kind: self.named_instance_kind_or_any(type_name, arguments, type_.span, instance_errors_before), span: type_.span)
         if array_element_name != "":
             val source_element = parser_type_kind_array_element(type_.kind, type_)
             val element = self.imported_surface_type(source_element, imported_module_name)

@@ -1,0 +1,47 @@
+"""
+LLVM backend receipt for Eq/Ne between an i1 (bool) left operand and a
+wider integer right operand.
+
+Before this fix `translate_binop` ran every Eq/Ne at the LEFT operand's
+width, so a `bool` on the left against an i64 TRUNCATED the right operand to
+i1: the raw nil sentinel 3 became 1 and a stage-2-built `true == nil`
+(bool param on the left) answered true while `nil == true` answered false
+(doc/08_tracking/bug/native_scalar_nil_compare_payload_bits_2026-10-10.md).
+MIR lowering now folds the nil literal case away entirely, but the width
+rule itself was wrong for every bool/int pairing; the compare must widen
+the i1 (zext) to the integer's width, never narrow the integer.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.backend.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+val SRC = "fn bool_eq_int(b: bool, n: i64) -> bool:\n    b == n\n\nfn bool_ne_int(b: bool, n: i64) -> bool:\n    b != n\n\nfn int_eq_bool(n: i64, b: bool) -> bool:\n    n == b\n"
+
+fn llvm_text() -> text:
+    val parsed = parse_full_frontend(SRC, "bool_width.spl", "bool_width", Logger(level: 0))
+    var hl = HirLowering.with_filename("bool_width.spl")
+    val hir = hl.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    MirToLlvm.create("bool_width", CodegenTarget.X86_64, nil).translate_module(mir)
+
+describe "LLVM Eq/Ne between an i1 left operand and an i64 right operand":
+    it "widens the bool with zext and compares at i64 width":
+        val llvm = llvm_text()
+        expect(llvm.len() > 0).to_equal(true)
+        expect(llvm.contains("zext i1")).to_equal(true)
+        expect(llvm.contains("icmp eq i64")).to_equal(true)
+        expect(llvm.contains("icmp ne i64")).to_equal(true)
+
+    it "never truncates the integer operand down to i1":
+        val llvm = llvm_text()
+        expect(llvm.contains("trunc i64 %l2 to i1")).to_equal(false)
+        expect(llvm.contains("icmp eq i1")).to_equal(false)
+        expect(llvm.contains("icmp ne i1")).to_equal(false)

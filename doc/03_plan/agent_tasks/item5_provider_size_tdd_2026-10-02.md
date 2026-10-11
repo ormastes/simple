@@ -1,5 +1,13 @@
 # Item 5 isolated development session
 
+## 2026-10-11 variation documentation and implementation handoff
+
+Current selected destination is `release/1.0`; this supersedes the historical target-clarification row below. Documentation owner/merge owner/final reviewer: root, isolated `work/item5-variation-docs-20261011`, base `02b150b385013d21bc408b45244431de85d391de`. User-requested research reviewer: Astra (`gpt-6-astra`). Lower-model sidecars: N/A.
+
+Shared contract names remain the existing environment-variant, target registry, loader/session and SOSIX/SimpleRing names. One contract owner controls schema/feature/service IDs and generation changes. Separate source-resolver, SIMD, GPU compile/runtime, OS-provider and verifier tasks consume those frozen contracts and identify the body reused/moved/retired before edits.
+
+Keep live bootstrap candidates immutable. New variation work enters a later candidate and retains independent evidence; no completed test is rerun merely for a documentation update. New acceptance cases I5-V01..V08 remain planned, with no passing placeholders or fabricated generated manuals. Root reviews Astra's source corrections and final documentation before the PR merge; native implementation requires its own current compiler and target gates.
+
 Status: IN_PROGRESS; no implementation or host certification claimed.
 
 Owner: Codex root. Session: item5-dev-20261002.

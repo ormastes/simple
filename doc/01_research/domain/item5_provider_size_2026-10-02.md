@@ -1,6 +1,19 @@
 <!-- codex-research -->
 # Item 5 domain research: trustworthy demand loading and size evidence
 
+## 2026-10-11 primary-source variation update (Astra)
+
+The [independent review](../local/item5_variation_astra_review_2026-10-11.md) extends the selected proposal with these source-backed constraints. This is domain research, not a measurement or support claim.
+
+- ISA legality differs from width and tuning. Preserve exact registered feature requirements and target-independent semantics. [GCC x86 options](https://gcc.gnu.org/onlinedocs/gcc-15.1.0/gcc/x86-Options.html).
+- SVE state/vector length is per thread; fixed-VL code needs a qualified worker domain. [Linux SVE](https://www.kernel.org/doc/html/latest/arch/arm64/sve.html). RISC-V vector enablement is separately controlled for the calling thread. [Linux RISC-V vector interface](https://docs.kernel.org/arch/riscv/vector.html).
+- Hardware presence alone does not grant dynamic extended-state permission. [Linux XSTATE](https://docs.kernel.org/arch/x86/xstate.html). RVV tail-agnostic lanes must not be assumed zero; distinguish VLEN, active VL, SEW and LMUL. [RISC-V vector specification](https://docs.riscv.org/reference/isa/extensions/vector/_attachments/riscv-v-spec.pdf).
+- Shared vectorization legality can support distinct loop/SLP matching and target profitability. [LLVM vectorizers](https://llvm.org/docs/Vectorizers.html).
+- CUDA submission may precede device completion; retain resources to the actual dependency/completion boundary. [CUDA asynchronous execution](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html).
+- Execution completion and memory visibility are separate Vulkan obligations; noncoherent memory needs the API's actual visibility handling. [Vulkan synchronization](https://docs.vulkan.org/spec/latest/chapters/synchronization.html), [Vulkan memory](https://docs.vulkan.org/spec/latest/chapters/memory.html).
+
+These constraints add structural and failure/lifetime tests, not invented numerical budgets. Preserve NFR-001..007 and require actual matched app/target evidence before claiming speed or availability.
+
 Date: 2026-10-02. Scope is the full retained kernel/extension aspect dynload
 and binary-size contract, including all supported targets. These findings
 extend existing research without changing user-selected requirements.

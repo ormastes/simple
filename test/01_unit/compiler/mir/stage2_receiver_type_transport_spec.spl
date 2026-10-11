@@ -1,0 +1,265 @@
+"""
+Purpose: Pin native MIR lowering of receivers whose HIR type is spelled via a
+generic alias (`List<f64>`), a `text` parameter, or a Dict iterable — the
+classes that made the pure-Simple stage2 compiler fail on the test runner
+closure (812 errors, 2026-10-09) while the Rust seed compiled the same source.
+Audience: compiler engineers maintaining HIR type lowering and MIR for-in /
+method-call lowering.
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.types.{flat_span_new, span_is_valid}
+use compiler.hir.hir_types.{HirTypeKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+fn lower_errors(src: text, tag: text) -> text:
+    lower_errors_with(src, tag, false)
+
+fn lower_errors_with(src: text, tag: text, allow_nonexhaustive_match: bool) -> text:
+    val filename = "stage2_receiver_" + tag + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var result = ""
+    for error in hir_lowering.errors:
+        result = result + "HIR_ERROR:" + error.message + "\n"
+    for error in mir_lowering.errors:
+        # Advisory in a real build: 80.driver's `_mir_error_is_fatal` allowlist
+        # does not include it, so the driver downgrades it to a warning. Only
+        # the case that opts in may drop it.
+        if allow_nonexhaustive_match and error.message.starts_with("non-exhaustive enum match"):
+            continue
+        var where = "@nil"
+        val sp = error.span
+        if sp != nil:
+            where = "@" + sp.line.to_text() + ":" + sp.col.to_text()
+        result = result + "MIR_ERROR:" + error.message + " " + where + "\n"
+    result
+
+fn first_param_type_shape(src: text, tag: text) -> text:
+    val filename = "stage2_receiver_" + tag + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    for func in hir.functions.values():
+        if func.name == "probe" and func.params.len() > 0:
+            match func.params[0].type_.kind:
+                case HirTypeKind.Array(_, _): return "array"
+                case HirTypeKind.Named(_, _): return "named"
+                case _: return "other"
+    "missing"
+
+val LIST_PARAM_SRC = """
+fn compute_mean(samples: List<f64>) -> f64:
+    if samples.len() == 0:
+        return 0.0
+    var sum = 0.0
+    for s in samples:
+        sum = sum + s
+    sum / (samples.len() as f64)
+"""
+
+val TEXT_PARAM_TO_INT_SRC = """
+extern fn rt_file_read_text(path: text) -> text
+
+fn parse_timeout(monitor_timeout: text, fallback: i64) -> i64:
+    val parsed = monitor_timeout.to_int() ?? fallback
+    val last_slash = monitor_timeout.last_index_of("/")
+    parsed + last_slash
+"""
+
+val TEXT_PARAM_PLAIN_SRC = """
+fn parse_plain(monitor_timeout: text) -> i64?:
+    monitor_timeout.to_int()
+"""
+
+val TEXT_PARAM_COALESCE_SRC = """
+fn parse_coalesce(monitor_timeout: text, fallback: i64) -> i64:
+    monitor_timeout.to_int() ?? fallback
+"""
+
+val TEXT_PARAM_AFTER_EXTERN_SRC = """
+extern fn rt_file_read_text(path: text) -> text
+
+fn parse_after_extern(monitor_timeout: text) -> i64?:
+    monitor_timeout.to_int()
+"""
+
+val TEXT_PARAM_LAST_INDEX_SRC = """
+fn tail_slash(path: text) -> i64:
+    path.last_index_of("/")
+"""
+
+val DICT_FOR_IN_SRC = """
+fn count_entries(table: {text: i64}) -> i64:
+    var total = 0
+    for key in table:
+        total = total + table[key]
+    total
+"""
+
+val DICT_KEYS_FOR_IN_SRC = """
+fn sum_keys(pairs: {text: i64}) -> i64:
+    var total = 0
+    for key in pairs.keys():
+        total = total + pairs[key]
+    total
+"""
+
+val TUPLE_ARRAY_FOR_IN_SRC = """
+fn char_frequency(s: text) -> [(text, i64)]:
+    var out: [(text, i64)] = []
+    out.push((s, 1))
+    out
+
+fn most_common(s: text) -> i64:
+    val freqs = char_frequency(s)
+    var max_count = freqs[0][1]
+    for (ch, count) in freqs:
+        if count > max_count:
+            max_count = count
+    max_count
+"""
+
+val GLOBAL_DICT_BYTE_AT_SRC = """
+var core_token_text_intern: {i64: text} = {}
+
+fn has_nul(value: text, n: i64) -> bool:
+    var i = 0
+    while i < n:
+        if (value.byte_at(i) as i64) == 0:
+            return true
+        i = i + 1
+    false
+"""
+
+val MATCH_PAYLOAD_FREE_FN_SRC = """
+struct SdnTable:
+    name: text
+    rows: [i64]
+
+fn find_table(tables: [SdnTable], name: text) -> SdnTable?:
+    var i = 0
+    while i < tables.len():
+        if tables[i].name == name:
+            return tables[i]
+        i = i + 1
+    nil
+
+fn sum_rows_free(tables: [SdnTable]) -> i64:
+    var tests_table = match find_table(tables, "tests"):
+        case Some(table): table
+        case nil: return 0
+    var total = 0
+    for row in tests_table.rows:
+        total = total + row
+    total
+"""
+
+fn unresolved_method_lines(src: text, tag: text) -> text:
+    var hits = ""
+    for line in lower_errors(src, tag).split("\n"):
+        if line.contains("unresolved method call"):
+            hits = hits + line + "\n"
+    hits
+
+val PLAIN_LIST_PROBE_SRC = """
+fn probe(samples: List<i64>) -> i64:
+    samples.len()
+"""
+
+val IMPORTED_LIST_CLASS_SRC = """
+use common.core.collections.{List}
+
+fn probe(regions: List<i64>) -> i64:
+    0
+"""
+
+val WILDCARD_IMPORT_LIST_SRC = """
+use common.core.collections.*
+
+fn probe(regions: List<i64>) -> i64:
+    0
+"""
+
+val WRONG_SPAN_SRC = """
+extern fn rt_file_read_text(path: text) -> text
+
+fn probe(monitor_timeout: text) -> i64:
+    monitor_timeout.frobnicate()
+"""
+
+describe "stage2 receiver type transport":
+    it "reports an unresolved method at the receiver's own line, not the first module item":
+        val out = lower_errors(WRONG_SPAN_SRC, "wrong_span")
+        expect(out.contains("unresolved method call: frobnicate @5:5")).to_equal(true)
+
+    it "lowers for-in over a List<f64> parameter as an array iteration":
+        val out = lower_errors(LIST_PARAM_SRC, "list_param")
+        expect(out).to_equal("")
+
+    it "resolves text methods on a text parameter":
+        val out = lower_errors(TEXT_PARAM_TO_INT_SRC, "text_param")
+        expect(out).to_equal("")
+
+    it "resolves to_int on a bare text parameter":
+        val out = lower_errors(TEXT_PARAM_PLAIN_SRC, "text_plain")
+        expect(out).to_equal("")
+
+    it "resolves to_int on a text parameter under ??":
+        val out = lower_errors(TEXT_PARAM_COALESCE_SRC, "text_coalesce")
+        expect(out).to_equal("")
+
+    it "resolves to_int on a text parameter after an extern decl":
+        val out = lower_errors(TEXT_PARAM_AFTER_EXTERN_SRC, "text_after_extern")
+        expect(out).to_equal("")
+
+    it "resolves last_index_of on a text parameter":
+        val out = lower_errors(TEXT_PARAM_LAST_INDEX_SRC, "text_last_index")
+        expect(out).to_equal("")
+
+    it "lowers for-in over a Dict parameter":
+        val out = lower_errors(DICT_FOR_IN_SRC, "dict_param")
+        expect(out).to_equal("")
+
+    it "lowers for-in over Dict.keys()":
+        val out = lower_errors(DICT_KEYS_FOR_IN_SRC, "dict_keys")
+        expect(out).to_equal("")
+
+    it "lowers tuple-destructuring for-in over a call result array":
+        val out = lower_errors(TUPLE_ARRAY_FOR_IN_SRC, "tuple_array")
+        expect(out).to_equal("")
+
+    it "lowers for-in over an array field of a match-payload-bound local from a free fn":
+        val out = lower_errors_with(MATCH_PAYLOAD_FREE_FN_SRC, "match_payload_free_fn", true)
+        expect(out).to_equal("")
+
+    it "resolves byte_at on a text parameter next to a global dict":
+        val out = lower_errors(GLOBAL_DICT_BYTE_AT_SRC, "global_dict_byte_at")
+        expect(out).to_equal("")
+
+    it "lowers every array read in the sha3 module (typed lanes, indexed reads)":
+        # 16 of the 114 stage2 test-runner MIR errors (2026-10-09) were
+        # `unresolved method call: get` in this module: its untyped `var s = []`
+        # locals carry no element type, so the Array `.get` arm fails closed.
+        val src = file_read("src/lib/common/crypto/sha3.spl")
+        expect(unresolved_method_lines(src, "sha3_module")).to_equal("")
+
+    it "rewrites List<T> to an array only when no List class can be imported":
+        expect(first_param_type_shape(PLAIN_LIST_PROBE_SRC, "plain_list_probe")).to_equal("array")
+        expect(first_param_type_shape(IMPORTED_LIST_CLASS_SRC, "imported_list_class") == "array").to_equal(false)
+        expect(first_param_type_shape(WILDCARD_IMPORT_LIST_SRC, "wildcard_list") == "array").to_equal(false)
+
+    it "treats the reserved span pool index 0 as no location":
+        val real = flat_span_new(1, 2, 3, 4)
+        expect(real > 0).to_equal(true)
+        expect(span_is_valid(real)).to_equal(true)
+        expect(span_is_valid(0)).to_equal(false)

@@ -20,6 +20,18 @@ bootstrap_product_frontend_policy() {
         [ "${SIMPLE_PARSE_SHARD_WORKER_KB:-1650000}" = 1650000 ] &&
         [ "${SIMPLE_HIR_SHARD_WORKER_KB:-3000000}" = 3000000 ] || return 1
     product_policy_effective=${product_policy_rows##*=}
-    [ "${SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB:-$product_policy_effective}" = "$product_policy_effective" ] || return 1
+    # An enclosing enforced owner (process-tree-rss-watchdog.pl exports its
+    # cap) may already declare a tree budget. A larger one is consistent:
+    # this lane's share stays the binding bound. A smaller one is stricter
+    # and wins. Zero, junk or overlong values remain contradictions.
+    product_policy_inherited=${SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB:-$product_policy_effective}
+    case "$product_policy_inherited" in
+        ''|0*|*[!0-9]*|??????????????????*) return 1 ;;
+    esac
+    if [ "$product_policy_inherited" -lt "$product_policy_effective" ]; then
+        product_policy_rows=$(printf '%s\n' "$product_policy_rows" |
+            sed "s/^SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=.*/SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=$product_policy_inherited/") ||
+            return 1
+    fi
     printf '%s\n' "$product_policy_rows"
 }

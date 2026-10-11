@@ -9,9 +9,9 @@ use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{StmtKind, Expr}  # explicit: a glob is not an import-origin for surface projection
 use compiler.common.diagnostics.span.{Span}
-use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.types.{HirLowering, hir_type_kind_disc}
 use compiler.hir.hir_lowering.expressions.*
-use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_disc}
+use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_disc, _hir_expr_symbol_or_invalid}
 
 extern fn rt_enum_payload(value: StmtKind) -> Expr
 extern fn rt_enum_discriminant(value: StmtKind) -> i64
@@ -42,6 +42,25 @@ fn _ast_tuple_lit_elements(e: Expr) -> [Expr]:
     []
 
 impl HirLowering:
+    # Early pattern validation runs before inference. Retain only an existing
+    # semantic type, including a variable's declared type; never invent an
+    # owner from the spelling of a later match alternative. Return a raw type
+    # with Error as the unknown sentinel, avoiding optional aggregate transport.
+    me binding_source_type(source: HirExpr, bind_optional_payload: bool = false) -> HirType:
+        if bind_optional_payload and source.has_type_:
+            if val source_type = source.type_:
+                match source_type.kind:
+                    case HirTypeKind.Optional(payload): return payload
+                    case _: ()
+        if source.has_type_ and source.type_ != nil:
+            return source.type_ ?? HirType(kind: HirTypeKind.Error, span: source.span)
+        val symbol = _hir_expr_symbol_or_invalid(source.kind)
+        if symbol.is_valid():
+            if val definition = self.symbols.get_symbol_raw(symbol.id):
+                if definition.type_ != nil:
+                    return definition.type_ ?? HirType(kind: HirTypeKind.Error, span: source.span)
+        HirType(kind: HirTypeKind.Error, span: source.span)
+
     # A discard is an assignment target, never a variable read. Keep this
     # shared by structured statements and the flat parser's expression form.
     me lower_hir_assignment_kind(target: Expr, op: AssignOp?, value: Expr, span: Span) -> HirStmtKind:
@@ -536,8 +555,12 @@ impl HirLowering:
                     vinit
                 case _:
                     sk_dummy
-            val v_hir_type = if v_type.?:
-                self.lower_type(v_type ?? Type(kind: TypeKind.Infer, span: s.span))
+            # Flat AST represents an absent annotation as a present Infer Type.
+            # Decide from the AST kind, not the lowered nullable HirType slot.
+            val v_ast_type: Type = v_type ?? Type(kind: TypeKind.Infer, span: s.span)
+            val v_has_annotation = hir_type_kind_disc(v_ast_type.kind) != hir_type_kind_disc(TypeKind.Infer)
+            val v_hir_type = if v_has_annotation:
+                self.lower_type(v_ast_type)
             else:
                 nil
             # `HirStmtKind.Let.type_` is a PLAIN NULLABLE, not an Option box
@@ -558,8 +581,13 @@ impl HirLowering:
             # `case Some` deep-copies and corrupts it (disc=-1), `.unwrap()` is
             # stolen by Poll.unwrap and returns raw 0, `??` corrupts it too.
             # Removing the box removes the extraction, so there is nothing to corrupt.
-            val v_sym_type = v_hir_type
             val v_hir_init = self.lower_hir_expr(v_init)
+            var v_sym_type = v_hir_type
+            if not v_has_annotation:
+                val inferred = self.binding_source_type(v_hir_init, s.bind_optional_payload)
+                match inferred.kind:
+                    case HirTypeKind.Error: ()
+                    case _: v_sym_type = inferred
             val v_symbol = self.symbols.define(v_name, SymbolKind.Variable, v_sym_type, s.span, Visibility.Private, false, nil)
             self.try_register_local_struct_type(v_symbol, v_init)
             self.try_register_local_tuple_type(v_symbol, v_init)
@@ -580,16 +608,25 @@ impl HirLowering:
                     vrinit
                 case _:
                     nil
-            val vr_hir_type = if vr_type.?:
-                self.lower_type(vr_type ?? Type(kind: TypeKind.Infer, span: s.span))
+            # Flat AST represents an absent annotation as a present Infer Type.
+            # Decide from the AST kind, not the lowered nullable HirType slot.
+            val vr_ast_type: Type = vr_type ?? Type(kind: TypeKind.Infer, span: s.span)
+            val vr_has_annotation = hir_type_kind_disc(vr_ast_type.kind) != hir_type_kind_disc(TypeKind.Infer)
+            val vr_hir_type = if vr_has_annotation:
+                self.lower_type(vr_ast_type)
             else:
                 nil
             # Same field migration as the `val` path above; see the note there.
-            val vr_sym_type = if vr_hir_type != nil: Some(vr_hir_type) else: nil
+            var vr_sym_type = if vr_has_annotation: Some(vr_hir_type) else: nil
             val vr_hir_init = if vr_init.?:
                 self.lower_hir_expr(vr_init ?? sk_dummy)
             else:
                 HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: s.span)
+            if not vr_has_annotation:
+                val inferred = self.binding_source_type(vr_hir_init, s.bind_optional_payload)
+                match inferred.kind:
+                    case HirTypeKind.Error: ()
+                    case _: vr_sym_type = inferred
             val vr_symbol = self.symbols.define(vr_name, SymbolKind.Variable, vr_sym_type, s.span, Visibility.Private, true, nil)
             if val vr_init_present = vr_init:
                 self.try_register_local_struct_type(vr_symbol, vr_init_present)
@@ -686,8 +723,10 @@ impl HirLowering:
 
         val kind: HirStmtKind = match stmt_kind_value:
             case StmtKind.Val(name, type_, init):
-                val hir_type = if type_.?:
-                    self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span))
+                val ast_type: Type = type_ ?? Type(kind: TypeKind.Infer, span: s.span)
+                val has_annotation = hir_type_kind_disc(ast_type.kind) != hir_type_kind_disc(TypeKind.Infer)
+                val hir_type = if has_annotation:
+                    self.lower_type(ast_type)
                 else:
                     nil
                 # `HirStmtKind.Let.type_` is a PLAIN NULLABLE, not an Option box
@@ -701,14 +740,21 @@ impl HirLowering:
                 # (get_symbol_type_raw -> mir_lowering_stmts.spl:812 `case Some`, plus the
                 # get_symbol_type wrapper at hir_symbol_table_methods.spl:467) and is
                 # deliberately NOT migrated here, so it keeps receiving the boxed form.
-                val sym_type = hir_type
                 val hir_init = self.lower_hir_expr(init)
+                var sym_type = hir_type
+                if not has_annotation:
+                    val inferred = self.binding_source_type(hir_init, s.bind_optional_payload)
+                    match inferred.kind:
+                        case HirTypeKind.Error: ()
+                        case _: sym_type = inferred
                 val symbol = self.symbols.define(name, SymbolKind.Variable, sym_type, s.span, Visibility.Private, false, nil)
                 HirStmtKind.Let(symbol, hir_type, hir_init)
 
             case StmtKind.Var(name, type_, init):
-                val hir_type = if type_.?:
-                    self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span))
+                val ast_type: Type = type_ ?? Type(kind: TypeKind.Infer, span: s.span)
+                val has_annotation = hir_type_kind_disc(ast_type.kind) != hir_type_kind_disc(TypeKind.Infer)
+                val hir_type = if has_annotation:
+                    self.lower_type(ast_type)
                 else:
                     nil
                 # `HirStmtKind.Let.type_` is a PLAIN NULLABLE, not an Option box
@@ -722,11 +768,16 @@ impl HirLowering:
                 # (get_symbol_type_raw -> mir_lowering_stmts.spl:812 `case Some`, plus the
                 # get_symbol_type wrapper at hir_symbol_table_methods.spl:467) and is
                 # deliberately NOT migrated here, so it keeps receiving the boxed form.
-                val sym_type = hir_type
+                var sym_type = hir_type
                 val hir_init = if init.?:
                     self.lower_hir_expr(init ?? Expr(kind: ExprKind.NilLit, span: s.span))
                 else:
                     HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: s.span)
+                if not has_annotation:
+                    val inferred = self.binding_source_type(hir_init, s.bind_optional_payload)
+                    match inferred.kind:
+                        case HirTypeKind.Error: ()
+                        case _: sym_type = inferred
                 val symbol = self.symbols.define(name, SymbolKind.Variable, sym_type, s.span, Visibility.Private, true, nil)
                 HirStmtKind.Let(symbol, hir_type, hir_init)
 
@@ -776,7 +827,13 @@ impl HirLowering:
                     )
                     HirExprKind.For(for_elem_sym, hir_iter, for_hir_body, nil)
                 else:
-                    val symbol = self.symbols.define(var_, SymbolKind.Variable, nil, s.span, Visibility.Private, false, nil)
+                    val iterable_type = self.binding_source_type(hir_iter)
+                    var element_type: HirType? = nil
+                    match iterable_type.kind:
+                        case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
+                            element_type = element
+                        case _: ()
+                    val symbol = self.symbols.define(var_, SymbolKind.Variable, element_type, s.span, Visibility.Private, false, nil)
                     val hir_body = self.lower_hir_block(body)
                     HirExprKind.For(symbol, hir_iter, hir_body, nil)
                 self.loop_depth = self.loop_depth - 1

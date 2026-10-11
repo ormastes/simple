@@ -122,3 +122,31 @@ sequence and corrected initialization boundary. Success is still unproven:
 the complete factory fixture, bootstrap initialization behavior, hello-world
 link/run, both canonical frontend modes, and Stage 2 admission must pass before
 the candidate can produce the canonical Chrome library.
+
+
+## Linux ARM64 recurrence, 2026-10-09
+
+Release `b9236c19ca642932663621fb69ce355f608a9790` reintroduced an omitted
+computed table default in `backend_helpers.cranelift_compile_module_via_k1_v1`.
+The 20-worker cold Stage 2 build compiled 1,212 modules with zero failures in
+98.5 seconds, but its canonical `p2_add` Cranelift admission probe failed.
+Rejected producer SHA-256:
+`c52a5781bde7dd2032ec757f7dada959dbd042010d68ed2db76862a04bb3d40f`.
+
+The worker debugger exposed the underlying error: Cranelift was reported as
+unavailable despite installed K1 policy `llvm-cranelift`. AArch64 disassembly
+at `0xd56e6c` assigns tagged nil (`3`) to `x1` immediately before the selector
+call at `0xd56e78`; the active table is never loaded. The public diagnostic
+only printed `backend session AOT result rejected: <enum@...>`.
+
+The new caller now reads `active_static_backend_table_v1()` and passes it
+explicitly, following the existing factory repair. Selection negotiation and
+unavailable-backend rejection are preserved. General computed-default lowering
+and opaque enum diagnostics remain open defects.
+
+Evidence in `/home/yoon/dev/simple-release-1.0-codex/build/native_probe/linux-arm-phase3-20261009/`:
+`bootstrap-attempt5.log`, `cranelift-rejection-debug-tree-complete.log`, and
+`cranelift-rejection-process-tree.gdb`. The canonical frontend smoke is the
+regression gate: it must compile and execute `p2_add` using the rebuilt producer.
+Verification of this new caller repair is pending; no Phase 3 admission is
+claimed by this source change.

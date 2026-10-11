@@ -123,7 +123,11 @@ else
   simple_msvc_sdk_ver=$(
     for simple_msvc_s_dir in "$simple_msvc_sdk_root/Include"/*/; do
       simple_msvc_s_dir="${simple_msvc_s_dir%/}"
-      [ -d "$simple_msvc_s_dir/ucrt" ] && printf '%s\n' "$(basename "$simple_msvc_s_dir")"
+      # A trailing non-SDK directory (e.g. wdf) is not a pipeline failure
+      # when the caller sources this helper with errexit and pipefail.
+      if [ -d "$simple_msvc_s_dir/ucrt" ]; then
+        printf '%s\n' "$(basename "$simple_msvc_s_dir")"
+      fi
     done | sort -V | tail -n1
   )
   if [ -z "$simple_msvc_sdk_ver" ]; then
@@ -223,6 +227,14 @@ export PATH
 INCLUDE="$(cygpath -w "$simple_msvc_vc_include" 2>/dev/null || printf '%s' "$simple_msvc_vc_include");$(cygpath -w "$simple_msvc_sdk_root/Include/$simple_msvc_sdk_ver/ucrt" 2>/dev/null);$(cygpath -w "$simple_msvc_sdk_root/Include/$simple_msvc_sdk_ver/shared" 2>/dev/null);$(cygpath -w "$simple_msvc_sdk_root/Include/$simple_msvc_sdk_ver/um" 2>/dev/null);$(cygpath -w "$simple_msvc_sdk_root/Include/$simple_msvc_sdk_ver/winrt" 2>/dev/null)"
 LIB="$(cygpath -w "$simple_msvc_vc_lib" 2>/dev/null);$(cygpath -w "$simple_msvc_sdk_root/Lib/$simple_msvc_sdk_ver/ucrt/x64" 2>/dev/null);$(cygpath -w "$simple_msvc_sdk_root/Lib/$simple_msvc_sdk_ver/um/x64" 2>/dev/null)"
 export INCLUDE LIB
+# Discovery-only mode for callers that need INCLUDE/LIB but must not adopt the
+# rest of this lane setup (PATH rewrite, LLVM authority). Used by
+# bootstrap-from-scratch.sh in a subshell when LIB is empty: a SET-but-empty
+# LIB disables lld-link's own MSVC/SDK auto-detection (measured with LLD 23:
+# unset LIB links hello.obj, `LIB=` fails "could not open 'kernel32.lib'").
+if [ "${SIMPLE_MSVC_ENV_DIRS_ONLY:-0}" = 1 ]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 # VCToolsInstallDir is exported for anything downstream that still reads it
 # (e.g. as a discovery hint), but it is NO LONGER used to resolve a linker:

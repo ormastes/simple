@@ -1,0 +1,187 @@
+# Little-endian fixed wire codec for SimpleVectorKernelsV1.
+
+use std.nogc_sync_mut.composition.vector_kernel_contract.{
+    SIMPLE_VECTOR_OP_BITMAP_AND_U32, SIMPLE_VECTOR_OP_BITMAP_OR_U32,
+    SIMPLE_VECTOR_OP_HTTP_FIND_BYTE, SIMPLE_VECTOR_OP_HTTP_FIND_CRLF,
+    SIMPLE_VECTOR_CAP_BITMAP_AND_U32, SIMPLE_VECTOR_CAP_BITMAP_OR_U32,
+    SIMPLE_VECTOR_CAP_HTTP_FIND_BYTE, SIMPLE_VECTOR_CAP_HTTP_FIND_CRLF,
+    SIMPLE_VECTOR_REQUEST_V1_SIZE, SIMPLE_VECTOR_RESPONSE_V1_SIZE,
+    SIMPLE_VECTOR_MAX_SPAN_BYTES, SIMPLE_VECTOR_MAX_ADDRESS,
+    SIMPLE_VECTOR_STATUS_OK, SIMPLE_VECTOR_STATUS_EXECUTION_FAILED,
+    SimpleVectorKernelRequestV1, SimpleVectorKernelResponseV1,
+    SimpleVectorKernelRequestEncodingV1, SimpleVectorKernelResponseDecodeV1
+}
+
+fn _vector_push_u32(out: [u8], value: u32):
+    out.push((value & 255) as u8)
+    out.push(((value >> 8) & 255) as u8)
+    out.push(((value >> 16) & 255) as u8)
+    out.push(((value >> 24) & 255) as u8)
+
+fn _vector_push_u64(out: [u8], value: u64):
+    var shift: i64 = 0
+    while shift < 64:
+        out.push(((value >> shift) & 255) as u8)
+        shift = shift + 8
+
+fn _vector_read_u32(data: [u8], offset: i64) -> u32:
+    (data[offset] as u32) |
+        ((data[offset + 1] as u32) << 8) |
+        ((data[offset + 2] as u32) << 16) |
+        ((data[offset + 3] as u32) << 24)
+
+fn _vector_read_u64(data: [u8], offset: i64) -> u64:
+    var value: u64 = 0
+    var shift: i64 = 0
+    while shift < 64:
+        value = value | ((data[offset + (shift / 8)] as u64) << shift)
+        shift = shift + 8
+    value
+
+fn _vector_address_span_valid(address: u64, byte_length: u64,
+        alignment: u64) -> bool:
+    if byte_length == 0:
+        return address == 0
+    if address == 0 or address > SIMPLE_VECTOR_MAX_ADDRESS:
+        return false
+    if byte_length > SIMPLE_VECTOR_MAX_SPAN_BYTES or
+            address > SIMPLE_VECTOR_MAX_ADDRESS - byte_length:
+        return false
+    if alignment > 1 and address % alignment != 0:
+        return false
+    true
+
+fn _vector_spans_overlap(left_address: u64, left_bytes: u64,
+        right_address: u64, right_bytes: u64) -> bool:
+    if left_bytes == 0 or right_bytes == 0:
+        return false
+    left_address < right_address + right_bytes and
+        right_address < left_address + left_bytes
+
+fn simple_vector_kernel_capability_v1(opcode: u32) -> u64:
+    if opcode == SIMPLE_VECTOR_OP_BITMAP_AND_U32:
+        return SIMPLE_VECTOR_CAP_BITMAP_AND_U32
+    if opcode == SIMPLE_VECTOR_OP_BITMAP_OR_U32:
+        return SIMPLE_VECTOR_CAP_BITMAP_OR_U32
+    if opcode == SIMPLE_VECTOR_OP_HTTP_FIND_BYTE:
+        return SIMPLE_VECTOR_CAP_HTTP_FIND_BYTE
+    if opcode == SIMPLE_VECTOR_OP_HTTP_FIND_CRLF:
+        return SIMPLE_VECTOR_CAP_HTTP_FIND_CRLF
+    0
+
+fn _vector_request_error(diagnostic: text) -> SimpleVectorKernelRequestEncodingV1:
+    SimpleVectorKernelRequestEncodingV1(
+        ok: false, bytes: [], required_capability_bits: 0,
+        diagnostic: diagnostic)
+
+fn _vector_request_validate_v1(request: SimpleVectorKernelRequestV1) -> text:
+    val capability = simple_vector_kernel_capability_v1(request.opcode)
+    if capability == 0:
+        return "vector-opcode-unsupported"
+    if request.left_bytes > SIMPLE_VECTOR_MAX_SPAN_BYTES or
+            request.right_bytes > SIMPLE_VECTOR_MAX_SPAN_BYTES or
+            request.output_capacity_bytes > SIMPLE_VECTOR_MAX_SPAN_BYTES:
+        return "vector-span-too-large"
+    if request.opcode == SIMPLE_VECTOR_OP_BITMAP_AND_U32 or
+            request.opcode == SIMPLE_VECTOR_OP_BITMAP_OR_U32:
+        if request.left_bytes % 4 != 0 or request.right_bytes != request.left_bytes:
+            return "vector-bitmap-length-invalid"
+        if request.output_capacity_bytes != request.left_bytes:
+            return "vector-bitmap-output-capacity-mismatch"
+        if not _vector_address_span_valid(request.left_address, request.left_bytes, 4) or
+                not _vector_address_span_valid(request.right_address, request.right_bytes, 4) or
+                not _vector_address_span_valid(request.output_address, request.output_capacity_bytes, 4):
+            return "vector-bitmap-span-invalid"
+        if _vector_spans_overlap(request.output_address, request.left_bytes,
+                request.left_address, request.left_bytes) or
+                _vector_spans_overlap(request.output_address, request.left_bytes,
+                request.right_address, request.right_bytes):
+            return "vector-bitmap-output-alias"
+        if request.argument != 0:
+            return "vector-bitmap-argument-invalid"
+        return ""
+    if request.right_address != 0 or request.right_bytes != 0 or
+            request.output_address != 0 or request.output_capacity_bytes != 0:
+        return "vector-http-unused-span-nonzero"
+    if not _vector_address_span_valid(request.left_address, request.left_bytes, 1):
+        return "vector-http-input-span-invalid"
+    if request.opcode == SIMPLE_VECTOR_OP_HTTP_FIND_BYTE:
+        if request.argument > 255:
+            return "vector-http-byte-invalid"
+        return ""
+    if request.argument != 0:
+        return "vector-http-crlf-argument-invalid"
+    ""
+
+fn encode_simple_vector_request_v1(
+        request: SimpleVectorKernelRequestV1) -> SimpleVectorKernelRequestEncodingV1:
+    val diagnostic = _vector_request_validate_v1(request)
+    if diagnostic != "":
+        return _vector_request_error(diagnostic)
+    var out: [u8] = []
+    _vector_push_u32(out, SIMPLE_VECTOR_REQUEST_V1_SIZE)
+    _vector_push_u32(out, request.opcode)
+    _vector_push_u64(out, request.left_address)
+    _vector_push_u64(out, request.left_bytes)
+    _vector_push_u64(out, request.right_address)
+    _vector_push_u64(out, request.right_bytes)
+    _vector_push_u64(out, request.output_address)
+    _vector_push_u64(out, request.output_capacity_bytes)
+    _vector_push_u64(out, request.argument)
+    SimpleVectorKernelRequestEncodingV1(
+        ok: out.len() == SIMPLE_VECTOR_REQUEST_V1_SIZE as i64,
+        bytes: out,
+        required_capability_bits: simple_vector_kernel_capability_v1(request.opcode),
+        diagnostic: if out.len() == SIMPLE_VECTOR_REQUEST_V1_SIZE as i64: "" else: "vector-request-size-internal")
+
+fn _vector_response_error(diagnostic: text) -> SimpleVectorKernelResponseDecodeV1:
+    SimpleVectorKernelResponseDecodeV1(
+        ok: false,
+        value: SimpleVectorKernelResponseV1(
+            struct_size: SIMPLE_VECTOR_RESPONSE_V1_SIZE,
+            status: SIMPLE_VECTOR_STATUS_EXECUTION_FAILED,
+            bytes_written: 0, scalar_result: -1),
+        diagnostic: diagnostic)
+
+fn decode_simple_vector_response_v1(data: [u8],
+        request: SimpleVectorKernelRequestV1) -> SimpleVectorKernelResponseDecodeV1:
+    if data.len() != SIMPLE_VECTOR_RESPONSE_V1_SIZE as i64:
+        return _vector_response_error("vector-response-size-invalid")
+    if _vector_read_u32(data, 0) != SIMPLE_VECTOR_RESPONSE_V1_SIZE:
+        return _vector_response_error("vector-response-header-invalid")
+    val status = _vector_read_u32(data, 4)
+    if status > SIMPLE_VECTOR_STATUS_EXECUTION_FAILED:
+        return _vector_response_error("vector-response-status-invalid")
+    val bytes_written = _vector_read_u64(data, 8)
+    val scalar_result = _vector_read_u64(data, 16) as i64
+    if bytes_written > SIMPLE_VECTOR_MAX_SPAN_BYTES:
+        return _vector_response_error("vector-response-length-invalid")
+    if status == SIMPLE_VECTOR_STATUS_OK:
+        if request.opcode == SIMPLE_VECTOR_OP_BITMAP_AND_U32 or
+                request.opcode == SIMPLE_VECTOR_OP_BITMAP_OR_U32:
+            if bytes_written != request.left_bytes or scalar_result != -1:
+                return _vector_response_error("vector-bitmap-response-invalid")
+        else:
+            if bytes_written != 0 or scalar_result < -1:
+                return _vector_response_error("vector-http-response-invalid")
+            if request.opcode == SIMPLE_VECTOR_OP_HTTP_FIND_BYTE and
+                    scalar_result >= 0 and scalar_result >= request.left_bytes as i64:
+                return _vector_response_error("vector-http-byte-index-invalid")
+            if request.opcode == SIMPLE_VECTOR_OP_HTTP_FIND_CRLF and
+                    scalar_result >= 0 and
+                    (request.left_bytes < 2 or
+                        scalar_result > request.left_bytes as i64 - 2):
+                return _vector_response_error("vector-http-crlf-index-invalid")
+    else:
+        if bytes_written != 0:
+            return _vector_response_error("vector-error-response-has-output")
+    SimpleVectorKernelResponseDecodeV1(
+        ok: true,
+        value: SimpleVectorKernelResponseV1(
+            struct_size: SIMPLE_VECTOR_RESPONSE_V1_SIZE,
+            status: status, bytes_written: bytes_written,
+            scalar_result: scalar_result),
+        diagnostic: "")
+
+export simple_vector_kernel_capability_v1
+export encode_simple_vector_request_v1, decode_simple_vector_response_v1

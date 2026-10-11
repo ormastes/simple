@@ -20,7 +20,8 @@ use app.cli.parse_shard_main.{run_parse_shard}
 use app.cli.bootstrap_internal_worker_routing.{bootstrap_internal_worker_entry_v1,
     bootstrap_internal_worker_run_v1, bootstrap_internal_worker_is_parse_v1}
 use app.cli.bootstrap_focused_native_build.{run_exact_stage3_focused_capsule, run_exact_stage4_focused_capsule}
-use app.cli.bootstrap_focused_native_build_args.{focused_native_build_cache_dir}
+use app.cli.bootstrap_focused_native_build_args.{focused_native_build_cache_dir,
+    focused_native_build_runtime_path, focused_native_build_runtime_bundle}
 use app.io.native_build_cache.{native_build_cache_snapshot, native_build_cache_bind, native_build_cache_restore}
 use app.cli.bootstrap_native_output_args.{native_build_flag_needs_value, bootstrap_native_build_output_mode}
 use app.io.native_build_output_mode.{native_build_output_mode_snapshot, native_build_output_mode_bind, native_build_output_mode_restore}
@@ -424,8 +425,27 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
             print "error: could not restore native-build environment after output-mode binding failure"
         print "error: could not bind native-build output mode '{requested_output_mode}'"
         return 1
+    # The link step reads the runtime authority from the environment only
+    # (llvm_native_link_orchestrator: SIMPLE_RUNTIME_PATH /
+    # SIMPLE_NATIVE_RUNTIME_BUNDLE). This route used to drop both flags, so
+    # `--runtime-bundle core-c-bootstrap` with an ambient SIMPLE_RUNTIME_PATH
+    # linked the "ordinary" runtime set plus the seed aggregate archive, whose
+    # LLVM backend members left 20 undefined LLVM* symbols on a hello-world
+    # link (Windows-MSVC, 2026-10-11). Bind them like the --entry route does.
+    val positional_runtime_path = focused_native_build_runtime_path(args)
+    val positional_runtime_bundle = focused_native_build_runtime_bundle(args)
+    val old_runtime_path = env_get("SIMPLE_RUNTIME_PATH")
+    val old_runtime_bundle = env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE")
+    if positional_runtime_path != "":
+        env_set("SIMPLE_RUNTIME_PATH", positional_runtime_path)
+    if positional_runtime_bundle != "":
+        env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", positional_runtime_bundle)
     val driver = compiler_driver_create(options)
     val result = compiler_driver_run_compile(driver)
+    if positional_runtime_path != "":
+        env_set("SIMPLE_RUNTIME_PATH", old_runtime_path)
+    if positional_runtime_bundle != "":
+        env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", old_runtime_bundle)
     # Restore before every result-dependent return, including compile failure
     # and missing/stub output refusal. Absent and empty are distinct states.
     val output_restored = native_build_output_mode_restore(previous_output_mode)

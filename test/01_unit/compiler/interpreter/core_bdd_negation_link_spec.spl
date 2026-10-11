@@ -1,0 +1,69 @@
+"""Pure-Simple core interpreter: the BDD negation link `expect(x).not.<matcher>`.
+
+Before this, `expect(3).not.to_equal(4)` evaluated `.not` as a field of the
+expect() handle ("cannot access field on i64") and `.not_()` as a method on it
+("no method 'not_' on int"), so the matcher never ran. The seed was fixed in
+d64a855db92 (peel_bdd_matcher_receiver / evaluate_negated_bdd_matcher); this
+pins the mirror in _EvalOps/call_method_eval.spl.
+
+The programs below are fed to core_interpret in-process. Their prelude is a
+minimal stand-in for std.spec's ExpectHelper contract (a `negated` flag that
+every matcher honours, `not_()`, and the `_expect_helper_slots` subject slot);
+the result of each program is its failure count.
+"""
+use std.spec.{describe, it, expect}
+use compiler.frontend.core.interpreter.mod.{core_interpret}
+use compiler.frontend.core.interpreter.value.{val_get_int}
+use compiler.frontend.core.interpreter.eval.{eval_get_error}
+
+val PRELUDE: text = """
+var failures = 0
+class ExpectHelper:
+    value: i64
+    negated: bool
+
+    fn not_() -> ExpectHelper:
+        ExpectHelper(value: self.value, negated: true)
+
+    fn to_equal(expected):
+        val matches = self.value == expected
+        if self.negated:
+            if matches:
+                failures = failures + 1
+        else:
+            if not matches:
+                failures = failures + 1
+
+var _expect_helper_slots: [ExpectHelper] = []
+
+fn expect(value) -> i64:
+    _expect_helper_slots = [ExpectHelper(value: value, negated: false)]
+    1
+
+"""
+
+fn failures_of(body: text) -> i64:
+    val result = core_interpret(PRELUDE + body + "failures\n", "core_bdd_negation_probe.spl")
+    if eval_get_error() != "":
+        return -1
+    val_get_int(result)
+
+describe "core interpreter BDD negation link":
+    it "baseline: positive matcher counts a mismatch":
+        expect(failures_of("expect(3).to_equal(3)\nexpect(3).to_equal(4)\n")).to_equal(1)
+
+    it "`.not` passes when the matcher does not match":
+        expect(failures_of("expect(3).not.to_equal(4)\n")).to_equal(0)
+
+    it "`.not` fails when the matcher matches":
+        expect(failures_of("expect(3).not.to_equal(3)\n")).to_equal(1)
+
+    it "`.not_()` is the same link":
+        expect(failures_of("expect(3).not_().to_equal(4)\nexpect(3).not_().to_equal(3)\n")).to_equal(1)
+
+    it "`.not.to_not_x` is a double negation, the positive `to_x`":
+        expect(failures_of("expect(3).not.to_not_equal(3)\nexpect(3).not.to_not_equal(4)\n")).to_equal(1)
+
+    it "a negated non-matcher fails closed with an error, never a pass":
+        val _result = core_interpret(PRELUDE + "expect(3).not.to_frobnicate(3)\nfailures\n", "core_bdd_negation_probe.spl")
+        expect(eval_get_error()).to_contain("is not a BDD matcher")

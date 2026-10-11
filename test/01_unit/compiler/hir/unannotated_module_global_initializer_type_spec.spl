@@ -1,0 +1,108 @@
+"""
+Purpose: Pin the HIR type of an unannotated module global whose initializer
+is a call, a struct constructor, or an array literal. That type is the
+storage ABI MIR reads for the owner's static and for every importer's
+external declaration; leaving it `Infer` made MIR fail with "cannot derive
+module static type from unresolved initializer" (rc1-small-large-next40:
+`var owner_tls = rt_thread_local_new()`, `val WM_STATUS_OK =
+WmStatus(value: 0)`, the bcrypt S-box `[0x..., ...]` tables). The type is
+settled only from declared evidence -- the callee's declared return type,
+the struct named by the constructor, or one element type shared by every
+array element -- and anything unconstrained stays `Infer` so MIR still
+fails closed.
+Audience: compiler engineers maintaining hir_lowering/_Items const lowering.
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+val SOURCE = """
+struct WmStatus:
+    value: i64
+extern fn rt_thread_local_new() -> i64
+fn make() -> text:
+    "x"
+fn nums() -> [i64]:
+    [1]
+fn untyped_ret(x: i64):
+    x
+fn main():
+    pass
+pub val S = WmStatus(value: 0)
+pub val XS = ["a", "b"]
+pub val NS = [1, -2, 0x85a308d3]
+pub var owner_tls = rt_thread_local_new()
+pub val M = make()
+pub val NN = nums()
+pub val STATUSES = [WmStatus(value: 0), WmStatus(value: 1)]
+pub val MIXED = [1, "a"]
+main()
+"""
+
+fn type_name(t: HirType) -> text:
+    match t.kind:
+        case HirTypeKind.Int(bits, signed):
+            if signed: "i{bits}" else: "u{bits}"
+        case HirTypeKind.Float(bits): "f{bits}"
+        case HirTypeKind.Str: "str"
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Unit: "unit"
+        case HirTypeKind.Array(elem, _):
+            val array_elem: HirType = elem
+            "[" + type_name(array_elem) + "]"
+        case HirTypeKind.Named(_, _): "named"
+        case HirTypeKind.Infer(_, _): "infer"
+        case _: "other"
+
+fn const_types(src: text) -> Dict<text, text>:
+    val filename = "globals.spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir: HirModule = hir_lowering.lower_module(module)
+    var out: Dict<text, text> = {}
+    for constant in hir.constants.values():
+        out[constant.name] = type_name(constant.type_)
+    out
+
+describe "unannotated module global initializer type":
+    it "takes an extern call's declared return type":
+        val types = const_types(SOURCE)
+        expect(types["owner_tls"]).to_equal("i64")
+
+    it "takes a function call's declared return type":
+        val types = const_types(SOURCE)
+        expect(types["M"]).to_equal("str")
+        expect(types["NN"]).to_equal("[i64]")
+
+    it "names the struct a constructor call builds":
+        val types = const_types(SOURCE)
+        expect(types["S"]).to_equal("named")
+
+    it "types an array literal from its common element type":
+        val types = const_types(SOURCE)
+        expect(types["XS"]).to_equal("[str]")
+        expect(types["NS"]).to_equal("[i64]")
+        expect(types["STATUSES"]).to_equal("[named]")
+
+    it "leaves an unconstrained initializer Infer for MIR to reject":
+        val types = const_types(SOURCE)
+        expect(types["MIXED"]).to_equal("infer")
+        val empty_types = const_types("pub val EMPTY = []\n")
+        expect(empty_types["EMPTY"]).to_equal("infer")
+
+    it "leaves a generic record constructor without type arguments Infer":
+        val src = "struct Box<T>:\n    value: T\npub val B = Box(value: 1)\n"
+        val types = const_types(src)
+        expect(types["B"]).to_equal("infer")
+
+    it "types a top-level Unit call statement as unit":
+        val types = const_types(SOURCE)
+        var expr_type = "missing"
+        for name in types.keys():
+            if name.starts_with("_expr_"):
+                expr_type = types[name]
+        expect(expr_type).to_equal("unit")

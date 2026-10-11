@@ -119,11 +119,22 @@
 #
 # This file provides the top-level entry points.
 
+# Explicit owners for names the seed resolved through its flat namespace;
+# the pure-Simple HIR resolves per module and reported them as unresolved.
+use compiler.core.ast.{ast_reset}
+use compiler.core.interpreter.eval.{eval_expr, eval_set_error}
+use compiler.core.interpreter.eval_decls.{eval_init, eval_module}
+use compiler.core.interpreter.eval_tables.{must_use_scan_source}
+use compiler.core.lexer.{lex_init}
+use compiler.core.parser.{parser_has_errors, parser_init}
+use compiler.core.parser_expr.{parse_expr}
 use compiler.core.frontend.{core_frontend_parse_reset}
+use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals}
 use compiler.core.interpreter.env.*
 use compiler.core.interpreter.value.*
 use compiler.core.interpreter.ops.*
 use compiler.core.interpreter.resolve.*
+use compiler.core.capture_write_check.{capture_write_check_module}
 use compiler.core.interpreter.jit.*
 use compiler.core.interpreter.cli_eval.*
 use compiler.core.interpreter.eval_access.*
@@ -160,7 +171,9 @@ fn _core_run_pipeline(source: text, path: text) -> i64:
     ast_reset()    # Reset AST arena (expr, stmt, decl pools)
 
     # Scan for @must_use / @profile(critical) annotations (R9)
-    must_use_scan_source(source)
+    # Scan the conditionally-selected text: an inactive @when/@cfg variant
+    # must not register annotations for the active same-named declaration.
+    must_use_scan_source(_pp_preprocess_conditionals(source))
 
     # Parse using shared core frontend runner
     if not core_frontend_parse_reset(source, path):
@@ -171,7 +184,7 @@ fn _core_run_pipeline(source: text, path: text) -> i64:
     resolve_module_locals()
 
     # A nested fn / lambda writing an enclosing local is a compile error
-    # (closures are read-only; resolve.spl capture_write_check_module).
+    # (closures are read-only; core/capture_write_check.spl).
     val capture_error = capture_write_check_module()
     if capture_error != "":
         eval_set_error(capture_error)

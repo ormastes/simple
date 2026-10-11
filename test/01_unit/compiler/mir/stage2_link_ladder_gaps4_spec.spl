@@ -1,0 +1,141 @@
+"""
+Purpose: Pin pure-Simple (stage2) frontend -> HIR -> MIR lowering of five
+shapes that failed the native link ladder (stage2 rebuilt at 34f27d67aec)
+while the Rust seed accepted the same source:
+
+- `fn()` / `fn(text)` callable types with no `-> ret` (std signal_stubs
+  `[(i64, fn())]`, text_advanced `f: fn(text)`) reached MIR as `[infer-arm]`.
+- struct methods on a receiver typed only by HIR -- a local bound from a
+  struct-returning call (std sha256 `SecureZeroReport.verified()`) or the
+  call result itself (std simd `simd_add_i32x8(a, b).to_array()`).
+- `cache.contains_key(k)` on a `cache: mut Dict<K, V>` parameter.
+- `arr.filter(predicate)` with a function-valued variable, not a lambda
+  (std fs `Walk.filter`).
+- an unannotated function with an early `return <value>` and a tail value
+  (test_runner `cleanup_orphaned_containers`) -> E-SFFI-016.
+Audience: compiler engineers maintaining HIR/MIR lowering.
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use std.io_runtime.{read_file}
+
+fn lower_errors(src: text, tag: text) -> text:
+    val filename = "stage2_gaps4_" + tag + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var result = ""
+    for error in hir_lowering.errors:
+        result = result + "HIR_ERROR:" + error.message + "\n"
+    for error in mir_lowering.errors:
+        result = result + "MIR_ERROR:" + error.message + "\n"
+    result
+
+val FN_VOID_SRC = """
+var _signal_handlers: [(i64, fn())] = []
+
+fn store(sig: i64, h: fn()):
+    _signal_handlers.push((sig, h))
+
+fn each_char(s: text, f: fn(text)):
+    f(s)
+"""
+
+val LOCAL_FROM_CALL_SRC = """
+struct Report:
+    n: u64
+    fn verified() -> bool:
+        self.n > 0u64
+
+fn mk() -> Report:
+    Report(n: 1u64)
+
+fn check() -> bool:
+    val a: Report = mk()
+    a.verified()
+"""
+
+val CALL_RESULT_SRC = """
+struct V8:
+    a: i32
+    fn to_array() -> [i32]:
+        [self.a]
+
+fn add8(x: V8, y: V8) -> V8:
+    V8(a: x.a + y.a)
+
+fn use8(x: V8) -> i64:
+    val sums = add8(x, x).to_array()
+    sums.len()
+"""
+
+val MUT_DICT_SRC = """
+fn cached(program: text, cache: mut Dict<text, i64>) -> i64:
+    if cache.contains_key(program): return cache[program]
+    0
+"""
+
+val FILTER_VALUE_SRC = """
+struct Entry:
+    is_file: bool
+
+fn files(entries: [Entry], predicate: fn(Entry) -> bool) -> [Entry]:
+    entries.filter(predicate)
+"""
+
+val UNTYPED_TAIL_SRC = """
+fn count_items(xs: [text]):
+    if xs.len() == 0:
+        return 0
+    var n = 0
+    for x in xs:
+        n = n + 1
+    n
+"""
+
+fn protocol_codepoint_fn() -> text:
+    # The ui.ipc protocol helper, lowered standalone: it called the
+    # nonexistent `i64.to_text_char()` (no seed or stage2 builtin);
+    # `to_char()` is the int-to-char builtin both compilers provide.
+    var out = ""
+    var inside = false
+    for line in read_file("src/app/ui.ipc/protocol.spl").split("\n"):
+        if line.starts_with("fn _codepoint_to_text("):
+            inside = true
+        elif inside and line != "" and not line.starts_with(" "):
+            inside = false
+        if inside:
+            out = out + line + "\n"
+    out
+
+describe "stage2 link-ladder gaps (rung 4)":
+    it "lowers the ui.ipc codepoint helper through a real int builtin":
+        val src = protocol_codepoint_fn()
+        expect(src.contains("fn _codepoint_to_text(")).to_equal(true)
+        expect(lower_errors(src, "codepoint")).to_equal("")
+
+    it "lowers fn() callable types without an [infer-arm] return":
+        expect(lower_errors(FN_VOID_SRC, "fn_void")).to_equal("")
+
+    it "resolves a struct method on a local bound from a struct-returning call":
+        expect(lower_errors(LOCAL_FROM_CALL_SRC, "local_from_call")).to_equal("")
+
+    it "resolves a struct method on a call result receiver":
+        expect(lower_errors(CALL_RESULT_SRC, "call_result")).to_equal("")
+
+    it "lowers contains_key on a mut Dict parameter":
+        expect(lower_errors(MUT_DICT_SRC, "mut_dict")).to_equal("")
+
+    it "lowers Array.filter with a function-valued predicate":
+        expect(lower_errors(FILTER_VALUE_SRC, "filter_value")).to_equal("")
+
+    it "keeps the tail value of an untyped function with an early value return":
+        expect(lower_errors(UNTYPED_TAIL_SRC, "untyped_tail")).to_equal("")

@@ -8,6 +8,55 @@ default is decimal 6 GB (5,859,375 KiB); the compiler-scope ceiling is
 The ordinary compilation acceptance target remains **less than 1,000,000,000
 bytes** (at most 976,562 whole KiB), assessed separately from this emergency guard.
 
+## Job-scaled compiler ceiling (`--compiler-jobs`)
+
+A parallel compiler tree holds one in-flight module per worker, so its real
+peak grows with `--threads`. Measured on the seed->Stage 2 native build
+(Windows Job Object; sum of member working sets / peak job commit):
+
+| workers | working-set sum | job commit |
+|--------:|----------------:|-----------:|
+| 19 | 2,984,068 KiB | 3,361,016 KiB |
+| 40 | 4,222,672 - 4,620,996 KiB | 4,836,920 - 5,002,608 KiB |
+| 80 | > 5,946,000 KiB (killed at the 5,859,375 KiB cap, exit 88) | - |
+
+Commit exceeds the working-set sum, so the reading is real memory rather than
+shared pages counted once per process: roughly 1.4-1.8 GiB fixed plus 57-76 MiB
+per worker. A fixed 7 GB ceiling therefore cannot admit an 80-worker build.
+
+With `--compiler-jobs=N` (1..128, compiler scope only) the hard ceiling is
+
+    max(6,835,937, min(3,145,728 + N * 262,144, 3/4 of host physical RAM)) KiB
+
+Host RAM comes from `/proc/meminfo` `MemTotal` (Linux, MSYS) or `sysctl
+hw.memsize` / `hw.physmem`; when it cannot be read the ceiling does not move.
+The constants are not configurable. The tunable budget that selects the actual
+cap beneath this ceiling is `scripts/bootstrap/lib/tree-rss-policy.shs`
+(`--selftest`, `--resolve JOBS`), driven by host config `tree_rss_base_mib`,
+`tree_rss_per_job_mib` and `tree_rss_host_pct` (1..75). The receipt records
+`compiler_jobs`, `host_total_kib`, `host_total_source` (`undeclared`,
+`proc-meminfo`, `sysctl`, `unknown` or `fixture`) and, from the caller's
+`--cap-source` / `--cap-bound`, `cap_source` (`explicit-env`, `env-knobs`,
+`host-config`, `default`) and `cap_bound` (`explicit`, `budget`, `floor`,
+`host-fraction`, `hard-ceiling`).
+
+Host memory decides how far the ceiling may rise, so substituting it is a
+**test-only** hook. `SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH` (watchdog) and
+`BOOTSTRAP_TREE_RSS_MEMINFO_PATH` (shell policy) are honoured only together
+with `SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE=1` / `BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1`
+and only in `monitor` mode. Set without the switch, or while the cap is
+enforced, the fixture is a policy refusal with a reason - never ignored, and
+never able to size a real limit. A fixture run is visible afterwards as
+`host_total_source=fixture`.
+
+A cap outside `1..ceiling` is a **policy refusal**: exit 125, reason on stderr,
+and a receipt with `status=policy-refused` and `refusal_reason=...`, so a
+file-reading stage diagnosis can report why nothing ran. On Windows the Job
+Object helper no longer carries its own fixed 6,835,937 KiB bound (which
+rejected every valid aggregate or job-scaled cap as `invalid --supervise
+options`); it refuses only a cap at or above host physical memory (the largest
+accepted value is one KiB below it), and says so.
+
 ## Explicit parallel-test aggregate budget
 
 A parallel test coordinator and its workers need a distinct aggregate allowance:
@@ -131,6 +180,30 @@ identities, and the selected snapshot's ancestry (cycle checked, at most 32
 rows). These are failure diagnostics, not a change to ownership selection or
 permission handling. A failed `getsid` in the diagnostic is recorded as -1.
 
+### FreeBSD ownership across PTY sessions
+
+On FreeBSD, the pinned session helper has a persistent `--reaper-owner` mode.
+It acquires kernel reaper ownership before forking the blocked workload. The
+Perl guard retains RSS limits, timeout/grace policy and receipts; the native
+owner supplies bounded process metadata and kernel descendant cleanup. Its
+private control descriptors are closed in the payload before exec.
+
+`containment_scope=freebsd-reaper-descendants` identifies this boundary. A PTY
+child may create a new session while remaining owned. Session changes are
+counted in `cross_session_owned_peak`; the owner must retain its admitted
+session and birth identity. Sampling recursively includes nested reapers, uses
+native microsecond birth identities and rejects incomplete metadata. Cleanup
+uses `PROC_REAP_KILL` on the live owner, never cached descendant PIDs.
+
+Control EOF, parent death and caught signals request native cleanup. Owner exit
+alone does not prove cleanup. A killed/unresponsive owner produces unverified
+quiescence and a nonzero result. Kernel syscalls may themselves stall; userspace
+observation deadlines cannot turn that condition into verified cleanup. This
+is resource supervision, not a sandbox against malicious privileged processes.
+See [the bounded protocol](freebsd-reaper-protocol.md). The focused regression
+harness requires FreeBSD and a real original-pane test command; missing that
+test is reported `NOT_RUN`, never a complete qualification PASS.
+
 Sampling failure, malformed output, or a sample exceeding its observation
 budget causes exit 89. The default is five seconds on FreeBSD and one second
 elsewhere. `SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS` explicitly selects a
@@ -234,3 +307,15 @@ when the inherited managed session authority is valid: current/live-root SID,
 same-owner regular no-symlink read-only admission, and pinned helper digest.
 The process-tree guard remains enforcing; malformed or missing authority retains
 ordinary monitor behavior. This applies only to bootstrap seed test dispatch.
+
+## Completed observation budget overruns in monitor mode
+
+A completed, validated sample exceeding its observation budget still fails with
+exit 89 in enforce mode. Monitor mode continues with a warning emitted once,
+`sample_budget_exceeded` counting overruns and `measurement_budget_complete=0`
+qualifying the measured peak as incomplete budget evidence. The counter includes
+cleanup samples. This does not relax missing/malformed observation failures,
+observer protocol deadlines, identity/session validation, explicit timeout or
+cancellation, or cleanup. No retries or additional sleeps are introduced.
+Regression: `test/01_unit/scripts/process_tree_rss_monitor_budget_test.shs`;
+defect: https://github.com/ormastes/simple/issues/3002.

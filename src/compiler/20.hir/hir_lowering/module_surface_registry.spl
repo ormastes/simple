@@ -2,17 +2,38 @@
 
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.parser_types.*
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceBuilder, ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceBuilder, ModuleSurfacesByName, ModuleSurfaceCallable, ModuleSurfaceComposite, ModuleSurfaceEnum, ModuleSurfaceTrait, ModuleSurfaceTypeAlias, ModuleSurfaceConst, ModuleSurfaceImpl}
+use compiler.common.cache.native_resolution_trace.{NativeResolutionTraceV1}
 use compiler.hir.hir_lowering.module_surface_declarations.{module_surface_from_module}
 use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_name_index_build}
 use compiler.hir.hir_lowering.module_surface_registry_index.{module_surfaces_freeze, module_surfaces_frozen_alignment, module_surfaces_frozen_alignment_error, module_surfaces_validate_index_alignment}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_fold_std_alias, module_surface_declaration_matches}
 
 extern fn rt_hash_text(content: text) -> i64
-extern fn rt_transient_heap_promote(value: Any) -> bool
-extern fn rt_array_free(array: [Any])
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+extern fn rt_array_free<T>(array: [T])
 
-fn module_surface_promote_roots(roots: [Any]) -> bool:
+# One managed root array per batch keeps promotion a single traversal. Each
+# element boxes one retained owner (a runtime enum object), and the walk
+# follows its payload into the owner exactly as it would follow an array slot.
+enum ModuleSurfaceRoot:
+    Imports([ParserImport])
+    Exports([Export])
+    Ints([i64])
+    Texts([text])
+    Bools([bool])
+    Traces([NativeResolutionTraceV1])
+    Callables([ModuleSurfaceCallable])
+    Composites([ModuleSurfaceComposite])
+    Enums([ModuleSurfaceEnum])
+    Traits([ModuleSurfaceTrait])
+    TypeAliases([ModuleSurfaceTypeAlias])
+    Constants([ModuleSurfaceConst])
+    Impls([ModuleSurfaceImpl])
+    Surface(ModuleSurface)
+    Registry(ModuleSurfacesByName)
+
+fn module_surface_promote_roots(roots: [ModuleSurfaceRoot]) -> bool:
     val promoted = rt_transient_heap_promote(roots)
     rt_array_free(roots)
     promoted
@@ -323,31 +344,31 @@ pub fn module_surface_promote(surface: ModuleSurface) -> bool:
     # Dict<text, aggregate> is construction-only; retained declaration payload
     # arrays are the required follow-up owner before Stage 3 can be admitted.
     val origin_index = surface.export_origin_index
-    var roots: [Any] = []
-    roots.push(surface.imports)
-    roots.push(surface.exports)
-    roots.push(surface.composite_names)
-    roots.push(surface.enum_names)
-    roots.push(surface.trait_names)
-    roots.push(surface.callable_names)
-    roots.push(surface.type_alias_names)
-    roots.push(surface.constant_names)
-    roots.push(surface.import_item_offsets)
-    roots.push(surface.import_item_names)
-    roots.push(surface.import_item_aliases)
-    roots.push(surface.import_item_has_alias)
-    roots.push(surface.callable_values)
-    roots.push(surface.composite_values)
-    roots.push(surface.enum_values)
-    roots.push(surface.trait_values)
-    roots.push(surface.type_alias_values)
-    roots.push(surface.constant_values)
-    roots.push(surface.impls)
-    roots.push(origin_index.names)
-    roots.push(origin_index.owner_modules)
-    roots.push(origin_index.source_names)
-    roots.push(origin_index.resolution_kinds)
-    roots.push(surface)
+    var roots: [ModuleSurfaceRoot] = []
+    roots.push(ModuleSurfaceRoot.Imports(surface.imports))
+    roots.push(ModuleSurfaceRoot.Exports(surface.exports))
+    roots.push(ModuleSurfaceRoot.Texts(surface.composite_names))
+    roots.push(ModuleSurfaceRoot.Texts(surface.enum_names))
+    roots.push(ModuleSurfaceRoot.Texts(surface.trait_names))
+    roots.push(ModuleSurfaceRoot.Texts(surface.callable_names))
+    roots.push(ModuleSurfaceRoot.Texts(surface.type_alias_names))
+    roots.push(ModuleSurfaceRoot.Texts(surface.constant_names))
+    roots.push(ModuleSurfaceRoot.Ints(surface.import_item_offsets))
+    roots.push(ModuleSurfaceRoot.Texts(surface.import_item_names))
+    roots.push(ModuleSurfaceRoot.Texts(surface.import_item_aliases))
+    roots.push(ModuleSurfaceRoot.Bools(surface.import_item_has_alias))
+    roots.push(ModuleSurfaceRoot.Callables(surface.callable_values))
+    roots.push(ModuleSurfaceRoot.Composites(surface.composite_values))
+    roots.push(ModuleSurfaceRoot.Enums(surface.enum_values))
+    roots.push(ModuleSurfaceRoot.Traits(surface.trait_values))
+    roots.push(ModuleSurfaceRoot.TypeAliases(surface.type_alias_values))
+    roots.push(ModuleSurfaceRoot.Constants(surface.constant_values))
+    roots.push(ModuleSurfaceRoot.Impls(surface.impls))
+    roots.push(ModuleSurfaceRoot.Texts(origin_index.names))
+    roots.push(ModuleSurfaceRoot.Texts(origin_index.owner_modules))
+    roots.push(ModuleSurfaceRoot.Texts(origin_index.source_names))
+    roots.push(ModuleSurfaceRoot.Texts(origin_index.resolution_kinds))
+    roots.push(ModuleSurfaceRoot.Surface(surface))
     module_surface_promote_roots(roots)
 
 fn module_surface_promote_fields(surface: ModuleSurface):
@@ -385,7 +406,7 @@ fn module_surface_promote_fields(surface: ModuleSurface):
 
     So the promotes are the work and stay; no per-field failure signal exists to
     report. Fail-closed coverage is not lost: the registry root carrier below is
-    a freshly built `[Any]` whose promote verdict IS meaningful, and the driver
+    a freshly built `[ModuleSurfaceRoot]` whose promote verdict IS meaningful, and the driver
     runs `module_surfaces_retained_alignment_error` AFTER
     `_sffi_transient_array_scope_end()`, which reads the names back out of the
     dead scope — the real post-condition, at the only moment it means anything.
@@ -404,7 +425,7 @@ fn module_surface_promote_fields(surface: ModuleSurface):
     COUNT: 24 individual promote calls per surface, each paying that O(N)
     scan, is 24x more expensive than it needs to be. `module_surface_promote`
     (a few lines above) already proves the batched shape is safe for exactly
-    this promote function: collect many roots into ONE `[Any]` array and
+    this promote function: collect many roots into ONE `[ModuleSurfaceRoot]` array and
     promote it once — the reachability walk inside `rt_transient_heap_promote`
     already recurses into an array's elements via `transient_heap_children`,
     so a single call over an array of all 24 fields promotes the same set of
@@ -413,31 +434,31 @@ fn module_surface_promote_fields(surface: ModuleSurface):
     `module_surface_promote_freeze_names` below does the same). Pinned by
     `test/01_unit/compiler/hir/module_surface_promote_field_batching_spec.spl`.
     """
-    var fields: [Any] = []
-    fields.push(surface.composite_names)
-    fields.push(surface.enum_names)
-    fields.push(surface.trait_names)
-    fields.push(surface.callable_names)
-    fields.push(surface.type_alias_names)
-    fields.push(surface.constant_names)
-    fields.push(surface.composite_values)
-    fields.push(surface.enum_values)
-    fields.push(surface.trait_values)
-    fields.push(surface.callable_values)
-    fields.push(surface.type_alias_values)
-    fields.push(surface.constant_values)
-    fields.push(surface.import_target_indices)
-    fields.push(surface.import_target_names)
-    fields.push(surface.import_resolution_traces)
-    fields.push(surface.import_item_offsets)
-    fields.push(surface.import_item_names)
-    fields.push(surface.import_item_aliases)
-    fields.push(surface.import_item_has_alias)
-    fields.push(surface.export_route_sources)
-    fields.push(surface.export_route_locals)
-    fields.push(surface.export_route_target_indices)
-    fields.push(surface.export_route_target_names)
-    fields.push(surface.export_route_is_glob)
+    var fields: [ModuleSurfaceRoot] = []
+    fields.push(ModuleSurfaceRoot.Texts(surface.composite_names))
+    fields.push(ModuleSurfaceRoot.Texts(surface.enum_names))
+    fields.push(ModuleSurfaceRoot.Texts(surface.trait_names))
+    fields.push(ModuleSurfaceRoot.Texts(surface.callable_names))
+    fields.push(ModuleSurfaceRoot.Texts(surface.type_alias_names))
+    fields.push(ModuleSurfaceRoot.Texts(surface.constant_names))
+    fields.push(ModuleSurfaceRoot.Composites(surface.composite_values))
+    fields.push(ModuleSurfaceRoot.Enums(surface.enum_values))
+    fields.push(ModuleSurfaceRoot.Traits(surface.trait_values))
+    fields.push(ModuleSurfaceRoot.Callables(surface.callable_values))
+    fields.push(ModuleSurfaceRoot.TypeAliases(surface.type_alias_values))
+    fields.push(ModuleSurfaceRoot.Constants(surface.constant_values))
+    fields.push(ModuleSurfaceRoot.Ints(surface.import_target_indices))
+    fields.push(ModuleSurfaceRoot.Texts(surface.import_target_names))
+    fields.push(ModuleSurfaceRoot.Traces(surface.import_resolution_traces))
+    fields.push(ModuleSurfaceRoot.Ints(surface.import_item_offsets))
+    fields.push(ModuleSurfaceRoot.Texts(surface.import_item_names))
+    fields.push(ModuleSurfaceRoot.Texts(surface.import_item_aliases))
+    fields.push(ModuleSurfaceRoot.Bools(surface.import_item_has_alias))
+    fields.push(ModuleSurfaceRoot.Texts(surface.export_route_sources))
+    fields.push(ModuleSurfaceRoot.Texts(surface.export_route_locals))
+    fields.push(ModuleSurfaceRoot.Ints(surface.export_route_target_indices))
+    fields.push(ModuleSurfaceRoot.Texts(surface.export_route_target_names))
+    fields.push(ModuleSurfaceRoot.Bools(surface.export_route_is_glob))
     val _promoted = rt_transient_heap_promote(fields)
 
 fn module_surface_promote_scope_sentinel() -> bool:
@@ -445,12 +466,12 @@ fn module_surface_promote_scope_sentinel() -> bool:
 
     `rt_transient_heap_promote` answers false unconditionally when the transient
     array scope is not both ACTIVE and PAUSED (runtime_native.c:2430) — the same
-    `false` a genuinely unpromotable field produces. A fresh `[Any]` is the same
+    `false` a genuinely unpromotable field produces. A fresh `[ModuleSurfaceRoot]` is the same
     shape as the `roots` carrier the tail already promotes, so a false here means
     the scope state (or a split runtime copy under `--mode=dynload`) is at fault
     and no field name would be meaningful. Reported, never fatal on its own.
     """
-    var probe: [Any] = []
+    var probe: [i64] = []
     probe.push(0)
     val ok = rt_transient_heap_promote(probe)
     rt_array_free(probe)
@@ -460,7 +481,7 @@ pub fn module_surfaces_promote_reason(registry: ModuleSurfacesByName) -> text:
     """Promote the registry graph; return "" on success, else a named reason.
 
     Fail-closed: the one route that can answer a meaningful `false` — the
-    registry root carrier, a freshly built `[Any]` — returns a non-empty text
+    registry root carrier, a freshly built `[ModuleSurfaceRoot]` — returns a non-empty text
     naming it plus the scope sentinel, rather than the bare `false` the driver
     used to surface as an unattributed phase-2 failure.
 
@@ -478,14 +499,14 @@ pub fn module_surfaces_promote_reason(registry: ModuleSurfacesByName) -> text:
     owning scope is paused, then retain the registry carriers.
     """
     val sentinel = module_surface_promote_scope_sentinel()
-    var roots: [Any] = []
+    var roots: [ModuleSurfaceRoot] = []
     var surface_index = 0
     while surface_index < registry.surfaces.len():
         val surface = registry.surfaces[surface_index]
         module_surface_promote_fields(surface)
         module_surface_promote_freeze_names(surface)
         surface_index = surface_index + 1
-    roots.push(registry)
+    roots.push(ModuleSurfaceRoot.Registry(registry))
     if not module_surface_promote_roots(roots):
         return "registry root carrier (scope sentinel promote={sentinel}, surfaces={registry.surfaces.len()} names={registry.ordered_names.len()} indices={registry.ordered_indices.len()} dict={registry.index_by_name.len()})"
     ""
@@ -535,7 +556,7 @@ fn module_surface_promote_freeze_names(surface: ModuleSurface):
     from the dead scope (module_surface_registry_index.spl:321).
 
     Linux S3-1 (2026-09-14, BOOT-18): briefly batched into one
-    `rt_transient_heap_promote` call over a constructed `[Any]` array, the same
+    `rt_transient_heap_promote` call over a constructed `[ModuleSurfaceRoot]` array, the same
     shape as `module_surface_promote_fields` above (each call pays an O(N)
     native scan over the whole transient-scope tracking vector — see
     doc/08_tracking/bug/stage3_phase2_surface_stall_after_huffman_46gb_2026-09-14.md

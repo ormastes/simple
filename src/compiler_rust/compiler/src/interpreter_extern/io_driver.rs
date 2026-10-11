@@ -137,15 +137,17 @@ fn dispatch_checked(name: &str, args: &[Value]) -> Result<Option<Value>, Compile
                 get_i64(args, 3, name)?,
             )
         })),
+        // Simple-level shape (handle, fd, data: text, offset): the native lane
+        // text-expands `data` to (ptr, len), so the whole text is written.
         "rt_driver_submit_write" => {
-            let (data, len) = checked_text_span(args, 2, 3, name)?;
+            let data = get_str(args, 2, name)?;
             Ok(Value::Int(unsafe {
                 rt_driver_submit_write(
                     get_i64(args, 0, name)?,
                     get_i64(args, 1, name)?,
                     data.as_ptr().cast(),
-                    len,
-                    get_i64(args, 4, name)?,
+                    data.len() as i64,
+                    get_i64(args, 3, name)?,
                 )
             }))
         }
@@ -273,13 +275,11 @@ mod tests {
         ));
         assert!(is_dispatch_error(
             "rt_driver_submit_write",
-            &[
-                Value::Int(1),
-                Value::Int(2),
-                Value::text("abc"),
-                Value::Int(-1),
-                Value::Int(0),
-            ],
+            &[Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(0)],
+        ));
+        assert!(is_dispatch_error(
+            "rt_driver_submit_write",
+            &[Value::Int(1), Value::Int(2), Value::text("abc")],
         ));
         assert!(is_dispatch_error("rt_driver_poll", &[Value::Int(1)]));
         assert!(dispatch("rt_driver_unknown", &[]).is_none());

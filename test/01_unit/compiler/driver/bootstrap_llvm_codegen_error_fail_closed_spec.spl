@@ -1,0 +1,58 @@
+"""
+Purpose: the direct-emit bootstrap LLVM path (driver_bootstrap.spl) drives
+MirToLlvm.translate_function itself and then builds the module text, so it
+never passes through translate_module's codegen-error check. A recorded LLVM
+codegen error there must fail the compile with the diagnostic and leave NO
+object file -- before the check existed a former abort would have assembled
+and linked an object containing `undef` placeholders.
+Audience: compiler engineers maintaining the bootstrap LLVM driver.
+"""
+
+use std.spec
+use std.io_runtime.{file_exists}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{CompileResult}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.driver.driver_bootstrap.{bootstrap_emit_real_llvm_module_object}
+
+val MAIN_SRC = "fn main() -> i64:\n    0\n"
+
+fn module_with_unlowerable_instruction() -> MirModule:
+    val parsed = parse_full_frontend(MAIN_SRC, "fail_closed.spl", "fail_closed", Logger(level: 0))
+    var hl = HirLowering.with_filename("fail_closed.spl")
+    val hir = hl.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    var mir = mir_lowering.lower_module(hir)
+    for key in mir.functions.keys():
+        var fn_ = mir.functions[key]
+        var blocks = fn_.blocks
+        var first = blocks[0]
+        # HostGpuLaneEnd has no LLVM lowering (E-BACKEND-LLVM-INST-HostGpuLaneEnd).
+        first.instructions = first.instructions.push(MirInst(kind: MirInstKind.HostGpuLaneEnd("lane"), span: nil))
+        blocks[0] = first
+        fn_.blocks = blocks
+        mir.functions[key] = fn_
+    mir
+
+describe "bootstrap direct-emit LLVM path fails closed on a codegen error":
+    it "returns the diagnostic as a CodegenError and writes no object":
+        val output = "build/test_tmp/bootstrap_fail_closed_probe"
+        val object_path = output + ".app.cli.bootstrap_main.o"
+        val result = bootstrap_emit_real_llvm_module_object(module_with_unlowerable_instruction(), output, 0)
+        var message = ""
+        var is_codegen_error = false
+        match result:
+            case CompileResult.CodegenError(detail):
+                is_codegen_error = true
+                message = detail
+            case _: ()
+        expect(is_codegen_error).to_be(true)
+        expect(message.contains("E-BACKEND-LLVM-INST-HostGpuLaneEnd")).to_be(true)
+        expect(message.contains("function=")).to_be(true)
+        expect(file_exists(object_path)).to_be(false)

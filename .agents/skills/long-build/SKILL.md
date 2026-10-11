@@ -7,6 +7,10 @@ description: Coordinate long Simple builds and test matrices through finite depe
 
 Use the [shared collection policy](../../../doc/07_guide/tooling/bootstrap_failure_collection.md)
 as the continuation contract.
+Use its [cached object continuation workflow](../../../doc/07_guide/tooling/bootstrap_failure_collection.md#cached-object-continuation-and-early-linking)
+when a failed aggregate build still has reusable successful files. Read only
+the last log line, exit code and object size for successful compile observation;
+inspect additional diagnostics only for failed runs.
 
 1. Freeze the requested build/test inventory and dependencies. Record producer,
    source, runtime/tool identities, cache owners, outputs and current user worker
@@ -30,3 +34,10 @@ as the continuation contract.
 7. Finish the finite graph with truthful PASS/FAILED/BLOCKED/SKIPPED rows and
    actual test counts. Reuse green results for unchanged inputs; stop at
    convergence and never run an indefinite identical retry loop.
+
+## Serialized native diagnosis
+
+Apply [native staging and terminal evidence](../../../doc/07_guide/tooling/bootstrap_native_staging.md)
+when the selected lane requires one compiler/thread. Keep the lock through owned
+child cleanup and archival; publish terminal status only after fallback/finalization
+completes. Source repair may remain parallel under separate ownership.

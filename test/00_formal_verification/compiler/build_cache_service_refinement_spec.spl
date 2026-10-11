@@ -1,0 +1,81 @@
+"""
+Production source replay for the immutable build action owner.
+
+Run with the pinned source closure from source_bindings.json. These assertions
+call the actual coordinator and artifact service; no replacement scheduler is
+used. The service regressions are intentionally RED on the captured c48 source.
+Passing this bounded replay is not FV2 SourceRefined or ArtifactVerified.
+"""
+use std.spec.*
+use compiler.driver.action_graph.build_action_v1.{BuildActionV1, BuildActionResultV1, BuildActionPoolV1, BuildActionStateV1}
+use compiler.driver.action_graph.persisted_graph.{PersistedBuildGraphV1}
+use compiler.driver.action_graph.coordinator.{BuildPoolBudgetV1, coordinator_new_v1, coordinator_claim_v1, coordinator_commit_v1}
+use lib.compiler_artifact_service.profile.{artifact_service_profile_v1}
+use lib.compiler_artifact_service.protocol.{ArtifactResultV1}
+use lib.compiler_artifact_service.service.{ArtifactServiceV1, ArtifactRequestV1, ArtifactLeaseV1, ArtifactRequestStateV1, artifact_service_enqueue_v1, artifact_service_claim_v1, artifact_service_complete_v1}
+
+fn formal_queued_service() -> ArtifactServiceV1:
+    val profile = artifact_service_profile_v1("formal-build", "compiler-c48", ["parse"], 0, true)
+    artifact_service_enqueue_v1(ArtifactServiceV1(profile, []),
+        ArtifactRequestV1("action-a", "compiler-c48", "generation-a", 1, 1024))
+
+fn formal_leased_service() -> ArtifactServiceV1:
+    artifact_service_claim_v1(formal_queued_service(), "owner-a", "lease-a", 7, 2048, -1)
+
+fn formal_success_result(action_id: text) -> ArtifactResultV1:
+    ArtifactResultV1(action_id, "compiler-c48", "generation-a", "sha256-artifact-a", [], true, false, "")
+
+describe "REQ-FORMAL-OWNER: production build owner transitions":
+    it "should reject a second claim when the authoritative coordinator transfer is retained":
+        step("Claim one immutable action and retain the returned owner state")
+        val action = BuildActionV1("action-a", "command-a", ["input-a"], [], ["output-a"], BuildActionPoolV1.parse, 1, "generation-a", 1024, "")
+        val graph = PersistedBuildGraphV1("graph-a", "", "generation-a", [action])
+        val initial = coordinator_new_v1(graph, [BuildPoolBudgetV1(BuildActionPoolV1.parse, 2, 4096)])
+        val first = coordinator_claim_v1(initial, "action-a", "owner-a")
+        expect(first.claim.valid).to_be(true)
+        val duplicate = coordinator_claim_v1(first.coordinator, "action-a", "owner-b")
+        expect(duplicate.claim.valid).to_be(false)
+        expect(duplicate.claim.reason).to_equal("single-flight")
+        expect(duplicate.coordinator.runtime[0].owner_token).to_equal("owner-a")
+
+        step("Reject publication by a different owner without losing the valid claim")
+        val result = BuildActionResultV1("action-a", "generation-a", true, false, "artifact-a", "", [], 512)
+        val foreign = coordinator_commit_v1(duplicate.coordinator, "owner-b", result)
+        expect(foreign.commit.accepted).to_be(false)
+        expect(foreign.coordinator.runtime[0].state).to_equal(BuildActionStateV1.running)
+        val finished = coordinator_commit_v1(foreign.coordinator, "owner-a", result)
+        expect(finished.commit.accepted).to_be(true)
+        expect(finished.coordinator.runtime[0].memory_reserved_bytes).to_equal(0)
+        expect(coordinator_commit_v1(finished.coordinator, "owner-a", result).commit.accepted).to_be(false)
+
+    it "should reject an artifact for another action while retaining the live lease":
+        step("Submit action B's artifact under action A's otherwise matching lease")
+        val leased = formal_leased_service()
+        expect(leased.entries[0].state).to_equal(ArtifactRequestStateV1.leased)
+        val owner = ArtifactLeaseV1("lease-a", "action-a", "owner-a", 7, false)
+        val wrong = artifact_service_complete_v1(leased, owner, formal_success_result("action-b"))
+        expect(wrong.entries[0].cas_artifact_digest).to_equal("")
+        expect(wrong.entries[0].state).to_equal(ArtifactRequestStateV1.leased)
+        val valid = artifact_service_complete_v1(wrong, owner, formal_success_result("action-a"))
+        expect(valid.entries[0].state).to_equal(ArtifactRequestStateV1.completed)
+        expect(valid.entries[0].cas_artifact_digest).to_equal("sha256-artifact-a")
+
+    it "should ignore a stale foreign lease without poisoning the current owner's completion":
+        step("Deliver a late completion from an older owner generation")
+        val leased = formal_leased_service()
+        val stale = ArtifactLeaseV1("lease-old", "action-a", "owner-old", 6, false)
+        val unchanged = artifact_service_complete_v1(leased, stale, formal_success_result("action-a"))
+        expect(unchanged.entries[0].state).to_equal(ArtifactRequestStateV1.leased)
+        expect(unchanged.entries[0].lease.unwrap().generation).to_equal(7)
+        expect(unchanged.entries[0].cas_artifact_digest).to_equal("")
+        val current = ArtifactLeaseV1("lease-a", "action-a", "owner-a", 7, false)
+        val completed = artifact_service_complete_v1(unchanged, current, formal_success_result("action-a"))
+        expect(completed.entries[0].state).to_equal(ArtifactRequestStateV1.completed)
+
+    it "should keep one running lease when another caller claims the same immutable action":
+        step("Repeat a claim against the returned service state")
+        val first = formal_leased_service()
+        val second = artifact_service_claim_v1(first, "owner-b", "lease-b", 8, 2048, -1)
+        expect(second.entries.len()).to_equal(1)
+        expect(second.entries[0].lease.unwrap().owner_id).to_equal("owner-a")
+        expect(second.entries[0].lease.unwrap().generation).to_equal(7)

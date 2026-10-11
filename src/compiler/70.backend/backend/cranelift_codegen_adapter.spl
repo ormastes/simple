@@ -28,8 +28,8 @@ use compiler.backend.common.mir_inst_variant_name.{mir_instkind_variant_name}
 extern fn rt_file_read_bytes(path: text) -> [u8]?
 @unsafe(reason: "raw backend-policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
-extern fn rt_enum_discriminant(value: Any) -> i64
-extern fn rt_enum_payload(value: Any) -> i64
+extern fn rt_enum_discriminant(value: MirInstKind) -> i64
+extern fn rt_enum_payload(value: MirInstKind) -> i64
 extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
 
 fn cranelift_file_read_bytes(path: text) -> [u8]:
@@ -121,7 +121,10 @@ fn cranelift_isa_opt_level_v2(options: BackendCompileOptions) -> i64:
         case OptimizationLevel.Basic: -1
         case OptimizationLevel.Size: 1
         case OptimizationLevel.Standard | OptimizationLevel.Speed: 2
-        case OptimizationLevel.Aggressive: 3
+        # Aggressive still selects the aggressive MIR pipeline. Cranelift's
+        # ISA has no O3 setting: its maximum supported setting is speed (2),
+        # which the provider validates and reports back without substitution.
+        case OptimizationLevel.Aggressive: 2
 
 fn cranelift_new_aot_for_request_v2(
     name: text, target: text, options: BackendCompileOptions,
@@ -1163,8 +1166,29 @@ fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type
 # Binary Operation Translation
 # ============================================================================
 
-fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, a: i64, b: i64, left_operand: MirOperand, right_operand: MirOperand, func: MirFunction) -> i64:
-    val is_float = operand_is_float(left_operand, func)
+fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, left_value: i64, right_value: i64, left_operand: MirOperand, right_operand: MirOperand, func: MirFunction) -> i64:
+    val left_type = operand_type(left_operand, func)
+    val right_type = operand_type(right_operand, func)
+    val left_is_float = type_is_float(left_type)
+    val right_is_float = type_is_float(right_type)
+    val is_float = left_is_float or right_is_float
+    var a = left_value
+    var b = right_value
+    # MIR retains each operand's numeric type. Cranelift requires equal SSA
+    # types, so promote before choosing the floating instruction. In particular,
+    # both 5 / 2.0 and 5.0 / 2 must divide as floats rather than emit an invalid
+    # sdiv(i64, f64) or fdiv(f64, i64). Reuse cast signedness and width handling.
+    match op:
+        case Add | Sub | Mul | Div | Eq | Ne | Lt | Le | Gt | Ge:
+            if is_float:
+                var float_type = left_type
+                if not left_is_float:
+                    float_type = right_type
+                elif right_is_float and right_type.size_bytes() > left_type.size_bytes():
+                    float_type = right_type
+                a = cl_translate_cast(ctx, cl_module, a, left_operand, float_type, func)
+                b = cl_translate_cast(ctx, cl_module, b, right_operand, float_type, func)
+        case _: pass
     val left_is_unsigned = operand_is_unsigned(left_operand, func)
     val is_unsigned = left_is_unsigned or operand_is_unsigned(right_operand, func)
     match op:

@@ -1,0 +1,65 @@
+# Stage2 link-ladder parse parity with the seed lexer/parser:
+# (1) unsuffixed decimal literals up to u64::MAX carry their exact 64-bit word
+#     (seed lexer/numbers.rs parse_integer_digits); > u64::MAX still errors.
+# (2) postfix `?` composes with binary operators and call arguments.
+# @cover src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl
+# @cover src/compiler/10.frontend/core/parser_expr.spl
+use std.spec
+use compiler.core.parser.{parser_get_errors}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped}
+use compiler.frontend.parser_types_expr.{StmtKind, ExprKind}
+use std.io_runtime.{read_file_text}
+
+fn parse_errors(source: text) -> text:
+    parse_and_build_module_scoped(source, "stage2_parity.spl", false)
+    parser_get_errors().join("\n")
+
+fn returned_int_word(source: text) -> i64:
+    val module = parse_and_build_module_scoped(source, "stage2_word.spl", false)
+    val function = module.functions["f"]
+    var word: i64 = 12345
+    match function.body.stmts[0].kind:
+        case StmtKind.Expr(expression):
+            match expression.kind:
+                case ExprKind.IntLit(value): word = value
+                case _: word = 12345
+        case _: word = 12345
+    word
+
+describe "unsuffixed decimal literal above i64::MAX":
+    it "carries u64::MAX as its exact word":
+        expect(returned_int_word("fn f() -> u64:\n    18446744073709551615\n")).to_equal(-1)
+        expect(parser_get_errors().len()).to_equal(0)
+
+    it "keeps 2**63 and i64::MAX words unchanged":
+        expect(returned_int_word("fn f() -> i64:\n    9223372036854775807\n")).to_equal(9223372036854775807)
+        expect(returned_int_word("fn f() -> u64:\n    9223372036854775809\n")).to_equal(-9223372036854775807)
+        expect(returned_int_word("fn f() -> u64:\n    18_446_744_073_709_551_614\n")).to_equal(-2)
+        expect(parser_get_errors().len()).to_equal(0)
+
+    it "accepts the literal in a comparison":
+        expect(parse_errors("fn f(x: u64) -> bool:\n    if x == 18446744073709551615:\n        return true\n    false\n")).to_equal("")
+
+    it "still rejects u64::MAX plus one":
+        expect(parse_errors("fn f() -> u64:\n    18446744073709551616\n")).to_contain("out of range")
+
+describe "postfix try with binary operators":
+    it "parses try operands joined by + inside a call argument":
+        val src = "fn f(a: text) -> Result<i64, text>:\n    g(h(a)? + h(a)? + h(a)?)\n    Ok(0)\n"
+        expect(parse_errors(src)).to_equal("")
+
+    it "parses try followed by minus, field, index and nested calls":
+        expect(parse_errors("fn f(a: i64) -> Result<i64, text>:\n    val x = h(a)? - 1\n    Ok(x)\n")).to_equal("")
+        expect(parse_errors("fn f(a: i64) -> Result<i64, text>:\n    val x = h(a)?.len\n    Ok(x)\n")).to_equal("")
+        expect(parse_errors("fn f(a: i64) -> Result<i64, text>:\n    val x = h(a)?[0]\n    Ok(x)\n")).to_equal("")
+        expect(parse_errors("fn f(a: i64) -> Result<i64, text>:\n    val x = g(h(a)?)\n    Ok(x)\n")).to_equal("")
+
+describe "real stage2 link-ladder files":
+    it "parses db_retention.spl":
+        expect(parse_errors(read_file_text("src/lib/scv/db_retention.spl"))).to_equal("")
+
+    it "parses distributed_identity_map.spl":
+        expect(parse_errors(read_file_text("src/lib/scv/distributed_identity_map.spl"))).to_equal("")
+
+    it "parses db_paged_indexes.spl":
+        expect(parse_errors(read_file_text("src/lib/scv/db_paged_indexes.spl"))).to_equal("")

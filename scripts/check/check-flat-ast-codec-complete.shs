@@ -91,10 +91,16 @@ RESET_FNS='reset_all_pools|ast_reset|decl_metadata_pools_reset|stmt_reset|expr_r
 INLINE_RESET_NAMES='UNSAFE_ANNOTATIONS ENUM_ATTRIBUTES ENUM_OPEN_REGIONS'
 
 extract_pools() {
+    _extract_files="$1"
+    _extract_extra="${2:-}"
+    set --
+    for f in $_extract_files; do
+        [ ! -f "$f" ] || set -- "$@" "$f"
+    done
     {
-        for f in $1; do
-            [ -f "$f" ] || continue
+        if [ "$#" -gt 0 ]; then
             awk -v fns="$RESET_FNS" '
+                FNR == 1 { inbody = 0 }
                 /^(pub )?fn [a-zA-Z_0-9]+\(/ {
                     inbody = 0
                     name = $0
@@ -110,9 +116,9 @@ extract_pools() {
                     sub(/ *=.*/, "", line)
                     if (line ~ /^[A-Za-z_0-9]+$/) print line
                 }
-            ' "$f" 2>/dev/null
-        done
-        for n in ${2:-}; do printf '%s\n' "$n"; done
+            ' "$@" 2>/dev/null
+        fi
+        for n in $_extract_extra; do printf '%s\n' "$n"; done
     } | sort -u
 }
 
@@ -123,9 +129,14 @@ extract_pools() {
 # at scope end, and the next ast_reset() then clears freed memory. That is the
 # warm-cache access violation in HIR of compiler.backend.backend_types.
 extract_inplace_pools() {
-    for f in $1; do
-        [ -f "$f" ] || continue
-        awk -v fns="$RESET_FNS" '
+    _extract_files="$1"
+    set --
+    for f in $_extract_files; do
+        [ ! -f "$f" ] || set -- "$@" "$f"
+    done
+    [ "$#" -gt 0 ] || return 0
+    awk -v fns="$RESET_FNS" '
+            FNR == 1 { inbody = 0 }
             /^(pub )?fn [a-zA-Z_0-9]+\(/ {
                 inbody = 0
                 name = $0
@@ -141,8 +152,7 @@ extract_inplace_pools() {
                 sub(/\.clear.*/, "", line)
                 print line
             }
-        ' "$f" 2>/dev/null
-    done | sort -u
+        ' "$@" 2>/dev/null | sort -u
 }
 
 # Every assignment to a pool inside a codec body (flat_*_dump / flat_*_restore).
@@ -150,9 +160,14 @@ extract_inplace_pools() {
 # it inside the transient scope, and `arm_body = arm_body_rebuilt` there is what
 # actually crashed the cold-cache run.
 extract_codec_assignments() {
-    for f in $1; do
-        [ -f "$f" ] || continue
-        awk '
+    _extract_files="$1"
+    set --
+    for f in $_extract_files; do
+        [ ! -f "$f" ] || set -- "$@" "$f"
+    done
+    [ "$#" -gt 0 ] || return 0
+    awk '
+            FNR == 1 { inbody = 0 }
             /^(pub )?fn [a-zA-Z_0-9]+\(/ {
                 inbody = 0
                 name = $0
@@ -167,8 +182,7 @@ extract_codec_assignments() {
                 sub(/^[ \t]+/, "", line)
                 print line
             }
-        ' "$f" 2>/dev/null
-    done
+        ' "$@" 2>/dev/null
 }
 
 # Some nested i64 pools have an authoritative text mirror named <pool>_flat.
@@ -178,9 +192,14 @@ extract_codec_assignments() {
 # in the same dump function; missing/wrong payload or a different iterator
 # fails closed. Both mirrors remain independently subject to the normal scan.
 extract_encoded_pool_aliases() {
-    for f in $1; do
-        [ -f "$f" ] || continue
-        awk '
+    _extract_files="$1"
+    set --
+    for f in $_extract_files; do
+        [ ! -f "$f" ] || set -- "$@" "$f"
+    done
+    [ "$#" -gt 0 ] || return 0
+    awk '
+            FNR == 1 { in_dump = 0; stage = 0 }
             /^(pub )?fn [a-zA-Z_0-9]+\(/ {
                 in_dump = ($0 ~ /fn flat_[a-z_0-9]*_dump\(/)
                 stage = 0
@@ -215,8 +234,7 @@ extract_encoded_pool_aliases() {
                     stage = 1
                 }
             }
-        ' "$f" 2>/dev/null
-    done | sort -u
+        ' "$@" 2>/dev/null | sort -u
 }
 
 run_scan() {
@@ -226,53 +244,93 @@ run_scan() {
     _inplace=$(extract_inplace_pools "$_pool_files")
     _codec_assigns=$(extract_codec_assignments "$_codec_files")
     _encoded_aliases=$(extract_encoded_pool_aliases "$_codec_files")
-    _checked=0
-    _missing=""
-    _stale=""
-
-    # Stale-exclusion check: an excluded name that no longer exists as a pool.
-    for ex in $(printf '%s\n' "$EXCLUDE_RE" | tr '|' '\n' | sed 's/[^a-zA-Z_0-9]//g'); do
-        [ -n "$ex" ] || continue
-        [ "$ex" = "__none__" ] && continue
-        if ! printf '%s\n' "$_pools" | grep -qx "$ex"; then
-            _stale="$_stale $ex"
-        fi
-    done
-
-    _codec_text=""
+    set --
     for f in $_codec_files; do
-        [ -f "$f" ] && _codec_text="$_codec_text
-$(cat "$f")"
+        [ ! -f "$f" ] || set -- "$@" "$f"
     done
-
-    for p in $_pools; do
-        printf '%s\n' "$p" | grep -qE "$EXCLUDE_RE" && continue
-        _checked=$((_checked + 1))
-        # Encoded: appears as an argument to an enc_ helper.
-        # Decoded: appears on the left of an assignment from a dec_ helper.
-        # Scalar state rides the blob inline ("{name}\n" / name = r.next_i64())
-        # rather than through an enc_/dec_ helper, so both forms count.
-        _enc=$(printf '%s\n' "$_codec_text" | grep -cE "flat_pool_enc_[a-z_0-9]+\($p\)|out \+ \"\{$p\}")
-        if [ "$_enc" -eq 0 ] && printf '%s\n' "$_encoded_aliases" | grep -qx "$p"; then
-            _enc=1
-        fi
-        _dec=$(printf '%s\n' "$_codec_text" | grep -cE "^ *$p *= *(flat_pool_dec_|r\.next_)")
-        _repl=0
-        if printf '%s\n' "$_inplace" | grep -qx "$p"; then
-            _repl=$(printf '%s\n' "$_codec_assigns" | grep -E "^$p *=" | grep -cvE "^$p *= *flat_pool_dec_[a-z_0-9]+_into\($p, r\)$")
-        fi
-        if [ "$_enc" -eq 0 ] || [ "$_dec" -eq 0 ] || [ "$_repl" -ne 0 ]; then
-            _why=""
-            [ "$_enc" -eq 0 ] && _why="not-encoded"
-            [ "$_dec" -eq 0 ] && _why="${_why:+$_why,}not-decoded"
-            [ "$_repl" -ne 0 ] && _why="${_why:+$_why,}owner-replaced"
-            _missing="$_missing $p($_why)"
-        fi
-    done
-
-    SCAN_CHECKED="$_checked"
-    SCAN_MISSING="$_missing"
-    SCAN_STALE="$_stale"
+    # Feed tagged records so source backslashes stay literal (awk -v would
+    # interpret escapes). Batch the original regex predicates in one process:
+    # spawning several grep pipelines per pool dominates this guard on Windows.
+    _scan_result=$({
+        printf '%s\n' "$_pools" | sed 's/^/P/'
+        printf '%s\n' "$_inplace" | sed 's/^/I/'
+        printf '%s\n' "$_codec_assigns" | sed 's/^/A/'
+        printf '%s\n' "$_encoded_aliases" | sed 's/^/E/'
+        [ "$#" -eq 0 ] || sed 's/^/C/' "$@"
+    } | awk -v exclusions="$EXCLUDE_RE" '
+        {
+            kind = substr($0, 1, 1)
+            value = substr($0, 2)
+            if (kind == "P" && value != "") {
+                pools[++pool_count] = value
+                known[value] = 1
+            } else if (kind == "I" && value != "") {
+                inplace[value] = 1
+            } else if (kind == "A" && value != "") {
+                assignments[++assignment_count] = value
+            } else if (kind == "E" && value != "") {
+                aliases[value] = 1
+            } else if (kind == "C") {
+                codec[++codec_count] = value
+            }
+        }
+        END {
+            checked = 0
+            missing = ""
+            stale = ""
+            count = split(exclusions, excluded, "|")
+            for (i = 1; i <= count; i++) {
+                name = excluded[i]
+                gsub(/[^a-zA-Z_0-9]/, "", name)
+                if (name != "" && name != "__none__" && !(name in known))
+                    stale = stale " " name
+            }
+            for (i = 1; i <= pool_count; i++) {
+                p = pools[i]
+                if (p ~ exclusions) continue
+                checked++
+                enc = (p in aliases)
+                dec = 0
+                repl = 0
+                enc_re = "flat_pool_enc_[a-z_0-9]+\\(" p "\\)|out \\+ \"\\{" p "\\}"
+                dec_re = "^ *" p " *= *(flat_pool_dec_|r\\.next_)"
+                for (j = 1; j <= codec_count && (!enc || !dec); j++) {
+                    if (codec[j] ~ enc_re) enc = 1
+                    if (codec[j] ~ dec_re) dec = 1
+                }
+                if (p in inplace) {
+                    assignment_re = "^" p " *="
+                    owned_re = "^" p " *= *flat_pool_dec_[a-z_0-9]+_into\\(" p ", r\\)$"
+                    for (j = 1; j <= assignment_count; j++) {
+                        if (assignments[j] ~ assignment_re && assignments[j] !~ owned_re) {
+                            repl = 1
+                            break
+                        }
+                    }
+                }
+                if (!enc || !dec || repl) {
+                    why = ""
+                    if (!enc) why = "not-encoded"
+                    if (!dec) why = why (why == "" ? "" : ",") "not-decoded"
+                    if (repl) why = why (why == "" ? "" : ",") "owner-replaced"
+                    missing = missing " " p "(" why ")"
+                }
+            }
+            print checked
+            print "missing:" missing
+            print "stale:" stale
+        }
+    ') || { echo 'ERROR — batched codec scan failed' >&2; exit 2; }
+    # Read in this shell: a pipe-to-read would discard the result in a subshell.
+    {
+        IFS= read -r SCAN_CHECKED
+        IFS= read -r SCAN_MISSING
+        IFS= read -r SCAN_STALE
+    } <<EOF
+$_scan_result
+EOF
+    SCAN_MISSING=${SCAN_MISSING#missing:}
+    SCAN_STALE=${SCAN_STALE#stale:}
 }
 
 selftest() {
@@ -399,6 +457,19 @@ ALIAS_FIXTURE
         *) echo "selftest: cross-function local must fail payload encoding (missing=$SCAN_MISSING)"; _fail=1 ;;
     esac
 
+    # Fixture H: batching files must not carry function/alias state across EOF.
+    mkdir -p "$_tmp/h"
+    printf 'fn ast_reset():\n    good_pool = []\n    held = []\n    held.clear()\n' > "$_tmp/h/pools_a.spl"
+    printf '    ghost = []\n    phantom.clear()\n' > "$_tmp/h/pools_b.spl"
+    printf 'fn flat_test_dump():\n    held = flat_pool_dec_i64_into(held, r)\n    var rebuilt: [[i64]] = []\n    for entry in good_pool_flat:\n' > "$_tmp/h/codec_a.spl"
+    printf '        rebuilt.push(ast_i64_list_split(entry))\n    parts = parts.push(flat_pool_enc_i64_list(rebuilt))\n    held = replacement\n' > "$_tmp/h/codec_b.spl"
+    printf 'good_pool = flat_pool_dec_i64(r)\nheld = flat_pool_dec_i64_into(held, r)\nout = flat_pool_enc_i64(held)\n' > "$_tmp/h/codec_c.spl"
+    run_scan "$_tmp/h/pools_a.spl $_tmp/h/pools_b.spl" "$_tmp/h/codec_a.spl $_tmp/h/codec_b.spl $_tmp/h/codec_c.spl"
+    if [ "$SCAN_CHECKED" -ne 2 ] || [ "$SCAN_MISSING" != " good_pool(not-encoded)" ]; then
+        echo "selftest: file boundaries must reset extraction state (checked=$SCAN_CHECKED missing=$SCAN_MISSING)"
+        _fail=1
+    fi
+
     rm -rf "$_tmp"
     if [ "$_fail" -ne 0 ]; then
         echo "ERROR — nothing was checked (selftest failed)"
@@ -409,7 +480,7 @@ ALIAS_FIXTURE
 case "${1:-}" in
     --selftest)
         selftest
-        echo "PASS — 7 selftest fixture(s) checked, all behaved as specified"
+        echo "PASS — 8 selftest fixture(s) checked, all behaved as specified"
         exit 0
         ;;
 esac

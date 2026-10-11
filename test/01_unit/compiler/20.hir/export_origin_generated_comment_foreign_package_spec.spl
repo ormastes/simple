@@ -1,0 +1,121 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# A "Re-exported from X.spl" facade comment must not manufacture an export origin
+
+A generated facade marks each block with `# Re-exported from <file>.spl`. The
+surface builder turns that comment into an export-origin hint
+`<facade package>.<file>` for the names on the next `export` line. The hint is
+only provenance: it is valid when the named file is a child of the facade
+package. `src/compiler/99.loader/runtime/__init__.spl` is a curated facade whose
+owners live in the SIBLING package `compiler.loader.loader`, so every hint it
+produced named a module that does not exist
+(`compiler.loader.runtime.smf_cache`), and importing the name failed with
+`invalid export origin`. The hint also mis-split an `export use m.{A, B, C}`
+line on commas and bound the bogus origin to the middle name `B`, overriding
+the explicit origin written on that very line.
+
+See doc/08_tracking/bug/runtime_export_comment_origins_2026-10-10.md.
+"""
+
+# @tag: unit, compiler, hir, imports, exports
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+
+val cache_source = "pub struct SmfCache:\n    n: i64\n\npub fn cache_new() -> SmfCache:\n    SmfCache(n: 0)\n"
+val sweeper_source = "pub struct SweeperConfig:\n    a: i64\n\npub struct SweeperStats:\n    b: i64\n\npub struct Sweeper:\n    c: i64\n"
+val local_owner_source = "pub struct LocalThing:\n    t: i64\n"
+val facade_source = "# Curated facade; owners live in the sibling package.\n\n# Re-exported from sweeper.spl\nexport use pkg.loader.sweeper.\{SweeperConfig, SweeperStats, Sweeper\}\n\n# Re-exported from smf_cache.spl\nexport SmfCache\nexport cache_new\n\n# Re-exported from local_owner.spl\nexport LocalThing\n"
+val explicit_consumer = "use pkg.runtime.\{SweeperStats, SweeperConfig\}\n\nfn probe(s: SweeperStats, c: SweeperConfig) -> i64:\n    s.b + c.a\n"
+val bare_consumer = "use pkg.runtime.\{SmfCache\}\n\nfn lonely() -> i64:\n    1\n"
+val child_consumer = "use pkg.runtime.\{LocalThing\}\n\nfn probe(l: LocalThing) -> i64:\n    l.t\n"
+
+fn lower_errors(source: text) -> text:
+    lower_errors_as(source, "app/main.spl", "app.main", "pkg.runtime.__init__")
+
+fn lower_errors_as(source: text, consumer_path: text, consumer_name: text, facade_name: text) -> text:
+    val log = Logger(level: 0)
+    val cache_ast = parse_full_frontend(cache_source, "pkg/loader/smf_cache.spl", "pkg.loader.smf_cache", log)
+    val sweeper_ast = parse_full_frontend(sweeper_source, "pkg/loader/sweeper.spl", "pkg.loader.sweeper", log)
+    val facade_ast = parse_full_frontend(facade_source, "pkg/runtime/__init__.spl", facade_name, log)
+    val local_owner_ast = parse_full_frontend(local_owner_source, "pkg/runtime/local_owner.spl", "pkg.runtime.local_owner", log)
+    val consumer_ast = parse_full_frontend(source, consumer_path, consumer_name, log)
+    var modules: Dict<text, Module> = {}
+    modules["pkg.loader.smf_cache"] = cache_ast
+    modules["pkg.loader.sweeper"] = sweeper_ast
+    modules[facade_name] = facade_ast
+    modules["pkg.runtime.local_owner"] = local_owner_ast
+    val sources = [
+        SourceFile(path: "pkg/loader/smf_cache.spl", content: cache_source, module_name: "pkg.loader.smf_cache"),
+        SourceFile(path: "pkg/loader/sweeper.spl", content: sweeper_source, module_name: "pkg.loader.sweeper"),
+        SourceFile(path: "pkg/runtime/__init__.spl", content: facade_source, module_name: facade_name),
+        SourceFile(path: "pkg/runtime/local_owner.spl", content: local_owner_source, module_name: "pkg.runtime.local_owner")
+    ]
+    val built = module_surfaces_from_modules(modules, sources)
+    if built.is_err():
+        return "SURFACE-ERR " + built.unwrap_err()
+    val surfaces = built.unwrap()
+    var lowering = hirlowering_for_module(consumer_name, surfaces)
+    val hir = lowering.lower_module(consumer_ast)
+    var errors = ""
+    for e in lowering.errors:
+        errors = errors + e.message + ";"
+    "errors=" + errors
+
+describe "facade whose Re-exported-from comment names a file outside its package":
+    it "routes an export-use name through its written origin, not the comment":
+        val summary = lower_errors(explicit_consumer)
+        print "explicit consumer: {summary}"
+        expect(summary).to_equal("errors=")
+
+    it "does not freeze an unroutable origin for a bare export":
+        val summary = lower_errors(bare_consumer)
+        print "bare consumer: {summary}"
+        expect(summary.contains("invalid export origin")).to_equal(false)
+
+    it "keeps the hint when the named file is a real child of the facade":
+        val summary = lower_errors(child_consumer)
+        print "child consumer: {summary}"
+        expect(summary).to_equal("errors=")
+
+    it "does not fail a package sibling that prebinds the facade's exports":
+        val summary = lower_errors_as("fn lonely() -> i64:\n    1\n", "pkg/lonely.spl", "pkg.lonely", "pkg.runtime")
+        print "sibling consumer: {summary}"
+        expect(summary).to_equal("errors=")
+
+# Pruning a stale hint hands the bare export to package-sibling inference. When
+# two children of the facade package declare the name, inference fails closed
+# at surface build instead of the stale hint failing later at each importer.
+val twin_a_source = "pub struct Twin:\n    a: i64\n"
+val twin_b_source = "pub struct Twin:\n    b: i64\n"
+val twin_facade_source = "# Re-exported from gone.spl\nexport Twin\n"
+
+fn twin_surface_error() -> text:
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    modules["two.a"] = parse_full_frontend(twin_a_source, "two/a.spl", "two.a", log)
+    modules["two.b"] = parse_full_frontend(twin_b_source, "two/b.spl", "two.b", log)
+    modules["two.__init__"] = parse_full_frontend(twin_facade_source, "two/__init__.spl", "two.__init__", log)
+    val sources = [
+        SourceFile(path: "two/a.spl", content: twin_a_source, module_name: "two.a"),
+        SourceFile(path: "two/b.spl", content: twin_b_source, module_name: "two.b"),
+        SourceFile(path: "two/__init__.spl", content: twin_facade_source, module_name: "two.__init__")
+    ]
+    val built = module_surfaces_from_modules(modules, sources)
+    if built.is_err():
+        return "SURFACE-ERR " + built.unwrap_err()
+    "built"
+
+describe "stale marker over a bare export with two declarers in the package":
+    it "fails closed as an ambiguous facade export at surface build":
+        val summary = twin_surface_error()
+        print "twin facade: {summary}"
+        expect(summary.starts_with("SURFACE-ERR ")).to_equal(true)
+        expect(summary.contains("ambiguous facade export")).to_equal(true)

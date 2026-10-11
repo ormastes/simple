@@ -129,13 +129,27 @@ static int simple_dynload_unique_snapshot_linux_v1(int snapshot) {
 }
 #endif
 
-/* Forward declaration: the definition is Windows-only and lives near the
- * bottom of this file, but simple_gpu_open() below calls it. Without this
- * clang-cl emits an implicit declaration returning int and then errors with
- * "conflicting types for 'runtime_dynload_open_utf8'" at the real HMODULE
- * definition, which broke the Windows MSVC stage 2 runtime probe. */
+/* Shared UTF-8 loader belongs to both the registry and legacy wrappers. */
 #ifdef _WIN32
-static HMODULE runtime_dynload_open_utf8(const char *path);
+static HMODULE runtime_dynload_open_utf8(const char *path) {
+    int wide_len;
+    wchar_t *wide_path;
+    HMODULE handle;
+    if (!path || !path[0]) return NULL;
+    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        path, -1, NULL, 0);
+    if (wide_len <= 0) return NULL;
+    wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide_path) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+            path, -1, wide_path, wide_len) != wide_len) {
+        free(wide_path);
+        return NULL;
+    }
+    handle = LoadLibraryW(wide_path);
+    free(wide_path);
+    return handle;
+}
 #endif
 
 static void *simple_gpu_open(const char *path) {
@@ -1572,6 +1586,9 @@ int64_t rt_gpu_provider_unload(int64_t backend_bit) {
     return 1;
 }
 
+/* Hosted Rust native-all uses this complete registry/state owner while keeping
+ * its existing legacy GPU and generic dynamic-library ABI implementations. */
+#ifndef SIMPLE_GPU_PROVIDER_REGISTRY_ONLY
 #define GPU_CALL0(ret, name, bit, provider_name, unavailable) \
     ret name(void) { typedef ret (*Fn)(void); SimpleGpuCallPinV1 pin; ret result; \
         if (!simple_gpu_call_acquire_v1(bit, provider_name, &pin)) return unavailable; \
@@ -1908,27 +1925,7 @@ int64_t rt_metal_set_bytes(int64_t encoder, int64_t array_value, int64_t request
     return result;
 }
 
-#ifdef _WIN32
-static HMODULE runtime_dynload_open_utf8(const char *path) {
-    int wide_len;
-    wchar_t *wide_path;
-    HMODULE handle;
-    if (!path || !path[0]) return NULL;
-    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-        path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
-    if (!wide_path) return NULL;
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-            path, -1, wide_path, wide_len) != wide_len) {
-        free(wide_path);
-        return NULL;
-    }
-    handle = LoadLibraryW(wide_path);
-    free(wide_path);
-    return handle;
-}
-#endif
+
 
 int64_t spl_dynlib_snapshot_linux(int64_t path_value) {
 #if defined(__linux__)
@@ -2051,3 +2048,4 @@ int64_t spl_dlclose(int64_t handle) {
     return (int64_t)dlclose((void*)(intptr_t)handle);
 #endif
 }
+#endif /* !SIMPLE_GPU_PROVIDER_REGISTRY_ONLY */

@@ -1,0 +1,40 @@
+# Link command recording — persist the exact linker argv next to the output.
+#
+# A failed (or hung) native link is only diagnosable from the exact command
+# that ran. Build logs trim long lines and are rotated, and the MSVC/MinGW/cc
+# paths each printed the command differently (or only on failure). Every
+# external link arm records its argv here BEFORE spawning the linker, so a
+# crash, a timeout or a trimmed log still leaves `<output>.link-command.txt`
+# behind, and `--verbose` prints the same text untrimmed.
+
+use std.io_runtime.{file_write}
+
+pub fn link_command_record_path(output: text) -> text:
+    output + ".link-command.txt"
+
+pub fn link_command_quote(arg: text) -> text:
+    """Quote one argv token for a copy-pasteable command line: tokens with
+    whitespace or quotes are wrapped in double quotes with embedded quotes
+    escaped; everything else is passed through verbatim."""
+    val needs_quotes = arg == "" or arg.contains(" ") or arg.contains("\t") or arg.contains("\"")
+    if not needs_quotes:
+        return arg
+    "\"" + arg.replace("\"", "\\\"") + "\""
+
+pub fn render_link_command(exe: text, args: [text]) -> text:
+    var parts: [text] = [link_command_quote(exe)]
+    for arg in args:
+        parts.push(link_command_quote(arg))
+    parts.join(" ")
+
+pub fn record_link_command(output: text, exe: text, args: [text], verbose: bool) -> text:
+    """Write the rendered command to link_command_record_path(output) and,
+    when verbose, print it in full. Returns the rendered command. A failed
+    write is reported, never fatal: recording is diagnostics, not the link."""
+    val command = render_link_command(exe, args)
+    val path = link_command_record_path(output)
+    if not file_write(path, command + "\n"):
+        print "[linker-wrapper] could not record link command at {path}"
+    if verbose:
+        print "[linker-wrapper] link command ({path}): {command}"
+    command

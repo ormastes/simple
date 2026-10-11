@@ -1,0 +1,96 @@
+extern fn rt_exit(code: i64)
+fn assert(condition: bool):
+    if not condition:
+        print "ASSERTION FAILED"
+        rt_exit(1)
+
+struct CompileSourceInventoryEntryV1:
+    source_identity: text
+    content_digest: text
+    semantic_digest: text
+    export_digest: text
+    initializer_digest: text
+    provider_digest: text
+    byte_count: i64
+
+fn compile_source_inventory_identity_cmp_v1(left: text, right: text) -> i64:
+    val shared = if left.len() < right.len(): left.len() else: right.len()
+    var index = 0
+    while index < shared:
+        val a = left.byte_at(index) as i64
+        val b = right.byte_at(index) as i64
+        if a != b:
+            return if a < b: -1 else: 1
+        index = index + 1
+    if left.len() == right.len(): 0 elif left.len() < right.len(): -1 else: 1
+
+
+fn compiler_source_manifest_membership_v1(
+    entries: [CompileSourceInventoryEntryV1], rows: [text]
+) -> bool:
+    if rows.len() == 0:
+        return true
+    # Full inventory validation already guarantees canonical ordering. Avoid
+    # building a checkout-sized hash table for a small selected snapshot.
+    # Keep the existing linear batch path for large selections: one binary
+    # search per inventory row would regress whole-project bootstrap.
+    if rows.len() <= 32 and rows.len() * 16 <= entries.len():
+        for row in rows:
+            if not compiler_source_manifest_row_present_v1(entries, row):
+                return false
+        return true
+    var admitted_rows: {text: bool} = {}
+    for entry in entries:
+        admitted_rows["{entry.source_identity}|sha256_{entry.content_digest}|{entry.byte_count}"] = true
+    for row in rows:
+        if not admitted_rows.contains_key(row):
+            return false
+    true
+
+fn compiler_source_manifest_row_present_v1(
+    entries: [CompileSourceInventoryEntryV1], row: text
+) -> bool:
+    val separator = row.index_of("|")
+    if separator < 0:
+        return false
+    val identity = row[0:separator]
+    var low = 0
+    var high = entries.len()
+    while low < high:
+        val middle = low + (high - low) / 2
+        val entry = entries[middle]
+        val order = compile_source_inventory_identity_cmp_v1(entry.source_identity, identity)
+        if order < 0:
+            low = middle + 1
+        elif order > 0:
+            high = middle
+        else:
+            if row == "{entry.source_identity}|sha256_{entry.content_digest}|{entry.byte_count}":
+                return true
+            break
+    # Preserve the helper's original membership behavior for caller-created
+    # (not decoded) records too, including unsorted or duplicate identities.
+    # Canonical successful admission never needs this fallback.
+    for entry in entries:
+        if row == "{entry.source_identity}|sha256_{entry.content_digest}|{entry.byte_count}":
+            return true
+    false
+
+fn main():
+    var entries: [CompileSourceInventoryEntryV1] = []
+    var i = 0
+    while i < 8:
+        val path = "src/module_{100000 + i}.spl"
+        entries.push(CompileSourceInventoryEntryV1(path, "digest", "digest", "digest", "digest", "digest", 128))
+        i = i + 1
+    var rows: [text] = []
+    i = 0
+    while i < 1:
+        rows.push("src/module_{100000 + 7 + i}.spl|sha256_digest|128")
+        i = i + 1
+    i = 0
+    while i < 10:
+        val actual = compiler_source_manifest_membership_v1(entries, rows)
+        assert(actual == true)
+        print actual
+        i = i + 1

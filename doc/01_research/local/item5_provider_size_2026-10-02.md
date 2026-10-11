@@ -1,6 +1,14 @@
 <!-- codex-research -->
 # Item 5: kernel/extension aspect loading and binary size
 
+## 2026-10-11 Astra variation reconciliation
+
+The user supplied the integrated SIMD/GPU/SOSIX proposal and explicitly requested Astra research. The [retained independent Astra review](item5_variation_astra_review_2026-10-11.md) compares it with release `02b150b385013d21bc408b45244431de85d391de`. Proposal SHA-256: `6e470a5c531aae39d6adec12c129986395681f5d3591bd4380db1113b232d3e1`. Preserve earlier authors and dated evidence below.
+
+The exact V2 feature registry and bounded target/environment generation owners already exist. Missing work includes host-independent vectorizer input, exact ISA receipts, scoped resolver policy, explicit V1-loader/V2-environment adaptation, target registration coverage, and production GPU/SOSIX task authority. The C registry repair is merged; its actual CUDA device evidence does not certify those other paths. The [shared-interface addendum](../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration) records selected ownership; REQ-016..023 and I5-V01..V08 incorporate the research without claiming implementation.
+
+Knowledge selection: exact feature `item5_simd_gpu_sosix_variation` routes to existing compiler layer knowledge plus the existing SOSIX expert; source consumers still use longest-prefix layer rules. Runtime/library routes preserve their architecture profiles; kernel/drivers remain `mdsoc_only`. No new runtime or wiki authority is introduced.
+
 Date: 2026-10-02. Research baseline: `e10963a3b065dde1643c777512c3988526973957`.
 Scope: item 5 of `doc/03_plan/seven_plans_host_completion_2026-09-29.md`.
 This additive document preserves prior research and selected requirements.

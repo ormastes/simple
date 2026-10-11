@@ -1,0 +1,112 @@
+# Shared non-vacuity helpers for compiler lowering specs (task 15a / BUG-02,
+# T12 of the robustness plans).
+#
+# A lowering spec that asserts on the TEXT of a module it lowered proves
+# nothing when the module came back empty: under SIMPLE_BOOTSTRAP=1 a spec's
+# parse_full_frontend once left `module.functions` empty and every `to_contain`
+# on the serialized output was evaluated against "", green. These helpers make
+# "something was lowered" an explicit, failing assertion. A spec that really
+# expects an empty module says so by passing `min = 0`, and that choice is
+# visible at the call site.
+
+use std.spec
+use std.nogc_sync_mut.spec.{fail_assertion, note_expectation}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir.*
+
+# Records a failing assertion on the current example when `module` carries
+# fewer than `min` functions. Returns the count so a caller can chain on it.
+# Each helper counts as ONE evaluated expectation (note_expectation) whether
+# it passes or fails, so a spec relying on it alone is not read as vacuous.
+pub fn expect_lowered_hir_functions(module: HirModule, min: i64) -> i64:
+    note_expectation()
+    val count = module.functions.len()
+    if count < min:
+        fail_assertion("expected at least {min} lowered HIR function(s) in module '{module.name}', got {count} (vacuous lowering)")
+    count
+
+pub fn expect_lowered_mir_functions(mir: MirModule, min: i64) -> i64:
+    note_expectation()
+    val count = mir.functions.len()
+    if count < min:
+        fail_assertion("expected at least {min} lowered MIR function(s), got {count} (vacuous lowering)")
+    count
+
+pub fn expect_parsed_functions(module: ParserModule, min: i64) -> i64:
+    note_expectation()
+    val count = module.functions.len()
+    if count < min:
+        fail_assertion("expected at least {min} parsed function(s), got {count} (vacuous parse)")
+    count
+
+# Parse + HIR-lower `src` as file `file_name`, asserting at least `min`
+# functions came out AND that lowering reported no errors -- a module that
+# lowered with errors is not a module the test meant to assert on.
+# `min = 0` declares an intentionally empty module; a test that expects
+# lowering errors uses lower_hir_expecting_errors instead.
+pub fn lower_hir_checked(src: text, file_name: text, min: i64) -> HirModule:
+    val (hir, errors) = lower_hir_expecting_errors(src, file_name)
+    note_expectation()
+    if errors.len() > 0:
+        fail_assertion("HIR lowering of {file_name} reported {errors.len()} error(s); first: {errors[0]}")
+    val _ = expect_lowered_hir_functions(hir, min)
+    hir
+
+# Opt-in variant: returns the module and the lowering error messages without
+# asserting on either, for specs whose subject IS a lowering error.
+pub fn lower_hir_expecting_errors(src: text, file_name: text) -> (HirModule, [text]):
+    val parsed = parse_full_frontend(src, file_name, file_name, Logger(level: 0))
+    var hl = HirLowering.with_filename(file_name)
+    val hir = hl.lower_module(parsed)
+    var messages: [text] = []
+    for e in hl.errors:
+        messages.push("{e.message}")
+    (hir, messages)
+
+# HIR -> MIR, asserting at least `min` MIR functions.
+pub fn lower_mir_checked(hir: HirModule, min: i64) -> MirModule:
+    var ml = MirLowering.new(hir.symbols)
+    val mir = ml.lower_module(hir)
+    val _ = expect_lowered_mir_functions(mir, min)
+    mir
+
+# Deterministic text of a whole MIR module: every function serialized, in
+# name order, so two lowerings of equal input compare byte-for-byte.
+pub fn mir_module_text(mir: MirModule) -> text:
+    var names: [text] = []
+    for function in mir.functions.values():
+        # Insertion into name order; no library sort dependency.
+        var at = 0
+        while at < names.len() and names[at] < function.name:
+            at = at + 1
+        names.insert(at, function.name)
+    var parts: [text] = []
+    for name in names:
+        for function in mir.functions.values():
+            if function.name == name:
+                parts.push(serialize_mir_function(function))
+    parts.join("\n")
+
+# "" when equal, else "<label>: line <n>: expected=<a> got=<b>" for the first
+# differing line, so an equivalence failure names where instead of dumping
+# two whole MIR texts.
+pub fn first_text_difference(label: text, expected: text, got: text) -> text:
+    if expected == got:
+        return ""
+    val a = expected.split("\n")
+    val b = got.split("\n")
+    var k = 0
+    while k < a.len() and k < b.len() and a[k] == b[k]:
+        k = k + 1
+    val ea = if k < a.len(): a[k] else: "<end>"
+    val gb = if k < b.len(): b[k] else: "<end>"
+    "{label}: line {k + 1}: expected={ea} got={gb}"
+
+export expect_lowered_hir_functions, expect_lowered_mir_functions, expect_parsed_functions
+export lower_hir_checked, lower_hir_expecting_errors, lower_mir_checked, mir_module_text, first_text_difference

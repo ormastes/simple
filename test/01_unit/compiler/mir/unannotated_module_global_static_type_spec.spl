@@ -1,0 +1,160 @@
+"""
+Purpose: Pin that an unannotated module global initialized by a call, a
+struct constructor or an array literal gets static storage on BOTH sides of
+a module boundary from the same settled HIR type: the owner's `lower_static`
+no longer fails with "cannot derive module static type from unresolved
+initializer", and an importer's `register_provider_global_bindings`
+declares the identical storage type. A genuinely unconstrained initializer
+(mixed-type array literal) still fails closed with a span on both sides --
+never a silent i64 slot.
+Audience: compiler engineers maintaining _MirLowering module statics and
+provider globals.
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{SymbolTable, HirModule}
+use compiler.hir.hir_definitions.{HirConst}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_globals.*
+use compiler.mir.mir_serialization.{serialize_mir_inst}
+
+val PROVIDER = """
+struct WmStatus:
+    value: i64
+extern fn rt_thread_local_new() -> i64
+fn make() -> text:
+    "x"
+pub val S = WmStatus(value: 0)
+pub val XS = ["a", "b"]
+pub var owner_tls = rt_thread_local_new()
+pub val M = make()
+"""
+
+val IMPORTED_SYMBOL_ID = 777
+
+fn lower_hir(src: text) -> HirModule:
+    val filename = "provmod.spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    hir_lowering.lower_module(module)
+
+fn mir_type_name(t: MirType) -> text:
+    match t.kind:
+        case MirTypeKind.I64: "i64"
+        case MirTypeKind.Opaque(name): "opaque:" + name
+        case MirTypeKind.Array(_, _): "array"
+        case _: "other"
+
+fn owner_errors(src: text) -> [text]:
+    val hir = lower_hir(src)
+    var lowering = MirLowering.new(hir.symbols)
+    val _mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for error in lowering.errors:
+        if error.message.contains("module static type"):
+            messages = messages.push(error.message)
+    messages
+
+fn imported_storage(src: text, name: text) -> (text, i64, bool):
+    """(storage type, error count, every error carries a span)."""
+    val hir = lower_hir(src)
+    var constants: [HirConst] = []
+    for constant in hir.constants.values():
+        constants = constants.push(constant)
+    var lowering = MirLowering.new(SymbolTable.new())
+    var demanded: Dict<text, [i64]> = {}
+    demanded[mir_global_declaration_key("provmod", name)] = [IMPORTED_SYMBOL_ID]
+    val _found = lowering.register_provider_global_bindings("provmod", hir.symbols, constants, demanded, {})
+    var storage = "missing"
+    for declaration in lowering.builder.module.statics.values():
+        if declaration.symbol.id == IMPORTED_SYMBOL_ID:
+            storage = mir_type_name(declaration.type_)
+    var all_spanned = true
+    for error in lowering.errors:
+        if error.span == nil:
+            all_spanned = false
+    (storage, lowering.errors.len(), all_spanned)
+
+fn unit_static_count(src: text) -> (i64, i64):
+    """(Unit-typed statics, statics named after a `_expr_` statement)."""
+    val hir = lower_hir(src)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var unit_statics = 0
+    var expr_statics = 0
+    for declaration in mir.statics.values():
+        match declaration.type_.kind:
+            case MirTypeKind.Unit: unit_statics = unit_statics + 1
+            case _: ()
+        if declaration.name.contains("_expr_"):
+            expr_statics = expr_statics + 1
+    (unit_statics, expr_statics)
+
+fn unit_fn_calls_by_function(src: text) -> Dict<text, i64>:
+    """Per MIR function: how many instructions call `unit_fn`."""
+    val hir = lower_hir(src)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var counts: Dict<text, i64> = {}
+    for function in mir.functions.values():
+        var calls = 0
+        for block in function.blocks:
+            for inst in block.instructions:
+                val rendered = serialize_mir_inst(inst)
+                if rendered.contains("\"Call\"") and rendered.contains("unit_fn"):
+                    calls = calls + 1
+        counts[function.name] = calls
+    counts
+
+describe "unannotated module global static storage":
+    it "lowers the owner's statics without an unresolved-initializer fatal":
+        expect(owner_errors(PROVIDER).len()).to_equal(0)
+
+    it "declares an imported extern-call global with the callee's return storage":
+        val (storage, error_count, _) = imported_storage(PROVIDER, "owner_tls")
+        expect(error_count).to_equal(0)
+        expect(storage).to_equal("i64")
+
+    it "declares an imported array-literal global as an array":
+        val (array_storage, array_errors, _) = imported_storage(PROVIDER, "XS")
+        expect(array_errors).to_equal(0)
+        expect(array_storage).to_equal("array")
+
+    it "declares an imported call global with the callee return storage":
+        val (text_storage, text_errors, _) = imported_storage(PROVIDER, "M")
+        expect(text_errors).to_equal(0)
+        expect(text_storage).to_equal("opaque:str")
+
+    it "still fails closed with a span for a mixed-type array literal":
+        val mixed = "pub val MIXED = [1, \"a\"]\n"
+        val owner = owner_errors(mixed)
+        expect(owner.len()).to_be_greater_than(0)
+        val (_, error_count, all_spanned) = imported_storage(mixed, "MIXED")
+        expect(error_count).to_be_greater_than(0)
+        expect(all_spanned).to_equal(true)
+
+    it "emits no storage for a Unit-valued top-level call statement":
+        val src = "fn main():\n    pass\nmain()\n"
+        val (unit_statics, expr_statics) = unit_static_count(src)
+        expect(unit_statics).to_equal(0)
+        expect(expr_statics).to_equal(0)
+
+    it "reads a Unit global as the unit value without re-running its initializer":
+        val src = "var count = 0\nfn unit_fn():\n    count = count + 1\nval r = unit_fn()\nfn read_twice():\n    r\n    r\n"
+        val counts = unit_fn_calls_by_function(src)
+        var init_calls = 0
+        var reader_calls = -1
+        for name in counts.keys():
+            if name.contains("__module_init"):
+                init_calls = init_calls + counts[name]
+            if name.contains("read_twice"):
+                reader_calls = counts[name]
+        # The initializer runs unit_fn exactly once (count == 1 after
+        # init); the two reads of `r` call nothing.
+        expect(init_calls).to_equal(1)
+        expect(reader_calls).to_equal(0)

@@ -1,0 +1,103 @@
+"""
+Purpose: Pin that a module constant whose initializer is a SIGNED numeric
+literal (`val NEG = -1`, `val HALF = -2.5`) is a compile-time constant on
+every path. The frontend emits every float literal as `FloatLexeme`, so the
+MIR const folder must negate the lexeme (it used to return nil for `-2.5`,
+leaving the owner module with no MirConstant); a folded `Float` keeps its
+sign bit (`-0.0`, not `0.0 - x`); and `runtime_module_initializer_supported`
+keeps a negated literal on the static path instead of admitting it for a
+redundant runtime re-store now that HIR settles its type.
+Audience: compiler engineers maintaining _MirLowering/module_lowering and
+_MirLoweringExpr/method_calls_literals.
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{SymbolTable, HirModule, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+val PROVIDER = "pub val NEG = -1\npub val HALF = -2.5\npub val MASK = ~0\npub val CAP = 1024 * 1024\npub val WORDS = \"a\" + \"b\"\n"
+
+fn lower_consts(src: text) -> [HirConst]:
+    val filename = "unarymod.spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir: HirModule = hir_lowering.lower_module(module)
+    var constants: [HirConst] = []
+    for constant in hir.constants.values():
+        constants = constants.push(constant)
+    constants
+
+fn const_named(constants: [HirConst], name: text) -> HirConst?:
+    for constant in constants:
+        if constant.name == name:
+            return Some(constant)
+    nil
+
+fn folded_text(constants: [HirConst], name: text) -> text:
+    """Render the folded constant of `name`, or why it did not fold."""
+    val found = const_named(constants, name)
+    if found == nil:
+        return "missing"
+    val constant: HirConst = found.unwrap()
+    var lowering = MirLowering.new(SymbolTable.new())
+    val folded = lowering.lower_const_expr(constant.value)
+    if folded == nil:
+        return "nil"
+    match folded.unwrap():
+        case MirConstValue.Int(v): "int:{v}"
+        case MirConstValue.Float(v): "float:{v}"
+        case MirConstValue.FloatLexeme(lexeme): "lexeme:" + lexeme
+        case _: "other"
+
+fn runtime_initializer_names(constants: [HirConst]) -> [text]:
+    var names: [text] = []
+    for constant in runtime_module_initializers_in_declaration_order(constants):
+        names = names.push(constant.name)
+    names
+
+describe "signed numeric literal module constants":
+    it "folds a negated float lexeme to a signed lexeme":
+        val constants = lower_consts(PROVIDER)
+        expect(folded_text(constants, "HALF")).to_equal("lexeme:-2.5")
+
+    it "still folds negated and bit-inverted integer literals":
+        val constants = lower_consts(PROVIDER)
+        expect(folded_text(constants, "NEG")).to_equal("int:-1")
+        expect(folded_text(constants, "MASK")).to_equal("int:-1")
+
+    it "preserves the sign bit of a negated float zero":
+        val span = Span.default()
+        val zero = HirExpr(kind: HirExprKind.FloatLit(0.0, nil), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Float(64), span: span), span: span)
+        val negated = HirExpr(kind: HirExprKind.Unary(HirUnaryOp.Neg, zero), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Float(64), span: span), span: span)
+        var lowering = MirLowering.new(SymbolTable.new())
+        val folded = lowering.lower_const_expr(negated)
+        expect(folded == nil).to_be(false)
+        var is_negative_zero = false
+        match folded.unwrap():
+            case MirConstValue.Float(v):
+                # -0.0 == 0.0, so the sign survives only through its reciprocal.
+                is_negative_zero = v == 0.0 and 1.0 / v < 0.0
+            case _: ()
+        expect(is_negative_zero).to_be(true)
+
+    it "keeps negated and bit-inverted literals on the static path":
+        val constants = lower_consts(PROVIDER)
+        val runtime = runtime_initializer_names(constants)
+        expect(runtime.contains("NEG")).to_be(false)
+        expect(runtime.contains("HALF")).to_be(false)
+        expect(runtime.contains("MASK")).to_be(false)
+
+    it "still routes runtime-valued initializers through the runtime path":
+        val constants = lower_consts(PROVIDER)
+        val runtime = runtime_initializer_names(constants)
+        expect(runtime.contains("CAP")).to_be(true)
+        expect(runtime.contains("WORDS")).to_be(true)

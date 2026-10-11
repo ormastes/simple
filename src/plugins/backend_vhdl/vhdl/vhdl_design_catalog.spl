@@ -15,26 +15,26 @@ use compiler.mir.mir_types.{MirType}
 # std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
 # cannot resolve it — declare the runtime extern directly.
 @unsafe(reason: "raw dictionary membership ABI", capabilities: [ffi])
-extern fn rt_dict_contains(dict: i64, key: Any) -> bool
+extern fn rt_dict_contains<K>(dict: i64, key: K) -> bool
 @unsafe(reason: "raw tagged-value discriminant ABI", capabilities: [ffi])
-extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_enum_discriminant<T>(value: T) -> i64
 @unsafe(reason: "raw tagged-value payload ABI", capabilities: [ffi])
-extern fn rt_enum_payload(value: Any) -> i64
+extern fn rt_enum_payload<T>(value: T) -> i64
 @unsafe(reason: "raw nullable environment-read ABI", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text?
 
 @always_inline
-fn _sffi_dict_contains(dict: i64, key: Any) -> bool:
+fn _sffi_dict_contains<K>(dict: i64, key: K) -> bool:
     unsafe(capabilities: [ffi]):
         rt_dict_contains(dict, key)
 
 @always_inline
-fn _sffi_enum_discriminant(value: Any) -> i64:
+fn _sffi_enum_discriminant<T>(value: T) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(value)
 
 @always_inline
-fn _sffi_enum_payload(value: Any) -> i64:
+fn _sffi_enum_payload<T>(value: T) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_payload(value)
 
@@ -347,7 +347,7 @@ fn vhdl_catalog_static(static_: MirStatic, rebase: Dict<i64, i64>) -> MirStatic:
 fn vhdl_catalog_validate_type_ref(ty: MirType, types: Dict<SymbolId, MirTypeDef>) -> Result<(), text>:
     match ty.kind:
         case Struct(symbol) | Enum(symbol):
-            if not _sffi_dict_contains(types, symbol):
+            if not rt_dict_contains(types, symbol):
                 return Err("VHDL design catalog references missing type symbol {symbol.id}")
         case Array(element, _) | Slice(element):
             return vhdl_catalog_validate_type_ref(element, types)
@@ -1010,7 +1010,7 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
                 vhdl_catalog_mark_inst_types(inst, needed_types)
                 match inst.kind:
                     case LoadGlobal(_, static_symbol) | StoreGlobal(static_symbol, _) | GlobalAddr(_, static_symbol, _):
-                        if static_symbol.id < 0 or not _sffi_dict_contains(all_statics, static_symbol):
+                        if static_symbol.id < 0 or not rt_dict_contains(all_statics, static_symbol):
                             eprint("[vhdl-catalog-site] unmapped-static")
                             return Err("VHDL design catalog references unmapped global/static symbol {static_symbol.id} from `{func.name}`")
                         val static_ = all_statics[static_symbol]
@@ -1020,7 +1020,7 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
                             if init.symbol.id < 0:
                                 eprint("[vhdl-catalog-site] unmapped-static-init")
                                 return Err("VHDL design catalog retained an unmapped static initializer symbol from `{static_.name}`")
-                            if _sffi_dict_contains(all_constants, init.symbol):
+                            if rt_dict_contains(all_constants, init.symbol):
                                 constants[init.symbol] = all_constants[init.symbol]
                             vhdl_catalog_mark_type(init.type_, needed_types)
                     case _: ()
@@ -1030,13 +1030,13 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
     while type_progress:
         type_progress = false
         for symbol in vhdl_catalog_sorted_symbols(all_types.keys()):
-            if _sffi_dict_contains(needed_types, symbol.id) and not _sffi_dict_contains(types, symbol):
+            if _sffi_dict_contains(needed_types, symbol.id) and not rt_dict_contains(types, symbol):
                 val type_def = all_types[symbol]
                 types[symbol] = type_def
                 vhdl_catalog_type_def_mark_dependencies(type_def, needed_types)
                 type_progress = true
     for type_id in needed_types.keys():
-        if type_id < 0 or not _sffi_dict_contains(types, SymbolId(id: type_id)):
+        if type_id < 0 or not rt_dict_contains(types, SymbolId(id: type_id)):
             eprint("[vhdl-catalog-site] unmapped-type")
             return Err("VHDL design catalog references unmapped type symbol {type_id}")
 

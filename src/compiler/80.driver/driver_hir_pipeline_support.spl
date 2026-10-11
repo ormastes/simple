@@ -20,9 +20,12 @@ use compiler.frontend.aspect_registry.{aspect_registry_reset}
 use compiler.frontend.effect_registry.{effect_registry_reset}
 use compiler.frontend.layer_eq_registry.{layer_eq_registry_reset}
 use compiler.driver.driver_source_pipeline_impl.{driver_end_transient_parse_scope, driver_promote_retained_frontend_owners_v1}
-use compiler.semantics.value_struct_layout.{validate_value_struct_layouts}
+use compiler.semantics.value_struct_layout.{value_struct_layout_report, value_struct_layout_is_cycle_diagnostic, value_struct_layout_cycle_is_fatal_for}
+use std.nogc_sync_mut.io.env_ops.{env_get}
 use compiler.semantics.layer_eq_validation.{validate_layer_eq_types}
 use compiler.semantics.effect_validation.{validate_effect_contracts}
+use compiler.semantics.rt_criticality_validation.{validate_rt_criticality_diagnostics}
+use compiler.semantics.rt_criticality.{RtCriticalDiagnosticSeverity}
 use compiler.semantics.aspect_validation.{validate_aspect_contracts}
 use compiler.semantics.aspect_weave.{weave_forward_advice}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -36,7 +39,7 @@ use compiler.common.cache.reverse_reference_facts.{
 
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_exit(code: i64)
-extern fn rt_heap_ref_wellformed(value: Any) -> bool
+extern fn rt_heap_ref_wellformed<T>(value: T) -> bool
 
 pub fn driver_rollback_flat_hir_row_or_abort(expected_count: i64):
     val actual_count = bootstrap_hir_module_count()
@@ -246,6 +249,29 @@ fn driver_hir_module_dict_dropped_values(hir_modules: Dict<text, HirModule>) -> 
             dropped = dropped.push(key)
     dropped
 
+# Every post-HIR validation failure is printed here, once, so all three
+# callers report identically (two of them used to add the errors to the
+# context without ever printing the marker).
+fn driver_print_post_hir_validation_fatal(errors: [text]):
+    var shown: i64 = 0
+    for error in errors:
+        if shown < 10:
+            eprint("[post-hir-validation-fatal] {error}")
+            shown = shown + 1
+    if errors.len() > 0:
+        eprint("[post-hir-validation-fatal-count] count={errors.len()} shown={shown}")
+
+pub fn driver_rt_criticality_errors(modules: Dict<text, HirModule>) -> [text]:
+    """Route typed RT warnings to diagnostics and errors to the fatal driver result."""
+    var errors: [text] = []
+    for diagnostic in validate_rt_criticality_diagnostics(modules):
+        match diagnostic.severity:
+            case RtCriticalDiagnosticSeverity.Warning:
+                eprint("[post-hir-validation-warning] {diagnostic.message}")
+            case RtCriticalDiagnosticSeverity.Error:
+                errors = errors.push(diagnostic.message)
+    errors
+
 pub fn driver_validate_value_struct_layouts(
     module_keys: [text],
     module_values: [HirModule],
@@ -257,9 +283,25 @@ pub fn driver_validate_value_struct_layouts(
     # 2026-09-05 without naming a step. Gated like every other log_phase
     # (SIMPLE_COMPILER_PHASE_PROFILE=1 / SIMPLE_COMPILER_TRACE=1).
     log_phase("phase3:hir:validate:value_struct_layouts:start")
-    for error in validate_value_struct_layouts(module_keys, module_values):
-        errors = errors.push(error)
-    log_phase("phase3:hir:validate:value_struct_layouts:done errors={errors.len()}")
+    val layout_report = value_struct_layout_report(module_keys, module_values)
+    # SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE=warning prints by-value struct cycles
+    # and keeps compiling, so out-of-tree code can list all of them in one
+    # run instead of failing after a full HIR pass. Default is fatal; the
+    # validator's internal errors are never downgraded. DIAGNOSTIC-ONLY: the
+    # build then continues into layout and codegen with a struct that has no
+    # finite size, so whatever it produces must not be trusted or shipped.
+    val layout_cycles_fatal = value_struct_layout_cycle_is_fatal_for(env_get("SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE"))
+    var layout_cycles_downgraded: i64 = 0
+    for error in layout_report.errors:
+        if not layout_cycles_fatal and value_struct_layout_is_cycle_diagnostic(error):
+            eprint("[post-hir-validation-warning] {error}")
+            layout_cycles_downgraded = layout_cycles_downgraded + 1
+        else:
+            errors = errors.push(error)
+    if layout_cycles_downgraded > 0:
+        eprint("[post-hir-validation-warning] {layout_cycles_downgraded} by-value struct cycle(s) not fatal: SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE=warning is diagnostic-only; do not trust or ship this build output")
+    val skipped_struct_edges: i64 = layout_report.skipped_struct_edges
+    log_phase("phase3:hir:validate:value_struct_layouts:done errors={errors.len()} skipped_struct_edges={skipped_struct_edges}")
     log_phase("phase3:hir:validate:dict_census:start")
     val dropped = driver_hir_module_dict_dropped_values(hir_modules)
     val census_total: i64 = hir_modules.keys().len()
@@ -280,6 +322,7 @@ pub fn driver_validate_value_struct_layouts(
                 eprint("[post-hir-validation-fatal]   dropped HIR aggregate: {dropped_key}")
             dropped_shown = dropped_shown + 1
         errors = errors.push("internal error: {dropped.len()} HIR module(s) lost their aggregate value in Dict<text, HirModule> before post-HIR validation (first: {dropped[0]})")
+        driver_print_post_hir_validation_fatal(errors)
         return errors
     log_phase("phase3:hir:validate:layer_eq:start")
     for layer_eq_error in validate_layer_eq_types(hir_modules):
@@ -289,6 +332,10 @@ pub fn driver_validate_value_struct_layouts(
     for effect_error in validate_effect_contracts(hir_modules):
         errors = errors.push(effect_error)
     log_phase("phase3:hir:validate:effects:done errors={errors.len()}")
+    log_phase("phase3:hir:validate:rt_criticality:start")
+    for rt_error in driver_rt_criticality_errors(hir_modules):
+        errors = errors.push(rt_error)
+    log_phase("phase3:hir:validate:rt_criticality:done errors={errors.len()}")
     log_phase("phase3:hir:validate:aspects:start")
     val aspect_errors = validate_aspect_contracts(hir_modules)
     for aspect_error in aspect_errors:
@@ -298,4 +345,5 @@ pub fn driver_validate_value_struct_layouts(
         log_phase("phase3:hir:validate:weave:start")
         val _woven = weave_forward_advice(hir_modules)
         log_phase("phase3:hir:validate:weave:done")
+    driver_print_post_hir_validation_fatal(errors)
     errors

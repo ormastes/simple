@@ -1,0 +1,67 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# auto_vectorize_codegen.generate_prologue: alignment-check call arity
+
+Found by the MIR verifier (MIRV-004b): `generate_prologue` called
+`create_alignment_check_block(ctx, loop_info)` with 2 of the callee's 6
+required parameters (no defaults), on the live `create_vector_loop` path
+(_AutoVectorize/recipe.spl:131). The call now passes the loop bound, the
+shared induction variable, a temp base above the function's locals and the
+peeling block id, mirroring the rewrite path (_AutoVectorize/rewrite.spl:554).
+
+This spec pins the shape of the prologue the fixed call produces: the first
+block is the `align_check` block, its `Le` compare reads the loop's induction
+variable against `bound - vector_width`, and its If falls to the peeling
+block (ctx.next_local + 1) when the vector loop does not fit.
+"""
+
+# @tag: unit, compiler, mir_opt, vectorize
+
+use std.spec
+use compiler.mir.mir_data.*
+use compiler.mir_opt.mir_opt.auto_vectorize_types.*
+use compiler.mir_opt.mir_opt.auto_vectorize_codegen.*
+
+fn loop_info() -> VectorLoopInfo:
+    VectorLoopInfo(
+        header_block: BlockId.new(1), body_blocks: [BlockId.new(2)], exit_block: BlockId.new(3),
+        induction_var: LocalId(id: 4), start_value: 0, end_value: 64, step: 1)
+
+fn ctx() -> VectorizeContext:
+    VectorizeContext(vector_width: 8, element_type: MirType(kind: MirTypeKind.F32), next_local: 40)
+
+describe "generate_prologue passes the full alignment-check contract":
+    it "emits align_check first, comparing the induction variable with bound - VF, falling to the peel block":
+        val blocks = generate_prologue(ctx(), loop_info())
+        expect(blocks.len()).to_be_greater_than(1)
+        val align = blocks[0]
+        expect(align.label ?? "").to_equal("align_check")
+        expect(align.id.id).to_equal(40)
+        expect(align.instructions.len()).to_equal(2)
+        var saw_bound_sub = false
+        var saw_le_on_induction = false
+        for inst in align.instructions:
+            match inst.kind:
+                case MirInstKind.BinOp(_, op, left, right):
+                    match op:
+                        case MirBinOp.Sub:
+                            match left.kind:
+                                case MirOperandKind.Const(value, _):
+                                    match value:
+                                        case MirConstValue.Int(v): saw_bound_sub = v == 64
+                                        case _: ()
+                                case _: ()
+                        case MirBinOp.Le:
+                            match left.kind:
+                                case MirOperandKind.Copy(local): saw_le_on_induction = local.id == 4
+                                case _: ()
+                        case _: ()
+                case _: ()
+        expect(saw_bound_sub).to_equal(true)
+        expect(saw_le_on_induction).to_equal(true)
+        match align.terminator:
+            case MirTerminator.If(_, then_, else_):
+                expect(then_.id).to_equal(42)
+                expect(else_.id).to_equal(41)
+            case _:
+                expect(false).to_equal(true)

@@ -14,8 +14,8 @@ use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete}
 use std.nogc_sync_mut.io.process_ops.{process_bounded_timed_out, process_run_bounded}
 use std.nogc_sync_mut.io.env_ops.{env_get}
-use std.io_runtime.{getpid}
-use std.sffi.cli.{cli_get_args}
+use std.io_runtime.{getpid, host_os}
+use std.sffi.cli_args.{cli_get_args}
 use std.string_core.{char_code}
 use lib.common.env_access.model.{env_canonical_evidence_artifact_path}
 use std.nogc_sync_mut.sffi.io.{path_absolute}
@@ -134,9 +134,18 @@ var _cached_binary_path = ""
 fn _self_exe_via_pid_query() -> text:
     """Canonical path of the executable this pid runs, via `ps`; "" if unknown.
 
-    Bounded (2s) single exec, no shell. Windows has no `ps`, so the exec fails
-    and this returns "" (SIMPLE_BINARY above covers that host). A `.spl` or an
-    unresolvable answer is rejected rather than returned as an executable."""
+    Bounded single exec, no shell. Windows has neither /proc nor `ps`, so it asks
+    PowerShell for this pid's image path (same query as
+    app.io.cli_ops._cli_self_exe_via_pid_query): without it a Windows runner fell
+    through to the literal `bin/simple`, i.e. the tracked/deployed bin/simple.exe,
+    which may be older than the source tree (BUG-IT-1, 2026-10-10). A `.spl` or
+    an unresolvable answer is rejected rather than returned as an executable."""
+    if host_os() == "windows":
+        val (win_out, _win_err, win_code) = process_run_bounded("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "(Get-Process -Id {getpid()}).Path"], 20000, 65536)
+        val win_path = win_out.trim()
+        if win_code != 0 or win_path == "" or win_path.ends_with(".spl") or not file_exists(win_path):
+            return ""
+        return win_path
     val (stdout, _stderr, code) = process_run_bounded("ps", ["-o", "comm=", "-p", "{getpid()}"], 2000, 65536)
     if code != 0:
         return ""
@@ -148,10 +157,46 @@ fn _self_exe_via_pid_query() -> text:
         return ""
     resolved
 
+fn explicit_simple_binary_from_env() -> text:
+    """SIMPLE_BINARY, then SIMPLE_RUNTIME, when it names an existing non-`.spl` file; else ""."""
+    for key in ["SIMPLE_BINARY", "SIMPLE_RUNTIME"]:
+        val configured = env_get(key) ?? ""
+        if configured != "" and not configured.ends_with(".spl"):
+            if file_exists(configured):
+                return configured
+            if file_exists(configured + ".exe"):
+                return configured + ".exe"
+    ""
+
+fn argv0_simple_binary(argv0: text) -> text:
+    """argv[0] only when it looks like the compiled binary and exists; else ""."""
+    if argv0 != "" and (argv0.ends_with("/simple") or argv0.ends_with("simple.exe")) and file_exists(argv0):
+        return argv0
+    ""
+
+fn explicit_binary_before_argv0(explicit: text, argv0_binary: text) -> text:
+    """Precedence between the operator-named binary and argv[0]: explicit wins.
+
+    Pinned by test/01_unit/app/test_runner_new/explicit_binary_precedence_spec.spl."""
+    if explicit != "":
+        return explicit
+    argv0_binary
+
 fn find_simple_binary() -> text:
     if _cached_binary_path != "":
         return _cached_binary_path
 
+    # Explicit override FIRST (before argv[0]): an operator who names the
+    # compiler under test must never have it shadowed by whatever binary
+    # happened to launch the runner. SIMPLE_BINARY (what the bootstrap harness and the
+    # app-layer twin in src/app/test_runner_new/test_executor_parsing.spl
+    # use to name the compiler under test), then SIMPLE_RUNTIME. Without
+    # SIMPLE_BINARY a standalone runner on a host with no /proc (Windows)
+    # fell through to the literal `bin/simple`, i.e. the DEPLOYED binary,
+    # not the CLI under test (measured 2026-09-25, bootstrap32 stage 2).
+    # The `.exe` retry covers a harness path spelled without the suffix
+    # (`simple_cli` for `simple_cli.exe`).
+    #
     # Prefer the currently running executable — subprocess tests should use
     # the same binary that invoked the test runner (self-hosted consistency).
     # Guard: when "test" is dispatched by interpreting a .spl entry file
@@ -160,29 +205,11 @@ fn find_simple_binary() -> text:
     # executable, so trusting it verbatim makes the subprocess spawn fail
     # immediately. Only trust argv[0] when it looks like the compiled binary.
     val args = cli_get_args()
-    if args.len() > 0:
-        val self_exe = args[0]
-        if self_exe != "" and (self_exe.ends_with("/simple") or self_exe.ends_with("simple.exe")) and file_exists(self_exe):
-            _cached_binary_path = self_exe
-            return self_exe
-
-    # Explicit override: SIMPLE_BINARY (what the bootstrap harness and the
-    # app-layer twin in src/app/test_runner_new/test_executor_parsing.spl
-    # use to name the compiler under test), then SIMPLE_RUNTIME. Without
-    # SIMPLE_BINARY a standalone runner on a host with no /proc (Windows)
-    # fell through to the literal `bin/simple`, i.e. the DEPLOYED binary,
-    # not the CLI under test (measured 2026-09-25, bootstrap32 stage 2).
-    # The `.exe` retry covers a harness path spelled without the suffix
-    # (`simple_cli` for `simple_cli.exe`).
-    for key in ["SIMPLE_BINARY", "SIMPLE_RUNTIME"]:
-        val configured = env_get(key) ?? ""
-        if configured != "" and not configured.ends_with(".spl"):
-            if file_exists(configured):
-                _cached_binary_path = configured
-                return configured
-            if file_exists(configured + ".exe"):
-                _cached_binary_path = configured + ".exe"
-                return configured + ".exe"
+    val argv0 = if args.len() > 0: args[0] else: ""
+    val named = explicit_binary_before_argv0(explicit_simple_binary_from_env(), argv0_simple_binary(argv0))
+    if named != "":
+        _cached_binary_path = named
+        return named
 
     # argv[0] is NOT the executable on the paths that matter. Measured
     # 2026-08-19: `simple run probe.spl extra1` reports
@@ -505,6 +532,17 @@ fn output_has_zero_pass_summary(output: text) -> bool:
             saw_failed_zero = true
     saw_passed_zero and saw_failed_zero
 
+fn output_has_canonical_skip_summary(output: text) -> bool:
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if clean.starts_with("Results:") and clean.contains(" total") and clean.contains(" passed") and clean.contains(" failed"):
+            # Use the same total/count validation as the combined-output
+            # parser. Loose "1 skipped" lines are not a complete summary.
+            val (passed, failed, skipped, pending) = parse_test_output(clean)
+            if passed == 0 and failed == 0 and skipped > 0:
+                return true
+    false
+
 # find_raw: first index of keyword in s, or -1. Returns a RAW i64 (never i64?),
 # so a match at offset 3 is not lost to the seed-JIT flat-optional payload-3 == nil
 # collision. `text.index_of` returns i64?, whose flat seed-JIT representation uses
@@ -809,6 +847,20 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
 
     if passed == 0 and failed == 0:
         if exit_code == 0:
+            # Combined stdout/stderr has passed truncation, omission and
+            # count checks. Accept a real skipped-only summary
+            # without allowing a hosted reason to rewrite failure counts.
+            if skipped > 0 and output_has_canonical_skip_summary(combined):
+                val lane_reason = hosted_lane_child_error(stdout)
+                for raw_line in combined.split("\n"):
+                    val clean = strip_ansi(raw_line).trim()
+                    # The child mirrors its omission reason to stderr; words
+                    # like "not found" there are not independent diagnostics.
+                    if lane_reason != "" and (clean == "hosted lane: {lane_reason}" or clean == "hosted lane error: {lane_reason}"):
+                        continue
+                    if _is_test_error_line(clean) or _is_crash_evidence_line(clean):
+                        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "ERROR: {clean}", timed_out: false, cached: false)
+                return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "", timed_out: false, cached: false)
             val filter = env_get("SIMPLE_TEST_FILTER")
             if filter != "" and filter != nil:
                 return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "", timed_out: false, cached: false)
@@ -846,6 +898,42 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
         combined
     )
 
+fn hosted_lane_child_error(stdout: text) -> text:
+    """The lane error a hosted-lane child (hosted_lane_main.spl) printed as
+    `hosted lane: <error>`, or "" when it printed none. The last such line wins."""
+    val prefix = "hosted lane: "
+    var found = ""
+    for line in stdout.split("\n"):
+        val clean = line.trim()
+        if clean.starts_with(prefix):
+            found = clean[prefix.len():]
+    found
+
+fn apply_hosted_lane_child_error(result: TestFileResult, stdout: text, exit_code: i32) -> TestFileResult:
+    """Carry a hosted-lane child's own error into the parent's result.
+
+    In-process (before the lanes moved to a child) a probe failure such as
+    `skip: cuda lane unavailable: ...` stayed on TestFileResult.error with
+    failed: 0, skipped: 1, which classifies as an error/skip-with-reason, never
+    a pass. The child exits 0 for that skip, and the generic exit-0 mapper
+    rebuilds the result with error "" -- a clean pass on a host without the
+    capability. Restore the in-process result: the child's named error wins,
+    without changing the counts established from combined stdout/stderr.
+    Only a child that completed normally (exit 0 or 1) is trusted;
+    crash/timeout/signal classifications stand."""
+    if exit_code != 0 and exit_code != 1:
+        return result
+    # Truncated-capture and omission evidence make the counts unverifiable; a
+    # child `skip:` line must never downgrade them (fail closed).
+    if result.error.starts_with("child output was truncated") or result.error.starts_with("ERROR: "):
+        return result
+    val child_error = hosted_lane_child_error(stdout)
+    if child_error == "":
+        return result
+    var out = result
+    out.error = child_error
+    out
+
 fn read_structured_test_evidence(path: text) -> (i64, i64, i64):
     if path == "" or not file_exists(path):
         return (0, 0, 0)
@@ -864,6 +952,58 @@ fn read_structured_test_evidence(path: text) -> (i64, i64, i64):
     if content != "simple-bdd-v1\n{passed_text}\n{failed_text}\n":
         return (0, 0, 0)
     (passed, failed, 1)
+
+# Expectation tally sidecar (`<evidence>.expectations`, written by std.spec as
+# "simple-bdd-expectations-v1\n<n>\n"). -1 = unknown (absent, unreadable or
+# malformed), and unknown is never zero: only an explicit 0 is VACUOUS.
+pub fn read_structured_test_expectations(evidence_path: text) -> i64:
+    if evidence_path == "":
+        return -1
+    val path = evidence_path + ".expectations"
+    if not file_exists(path):
+        return -1
+    val content = read_file_content(path)
+    val parts = content.split("\n")
+    if parts.len() < 2 or parts[0] != "simple-bdd-expectations-v1":
+        return -1
+    val n_text = parts[1].trim()
+    val n = n_text.to_int() ?? -1
+    if n < 0 or n.to_text() != n_text or content != "simple-bdd-expectations-v1\n{n_text}\n":
+        return -1
+    n
+
+# A raw `assert <cond>` is a language statement: it never reaches std.spec's
+# tally, so a spec that asserts only that way reports expectations=0 while
+# being a real test. Static source check (a statement beginning with
+# `assert`): it shows the file carries an assertion, not that it ran.
+pub fn spec_source_has_raw_assert(source: text) -> bool:
+    for line in source.split("\n"):
+        val stmt = line.trim()
+        if stmt.starts_with("assert ") or stmt.starts_with("assert("):
+            return true
+    false
+
+# The error text of a VACUOUS file result; its class token is what
+# test_file_result_outcome_class reads (BUG-02 / T12, task 15a).
+pub fn vacuous_result_error(executed: i64) -> text:
+    "VACUOUS: {executed} example(s) executed, 0 expectations evaluated"
+
+val VACUOUS_SPEC_BASELINE_PATH: text = "scripts/check/vacuous_spec_zero_assertion_baseline.txt"
+
+# Known zero-assertion specs that strict mode must not fail until each is
+# fixed and removed from the baseline (one repo-relative path per line,
+# `#` comments allowed). Same file the single runner consults.
+pub fn vacuous_spec_baselined(path: text) -> bool:
+    if not file_exists(VACUOUS_SPEC_BASELINE_PATH):
+        return false
+    val wanted = path.replace("\\", "/")
+    for line in read_file_content(VACUOUS_SPEC_BASELINE_PATH).split("\n"):
+        val entry = line.trim()
+        if entry == "" or entry.starts_with("#"):
+            continue
+        if entry == wanted or wanted.ends_with("/" + entry):
+            return true
+    false
 
 fn make_result_from_structured_evidence(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64, evidence_path: text) -> TestFileResult:
     if evidence_path == "" or env_get("SIMPLE_TEST_ASSERT_RAN") != "1":
@@ -916,6 +1056,16 @@ fn make_result_from_structured_evidence(file_path: text, stdout: text, stderr: t
         return TestFileResult(path: file_path, passed: passed, failed: failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "Process exited with code {exit_code}", timed_out: false, cached: false)
     if valid == 0 or passed + evidence_failed == 0:
         return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "--assert-ran: no BDD examples executed", timed_out: false, cached: false)
+    # Zero-expectation gate: examples ran and none failed, but the child's own
+    # tally says no expect()/assert was ever evaluated. WARN-FIRST: the
+    # vacuity line is printed; the result becomes VACUOUS (a failure class)
+    # only under SIMPLE_TEST_VACUOUS_STRICT=1 and outside the baseline file.
+    # An unknown tally (-1) is left alone.
+    if evidence_failed == 0 and read_structured_test_expectations(evidence_path) == 0 and not spec_source_has_raw_assert(read_file_content(file_path)):
+        print "SPEC FILE VACUITY: {file_path} outcome=VACUOUS executed={passed} expectations=0"
+        if env_get("SIMPLE_TEST_VACUOUS_STRICT") == "1" and not vacuous_spec_baselined(file_path):
+            return TestFileResult(path: file_path, passed: passed, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: vacuous_result_error(passed), timed_out: false, cached: false)
+        print "warning: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated (advisory; SIMPLE_TEST_VACUOUS_STRICT=1 fails it)"
     val error = if evidence_failed > 0: "test-runner: spec failed" else: ""
     test_runner_result_with_mcdc_evidence(
         TestFileResult(path: file_path, passed: passed, failed: evidence_failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error, timed_out: false, cached: false),
@@ -1094,9 +1244,12 @@ export MCDC_OBLIGATION_BEGIN, MCDC_OBLIGATION_END
 export extract_compiler_coverage_manifest_sdn, strip_compiler_coverage_manifest_blocks
 export extract_compiler_mcdc_obligation_manifest
 export find_simple_new_binary, find_runtime_lib_dir, find_simple_binary
+export explicit_simple_binary_from_env, argv0_simple_binary, explicit_binary_before_argv0
 export extract_error_message, parse_test_output, parse_test_omission_evidence
 export extract_number_before, extract_number_after_colon
 export build_child_args, make_result_from_output, read_structured_test_evidence, make_result_from_structured_evidence
+export read_structured_test_expectations, vacuous_result_error, vacuous_spec_baselined, spec_source_has_raw_assert
+export hosted_lane_child_error, apply_hosted_lane_child_error
 export coverage_wrapper_suffix, build_coverage_wrapper
 export extract_coverage_sdn, strip_coverage_blocks
 export list_tests_static, extract_static_test_name
