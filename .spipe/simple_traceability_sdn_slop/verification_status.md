@@ -18,6 +18,11 @@ Historical Phase 2 probes do not qualify the Phase 3 candidate.
 
 ## Blocking findings
 
+- SDN-only migration is incomplete: shared test-runner output still contains
+  legacy JSON serializers and JSON branches in `print_result` and
+  `print_summary`. Public main/client flag rejection does not prove those
+  internal interfaces have migrated. Their callers and existing fixtures need
+  migration without changing externally imposed provider protocols.
 - Public SDN output now routes through one bounded wrapper and the obsolete
   unreferenced JSON wrapper is removed. Native V4 currently lacks the required
   descendant-group retirement contract even on Linux; Windows additionally
