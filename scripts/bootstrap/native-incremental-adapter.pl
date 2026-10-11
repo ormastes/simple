@@ -37,8 +37,8 @@ else {
     $prior->{schema} eq 'simple-restricted-prefix-v1' && $prior->{source_root} eq $root &&
         $prior->{subsystem} eq $subsystem && $prior->{canonical_inventory_sha256} eq $selection->{canonical_inventory_sha256}
         or die "prefix lineage differs\n";
-    @paths == @{$prior->{ordered_paths}}+1 or die "append exactly one owner\n";
-    for my $i (0..$#paths-1) { $paths[$i] eq $prior->{ordered_paths}[$i] or die "prefix order changed\n"; }
+    @paths > @{$prior->{ordered_paths}} or die "append a nonempty batch of owners\n";
+    for my $i (0..$#{$prior->{ordered_paths}}) { $paths[$i] eq $prior->{ordered_paths}[$i] or die "prefix order changed\n"; }
 }
 my $catalog_bytes=bytes("$FindBin::Bin/fixtures/native-incremental-adapter-catalog.json");
 my $catalog=decode_json($catalog_bytes);
@@ -85,7 +85,10 @@ for my $row (@{$selection->{rows}}) {
     push @cases,@file_cases;
 }
 @cases or die "no supported attached cases; no native entry produced\n";
-my @new_cases=grep { $_->{owner} eq $paths[-1] } @cases;
+my %old_paths=map {$_=>1} ($prior ? @{$prior->{ordered_paths}} : ());
+my @added_paths=grep {!$old_paths{$_}} @paths;
+my %added_paths=map {$_=>1} @added_paths;
+my @new_cases=grep { $added_paths{$_->{owner}} } @cases;
 my $negative_case=@new_cases ? $new_cases[0] : undef;
 my $negative_line=$negative_case ? $negative_case->{assertions}[0]{line} : undef;
 !-e $out && !-l $out or die "output exists; retain prior evidence\n";
@@ -95,7 +98,7 @@ write_bytes("$out/canonical-inventory.tsv",bytes($canonical));
 write_bytes("$out/sources/$_",$source{$_}) for @paths;
 my $proof={schema=>'simple-restricted-prefix-v1',source_root=>$root,subsystem=>$subsystem,
     canonical_inventory_sha256=>$selection->{canonical_inventory_sha256},canonical_owners=>$selection->{canonical_subsystem_owner_count},
-    ordered_paths=>\@paths,ordered_paths_sha256=>$selection->{spec_list_sha256},
+    ordered_paths=>\@paths,added_paths=>\@added_paths,previous_ordered_paths=>($prior ? $prior->{ordered_paths} : []),ordered_paths_sha256=>$selection->{spec_list_sha256},
     catalog_sha256=>sha256_hex($catalog_bytes),owners=>\@owners,
     selected_owners=>scalar(@paths),attached_owners=>scalar(grep {$_->{attachment} eq 'attached'} @owners),
     detached_owners=>scalar(grep {$_->{attachment} eq 'detached'} @owners),compiled_owners=>0,executed_owners=>0,
