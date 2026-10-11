@@ -185,6 +185,10 @@ on:
           - all
           - linux-llvm
           - linux-cranelift
+      defer_portability_verdict:
+        description: Diagnostic Linux LLVM collection; failed portability remains an unadmitted final failure
+        type: boolean
+        default: false
 
 # main must reach a verdict: before 2026-09-28 every main run was cancelled by
 # the next main push (874/1000 runs cancelled, 0 completed on main). With
@@ -224,8 +228,21 @@ jobs:
         run: sh scripts/check/check-seed-parse-superset.shs
 
       - name: Validate bootstrap portability contracts
+        id: portability_contract
         if: runner.os == 'Linux' && matrix.backend == 'llvm'
+        continue-on-error: ${{ github.event_name == 'workflow_dispatch' && inputs.native_lane == 'linux-llvm' && inputs.defer_portability_verdict }}
         run: sh scripts/check/check-bootstrap-portability.shs
+
+      - name: Record unadmitted diagnostic collection
+        if: ${{ steps.portability_contract.outcome == 'failure' && github.event_name == 'workflow_dispatch' && inputs.native_lane == 'linux-llvm' && inputs.defer_portability_verdict }}
+        env:
+          DIAGNOSTIC_SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          mkdir -p build/bootstrap
+          printf '%s\n' 'schema=simple-bootstrap-portability-diagnostic-v1' \
+            'tag=WORKAROUND_DEFER_PORTABILITY_VERDICT' 'qualification=UNADMITTED' \
+            'portability_result=FAIL' "source_revision=${DIAGNOSTIC_SOURCE_REVISION}" \
+            > build/bootstrap/portability-diagnostic.env
 
       - name: Validate bootstrap capacity and Windows authority contracts
         if: runner.os == 'Linux' && matrix.backend == 'llvm'
@@ -710,11 +727,18 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: bootstrap-${{ matrix.name }}-${{ matrix.backend }}-${{ github.sha }}
+          name: ${{ steps.portability_contract.outcome == 'failure' && 'unadmitted-' || '' }}bootstrap-${{ matrix.name }}-${{ matrix.backend }}-${{ github.sha }}
           path: |
             build/bootstrap/stage2/**/simple*
             build/bootstrap/stage3/**/simple*
+            build/bootstrap/portability-diagnostic.env
           retention-days: 7
+
+      - name: Enforce portability verdict after diagnostic collection
+        if: ${{ always() && steps.portability_contract.outcome == 'failure' }}
+        run: |
+          echo '::error::Portability contracts failed; collected bootstrap artifacts are UNADMITTED.'
+          exit 1
 
   native-architectures:
     if: (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == '')
