@@ -1,5 +1,24 @@
 # Collect bootstrap, build, and test failures
 
+## Windows bootstrap harness prerequisites
+
+Run the PATH fixture with
+`python scripts/check/check-bootstrap-path-access.py --script scripts/bootstrap/bootstrap-from-scratch.sh --output <fresh-private-directory>`.
+On Windows it discovers native Bash beside Git on PATH; for MSYS2 or a custom
+installation, pass `--shell "C:/path with spaces/bash.exe"`. On POSIX it resolves
+`bash` from PATH. Windows ambient Bash is not selected automatically because it
+may be the WSL launcher. Shell discovery occurs before creating the output
+directory, and an existing output directory is rejected to preserve evidence.
+
+`sh scripts/check/check-bootstrap-windows-authority-paths.shs` exercises the
+actual `run_rust_authority_cargo` and `run_rust_authority_command` owners together.
+The fixture binds `PLATFORM_RUST_TRIPLE`, checks the forwarded
+`build --target x86_64-pc-windows-msvc` arguments, and checks scoped
+`TEMP`/`TMP`/`SystemRoot` through all four LLVM/LTO branches. It substitutes the
+Cargo process and resource setup; it does not compile the seed or admit a phase.
+Keep these host-harness results separate from compiler and Phase4 evidence.
+See the [harness drift bug and retained results](../../08_tracking/bug/windows_bootstrap_contract_harness_drift_2026-10-11.md).
+
 During bootstrap diagnosis, reach the end of all independently runnable build
 and test work instead of ending the investigation at the first failure. This
 is the shared agent policy for SPipe, bootstrap, builds, tests, and bug repair.
