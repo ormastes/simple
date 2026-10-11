@@ -169,6 +169,15 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     val hosted_cc = find_c_compiler()
     if hosted_cc == "":
         return Err("No C compiler found (hosted native link, target '{hosted_target}'). Install clang or gcc.")
+    # Strict Stage4 fingerprints and projects only its admitted archive closure.
+    # SIMPLE_LINK_OBJECTS would be appended after that profile was computed,
+    # allowing an unlisted object or eager shared library into the executable.
+    # Admit such extensions through the demand-loaded runtime provider path.
+    val external_providers = match llvm_configured_external_link_objects():
+        case Ok(paths): paths
+        case Err(err): return Err(err)
+    if stage4_requested and external_providers.len() != 0:
+        return Err("Stage4 strict profile rejects SIMPLE_LINK_OBJECTS outside its verified runtime closure")
 
     var stage4_msvc_linker = false
     var stage4_msvc_objects = false
@@ -519,17 +528,6 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     # not pass them to cleanup_runtime_objects or delete them after linking.
     # They remain caller-owned; dynamic providers stay in the dependency table
     # while static providers contribute only extracted members.
-    val external_providers = match llvm_configured_external_link_objects():
-        case Ok(paths): paths
-        case Err(err):
-            cleanup_runtime_objects(runtime_objects)
-            if bootstrap_support_obj != "":
-                file_delete(bootstrap_support_obj)
-            if stage4_requested:
-                remove_file_if_exists(entry_obj_path)
-            else:
-                file_delete(entry_obj_path)
-            return Err(err)
     for provider in external_providers:
         all_objects = all_objects.push(provider)
         runtime_provider_inputs = runtime_provider_inputs.push(provider)

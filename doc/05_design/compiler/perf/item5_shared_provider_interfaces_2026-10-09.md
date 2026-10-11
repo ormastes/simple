@@ -25,6 +25,8 @@ The proposal's P0–P9 are migration work packages in the [existing implementati
 
 Status: documentation reconciliation against release `59499d746975ef06ada5e6769142bdb7d5403e86`, 2026-10-09. This defines the compatibility and verification handoff; it does not certify implementation completion, native application execution, or bootstrap admission.
 
+On the isolated Item 5 branch, strict Stage4 now checks SIMPLE_LINK_OBJECTS before runtime compilation and rejects external link inputs that are absent from its selected archive closure and link-profile fingerprint. The ordinary hosted link route still accepts explicitly configured providers. This closes one closure bypass; it does not supply the RuntimeFeatureClosureV1 production contract, demand-load admission, or matched size and startup evidence.
+
 Item 5 is kernel/extension aspects and binary size in the [seven-item plan](../../../03_plan/seven_plans_host_completion_2026-09-29.md). Its own **Phase 5 is Size and Loading Gates** in the [implementation plan](../../../03_plan/compiler/perf/runtime_optional_provider_binary_size_optimization_plan_2026-09-02.md). Neither name is a compiler generation or permission to skip the other phases. The selected [requirements](../../../02_requirements/feature/runtime_optional_provider_binary_size_optimization.md) and their budgets remain unchanged.
 
 ## Shared owners, not parallel interfaces
