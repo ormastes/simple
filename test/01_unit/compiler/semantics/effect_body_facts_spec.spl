@@ -10,6 +10,8 @@ use compiler.semantics.effect_validation.{EffectFunctionFactsV1,
     effect_function_facts_v1, validate_effect_contract_facts_v1,
     validate_effect_contracts, effect_struct_sizes, effect_fn_names}
 use compiler.semantics.effect_verifier.{LOOP_BOUND_NONE, LOOP_BOUND_CONST}
+use compiler.semantics.effect_validation.{effect_contract_claims_v1, validate_effect_claim_facts_v1}
+use compiler.frontend.effect_registry.{effect_registry_reset}
 
 fn lowered(src: text, path: text, name: text) -> HirModule:
     val parsed = parse_full_frontend(src, path, name, Logger(level: 0))
@@ -26,6 +28,32 @@ fn facts(modules: Dict<text, HirModule>) -> [EffectFunctionFactsV1]:
     out
 
 describe "real lowered effect body facts and aggregate gate":
+    it "replays a real transitive copy failure after its ambient claim is removed":
+        effect_registry_reset()
+        val hir = lowered("struct Blob:\n    a: i64\n\nfn helper(src: Blob) -> i64:\n    val dup: Blob = src\n    dup.a\n\n@copy_budget(0)\nfn outer(src: Blob) -> i64:\n    helper(src)\n", "facts_claim_copy.spl", "facts_claim_copy")
+        val rows = facts({"facts_claim_copy": hir})
+        val ids = ["facts_claim_copy.spl"]
+        val claims = effect_contract_claims_v1()
+        val original = validate_effect_contract_facts_v1(ids, rows)
+        expect(original.len()).to_equal(1)
+        expect(original[0]).to_contain("8 bytes (8 from callees)")
+        effect_registry_reset()
+        expect(validate_effect_claim_facts_v1(ids, rows, claims)).to_equal(original)
+        expect(validate_effect_contract_facts_v1(ids, rows).len()).to_equal(0)
+
+    it "replays actual loop obligations in original claim order without registry installation":
+        effect_registry_reset()
+        val hir = lowered("@bounded_loop\nfn first():\n    while true:\n        val one = 1\n\n@bounded_loop\nfn second():\n    while true:\n        val two = 2\n", "facts_claim_order.spl", "facts_claim_order")
+        val rows = facts({"facts_claim_order": hir})
+        val ids = ["facts_claim_order.spl"]
+        val claims = effect_contract_claims_v1()
+        val original = validate_effect_contract_facts_v1(ids, rows)
+        expect(original.len()).to_equal(2)
+        expect(original[0]).to_contain("first")
+        expect(original[1]).to_contain("second")
+        effect_registry_reset()
+        expect(validate_effect_claim_facts_v1(ids, rows, claims)).to_equal(original)
+
     it "charges the actual 24-byte unannotated callee copy to its caller":
         val src = "struct Blob:\n    a: i64\n    b: i64\n    c: i64\n\nfn helper(src: Blob) -> i64:\n    val dup: Blob = src\n    dup.a\n\n@copy_budget(8)\nfn outer(src: Blob) -> i64:\n    helper(src)\n"
         val hir = lowered(src, "facts_transitive.spl", "facts_transitive")

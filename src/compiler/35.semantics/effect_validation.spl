@@ -659,9 +659,28 @@ pub fn effect_function_facts_v1(func: HirFunction, sizes: Dict<i64, i64>,
 # driver must bind/replay these editable rows against complete admitted HIR.
 pub fn validate_effect_contract_facts_v1(module_ids: [text],
         functions: [EffectFunctionFactsV1]) -> [text]:
+    validate_effect_claim_facts_v1(module_ids, functions, effect_contract_claims_v1())
+
+struct EffectContractClaimV1:
+    registry_key: text
+    path: text
+    fn_name: text
+    budget: i64
+    bounded: bool
+
+# Captured from the real parser registry, not a grant from editable rows.
+pub fn effect_contract_claims_v1() -> [EffectContractClaimV1]:
+    var claims: [EffectContractClaimV1] = []
+    for key in effect_registry_claim_keys():
+        claims.push(EffectContractClaimV1(registry_key: key, path: effect_claim_path(key),
+            fn_name: effect_claim_fn(key), budget: effect_registry_budget_of_key(key),
+            bounded: effect_registry_bounded_of_key(key)))
+    claims
+
+pub fn validate_effect_claim_facts_v1(module_ids: [text],
+        functions: [EffectFunctionFactsV1], claims: [EffectContractClaimV1]) -> [text]:
     var errors: [text] = []
-    val claim_keys = effect_registry_claim_keys()
-    if claim_keys.len() == 0: return errors
+    if claims.len() == 0: return errors
     # Whole-compilation call graph, so the transitive closure sees callees that
     # are NOT themselves annotated -- an unannotated helper's copy cost is
     # still paid by its annotated caller. Building this from annotated
@@ -680,9 +699,9 @@ pub fn validate_effect_contract_facts_v1(module_ids: [text],
         graph_callees = graph_callees.push(func.callees)
     val totals = effect_copy_closure(graph_names, graph_own, graph_callees)
 
-    for key in claim_keys:
-        val claim_path = effect_claim_path(key)
-        val fn_name = effect_claim_fn(key)
+    for claim in claims:
+        val claim_path = claim.path
+        val fn_name = claim.fn_name
         if fn_name == "":
             continue
         # Out-of-scope contract: recorded for a module that is not part of this
@@ -693,8 +712,8 @@ pub fn validate_effect_contract_facts_v1(module_ids: [text],
         if not module_ids.contains(claim_path):
             continue
 
-        val budget = effect_registry_budget_of_key(key)
-        val bounded = effect_registry_bounded_of_key(key)
+        val budget = claim.budget
+        val bounded = claim.bounded
 
         var found = false
         for func in functions:
@@ -749,4 +768,5 @@ export effect_block_loops, effect_block_copies, effect_block_callees
 export effect_while_bound, effect_for_bound, effect_is_growth_method
 export EffectFunctionFactsV1, effect_function_facts_v1, validate_effect_contract_facts_v1
 export effect_struct_sizes_for_module_v1, effect_fn_names_for_module_v1
+export EffectContractClaimV1, effect_contract_claims_v1, validate_effect_claim_facts_v1
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
