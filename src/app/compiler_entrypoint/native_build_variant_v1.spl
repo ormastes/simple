@@ -1,0 +1,105 @@
+# Bind the native-build invocation to a compiler-authored V3 variant.
+# The argv frames intentionally over-invalidate until a typed flag projection
+# replaces them. This prevents a changed option from reusing a stale graph.
+
+use app.io.env_ops.{env_get}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.cache.package_tldr_metadata.{
+    ConfigVariantKeyV1, config_variant_digest_v1}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+
+fn native_build_variant_from_driver_v1(
+    driver: CompilerDriver, args: [text]
+) -> Result<ConfigVariantKeyV1, text>:
+    val options = driver.ctx.options
+    if driver.ctx.native_target == "" or options.backend == "" or
+            options.build_mode == "" or options.cli_mode_text != "aot":
+        return Err("native-build-variant-options-incomplete")
+    val aspect = options.aspect_params
+    if aspect.hdr.schema_name != "simple.aop.AspectParams" or
+            aspect.hdr.schema_major != 1 or aspect.hdr.schema_minor != 0 or
+            aspect.hdr.present != 0 or aspect.log_calls or
+            aspect.log_assignments or aspect.compile_log_level != 1 or
+            aspect.runtime_log_level != 1 or aspect.mcdc_mode != 0 or
+            aspect.mcdc_manifest_sha256 != "" or aspect.ext.len() != 1:
+        return Err("native-build-aspect-variant-unsupported")
+    val extension = aspect.ext[0]
+    if extension.ext_name != "simple.instrumentation.cutover/atomic" or
+            extension.ext_major != 1 or extension.payload.len() != 0 or
+            extension.payload_schema_hash !=
+                "sha256:simple.instrumentation.cutover.atomic.v1":
+        return Err("native-build-aspect-variant-unsupported")
+    var normalized: [text] = [
+        "backend=" + options.backend,
+        "backend_plugin_path=" + options.backend_plugin_path,
+        "build_mode=" + options.build_mode,
+        "cli_mode=" + options.cli_mode_text,
+        "debug_info=" + (if options.debug_info: "1" else: "0"),
+        "debug_trace_level=" + options.debug_trace_level,
+        "gc_off=" + (if options.gc_off: "1" else: "0"),
+        "coverage_enabled=" + (if options.coverage_enabled: "1" else: "0"),
+        "low_memory=" + (if options.low_memory: "1" else: "0"),
+        "mode=" + options.mode.to_text(),
+        "mcdc_mode=" + options.mcdc_mode_text,
+        "mcdc_owner_bytes=" + str(options.mcdc_owner_bytes),
+        "mcdc_global_bytes=" + str(options.mcdc_global_bytes),
+        "no_borrow_check=" + (if options.no_borrow_check: "1" else: "0"),
+        "opt_level=" + str(options.opt_level ?? -1),
+        "optimize=" + (if options.optimize: "1" else: "0"),
+        "output_format=" + options.output_format.to_text(),
+        "interpreter_mode=" + options.interpreter_mode,
+        "profile=" + options.profile,
+        "release=" + (if options.release: "1" else: "0"),
+        "smf_output_mode=" + options.smf_output_mode,
+        "strip_output=" + (if options.strip_output: "1" else: "0")
+    ]
+    var list_index = 0
+    for family in options.allowed_families:
+        normalized = normalized.push("family[" + str(list_index) + "]=" + family)
+        list_index = list_index + 1
+    list_index = 0
+    for library in options.native_libraries:
+        normalized = normalized.push("library[" + str(list_index) + "]=" + library)
+        list_index = list_index + 1
+    list_index = 0
+    for path in options.native_library_paths:
+        normalized = normalized.push("library_path[" + str(list_index) + "]=" + path)
+        list_index = list_index + 1
+    list_index = 0
+    for flag in options.native_linker_flags:
+        normalized = normalized.push("linker_flag[" + str(list_index) + "]=" + flag)
+        list_index = list_index + 1
+    var index = 0
+    for arg in args:
+        if arg.contains("\n") or arg.contains("\r"):
+            return Err("native-build-variant-argument-invalid")
+        normalized = normalized.push("argv[" + str(index) + "]=" + arg)
+        index = index + 1
+    val environment = [
+        "bootstrap=" + (env_get("SIMPLE_BOOTSTRAP") ?? ""),
+        "bootstrap_stage4=" + (env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? ""),
+        "bootstrap_skip_mir=" + (env_get("SIMPLE_BOOTSTRAP_SKIP_MIR_LOWER") ?? ""),
+        "safety_profile=" + (env_get("SIMPLE_SAFETY_PROFILE") ?? ""),
+        "core_runtime_path=" + (env_get("SIMPLE_CORE_RUNTIME_PATH") ?? ""),
+        "environment_policy=" + driver.ctx.environment_variant_policy_digest,
+        "native_cpu=" + (env_get("SIMPLE_NATIVE_CPU") ?? ""),
+        "os_log_mode=" + (env_get("SIMPLE_OS_LOG_MODE") ?? ""),
+        "runtime_bundle=" + (env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""),
+        "runtime_path=" + (env_get("SIMPLE_RUNTIME_PATH") ?? "")
+    ]
+    val variant = ConfigVariantKeyV1(
+        driver.ctx.native_target, options.backend, [], options.build_mode,
+        "simple-v1", canonical_identity_sort_texts(normalized),
+        canonical_identity_sort_texts(environment))
+    if config_variant_digest_v1(variant) == "":
+        return Err("native-build-variant-digest-unavailable")
+    Ok(variant)
+
+fn native_build_variant_matches_pinned_v1(
+    variant: ConfigVariantKeyV1
+) -> bool:
+    val pinned = env_get("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? ""
+    pinned == "" or pinned == config_variant_digest_v1(variant)
+
+export native_build_variant_from_driver_v1
+export native_build_variant_matches_pinned_v1

@@ -22,6 +22,11 @@ use compiler.driver.driver (
     aot_opencl_file, aot_vhdl_file, compile_to_smf)
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_types.{ColdHirScopedSelectionV1}
+use app.compiler_entrypoint.native_build_variant_v1.{
+    native_build_variant_from_driver_v1, native_build_variant_matches_pinned_v1}
+use compiler.driver.cache.package_tldr_metadata.{config_variant_digest_v1}
+use app.compiler_entrypoint.scoped_index_publish.{
+    native_build_scoped_index_base_digest_v1, native_build_scoped_index_publish_v1}
 use compiler.frontend.frontend_advisory_preprocess_port_v1.{FrontendAdvisoryPreprocessPolicyV1}
 use compiler.common.structural_contracts.environment_variant_policy_collection_v1.{
     EnvironmentVariantPolicyCollectionV1}
@@ -710,6 +715,7 @@ fn _cli_native_build_prepare_scoped_facets_v1(
     val source_digest = env_get("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? ""
     val frozen_entry = _nb_scv_snapshot_path_v1(entry_point)
     if not entry_closure or collection != nil or
+            driver.ctx.native_target == "" or
             driver.ctx.frontend_advisory_policy !=
                 FrontendAdvisoryPreprocessPolicyV1.Reference or
             (env_get("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "") != "" or
@@ -717,7 +723,7 @@ fn _cli_native_build_prepare_scoped_facets_v1(
             source_digest == "" or native_inputs.len() == 0 or
             not frozen_entry.starts_with(snapshot_root + "/") or
             not native_inputs.contains(frozen_entry):
-        _cli_eprint("Error: scoped cold facets require one frozen entry closure")
+        _cli_eprint("Error: scoped cold facets require a frozen entry closure and explicit target")
         return false
     for source in native_inputs:
         if not source.starts_with(snapshot_root + "/"):
@@ -733,6 +739,57 @@ fn _cli_native_build_prepare_scoped_facets_v1(
             source_digest, frozen_entry.substring(
                 snapshot_root.len() + 1, frozen_entry.len())))
     true
+
+fn _cli_native_build_compile_indexed_v1(
+    driver: CompilerDriver, args: [text], entry_point: text,
+    collection_profile_path: text, collection_workload: text,
+    collection_target: text, collection_profile_digest: text,
+    scoped_capture_ready: bool, check_index_variant: bool
+) -> CompileResult:
+    if not scoped_capture_ready:
+        return CompileResult.CodegenError(
+            "scoped cold capture admission failed")
+    val scoped = driver.ctx.cold_hir_scoped_selection != nil
+    val pinned_schema = env_get("SIMPLE_PACKAGE_INDEX_SCHEMA") ?? ""
+    if not check_index_variant or (not scoped and pinned_schema != "3"):
+        return native_build_compile_with_collection_profile(
+            driver, entry_point, collection_profile_path,
+            collection_workload, collection_target, collection_profile_digest)
+    val variant = match native_build_variant_from_driver_v1(driver, args):
+        case Ok(value): value
+        case Err(reason):
+            return CompileResult.CodegenError(
+                "native-build variant invalid: {reason}")
+    if not native_build_variant_matches_pinned_v1(variant):
+        return CompileResult.CodegenError(
+            "native-build options differ from admitted package graph")
+    var base_digest = ""
+    if scoped:
+        match native_build_scoped_index_base_digest_v1():
+            case Ok(value): base_digest = value
+            case Err(reason):
+                return CompileResult.CodegenError(
+                    "scoped-index base admission failed: {reason}")
+    val result = native_build_compile_with_collection_profile(
+        driver, entry_point, collection_profile_path,
+        collection_workload, collection_target, collection_profile_digest)
+    if not result.is_success() or not scoped:
+        return result
+    val completed_variant = match native_build_variant_from_driver_v1(driver, args):
+        case Ok(value): value
+        case Err(reason):
+            return CompileResult.CodegenError(
+                "scoped-index completed variant invalid: {reason}")
+    if config_variant_digest_v1(completed_variant) !=
+            config_variant_digest_v1(variant):
+        return CompileResult.CodegenError(
+            "scoped-index compile variant changed during AOT")
+    match native_build_scoped_index_publish_v1(
+            driver, variant, base_digest):
+        case Ok(_): result
+        case Err(reason):
+            CompileResult.CodegenError(
+                "scoped-index publication failed: {reason}")
 
 fn _cli_native_build(
     args: [text], collection: EnvironmentVariantPolicyCollectionV1?
@@ -1386,12 +1443,10 @@ fn _cli_native_build(
                 collection)
             if verbose:
                 _cli_eprint("[native-build] Driver start: inputs={native_inputs.len()} backend={backend} mode={build_mode}")
-            val driver_result = if scoped_capture_ready:
-                native_build_compile_with_collection_profile(
-                    driver, entry_point, collection_profile_path,
-                    collection_workload, collection_target, collection_profile_digest)
-            else:
-                CompileResult.CodegenError("scoped cold capture admission failed")
+            val driver_result = _cli_native_build_compile_indexed_v1(
+                driver, args, entry_point, collection_profile_path,
+                collection_workload, collection_target, collection_profile_digest,
+                scoped_capture_ready, not native_group_requested)
             if verbose:
                 _cli_eprint("[native-build] Driver finished")
             driver_result
@@ -1443,12 +1498,10 @@ fn _cli_native_build(
                 collection)
             if verbose:
                 _cli_eprint("[native-build] Driver start: inputs={native_inputs.len()} backend={backend} mode={build_mode}")
-            val driver_result = if scoped_capture_ready:
-                native_build_compile_with_collection_profile(
-                    driver, entry_point, collection_profile_path,
-                    collection_workload, collection_target, collection_profile_digest)
-            else:
-                CompileResult.CodegenError("scoped cold capture admission failed")
+            val driver_result = _cli_native_build_compile_indexed_v1(
+                driver, args, entry_point, collection_profile_path,
+                collection_workload, collection_target, collection_profile_digest,
+                scoped_capture_ready, not native_group_requested)
             if verbose:
                 _cli_eprint("[native-build] Driver finished")
             driver_result

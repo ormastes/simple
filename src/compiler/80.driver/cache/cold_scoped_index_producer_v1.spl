@@ -1,0 +1,154 @@
+# Publish one entry-scoped V3 graph from compiler-owned HIR/MIR receipts.
+# Inputs are pinned by the caller; no source-root discovery occurs here.
+
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_build.native_full_inventory_sources.{NativeFullInventorySourcesV1}
+use compiler.driver.cache.cold_package_ownership_v1.{
+    ColdPackageOwnershipManifestV1, cold_package_ownership_capture_scoped_v1}
+use compiler.driver.cache.cold_hir_semantic_action_emission_v1.{
+    cold_hir_semantic_source_witness_v1, cold_hir_semantic_action_emit_v1}
+use compiler.driver.cache.cold_hir_compiled_payload_file_v1.{ColdHirCompiledPayloadFileV1}
+use compiler.driver.cache.cold_hir_native_object_persistence_v1.{ColdHirNativeObjectArtifactV1}
+use compiler.driver.cache.cold_hir_compiled_package_outputs_v1.{
+    ColdHirCompiledPackageArtifactV1, cold_hir_package_publish_from_driver_v1}
+use compiler.driver.cache.cold_full_index_root_identity_v1.{
+    cold_full_index_workspace_root_generation_v1}
+use compiler.driver.cache.package_module_index.{PackageModuleIndexGenerationV1}
+use compiler.driver.cache.package_module_index_builder.{PackageModuleIndexBuildAuthorityV1}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1, config_variant_digest_v1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryV1, compile_source_inventory_digest_v1}
+
+fn cold_scoped_index_publish_from_driver_v1(
+    driver: CompilerDriver, snapshot: ScvCompileSnapshotV1,
+    inventory: CompileSourceInventoryV1, source_root: text,
+    cache_root: text, scv_receipt_digest: text, producer_digest: text,
+    variant: ConfigVariantKeyV1, expected_index_digest: text,
+    policy_content: text, manifests: [ColdPackageOwnershipManifestV1]
+) -> Result<PackageModuleIndexGenerationV1, text>:
+    val ctx = driver.ctx
+    if ctx.cold_hir_scoped_selection == nil:
+        return Err("scoped-index-selection-missing")
+    val selection = ctx.cold_hir_scoped_selection!
+    val inventory_digest = compile_source_inventory_digest_v1(inventory)
+    val root_generation = cold_full_index_workspace_root_generation_v1(source_root)
+    val count = ctx.cold_hir_typed_receipts.len()
+    if not snapshot.valid or snapshot.source_drifted or
+            snapshot.snapshot_root == "" or
+            snapshot.inventory_digest != selection.snapshot_manifest_digest or
+            inventory_digest != selection.source_inventory_digest or
+            not builder_digest_valid_v1(scv_receipt_digest) or
+            not builder_digest_valid_v1(producer_digest) or
+            config_variant_digest_v1(variant) == "" or
+            ctx.native_target != variant.target_triple or
+            root_generation == "" or cache_root == "" or
+            selection.artifact_root == "" or
+            selection.entry_source_identity == "" or
+            count < 1 or count != ctx.source_paths_owner.len() or
+            count != ctx.source_identities_owner.len() or
+            count != ctx.source_byte_lengths_owner.len() or
+            count != ctx.source_module_names_owner.len() or
+            count != ctx.runtime_std_hir_emissions.len() or
+            count != ctx.runtime_std_mir_emissions.len():
+        return Err("scoped-index-driver-authority-invalid")
+    var inventory_by_source: Dict<text, i64> = {}
+    var inventory_index = 0
+    for row in inventory.entries:
+        if inventory_by_source.has(row.source_identity):
+            return Err("scoped-index-inventory-duplicate")
+        inventory_by_source[row.source_identity] = inventory_index
+        inventory_index = inventory_index + 1
+    var path_by_source: Dict<text, i64> = {}
+    var path_index = 0
+    while path_index < ctx.source_paths_owner.len():
+        val path = ctx.source_paths_owner[path_index]
+        val prefix = snapshot.snapshot_root + "/"
+        if not path.starts_with(prefix):
+            return Err("scoped-index-source-outside-snapshot")
+        val identity = path.substring(prefix.len(), path.len())
+        if path_by_source.has(identity):
+            return Err("scoped-index-source-path-duplicate")
+        path_by_source[identity] = path_index
+        path_index = path_index + 1
+    var source_paths: [text] = []
+    var source_identities: [text] = []
+    var source_digests: [text] = []
+    var source_byte_counts: [i64] = []
+    var seen: Dict<text, bool> = {}
+    var entry_seen = false
+    for receipt in ctx.cold_hir_typed_receipts:
+        val seed = receipt.seed
+        if seen.has(seed.source_identity) or
+                not inventory_by_source.has(seed.source_identity) or
+                not path_by_source.has(seed.source_identity) or
+                not ctx.runtime_std_hir_emissions.has(seed.source_identity) or
+                not ctx.runtime_std_mir_emissions.has(seed.source_identity):
+            return Err("scoped-index-typed-source-missing")
+        seen[seed.source_identity] = true
+        if seed.source_identity == selection.entry_source_identity:
+            entry_seen = true
+        val row = inventory.entries[inventory_by_source[seed.source_identity]]
+        val owned_index = path_by_source[seed.source_identity]
+        if row.content_digest != seed.source_digest or
+                row.byte_count != ctx.source_byte_lengths_owner[owned_index] or
+                seed.inventory_digest != inventory_digest or
+                ctx.source_identities_owner[owned_index] != seed.source_digest or
+                ctx.source_module_names_owner[owned_index] != seed.module_identity:
+            return Err("scoped-index-typed-source-differs")
+        source_paths = source_paths.push(ctx.source_paths_owner[owned_index])
+        source_identities = source_identities.push(seed.source_identity)
+        source_digests = source_digests.push(seed.source_digest)
+        source_byte_counts = source_byte_counts.push(row.byte_count)
+    if not entry_seen or seen.len() != count:
+        return Err("scoped-index-entry-or-source-count-missing")
+    val sources = NativeFullInventorySourcesV1(
+        source_paths, source_identities, source_digests, source_byte_counts,
+        count, snapshot.inventory_digest, inventory_digest, scv_receipt_digest)
+    val captured = cold_package_ownership_capture_scoped_v1(
+        inventory, sources, policy_content, manifests)?
+    val authority = PackageModuleIndexBuildAuthorityV1(
+        producer_digest, root_generation, snapshot.revision_id,
+        snapshot.commit_id, snapshot.tree_id, inventory_digest,
+        variant, selection.entry_source_identity)
+    var objects: [ColdHirNativeObjectArtifactV1] = []
+    var compiled: [ColdHirCompiledPackageArtifactV1] = []
+    for receipt in ctx.cold_hir_typed_receipts:
+        val seed = receipt.seed
+        val row = inventory.entries[inventory_by_source[seed.source_identity]]
+        val owner = captured.members_by_source[seed.source_identity]
+        val hir = ctx.runtime_std_hir_emissions[seed.source_identity]
+        val mir = ctx.runtime_std_mir_emissions[seed.source_identity]
+        if owner.source_digest != seed.source_digest or
+                hir.module_identity != seed.module_identity or
+                hir.source_digest != seed.source_digest or
+                mir.module_identity != seed.module_identity or
+                mir.source_digest != seed.source_digest:
+            return Err("scoped-index-artifact-source-differs")
+        val mir_file = ColdHirCompiledPayloadFileV1(
+            mir.mir_file.path, mir.mir_file.digest, mir.mir_file.byte_count)
+        val witness = cold_hir_semantic_source_witness_v1(authority, row)
+        val action = cold_hir_semantic_action_emit_v1(
+            receipt, row, witness, mir_file, authority,
+            selection.artifact_root)?
+        objects = objects.push(action.object_artifact)
+        compiled = compiled.push(ColdHirCompiledPackageArtifactV1(
+            seed.module_identity, owner.package_identity, hir.export_file,
+            hir.initializer_file, hir.provider_file, hir.generated_source_file,
+            mir_file, action.action_file, owner.manifest_source_identity))
+    # Only immutable receipts and files are needed from here onward. Release
+    # native compile graphs before archive aggregation grows the cold peak.
+    ctx.sources = []
+    ctx.source_contents_owner = []
+    ctx.hir_modules = {}
+    ctx.mir_modules = {}
+    ctx.runtime_std_hir_emissions = {}
+    ctx.runtime_std_mir_emissions = {}
+    val result = cold_hir_package_publish_from_driver_v1(
+        cache_root, expected_index_digest, ctx.cold_hir_typed_receipts,
+        objects, inventory, authority, compiled)
+    ctx.cold_hir_typed_receipts = []
+    result
+
+export cold_scoped_index_publish_from_driver_v1

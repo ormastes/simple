@@ -1,0 +1,84 @@
+# Ordinary native-build V3 publication after successful scoped AOT output.
+# The compiler producer validates every artifact before the CURRENT CAS.
+
+use app.io.env_ops.{env_get, cwd}
+use app.io.file_ops.{file_read_regular_no_follow_bounded, file_hash_sha256}
+use app.io.cli_ops.{cli_current_exe_path}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.cache.cache_root.{machine_cache_root}
+use compiler.driver.cache.cold_package_ownership_v1.{
+    ColdPackageOwnershipManifestV1, COLD_PACKAGE_OWNERSHIP_POLICY_IDENTITY_V1}
+use compiler.driver.cache.cold_scoped_index_producer_v1.{
+    cold_scoped_index_publish_from_driver_v1}
+use compiler.driver.cache.package_module_index.{
+    package_module_index_read_current_v1, package_module_index_digest_v1}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+use std.scv.compile_snapshot.{scv_compile_snapshot_open_v1}
+use std.scv.compile_source_inventory.{
+    compile_source_inventory_read_at_pointer_v1,
+    compile_source_inventory_snapshot_cache_root_v1}
+
+fn native_build_scoped_index_base_digest_v1() -> Result<text, text>:
+    val current = package_module_index_read_current_v1(machine_cache_root())
+    if not current.valid and current.reason != "missing-or-invalid-generation":
+        return Err("scoped-index-current-invalid:{current.reason}")
+    val expected = if current.valid: current.digest else: ""
+    val pinned = env_get("SIMPLE_PACKAGE_INDEX_DIGEST") ?? ""
+    if pinned != "" and pinned != expected:
+        return Err("scoped-index-current-pin-changed")
+    Ok(expected)
+
+fn native_build_scoped_index_publish_v1(
+    driver: CompilerDriver, variant: ConfigVariantKeyV1,
+    expected_index_digest: text
+) -> Result<text, text>:
+    if driver.ctx.cold_hir_scoped_selection == nil:
+        return Ok("")
+    val root = cwd()
+    val snapshot_root = env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
+    val revision = env_get("SIMPLE_SCV_REVISION_ID") ?? ""
+    val commit = env_get("SIMPLE_SCV_COMMIT_ID") ?? ""
+    val tree = env_get("SIMPLE_SCV_TREE_ID") ?? ""
+    val snapshot_digest = env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? ""
+    val source_digest = env_get("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? ""
+    val scv_receipt_digest = env_get("SIMPLE_SCV_RECEIPT_DIGEST") ?? ""
+    val inventory_root = compile_source_inventory_snapshot_cache_root_v1(
+        root, snapshot_root, revision)
+    if inventory_root == "" or source_digest == "":
+        return Err("scoped-index-inventory-root-unavailable")
+    val admitted = compile_source_inventory_read_at_pointer_v1(
+        inventory_root, source_digest)
+    if not admitted.valid or admitted.inventory == nil or
+            admitted.digest != source_digest:
+        return Err("scoped-index-inventory-not-admitted:{admitted.reason}")
+    val inventory = admitted.inventory!
+    val snapshot = scv_compile_snapshot_open_v1(
+        root, snapshot_root, revision, commit, tree, snapshot_digest)
+    if not snapshot.valid or snapshot.source_drifted:
+        return Err("scoped-index-snapshot-not-admitted:{snapshot.reason}")
+    val policy = file_read_regular_no_follow_bounded(
+        snapshot_root + "/" + COLD_PACKAGE_OWNERSHIP_POLICY_IDENTITY_V1,
+        65536)?
+    var manifests: [ColdPackageOwnershipManifestV1] = []
+    for row in inventory.entries:
+        if row.source_identity.ends_with("/simple.sdn") and
+                row.source_identity != COLD_PACKAGE_OWNERSHIP_POLICY_IDENTITY_V1:
+            val content = file_read_regular_no_follow_bounded(
+                snapshot_root + "/" + row.source_identity, 65536)?
+            manifests = manifests.push(
+                ColdPackageOwnershipManifestV1(row.source_identity, content))
+    val exe = cli_current_exe_path()
+    val producer_digest = if exe == "": "" else: file_hash_sha256(exe)
+    val cache_root = machine_cache_root()
+    val current = package_module_index_read_current_v1(cache_root)
+    val observed = if current.valid: current.digest else: ""
+    if (not current.valid and current.reason != "missing-or-invalid-generation") or
+            observed != expected_index_digest:
+        return Err("scoped-index-current-changed")
+    val published = cold_scoped_index_publish_from_driver_v1(
+        driver, snapshot, inventory, root, cache_root, scv_receipt_digest,
+        producer_digest, variant, expected_index_digest, policy, manifests)?
+    Ok(package_module_index_digest_v1(published))
+
+export native_build_scoped_index_base_digest_v1
+export native_build_scoped_index_publish_v1

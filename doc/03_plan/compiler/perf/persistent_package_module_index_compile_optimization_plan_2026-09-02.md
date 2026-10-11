@@ -568,3 +568,20 @@ The full-inventory semantic-only AOT exit remains separate. This diagnostic
 capture is opt-in until the CLI can publish the resulting complete V3 graph
 and remove private artifacts after readback. It is not a warm-build or
 performance qualification. A no-stub Stage 2 direct compile of the driver HIR module parsed all 952 source units, then timed out at 180 seconds in HIR before this lane had a type or executable PASS.
+
+### 2026-10-11 Scoped V3 publication connection
+
+The opt-in ordinary native-build lane now prepares a typed invocation variant
+before compiling, rejects a pinned graph with different options, captures the
+CURRENT digest before compilation, and invokes a compiler-owned V3 producer
+only after successful AOT output. The producer matches each typed receipt to
+the full frozen inventory and scoped ownership policy, emits semantic actions,
+and delegates archive readback and CURRENT CAS to the existing verified
+publisher. Filesystem reads use the app IO facade. Capture currently requires
+an explicit native target, a frozen entry closure, and the reference frontend
+policy. Invocation argv frames deliberately over-invalidate the variant.
+
+This is a source-level connection, not a qualified production cutover. A
+self-hosted compile, first V3 publication, subsequent warm native build,
+archive object attachment, artifact cleanup, and paired p95/RSS evidence
+remain open. The default capture switch remains off until those gates pass. The bounded no-stub Stage 2 wrapper compile found two HIR diagnostics from a wrong cwd facade import, now corrected. A later 1,019-unit CLI compile parsed but timed out in HIR; a focused variant-helper compile completed that helper’s HIR module with zero diagnostics before the bounded run was stopped. No type, native, or end-to-end V3 PASS is claimed. The producer releases retained source/HIR/MIR graphs before archive aggregation; a peak-RSS benefit remains unmeasured.
