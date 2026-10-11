@@ -31,3 +31,37 @@ The composition root may install only the fixed OS adapter using an owner-issued
 6. Run the core runtime and MCP native smoke gates required for compiler changes, then measure no-import startup, representative request p95, and peak RSS against the admitted baseline. Apply the shared normalized-sum rule and independent budgets.
 
 Until all evidence passes, Item 5 remains open and release landing is blocked.
+
+## Closure and SOSIX constraints
+
+A named `use lazy app.startup.dynsmf_status.{run_product_dynsmf_status}`
+would still collect `dynsmf_status` in the native entry closure. The
+self-hosted scanner explicitly treats named lazy imports as static name
+dependencies in `src/compiler/80.driver/driver_source_loading.spl`. Replacing
+the current import with that spelling is therefore not a size cut. A real
+first-demand path must defer the compiled provider artifact itself and prove
+that the default entry's link map and loaded-image list exclude it.
+
+The [SIMD/GPU/SOSIX design](../simd_gpu_sosix_variation_final_2026-10-10.md)
+keeps artifact identity, trust, ABI admission and dependency policy in the
+loader. SOSIX owns native mapping and dynamic-library mechanisms. The port
+must maintain that split: its logical V3 rows stay with `ModuleLoader`; the
+physical adapter delegates only host effects through SOSIX and retains exact
+mapping receipts in the physical owner. A wrapper that merely renames an
+`os.smf` import to `os.sosix` without this route and lifetime proof does not
+close the boundary.
+
+The current OS helper functions have underscore names but are directly imported
+by the K0 loader. Naming and an `export` list alone are not proof of a
+language-enforced private issuer. The negative fixture in the sequence above
+must compile a hostile importer and show that it cannot install a fake adapter
+or authorize a physical success; until then the port remains a design candidate.
+
+The default dynSMF manifest already marks its file, network, renderer, UI and
+tool entries `default_autoload: false` in
+`src/os/smf/dynsmf_session.spl`. Repeating that metadata edit would not remove
+any static entry-closure code or mapped library. The next implementation cut is
+the artifact/command boundary: the no-import entry must link only its static
+bootstrap mechanism; a requested feature must admit and bind its separately
+compiled provider on first demand, with link-map and loaded-image evidence for
+both paths.
