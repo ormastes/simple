@@ -7,7 +7,7 @@ use std.common.perf.execution_metrics.{ResourceUsage, ResourceEvidenceQuality, T
 use std.nogc_sync_mut.io.process_completion.{ProcessCompletionV1}
 use std.test_runner.test_runner_types.{TestFileResult, TestRunResult, TestOmissionEvidence, TestOmissionStatus}
 use std.test_runner.sdoctest.types.{SdoctestBlock, BlockResult, BlockStatus, SdoctestFileResult, SdoctestRunResult, SdoctestModifier}
-use std.test_runner.test_runner_output.{combined_test_run_sdn}
+use std.test_runner.test_runner_output.{combined_test_run_sdn, test_run_result_sdn, validate_test_output_format}
 
 fn _output_file() -> TestFileResult:
     TestFileResult(
@@ -71,6 +71,69 @@ fn _output_expect_fields(record: Dict<text, SdnValue>, names: [text], values: [S
         expect(record[names[i]]).to_equal(values[i])
 
 describe "native SDN test-runner output transport":
+    it "rejects retired JSON while retaining text, doc and native SDN formats":
+        for format in ["text", "doc", "sdn"]:
+            expect(validate_test_output_format(format).is_ok()).to_equal(true)
+        match validate_test_output_format("json"):
+            case Err(reason): expect(reason).to_contain("JSON test output is retired")
+            case Ok(_): fail("legacy JSON output was admitted")
+
+    it "rejects unknown or empty formats instead of falling back to human output":
+        for format in ["", "unknown", "SDN", "jsonl"]:
+            match validate_test_output_format(format):
+                case Err(reason): expect(reason).to_contain("expected text, doc or sdn")
+                case Ok(_): fail("unknown output format was admitted: {format}")
+
+    it "emits standalone SDN summaries with exact grouped counters and full file evidence":
+        var first = _output_file()
+        first.path = "test/01_unit/日本_spec.spl"
+        var second = _output_file()
+        second.path = "test/01_unit/other_spec.spl"
+        second.passed = 4
+        second.failed = 1
+        second.skipped = 7
+        second.pending = 0
+        var gated = _output_file()
+        gated.path = "test/02_integration/gated_spec.spl"
+        gated.passed = 0
+        gated.failed = 0
+        gated.skipped = 5
+        gated.pending = 0
+        gated.error = ""
+        gated.feature_gated = "unavailable-feature"
+        val result = TestRunResult(files: [first, second, gated], total_passed: 6, total_failed: 2,
+            total_skipped: 15, total_pending: 4, total_timed_out: 0, total_duration_ms: 75,
+            total_setup_ms: 15, total_cached: 0)
+        val source = test_run_result_sdn(result).unwrap()
+        val parsed = parse_with_spans_and_issues(source).unwrap()
+        expect(parsed.2.len()).to_equal(0)
+        val root = _output_fields(parsed.0)
+        expect(root["schema"]).to_equal(SdnValue.String("simple.test-runner.output/v1"))
+        expect(root["success"]).to_equal(SdnValue.Bool(false))
+        expect(root["spl_doctest"]).to_equal(SdnValue.Null)
+        expect(root["sdoctest"]).to_equal(SdnValue.Null)
+        val spec = _output_fields(root["spec"])
+        val groups = _output_items(spec["groups"])
+        expect(groups.len()).to_equal(2)
+        _output_expect_fields(_output_fields(groups[0]),
+            ["name", "passed", "failed", "skipped", "pending", "done_pct"],
+            [SdnValue.String("01_unit"), SdnValue.Int(6), SdnValue.Int(2), SdnValue.Int(10), SdnValue.Int(4), SdnValue.Int(50)])
+        _output_expect_fields(_output_fields(groups[1]),
+            ["name", "passed", "failed", "skipped", "pending", "done_pct"],
+            [SdnValue.String("02_integration"), SdnValue.Int(0), SdnValue.Int(0), SdnValue.Int(5), SdnValue.Int(0), SdnValue.Int(0)])
+        val files = _output_items(spec["files"])
+        expect(files.len()).to_equal(3)
+        val retained = _output_fields(files[0])
+        expect(retained.len()).to_equal(27)
+        expect(retained["path"]).to_equal(SdnValue.String("test/01_unit/日本_spec.spl"))
+        expect(_output_fields(retained["resource_usage"])["peak_tree_charge_bytes"]).to_equal(SdnValue.Int(1000))
+        expect(retained["trace_case_events_sdn"]).to_equal(SdnValue.String(first.trace_case_events_sdn))
+
+    it "rejects an oversized standalone summary rather than returning partial evidence":
+        var file = _output_file()
+        file.error = "x".repeat(1048577)
+        expect(test_run_result_sdn(_output_spec(file)).is_err()).to_equal(true)
+
     it "serializes all runner result evidence and nested documentation blocks":
         val spec = TestRunResult(files: [_output_file()], total_passed: 2, total_failed: 1,
             total_skipped: 3, total_pending: 4, total_timed_out: 0, total_duration_ms: 25,

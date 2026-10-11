@@ -18,11 +18,11 @@ Historical Phase 2 probes do not qualify the Phase 3 candidate.
 
 ## Blocking findings
 
-- SDN-only migration is incomplete: shared test-runner output still contains
-  legacy JSON serializers and JSON branches in `print_result` and
-  `print_summary`. Public main/client flag rejection does not prove those
-  internal interfaces have migrated. Their callers and existing fixtures need
-  migration without changing externally imposed provider protocols.
+- Shared test-runner JSON serializers are removed in authored source. Format
+  validation admits text, doc and SDN; SDN summaries use the canonical envelope.
+  Native caller and fixture execution remain unverified. Void human-printer
+  APIs report encoding errors on stderr; machine callers must consume the
+  fallible serializer or worker transport to preserve a nonzero failure result.
 - Public SDN output now routes through one bounded wrapper and the obsolete
   unreferenced JSON wrapper is removed. Native V4 currently lacks the required
   descendant-group retirement contract even on Linux; Windows additionally
