@@ -3,8 +3,10 @@
 Requirement: `REQ-INTERP-ARRAY-PARAM-VALUE`.
 Executable: `test/01_unit/compiler_core/interpreter/array_parameter_copy_spec.spl`.
 
-The executable specification calls the production `val_copy_for_parameter`
-helper and the real interpreter value arena. It verifies independent array
+The executable specification calls the production `eval_function_call` with
+a real function declaration and then mutates the returned parameter array.
+The remaining cases call `val_copy_for_parameter` and the real value arena.
+It verifies independent array
 storage after append and replacement, independent nested arrays, shared
 registered class identities, copied registered value structs with array fields,
 and unchanged scalar identities plus independent empty arrays.
