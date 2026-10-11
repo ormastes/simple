@@ -243,3 +243,25 @@ keys and source-less cumulative key/header/string byte limits. Earlier12/0
 acceptance and regressions remain pre-repair evidence; final raw controls5/0,
 acceptance13/0 and affected graph14/0, qualification15/0, budget/order11/0
 match the changed source. No whole AC, broad runtime or admission PASS follows.
+
+## Targeted operation contract increment — 2026-10-11
+
+Full20REQ/40AC/WP0–WP7 are unchanged. Root owns implementation/merge; sidecarsN/A;
+Astra is final reviewer. Declarations major2 supplies explicit add/replace/suppress
+without reinterpreting major1. Desired replacement and exact original tuple are
+separate, and provenance/applicability references remain untrusted data. Native
+strict-valid baseline3/3 -> initial typed3/0 and broader12/0 are distinct stages.
+Actual policy authorization/stale-rule resolution AC006 remains required.
+See doc/05_design/infra/traceability_link_operations_v2.md and its TDD report.
+
+The unpublished work branch was rebased onto releasee2d56c2 with all89 prior
+owned product files byte-identical (AstraPASS P0=0/P1=0). New canonical Stage2
+qualification stopped before compilation at its10GB disk-space guard. Logs are
+retained; no admission was emitted. Continue implementation independently while
+build storage is unavailable; broad runtime and protected admission remain open.
+
+Final operation component native acceptance14/0, affected major1 declarations13/0
+and qualification15/0 match the new dispatcher stage. Empty63-node shape and
+exact aggregate text boundaries are covered. This remains component evidence,
+not real resolver AC006 or whole20/40 completion. Source/oracle AstraPASS P0=0/P1=0;
+final evidence review PASS (10source/36artifacts reconciled).
