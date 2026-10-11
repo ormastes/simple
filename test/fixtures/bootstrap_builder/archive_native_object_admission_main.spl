@@ -1,0 +1,56 @@
+use compiler.driver.cache.binary_object_cas.{binary_object_cas_put}
+use compiler.driver.cache.archive_native_object_admission_v1.{
+    ArchiveNativeObjectActionV1, archive_native_object_paths_v1}
+
+fn fixture_action(kind: text, digest: text) -> [ArchiveNativeObjectActionV1]:
+    [ArchiveNativeObjectActionV1(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        kind, "fixture.main", digest)]
+
+fn main() -> i64:
+    val root = "build/test/archive-native-object-admission-fixture"
+    val elf: [u8] = [127u8, 69u8, 76u8, 70u8, 1u8, 2u8, 3u8, 4u8]
+    val digest = binary_object_cas_put(root, elf)
+    if digest.len() != 64:
+        print "FAIL CAS publication"
+        return 11
+    match archive_native_object_paths_v1(
+            fixture_action("compile-native", digest), root,
+            "aarch64-unknown-linux-gnu"):
+        case Err(reason):
+            print "FAIL valid admission: {reason}"
+            return 12
+        case Ok(paths):
+            if paths.len() != 1 or not paths[0].ends_with(
+                    digest.substring(2, 64)):
+                print "FAIL admitted object path"
+                return 13
+    match archive_native_object_paths_v1(
+            fixture_action("compile-semantic", digest), root,
+            "aarch64-unknown-linux-gnu"):
+        case Ok(_):
+            print "FAIL semantic-only action admitted"
+            return 14
+        case Err(_): pass
+    match archive_native_object_paths_v1(
+            fixture_action("compile-native", digest), root,
+            "aarch64-apple-darwin"):
+        case Ok(_):
+            print "FAIL wrong target admitted"
+            return 15
+        case Err(_): pass
+    val duplicate = [
+        ArchiveNativeObjectActionV1(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "compile-native", "fixture.main", digest),
+        ArchiveNativeObjectActionV1(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "compile-native", "fixture.main", digest)]
+    match archive_native_object_paths_v1(
+            duplicate, root, "aarch64-unknown-linux-gnu"):
+        case Ok(_):
+            print "FAIL duplicate symbol admitted"
+            return 16
+        case Err(_): pass
+    print "PASS archived native object CAS admission"
+    0

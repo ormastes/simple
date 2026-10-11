@@ -631,3 +631,19 @@ reached for this helper. Full CLI warm
 linking, object-format coverage across targets, matched p95/RSS cohorts, and
 the release verification gate remain open. The default V3 capture switch stays
 off.
+
+### 2026-10-11 warm-link native fixture boundary
+
+A no-stub LLVM fixture exposed an undefined global when the warm admission
+helper imported the CAS byte cap directly. The CAS now offers a full bounded
+read function that keeps that cap in its owning module; the next native link
+succeeded. The resulting 107,640-byte fixture exits 11 before admission
+assertions because CAS publication returns an empty digest. Its test parent
+directory exists but no object blob was published. The exact unresolved stage
+is tracked in
+`doc/08_tracking/bug/target6_archive_native_fixture_cas_publication_2026-10-11.md`.
+Cranelift independently rejected imported globals in the first attempt.
+After these three bounded attempts, archive object consumption has no
+executable PASS. The broad package-index system spec now routes its process
+calls through SOSIX, but the compiled acceptance owner and end-to-end warm
+route remain unqualified. No p95/RSS claim follows from this fixture.

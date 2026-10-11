@@ -431,3 +431,23 @@ loops, preserving order and duplicate-owner rejection. The isolated
 `stage4_symbol_closure.spl` module completed parse, HIR, MIR, borrow check,
 and SMF packaging after this repair. This is a focused compiler PASS, not a
 full CLI/native hello or size/startup qualification.
+
+## 2026-10-11 bounded current-source Stage4 bootstrap attempt
+
+An admitted pure-Simple Stage 2 compiler was used from the isolated target
+worktree (SHA-256 `e0e5a6cd522d6ee86b0dbb8e7cdd88cad21b3daa39d18b65b2ce163867e0eb06`).
+The first bootstrap command omitted the required `src/plugins` source root
+and failed source closure on `plugins.backend_registry.full_static_backend_registry`.
+A corrected Cranelift command advanced through parsing, but it was stopped
+before native codegen after a smaller same-backend fixture proved existing
+imported-global/module-static rejection. The third command used LLVM and all
+required source roots. It selected 1,191 source modules and reached HIR
+638/1,191 without a terminal source diagnostic before the 600-second bound.
+The timeout left an orphan worker, which was explicitly terminated. No
+Stage4 executable was produced.
+
+These are bootstrap/build diagnostics, not a size, startup, RSS, optional
+provider, or release-small qualification. The LLVM run used the pre-fix
+snapshot of the cross-module CAS constant; a separate focused fixture
+subsequently found and repaired that undefined-link input. The bounded
+three-cycle gate is exhausted for this Stage4 attempt.
