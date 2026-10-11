@@ -74,3 +74,43 @@ position-aware highlighting search helper. Retained only additional empty-keywor
 LF-boundary, consistent callback and presence-binding repairs. The changed
 highlighter helper requires a new native regression; prior13 checks describe
 the earlier implementation only. No trait failure was bypassed.
+
+
+## 2026-10-12 executed evidence and owner diagnosis
+
+The notes above are historical checkpoints. Current upstream is5b1620525c6
+(previous a55e compiler tree unchanged; newer release documentation only).
+The highlighter regression on rebased63467f2716c passed13 actual assertions:
+`/root/simple-block-repair-diagnostic-20261012/highlighter-rebased`, binarySHA256
+90e57b91c5eaedfa410e9c6fa1a20efd3be482c0feff499f1a9ec78c11063b0b.
+This remains bootstrap-seed evidence only.
+
+The canonical seed/runtime attempt for63467f2716c completed exit0 in1475.41s,
+peak process-treeRSS3001284KiB, no resource stop, quiescent1. Its receipts are
+`/root/simple-block-repair-canonical-20261012/seed`; no Phase2 or Phase3 PASS
+is implied. The matching native-all, hosted runtime and compiler backfill were
+built through the canonical wrapper. Source must be requalified after repairs.
+
+Both real parser and annotation-only diagnostics fail the same abstract
+BlockDefinition.parse_payload link. HIR let bindings lose declared trait
+identity after the trait aliases to Any; explicit parameter dispatch retains
+its slot. A returned-local metadata repair requires defining-module identity,
+including same-short-name imported traits with different slot layouts. The
+first raw-name-only candidate was rejected during review; it was never applied.
+
+Both original optional registry fixtures executed and crashed before assertions.
+Their class-parent syntax is unsupported; use struct trait declarations. The
+corrected struct diagnostic allocates a real object with a valid probe vtable,
+but crashes later when initializing builtin blocks. Builtin methods declared in
+separate inherent impl blocks are omitted from synthetic trait tables, leaving
+a null kind slot. Retain actual method ownership and imported declaration/default
+authority when repairing this; AST-only imported trait lookup was rejected in
+review because per-file native builds retain imported declarations separately.
+The fixture syntax correction alone is not a registry-crash fix.
+
+Failure evidence: `/root/simple-return-trait-diagnostic-20261012/{original,annotated}`,
+`/root/simple-block-optional-diagnostics-20261012/{absent,present}`, and
+`/root/simple-block-optional-struct-diagnostics-20261012/{absent,present}`.
+No unchanged failing probe is rerun. Native regression execution with a newly
+built repaired producer, real Hello, Phase2/Phase3 and required core/MCP checks
+remain pending. No changes from this repair lane have landed.
