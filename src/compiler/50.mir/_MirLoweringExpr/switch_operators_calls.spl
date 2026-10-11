@@ -30,6 +30,7 @@ use compiler.semantics.match_exhaustiveness.{build_match_coverage, match_coverag
 use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_mir_logical_module_name}
 use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
 use compiler.mir._MirLowering.provider_metadata.{mir_class_identity}
+use compiler.mono.monomorphize_integration.{MONO_SYMBOL_BASE}
 
 fn mono_mangling_names_type(callee_name: text, type_name: text) -> bool:
     """True when `type_name` is a token of the 40.mono mangling suffix of
@@ -206,6 +207,23 @@ fn enum_variant_disc(names: [text], variant: text) -> i64:
     -1
 
 impl MirLowering:
+    me mono_caller_return_owner(type_: HirType) -> text:
+        """Layout for a nominal type already relocated by mono into this table."""
+        match type_.kind:
+            case HirTypeKind.Named(symbol, _):
+                val row = self.symbols.get_symbol_raw(symbol.id)
+                if row == nil:
+                    self.error_fatal("E-MIR-MONO-RETURN-OWNER: relocated specialization return has no caller declaration", Some(type_.span))
+                    return ""
+                match row.kind:
+                    case SymbolKind.Class:
+                        return mir_class_identity(row)
+                    case SymbolKind.Struct | SymbolKind.Enum:
+                        return self.declared_struct_layout_key(self.composite_layout_key(row))
+                    case _: ()
+            case _: ()
+        ""
+
     me enum_qualified_key(symbol: SymbolId) -> text:
         """The `runtime_name` key ("{owner_module}.{Name}") for an enum SYMBOL,
         or "" when the symbol has no defining module (then the bare name IS the
@@ -6503,15 +6521,23 @@ impl MirLowering:
             # minted outside every module table, so the symbol/registry chain
             # above cannot type it and fell back to the erased i64 -- the
             # `text` instance's ptr result was then consumed as an integer.
-            # The stamped signature wins when R is symbol-free (ids inside a
-            # Named R belong to the TEMPLATE's table, not necessarily ours).
+            # 40.mono transports specialization signatures into the caller
+            # table. Other stamped signatures retain the legacy checks below.
             var stamped_return: HirType? = nil
             var stamped_struct_name = ""
             if callee.has_type_:
                 match callee.type_.kind:
                     case HirTypeKind.Function(_, stamped_ret, _):
                         val sr: HirType = stamped_ret
-                        if hir_type_metadata_symbol_free(sr):
+                        if direct_symbol.id >= MONO_SYMBOL_BASE:
+                            # 40.mono relocates the specialization's signature
+                            # into the CALLER table before publishing NamedVar.
+                            # Do not reconstruct ownership from display mangling
+                            # or the name-only global return-shape registry.
+                            return_type = self.lower_type(sr)
+                            stamped_return = sr
+                            stamped_struct_name = self.mono_caller_return_owner(sr)
+                        elif hir_type_metadata_symbol_free(sr):
                             return_type = self.lower_type(sr)
                             stamped_return = sr
                         else:
@@ -6579,18 +6605,29 @@ impl MirLowering:
             else:
                 self.symbol_to_operand(direct_symbol)
             val result = self.emit_resolved_direct_call(func_operand, arg_operands, return_type)
-            self.remember_call_hir_return(result, direct_symbol)
+            if direct_symbol.id < MONO_SYMBOL_BASE or stamped_return == nil:
+                self.remember_call_hir_return(result, direct_symbol)
             if stamped_struct_name != "" and not self.struct_value_syms.contains(result.id):
                 self.struct_value_syms[result.id] = stamped_struct_name
             if stamped_return != nil:
                 val stamped_t: HirType = stamped_return
                 self.remember_local_hir_type(result.id, stamped_t, 0, 0)
                 match stamped_t.kind:
-                    case HirTypeKind.Optional(_):
+                    case HirTypeKind.Optional(inner):
                         self.option_value_locals[result.id] = true
                         self.mark_runtime_value_local(result.id)
-                    case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                        if direct_symbol.id >= MONO_SYMBOL_BASE:
+                            val owner = self.mono_caller_return_owner(inner)
+                            if owner != "":
+                                self.struct_value_syms[result.id] = owner
+                    case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
                         self.runtime_array_locals[result.id] = true
+                        self.mark_runtime_value_local(result.id)
+                        if direct_symbol.id >= MONO_SYMBOL_BASE:
+                            val owner = self.mono_caller_return_owner(element)
+                            if owner != "":
+                                self.array_element_struct_syms[result.id] = owner
+                    case HirTypeKind.Any:
                         self.mark_runtime_value_local(result.id)
                     case _:
                         ()
