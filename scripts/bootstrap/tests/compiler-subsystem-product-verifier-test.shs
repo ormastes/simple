@@ -37,8 +37,35 @@ mkdir -p "$tmp/source-overlay/src/app/product"
 printf 'generated wrapper\n' >"$tmp/source-overlay/src/app/product/main.spl"
 printf 'path\tsha256\nproduct/main.spl\t%s\n' "$(sha "$tmp/source-overlay/src/app/product/main.spl")" \
   >"$tmp/source-overlay/src/app/generated-manifest.tsv"
-printf 'path\tsha256\nsrc/app/source.spl\t%s\n' "$(sha "$source_root/src/app/source.spl")" \
-  >"$tmp/logs/source-overlay-inputs.tsv"
+perl -I "$script_root/lib" -MBootstrapProductOverlay -e \
+  'print BootstrapProductOverlay::encoded(BootstrapProductOverlay::plan($ARGV[0]))' \
+  "$source_root" >"$tmp/logs/source-overlay-inputs.tsv"
+# Test fixture for the current SCV provenance contract; never executed as a native product.
+python3 - "$tmp/source-overlay" <<'PYSCV'
+from pathlib import Path
+import hashlib, shutil, sys
+root = Path(sys.argv[1])
+member = 'src/app/product/main.spl'
+payload = (root / member).read_bytes()
+sha = lambda data: hashlib.sha256(data).hexdigest()
+inventory = f'{member}|sha256_{sha(payload)}|{len(payload)}\n'.encode()
+digest = sha(inventory)
+tree = f'scv-tree-v1-{digest}'
+revision = 'scv-revision-v1-' + sha(f'simple/scv-compile-revision/v1|{tree}|{digest}'.encode())
+commit = 'scv-compile-v1-' + sha(f'simple/scv-compile-commit/v1|{tree}|1'.encode())
+provenance = f'simple-scv-compile-snapshot-v1\nrevision={revision}\ncommit={commit}\ntree={tree}\ninventory={digest}\ncount=1'
+snapshot = root / 'build/scv/snapshots' / revision
+(snapshot / member).parent.mkdir(parents=True)
+shutil.copyfile(root / member, snapshot / member)
+(snapshot / 'SCV_COMPILE_INVENTORY').write_bytes(inventory)
+(snapshot / 'SCV_COMPILE_SNAPSHOT').write_text(provenance)
+receipts = root / 'build/scv/receipts'
+receipts.mkdir()
+(receipts / f'{revision}.receipt').write_text(provenance + f'\nsnapshot=snapshots/{revision}')
+PYSCV
+perl "$script_root/verify-product-generated-snapshot.pl" "$tmp/source-overlay" \
+  "$tmp/source-overlay/src/app" "$tmp/source-overlay/src/app/generated-manifest.tsv" \
+  "$tmp/logs/generated-source-snapshot.env"
 one_sha=$(sha "$source_root/test/01_unit/compiler/one_spec.spl")
 helper_sha=$(sha "$source_root/test/01_unit/compiler/helper_spec.spl")
 {
@@ -106,6 +133,8 @@ source_overlay_input_manifest_path=$tmp/logs/source-overlay-inputs.tsv
 source_overlay_input_sha256=$(sha "$tmp/logs/source-overlay-inputs.tsv")
 generated_manifest_path=$tmp/source-overlay/src/app/generated-manifest.tsv
 generated_tree_sha256=$(sha "$tmp/source-overlay/src/app/generated-manifest.tsv")
+generated_snapshot_proof_path=$tmp/logs/generated-source-snapshot.env
+generated_snapshot_proof_sha256=$(sha "$tmp/logs/generated-source-snapshot.env")
 source_spans_path=$tmp/source-spans.tsv
 source_spans_sha256=$(sha "$tmp/source-spans.tsv")
 main_policy_path=$source_root/config/check/compiler_subsystem_main_verdict_policy.tsv
@@ -183,6 +212,34 @@ grep -qx 'source_owner_count=2' "$tmp/result.env"
 grep -qx 'registered=1' "$tmp/result.env"
 grep -qx 'executed=1' "$tmp/result.env"
 grep -qx 'zero_case_owners=1' "$tmp/result.env"
+# Only independently authenticated completed SCV artifacts are accepted.
+for stray in build/scv/unbound.txt build/adjacent.txt; do
+  printf 'not admitted\n' >"$tmp/source-overlay/$stray"
+  if verify >"$tmp/out" 2>"$tmp/error"; then exit 1; fi
+  grep -q 'overlay has unlisted or missing physical members' "$tmp/error"
+  rm "$tmp/source-overlay/$stray"
+done
+# Selection authority stays partial even when its list contains every owner.
+cp "$tmp/inventory.tsv" "$tmp/canonical.tsv"
+printf '%s\n' test/01_unit/compiler/helper_spec.spl test/01_unit/compiler/one_spec.spl >"$tmp/spec-list.txt"
+cp "$tmp/build.env" "$tmp/build.full"
+perl "$script_root/product-spec-selection.pl" verify "$tmp/canonical.tsv" "$tmp/spec-list.txt" \
+  compiler "$tmp/inventory.tsv" >>"$tmp/build.env"
+verify --spec-list="$tmp/spec-list.txt" --canonical-inventory="$tmp/canonical.tsv"
+grep -qx 'status=SUBSET_PASS' "$tmp/result.env"
+grep -qx 'selected_owner_count=2' "$tmp/result.env"
+if verify >"$tmp/out" 2>"$tmp/error"; then exit 1; fi
+grep -q 'subset receipt requires explicit selection authority' "$tmp/error"
+# Canonical source omission cannot be disguised by a valid selected list.
+head -n 2 "$tmp/canonical.tsv" >"$tmp/canonical.omitted.tsv"
+printf '%s\n' test/01_unit/compiler/helper_spec.spl >"$tmp/omitted-list.txt"
+cp "$tmp/inventory.tsv" "$tmp/inventory.full"
+cp "$tmp/canonical.omitted.tsv" "$tmp/inventory.tsv"
+if verify --spec-list="$tmp/omitted-list.txt" --canonical-inventory="$tmp/canonical.omitted.tsv" \
+    >"$tmp/out" 2>"$tmp/error"; then exit 1; fi
+grep -q 'inventory omits tracked subsystem owner' "$tmp/error"
+cp "$tmp/inventory.full" "$tmp/inventory.tsv"
+cp "$tmp/build.full" "$tmp/build.env"
 # The successful fixture above includes compiler_sha256 command fields.
 # Rehash command evidence so malformed/duplicate/unknown keys reach its parser.
 cp "$tmp/logs/generator.command.tsv" "$tmp/generator.command.original"

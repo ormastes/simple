@@ -1,5 +1,29 @@
 # Runtime Optional Provider and Binary-Size Optimization Plan
 
+## 2026-10-11 OS and filesystem variation refinement
+
+The user selected separate sibling `variants/os/` and `variants/filesystem/`
+groups. This refines P2/P3/P4 in this plan; it does not create another resolver
+or implementation plan. See the [current design](../../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-selected-os-and-filesystem-separation).
+
+The corresponding plan folders are separate: [variation/os](variation/os/README.md)
+and [variation/filesystem](variation/filesystem/README.md). They index this plan's
+work by independent axis and do not duplicate its status or acceptance owners.
+
+| Work | Required exit evidence | Status |
+|---|---|---|
+| P2: separate OS and filesystem slots | Existing resolver recognizes independent selections, preserves `platform` compatibility, rejects ambiguous/conflicting aliases, and invalidates only affected selection/cache entries. | Planned |
+| P3: neutral filesystem operations | Common SOSIX contracts and production routing for statfs and path/handle truncate; existing positioned I/O retained; permission, generation and error checks verified. | Missing routes; open |
+| P4: independent provider composition | Same filesystem through two admitted OS providers; two filesystem providers under one OS; multiple simultaneous mounts; open handles retain provider identity. | Native combinations unqualified |
+| P4: shared operation acceptance | SOSIX tests parameterized by OS and filesystem, including unavailable capabilities and backend failure propagation; driver-private tests reported separately. | Open |
+
+Windows, Linux, BSD/FreeBSD and SimpleOS are OS candidates; FAT32, NVFS and DBFS
+are filesystem candidates. This is a qualification matrix, not a claim that its
+Cartesian product works. Keep native-format translation within the OS provider
+and filesystem-format algorithms within the shared filesystem owner. Do not
+copy either tree per pair. SDN remains the default configuration/evidence format;
+JSON is an explicit interoperability option.
+
 ## 2026-10-11 selected variation migration
 
 The user requested incorporation of the [SIMD/GPU/SOSIX variation design](../../../05_design/compiler/simd_gpu_sosix_variation_final_2026-10-10.md). This table adds its work to this existing Item 5 plan; it creates no competing implementation plan. All rows remain **planned/unqualified** until their own production evidence passes. Current owner corrections are in the [shared-interface design](../../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration).
