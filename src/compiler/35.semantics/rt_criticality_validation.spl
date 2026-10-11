@@ -524,8 +524,33 @@ pub fn validate_rt_criticality_facts_v1(module_ids: [text],
 pub fn validate_rt_criticality_facts_with_capabilities_v1(module_ids: [text],
         functions: [RtCriticalFunctionFactsV1],
         capabilities: [RtBoundCapability]) -> [RtCriticalDiagnostic]:
+    validate_rt_criticality_claim_facts_v1(module_ids, functions, capabilities,
+        rt_critical_contract_claims_v1(), rt_implicit_profile_is_error())
+
+struct RtCriticalContractClaimV1:
+    registry_key: text
+    path: text
+    fn_name: text
+    profile: text
+    reason: text
+    raw_bounds: text
+    is_hal: bool
+
+pub fn rt_critical_contract_claims_v1() -> [RtCriticalContractClaimV1]:
+    var claims: [RtCriticalContractClaimV1] = []
+    for key in rt_criticality_claim_keys():
+        claims.push(RtCriticalContractClaimV1(registry_key: key, path: rt_criticality_claim_path(key),
+            fn_name: rt_criticality_claim_fn(key), profile: rt_criticality_profile(key),
+            reason: rt_criticality_reason(key), raw_bounds: rt_criticality_bounds_for(key),
+            is_hal: rt_criticality_is_hal(key)))
+    claims
+
+# Replay reads no ambient claim/capability registry or severity switch. The
+# driver must bind every editable input to actual source/policy admission.
+pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
+        functions: [RtCriticalFunctionFactsV1], capabilities: [RtBoundCapability],
+        claims: [RtCriticalContractClaimV1], implicit_profile_error: bool) -> [RtCriticalDiagnostic]:
     var diagnostics: [RtCriticalDiagnostic] = []
-    val claims = rt_criticality_claim_keys()
     var has_rt_hal = false
     for fn_ in functions:
         if fn_.declaration.is_rt_hal: has_rt_hal = true
@@ -559,14 +584,15 @@ pub fn validate_rt_criticality_facts_with_capabilities_v1(module_ids: [text],
     # critical or verified dependency.
     var claim_roots: Dict<text, text> = {}
     var declared_ranks: Dict<text, i64> = {}
-    for key in claims:
-        if not module_ids.contains(rt_criticality_claim_path(key)): continue
-        val fn_name = rt_criticality_claim_fn(key)
-        val profile = rt_criticality_profile(key)
+    for claim in claims:
+        val key = claim.registry_key
+        if not module_ids.contains(claim.path): continue
+        val fn_name = claim.fn_name
+        val profile = claim.profile
         var root_id = ""
         for fn_ in functions:
             val declaration = fn_.declaration
-            if not rt_declaration_matches_v1(declaration, rt_criticality_claim_path(key)): continue
+            if not rt_declaration_matches_v1(declaration, claim.path): continue
             if declaration.name == fn_name:
                 if root_id != "": root_id = "__rt_ambiguous_root__"
                 else: root_id = rt_stable_fn_id(declaration.module_key, declaration.symbol_id)
@@ -587,22 +613,23 @@ pub fn validate_rt_criticality_facts_with_capabilities_v1(module_ids: [text],
         fact_positions[facts[fact_position].name] = fact_position
         fact_position = fact_position + 1
     var admitted_roots: Dict<text, bool> = {}
-    for key in claims:
+    for claim in claims:
+        val key = claim.registry_key
         if not claim_roots.contains_key(key): continue
-        val fn_name = rt_criticality_claim_fn(key)
-        val profile = rt_criticality_profile(key)
+        val fn_name = claim.fn_name
+        val profile = claim.profile
         val root_id = claim_roots[key]
         # The parser exclusively owns the implicit warning/error, preventing a
         # warning+error pair at the promotion epoch. Semantics owns explicit
         # profile validity and lower-tier reasons.
         if profile != "":
             for d in rt_critical_profile_diagnostics(fn_name, profile,
-                rt_criticality_reason(key), rt_implicit_profile_is_error()):
+                claim.reason, implicit_profile_error):
                 if d.starts_with("error["):
                     diagnostics.push(RtCriticalDiagnostic(
                         severity: RtCriticalDiagnosticSeverity.Error, message: d))
         val raw_bound_error = rt_annotation_bound_diagnostic(fn_name,
-            rt_criticality_bounds_for(key))
+            claim.raw_bounds)
         if raw_bound_error != "":
             diagnostics.push(RtCriticalDiagnostic(
                 severity: RtCriticalDiagnosticSeverity.Error, message: raw_bound_error))
@@ -614,7 +641,7 @@ pub fn validate_rt_criticality_facts_with_capabilities_v1(module_ids: [text],
         val admission_root = if unresolved: admission_identity else: root_id
         if admitted_roots.contains_key(admission_identity): continue
         if effective_rank >= 3:
-            if rt_criticality_is_hal(key):
+            if claim.is_hal:
                 val hal_facts = rt_hal_facts_with_reviewed_intrinsic(root_id, facts)
                 for d in rt_admit_with_capabilities_v1(root_id, hal_facts, capabilities):
                     diagnostics.push(RtCriticalDiagnostic(
@@ -630,12 +657,12 @@ pub fn validate_rt_criticality_facts_with_capabilities_v1(module_ids: [text],
         elif fact_positions.contains_key(root_id):
             for d in rt_admit_with_capabilities_v1(root_id, facts, capabilities):
                 if d.starts_with("error[RT-E-UNBOUNDED-ALLOCATION]"):
-                    val level = if rt_implicit_profile_is_error(): "error" else: "warning"
-                    val code = if rt_implicit_profile_is_error():
+                    val level = if implicit_profile_error: "error" else: "warning"
+                    val code = if implicit_profile_error:
                         "RT-E-STEADY-ALLOCATION-001"
                     else:
                         "RT-W-STEADY-ALLOCATION-001"
-                    val severity = if rt_implicit_profile_is_error():
+                    val severity = if implicit_profile_error:
                         RtCriticalDiagnosticSeverity.Error
                     else:
                         RtCriticalDiagnosticSeverity.Warning
@@ -698,3 +725,4 @@ export RtCriticalFunctionDeclarationV1, RtCriticalFunctionFactsV1
 export rt_module_function_declarations_v1, rt_unambiguous_declaration_names_v1
 export rt_function_facts_v1, validate_rt_criticality_facts_v1
 export validate_rt_criticality_facts_with_capabilities_v1
+export RtCriticalContractClaimV1, rt_critical_contract_claims_v1, validate_rt_criticality_claim_facts_v1

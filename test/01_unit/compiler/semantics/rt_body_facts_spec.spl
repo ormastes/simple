@@ -34,6 +34,43 @@ fn messages(diagnostics: [RtCriticalDiagnostic]) -> [text]:
     out
 
 describe "RT shared actual body facts and aggregate policy":
+    it "replays a source-declared critical allocation failure after claim removal":
+        rt_criticality_reset()
+        rt_bound_manifest_clear()
+        val hir = lowered("@rt(critical)\nfn array_value() -> [i64]:\n    [1, 2]\n", "rt_claim_replay.spl", "rt_claim_replay")
+        val rows = body_facts({"rt_claim_replay": hir})
+        val claims = rt_critical_contract_claims_v1()
+        expect(claims.len()).to_equal(1)
+        expect(claims[0].fn_name).to_equal("array_value")
+        expect(claims[0].profile).to_equal("critical")
+        val ids = ["rt_claim_replay.spl"]
+        val original = validate_rt_criticality_facts_with_capabilities_v1(ids, rows, [])
+        expect(original.len()).to_equal(1)
+        expect(original[0].severity).to_equal(RtCriticalDiagnosticSeverity.Error)
+        expect(original[0].message).to_contain("RT-E-UNBOUNDED-ALLOCATION")
+        rt_criticality_reset()
+        val replay = validate_rt_criticality_claim_facts_v1(ids, rows, [], claims, false)
+        expect(messages(replay)).to_equal(messages(original))
+        expect(replay[0].severity).to_equal(original[0].severity)
+        expect(validate_rt_criticality_facts_with_capabilities_v1(ids, rows, []).len()).to_equal(0)
+
+    it "uses the captured severity for a real source-declared lower-tier allocation":
+        rt_criticality_reset()
+        val hir = lowered("@rt(robust,reason:\"test\")\nfn lower_array() -> [i64]:\n    [3, 4]\n", "rt_claim_severity.spl", "rt_claim_severity")
+        val rows = body_facts({"rt_claim_severity": hir})
+        val claims = rt_critical_contract_claims_v1()
+        expect(claims.len()).to_equal(1)
+        expect(claims[0].reason).to_equal("test")
+        rt_criticality_reset()
+        val warning = validate_rt_criticality_claim_facts_v1(["rt_claim_severity.spl"], rows, [], claims, false)
+        val error = validate_rt_criticality_claim_facts_v1(["rt_claim_severity.spl"], rows, [], claims, true)
+        expect(warning.len()).to_equal(1)
+        expect(warning[0].severity).to_equal(RtCriticalDiagnosticSeverity.Warning)
+        expect(warning[0].message).to_contain("RT-W-STEADY-ALLOCATION-001")
+        expect(error.len()).to_equal(1)
+        expect(error[0].severity).to_equal(RtCriticalDiagnosticSeverity.Error)
+        expect(error[0].message).to_contain("RT-E-STEADY-ALLOCATION-001")
+
     it "retains allocation and unbounded-loop observed units from real bodies":
         val hir = lowered("fn array_value() -> [i64]:\n    [1, 2]\n\nfn spin():\n    while true:\n        val one = 1\n", "rt_facts_units.spl", "rt_facts_units")
         val rows = body_facts({"rt_facts_units": hir})
