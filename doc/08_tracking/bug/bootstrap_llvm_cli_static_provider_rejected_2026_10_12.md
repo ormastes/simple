@@ -50,7 +50,7 @@ fallback only for the matching native host/target and LLVM23. It requires:
 - executable llc, llvm-as, opt, clang, clang++, llvm-ar with exact matching version;
 - a nonempty llvm-config --link-static --libnames list, only archive basenames;
 - every reported archive plus Polly/PollyISL exists, is nonempty, and is readable
-  by the selected llvm-ar.
+  by the selected llvm-ar with at least one actual archive member.
 
 The result is explicitly tagged LLVM_PROVIDER_KIND=static-cli, with no LLVM_LIB
 or fabricated SIMPLE_LLVM_PATH. CLI tools and Rust static prefix share the same
@@ -63,13 +63,15 @@ No provider alias, symbol suppression, patch-version relaxation or seed fallback
 actual detector and production bootstrap selection block with controlled tool
 fixtures and real archive containers. The original detector fails the static
 acceptance case. Candidate cycle1 passed24 checks; cycle2 adds llvm-config prefix
-identity rejection and passes25. Existing bootstrap_llvm23_platform_detection
+identity rejection and passes25. Root review found that an empty valid archive still passed ar t;
+cycle3 requires nonempty member output and passes26 checks, including that
+negative. The three-cycle limit is reached. Existing bootstrap_llvm23_platform_detection
 shared/version-policy suite passes once. Shell syntax and diff checks pass.
 Artifacts: `/mnt/c/Temp/simple-llvm-static-cli-admission-20261012`.
 
 Positive cases: native Linux/FreeBSD, prefix containing spaces, shared priority.
 Negative cases: defaultshared/llvm-lib, unknown mode, Darwin/Windows/SimpleOS,
-missing/corrupt archive, missing Polly, empty/traversal archive names, foreign
+missing/corrupt/empty-valid archive, missing Polly, empty/traversal archive names, foreign
 prefix/libdir, unadmitted patch, mismatched/missing CLI tools. Simulated hosts are
 shell policy tests, not native platform qualification. Archives contain test data;
 these fixtures establish admission logic, not a working LLVM installation.
@@ -78,3 +80,11 @@ No full build restarted, no installation download, no compiler performance or
 memory improvement claimed. Detection is startup-only; it retains no long-lived
 allocation/cache. Actual immutable-asset CLI invocation and complete bootstrap
 remain the next integration gate. Windows/macOS/BSD/SimpleOS execution unqualified.
+
+A separate real installed-provider check calls the actual static helper on
+`/usr/lib/llvm-23`, llvm-config23.1.2, without hiding/removing its shared library.
+It passes with provider=static-cli and empty LLVM_LIB. `/usr/bin/time -v` records
+1.52seconds elapsed and74184KiB maximum child/process RSS. This bounds the
+startup validation cost on this installed provider, not compiler memory or CI
+asset23.1.1 availability. Receipts: local-static-owner.log and
+local-static-owner-time.txt. No unchanged shared-policy test was rerun.
