@@ -18,6 +18,7 @@ use std.nogc_sync_mut.sffi.transient.{
     transient_scope_begin, transient_scope_pause, transient_scope_end,
     transient_promote
 }
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 
 struct HirBodyArchiveInputV1:
     source_path: text
@@ -87,14 +88,16 @@ fn hir_body_archive_warnings_digest_v1(warnings: [text]) -> text:
 fn hir_body_archive_content_key_v1(input_key: text, body_digest: text, warnings_digest: text) -> text:
     sha256_text("owned-hir-body-content-v1\n" + input_key + "\n" + body_digest + "\n" + warnings_digest + "\n")
 
-fn hir_body_archive_store_v1(input: HirBodyArchiveInputV1, module: HirModule, warnings: [text]) -> Result<HirBodyArchiveV1, text>:
-    # Initialize the one persistent frontend identity before owning scratch.
-    if not hir_cache_enabled():
-        return Err("body archive identity unavailable")
+fn hir_body_archive_store_in_owned_scope_v1(
+    input: HirBodyArchiveInputV1, module: HirModule, warnings: [text]
+) -> Result<HirBodyArchiveV1, text>:
+    # The caller owns an ACTIVE scope and has initialized the cache identity
+    # before opening it. This helper acquires/releases/promotes no lease roots.
+    # Its complete result is scratch until the caller pauses and promotes it.
+    if transient_array_scope_state_v1() != 1:
+        return Err("body archive borrowed scope must be active and unpaused")
     if module.name != input.module_name or module.path != input.source_path:
         return Err("body archive module identity mismatch")
-    if not transient_scope_begin():
-        return Err("body archive store scope unavailable")
     # File-backed admission and its hashes are scratch too: a no-GC caller
     # must not accumulate one whole authority receipt per completed module.
     val input_key = hir_body_archive_input_key_v1(input)
@@ -105,20 +108,6 @@ fn hir_body_archive_store_v1(input: HirBodyArchiveInputV1, module: HirModule, wa
     val warnings_digest = hir_body_archive_warnings_digest_v1(warnings)
     val key = hir_body_archive_content_key_v1(input_key, body_digest, warnings_digest)
     val stored = blob != "" and hir_cache_store_in_owned_scope(key, module, warnings)
-    val paused = transient_scope_pause()
-    var owned = false
-    var cache_owner_owned = false
-    if paused:
-        cache_owner_owned = hir_cache_promote_diagnostic_owner_v1()
-    if paused and stored:
-        val key_owned = transient_promote(key)
-        val digest_owned = transient_promote(body_digest)
-        val warnings_digest_owned = transient_promote(warnings_digest)
-        val source_key_owned = transient_promote(source_key)
-        owned = key_owned and digest_owned and warnings_digest_owned and source_key_owned
-    val ended = transient_scope_end()
-    if not paused or not ended or not cache_owner_owned or (stored and not owned):
-        panic("body archive store ownership failed")
     if not identity_valid:
         return Err("body archive identity unavailable")
     if not stored:
@@ -126,6 +115,29 @@ fn hir_body_archive_store_v1(input: HirBodyArchiveInputV1, module: HirModule, wa
     Ok(HirBodyArchiveV1(input: input,
         source_key: source_key, archive_key: key, body_digest: body_digest,
         lowering_warnings_digest: warnings_digest))
+
+fn hir_body_archive_store_v1(input: HirBodyArchiveInputV1, module: HirModule, warnings: [text]) -> Result<HirBodyArchiveV1, text>:
+    # Initialize the one persistent frontend identity before owning scratch.
+    if not hir_cache_enabled():
+        return Err("body archive identity unavailable")
+    if module.name != input.module_name or module.path != input.source_path:
+        return Err("body archive module identity mismatch")
+    if not transient_scope_begin():
+        return Err("body archive store scope unavailable")
+    val result = hir_body_archive_store_in_owned_scope_v1(input, module, warnings)
+    val paused = transient_scope_pause()
+    var owned = false
+    var cache_owner_owned = false
+    if paused:
+        cache_owner_owned = hir_cache_promote_diagnostic_owner_v1()
+    if paused:
+        # Exhaustive escape set includes the descriptor input and an Err reason,
+        # not merely the four successful key/digest fields.
+        owned = transient_promote(result)
+    val ended = transient_scope_end()
+    if not paused or not ended or not cache_owner_owned or not owned:
+        panic("body archive store ownership failed")
+    result
 
 # The shared consumer is read-only over complete HIR, with no CompileContext
 # mutation or unrestricted callback while scratch is alive. Publish the receipt
@@ -185,4 +197,4 @@ fn hir_body_archive_typecheck_lease_v1(
 export HirBodyArchiveInputV1, HirBodyArchiveV1, HirBodyTypecheckLeaseReceiptV1
 export hir_body_archive_input_key_v1, hir_body_archive_matches_v1
 export hir_body_archive_content_key_v1, hir_body_archive_warnings_digest_v1
-export hir_body_archive_store_v1, hir_body_archive_typecheck_lease_v1
+export hir_body_archive_store_v1, hir_body_archive_store_in_owned_scope_v1, hir_body_archive_typecheck_lease_v1

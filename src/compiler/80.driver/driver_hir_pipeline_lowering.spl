@@ -1,4 +1,14 @@
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.cache.hir_body_typecheck_lease_v1.{
+    HirBodyArchiveInputV1, HirBodyArchiveV1,
+    hir_body_archive_store_in_owned_scope_v1}
+use compiler.driver.cache.driver_hir_archive_authority_v1.{
+    DriverHirRuntimeStdArchiveSelectionV1,
+    driver_hir_archive_input_from_runtime_std_selection_v1}
+use compiler.mono.mono_archive_registration_v1.{
+    MonoArchiveRegistrationOwnerV1, MonoArchiveRegistrationReceiptV1,
+    mono_archive_collect_registration_in_owned_scope_v1}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.io_runtime.{exit, hash_text}
 use std.env.{env_get}
 use compiler.driver.driver_types.{CompileContext}
@@ -74,6 +84,7 @@ use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_l
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_last_warnings, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_in_owned_scope, hir_cache_clear_last_warnings}
+use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1}
 use compiler.driver.driver_hir_cache.{hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block, hir_shard_inventory}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
 use compiler.common.cache.reverse_reference_facts.{
@@ -84,6 +95,15 @@ extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_heap_promote<T>(value: T) -> bool
 extern fn rt_heap_ref_wellformed<T>(value: T) -> bool
 extern fn rt_stdout_flush()
+
+struct DriverHirShardTransactionReceiptV1:
+    status: i64
+    archive: HirBodyArchiveV1?
+    declaration_registration: MonoArchiveRegistrationReceiptV1?
+
+fn driver_hir_failed_shard_receipt_v1(status: i64) -> DriverHirShardTransactionReceiptV1:
+    DriverHirShardTransactionReceiptV1(status: status,
+        archive: nil, declaration_registration: nil)
 
 fn driver_log_typed_hir_abi_interface_v1(module: HirModule, path: text):
     driver_log_typed_hir_abi_result_v1(module.name,
@@ -466,16 +486,59 @@ impl CompilerDriver:
     me lower_streaming_hir_shard_transaction_v1(
         lowering: HirLowering, source: SourceFile, is_entry: bool, cache_key: text
     ) -> i64:
+        # Existing shard/default route deliberately requests no bounded receipts.
+        val receipt = self.lower_streaming_hir_shard_receipt_transaction_v1(
+            lowering, source, is_entry, cache_key, nil, nil, -1)
+        receipt.status
+
+    me lower_streaming_hir_archived_shard_transaction_v1(
+        lowering: HirLowering, source: SourceFile, source_index: i64, is_entry: bool,
+        selection: DriverHirRuntimeStdArchiveSelectionV1,
+        registration_owner: MonoArchiveRegistrationOwnerV1
+    ) -> Result<DriverHirShardTransactionReceiptV1, text>:
+        # Prerequisite only: no production main-loop selection is added.
+        if transient_array_scope_state_v1() != 0:
+            return Err("HIR archive driver lease already occupied")
+        if not self.streaming_surface_owner_ready:
+            return Err("HIR archive driver frozen surface owner unavailable")
+        val receipt = self.lower_streaming_hir_shard_receipt_transaction_v1(
+            lowering, source, is_entry, "", Some(selection), Some(registration_owner), source_index)
+        # The caller publishes the declaration delta in its original collector
+        # order only AFTER this returned, closed transaction. No body escapes.
+        Ok(receipt)
+
+    me lower_streaming_hir_shard_receipt_transaction_v1(
+        lowering: HirLowering, source: SourceFile, is_entry: bool, cache_key: text,
+        archive_selection: DriverHirRuntimeStdArchiveSelectionV1?,
+        registration_owner: MonoArchiveRegistrationOwnerV1?, source_index: i64
+    ) -> DriverHirShardTransactionReceiptV1:
         # 0 = validated cache hit, 1 = published full HIR, 2 = source diagnostic,
         # -1 = infrastructure/ownership failure. No HirModule escapes this scope.
+        var archive_input: HirBodyArchiveInputV1? = nil
+        var transaction_cache_key = cache_key
+        if val Some(selection) = archive_selection:
+            if not self.streaming_surface_owner_ready:
+                self.ctx.add_error("HIR archive driver frozen surface owner unavailable")
+                return driver_hir_failed_shard_receipt_v1(-1)
+            val selected = driver_hir_archive_input_from_runtime_std_selection_v1(
+                selection, source, self.streaming_module_surfaces_owner, source_index, is_entry)
+            if selected.is_err():
+                self.ctx.add_error(selected.unwrap_err())
+                return driver_hir_failed_shard_receipt_v1(-1)
+            val input = selected.unwrap()
+            transaction_cache_key = hir_cache_key(input.source_path, input.closure_digest, input.is_entry)
+            if transaction_cache_key == "":
+                self.ctx.add_error("HIR archive driver source key unavailable")
+                return driver_hir_failed_shard_receipt_v1(-1)
+            archive_input = Some(input)
         if not rt_transient_array_scope_begin():
             self.ctx.add_error("HIR shard transient scope unavailable for {source.path}")
-            return -1
+            return driver_hir_failed_shard_receipt_v1(-1)
         val reverse_token = reverse_reference_module_begin_v1()
         if reverse_token < 0:
             val ended = driver_end_transient_parse_scope()
             self.ctx.add_error("HIR shard reverse-reference scope unavailable; cleanup={ended}")
-            return -1
+            return driver_hir_failed_shard_receipt_v1(-1)
         val parser_generation = parser_initialization_generation_v1()
         val flat_rows_before = bootstrap_hir_module_count()
         lowering.begin_module(source.path)
@@ -486,7 +549,9 @@ impl CompilerDriver:
         var abi_receipt: (text, Result<text, text>) = ("", Err(""))
         var errors: [text] = []
         var warnings: [text] = []
-        val cache_result = hir_cache_load_in_owned_scope(cache_key)
+        var archived_body: HirBodyArchiveV1? = nil
+        var declaration_registration: MonoArchiveRegistrationReceiptV1? = nil
+        val cache_result = hir_cache_load_in_owned_scope(transaction_cache_key)
         if val found = cache_result:
             module = found
             cached = true
@@ -528,9 +593,27 @@ impl CompilerDriver:
             else:
                 # Reuse the existing atomic codec writer while OUR scope owns
                 # its scratch. hir_cache_store would try to nest a new scope.
-                stored = hir_cache_store_in_owned_scope(cache_key, module, warnings)
+                stored = hir_cache_store_in_owned_scope(transaction_cache_key, module, warnings)
                 if not stored:
                     infrastructure_error = "HIR shard cache publication failed for {source.path}"
+
+        if errors.len() == 0 and infrastructure_error == "":
+            if val Some(input) = archive_input:
+                val archived = hir_body_archive_store_in_owned_scope_v1(input, module, warnings)
+                if archived.is_err():
+                    infrastructure_error = "HIR shard archive publication: {archived.unwrap_err()}"
+                else:
+                    val archive = archived.unwrap()
+                    archived_body = Some(archive)
+                    if val Some(owner) = registration_owner:
+                        val registered = mono_archive_collect_registration_in_owned_scope_v1(
+                            owner, module, module.name, archive)
+                        if registered.is_err():
+                            infrastructure_error = "HIR shard declaration registration: {registered.unwrap_err()}"
+                        else:
+                            declaration_registration = Some(registered.unwrap())
+                    else:
+                        infrastructure_error = "HIR shard archive registration owner unavailable"
 
         # Retain diagnostics and genuinely phase-wide memo/registry roots only.
         # Module bodies and their symbol-table snapshots stay transient, including
@@ -542,7 +625,7 @@ impl CompilerDriver:
             # to the driver or inspect the lowerer after reclamation.
             eprint("HIR shard scope pause failed; cleanup={ended}")
             exit(1)
-            return -1
+            return driver_hir_failed_shard_receipt_v1(-1)
         val errors_owned = rt_transient_heap_promote(errors)
         val warnings_owned = rt_transient_heap_promote(warnings)
         val failure_owned = infrastructure_error == "" or rt_transient_heap_promote(infrastructure_error)
@@ -550,6 +633,11 @@ impl CompilerDriver:
         val memos_owned = lowering.promote_phase_memo_transient_owners()
         val frontend_owned = driver_promote_retained_frontend_owners_v1(
             parser_initialization_generation_v1() != parser_generation)
+        val cache_reason_owned = hir_cache_promote_diagnostic_owner_v1()
+        # Exact additional escape set: archive descriptor and compact delta.
+        # Neither contains HirModule, full declaration bodies or SymbolTables.
+        val archive_owned = rt_transient_heap_promote(archived_body)
+        val registration_owned = rt_transient_heap_promote(declaration_registration)
         # Flat rows are unnecessary in a cache worker. Remove their references
         # before reclaiming the graph; the final compiler loads the complete cache.
         driver_rollback_flat_hir_row_or_abort(flat_rows_before)
@@ -557,16 +645,17 @@ impl CompilerDriver:
         # on the retained lowerer points into the scope about to be reclaimed.
         lowering.begin_module(source.path)
         hir_cache_clear_last_warnings()
-        if not (errors_owned and warnings_owned and failure_owned and abi_owned and memos_owned and frontend_owned):
+        if not (errors_owned and warnings_owned and failure_owned and abi_owned and memos_owned and frontend_owned and
+                cache_reason_owned and archive_owned and registration_owned):
             val ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             # Partial root promotion cannot authorize another task in this
             # process. The parent records an incomplete infrastructure failure.
             eprint("HIR shard retained-root promotion failed; cleanup={ended}")
             exit(1)
-            return -1
+            return driver_hir_failed_shard_receipt_v1(-1)
         if not driver_publish_reverse_reference_parse_scope_v1(reverse_token):
             self.ctx.add_error("HIR shard scope publication/reclamation failed for {source.path}")
-            return -1
+            return driver_hir_failed_shard_receipt_v1(-1)
         # These context allocations happen AFTER scratch reclamation.
         if abi_receipt.0 != "":
             driver_log_typed_hir_abi_result_v1(abi_receipt.0, abi_receipt.1, source.path)
@@ -577,12 +666,13 @@ impl CompilerDriver:
             self.ctx.add_error(message)
         if infrastructure_error != "":
             self.ctx.add_error(infrastructure_error)
-            return -1
-        if errors.len() > 0: return 2
+            return driver_hir_failed_shard_receipt_v1(-1)
+        if errors.len() > 0: return driver_hir_failed_shard_receipt_v1(2)
         if not stored:
             self.ctx.add_error("HIR shard completed without a durable module")
-            return -1
-        if cached: 0 else: 1
+            return driver_hir_failed_shard_receipt_v1(-1)
+        DriverHirShardTransactionReceiptV1(status: if cached: 0 else: 1,
+            archive: archived_body, declaration_registration: declaration_registration)
 
     me lower_and_check_streaming_surfaces_impl() -> bool:
         if not self.streaming_surface_owner_ready:
@@ -1850,3 +1940,4 @@ impl CompilerDriver:
             ctx.hir_modules[name] = hir_module
         (ctx, not ctx.has_errors())
 use compiler.common.diagnostics.span.{Span}
+export DriverHirShardTransactionReceiptV1
