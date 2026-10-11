@@ -319,11 +319,14 @@ impl MirLowering:
         # `for (i, x) in xs.enumerate()`. Same tuple-array shape (and the same
         # consumer, lower_for_array_indexed) as rt_dict_entries.
         if method == "enumerate":
-            # A struct/array/enum element would reach the loop as an untyped
-            # tuple field: its owner is lost and `p.field` silently resolves
-            # to field 0. Only elements with a self-describing decode lower.
-            if not self.builtin_elem_mir_is_primitive(elem_type):
-                return Some(self.builtin_extra_fail_closed("unsupported in stage2: array.enumerate() over a non-primitive element type (only integer, float, bool and text elements are lowered); index the array in a counted loop", Some(receiver.span)))
+            # A runtime handle preserves its bits without scalar decoding,
+            # but its record owner must also survive the tuple boundary.
+            # Name-keyed container provenance is authoritative across module
+            # SymbolId namespaces, just as it is for ordinary array indexing.
+            var pair_element_type = elem_type
+            val element_owner = self.array_element_struct_syms.get(arr.id) ?? ""
+            if element_owner != "" and element_owner != "__runtime_array__":
+                pair_element_type = MirType(kind: MirTypeKind.Opaque(element_owner))
             var b_enum = self.builder
             val enum_raw = b_enum.emit_call_value(
                 builtin_extra_rt_operand("rt_array_enumerate", [MirType.i64()], word_array),
@@ -333,7 +336,7 @@ impl MirLowering:
             # `(i64, text)` gives text its fat-pointer form, which is not the
             # field type the native tuples below are built with. The result's
             # own MIR type is the authority for the loop.
-            return Some(self.builtin_runtime_tuples_to_native(enum_raw, [MirType.i64(), elem_type]))
+            return Some(self.builtin_runtime_tuples_to_native(enum_raw, [MirType.i64(), pair_element_type]))
 
         if not self.builtin_elem_mir_is_primitive(elem_type):
             return Some(self.builtin_extra_fail_closed("unsupported in stage2: array.{method}() over a non-primitive element type (only integer, float, bool and text elements are lowered); write the loop", Some(receiver.span)))

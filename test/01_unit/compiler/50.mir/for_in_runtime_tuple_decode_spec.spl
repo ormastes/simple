@@ -32,6 +32,7 @@ struct TupleLowered:
     callees: [text]
     aggregates: i64
     get_fields: i64
+    field_indices: [i64]
 
 fn tuple_lower(src: text) -> TupleLowered:
     val file = "testdata/fixture_runtime_tuple.spl"
@@ -53,6 +54,7 @@ fn tuple_lower(src: text) -> TupleLowered:
     var callees: [text] = []
     var aggregates = 0
     var get_fields = 0
+    var field_indices: [i64] = []
     for function in mir.functions.values():
         for block in function.blocks:
             for instruction in block.instructions:
@@ -67,10 +69,11 @@ fn tuple_lower(src: text) -> TupleLowered:
                         match aggregate_kind:
                             case AggregateKind.Tuple: aggregates = aggregates + 1
                             case _: pass
-                    case MirInstKind.GetField(_, _, _):
+                    case MirInstKind.GetField(_, _, field_index):
                         get_fields = get_fields + 1
+                        field_indices = field_indices.push(field_index)
                     case _: pass
-    TupleLowered(messages: messages, fatal: fatal, callees: callees, aggregates: aggregates, get_fields: get_fields)
+    TupleLowered(messages: messages, fatal: fatal, callees: callees, aggregates: aggregates, get_fields: get_fields, field_indices: field_indices)
 
 fn tuple_count(items: [text], wanted: text) -> i64:
     var n = 0
@@ -142,27 +145,68 @@ describe "for-in over enumerate(): runtime pairs become native tuples":
             "    s\n")
         tuple_expect_converted(low, "rt_array_enumerate")
 
-    it "struct elements are rejected, fatally and with a panic placeholder":
+    it "struct elements retain their owner and read the second field":
         val low = tuple_lower("struct P:\n" +
             "    lo: i64\n" +
+            "    hi: i64\n" +
             "\n" +
             "fn f(ps: [P]) -> i64:\n" +
             "    var s = 0\n" +
             "    for (i, p) in ps.enumerate():\n" +
-            "        s = s + i + p.lo\n" +
+            "        s = s + i + p.hi\n" +
             "    s\n")
-        var rejected = false
-        for m in low.fatal:
-            if m.contains("array.enumerate()") and m.contains("non-primitive"):
-                rejected = true
-        if not rejected:
-            for m in low.messages:
-                print "diagnostic: {m}"
-        expect(rejected).to_equal(true)
-        expect(tuple_count(low.callees, "rt_panic") > 0).to_equal(true)
-        expect(tuple_count(low.callees, "rt_array_enumerate")).to_equal(0)
+        expect(low.messages.len()).to_equal(0)
+        expect(low.fatal.len()).to_equal(0)
+        expect(tuple_count(low.callees, "rt_array_enumerate")).to_equal(1)
+        expect(tuple_count(low.callees, "rt_tuple_get")).to_equal(2)
+        expect(low.field_indices).to_equal([0, 1, 1])
+
+    it "nested array elements retain runtime-array dispatch":
+        val low = tuple_lower("fn f(rows: [[i64]]) -> i64:\n" +
+            "    var s = 0\n" +
+            "    for (i, row) in rows.enumerate():\n" +
+            "        for value in row:\n" +
+            "            s = s + i + value\n" +
+            "    s\n")
+        expect(low.messages.len()).to_equal(0)
+        expect(low.fatal.len()).to_equal(0)
+        expect(tuple_count(low.callees, "rt_array_enumerate")).to_equal(1)
+        expect(tuple_count(low.callees, "rt_array_get")).to_be_greater_than(1)
+
+    it "record method receivers retain their owner after destructuring":
+        val low = tuple_lower("struct P:\n" +
+            "    lo: i64\n" +
+            "    hi: i64\n" +
+            "\n" +
+            "impl P:\n" +
+            "    fn upper(self) -> i64:\n" +
+            "        self.hi\n" +
+            "\n" +
+            "fn f(ps: [P]) -> i64:\n" +
+            "    var s = 0\n" +
+            "    for (i, p) in ps.enumerate():\n" +
+            "        s = s + p.upper()\n" +
+            "    s\n")
+        expect(low.messages.len()).to_equal(0)
+        expect(low.fatal.len()).to_equal(0)
+        expect(tuple_count(low.callees, "rt_array_enumerate")).to_equal(1)
 
 describe "for-in over a dict by pair: runtime entries become native tuples":
+    it "record values retain the owner of a nonzero field":
+        val low = tuple_lower("struct P:\n" +
+            "    lo: i64\n" +
+            "    hi: i64\n" +
+            "\n" +
+            "fn f(d: Dict<text, P>) -> i64:\n" +
+            "    var s = 0\n" +
+            "    for (key, value) in d:\n" +
+            "        s = s + value.hi\n" +
+            "    s\n")
+        expect(low.messages.len()).to_equal(0)
+        expect(low.fatal.len()).to_equal(0)
+        expect(tuple_count(low.callees, "rt_dict_entries")).to_equal(1)
+        expect(low.field_indices).to_equal([0, 1, 1])
+
     it "text keys and i64 values":
         val low = tuple_lower("fn f(d: Dict<text, i64>) -> i64:\n" +
             "    var s = 0\n" +
