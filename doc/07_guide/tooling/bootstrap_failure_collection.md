@@ -489,3 +489,16 @@ measured Linux/WSL cache-parent staging path, launch-interrupt ownership and ato
 terminal receipts. Preserve the exact source/runtime boundaries and the campaign
 Phase 3/full-CLI gates; neither a progress marker nor a partial object inventory
 is a completed producer.
+
+For a Windows durable-flush stall, retain the native stack and compare a bounded
+independent file-sync probe on the affected volume and NTFS. The
+[ReFS incident](../../08_tracking/bug/windows_refs_durable_flush_stall_2026-10-11.md)
+required an NTFS source copy as well as output, CAS and temporary roots: compile
+SCV writes remain under `<checkout>/build/scv`. Keep durability enabled and
+preserve failed receipts; storage relocation does not admit the candidate.
+
+The provisional Hello owner scopes `SIMPLE_SCV_INVENTORY_COLD_INIT=1` to its
+first compile only when both current and legacy inventory publication paths
+are absent. Existing publications use warm admission, including malformed
+ones; preserve their failures. Do not export cold initialization across an
+entire phase campaign. See the [first-build fix](../../08_tracking/bug/provisional_hello_missing_inventory_init_2026-10-11.md).
