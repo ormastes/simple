@@ -38,3 +38,28 @@ weave-before-final-fatal order. A recipe does not prove that rewriting occurred.
 Native controls and full production-owner integration remain pending. Source
 review and this extraction do not admit a compiler, final repository or MIR
 reader, and establish no RSS improvement.
+
+`driver_hir_archive_weave_facts_v1` collects one complete decoded body per
+declaration or body lease using the shared actual walkers. Mutable indexed
+maps retain only declaration and graph facts, preserving logical publication
+order, last-name layer winners, symbol-indexed effect providers, RT declaration
+order and the original first join-point ID of one. Its per-body singleton Dict
+census is a check of that actual borrowed representation, not a claim that the
+former cumulative full-HIR Dict had the same representation. The engine must
+finish the complete declaration barrier before collecting any body facts.
+
+`driver_hir_archive_weave_gate_v1` verifies complete logical coverage and exact
+body/declaration warning and join-point predecessors before aggregating scalar
+graphs inside one scope. Layout keys select the actual first physical source;
+the parallel layout labels retain the frozen surface's canonical name. Shared
+canonical archive paths provide coverage checks after the engine has verified
+the actual physical inventory and aliases. Authored alias spellings cannot
+create extra physical layouts. Identity membership is projected in the retained
+path, canonical HIR name, logical key order, including coincident identities.
+
+Only the fresh Result containing diagnostics, counters and ordered weave recipe
+is promoted, together with the existing cache diagnostic owner. Policy decode,
+whole-graph aggregate arrays and per-module intermediate identity arrays stay
+scratch. Active or paused foreign ownership is refused. These mechanical
+checks still do not authenticate supplied mutable facts or order lists; the
+genuine engine must derive them again under its source/policy boundary.
