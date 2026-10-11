@@ -517,3 +517,15 @@ coverage. These cases are authored but unexecuted. One bounded admitted Stage 2
 compile parsed all 531 reached modules, reached HIR 356/531, and timed out at
 240 seconds without a terminal source diagnostic. Ordinary CLI artifact
 emission/publication and native performance proof remain open.
+
+### 2026-10-11 V3 semantic action admission
+
+The cold semantic action emitter previously rejected every nonempty V3 entry
+scope before a reached module could produce its action receipt. It now accepts
+a valid `.spl` entry scope while retaining the frozen source, typed ABI,
+source-witness, and MIR receipt checks. A focused unit case covers an imported
+module whose source differs from the entry and rejects a traversal scope.
+This only unblocks receipt emission; ordinary CLI artifact attachment and V3
+publication remain open. The admitted Stage 2 binary has no `test` command.
+A single bounded focused native-build parsed 452/532 files before its 100 s
+timeout, so no executable unit PASS or full runtime qualification is claimed.

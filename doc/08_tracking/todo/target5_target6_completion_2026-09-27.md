@@ -152,6 +152,9 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
 - [ ] Attach real archive outputs to retained receipts and publish the V3
   scoped graph from the production driver; then prove current-source warm/cold
   time and RSS against the independent gates.
+  The V3 semantic action emitter now accepts a valid entry scope for reached
+  modules; its focused unit case is written but lacks an executable PASS on
+  the admitted Stage 2 toolchain.
 
 - [x] Define a serialized entry-scoped graph when entry-closure compilation
   lowers fewer sources than the full frozen inventory. V3 binds the full

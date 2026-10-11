@@ -88,6 +88,41 @@ describe "objectless cold HIR semantic action emission":
             typed, source, witness, mir_file, authority, root).is_err()
         ).to_equal(true)
 
+    it "admits a reached module action under a valid V3 entry scope":
+        val root = cold_semantic_test_root_v1()
+        val content = "reached-source"
+        val digest = sha256_text(content)
+        val source = CompileSourceInventoryEntryV1(
+            "src/reached.spl", digest, digest, digest, digest, digest,
+            content.len())
+        val authority = PackageModuleIndexBuildAuthorityV1(
+            sha256_text("producer"), "root", "revision", "commit", "tree",
+            sha256_text("inventory"), ConfigVariantKeyV1(
+                "x86_64-unknown-linux-gnu", "llvm", [], "debug",
+                "abi-v1", [], []), "src/entry.spl")
+        val abi = "typed-reached"
+        val abi_digest = sha256_text(abi)
+        val typed = ColdHirTypedReceiptV1(
+            ColdHirSemanticSeedV1("reached", source.source_identity,
+                digest, authority.inventory_digest, abi_digest, []),
+            abi, "symbol|reached|module|{abi_digest}|{abi_digest}")
+        val mir_content = runtime_std_mir_body_payload_v1(
+            MirModule("reached", {}, {}, {}, {}), source.source_identity,
+            digest).unwrap().content
+        val mir_path = root + "/reached.mir"
+        expect(file_create_exclusive(mir_path, mir_content)).to_equal(true)
+        val mir_file = ColdHirCompiledPayloadFileV1(
+            mir_path, sha256_text(mir_content), mir_content.len())
+        val witness = cold_hir_semantic_source_witness_v1(authority, source)
+        expect(cold_hir_semantic_action_emit_v1(
+            typed, source, witness, mir_file, authority, root).is_ok()
+        ).to_equal(true)
+        var invalid_scope = authority
+        invalid_scope.scope_entry_source_identity = "../entry.spl"
+        expect(cold_hir_semantic_action_emit_v1(
+            typed, source, witness, mir_file, invalid_scope, root
+        ).unwrap_err()).to_equal("cold-semantic-source-authority-invalid")
+
     it "refuses a changed source witness or MIR receipt before action publication":
         val root = cold_semantic_test_root_v1()
         val digest = sha256_text("source")
