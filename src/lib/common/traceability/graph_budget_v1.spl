@@ -1,7 +1,7 @@
 """Resource preflight before graph indexes, table rows or escaped sort keys."""
 use std.common.sdn.strict_v1.{sdn_strict_limits_valid_v1}
-use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
-use std.common.traceability.types_v1.{TraceCodecIssueV1, trace_codec_issue_v1}
+use std.common.traceability.codec_text_budget_v1.{TraceCodecTextBudgetV1}
+use std.common.traceability.envelope_types_v1.{TraceCodecIssueV1, trace_codec_issue_v1}
 use std.common.traceability.graph_types_v1.*
 use std.common.traceability.graph_wire_v1.{trace_graph_output_size_v1}
 
@@ -14,26 +14,6 @@ pub fn trace_graph_limits_valid_v1(limits: TraceGraphCodecLimitsV1) -> bool:
 
 pub fn trace_graph_output_cap_v1(limits: TraceGraphCodecLimitsV1) -> i64:
     if limits.max_output_bytes < limits.sdn.max_source_bytes: limits.max_output_bytes else: limits.sdn.max_source_bytes
-
-class TraceGraphTextBudgetV1:
-    limits: TraceGraphCodecLimitsV1
-    used: i64 = 0
-    me charge(fields: [text], path: text) -> Result<bool, TraceCodecIssueV1>:
-        for item in fields:
-            if item.len() > self.limits.max_field_bytes:
-                return Err(trace_codec_issue_v1("field_limit", path, "Graph field exceeds byte budget"))
-            if item.len() > self.limits.max_text_bytes - self.used:
-                return Err(trace_codec_issue_v1("text_limit", path, "Graph text exceeds aggregate budget"))
-            self.used = self.used + item.len()
-            match validated_utf8_bytes_to_text_linear(item.bytes()):
-                case Ok(_): ()
-                case Err(reason): return Err(trace_codec_issue_v1("invalid_utf8", path, reason))
-            var index = 0
-            while index < item.len():
-                if item.byte_at(index) == 0:
-                    return Err(trace_codec_issue_v1("invalid_text", path, "NUL is not a graph text character"))
-                index = index + 1
-        Ok(true)
 
 pub fn trace_graph_preflight_v1(document: TraceGraphV1, limits: TraceGraphCodecLimitsV1, for_encoding: bool = false) -> Result<bool, TraceCodecIssueV1>:
     if not trace_graph_limits_valid_v1(limits):
@@ -59,7 +39,7 @@ pub fn trace_graph_preflight_v1(document: TraceGraphV1, limits: TraceGraphCodecL
         return Err(trace_codec_issue_v1("node_limit", "", "Graph exceeds SDN node budget"))
     if limits.sdn.max_depth < 3: return Err(trace_codec_issue_v1("depth_limit", "", "Graph requires SDN depth three"))
     if limits.sdn.max_columns < 9: return Err(trace_codec_issue_v1("column_limit", "", "Graph requires nine origin columns"))
-    var budget = TraceGraphTextBudgetV1(limits: limits)
+    var budget = TraceCodecTextBudgetV1(max_field_bytes: limits.max_field_bytes, max_text_bytes: limits.max_text_bytes)
     budget.charge([document.snapshot.id, document.snapshot.kind, document.manifest.input_set_id,
         document.manifest.extractor_version, document.manifest.rules_version, document.manifest.policy_id], "manifest")?
     for item in document.inputs: budget.charge([item.path, item.sha256, item.role], "inputs")?

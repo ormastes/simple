@@ -148,3 +148,20 @@ These component examples contribute evidence; they do not mark any whole AC done
 All other families/dispatcher, extractors/resolver, snapshot/hook/admission,
 execution/DB, projections/Slop/extensions, coverage/runtime/NFR/manual evidence
 remain required. See doc/09_report/traceability_graph_codec_tdd_2026-10-11.md.
+
+## Document/declarations component evidence — 2026-10-11
+
+The full40-case matrix is unchanged. Strict-valid dispatcher baseline4/4 became
+initial typed4/0; broader final-source native acceptance12/0 covers the three
+supported family payloads, four declaration tables, retained conflicts, exception
+calendar facts, exact budgets and independently bounded constructed-value APIs.
+Because common owners changed, graph14/0, qualification15/0 and budget/order11/0
+were renewed once at this source stage. Report and authored manual distinguish
+component evidence from whole AC001/002 completion and generated evidence.
+See doc/09_report/traceability_document_declarations_tdd_2026-10-11.md.
+
+Review-derived raw-boundary repair adds verified dictionary cardinality before
+keys and source-less cumulative key/header/string byte limits. Earlier12/0
+acceptance and regressions remain pre-repair evidence; final raw controls5/0,
+acceptance13/0 and affected graph14/0, qualification15/0, budget/order11/0
+match the changed source. No whole AC, broad runtime or admission PASS follows.

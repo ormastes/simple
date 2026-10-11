@@ -226,3 +226,20 @@ strict decoding, closure and bounded canonical encoding now exist. Entire20/40
 and WP0–WP7 remain authoritative. Next WP1 work is other families and explicit
 common-envelope/all-family dispatch, followed by original WP2–WP7; broad runtime,
 coverage/NFR/manual evidence and authenticated integration stay open.
+
+## Document/declarations private increment — 2026-10-11
+
+Implementation/merge owner: Codex root. Sidecar lanes: N/A. Final reviewer: Astra
+(final source/oracles/evidence PASS, P0=0/P1=0). Generic dispatch supports actual
+qualification-summary, graph and declarations major1. Dedicated APIs keep their
+signatures; raw-value entry points independently enforce structural budgets.
+Native stages4/4 ->4/0 and acceptance12/0, with affected regressions14/0,15/0,11/0.
+All20REQ/40AC/WP0–WP7 remain required. Next WP1 work includes policy/run/receipt,
+full qualification major2, graph diagnostics and both Slop families. Original
+WP2–WP7, runtime/coverage/NFR/manual and authenticated integration remain open.
+
+Review-derived raw-boundary repair adds verified dictionary cardinality before
+keys and source-less cumulative key/header/string byte limits. Earlier12/0
+acceptance and regressions remain pre-repair evidence; final raw controls5/0,
+acceptance13/0 and affected graph14/0, qualification15/0, budget/order11/0
+match the changed source. No whole AC, broad runtime or admission PASS follows.
