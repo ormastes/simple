@@ -21,6 +21,8 @@ use compiler.frontend.effect_registry.{effect_registry_reset}
 use compiler.frontend.layer_eq_registry.{layer_eq_registry_reset}
 use compiler.driver.driver_source_pipeline_impl.{driver_end_transient_parse_scope, driver_promote_retained_frontend_owners_v1}
 use compiler.semantics.value_struct_layout.{value_struct_layout_report, value_struct_layout_is_cycle_diagnostic, value_struct_layout_cycle_is_fatal_for}
+use compiler.semantics.value_struct_layout.{ValueStructLayoutModuleV1,
+    value_struct_layout_declarations_v1, value_struct_layout_declaration_report_v1}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use compiler.semantics.layer_eq_validation.{validate_layer_eq_types}
 use compiler.semantics.effect_validation.{validate_effect_contracts}
@@ -277,13 +279,29 @@ pub fn driver_validate_value_struct_layouts(
     module_values: [HirModule],
     hir_modules: Dict<text, HirModule>
 ) -> [text]:
+    # Compatibility caller: project declarations, never synthesize HIR bodies.
+    var declarations: [ValueStructLayoutModuleV1] = []
+    var index = 0
+    while index < module_values.len():
+        val module = module_values[index]
+        val module_key = if index < module_keys.len(): module_keys[index] else: ""
+        declarations.push(value_struct_layout_declarations_v1(module_key, module.path,
+            module.structs, module.symbols))
+        index = index + 1
+    driver_validate_value_struct_layout_declarations_v1(module_keys, declarations, hir_modules)
+
+pub fn driver_validate_value_struct_layout_declarations_v1(
+    module_keys: [text],
+    module_values: [ValueStructLayoutModuleV1],
+    hir_modules: Dict<text, HirModule>
+) -> [text]:
     var errors: [text] = []
     # One receipt per sub-pass: the Stage-3 worker died between the last
     # hir:file:done and streaming_source_reclaim:done four times on
     # 2026-09-05 without naming a step. Gated like every other log_phase
     # (SIMPLE_COMPILER_PHASE_PROFILE=1 / SIMPLE_COMPILER_TRACE=1).
     log_phase("phase3:hir:validate:value_struct_layouts:start")
-    val layout_report = value_struct_layout_report(module_keys, module_values)
+    val layout_report = value_struct_layout_declaration_report_v1(module_keys, module_values)
     # SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE=warning prints by-value struct cycles
     # and keeps compiling, so out-of-tree code can list all of them in one
     # run instead of failing after a full HIR pass. Default is fatal; the
