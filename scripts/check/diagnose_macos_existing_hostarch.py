@@ -1,6 +1,7 @@
 """Bounded read-only breakpoint inspection of one rejected immutable candidate."""
 import json
 import os
+import time
 import lldb
 
 PREFIX = "src__lib__nogc_sync_mut__io_runtime__"
@@ -9,6 +10,22 @@ def run(debugger):
     target = debugger.GetSelectedTarget()
     process = target.GetProcess()
     evidence = {"qualification": "UNADMITTED", "checkpoints": {}}
+    debugger.SetAsync(True)
+    def bounded_continue(seconds=30):
+        error = process.Continue()
+        if error.Fail():
+            raise RuntimeError("debugger continue failed")
+        deadline = time.monotonic() + seconds
+        while process.GetState() in [lldb.eStateRunning, lldb.eStateStepping, lldb.eStateLaunching] and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if process.GetState() in [lldb.eStateRunning, lldb.eStateStepping, lldb.eStateLaunching]:
+            process.Stop()
+            stop_deadline = time.monotonic() + 3
+            while process.GetState() != lldb.eStateStopped and time.monotonic() < stop_deadline:
+                time.sleep(0.1)
+            evidence["timeout_stack"] = [[str(frame) for frame in list(thread)[:12]] for thread in process]
+            raise RuntimeError("bounded debugger timeout before requested boundary")
+        return process.GetState()
     def symbol(name):
         contexts = target.FindFunctions(name)
         if contexts.GetSize() != 1:
@@ -52,8 +69,8 @@ def run(debugger):
         return {"raw": raw, "length": length, "hex": data.hex()}
     def stop_at(address):
         breakpoint = target.BreakpointCreateByAddress(address)
-        error = process.Continue()
-        if error.Fail() or process.GetState() != lldb.eStateStopped or breakpoint.GetHitCount() != 1:
+        bounded_continue()
+        if process.GetState() != lldb.eStateStopped or breakpoint.GetHitCount() != 1:
             raise RuntimeError("required boundary not reached; possible child escape")
         thread = process.GetSelectedThread()
         frame = thread.GetFrameAtIndex(0)
@@ -62,6 +79,7 @@ def run(debugger):
     try:
         # Workflow launches already stopped at the exact host_arch owner.
         host = target.FindBreakpointByID(1)
+        bounded_continue(70)
         if process.GetState() != lldb.eStateStopped or host.GetHitCount() != 1:
             raise RuntimeError("host_arch breakpoint not reached")
         host.SetEnabled(False)
@@ -78,12 +96,16 @@ def run(debugger):
             evidence["checkpoints"][label] = frame.FindRegister("x0").GetValueAsSigned() if label == "exit_code" else text(frame, raw)
         # Return from actual shell_output, recording post-trim text.
         thread = process.GetSelectedThread()
+        debugger.SetAsync(False)
         thread.StepOut()
+        debugger.SetAsync(True)
         if process.GetState() != lldb.eStateStopped:
             raise RuntimeError("shell_output return not observed")
         frame = thread.GetFrameAtIndex(0)
         evidence["trimmed"] = text(frame, frame.FindRegister("x0").GetValueAsUnsigned())
+        debugger.SetAsync(False)
         thread.StepOut()
+        debugger.SetAsync(True)
         if process.GetState() != lldb.eStateStopped:
             raise RuntimeError("host_arch return not observed")
         frame = thread.GetFrameAtIndex(0)
