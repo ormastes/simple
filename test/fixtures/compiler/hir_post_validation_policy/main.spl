@@ -4,6 +4,7 @@ use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_hir_archive_schedule_owner_v1.*
 use compiler.driver.driver_hir_post_validation_policy_owner_v1.*
 use compiler.driver.cache.driver_hir_post_validation_policy_v1.*
+use compiler.driver.cache.driver_hir_weave_source_policy_v1.{driver_hir_weave_source_policy_v1}
 use compiler.driver.cache.driver_hir_managed_runtime_selection_v1.*
 use compiler.driver.cache.driver_hir_archive_journal_v1.*
 use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{hir_owned_artifact_load_blob_v1, hir_owned_artifact_store_blob_v1}
@@ -27,10 +28,10 @@ use compiler.semantics.rt_criticality.{RtCriticalDiagnosticSeverity, RtBoundCapa
 use compiler.semantics.aspect_validation.*
 use compiler.semantics.aspect_weave.{aspect_forward_weave_contract_claims_v1}
 use compiler.semantics.join_point_model.{forward_join_points_for_module_v1}
-use compiler.frontend.layer_eq_registry.{layer_eq_registry_reset}
-use compiler.frontend.effect_registry.{effect_registry_reset}
-use compiler.frontend.rt_criticality_registry.{rt_criticality_reset}
-use compiler.frontend.aspect_registry.{aspect_registry_reset}
+use compiler.frontend.layer_eq_registry.{layer_eq_registry_reset, layer_eq_registry_claim_keys}
+use compiler.frontend.effect_registry.{effect_registry_reset, effect_registry_claim_keys}
+use compiler.frontend.rt_criticality_registry.{rt_criticality_reset, rt_criticality_claim_keys}
+use compiler.frontend.aspect_registry.{aspect_registry_reset, aspect_registry_claim_keys}
 use std.common.crypto.sha256.{sha256_text}
 use std.env.{env_get}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
@@ -226,6 +227,13 @@ fn main() -> i64:
     if first.rt_errors.len() != 0 or first.rt_denied_errors.len() != 1 or
             not first.rt_denied_errors[0].contains("RT-E-UNBOUNDED-ALLOCATION"): return 17
     checks = checks + 1
+    val source_ids = [path, name, "policy.logical_alias"]
+    if driver_hir_weave_source_policy_v1(driver, owner, archive, 0, source_ids).is_err() or
+            layer_eq_registry_claim_keys().len() != 1 or effect_registry_claim_keys().len() != 1 or
+            rt_criticality_claim_keys().len() != 1 or aspect_registry_claim_keys().len() != 1 or
+            rt_bound_manifest_capabilities().len() != 1 or
+            rt_bound_manifest_capabilities()[0].review_id != capability.review_id: return 38
+    checks = checks + 1
     if rt_bound_manifest_capabilities().len() != 1 or
             validate_rt_criticality_diagnostics({module.name: module}).len() != 0 or
             rt_bound_manifest_capabilities().len() != 0: return 36
@@ -234,6 +242,26 @@ fn main() -> i64:
     effect_registry_reset()
     rt_criticality_reset()
     aspect_registry_reset()
+    if driver_hir_weave_source_policy_v1(driver, owner, archive, 0, source_ids).is_err() or
+            layer_eq_registry_claim_keys().len() != 0 or effect_registry_claim_keys().len() != 0 or
+            rt_criticality_claim_keys().len() != 0 or aspect_registry_claim_keys().len() != 0 or
+            rt_bound_manifest_capabilities().len() != 0: return 39
+    checks = checks + 1
+    # A genuine mechanical capture after registry loss still has a valid raw
+    # envelope. It cannot omit source obligations at the actual weave boundary.
+    val omitted = driver_hir_post_validation_policy_capture_v1(driver.ctx, schedule, journal)
+    if omitted.is_err() or not driver_hir_weave_source_policy_v1(driver, omitted.unwrap(), archive, 0, source_ids).is_err(): return 40
+    checks = checks + 1
+    val authored_rows = driver.ctx.source_authored_paths_owner
+    driver.ctx.source_authored_paths_owner = []
+    val alignment_refused = driver_hir_weave_source_policy_v1(driver, owner, archive, 0, source_ids).is_err()
+    driver.ctx.source_authored_paths_owner = authored_rows
+    if not alignment_refused or driver_hir_weave_source_policy_v1(driver, owner, archive, 0, source_ids).is_err(): return 41
+    checks = checks + 1
+    if not transient_scope_begin() or not transient_scope_pause(): return 42
+    val foreign_refused = driver_hir_weave_source_policy_v1(driver, owner, archive, 0, source_ids).is_err()
+    if not foreign_refused or transient_array_scope_state_v1() != 2 or not transient_scope_end(): return 43
+    checks = checks + 1
     val replay_result = observe(owner, archive)
     if replay_result.is_err(): return 18
     val replay = replay_result.unwrap()
@@ -285,6 +313,6 @@ fn main() -> i64:
     driver.ctx.source_identities_owner[1] = sha256_text(source.content)
     if not altered_source_refused or driver_hir_archive_journal_verify_v1(journal, driver.ctx).is_err(): return 34
     checks = checks + 1
-    if checks != 17: return 28
+    if checks != 22: return 28
     print "HIR post-validation policy: {checks} checks passed"
     0

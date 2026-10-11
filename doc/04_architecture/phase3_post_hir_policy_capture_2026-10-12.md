@@ -31,7 +31,7 @@ Immutable bytes alone do not authenticate caller-created recipes or permit
 missing diagnostics, supplied clean booleans or skipped validators.
 
 The native fixture `test/fixtures/compiler/hir_post_validation_policy/main.spl`
-has seventeen guards. It parses a real provider file and freezes a real physical
+has twenty-two guards. It parses a real provider file and freezes a real physical
 surface plus an independently loaded `./provider` alias with a distinct
 authored spelling; its archive uses that actual surface closure. The actual
 journal publisher registers declarations and publishes the alias before policy
@@ -43,6 +43,19 @@ its one-unit bound permits the real allocation and all five captured fields are
 checked. Retained validation consumes the actual manifest. Explicit replay
 keeps the captured grant after that consumption, and leaves a separately
 installed next-compilation manifest unchanged.
+The source replay helper reads the retained physical snapshot path with the
+actual no-follow byte owner and coverage identity, then runs the driver's
+selected frontend in one file lease. Four constant-size snapshots borrow the
+actual registry roots before scratch; isolated replay registries cannot hide
+missing source rows behind an earlier compilation's claims. Original roots are
+restored before pause/close, actual small frontend/cache/CFG owners are retained,
+and lexer/interner/AST resets happen after close. No parser module or default
+body escapes. Complete claim rows and per-source declaration order must match.
+Controls replay with populated and empty ambient registries, refuse a valid
+capture that omitted source claims, reject misaligned source arrays, and retain
+an independently owned paused lease on refusal. This helper is source evidence,
+not a complete weave/final admission token; the actual boundary derives its
+identities and chronology from the verified driver schedule and journal.
 After all four ambient claim registries are reset, the pinned policy produces
 the same diagnostics and weave recipe. Altered digest/source pins and paused
 reads refuse; post-close replay remains available. A separately stored raw
