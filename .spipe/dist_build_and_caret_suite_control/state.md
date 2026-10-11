@@ -38,3 +38,7 @@ User selected full feature implementation and landing. Isolated branch based on 
 ## M1 composition progress
 
 Added seven static capsule descriptors with declared required/provided facets and common sealer delegation; four acceptance/rejection tests authored. No runtime test execution, activation, release qualification or landing claimed. Full feature scope remains active.
+
+## M1 wire progress
+
+Added bounded canonical environment/operation codecs, strict V2 headers and fixed-field rejection, environment digest binding and seven unit scenarios. Reused existing builder wire reader rather than adding another decoder. Execution NOT_RUN; broker/caller wiring and durable admission remain next.
