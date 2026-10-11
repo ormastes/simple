@@ -2,7 +2,7 @@
 
 Original target base: `0c7bb72f83663c4407e694af1388109be25d7ac3` (`origin/release_phase3`).
 Work branch: `work/rel-phase3-generics-integrated-20261011`.
-Source integration head before final inventory: `6b690035900aaa5de790253eb645165a96d8d13a`.
+Source integration head before refreshed inventory: `60c2eaf388709ca4d723f29f01c535ead0f7ec02`. Previous frozen candidate `ae2b2f13f792` was not built; bootstrap owner explicitly released its source hold for this reviewed repair.
 The separate release/1.0 successor at `80485d40aed` remains preserved.
 
 Each commit below was applied individually, then its scope, conflict state and
@@ -43,6 +43,7 @@ not Phase 3, native execution, or full-generics acceptance evidence.
 | 61d53aa756ff | 96105b66905 | Symbolic optional binding provenance; symmetric effect guard |
 | c05c7204ed3 | 9dd5186ba51 | Newly landed target Windows contract harness fixes |
 | 2adf22a2fb2 | 6b690035900 | Stage3 reviewed-repair intent; identity binding unchanged |
+| 9fab87545c3 | 60c2eaf3887 | Windows Git capture dialect forwarding and strict receipt schema |
 
 ## Overlap and conflict decisions
 
@@ -91,3 +92,7 @@ Windows progress telemetry still misses orphaned native descendants in the
 older live bootstrap. Separate read-only job membership evidence established
 that its producer remained in the enforcing Job Object; telemetry omission
 does not imply missing job enforcement. No live workload was stopped or altered.
+
+## Reviewed admission repair before successor launch
+
+Old bootstrap evidence demonstrated hermetic preflight discarded the Windows materialization authority, producing a plain Git receipt later compared with a Windows alias receipt. The new repair forwards that authority only to preflight, validates both exact schemas through already tool-bound Perl, and preserves byte-exact before/after checks. Counts, digests, canonical paths, byte lengths, ordering and duplicate rows are validated. Native case identity remains the materialization consumer responsibility. The controlled contract passed under WSL; root independently reviewed with no demonstrated P0/P1. No live receipt was rewritten and no old build was restarted. Windows candidate qualification remains pending. The separate sanitizer reporting fix PR #3068 is intentionally excluded from this frozen compiler candidate.
