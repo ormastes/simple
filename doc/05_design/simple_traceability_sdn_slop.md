@@ -307,3 +307,35 @@ before filtering/replay checks and keep surviving historical rows unverified.
 No lost legacy row can be reconstructed from a passing aggregate counter.
 Actual native execution, disk reload/crash recovery, lease contention and
 failure-path acceptance remain required; authored fixtures are not receipts.
+
+### Predispatch selection boundary review (Astra, 2026-10-11)
+
+`run_tests` currently performs discovery, coverage admission, daemon/parallel
+routing and sequential execution together. Freezing a file list outside that
+function is insufficient: late single-file checks still decide feature skips,
+effective backend and timeout. Split preparation from execution. A frozen
+selection must retain selected cases, omission reasons, effective lane/options
+and exact source/definition identities. Every dispatch route consumes the same
+selection without rediscovering or silently changing those decisions.
+
+The initial owner protocol accepts a distinct `simple.trace.run-request/v1`
+SDN document without a run ID. The existing DB child allocates the identity,
+materializes a validated plan, saves it and returns an SDN acknowledgement
+binding request digest, persisted plan digest and allocated identity. Missing or
+invalid acknowledgement prevents dispatch. Post-run submission uses that exact
+identity. A request is execution intent; it cannot authenticate its own inputs.
+Full provenance still requires versioned input closure, shard and attempt data
+beyond the current v1 plan.
+
+Current snapshot extraction supports registered SDN declarations and artifact
+locators, not an authoritative static case inventory. The test manifest is
+file-level metadata. Runtime enumeration suppresses case bodies but executes
+user describe/context callbacks and lacks exact selector/requirement data;
+it is unsuitable as a trusted static extractor. An owned SDN case inventory
+can support the initial path, with source bindings validated independently.
+It does not replace the required automatic semantic extraction in the final
+feature. Unsupported dynamic or parameterized discovery must stay explicit.
+
+Legacy runner JSON worker producers and consumers must be inventoried and
+migrated to native SDN for this feature's full interchange contract. Neither
+new SDN sidecars nor passing ordinary worker execution prove that migration.
