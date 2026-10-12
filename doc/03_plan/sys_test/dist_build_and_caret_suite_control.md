@@ -25,3 +25,7 @@ These files reside under `test/01_unit/app/llm_caret/`. They do not replace the 
 ## Runtime qualification prerequisite
 
 The c27cb117… producer rebuilt compiler modules and passed bootstrap sanity/receiver checks, but its compiler matrix is still pending and the independent native callback execution regression failed. General CLI/test/SPipe use remains unqualified. A successful compile/link is insufficient: text-returning callback and captured record-returning array-loop behavior must be correct. The scoped callback retry limit is exhausted; retain and report the failure rather than repeating its test. Full acceptance coverage, coverage measurement and generated execution manuals remain incomplete.
+
+## Current F04 source regression trace
+
+`test/01_unit/app/llm_caret/distributed_session_binding_v2_spec.spl` traces DBC-017/020/021 and AT-07–10/19: exact boot/service/generation/ticket identity, separate action scopes, input/geometry lease independence, monotonic expiry and detach preserving process/turn state. All scenarios are NOT_RUN and pure metadata checks. Real acceptance still requires the fixed broker and authoritative process/smux leases, EOF/reconnect behavior, no PID adoption, independent turn/job cancellation and terminal/ownership-unknown receipts.

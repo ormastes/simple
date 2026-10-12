@@ -1,12 +1,12 @@
 # Distributed build and Caret Suite control: detail design
 
-Date: 2026-10-12. Branch: `release_phase3`; inspected HEAD: `d5df0cb60`. Status: proposed planning/design, not implemented or runtime-qualified. This lane imports the supplied research without changing its historical claims. Existing uncommitted Caret production artifacts are preserved and remain separately owned. Scope is documentation; requirement selection precedes implementation.
+Date: 2026-10-12. Target: `release_phase3`; initial design inspected HEAD `d5df0cb60`. The user selected full F01–F16 implementation. Status: source increments in progress, runtime/provider acceptance incomplete. The supplied research and separately owned dirty Caret artifacts remain preserved. The implementation progress ledger distinguishes authored source, failed/NOT_RUN evidence and remaining integration.
 
 Architecture: [ownership](../04_architecture/dist_build_and_caret_suite_control.md). Research: [integration record](../01_research/app/llm_caret/dist_build_and_caret_suite_control_research_plan_2026-10-11.md). Existing Caret product design remains authoritative for desktop/mobile, provider protocols and terminal rendering. This companion defines build integration and links overlapping work; it does not replace that product scope.
 
 ## Shared contracts and lifecycle
 
-Extend existing contracts rather than creating parallel registries. SessionId and generation already exist in workbench/session_contract.spl; BuildHostV1, BuildTaskV1 and result validators exist in common/build_manager/contracts.spl; GatewayQuota and gateway_quota_admit exist in cache_gateway/quota.spl. New field names below are proposed, not discovered APIs.
+Extend existing contracts rather than creating parallel registries. SessionId and generation already exist in workbench/session_contract.spl; BuildHostV1, BuildTaskV1 and result validators exist in common/build_manager/contracts.spl; GatewayQuota and gateway_quota_admit exist in cache_gateway/quota.spl. Field/adapter names are design contracts; the progress ledger identifies authored implementations and remaining proposals.
 
 ExecutionGrant: principal, issuer, project, host, operation set, environment constraint, budgets, policy revision, expiry, revocation epoch. EnvironmentBinding: actual host/runtime, compiler/toolchain digests, SDK/ABI/ISA, target, test runtime and isolation class. OperationEnvelope: version, operation ID, canonical payload digest, grant reference, session generation. ExecutionReceipt: exact source manifest, action/check selection, effective binding, outputs, execution times, cleanup, authority and signature.
 
@@ -65,6 +65,10 @@ Public signed-grant/approval value records are extracted into `common/contracts/
 | Invariant | smux owns PTY/VT; client EOF detaches; input and size leases are distinct. Timeout yields ownership unknown, never PID-only adoption or duplicate launch. |
 | Owner and algorithm | Boundary: `src/app/llm_caret/workbench/session_contract.spl`. Algorithm/change: Extend SessionId generation binding with host boot/service/process identities; invoke a fixed broker with framed typed stdin; launch provider through existing execution/smux owners; persist session bindings and reconcile reconnect. |
 | Rejection evidence | Failure verification: AT-01,02,07–10,19; real remote turn, detach and reconnect receipt. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
+
+F04 extends the existing `session_contract.spl` identity surface with `SessionExecutionBindingV2`: SessionId/generation, host ID/boot digest, service-instance digest and the existing V4 process request/ticket/PID/start facts. Exact matching refuses changed generations, reboot/replacement and recycled process identities; persisted metadata never adopts a PID or reconstructs an opaque native lease. `session_execution_observation_v2.spl` is a separate Session-owner adapter that accepts only confirmed running observations from the live process owner. Basic UI identity consumers do not import the observation implementation.
+
+Control verbs/scopes are distinct for detach, turn cancellation, job cancellation, session termination, history deletion, input and resize; job cancellation routes to Build. Input and geometry leases have separate kinds, holder/client IDs, nonce/revision and owner-local monotonic-nanosecond expiry. Owner-supplied binding/lease facts and authenticated grants remain mandatory. Detach changes only transport state; it leaves process lifecycle and agent turn independent. Fixed broker invocation, actual smux/native lease integration, persistent bindings, authenticated caller derivation and reconnect/timeout reconciliation remain required and unqualified.
 
 ### F05 — Caret controls and model tools
 
