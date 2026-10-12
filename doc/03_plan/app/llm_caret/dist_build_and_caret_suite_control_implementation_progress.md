@@ -1,12 +1,27 @@
 # Full implementation progress
 
-Source base: c5f33e7b09392200b36b44876aadfac9e5ade251, remote release_phase3. Isolated workspace: /home/ormastes/simple-dbc-plan-landing-20261012; branch work/dbc-full-implementation-20261012. Shared release worktree dirty source is other-session work and excluded.
+Source base: c5f33e7b09392200b36b44876aadfac9e5ade251, remote release_phase3. Current isolated implementation workspace: /dev/shm/simple-dbc-runtime-recovery-20261012; native checkout: /mnt/wsl/simple-dbc-native-recovery-20261012; branch work/dbc-full-implementation-20261012. Earlier workspace paths below are historical evidence. Shared release worktree dirty source is other-session work and excluded.
 
-| Feature | Current authoritative evidence | Remaining |
+| Feature | New-lane source/evidence | Required completion still missing |
 |---|---|---|
-| F01 contracts | New common/contracts/distributed_control_v2.spl defines value envelopes, exact environment matcher and scoped grant authorization; negative unit scenarios authored | Runtime checks, versioned wire codec, caller wiring and actual activation |
-| F02 host roles | Bounded pinned host-role resolver and negative source regressions authored | Strict SDN owner, authenticated enrollment/rotation, credential and SSH integration, runtime verification |
-| F03–F16 | Design and plan retained; full scope selected | Implementation, owner integration and real runtime/provider acceptance |
+| F01 contracts and baseline | Value contracts, codecs, capsule descriptors, WAL admission source; unit/integration scenarios NOT_RUN | Qualified tooling, runtime activation, complete common wire contracts and acceptance |
+| F02 host registry and roles | Bounded pinned-role resolver, closed SDN decoder, dependency query; source tests NOT_RUN | Authenticated enrollment/rotation publication, credential/SSH integration and real host rejection receipts |
+| F03 scoped grants and approvals | Trusted-value scope/budget/expiry/revocation checks | Canonical grant wire, authenticated issuer/approval events, sandbox authority and real containment acceptance |
+| F04 managed SSH and sessions | Existing owner seams retained; design specified | Fixed typed broker, persistent bindings, reconnect/detach/cancel receipts and remote execution |
+| F05 Caret/model controls | Detail design and planned owner integration | UI/tool caller wiring, independent approval handling, stale-target rejection and captures |
+| F06 exact environments | Exact value matching and actual task/environment admission source | Discovery/placement integration and independent native/emulated mismatch execution evidence |
+| F07 snapshots/build execution | Task digest binding, durable admission/claim/recovery source; memory enforcement gap documented | Owned reservation/worker confinement, immutable snapshot dispatch, two-host execution and settlement receipts |
+| F08 CAS/quotas/group state | Design retained | CAS transfer/integrity, concurrent quota/disk/pin enforcement and qualified group lifetime |
+| F09 Windows/host facades | Platform owner design retained | Native Windows V2 service integration and installed-binary/platform receipts |
+| F10 signed evidence/GitHub | Protected evidence design retained | Signer isolation, check-specific authenticated receipts, protected verifier and stale/forged-event acceptance |
+| F11 SHS/SDN containers | Validated plan/provider design retained | Equivalent digest-bound recipes, qualified real container/image providers and no-downgrade evidence |
+| F12 updates/disposable attempts | Snapshot/lifecycle design retained | Update isolation, owned cleanup, rollback integration and update-during-build receipts |
+| F13 mirrors/backups | Guarded inbound mirror design retained | Divergence/fetch/gitlink policy implementation and guarded backup acceptance |
+| F14 additional hosts/clients | Role-specific platform design retained | Installed native/emulated role integration and independent host/client execution receipts |
+| F15 TLS/optional RDMA | SSH-first/qualified transport design retained | Secure RPC parity, qualified provider and enabled-hardware grant/retirement evidence |
+| F16 operations/performance | Producer-bound recovery failures retained | End-to-end failure matrix, observability, measured startup/latency/RSS baseline and release-blocking acceptance |
+
+Every feature remains incomplete. These rows describe this new lane's evidence, not a claim that legacy owners have no implementation. Existing owner code does not qualify the newly selected integrated behavior without matching acceptance receipts.
 
 ## M0 runtime inventory
 
@@ -97,3 +112,7 @@ The c27cb117… test-runner build failed MIR lowering at 334400 ms with B5b: mat
 ## Terminal recovery qualification verdict
 
 Session30186 is terminal: exit1 at stage2-compiler-tests. c27cb117… CLI build failed status88 after793 seconds with5882956 KiB peak versus5859375 KiB cap, during HIR; test-runner failed status1 after373 seconds with2946784 KiB peak on B5b multiple wildcard arms. Both artifacts are producer-failed and behavior_qualified=0. These earlier failures leave the native-cache scratch RSS repair unverified. Source-only wildcard owner diagnostics and facade classification are not present in this frozen producer. Deployed bin/simple and bin/release remain absent in both shared workspaces. No further full rebuild, Stage3 resume, seed tooling substitution or exhausted callback retry was launched. Preserve rejection/receipts/capsules. Full F01–F16 acceptance and landing remain incomplete; only the initial documentation PR is merged.
+
+## Durable terminal checkpoint
+
+Terminal c27 compiler matrix evidence is preserved in `/mnt/c/Temp/dbc-c27-terminal-compiler-matrix-evidence-20261012.tar` (452024320 bytes), byte-compared against the retained native tree. No evidence/cache/lineage was deleted. All repair/feature increments have persistent Git bundles beside the recovery archive. The full feature scope is retained above; no feature was narrowed to its currently authored helper or unit fixture.
