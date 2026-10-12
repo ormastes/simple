@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+. "$root/scripts/check/lib/bootstrap-stage3/manifest-verify.shs"
+python3 -I - "$work" <<'PY'
+import hashlib, pathlib, sys
+out = pathlib.Path(sys.argv[1])
+base = b'head=' + b'a'*40 + b'\ndirty_fingerprint=' + b'b'*64 + b'\n'
+def windows(paths):
+    records = b''.join(b'alias-collapse-directory:' + str(len(p)).encode() + b':' + p.hex().encode() + b'\n' for p in paths)
+    return base + b'alias_collapse_count=' + str(len(paths)).encode() + b'\nalias_collapse_sha256=' + hashlib.sha256(records).hexdigest().encode() + b'\n' + records
+good = windows([b'.spipe/doc', 'doc/한글'.encode()])
+fixtures = {'legacy': base, 'zero': windows([]), 'windows': good,
+            'different': windows([b'.spipe/other']),
+            'bad-extra': base+b'unknown=1\n', 'bad-duplicate-key': base+base,
+            'bad-count': good.replace(b'count=2', b'count=3'),
+            'bad-count-canonical': good.replace(b'count=2', b'count=02'),
+            'bad-hash': good.replace(hashlib.sha256(good.split(b'\n',4)[4]).hexdigest().encode(), b'0'*64),
+            'bad-dirty': base.replace(b'b'*64, b'B'*64),
+            'bad-duplicate-path': windows([b'a',b'a']),
+            'unicode-distinct': windows([b'ss','ß'.encode()]),
+            'bad-order': windows([b'z',b'a']),
+            'bad-parent': windows([b'a/../b']),
+            'bad-absolute': windows([b'/a']),
+            'bad-reserved': windows([b'a/NUL.txt']),
+            'bad-trailing-dot': windows([b'a.']),
+            'bad-control': windows([b'a\x01b']),
+            'bad-utf8': windows([b'\xff']),
+            'bad-newline': good[:-1]}
+# Rehash malformed record payloads so length/hex validation cannot be masked
+# by the outer digest check.
+for label, records in [('length',b'alias-collapse-directory:2:61\n'),
+                       ('hex',b'alias-collapse-directory:1:6A\n'),
+                       ('odd-hex',b'alias-collapse-directory:1:6\n')]:
+    fixtures['bad-'+label] = base+b'alias_collapse_count=1\nalias_collapse_sha256='+hashlib.sha256(records).hexdigest().encode()+b'\n'+records
+for name,data in fixtures.items(): (out/name).write_bytes(data)
+PY
+for good in legacy zero windows different unicode-distinct; do
+    bootstrap_stage3_git_state_schema_valid "$work/$good"
+done
+for bad in "$work"/bad-*; do
+    if bootstrap_stage3_git_state_schema_valid "$bad" >"$bad.log" 2>&1; then
+        echo "FAIL: malformed receipt accepted: $bad" >&2; exit 1
+    fi
+done
+cp "$work/windows" "$work/after"
+cmp -s "$work/windows" "$work/after"
+if cmp -s "$work/windows" "$work/different"; then
+    echo 'FAIL: distinct valid alias receipts compare equal' >&2; exit 1
+fi
+# Exercise the actual hermetic environment owner with a spaced receipt path.
+awk '/^run_rust_authority_env\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$root/scripts/bootstrap/bootstrap-from-scratch.sh" >"$work/environment.sh"
+. "$work/environment.sh"
+run_logged() { shift; "$@"; }
+os=windows
+SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT="$work/receipt with spaces.env"
+export SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT
+run_rust_authority_env bootstrap-preflight PATH="$PATH" sh -c 'printf "%s" "$SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT"' >"$work/forwarded"
+printf '%s' "$SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT" >"$work/expected"
+cmp -s "$work/expected" "$work/forwarded"
+run_rust_authority_env cargo-build PATH="$PATH" sh -c 'test -z "${SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT:-}"'
+echo 'PASS: legacy and Windows git schemas, alias corruption rejection, raw drift comparison and scoped preflight forwarding'

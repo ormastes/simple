@@ -1,0 +1,171 @@
+# Optional native inventory planner. Never import this compiler-bearing module
+# into the lightweight checker or claim that a v1 request freezes full execution
+# selection. Kind/span/source metadata stays in the returned definition envelope.
+# Matching caller-supplied subject IDs and hashes proves consistency, not source
+# authenticity, import closure, admitted binaries, or requirement provenance.
+# @req REQ-TRC-003 REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+use app.traceability.extract.sspec_inventory.{TraceSspecCase, TraceSspecInventory, extract_sspec_inventory_single_owner}
+use std.common.traceability.run_plan.{TracePlannedCase}
+use std.common.traceability.run_request.{TraceRunRequest, validate_trace_run_request}
+use std.common.traceability.run_selection.{validate_trace_request_selection}
+export use std.common.traceability.sspec_inventory.{TraceSspecPlannedDefinition, TraceSspecPlannedRequest}
+use std.common.traceability.sspec_inventory.{trace_sspec_definition_id, trace_sspec_planned_case_id, trace_sspec_inventory_digest}
+use std.common.traceability.sspec_inventory_codec.{encode_trace_sspec_planned_request}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+
+pub struct TraceSspecPlanningContext:
+    subject_id: text
+    configuration_id: text
+    expectation_id: text
+    binary_id: text
+    lane_id: text
+
+pub struct TraceSspecSource:
+    subject_id: text
+    test_path: text
+    source: text
+    source_sha256: text
+
+pub struct TraceSspecPlanningInput:
+    source: TraceSspecSource
+    inventory: TraceSspecInventory
+
+fn sspec_planner_bytes(value: text) -> [u8]:
+    var bytes: [u8] = []
+    for byte in value.bytes(): bytes.push(byte)
+    bytes
+
+fn sspec_planner_sources(context: TraceSspecPlanningContext, sources: [TraceSspecSource]) -> Result<(), text>:
+    for value in [context.subject_id, context.configuration_id, context.expectation_id, context.binary_id, context.lane_id]:
+        if value == "" or value.len() > 4096:
+            return Err("SSPEC-PLAN: missing or oversized frozen identity")
+    if sources.len() == 0 or sources.len() > 256:
+        return Err("SSPEC-PLAN: source inventory requires 1 through 256 files")
+    var paths: Dict<text, bool> = {}
+    var total_bytes: i64 = 0
+    for source in sources:
+        if source.subject_id != context.subject_id:
+            return Err("SSPEC-PLAN: source subject differs from frozen subject")
+        val path = source.test_path
+        if path == "" or path.len() > 4096 or path.starts_with("/") or path.contains("\\") or path.contains(":"):
+            return Err("SSPEC-PLAN: source path must be repository-relative")
+        for part in path.split("/"):
+            if part == "" or part == "." or part == "..":
+                return Err("SSPEC-PLAN: source path is not canonical")
+        for byte in path.bytes():
+            if byte == 0 or byte == 10 or byte == 13:
+                return Err("SSPEC-PLAN: source path contains a protocol control byte")
+        if paths.contains_key(path): return Err("SSPEC-PLAN: duplicate source path: " + path)
+        paths[path] = true
+        if source.source == "" or source.source.len() > 1048576 or source.source.len() > 4194304 - total_bytes:
+            return Err("SSPEC-PLAN: source exceeds per-file 1 MiB or aggregate 4 MiB budget")
+        total_bytes += source.source.len()
+        if source.source_sha256.len() != 71 or not source.source_sha256.starts_with("sha256:"):
+            return Err("SSPEC-PLAN: expected source SHA-256 is missing or malformed")
+        val digest_bytes = source.source_sha256.bytes()
+        for i in 7..digest_bytes.len():
+            val byte = digest_bytes[i].to_i64()
+            if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)):
+                return Err("SSPEC-PLAN: source SHA-256 must use lowercase hexadecimal")
+    Ok(())
+
+# Cheap aggregate validation precedes source hashing and definition encoding.
+fn sspec_planner_inventory_budget(inputs: [TraceSspecPlanningInput]) -> Result<(), text>:
+    var count: i64 = 0
+    var metadata_bytes: i64 = 0
+    for input in inputs:
+        if input.inventory.cases.len() == 0 or input.inventory.cases.len() > 65536 - count:
+            return Err("SSPEC-PLAN: empty inventory or aggregate case budget exceeded")
+        count += input.inventory.cases.len()
+        for item in input.inventory.cases:
+            if item.suite_path.len() == 0 or item.suite_path.len() > 64 or item.context_path.len() > 64:
+                return Err("SSPEC-PLAN: missing suite or excessive scope depth")
+            var values = [item.test_path, item.case_name, item.leaf_name, item.kind]
+            for part in item.suite_path: values.push(part)
+            for part in item.context_path: values.push(part)
+            for value in values:
+                if value == "" or value.len() > 4096 or value.len() > 4194304 - metadata_bytes:
+                    return Err("SSPEC-PLAN: missing metadata or metadata budget exceeded")
+                metadata_bytes += value.len()
+    Ok(())
+
+# Pure consistency adapter for explicit frozen inventory records. It does not
+# authenticate a supplied AST inventory. Use the native owner entry below to
+# derive those records from the actual production parser in this process.
+# File order and source declaration order are retained, not sorted/discovered.
+pub fn plan_sspec_inventories(context: TraceSspecPlanningContext, inputs: [TraceSspecPlanningInput]) -> Result<TraceSspecPlannedRequest, text>:
+    if inputs.len() == 0 or inputs.len() > 256:
+        return Err("SSPEC-PLAN: source inventory requires 1 through 256 files")
+    var sources: [TraceSspecSource] = []
+    for input in inputs: sources.push(input.source)
+    sspec_planner_sources(context, sources)?
+    sspec_planner_inventory_budget(inputs)?
+    var cases: [TracePlannedCase] = []
+    var definitions: [TraceSspecPlannedDefinition] = []
+    var paths: [text] = []
+    for input in inputs:
+        val source = input.source
+        val inventory = input.inventory
+        if inventory.evidence_validity != "unverified" or inventory.extractor_version != "simple.sspec.literal-ast/v1":
+            return Err("SSPEC-PLAN: unsupported inventory version or forged validity")
+        if inventory.test_path != source.test_path or inventory.source_sha256 != source.source_sha256:
+            return Err("SSPEC-PLAN: inventory path or digest differs from frozen source")
+        val bytes = sspec_planner_bytes(source.source)
+        validated_utf8_bytes_to_text_linear(bytes)?
+        if "sha256:" + sha256_u8_hex(bytes) != source.source_sha256:
+            return Err("SSPEC-PLAN: exact source bytes do not match expected digest")
+        paths.push(source.test_path)
+        var previous_end: i64 = -1
+        for item in inventory.cases:
+            if item.test_path != source.test_path:
+                return Err("SSPEC-PLAN: case path differs from inventory source")
+            if item.kind != "normal" and item.kind != "test" and item.kind != "example" and item.kind != "slow":
+                return Err("SSPEC-PLAN: unsupported declaration kind")
+            if item.start_byte < 0 or item.end_byte <= item.start_byte or item.end_byte > bytes.len() or item.start_byte < previous_end or item.line < 1 or item.column < 1:
+                return Err("SSPEC-PLAN: missing, overlapping or invalid source span")
+            if bytes[item.start_byte] >= 128 and bytes[item.start_byte] < 192:
+                return Err("SSPEC-PLAN: span starts inside a UTF-8 character")
+            if item.end_byte < bytes.len():
+                if bytes[item.end_byte] >= 128 and bytes[item.end_byte] < 192:
+                    return Err("SSPEC-PLAN: span ends inside a UTF-8 character")
+            previous_end = item.end_byte
+            var selector = item.suite_path[item.suite_path.len() - 1] + " > "
+            if item.context_path.len() > 0: selector += item.context_path[item.context_path.len() - 1] + " > "
+            selector += item.leaf_name
+            if item.case_name != selector:
+                return Err("SSPEC-PLAN: runtime selector differs from literal scopes")
+            val definition_id = trace_sspec_definition_id(source.source_sha256, inventory.extractor_version, item)
+            val case_id = trace_sspec_planned_case_id(context.subject_id, context.configuration_id,
+                context.expectation_id, context.binary_id, context.lane_id, definition_id)
+            cases.push(TracePlannedCase(case_id: case_id, test_path: item.test_path, case_name: item.case_name,
+                test_definition_id: definition_id, lane_id: context.lane_id))
+            definitions.push(TraceSspecPlannedDefinition(case_id: case_id, test_definition_id: definition_id,
+                source_sha256: source.source_sha256, extractor_version: inventory.extractor_version, definition: item))
+    val request = TraceRunRequest(subject_id: context.subject_id, configuration_id: context.configuration_id,
+        expectation_id: context.expectation_id, binary_id: context.binary_id, cases: cases)
+    validate_trace_run_request(request)?
+    validate_trace_request_selection(request, paths)?
+    val result = TraceSspecPlannedRequest(request: request, definitions: definitions,
+        inventory_digest: trace_sspec_inventory_digest(request, definitions)?, evidence_validity: "unverified")
+    # Validate complete metadata/request projection and the bounded native wire
+    # representation before returning. No database persistence is implied.
+    encode_trace_sspec_planned_request(result)?
+    Ok(result)
+
+# Destructively uses the native frontend's single-owner arena, serially. No
+# candidate module is imported/evaluated. The caller must retain exclusive
+# frontend ownership and later execute only a separately frozen selection.
+pub fn build_sspec_trace_request_single_owner(context: TraceSspecPlanningContext, sources: [TraceSspecSource]) -> Result<TraceSspecPlannedRequest, text>:
+    sspec_planner_sources(context, sources)?
+    var inputs: [TraceSspecPlanningInput] = []
+    var count: i64 = 0
+    for source in sources:
+        val inventory = extract_sspec_inventory_single_owner(source.test_path, source.source)?
+        if inventory.source_sha256 != source.source_sha256:
+            return Err("SSPEC-PLAN: parsed source differs from supplied digest")
+        if inventory.cases.len() > 65536 - count:
+            return Err("SSPEC-PLAN: aggregate case budget exceeded")
+        count += inventory.cases.len()
+        inputs.push(TraceSspecPlanningInput(source: source, inventory: inventory))
+    plan_sspec_inventories(context, inputs)

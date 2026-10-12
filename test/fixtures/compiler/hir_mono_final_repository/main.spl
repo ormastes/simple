@@ -10,8 +10,9 @@ use compiler.mono.mono_archive_current_body_v1.*
 use compiler.mono.monomorphize_integration.{MonomorphizationPass}
 use compiler.mono.verify.post_mono_verify.{post_mono_verify_modules}
 use compiler.driver.cache.hir_mono_archive_verify_v1.{mono_archive_post_mono_report_digest_v1}
+use compiler.driver.cache.hir_mono_function_record_v1.{mono_complete_function_digest_v1}
 use compiler.hir.hir_types.{HirModule}
-use compiler.hir.hir_definitions.{HirStruct, HirField, HirExpr, HirExprKind}
+use compiler.hir.hir_definitions.{HirStruct, HirField, HirExpr, HirExprKind, HirFunction}
 use compiler.hir.hir_codec.{hir_module_encode}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
@@ -59,10 +60,16 @@ fn observe_in_owned_scope(setup: HirArchiveWeaveFixtureSetupV1, repo: MonoArchiv
         expected_: ExpectedFinal) -> Result<bool, text>:
     if not mono_archive_final_repository_matches_v1(setup.driver, repo): return Err("actual final pin refused")
     for name in repo.ordered_inventory:
+        val origins = mono_archive_final_specialization_selections_in_owned_scope_v1(setup.driver, repo, name)?
         val loaded = mono_archive_load_final_module_in_owned_scope_v1(setup.driver, repo, name)?
         if sha256_text(hir_module_encode(loaded)) != expected_.digests[name] or
                 loaded.name != setup.archive.input.module_name or loaded.path != setup.source.path:
             return Err("actual retained complete final body parity differs")
+        for origin in origins:
+            if not loaded.functions.has(origin.target_symbol): return Err("actual FIFO-selected function body absent")
+            val function: HirFunction = loaded.functions[origin.target_symbol]
+            if function.name != origin.target_name or mono_complete_function_digest_v1(function) != origin.output_function_digest:
+                return Err("actual FIFO specialization origin/function digest differs")
         hir_cache_clear_last_warnings()
     Ok(true)
 
@@ -171,6 +178,15 @@ fn run_case(path: text, name: text, zero: bool) -> Result<i64, text>:
     if mono_archive_final_repository_matches_v1(setup.driver, repo): return Err("final matcher accepted inactive scope")
     checks = checks + 1
     if not transient_scope_begin(): return Err("final negatives lease unavailable")
+    var specialization_origins = 0
+    for logical in repo.ordered_inventory:
+        val origins = mono_archive_final_specialization_selections_in_owned_scope_v1(setup.driver, repo, logical)?
+        if logical != repo.ordered_inventory[repo.ordered_inventory.len() - 1] and origins.len() != 0:
+            return Err("specialization body moved from actual last template owner")
+        specialization_origins = specialization_origins + origins.len()
+    if (zero and specialization_origins != 0) or (not zero and specialization_origins < 2):
+        return Err("actual zero/generic specialization origin schedule missing")
+    checks = checks + 1
     val other = CompilerDriver.create(driver_core_compile_options_default())
     other.ctx = setup.driver.ctx
     if mono_archive_final_repository_matches_v1(other, repo): return Err("foreign driver accepted copied context")
@@ -254,6 +270,6 @@ fn main() -> i64:
         return 3
     if not env_set("SIMPLE_RESOLVE_METHODS", saved_quiet): return 4
     val checks = zero.unwrap() + generic.unwrap()
-    if checks != 41 or transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0: return 5
+    if checks != 43 or transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0: return 5
     print "HIR genuine final repository: {checks} checks passed"
     0
