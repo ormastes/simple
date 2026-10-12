@@ -40,10 +40,6 @@ Validate each fix with `simple release backport-check` and record:
 
 Apply the commit only on the private work branch, rerun affected tests, and submit by compare-and-swap. Feature commits, ranges, moving branch names, automatic “all fixes” selection, stale review, or pre-application evidence are rejected. Every changed input creates a new candidate attempt and, after publication, a new beta number.
 
-### Release task retry naming
-
-A release task keeps one stable name per release identity, spelled as the full version (`1.0.0-rc.1`, `2.0.0-beta.3`; shorthand `rc1` is the same rule). When a release task fails, the retry appends an incrementing `_N` suffix — `1.0.0-rc.1_1`, `1.0.0-rc.1_2` — as a new `work/release/<full-version>_<N>` branch and worktree at the fetched target SHA. Never re-number the release (`1.0.0-rc.2`) merely because an attempt failed; the prerelease number advances only for a new published release version. The immutable candidate attempt counter (`candidate/vX.Y.Z-rc.N/aNNN`) is independent of the task-name suffix.
-
 ### Periodic main/release convergence
 
 During a long beta or bootstrap qualification run, schedule a bounded read-only fetch-and-compare checkpoint before every candidate attempt, after a bootstrap failure is repaired, and before release admission. `inspect_release_main_convergence` fetches exact remote heads with bounded refspecs, compares at most 256 source-only commits, and verifies that every selected SHA is review-bound, reachable from the source, and not already represented in the target. It must not choose, cherry-pick, merge, or push a fix. Avoid tight polling and do not give the bootstrap worker protected-ref credentials.
@@ -67,6 +63,42 @@ scripts/release/convergence-checkpoint.shs --release-ref=release/X.Y --require-r
 A checkpoint is an operator hint only: it cannot
 select a fix or satisfy review, backport/forward-port, integration, candidate,
 or promotion admission.
+
+### Release-line ref contract and rc1 drive lessons
+
+The protected convergence/candidate machinery accepts a release line only when
+every layer agrees on the ref:
+
+- `pr-admission.yml` and `scripts/release/convergence-checkpoint.shs` validate
+  `release_ref` against `^release/[0-9]+\.[0-9]+$`; the review broker maps the
+  PR base to a live ruleset (`release/*` → `spipe-vcs-v3-release-lines`), and
+  `candidate.yml` derives the line from `release/version.sdn` semver
+  (`candidate/vX.Y.Z-pre/aNNN` → `release/X.Y`). A non-standard line
+  (e.g. `release_phase3`) must be added to **all** of these sites on **both**
+  main and the line, plus the `spipe-vcs-v3-release-lines` ruleset conditions,
+  before any dispatch.
+- Failed attempts keep the version: manifest branches
+  `work/release/1.0.0-rc.1_<N>` and candidates `candidate/v1.0.0-rc.1/aNNN`
+  increment only; never rename to a new prerelease to escape a gate.
+- The convergence manifest validator prunes classifications whose commits
+  merged to main and then requires exact equality with
+  `git rev-list origin/main..<release-ref>`. On release-tip drift, rebind a
+  fresh manifest attempt; never merge-sync a manifest PR branch (convergence
+  requires `inventory_head..HEAD` to touch only the manifest).
+- Convergence receipt accumulation must stream (`slurpfile`), not
+  `jq --argjson`, or ~624+ manifest rows hit `MAX_ARG_STRLEN`.
+- Candidate refs are created via `gh api repos/.../git/refs`; direct
+  `git push` to `candidate/...` is ruleset-blocked.
+- Fast-moving release lines routinely lose the broker's resolve→fetch window
+  ("protected base advanced"); resync the PR branch and redrive the broker.
+- Runner image drift breaks llvm archive fingerprints; `candidate.yml`
+  verifies `llvm-config --libfiles` archives exist and installs the matching
+  dev package (e.g. `libpolly-18-dev`) when absent.
+- FreeBSD QEMU bootstrap: wrapper timeouts are hours-scale (14400s), guest
+  logs live under `.simple/storage/build/bootstrap/logs/` inside the guest,
+  and each run needs 4 GiB host free for a 10–14 GB overlay.
+
+See the `release` skill's "rc1 Drive Machinery Lessons" for the full list.
 
 For each operator-selected exact commit:
 
