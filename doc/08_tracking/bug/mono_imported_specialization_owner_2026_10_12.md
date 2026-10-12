@@ -61,8 +61,8 @@ current owner SHA256:
 `98721e542dc9d4bc8cebfc83dbed2f338add4dda492d4532f4398184a014a837`.
 The final repaired function body matches the tested proposal; import placement
 and removal of the now-unreferenced old helper are the only cleanup changes.
-Selective local application commit is pending. Remote landing remains gated
-on the user's Phase 3 buildability requirement.
+Selective local application commit: `f26793b4a88`.
+Remote landing remains gated on the user's Phase 3 buildability requirement.
 
 Port note (release_phase3 sync 2026-10-19): upstream had independently replaced
 `mono_requalify` with `specialization_callee_name_v1`, which names the callee
