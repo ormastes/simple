@@ -93,3 +93,7 @@ Producer c27cb117… at frozen source 6ec114562 rebuilt 1,237 modules and passed
 ## Current matrix test-runner failure
 
 The c27cb117… test-runner build failed MIR lowering at 334400 ms with B5b: match has multiple wildcard arms, before native-cache planning. Root cause and source/function location are not established by the emitted diagnostic. This run does not verify the scratch repair's RSS effect. The separate CLI build and overall matrix remain live; no new build/retry was launched. Evidence is recorded in native_test_runner_multiple_wildcard_mir_2026-10-12.md.
+
+## Terminal recovery qualification verdict
+
+Session30186 is terminal: exit1 at stage2-compiler-tests. c27cb117… CLI build failed status88 after793 seconds with5882956 KiB peak versus5859375 KiB cap, during HIR; test-runner failed status1 after373 seconds with2946784 KiB peak on B5b multiple wildcard arms. Both artifacts are producer-failed and behavior_qualified=0. These earlier failures leave the native-cache scratch RSS repair unverified. Source-only wildcard owner diagnostics and facade classification are not present in this frozen producer. Deployed bin/simple and bin/release remain absent in both shared workspaces. No further full rebuild, Stage3 resume, seed tooling substitution or exhausted callback retry was launched. Preserve rejection/receipts/capsules. Full F01–F16 acceptance and landing remain incomplete; only the initial documentation PR is merged.
