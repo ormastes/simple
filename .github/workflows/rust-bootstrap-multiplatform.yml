@@ -991,16 +991,16 @@ jobs:
           run-id: 38174655243
           name: bootstrap-diagnostic-UNADMITTED-Windows x86_64-cranelift-82bba68602c2cff2b87f42b0f5ae8a54f1d14b8b
           path: ${{ runner.temp }}/retained-windows-seed
-      - name: Qualify canonical Windows unsupported browser contracts only
+      - name: Diagnose retained Rust string terminal compatibility only
         shell: bash
         run: |
           set -eu
-          export LINK_OUT="$RUNNER_TEMP/windows-browser-unsupported"
+          export LINK_OUT="$RUNNER_TEMP/windows-term-rust-compatibility"
           export RETAINED_RUNTIME="$RUNNER_TEMP/retained-windows-seed/files/src/compiler_rust/target/bootstrap/simple_native_all.lib"
           python - <<'PYSTRICT'
-          files = {'provider.c': '#include <stdint.h>\n#include <stdbool.h>\n#if !defined(_WIN32)\n#error Canonical Windows-only unsupported browser sandbox profile\n#endif\ntypedef struct SplArray SplArray;\nint64_t rt_browser_renderer_spawn_sandboxed(\n        const char* cmd, SplArray* args) {\n    (void)cmd;\n    (void)args;\n    return -1;\n}\nbool rt_browser_renderer_sandbox_enter(void) {\n    return false;\n}\n', 'fixture.c': '#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <string.h>\n#include <windows.h>\ntypedef struct SplArray SplArray;\nextern int64_t rt_browser_renderer_spawn_sandboxed(const char*,SplArray*);\nextern bool rt_browser_renderer_sandbox_enter(void);\nint main(void) {\n void* unread=VirtualAlloc(NULL,4096,MEM_RESERVE|MEM_COMMIT,PAGE_NOACCESS);\n if(!unread) return 1;\n char guard[]="untouched command";\n const char* cmds[]={NULL,guard,(const char*)unread};\n SplArray* arrays[]={NULL,(SplArray*)guard,(SplArray*)unread};\n unsigned checks=0;\n for(unsigned repetition=0;repetition<3;repetition++) {\n  if(rt_browser_renderer_sandbox_enter()!=false) return 2;\n  checks++;\n  for(unsigned i=0;i<3;i++) for(unsigned j=0;j<3;j++) {\n   if(rt_browser_renderer_spawn_sandboxed(cmds[i],arrays[j])!=-1) return 3;\n   checks++;\n  }\n }\n if(strcmp(guard,"untouched command")) return 4;\n if(!VirtualFree(unread,0,MEM_RELEASE)) return 5;\n printf("WINDOWS_BROWSER_UNSUPPORTED_CONTRACT_PASS checks=%u\\n",checks);\n return 0;\n}\n'}
-          hashes = {'provider.c': '775de8c35b2f047ed2ab1d8a5fd46a41148e38ca13b778f973096d1dcf92ce36', 'fixture.c': '04621d9cd31155e3abdf9685226aaf30a84622a6f764944c0e4818fb63eec619'}
-          expected = {'rt_browser_renderer_spawn_sandboxed','rt_browser_renderer_sandbox_enter'}
+          files = {'provider.c': '#include <stdint.h>\n#include <stdio.h>\nextern int64_t rt_string_len(int64_t text_value);\nextern const uint8_t* rt_string_data(int64_t text_value);\nint64_t rt_term_write(int64_t text_value) {\n    int64_t len = rt_string_len(text_value);\n    if (len <= 0) return 0;\n    const uint8_t* data = rt_string_data(text_value);\n    if (!data) return 0;\n    size_t written = fwrite(data, 1, (size_t)len, stdout);\n    return (int64_t)written;\n}\n', 'fixture.c': "#include <stdint.h>\n#include <stdio.h>\nextern uint64_t rt_string_new(const uint8_t*,uint64_t);\nextern int64_t rt_term_write(int64_t);\nint main(void) {\n const uint8_t bytes[]={'A',0,0xc3,0xa9,'Z'};\n uint64_t text=rt_string_new(bytes,sizeof bytes);\n uint64_t empty=rt_string_new(NULL,0);\n if(rt_term_write((int64_t)empty)!=0) return 1;\n if(rt_term_write((int64_t)text)!=sizeof bytes) return 2;\n if(rt_term_write((int64_t)text)!=sizeof bytes) return 3;\n /* Parent must assert stdout equals exact ten bytes, including NULs. */\n return 0;\n}\n"}
+          hashes = {'provider.c': '5621f546a57fbcd5d869abc802a7e6c47a938486696887bf5a8521126e285dd7', 'fixture.c': '2929ce4663498cfc9993598c0e9dbcaafc200dc368ed67be901f08d76b26150d'}
+          expected = {'rt_term_write'}
           import hashlib, json, os, shutil, subprocess, time
           from pathlib import Path
           out = Path(os.environ['LINK_OUT']); out.mkdir(parents=True, exist_ok=True)
@@ -1035,18 +1035,18 @@ jobs:
           run('provider-imports',['llvm-nm.exe','--undefined-only',str(out/'provider.obj')])
           run('driver-target-crt',['clang-cl.exe','/nologo','/D_NO_CRT_STDIO_INLINE=1','/clang:-###','/c',str(out/'provider.c')])
           run('object-crt-directives',['llvm-readobj.exe','--coff-directives',str(out/'provider.obj')])
-          exe = out/'browser-unsupported-fixture.exe'
+          exe = out/'term-fixture.exe'
           run('link',['clang-cl.exe','/nologo',str(out/'fixture.obj'),str(out/'provider.obj'),str(runtime),'/Fe'+str(exe),'/link','/SUBSYSTEM:CONSOLE','kernel32.lib','ws2_32.lib','bcrypt.lib','userenv.lib','ntdll.lib','advapi32.lib','dbghelp.lib','ole32.lib','oleaut32.lib','shell32.lib','propsys.lib','runtimeobject.lib','crypt32.lib','secur32.lib','ncrypt.lib','iphlpapi.lib','pdh.lib','netapi32.lib','psapi.lib','powrprof.lib','d3d11.lib','dxgi.lib','user32.lib','gdi32.lib','ucrt.lib','msvcrt.lib','vcruntime.lib'])
           stdout = run('native-run',[str(exe)],60)
-          assert 'WINDOWS_BROWSER_UNSUPPORTED_CONTRACT_PASS checks=30' in stdout
-          receipt = {'scope':'BROWSER_UNSUPPORTED_ONLY; no Windows sandbox capability or Text/array decoder; canonical optional lifecycle hooks remain unchanged','source_sha':'82bba68602c2cff2b87f42b0f5ae8a54f1d14b8b','hashes':hashes,'runtime_sha256':hashlib.sha256(runtime.read_bytes()).hexdigest(),'strong_unique_providers':sorted(defined),'retained_overlap':[],'run_exit':0,'stdout':stdout,'exe_size':exe.stat().st_size,'exe_sha256':hashlib.sha256(exe.read_bytes()).hexdigest(),'tools':tools,'SDK_stdio_guard':header_receipt,'VCTools':os.environ.get('VCToolsVersion')}
+          assert (out/'native-run.stdout').read_bytes() == bytes.fromhex('4100c3a95a4100c3a95a')
+          receipt = {'scope':'TERM_WRITE_RUST_CONSTRUCTOR_COMPATIBILITY_ONLY; actualSimplecaller textword origins unqualified; not compilereligible','source_sha':'82bba68602c2cff2b87f42b0f5ae8a54f1d14b8b','hashes':hashes,'runtime_sha256':hashlib.sha256(runtime.read_bytes()).hexdigest(),'strong_unique_providers':sorted(defined),'retained_overlap':[],'run_exit':0,'stdout':stdout,'exe_size':exe.stat().st_size,'exe_sha256':hashlib.sha256(exe.read_bytes()).hexdigest(),'tools':tools,'SDK_stdio_guard':header_receipt,'VCTools':os.environ.get('VCToolsVersion')}
           (out/'qualification.json').write_text(json.dumps(receipt,indent=2)+'\n')
           print(json.dumps({'run_exit':0,'exe_size':receipt['exe_size'],'stdout':stdout}))
           PYSTRICT
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-browser-unsupported-UNADMITTED-${{ github.sha }}
-          path: ${{ runner.temp }}/windows-browser-unsupported/
+          name: windows-term-rust-compatibility-UNADMITTED-${{ github.sha }}
+          path: ${{ runner.temp }}/windows-term-rust-compatibility/
           if-no-files-found: error
           retention-days: 7
