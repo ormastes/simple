@@ -240,3 +240,90 @@ describe "Result tuple payload transport", tag: ["only-compiled"]:
                     case _: ()
         expect(checked).to_equal(2)
         expect(tuple_result_bridge_count(function, [MirType.i64(), MirType.i64()])).to_equal(1)
+
+    it "matches a Result tuple using exact native fields and array provenance":
+        val source = "fn choose(value: Result<(i64, [i64]), text>) -> i64:\n    match value:\n        case Err(_): -1\n        case Ok((number, items)): number + items[0]\n"
+        val (function, errors, fatal) = tuple_result_function(source, "choose")
+        expect(errors).to_equal("")
+        expect(fatal).to_be(false)
+        val array_type = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))
+        expect(tuple_result_bridge_count(function, [MirType.i64(), array_type])).to_equal(1)
+        expect(tuple_result_projection_count(function, 0)).to_equal(1)
+        expect(tuple_result_projection_count(function, 1)).to_equal(1)
+        expect(tuple_result_call_count(function, "rt_tuple_get")).to_equal(0)
+        expect(tuple_result_call_count(function, "rt_array_get")).to_equal(1)
+
+    it "keeps a single Result tuple bind typed before ordinary tuple indexing":
+        val source = "fn choose(value: Result<(i64, [i64]), text>) -> i64:\n    match value:\n        case Err(_): -1\n        case Ok(payload): payload[0] + payload[1][0]\n"
+        val (function, errors, fatal) = tuple_result_function(source, "choose")
+        expect(errors).to_equal("")
+        expect(fatal).to_be(false)
+        val array_type = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))
+        expect(tuple_result_bridge_count(function, [MirType.i64(), array_type])).to_equal(1)
+        expect(tuple_result_call_count(function, "rt_tuple_get")).to_equal(0)
+        expect(tuple_result_call_count(function, "rt_array_get")).to_equal(1)
+
+    it "reads the correct native slot when a wrapper tuple pattern skips a field":
+        val source = "fn choose(value: Result<(i64, [i64]), text>) -> i64:\n    match value:\n        case Err(_): -1\n        case Ok((_, items)): items[0]\n"
+        val (function, errors, fatal) = tuple_result_function(source, "choose")
+        expect(errors).to_equal("")
+        expect(fatal).to_be(false)
+        expect(tuple_result_projection_count(function, 0)).to_equal(0)
+        expect(tuple_result_projection_count(function, 1)).to_equal(1)
+        expect(tuple_result_call_count(function, "rt_tuple_get")).to_equal(0)
+        expect(tuple_result_call_count(function, "rt_array_get")).to_equal(1)
+
+    it "keeps multiargument custom enum payloads on the headered tuple accessor":
+        val source = "enum CompetingWrapper:\n    Ok(i64, [i64])\n    Err(text)\nfn choose(value: CompetingWrapper) -> i64:\n    match value:\n        case CompetingWrapper.Err(_): -1\n        case CompetingWrapper.Ok(number, items): number + items[0]\n"
+        val (function, errors, fatal) = tuple_result_function(source, "choose")
+        expect(errors).to_equal("")
+        expect(fatal).to_be(false)
+        expect(tuple_result_call_count(function, "rt_tuple_get")).to_equal(2)
+        val array_type = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))
+        expect(tuple_result_bridge_count(function, [MirType.i64(), array_type])).to_equal(0)
+
+    it "uses the exact Optional tuple signature for Some pattern fields":
+        val source = "fn choose(value: Option<(i64, [i64])>) -> i64:\n    match value:\n        case None: -1\n        case Some((number, items)): number + items[0]\n"
+        val (function, errors, fatal) = tuple_result_function(source, "choose")
+        expect(errors).to_equal("")
+        expect(fatal).to_be(false)
+        val array_type = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))
+        expect(tuple_result_bridge_count(function, [MirType.i64(), array_type])).to_equal(1)
+        expect(tuple_result_call_count(function, "rt_tuple_get")).to_equal(0)
+        expect(tuple_result_call_count(function, "rt_array_get")).to_equal(1)
+
+    it "preserves native word stride for bool float and nested tuple fields":
+        val source = "fn choose(value: Result<(bool, f64, (i64, i64)), text>) -> i64:\n    match value:\n        case Err(_): -1\n        case Ok((flag, score, pair)):\n            if flag and score == 2.5: pair[1] else: 0\n"
+        val (function, errors, fatal) = tuple_result_function(source, "choose")
+        expect(errors).to_equal("")
+        expect(fatal).to_be(false)
+        val pair_type = MirType(kind: MirTypeKind.Tuple([MirType.i64(), MirType.i64()]))
+        expect(tuple_result_bridge_count(function, [MirType.bool(), MirType.f64(), pair_type])).to_equal(1)
+        expect(tuple_result_call_count(function, "rt_tuple_get")).to_equal(0)
+        var saw_bool = false
+        var saw_float = false
+        var saw_pair = false
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.GetField(dest, _, field):
+                        val type_ = tuple_result_local_type(function, dest.id)
+                        if field == 0 and type_.kind == MirTypeKind.Bool: saw_bool = true
+                        if field == 1 and type_.kind == MirTypeKind.F64: saw_float = true
+                        if field == 2 and type_.kind == pair_type.kind: saw_pair = true
+                    case _: ()
+        expect(saw_bool and saw_float and saw_pair).to_be(true)
+
+    it "adds no rejection or guessed native representation for text tuple fields":
+        val source = "fn choose(value: Result<(i64, text), text>) -> i64:\n    match value:\n        case Err(_): -1\n        case Ok((number, label)): number\n"
+        val (function, errors, fatal) = tuple_result_function(source, "choose")
+        expect(errors).to_equal("")
+        expect(fatal).to_be(false)
+        expect(tuple_result_call_count(function, "rt_tuple_get")).to_equal(2)
+
+    it "does not erase Any tuple fields into the native wrapper plan":
+        val source = "fn choose(value: Result<(i64, Any), text>) -> i64:\n    match value:\n        case Err(_): -1\n        case Ok((number, other)): number\n"
+        val (function, errors, fatal) = tuple_result_function(source, "choose")
+        expect(errors).to_equal("")
+        expect(fatal).to_be(false)
+        expect(tuple_result_call_count(function, "rt_tuple_get")).to_equal(2)

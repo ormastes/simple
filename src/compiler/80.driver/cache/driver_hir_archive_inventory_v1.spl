@@ -1,0 +1,227 @@
+# Inventory prerequisite only. No semantic, mono or final-stage admission.
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_source_loading.{_driver_physical_source_key}
+use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1}
+use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveV1,
+    hir_body_archive_load_in_owned_scope_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_last_warnings,
+    hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+
+struct DriverHirArchiveInventoryRowV1:
+    logical_name: text
+    physical_path: text
+    authored_path: text
+    source_digest: text
+    source_bytes: i64
+    module_owner: text
+    archive_key: text
+
+struct DriverHirArchiveInventoryV1:
+    logical_rows: [DriverHirArchiveInventoryRowV1]
+    representative_indices: [i64]
+    ordered_modules: [text]
+    ordered_archives: [HirBodyArchiveV1]
+    inventory_digest: text
+
+# Hashing runs before the separate body leases. Defer the original alias
+# refusal until those body checks finish, preserving their failure priority.
+struct DriverHirArchiveInventoryProjectionV1:
+    inventory: DriverHirArchiveInventoryV1
+    alias_failure: text
+
+# Every complete decode is reclaimed before the next physical module. Only
+# the boolean or dynamic refusal reason and existing cache memo escape.
+fn driver_hir_archive_inventory_body_v1(archive: HirBodyArchiveV1) -> Result<bool, text>:
+    if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0:
+        return Err("HIR archive inventory lease or warning owner occupied")
+    if not hir_cache_enabled(): return Err("HIR archive inventory cache unavailable")
+    if not transient_scope_begin(): return Err("HIR archive inventory lease unavailable")
+    val loaded = hir_body_archive_load_in_owned_scope_v1(archive, archive.input)
+    val result: Result<bool, text> = if loaded.is_ok(): Ok(true) else: Err(loaded.unwrap_err())
+    val paused = transient_scope_pause()
+    var owned = false
+    var cache_owned = false
+    if paused:
+        owned = transient_promote(result)
+        cache_owned = hir_cache_promote_diagnostic_owner_v1()
+        hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not cache_owned or not ended:
+        panic("HIR archive inventory body ownership failed")
+    result
+
+fn driver_hir_archive_inventory_projection_in_owned_scope_v1(ctx: CompileContext,
+        logical_archives: Dict<text, HirBodyArchiveV1>) -> Result<DriverHirArchiveInventoryProjectionV1, text>:
+    if transient_array_scope_state_v1() != 1:
+        return Err("HIR archive inventory projection requires active unpaused ownership")
+    val count = ctx.source_paths_owner.len()
+    if count == 0 or ctx.source_module_names_owner.len() != count or
+            ctx.source_identities_owner.len() != count or ctx.source_authored_paths_owner.len() != count or
+            ctx.source_byte_lengths_owner.len() != count or logical_archives.len() != count:
+        return Err("HIR archive inventory lacks complete retained phase-1 rows")
+    if ctx.sources.len() != 0 and ctx.sources.len() != count:
+        return Err("HIR archive inventory differs from source scheduling")
+    var names: Dict<text, bool> = {}
+    var paths: [text] = []
+    var owners: [text] = []
+    var rows: [DriverHirArchiveInventoryRowV1] = []
+    var archives: [HirBodyArchiveV1] = []
+    var canonical_author_by_path: Dict<text, i64> = {}
+    var index = 0
+    while index < count:
+        val name = ctx.source_module_names_owner[index]
+        if name == "" or names.has(name) or not logical_archives.has(name):
+            return Err("HIR archive inventory missing or duplicate logical row")
+        names[name] = true
+        val archive = logical_archives[name]
+        val input = archive.input
+        val physical = _driver_physical_source_key(ctx.source_paths_owner[index])
+        val authored = ctx.source_authored_paths_owner[index]
+        if physical == "" or _driver_physical_source_key(input.source_path) != physical or
+                input.source_content_digest != ctx.source_identities_owner[index] or
+                authored == "" or
+                ctx.source_byte_lengths_owner[index] < 0 or input.provider_selection_digest.len() != 64:
+            return Err("HIR archive inventory differs from admitted physical source row")
+        if input.source_authored_path == authored:
+            canonical_author_by_path[physical] = index
+        if ctx.sources.len() != 0:
+            if ctx.sources[index].module_name != name or
+                    _driver_physical_source_key(ctx.sources[index].path) != physical:
+                return Err("HIR archive inventory source scheduling order mismatch")
+        if index > 0:
+            val first = archives[0].input
+            if input.closure_digest != first.closure_digest or input.producer_header != first.producer_header or
+                    input.runtime_provider_receipt_path != first.runtime_provider_receipt_path or
+                    input.runtime_provider_digest != first.runtime_provider_digest or
+                    input.provider_selection_digest != first.provider_selection_digest:
+                return Err("HIR archive inventory selected authority conflict")
+        paths.push(physical)
+        owners.push(input.module_name)
+        archives.push(archive)
+        rows.push(DriverHirArchiveInventoryRowV1(logical_name: name, physical_path: physical,
+            authored_path: authored, source_digest: ctx.source_identities_owner[index],
+            source_bytes: ctx.source_byte_lengths_owner[index], module_owner: input.module_name,
+            archive_key: archive.archive_key))
+        index = index + 1
+    # Independently authored aliases keep their own spelling in the rows, but
+    # cannot invent a canonical parent. Require that parent's admitted row and
+    # exact physical byte length and full SHA for every alias.
+    index = 0
+    while index < count:
+        val physical = paths[index]
+        if not canonical_author_by_path.has(physical):
+            return Err("HIR archive inventory canonical authored source row absent")
+        val canonical = canonical_author_by_path[physical]
+        if archives[canonical].input.source_authored_path != archives[index].input.source_authored_path or
+                ctx.source_identities_owner[canonical] != ctx.source_identities_owner[index] or
+                ctx.source_byte_lengths_owner[canonical] != ctx.source_byte_lengths_owner[index]:
+            return Err("HIR archive inventory alias differs from canonical authored source")
+        index = index + 1
+    val representatives = driver_mir_physical_source_indices_v1(paths, ctx.source_identities_owner, owners)?
+    var selected: [HirBodyArchiveV1] = []
+    var order: [text] = []
+    var first_archive_by_path: Dict<text, text> = {}
+    for representative in representatives:
+        val archive = archives[representative]
+        first_archive_by_path[paths[representative]] = archive.archive_key
+        selected.push(archive)
+        order.push(archive.input.module_name)
+    # A logical alias must name the SAME body descriptor, not just the same
+    # leaf owner or source SHA. Distinct parent/entry/provider keys reject.
+    var material = "driver-hir-archive-inventory-v1\n{count}\n"
+    var alias_failure = ""
+    for row in rows:
+        if first_archive_by_path[row.physical_path] != row.archive_key:
+            alias_failure = "HIR archive logical alias has conflicting body authority"
+            break
+        material = material + sha256_text(row.logical_name) + "\n" + sha256_text(row.physical_path) + "\n" +
+            sha256_text(row.authored_path) + "\n" + row.source_digest + "\n{row.source_bytes}\n" +
+            sha256_text(row.module_owner) + "\n" + row.archive_key + "\n"
+    material = material + "representatives\n{representatives.len()}\n"
+    for representative in representatives: material = material + "{representative}\n"
+    val inventory = DriverHirArchiveInventoryV1(logical_rows: rows, representative_indices: representatives,
+        ordered_modules: order, ordered_archives: selected,
+        inventory_digest: if alias_failure == "": sha256_text(material) else: "")
+    Ok(DriverHirArchiveInventoryProjectionV1(inventory: inventory, alias_failure: alias_failure))
+
+pub fn driver_hir_archive_inventory_from_context_v1(ctx: CompileContext,
+        logical_archives: Dict<text, HirBodyArchiveV1>) -> Result<DriverHirArchiveInventoryV1, text>:
+    if transient_array_scope_state_v1() != 0:
+        return Err("HIR archive inventory lease occupied")
+    if not transient_scope_begin(): return Err("HIR archive inventory projection lease unavailable")
+    val result = driver_hir_archive_inventory_projection_in_owned_scope_v1(ctx, logical_archives)
+    val paused = transient_scope_pause()
+    # Only final body-free rows/representatives and a deferred refusal escape.
+    # Canonical paths, cumulative material strings and hash inputs are scratch.
+    val owned = if paused: transient_promote(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: panic("HIR archive inventory projection ownership failed")
+    if result.is_err(): return Err(result.unwrap_err())
+    val projection = result.unwrap()
+    for archive in projection.inventory.ordered_archives:
+        val _body = driver_hir_archive_inventory_body_v1(archive)?
+    if projection.alias_failure != "": return Err(projection.alias_failure)
+    Ok(projection.inventory)
+
+fn driver_hir_archive_inventory_compare_rows_in_owned_scope_v1(captured: DriverHirArchiveInventoryV1,
+        actual: DriverHirArchiveInventoryV1) -> Result<bool, text>:
+    if transient_array_scope_state_v1() != 1:
+        return Err("HIR archive inventory comparison requires active unpaused ownership")
+    if captured.logical_rows.len() != actual.logical_rows.len() or
+            captured.representative_indices != actual.representative_indices or
+            captured.ordered_modules != actual.ordered_modules or
+            captured.ordered_archives.len() != actual.ordered_archives.len() or
+            captured.inventory_digest != actual.inventory_digest:
+        return Err("HIR archive inventory receipt differs from actual retained owners")
+    var index = 0
+    while index < actual.logical_rows.len():
+        val row = captured.logical_rows[index]
+        val expected = actual.logical_rows[index]
+        if row.logical_name != expected.logical_name or row.physical_path != expected.physical_path or
+                row.authored_path != expected.authored_path or row.source_digest != expected.source_digest or
+                row.source_bytes != expected.source_bytes or row.module_owner != expected.module_owner or
+                row.archive_key != expected.archive_key:
+            return Err("HIR archive inventory row was edited")
+        index = index + 1
+    Ok(true)
+
+fn driver_hir_archive_inventory_compare_rows_v1(captured: DriverHirArchiveInventoryV1,
+        actual: DriverHirArchiveInventoryV1) -> Result<bool, text>:
+    if transient_array_scope_state_v1() != 0:
+        return Err("HIR archive inventory comparison lease occupied")
+    if not transient_scope_begin(): return Err("HIR archive inventory comparison lease unavailable")
+    val result = driver_hir_archive_inventory_compare_rows_in_owned_scope_v1(captured, actual)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: panic("HIR archive inventory comparison ownership failed")
+    result
+
+pub fn driver_hir_archive_inventory_verify_context_v1(ctx: CompileContext,
+        logical_archives: Dict<text, HirBodyArchiveV1>, captured: DriverHirArchiveInventoryV1) -> Result<bool, text>:
+    # An editable record/digest is not an authority token. Reconstruct against
+    # retained source owners and revalidate complete archive bodies before use.
+    val actual = driver_hir_archive_inventory_from_context_v1(ctx, logical_archives)?
+    val _rows = driver_hir_archive_inventory_compare_rows_v1(captured, actual)?
+    var index = 0
+    while index < actual.ordered_archives.len():
+        val archive = captured.ordered_archives[index]
+        val expected = actual.ordered_archives[index]
+        # Revalidate the caller's whole descriptor too, not just its key field.
+        if archive.archive_key != expected.archive_key or archive.body_digest != expected.body_digest or
+                archive.lowering_warnings_digest != expected.lowering_warnings_digest:
+            return Err("HIR archive inventory physical descriptor was edited")
+        val _body = driver_hir_archive_inventory_body_v1(archive)?
+        if archive.input.module_name != expected.input.module_name or
+                archive.input.source_path != expected.input.source_path or
+                archive.input.provider_selection_digest != expected.input.provider_selection_digest:
+            return Err("HIR archive inventory physical authority was edited")
+        index = index + 1
+    Ok(true)
+
+export DriverHirArchiveInventoryRowV1, DriverHirArchiveInventoryV1
+export driver_hir_archive_inventory_from_context_v1, driver_hir_archive_inventory_verify_context_v1

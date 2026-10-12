@@ -1,0 +1,205 @@
+# A mechanical transform fixture, not admission of the production weaver.
+use provider.{root}
+use compiler.driver.cache.hir_body_typecheck_lease_v1.*
+use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_context_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_header, hir_cache_last_warnings,
+    hir_cache_promote_diagnostic_owner_v1, hir_cache_clear_last_warnings}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirFunction, HirParam, HirExpr, HirExprKind}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.mono.mono_archive_current_body_v1.*
+use compiler.mono.mono_archive_registration_v1.*
+use compiler.mono.mono_archive_types_v1.{mono_template_signature_v1, mono_template_signature_digest_v1, mono_archive_put_type_v1}
+use compiler.mono.monomorphize_integration.{MonomorphizationPass}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.common.config.{Logger}
+use std.env.{env_get}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+struct CurrentFixtureCapture:
+    receipt: MonoArchiveCurrentRegistrationReceiptV1
+    checks: i64
+    expected_root: i64
+
+fn type_digest(type_: HirType) -> text:
+    var writer = HirCodecWriter.create()
+    mono_archive_put_type_v1(writer, type_)
+    sha256_text(writer.finish())
+
+fn function_named(module: HirModule, name: text) -> HirFunction:
+    for raw in module.functions.values():
+        val function: HirFunction = raw
+        if function.name == name: return function
+    panic("current fixture function absent")
+
+fn current_literals(module: HirModule) -> bool:
+    val root_function = function_named(module, "root")
+    val template = function_named(module, "template")
+    if not root_function.body.has or not template.body.has or not template.params[0].has_default: return false
+    val root_ok = match root_function.body.value.kind:
+        case HirExprKind.BoolLit(value): value
+        case _: false
+    val template_ok = match template.body.value.kind:
+        case HirExprKind.IntLit(value, _): value == 99
+        case _: false
+    val default_ok = match template.params[0].default.kind:
+        case HirExprKind.IntLit(value, _): value == 99
+        case _: false
+    root_ok and template_ok and default_ok
+
+fn capture(owner: MonoArchiveCurrentRegistrationOwnerV1,
+        parent: HirBodyArchiveV1) -> Result<CurrentFixtureCapture, text>:
+    if not transient_scope_begin(): return Err("current fixture scope unavailable")
+    var output: Result<CurrentFixtureCapture, text> = Err("current complete parent unavailable")
+    val loaded = hir_body_archive_load_in_owned_scope_v1(parent, parent.input)
+    if loaded.is_ok():
+        var module = loaded.unwrap()
+        var generic = function_named(module, "template")
+        var root_function = function_named(module, "root")
+        val old_root = root_function.symbol.id
+        # Actual complete function changes: move the template/root boundary,
+        # change return signature/body and retain an executable default.
+        root_function.type_params = generic.type_params
+        root_function.return_type = HirType(kind: HirTypeKind.Bool, span: root_function.span)
+        root_function.body.stmts = []
+        root_function.body.has = true
+        root_function.body.value = HirExpr(kind: HirExprKind.BoolLit(true), has_type_: true,
+            type_: root_function.return_type, span: root_function.span)
+        generic.type_params = []
+        generic.is_generic_template = false
+        var param: HirParam = generic.params[0]
+        param.type_ = HirType(kind: HirTypeKind.Int(64, true), span: generic.span)
+        param.has_default = true
+        param.default = HirExpr(kind: HirExprKind.IntLit(99, nil), has_type_: true,
+            type_: param.type_, span: generic.span)
+        generic.params = [param]
+        generic.body.stmts = []
+        generic.body.has = true
+        generic.body.value = HirExpr(kind: HirExprKind.IntLit(99, nil), has_type_: true,
+            type_: generic.return_type, span: generic.span)
+        module.functions[root_function.symbol] = root_function
+        module.functions[generic.symbol] = generic
+        val warnings = ["current first warning", "current second warning"]
+        # Explicit fixture boundary values; they do not pretend to be an
+        # accepted production post-HIR prerequisite capability.
+        val stored = mono_archive_current_body_store_in_owned_scope_v1(owner.cache, parent,
+            sha256_text("fixture boundary key"), sha256_text("fixture boundary contents"), module, warnings)
+        if stored.is_ok():
+            val body = stored.unwrap()
+            val decoded = mono_archive_current_body_load_in_owned_scope_v1(owner.cache, body)
+            val captured = mono_archive_collect_current_registration_in_owned_scope_v1(owner, module, body, warnings)
+            var checks = 0
+            if decoded.is_ok() and sha256_text(hir_module_encode(decoded.unwrap().module)) == body.current_body_digest and
+                    decoded.unwrap().warnings == warnings and body.current_body_digest != parent.body_digest and
+                    current_literals(decoded.unwrap().module):
+                checks = checks + 1
+            # The original entry must not collect facts from this current body.
+            if mono_archive_collect_registration_in_owned_scope_v1(owner.registration, module, module.name, parent).is_err():
+                checks = checks + 1
+            if captured.is_ok():
+                val receipt = captured.unwrap()
+                val exact = MonomorphizationPass.create()
+                exact.collect_declared_globals(module, module.name)
+                exact.collect_generics(module, module.name)
+                var signature_ok = false
+                var recipe_ok = false
+                var return_ok = false
+                for row in receipt.registration.rows:
+                    match row:
+                        case MonoArchiveRegistrationRowV1.TemplateSignature(key, signature):
+                            if key == "root" and exact.generic_functions.has(key):
+                                val full: HirFunction = exact.generic_functions[key]
+                                signature_ok = mono_template_signature_digest_v1(signature) ==
+                                    mono_template_signature_digest_v1(mono_template_signature_v1(full))
+                        case MonoArchiveRegistrationRowV1.TemplateRecipe(key, recipe):
+                            if key == "root": recipe_ok = recipe.original_symbol.id == old_root
+                        case MonoArchiveRegistrationRowV1.FunctionReturn(key, type_):
+                            if exact.fn_returns.has(key): return_ok = type_digest(type_) == type_digest(exact.fn_returns[key])
+                        case _: ()
+                if receipt.registration.roots == [generic.symbol.id] and signature_ok and recipe_ok and return_ok and
+                        receipt.registration.next_symbol == exact.next_symbol and receipt.registration.generic_functions == exact.stats.generic_functions_found:
+                    checks = checks + 1
+                var wrong = body
+                wrong.current_body_digest = parent.body_digest
+                if mono_archive_current_body_load_in_owned_scope_v1(owner.cache, wrong).is_err() and
+                        mono_archive_collect_current_registration_in_owned_scope_v1(owner, module, wrong, warnings).is_err():
+                    checks = checks + 1
+                wrong = body
+                wrong.parent_boundary_digest = sha256_text("wrong boundary")
+                if mono_archive_current_body_load_in_owned_scope_v1(owner.cache, wrong).is_err(): checks = checks + 1
+                wrong = body
+                wrong.current_stage = "lowered-unresolved-v1"
+                if mono_archive_current_body_load_in_owned_scope_v1(owner.cache, wrong).is_err(): checks = checks + 1
+                if mono_archive_collect_current_registration_in_owned_scope_v1(owner, module, body,
+                        [warnings[1], warnings[0]]).is_err(): checks = checks + 1
+                output = Ok(CurrentFixtureCapture(receipt: receipt, checks: checks, expected_root: generic.symbol.id))
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(output) else: false
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not cache_owned or not ended: panic("current fixture capture ownership")
+    output
+
+fn main() -> i64:
+    if root(1) != 7: return 1
+    val path = "test/fixtures/compiler/hir_mono_current_registration/provider.spl"
+    val parsed = parse_full_frontend(file_read_nullable(path) ?? "", path, "current_provider", Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    val module = lowering.lower_parser_module_unstub(parsed, false)
+    val parent_result = hir_body_archive_store_v1(HirBodyArchiveInputV1(source_path: path,
+        module_name: module.name, is_entry: false, producer_header: hir_cache_header(), stage: "lowered-unresolved-v1",
+        closure_digest: env_get("SIMPLE_HIR_LEASE_CLOSURE_DIGEST"),
+        runtime_provider_digest: env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_DIGEST"),
+        runtime_provider_receipt_path: env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_RECEIPT")), module, [])
+    if parent_result.is_err(): return 2
+    val created = mono_archive_current_registration_create_v1()
+    if created.is_err(): return 3
+    val owner = created.unwrap()
+    val captured = capture(owner, parent_result.unwrap())
+    if captured.is_err(): return 4
+    val result = captured.unwrap()
+    var checks = result.checks
+    if checks != 7: return 5
+    var edited = result.receipt
+    edited.registration.roots = []
+    if not mono_archive_publish_current_registration_v1(owner, edited).is_err() or owner.registration.epoch != 0: return 6
+    checks = checks + 1
+    if mono_archive_publish_current_registration_v1(owner, result.receipt).is_err() or owner.registration.epoch != 1 or
+            owner.registration.roots[0].symbols != [result.expected_root] or not owner.bodies.has(module.name): return 7
+    checks = checks + 1
+    if not mono_archive_publish_current_registration_v1(owner, result.receipt).is_err() or owner.registration.epoch != 1: return 8
+    checks = checks + 1
+    if not mono_archive_current_body_load_in_owned_scope_v1(owner.cache, result.receipt.current_body).is_err(): return 9
+    checks = checks + 1
+    if not transient_scope_begin(): return 10
+    val occupied_refused = mono_archive_publish_current_registration_v1(owner, result.receipt).is_err()
+    val paused = transient_scope_pause()
+    val paused_refused = if paused: mono_archive_current_body_load_in_owned_scope_v1(owner.cache, result.receipt.current_body).is_err() else: false
+    if not transient_scope_end() or not occupied_refused or not paused_refused: return 11
+    checks = checks + 1
+    if not transient_scope_begin(): return 12
+    var growth: [text] = []
+    var index = 0
+    while index < 4096:
+        growth = growth.push("current registration churn {index}")
+        index = index + 1
+    val grown = growth.len() == 4096
+    if not transient_scope_end() or not grown: return 13
+    if not transient_scope_begin(): return 14
+    val replayed = mono_archive_current_body_load_in_owned_scope_v1(owner.cache, result.receipt.current_body)
+    val replay_ok = replayed.is_ok() and sha256_text(hir_module_encode(replayed.unwrap().module)) == result.receipt.current_body.current_body_digest and
+        owner.registration.roots[0].symbols == [result.expected_root] and current_literals(replayed.unwrap().module)
+    val replay_paused = transient_scope_pause()
+    val replay_owned = if replay_paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if replay_paused: hir_cache_clear_last_warnings()
+    if not transient_scope_end() or not replay_paused or not replay_owned or not replay_ok: return 15
+    checks = checks + 1
+    if checks != 13: return 16
+    print "HIR current mono registration: {checks} checks passed"
+    0
