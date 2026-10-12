@@ -442,3 +442,12 @@ artifact). Functional validation: next matrix/admission run.
   other 50.mir consumer already imports it itemized). Also fixed a latent
   `field.type_` (undefined in scope; now `field_type`) in the extracted
   register_composite_field_metadata_types_v1.
+- Novel cause (2026-10-12, candidate_frontend_smoke p2_add admission):
+  runtime_tagged_callback_owner_v1.spl nm-parsed required core-C symbols with
+  EXACT name matching, but Mach-O nm always prepends a leading underscore to C
+  symbols (`_rt_tagged_add`), so no required symbol ever matched on Darwin and
+  the gate failed with 'lacks defined function
+  rt_transient_array_scope_state_v1' even though nm listed it as defined text
+  (added 54908626175). The gate (e98757b4d8e) passed Linux CI (no underscore)
+  and failed on its first macOS run. Fix: strip a leading underscore from the
+  parsed symbol name (matches both ELF/GNU and Mach-O spellings).
