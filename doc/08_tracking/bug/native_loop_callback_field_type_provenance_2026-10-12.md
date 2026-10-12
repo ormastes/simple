@@ -35,6 +35,17 @@ the existing construction/read namespace collision remains separately tracked.
 A typed-parameter record-returning callback lowering regression is authored,
 also NOT_RUN.
 
+The corrected native behavioral probe subsequently reached a distinct closure
+conversion error for the capturing, record-returning callback. Its constructor
+callee was collected as a free runtime variable; it has a Struct declaration
+symbol but no enclosing runtime binding, so closure lifting returned nil.
+The candidate excludes exact Struct/Class declarations from free-variable
+capture collection and carries field HIR types/ownership metadata into the
+fresh lambda lowering. The captured offset remains a real capture. An authored
+regression requires one stored and one loaded capture, with no lowering error.
+The behavioral probe still requires returned value 20 and label `captured`.
+No execution PASS is claimed for this candidate.
+
 The first rebuilt candidate failed closed during bootstrap: the initial loop
 patch referred to `iter` inside `lower_for_array_indexed`, where that name is
 not in scope. The retained native-build diagnostic names the unresolved global
