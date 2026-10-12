@@ -420,7 +420,13 @@ pub(crate) fn resolve_defined_suffix_alias(sym: &str, defined: &std::collections
         let mut matches = defined
             .iter()
             .filter(|candidate| candidate.as_str() != sym)
-            .filter(|candidate| candidate.replace('.', "_dot_").ends_with(suffix));
+            // Reserved C/platform symbols (notably libc __assert) are not
+            // Simple module owners, even when their tail matches a bare call.
+            .filter(|candidate| !candidate.starts_with("__"))
+            .filter(|candidate| {
+                let normalized = candidate.replace('.', "_dot_");
+                normalized.strip_suffix(suffix).is_some_and(|owner| !owner.is_empty())
+            });
         let first = matches.next().cloned();
         if matches.next().is_none() {
             first
@@ -1973,6 +1979,14 @@ mod tests {
 
         assert_eq!(resolve_defined_suffix_alias("__rt_hashmap_new", &defined), None);
         assert_eq!(resolve_defined_suffix_alias("rt_thread_join", &defined), None);
+    }
+
+    #[test]
+    fn reserved_platform_assert_is_not_a_simple_suffix_owner() {
+        let defined = HashSet::from(["__assert".to_string()]);
+        assert_eq!(resolve_defined_suffix_alias("assert", &defined), None);
+        let defined = HashSet::from(["__libc__helper".to_string()]);
+        assert_eq!(resolve_defined_suffix_alias("helper", &defined), None);
     }
 
     #[test]

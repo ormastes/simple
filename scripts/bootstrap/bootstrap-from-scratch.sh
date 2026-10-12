@@ -1818,9 +1818,11 @@ bootstrap_prepare_phase_cache() {
       echo 'error: source refresh requires Rust full-bootstrap Stage2-only, without clean/invalidate' >&2; exit 64;
     }
     # This reviewed owner folds full module source with unconditional global
-    # structural dependencies. Unknown implementations fail closed.
+    # structural dependencies, including imported method defaults. The reviewed
+    # target-selection update also binds the effective compilation target.
+    # Unknown implementations fail closed; producer identity is still exact.
     [ "$(hash_file "${repo_root}/src/compiler_rust/compiler/src/pipeline/native_project/mod.rs")" = \
-      67ffbc45c28f92d2e7112840c07f3c2b63095ceaf1c51b0b627d1523682d40f0 ] &&
+      5e566362d85041b93f3ae9a8e11733f099adfdebc3dd04172c7b7aafc9cb7f37 ] &&
       [ "$(hash_file "$4")" = "$(hash_file "${seed_bin}")" ] || {
       echo 'error: source refresh rejected: unsupported Rust dependency-key owner/producer' >&2; exit 64;
     }

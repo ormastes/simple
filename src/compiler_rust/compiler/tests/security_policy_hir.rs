@@ -48,6 +48,7 @@ fn capability_param(name: &str, type_name: &str) -> hir::LocalVar {
         name: name.to_string(),
         ty: hir::TypeId::I64,
         type_name_hint: Some(type_name.to_string()),
+        trait_dispatch_owner: None,
         mutability: simple_parser::ast::Mutability::Immutable,
         inject: false,
         is_ghost: false,
