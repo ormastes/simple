@@ -32,32 +32,37 @@ the real seed binary end-to-end; nothing is mocked.
 """
 
 use std.spec.*
-use std.io_runtime.{process_run, file_write, file_read, file_exists, dir_create_all}
+use std.io_runtime.{file_write, file_read, file_exists, dir_create_all, env_get}
+use test.support.compiled_child_authority_v1.{test_compiled_child_run_v1, test_compiled_child_text_v1}
 
-val SEED: text = "src/compiler_rust/target/release/simple"
-val CAPTURE_DIR: text = "build/test-artifacts/03_system/app/test_runner/test_runner_contract_system"
+# Child execution now uses actual owner-v3 compiled CLI authority. Historical
+# seed descriptions below retain the original asserted behavior for review;
+# especially the directory-scan gap requires actual new-runner evidence before
+# its expected failure may change. No Rust/source fallback remains executable.
+
+val CAPTURE_DIR: text = (env_get("SIMPLE_TEST_CHILD_EVIDENCE_DIR") ?? "") + "/manual"
 
 
 # ============================================================================
 # Step Helpers
 # ============================================================================
 
-# Run the seed test runner against a single fixture file, bounded by a
-# `timeout`-wrapped shell invocation (see
-# doc/08_tracking/bug/interp_app_io_mod_import_stack_overflow_2026-07-17.md
-# for why this does not use app.io.mod.process_run_timeout directly).
+# Run the actual receipt-owned compiled CLI with typed argv and native
+# deadline/reap/complete-output custody. Retain the legacy helper name so
+# original scenarios and assertions remain unchanged.
 # `--no-session-daemon` is single-file-only: it routes straight to
 # test_runner_single.spl, skipping both test daemons.
 fn run_seed_test(target: text, timeout_secs: i64) -> (text, text, i64):
-    val command = "timeout " + timeout_secs.to_text() + " " + SEED + " test --no-session-daemon " + target
-    process_run("/bin/sh", ["-c", command])
+    val result = test_compiled_child_run_v1("compiler_cli",
+        ["test", "--no-session-daemon", target], [], timeout_secs * 1000).unwrap()
+    (test_compiled_child_text_v1(result.stdout), test_compiled_child_text_v1(result.stderr), result.exit_code)
 
-# Run the seed test runner against a directory of fixtures, bounded the same
+# Run the compiled test runner against a directory of fixtures, bounded the same
 # way. Directory targets are not accepted by `--no-session-daemon`, so this
 # always goes through the aggregate/discovery path.
 fn run_seed_test_dir(target: text, timeout_secs: i64) -> (text, text, i64):
-    val command = "timeout " + timeout_secs.to_text() + " " + SEED + " test " + target
-    process_run("/bin/sh", ["-c", command])
+    val result = test_compiled_child_run_v1("compiler_cli", ["test", target], [], timeout_secs * 1000).unwrap()
+    (test_compiled_child_text_v1(result.stdout), test_compiled_child_text_v1(result.stderr), result.exit_code)
 
 # Capture the runner's console report as manual evidence.
 fn capture_evidence(name: text, content: text) -> bool:

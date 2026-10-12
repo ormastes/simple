@@ -54,6 +54,12 @@ use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
 use compiler.backend.backend.backend_helpers.{get_effective_backend_name}
 use compiler.driver.cache.driver_hir_managed_runtime_selection_v1.{driver_hir_capture_managed_runtime_selection_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_shard_active}
+use compiler.driver.driver_hir_archive_production_controller_v1.{
+    driver_hir_archive_production_begin_v1,
+    driver_hir_archive_production_phase3_v1,
+    driver_hir_archive_production_phase4_v1,
+    driver_hir_archive_production_finish_v1}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 pub use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
@@ -70,6 +76,20 @@ fn driver_noop_default_output_v1(input_files: [text]) -> text:
     val dot = base.rfind(".")
     val stem = if dot > 0: base.substring(0, dot) else: base
     "build/native/{stem}"
+
+fn driver_hir_archive_production_requested_v1(ctx: CompileContext, mode: text) -> bool:
+    val runtime_bundle = env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
+    mode == "aot" and driver_streaming_surface_route(ctx) == 1 and
+        ctx.options.output_format == driver_output_format_native() and
+        ctx.runtime_std_full_inventory_selection == nil and
+        ctx.demand_compile_execution == nil and ctx.demand_mir_input == nil and
+        ctx.demand_mir_admission == nil and ctx.demand_dirty_modules.len() == 0 and
+        ctx.sources.len() == ctx.source_paths_owner.len() and
+        ctx.source_contents_owner.len() == ctx.source_paths_owner.len() and
+        native_tool_strict_requested_v1() and hir_cache_enabled() and not hir_shard_active() and
+        (env_get("SIMPLE_RUNTIME_PATH") ?? "") != "none" and runtime_bundle != "" and runtime_bundle != "auto" and
+        env_get("SIMPLE_BOOTSTRAP") != "1" and
+        env_get("SIMPLE_BOOTSTRAP_SKIP_MONO") != "1"
 
 fn driver_native_noop_request_v1(ctx: CompileContext) -> NativeNoopRequestV1:
     val options = ctx.options
@@ -154,7 +174,10 @@ impl CompilerDriver:
             return CompileResult.RuntimeError(
                 "reverse-reference owner already active in this process")
         val result = self.compile_with_reverse_reference_owner_v1()
+        val archive_finished = driver_hir_archive_production_finish_v1(self)
         reverse_reference_owner_end_v1()
+        if not archive_finished and result.is_success():
+            return CompileResult.RuntimeError("bounded HIR production cleanup refused")
         result
 
     me compile_with_reverse_reference_owner_v1() -> CompileResult:
@@ -207,6 +230,8 @@ impl CompilerDriver:
         log_phase("compile:start")
         log_build_progress("load_sources", "files", -1, -1,
             "starting", 0, 6, 0, 0, "running")
+        if not driver_hir_archive_production_begin_v1(self):
+            return CompileResult.RuntimeError("bounded HIR production begin refused")
         log_phase("phase1:load_sources:start")
         val sources_streaming_in_place = streaming_route == 1
         val (loaded_ctx, load_ok) = self.load_sources_impl(nil)
@@ -323,8 +348,12 @@ impl CompilerDriver:
         # methods. lower_and_check_streaming_surfaces_impl validates/rebuilds
         # the frozen owner before doing any work.
         val hir_streaming_in_place = driver_streaming_surface_enabled(self.ctx)
+        val archive_production = driver_hir_archive_production_requested_v1(self.ctx, compile_mode_text)
         var analyze_ok_effective = false
-        if hir_streaming_in_place:
+        if archive_production:
+            log_phase("phase3:hir_typecheck:carrier=owned-archives")
+            analyze_ok_effective = driver_hir_archive_production_phase3_v1(self)
+        elif hir_streaming_in_place:
             analyze_ok_effective = self.lower_and_check_streaming_surfaces_impl()
         else:
             analyze_ok_effective = self.lower_and_check_retained_owner_impl()
@@ -421,7 +450,10 @@ impl CompilerDriver:
 
         log_phase("phase4:monomorphize:start")
         log_debug("phase 4: monomorphization...")
-        val mono_ok = self.monomorphize_impl(analyze_ok_effective)
+        val mono_ok = if archive_production:
+            driver_hir_archive_production_phase4_v1(self, false, true, true)
+        else:
+            self.monomorphize_impl(analyze_ok_effective)
         if not mono_ok:
             log_error("phase 4 FAILED")
             log_build_progress("monomorphize", "modules", -1, -1,

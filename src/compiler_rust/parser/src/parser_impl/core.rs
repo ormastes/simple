@@ -884,10 +884,18 @@ impl<'a> Parser<'a> {
                 // Check if this is a context statement (context expr:) or function call (context(...)) or BDD DSL (context "string":)
                 let next = self.peek_next();
 
-                // If next token is assignment, variable name, string literal (BDD), or paren (call)
+                // Comparison operators continue the identifier expression,
+                // including an implicit function tail such as `context != ""`.
+                // A DSL receiver still begins after `context` (e.g. `active:`).
                 if matches!(
                     &next.kind,
-                    TokenKind::Assign
+                    TokenKind::Eq
+                        | TokenKind::NotEq
+                        | TokenKind::Lt
+                        | TokenKind::Gt
+                        | TokenKind::LtEq
+                        | TokenKind::GtEq
+                        | TokenKind::Assign
                         | TokenKind::PlusAssign
                         | TokenKind::MinusAssign
                         | TokenKind::StarAssign

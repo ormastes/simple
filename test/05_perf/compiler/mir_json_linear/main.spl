@@ -1,0 +1,136 @@
+# Native differential regression for the production MIR JSON owner.
+# MIR_JSON_MODE=compare|baseline|candidate; MIR_JSON_SIZE=small|512|1024.
+# Baseline functions below are frozen source, not a substitute MIR model.
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_block, serialize_mir_signature, serialize_mir_local, serialize_mir_inst_kind, serialize_mir_terminator, escape_json_string, symbol_id_value, block_id_value}
+use compiler.mir.mir_instruction_graph.{MirFunction, MirBlock, MirInst}
+use compiler.mir.mir_instruction_support.{BlockId, MirTerminator, MirOperand, MirOperandKind, MirBinOp}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_types.{MirLocal, LocalId, LocalKind, MirType, MirTypeKind, MirSignature, MirConstValue}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+
+fn integer_operand(value: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), MirType(kind: MirTypeKind.I64)))
+
+fn fixture(count: i64) -> MirFunction:
+    val integer = MirType(kind: MirTypeKind.I64)
+    val text_type = MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.I8), false))
+    var locals: [MirLocal] = []
+    var instructions: [MirInst] = []
+    var index = 0
+    while index < count:
+        val local = LocalId(id: index)
+        val local_type = if index % 4 < 2: text_type else: integer
+        locals.push(MirLocal(id: local, name: Some("local-λ-{index}\n\"\\"), type_: local_type, kind: LocalKind.Temp, is_ghost: false))
+        val kind = match index % 4:
+            case 0: MirInstKind.Const(local, MirConstValue.Str("λ\n\r\t\"\\\0end"), text_type)
+            case 1: MirInstKind.Copy(local, LocalId(id: 0))
+            case 2: MirInstKind.BinOp(local, MirBinOp.Add, integer_operand(index), integer_operand(7))
+            case _: MirInstKind.Call(Some(local), integer_operand(42), [integer_operand(index)])
+        instructions.push(MirInst(kind: kind, span: nil))
+        index = index + 1
+    val first = MirBlock(id: BlockId(id: 0), label: Some("entry-λ\n\"\\"), instructions: instructions, terminator: MirTerminator.If(integer_operand(1), BlockId(id: 1), BlockId(id: 2)))
+    val second = MirBlock(id: BlockId(id: 1), label: nil, instructions: [], terminator: MirTerminator.Ret(Some(integer_operand(9))))
+    val third = MirBlock(id: BlockId(id: 2), label: Some("end"), instructions: [], terminator: MirTerminator.Unreachable)
+    MirFunction(symbol: SymbolId(id: 17), name: "fixture-λ\n\"\\\0end",
+        signature: MirSignature(params: [integer], return_type: integer, is_variadic: true, params_known: true),
+        locals: locals, blocks: [first, second, third], entry_block: BlockId(id: 0),
+        span: Span(start: 0, end: 7, line: 1, col: 1, file: "fixture.spl", length: 7),
+        generic_params: ["T"], is_generic_template: true, specialization_of: Some("template"), type_bindings: {},
+        layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: true, export_name: "external_fixture", has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false,
+        unroll_factor: 4, pipeline_ii: 2, memory_banks: 1, verification_contract: nil)
+
+fn main() -> i64:
+    val mode = env_get("MIR_JSON_MODE") ?? "compare"
+    val size = env_get("MIR_JSON_SIZE") ?? "small"
+    val count = if size == "1024": 1024 else: if size == "512": 512 else: 4
+    val data = fixture(count)
+    val start = time_now_unix_micros()
+    val actual = if mode == "baseline": baseline_function(data) else: serialize_mir_function(data)
+    val elapsed = time_now_unix_micros() - start
+    # Independent shape guards prevent empty/default-result false parity.
+    if actual.len() < count * 100: return 11
+    if not actual.starts_with("{\"symbol\":17,\"name\":"): return 12
+    if not actual.contains("\"entry_block\":0}"): return 13
+    if not actual.contains("\"instructions\":[]"): return 14
+    if not actual.contains("\\n"): return 15
+    if not actual.contains("λ"): return 16
+    if not actual.contains("\0end"): return 17
+    if mode == "compare":
+        val previous = baseline_function(data)
+        if actual != previous: return 21
+        val empty = MirBlock(id: BlockId(id: 3), label: nil, instructions: [], terminator: MirTerminator.Unreachable)
+        val empty_json = serialize_mir_block(empty)
+        if empty_json != baseline_block(empty): return 22
+        if empty_json != "{\"id\":3,\"label\":null,\"instructions\":[],\"terminator\":\"Unreachable\"}": return 23
+        val zero = fixture(0)
+        if serialize_mir_function(zero) != baseline_function(zero): return 24
+    if not file_write("build/mir-json-{mode}-{size}.json", actual): return 25
+    print "mir-json mode={mode} size={size} bytes={actual.len()} elapsed_us={elapsed} PASS"
+    0
+
+# Frozen byte oracle from 020e419f5bedbd83449bafd04d98e89fd9a8bb27.
+fn baseline_block(block: MirBlock) -> text:
+    """Serialize block to JSON."""
+    match block:
+        case MirBlock(id, label, instructions, terminator):
+            var json = "{"
+            json = "{json}\"id\":{block_id_value(id)},"
+
+            if val block_label = label:
+                json = "{json}\"label\":\"{escape_json_string(block_label)}\","
+            else:
+                json = "{json}\"label\":null,"
+
+            # Instructions
+            json = "{json}\"instructions\":["
+            var firstInst = true
+            for inst in instructions:
+                if not firstInst:
+                    json = "{json},"
+                json = "{json}{serialize_mir_inst_kind(inst.kind)}"
+                firstInst = false
+            json = "{json}],"
+
+            # Terminator
+            json = "{json}\"terminator\":{serialize_mir_terminator(terminator)}"
+            json = "{json}}"
+            json
+
+fn baseline_function(func: MirFunction) -> text:
+    """Serialize MIR function to JSON."""
+    var json = "{"
+    json = "{json}\"symbol\":{symbol_id_value(func.symbol)},"
+    json = "{json}\"name\":\"{escape_json_string(func.name)}\","
+    json = "{json}\"signature\":{serialize_mir_signature(func.signature)},"
+
+    # Locals
+    json = "{json}\"locals\":["
+    var firstLocal = true
+    for local in func.locals:
+        if not firstLocal:
+            json = "{json},"
+        json = "{json}{serialize_mir_local(local)}"
+        firstLocal = false
+    json = "{json}],"
+
+    # Blocks
+    json = "{json}\"blocks\":["
+    var firstBlock = true
+    for block in func.blocks:
+        if not firstBlock:
+            json = "{json},"
+        json = "{json}{baseline_block(block)}"
+        firstBlock = false
+    json = "{json}],"
+
+    json = "{json}\"entry_block\":{block_id_value(func.entry_block)}"
+    json = "{json}}"
+    json
+

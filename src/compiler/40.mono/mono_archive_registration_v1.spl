@@ -1,7 +1,9 @@
 # Ordered actual collection publication. No production ownership switch.
+use compiler.hir.hir_mono_symbol_projection_v1.*
 use compiler.mono.mono_archive_registration_types_v1.{MonoArchiveRegistrationRowV1,
     MonoArchiveRootOrderV1, MonoArchiveRegistrationOwnerV1, MonoArchiveRegistrationReceiptV1,
-    MonoArchiveCurrentRegistrationOwnerV1, MonoArchiveCurrentRegistrationReceiptV1}
+    MonoArchiveCurrentRegistrationOwnerV1, MonoArchiveCurrentRegistrationReceiptV1,
+    mono_archive_registration_receipt_module_name_v1}
 use compiler.mono.mono_archive_registration_identity_v1.{mono_archive_registration_schedule_digest_v1,
     mono_archive_registration_owner_digest_v1, mono_archive_current_registration_digest_v1}
 use compiler.hir.hir_types.{HirModule, HirType}
@@ -41,6 +43,13 @@ fn mono_archive_current_registration_create_v1() -> Result<MonoArchiveCurrentReg
     if owner.published_digest == "": return Err("fresh current registration owner unavailable")
     Ok(owner)
 
+fn mono_archive_logical_current_registration_create_v1() -> Result<MonoArchiveCurrentRegistrationOwnerV1, text>:
+    val owner = mono_archive_current_registration_create_v1()?
+    owner.registration.logical_mode = true
+    owner.published_digest = mono_archive_current_registration_digest_v1(owner)
+    if owner.published_digest == "": return Err("fresh logical current registration owner unavailable")
+    Ok(owner)
+
 # Build the prospective compact state in scratch so hashing it cannot retain
 # repeated persistent serializations of the growing provider tables.
 fn mono_archive_current_registration_scratch_successor_v1(current: MonoArchiveCurrentRegistrationOwnerV1,
@@ -48,6 +57,8 @@ fn mono_archive_current_registration_scratch_successor_v1(current: MonoArchiveCu
     val owner = current.registration
     val worker = mono_archive_registration_scratch_collector_v1(owner)
     val old = owner.state.facts
+    var projections: Dict<text, text> = {}
+    for name in old.symbol_projections.keys(): projections[name] = old.symbol_projections[name]
     val facts = MonoArchiveFactsV1(body_authority: old.body_authority, feature_policy: old.feature_policy,
         initial_symbol: old.initial_symbol, sym_names: worker.sym_names, fn_returns: worker.fn_returns,
         fn_sigs: worker.fn_sigs, named_types: worker.named_types, named_ambiguous: worker.named_ambiguous,
@@ -58,7 +69,8 @@ fn mono_archive_current_registration_scratch_successor_v1(current: MonoArchiveCu
         generic_type_params: worker.generic_type_params, generic_type_modules: worker.generic_type_modules,
         generic_type_field_names: worker.generic_type_field_names, generic_type_fields: worker.generic_type_fields,
         declared_global_types: worker.declared_global_types, templates: worker.archive_template_signatures,
-        recipes: worker.template_recipes, symbol_identities: worker.archive_symbol_identities)
+        recipes: worker.template_recipes, symbol_identities: worker.archive_symbol_identities,
+        symbol_projections: projections)
     var archives: Dict<text, HirBodyArchiveV1> = {}
     for name in owner.archives.keys(): archives[name] = owner.archives[name]
     var roots: [MonoArchiveRootOrderV1] = []
@@ -67,11 +79,11 @@ fn mono_archive_current_registration_scratch_successor_v1(current: MonoArchiveCu
         archives: archives, roots: roots, generic_functions: owner.generic_functions,
         generic_structs: owner.generic_structs, generic_classes: owner.generic_classes,
         epoch: owner.epoch, sealed: false, published_schedule_digest: owner.published_schedule_digest,
-        sealed_schedule_digest: owner.sealed_schedule_digest)
+        sealed_schedule_digest: owner.sealed_schedule_digest, logical_mode: owner.logical_mode)
     if mono_archive_registration_install_v1(scratch, receipt.registration, schedule).is_err(): return ""
     var bodies: Dict<text, MonoArchiveCurrentBodyV1> = {}
     for name in current.bodies.keys(): bodies[name] = current.bodies[name]
-    bodies[receipt.current_body.original_parent.input.module_name] = receipt.current_body
+    bodies[mono_archive_registration_receipt_module_name_v1(receipt.registration)] = receipt.current_body
     mono_archive_current_registration_digest_v1(MonoArchiveCurrentRegistrationOwnerV1(
         registration: scratch, cache: current.cache, bodies: bodies, published_digest: ""))
 
@@ -201,6 +213,10 @@ fn mono_archive_registration_row_digest_v1(row: MonoArchiveRegistrationRowV1) ->
             for params in [value.canonical_type_params, value.bound_type_params]:
                 w.put_i64(params.len())
                 for param in params: hc_enc_hir_type_param(w, param)
+        case MonoArchiveRegistrationRowV1.SymbolProjection(key, value):
+            w.put_i64(21)
+            w.put_text(key)
+            w.put_text(value)
         case MonoArchiveRegistrationRowV1.SymbolIdentity(key, value):
             w.put_i64(20)
             w.put_text(key)
@@ -210,6 +226,7 @@ fn mono_archive_registration_row_digest_v1(row: MonoArchiveRegistrationRowV1) ->
 
 fn mono_archive_registration_receipt_seal_v1(receipt: MonoArchiveRegistrationReceiptV1) -> text:
     var w = HirCodecWriter.create()
+    if receipt.logical_name != "": w.put_text(receipt.logical_name)
     w.put_text(receipt.archive.archive_key)
     w.put_text(receipt.archive.body_digest)
     w.put_text(receipt.archive.lowering_warnings_digest)
@@ -227,7 +244,7 @@ fn mono_archive_registration_receipt_seal_v1(receipt: MonoArchiveRegistrationRec
         if digest == "": return ""
         w.put_text(digest)
     if not w.ok: return ""
-    sha256_text("mono-registration-receipt-v1\n" + w.finish())
+    sha256_text((if receipt.logical_name != "": "mono-logical-registration-receipt-v1\n" else: "mono-registration-receipt-v1\n") + w.finish())
 
 fn mono_archive_registration_scratch_collector_v1(owner: MonoArchiveRegistrationOwnerV1) -> MonomorphizationPass:
     var worker = MonomorphizationPass.create()
@@ -265,7 +282,7 @@ fn mono_archive_collect_registration_in_owned_scope_v1(owner: MonoArchiveRegistr
     # owns this borrowed scope and promotes the receipt before closing it.
     if transient_array_scope_state_v1() != 1:
         return Err("registration capture requires active unpaused parent scope")
-    if owner.sealed or owner.state.queue.len() != 0 or owner.archives.has(module_name) or
+    if owner.logical_mode or owner.sealed or owner.state.queue.len() != 0 or owner.archives.has(module_name) or
             module.name != module_name or archive.input.module_name != module_name or
             module.path != archive.input.source_path or
             owner.state.facts.feature_policy != env_get("SIMPLE_MONO_LEVELS") or
@@ -285,6 +302,18 @@ fn mono_archive_collect_registration_in_owned_scope_v1(owner: MonoArchiveRegistr
 fn mono_archive_collect_current_registration_in_owned_scope_v1(current: MonoArchiveCurrentRegistrationOwnerV1,
         module: HirModule, body: MonoArchiveCurrentBodyV1,
         warnings: [text]) -> Result<MonoArchiveCurrentRegistrationReceiptV1, text>:
+    mono_archive_collect_current_named_registration_in_owned_scope_v1(current, module,
+        body.original_parent.input.module_name, body, warnings, false)
+
+fn mono_archive_collect_logical_current_registration_in_owned_scope_v1(current: MonoArchiveCurrentRegistrationOwnerV1,
+        module: HirModule, logical_name: text, body: MonoArchiveCurrentBodyV1,
+        warnings: [text]) -> Result<MonoArchiveCurrentRegistrationReceiptV1, text>:
+    mono_archive_collect_current_named_registration_in_owned_scope_v1(current, module,
+        logical_name, body, warnings, true)
+
+fn mono_archive_collect_current_named_registration_in_owned_scope_v1(current: MonoArchiveCurrentRegistrationOwnerV1,
+        module: HirModule, module_name: text, body: MonoArchiveCurrentBodyV1,
+        warnings: [text], logical_capture: bool) -> Result<MonoArchiveCurrentRegistrationReceiptV1, text>:
     if transient_array_scope_state_v1() != 1:
         return Err("current registration capture requires active unpaused parent scope")
     val owner = current.registration
@@ -292,10 +321,10 @@ fn mono_archive_collect_current_registration_in_owned_scope_v1(current: MonoArch
     if predecessor == "" or predecessor != current.published_digest:
         return Err("fresh current registration predecessor refused")
     val archive = body.original_parent
-    val module_name = archive.input.module_name
     val current_digest = mono_archive_current_body_digest_v1(body)
     if current_digest == "" or owner.sealed or owner.state.queue.len() != 0 or
-            owner.archives.has(module_name) or module.name != module_name or
+            owner.logical_mode != logical_capture or module_name == "" or owner.archives.has(module_name) or
+            module.name != archive.input.module_name or (not logical_capture and module_name != archive.input.module_name) or
             module.path != archive.input.source_path or
             owner.state.facts.feature_policy != env_get("SIMPLE_MONO_LEVELS") or
             sha256_text(hir_module_encode(module)) != body.current_body_digest or
@@ -329,14 +358,15 @@ fn mono_archive_publish_current_registration_v1(current: MonoArchiveCurrentRegis
     val loaded = mono_archive_current_body_load_in_owned_scope_v1(current.cache, receipt.current_body)
     if loaded.is_ok():
         val body = loaded.unwrap()
-        val exact = mono_archive_collect_current_registration_in_owned_scope_v1(current,
-            body.module, receipt.current_body, body.warnings)
+        val exact = mono_archive_collect_current_named_registration_in_owned_scope_v1(current,
+            body.module, mono_archive_registration_receipt_module_name_v1(receipt.registration),
+            receipt.current_body, body.warnings, receipt.registration.logical_name != "")
         valid = exact.is_ok() and exact.unwrap().seal == receipt.seal and
             exact.unwrap().base_current_digest == receipt.base_current_digest and
             exact.unwrap().registration.seal == receipt.registration.seal and
             receipt.registration.seal == mono_archive_registration_receipt_seal_v1(receipt.registration)
     val schedule = if valid: mono_archive_registration_schedule_digest_v1(owner.roots +
-        [MonoArchiveRootOrderV1(module_name: receipt.current_body.original_parent.input.module_name,
+        [MonoArchiveRootOrderV1(module_name: mono_archive_registration_receipt_module_name_v1(receipt.registration),
             symbols: receipt.registration.roots)]) else: ""
     valid = valid and schedule != ""
     val next_digest = if valid: mono_archive_current_registration_scratch_successor_v1(current, receipt, schedule) else: ""
@@ -350,7 +380,7 @@ fn mono_archive_publish_current_registration_v1(current: MonoArchiveCurrentRegis
     if not valid: return Err("current registration body, rows, or predecessor refused")
     val installed = mono_archive_registration_install_v1(owner, receipt.registration, schedule)
     if installed.is_err(): return installed
-    current.bodies[receipt.current_body.original_parent.input.module_name] = receipt.current_body
+    current.bodies[mono_archive_registration_receipt_module_name_v1(receipt.registration)] = receipt.current_body
     current.published_digest = next_digest
     Ok(true)
 
@@ -377,6 +407,10 @@ fn mono_archive_collect_complete_registration_v1(owner: MonoArchiveRegistrationO
             roots = roots.push(function.symbol.id)
     val facts = owner.state.facts
     var rows: [MonoArchiveRegistrationRowV1] = []
+    val projection = hir_mono_symbol_projection_encode_v1(module.symbols,
+        sha256_text(archive.archive_key + "\n" + hir_module_encode(module)))
+    if projection == "": return Err("registration actual nominal symbol projection refused")
+    rows.push(MonoArchiveRegistrationRowV1.SymbolProjection(module_name, projection))
     for key in worker.sym_names.keys().sort():
         val row = MonoArchiveRegistrationRowV1.SymbolName(key, worker.sym_names[key])
         val changed = not facts.sym_names.has(key) or
@@ -508,7 +542,8 @@ fn mono_archive_collect_complete_registration_v1(owner: MonoArchiveRegistrationO
         next_symbol: worker.next_symbol,
         generic_functions: worker.stats.generic_functions_found,
         generic_structs: worker.stats.generic_structs_found,
-        generic_classes: worker.stats.generic_classes_found, seal: "")
+        generic_classes: worker.stats.generic_classes_found, seal: "",
+        logical_name: if owner.logical_mode: module_name else: "")
     receipt.seal = mono_archive_registration_receipt_seal_v1(receipt)
     if receipt.seal == "": return Err("registration publication unavailable")
     Ok(receipt)
@@ -574,13 +609,15 @@ fn mono_archive_registration_install_v1(owner: MonoArchiveRegistrationOwnerV1,
             case MonoArchiveRegistrationRowV1.TemplateSignature(key, value): owner.state.facts.templates[key] = value
             case MonoArchiveRegistrationRowV1.TemplateRecipe(key, value): owner.state.facts.recipes[key] = value
             case MonoArchiveRegistrationRowV1.SymbolIdentity(key, value): owner.state.facts.symbol_identities[key] = value
+            case MonoArchiveRegistrationRowV1.SymbolProjection(key, value): owner.state.facts.symbol_projections[key] = value
     owner.state.next_symbol = receipt.next_symbol
     var facts = owner.state.facts
     facts.initial_symbol = receipt.next_symbol
     owner.state.facts = facts
-    owner.archives[receipt.archive.input.module_name] = receipt.archive
+    val name = mono_archive_registration_receipt_module_name_v1(receipt)
+    owner.archives[name] = receipt.archive
     owner.roots = owner.roots.push(MonoArchiveRootOrderV1(
-        module_name: receipt.archive.input.module_name, symbols: receipt.roots))
+        module_name: name, symbols: receipt.roots))
     owner.generic_functions = owner.generic_functions + receipt.generic_functions
     owner.generic_structs = owner.generic_structs + receipt.generic_structs
     owner.generic_classes = owner.generic_classes + receipt.generic_classes
@@ -594,7 +631,7 @@ fn mono_archive_registration_seal_v1(owner: MonoArchiveRegistrationOwnerV1,
     # Names, paths and order MUST come from the already admitted driver inventory.
     # Collision winners depend on collection order; a sorted repository digest
     # alone cannot establish that the admitted schedule was followed.
-    if owner.sealed or not hir_cache_enabled() or hir_cache_last_warnings().len() != 0:
+    if owner.sealed or owner.logical_mode or not hir_cache_enabled() or hir_cache_last_warnings().len() != 0:
         return Err("registration seal owner unavailable")
     if not transient_scope_begin(): return Err("registration seal scope unavailable")
     var valid = owner.state.facts.feature_policy == env_get("SIMPLE_MONO_LEVELS") and
@@ -638,6 +675,7 @@ export mono_archive_registration_create_v1, mono_archive_collect_registration_in
 export mono_archive_publish_registration_v1, mono_archive_registration_seal_v1
 export mono_archive_collect_current_registration_in_owned_scope_v1
 export mono_archive_current_registration_create_v1
+export mono_archive_logical_current_registration_create_v1, mono_archive_collect_logical_current_registration_in_owned_scope_v1
 export mono_archive_publish_current_registration_v1
 export use compiler.mono.mono_archive_registration_types_v1.{MonoArchiveRegistrationRowV1,
     MonoArchiveRootOrderV1, MonoArchiveRegistrationOwnerV1, MonoArchiveRegistrationReceiptV1,

@@ -1,0 +1,250 @@
+# @tag:in-development
+# @req REQ-TRC-003 REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+use std.spec.*
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.test_runner.test_runner_types.{TestFileResult, TestRunResult}
+use std.common.perf.execution_metrics.{ResourceUsage, ResourceEvidenceQuality, TerminationCause}
+use std.nogc_sync_mut.io.process_completion.{ProcessCompletionV1}
+use std.test_runner.sdoctest.types.{SdoctestBlock, BlockResult, BlockStatus, SdoctestFileResult, SdoctestRunResult, SdoctestModifier}
+use std.test_runner.test_runner_output.{combined_test_run_sdn}
+use app.test_runner_new.sdn_worker_protocol.{TestRunnerSdnMessage, validate_test_runner_sdn_message}
+
+fn _protocol_record(names: [text], values: [SdnValue]) -> SdnValue:
+    var fields: Dict<text, SdnValue> = {}
+    var i = 0
+    while i < names.len():
+        fields[names[i]] = values[i]
+        i += 1
+    SdnValue.Dict(fields)
+
+fn _valid_spec() -> SdnValue:
+    _protocol_record(
+        ["success", "total_passed", "total_failed", "total_skipped", "total_pending", "total_timed_out", "total_duration_ms", "total_setup_ms", "total_cached", "groups", "files"],
+        [SdnValue.Bool(true), SdnValue.Int(0), SdnValue.Int(0), SdnValue.Int(0), SdnValue.Int(0),
+            SdnValue.Int(0), SdnValue.Int(0), SdnValue.Int(0), SdnValue.Int(0), SdnValue.Array([]), SdnValue.Array([])])
+
+fn _valid_output() -> SdnValue:
+    _protocol_record(
+        ["schema", "success", "runner_ok", "spec", "spl_doctest", "sdoctest"],
+        [SdnValue.String("simple.test-runner.output/v1"), SdnValue.Bool(true), SdnValue.Bool(true),
+            _valid_spec(), SdnValue.Null, SdnValue.Null])
+
+fn _encode(value: SdnValue) -> text:
+    sdn_encode_canonical(value)
+
+fn _with_field(value: SdnValue, name: text, replacement: SdnValue) -> SdnValue:
+    match value:
+        case SdnValue.Dict(original):
+            var fields = original
+            fields[name] = replacement
+            SdnValue.Dict(fields)
+        case _: value
+
+fn _protocol_fields(value: SdnValue) -> Dict<text, SdnValue>:
+    match value:
+        case SdnValue.Dict(fields): fields
+        case _:
+            fail("expected SDN record")
+            {}
+
+fn _protocol_items(value: SdnValue) -> [SdnValue]:
+    match value:
+        case SdnValue.Array(items): items
+        case _:
+            fail("expected SDN array")
+            []
+
+describe "strict SDN worker protocol consumer":
+    it "accepts only canonical output v1 and a single optional terminal newline":
+        val source = _encode(_valid_output())
+        match validate_test_runner_sdn_message(source):
+            case Err(reason): fail("valid worker output was rejected: {reason}")
+            case Ok(message):
+                match message:
+                    case TestRunnerSdnMessage.Output(output):
+                        expect(output.success).to_equal(true)
+                        expect(output.runner_ok).to_equal(true)
+                        expect(output.spec.type_name()).to_equal("dict")
+                        expect(output.spl_doctest).to_equal(SdnValue.Null)
+                    case _: fail("valid output was misclassified as worker failure")
+        match validate_test_runner_sdn_message(source + "\n"):
+            case Ok(_): pass
+            case Err(reason): fail("one terminal LF was rejected: {reason}")
+        match validate_test_runner_sdn_message(source + "\r\n"):
+            case Ok(_): pass
+            case Err(reason): fail("one terminal CRLF was rejected: {reason}")
+
+    it "accepts the authoritative producer's current v1 payload":
+        val spec = TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0,
+            total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
+        val docs = SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0,
+            errors: 0, accepted: 0, duration_ms: 0)
+        match combined_test_run_sdn(true, true, spec, false, docs, false, docs):
+            case Err(reason): fail("producer refused a bounded empty result: {reason}")
+            case Ok(source):
+                match validate_test_runner_sdn_message(source):
+                    case Err(reason): fail("consumer rejected producer output: {reason}")
+                    case Ok(message):
+                        match message:
+                            case TestRunnerSdnMessage.Output(output): expect(output.success).to_equal(true)
+                            case _: fail("producer output was classified as a failure")
+
+    it "matches producer classification for whitespace errors and feature gates with evidence":
+        val evidence = Some(ResourceUsage(
+            wall_ms: 12, user_cpu_ms: 5, system_cpu_ms: 1, peak_tree_charge_bytes: 800,
+            peak_direct_child_rss_bytes: 700, heap_live_end_bytes: 200, heap_peak_bytes: 300,
+            io_read_bytes: 4, io_write_bytes: 6, pids_peak: 2,
+            evidence_quality: ResourceEvidenceQuality.ExactTree, termination: TerminationCause.Exited,
+            signal: 0, exit_code: 0))
+        val completion = Some(ProcessCompletionV1(
+            pid: 42, process_generation: 2, exit_code: 0, signal_number: 0, tree_reaped: true,
+            timed_out: false, cancelled: false, stdout_digest: "sha256:out", stderr_digest: "sha256:err",
+            transport_execution_digest: "sha256:transport"))
+        val whitespace_error = TestFileResult(
+            path: "test/日本_whitespace_error.spl", passed: 1, failed: 0, skipped: 0, pending: 0,
+            duration_ms: 12, setup_ms: 2, error: "  ", timed_out: false, cached: false,
+            resource_usage: evidence, process_completion: completion)
+        # The canonical classifier gives a feature gate precedence over stale
+        # counters and timeout status. The consumer must preserve that order.
+        val gated = TestFileResult(
+            path: "test/gated.spl", passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: 0, error: "", timed_out: true, cached: false,
+            feature_gated: "feature unavailable")
+        val spec = TestRunResult(files: [whitespace_error, gated], total_passed: 1,
+            total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0,
+            total_duration_ms: 12, total_setup_ms: 2, total_cached: 0)
+        val docs = SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0,
+            errors: 0, accepted: 0, duration_ms: 0)
+        match combined_test_run_sdn(true, true, spec, false, docs, false, docs):
+            case Err(reason): fail("producer rejected classifier edge-case fixture: {reason}")
+            case Ok(source):
+                for ending in ["", "\n", "\r\n"]:
+                    match validate_test_runner_sdn_message(source + ending):
+                        case Err(reason): fail("consumer disagreed with producer classifier or Unicode framing: {reason}")
+                        case Ok(message):
+                            match message:
+                                case TestRunnerSdnMessage.Output(output): expect(output.success).to_equal(true)
+                                case _: fail("producer edge-case output was classified as worker failure")
+
+    it "roundtrips nonempty producer documentation blocks and all modifier variants":
+        val resource = Some(ResourceUsage(
+            wall_ms: 19, user_cpu_ms: 8, system_cpu_ms: 2, peak_tree_charge_bytes: 1500,
+            peak_direct_child_rss_bytes: 1200, heap_live_end_bytes: 400, heap_peak_bytes: 600,
+            io_read_bytes: 31, io_write_bytes: 17, pids_peak: 3,
+            evidence_quality: ResourceEvidenceQuality.SampledTree, termination: TerminationCause.Exited,
+            signal: 0, exit_code: 0))
+        val process = Some(ProcessCompletionV1(
+            pid: 73, process_generation: 5, exit_code: 0, signal_number: 0, tree_reaped: true,
+            timed_out: false, cancelled: false, stdout_digest: "sha256:doc-out",
+            stderr_digest: "sha256:doc-err", transport_execution_digest: "sha256:doc-run"))
+        val file_result = TestFileResult(
+            path: "test/runner_evidence_spec.spl", passed: 2, failed: 0, skipped: 0, pending: 0,
+            duration_ms: 19, setup_ms: 3, error: "", timed_out: false, cached: false,
+            resource_usage: resource, resource_class: "sampled", cohort_id: "cohort-doc",
+            budget_status: "within", anomaly_status: "clean", process_completion: process)
+        val spec = TestRunResult(files: [file_result], total_passed: 2, total_failed: 0,
+            total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 19,
+            total_setup_ms: 3, total_cached: 0)
+        val modifiers = [
+            SdoctestModifier.Skip, SdoctestModifier.Ignore, SdoctestModifier.ShouldFail,
+            SdoctestModifier.FailAsSuccess, SdoctestModifier.IgnoreOutput,
+            SdoctestModifier.Init("setup-name"), SdoctestModifier.Env("docs-env"),
+            SdoctestModifier.Tag("trace-docs"), SdoctestModifier.RunConfig("strict")]
+        val source_block = SdoctestBlock(source_file: "doc/指南.md", line_number: 27,
+            code: "print(1)", language: "simple", modifiers: modifiers, transcript: "1\n")
+        val block_result = BlockResult(block: source_block, status: BlockStatus.Skipped,
+            duration_ms: 6, stdout: "", stderr: "", error: "")
+        val doc_file = SdoctestFileResult(source_file: "doc/指南.md", blocks: [block_result],
+            total: 1, passed: 0, failed: 0, skipped: 1, errors: 0, accepted: 0, duration_ms: 6)
+        val docs = SdoctestRunResult(files: [doc_file], total: 1, passed: 0, failed: 0,
+            skipped: 1, errors: 0, accepted: 0, duration_ms: 6)
+        match combined_test_run_sdn(true, true, spec, false, docs, true, docs):
+            case Err(reason): fail("producer refused complete result fixture: {reason}")
+            case Ok(source):
+                match validate_test_runner_sdn_message(source):
+                    case Err(reason): fail("consumer rejected producer's complete result: {reason}")
+                    case Ok(message):
+                        match message:
+                            case TestRunnerSdnMessage.Output(output):
+                                expect(output.success).to_equal(true)
+                                val result_file = _protocol_items(_protocol_fields(output.spec)["files"])[0]
+                                val result_fields = _protocol_fields(result_file)
+                                expect(result_fields["resource_class"]).to_equal(SdnValue.String("sampled"))
+                                expect(result_fields["cohort_id"]).to_equal(SdnValue.String("cohort-doc"))
+                                expect(_protocol_fields(result_fields["resource_usage"])["evidence_quality"]).to_equal(SdnValue.String("sampled_tree"))
+                                expect(_protocol_fields(result_fields["process_completion"])["transport_execution_digest"]).to_equal(SdnValue.String("sha256:doc-run"))
+                                val doc_fields = _protocol_fields(output.sdoctest)
+                                expect(doc_fields["total"]).to_equal(SdnValue.Int(1))
+                                val emitted_file = _protocol_items(doc_fields["files"])[0]
+                                val emitted_block = _protocol_items(_protocol_fields(emitted_file)["blocks"])[0]
+                                val block_fields = _protocol_fields(emitted_block)
+                                expect(block_fields["status"]).to_equal(SdnValue.String("skipped"))
+                                expect(block_fields["duration_ms"]).to_equal(SdnValue.Int(6))
+                                val block = _protocol_fields(block_fields["block"])
+                                expect(block["source_file"]).to_equal(SdnValue.String("doc/指南.md"))
+                                expect(block["line_number"]).to_equal(SdnValue.Int(27))
+                                expect(block["transcript"]).to_equal(SdnValue.String("1\n"))
+                                val emitted_modifiers = _protocol_items(block["modifiers"])
+                                expect(emitted_modifiers.len()).to_equal(9)
+                                expect(_protocol_fields(emitted_modifiers[0])["kind"]).to_equal(SdnValue.String("skip"))
+                                expect(_protocol_fields(emitted_modifiers[1])["kind"]).to_equal(SdnValue.String("ignore"))
+                                expect(_protocol_fields(emitted_modifiers[2])["kind"]).to_equal(SdnValue.String("should_fail"))
+                                expect(_protocol_fields(emitted_modifiers[3])["kind"]).to_equal(SdnValue.String("fail_as_success"))
+                                expect(_protocol_fields(emitted_modifiers[4])["kind"]).to_equal(SdnValue.String("ignore_output"))
+                                expect(_protocol_fields(emitted_modifiers[5])["kind"]).to_equal(SdnValue.String("init"))
+                                expect(_protocol_fields(emitted_modifiers[6])["kind"]).to_equal(SdnValue.String("env"))
+                                expect(_protocol_fields(emitted_modifiers[7])["kind"]).to_equal(SdnValue.String("tag"))
+                                expect(_protocol_fields(emitted_modifiers[8])["kind"]).to_equal(SdnValue.String("run_config"))
+                                expect(_protocol_fields(emitted_modifiers[5])["value"]).to_equal(SdnValue.String("setup-name"))
+                                expect(_protocol_fields(emitted_modifiers[6])["value"]).to_equal(SdnValue.String("docs-env"))
+                                expect(_protocol_fields(emitted_modifiers[7])["value"]).to_equal(SdnValue.String("trace-docs"))
+                                expect(_protocol_fields(emitted_modifiers[8])["value"]).to_equal(SdnValue.String("strict"))
+                            case _: fail("producer payload was classified as worker failure")
+
+    it "rejects noncanonical, duplicate, unknown, and JSON-shaped documents":
+        val source = _encode(_valid_output())
+        match validate_test_runner_sdn_message(source + " "):
+            case Ok(_): fail("noncanonical whitespace was accepted")
+            case Err(reason): expect(reason).to_contain("canonical")
+        val duplicate = "{schema: \"simple.test-runner.output/v1\", schema: \"simple.test-runner.output/v1\", success: true, runner_ok: true, spec: null, spl_doctest: null, sdoctest: null}"
+        match validate_test_runner_sdn_message(duplicate):
+            case Ok(_): fail("duplicate root key was accepted")
+            case Err(reason): expect(reason).to_contain("duplicate")
+        val unknown_root = _with_field(_valid_output(), "extra", SdnValue.Bool(true))
+        match validate_test_runner_sdn_message(_encode(unknown_root)):
+            case Ok(_): fail("unknown root field was accepted")
+            case Err(reason): expect(reason).to_contain("unexpected")
+        match validate_test_runner_sdn_message("{\"success\":true}"):
+            case Ok(_): fail("JSON-shaped input was accepted as worker SDN")
+            case Err(_): pass
+
+    it "validates all nested result shapes and checks aggregate success":
+        val malformed_spec = _with_field(_valid_spec(), "files", SdnValue.Array([_protocol_record(["path"], [SdnValue.String("test/a.spl")])]))
+        val malformed_root = _with_field(_valid_output(), "spec", malformed_spec)
+        match validate_test_runner_sdn_message(_encode(malformed_root)):
+            case Ok(_): fail("incomplete nested file row was accepted")
+            case Err(reason): expect(reason).to_contain("unexpected")
+        val inconsistent_root = _with_field(_valid_output(), "success", SdnValue.Bool(false))
+        match validate_test_runner_sdn_message(_encode(inconsistent_root)):
+            case Ok(_): fail("inconsistent aggregate success was accepted")
+            case Err(reason): expect(reason).to_contain("disagrees")
+
+    it "recognizes a versioned worker failure envelope without JSON fallback":
+        val failure = _protocol_record(
+            ["schema", "success", "worker_exit_code", "error"],
+            [SdnValue.String("simple.test-runner.failure/v1"), SdnValue.Bool(false), SdnValue.Int(7), SdnValue.String("worker crashed")])
+        match validate_test_runner_sdn_message(_encode(failure)):
+            case Err(reason): fail("valid failure envelope was rejected: {reason}")
+            case Ok(message):
+                match message:
+                    case TestRunnerSdnMessage.Failure(value):
+                        expect(value.worker_exit_code).to_equal(7)
+                        expect(value.error).to_equal("worker crashed")
+                    case _: fail("worker failure was misclassified as result output")
+
+    it "rejects unsupported output and failure schemas":
+        val unsupported = _encode(_protocol_record(["schema"], [SdnValue.String("simple.test-runner.output/v9")]))
+        match validate_test_runner_sdn_message(unsupported):
+            case Ok(_): fail("unsupported worker protocol version was accepted")
+            case Err(reason): expect(reason).to_contain("unsupported")

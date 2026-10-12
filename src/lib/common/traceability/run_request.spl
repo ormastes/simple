@@ -1,0 +1,52 @@
+# Pre-dispatch intent without an allocated execution run identity.
+# @req REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+# A valid request is unverified caller intent. Materializing it as a run plan
+# does not authenticate provenance or admit execution evidence.
+use std.common.traceability.run_plan.{TracePlannedCase, TraceRunPlan, validate_trace_run_plan}
+
+val TRACE_RUN_REQUEST_MAX_CASES: i64 = 65536
+
+pub struct TraceRunRequest:
+    subject_id: text
+    configuration_id: text
+    expectation_id: text
+    binary_id: text
+    cases: [TracePlannedCase]
+
+fn _request_case_scope_key(test_path: text, case_name: text) -> text:
+    "{test_path.len()}:{test_path}{case_name}"
+
+pub fn validate_trace_run_request(request: TraceRunRequest) -> Result<(), text>:
+    if request.subject_id == "" or request.configuration_id == "" or request.expectation_id == "" or request.binary_id == "":
+        return Err("trace run request identity is incomplete")
+    if request.cases.len() == 0:
+        return Err("feature trace run request requires at least one planned case")
+    if request.cases.len() > TRACE_RUN_REQUEST_MAX_CASES:
+        return Err("trace run request exceeds 65536 planned cases")
+    var case_ids: Dict<text, bool> = {}
+    var scoped_names: Dict<text, bool> = {}
+    for planned in request.cases:
+        if planned.case_id == "" or planned.test_path == "" or planned.case_name == "" or planned.test_definition_id == "" or planned.lane_id == "":
+            return Err("planned case identity is incomplete")
+        if case_ids.contains_key(planned.case_id):
+            return Err("duplicate planned case id: " + planned.case_id)
+        case_ids[planned.case_id] = true
+        val scoped_name = _request_case_scope_key(planned.test_path, planned.case_name)
+        if scoped_names.contains_key(scoped_name):
+            return Err("duplicate planned path and case name: " + planned.test_path + " :: " + planned.case_name)
+        scoped_names[scoped_name] = true
+    Ok(())
+
+pub fn materialize_trace_run_plan(request: TraceRunRequest, allocated_run_id: text) -> Result<TraceRunPlan, text>:
+    if allocated_run_id == "":
+        return Err("allocated trace run identity is empty")
+    validate_trace_run_request(request)?
+    val plan = TraceRunPlan(
+        run_id: allocated_run_id,
+        subject_id: request.subject_id,
+        configuration_id: request.configuration_id,
+        expectation_id: request.expectation_id,
+        binary_id: request.binary_id,
+        cases: request.cases)
+    validate_trace_run_plan(plan)?
+    Ok(plan)
