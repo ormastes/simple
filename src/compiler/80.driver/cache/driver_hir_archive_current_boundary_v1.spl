@@ -41,6 +41,7 @@ struct DriverHirArchiveCurrentPinV1:
     driver_identity: i64
     artifact_digest: text
     serial: i64
+    context_binding: text
 
 struct DriverHirArchiveCurrentShardV1:
     receipt: MonoArchiveCurrentRegistrationReceiptV1
@@ -245,6 +246,33 @@ fn driver_current_bytes_in_owned_scope_v1(owner: DriverHirArchiveCurrentBoundary
     if not writer.ok: return ""
     writer.finish()
 
+# Immutable pre-mono context portion. The actual final consumer changes the
+# mutable registration state, while source/policy/cold custody remains pinned.
+fn driver_current_context_binding_in_owned_scope_v1(owner: DriverHirArchiveCurrentBoundaryV1) -> text:
+    if transient_array_scope_state_v1() != 1: return ""
+    var writer = HirCodecWriter.create()
+    writer.put_text(owner.semantic.artifact_key)
+    writer.put_text(owner.semantic.artifact_digest)
+    writer.put_text(owner.policy.artifact_key)
+    writer.put_text(owner.policy.artifact_digest)
+    writer.put_text(owner.config_binding)
+    writer.put_text(owner.context_digest)
+    writer.put_text(owner.cold_digest)
+    writer.put_bool(owner.cold_plan.enabled)
+    writer.put_bool(owner.cold_plan.full_inventory)
+    writer.put_text(owner.cold_plan.source_root)
+    writer.put_text(owner.cold_plan.source_inventory_digest)
+    writer.put_text(owner.cold_plan.snapshot_inventory_digest)
+    writer.put_i64(owner.cold_plan.inventory_generation)
+    writer.put_i64(owner.cold_plan.source_count)
+    writer.put_bool(owner.quiet)
+    writer.put_i64(owner.serial)
+    writer.put_text(owner.registration.cache.directory)
+    writer.put_text(owner.registration.cache.producer_header)
+    writer.put_bool(owner.registration.cache.enabled)
+    if not writer.ok: return ""
+    sha256_text("driver-current-context-binding-v1\n" + writer.finish())
+
 pub fn driver_hir_archive_current_boundary_capture_v1(driver: CompilerDriver,
         boundary: DriverHirArchiveWeaveBoundaryV1) -> Result<DriverHirArchiveCurrentBoundaryV1, [text]>:
     if not driver_current_initialize_v1(): return Err(["current capture requires closed lease"])
@@ -323,17 +351,40 @@ pub fn driver_hir_archive_current_boundary_capture_v1(driver: CompilerDriver,
     val bytes = driver_current_bytes_in_owned_scope_v1(owner)
     val digest = if bytes != "": sha256_text(bytes) else: ""
     val key = sha256_text("driver-current-issued-key-v1\n" + digest)
+    val context_binding = driver_current_context_binding_in_owned_scope_v1(owner)
     val stored = digest != "" and driver_current_context_in_owned_scope_v1(driver) == context_digest and
         driver_current_cold_context_matches_in_owned_scope_v1(driver, owner) and
         hir_owned_artifact_store_blob_v1(use.cache, key, bytes).is_ok()
     val pin_paused = transient_scope_pause()
-    val pin_owned = if pin_paused: transient_promote(key) and transient_promote(digest) else: false
+    val pin_owned = if pin_paused: transient_promote(key) and transient_promote(digest) and transient_promote(context_binding) else: false
     driver_current_close_v1(pin_paused, pin_owned)
     if not stored: return Err(["current complete issuance refused"])
     owner.artifact_key = key
     owner.artifact_digest = digest
-    _driver_current_pins_v1["{driver as i64}:" + key] = DriverHirArchiveCurrentPinV1(driver as i64, digest, owner.serial)
+    _driver_current_pins_v1["{driver as i64}:" + key] = DriverHirArchiveCurrentPinV1(driver as i64, digest, owner.serial, context_binding)
     Ok(owner)
+
+# Actual issued parent custody after mono consumption. This deliberately does
+# not admit changed registration/body descriptors; final issuance binds those
+# from its real execution separately. No public parent constructor qualifies.
+pub fn driver_hir_archive_current_context_matches_in_owned_scope_v1(driver: CompilerDriver,
+        owner: DriverHirArchiveCurrentBoundaryV1) -> Result<bool, text>:
+    if transient_array_scope_state_v1() != 1 or not _driver_current_pins_ready_v1:
+        return Err("current context requires issued borrowed pin")
+    val lookup = "{driver as i64}:" + owner.artifact_key
+    if not _driver_current_pins_v1.has(lookup): return Err("current context has no actual issuance")
+    val pin: DriverHirArchiveCurrentPinV1 = _driver_current_pins_v1[lookup]
+    val semantic = driver_hir_archive_semantic_prerequisite_matches_in_owned_scope_v1(driver, owner.semantic)?
+    val config = driver_hir_weave_config_binding_in_owned_scope_v1(driver.ctx, owner.policy)?
+    if not semantic or pin.driver_identity != (driver as i64) or pin.serial != owner.serial or
+            pin.artifact_digest != owner.artifact_digest or pin.context_binding == "" or
+            pin.context_binding != driver_current_context_binding_in_owned_scope_v1(owner) or
+            config != owner.config_binding or driver_current_context_in_owned_scope_v1(driver) != owner.context_digest or
+            not driver_current_cold_context_matches_in_owned_scope_v1(driver, owner):
+        return Err("current issued source, policy or cold context changed")
+    val issued = hir_owned_artifact_load_blob_v1(owner.registration.cache, owner.artifact_key)?
+    if sha256_text(issued) != pin.artifact_digest: return Err("current immutable issuance changed")
+    Ok(true)
 
 pub fn driver_hir_archive_current_boundary_matches_in_owned_scope_v1(driver: CompilerDriver,
         owner: DriverHirArchiveCurrentBoundaryV1) -> Result<bool, text>:
@@ -357,3 +408,4 @@ pub fn driver_hir_archive_current_boundary_matches_in_owned_scope_v1(driver: Com
 
 export DriverHirArchiveCurrentBoundaryV1, driver_hir_archive_current_boundary_capture_v1
 export driver_hir_archive_current_boundary_matches_in_owned_scope_v1
+export driver_hir_archive_current_context_matches_in_owned_scope_v1
