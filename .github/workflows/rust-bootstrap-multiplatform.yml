@@ -991,16 +991,16 @@ jobs:
           run-id: 38174655243
           name: bootstrap-diagnostic-UNADMITTED-Windows x86_64-cranelift-82bba68602c2cff2b87f42b0f5ae8a54f1d14b8b
           path: ${{ runner.temp }}/retained-windows-seed
-      - name: Qualify peak-memory scalar provider only
+      - name: Qualify canonical Windows unsupported fd contracts only
         shell: bash
         run: |
           set -eu
-          export LINK_OUT="$RUNNER_TEMP/windows-hwm-only"
+          export LINK_OUT="$RUNNER_TEMP/windows-fd-unsupported"
           export RETAINED_RUNTIME="$RUNNER_TEMP/retained-windows-seed/files/src/compiler_rust/target/bootstrap/simple_native_all.lib"
           python - <<'PYSTRICT'
-          files = {'provider.c': '#include <stdint.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <string.h>\n#include <stdlib.h>\n#if !defined(_WIN32)\n#error Windows-only source projection\n#endif\n#include <windows.h>\n#include <psapi.h>\n\nstatic int64_t rt_mem_snapshot_status_kib(const char* key) {\n#if defined(_WIN32)\n#if defined(_WIN64)\n    _Static_assert(sizeof(PROCESS_MEMORY_COUNTERS_EX) == 80,\n        "Win64 PROCESS_MEMORY_COUNTERS_EX layout changed");\n    _Static_assert(offsetof(PROCESS_MEMORY_COUNTERS_EX, WorkingSetSize) == 16 &&\n        offsetof(PROCESS_MEMORY_COUNTERS_EX, PeakWorkingSetSize) == 8,\n        "Win64 process working-set offsets changed");\n#endif\n    PROCESS_MEMORY_COUNTERS_EX counters = {0};\n    counters.cb = (DWORD)sizeof(counters);\n    if (!K32GetProcessMemoryInfo(GetCurrentProcess(),\n            (PROCESS_MEMORY_COUNTERS*)&counters, counters.cb)) return -1;\n    if (strcmp(key, "VmRSS:") == 0) return (int64_t)(counters.WorkingSetSize / 1024);\n    if (strcmp(key, "VmHWM:") == 0) return (int64_t)(counters.PeakWorkingSetSize / 1024);\n    return -1;\n#else\n    FILE* f = fopen("/proc/self/status", "r"); if (!f) return -1;\n    char line[256]; int64_t value = -1;\n    while (fgets(line, sizeof(line), f)) if (strncmp(line, key, strlen(key)) == 0) { value = strtoll(line + strlen(key), NULL, 10); break; }\n    fclose(f); return value;\n#endif\n}\n\nint64_t rt_process_hwm_kib(void) { return rt_mem_snapshot_status_kib("VmHWM:"); }\n', 'fixture.c': '#include <stdint.h>\n#include <stdio.h>\n#include <windows.h>\n#include <psapi.h>\nextern int64_t rt_process_hwm_kib(void);\nint main(void) {\n    SIZE_T size=16*1024*1024;\n    volatile unsigned char* memory=(volatile unsigned char*)VirtualAlloc(NULL,size,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);\n    if(!memory) return 1;\n    for(SIZE_T i=0;i<size;i+=4096) memory[i]=1;\n    if(!VirtualFree((void*)memory,0,MEM_RELEASE)) return 2;\n    PROCESS_MEMORY_COUNTERS_EX counters={0}; counters.cb=(DWORD)sizeof counters;\n    if(!K32GetProcessMemoryInfo(GetCurrentProcess(),(PROCESS_MEMORY_COUNTERS*)&counters,counters.cb)) return 3;\n    int64_t peak=(int64_t)(counters.PeakWorkingSetSize/1024);\n    int64_t current=(int64_t)(counters.WorkingSetSize/1024);\n    /* A current-RSS substitution must fail after the released working set. */\n    if(peak-current<8192) return 4;\n    int64_t actual=rt_process_hwm_kib();\n    if(actual<=0 || actual<peak || actual-peak>1024) return 5;\n    printf("WINDOWS_HWM_NATIVE_PASS actual=%lld peak=%lld current=%lld\\n",(long long)actual,(long long)peak,(long long)current);\n    return 0;\n}\n'}
-          hashes = {'provider.c': '506eea7514804075baa32da86c724657a9daa5ef3dbb0486e4579de3f851a907', 'fixture.c': 'd4232a61b27c247f10012fb6b0c28a64b131f326f30e5bd1d15fd823221d2977'}
-          expected = {'rt_process_hwm_kib'}
+          files = {'provider.c': '#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#if !defined(_WIN32)\n#error Windows-only source projection\n#endif\nbool rt_fd_close(int64_t fd) {\n#if defined(_WIN32)\n    (void)fd;\n    return false;\n#else\n    if (fd < 0) return false;\n    return close((int)fd) == 0;\n#endif\n}\nint64_t rt_fd_write(int64_t fd, const char* data, int64_t len) {\n#if defined(_WIN32)\n    (void)fd; (void)data; (void)len;\n    return -1;\n#else\n    if (fd < 0 || !data || len < 0) return -1;\n    ssize_t written = 0;\n    while (written < (ssize_t)len) {\n        ssize_t n = write((int)fd, data + written, (size_t)(len - written));\n        if (n <= 0) return written > 0 ? (int64_t)written : -1;\n        written += n;\n    }\n    return (int64_t)written;\n#endif\n}\n', 'fixture.c': '#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <string.h>\n#include <windows.h>\nextern bool rt_fd_close(int64_t fd);\nextern int64_t rt_fd_write(int64_t fd,const char* data,int64_t len);\nint main(void) {\n    int64_t fds[]={INT64_MIN,-1,0,1,INT64_MAX};\n    int64_t lens[]={INT64_MIN,-1,0,1,INT64_MAX};\n    char guard[]="unchanged payload";\n    void* unread=VirtualAlloc(NULL,4096,MEM_RESERVE|MEM_COMMIT,PAGE_NOACCESS);\n    if(!unread) return 1;\n    unsigned checks=0;\n    for(unsigned i=0;i<5;i++) {\n        if(rt_fd_close(fds[i])!=false) return 2;\n        checks++;\n        for(unsigned j=0;j<5;j++) {\n            const char* data[]={NULL,guard,(const char*)unread};\n            for(unsigned k=0;k<3;k++) {\n                if(rt_fd_write(fds[i],data[k],lens[j])!=-1) return 3;\n                checks++;\n            }\n        }\n    }\n    if(strcmp(guard,"unchanged payload")) return 4;\n    if(!VirtualFree(unread,0,MEM_RELEASE)) return 5;\n    printf("WINDOWS_FD_UNSUPPORTED_CONTRACT_PASS checks=%u\\n",checks);\n    return 0;\n}\n'}
+          hashes = {'provider.c': '23d5534ef325c21a53ffc95b11700c57a5cd02a1fc0b9e2e2872473bf32ca13a', 'fixture.c': 'bcef4fedce7d871ad1df6454dc993c4718ede6b7ba25e9dd602914b5612d8557'}
+          expected = {'rt_fd_close','rt_fd_write'}
           import hashlib, json, os, shutil, subprocess, time
           from pathlib import Path
           out = Path(os.environ['LINK_OUT']); out.mkdir(parents=True, exist_ok=True)
@@ -1035,18 +1035,18 @@ jobs:
           run('provider-imports',['llvm-nm.exe','--undefined-only',str(out/'provider.obj')])
           run('driver-target-crt',['clang-cl.exe','/nologo','/D_NO_CRT_STDIO_INLINE=1','/clang:-###','/c',str(out/'provider.c')])
           run('object-crt-directives',['llvm-readobj.exe','--coff-directives',str(out/'provider.obj')])
-          exe = out/'hwm-fixture.exe'
+          exe = out/'fd-unsupported-fixture.exe'
           run('link',['clang-cl.exe','/nologo',str(out/'fixture.obj'),str(out/'provider.obj'),str(runtime),'/Fe'+str(exe),'/link','/SUBSYSTEM:CONSOLE','kernel32.lib','ws2_32.lib','bcrypt.lib','userenv.lib','ntdll.lib','advapi32.lib','dbghelp.lib','ole32.lib','oleaut32.lib','shell32.lib','propsys.lib','runtimeobject.lib','crypt32.lib','secur32.lib','ncrypt.lib','iphlpapi.lib','pdh.lib','netapi32.lib','psapi.lib','powrprof.lib','d3d11.lib','dxgi.lib','user32.lib','gdi32.lib','ucrt.lib','msvcrt.lib','vcruntime.lib'])
           stdout = run('native-run',[str(exe)],60)
-          assert 'WINDOWS_HWM_NATIVE_PASS actual=' in stdout
-          receipt = {'scope':'HWM_ONLY; no file writer; compiler link and lifecycle remain unqualified','source_sha':'82bba68602c2cff2b87f42b0f5ae8a54f1d14b8b','hashes':hashes,'runtime_sha256':hashlib.sha256(runtime.read_bytes()).hexdigest(),'strong_unique_providers':sorted(defined),'retained_overlap':[],'run_exit':0,'stdout':stdout,'exe_size':exe.stat().st_size,'exe_sha256':hashlib.sha256(exe.read_bytes()).hexdigest(),'tools':tools,'SDK_stdio_guard':header_receipt,'VCTools':os.environ.get('VCToolsVersion')}
+          assert 'WINDOWS_FD_UNSUPPORTED_CONTRACT_PASS checks=80' in stdout
+          receipt = {'scope':'FD_UNSUPPORTED_ONLY; no Windows fd capability or Text decoder; canonical optional lifecycle hooks remain unchanged','source_sha':'82bba68602c2cff2b87f42b0f5ae8a54f1d14b8b','hashes':hashes,'runtime_sha256':hashlib.sha256(runtime.read_bytes()).hexdigest(),'strong_unique_providers':sorted(defined),'retained_overlap':[],'run_exit':0,'stdout':stdout,'exe_size':exe.stat().st_size,'exe_sha256':hashlib.sha256(exe.read_bytes()).hexdigest(),'tools':tools,'SDK_stdio_guard':header_receipt,'VCTools':os.environ.get('VCToolsVersion')}
           (out/'qualification.json').write_text(json.dumps(receipt,indent=2)+'\n')
           print(json.dumps({'run_exit':0,'exe_size':receipt['exe_size'],'stdout':stdout}))
           PYSTRICT
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-hwm-only-UNADMITTED-${{ github.sha }}
-          path: ${{ runner.temp }}/windows-hwm-only/
+          name: windows-fd-unsupported-UNADMITTED-${{ github.sha }}
+          path: ${{ runner.temp }}/windows-fd-unsupported/
           if-no-files-found: error
           retention-days: 7
