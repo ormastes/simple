@@ -18,6 +18,7 @@ accepts `context` as an identifier. The source workaround adds explicit
 `return` immediately before the same expression, preserving its condition and
 result. The annotated recovery reference identifies the intended original form.
 The workaround commit remains distinct from the pending parser repair.
+Workaround commit: `595121105c34159933cb5ddf20481b4122d52a97`.
 
 Preserved evidence: `C:/dev/simple-phase3-bootstrap-evidence/attempt11` and
 the frozen attempt11 `build/bootstrap` tree. Stage2 peak RSS was 53,536 KiB
