@@ -549,3 +549,20 @@ Latest release `a95346aaef7a04c2e0935b2816e6157dd497457d` includes the typed
   snapshot contain the restructures): 0 'cannot infer field type' and 0
   'Capability error/Aliasing' lines respectively. Real confirmation: next
   bulk build.
+- Plateau bisection outcome (2026-10-12): with 1540f5def5f in the tree, the
+  EXACT plateau command shape (dynload mode, full -o, --source
+  compositions/kernel_llvm_cranelift + src + compiler + app + lib, admitted
+  binary cd1601c9 + matching capsule) compiles BOTH former-failing files
+  cleanly at full --source src scale: archive_borrowed_module_v1.spl and
+  driver_pipeline_lowering.spl each appear in the HIR progress with ZERO
+  'cannot infer field type' / ZERO 'Capability error' lines (verified in
+  /tmp/bisect2.log, snapshot b28cbc59). The plateau log quoted to the lane
+  predates 1540f5def5f. No interfering dir to isolate: the bulk-context
+  registry/borrow interference is neutralized by the restructures themselves
+  (annotations pin element types regardless of projection degradation;
+  index-based loops hold no iterator borrow). The residual 93 hir-fatals in
+  that validation run are the admitted binary's OWN pre-fix state
+  (unresolved type: MirType/ImplBlock/LocalId/Option/Result/Dict — the
+  builtin-guard and enum-retry fixes fe1f4ed6d72 / 20694e21a1a landed after
+  cd1601c9 was admitted) — they confirm at the next admission, not a new
+  interference source.
