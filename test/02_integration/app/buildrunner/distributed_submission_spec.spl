@@ -2,6 +2,7 @@
 use std.spec.{describe, it, expect}
 use std.common.build_manager.contracts.{BuildTaskV1, BuildHostV1}
 use std.common.contracts.distributed_control_v2.*
+use std.common.contracts.distributed_operation_state_v2.distributed_operation_transition_v2
 use std.common.contracts.distributed_control_codec_v2.distributed_environment_digest_v2
 use std.common.task_runner.distributed_operation_journal_v2.*
 use std.nogc_sync_mut.io.file_ops.secure_temp_dir
@@ -101,4 +102,27 @@ describe "managed build durable submission":
             case Err(reason): expect(reason).to_equal("GRANT_EXPIRED")
         expect(admitted.journal.sequence).to_equal(1)
         expect(distributed_operation_journal_close_v2(admitted.journal).unwrap()).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "durably retains execution uncertainty across replacement owners":
+        val root = secure_temp_dir("build", "managed-build-uncertainty").unwrap()
+        val owner = distributed_operation_journal_open_v2(root, "a".repeat(64), "b".repeat(64), 32).unwrap()
+        val admitted = submit_fixture(owner, admission_request(), admission_task(), 100).unwrap()
+        val initial = distributed_operation_journal_lookup_v2(admitted.journal, "operation_1").unwrap()
+        val executing = distributed_operation_transition_v2(initial, "executing", "").unwrap()
+        val started = distributed_operation_journal_commit_v2(admitted.journal, executing).unwrap()
+        expect(distributed_operation_journal_close_v2(started).unwrap()).to_equal(true)
+        val replacement = distributed_operation_journal_open_v2(root, "a".repeat(64), "c".repeat(64), 32).unwrap()
+        val recovered = distributed_operation_journal_recover_execution_v2(replacement, "operation_1").unwrap()
+        expect(recovered.sequence).to_equal(3)
+        val duplicate = submit_fixture(recovered, admission_request(), admission_task(), 100).unwrap()
+        expect(duplicate.disposition).to_equal("OUTCOME_UNKNOWN")
+        val uncertain = distributed_operation_journal_lookup_v2(recovered, "operation_1").unwrap()
+        expect(distributed_operation_transition_v2(uncertain, "executing", "").is_err()).to_equal(true)
+        val unchanged = distributed_operation_journal_recover_execution_v2(recovered, "operation_1").unwrap()
+        expect(unchanged.sequence).to_equal(3)
+        expect(distributed_operation_journal_close_v2(unchanged).unwrap()).to_equal(true)
+        val reopened = distributed_operation_journal_open_v2(root, "a".repeat(64), "d".repeat(64), 32).unwrap()
+        expect(distributed_operation_journal_lookup_v2(reopened, "operation_1").unwrap().state).to_equal("outcome-unknown")
+        expect(distributed_operation_journal_close_v2(reopened).unwrap()).to_equal(true)
         expect(dir_remove(root, true)).to_equal(true)
