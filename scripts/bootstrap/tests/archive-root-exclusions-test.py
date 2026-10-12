@@ -46,10 +46,18 @@ with tempfile.TemporaryDirectory(prefix='simple-archive-root.') as tmp:
         dest = repo / name
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(payload[name])
-    for name in ('build/cache.o', 'system/cache.bin'):
+    for name in ('build/cache.o', 'system/cache.bin', 'tmp/cache.bin', 'artifacts/cache.bin', 'node-compile-cache/cache.bin'):
         dest = repo / name
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b'root cache must stay excluded\n')
+    cache_names = ('build', 'system', 'tmp', 'artifacts', 'node-compile-cache')
+    synthetic = {}
+    for cache_name in cache_names:
+        name = f'src/fixture/{cache_name}/owner.spl'
+        synthetic[name] = f'# genuine nested {cache_name} source\n'.encode()
+        dest = repo / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(synthetic[name])
     attributes = (ROOT / '.gitattributes').read_text()
     def archive(attr):
         (repo / '.gitattributes').write_text(attr)
@@ -59,12 +67,16 @@ with tempfile.TemporaryDirectory(prefix='simple-archive-root.') as tmp:
         with tarfile.open(fileobj=io.BytesIO(git('archive', '--format=tar', 'HEAD'))) as tar:
             return {item.name: tar.extractfile(item).read() for item in tar if item.isfile()}
     old = archive(attributes.replace('/build export-ignore', 'build export-ignore')
-                           .replace('/system export-ignore', 'system export-ignore'))
+                           .replace('/system export-ignore', 'system export-ignore')
+                           .replace('/tmp export-ignore', 'tmp export-ignore')
+                           .replace('/artifacts export-ignore', 'artifacts export-ignore')
+                           .replace('/node-compile-cache export-ignore', 'node-compile-cache export-ignore'))
     assert all(name not in old for name in PATHS), 'fixture must reproduce all 26 omissions'
+    assert all(name not in old for name in synthetic), 'all five unanchored rules must reproduce nested omissions'
     fixed = archive(attributes)
     assert len(PATHS) == 26
-    for name, content in payload.items():
+    for name, content in {**payload, **synthetic}.items():
         assert fixed.get(name) == content, f'tracked source missing or changed: {name}'
-    for name in ('build/cache.o', 'system/cache.bin'):
+    for name in ('build/cache.o', 'system/cache.bin', 'tmp/cache.bin', 'artifacts/cache.bin', 'node-compile-cache/cache.bin'):
         assert name not in fixed, f'root cache exported: {name}'
-print('PASS: git archive retains all 26 tracked nested build/system sources; root build/system caches remain excluded')
+print('PASS: git archive retains all 26 tracked nested build/system sources; all five root caches remain excluded; five nested names retained')
