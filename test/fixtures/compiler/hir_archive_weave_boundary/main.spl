@@ -4,6 +4,10 @@ use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_hir_archive_schedule_owner_v1.*
 use compiler.driver.driver_hir_post_validation_policy_owner_v1.*
 use compiler.driver.cache.driver_hir_archive_weave_boundary_v1.*
+use compiler.driver.cache.driver_hir_archive_weave_inputs_v1.{driver_hir_weave_inputs_v1,
+    driver_hir_weave_recollect_facts_v1}
+use compiler.driver.cache.driver_hir_archive_weave_facts_v1.{DriverHirArchiveWeaveDeclarationV1}
+use compiler.driver.cache.driver_hir_archive_weave_gate_v1.{driver_hir_archive_weave_gate_v1}
 use compiler.driver.cache.driver_cold_hir_weave_body_v1.{DriverColdHirWeaveBodyV1}
 use compiler.driver.cache.driver_hir_post_validation_policy_v1.{DriverHirPostValidationPolicyOwnerV1}
 use compiler.driver.cache.driver_hir_managed_runtime_selection_v1.*
@@ -103,6 +107,79 @@ fn observe(accepted: DriverHirArchiveWeaveBoundaryUseV1, key: text) -> Result<We
     val ended = transient_scope_end()
     if not paused or not owned or not ended: panic("fixture woven observation ownership")
     result
+
+# Mechanical negative census inputs below never grant genuine owner admission.
+# All declarations and complete graphs come from actual source recollection.
+fn gate_controls(driver: CompilerDriver, original: RtBoundCapability,
+        later: RtBoundCapability) -> Result<i64, text>:
+    val inputs = driver_hir_weave_inputs_v1(driver)?
+    val facts = driver_hir_weave_recollect_facts_v1(driver, inputs)?
+    val first = inputs.journal.logical_order[0]
+    val second = inputs.journal.logical_order[1]
+    val first_declaration = facts.declarations[first]
+    val second_declaration = facts.declarations[second]
+    val bodies = facts.bodies
+    facts.declarations[first] = DriverHirArchiveWeaveDeclarationV1(..first_declaration, dropped: true)
+    facts.bodies = {}
+    val partial = driver_hir_archive_weave_gate_v1(inputs.policy, facts, inputs.journal.logical_order,
+        inputs.layout_keys, inputs.schedule.layout_module_order, false, true)?
+    if not partial.gates_skipped or partial.errors.len() != 1 or
+            not partial.errors[0].contains("1 HIR module(s) lost their aggregate") or
+            partial.aspect_errors.len() != 0 or partial.weave_claims.len() != 0 or
+            rt_bound_manifest_capabilities().len() != 1 or rt_bound_manifest_capabilities()[0].review_id != later.review_id:
+        return Err("partial census demanded body rows or consumed later RT grant")
+    var checks = 1
+    if not driver_hir_archive_weave_gate_v1(inputs.policy, facts, inputs.journal.logical_order,
+            [], [], false).is_err(): return Err("partial census skipped physical declaration coverage")
+    checks = checks + 1
+    facts.declarations[second] = DriverHirArchiveWeaveDeclarationV1(..second_declaration, dropped: true)
+    if not driver_hir_archive_weave_gate_v1(inputs.policy, facts, inputs.journal.logical_order,
+            inputs.layout_keys, inputs.schedule.layout_module_order, false).is_err():
+        return Err("all-dropped branch skipped real body coverage")
+    checks = checks + 1
+    facts.bodies = bodies
+    val all_dropped = driver_hir_archive_weave_gate_v1(inputs.policy, facts, inputs.journal.logical_order,
+        inputs.layout_keys, inputs.schedule.layout_module_order, false)?
+    if all_dropped.gates_skipped or all_dropped.errors.len() != 0 or all_dropped.weave_claims.len() != 2 or
+            all_dropped.census_messages.len() != 1 or not all_dropped.census_messages[0].contains("test is unreliable") or
+            rt_bound_manifest_capabilities()[0].review_id != later.review_id:
+        return Err("all-dropped did not execute actual graph gates")
+    checks = checks + 1
+    facts.declarations[first] = first_declaration
+    facts.declarations[second] = second_declaration
+    val mismatches = [RtBoundCapability(..original, subject_id: "different actual subject"),
+        RtBoundCapability(..original, closure_digest: sha256_text("different closure")),
+        RtBoundCapability(..original, effect: original.effect + 1),
+        RtBoundCapability(..original, max_units: original.max_units + 1),
+        RtBoundCapability(..original, review_id: "different review")]
+    for changed in mismatches:
+        rt_bound_manifest_replace([changed])
+        val rejected = driver_hir_archive_weave_gate_v1(inputs.policy, facts, inputs.journal.logical_order,
+            inputs.layout_keys, inputs.schedule.layout_module_order, false, true)?
+        if rejected.errors.len() != 1 or not rejected.errors[0].contains("original RT capability manifest differs") or
+                rt_bound_manifest_capabilities().len() != 1 or rt_bound_manifest_capabilities()[0].review_id != changed.review_id:
+            return Err("changed complete capability was admitted or consumed")
+        checks = checks + 1
+    rt_bound_manifest_replace([original, later])
+    val extra = driver_hir_archive_weave_gate_v1(inputs.policy, facts, inputs.journal.logical_order,
+        inputs.layout_keys, inputs.schedule.layout_module_order, false, true)?
+    if extra.errors.len() != 1 or rt_bound_manifest_capabilities().len() != 2:
+        return Err("different capability cardinality was consumed")
+    checks = checks + 1
+    rt_bound_manifest_replace([original])
+    val consumed = driver_hir_archive_weave_gate_v1(inputs.policy, facts, inputs.journal.logical_order,
+        inputs.layout_keys, inputs.schedule.layout_module_order, false, true)?
+    if consumed.errors.len() != 0 or rt_bound_manifest_capabilities().len() != 0:
+        return Err("genuine original manifest not consumed at no-claim RT gate")
+    checks = checks + 1
+    rt_bound_manifest_replace([later])
+    val replay = driver_hir_archive_weave_gate_v1(inputs.policy, facts, inputs.journal.logical_order,
+        inputs.layout_keys, inputs.schedule.layout_module_order, false)?
+    if replay.errors.len() != 0 or rt_bound_manifest_capabilities().len() != 1 or
+            rt_bound_manifest_capabilities()[0].review_id != later.review_id:
+        return Err("default replay consumed future grant")
+    checks = checks + 1
+    Ok(checks)
 
 fn main() -> i64:
     val selected_result = driver_hir_capture_managed_runtime_selection_v1("llvm",
@@ -242,5 +319,12 @@ fn main() -> i64:
     if observe(accepted, name).is_err() or transient_array_scope_state_v1() != 0: return 33
     checks = checks + 1
     if checks != 17: return 34
+    val controls = gate_controls(driver, granted.unwrap(), next_grant)
+    if controls.is_err():
+        print "weave gate controls failed: {controls.unwrap_err()}"
+        return 35
+    if controls.unwrap() != 12: return 36
+    checks = checks + controls.unwrap()
+    if checks != 29: return 37
     print "HIR archive weave boundary: {checks} checks passed"
     0
