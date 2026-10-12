@@ -101,3 +101,7 @@ receives raw rodata rather than a prior boxed handle. Repeat on the other backen
 or label it unexecuted. Source-only overlays with d356, stale cached providers,
 renamed ABI symbols or fabricated cache admissions cannot qualify this repair.
 No extra build was started merely to wait for those existing CI jobs.
+
+## Historical and current qualification
+
+The d356 probe above is historical and still fails. The later frozen old-DAE 9fd literal-owner facet passed real Hello and 28 scoped text/byte checks; see the [merged DAE evidence appendix](nul_literal_double_box_constructor_2026_10_12_dae_evidence.md) and its exact receipt hashes. Those are distinct fixtures and lineage, not execution of this latest source composition. The current source, frontend/MIR specification, original eight-case native probe, generation and mandatory compiler/library/MCP/LSP core gates remain unexecuted/unqualified. This corrective source PR stays DRAFT; no production acceptance or memory-safety PASS is claimed.
