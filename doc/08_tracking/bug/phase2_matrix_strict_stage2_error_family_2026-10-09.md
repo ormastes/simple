@@ -451,3 +451,32 @@ artifact). Functional validation: next matrix/admission run.
   (added 54908626175). The gate (e98757b4d8e) passed Linux CI (no underscore)
   and failed on its first macOS run. Fix: strip a leading underscore from the
   parsed symbol name (matches both ELF/GNU and Mach-O spellings).
+
+### Addendum 7 follow-up (155dc9eb lane): sffi/plugins import fixes + constructor-path retry + executor ambiguity recorded
+
+- runtime.spl: `type RuntimeValuePtr = i64` declared at the point of use —
+  the alias existed only in compiler/70.backend/sffi_minimal.spl, so all 24
+  extern signatures in sffi/runtime.spl failed with 'unresolved type:
+  RuntimeValuePtr' and poisoned every sibling projection. Seed-validated:
+  runtime.spl now compiles standalone.
+- exec_mapping.spl: `export exec_mapping_map_rx, exec_mapping_free` added —
+  both object_mapper files (loader/object_mapper.spl:6 relative,
+  99.loader/object_mapper.spl:5 absolute, both resolving to this module under
+  the collapsed naming) imported items the module never exported (HirConst-
+  class visibility bug).
+- B5b constructor-path extension: static_enum_receiver_owner.spl
+  (try_lower_declared_enum_static_call) now applies the same owner-qualified
+  retry as the NamedVar arm — when the flat lexical lookup misses and the HIR
+  node's symbol names a foreign defining_module, retry via
+  lookup_qualified_type_raw(owner, name). `SdnValue.Float(f)` is a
+  named-constructor MethodCall (this path), not a NamedVar. Pending
+  validation: next admission (3-module parser.spl repro must flip green).
+- executor.spl:65 'Optional record has ambiguous current provider
+  declaration' (test_runner_build): the text? Some-record's layout identity
+  matches TWO Struct/Class symbols in the lowering symbol table
+  (optional_record_owner.spl:64-68). Registry-level duplicate-declaration
+  family; every Some-destructuring of that Option in the module hits it, and
+  `.?`/if val lower through the same machinery, so no safe source workaround
+  exists. Recorded for the compiler lane: the ambiguity diagnostic should
+  name both colliding declarations (symbol ids + owners), and the
+  duplicate-struct dedup should consider Option-record provider layouts.
