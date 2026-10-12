@@ -15,6 +15,8 @@ struct MonoTemplateSignatureV1:
     param_types: [HirType]
     return_type: HirType
     type_params: [HirTypeParam]
+    # Physical ABI ownership survives retained and archive-request modes.
+    global_linkage: bool
 
 struct MonoTemplateRecipeV1:
     module_name: text
@@ -37,7 +39,8 @@ fn mono_template_signature_v1(func: HirFunction) -> MonoTemplateSignatureV1:
     for param in func.params:
         params = params.push(param.type_)
     MonoTemplateSignatureV1(name: func.name, param_types: params,
-        return_type: func.return_type, type_params: func.type_params)
+        return_type: func.return_type, type_params: func.type_params,
+        global_linkage: func.is_extern or func.has_export_attr or func.func_attr.is_global or func.func_attr.is_entry)
 
 fn mono_specialized_signature_v1(template: MonoTemplateSignatureV1, args: [HirType], name: text) -> MonoTemplateSignatureV1:
     val subst = typesubstitution_from_params(template.type_params, args)
@@ -45,11 +48,13 @@ fn mono_specialized_signature_v1(template: MonoTemplateSignatureV1, args: [HirTy
     for param in template.param_types:
         params = params.push(substitute_type(param, subst))
     MonoTemplateSignatureV1(name: name, param_types: params,
-        return_type: substitute_type(template.return_type, subst), type_params: [])
+        return_type: substitute_type(template.return_type, subst), type_params: [],
+        global_linkage: template.global_linkage)
 
 fn mono_template_signature_digest_v1(signature: MonoTemplateSignatureV1) -> text:
     var writer = HirCodecWriter.create()
     writer.put_text(signature.name)
+    writer.put_bool(signature.global_linkage)
     writer.put_i64(signature.param_types.len())
     for param in signature.param_types:
         mono_archive_put_type_v1(writer, param)
@@ -58,7 +63,7 @@ fn mono_template_signature_digest_v1(signature: MonoTemplateSignatureV1) -> text
     for param in signature.type_params:
         hc_enc_hir_type_param(writer, param)
     if not writer.ok: return ""
-    sha256_text("mono-template-signature-v1\n" + writer.finish())
+    sha256_text("mono-template-signature-v2\n" + writer.finish())
 
 fn mono_archive_put_type_v1(writer: HirCodecWriter, type_: HirType):
     # Declaration summaries can contain an absent inferred type. Preserve its
