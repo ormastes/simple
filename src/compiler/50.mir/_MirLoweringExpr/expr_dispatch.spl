@@ -4988,6 +4988,27 @@ impl MirLowering:
                     return resolved_named_local
                 if val pre_nv_glob2 = self.try_lower_global_read(pre_nv_id):
                     return pre_nv_glob2
+            # B5b shard-registry family (bug-doc phase2_matrix addendum 7): the
+            # flat short-name entry can name a symbol owned by ANOTHER module
+            # that lowered earlier in this batch (importer pre-registration),
+            # so its id is neither a local here nor a registered global read.
+            # Retry through the declaring owner's qualified scope before giving
+            # up: the declaring module's registration is authoritative over a
+            # foreign flat entry. Without this, `SdnValue.Float(f)` in the
+            # enum's own static degraded to "undefined variable SdnValue" and
+            # every enum pattern over the type collapsed to wildcards.
+            if pre_sym_id >= 0 and pre_named_local.id < 0:
+                if val foreign_symbol = self.symbols.get_symbol_raw(pre_sym_id):
+                    if val foreign_owner = foreign_symbol.defining_module:
+                        if foreign_owner != "" and foreign_owner != self.current_module_id:
+                            val qualified_retry_id = self.symbols.lookup_qualified_type_raw(
+                                foreign_owner, named_var_name)
+                            if qualified_retry_id >= 0 and qualified_retry_id != pre_sym_id:
+                                if val retry_glob = self.try_lower_global_read(qualified_retry_id):
+                                    return retry_glob
+                                val retry_local = self.find_local(qualified_retry_id)
+                                if retry_local.id >= 0:
+                                    return retry_local
             # Built-in nullary Option `None` used as a value (not a
             # call): construct Option.None (disc 1) via rt_enum_new.
             # A local of the same name shadows it (handled above).
@@ -5089,14 +5110,8 @@ impl MirLowering:
                 if has_interps:
                     self.lower_string_interpolation(value, interp_list)
                 else:
-                    # Store string as constant; runtime resolves pointer
-                    var b = self.builder
-                    val dest = b.new_temp(MirType(kind: MirTypeKind.Opaque("str")))
-                    b.emit_const(dest, MirConstValue.Str(value), MirType(kind: MirTypeKind.Opaque("str")))
-                    self.builder = b
-                    # A C-string pointer cannot retain an embedded NUL byte.
-                    # Materialize those literals with the authored byte count
-                    # before any text operation or parameter transport.
+                    # NUL literals need a counted constructor. Its input must
+                    # be raw bytes: backends already box Opaque("str") constants.
                     var literal_has_nul = false
                     var literal_byte = 0
                     val literal_byte_length = value.len()
@@ -5105,13 +5120,18 @@ impl MirLowering:
                             literal_has_nul = true
                             break
                         literal_byte = literal_byte + 1
+                    val literal_type = if literal_has_nul: MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)) else: MirType(kind: MirTypeKind.Opaque("str"))
+                    var b = self.builder
+                    val dest = b.new_temp(literal_type)
+                    b.emit_const(dest, MirConstValue.Str(value), literal_type)
+                    self.builder = b
                     if literal_has_nul:
                         var b_nul = self.builder
                         val literal_length = b_nul.new_temp(MirType.i64())
                         b_nul.emit_const(literal_length, MirConstValue.Int(literal_byte_length), MirType.i64())
                         val literal_new = MirOperand(kind: MirOperandKind.Const(
                             MirConstValue.Str("rt_string_new"),
-                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [literal_type, MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
                         ))
                         val literal_tagged = b_nul.emit_call(literal_new, [mir_operand_copy(dest), mir_operand_copy(literal_length)], MirType.i64())
                         self.builder = b_nul
@@ -6574,7 +6594,7 @@ impl MirLowering:
                 case Wildcard:
                     if has_default_body:
                         self.error(
-                            "B5b: match has multiple wildcard arms",
+                            "B5b: match has multiple wildcard arms (module {self.current_module_id})",
                             Some(arm.span)
                         )
                         var b_err2 = self.builder

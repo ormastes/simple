@@ -12,6 +12,7 @@
 
 use std.test_runner.test_runner_types.{TestFileResult, TestRunResult}
 use std.common.perf.execution_metrics.{resource_evidence_quality_name, termination_cause_name}
+use std.nogc_sync_mut.test_runner.test_db_trace_record.{TestDbTraceFile}
 
 val TEST_DB_RECORD_MAGIC = "simple-test-db-record v1"
 
@@ -39,6 +40,8 @@ struct TestDbFileRow:
     exit_code: i64
     budget_status: text
     anomaly_status: text
+    # In-memory SDN transport only; excluded from legacy v1 rows.
+    trace_case_events_sdn: text = ""
 
 struct TestDbRunRecord:
     files: [TestDbFileRow]
@@ -189,3 +192,31 @@ fn test_db_run_record_decode(content: text) -> Result<TestDbRunRecord, text>:
         return Err("test-db run record has no run line")
     record.files = rows
     Ok(record)
+
+# Attach versioned SDN events in linear time. Reject ambiguity and any event
+# path with no corresponding summary row before assigning payloads.
+pub fn test_db_run_record_attach_trace_events(record: TestDbRunRecord, trace_files: [TestDbTraceFile]) -> Result<TestDbRunRecord, text>:
+    var trace_by_path: Dict<text, text> = {}
+    var summary_counts: Dict<text, i64> = {}
+    for row in record.files:
+        summary_counts[row.path] = (summary_counts[row.path] ?? 0) + 1
+    for trace_file in trace_files:
+        if trace_file.path == "" or trace_file.events_sdn == "":
+            return Err("trace record requires non-empty path and events")
+        if trace_by_path.contains_key(trace_file.path):
+            return Err("trace record has duplicate test path: " + trace_file.path)
+        trace_by_path[trace_file.path] = trace_file.events_sdn
+        val matches = summary_counts[trace_file.path] ?? 0
+        if matches == 0:
+            return Err("trace record names a file absent from summary: " + trace_file.path)
+        if matches != 1:
+            return Err("trace record path is ambiguous in summary: " + trace_file.path)
+    var rows: [TestDbFileRow] = []
+    for row in record.files:
+        var updated = row
+        if trace_by_path.contains_key(row.path):
+            updated.trace_case_events_sdn = trace_by_path[row.path]
+        rows.push(updated)
+    var updated_record = record
+    updated_record.files = rows
+    Ok(updated_record)

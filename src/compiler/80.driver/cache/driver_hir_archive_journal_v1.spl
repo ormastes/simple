@@ -142,7 +142,9 @@ fn driver_hir_archive_journal_initial_metadata_v1(ctx: CompileContext,
     val binding = driver_hir_archive_journal_sources_v1(ctx)
     val digest = mono_archive_registration_owner_digest_v1(registration)
     val result: Result<(text, text), text> = if binding == "" or digest == "":
-        Err("HIR journal retained source or registration predecessor incomplete") else: Ok((binding, digest))
+        Err("HIR journal retained source or registration predecessor incomplete")
+    else:
+        Ok((binding, digest))
     val paused = transient_scope_pause()
     val owned = if paused: transient_promote(result) else: false
     val ended = transient_scope_end()
@@ -346,8 +348,18 @@ pub fn driver_hir_archive_journal_alias_v1(owner: DriverHirArchiveJournalV1,
         ctx: CompileContext, source_index: i64, logical_name: text,
         canonical_name: text) -> Result<bool, text>:
     val _verified = driver_hir_archive_journal_verify_v1(owner, ctx)?
-    if not owner.registration.archives.has(canonical_name): return Err("HIR journal alias canonical owner absent")
-    val archive = owner.registration.archives[canonical_name]
+    # The source label and the complete HIR's physical module name are
+    # different identities. Select the caller's actual published logical row,
+    # then prove it was a canonical transaction, rather than guessing a key in
+    # the physical registration map or admitting an alias as a new parent.
+    if not owner.logical_archives.has(canonical_name): return Err("HIR journal alias canonical owner absent")
+    val archive = owner.logical_archives[canonical_name]
+    var canonical_published = false
+    for event in owner.events:
+        if not event.alias and event.logical_name == canonical_name and
+                driver_hir_archive_journal_same_archive_v1(event.archive, archive):
+            canonical_published = true
+    if not canonical_published: return Err("HIR journal alias canonical transaction absent")
     if not driver_hir_archive_journal_alias_row_v1(owner, ctx, source_index, logical_name, archive):
         return Err("HIR journal alias source binding refused")
     val stored = driver_hir_archive_journal_store_event_v1(owner, logical_name, source_index,

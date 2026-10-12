@@ -1,0 +1,63 @@
+# @tag:in-development
+# @req REQ-TRC-003 REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+use std.spec.*
+use app.test_runner_new.sdn_worker_args.{parse_private_sdn_worker_args}
+
+describe "private SDN worker argument validation":
+    it "accepts reordered authenticated private flags and forwards ordinary args":
+        match parse_private_sdn_worker_args(
+            ["test", "--timeout=20", "--test-sdn-result=C:/tmp/worker.sdn", "suite_spec.spl", "--test-sdn-worker"], true):
+            case Err(reason): fail("valid private worker args were rejected: {reason}")
+            case Ok(parsed):
+                expect(parsed.worker).to_equal(true)
+                expect(parsed.result_path).to_equal("C:/tmp/worker.sdn")
+                expect(parsed.forwarded_args).to_equal(["--timeout=20", "suite_spec.spl"])
+                expect(parsed.public_sdn_requested).to_equal(false)
+        match parse_private_sdn_worker_args(
+            ["--test-sdn-result=C:/tmp/日本語.sdn", "--test-sdn-worker"], true):
+            case Err(reason): fail("valid Unicode result path was rejected: {reason}")
+            case Ok(parsed): expect(parsed.result_path).to_equal("C:/tmp/日本語.sdn")
+
+    it "counts duplicate private controls regardless of their position":
+        match parse_private_sdn_worker_args(
+            ["--test-sdn-worker", "--test-sdn-result=a.sdn", "--test-sdn-result=b.sdn"], true):
+            case Ok(_): fail("duplicate result path was accepted")
+            case Err(reason): expect(reason).to_contain("exactly once")
+        match parse_private_sdn_worker_args(
+            ["--test-sdn-worker", "--test-sdn-result=a.sdn", "suite.spl", "--test-sdn-worker"], true):
+            case Ok(_): fail("duplicate worker marker was accepted")
+            case Err(reason): expect(reason).to_contain("exactly once")
+        match parse_private_sdn_worker_args(["--test-sdn-result=a.sdn", "suite.spl"], true):
+            case Ok(_): fail("unmarked result path was accepted")
+            case Err(reason): expect(reason).to_contain("requires")
+
+    it "rejects legacy JSON flags before a private marker and requires authorization":
+        match parse_private_sdn_worker_args(
+            ["--json", "--test-sdn-worker", "--test-sdn-result=a.sdn"], true):
+            case Ok(_): fail("JSON before the marker was accepted")
+            case Err(reason): expect(reason).to_contain("JSON")
+        match parse_private_sdn_worker_args(
+            ["--format", "json", "--test-sdn-worker", "--test-sdn-result=a.sdn"], true):
+            case Ok(_): fail("--format json before the marker was accepted")
+            case Err(reason): expect(reason).to_contain("JSON")
+        match parse_private_sdn_worker_args(
+            ["--test-sdn-worker", "--test-sdn-result=a.sdn"], false):
+            case Ok(_): fail("unauthorized private worker was accepted")
+            case Err(reason): expect(reason).to_contain("unauthorized")
+
+    it "bounds UTF-8 result paths and rejects reserved controls":
+        val oversized = "界".repeat(1366)
+        match parse_private_sdn_worker_args(
+            ["--test-sdn-worker", "--test-sdn-result=" + oversized], true):
+            case Ok(_): fail("oversized UTF-8 result path was accepted")
+            case Err(reason): expect(reason).to_contain("path")
+        match parse_private_sdn_worker_args(
+            ["--test-sdn-worker", "--test-sdn-result=bad\npath"], true):
+            case Ok(_): fail("control-containing result path was accepted")
+            case Err(reason): expect(reason).to_contain("path")
+        match parse_private_sdn_worker_args([], true):
+            case Err(reason): fail("empty ordinary CLI args broke default test invocation: {reason}")
+            case Ok(parsed):
+                expect(parsed.worker).to_equal(false)
+                expect(parsed.public_sdn_requested).to_equal(false)
+                expect(parsed.forwarded_args).to_equal([])
