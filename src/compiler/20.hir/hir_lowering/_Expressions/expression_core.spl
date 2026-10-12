@@ -11,6 +11,8 @@ use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_dis
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.hir.hir_lowering._Expressions.type_test_operand.{binary_is_type_operand}
 use compiler.hir.hir_lowering._Expressions.declared_enum_constructor.*
+use compiler.hir.hir_lowering._Expressions.collection_factory_types.{collection_factory_type_concrete}
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 
 impl HirLowering:
     fn attributed_collection_family_identity(name: text, owner: text) -> text:
@@ -48,7 +50,9 @@ impl HirLowering:
             case _: ()
         ""
 
-    fn attributed_factory_return_name(source: HirExpr) -> text:
+    fn attributed_factory_return_type(source: HirExpr) -> HirType?:
+        if source.has_type_:
+            return source.type_
         var callable = SymbolId(id: -1)
         match source.kind:
             case HirExprKind.Call(callee, _, _):
@@ -59,28 +63,32 @@ impl HirLowering:
                     case _: ()
             case _: ()
         if not callable.is_valid():
-            return ""
+            return nil
         if val symbol = self.symbols.get_symbol_raw(callable.id):
             if val signature = symbol.type_:
                 match signature.kind:
-                    case HirTypeKind.Function(_, returned, _):
-                        match returned.kind:
-                            case HirTypeKind.Named(owner, _):
-                                if val returned_symbol = self.symbols.get_symbol_raw(owner.id):
-                                    val family = self.attributed_collection_family(returned)
-                                    if family != "": return family
-                                    if returned_symbol.name == "AdaptiveTextSet" or
-                                            returned_symbol.name == "AdaptiveTextMap" or
-                                            returned_symbol.name == "AdaptiveSet" or
-                                            returned_symbol.name == "AdaptiveMap":
-                                        return "non-stdlib {returned_symbol.name}"
-                                    return returned_symbol.name
-                            case HirTypeKind.Str: return "text"
-                            case HirTypeKind.Int(_, _): return "integer"
-                            case HirTypeKind.Bool: return "bool"
-                            case HirTypeKind.Error | HirTypeKind.Infer(_, _) | HirTypeKind.TypeParam(_, _): return ""
-                            case _: return "non-adaptive value"
+                    case HirTypeKind.Function(_, returned, _): return returned
                     case _: ()
+        nil
+
+    fn attributed_factory_return_name(source: HirExpr) -> text:
+        if val returned = self.attributed_factory_return_type(source):
+            match returned.kind:
+                case HirTypeKind.Named(owner, _):
+                    if val returned_symbol = self.symbols.get_symbol_raw(owner.id):
+                        val family = self.attributed_collection_family(returned)
+                        if family != "": return family
+                        if returned_symbol.name == "AdaptiveTextSet" or
+                                returned_symbol.name == "AdaptiveTextMap" or
+                                returned_symbol.name == "AdaptiveSet" or
+                                returned_symbol.name == "AdaptiveMap":
+                            return "non-stdlib {returned_symbol.name}"
+                        return returned_symbol.name
+                case HirTypeKind.Str: return "text"
+                case HirTypeKind.Int(_, _): return "integer"
+                case HirTypeKind.Bool: return "bool"
+                case HirTypeKind.Error | HirTypeKind.Infer(_, _) | HirTypeKind.TypeParam(_, _): return ""
+                case _: return "non-adaptive value"
         ""
 
     me validate_attributed_collection_factory(
@@ -104,6 +112,48 @@ impl HirLowering:
         val found = self.attributed_factory_return_name(args[0].value)
         if found != "" and found != expected:
             self.error("attributed collection factory returns {found}, expected {expected}", span)
+            return
+        if receiver.has_type_ and (expected == "AdaptiveSet" or expected == "AdaptiveMap"):
+            if val returned = self.attributed_factory_return_type(args[0].value):
+                match (receiver.type_.kind, returned.kind):
+                    case (HirTypeKind.Named(expected_owner, expected_args), HirTypeKind.Named(found_owner, found_args)):
+                        # Bare generic receivers carry no instantiation. They
+                        # cannot prove a mismatch; inference still owns them.
+                        val arity = if expected == "AdaptiveSet": 1 else: 2
+                        if expected_owner.id == owner.id and found_owner.id == owner.id and
+                                expected_args.len() == arity and found_args.len() == arity and
+                                collection_factory_type_concrete(receiver.type_) and
+                                collection_factory_type_concrete(returned) and
+                                not hir_types_equal(receiver.type_, returned):
+                            self.error("attributed collection factory generic arguments do not match {expected}", span)
+                    case _: ()
+
+    me retain_attributed_collection_type(initializer: HirExpr, declared: HirType?) -> HirExpr:
+        """Carry a written instance type through the compiler-owned wrapper."""
+        if declared == nil:
+            return initializer
+        val family = self.attributed_collection_family(declared)
+        if family == "": return initializer
+        match initializer.kind:
+            case HirExprKind.MethodCall(receiver, method, args, resolution):
+                if method != "attributed_at_site" and method != "attributed_with_prior_at_site":
+                    return initializer
+                val owner = _hir_expr_symbol_or_invalid(receiver.kind)
+                match declared.kind:
+                    case HirTypeKind.Named(declared_owner, _):
+                        if owner.id != declared_owner.id: return initializer
+                    case _: return initializer
+                val typed_receiver = HirExpr(kind: receiver.kind, has_type_: true,
+                    type_: declared, span: receiver.span)
+                # The ordinary expression path already checks family errors.
+                # Recheck only matching/unknown families for generic arguments.
+                if args.len() >= 3:
+                    val found = self.attributed_factory_return_name(args[0].value)
+                    if found == "" or found == family:
+                        self.validate_attributed_collection_factory(typed_receiver, method, args, initializer.span)
+                return HirExpr(kind: HirExprKind.MethodCall(typed_receiver, method, args, resolution),
+                    has_type_: initializer.has_type_, type_: initializer.type_, span: initializer.span)
+            case _: initializer
 
     fn declared_static_method_resolution(receiver: HirExpr, method: text) -> MethodResolution:
         # Keep the declared owner while HIR still owns the receiver expression.
