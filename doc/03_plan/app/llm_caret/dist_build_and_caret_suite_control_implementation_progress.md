@@ -5,7 +5,8 @@ Source base: c5f33e7b09392200b36b44876aadfac9e5ade251, remote release_phase3. Is
 | Feature | Current authoritative evidence | Remaining |
 |---|---|---|
 | F01 contracts | New common/contracts/distributed_control_v2.spl defines value envelopes, exact environment matcher and scoped grant authorization; negative unit scenarios authored | Runtime checks, versioned wire codec, caller wiring and actual activation |
-| F02–F16 | Design and plan retained; full scope selected | Implementation, owner integration and real runtime/provider acceptance |
+| F02 host roles | Bounded pinned host-role resolver and negative source regressions authored | Strict SDN owner, authenticated enrollment/rotation, credential and SSH integration, runtime verification |
+| F03–F16 | Design and plan retained; full scope selected | Implementation, owner integration and real runtime/provider acceptance |
 
 ## M0 runtime inventory
 
@@ -72,3 +73,7 @@ Native frozen bootstrap source is now `6ec114562`, integrating the nested compil
 The first new bootstrap attempt stopped at the unchanged 10 GiB disk preflight. Owned old `build/phase_snapshots` were archived and byte-compared into `/mnt/c/Temp/dbc-owned-phase-snapshots-before-capture-rebuild-20261012.tar` before reclaiming their native storage. Bootstrap restarted with unchanged disk/RSS/admission policies and non-delegated compiler testing. Its active log is `/mnt/c/Temp/dbc-capture-scratch-owner-bootstrap-after-archive-20261012.log`; no terminal PASS is claimed. Native source remains frozen while this build runs; further feature edits belong only to the RAM checkout.
 
 A cleanup agent inspected temporary files and worktrees. Seventeen apparently prunable registrations still refer to existing directories; no additional deletions were safe. Active sessions, unknown ownership and bootstrap evidence were preserved. F01 remains incomplete, F02–F16 remain open, and only the initial documentation PR has landed on `release_phase3`.
+
+## F02 host-role boundary increment
+
+Added `workbench/distributed_host_roles_v2.spl` with bounded snapshot lookup, exact registry revision and host-key digest checks, duplicate-ID rejection, and independent credential identity/reference/revision/revocation checks. It does not read secrets, connect, auto-enroll, or establish authentication from caller-provided values. Six unit scenarios include all four revoked roles, stale rotation, changed key, duplicate and unknown host, and invalid secret references. Tests are NOT_RUN. Strict SDN and authenticated enrollment/rotation ownership, dependency inspection and real transport wiring remain required for F02 completion. Further source work stays outside the live frozen native compiler checkout.

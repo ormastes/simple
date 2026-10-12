@@ -30,6 +30,8 @@ Authenticate → validate schema → authorize → match environment → durably
 | Owner and algorithm | Boundary: `src/app/llm_caret`. Algorithm/change: Resolve independent host roles from strict SDN; enroll host fingerprint with explicit operator action; store credential references; implement rotation, revocation and dependency inspection. |
 | Rejection evidence | Failure verification: AT-01,05,11,25; changed-key and revoked-role tests. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
+F02 value boundary is `workbench/distributed_host_roles_v2.spl`. An authenticated enrollment/config owner must publish a bounded snapshot (maximum 128 hosts) with an exact registry revision, decoded SSH public-key SHA-256 digest in lowercase hex, and separate SSH-account/provider-profile/node/signer credential roles. Each role carries its own identity, secret reference, revision and revocation. Resolution validates all host identities and duplicate IDs before selecting; checks the observed host key and all selected roles; and never enrolls or opens a connection. Secret reference names are bounded to 256 bytes and reject traversal, whitespace and raw secret material. Reference resolution and secret access remain in the credential provider. Strict SDN loading, authenticated enrollment/rotation publication, dependency inspection and transport caller wiring are still required; the value resolver alone is not host authentication.
+
 ### F03 — Scoped grants and approvals
 
 | Concern | Design |
