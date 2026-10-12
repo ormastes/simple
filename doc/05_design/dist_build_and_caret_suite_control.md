@@ -56,6 +56,8 @@ This is a cold reference path with dynamic message buffers, not a qualified no-a
 
 Staging a validated value is not authenticated or durable publication. The owner must authenticate the trust-root source, commit the replacement generation atomically, retain approval/audit events, and keep expected generation values in its private service context. The reference queries still allocate lookup/message buffers; no no-allocation activation or opaque token guarantee is claimed.
 
+Public signed-grant/approval value records are extracted into `common/contracts/distributed_authority_v2.spl`; publisher keys and indexed authority state remain private to HostAuthority. `distributed_authority_codec_v2.spl` uses versioned bounded frames (`DBC_SIGNED_GRANT_V2`, `DBC_SIGNED_APPROVAL_V2`), canonical nested grant bytes, shared metadata validation and exact 64-byte signatures encoded as 128 lowercase hex characters by the existing binary-inspection owner. Reject unknown versions, trailing/truncated fields, noncanonical integers/hex and frames over 64 KiB. Full decode/re-encode equality preserves exact bytes. This codec parses untrusted values only; a well-formed or all-zero signature is not authorization. The separate authority snapshot and signature verifier must reject forged frames before admission. No frame carries publisher keys, an authenticated flag or approval boolean.
+
 ### F04 — Managed SSH and persistent sessions
 
 | Concern | Design |

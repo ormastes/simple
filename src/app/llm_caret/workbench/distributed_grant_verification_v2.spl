@@ -3,9 +3,11 @@
 # Cold reference path: dynamic message buffers are not an admitted
 # no-allocation capsule command path. Activation requires bounded ownership.
 use std.common.contracts.distributed_control_v2.*
+use std.common.contracts.distributed_authority_v2.*
+use std.common.contracts.distributed_authority_codec_v2.{distributed_grant_issuer_metadata_validate_v2, distributed_approval_metadata_validate_v2}
 use std.common.contracts.distributed_control_codec_v2.*
 use std.common.build_manager.codec.builder_wire_line_v1
-use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.build_manager.contracts.builder_identifier_valid_v1
 use std.common.crypto.sha256.sha256_text
 use std.common.crypto.ed25519.pure_ed25519_verify
 
@@ -25,22 +27,6 @@ struct DistributedAuthorityKeyV2:
     expires_at: i64
     revoked: bool
 
-struct DistributedSignedGrantV2:
-    grant: ExecutionGrantV2
-    issuer_id: text
-    key_revision: i64
-    signature: [u8]
-
-struct DistributedSignedApprovalV2:
-    approver_id: text
-    key_revision: i64
-    grant_digest: text
-    request_digest: text
-    policy_revision: i64
-    session_generation: i64
-    expires_at: i64
-    signature: [u8]
-
 fn distributed_signature_bytes_v2(message: text) -> [u8]:
     var bytes: [u8] = []
     for i in 0..message.len():
@@ -48,9 +34,8 @@ fn distributed_signature_bytes_v2(message: text) -> [u8]:
     bytes
 
 fn distributed_grant_signature_message_v2(value: DistributedSignedGrantV2) -> Result<[u8], text>:
-    if not builder_identifier_valid_v1(value.issuer_id) or value.key_revision <= 0 or
-            value.key_revision > DISTRIBUTED_WIRE_INTEGER_MAX_V2:
-        return Err("ISSUER_IDENTITY_INVALID")
+    val metadata_error = distributed_grant_issuer_metadata_validate_v2(value)
+    if metadata_error != "": return Err(metadata_error)
     val grant = distributed_encode_grant_v2(value.grant)?
     val message = builder_wire_line_v1("DBC_GRANT_SIGNATURE_V2") +
         builder_wire_line_v1(value.issuer_id) + builder_wire_line_v1("{value.key_revision}") +
@@ -59,12 +44,8 @@ fn distributed_grant_signature_message_v2(value: DistributedSignedGrantV2) -> Re
     Ok(distributed_signature_bytes_v2(message))
 
 fn distributed_approval_signature_message_v2(value: DistributedSignedApprovalV2) -> Result<[u8], text>:
-    if not builder_identifier_valid_v1(value.approver_id) or
-            not builder_digest_valid_v1(value.grant_digest) or not builder_digest_valid_v1(value.request_digest):
-        return Err("APPROVAL_IDENTITY_INVALID")
-    for number in [value.key_revision, value.policy_revision, value.session_generation, value.expires_at]:
-        if number <= 0 or number > DISTRIBUTED_WIRE_INTEGER_MAX_V2:
-            return Err("APPROVAL_INTEGER_INVALID")
+    val metadata_error = distributed_approval_metadata_validate_v2(value)
+    if metadata_error != "": return Err(metadata_error)
     var lines: [text] = [builder_wire_line_v1("DBC_APPROVAL_SIGNATURE_V2")]
     for field in [value.approver_id, "{value.key_revision}", value.grant_digest,
             value.request_digest, "{value.policy_revision}", "{value.session_generation}", "{value.expires_at}"]:
