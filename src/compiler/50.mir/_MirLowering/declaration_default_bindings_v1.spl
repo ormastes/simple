@@ -18,6 +18,10 @@ use compiler.mir._MirLoweringExpr.lambda_abi.{lambda_abi_type_resolved}
 use compiler.mir._MirLowering.function_lowering.*
 use compiler.mir._MirLowering.declaration_default_effects_v1.*
 use compiler.mir.hir_declaration_codec_v1.{mir_hir_write_function_declaration_v1}
+use compiler.mir.hir_declaration_summary_v1.{mir_hir_declaration_logical_key_v1,
+    mir_hir_declarations_same_physical_source_v1}
+use compiler.mir.hir_declaration_variant_identity_v1.{mir_hir_callable_variant_identity_v1,
+    mir_hir_global_variant_identity_v1}
 use compiler.hir.hir_codec_support.{HirCodecWriter}
 use compiler.mir._MirLowering.provider_metadata.*
 use compiler.mir._MirLowering.provider_globals.*
@@ -173,6 +177,12 @@ impl MirLowering:
                 val owner = mir_layout_canonical_module_name(definition.defining_module ?? provider.name)
                 if owner != source_owner: continue
                 if selected != nil:
+                    val previous_provider: MirHirModuleDeclarationsV1 = repository.modules[selected_owner]
+                    val previous: MirHirGlobalDeclarationV1 = selected.unwrap()
+                    val previous_bytes = mir_hir_global_variant_identity_v1(previous)
+                    if mir_hir_declarations_same_physical_source_v1(previous_provider, provider) and
+                            previous.symbol.id == declaration.symbol.id and previous_bytes != "" and
+                            previous_bytes == mir_hir_global_variant_identity_v1(declaration): continue
                     self.declaration_default_fail_v1(frame, "parameter default global has conflicting provider declarations", source.span)
                     return SymbolId(id: -1)
                 selected = Some(declaration)
@@ -220,7 +230,7 @@ impl MirLowering:
         if self.declaration_repository != nil:
             val repository: MirHirDeclarationRepositoryV1 = self.declaration_repository.unwrap()
             for name in repository.ordered_modules:
-                if name != frame.provider.name: providers.push(repository.modules[name])
+                if name != mir_hir_declaration_logical_key_v1(frame.provider): providers.push(repository.modules[name])
         var selected: [MirHirFunctionDeclarationV1] = []
         var selected_provider: MirHirModuleDeclarationsV1 = frame.provider
         var selected_bytes = ""
@@ -240,12 +250,15 @@ impl MirLowering:
                 if not mir_hir_callable_record_binding_valid_v1(provider, function) or (exact_local and (definition.name != source.name or definition.kind != source.kind)):
                     self.declaration_default_fail_v1(frame, "parameter default callable record does not match its retained symbol declaration", source.span)
                     return SymbolId(id: -1)
-                val bytes = declaration_default_callable_bytes_v1(function)
+                val bytes = mir_hir_callable_variant_identity_v1(function)
                 if bytes == "":
                     self.declaration_default_fail_v1(frame, "parameter default callable declaration codec refused", source.span)
                     return SymbolId(id: -1)
                 if selected.len() > 0:
-                    if selected_provider.name == provider.name and selected[0].symbol.id == function.symbol.id and selected_bytes == bytes: continue
+                    val same_record = mir_hir_declaration_logical_key_v1(selected_provider) == mir_hir_declaration_logical_key_v1(provider)
+                    val same_source = mir_hir_declarations_same_physical_source_v1(selected_provider, provider)
+                    if (same_record or same_source) and selected_provider.name == provider.name and
+                            selected[0].symbol.id == function.symbol.id and selected_bytes == bytes: continue
                     self.declaration_default_fail_v1(frame, "parameter default callable has conflicting canonical declarations", source.span)
                     return SymbolId(id: -1)
                 selected.push(function)
@@ -262,7 +275,7 @@ impl MirLowering:
         if not self.callable_link_names.has(key):
             # Trait interface records are declarations too. Publish their real
             # naming contract; this neither supplies nor fabricates a body.
-            self.register_declaration_callable_link_v1(selected_provider.name, selected_provider.symbols, function)
+            self.register_declaration_callable_variant_link_v1(selected_provider, function)
         if not self.callable_link_names.has(key):
             self.declaration_default_fail_v1(frame, "parameter default callable has no admitted emission identity", source.span)
             return SymbolId(id: -1)

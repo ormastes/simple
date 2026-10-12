@@ -1,0 +1,58 @@
+# @tag:in-development
+# @req REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+use std.spec.*
+use std.common.traceability.run_plan.{TracePlannedCase}
+use std.common.traceability.run_request.{TraceRunRequest}
+use std.common.traceability.run_selection.{validate_trace_request_selection}
+
+fn _selection_case(case_id: text, path: text, case_name: text) -> TracePlannedCase:
+    TracePlannedCase(case_id: case_id, test_path: path, case_name: case_name,
+        test_definition_id: "definition-{case_id}", lane_id: "lane-unit")
+
+fn _selection_request(cases: [TracePlannedCase]) -> TraceRunRequest:
+    TraceRunRequest(subject_id: "subject-1", configuration_id: "config-1",
+        expectation_id: "expectation-1", binary_id: "binary-1", cases: cases)
+
+describe "exact trace request selection" :
+    it "accepts exact selected paths with multiple planned cases in one file":
+        val request = _selection_request([
+            _selection_case("case-1", "test/日本_spec.spl", "first"),
+            _selection_case("case-2", "test/日本_spec.spl", "second"),
+            _selection_case("case-3", "test/other_spec.spl", "third")])
+        expect(validate_trace_request_selection(request,
+            ["test/日本_spec.spl", "test/other_spec.spl"]).is_ok()).to_equal(true)
+
+    it "rejects missing, duplicate, and extra selected paths":
+        val request = _selection_request([
+            _selection_case("case-1", "test/a_spec.spl", "first"),
+            _selection_case("case-2", "test/b_spec.spl", "second")])
+        expect(validate_trace_request_selection(request, ["test/a_spec.spl"]).is_err()).to_equal(true)
+        expect(validate_trace_request_selection(request,
+            ["test/a_spec.spl", "test/a_spec.spl", "test/b_spec.spl"]).is_err()).to_equal(true)
+        expect(validate_trace_request_selection(request,
+            ["test/a_spec.spl", "test/b_spec.spl", "test/extra_spec.spl"]).is_err()).to_equal(true)
+
+    it "rejects empty paths and empty selected inventory":
+        val request = _selection_request([_selection_case("case-1", "test/a_spec.spl", "first")])
+        expect(validate_trace_request_selection(request, []).is_err()).to_equal(true)
+        expect(validate_trace_request_selection(request, [""]).is_err()).to_equal(true)
+
+    it "compares source paths exactly without normalizing them":
+        val request = _selection_request([_selection_case("case-1", "test/a_spec.spl", "first")])
+        expect(validate_trace_request_selection(request, ["./test/a_spec.spl"]).is_err()).to_equal(true)
+
+    it "bounds individual selected path bytes before membership lookup":
+        val path = "x".repeat(4097)
+        val request = _selection_request([_selection_case("case-1", path, "first")])
+        match validate_trace_request_selection(request, [path]):
+            case Ok(_): fail("oversized selected path was accepted")
+            case Err(reason): expect(reason).to_contain("4096 bytes")
+
+    it "bounds total selected inventory bytes independently of path count":
+        var paths: [text] = []
+        for i in 0..257:
+            paths.push("{i}" + "x".repeat(4089))
+        val request = _selection_request([_selection_case("case-1", paths[0], "first")])
+        match validate_trace_request_selection(request, paths):
+            case Ok(_): fail("oversized selected inventory was accepted")
+            case Err(reason): expect(reason).to_contain("1 MiB")

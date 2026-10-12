@@ -442,3 +442,110 @@ artifact). Functional validation: next matrix/admission run.
   other 50.mir consumer already imports it itemized). Also fixed a latent
   `field.type_` (undefined in scope; now `field_type`) in the extracted
   register_composite_field_metadata_types_v1.
+
+Canonical Windows attempt13 independently reached this extracted function on
+frozen source `5c891cd74242833f3dee8a88da264a73a242fae1`: the Rust seed compiled
+1,297 files and failed one, `50.mir/_MirLowering/module_lowering.spl`, with
+`cannot infer field type while lowering MirLowering.register_composite_field_metadata_types_v1:
+struct 'ANY' field 'type_'`. All four support builds finished. The native build
+terminated with exit1, quiescent1 and measured peak1,251,560 KiB under the
+5,859,375 KiB enforced process-tree cap (jobs3). No new compiler was admitted;
+fresh Hello, CLI and runner checks were not run. Original logs and hashes are
+retained in `C:/dev/simple-phase3-bootstrap-evidence/attempt13/final-summary.env`.
+Latest release `a95346aaef7a04c2e0935b2816e6157dd497457d` includes the typed
+`field_type` correction. Its actual rebuild/admission remains pending.
+- Novel cause (2026-10-12, candidate_frontend_smoke p2_add admission):
+  runtime_tagged_callback_owner_v1.spl nm-parsed required core-C symbols with
+  EXACT name matching, but Mach-O nm always prepends a leading underscore to C
+  symbols (`_rt_tagged_add`), so no required symbol ever matched on Darwin and
+  the gate failed with 'lacks defined function
+  rt_transient_array_scope_state_v1' even though nm listed it as defined text
+  (added 54908626175). The gate (e98757b4d8e) passed Linux CI (no underscore)
+  and failed on its first macOS run. Fix: strip a leading underscore from the
+  parsed symbol name (matches both ELF/GNU and Mach-O spellings).
+
+### Addendum 7 follow-up (155dc9eb lane): sffi/plugins import fixes + constructor-path retry + executor ambiguity recorded
+
+- runtime.spl: `type RuntimeValuePtr = i64` declared at the point of use —
+  the alias existed only in compiler/70.backend/sffi_minimal.spl, so all 24
+  extern signatures in sffi/runtime.spl failed with 'unresolved type:
+  RuntimeValuePtr' and poisoned every sibling projection. Seed-validated:
+  runtime.spl now compiles standalone.
+- exec_mapping.spl: `export exec_mapping_map_rx, exec_mapping_free` added —
+  both object_mapper files (loader/object_mapper.spl:6 relative,
+  99.loader/object_mapper.spl:5 absolute, both resolving to this module under
+  the collapsed naming) imported items the module never exported (HirConst-
+  class visibility bug).
+- B5b constructor-path extension: static_enum_receiver_owner.spl
+  (try_lower_declared_enum_static_call) now applies the same owner-qualified
+  retry as the NamedVar arm — when the flat lexical lookup misses and the HIR
+  node's symbol names a foreign defining_module, retry via
+  lookup_qualified_type_raw(owner, name). `SdnValue.Float(f)` is a
+  named-constructor MethodCall (this path), not a NamedVar. Pending
+  validation: next admission (3-module parser.spl repro must flip green).
+- executor.spl:65 'Optional record has ambiguous current provider
+  declaration' (test_runner_build): the text? Some-record's layout identity
+  matches TWO Struct/Class symbols in the lowering symbol table
+  (optional_record_owner.spl:64-68). Registry-level duplicate-declaration
+  family; every Some-destructuring of that Option in the module hits it, and
+  `.?`/if val lower through the same machinery, so no safe source workaround
+  exists. Recorded for the compiler lane: the ambiguity diagnostic should
+  name both colliding declarations (symbol ids + owners), and the
+  duplicate-struct dedup should consider Option-record provider layouts.
+- Stage-2 self-build pair (2026-10-12, regression from 43c3f3d979a): (1)
+  archive_borrowed_module_v1.spl — 'struct ANY field symbol' in
+  lower_archive_module_in_owned_scope_v1: MirHirDeclarationRepositoryV1 /
+  MirHirModuleDeclarationsV1 came only through the summary module's nested
+  'export use ... .*' re-export glob, which the seed registry does not
+  materialize one level up; explicit itemized import from
+  hir_declaration_types_v1 added. (2) driver_pipeline_lowering.spl —
+  'Aliasing violation: reference 9 already has Exclusive' in the new
+  publish_runtime_std_mir_emissions_v1: 'val selection = self.ctx....!' held
+  an Exclusive borrow on self.ctx across the source loop while
+  self.ctx.add_error re-acquired Exclusive inside it. Fix: never bind the
+  unwrapped aggregate — hoist its two used scalars via inline '.?.field'
+  chains before the loop (the pattern cold_full_index_producer_v1.spl:139-140
+  already uses and the seed accepts).
+- Closure-verified corrections (2026-10-12, supersedes the masked standalone
+  diagnoses): (1) archive_borrowed_module_v1.spl — the itemized
+  MirHirDeclarationRepositoryV1/MirHirModuleDeclarationsV1 import IS
+  closure-effective (0 'cannot infer field type' in the entry-closure build);
+  the prior 'persists' report was the stale-snapshot bulk build. Root cause
+  remains: hir_declaration_types_v1.spl exports NOTHING and the summary
+  module's 'export use ... .*' re-export does not materialize under the seed.
+  (2) driver_pipeline_lowering.spl — true root: 'for source in
+  self.ctx.sources' holds an Exclusive borrow on self.ctx (reference 9) for
+  the whole loop, so EVERY inner self.ctx access (read probes and
+  self.ctx.add_error alike) re-acquired it. Scalar hoisting of the selection
+  alone could not cure that. Fix: snapshot ALL six self.ctx fields the loop
+  touches into locals BEFORE the loop (sources, cold_hir_typed_receipts,
+  mir_modules, runtime_std_cfg_decisions, native_target,
+  runtime_std_hir_emissions); no self.ctx borrow is live inside the loop, so
+  add_error's Exclusive acquisition is uncontended. Closure-verified: 0
+  'Capability error/Aliasing' lines. Both verified with admitted binary
+  cd1601c9 (sha matches admission.env) via entry-closure builds; the residual
+  failures in those runs are the old binary's builtin-class receipts
+  (Option/Result/Dict, fixed in fe1f4ed6d72) and shard-inventory
+  infrastructure, not these files.
+- Full-closure-safe restructures (2026-10-12, on top of a791b5e5cd1): the
+  single-file entry-closure passes were necessary but not sufficient — the
+  interference is bulk-context registry/borrow state. (1)
+  archive_borrowed_module_v1.spl: every registry-projection element is now
+  bound to an explicitly annotated local before any field read — 'val
+  primary: MirHirModuleDeclarationsV1 = ...', and the nested globals loops
+  rewritten to index-based iteration with 'val global/own_global:
+  MirHirGlobalDeclarationV1 = ...[i]' (for-in element types degrade to ANY
+  in the bulk closure; the annotation pins the real type).
+  MirHirGlobalDeclarationV1 added to the itemized import. (2)
+  driver_pipeline_lowering.spl: the source loop is now index-based
+  ('while source_idx < sources.len(): val source = sources[source_idx]'),
+  keeping the six field snapshots — the for-iterator itself held the
+  Exclusive borrow (reference 9) across the body. (3) Preventive scan of the
+  43c3f3d979a/4bec5687ee6 sibling files: declaration_default_bindings_v1
+  already annotates its element bindings; declaration_default_rewrite_v1
+  iterates only local collections; mir_lowering_types.spl:914 iterates a
+  self field but never touches self inside the loop — all safe, no changes.
+  Entry-closure validation (admitted cd1601c9, snapshots c24e5dd2 / file-2
+  snapshot contain the restructures): 0 'cannot infer field type' and 0
+  'Capability error/Aliasing' lines respectively. Real confirmation: next
+  bulk build.

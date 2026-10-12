@@ -1,0 +1,172 @@
+# @tag:in-development
+# @req REQ-TRC-017
+# @ac AC-TRC-028
+# Pure delta fixtures target exact candidate reconciliation and cold graph parity.
+use std.spec.*
+use std.common.traceability.model.*
+use std.common.traceability.incremental.*
+use std.common.traceability.sdn_codec.{encode_trace_document}
+use app.traceability.extract.snapshot_pipeline.{TraceSnapshotScope, TraceSnapshotBuild, build_snapshot_trace_graph}
+use app.traceability.extract.snapshot_delta.*
+
+fn delta_base() -> SnapshotInput:
+    SnapshotInput(subject: SnapshotSubject(repository_id: "repo:delta", snapshot_id: "snap:base",
+        kind: "git_tree", revision_id: "rev:base", tree_id: "tree:base", object_format: "sha256"),
+        artifacts: [
+            SnapshotArtifact(path: "src/app/a.spl", blob_id: "blob:a1", content: "fn a(): 1", visibility: "selected_content"),
+            SnapshotArtifact(path: "test/01_unit/app/a_spec.spl", blob_id: "blob:t1", content: "# old", visibility: "selected_content"),
+            SnapshotArtifact(path: "test/01_unit/app/kept_spec.spl", blob_id: "blob:keep", content: "# retained", visibility: "selected_content")], complete: true)
+
+fn delta_candidate() -> SnapshotInput:
+    SnapshotInput(subject: SnapshotSubject(repository_id: "repo:delta", snapshot_id: "snap:candidate",
+        kind: "git_tree", revision_id: "rev:candidate", tree_id: "tree:candidate", object_format: "sha256"),
+        artifacts: [
+            SnapshotArtifact(path: "src/app/a.spl", blob_id: "blob:a2", content: "fn a(): 2", visibility: "selected_content"),
+            SnapshotArtifact(path: "test/01_unit/app/b_spec.spl", blob_id: "blob:t2", content: "# new", visibility: "selected_content"),
+            SnapshotArtifact(path: "test/01_unit/app/kept_spec.spl", blob_id: "blob:keep", content: "# retained", visibility: "selected_content")], complete: true)
+
+fn delta_policy() -> TracePolicy:
+    TracePolicy(id: "policy:delta", conventions: [TraceConventionRule(id: "app-unit", source_root: "src/app/",
+        target_root: "test/01_unit/app/", source_suffix: ".spl", target_suffix: "_spec.spl",
+        relation: TraceRelation.Targets, version: "1")], authorities: [], max_nodes: 100, max_claims: 100)
+
+fn delta_scope() -> TraceSnapshotScope:
+    TraceSnapshotScope(selected_roots: ["src/app", "test/01_unit/app"], authority_id: "", closure_kind: "selected_scope")
+
+fn delta_invalidations(complete_inventory: bool, identity_changed: bool, membership_changed: bool) -> TraceInvalidationInput:
+    val identities = if identity_changed: ["req:new"] else: []
+    val memberships = if membership_changed: ["suite:one"] else: []
+    TraceInvalidationInput(known_paths: [], changed_paths: [], changed_identities: identities,
+        changed_memberships: memberships, changed_configurations: [],
+        dependencies: [
+            TraceDependency(owner_path: "test/01_unit/app/kept_spec.spl", kind: TraceDependencyKind.MissingIdentity, key: "req:new"),
+            TraceDependency(owner_path: "test/01_unit/app/kept_spec.spl", kind: TraceDependencyKind.Membership, key: "suite:one")],
+        dependency_inventory_complete: complete_inventory, policy_changed: false,
+        extractor_changed: false, schema_changed: false, max_affected: 100)
+
+fn delta_sdn(build: TraceSnapshotBuild) -> Result<text, text>:
+    match encode_trace_document(TraceDocument(schema_name: "simple.trace.graph", schema_version: 1, graph: build.graph)):
+        case Ok(source): Ok(source)
+        case Err(issues): Err("graph encoding failed: " + issues[0].message)
+
+describe "Exact snapshot delta reconciliation (in-development)":
+    it "matches an independent cold build after add, replace and delete operations":
+        # @ac AC-TRC-028
+        val base = delta_base()
+        val candidate = delta_candidate()
+        val delta = TraceSnapshotDelta(removed_paths: ["test/01_unit/app/a_spec.spl"], upserted_artifacts: [
+            candidate.artifacts[0], candidate.artifacts[1]])
+        val result = build_snapshot_trace_delta(base, candidate, delta, [], delta_policy(), delta_scope(), delta_invalidations(true, true, true))
+        match result:
+            case Err(reason): fail(reason)
+            case Ok(composed):
+                match build_snapshot_trace_graph(candidate, delta_policy(), [], delta_scope()):
+                    case Err(reason): fail(reason)
+                    case Ok(cold):
+                        match delta_sdn(composed.build):
+                            case Err(reason): fail(reason)
+                            case Ok(composed_sdn):
+                                match delta_sdn(cold):
+                                    case Err(reason): fail(reason)
+                                    case Ok(cold_sdn):
+                                        expect(composed_sdn).to_equal(cold_sdn)
+                                        expect(composed.reused_base_facts).to_equal(false)
+                                        expect(composed.invalidation.complete).to_equal(true)
+                                        expect(composed.invalidation.affected_paths.contains("src/app/a.spl")).to_equal(true)
+                                        expect(composed.invalidation.affected_paths.contains("test/01_unit/app/a_spec.spl")).to_equal(true)
+                                        expect(composed.invalidation.affected_paths.contains("test/01_unit/app/b_spec.spl")).to_equal(true)
+                                        expect(composed.invalidation.affected_paths.contains("test/01_unit/app/kept_spec.spl")).to_equal(true)
+
+    it "rejects same-count candidates with different exact artifact content":
+        val candidate = delta_candidate()
+        var altered = candidate
+        var changed = altered.artifacts[1]
+        changed.content = "# substituted content"
+        altered.artifacts = [altered.artifacts[0], changed, altered.artifacts[2]]
+        val delta = TraceSnapshotDelta(removed_paths: ["test/01_unit/app/a_spec.spl"], upserted_artifacts: [candidate.artifacts[0], candidate.artifacts[1]])
+        match build_snapshot_trace_delta(delta_base(), altered, delta, [], delta_policy(), delta_scope(), delta_invalidations(true, true, true)):
+            case Ok(_): fail("same-count but different candidate content was accepted")
+            case Err(reason): expect(reason).to_contain("differs from exact candidate")
+
+    it "invalidates an unchanged owner through negative and membership dependencies":
+        val base = delta_base()
+        val candidate = delta_candidate()
+        val delta = TraceSnapshotDelta(removed_paths: ["test/01_unit/app/a_spec.spl"], upserted_artifacts: [candidate.artifacts[0], candidate.artifacts[1]])
+        match build_snapshot_trace_delta(base, candidate, delta, [], delta_policy(), delta_scope(), delta_invalidations(true, true, false)):
+            case Err(reason): fail(reason)
+            case Ok(result):
+                expect(result.invalidation.full_rebuild).to_equal(false)
+                expect(result.invalidation.complete).to_equal(true)
+                expect(result.invalidation.affected_paths.contains("test/01_unit/app/kept_spec.spl")).to_equal(true)
+        match build_snapshot_trace_delta(base, candidate, delta, [], delta_policy(), delta_scope(), delta_invalidations(true, false, true)):
+            case Err(reason): fail(reason)
+            case Ok(result): expect(result.invalidation.affected_paths.contains("test/01_unit/app/kept_spec.spl")).to_equal(true)
+
+    it "forces a full rebuild when the dependency inventory is incomplete":
+        val base = delta_base()
+        val candidate = delta_candidate()
+        val delta = TraceSnapshotDelta(removed_paths: ["test/01_unit/app/a_spec.spl"], upserted_artifacts: [candidate.artifacts[0], candidate.artifacts[1]])
+        match build_snapshot_trace_delta(base, candidate, delta, [], delta_policy(), delta_scope(), delta_invalidations(false, true, true)):
+            case Err(reason): fail(reason)
+            case Ok(result):
+                expect(result.invalidation.full_rebuild).to_equal(true)
+                expect(result.invalidation.complete).to_equal(true)
+                expect(result.invalidation.affected_paths.contains("test/01_unit/app/kept_spec.spl")).to_equal(true)
+
+    it "rejects a candidate that omits an unchanged base artifact":
+        val complete = delta_candidate()
+        var omitted = complete
+        omitted.artifacts = [complete.artifacts[0], complete.artifacts[1]]
+        val delta = TraceSnapshotDelta(removed_paths: ["test/01_unit/app/a_spec.spl"], upserted_artifacts: [complete.artifacts[0], complete.artifacts[1]])
+        match build_snapshot_trace_delta(delta_base(), omitted, delta, [], delta_policy(), delta_scope(), delta_invalidations(true, true, true)):
+            case Ok(_): fail("candidate omission was accepted because its delta had fewer artifacts")
+            case Err(reason): expect(reason).to_contain("differs from exact candidate")
+
+    it "rejects duplicate candidate paths":
+        val candidate = delta_candidate()
+        var duplicate = candidate
+        duplicate.artifacts = candidate.artifacts + [candidate.artifacts[0]]
+        val delta = TraceSnapshotDelta(removed_paths: ["test/01_unit/app/a_spec.spl"], upserted_artifacts: candidate.artifacts)
+        match build_snapshot_trace_delta(delta_base(), duplicate, delta, [], delta_policy(), delta_scope(), delta_invalidations(true, true, true)):
+            case Ok(_): fail("duplicate candidate path was accepted")
+            case Err(reason): expect(reason).to_contain("differs from exact candidate")
+
+    it "rejects blob and visibility changes against the composed artifact":
+        val candidate = delta_candidate()
+        val delta = TraceSnapshotDelta(removed_paths: ["test/01_unit/app/a_spec.spl"], upserted_artifacts: candidate.artifacts)
+        var wrong_blob = candidate
+        var blob_artifact = wrong_blob.artifacts[0]
+        blob_artifact.blob_id = "blob:other"
+        wrong_blob.artifacts = [blob_artifact, wrong_blob.artifacts[1], wrong_blob.artifacts[2]]
+        match build_snapshot_trace_delta(delta_base(), wrong_blob, delta, [], delta_policy(), delta_scope(), delta_invalidations(true, true, true)):
+            case Ok(_): fail("candidate blob mismatch was accepted")
+            case Err(reason): expect(reason).to_contain("differs from exact candidate")
+        var wrong_visibility = candidate
+        var visibility_artifact = wrong_visibility.artifacts[1]
+        visibility_artifact.visibility = "metadata_only"
+        wrong_visibility.artifacts = [wrong_visibility.artifacts[0], visibility_artifact, wrong_visibility.artifacts[2]]
+        match build_snapshot_trace_delta(delta_base(), wrong_visibility, delta, [], delta_policy(), delta_invalidations(true, true, true)):
+            case Ok(_): fail("candidate visibility mismatch was accepted")
+            case Err(reason): expect(reason).to_contain("differs from exact candidate")
+
+    it "rejects incompatible candidate subjects and incomplete candidates":
+        var candidate = delta_candidate()
+        var wrong_subject = candidate.subject
+        wrong_subject.repository_id = "repo:other"
+        candidate.subject = wrong_subject
+        val delta = TraceSnapshotDelta(removed_paths: ["test/01_unit/app/a_spec.spl"], upserted_artifacts: delta_candidate().artifacts)
+        match build_snapshot_trace_delta(delta_base(), candidate, delta, [], delta_policy(), delta_scope(), delta_invalidations(true, true, true)):
+            case Ok(_): fail("incompatible candidate subject was accepted")
+            case Err(reason): expect(reason).to_contain("compatible complete base")
+        candidate = delta_candidate()
+        candidate.complete = false
+        match build_snapshot_trace_delta(delta_base(), candidate, delta, [], delta_policy(), delta_scope(), delta_invalidations(true, true, true)):
+            case Ok(_): fail("incomplete candidate was accepted")
+            case Err(reason): expect(reason).to_contain("differs from exact candidate")
+
+    it "rejects removals absent from the base inventory":
+        val candidate = delta_candidate()
+        val delta = TraceSnapshotDelta(removed_paths: ["src/app/not-present.spl"], upserted_artifacts: candidate.artifacts)
+        match build_snapshot_trace_delta(delta_base(), candidate, delta, [], delta_policy(), delta_scope(), delta_invalidations(true, true, true)):
+            case Ok(_): fail("nonexistent base removal was accepted")
+            case Err(reason): expect(reason).to_contain("absent from base inventory")
