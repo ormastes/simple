@@ -1,0 +1,36 @@
+#!/bin/sh
+# @req BOOTSTRAP-COMPILER-HEADROOM-001
+# Additional boundary controls, separate from the already passed parser suite.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+. "$root/scripts/bootstrap/lib/tree-rss-policy.shs"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/compiler-headroom-boundary.XXXXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB BOOTSTRAP_TREE_RSS_MEMINFO_PATH BOOTSTRAP_TREE_RSS_TEST_FIXTURE
+unset SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE
+export SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=6291456
+bootstrap_tree_rss_resolve 8 ''
+[ "$bootstrap_tree_rss_cap_kib:$bootstrap_tree_rss_ceiling_kib:$bootstrap_tree_rss_ceiling_admission" = '6291456:6835937:default' ]
+export SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=12582912 SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=12582913
+if bootstrap_tree_rss_resolve 8 ''; then echo 'FAIL cap above request' >&2; exit 1; fi
+[ "$bootstrap_tree_rss_ceiling_admission" = refused ]
+export SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=6835937 SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=6291456
+if bootstrap_tree_rss_resolve 8 ''; then echo 'FAIL non-elevated override' >&2; exit 1; fi
+export SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=12582912 SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=12582912
+export BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1
+if bootstrap_tree_rss_resolve 8 ''; then echo 'FAIL fixture hook' >&2; exit 1; fi
+unset BOOTSTRAP_TREE_RSS_TEST_FIXTURE
+guard_refusal() {
+  label=$1; shift
+  if perl "$root/scripts/resource/process-tree-rss-watchdog.pl" \
+    --receipt="$scratch/$label.env" --compiler-jobs=8 "$@" -- /bin/sh -c 'exit 99' >"$scratch/$label.log" 2>&1; then
+    echo "FAIL $label accepted" >&2; exit 1
+  else code=$?; fi
+  [ "$code" = 125 ] && grep -q '^compiler_ceiling_admission=refused$' "$scratch/$label.env"
+}
+guard_refusal cap_above --compiler-ceiling-kib=12582912 --max-rss-kib=12582913
+guard_refusal not_elevated --compiler-ceiling-kib=6835937 --max-rss-kib=6291456
+export SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE=1
+guard_refusal fixture --compiler-ceiling-kib=12582912 --max-rss-kib=12582912
+unset SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE
+printf 'PASS compiler headroom: 7 additional default/boundary/fixture controls\n'
