@@ -400,3 +400,32 @@ with SDKROOT/MACOSX_DEPLOYMENT_TARGET from `xcrun --sdk macosx`):
   self.current_module_id (the binding-twin at :6506 already does). Hardening
   also recommended: always-on receipt when a match arm's enum pattern has no
   registry entry (currently silent degradation).
+
+### Addendum 7 implementation status (c556a66e4fd follow-up)
+
+IMPLEMENTED the recorded B5b compiler fix (pending next admission for
+functional validation — the admitted binary predates the fix, so the fast
+repro cannot flip green until the next stage-2 build):
+1. expr_dispatch.spl NamedVar arm: owner-qualified retry — when the flat
+   short-name resolution yields a symbol id that is neither a local nor a
+   registered global read, and the symbol's defining_module differs from
+   self.current_module_id, retry via symbols.lookup_qualified_type_raw(owner,
+   name) before the "undefined variable" error. Declaring-module registration
+   is authoritative over importer pre-registrations.
+2. expr_dispatch.spl B5b diagnostic now carries self.current_module_id (the
+   binding twin at the :6506-class message already did).
+3. convert_nodes.spl: the match-pattern degradation receipt
+   ([match-pat] convert_flat_pattern DROPPED to wildcard: tag=N) is now
+   ALWAYS ON (was gated behind SIMPLE_DEBUG_MATCH_PAT), so a degraded arm is
+   attributable at parse time instead of surfacing as a location-blind B5b
+   much later.
+
+Controls run with the OLD admitted binary (expected: repro unchanged until
+admission): parser.spl repro exit 1 with B5b (repro intact); sdn/value.spl
+alone exit 0; stage2_module_path_naming fixture exit 0 with correct output;
+db_atomic 50-module closure still shows B5b + 3x "unsupported Result tuple
+payload element type" (the Result-tuple-payload family is tracked separately
+and may need the same owner-qualified treatment in the enum-payload
+materialization path on the next iteration). Seed semantics of all changed
+files identical to pristine (only the pre-existing sffi_env_get standalone
+artifact). Functional validation: next matrix/admission run.
