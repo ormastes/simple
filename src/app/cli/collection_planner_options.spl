@@ -1,0 +1,67 @@
+# Shared command-line admission for typed physical collection planning.
+struct CollectionPlannerOptions:
+    policy: text = "moderate"
+    memory_budget_bytes: i64 = -1
+    specified: bool = false
+    error: text = ""
+
+fn collection_planner_options(args: [text]) -> CollectionPlannerOptions:
+    var result = CollectionPlannerOptions()
+    var policy_seen = false
+    var budget_seen = false
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--": break
+        var flag = ""
+        var value = ""
+        for name in ["--collection-policy", "--collection-memory-budget"]:
+            if arg == name:
+                flag = name
+                i = i + 1
+                if i >= args.len() or args[i].starts_with("--"):
+                    result.error = "{name} requires a value"
+                    return result
+                value = args[i]
+            elif arg.starts_with("{name}="):
+                flag = name
+                value = arg.substring(name.len() + 1)
+        if flag != "":
+            result.specified = true
+            if value == "":
+                result.error = "{flag} requires a value"
+                return result
+            if flag == "--collection-policy":
+                if policy_seen:
+                    result.error = "duplicate --collection-policy"
+                    return result
+                policy_seen = true
+                if value != "moderate" and value != "strict" and value != "robust" and value != "critical":
+                    result.error = "--collection-policy expects moderate, strict, robust, or critical"
+                    return result
+                result.policy = value
+            else:
+                if budget_seen:
+                    result.error = "duplicate --collection-memory-budget"
+                    return result
+                budget_seen = true
+                var budget: i64 = 0
+                for offset in 0..value.len():
+                    val digit = value.char_code_at(offset) - 48
+                    if digit < 0 or digit > 9:
+                        result.error = "--collection-memory-budget expects a nonnegative integer"
+                        return result
+                    # Guard BEFORE multiplication/addition; to_i64 may wrap on
+                    # an older runtime and is not an admission boundary.
+                    if budget > (9223372036854775807 - digit) / 10:
+                        result.error = "--collection-memory-budget exceeds i64"
+                        return result
+                    budget = budget * 10 + digit
+                result.memory_budget_bytes = budget
+        i = i + 1
+    result
+
+fn collection_planner_fingerprint(options: CollectionPlannerOptions) -> text:
+    "collection-plan-v1|policy={options.policy}|memory={options.memory_budget_bytes}"
+
+export CollectionPlannerOptions, collection_planner_options, collection_planner_fingerprint
