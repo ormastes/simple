@@ -1,0 +1,61 @@
+# DBC-003/005/018/020; AT-01/05/11/25. Source regressions are not remote acceptance.
+use std.spec.{describe, it, expect}
+use app.llm_caret.workbench.distributed_host_registry_sdn_v2.*
+use app.llm_caret.workbench.distributed_host_roles_v2.*
+
+fn registry_role_source(role: text) -> text:
+    "    {role}:\n      identity: {role}\n      credential_reference: secret://roles/{role}\n      revision: 1\n      revoked: false\n"
+
+fn registry_host_source() -> text:
+    "  - host_id: worker_1\n    host_key_digest: " + "a".repeat(64) + "\n" +
+        registry_role_source("ssh_account") + registry_role_source("provider_profile") +
+        registry_role_source("node_identity") + registry_role_source("signer_identity")
+
+fn registry_source() -> text:
+    "schema: distributed-host-registry-v2\nrevision: 7\nhosts:\n" + registry_host_source()
+
+fn registry_decode_error(source: text) -> text:
+    match distributed_host_registry_decode_v2(source):
+        case Ok(value): ""
+        case Err(reason): reason
+
+describe "strict distributed host registry SDN":
+    it "decodes actual nested role records without reading credentials":
+        match distributed_host_registry_decode_v2(registry_source()):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(hosts):
+                expect(hosts.len()).to_equal(1)
+                expect(hosts[0].host_id).to_equal("worker_1")
+                expect(hosts[0].registry_revision).to_equal(7)
+                expect(hosts[0].signer_identity.credential_reference).to_equal("secret://roles/signer_identity")
+
+    it "rejects duplicate top-level and nested credential keys":
+        expect(registry_decode_error(registry_source() + "revision: 8\n")).to_equal("HOST_CONFIG_DUPLICATE_KEY")
+        val nested = registry_source().replace("      revision: 1\n", "      revision: 1\n      revision: 2\n")
+        expect(registry_decode_error(nested)).to_equal("HOST_CONFIG_DUPLICATE_KEY")
+
+    it "rejects unknown and missing fields instead of applying defaults":
+        expect(registry_decode_error(registry_source() + "extra: true\n")).to_equal("HOST_CONFIG_FIELDS")
+        expect(registry_decode_error(registry_source().replace("signer_identity:", "unknown_role:"))).to_equal("HOST_CONFIG_FIELDS")
+
+    it "rejects wrong schema, revision type and boolean coercion":
+        expect(registry_decode_error(registry_source().replace("distributed-host-registry-v2", "distributed-host-registry-v1"))).to_equal("HOST_CONFIG_SCHEMA")
+        expect(registry_decode_error(registry_source().replace("revision: 7", "revision: \"7\""))).to_equal("HOST_CONFIG_TYPE")
+        expect(registry_decode_error(registry_source().replace("revoked: false", "revoked: \"false\""))).to_equal("HOST_CONFIG_TYPE")
+
+    it "preserves revocation and rejects subsequent role use":
+        val source = registry_source().replace("revoked: false", "revoked: true")
+        match distributed_host_registry_decode_v2(source):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(hosts):
+                expect(hosts[0].signer_identity.revoked).to_equal(true)
+                match distributed_host_roles_resolve_v2(hosts, "worker_1", "a".repeat(64), 7):
+                    case Ok(value): expect("accepted revoked role").to_equal("ROLE_REVOKED")
+                    case Err(reason): expect(reason).to_equal("ROLE_REVOKED")
+
+    it "rejects duplicate enrolled IDs and bounds input before parsing":
+        val repeated = "schema: distributed-host-registry-v2\nrevision: 7\nhosts:\n" + registry_host_source() + registry_host_source()
+        expect(registry_decode_error(repeated)).to_equal("HOST_REGISTRY_DUPLICATE")
+        expect(registry_decode_error("x".repeat(65537))).to_equal("HOST_CONFIG_SIZE")
+        val oversized = "schema: distributed-host-registry-v2\nrevision: 7\nhosts: [" + "null,".repeat(128) + "null]\n"
+        expect(registry_decode_error(oversized)).to_equal("HOST_CONFIG_CAPACITY")

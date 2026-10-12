@@ -1,0 +1,82 @@
+# DBC-002, DBC-003, DBC-005, DBC-020: exact scope and environment rejection.
+use std.spec.{describe, it, expect}
+use std.common.contracts.distributed_control_v2.*
+
+fn environment() -> ExecutionEnvironmentV2:
+    ExecutionEnvironmentV2(host_id: "worker_1", execution_platform: "windows_x64",
+        target_platform: "windows_x64", test_runtime: "windows_native",
+        isolation_class: "native-container", toolchain_digest: "a".repeat(64),
+        sdk_digest: "b".repeat(64), abi: "msvc", isa: "baseline", optimization: "release")
+
+fn grant() -> ExecutionGrantV2:
+    ExecutionGrantV2(id: "grant_1", principal: "user_1", project: "project_1",
+        host_id: "worker_1", operations: ["build", "test"], environment_digest: "c".repeat(64),
+        policy_revision: 4, revocation_epoch: 2, expires_at: 200,
+        maximum_memory_bytes: 1024, maximum_duration_ms: 1000)
+
+fn request() -> OperationEnvelopeV2:
+    OperationEnvelopeV2(version: 2, id: "operation_1", payload_digest: "d".repeat(64),
+        principal: "user_1", project: "project_1", host_id: "worker_1", operation: "build",
+        environment_digest: "c".repeat(64), policy_revision: 4, revocation_epoch: 2,
+        session_generation: 3, memory_bytes: 1024, duration_ms: 1000)
+
+describe "distributed control V2 admission contracts":
+    it "accepts an exact valid observed environment":
+        expect(distributed_environment_match_v2(environment(), environment())).to_equal("")
+
+    it "rejects cross compilation as a replacement for requested native execution":
+        var observed = environment()
+        observed.execution_platform = "linux_x64"
+        expect(distributed_environment_match_v2(environment(), observed)).to_equal("ENV_NO_MATCH_EXECUTION")
+
+    it "rejects emulated tests and weaker isolation independently":
+        var observed = environment()
+        observed.test_runtime = "wine"
+        expect(distributed_environment_match_v2(environment(), observed)).to_equal("ENV_NO_MATCH_TEST_RUNTIME")
+        observed = environment()
+        observed.isolation_class = "native-process"
+        expect(distributed_environment_match_v2(environment(), observed)).to_equal("ENV_NO_MATCH_ISOLATION")
+
+    it "rejects invalid digests before comparison":
+        var observed = environment()
+        observed.sdk_digest = "not_a_digest"
+        expect(distributed_environment_match_v2(environment(), observed)).to_equal("ENV_DIGEST_INVALID")
+
+    it "accepts a current exact grant at its resource boundary":
+        expect(distributed_grant_authorize_v2(grant(), request(), 100, 4, 2, 3)).to_equal("")
+
+    it "rejects exact expiry and revocation even for otherwise authorized requests":
+        expect(distributed_grant_authorize_v2(grant(), request(), 200, 4, 2, 3)).to_equal("GRANT_EXPIRED")
+        expect(distributed_grant_authorize_v2(grant(), request(), 100, 4, 3, 3)).to_equal("GRANT_REVOKED")
+
+    it "rejects old policies and replaced sessions":
+        expect(distributed_grant_authorize_v2(grant(), request(), 100, 5, 2, 3)).to_equal("POLICY_STALE")
+        expect(distributed_grant_authorize_v2(grant(), request(), 100, 4, 2, 4)).to_equal("SESSION_STALE")
+
+    it "rejects project escape and environment substitution":
+        var value = request()
+        value.project = "other_project"
+        expect(distributed_grant_authorize_v2(grant(), value, 100, 4, 2, 3)).to_equal("SCOPE_DENIED")
+        value = request()
+        value.environment_digest = "e".repeat(64)
+        expect(distributed_grant_authorize_v2(grant(), value, 100, 4, 2, 3)).to_equal("ENVIRONMENT_DENIED")
+
+    it "does not widen build authority to deployment":
+        var value = request()
+        value.operation = "deploy"
+        expect(distributed_grant_authorize_v2(grant(), value, 100, 4, 2, 3)).to_equal("OPERATION_DENIED")
+
+    it "rejects over-budget and nonpositive requests":
+        var value = request()
+        value.memory_bytes = 1025
+        expect(distributed_grant_authorize_v2(grant(), value, 100, 4, 2, 3)).to_equal("BUDGET_EXCEEDED")
+        value.memory_bytes = 0
+        expect(distributed_grant_authorize_v2(grant(), value, 100, 4, 2, 3)).to_equal("BUDGET_INVALID")
+
+    it "rejects legacy envelope interpretation and malformed command identity":
+        var value = request()
+        value.version = 1
+        expect(distributed_grant_authorize_v2(grant(), value, 100, 4, 2, 3)).to_equal("VERSION_UNSUPPORTED")
+        value = request()
+        value.id = "command; injected"
+        expect(distributed_grant_authorize_v2(grant(), value, 100, 4, 2, 3)).to_equal("IDENTITY_INVALID")

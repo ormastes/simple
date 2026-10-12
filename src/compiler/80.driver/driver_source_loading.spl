@@ -1346,6 +1346,16 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
         return mapped
     ""
 
+fn _driver_nested_compiler_owner_rel_v1(module_path: text) -> text:
+    # These declared compiler families retain same-name nested owners behind
+    # their compatibility facades. Do not invent nested fallback for libraries
+    # or arbitrary packages, and do not duplicate an explicit nested spelling.
+    for family in ["blocks", "mir_opt", "backend", "loader"]:
+        val prefix = "compiler." + family + "."
+        if module_path.starts_with(prefix) and not module_path.starts_with(prefix + family + "."):
+            return family + "/" + family + "/" + module_path.substring(prefix.len()).replace(".", "/")
+    ""
+
 pub fn _driver_resolve_source_root_entry_import_v1(module_path: text, source_roots: [text]) -> SourceRootResolutionV1:
     _driver_resolve_source_root_entry_import_from_v1(module_path, source_roots, "")
 
@@ -1358,6 +1368,7 @@ pub fn _driver_resolve_source_root_entry_import_from_v1(module_path: text, sourc
     var probe = module_path
     while probe != "":
         val segments = probe.split(".")
+        val nested = _driver_nested_compiler_owner_rel_v1(probe)
         for source_root in source_roots:
             if source_root.ends_with(".spl"): continue
             var root = source_root
@@ -1375,12 +1386,26 @@ pub fn _driver_resolve_source_root_entry_import_from_v1(module_path: text, sourc
                         if _driver_source_root_hit_allowed_v1(path, probe == module_path): return selected
                     case SourceRootResolutionV1.Ambiguous(_): return selected
                     case SourceRootResolutionV1.Missing: ()
+                # Probe the declared nested leaf before parent stripping can
+                # incorrectly alias its package facade to the requested leaf.
+                if root_name == "compiler" and nested != "":
+                    val nested_selected = _driver_try_numbered_entry_import_rel_checked_v1(root, nested)
+                    match nested_selected:
+                        case SourceRootResolutionV1.Found(_): return nested_selected
+                        case SourceRootResolutionV1.Ambiguous(_): return nested_selected
+                        case SourceRootResolutionV1.Missing: ()
             val selected = _driver_try_numbered_entry_import_rel_checked_v1(root, probe.replace(".", "/"))
             match selected:
                 case SourceRootResolutionV1.Found(path):
                     if _driver_source_root_hit_allowed_v1(path, probe == module_path): return selected
                 case SourceRootResolutionV1.Ambiguous(_): return selected
                 case SourceRootResolutionV1.Missing: ()
+            if nested != "":
+                val nested_selected = _driver_try_numbered_entry_import_rel_checked_v1(root, "compiler/" + nested)
+                match nested_selected:
+                    case SourceRootResolutionV1.Found(_): return nested_selected
+                    case SourceRootResolutionV1.Ambiguous(_): return nested_selected
+                    case SourceRootResolutionV1.Missing: ()
         # Parent stripping (`use module.item`) must not outrank the checkout
         # resolver at the SAME spelling. The checkout owns layout rewrites the
         # roots cannot see (`compiler.backend.X` -> 70.backend/backend/X,

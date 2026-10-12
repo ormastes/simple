@@ -5470,13 +5470,18 @@ impl MirLowering:
         match body.kind:
             case Var(symbol):
                 val sid = mir_expr_symbol_id_value(symbol)
-                if sid >= 0 and not int_list_contains(param_syms, sid) and not int_list_contains(acc, sid):
+                # A record constructor names a declaration, not a runtime
+                # binding captured from the enclosing activation. Retain the
+                # exact symbol owner; never classify by a bare name.
+                val is_record_declaration = self.symbols.record_owner_identity_scalar_raw(sid) != ""
+                if sid >= 0 and not is_record_declaration and not int_list_contains(param_syms, sid) and not int_list_contains(acc, sid):
                     acc.push(sid)
                 else:
                     acc
             case NamedVar(symbol, name):
                 val sid = mir_expr_symbol_id_value(symbol)
-                if sid >= 0 and not int_list_contains(param_syms, sid) and not self.is_known_top_level_function(name, symbol) and not int_list_contains(acc, sid):
+                val is_record_declaration = self.symbols.record_owner_identity_scalar_raw(sid) != ""
+                if sid >= 0 and not is_record_declaration and not int_list_contains(param_syms, sid) and not self.is_known_top_level_function(name, symbol) and not int_list_contains(acc, sid):
                     acc.push(sid)
                 else:
                     acc
@@ -6256,6 +6261,8 @@ impl MirLowering:
                 lw.bitfield_map = self.bitfield_map
                 lw.struct_field_order = self.struct_field_order
                 lw.struct_field_type_name = self.struct_field_type_name
+                lw.struct_field_type_ownership_key = self.struct_field_type_ownership_key
+                lw.struct_field_hir_type = self.struct_field_hir_type
                 lw.struct_field_repr_name = self.struct_field_repr_name
                 lw.struct_field_array_element_type_name = self.struct_field_array_element_type_name
                 lw.struct_field_array_elem_type = self.struct_field_array_elem_type
@@ -7199,8 +7206,21 @@ impl MirLowering:
         val indirect_result = self.emit_function_value_call(callee_local, arg_operands, sig, ret_type)
         if val result_hir = indirect_hir_return:
             self.remember_local_hir_type(indirect_result.id, result_hir, 0, 0)
-            if result_hir.kind == HirTypeKind.Any:
-                self.mark_runtime_value_local(indirect_result.id)
+            match result_hir.kind:
+                case HirTypeKind.Named(owner, _):
+                    if val declaration = self.symbols.get_symbol_raw(owner.id):
+                        val layout_key = self.composite_layout_key(declaration)
+                        if self.struct_field_order.has(layout_key):
+                            self.struct_value_syms[indirect_result.id] = layout_key
+                case HirTypeKind.Optional(_):
+                    self.option_value_locals[indirect_result.id] = true
+                    self.mark_runtime_value_local(indirect_result.id)
+                case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                    self.runtime_array_locals[indirect_result.id] = true
+                    self.mark_runtime_value_local(indirect_result.id)
+                case HirTypeKind.Any:
+                    self.mark_runtime_value_local(indirect_result.id)
+                case _: ()
         indirect_result
 
     me emit_function_value_call(callee_local: LocalId, arg_operands: [MirOperand], sig: MirSignature, ret_type: MirType) -> LocalId:

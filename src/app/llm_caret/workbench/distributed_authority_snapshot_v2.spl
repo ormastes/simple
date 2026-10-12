@@ -1,0 +1,67 @@
+# HostAuthority-private cold publisher/query boundary. Never deserialize this
+# key registry from a client request. Publication authentication is external.
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.contracts.distributed_control_v2.*
+use std.common.contracts.distributed_authority_v2.*
+use app.llm_caret.workbench.distributed_grant_verification_v2.*
+
+struct DistributedAuthoritySnapshotV2:
+    generation: i64
+    policy_revision: i64
+    revocation_epoch: i64
+    keys: Dict<text, DistributedAuthorityKeyV2>
+
+fn distributed_authority_lookup_id_v2(role: text, identity: text) -> text:
+    role + "/" + identity
+
+# Validate once on protected publication; command queries use the index.
+fn distributed_authority_snapshot_create_v2(keys: [DistributedAuthorityKeyV2],
+        generation: i64, policy_revision: i64,
+        revocation_epoch: i64) -> Result<DistributedAuthoritySnapshotV2, text>:
+    if generation <= 0 or policy_revision <= 0 or revocation_epoch < 0:
+        return Err("AUTHORITY_SNAPSHOT_CONFIGURATION_INVALID")
+    if keys.len() == 0 or keys.len() > 128:
+        return Err("AUTHORITY_SNAPSHOT_CAPACITY_INVALID")
+    var index: Dict<text, DistributedAuthorityKeyV2> = {}
+    for key in keys:
+        if key.role != "grant-issuer" and key.role != "human-approver":
+            return Err("AUTHORITY_KEY_ROLE_INVALID")
+        if not builder_identifier_valid_v1(key.identity) or not builder_identifier_valid_v1(key.principal) or
+                not builder_identifier_valid_v1(key.project) or not builder_identifier_valid_v1(key.host_id) or
+                key.revision <= 0 or key.public_key.len() != 32 or key.expires_at <= 0 or
+                key.maximum_memory_bytes <= 0 or key.maximum_duration_ms <= 0:
+            return Err("AUTHORITY_KEY_INVALID")
+        if key.policy_revision != policy_revision or key.revocation_epoch != revocation_epoch:
+            return Err("AUTHORITY_KEY_POLICY_MISMATCH")
+        if key.operations.len() == 0 or key.operations.len() > 64:
+            return Err("AUTHORITY_OPERATIONS_INVALID")
+        var operations: [text] = []
+        for operation in key.operations:
+            if not builder_identifier_valid_v1(operation) or operations.contains(operation):
+                return Err("AUTHORITY_OPERATIONS_INVALID")
+            operations.push(operation)
+        val identity = distributed_authority_lookup_id_v2(key.role, key.identity)
+        # Retired revisions belong in audit history, never competing live keys.
+        if index.contains_key(identity): return Err("AUTHORITY_KEY_DUPLICATE")
+        index[identity] = key
+    Ok(DistributedAuthoritySnapshotV2(generation: generation, policy_revision: policy_revision,
+        revocation_epoch: revocation_epoch, keys: index))
+
+fn distributed_verify_grant_approval_from_snapshot_v2(snapshot: DistributedAuthoritySnapshotV2,
+        signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2,
+        request: OperationEnvelopeV2, now: i64, expected_generation: i64,
+        policy_revision: i64, revocation_epoch: i64,
+        session_generation: i64) -> Result<ExecutionGrantV2, text>:
+    # Expected values come from the active service owner, not command fields.
+    if expected_generation <= 0 or snapshot.generation != expected_generation or
+            policy_revision <= 0 or snapshot.policy_revision != policy_revision or
+            revocation_epoch < 0 or snapshot.revocation_epoch != revocation_epoch:
+        return Err("AUTHORITY_SNAPSHOT_STALE")
+    if not builder_identifier_valid_v1(signed.issuer_id) or not builder_identifier_valid_v1(approval.approver_id):
+        return Err("AUTHORITY_KEY_UNAVAILABLE")
+    val issuer_id = distributed_authority_lookup_id_v2("grant-issuer", signed.issuer_id)
+    val approver_id = distributed_authority_lookup_id_v2("human-approver", approval.approver_id)
+    if not snapshot.keys.contains_key(issuer_id) or not snapshot.keys.contains_key(approver_id):
+        return Err("AUTHORITY_KEY_UNAVAILABLE")
+    distributed_verify_grant_approval_v2(signed, approval, snapshot.keys[issuer_id],
+        snapshot.keys[approver_id], request, now, policy_revision, revocation_epoch, session_generation)

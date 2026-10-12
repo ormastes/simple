@@ -1,0 +1,79 @@
+# DBC-007, DBC-018: immutable identity and strict versioned broker records.
+use std.spec.{describe, it, expect}
+use std.common.contracts.distributed_control_v2.*
+use std.common.contracts.distributed_control_codec_v2.*
+
+fn wire_environment() -> ExecutionEnvironmentV2:
+    ExecutionEnvironmentV2(host_id: "worker_1", execution_platform: "linux_x64",
+        target_platform: "windows_x64", test_runtime: "windows_native",
+        isolation_class: "native-process", toolchain_digest: "a".repeat(64),
+        sdk_digest: "b".repeat(64), abi: "msvc", isa: "baseline", optimization: "release")
+
+fn wire_operation() -> OperationEnvelopeV2:
+    OperationEnvelopeV2(version: 2, id: "operation_1", payload_digest: "d".repeat(64),
+        principal: "user_1", project: "project_1", host_id: "worker_1", operation: "build",
+        environment_digest: "c".repeat(64), policy_revision: 4, revocation_epoch: 2,
+        session_generation: 3, memory_bytes: 1024, duration_ms: 1000)
+
+fn encoded_operation() -> text:
+    match distributed_encode_operation_v2(wire_operation()):
+        case Ok(payload): payload
+        case Err(reason):
+            expect(reason).to_equal("")
+            ""
+
+fn rejected_operation(payload: text) -> bool:
+    match distributed_decode_operation_v2(payload):
+        case Ok(value): false
+        case Err(reason): reason != ""
+
+describe "distributed V2 bounded wire codec":
+    it "preserves distinct execution, target and test identities":
+        match distributed_encode_environment_v2(wire_environment()):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(payload):
+                match distributed_decode_environment_v2(payload):
+                    case Err(reason): expect(reason).to_equal("")
+                    case Ok(value):
+                        expect(value.execution_platform).to_equal("linux_x64")
+                        expect(value.target_platform).to_equal("windows_x64")
+                        expect(value.test_runtime).to_equal("windows_native")
+
+    it "binds environment digest to canonical bytes and actual isolation":
+        var altered = wire_environment()
+        altered.isolation_class = "native-container"
+        match distributed_environment_digest_v2(wire_environment()):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(original):
+                match distributed_environment_digest_v2(altered):
+                    case Err(reason): expect(reason).to_equal("")
+                    case Ok(changed): expect(original == changed).to_equal(false)
+
+    it "preserves operation authority and integer boundaries":
+        match distributed_decode_operation_v2(encoded_operation()):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(value):
+                expect(value.version).to_equal(2)
+                expect(value.project).to_equal("project_1")
+                expect(value.revocation_epoch).to_equal(2)
+                expect(value.memory_bytes).to_equal(1024)
+                expect(value.duration_ms).to_equal(1000)
+
+    it "rejects legacy headers, appended constraints and oversized frames":
+        expect(rejected_operation(encoded_operation().replace("DBC_OPERATION_V2", "DBC_OPERATION_V1"))).to_equal(true)
+        expect(rejected_operation(encoded_operation() + "extra_constraint\n")).to_equal(true)
+        expect(rejected_operation("x".repeat(65537))).to_equal(true)
+
+    it "rejects leading zero, negative resource and overflow scalars":
+        expect(rejected_operation(encoded_operation().replace("\n1024\n", "\n01024\n"))).to_equal(true)
+        expect(rejected_operation(encoded_operation().replace("\n1024\n", "\n-1\n"))).to_equal(true)
+        expect(rejected_operation(encoded_operation().replace("\n1024\n", "\n99999999999999999\n"))).to_equal(true)
+
+    it "rejects unknown escapes and missing terminal delimiter":
+        expect(rejected_operation(encoded_operation().replace("operation_1", "operation%ZZ"))).to_equal(true)
+        expect(rejected_operation("DBC_OPERATION_V2")).to_equal(true)
+
+    it "rejects nonpositive generation before encoding":
+        var value = wire_operation()
+        value.session_generation = 0
+        expect(distributed_operation_validate_v2(value)).to_equal("INTEGER_INVALID")
