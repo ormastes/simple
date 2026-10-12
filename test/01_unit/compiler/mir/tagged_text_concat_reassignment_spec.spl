@@ -1,0 +1,116 @@
+# UNEXECUTED source proposal; require a source-containing producer later.
+use std.spec.*
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn tagged_probe_mir(source: text) -> MirFunction:
+    val parsed = parse_and_build_module(source, "tagged_text_probe.spl")
+    var hir_lowering = HirLowering.with_filename("tagged_text_probe.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    expect(lowering.errors.len()).to_equal(0)
+    for function in mir.functions.values():
+        if function.name == "probe" or function.name.ends_with(".probe"):
+            return function
+    panic("missing real lowered probe function")
+
+fn tagged_runtime_call_count(owner: MirFunction, target: text) -> i64:
+    var count = 0
+    for block in owner.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, _):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(name), _):
+                            if name == target:
+                                count = count + 1
+                        case _: ()
+                case _: ()
+    count
+
+fn tagged_indirect_call_count(owner: MirFunction) -> i64:
+    var count = 0
+    for block in owner.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, _):
+                    match callee.kind:
+                        case MirOperandKind.Copy(_) | MirOperandKind.Move(_):
+                            count = count + 1
+                        case _: ()
+                case _: ()
+    count
+
+describe "Tagged concat result provenance in actual MIR", tag: ["only-compiled"]:
+    it "keeps tagged i64 renderer storage across loop concat reassignment":
+        val mir = tagged_probe_mir("fn probe(frac: i64) -> text:\n    var value = str(frac)\n    while value.len() < 3:\n        value = \"0\" + value\n    \"=\" + value\n")
+        expect(tagged_runtime_call_count(mir, "rt_raw_i64_to_string")).to_equal(1)
+        expect(tagged_runtime_call_count(mir, "rt_strcat_tagged")).to_equal(2)
+
+    it "preserves marker through val copy and var reassignment":
+        val mir = tagged_probe_mir("fn probe(frac: i64) -> text:\n    var value = str(frac)\n    val copy = value\n    value = \"0\" + copy\n    val copied_again = value\n    \"=\" + copied_again\n")
+        expect(tagged_runtime_call_count(mir, "rt_raw_i64_to_string")).to_equal(1)
+
+    it "keeps the explicit text annotation from disguising the same ABI gap":
+        val mir = tagged_probe_mir("fn probe(frac: i64) -> text:\n    var value: text = str(frac)\n    while value.len() < 3:\n        value = \"0\" + value\n    \"=\" + value\n")
+        expect(tagged_runtime_call_count(mir, "rt_raw_i64_to_string")).to_equal(1)
+
+    it "preserves the tagged fallback when replacing an existing i64 renderer slot":
+        val mir = tagged_probe_mir("struct OpaqueValue:\n    number: i64\n\nfn probe(value: OpaqueValue) -> text:\n    var shown = str(7)\n    shown = str(value)\n    \"=\" + shown\n")
+        expect(tagged_runtime_call_count(mir, "rt_value_to_string")).to_equal(1)
+        expect(tagged_runtime_call_count(mir, "rt_raw_i64_to_string")).to_equal(1)
+
+    it "still converts a genuine plain integer exactly once":
+        val mir = tagged_probe_mir("fn probe(number: i64) -> text:\n    \"n=\" + number\n")
+        expect(tagged_runtime_call_count(mir, "rt_raw_i64_to_string")).to_equal(1)
+
+    it "leaves indirect user str callbacks on the normal call path":
+        val mir = tagged_probe_mir("fn probe(str: fn(i64) -> text, number: i64) -> text:\n    \"=\" + str(number)\n")
+        expect(tagged_runtime_call_count(mir, "rt_raw_i64_to_string")).to_equal(0)
+        expect(tagged_runtime_call_count(mir, "rt_value_to_string")).to_equal(0)
+        expect(tagged_indirect_call_count(mir)).to_equal(1)
+
+fn tagged_score_fixture(score: f64) -> text:
+    val milli = (score * 1000.0) as i64
+    val whole = milli / 1000
+    var frac = milli - whole * 1000
+    if frac < 0:
+        frac = 0 - frac
+    var value = str(frac)
+    while value.len() < 3:
+        value = "0" + value
+    str(whole) + "." + value
+
+fn tagged_custom_renderer(number: i64) -> text:
+    "custom"
+
+fn tagged_invoke_custom(str: fn(i64) -> text, number: i64) -> text:
+    "=" + str(number)
+
+describe "Tagged text native prevention values", tag: ["only-compiled"]:
+    it "pads loop-produced score fractions without printing handle digits":
+        expect(tagged_score_fixture(0.0)).to_equal("0.000")
+        expect(tagged_score_fixture(1.25)).to_equal("1.250")
+        expect(tagged_score_fixture(12.345)).to_equal("12.345")
+        expect(tagged_score_fixture(-1.25)).to_equal("-1.250")
+        expect(tagged_score_fixture(0.001)).to_equal("0.001")
+        expect(tagged_score_fixture(1.2349)).to_equal("1.234")
+
+    it "preserves tagged copies and a later concat reassignment":
+        var value = str(7)
+        val copied = value
+        value = "0" + copied
+        val copied_again = value
+        expect("=" + copied_again).to_equal("=07")
+
+    it "accepts raw literals alongside tagged text and ordinary integers":
+        expect("raw" + str(7)).to_equal("raw7")
+        expect("n=" + 42).to_equal("n=42")
+        expect("raw" + " text").to_equal("raw text")
+
+    it "preserves custom callback precedence instead of invoking builtin str":
+        expect(tagged_invoke_custom(tagged_custom_renderer, 7)).to_equal("=custom")
