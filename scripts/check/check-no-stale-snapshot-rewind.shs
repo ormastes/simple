@@ -248,7 +248,11 @@ scan() {
     _repo=$1
     _range=$2
     _work=$TMPROOT/work
-    rm -rf "$_work"; mkdir -p "$_work/blob"
+    rm -rf "$_work"
+    if ! mkdir -p "$_work/blob" "$_work/contributor"; then
+        echo "SCANERROR" > "$TMPROOT/result"
+        return 0
+    fi
 
     ( cd "$_repo" && git rev-parse --git-dir ) >/dev/null 2>&1 \
         || { echo "NOTGIT" > "$TMPROOT/result"; return 0; }
@@ -264,7 +268,10 @@ scan() {
 
     while IFS= read -r C; do
         [ -n "$C" ] || continue
-        scan_commit "$_repo" "$C" "$_work" || true
+        if ! scan_commit "$_repo" "$C" "$_work"; then
+            echo "SCANERROR" > "$TMPROOT/result"
+            return 0
+        fi
         _ncommits=$((_ncommits + 1))
     done < "$_work/commits"
 
@@ -376,11 +383,29 @@ scan_commit() {
         _sofar=$(nlines "$_c/flag")
         [ "$_sofar" -ge "$MAX_FLAGGED" ] && break
 
-        XP=$( cd "$_repo" && git rev-parse --quiet --verify "$X^1" 2>/dev/null )
-        [ -n "$XP" ] || XP=$EMPTY_TREE
-
-        ( cd "$_repo" && git diff --name-only "$XP" "$X" 2>/dev/null ) \
-            | grep -E "$SCOPE_RE" 2>/dev/null | grep -Ev "$EXCLUDE_RE" | sort -u > "$_c/xfiles" || true
+        # Contributor commits are immutable and recur in overlapping parent
+        # windows. Cache only their parent and scoped file list within this
+        # scan; current-edge changes and surviving/lost lines stay per commit.
+        _contributor="$_work/contributor/$X"
+        if [ ! -f "$_contributor.parent" ]; then
+            XP=$( cd "$_repo" && git rev-parse --quiet --verify "$X^1" 2>/dev/null )
+            [ -n "$XP" ] || XP=$EMPTY_TREE
+            ( cd "$_repo" && git diff --name-only "$XP" "$X" 2>/dev/null ) \
+                > "$_contributor.raw" || return 1
+            grep -E "$SCOPE_RE" "$_contributor.raw" > "$_contributor.included"
+            _list_status=$?
+            [ "$_list_status" -le 1 ] || return 1
+            grep -Ev "$EXCLUDE_RE" "$_contributor.included" > "$_contributor.scoped"
+            _list_status=$?
+            [ "$_list_status" -le 1 ] || return 1
+            sort -u "$_contributor.scoped" > "$_contributor.files" || return 1
+            # Publish readiness last, after the complete file list exists.
+            printf '%s\n' "$XP" > "$_contributor.parent" || return 1
+        fi
+        [ -f "$_contributor.files" ] || return 1
+        XP=$(cat "$_contributor.parent") || return 1
+        [ -n "$XP" ] || return 1
+        cp "$_contributor.files" "$_c/xfiles" || return 1
         _xn=$(nlines "$_c/xfiles")
         if [ "$_xn" -gt "$BULK_MAX" ]; then
             [ "$VERBOSE" -eq 1 ] && printf '      skipped bulk ancestor %s (%s in-scope files)\n' \
@@ -610,6 +635,31 @@ Rewind-Allowed: 6 reviewed rollback, see doc/08_tracking/bug/x.md" ) >/dev/null 
         echo "  [selftest FAIL] a non-repository directory did not report NOTGIT"; _fail=$((_fail + 1))
     fi
 
+    # Overlapping contributor windows must still find the real clobber.
+    scan "$F2" "HEAD~2..HEAD"; _ran=$((_ran + 1))
+    if ! grep -q '^EV_COMMITS=2$' "$TMPROOT/result" 2>/dev/null; then
+        echo "  [selftest FAIL] overlapping-window scan omitted a commit"; _fail=$((_fail + 1))
+    fi
+    if ! grep -q '^EV_REWINDS=7$' "$TMPROOT/result" 2>/dev/null; then
+        echo "  [selftest FAIL] overlapping-window scan missed the clobber"; _fail=$((_fail + 1))
+    fi
+    # Real cache I/O failures must prevent a completed PASS census. Each
+    # subshell overrides one utility; normal Git/blob/scoring paths stay real.
+    ( cp() { return 1; }; scan "$F1" "HEAD~2..HEAD" ) >/dev/null 2>&1
+    _ran=$((_ran + 1))
+    if ! grep -q '^SCANERROR$' "$TMPROOT/result" 2>/dev/null; then
+        echo "  [selftest FAIL] contributor copy failure was admitted"; _fail=$((_fail + 1))
+    fi
+    ( cat() { return 1; }; scan "$F1" "HEAD~2..HEAD" ) >/dev/null 2>&1
+    _ran=$((_ran + 1))
+    if ! grep -q '^SCANERROR$' "$TMPROOT/result" 2>/dev/null; then
+        echo "  [selftest FAIL] contributor parent read failure was admitted"; _fail=$((_fail + 1))
+    fi
+    ( cp() { command rm -f "$1"; command cp "$@"; }; scan "$F1" "HEAD~2..HEAD" ) >/dev/null 2>&1
+    _ran=$((_ran + 1))
+    if ! grep -q '^SCANERROR$' "$TMPROOT/result" 2>/dev/null; then
+        echo "  [selftest FAIL] incomplete contributor pair was admitted"; _fail=$((_fail + 1))
+    fi
     if [ "$_ran" -eq 0 ]; then
         echo "  [selftest FAIL] no fixture ran"
         return 1
@@ -734,6 +784,10 @@ printf 'window: %s ancestor(s)  threshold: %s file(s)  min-lost: %s line(s) / %s
     "$WINDOW" "$THRESHOLD" "$MIN_LOST_LINES" "$MIN_LOST_PCT"
 
 scan "$REPO" "$RANGE"
+
+if grep -q '^SCANERROR$' "$TMPROOT/result" 2>/dev/null; then
+    die_error "contributor cache I/O failed; the range scan is incomplete"
+fi
 
 if grep -q '^NOTGIT$' "$TMPROOT/result" 2>/dev/null; then
     die_error "not a git repository"

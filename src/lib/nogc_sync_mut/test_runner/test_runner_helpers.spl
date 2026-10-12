@@ -12,6 +12,8 @@ use std.test_runner.test_runner_files.{strip_ansi}
 use std.test_runner.test_db_compat.{RunnerTestDb, load_test_db_compat, micros_to_rfc3339}
 use std.test_runner.test_db_types.{IndividualTestResult, TestStatus}
 use std.nogc_sync_mut.test_runner.test_db_record.{TestDbRunRecord, test_db_run_record_from_result}
+use std.common.traceability.case_events.{decode_trace_case_events}
+use std.common.traceability.run_plan.{TraceCaseEventFile, reconcile_trace_case_events}
 use std.database.feature.{FeatureDatabase, FeatureStatus, Feature}
 use std.common.perf.execution_metrics.{
     ApprovedBaseline, AnomalyPolicy, BaselineState, DecisionStatus,
@@ -234,21 +236,35 @@ fn display_call_graph_warnings():
 fn update_test_database(result: TestRunResult, run_start: i64, run_end: i64) -> Result<RunnerTestDb, text>:
     update_test_database_from_record(test_db_run_record_from_result(result, run_start, run_end))
 
-fn update_test_database_from_record(record: TestDbRunRecord) -> Result<RunnerTestDb, text>:
+fn update_test_database_from_record(record: TestDbRunRecord, trace_run_id: text = "", trace_input_error: text = "") -> Result<RunnerTestDb, text>:
     """Record one run into the test database. The core runner reaches this
     through src/app/test_runner_new/test_db_lane_main.spl (a child process) so
     the database modules stay out of its static closure; the row status
     (in_development / passed / failed) was classified from the full
     TestFileResult by test_db_record.test_db_file_row_from_result."""
-    val db_result = load_test_db_compat()
+    val db_result = if trace_run_id == "": load_test_db_compat() else: RunnerTestDb.resume_trace_run(trace_run_id)
     var db = match db_result:
         case Ok(loaded): loaded
         case Err(reason):
             print "Warning: Could not load test database: {reason}"
             return Err(reason)
-    val run_id = db.start_run()
+    val run_id = if trace_run_id == "": db.start_run() else: trace_run_id
+    var trace_errors: [text] = []
+    if trace_input_error != "":
+        trace_errors.push(trace_input_error)
+    if trace_run_id != "" and record.timed_out > 0:
+        trace_errors.push("planned execution contains timed-out workers")
+    var actual_files: [TraceCaseEventFile] = []
 
     for row in record.files:
+        if row.trace_case_events_sdn != "":
+            if trace_run_id != "":
+                match decode_trace_case_events(row.trace_case_events_sdn):
+                    case Ok(events): actual_files.push(TraceCaseEventFile(test_path: row.path, events: events))
+                    case Err(reason): trace_errors.push("{row.path}: {reason}")
+            match db.record_trace_case_events(run_id, row.path, row.trace_case_events_sdn):
+                case Ok(_): pass
+                case Err(reason): trace_errors.push("{row.path}: {reason}")
         val status = if row.status == "in_development":
             TestStatus.InDevelopment
         elif row.status == "feature_gated":
@@ -269,11 +285,26 @@ fn update_test_database_from_record(record: TestDbRunRecord) -> Result<RunnerTes
         if row.has_resource:
             db.record_resource_row(run_id, row)
 
-    db.complete_run(run_id, record.test_count, record.passed, record.failed, record.timed_out)
+    if trace_run_id != "":
+        match db.db.get_trace_run_plan(run_id):
+            case Ok(Some(plan)):
+                match reconcile_trace_case_events(plan, actual_files):
+                    case Ok(completion):
+                        if not completion.complete:
+                            trace_errors.push("frozen execution plan is incomplete: " + completion.reason)
+                    case Err(reason): trace_errors.push(reason)
+            case Ok(nil): trace_errors.push("frozen execution plan is missing")
+            case Err(reason): trace_errors.push(reason)
+    # Persist partial observations without claiming the planned run completed.
+    if trace_run_id == "" or trace_errors.len() == 0:
+        db.complete_run(run_id, record.test_count, record.passed, record.failed, record.timed_out)
     db.cleanup_stale_runs(48)
     val save_result = db.save()
     match save_result:
-        case Ok(_): Ok(db)
+        case Ok(_):
+            if trace_errors.len() > 0:
+                return Err("trace event persistence failed after summary save: " + trace_errors.join("; "))
+            Ok(db)
         case Err(reason):
             print "Warning: Could not save test database: {reason}"
             Err(reason)

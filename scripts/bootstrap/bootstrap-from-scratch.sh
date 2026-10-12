@@ -1642,9 +1642,14 @@ case "${cuda_enabled}:${cuda_placement}" in
   *) echo 'error: CUDA enabled must be true|false and placement static|dynamic' >&2; exit 1 ;;
 esac
 case "${cuda_mode}" in
-  static) cuda_composition_template="${repo_root}/src/plugins/backend_registry/selected_cuda_backend.spl" ;;
-  *) cuda_composition_template="${repo_root}/src/compositions/cuda_${cuda_mode}/plugins/backend_registry/selected_cuda_backend.spl" ;;
+  static) cuda_composition_source_root=src ;;
+  dynamic|disabled) cuda_composition_source_root="src/compositions/cuda_${cuda_mode}" ;;
+  *) echo 'error: unsupported CUDA composition mode' >&2; exit 1 ;;
 esac
+cuda_composition_template="${repo_root}/${cuda_composition_source_root}/plugins/backend_registry/selected_cuda_backend.spl"
+[ -f "${cuda_composition_template}" ] && [ ! -L "${cuda_composition_template}" ] || {
+  echo 'error: selected CUDA template must be a regular checkout source' >&2; exit 1;
+}
 cuda_manifest_sha256=$(bootstrap_stage3_hash_file "${compiler_backend_manifest}") || exit 1
 cuda_template_sha256=$(bootstrap_stage3_hash_file "${cuda_composition_template}") || exit 1
 cuda_composition_root="${output_dir}/compositions/cuda-${cuda_manifest_sha256}-${cuda_template_sha256}"
@@ -1655,6 +1660,11 @@ if [ ! -f "${cuda_composition_file}" ]; then
 fi
 [ "$(bootstrap_stage3_hash_file "${cuda_composition_file}")" = "${cuda_template_sha256}" ] || {
   echo 'error: selected CUDA composition content differs from its identity' >&2; exit 1;
+}
+# SCV admits checkout src/test selectors, not generated output directories.
+# Keep the publication copy and its identity, but compile the same tracked bytes.
+[ "$(bootstrap_stage3_hash_file "${cuda_composition_template}")" = "${cuda_template_sha256}" ] || {
+  echo 'error: selected CUDA template changed during publication' >&2; exit 1;
 }
 case "${SIMPLE_KERNEL_K1_POLICY:-unselected}" in
   llvm-cranelift)
@@ -1679,7 +1689,8 @@ export SIMPLE_KERNEL_K1_POLICY
 # seed, which has no log_phase instrumentation and cannot emit those lines;
 # the receipt gate falls back to transcript-level source binding for Stage 2
 # and keeps content-level closure verification for Stage 3.
-k1_composition_source_args="--source ${k1_composition_root}"
+k1_composition_source_root=${k1_composition_root#"${repo_root}/"}
+k1_composition_source_args="--source ${k1_composition_source_root}"
 k1_composition_file="${k1_composition_root}/compiler/driver/bootstrap_k1_selected.spl"
 [ -f "${k1_composition_file}" ] && [ ! -L "${k1_composition_file}" ] || {
   echo "error: selected K1 composition is missing or a symlink: ${k1_composition_file}" >&2
@@ -2465,7 +2476,7 @@ bootstrap_native_build_main() {
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    --source "${cuda_composition_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" --source examples/10_tooling \
+    --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" --source examples/10_tooling \
     --entry-closure \
     --timeout "${NATIVE_FILE_TIMEOUT_SECONDS}" \
     $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory)
@@ -3059,6 +3070,12 @@ prepare_rust_authority_workspace() {
 run_rust_authority_env() {
   rust_env_log=$1
   shift
+  # Preflight must capture the same materialized Windows authority dialect as
+  # the parent before/after snapshots. env -i otherwise silently drops it.
+  if [ "$rust_env_log" = bootstrap-preflight ] && [ "${os}" = windows ] &&
+      [ -n "${SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT:-}" ]; then
+    set -- "SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT=$SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT" "$@"
+  fi
   if [ "${os}" != windows ] && [ "${CXX+x}" = x ]; then set -- "CXX=$CXX" "$@"; fi
   if [ "${AR+x}" = x ]; then set -- "AR=$AR" "$@"; fi
   if [ "${LD+x}" = x ]; then set -- "LD=$LD" "$@"; fi
@@ -3886,6 +3903,9 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     *) stage2_timeout_args="--timeout ${SIMPLE_NATIVE_FILE_TIMEOUT}" ;;
   esac
   stage2_cold_init_env=
+  compiler_ceiling_env=$(bootstrap_stage3_compiler_ceiling_environment) || {
+    echo 'error: invalid SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB' >&2; exit 1;
+  }
   case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
     '') ;;
     1) stage2_cold_init_env=SIMPLE_SCV_INVENTORY_COLD_INIT=1 ;;
@@ -3933,9 +3953,10 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
       ${stage2_cold_init_env:+"${stage2_cold_init_env}"} \
+      ${compiler_ceiling_env:+"${compiler_ceiling_env}"} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
-      ${k1_composition_source_args} --source "${cuda_composition_root}" --source src/compiler --source src/app --source src/lib \
+      ${k1_composition_source_args} --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib \
       --entry-closure --threads "${jobs}" \
       ${native_verbose_arg} \
       ${stage2_timeout_args} \
@@ -4014,9 +4035,10 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
       "SIMPLE_BINARY=${stage2_admitted_absolute}" \
       ${stage3_diagnostic_env} \
+      ${compiler_ceiling_env:+"${compiler_ceiling_env}"} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
-      ${k1_composition_source_args} --source "${cuda_composition_root}" \
+      ${k1_composition_source_args} --source "${cuda_composition_source_root}" \
       --source src/compiler --source src/app --source src/lib \
       --entry-closure --threads "${selfhost_jobs}" \
       --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
@@ -4082,7 +4104,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=${stage2_compatibility_manifest_absolute}" \
       "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
-      ${stage2_cold_init_env:+"${stage2_cold_init_env}"}
+      ${stage2_cold_init_env:+"${stage2_cold_init_env}"} \
+      ${compiler_ceiling_env:+"${compiler_ceiling_env}"}
     # These three guards are the ONLY pre-exec refusal on this path, and they
     # used to be bare `|| return 1`. A mismatch therefore produced no build log
     # and no reason anywhere, and the script's own failure diagnosis correctly
@@ -4099,7 +4122,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       cat "${stage2_refusal_log}" >&2
       return 1
     }
-    stage2_expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "${PLATFORM}" "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}") || {
+    stage2_expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "${PLATFORM}" "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-}") || {
       echo "error: stage2 pre-exec refusal: no canonical stage2 env name list for ${PLATFORM}" \
         > "${stage2_refusal_log}"
       cat "${stage2_refusal_log}" >&2
@@ -4137,7 +4160,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    ${k1_composition_source_args} --source "${cuda_composition_root}" --source src/compiler --source src/app --source src/lib \
+    ${k1_composition_source_args} --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${jobs}" \
     ${native_verbose_arg} \
@@ -5020,12 +5043,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
     ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
     SIMPLE_BINARY="${stage2_admitted_absolute}" \
-    ${stage3_diagnostic_env} -- \
+    ${stage3_diagnostic_env} ${compiler_ceiling_env:+"${compiler_ceiling_env}"} -- \
     "${stage2_admitted_absolute}" native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    ${k1_composition_source_args} --source "${cuda_composition_root}" \
+    ${k1_composition_source_args} --source "${cuda_composition_source_root}" \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${selfhost_jobs}" \
@@ -5561,7 +5584,7 @@ run_logged stage4b-ui-backend env RUST_LOG="${RUST_LOG:-error}" \
   SIMPLE_BINARY="$(absolute_path "${full_bin}")" \
   "${full_bin}" native-build \
     --backend "${backend}" \
-  --source "${cuda_composition_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
+  --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
   --entry-closure --threads "${jobs}" --cache-dir "${native_cache_dir}" \
   --mode "${bootstrap_mode}" --entry src/app/ui/main.spl \
   --runtime-path "${stage_runtime_absolute}" \
@@ -5604,7 +5627,7 @@ if [ "${build_mcp}" -eq 1 ]; then
       SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
       "${stage_for_build}" native-build \
       --backend "${backend}" \
-      --source "${cuda_composition_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
+      --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
       --entry-closure \
       --threads "${jobs}" \
       --cache-dir "${native_cache_dir}" \

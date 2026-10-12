@@ -1,0 +1,70 @@
+use std.spec.*
+use std.nogc_sync_mut.test_runner.test_db_trace_record.{TestDbTraceFile, TestDbTraceRecord, test_db_trace_record_encode, test_db_trace_record_decode}
+use std.common.traceability.case_events.{TraceCaseEvent, encode_trace_case_event, decode_trace_case_events}
+use std.test_runner.test_runner_types.{TestFileResult, TestRunResult}
+use std.nogc_sync_mut.test_runner.test_db_record.{test_db_run_record_from_result, test_db_run_record_attach_trace_events, test_db_run_record_encode}
+
+val EVENTS = "[" + encode_trace_case_event(TraceCaseEvent(case_name: "works", phase: "started", outcome: "not_finished")) + ", " + encode_trace_case_event(TraceCaseEvent(case_name: "works", phase: "finished", outcome: "passed")) + "]"
+
+describe "test-db SDN trace record":
+    it "round-trips a versioned file event batch through canonical SDN":
+        val encoded = test_db_trace_record_encode(TestDbTraceRecord(files: [TestDbTraceFile(path: "test/a_spec.spl", events_sdn: EVENTS)]))
+        match encoded:
+            case Err(reason): fail("encode failed: {reason}")
+            case Ok(document):
+                expect(document).to_contain("simple.test-db.trace-event-batch/v1")
+                match test_db_trace_record_decode(document):
+                    case Err(reason): fail("decode failed: {reason}")
+                    case Ok(record):
+                        expect(record.files.len()).to_equal(1)
+                        expect(record.files[0].path).to_equal("test/a_spec.spl")
+                        match decode_trace_case_events(record.files[0].events_sdn):
+                            case Err(reason): fail("event payload rejected: {reason}")
+                            case Ok(events): expect(events.len()).to_equal(2)
+
+    it "rejects duplicate file paths and unsupported schema versions":
+        val duplicate = TestDbTraceRecord(files: [
+            TestDbTraceFile(path: "same.spl", events_sdn: EVENTS),
+            TestDbTraceFile(path: "same.spl", events_sdn: EVENTS)
+        ])
+        match test_db_trace_record_encode(duplicate):
+            case Ok(_): fail("duplicate path was accepted")
+            case Err(reason): expect(reason).to_contain("duplicate")
+        match test_db_trace_record_decode("{schema: \"simple.test-db.trace-event-batch/v2\", files: []}"):
+            case Ok(_): fail("unknown schema was accepted")
+            case Err(reason): expect(reason).to_contain("unsupported")
+
+    it "rejects malformed event SDN":
+        # Empty valid event lists are intentionally transportable; framing errors
+        # are instead covered by passing a truncated SDN document.
+        match test_db_trace_record_encode(TestDbTraceRecord(files: [TestDbTraceFile(path: "bad.spl", events_sdn: "[{schema: \"simple.trace.case-event/v1\", case_name: broken")])):
+            case Ok(_): fail("truncated events were accepted")
+            case Err(_): pass
+describe "test-db trace attachment":
+    it "matches non-ASCII paths exactly and preserves summary outcomes":
+        val source = TestRunResult(files: [TestFileResult(path: "例/星_spec.spl", passed: 1, failed: 0, skipped: 0, pending: 0, duration_ms: 4, setup_ms: 0, error: "", timed_out: false, cached: false)], total_passed: 1, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 4, total_setup_ms: 0, total_cached: 0)
+        val summary = test_db_run_record_from_result(source, 1, 2)
+        match test_db_run_record_attach_trace_events(summary, [TestDbTraceFile(path: "例/星_spec.spl", events_sdn: EVENTS)]):
+            case Err(reason): fail("attachment failed: {reason}")
+            case Ok(attached):
+                expect(attached.files[0].path).to_equal("例/星_spec.spl")
+                expect(attached.files[0].trace_case_events_sdn).to_equal(EVENTS)
+                expect(attached.files[0].status).to_equal("passed")
+                expect(attached.passed).to_equal(1)
+                expect(attached.failed).to_equal(0)
+                val legacy_summary = test_db_run_record_encode(attached)
+                expect(legacy_summary.contains("simple.trace.case-event/v1")).to_equal(false)
+
+    it "rejects unmatched trace paths and ambiguous duplicate summary paths":
+        val one = TestRunResult(files: [TestFileResult(path: "a.spl", passed: 1, failed: 0, skipped: 0, pending: 0, duration_ms: 1, setup_ms: 0, error: "", timed_out: false, cached: false)], total_passed: 1, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 1, total_setup_ms: 0, total_cached: 0)
+        val one_record = test_db_run_record_from_result(one, 1, 2)
+        match test_db_run_record_attach_trace_events(one_record, [TestDbTraceFile(path: "missing.spl", events_sdn: EVENTS)]):
+            case Ok(_): fail("unmatched trace path was accepted")
+            case Err(reason): expect(reason).to_contain("absent")
+        val duplicate = TestRunResult(files: [
+            TestFileResult(path: "a.spl", passed: 1, failed: 0, skipped: 0, pending: 0, duration_ms: 1, setup_ms: 0, error: "", timed_out: false, cached: false),
+            TestFileResult(path: "a.spl", passed: 1, failed: 0, skipped: 0, pending: 0, duration_ms: 1, setup_ms: 0, error: "", timed_out: false, cached: false)
+        ], total_passed: 2, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 2, total_setup_ms: 0, total_cached: 0)
+        match test_db_run_record_attach_trace_events(test_db_run_record_from_result(duplicate, 1, 2), [TestDbTraceFile(path: "a.spl", events_sdn: EVENTS)]):
+            case Ok(_): fail("ambiguous summary path was accepted")
+            case Err(reason): expect(reason).to_contain("ambiguous")
