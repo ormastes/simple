@@ -429,3 +429,16 @@ and may need the same owner-qualified treatment in the enum-payload
 materialization path on the next iteration). Seed semantics of all changed
 files identical to pristine (only the pre-existing sffi_env_get standalone
 artifact). Functional validation: next matrix/admission run.
+- Novel cause (2026-10-12, stage-2 seed regression from 4bec5687ee6): the new
+  declaration_{providers,default_bindings,default_rewrite}_v1.spl referenced
+  `HirConst` through a bare `use compiler.hir.hir_definitions.*` glob, but
+  HirConst is neither pub nor exported there — the glob does not provide it
+  under the Rust seed (self-hosted directory-package visibility masked this),
+  so `HirConst(...)` literals in
+  register_provider_global_bindings_with_initializer_policy_v1's callees
+  resolved to struct ANY and seed HIR failed with "cannot infer field type
+  ... struct 'ANY' field 'type_'". Fix: explicit itemized
+  `use compiler.hir.hir_definitions.{HirConst}` in all three files (every
+  other 50.mir consumer already imports it itemized). Also fixed a latent
+  `field.type_` (undefined in scope; now `field_type`) in the extracted
+  register_composite_field_metadata_types_v1.
