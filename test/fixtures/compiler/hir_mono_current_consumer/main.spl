@@ -12,6 +12,7 @@ use compiler.driver.cache.hir_mono_archive_execution_v1.*
 use compiler.driver.cache.hir_mono_archive_assembly_v1.*
 use compiler.driver.cache.hir_mono_archive_verify_v1.{mono_archive_post_mono_report_digest_v1}
 use compiler.driver.cache.hir_mono_verification_use_v1.*
+use compiler.driver.cache.driver_hir_archive_mono_execute_v1.*
 use compiler.mono.verify.post_mono_verify.{post_mono_verify_modules}
 use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_definitions.{HirFunction, HirExpr, HirExprKind}
@@ -208,6 +209,59 @@ fn main() -> i64:
     val paused_refused = if paused: mono_archive_verification_use_load_module_in_owned_scope_v1(replay_owner, provider.name).is_err() else: false
     if not transient_scope_end() or not occupied_refused or not paused_refused: return 28
     checks = checks + 1
-    if checks != 20: return 29
+    # Exercise the actual closed continuation against another freshly captured
+    # owner. Reusing the earlier completed mutable state is not admission.
+    val next_created = mono_archive_current_registration_create_v1()
+    if next_created.is_err(): return 33
+    val next = next_created.unwrap()
+    val next_root = capture_current(next, root_archive.unwrap(), false)
+    if next_root.is_err() or mono_archive_publish_current_registration_v1(next, next_root.unwrap()).is_err(): return 34
+    val next_provider = capture_current(next, provider_archive.unwrap(), true)
+    if next_provider.is_err() or mono_archive_publish_current_registration_v1(next, next_provider.unwrap()).is_err(): return 35
+    if mono_archive_current_registration_seal_v1(next, inventory, order).is_err(): return 36
+    if not driver_hir_archive_current_mono_execute_v1(next, inventory, [provider.name, root.name]).is_err() or
+            next.registration.state.epoch != 0: return 37
+    checks = checks + 1
+    if not transient_scope_begin(): return 38
+    val active_continuation_refused = driver_hir_archive_current_mono_execute_v1(next, inventory, order).is_err()
+    val next_paused = transient_scope_pause()
+    val paused_continuation_refused = if next_paused: driver_hir_archive_current_mono_execute_v1(next, inventory, order).is_err() else: false
+    if not transient_scope_end() or not active_continuation_refused or not paused_continuation_refused or
+            next.registration.state.epoch != 0: return 39
+    checks = checks + 1
+    val continued = driver_hir_archive_current_mono_execute_v1(next, inventory, order)
+    if continued.is_err(): return 40
+    val result = continued.unwrap()
+    if not mono_archive_execution_complete_v1(result.execution) or result.execution.specialization_records.len() != 2 or
+            result.verification.capture.ordered_inventory != order or result.verification.modules.len() != 2: return 41
+    checks = checks + 1
+    val statistics = driver_hir_archive_mono_stats_v1(result.execution)
+    if statistics.generic_functions_found != execution.generic_functions or
+            statistics.call_sites_found != execution.call_sites_found or
+            statistics.specializations_created != execution.specializations_created or
+            statistics.unresolved_generic_calls != execution.unresolved_generic_calls or
+            result.execution.diagnostics != execution.diagnostics or result.execution.warnings != execution.warnings: return 42
+    checks = checks + 1
+    val continued_parity = observe_parity(result.execution.admission.repository, root.name, provider.name,
+        Some(result.verification.capture))
+    if continued_parity.is_err() or not continued_parity.unwrap().literal_bodies_ok or
+            continued_parity.unwrap().root_digest != retained.unwrap().root_digest or
+            continued_parity.unwrap().provider_digest != retained.unwrap().provider_digest or
+            mono_archive_post_mono_report_digest_v1(result.verification.report) != retained.unwrap().report_digest: return 43
+    checks = checks + 1
+    val final_epoch = next.registration.state.epoch
+    if not driver_hir_archive_current_mono_execute_v1(next, inventory, order).is_err() or
+            next.registration.state.epoch != final_epoch: return 44
+    checks = checks + 1
+    if not transient_scope_begin(): return 45
+    var continuation_growth: [text] = []
+    for number in 0..4096: continuation_growth = continuation_growth.push("closed mono continuation churn {number}")
+    val continuation_grown = continuation_growth.len() == 4096
+    if not transient_scope_end() or not continuation_grown: return 46
+    val continuation_replay = mono_archive_verification_use_v1(result.verification.capture)
+    if continuation_replay.is_err() or mono_archive_post_mono_report_digest_v1(continuation_replay.unwrap().report) !=
+            retained.unwrap().report_digest: return 47
+    checks = checks + 1
+    if checks != 27: return 29
     print "HIR current mono consumer: {checks} checks passed"
     0
