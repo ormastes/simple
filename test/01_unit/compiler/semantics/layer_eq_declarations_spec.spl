@@ -1,0 +1,108 @@
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.common.config.{Logger}
+use compiler.semantics.layer_eq_validation.{layer_eq_module_declarations_v1,
+    validate_layer_eq_declarations_v1, validate_layer_eq_types,
+    layer_eq_required_declaration_names_v1, validate_layer_eq_selected_declarations_v1,
+    layer_eq_index_structs, layer_eq_struct_declaration_v1}
+use compiler.semantics.layer_eq_checker.{LayerEqType}
+use compiler.semantics.layer_eq_validation.{layer_eq_contract_claims_v1,
+    layer_eq_required_claim_declaration_names_v1, validate_layer_eq_claim_declarations_v1}
+use compiler.frontend.layer_eq_registry.{layer_eq_registry_reset}
+
+fn lowered(src: text, path: text, name: text) -> HirModule:
+    val parsed = parse_full_frontend(src, path, name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_module(parsed)
+
+describe "actual physical layer-equivalence declaration projection":
+    it "replays actual field rename diagnostics after another registry replaces the source claims":
+        layer_eq_registry_reset()
+        val hir = lowered("@layer_eq(Device)\nstruct View:\n    @layer_field(depth)\n    width: i64\n\nstruct Device:\n    width: i64\n", "leq_claim_replay.spl", "leq_claim_replay")
+        val ids = ["leq_claim_replay.spl"]
+        val names = ["View", "Device"]
+        val claims = layer_eq_contract_claims_v1()
+        val declarations = layer_eq_module_declarations_v1(hir)
+        val original = validate_layer_eq_selected_declarations_v1(ids, names, declarations)
+        expect(original.len()).to_equal(1)
+        expect(original[0]).to_contain("maps to 'depth'")
+        layer_eq_registry_reset()
+        expect(layer_eq_required_claim_declaration_names_v1(ids, names, claims)).to_equal(["View", "Device"])
+        expect(validate_layer_eq_claim_declarations_v1(ids, names, declarations, claims)).to_equal(original)
+        expect(validate_layer_eq_selected_declarations_v1(ids, names, declarations).len()).to_equal(0)
+
+    it "retains the real absent-target exclusion during explicit claim replay":
+        layer_eq_registry_reset()
+        val hir = lowered("@layer_eq(Absent)\nstruct MissingView:\n    x: i64\n", "leq_claim_missing.spl", "leq_claim_missing")
+        val ids = ["leq_claim_missing.spl"]
+        val names = ["MissingView"]
+        val claims = layer_eq_contract_claims_v1()
+        val original = validate_layer_eq_selected_declarations_v1(ids, names, [])
+        expect(original.len()).to_equal(1)
+        expect(original[0]).to_contain("Absent")
+        layer_eq_registry_reset()
+        expect(layer_eq_required_claim_declaration_names_v1(ids, names, claims)).to_equal([])
+        expect(validate_layer_eq_claim_declarations_v1(ids, names, [], claims)).to_equal(original)
+
+    it "measures two i64 fields and applies real parser-recorded field renames":
+        val src = "@layer_eq(DeviceSize)\nstruct ViewSize:\n    @layer_field(w)\n    width: i64 = 37\n    @layer_field(h)\n    height: i64\n\nstruct DeviceSize:\n    w: i64\n    h: i64\n"
+        val hir = lowered(src, "leq_decl_rename.spl", "leq_decl_rename")
+        val declarations = layer_eq_module_declarations_v1(hir)
+        expect(declarations.len()).to_equal(2)
+        for declaration in declarations:
+            expect(declaration.total_size).to_equal(16)
+            expect(declaration.fields.len()).to_equal(2)
+            expect(declaration.fields[0].offset).to_equal(0)
+            expect(declaration.fields[1].offset).to_equal(8)
+            expect(declaration.fields[0].size).to_equal(8)
+        val errors = validate_layer_eq_declarations_v1(["leq_decl_rename.spl", "leq_decl_rename"], declarations)
+        expect(errors.len()).to_equal(0)
+        expect(errors).to_equal(validate_layer_eq_types({"leq_decl_rename": hir}))
+        var original_default_present = false
+        for struct_ in hir.structs.values():
+            if struct_.name == "ViewSize": original_default_present = struct_.fields[0].has_default
+        expect(original_default_present).to_equal(true)
+
+    it "rejects the real wrong field mapping with unchanged diagnostics":
+        val src = "@layer_eq(DeviceSize)\nstruct ViewSize:\n    @layer_field(w)\n    width: i64\n    @layer_field(depth)\n    height: i64\n\nstruct DeviceSize:\n    w: i64\n    h: i64\n"
+        val hir = lowered(src, "leq_decl_bad.spl", "leq_decl_bad")
+        val errors = validate_layer_eq_declarations_v1(["leq_decl_bad.spl"], layer_eq_module_declarations_v1(hir))
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_contain("maps to 'depth'")
+        expect(errors).to_equal(validate_layer_eq_types({"leq_decl_bad": hir}))
+
+    it "refuses an absent in-scope target and ignores an out-of-compilation claim":
+        val hir = lowered("@layer_eq(NoSuchType)\nstruct ViewPoint:\n    x: i64\n", "leq_decl_missing.spl", "leq_decl_missing")
+        val declarations = layer_eq_module_declarations_v1(hir)
+        val rejected = validate_layer_eq_declarations_v1(["leq_decl_missing.spl"], declarations)
+        expect(rejected.len()).to_equal(1)
+        expect(rejected[0]).to_contain("NoSuchType")
+        expect(validate_layer_eq_declarations_v1(["unrelated_module.spl"], declarations).len()).to_equal(0)
+
+    it "does not measure a view whose real target is absent":
+        val hir = lowered("@layer_eq(AbsentDevice)\nstruct UnmeasuredView:\n    x: i64\n", "leq_selection_missing.spl", "leq_selection_missing")
+        val ids = ["leq_selection_missing.spl"]
+        val names = ["UnmeasuredView"]
+        expect(layer_eq_required_declaration_names_v1(ids, names).len()).to_equal(0)
+        val errors = validate_layer_eq_selected_declarations_v1(ids, names, [])
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_contain("AbsentDevice")
+        expect(errors).to_equal(validate_layer_eq_types({"leq_selection_missing": hir}))
+
+    it "selects only the claimed pair and rejects missing measured facts":
+        val hir = lowered("@layer_eq(SelectedDevice)\nstruct SelectedView:\n    x: i64\n\nstruct UnrelatedLayout:\n    spare: text\n\nstruct SelectedDevice:\n    x: i64\n", "leq_selection_pair.spl", "leq_selection_pair")
+        val ids = ["leq_selection_pair.spl"]
+        val names = ["SelectedView", "UnrelatedLayout", "SelectedDevice"]
+        val required = layer_eq_required_declaration_names_v1(ids, names)
+        expect(required).to_equal(["SelectedView", "SelectedDevice"])
+        val by_name = layer_eq_index_structs({"leq_selection_pair": hir})
+        var selected: [LayerEqType] = []
+        for name in required: selected.push(layer_eq_struct_declaration_v1(by_name[name]))
+        expect(validate_layer_eq_selected_declarations_v1(ids, names, selected).len()).to_equal(0)
+        expect(validate_layer_eq_types({"leq_selection_pair": hir}).len()).to_equal(0)
+        val missing = validate_layer_eq_selected_declarations_v1(ids, names, [])
+        expect(missing.len()).to_equal(1)
+        expect(missing[0]).to_contain("was not measured")

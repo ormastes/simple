@@ -1,0 +1,232 @@
+# First complete-body consumer adapter; deliberately not a full-route switch.
+# The archive contains actual lowered HIR. Only diagnostics and scalar counts
+# survive a lease; provider/template body ownership still needs other adapters.
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.driver.driver_hir_cache.{
+    hir_cache_key, hir_cache_header, hir_cache_enabled, hir_cache_store_in_owned_scope,
+    hir_cache_load_in_owned_scope, hir_cache_last_warnings,
+    hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1
+}
+use compiler.driver.hir_typecheck_consumer_v1.{
+    HirTypecheckReceiptV1, collect_module_typecheck_receipt_v1
+}
+use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.sffi.transient.{
+    transient_scope_begin, transient_scope_pause, transient_scope_end,
+    transient_promote
+}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use compiler.common.driver_source_file.{source_file_coverage_identity}
+
+struct HirBodyArchiveInputV1:
+    source_path: text
+    closure_digest: text
+    is_entry: bool
+    module_name: text
+    # The selected canonical authority must already have been admitted by the
+    # existing runtime-capsule/provider authority owner. Recheck that exact
+    # file's bytes here; environment text alone cannot establish this identity.
+    runtime_provider_receipt_path: text
+    runtime_provider_digest: text
+    # Current producer + compiler sources + codec, captured outside scratch.
+    producer_header: text
+    stage: text
+    # Additive strict driver bindings. Legacy explicit consumers leave these
+    # empty; selected production owners populate all three fields together.
+    provider_selection_digest: text = ""
+    source_content_digest: text = ""
+    source_authored_path: text = ""
+
+struct HirBodyArchiveV1:
+    input: HirBodyArchiveInputV1
+    source_key: text
+    archive_key: text
+    body_digest: text
+    lowering_warnings_digest: text
+
+struct HirBodyTypecheckLeaseReceiptV1:
+    diagnostics: HirTypecheckReceiptV1
+    lowering_warnings: [text]
+    functions_checked: i64
+    body_digest: text
+
+fn hir_body_archive_input_key_v1(input: HirBodyArchiveInputV1) -> text:
+    if input.stage != "lowered-unresolved-v1" or input.module_name == "":
+        return ""
+    if input.closure_digest.len() != 64 or input.runtime_provider_digest.len() != 64:
+        return ""
+    if input.runtime_provider_receipt_path == "":
+        return ""
+    val authority = file_read_regular_no_follow_bounded(input.runtime_provider_receipt_path, 67108864)
+    if authority.is_err():
+        return ""
+    if sha256_text(authority.unwrap()) != input.runtime_provider_digest:
+        return ""
+    if input.producer_header == "" or input.producer_header != hir_cache_header():
+        return ""
+    if input.provider_selection_digest != "" or input.source_content_digest != "" or input.source_authored_path != "":
+        if input.provider_selection_digest.len() != 64 or input.source_content_digest.len() != 64 or input.source_authored_path == "":
+            return ""
+        val physical = file_read_regular_no_follow_bounded(input.source_path, 67108864)
+        if physical.is_err(): return ""
+        val (authored_path, source_content) = source_file_coverage_identity(input.source_path, physical.unwrap())
+        if authored_path != input.source_authored_path or sha256_text(source_content) != input.source_content_digest:
+            return ""
+    val source_key = hir_cache_key(input.source_path, input.closure_digest, input.is_entry)
+    if source_key == "":
+        return ""
+    # Independently hash arbitrary text fields, so line delimiters cannot alias.
+    sha256_text("owned-hir-body-v2\n" + source_key + "\n" +
+        sha256_text(input.module_name) + "\n" +
+        sha256_text(input.producer_header) + "\n" +
+        input.runtime_provider_digest + "\n" + sha256_text(input.stage) + "\n" +
+        sha256_text(input.provider_selection_digest) + "\n" +
+        sha256_text(input.source_content_digest) + "\n" + sha256_text(input.source_authored_path) + "\n")
+
+fn hir_body_archive_matches_v1(archive: HirBodyArchiveV1, expected: HirBodyArchiveInputV1) -> bool:
+    val current = hir_body_archive_input_key_v1(expected)
+    # Recompute against both descriptor and caller. Changed source bytes,
+    # closure, producer, runtime selection, stage or forged descriptor reject.
+    current != "" and archive.body_digest.len() == 64 and archive.lowering_warnings_digest.len() == 64 and
+        hir_body_archive_content_key_v1(current, archive.body_digest, archive.lowering_warnings_digest) == archive.archive_key and
+        hir_body_archive_input_key_v1(archive.input) == current and
+        archive.source_key == hir_cache_key(expected.source_path, expected.closure_digest, expected.is_entry)
+
+fn hir_body_archive_warnings_digest_v1(warnings: [text]) -> text:
+    var hashes: [text] = []
+    for warning in warnings:
+        hashes.push(sha256_text(warning))
+    sha256_text("owned-hir-warnings-v1\n{warnings.len()}\n" + hashes.join("\n") + "\n")
+
+fn hir_body_archive_content_key_v1(input_key: text, body_digest: text, warnings_digest: text) -> text:
+    sha256_text("owned-hir-body-content-v1\n" + input_key + "\n" + body_digest + "\n" + warnings_digest + "\n")
+
+fn hir_body_archive_store_in_owned_scope_v1(
+    input: HirBodyArchiveInputV1, module: HirModule, warnings: [text]
+) -> Result<HirBodyArchiveV1, text>:
+    # The caller owns an ACTIVE scope and has initialized the cache identity
+    # before opening it. This helper acquires/releases/promotes no lease roots.
+    # Its complete result is scratch until the caller pauses and promotes it.
+    if transient_array_scope_state_v1() != 1:
+        return Err("body archive borrowed scope must be active and unpaused")
+    if module.name != input.module_name or module.path != input.source_path:
+        return Err("body archive module identity mismatch")
+    # File-backed admission and its hashes are scratch too: a no-GC caller
+    # must not accumulate one whole authority receipt per completed module.
+    val input_key = hir_body_archive_input_key_v1(input)
+    val identity_valid = input_key != ""
+    val source_key = hir_cache_key(input.source_path, input.closure_digest, input.is_entry)
+    val blob = if identity_valid: hir_module_encode(module) else: ""
+    val body_digest = sha256_text(blob)
+    val warnings_digest = hir_body_archive_warnings_digest_v1(warnings)
+    val key = hir_body_archive_content_key_v1(input_key, body_digest, warnings_digest)
+    val stored = blob != "" and hir_cache_store_in_owned_scope(key, module, warnings)
+    if not identity_valid:
+        return Err("body archive identity unavailable")
+    if not stored:
+        return Err("body archive publication refused")
+    Ok(HirBodyArchiveV1(input: input,
+        source_key: source_key, archive_key: key, body_digest: body_digest,
+        lowering_warnings_digest: warnings_digest))
+
+fn hir_body_archive_store_v1(input: HirBodyArchiveInputV1, module: HirModule, warnings: [text]) -> Result<HirBodyArchiveV1, text>:
+    # Initialize the one persistent frontend identity before owning scratch.
+    if not hir_cache_enabled():
+        return Err("body archive identity unavailable")
+    if module.name != input.module_name or module.path != input.source_path:
+        return Err("body archive module identity mismatch")
+    if not transient_scope_begin():
+        return Err("body archive store scope unavailable")
+    val result = hir_body_archive_store_in_owned_scope_v1(input, module, warnings)
+    val paused = transient_scope_pause()
+    var owned = false
+    var cache_owner_owned = false
+    if paused:
+        cache_owner_owned = hir_cache_promote_diagnostic_owner_v1()
+    if paused:
+        # Exhaustive escape set includes the descriptor input and an Err reason,
+        # not merely the four successful key/digest fields.
+        owned = transient_promote(result)
+    val ended = transient_scope_end()
+    if not paused or not ended or not cache_owner_owned or not owned:
+        panic("body archive store ownership failed")
+    result
+
+# The shared consumer is read-only over complete HIR, with no CompileContext
+# mutation or unrestricted callback while scratch is alive. Publish the receipt
+# only after this function returns. A miss is an error, never a partial success.
+fn hir_body_archive_load_in_owned_scope_v1(
+    archive: HirBodyArchiveV1, expected: HirBodyArchiveInputV1
+) -> Result<HirModule, text>:
+    if transient_array_scope_state_v1() != 1:
+        return Err("body archive borrowed reader requires active unpaused scope")
+    if hir_cache_last_warnings().len() != 0:
+        return Err("body archive warning owner occupied")
+    if not hir_body_archive_matches_v1(archive, expected):
+        return Err("body archive identity mismatch")
+    if val module = hir_cache_load_in_owned_scope(archive.archive_key):
+        if module.name == expected.module_name and module.path == expected.source_path and
+                sha256_text(hir_module_encode(module)) == archive.body_digest and
+                hir_body_archive_warnings_digest_v1(hir_cache_last_warnings()) == archive.lowering_warnings_digest:
+            return Ok(module)
+    Err("body archive absent, corrupt, or module identity mismatch")
+
+fn hir_body_archive_typecheck_lease_v1(
+    archive: HirBodyArchiveV1, expected: HirBodyArchiveInputV1,
+    severity: TypecheckPassSeverity
+) -> Result<HirBodyTypecheckLeaseReceiptV1, text>:
+    # Memo initialization alone happens outside scratch. Admission temporaries
+    # belong to the same scope as decode, rather than persistent no-GC storage.
+    if not hir_cache_enabled():
+        return Err("body archive identity mismatch")
+    # Refuse to steal a previous consumer's warning alias. Our loader's alias is
+    # cleared before reclamation; preserving an arbitrary prior owner is unsafe.
+    if hir_cache_last_warnings().len() != 0:
+        return Err("body archive warning owner occupied")
+    if not transient_scope_begin():
+        return Err("body archive scope unavailable")
+    val identity_matches = hir_body_archive_matches_v1(archive, expected)
+    var diagnostics = HirTypecheckReceiptV1(messages: [], warnings: [], errors: [])
+    var warnings: [text] = []
+    var functions = 0
+    var admitted = false
+    if identity_matches:
+        val loaded = hir_body_archive_load_in_owned_scope_v1(archive, expected)
+        if loaded.is_ok():
+            val module = loaded.unwrap()
+            diagnostics = collect_module_typecheck_receipt_v1(module.name, module, severity)
+            warnings = hir_cache_last_warnings()
+            functions = module.functions.len()
+            admitted = true
+    val paused = transient_scope_pause()
+    var owned = false
+    var cache_owner_owned = false
+    if paused:
+        cache_owner_owned = hir_cache_promote_diagnostic_owner_v1()
+    if paused and admitted:
+        # Exhaustive escape set: three diagnostic text arrays + cache warnings.
+        # The receipt's spans/types are already rendered into owned text.
+        val diagnostics_owned = transient_promote(diagnostics)
+        val warnings_owned = transient_promote(warnings)
+        owned = diagnostics_owned and warnings_owned
+    if paused:
+        hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not ended or not cache_owner_owned or (admitted and not owned):
+        panic("body archive typecheck lease ownership failed")
+    if not identity_matches:
+        return Err("body archive identity mismatch")
+    if not admitted:
+        return Err("body archive absent, corrupt, or module identity mismatch")
+    Ok(HirBodyTypecheckLeaseReceiptV1(diagnostics: diagnostics,
+        lowering_warnings: warnings, functions_checked: functions,
+        body_digest: archive.body_digest))
+
+export HirBodyArchiveInputV1, HirBodyArchiveV1, HirBodyTypecheckLeaseReceiptV1
+export hir_body_archive_input_key_v1, hir_body_archive_matches_v1
+export hir_body_archive_content_key_v1, hir_body_archive_warnings_digest_v1
+export hir_body_archive_store_v1, hir_body_archive_store_in_owned_scope_v1, hir_body_archive_typecheck_lease_v1
+export hir_body_archive_load_in_owned_scope_v1

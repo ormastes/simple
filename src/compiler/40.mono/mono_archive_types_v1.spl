@@ -1,0 +1,82 @@
+# Body-free facts shared by the retained pass and owned archive consumers.
+use compiler.hir.hir_types.{HirType, SymbolId}
+use compiler.hir.hir_definitions.{HirFunction, HirTypeParam}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_type, hc_enc_hir_type_param}
+use compiler.monomorphize.type_subst.{canonicalize_template, substitute_type, typesubstitution_from_params}
+use std.common.crypto.sha256.{sha256_text}
+
+enum MonoTemplateBodyModeV1:
+    Retained
+    ArchiveRequests
+
+struct MonoTemplateSignatureV1:
+    name: text
+    param_types: [HirType]
+    return_type: HirType
+    type_params: [HirTypeParam]
+
+struct MonoTemplateRecipeV1:
+    module_name: text
+    original_symbol: SymbolId
+    template_name: text
+    canonical_type_params: [HirTypeParam]
+    bound_type_params: [HirTypeParam]
+    inherent_method: bool
+
+struct MonoSpecializationRequestV1:
+    template_name: text
+    module_name: text
+    mangled_name: text
+    symbol_id: i64
+    type_args: [HirType]
+
+fn mono_template_signature_v1(func: HirFunction) -> MonoTemplateSignatureV1:
+    # HirParam.default is executable HIR: deliberately project only its type.
+    var params: [HirType] = []
+    for param in func.params:
+        params = params.push(param.type_)
+    MonoTemplateSignatureV1(name: func.name, param_types: params,
+        return_type: func.return_type, type_params: func.type_params)
+
+fn mono_specialized_signature_v1(template: MonoTemplateSignatureV1, args: [HirType], name: text) -> MonoTemplateSignatureV1:
+    val subst = typesubstitution_from_params(template.type_params, args)
+    var params: [HirType] = []
+    for param in template.param_types:
+        params = params.push(substitute_type(param, subst))
+    MonoTemplateSignatureV1(name: name, param_types: params,
+        return_type: substitute_type(template.return_type, subst), type_params: [])
+
+fn mono_template_signature_digest_v1(signature: MonoTemplateSignatureV1) -> text:
+    var writer = HirCodecWriter.create()
+    writer.put_text(signature.name)
+    writer.put_i64(signature.param_types.len())
+    for param in signature.param_types:
+        mono_archive_put_type_v1(writer, param)
+    mono_archive_put_type_v1(writer, signature.return_type)
+    writer.put_i64(signature.type_params.len())
+    for param in signature.type_params:
+        hc_enc_hir_type_param(writer, param)
+    if not writer.ok: return ""
+    sha256_text("mono-template-signature-v1\n" + writer.finish())
+
+fn mono_archive_put_type_v1(writer: HirCodecWriter, type_: HirType):
+    # Declaration summaries can contain an absent inferred type. Preserve its
+    # presence separately; generated non-optional node encoders dereference it.
+    writer.put_bool(type_ != nil)
+    if type_ != nil: hc_enc_hir_type(writer, type_)
+
+fn mono_apply_template_recipe_v1(original: HirFunction, recipe: MonoTemplateRecipeV1) -> HirFunction:
+    var template = original
+    template.type_params = recipe.canonical_type_params
+    if recipe.inherent_method:
+        template.name = recipe.template_name
+        template.is_method = false
+    var canonical = canonicalize_template(template)
+    canonical.type_params = recipe.bound_type_params
+    canonical
+
+export MonoTemplateBodyModeV1, MonoTemplateSignatureV1, MonoTemplateRecipeV1, MonoSpecializationRequestV1
+export mono_template_signature_v1, mono_specialized_signature_v1
+export mono_template_signature_digest_v1, mono_apply_template_recipe_v1
+export mono_archive_put_type_v1

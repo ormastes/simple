@@ -1,0 +1,40 @@
+# Shared exact collection binding validation for retained and archived HIR.
+use compiler.semantics.perf_facts.registry.{CollectionRegistryBindingV1}
+use compiler.hir.hir_types.{HirModule, SymbolId, SymbolKind}
+use compiler.hir.abi_interface.{hir_abi_function_digest_v1}
+use compiler.semantics.perf_facts.collector.{
+    hir_perf_receiver_kind_for_type, hir_perf_receiver_matches}
+
+fn collection_driver_validate_binding_v1(
+    module: HirModule, binding: CollectionRegistryBindingV1, backend: text
+) -> Result<bool, text>:
+    if module.path == "" or binding.module_path != module.path:
+        return Err("collection-binding-module-owner-mismatch")
+    if backend == "auto" or binding.backend != backend:
+        return Err("collection-binding-backend-mismatch")
+    val symbol_id = SymbolId(id: binding.symbol_id)
+    if not module.functions.contains_key(symbol_id) or not module.symbols.symbols.contains_key(binding.symbol_id):
+        return Err("collection-binding-definition-missing")
+    val function = module.functions[symbol_id]
+    val symbol = module.symbols.symbols[binding.symbol_id]
+    if (function.symbol.id != binding.symbol_id or symbol.id.id != binding.symbol_id or
+            symbol.name != function.name or function.is_extern or
+            function.span.file != module.path or symbol.span.file != module.path):
+        return Err("collection-binding-definition-owner-mismatch")
+    match symbol.kind:
+        case SymbolKind.Function: pass_do_nothing
+        case SymbolKind.Method: pass_do_nothing
+        case _: return Err("collection-binding-symbol-kind-mismatch")
+    if val owner = symbol.defining_module:
+        if owner != module.name:
+            return Err("collection-binding-imported-owner")
+    if function.params.len() == 0 or function.is_static:
+        return Err("collection-binding-receiver-missing")
+    if not hir_perf_receiver_matches(binding.receiver, hir_perf_receiver_kind_for_type(function.params[0].type_)):
+        return Err("collection-binding-typed-receiver-mismatch")
+    val digest = hir_abi_function_digest_v1(module, function)?
+    if digest != binding.signature_fingerprint:
+        return Err("collection-binding-typed-signature-mismatch")
+    Ok(true)
+
+export collection_driver_validate_binding_v1

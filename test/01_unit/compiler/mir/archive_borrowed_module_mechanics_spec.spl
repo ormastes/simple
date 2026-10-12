@@ -1,0 +1,141 @@
+# Source-only diagnostic mechanics, NOT final archive or native qualification.
+# The diagnostic identity is bound to actual frontend bytes; no final producer
+# policy/journal/prerequisite is manufactured or admitted by these tests.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+use compiler.mir.hir_declaration_summary_v1.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.transient_owner.*
+use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_mir_registries_promote}
+use compiler.mir._MirLowering.archive_borrowed_module_v1.*
+use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_context_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+
+fn mechanical_mir_module() -> HirModule:
+    val source = "fn main() -> i64:\n    7\n"
+    val ast = parse_full_frontend(source, "mechanical_mir.spl", "mechanical_mir", Logger(level: 0))
+    var frontend = HirLowering.with_filename("mechanical_mir.spl")
+    val module = frontend.lower_module(ast)
+    expect(frontend.errors.len()).to_equal(0)
+    module
+
+fn mechanical_mir_declarations(module: HirModule) -> MirHirDeclarationRepositoryV1:
+    # Select actual initialized producer/cache framing before scratch. This
+    # context grants byte access only; the diagnostic seal grants no admission.
+    val context = hir_owned_artifact_context_v1()
+    val body = hir_module_encode(module)
+    val body_digest = sha256_text(body)
+    val diagnostic_identity = sha256_text("MIR-mechanics-NOT-final-admission-v1\n" + body)
+    expect(transient_scope_begin()).to_equal(true)
+    val projected = mir_hir_project_module_in_owned_scope_v1(context, module,
+        diagnostic_identity, body_digest, body_digest)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(projected) else: false
+    val ended = transient_scope_end()
+    expect(paused and owned and ended).to_equal(true)
+    expect(projected.is_ok()).to_equal(true)
+    var repository = MirHirDeclarationRepositoryV1(artifact_context: context,
+        final_repository_authority: diagnostic_identity, ordered_modules: [module.name],
+        modules: {module.name: projected.unwrap()}, authority: "")
+    repository.authority = mir_hir_declaration_repository_digest_v1(repository)
+    expect(mir_hir_declaration_repository_valid_v1(repository)).to_equal(true)
+    repository
+
+fn mechanical_mir_return_word(module: MirModule) -> i64:
+    expect(module.functions.len()).to_equal(1)
+    val function: MirFunction = module.functions.values()[0]
+    expect(function.signature.return_type.kind).to_equal(MirTypeKind.I64)
+    var words: Dict<i64, i64> = {}
+    var returns: [i64] = []
+    for raw_block in function.blocks:
+        val block: MirBlock = raw_block
+        for raw_inst in block.instructions:
+            val inst: MirInst = raw_inst
+            match inst.kind:
+                case MirInstKind.Const(dest, value, type_):
+                    match value:
+                        case MirConstValue.Int(word): words[dest.id] = word
+                        case _: panic("unexpected constant in actual word-return graph")
+                case MirInstKind.Copy(dest, source) | MirInstKind.Move(dest, source):
+                    expect(words.has(source.id)).to_equal(true)
+                    words[dest.id] = words[source.id]
+                case _: panic("unexpected instruction in actual word-return graph")
+        match block.terminator:
+            case MirTerminator.Ret(value):
+                expect(value != nil).to_equal(true)
+                val operand: MirOperand = value ?? mir_operand_const_int(0)
+                match operand.kind:
+                    case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                        expect(words.has(local.id)).to_equal(true)
+                        returns.push(words[local.id])
+                    case MirOperandKind.Const(value, _):
+                        match value:
+                            case MirConstValue.Int(word): returns.push(word)
+                            case _: panic("actual return is not a word")
+            case _: ()
+    expect(returns.len()).to_equal(1)
+    returns[0]
+
+describe "actual borrowed complete MIR mechanics without final admission", tag: ["only-compiled"]:
+    it "retains the real emitted return operand after the caller closes its scope":
+        val module = mechanical_mir_module()
+        val declarations = mechanical_mir_declarations(module)
+        var lowering = MirLowering.new(module.symbols)
+        lowering.use_explicit_semantic_policy()
+        lowering.declaration_repository = Some(declarations)
+        expect(transient_scope_begin()).to_equal(true)
+        val result = lowering.lower_archive_module_in_owned_scope_v1(module, true)
+        val paused = transient_scope_pause()
+        var owned = false
+        if paused:
+            owned = transient_promote(result)
+            owned = lowering.promote_transient_owner() and owned
+            owned = bootstrap_fn_registries_promote() and owned
+            owned = bootstrap_mir_registries_promote() and owned
+        val ended = transient_scope_end()
+        expect(paused and owned and ended).to_equal(true)
+        expect(result.is_ok()).to_equal(true)
+        expect(mechanical_mir_return_word(result.unwrap())).to_equal(7)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.lambda_bindings.len()).to_equal(0)
+        expect(lowering.lambda_capture_snapshot.len()).to_equal(0)
+        expect(lowering.global_const_exprs.len()).to_equal(0)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+
+    it "rejects a changed actual complete body without closing the caller scope":
+        var module = mechanical_mir_module()
+        val declarations = mechanical_mir_declarations(module)
+        val symbol: SymbolId = module.functions.keys()[0]
+        var function: HirFunction = module.functions[symbol]
+        expect(function.body.has).to_equal(true)
+        var body: HirBlock = function.body
+        var value: HirExpr = body.value
+        value.kind = HirExprKind.IntLit(8, nil)
+        body.value = value
+        function.body = body
+        module.functions[symbol] = function
+        var lowering = MirLowering.new(module.symbols)
+        lowering.use_explicit_semantic_policy()
+        lowering.declaration_repository = Some(declarations)
+        expect(transient_scope_begin()).to_equal(true)
+        val refused = lowering.lower_archive_module_in_owned_scope_v1(module, true).is_err()
+        val state = transient_array_scope_state_v1()
+        val paused = transient_scope_pause()
+        val ended = transient_scope_end()
+        expect(refused).to_equal(true)
+        expect(state).to_equal(1)
+        expect(paused and ended).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(transient_array_scope_state_v1()).to_equal(0)

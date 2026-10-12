@@ -85,6 +85,96 @@ fn enum_payload_types_alias_compatible(expected: HirType, actual: HirType, symbo
         case _:
             false
 
+# Cross-representation alias-aware comparison for the MIR-evidence fallback:
+# the expected side is a declared HIR payload type, the actual side is the
+# lowered local's MIR type (used only when the remembered-HIR-type registry
+# read misses -- e.g. the seed-native lane's registry corruption documented
+# in doc/08_tracking/bug/seed_codegen_interp_native_divergence_2026-10-12.md).
+# Named/Struct leaves use the same (name, defining_module) rule as
+# enum_payload_named_alias_equal; composites recurse; primitives mirror the
+# existing MIR-evidence arms.
+fn enum_payload_hir_mir_alias_compatible(expected: HirType, actual: MirType, symbols: SymbolTable, canonical_owners: Dict<text, i64>) -> bool:
+    match expected.kind:
+        case HirTypeKind.Dict(ek, ev):
+            match actual.kind:
+                case MirTypeKind.Dict(ak, av):
+                    enum_payload_hir_mir_alias_compatible(ek, ak, symbols, canonical_owners) and enum_payload_hir_mir_alias_compatible(ev, av, symbols, canonical_owners)
+                case _: return false
+        case HirTypeKind.Array(ee, _):
+            match actual.kind:
+                case MirTypeKind.Array(ae, _) | MirTypeKind.Slice(ae):
+                    enum_payload_hir_mir_alias_compatible(ee, ae, symbols, canonical_owners)
+                case _: return false
+        case HirTypeKind.Slice(ee):
+            match actual.kind:
+                case MirTypeKind.Array(ae, _) | MirTypeKind.Slice(ae):
+                    enum_payload_hir_mir_alias_compatible(ee, ae, symbols, canonical_owners)
+                case _: return false
+        case HirTypeKind.Tuple(ef):
+            match actual.kind:
+                case MirTypeKind.Tuple(af):
+                    if ef.len() != af.len():
+                        return false
+                    var i = 0
+                    while i < ef.len():
+                        if not enum_payload_hir_mir_alias_compatible(ef[i], af[i], symbols, canonical_owners):
+                            return false
+                        i = i + 1
+                    true
+                case _: return false
+        case HirTypeKind.Optional(ei):
+            match actual.kind:
+                case MirTypeKind.Tuple(parts):
+                    # lower_type preserves Optional(T) as (Bool, lower_type(T)).
+                    # Both the presence slot and the recursively declared inner
+                    # owner are required. A raw/boxed word has lost that proof;
+                    # remembered or source HIR must admit it before this path.
+                    if parts.len() != 2: return false
+                    if parts[0].kind != MirTypeKind.Bool: return false
+                    enum_payload_hir_mir_alias_compatible(ei, parts[1], symbols, canonical_owners)
+                case _: return false
+        case HirTypeKind.Named(owner, _):
+            match actual.kind:
+                case MirTypeKind.Struct(actual_owner):
+                    if not symbols.symbols.has(owner.id): return false
+                    val declaration: HirSymbol = symbols.symbols[owner.id]
+                    match declaration.kind:
+                        case SymbolKind.Struct | SymbolKind.Class | SymbolKind.Enum: ()
+                        case _: return false
+                    val module_owner = mir_layout_canonical_module_name(declaration.defining_module ?? "")
+                    if module_owner == "" or declaration.name == "": return false
+                    if enum_payload_named_alias_equal(owner, actual_owner, symbols): return true
+                    # lower_type's canonical MIR IDs are not SymbolTable IDs.
+                    # Bind them through the actual lowerer's exact declaration
+                    # owner registry, never a bare name or foreign numeric ID.
+                    val key = "{module_owner}.{declaration.name}"
+                    canonical_owners.has(key) and canonical_owners[key] == actual_owner.id
+                case _: return false
+        case HirTypeKind.Str:
+            match actual.kind:
+                case MirTypeKind.Opaque(name): return name == "str"
+                case _: return false
+        case HirTypeKind.Bool:
+            match actual.kind:
+                case MirTypeKind.Bool: return true
+                case _: return false
+        case HirTypeKind.Char:
+            match actual.kind:
+                case MirTypeKind.Char: return true
+                case _: return false
+        case HirTypeKind.Int(_, _):
+            match actual.kind:
+                case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: return true
+                case _: return false
+        case HirTypeKind.Float(_):
+            match actual.kind:
+                case MirTypeKind.F32 | MirTypeKind.F64: return true
+                case _: return false
+        case HirTypeKind.Any:
+            return true
+        case _:
+            return false
+
 impl MirLowering:
     me enum_constructor_symbol_owner(owner: SymbolId) -> text:
         if not owner.is_valid(): return ""
@@ -218,6 +308,12 @@ impl MirLowering:
                                 return actual_owner == mir_class_identity(declaration)
                             case _: ()
                 return false
+            case HirTypeKind.Dict(_, _) | HirTypeKind.Array(_, _) | HirTypeKind.Slice(_) | HirTypeKind.Tuple(_):
+                # Container payloads (the SdnValue.Dict/Array shape): the MIR
+                # word is a handle, so KIND-shape evidence plus alias-aware
+                # element comparison is sufficient — same rule as the
+                # HIR-side fallback, cross-representation.
+                enum_payload_hir_mir_alias_compatible(expected, actual_mir, self.symbols, self.canonical_type_symbols)
             case _: return false
 
     me adapt_declared_enum_payload(expected: HirType, local: LocalId) -> LocalId:
