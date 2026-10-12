@@ -1,0 +1,84 @@
+# @req REQ-SSPEC-COMPILER
+# Authored source-bound regression; execution admission is recorded separately.
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.diagnostics.span.Span
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.HirFunction
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode_stable}
+use compiler.mono.monomorphize_integration.MonomorphizationPass
+use compiler.mono.mono_archive_types_v1.{MonoTemplateBodyModeV1, mono_template_signature_digest_v1}
+
+fn linkage_fixture(flag: text) -> HirModule:
+    val source = "fn identity<T>(value: T) -> T:\n    value\n"
+    val parsed = parse_full_frontend(source, "provider.spl", "provider", Logger(level: 0))
+    var lowering = HirLowering.with_filename("provider.spl")
+    var module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(module.functions.len()).to_equal(1)
+    for key in module.functions.keys():
+        var function: HirFunction = module.functions[key]
+        function.is_extern = flag.contains("extern")
+        function.has_export_attr = flag.contains("export")
+        var attributes = function.func_attr
+        attributes.is_global = flag.contains("global")
+        attributes.is_entry = flag.contains("entry")
+        function.func_attr = attributes
+        module.functions[key] = function
+    module
+
+fn linkage_check_mode(module: HirModule, mode: MonoTemplateBodyModeV1, expected: bool) -> text:
+    var pass_ = MonomorphizationPass.create()
+    pass_.template_body_mode = mode
+    pass_.current_module = "provider"
+    pass_.collect_generics(module, "provider")
+    val template = pass_.template_signature_v1("identity")
+    expect(template.global_linkage).to_equal(expected)
+    val argument = HirType(kind: HirTypeKind.Int(64, true), span: Span.new(0, 0, 1, 1))
+    val symbol = pass_.request_specialization("identity", [argument])
+    expect(symbol).to_be_greater_than(-1)
+    val name = pass_.mangled_name("identity", [argument])
+    val specialized = pass_.specialization_signature_v1(name)
+    expect(specialized.global_linkage).to_equal(expected)
+    expect(specialized.type_params.len()).to_equal(0)
+    mono_template_signature_digest_v1(template)
+
+describe "generic ABI linkage metadata survives archive projection":
+    it "preserves all sixteen flag combinations in both body modes":
+        for external in [false, true]:
+            for exported in [false, true]:
+                for global_ in [false, true]:
+                    for entry in [false, true]:
+                        var flags = ""
+                        if external: flags = flags + "extern "
+                        if exported: flags = flags + "export "
+                        if global_: flags = flags + "global "
+                        if entry: flags = flags + "entry "
+                        val expected = external or exported or global_ or entry
+                        val module = linkage_fixture(flags)
+                        val retained = linkage_check_mode(module, MonoTemplateBodyModeV1.Retained, expected)
+                        val archived = linkage_check_mode(module, MonoTemplateBodyModeV1.ArchiveRequests, expected)
+                        expect(archived).to_equal(retained)
+
+    it "retains ordinary and each ABI attribute through both body modes and HIR persistence":
+        for flag in ["ordinary", "extern", "export", "global", "entry"]:
+            val module = linkage_fixture(flag)
+            val encoded = hir_module_encode(module)
+            val decoded = hir_module_decode_stable(encoded)
+            expect(decoded != nil).to_equal(true)
+            val restored = decoded.unwrap()
+            val expected = flag != "ordinary"
+            val retained = linkage_check_mode(module, MonoTemplateBodyModeV1.Retained, expected)
+            val archived = linkage_check_mode(module, MonoTemplateBodyModeV1.ArchiveRequests, expected)
+            val persisted = linkage_check_mode(restored, MonoTemplateBodyModeV1.ArchiveRequests, expected)
+            expect(archived).to_equal(retained)
+            expect(persisted).to_equal(retained)
+            expect(retained.len()).to_equal(64)
+
+    it "changes the signature digest when only physical linkage changes":
+        val ordinary = linkage_check_mode(linkage_fixture("ordinary"), MonoTemplateBodyModeV1.ArchiveRequests, false)
+        val global = linkage_check_mode(linkage_fixture("global"), MonoTemplateBodyModeV1.ArchiveRequests, true)
+        expect(ordinary == global).to_equal(false)
