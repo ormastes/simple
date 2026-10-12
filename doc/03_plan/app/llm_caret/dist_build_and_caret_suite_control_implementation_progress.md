@@ -120,3 +120,7 @@ Terminal c27 compiler matrix evidence is preserved in `/mnt/c/Temp/dbc-c27-termi
 ## F03 canonical grant wire increment
 
 Shared V2 codec now serializes every grant scope, policy/revocation, expiry and budget field plus a bounded distinct operation list; it rejects oversized frames, unsupported versions, trailing fields, invalid/oversized integers and noncanonical bytes. SHA-256 identifies the exact encoded body. Five source scenarios use independently specified golden bytes and explicit negative cases. Execution NOT_RUN; these are not signatures or authenticated approval events. Issuer key/identity binding, authenticated approval wrapper, trusted owner token and service/OS enforcement remain missing, so F03 is incomplete. No failed producer was used for general tests and no bootstrap retry was launched.
+
+## F03 existing permission gate repair
+
+Source inspection found unknown default modes passed through permission_decision and run_tool's deny/ask-only gate to actual dispatch. The existing owner now rejects invalid modes before allow shortcuts and independently requires exact allow before execution. Two regression scenarios include a real bash marker noncreation oracle; execution NOT_RUN. This repairs local gate logic without claiming remote authentication, approval or sandbox enforcement. No runtime/build retry was launched.

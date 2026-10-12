@@ -46,6 +46,8 @@ Credential dependency inspection is `distributed_host_credential_dependents_v2`:
 
 Canonical grant body is `DBC_EXECUTION_GRANT_V2` in the existing shared V2 codec: id, principal, project, host, environment digest, policy revision, revocation epoch, expiry, memory/duration budgets, bounded operation count and ordered operation entries. Encoding and decoding reject invalid identifiers/digests, nonpositive required values, numbers outside the 16-digit bound, duplicate operations and counts beyond 64. Frames are limited to 64 KiB; decoding must re-encode to the exact received bytes. `distributed_grant_digest_v2` hashes those canonical bytes. This is an untrusted body until an authenticated issuer/approval owner independently binds authority, key identity/revision, request and policy. Decoding or presenting the digest does not grant permission, authenticate a principal, or mint a trusted owner token. The signature/approval wrapper and service enforcement remain required.
 
+The existing local tool gate must reject invalid policy modes before read-only/allow-list/allow-all shortcuts, and dispatch only on an exact allow decision. `tools.spl` retains that owner and denies unresolved interactive approval. The invalid-mode regression must prove no bash marker is created, not merely inspect a returned decision. This local configuration gate is not a remote principal or authenticated human approval seam; managed commands must still enter through the separate HostAuthority contract.
+
 ### F04 — Managed SSH and persistent sessions
 
 | Concern | Design |
