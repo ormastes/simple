@@ -9,3 +9,15 @@ Existing full-CLI receipts under build/standalone/caret-recovery/full-cli report
 Impact: contract, codec, composition and admission specs are authored but NOT_RUN. No branch coverage, runtime PASS, general Phase 3 qualification or implementation landing may be claimed.
 
 Unblock: admit a pure-Simple runtime with full CLI/test/SPipe closure and retained exact binary/source/provider lineage; run focused specs once against this source, generate current manuals, complete required dependency checks and review before landing. Do not substitute Rust seed or diagnostic Phase 3 binary.
+
+## User-directed runtime repair
+
+User requested fixing the missing runtime on 2026-10-12. Owner claimed by current Codex lane. Exact reproducer: /home/ormastes/simple-caret-release-phase3/bin/simple-interp test test/01_unit/lib/common/contracts/distributed_control_v2_spec.spl --mode=interpreter, exit 127, no runtime found.
+
+Canonical planner recovery uses admitted Stage 2 at /home/ormastes/simple-linux-bootstrap-build-20261009/logic-candidate-v4/stage2/x86_64-unknown-linux-gnu/simple. Initial request required explicit external output allowlist. With that supplied, actual planner compilation reported SCV-E-ADMISSION compile-event-journal-missing and prescribed SIMPLE_SCV_INVENTORY_COLD_INIT=1 for first build. Initialized through that supported cold path; no admission/no-stub checks disabled. Retained logs in build/runtime-recovery. Planner build session 86464 is live with compiler PID 123318 observed (86% CPU, ~115 MiB RSS at observation). This is recovery progress, not runtime admission or test PASS.
+
+## Subsequent canonical recovery evidence
+
+The preceding planner/process observation is historical. Planner compilation subsequently succeeded, but the old lineage could not resume general qualification because its compiler-test PASS receipt was unavailable. Fresh canonical bootstrap was selected instead. Mounted source/output initially failed exact immutable artifact modes after successful Rust compilation. Native source and authority output now reside under `/mnt/wsl`; only bulk mutable storage and the retained Cargo cache use the mounted drive. No mode/admission checks were weakened.
+
+Latest frozen source is b36501e87 in `/mnt/wsl/simple-dbc-native-recovery-20261012`; output `/mnt/wsl/simple-dbc-native-bootstrap-20261012`. Recovery master log `/mnt/c/Temp/dbc-native-authority-stage2-20261012.log` records successful Rust package builds, successful immutable authority publication, bootstrap preflight PASS (5 checks, zero failed/skipped), and the start of Stage 2 compilation of `bootstrap_main.spl`. This proves recovery advanced past the prior filesystem failure, not Stage 2 admission, general CLI/test-runner qualification or feature test PASS. Feature increments after the frozen source remain separate and are retained in Git bundles on the mounted drive.
