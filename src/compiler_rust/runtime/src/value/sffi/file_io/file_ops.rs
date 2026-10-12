@@ -2105,6 +2105,11 @@ pub extern "C" fn rt_text_to_bytes(text: RuntimeValue) -> RuntimeValue {
 /// must retain their [u8] arrays instead of passing them through text.
 #[no_mangle]
 pub extern "C" fn rt_bytes_to_text(bytes: RuntimeValue) -> RuntimeValue {
+    // rt_array_len accepts zero-payload immediates as empty for legacy callers.
+    // This typed byte decoder requires a genuine non-null array receiver.
+    if !bytes.is_heap() || bytes.as_heap_ptr().is_null() {
+        return RuntimeValue::NIL;
+    }
     let len = crate::value::collections::rt_array_len(bytes);
     if len < 0 {
         return RuntimeValue::NIL;
@@ -3263,7 +3268,7 @@ mod byte_text_utf8_invariant_tests {
     #[test]
     fn invalid_array_receivers_and_elements_keep_nil_contract() {
         let text = rt_string_new(b"text".as_ptr(), 4);
-        for receiver in [RuntimeValue::NIL, RuntimeValue::from_int(7), text] {
+        for receiver in [RuntimeValue::NIL, RuntimeValue::from_int(0), RuntimeValue::from_bool(false), RuntimeValue::from_raw(1), RuntimeValue::from_int(7), text] {
             assert!(rt_bytes_to_text(receiver).is_nil());
         }
         for invalid in [RuntimeValue::from_int(-1), RuntimeValue::from_int(256), RuntimeValue::NIL, text] {
