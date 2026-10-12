@@ -169,7 +169,9 @@ case "$threads" in ''|*[!0-9]*|0) resume_fail "invalid transcript thread count" 
 
 stage2_recorded_cold_init=$(bootstrap_stage3_stage2_transcript_cold_init "$transcript") ||
     resume_fail "transcript SCV cold-init control is invalid"
-expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "$platform" "$stage2_recorded_cold_init") ||
+stage2_recorded_compiler_ceiling=$(bootstrap_stage3_transcript_compiler_ceiling "$transcript") ||
+    resume_fail "transcript compiler RSS ceiling is invalid"
+expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "$platform" "$stage2_recorded_cold_init" "$stage2_recorded_compiler_ceiling") ||
     resume_fail "canonical environment set is unavailable"
 [ "$(transcript_explicit_env_names "$transcript")" = "$expected_env_names" ] ||
     resume_fail "transcript environment set is not canonical"
@@ -179,6 +181,18 @@ if [ "$stage2_recorded_cold_init" = 1 ]; then
     export SIMPLE_SCV_INVENTORY_COLD_INIT
 else
     unset SIMPLE_SCV_INVENTORY_COLD_INIT
+fi
+# Reuse the recorded ceiling only. A new ambient value must not change the
+# recovered command's policy; a legacy transcript retains its absent binding.
+if [ -n "$stage2_recorded_compiler_ceiling" ]; then
+    [ "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB-$stage2_recorded_compiler_ceiling}" = "$stage2_recorded_compiler_ceiling" ] ||
+        resume_fail "ambient compiler RSS ceiling conflicts with transcript"
+    SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$stage2_recorded_compiler_ceiling
+    export SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+else
+    [ "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB+x}" != x ] ||
+        resume_fail "legacy transcript cannot acquire an ambient compiler RSS ceiling"
+    unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
 fi
 
 SIMPLE_ABI_POLICY=$(bootstrap_stage3_transcript_explicit_env_value "$transcript" SIMPLE_ABI_POLICY) ||

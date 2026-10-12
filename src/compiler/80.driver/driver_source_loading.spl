@@ -1390,6 +1390,9 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
     ""
 
 pub fn _driver_resolve_source_root_entry_import_v1(module_path: text, source_roots: [text]) -> SourceRootResolutionV1:
+    _driver_resolve_source_root_entry_import_from_v1(module_path, source_roots, "")
+
+pub fn _driver_resolve_source_root_entry_import_from_v1(module_path: text, source_roots: [text], entry_dir: text) -> SourceRootResolutionV1:
     # Match native-build's ordered explicit-root contract before probing the
     # checkout. A composition overlay is authoritative for the module it owns;
     # re-resolving that name in src/ silently restores an excluded provider.
@@ -1411,16 +1414,39 @@ pub fn _driver_resolve_source_root_entry_import_v1(module_path: text, source_roo
                 val stripped = segments.slice(1, segments.len()).join("/")
                 val selected = _driver_try_numbered_entry_import_rel_checked_v1(root, stripped)
                 match selected:
-                    case SourceRootResolutionV1.Found(_): return selected
+                    case SourceRootResolutionV1.Found(path):
+                        if _driver_source_root_hit_allowed_v1(path, probe == module_path): return selected
                     case SourceRootResolutionV1.Ambiguous(_): return selected
                     case SourceRootResolutionV1.Missing: ()
             val selected = _driver_try_numbered_entry_import_rel_checked_v1(root, probe.replace(".", "/"))
             match selected:
-                case SourceRootResolutionV1.Found(_): return selected
+                case SourceRootResolutionV1.Found(path):
+                    if _driver_source_root_hit_allowed_v1(path, probe == module_path): return selected
                 case SourceRootResolutionV1.Ambiguous(_): return selected
                 case SourceRootResolutionV1.Missing: ()
+        # Parent stripping (`use module.item`) must not outrank the checkout
+        # resolver at the SAME spelling. The checkout owns layout rewrites the
+        # roots cannot see (`compiler.backend.X` -> 70.backend/backend/X,
+        # `compiler.mir_opt.X` -> 60.mir_opt/mir_opt/X). Stripping first
+        # answered such a module with its ancestor facade
+        # (70.backend/__init__.spl) and bound the import spelling to it.
+        # Rule: a root wins for a spelling that exists under it; after
+        # stripping it may answer only with a module FILE (`use module.item`),
+        # never a package facade (_driver_source_root_hit_allowed_v1);
+        # once the checkout resolves the current spelling, report Missing so
+        # the fallback selects that file.
+        if _driver_resolve_entry_import_exact(probe, entry_dir) != "":
+            return SourceRootResolutionV1.Missing
         probe = _driver_entry_import_parent(probe)
     SourceRootResolutionV1.Missing
+
+fn _driver_source_root_hit_allowed_v1(path: text, exact_spelling: bool) -> bool:
+    # A stripped spelling names `module.item`. Its module is a file. A
+    # package facade reached that way is an ANCESTOR of the module that was
+    # asked for (`backend.env` -> 70.backend/__init__.spl): binding it pulls
+    # the whole facade into the closure under the wrong name.
+    if exact_spelling: return true
+    not (path.ends_with("/mod.spl") or path.ends_with("/__init__.spl"))
 
 pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
     """File path backing a Simple import path, or "" when none exists.
