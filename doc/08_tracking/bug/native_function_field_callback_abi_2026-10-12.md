@@ -25,3 +25,5 @@ returned HIR type and exact registered record layout. Closure dispatch and
 capture storage remain intact. Authored MIR regressions require non-I64 callback
 return signatures for text and record callbacks. They are NOT_RUN; behavioral
 FAIL remains authoritative and no further verification attempt was made.
+
+Primary review retained the final closure-lift guard as an unqualified patch, not an integrated repair: /mnt/c/Temp/dbc-unqualified-lambda-return-guard-candidate-20261012.patch, based on043d83f4a. It selects concrete Int/Bool/Str/record returns and rejects any lowered-result/signature mismatch, while preserving flat arguments/hidden captures. Unit/float and other valid return paths lack compatibility evidence; broad rejection could regress callers. HIR lambda and constructor expressions also lack contextual function-return typing in some paths. The source diagnostic budget is exhausted, with no new execution or bootstrap. Future bounded qualification must cover ordinary integer, unit, float, text and captured record callbacks, plus actual caller/provider signatures. Existing native FAIL is unchanged.
