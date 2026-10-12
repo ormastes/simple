@@ -1,0 +1,89 @@
+# @tag: in-development
+# @cover src/lib/nogc_sync_mut/sffi/collection_capture.spl
+# @cover src/lib/nogc_sync_mut/src/collections/adaptive_set_filter.spl
+use std.spec.*
+use std.nogc_sync_mut.sffi.collection_capture.{collection_capture_begin, collection_capture_finish}
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveTextSet, adaptive_set_default_profile}
+use std.nogc_sync_mut.src.collections.adaptive_set_filter.{adaptive_set_filter_observed}
+
+fn filter_capture_keep_a(value: text) -> Result<bool, text>:
+    Ok(value == "a")
+
+fn filter_capture_keep_all(value: text) -> Result<bool, text>:
+    Ok(true)
+
+fn filter_capture_keep_none(value: text) -> Result<bool, text>:
+    Ok(false)
+
+fn filter_capture_fail(value: text) -> Result<bool, text>:
+    Err("filter capture predicate failure")
+
+fn captured_filter_selectivity(body: text, site: text) -> i64:
+    for line in body.split("\n"):
+        if line.contains("site=" + site + ";") and
+                line.contains("name=filter_selectivity;value="):
+            val fields = line.split("name=filter_selectivity;value=")
+            if fields.len() == 2:
+                return fields[1].to_i64() ?? -1
+    -1
+
+describe "shared filter selectivity capture":
+    it "publishes weighted completed observations and omits empty or failed filters":
+        val target = "x86_64-v3"
+        val site = "ast://perf/filter/weighted#stable"
+        val rejected_site = "ast://perf/filter/rejected#stable"
+        val empty_site = "ast://perf/filter/empty#stable"
+        val failed_site = "ast://perf/filter/failed#stable"
+        expect(collection_capture_begin(target)).to_be(true)
+
+        var first = AdaptiveTextSet.with_site_and_target(
+            adaptive_set_default_profile(), site, target)
+        first.insert("a")
+        first.insert("b")
+        first.insert("c")
+        val first_result = adaptive_set_filter_observed(first, filter_capture_keep_a).unwrap()
+        expect(first_result.observation.unwrap().evaluated).to_equal(3)
+        expect(first_result.observation.unwrap().accepted).to_equal(1)
+
+        var second = AdaptiveTextSet.with_site_and_target(
+            adaptive_set_default_profile(), site, target)
+        second.insert("d")
+        val second_result = adaptive_set_filter_observed(second, filter_capture_keep_all).unwrap()
+        expect(second_result.observation.unwrap().evaluated).to_equal(1)
+        expect(second_result.observation.unwrap().accepted).to_equal(1)
+
+        var rejected = AdaptiveTextSet.with_site_and_target(
+            adaptive_set_default_profile(), rejected_site, target)
+        rejected.insert("a")
+        rejected.insert("b")
+        val rejected_result = adaptive_set_filter_observed(rejected, filter_capture_keep_none).unwrap()
+        expect(rejected_result.observation.unwrap().accepted).to_equal(0)
+
+        val empty = AdaptiveTextSet.with_site_and_target(
+            adaptive_set_default_profile(), empty_site, target)
+        val empty_result = adaptive_set_filter_observed(empty, filter_capture_keep_all).unwrap()
+        expect(empty_result.observation).to_be_nil()
+
+        var failed = AdaptiveTextSet.with_site_and_target(
+            adaptive_set_default_profile(), failed_site, target)
+        failed.insert("a")
+        val failed_result = adaptive_set_filter_observed(failed, filter_capture_fail)
+        expect(failed_result.is_err()).to_be(true)
+
+        val body = collection_capture_finish() ?? ""
+        expect(captured_filter_selectivity(body, site)).to_equal(500000)
+        expect(captured_filter_selectivity(body, rejected_site)).to_equal(0)
+        expect(captured_filter_selectivity(body, empty_site)).to_equal(-1)
+        expect(captured_filter_selectivity(body, failed_site)).to_equal(-1)
+
+        expect(collection_capture_begin(target)).to_be(true)
+        var invalid_capture_source = AdaptiveTextSet.with_profile(adaptive_set_default_profile())
+        invalid_capture_source.insert("kept")
+        invalid_capture_source.site_id = "not-an-admitted-site"
+        invalid_capture_source.target_profile_id = target
+        val completed_despite_capture_error = adaptive_set_filter_observed(
+            invalid_capture_source, filter_capture_keep_all).unwrap()
+        expect(completed_despite_capture_error.result.snapshot_values()).to_equal(["kept"])
+        expect(completed_despite_capture_error.observation.unwrap().evaluated).to_equal(1)
+        expect(completed_despite_capture_error.observation.unwrap().accepted).to_equal(1)
+        expect(collection_capture_finish()).to_be_nil()
