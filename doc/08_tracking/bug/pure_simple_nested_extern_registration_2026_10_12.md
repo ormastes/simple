@@ -10,7 +10,7 @@ Moving the identical extern declaration to module scope preserves the call, retu
 
 Evidence: `build/native_probe/parallel-nested-extern-20261012-astra/`; patch SHA256 `603e82db1a39ea20f2403ef556b5fe207d566d9ae54de0c005fdae96b40418b3`; successful receipt SHA256 `b0f9f6296552fef76672fe4ac61405d9c1cf6001cb3a9591a07c197f892e5d26`.
 
-Recovery reference: `50c8c89f6e476d1e0f3e7b2e1512e7db57a6bd06`, original nested declaration in the same source owner. Workaround commit: pending local commit; append the actual hash after committing.
+Recovery reference: `50c8c89f6e476d1e0f3e7b2e1512e7db57a6bd06`, original nested declaration in the same source owner. Workaround commit: `0a9ecc244a6de194f9bd3bd8e34f9805d1337372` on local `release_phase3`. Remote landing remains subject to the user's Phase3 gate.
 
 Permanent repair must register nested extern declarations at their intended lexical scope in pure-Simple HIR lowering. Check the Rust seed for the same behavior. Add prevention cases for nested extern calls in static methods and ordinary functions, identical declarations in separate scopes, and conflicting signatures. Before removal, apply the permanent repair, verify the original nested reproducer and these scope cases, then restore only this tagged declaration move. Fetching a purported repair alone does not authorize recovery.
 
