@@ -6647,10 +6647,31 @@ impl MirLowering:
         for arg_op in arg_operands:
             param_types.push(MirType.i64())
         var ret_type = MirType.i64()
+        var indirect_return: HirType? = nil
         if callee.has_type_:
-            ret_type = self.lower_type(callee.type_)
+            match callee.type_.kind:
+                case HirTypeKind.Function(_, declared_return, _):
+                    indirect_return = Some(declared_return)
+                    ret_type = self.lower_type(declared_return)
+                case _: ()
         val sig = MirSignature(params: param_types, return_type: ret_type, is_variadic: false)
-        self.emit_function_value_call(callee_local, arg_operands, sig, ret_type)
+        val result = self.emit_function_value_call(callee_local, arg_operands, sig, ret_type)
+        if val declared_return = indirect_return:
+            self.remember_local_hir_type(result.id, declared_return, 0, 0)
+            match declared_return.kind:
+                case HirTypeKind.Named(owner, _):
+                    if val declaration = self.symbols.get_symbol_raw(owner.id):
+                        val layout_key = self.composite_layout_key(declaration)
+                        if self.struct_field_order.has(layout_key):
+                            self.struct_value_syms[result.id] = layout_key
+                case HirTypeKind.Optional(_):
+                    self.option_value_locals[result.id] = true
+                    self.mark_runtime_value_local(result.id)
+                case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                    self.runtime_array_locals[result.id] = true
+                    self.mark_runtime_value_local(result.id)
+                case _: ()
+        result
 
     me emit_function_value_call(callee_local: LocalId, arg_operands: [MirOperand], sig: MirSignature, ret_type: MirType) -> LocalId:
         """Call a function-typed VALUE (a local holding either a raw function
