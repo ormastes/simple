@@ -1,5 +1,37 @@
 # Compiler Driver Layer Expert
 
+MIR progress uses actual per-module fatal/context/ICE classification and the
+common processed-minus-cached-minus-failed calculation. The logger's console,
+events and snapshot share that calculation; a terminal failure reuses only
+matching complete parent accounting. Unclassified or interrupted counts stay
+unknown. The Windows logger diagnostic exceeded the cap before object output;
+actual compiled reporting remains unqualified. See
+`doc/08_tracking/bug/mir_progress_failed_modules_reported_success_2026_10_12.md`.
+
+## Current bounded archive activation (2026-10-12)
+
+The production controller owns a compilation generation before source loading,
+then performs actual selected-source HIR transactions, journal publication and
+genuine weave/current/mono/final issuance. MIR must consume the private final
+repository in borrowed body scopes, retaining physical names and independent
+logical specialization owners. Every new compilation resets the previous
+generation after the native no-op fast path; cleanup revokes the final reader
+only after MIR and code generation finish. Diagnostic publication must preserve
+the original ordered counts, including failures already published by the real
+validator or mono pass.
+
+The initial orchestration admission targets managed native AOT, complete
+streaming source inventories, enabled nonshard HIR cache and an explicit runtime
+bundle. Actual ambient bootstrap routes retain their established semantics;
+the full-native borrowed MIR consumer does not admit bootstrap-flat lowering.
+Cold full-inventory and demand routes retain their existing owners. Routing is
+derived after source loading and parsing publish the actual selection and
+inventory; projected/nonstreaming routes require their own custody proof. Source review
+and authored controls do not establish native activation or memory improvement.
+Attempt13 compiled1,297 files and failed the extracted MIR field-type defect;
+the incoming typed `field_type` correction awaits a fresh bootstrap. See
+`doc/08_tracking/bug/phase2_matrix_strict_stage2_error_family_2026-10-09.md`.
+
 Mission-critical V2 bootstrap/admission status is owned by
 `doc/03_plan/sys_test/mission_critical_infra_hardening_v2.md`; its active owner
 failure is `doc/08_tracking/bug/stage3_selfhost_exit_139_2026-08-14.md`.
@@ -108,6 +140,99 @@ See `doc/08_tracking/bug/simpleos_wm_vulkan_cross_arch_rows_blocked_2026-08-31.m
 
 - 2026-09-05 gpu_frontend_offload: default-off frontend offload switch (`structural_contracts/frontend_offload_switch.spl`, driver gate in `80.driver/driver_source_pipeline_parsing.spl`) — see `doc/00_llm_process/feature_expert/gpu_frontend_offload/skill.md`.
 
+## Phase 3 archive publication journal (2026-10-12)
+
+The inactive `cache/driver_hir_archive_journal_v1.spl` owner records actual
+registration calls and logical alias events. Publication failure retains the
+pending event and closes registration without minting a successful schedule.
+Owned verification scopes reclaim cumulative metadata scratch. The native
+`journal` fixture requires 13 checks and the canonical managed runtime/tool
+authority. These checks remain unrun; production admission still requires the
+actual surface visit order, distinct layout order and post-HIR transformed-body
+prerequisites.
+
+`cache/hir_mono_verification_use_v1.spl` independently replays immutable actual
+applied selections and produces a fresh real verifier report (`verification`,
+18 native checks pending). `cache/driver_hir_post_validation_fact_lease_v1.spl`
+reads full original bodies inside borrowed leases, yielding body-free DTOs
+(`postfacts`, 26 native checks pending). Production owners must bind actual
+ordered indexes, RT capabilities and transformed parents; these helpers alone
+do not activate the pipeline or grant final admission.
+
+`cache/driver_cold_hir_source_capture_plan_v1.spl` performs actual pinned SCV
+generation, snapshot, canonical generation text, selected-source, full-inventory
+CFG and count checks in one owned inventory scope. Only first-physical-source
+capture input rows escape. The retained cold typed-receipt helper shares the
+same source validators at its original check points, preserving first-physical
+deduplication and independent ABI failure collection. The new source factory is
+inactive and does not publish ctx receipts or admit transformed bodies; four
+new boundary examples and full SCV/native integration remain unrun.
+
+The retained full-inventory emission loop now calls
+`cache/driver_cold_hir_emission_lease_v1.spl` after complete typed ABI receipt
+collection. Its owned wrapper promotes the fresh emission/failure Result and
+cache diagnostic owner; it preserves the prior cache warning alias and never
+promotes the input HIR. The archive module helper
+uses the same actual borrowed emitter/witness implementation. All-success ctx
+publication and original error categories remain; two new compiled examples
+are unrun. This is scoped retained-path emission, not full pipeline activation.
+
+`cache/driver_hir_archive_schedule_v1.spl` and the actual CompilerDriver capture
+wrapper replay the frozen streaming surface/source owner, independent authored
+aliases, shared visit producer and separate physical layout schedule. A shard's
+all-source recipe cannot admit full publication. The `schedule` and
+`schedule_shard` native selectors each require 13 checks in a fresh runtime
+process; both remain unrun. Aspect policy replay now accepts explicit actual
+ordered claim DTOs without registry mutation. Genuine source/policy and
+transformed-body ownership remains required before production activation.
+
+Distinct `mono_archive_current_body_v1` frames and fresh current registration
+preserve the unresolved original parent instead of reusing stale declarations.
+The actual publisher rereads full current bodies and recollects their rows.
+The `current-registration` selector requires 13 native checks, still unrun.
+Explicit aspect/layer/effect/RT claim replay avoids installing another
+compilation's registries; the real driver still must capture and bind all actual
+source/policy inputs. Borrowed MIR lowering uses the existing complete lowering
+implementation and leaves scope/output promotion to its caller. These are
+inactive mechanical prerequisites, not a final repository or admission token.
+
+`cache/driver_cold_hir_weave_body_v1.spl` reads a separate complete
+`post-hir-weave-v1` artifact for cold ABI/SMF/witness capture before optional
+quiet resolution. It shares the byte grammar with strict current mono bodies
+without changing their resolved-stage bytes/key/API. The `weave-cold` selector
+requires 14 actual-body native checks, unrun. The real driver prerequisite owner
+must authenticate both stage boundaries and the original returned cold capture.
+
+The post-HIR `*_selected_in_owned_scope_v1` readers accept actual captured-policy
+walker selection. Ambient wrappers remain unchanged, and global/local HAL
+overrides remain mandatory. The `postfacts` selector now hashes all three real
+fixture source files and requires 26 native checks, still unrun. Selection flags
+alone grant no accepted policy or stage ownership.
+
+`cache/driver_hir_post_validation_policy_v1.spl` and its once-only real driver
+bridge capture actual ordered claims and pre-consumption capabilities under the
+verified full schedule/journal. Aliases retain their independent authored paths
+while proving the genuine earlier canonical body and physical bytes. The
+`postpolicy` selector requires 22 checks and the exact managed tool/runtime
+handoff, still unrun. Actual complete gates, weave and cold/quiet stage use must
+be independently replayed before production or final admission.
+
+`cache/driver_hir_weave_source_policy_v1.spl` replays actual frozen physical
+source through the selected frontend with fresh isolated claim registries,
+then restores the original registry roots before scratch closes. It checks
+complete source-produced rows and retains only actual frontend/CFG metadata;
+it does not consume or reinstall the next RT capability manifest. The five
+added source/custody controls are unrun and grant no final admission.
+
+The complete current-body input now reaches the shared mono root/FIFO,
+assembly and immutable full-verification recipe consumers. Current-mode inputs
+refuse missing frames/cache or stale original-body publication identities;
+original-mode recipes keep their existing bytes. `current-mono` requires 20
+native checks, unrun. Registration schemas, identity and current seal are
+extracted below the 800-line limit; the facade preserves its public API and
+the unchecked installer stays private. This mechanical replay still requires
+the genuine driver prerequisite and final repository owner before MIR use.
+
 ## 2026-09-26 — `native-build` restored: backend table in the interpreted worker, entry-file hashing, module-init reads
 
 - **The interpreted native-build worker never installed the static backend
@@ -137,3 +262,14 @@ See `doc/08_tracking/bug/simpleos_wm_vulkan_cross_arch_rows_blocked_2026-08-31.m
   record [stage2_candidate_env_lexer_array_oob_sigill_2026-09-26](../../../08_tracking/bug/stage2_candidate_env_lexer_array_oob_sigill_2026-09-26.md).
   Until the driver guarantees `__module_init_*` runs for every consumer, treat
   every module-level container read in compiler code as possibly-empty.
+
+Production archive activation begins a fresh generation after the no-op fast
+path, selects eligibility after actual source selection, and revokes the owner
+after every compilation result. An attempted or revoked archive owner cannot
+fall back to retained HIR in the MIR consumer. Native qualification remains
+pending; source checks alone do not establish compiler or runner admission.
+
+Generic archive signatures retain declaration linkage metadata in digest v2.
+Driver archive transport must preserve this field through specialization;
+caller display qualifiers cannot establish the native callee owner. The
+source-reviewed repair requires a fresh generation for native qualification.

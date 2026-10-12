@@ -58,6 +58,12 @@ Require ($failed -and $partial.Count -eq 0) 'partial native snapshot escaped as 
 $failed = $false
 try { ConvertTo-BootstrapProgressRows $fixture 777 400 | Out-Null } catch { $failed = $true }
 Require $failed 'missing root accepted as empty healthy tree'
+$nativeIdentity = Get-BootstrapNativeProcessIdentity $PID
+Require ($nativeIdentity -match ('^windows:' + $PID + ':\d+$')) 'native birth token malformed'
+Require ((Get-BootstrapNativeProcessIdentity $PID) -ceq $nativeIdentity) 'live native birth identity changed'
+$failed = $false
+try { Get-BootstrapNativeProcessIdentity 0 | Out-Null } catch { $failed = $true }
+Require $failed 'invalid native PID accepted'
 $supervisor = Entry 601 100 'bootstrap-session-exec.exe' 0 1024
 $supervisor | Add-Member CommandLine 'bootstrap-session-exec.exe --supervise --spec fixture'
 $jobFixture = @((Entry 100 1 'sh.exe' 0 1024), $supervisor,
@@ -136,4 +142,4 @@ try {
     } { @(602) } {})
 } catch { $failed = $true }
 Require ($failed -and $partial.Count -eq 0 -and $state.Snapshots -eq 1) 'missing metrics were downgraded to a retryable membership race'
-Write-Output 'PASS windows process observer: 31 checks'
+Write-Output 'PASS windows process observer: 34 checks'

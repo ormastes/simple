@@ -5,12 +5,31 @@ use compiler.hir.hir_types.{SymbolKind}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_symbol_table_methods.{_hir_symbol_owner_module}
+use compiler.common.attributes.{FunctionAttr}
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
 
 fn mir_class_identity(symbol: HirSymbol) -> text:
     val owner = _hir_symbol_owner_module(symbol.defining_module ?? "")
     if owner == "": symbol.name else: "{owner}.{symbol.name}"
+
+fn mir_nominal_owner_matches(name: text, defining_module: text, ownership_key: text) -> bool:
+    """Compare one full declaration owner across path and logical spellings.
+    The layout registration retains its raw key; only the owner comparison
+    uses the existing module identity contract. A leaf name proves nothing
+    about a declaration that has a defining module."""
+    if name == "": return false
+    if ownership_key == name: return defining_module == ""
+    var separator = ownership_key.rfind("::")
+    var width = 2
+    if separator < 0:
+        separator = ownership_key.rfind(".")
+        width = 1
+    if separator <= 0 or ownership_key.substring(separator + width) != name:
+        return false
+    val expected = mir_layout_canonical_module_name(ownership_key.substring(0, separator))
+    val actual = mir_layout_canonical_module_name(defining_module)
+    expected != "" and actual == expected
 
 fn mir_provider_callable_key(owner: text, name: text) -> text:
     val module_name = _hir_symbol_owner_module(owner)
@@ -66,10 +85,16 @@ fn mir_provider_extension_owner_key(module_name: text, source_name: text) -> tex
     "{owner_module}.{owner_name.substring(type_sep + 1)}"
 
 fn mir_provider_function_name(owner: text, symbols: SymbolTable, func: HirFunction, is_entry_module: bool = false) -> text:
+    mir_provider_function_name_fields_v1(owner, symbols, func.symbol, func.name,
+        func.is_extern, func.has_export_attr, func.func_attr, is_entry_module)
+
+fn mir_provider_function_name_fields_v1(owner: text, symbols: SymbolTable, symbol: SymbolId,
+        name: text, is_extern: bool, has_export_attr: bool, attr: FunctionAttr,
+        is_entry_module: bool = false) -> text:
     # Linkage attributes are an ABI boundary, including runtime push helpers.
-    if func.is_extern or func.has_export_attr or func.func_attr.is_global or func.func_attr.is_entry or (is_entry_module and func.name == "main"):
-        return func.name
-    mir_provider_callable_identity(owner, symbols.symbol_display_name(func.symbol, func.name))
+    if is_extern or has_export_attr or attr.is_global or attr.is_entry or (is_entry_module and name == "main"):
+        return name
+    mir_provider_callable_identity(owner, symbols.symbol_display_name(symbol, name))
 
 fn mir_provider_default_is_error(expr: HirExpr) -> bool:
     val expr_kind: HirExprKind = expr.kind
@@ -111,15 +136,24 @@ fn mir_provider_default_children_valid(expr: HirExpr) -> bool:
 
 impl MirLowering:
     me register_provider_callable_link(owner: text, symbols: SymbolTable, func: HirFunction, is_entry_module: bool = false):
-        val link = mir_provider_function_name(owner, symbols, func, is_entry_module)
-        val name = symbols.symbol_display_name(func.symbol, func.name)
+        self.register_provider_callable_link_fields_v1(owner, symbols, func.symbol, func.name,
+            func.is_extern, func.is_method, func.is_static, func.has_export_attr,
+            func.func_attr, is_entry_module)
+
+    me register_provider_callable_link_fields_v1(owner: text, symbols: SymbolTable,
+            symbol: SymbolId, source_name: text, is_extern: bool, is_method: bool,
+            is_static: bool, has_export_attr: bool, attr: FunctionAttr,
+            is_entry_module: bool = false):
+        val link = mir_provider_function_name_fields_v1(owner, symbols, symbol, source_name,
+            is_extern, has_export_attr, attr, is_entry_module)
+        val name = symbols.symbol_display_name(symbol, source_name)
         self.callable_link_names[mir_provider_callable_key(owner, name)] = link
         var text_value_abi = self.callable_text_value_abi
-        text_value_abi[mir_provider_callable_key(owner, name)] = not func.is_extern
+        text_value_abi[mir_provider_callable_key(owner, name)] = not is_extern
         # A free function's source name can differ from its imported alias.
-        if not func.is_method and not func.is_static:
-            self.callable_link_names[mir_provider_callable_key(owner, func.name)] = link
-            text_value_abi[mir_provider_callable_key(owner, func.name)] = not func.is_extern
+        if not is_method and not is_static:
+            self.callable_link_names[mir_provider_callable_key(owner, source_name)] = link
+            text_value_abi[mir_provider_callable_key(owner, source_name)] = not is_extern
         self.callable_text_value_abi = text_value_abi
 
     fn provider_callable_accepts_text_value(symbol: SymbolId) -> bool:
@@ -194,11 +228,16 @@ impl MirLowering:
         self.struct_method_syms[key] = method
 
     me register_provider_method(func: HirFunction, provider: SymbolTable, links: Dict<i64, text>):
-        if not func.is_method and not func.is_static:
+        self.register_provider_method_fields_v1(func.symbol, func.is_method, func.is_static,
+            func.return_type, provider, links)
+
+    me register_provider_method_fields_v1(function_symbol: SymbolId, is_method: bool,
+            is_static: bool, return_type: HirType, provider: SymbolTable, links: Dict<i64, text>):
+        if not is_method and not is_static:
             return
-        if not links.has(func.symbol.id):
+        if not links.has(function_symbol.id):
             return
-        val source = provider.get_symbol_raw(func.symbol.id)
+        val source = provider.get_symbol_raw(function_symbol.id)
         if source == nil:
             return
         # Method dispatch owns the declaring type even when its link spelling
@@ -215,14 +254,14 @@ impl MirLowering:
                 if extension_owner == "" or not self.extension_owner_is_known(extension_owner):
                     return
                 class_key = extension_owner
-        val method = self.relocate_provider_callable(func.symbol, provider, links)
+        val method = self.relocate_provider_callable(function_symbol, provider, links)
         if method.id < 0:
             return
         val key = "{class_key}::{method_name}"
         self.register_owner_method(key, method, source.defining_module ?? "")
-        if func.is_static:
+        if is_static:
             self.register_owner_method("static::{key}", method, source.defining_module ?? "")
-        val ret = self.relocate_provider_type(func.return_type, provider)
+        val ret = self.relocate_provider_type(return_type, provider)
         match ret.kind:
             case Named(id, _):
                 val symbol = self.symbols.get_symbol_raw(id.id)
@@ -297,11 +336,22 @@ impl MirLowering:
             case DynTrait(id):
                 val target = self.relocate_provider_type_symbol(id, provider)
                 if target.id < 0: HirTypeKind.Error else: HirTypeKind.DynTrait(target)
-            case Function(params, ret, effects): HirTypeKind.Function(self.relocate_provider_types(params, provider), self.relocate_provider_type(ret, provider), effects)
+            case Function(params, ret, effects): HirTypeKind.Function(self.relocate_provider_types(params, provider), self.relocate_provider_type(ret, provider), self.relocate_provider_effects_v1(effects, provider))
             case Projection(base, name): HirTypeKind.Projection(self.relocate_provider_type(base, provider), name)
             case Isolated(inner): HirTypeKind.Isolated(self.relocate_provider_type(inner, provider))
             case Tensor(elem, dims, device): HirTypeKind.Tensor(self.relocate_provider_type(elem, provider), dims, device)
             case _: kind
+        result
+
+    me relocate_provider_effects_v1(effects: [Effect], provider: SymbolTable) -> [Effect]:
+        var result: [Effect] = []
+        for raw_effect in effects:
+            var effect: Effect = raw_effect
+            match effect.kind:
+                case EffectKind.Throws(type_):
+                    effect.kind = EffectKind.Throws(self.relocate_provider_type(type_, provider))
+                case _: ()
+            result = result.push(effect)
         result
 
     me relocate_provider_callable(id: SymbolId, provider: SymbolTable, links: Dict<i64, text>) -> SymbolId:

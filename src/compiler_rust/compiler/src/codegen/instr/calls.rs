@@ -209,6 +209,17 @@ mod tests {
     }
 
     #[test]
+    fn atomic_publication_retains_tagged_text_and_scalar_mode() {
+        assert_eq!(boxed_text_arg_indices("rt_file_atomic_write"), Some(&[0, 1][..]));
+        assert_eq!(boxed_text_arg_indices("rt_file_atomic_write_mode"), Some(&[0, 1][..]));
+        assert!(!boxed_text_arg_indices("rt_file_atomic_write_mode").unwrap().contains(&2));
+        assert_eq!(boxed_text_arg_indices("other.rt_file_atomic_write"), None);
+        assert_eq!(boxed_text_arg_indices("other.rt_file_atomic_write_mode"), None);
+        assert_eq!(boxed_text_arg_indices("rt_file_atomic_write_mode_extra"), None);
+        assert_eq!(boxed_text_arg_indices("rt_string_builder_push"), Some(&[1][..]));
+    }
+
+    #[test]
     fn string_builder_push_boxes_only_its_text_argument() {
         assert_eq!(boxed_text_arg_indices("rt_string_builder_push"), Some(&[1][..]));
         assert_eq!(boxed_text_arg_indices("rt_string_builder_finish"), None);
@@ -3045,6 +3056,9 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 pub fn boxed_text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     match func_name {
         "rt_string_builder_push" => Some(&[1]),
+        // Both atomic runtime owners consume tagged path/content values;
+        // mode remains a scalar argument at index 2.
+        "rt_file_atomic_write" | "rt_file_atomic_write_mode" => Some(&[0, 1]),
         _ => None,
     }
 }

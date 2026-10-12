@@ -28,6 +28,11 @@ use compiler.mono.nominal_type_identity.{mono_owned_type_key, mono_owned_type_ke
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
 use std.io_runtime.{env_get}
+use compiler.mono.mono_archive_types_v1.{
+    MonoTemplateBodyModeV1, MonoTemplateSignatureV1, MonoTemplateRecipeV1,
+    MonoSpecializationRequestV1, mono_template_signature_v1,
+    mono_specialized_signature_v1, mono_apply_template_recipe_v1
+}
 
 fn mono_arg_value(a: HirCallArg) -> HirExpr:
     """Typed-parameter accessor for HirCallArg.value (stage4 ANY-erasure
@@ -189,6 +194,16 @@ class MonomorphizationPass:
     # Declared module constants/statics, keyed by module + actual SymbolId.
     # Raw IDs repeat in other modules; source names are not type authority.
     declared_global_types: Dict<text, HirType> = {}
+    # Explicit consumer ownership, never an ambient production activation flag.
+    archive_nominal_projection_valid: bool = true
+    template_body_mode: MonoTemplateBodyModeV1 = MonoTemplateBodyModeV1.Retained
+    archive_template_signatures: Dict<text, MonoTemplateSignatureV1> = {}
+    archive_specialized_signatures: Dict<text, MonoTemplateSignatureV1> = {}
+    archive_symbol_identities: Dict<text, text> = {}
+    template_recipes: Dict<text, MonoTemplateRecipeV1> = {}
+    archive_requests: [MonoSpecializationRequestV1] = []
+    # Filled only from completed FIFO emission records during archive assembly.
+    archive_emitted_templates: Dict<text, text> = {}
 
 struct MonoStats:
     generic_functions_found: i64
@@ -392,9 +407,19 @@ impl MonomorphizationPass:
             if is_generic_function(func):
                 # Canonicalize `Named(sym_of_T, [])` -> `TypeParam("T")` once,
                 # so inference and substitution see one spelling.
-                self.generic_functions[func.name] = canonicalize_template(func)
+                val recipe = MonoTemplateRecipeV1(module_name: module_name,
+                    original_symbol: func.symbol, template_name: func.name,
+                    canonical_type_params: func.type_params,
+                    bound_type_params: func.type_params, inherent_method: false)
+                val canonical = mono_apply_template_recipe_v1(func, recipe)
+                if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
+                    self.archive_template_signatures[func.name] = mono_template_signature_v1(canonical)
+                else:
+                    self.generic_functions[func.name] = canonical
+                self.template_recipes[func.name] = recipe
                 self.template_module[func.name] = module_name
-                self.monomorphizer.register_generic_function(func.name, func)
+                if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
+                    self.monomorphizer.register_generic_function(func.name, func)
                 self.stats.generic_functions_found = self.stats.generic_functions_found + 1
             else:
                 self.fn_returns[mono_sym_key(module_name, fsym.id)] = func.return_type
@@ -414,8 +439,9 @@ impl MonomorphizationPass:
                 self.record_field_types(module_name, s.name, s.fields)
             if is_generic_struct(s):
                 self.record_generic_type(module, module_name, s.symbol, s.type_params, s.fields)
-                self.generic_structs[s.name] = s
-                self.monomorphizer.register_generic_struct(s.name, s)
+                if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
+                    self.generic_structs[s.name] = s
+                    self.monomorphizer.register_generic_struct(s.name, s)
                 self.stats.generic_structs_found = self.stats.generic_structs_found + 1
 
         # Collect enum variant payload types. Enums were not collected at all
@@ -455,11 +481,18 @@ impl MonomorphizationPass:
                 self.record_field_types(module_name, c.name, c.fields)
             if is_generic_class(c):
                 self.record_generic_type(module, module_name, c.symbol, c.type_params, c.fields)
-                self.generic_classes[c.name] = c
-                self.monomorphizer.register_generic_class(c.name, c)
+                if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
+                    self.generic_classes[c.name] = c
+                    self.monomorphizer.register_generic_class(c.name, c)
                 self.stats.generic_classes_found = self.stats.generic_classes_found + 1
 
-        self.module_symbols[module_name] = module.symbols
+        if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
+            for raw_id in module.symbols.symbols.keys():
+                val symbol: HirSymbol = module.symbols.symbols[raw_id]
+                self.archive_symbol_identities[mono_sym_key(module_name, symbol.id.id)] =
+                    mono_type_identity(module.symbols, symbol.id, module_name)
+        else:
+            self.module_symbols[module_name] = module.symbols
         self.collect_generic_impl_methods(module, module_name)
 
     me collect_generic_impl_methods(module: HirModule, module_name: text):
@@ -530,7 +563,7 @@ impl MonomorphizationPass:
                         bound_tps = bound_tps.push(own_tp)
                 if reason == "" and bound_tps.len() != impl_bound_count:
                     reason = "it declares type parameters of its own"
-                if reason == "" and (self.generic_functions.has(gname) or self.generic_methods.has(method_key)):
+                if reason == "" and (self.has_template_v1(gname) or self.generic_methods.has(method_key)):
                     reason = "another module declares a method under the same template key `{gname}`"
                     # The earlier registration is equally unusable.
                     for prior_key in self.generic_methods.keys():
@@ -544,12 +577,20 @@ impl MonomorphizationPass:
                 as_fn.type_params = all_tps
                 as_fn.is_method = false
                 as_fn.name = gname
-                var canonical_fn = canonicalize_template(as_fn)
-                canonical_fn.type_params = bound_tps
+                val recipe = MonoTemplateRecipeV1(module_name: module_name,
+                    original_symbol: template.symbol, template_name: gname,
+                    canonical_type_params: all_tps, bound_type_params: bound_tps,
+                    inherent_method: true)
+                val canonical_fn = mono_apply_template_recipe_v1(template, recipe)
                 as_fn.type_params = bound_tps
-                self.generic_functions[gname] = canonical_fn
+                if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
+                    self.archive_template_signatures[gname] = mono_template_signature_v1(canonical_fn)
+                else:
+                    self.generic_functions[gname] = canonical_fn
+                self.template_recipes[gname] = recipe
                 self.template_module[gname] = module_name
-                self.monomorphizer.register_generic_function(gname, as_fn)
+                if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
+                    self.monomorphizer.register_generic_function(gname, as_fn)
                 self.generic_methods[method_key] = gname
 
     # ========================================================================
@@ -689,17 +730,36 @@ impl MonomorphizationPass:
         Some(result.types)
 
     me specialization_signature_in_caller(spec_name: text, span: Span) -> HirType?:
-        val specialized: HirFunction = self.specialized_functions[spec_name]
+        # Both body modes: the signature's types live in the SPECIALIZATION's
+        # module scope; the call-site stamp needs them in the caller's scope.
         var params: [HirType] = []
-        for param in specialized.params:
-            val p: HirParam = param
-            params = params.push(p.type_)
-        val signature = HirType(kind: HirTypeKind.Function(params, specialized.return_type, []), span: span)
+        var return_type: HirType = HirType(kind: HirTypeKind.Any, span: span)
+        var symbol_id: i64 = -1
+        if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
+            if not self.archive_specialized_signatures.has(spec_name):
+                return nil
+            val archived: MonoTemplateSignatureV1 = self.archive_specialized_signatures[spec_name]
+            params = archived.param_types
+            return_type = archived.return_type
+        else:
+            if not self.specialized_functions.has(spec_name):
+                return nil
+            val specialized: HirFunction = self.specialized_functions[spec_name]
+            for param in specialized.params:
+                val p: HirParam = param
+                params = params.push(p.type_)
+            return_type = specialized.return_type
+            symbol_id = specialized.symbol.id
+        val signature = HirType(kind: HirTypeKind.Function(params, return_type, []), span: span)
         if val transported = self.relocate_mono_types([signature], self.spec_module[spec_name], self.current_module, "signature of `{spec_name}`"):
             val caller_signature: HirType = transported[0]
             match caller_signature.kind:
                 case HirTypeKind.Function(_, ret, _):
-                    self.fn_returns[mono_sym_key(self.current_module, specialized.symbol.id)] = ret
+                    if symbol_id < 0:
+                        if self.spec_symbols.has(spec_name):
+                            symbol_id = self.spec_symbols[spec_name]
+                    if symbol_id >= 0:
+                        self.fn_returns[mono_sym_key(self.current_module, symbol_id)] = ret
                 case _: ()
             return caller_signature
         nil
@@ -731,26 +791,74 @@ impl MonomorphizationPass:
         val sym = self.next_symbol
         self.next_symbol = self.next_symbol + 1
         self.spec_symbols[mangled] = sym
-        val template: HirFunction = self.generic_functions[func_name]
-        var specialized: HirFunction = specialize_function_with_types(template, local_type_args)
-        specialized.name = mangled
-        specialized.symbol = SymbolId.new(sym)
-        self.specialized_functions[mangled] = specialized
+        var signature = self.template_signature_v1(func_name)
+        if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
+            # The archive consumer fulfills this request with
+            # `specialize_function_with_types(canonical, item.type_args)` in
+            # the TEMPLATE module's scope, so the archived arguments must be
+            # the ones transported into that scope, not the caller-scoped
+            # `type_args` (nominal identity is module-scoped).
+            signature = mono_specialized_signature_v1(self.template_signature_v1(func_name), local_type_args, mangled)
+            self.archive_specialized_signatures[mangled] = signature
+            self.archive_requests = self.archive_requests.push(MonoSpecializationRequestV1(
+                template_name: func_name, module_name: spec_mod,
+                mangled_name: mangled, symbol_id: sym, type_args: local_type_args,
+                caller_module: self.current_module, caller_type_args: type_args))
+        else:
+            val template: HirFunction = self.generic_functions[func_name]
+            var specialized: HirFunction = specialize_function_with_types(template, local_type_args)
+            specialized.name = mangled
+            specialized.symbol = SymbolId.new(sym)
+            self.specialized_functions[mangled] = specialized
+            signature = mono_template_signature_v1(specialized)
         # A specialization is a concrete callee from here on: its return
         # type feeds the inference of an ENCLOSING generic call (`wrap(wrap(v))`).
-        self.fn_returns[mono_sym_key(spec_mod, sym)] = specialized.return_type
-        self.sym_names[mono_sym_key(spec_mod, sym)] = specialized.name
+        self.fn_returns[mono_sym_key(spec_mod, sym)] = signature.return_type
+        self.sym_names[mono_sym_key(spec_mod, sym)] = signature.name
         self.spec_template[mangled] = func_name
         self.spec_module[mangled] = spec_mod
         self.spec_queue = self.spec_queue.push(mangled)
         self.stats.specializations_created = self.stats.specializations_created + 1
         # Mirror the request into the engine table (its own bookkeeping).
-        var concrete_args: [ConcreteType] = []
-        for ta in type_args:
-            val tat2: HirType = ta
-            concrete_args = concrete_args.push(hir_type_to_concrete(tat2))
-        self.monomorphizer.specialize_function_call(func_name, concrete_args)
+        if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
+            var concrete_args: [ConcreteType] = []
+            for ta in type_args:
+                val tat2: HirType = ta
+                concrete_args = concrete_args.push(hir_type_to_concrete(tat2))
+            self.monomorphizer.specialize_function_call(func_name, concrete_args)
         sym
+
+    me has_template_v1(name: text) -> bool:
+        if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
+            return self.archive_template_signatures.has(name)
+        self.generic_functions.has(name)
+
+    me template_signature_v1(name: text) -> MonoTemplateSignatureV1:
+        if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
+            return self.archive_template_signatures[name]
+        mono_template_signature_v1(self.generic_functions[name])
+
+    me specialization_signature_v1(name: text) -> MonoTemplateSignatureV1:
+        if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
+            return self.archive_specialized_signatures[name]
+        mono_template_signature_v1(self.specialized_functions[name])
+
+    me specialization_callee_name_v1(template_name: text, spec_name: text) -> text:
+        # Original caller spelling may be bare or an import alias. Linkage is
+        # owned by the actual template declaration, shared by both body modes.
+        val signature = self.template_signature_v1(template_name)
+        val owner: text = self.template_module[template_name]
+        if signature.global_linkage or owner == self.current_module:
+            return spec_name
+        "{owner}.{spec_name}"
+
+    me symbol_identity_v1(module_name: text, symbol: SymbolId) -> text:
+        if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
+            val key = mono_sym_key(module_name, symbol.id)
+            if self.archive_symbol_identities.has(key): return self.archive_symbol_identities[key]
+            return ""
+        if not self.module_symbols.has(module_name): return ""
+        mono_type_identity(self.module_symbols[module_name], symbol, module_name)
 
     me record_named_type(module_name: text, sym: SymbolId, name: text, concrete: bool):
         self.named_symbol_names[mono_sym_key(module_name, sym.id)] = name
@@ -783,9 +891,7 @@ impl MonomorphizationPass:
     me generic_type_identity(module_name: text, sym: SymbolId) -> text:
         """Identity of a recorded generic struct/class named by `sym` in
         `module_name`'s table, else ""."""
-        if not self.module_symbols.has(module_name):
-            return ""
-        val identity = mono_type_identity(self.module_symbols[module_name], sym, module_name)
+        val identity = self.symbol_identity_v1(module_name, sym)
         if identity == "" or not self.generic_type_params.has(identity):
             return ""
         val tps: [HirTypeParam] = self.generic_type_params[identity]
@@ -1120,15 +1226,15 @@ impl MonomorphizationPass:
         match callee.kind:
             case HirExprKind.Var(sym_id):
                 val name = self.sym_name(sym_id)
-                if self.generic_functions.has(name):
+                if self.has_template_v1(name):
                     return name
                 ""
             case HirExprKind.NamedVar(sym_id, name):
                 val by_sym = self.sym_name(sym_id)
-                if self.generic_functions.has(by_sym):
+                if self.has_template_v1(by_sym):
                     return by_sym
                 val n: text = name
-                if self.generic_functions.has(n):
+                if self.has_template_v1(n):
                     return n
                 # A cross-module import arrives as the qualified
                 # `<module>.<fn>` display name baked in by HIR lowering
@@ -1137,7 +1243,7 @@ impl MonomorphizationPass:
                 # the template's module agree, so two modules with a
                 # same-named generic never alias.
                 val last = mono_last_segment(n)
-                if last != n and self.generic_functions.has(last):
+                if last != n and self.has_template_v1(last):
                     val qual = n.substring(0, n.len() - last.len() - 1)
                     if mono_module_matches(qual, self.template_module[last]):
                         return last
@@ -1181,6 +1287,9 @@ impl MonomorphizationPass:
             argument_module: self.current_module)
 
     me infer_call_type_args(template: HirFunction, args: [HirCallArg], expected_result: HirType? = nil) -> [HirType]:
+        self.infer_call_type_args_signature_v1(mono_template_signature_v1(template), args, expected_result)
+
+    me infer_call_type_args_signature_v1(template: MonoTemplateSignatureV1, args: [HirCallArg], expected_result: HirType? = nil) -> [HirType]:
         """Infer the template's type arguments from the call's argument types.
 
         Unifies each declared parameter type against the locally inferred
@@ -1190,11 +1299,11 @@ impl MonomorphizationPass:
         concrete - fail-closed, never a guess."""
         var bindings: Dict<text, HirType> = {}
         var i = 0
-        val params: [HirParam] = template.params
+        val params: [HirType] = template.param_types
         val owner_module: text = self.template_module[template.name] ?? self.current_module
         val nominal_context = self.nominal_binding_context(owner_module)
         while i < params.len() and i < args.len():
-            val pt: HirParam = params[i]
+            val pt: HirType = params[i]
             val at: HirCallArg = args[i]
             if at.has_name:
                 return []
@@ -1203,9 +1312,9 @@ impl MonomorphizationPass:
                 if arg_ty == nil:
                     eprint("[mono-diag] infer `{template.name}` arg {i}: no local type for {mono_arg_value(at).kind}")
             if arg_ty != nil:
-                if nominal_context == nil and (hir_type_has_nominal(pt.type_) or hir_type_has_nominal(arg_ty)):
+                if nominal_context == nil and (hir_type_has_nominal(pt) or hir_type_has_nominal(arg_ty)):
                     return []
-                if not bind_type_params(pt.type_, arg_ty, bindings, nominal_context):
+                if not bind_type_params(pt, arg_ty, bindings, nominal_context):
                     return []
             i = i + 1
         if expected_result != nil:
@@ -1334,8 +1443,8 @@ impl MonomorphizationPass:
                 # makes `a` a `text`); an unresolved one answers nothing.
                 val gname = self.callee_generic_name(ce)
                 if gname != "":
-                    val template: HirFunction = self.generic_functions[gname]
-                    return self.instantiated_return_type(template, self.call_type_args(template, call_args, type_args))
+                    val template = self.template_signature_v1(gname)
+                    return self.instantiated_return_type_signature_v1(template, self.call_type_args_signature_v1(template, call_args, type_args))
                 val generic_ctor = self.generic_constructor_type(ce, call_args, type_args)
                 if generic_ctor != nil:
                     return generic_ctor
@@ -1354,14 +1463,14 @@ impl MonomorphizationPass:
                 val mname = self.generic_method_lookup(mrecv, method)
                 if mname == "":
                     return nil
-                val mtemplate: HirFunction = self.generic_functions[mname]
+                val mtemplate = self.template_signature_v1(mname)
                 val (mrt, _mmod) = self.receiver_instance_type(mrecv)
                 if mrt == nil:
                     return nil
                 val mrtt: HirType = mrt
                 match mrtt.kind:
                     case HirTypeKind.Named(_, owner_args):
-                        self.instantiated_return_type(mtemplate, owner_args)
+                        self.instantiated_return_type_signature_v1(mtemplate, owner_args)
                     case _: nil
             case HirExprKind.Block(block):
                 val bt: HirBlock = block
@@ -1541,14 +1650,20 @@ impl MonomorphizationPass:
             case _: nil
 
     me call_type_args(template: HirFunction, args: [HirCallArg], type_args: [HirType]) -> [HirType]:
+        self.call_type_args_signature_v1(mono_template_signature_v1(template), args, type_args)
+
+    me call_type_args_signature_v1(template: MonoTemplateSignatureV1, args: [HirCallArg], type_args: [HirType]) -> [HirType]:
         """Type arguments of one call to `template`: the written ones when
         present, else inferred from the argument types. [] = unresolved."""
         if type_args != nil:
             if type_args.len() > 0:
                 return type_args
-        self.infer_call_type_args(template, args)
+        self.infer_call_type_args_signature_v1(template, args)
 
     me instantiated_return_type(template: HirFunction, targs: [HirType]) -> HirType?:
+        self.instantiated_return_type_signature_v1(mono_template_signature_v1(template), targs)
+
+    me instantiated_return_type_signature_v1(template: MonoTemplateSignatureV1, targs: [HirType]) -> HirType?:
         """`template`'s declared return type under [type_params := targs],
         when that instantiation is complete and concrete."""
         val tps: [HirTypeParam] = template.type_params
@@ -1576,14 +1691,15 @@ impl MonomorphizationPass:
         val rtt: HirType = rt
         match rtt.kind:
             case HirTypeKind.Named(owner_sym, owner_args):
-                if owner_args.len() == 0 or not self.module_symbols.has(rmod):
+                if owner_args.len() == 0:
                     return ""
-                val identity = mono_type_identity(self.module_symbols[rmod], owner_sym, rmod)
+                val identity = self.symbol_identity_v1(rmod, owner_sym)
+                if identity == "": return ""
                 val key = "{identity}::{method}"
                 if self.generic_method_rejected.has(key) or not self.generic_methods.has(key):
                     return ""
                 val known: text = self.generic_methods[key]
-                val template: HirFunction = self.generic_functions[known]
+                val template = self.template_signature_v1(known)
                 if template.type_params.len() == owner_args.len():
                     return known
                 ""
@@ -2198,7 +2314,7 @@ impl MonomorphizationPass:
         if gname == "":
             return HirExprKind.Call(new_callee, new_args, new_type_args)
         self.stats.call_sites_found = self.stats.call_sites_found + 1
-        val template: HirFunction = self.generic_functions[gname]
+        val template = self.template_signature_v1(gname)
         var targs: [HirType] = []
         var explicit = false
         if type_args != nil:
@@ -2206,7 +2322,7 @@ impl MonomorphizationPass:
                 explicit = true
                 targs = type_args
         if not explicit:
-            targs = self.infer_call_type_args(template, new_args, expected_result)
+            targs = self.infer_call_type_args_signature_v1(template, new_args, expected_result)
         val expected: [HirTypeParam] = template.type_params
         if targs.len() != expected.len():
             self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
@@ -2231,7 +2347,7 @@ impl MonomorphizationPass:
         # uses the baked display name; its Var arm looks the id up in the
         # CALLER's symbol table, where a fresh mono symbol does not exist).
         # So the repointed callee is a NamedVar carrying the mangled name,
-        # re-qualified exactly as the original callee was.
+        # qualified by the template declaration's actual ABI owner.
         val spec_name: text = self.mangled_name(gname, targs)
         # The repointed callee carries the SPECIALIZATION's concrete
         # `fn(params) -> ret`. Its SymbolId is minted outside every module
@@ -2239,6 +2355,8 @@ impl MonomorphizationPass:
         # symbol lookup; without this stamp the result defaulted to the
         # erased i64 and a `text`/`f64` instance was consumed as an integer
         # (BUG-IT-5).
+        # The stamp's nominal ids must live in the CALLER's module scope, so
+        # the signature is transported out of the specialization's module.
         var spec_sig = HirType(kind: HirTypeKind.Any, span: callee.span)
         if val signature = self.specialization_signature_in_caller(spec_name, callee.span):
             spec_sig = signature
@@ -2246,7 +2364,7 @@ impl MonomorphizationPass:
             self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
             self.unresolved_templates[gname] = true
             return HirExprKind.Call(new_callee, new_args, new_type_args)
-        new_callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId.new(target), mono_requalify(callee, spec_name)),
+        new_callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId.new(target), self.specialization_callee_name_v1(gname, spec_name)),
                              has_type_: true,
                              type_: spec_sig,
                              span: callee.span)
@@ -2301,9 +2419,8 @@ impl MonomorphizationPass:
             case HirTypeKind.Named(owner_sym, owner_args):
                 if owner_args.len() == 0:
                     return ""
-                if not self.module_symbols.has(rmod):
-                    return ""
-                val identity = mono_type_identity(self.module_symbols[rmod], owner_sym, rmod)
+                val identity = self.symbol_identity_v1(rmod, owner_sym)
+                if identity == "": return ""
                 val key = "{identity}::{method}"
                 var reason = ""
                 if self.generic_method_rejected.has(key):
@@ -2312,7 +2429,7 @@ impl MonomorphizationPass:
                     return ""
                 else:
                     val known: text = self.generic_methods[key]
-                    val template: HirFunction = self.generic_functions[known]
+                    val template = self.template_signature_v1(known)
                     if template.type_params.len() == owner_args.len():
                         return known
                     reason = "the receiver has {owner_args.len()} type arguments and the impl declares {template.type_params.len()} type parameters"
@@ -2354,17 +2471,14 @@ impl MonomorphizationPass:
             self.unresolved_templates[gname] = true
             return HirExprKind.MethodCall(new_receiver, method, new_args, resolution)
         val spec_name: text = self.mangled_name(gname, targs)
-        val template_mod: text = self.template_module[gname]
-        # MIR resolves a fresh mono callee by its baked display name; a
-        # specialization placed in another module is spelled `<module>.<fn>`
-        # exactly like HIR's qualified imported-function references.
-        val callee_name = if template_mod == self.current_module: spec_name else: "{template_mod}.{spec_name}"
+        val callee_name = self.specialization_callee_name_v1(gname, spec_name)
         var call_args: [HirCallArg] = [HirCallArg(has_name: false, name: "", value: new_receiver, span: receiver.span)]
         for a in new_args:
             call_args = call_args.push(a)
         # Same stamp as `rewrite_call`: the specialization's own signature
         # types the call's result (a `text`-returning `get` is a pointer, not
-        # the erased i64 -- BUG-IT-5 class).
+        # the erased i64 -- BUG-IT-5 class), transported into the caller's
+        # module scope.
         var spec_sig = HirType(kind: HirTypeKind.Any, span: receiver.span)
         if val signature = self.specialization_signature_in_caller(spec_name, receiver.span):
             spec_sig = signature
@@ -2709,6 +2823,10 @@ impl MonomorphizationPass:
         symbol)."""
         if self.unresolved_templates.has(name):
             return false
+        if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
+            for template in self.archive_emitted_templates.values():
+                if template == name: return true
+            return false
         for mangled in self.specialized_functions.keys():
             val m: text = mangled
             if self.spec_template[m] == name:
@@ -2735,7 +2853,8 @@ impl MonomorphizationPass:
         if module == nil:
             return module
         if self.specialized_functions.len() == 0:
-            return module
+            if self.template_body_mode != MonoTemplateBodyModeV1.ArchiveRequests or self.archive_emitted_templates.len() == 0:
+                return module
         var out = module
         var kept: Dict<SymbolId, HirFunction> = {}
         for sym_id in module.functions.keys():
@@ -3380,18 +3499,6 @@ fn mono_module_matches(qual: text, template_mod: text) -> bool:
     if template_mod.ends_with(".{qual}"):
         return true
     qual.ends_with(".{template_mod}")
-
-# Keep the original callee's module qualifier, swap only the function name.
-fn mono_requalify(callee: HirExpr, spec_name: text) -> text:
-    match callee.kind:
-        case HirExprKind.NamedVar(_, name):
-            val n: text = name
-            val last = mono_last_segment(n)
-            if last == n:
-                return spec_name
-            n.substring(0, n.len() - last.len()) + spec_name
-        case _:
-            spec_name
 
 fn mono_type_identity(symbols: SymbolTable, sym: SymbolId, module_name: text) -> text:
     """Ownership identity `<owner module>.<Name>` of a type symbol, read in
