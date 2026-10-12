@@ -103,6 +103,9 @@ pub struct Lowerer {
     pub(super) type_inference_config: TypeInferenceConfig,
     /// Pre-registered method return types: "ClassName.method" -> return TypeId
     pub(super) method_return_types: HashMap<String, TypeId>,
+    /// Authored free-function return types, before trait aliases erase to Any.
+    pub(super) declared_function_returns: HashMap<String, Option<crate::hir::HirTraitDispatch>>,
+    pub(super) trait_declared_owners: HashMap<std::path::PathBuf, HashMap<String, crate::hir::HirTraitDispatch>>,
     /// M12 3b: free-function parameter default-value expressions, keyed by
     /// function name (one Option per declared parameter; None = no default).
     /// Keyed by the emitted owner-specific symbol for flattened definitions.
@@ -276,6 +279,8 @@ impl Lowerer {
             deprecation_warnings: DeprecationWarningCollector::new(),
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
+            declared_function_returns: HashMap::new(),
+            trait_declared_owners: HashMap::new(),
             fn_param_defaults: HashMap::new(),
             imported_fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
@@ -340,6 +345,8 @@ impl Lowerer {
             deprecation_warnings: DeprecationWarningCollector::new(),
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
+            declared_function_returns: HashMap::new(),
+            trait_declared_owners: HashMap::new(),
             fn_param_defaults: HashMap::new(),
             imported_fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
@@ -427,6 +434,8 @@ impl Lowerer {
             deprecation_warnings: DeprecationWarningCollector::new(),
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
+            declared_function_returns: HashMap::new(),
+            trait_declared_owners: HashMap::new(),
             fn_param_defaults: HashMap::new(),
             imported_fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,

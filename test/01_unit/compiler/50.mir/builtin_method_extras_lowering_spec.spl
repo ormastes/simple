@@ -6,7 +6,7 @@ Edge cases for the lowerings in
 `src/compiler/50.mir/_MirLoweringExpr/builtin_method_extras.spl`:
 array `reversed` / `sorted` / `index_of` / `enumerate` / `find` / `reduce`,
 numeric `abs` / `min` / `max` / `floor` / `ceil` / `round`, Result `map` /
-`map_err` / `ok`, list comprehensions and `(a..b).step(n)`.
+`map_err` / `ok` / `err`, list comprehensions and `(a..b).step(n)`.
 
 Each example checks three things: no diagnostic, the runtime symbol (or loop
 shape) the lowering must use, and -- for the forms stage2 does not lower --
@@ -191,6 +191,25 @@ describe "builtin method extras: Result":
         expect(extra_has(low.labels, "result_map_active")).to_equal(true)
         expect(extra_has(low.labels, "result_map_err_active")).to_equal(true)
         expect(extra_has(low.labels, "result_ok_active")).to_equal(true)
+
+    it "err projects the error payload and remembers Optional type for chained unwrap":
+        val low = extra_clean("fn f(v: Result<i64, text>) -> text:\n" +
+            "    v.err().unwrap()\n")
+        expect(extra_has(low.labels, "result_err_active")).to_equal(true)
+        expect(extra_has(low.labels, "result_err_other")).to_equal(true)
+        expect(extra_has(low.callees, "rt_enum_payload")).to_equal(true)
+
+    it "err with an argument fails closed":
+        val low = extra_lower("fn f(v: Result<i64, text>) -> text:\n" +
+            "    v.err(1)\n")
+        expect(extra_message_with(low, "unresolved method call: err")).to_equal(true)
+        expect(extra_has(low.labels, "result_err_active")).to_equal(false)
+
+    it "err on an integer stays unresolved":
+        val low = extra_lower("fn f(v: i64) -> i64:\n" +
+            "    v.err()\n")
+        expect(extra_message_with(low, "unresolved method call: err")).to_equal(true)
+        expect(extra_has(low.labels, "result_err_active")).to_equal(false)
 
     it "map with a mapper that is not a lambda literal fails closed":
         val low = extra_lower("fn twice(x: i64) -> i64:\n" +

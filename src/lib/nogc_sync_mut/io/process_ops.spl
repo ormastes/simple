@@ -827,6 +827,8 @@ extern fn rt_process_write_stdin_some(pid: i64, data: text, data_len: i64, offse
 extern fn rt_process_read_stdout(pid: i64) -> text
 @unsafe(reason: "raw piped-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
 extern fn rt_process_is_alive(pid: i64) -> bool
+@unsafe(reason: "raw stdout stream state; distinguishes open, observed EOF, and terminal failure", capabilities: [ffi])
+extern fn rt_process_stdout_state(pid: i64) -> i64
 @unsafe(reason: "raw piped-child close status; false sentinel means absent or cleanup failure", capabilities: [ffi])
 extern fn rt_process_close_piped(pid: i64) -> bool
 
@@ -857,20 +859,19 @@ pub fn process_spawn_pinned_piped(executable_handle: i64, args: [text]) -> i64:
     unsafe(capabilities: [ffi]):
         rt_process_spawn_pinned_piped(executable_handle, args)
 
-# Result-carrying stdout drain, composed in pure Simple from the real
-# rt_process_read_stdout (non-blocking drain, "" sentinel = no new data
-# right now) and rt_process_is_alive primitives already backing
-# process_read_stdout/process_is_piped_alive below: Ok(Some(chunk)) for new
-# output, Ok(nil) when the child is still alive with nothing new yet, and
-# Err("process_stdout_eof") once the child is gone — the caller
-# (host_join_exact) reads that Err as "drain finished, parse the join".
+# Stdout drain state is independent of child liveness: 0=open/deferred,
+# 1=observed EOF with buffered tail delivered, -1=terminal read error/unknown.
+# Exited children retain their stdout owner until drain completion or close.
 pub fn process_read_stdout_result(pid: i64) -> Result<text?, text>:
     val chunk = process_read_stdout(pid)
     if chunk.len() > 0:
         return Ok(Some(chunk))
-    if process_is_piped_alive(pid):
-        return Ok(nil)
-    Err("process_stdout_eof")
+    val state = _process_stdout_state_raw(pid)
+    if state == 1:
+        return Err("process_stdout_eof")
+    if state < 0:
+        return Err("process_stdout_read_failed")
+    Ok(nil)
 
 use std.nogc_sync_mut.io.file_ops.{file_read_text}
 use std.io_runtime.{file_delete}
@@ -969,6 +970,10 @@ fn _process_write_stdin_some_raw(pid: i64, data: text, data_len: i64, offset: i6
 fn _process_read_stdout_raw(pid: i64) -> text:
     unsafe(capabilities: [ffi]):
         rt_process_read_stdout(pid)
+
+fn _process_stdout_state_raw(pid: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_stdout_state(pid)
 
 fn _process_is_alive_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
