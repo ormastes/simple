@@ -442,6 +442,18 @@ artifact). Functional validation: next matrix/admission run.
   other 50.mir consumer already imports it itemized). Also fixed a latent
   `field.type_` (undefined in scope; now `field_type`) in the extracted
   register_composite_field_metadata_types_v1.
+
+Canonical Windows attempt13 independently reached this extracted function on
+frozen source `5c891cd74242833f3dee8a88da264a73a242fae1`: the Rust seed compiled
+1,297 files and failed one, `50.mir/_MirLowering/module_lowering.spl`, with
+`cannot infer field type while lowering MirLowering.register_composite_field_metadata_types_v1:
+struct 'ANY' field 'type_'`. All four support builds finished. The native build
+terminated with exit1, quiescent1 and measured peak1,251,560 KiB under the
+5,859,375 KiB enforced process-tree cap (jobs3). No new compiler was admitted;
+fresh Hello, CLI and runner checks were not run. Original logs and hashes are
+retained in `C:/dev/simple-phase3-bootstrap-evidence/attempt13/final-summary.env`.
+Latest release `a95346aaef7a04c2e0935b2816e6157dd497457d` includes the typed
+`field_type` correction. Its actual rebuild/admission remains pending.
 - Novel cause (2026-10-12, candidate_frontend_smoke p2_add admission):
   runtime_tagged_callback_owner_v1.spl nm-parsed required core-C symbols with
   EXACT name matching, but Mach-O nm always prepends a leading underscore to C

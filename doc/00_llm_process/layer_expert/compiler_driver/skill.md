@@ -1,5 +1,37 @@
 # Compiler Driver Layer Expert
 
+MIR progress uses actual per-module fatal/context/ICE classification and the
+common processed-minus-cached-minus-failed calculation. The logger's console,
+events and snapshot share that calculation; a terminal failure reuses only
+matching complete parent accounting. Unclassified or interrupted counts stay
+unknown. The Windows logger diagnostic exceeded the cap before object output;
+actual compiled reporting remains unqualified. See
+`doc/08_tracking/bug/mir_progress_failed_modules_reported_success_2026_10_12.md`.
+
+## Current bounded archive activation (2026-10-12)
+
+The production controller owns a compilation generation before source loading,
+then performs actual selected-source HIR transactions, journal publication and
+genuine weave/current/mono/final issuance. MIR must consume the private final
+repository in borrowed body scopes, retaining physical names and independent
+logical specialization owners. Every new compilation resets the previous
+generation after the native no-op fast path; cleanup revokes the final reader
+only after MIR and code generation finish. Diagnostic publication must preserve
+the original ordered counts, including failures already published by the real
+validator or mono pass.
+
+The initial orchestration admission targets managed native AOT, complete
+streaming source inventories, enabled nonshard HIR cache and an explicit runtime
+bundle. Actual ambient bootstrap routes retain their established semantics;
+the full-native borrowed MIR consumer does not admit bootstrap-flat lowering.
+Cold full-inventory and demand routes retain their existing owners. Routing is
+derived after source loading and parsing publish the actual selection and
+inventory; projected/nonstreaming routes require their own custody proof. Source review
+and authored controls do not establish native activation or memory improvement.
+Attempt13 compiled1,297 files and failed the extracted MIR field-type defect;
+the incoming typed `field_type` correction awaits a fresh bootstrap. See
+`doc/08_tracking/bug/phase2_matrix_strict_stage2_error_family_2026-10-09.md`.
+
 Mission-critical V2 bootstrap/admission status is owned by
 `doc/03_plan/sys_test/mission_critical_infra_hardening_v2.md`; its active owner
 failure is `doc/08_tracking/bug/stage3_selfhost_exit_139_2026-08-14.md`.
@@ -230,3 +262,9 @@ the genuine driver prerequisite and final repository owner before MIR use.
   record [stage2_candidate_env_lexer_array_oob_sigill_2026-09-26](../../../08_tracking/bug/stage2_candidate_env_lexer_array_oob_sigill_2026-09-26.md).
   Until the driver guarantees `__module_init_*` runs for every consumer, treat
   every module-level container read in compiler code as possibly-empty.
+
+Production archive activation begins a fresh generation after the no-op fast
+path, selects eligibility after actual source selection, and revokes the owner
+after every compilation result. An attempted or revoked archive owner cannot
+fall back to retained HIR in the MIR consumer. Native qualification remains
+pending; source checks alone do not establish compiler or runner admission.

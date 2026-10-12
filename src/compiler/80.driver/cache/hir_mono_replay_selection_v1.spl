@@ -8,6 +8,7 @@ use compiler.mono.mono_archive_publication_identity_v1.{MonoArchiveSelectedFunct
     mono_archive_selected_record_key_v1, mono_archive_selected_output_key_v1}
 use compiler.driver.cache.hir_mono_function_record_v1.{mono_function_record_load_in_owned_scope_v1}
 use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.hir_mono_symbol_projection_v1.{hir_mono_symbol_projection_install_v1, hir_mono_symbol_projection_decode_v1, hir_mono_symbol_patch_apply_v1}
 use compiler.hir.hir_types.{HirModule, SymbolId, HirSymbol, SymbolKind, ScopeId, BUILTIN_METHOD_NONE}
 use compiler.hir.hir_definitions.{HirFunction}
 use compiler.common.dependency.visibility.{Visibility}
@@ -38,12 +39,19 @@ fn mono_archive_reassemble_selected_module_in_owned_scope_v1(archive: HirBodyArc
 fn mono_archive_reassemble_body_input_in_owned_scope_v1(input: MonoArchiveBodyInputV1,
         roots: [MonoArchiveSelectedFunctionV1], specializations: [MonoArchiveSelectedFunctionV1],
         unresolved_templates: [text], emitted_templates: [text], next_symbol: i64,
-        shared_symbols: [MonoArchiveSelectedFunctionV1] = []) -> Result<MonoArchiveCurrentBodyLoadV1, text>:
+        shared_symbols: [MonoArchiveSelectedFunctionV1] = [], symbol_projection: text = "", symbol_patches: [text] = []) -> Result<MonoArchiveCurrentBodyLoadV1, text>:
     if transient_array_scope_state_v1() != 1: return Err("mono selected assembly scope refused")
     val loaded = mono_archive_body_input_load_in_owned_scope_v1(input)?
     val original = loaded.module
     val archive = input.original_parent
     var output = original
+    if symbol_projection != "":
+        val installed = hir_mono_symbol_projection_install_v1(output.symbols, symbol_projection)
+        if installed.is_err(): return Err(installed.unwrap_err())
+        val (cohort, _) = hir_mono_symbol_projection_decode_v1(symbol_projection)?
+        for patch in symbol_patches:
+            val applied = hir_mono_symbol_patch_apply_v1(output.symbols, cohort, patch)
+            if applied.is_err(): return Err(applied.unwrap_err())
     var functions: Dict<SymbolId, HirFunction> = {}
     val function_values: [HirFunction] = original.functions.values()
     var root_index = 0
@@ -97,7 +105,7 @@ fn mono_archive_reassemble_body_input_in_owned_scope_v1(input: MonoArchiveBodyIn
             defining_module: selected.module_name, builtin_method_tag: BUILTIN_METHOD_NONE))
     if input.logical_name != "" and own_symbols != specializations.len():
         return Err("mono own shared symbol coverage differs")
-    if (specializations.len() != 0 or shared_symbols.len() != 0) and output.symbols.next_symbol_id < next_symbol:
+    if (specializations.len() != 0 or shared_symbols.len() != 0 or output.symbols.next_symbol_id >= 1125899906842624) and output.symbols.next_symbol_id < next_symbol:
         output.symbols.next_symbol_id = next_symbol
     output.functions = functions
     val worker = MonomorphizationPass.create()

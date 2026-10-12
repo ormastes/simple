@@ -88,7 +88,9 @@ fn mono_verification_capture_in_owned_scope_v1(execution: MonoArchiveExecutionV1
         val recipe = MonoVerificationModuleRecipeV1(archive: archive, roots: roots,
             specializations: specializations, coverage_digest: mono_archive_module_coverage_v1(execution, name),
             body_input: if body_input.current_body != nil: Some(body_input) else: nil,
-            shared_symbols: mono_archive_shared_symbol_publications_v1(execution, body_input)?)
+            shared_symbols: mono_archive_shared_symbol_publications_v1(execution, body_input)?,
+            symbol_projection: execution.admission.state.facts.symbol_projections[name] ?? "",
+            symbol_patches: execution.admission.state.symbol_patches[name] ?? [])
         val blob = mono_verification_module_encode_v1(recipe)
         if blob == "" or recipe.coverage_digest == "": return Err("mono verification module encoding refused")
         val digest = sha256_text(blob)
@@ -180,8 +182,19 @@ fn mono_archive_verification_use_load_module_in_owned_scope_v1(owner: MonoArchiv
     val body_input = recipe.body_input ?? MonoArchiveBodyInputV1(original_parent: recipe.archive)
     val reassembled = mono_archive_reassemble_body_input_in_owned_scope_v1(body_input, recipe.roots,
         recipe.specializations, pruning_recipe.unresolved_templates, pruning_recipe.emitted_templates, pruning_recipe.next_symbol,
-        recipe.shared_symbols)?
+        recipe.shared_symbols, recipe.symbol_projection, recipe.symbol_patches)?
     Ok(reassembled.module)
+
+# Exact applied FIFO origin metadata from the immutable captured recipe.
+# No full body is loaded and no lifecycle is acquired. Final production users
+# must first validate their privately issued repository/read pin.
+fn mono_archive_verification_use_specializations_in_owned_scope_v1(owner: MonoArchiveVerificationUseV1,
+        name: text) -> Result<[MonoArchiveSelectedFunctionV1], text>:
+    if transient_array_scope_state_v1() != 1 or hir_cache_last_warnings().len() != 0:
+        return Err("mono specialization selection requires borrowed unpaused scope")
+    val manifest = mono_verification_load_manifest_in_owned_scope_v1(owner)?
+    val recipe = mono_verification_load_recipe_in_owned_scope_v1(owner, manifest, name)?
+    Ok(recipe.specializations)
 
 fn mono_verification_materialize_in_owned_scope_v1(owner: MonoArchiveVerificationUseV1,
         name: text) -> Result<MonoArchiveAssembledModuleV1, text>:
@@ -191,7 +204,7 @@ fn mono_verification_materialize_in_owned_scope_v1(owner: MonoArchiveVerificatio
     val body_input = recipe.body_input ?? MonoArchiveBodyInputV1(original_parent: recipe.archive)
     val loaded = mono_archive_reassemble_body_input_in_owned_scope_v1(body_input, recipe.roots,
         recipe.specializations, pruning_recipe.unresolved_templates, pruning_recipe.emitted_templates, pruning_recipe.next_symbol,
-        recipe.shared_symbols)?
+        recipe.shared_symbols, recipe.symbol_projection, recipe.symbol_patches)?
     val module = loaded.module
     var assembled = MonoArchiveAssembledModuleV1(input_archive: recipe.archive,
         archive_key: "", body_digest: sha256_text(hir_module_encode(module)),
@@ -227,3 +240,4 @@ fn mono_archive_verification_use_v1(owner: MonoArchiveVerificationUseV1) -> Resu
 export MonoArchiveVerificationUseV1, MonoArchiveVerificationUseResultV1
 export mono_archive_verification_use_capture_v1, mono_archive_verification_use_v1
 export mono_archive_verification_use_load_module_in_owned_scope_v1
+export mono_archive_verification_use_specializations_in_owned_scope_v1
