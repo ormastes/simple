@@ -1,5 +1,31 @@
 # Profile-switchable container detail design
 
+## Concrete typed integration and TDD contract (2026-10-03)
+
+The [architecture acceptance matrix](../../04_architecture/compiler/profile_switchable_container_algorithms.md#completion-contract-supplement-2026-10-03) binds PSC-AC-001..008 to REQ-PSC-001..008. Existing unary typed extraction must be extended, not replaced with source-name matching.
+
+### Extraction and proof adapter
+
+Carry declaration identity, explicit algorithm, policy and instantiated container/key/value types from the attributed declaration into typed HIR. Validate factory result types there. Use resolved operation symbols from the collection registry; identical method spellings on unrelated types are negative cases. Keep the original expression/block and evaluation order in the logical plan so rejection is lossless.
+
+The adapter between logical and physical facts starts from `collection_plan_unproven_facts()`. Fill each boolean only from its owning analysis: equality/hash/order capability from resolved typed operations, purity from effect summaries, duplicate/order equivalence from operation semantics, epoch stability from alias/mutation analysis, target availability from backend capabilities, and bounded updates from the implementation plus allocation policy. A known cardinality estimate or admitted p95 never supplies `hard_size_bound`. Memory estimates describe peak extra live storage during construction and transition, including simultaneous old/new storage. Unknown memory remains `-1`.
+
+Use explicit imports or qualified names for the distinct logical and physical `CollectionPlanFacts`. Bind the adapter result to site, instantiated types, body hash, callee-summary versions, target, policy/registry version and admitted profile digest. Invalidating any input invalidates the decision. Prepare profile indexes once per admitted immutable module/dependency snapshot; no per-node file reads, sorts or full-profile scans.
+
+### Lowering and fallback
+
+Lower only a decision whose proof receipt still matches the typed node. Original emits the preserved logical expression. Other decisions emit the selected storage/operation and explicit runtime guards before any observable callback is evaluated. A failed guard executes Original with the same source values and callback evaluation count. Reuse an index only when both collection identity and mutation epoch match; clear, remove, replacement and insertion invalidate affected indexes. Do not key reuse by pointer alone.
+
+Join extension must represent both inputs, key functions, output projection, duplicate multiplicity and required output order. Nested is the semantic baseline. Hash needs proved compatible equality/hash and order reconstruction where required; merge needs proved ordering on both inputs or an explicit costed sort that preserves the logical contract. Unique-key assumptions cannot erase duplicate cross-products. Short-circuit operations must preserve the first observable result and callback trace. P0 correctness evidence is a prerequisite to enabling these lowering choices, not a flag set by the extractor.
+
+### Executable acceptance sequence
+
+For each matrix row, first add a focused failing SSpec invoking the actual typed/compiler/runtime boundary. Reuse existing manual `step` and setup/checker helper names. A deliberately incomplete scenario fails with `assert(false)` or `fail(...)`; it cannot pass through a TODO marker, source substring assertion or fixed expected transcript. Record the initial failure, implement the behavior, and execute the focused check once after the fix. Complete at most three fix/verification cycles per feature session.
+
+The representation trace corpus includes empty containers, repeated equal keys, replacement retaining correct payload, present nil payload versus absent key, removals at each tree position, clear/reuse and all six directed representation transitions. Typed negative fixtures cover same-spelling unrelated methods, missing capabilities, effectful equality/callbacks, escaping references, stale mutation epochs, wrong target, and unproved hard bounds. Join fixtures include duplicate keys on both sides, empty sides and order-sensitive projections.
+
+Capture deterministic operation results, selected algorithm and measured counters as structured execution artifacts. Generate the SSpec manual from the executed scenarios; keep executable specs under `test/`, never `doc/06_spec/`. Interpreter and native receipts must identify the admitted self-hosted executable and tested source revision. Geometric performance cases compare build and query phases separately and record peak temporary bytes/RSS; a green semantic fixture cannot prove scaling or memory bounds. Pending backend or metric coverage remains a release blocker.
+
 **Architecture:** [profile-switchable container algorithms](../../04_architecture/compiler/profile_switchable_container_algorithms.md). **Requirements:** [feature](../../02_requirements/feature/profile_switchable_container_algorithms.md), [NFR](../../02_requirements/nfr/profile_switchable_container_algorithms.md).
 
 ## Source and type contract
@@ -76,3 +102,58 @@ Native build warm reuse now includes the collection profile file's SHA-256 diges
 The native profile compile helper also hashes the entry source before deriving its profile identity, checks that hash after identity derivation, and checks it again after compilation. A changed source fails the profiled build instead of publishing an artifact under feedback admitted for earlier source bytes. This remains a detection check for the live source path; an immutable source snapshot is needed to exclude its A→B→A race.
 
 The native profile cache scope's digest is now passed into the compile helper. The helper reads the profile body once and requires that body's SHA-256 to equal the scope digest before parsing feedback, so the embedded constants and cache key refer to the same profile bytes. The remaining source-input checks still use the live entry path; a source snapshot is required to remove its A→B→A race.
+
+### Filter selectivity shared-capture update (2026-10-10)
+
+`adaptive_set_filter_observed` publishes its completed raw evaluated/accepted
+pair to the existing process capture owner after predicate success and result
+materialization. The owner aggregates raw counts under its capture lock, rejects
+invalid pairs and overflow, omits `0/0`, and emits one millionths-scaled
+`filter_selectivity` sample per observed site at finish. Per-call ratios are not
+averaged. An optional capture rejection marks the capture session failed; the
+completed filter result and returned observation remain unchanged.
+
+The owner enforces the existing 100,000-row `.sprof` budget incrementally:
+one collection record plus four base metrics per site, two additional rows for
+observed hash probes, and one for observed filter selectivity. The 14,285-site
+bound remains. The bounded core-C selfcheck passed, including an exact 100,000
+row serialization and rejection of the next event. The Simple wrapper scenario
+is authored but unrun. This implementation covers only the explicit observed
+filter API; generic loop trips, join output, allocation bytes, and early-exit
+position remain unmeasured.
+
+### Phase 3 parser integration (2026-10-11)
+
+The `release_phase3` imported-generic registry and adaptive named-type registry
+coexist in flat-pool schema v7. Imported names resolve first; unimported
+AdaptiveMap/AdaptiveSet annotations retain the existing adaptive fallback.
+Both paths use a single parsed generic-argument list. The AST bridge converts
+an imported instance before the general named-type conversion.
+
+Imported registry IDs, base names, and argument lists are promoted with the
+HIR-owned type metadata. Cache restoration validates parallel shapes, ID
+bounds/uniqueness, canonical synthetic names, and layout ownership before
+following any imported argument. A per-restore index maps named IDs to imported
+rows in constant time during the existing depth-128/4096-edge traversal; no
+linear registry search is added per graph node. Forward, self, and wrapper
+cycles are rejected before recursive AST conversion. New regression cases are
+authored but UNRUN pending an admitted Simple test runner; v6 snapshots are
+explicitly rejected. See the item7 release/bootstrap blocker report for the
+failed Phase 3 admission check and the separately passing native capture check.
+
+### Completed explicit set-loop observations (2026-10-11)
+
+`adaptive_set_for_each_observed` visits the existing complete sorted snapshot.
+It copies site/target identity before callbacks and records snapshot cardinality
+even when capture starts after construction. Each body entry increments the
+trip count before callback execution. Continue advances, Break completes, and
+Err returns without a completed-loop event. Successful empty input has a known
+zero count. Capture rejection affects profile finish, not the loop result.
+
+`spl_collection_capture_note_loop` accepts only an existing site and accumulates
+completed trips under the shared lock. A first loop measurement costs one
+serialized metric row, including zero; subsequent completions reuse that row.
+Negative counts, signed overflow and the 100000-row cap fail capture. Unobserved
+loop metrics remain absent. Interpreter/native dispatch share this owner.
+The native owner selfcheck passed; the Simple wrapper scenarios are UNRUN.
+This API does not instrument arbitrary compiler loops or enable join lowering.

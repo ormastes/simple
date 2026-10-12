@@ -519,3 +519,7 @@ first compile only when both current and legacy inventory publication paths
 are absent. Existing publications use warm admission, including malformed
 ones; preserve their failures. Do not export cold initialization across an
 entire phase campaign. See the [first-build fix](../../08_tracking/bug/provisional_hello_missing_inventory_init_2026-10-11.md).
+
+## Native tool aliases and receipt artifacts
+
+PATH-selected native tools are resolved to executable physical regular-file targets before hashing (for example Debian llvm-config aliases). Receipt-named compiler artifacts retain strict rejection of symlink leaves. Dangling/cyclic/nonexecutable tool targets fail closed. The focused harness is `sh scripts/check/check-bootstrap-native-command-alias.shs`; it does not qualify Windows execution or a bootstrap stage.

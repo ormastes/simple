@@ -53,6 +53,10 @@ Facet names here are proposed interface identities; seal them to stable KpfId128
 | SourceLifecycle / proposed builder mirror adapter | SnapshotCommandV2, SnapshotQueryV2 | ArtifactQueryV2, GrantQueryV2 | snapshots/image generations/mirror refs | F11–13 |
 | Client / workbench facade | ViewQueryV2 | SessionQueryV2, BuildQueryV2, EvidenceQueryV2 | drafts only | F05,16 |
 
+HostAuthority trust publication and signature verification remain separate from client decoding. The cold reference verifier reads only protected publisher key-policy values and checks distinct issuer/approver signatures bound to the canonical grant and complete operation envelope. A client-supplied public key, authenticated flag, approval boolean or permission mode cannot replace that publisher. Approval-event persistence and the service's non-bypassable admission call remain required. Dynamic message/crypto buffers are outside the admitted no-allocation command path; activation must establish bounded ownership/transfer or a separately declared cold boundary before trusting any critical descriptor. Authored static descriptors are not execution or allocation proof.
+
+Cross-capsule signed values/frames now have a common owner (`distributed_authority_v2.spl` and `distributed_authority_codec_v2.spl`). Clients may encode/decode those untrusted values without importing private HostAuthority keys, its publisher snapshot or verification state. The authority implementation consumes the same metadata validator instead of duplicating protocol shape rules. Public decoding must remain distinct from authenticated authority publication and command admission.
+
 ## Sealed composition, lifecycle and ADRs
 
 | Decision | Contract and consequence |

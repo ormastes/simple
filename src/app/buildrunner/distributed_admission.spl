@@ -1,0 +1,46 @@
+# Typed managed admission before existing TaskRunner resource/process side effects.
+# The caller must authenticate the issuer and persist operation admission separately.
+use std.common.build_manager.contracts.{BuildTaskV1, BuildHostV1,
+    builder_validate_task_v1, builder_validate_host_v1}
+use std.common.build_manager.codec.builder_encode_task_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.distributed_control_v2.*
+use std.common.contracts.distributed_control_codec_v2.{distributed_environment_digest_v2,
+    distributed_operation_validate_v2}
+
+fn distributed_build_payload_digest_v2(task: BuildTaskV1) -> Result<text, text>:
+    val payload = builder_encode_task_v1(task)
+    if payload == "": return Err("BUILD_TASK_INVALID")
+    Ok(sha256_text(payload))
+
+fn distributed_build_admission_v2(grant: ExecutionGrantV2, request: OperationEnvelopeV2,
+        task: BuildTaskV1, host: BuildHostV1, requested: ExecutionEnvironmentV2,
+        observed: ExecutionEnvironmentV2, now: i64, policy_revision: i64,
+        revocation_epoch: i64, session_generation: i64) -> text:
+    val envelope_error = distributed_operation_validate_v2(request)
+    if envelope_error != "": return envelope_error
+    val grant_error = distributed_grant_authorize_v2(grant, request, now,
+        policy_revision, revocation_epoch, session_generation)
+    if grant_error != "": return grant_error
+    if request.operation != "build": return "BUILD_OPERATION_REQUIRED"
+    if builder_validate_task_v1(task) != "": return "BUILD_TASK_INVALID"
+    if builder_validate_host_v1(host) != "": return "BUILD_HOST_INVALID"
+    if host.id != request.host_id or requested.host_id != host.id:
+        return "BUILD_HOST_BINDING_MISMATCH"
+    val environment_error = distributed_environment_match_v2(requested, observed)
+    if environment_error != "": return environment_error
+    match distributed_environment_digest_v2(requested):
+        case Err(reason): return reason
+        case Ok(digest):
+            if digest != request.environment_digest: return "BUILD_ENVIRONMENT_DIGEST_MISMATCH"
+    if task.toolchain_digest != observed.toolchain_digest:
+        return "BUILD_TOOLCHAIN_MISMATCH"
+    # Zero task timeout means unlimited in V1; managed admission never permits it.
+    if task.timeout_ms != request.duration_ms or task.memory_limit_bytes != request.memory_bytes:
+        return "BUILD_RESOURCE_BINDING_MISMATCH"
+    if task.memory_policy != "enforce": return "BUILD_MEMORY_ENFORCEMENT_REQUIRED"
+    match distributed_build_payload_digest_v2(task):
+        case Err(reason): return reason
+        case Ok(digest):
+            if digest != request.payload_digest: return "BUILD_PAYLOAD_DIGEST_MISMATCH"
+    ""

@@ -15,3 +15,11 @@ Final result: cycle3 explicit-text candidate compiled6544 bytes and linked220395
 Copy the adjacent `.spl.repro` attachment to a tracked `.spl` file in an isolated diagnostic project. Compile with the recorded a45 pure-Simple producer, then strictly link with the recorded canonical __simple_main startup and core-C47/backfill935 pair. Expected assertions cover six formatted numeric values. Actual native exit is1. No scalar contract, whole MCP or compiler repair PASS is claimed.
 
 The renderer intentionally returns a tagged text handle carried as nominal i64. The renderer marks its result as tagged text, but the final local is nevertheless rendered as a raw integer. The precise owner that loses or misinterprets the marker is still under investigation. Replacing the representation with an opaque raw text pointer would be an incorrect repair. Explicit text annotation also failed in the final permitted cycle.
+
+## Source-only repair proposal (unexecuted)
+
+Source review identifies the missing marker at the genuine `rt_strcat_tagged` producer. `str(frac)` initially carries tagged-text provenance in an i64 slot. Padding creates tagged text in a nominal string temporary without the marker; reassignment removes the destination marker, causing the final integer renderer to stringify the handle. The proposal marks this producer and the genuine `rt_value_to_string` fallback, leaving runtime ABI, storage types, existing copy/removal rules and custom call routing unchanged.
+
+Astra found no P0/P1 in source review. Ten executable prevention cases inspect actual MIR call operands and native score/copy/raw-literal/integer/callback behavior. They are UNEXECUTED. No producer was built, no fourth score probe ran, and no compiler/lib/MCP/LSP/core/native or whole-suite PASS is claimed. Bug remains OPEN; root owns landing after future source-containing qualification. Raw-literal reassignment into nominal i64 storage and branch-join marker merging remain separate unqualified concerns.
+
+Regression source: `test/01_unit/compiler/mir/tagged_text_concat_reassignment_spec.spl`. Source/evidence identities are in the adjacent `_source_proposal.json` attachment.

@@ -1311,6 +1311,7 @@ main = 0
                 name: "vals".to_string(),
                 ty: array_ty_id,
                 type_name_hint: None,
+                trait_dispatch_owner: None,
                 mutability: simple_parser::ast::Mutability::Immutable,
                 inject: false,
                 is_ghost: false,

@@ -123,3 +123,21 @@ runtime acceptance. The snapshot-derived root-generation gap remains present,
 the compiled acceptance artifact is unavailable in this isolated worktree, and
 both inspected Windows binaries explicitly identify as Rust seeds. Item 6
 remains **BLOCKED / IN PROGRESS**, with no performance or qualification PASS.
+
+## 2026-10-11 requested release_phase3 continuation
+
+The user's current landing target is `release_phase3`; the complete A-H scope
+above is retained. See
+`doc/09_report/item6_release_phase3_readiness_2026-10-11.md` for current ownership,
+focused provenance repairs in draft PR 3098, the located migration draft PR
+3072, and exact bounded evidence. Neither draft is admitted for landing.
+
+Current source contains retained indexing, semantic routing and corruption
+guards, but generated compilation still rejects missing independent producer
+authority. PR 3072's witness migration does not implement selected producer
+execution or derived immutable snapshot consumption. These are Stage E
+implementation obligations. Production compiler/filesystem observations,
+all 44 scenarios, Phase 3/full CLI/core/MCP/LSP and Stage G measurements remain
+unverified. A new pure-Simple acceptance-entry diagnostic build timed out after
+240 seconds with no executable; its stopped cycle and cache are preserved.
+Do not retry either lane's stopped three-cycle bootstrap/build campaign.

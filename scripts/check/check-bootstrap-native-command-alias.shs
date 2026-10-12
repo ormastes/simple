@@ -1,0 +1,27 @@
+#!/bin/sh
+# Exercise native-tool resolution without relaxing receipt artifact identity.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+fixture=$(mktemp -d)
+trap 'rm -r -- "$fixture"' EXIT HUP INT TERM
+mkdir "$fixture/tools with spaces"
+printf '#!/bin/sh\nexit 0\n' >"$fixture/tools with spaces/compiler"
+chmod +x "$fixture/tools with spaces/compiler"
+ln -s 'tools with spaces/compiler' "$fixture/alias"
+ln -s alias "$fixture/chain"
+expected=$(CDPATH= cd -- "$fixture/tools with spaces" && pwd -P)/compiler
+actual=$(bootstrap_stage3_canonical_native_command "$fixture/alias")
+[ "$actual" = "$expected" ] || exit 1
+actual=$(bootstrap_stage3_canonical_native_command "$fixture/chain")
+[ "$actual" = "$expected" ] || exit 1
+if bootstrap_stage3_canonical_file "$fixture/alias" >/dev/null; then exit 1; fi
+ln -s missing "$fixture/dangling"
+if bootstrap_stage3_canonical_native_command "$fixture/dangling" >/dev/null; then exit 1; fi
+ln -s cycle-b "$fixture/cycle-a"
+ln -s cycle-a "$fixture/cycle-b"
+if bootstrap_stage3_canonical_native_command "$fixture/cycle-a" >/dev/null; then exit 1; fi
+printf 'data\n' >"$fixture/nonexecutable"
+chmod -x "$fixture/nonexecutable"
+if bootstrap_stage3_canonical_native_command "$fixture/nonexecutable" >/dev/null; then exit 1; fi
+printf '%s\n' 'PASS: native aliases/chains with spaces; artifact aliases, dangling links, cycles and nonexecutables rejected'

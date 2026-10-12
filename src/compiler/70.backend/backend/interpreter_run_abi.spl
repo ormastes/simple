@@ -1,0 +1,63 @@
+# Narrow adapters for canonical runtime externs used by source run capture.
+use compiler.backend.backend_types.{BackendError, Value}
+use std.nogc_sync_mut.sffi.collection_capture.{
+    collection_capture_note_size, collection_capture_note_lookup,
+    collection_capture_note_materialization, collection_capture_note_hash_probe,
+    collection_capture_note_filter, collection_capture_note_loop
+}
+
+fn interpreter_run_abi(name: text, owner: text, external: bool, args: [Value], program_args: [text]) -> Result<Value, BackendError>?:
+    if not external: return nil
+    val module_name = if owner.starts_with("std."): "lib." + owner.substring(4) else: owner
+    if name == "rt_get_args" and (module_name == "lib.nogc_sync_mut.sffi.system" or module_name == "lib.nogc_sync_mut.sffi.host" or module_name == "lib.nogc_sync_mut.src.config"):
+        if args.len() != 0:
+            return Some(Err(BackendError.runtime_error("rt_get_args takes no arguments", nil)))
+        var values: [Value] = []
+        for arg in program_args: values.push(Value.String(arg))
+        return Some(Ok(Value.Array(values)))
+    if module_name != "lib.nogc_sync_mut.sffi.collection_capture": return nil
+    var expected = 0
+    if name == "spl_collection_capture_note_materialization": expected = 2
+    elif name == "spl_collection_capture_note_size" or name == "spl_collection_capture_note_lookup": expected = 3
+    elif name == "spl_collection_capture_note_hash_probe": expected = 4
+    elif name == "spl_collection_capture_note_filter": expected = 4
+    elif name == "spl_collection_capture_note_loop": expected = 3
+    else: return nil
+    if args.len() != expected:
+        return Some(Err(BackendError.runtime_error("invalid collection capture ABI arity", nil)))
+    var site = ""
+    var target = ""
+    match args[0]:
+        case Value.String(value): site = value
+        case _: return Some(Err(BackendError.type_error("collection capture site must be text", nil)))
+    match args[1]:
+        case Value.String(value): target = value
+        case _: return Some(Err(BackendError.type_error("collection capture target must be text", nil)))
+    var first: i64 = 0
+    var second: i64 = 0
+    if expected >= 3:
+        match args[2]:
+            case Value.Int(value): first = value
+            case _: return Some(Err(BackendError.type_error("collection capture count must be integer", nil)))
+    if expected == 4:
+        match args[3]:
+            case Value.Int(value): second = value
+            case _: return Some(Err(BackendError.type_error("collection capture second count must be integer", nil)))
+    if name == "spl_collection_capture_note_lookup" and first != 0 and first != 1:
+        return Some(Err(BackendError.runtime_error("collection capture hit must be zero or one", nil)))
+    val accepted = if expected == 2:
+        collection_capture_note_materialization(site, target)
+    elif expected == 4:
+        if name == "spl_collection_capture_note_filter":
+            collection_capture_note_filter(site, target, first, second)
+        else:
+            collection_capture_note_hash_probe(site, target, first, second)
+    elif name == "spl_collection_capture_note_size":
+        collection_capture_note_size(site, target, first)
+    elif name == "spl_collection_capture_note_loop":
+        collection_capture_note_loop(site, target, first)
+    else:
+        collection_capture_note_lookup(site, target, first == 1)
+    Some(Ok(Value.Int(if accepted: 1 else: 0)))
+
+export interpreter_run_abi
