@@ -30,3 +30,7 @@ Next integration must hash the actual typed BuildTask request into payload_diges
 ## Existing builder owner and admission binding
 
 Inspection found bootstrap_builder/manager.spl is a compatibility facade over app/buildrunner/runner.spl, which in turn exports common/task_runner/scheduler. Preserve that canonical owner. New app/buildrunner/distributed_admission.spl binds authorized operation to canonical serialized BuildTaskV1 bytes and exact requested/observed environment before any process or resource side effect. It rejects alternate hosts, toolchain substitutions, altered duration/memory, unlimited V1 timeout and monitor-only memory mode. It is not yet called from a service entrypoint; durable operation journal and authenticated broker remain required. No runtime execution or feature PASS claimed.
+
+## Build admission regression increment
+
+Added eight real-call scenarios in test/01_unit/app/buildrunner/distributed_admission_spec.spl. Exact task acceptance is paired with source/argv sabotage, host redirect, resource substitution, monitor-mode memory downgrade, toolchain change and emulated test substitution. Execution remains NOT_RUN. Existing task_runner/journal.spl already provides PureDatabase-backed segmented WAL with owner lock, exact revision and replay validation; next durable operation work must reuse that foundation. Runtime verification gap is tracked in doc/08_tracking/bug/distributed_control_runtime_verification_unavailable_2026-10-12.md.

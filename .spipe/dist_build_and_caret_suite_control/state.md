@@ -42,3 +42,7 @@ Added seven static capsule descriptors with declared required/provided facets an
 ## M1 wire progress
 
 Added bounded canonical environment/operation codecs, strict V2 headers and fixed-field rejection, environment digest binding and seven unit scenarios. Reused existing builder wire reader rather than adding another decoder. Execution NOT_RUN; broker/caller wiring and durable admission remain next.
+
+## Admission regression progress
+
+Eight builder admission regressions authored; NOT_RUN. Inspected canonical PureDatabase/segmented-WAL TaskRunner journal for durable operation integration. Runtime gap tracked with owner and unblock condition; no live full-CLI build was found. Full implementation/landing remains incomplete and active.
