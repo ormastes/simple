@@ -30,14 +30,21 @@ and repeats the actual source, graph, gate and weave execution. Borrowed reads
 require scope state 1 and the exact registered complete use metadata; they do
 not open a nested scope or retain complete HIR outside the body lease.
 
-The native fixture `hir_archive_weave_boundary` contains 29 behavior guards.
+The native fixture `hir_archive_weave_boundary` contains 40 behavior guards.
 It checks two real advice claims over canonical/independently authored alias
 rows, the actual inserted advice call, cessation of pure forwarding, retained
-field default 37 and exact lowering warning, stable repeated uses, later RT
+field default 37 and original empty lowering-warning set, stable repeated uses, later RT
 grant custody, forged metadata refusal and foreign/post-close scope behavior.
 Twelve additional aggregate controls use actual recollected facts to exercise
 declarations-only partial census, the all-dropped real-body branch, each of the
 five capability fields, capability cardinality and exact consumption/replay.
+The actual selected lower transaction must also ignore a poisoned caller
+lowerer and a mechanically valid flat-AST cache with real source SHA but body
+69/default 99. A legacy cached control proves that poisoned frame is usable;
+fresh parser counters and the produced complete body prove the source replay.
+Public same-SHA edited HIR stores, copied driver contexts and inactive/paused
+producer-custody queries are refusal controls. Public journal seals alone are
+not accepted source-to-HIR producer authority.
 The fixture is authored but has not been compiled or executed. No native
 success, memory bound, or bootstrap admission is asserted here.
 
