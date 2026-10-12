@@ -454,3 +454,12 @@ fresh Hello, CLI and runner checks were not run. Original logs and hashes are
 retained in `C:/dev/simple-phase3-bootstrap-evidence/attempt13/final-summary.env`.
 Latest release `a95346aaef7a04c2e0935b2816e6157dd497457d` includes the typed
 `field_type` correction. Its actual rebuild/admission remains pending.
+- Novel cause (2026-10-12, candidate_frontend_smoke p2_add admission):
+  runtime_tagged_callback_owner_v1.spl nm-parsed required core-C symbols with
+  EXACT name matching, but Mach-O nm always prepends a leading underscore to C
+  symbols (`_rt_tagged_add`), so no required symbol ever matched on Darwin and
+  the gate failed with 'lacks defined function
+  rt_transient_array_scope_state_v1' even though nm listed it as defined text
+  (added 54908626175). The gate (e98757b4d8e) passed Linux CI (no underscore)
+  and failed on its first macOS run. Fix: strip a leading underscore from the
+  parsed symbol name (matches both ELF/GNU and Mach-O spellings).

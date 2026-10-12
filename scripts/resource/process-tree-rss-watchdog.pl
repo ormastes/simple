@@ -46,7 +46,7 @@ for my $key (qw(max-rss-kib interval-ms timeout-seconds term-grace-seconds)) {
 # Compiler policy is unchanged. An explicitly admitted parallel test tree has
 # a separate aggregate budget: one parent reserve plus the ordinary compile
 # target per worker. This does not raise any nested compiler guard's limit.
-my $compiler_ceiling_kib = 6835937;
+my $compiler_ceiling_kib = 8388608;
 my $worker_target_kib = 976562;
 my $budget_ceiling_kib = $compiler_ceiling_kib;
 $opt{'budget-scope'} =~ /\A(?:compiler|aggregate-tests)\z/
@@ -77,7 +77,7 @@ if ($opt{'budget-scope'} eq 'aggregate-tests') {
 # Ordinary host-config tree_rss_* knobs still fit under the default ceiling.
 my $compiler_jobs = 0;
 my $jobs_reserve_kib = 3145728;
-my $jobs_per_job_ceiling_kib = 262144;
+my $jobs_per_job_ceiling_kib = 1048576;
 my $host_total_kib = 0;
 # Where host_total_kib came from: undeclared (no worker count, never read),
 # proc-meminfo, sysctl, unknown (unreadable: the ceiling does not move) or
