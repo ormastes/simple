@@ -77,3 +77,7 @@ A cleanup agent inspected temporary files and worktrees. Seventeen apparently pr
 ## F02 host-role boundary increment
 
 Added `workbench/distributed_host_roles_v2.spl` with bounded snapshot lookup, exact registry revision and host-key digest checks, duplicate-ID rejection, and independent credential identity/reference/revision/revocation checks. It does not read secrets, connect, auto-enroll, or establish authentication from caller-provided values. Six unit scenarios include all four revoked roles, stale rotation, changed key, duplicate and unknown host, and invalid secret references. Tests are NOT_RUN. Strict SDN and authenticated enrollment/rotation ownership, dependency inspection and real transport wiring remain required for F02 completion. Further source work stays outside the live frozen native compiler checkout.
+
+## F02 strict SDN decoding increment
+
+Added an exact versioned host registry decoder over the shared SDN owner, with 64 KiB/128-host limits, structural guarding, duplicate diagnostics, closed fields and scalar types, independent role records and preserved revocation. A bounded second issue-aware parse is confined by design to configuration publication, never the request path. Six real source-fixture scenarios cover nested records, top/nested duplicate keys, unknown/missing fields, wrong types/version, revoke-then-reject and size/capacity/duplicate-host rejection. Tests remain NOT_RUN. The decoder is not yet wired to authenticated configuration publication, enrollment, rotation or SSH, so F02 is still incomplete.
