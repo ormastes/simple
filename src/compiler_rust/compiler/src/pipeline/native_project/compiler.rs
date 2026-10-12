@@ -2162,6 +2162,44 @@ mod aggregate_layout_tests {
     use crate::mir::{AggregateFieldCopy, MirFunction, MirInst, MirModule, VReg};
     use std::collections::{HashMap, HashSet};
 
+    #[test]
+    fn shorthand_trait_inventory_preserves_receiver_header_in_copies() {
+        let root = std::path::PathBuf::from("/tmp/shorthand-trait-layout/src");
+        let sources = vec![
+            (root.join("provider.spl"), concat!(
+                "trait Probe:\n    fn read() -> i64\n\n",
+                "struct Value(Probe):\n    first: i64\n    second: i64\n",
+                "    fn read() -> i64:\n        self.second\n"
+            ).to_string()),
+            (root.join("plain.spl"), "struct Value:\n    first: i64\n    second: i64\n".to_string()),
+        ];
+        // Parse independently so a silently skipped malformed fixture cannot pass.
+        for (_, source) in &sources {
+            simple_parser::Parser::new(source).parse().unwrap();
+        }
+        let inventory = super::super::imports::build_import_map(&sources, std::slice::from_ref(&root), &root);
+        assert!(inventory.vtable_type_owners.contains("provider__Value"));
+        assert!(!inventory.vtable_type_owners.contains("plain__Value"));
+        assert_eq!(inventory.vtable_symbols.get("provider__Value").map(String::as_str),
+                   Some("__vtable__provider__Value__for__Probe"));
+        let mut mir = MirModule::new();
+        mir.local_globals.insert("Value".to_string());
+        let mut function = MirFunction::new("read".to_string(), crate::hir::TypeId::I64,
+                                           simple_parser::ast::Visibility::Public);
+        function.blocks[0].instructions.push(MirInst::AggregateCopy {
+            dest: VReg(1), src: VReg(0), byte_size: 16,
+            type_name: Some("Value".to_string()), owner_has_vtable: None, deep_fields: vec![],
+        });
+        mir.functions.push(function);
+        qualify_native_struct_layouts(&mut mir, "provider", &HashMap::new(), &HashMap::new(),
+            &HashSet::new(), &HashMap::new(), &inventory.vtable_type_owners,
+            &inventory.vtable_symbols).unwrap();
+        let MirInst::AggregateCopy { byte_size, owner_has_vtable, .. } =
+            &mir.functions[0].blocks[0].instructions[0] else { panic!("expected copy") };
+        assert_eq!(*byte_size, 16, "user payload size remains two words");
+        assert_eq!(*owner_has_vtable, Some(true), "backend must retain the additional header word");
+    }
+
     fn field(name: &str, nested: Vec<AggregateFieldCopy>) -> AggregateFieldCopy {
         AggregateFieldCopy {
             word_index: 0,
