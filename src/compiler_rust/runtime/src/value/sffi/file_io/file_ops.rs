@@ -2100,7 +2100,9 @@ pub extern "C" fn rt_text_to_bytes(text: RuntimeValue) -> RuntimeValue {
     crate::value::collections::rt_string_bytes(text)
 }
 
-/// Convert a byte array ([u8]) to a UTF-8 text value.
+/// Convert bytes to UTF-8 text, replacing malformed sequences with U+FFFD.
+/// Invalid array representations/elements still return NIL; binary callers
+/// must retain their [u8] arrays instead of passing them through text.
 #[no_mangle]
 pub extern "C" fn rt_bytes_to_text(bytes: RuntimeValue) -> RuntimeValue {
     let len = crate::value::collections::rt_array_len(bytes);
@@ -2121,7 +2123,10 @@ pub extern "C" fn rt_bytes_to_text(bytes: RuntimeValue) -> RuntimeValue {
     // elements still yield NIL exactly as before.
     // See doc/08_tracking/bug/codegen_lane_still_slow_base64url_utf8_time_utils_2026-08-18.md
     if let Some(packed) = crate::value::collections::packed_byte_array_bytes(bytes) {
-        return unsafe { rt_string_new(packed.as_ptr(), packed.len() as u64) };
+        // Text is UTF-8, not an unchecked binary carrier. Cow borrows valid
+        // input; malformed sequences use the documented U+FFFD text policy.
+        let text = String::from_utf8_lossy(packed);
+        return rt_string_new(text.as_ptr(), text.len() as u64);
     }
 
     let mut out = Vec::with_capacity(len as usize);
@@ -2137,7 +2142,8 @@ pub extern "C" fn rt_bytes_to_text(bytes: RuntimeValue) -> RuntimeValue {
         out.push(byte as u8);
     }
 
-    unsafe { rt_string_new(out.as_ptr(), out.len() as u64) }
+    let text = String::from_utf8_lossy(&out);
+    rt_string_new(text.as_ptr(), text.len() as u64)
 }
 
 /// Write raw bytes to file
@@ -3191,6 +3197,80 @@ sandbox_lowering:
             );
             assert!(occupied.is_dir());
             assert_eq!(fs::read_dir(temp_dir.path()).unwrap().count(), before);
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod byte_text_utf8_invariant_tests {
+    use super::*;
+    use crate::value::collections::{
+        rt_array_new, rt_array_push, rt_string_data, rt_string_len,
+    };
+
+    fn boxed(bytes: &[u8]) -> RuntimeValue {
+        let array = rt_array_new(bytes.len() as u64);
+        assert!(!array.is_nil());
+        for byte in bytes {
+            assert!(rt_array_push(array, RuntimeValue::from_int(i64::from(*byte))));
+        }
+        array
+    }
+
+    fn assert_decoded(value: RuntimeValue, expected: &str) {
+        assert!(!value.is_nil());
+        let length = rt_string_len(value);
+        assert!(length >= 0);
+        let data = rt_string_data(value);
+        assert!(!data.is_null());
+        let bytes = unsafe { std::slice::from_raw_parts(data, length as usize) };
+        // Establish the invariant before exercising any str operation.
+        let actual = std::str::from_utf8(bytes).expect("decoder constructed invalid RuntimeString");
+        assert_eq!(actual.as_bytes(), expected.as_bytes());
+        assert_eq!(actual.chars().count(), expected.chars().count());
+    }
+
+    #[test]
+    fn malformed_packed_and_boxed_bytes_become_valid_replacement_text() {
+        let cases: &[(&[u8], &str)] = &[
+            (&[0x80, 0xff, 0xc3], "\u{fffd}\u{fffd}\u{fffd}"),
+            (&[0xc0, 0xaf], "\u{fffd}\u{fffd}"),
+            (&[0xed, 0xa0, 0x80], "\u{fffd}\u{fffd}\u{fffd}"),
+            (&[0xf4, 0x90, 0x80, 0x80], "\u{fffd}\u{fffd}\u{fffd}\u{fffd}"),
+            (&[0xe2, 0x82], "\u{fffd}"),
+            (&[0xf0, 0x9f, 0x98], "\u{fffd}"),
+            (&[b'a', 0xe2, 0x82, b'b'], "a\u{fffd}b"),
+            (&[0xe1, 0x80, 0xff], "\u{fffd}\u{fffd}"),
+            (&[0, 0xff, 0], "\0\u{fffd}\0"),
+        ];
+        for (input, expected) in cases {
+            let packed = unsafe { bytes_to_runtime_array(input) };
+            assert_decoded(rt_bytes_to_text(packed), expected);
+            assert_decoded(rt_bytes_to_text(boxed(input)), expected);
+        }
+    }
+
+    #[test]
+    fn valid_utf8_and_embedded_nul_are_unchanged_for_both_representations() {
+        for expected in ["", "ASCII", "A\0B", "한글😀e\u{301}", "\u{7f}\u{800}\u{10000}\u{10ffff}"] {
+            let input = expected.as_bytes();
+            assert_decoded(rt_bytes_to_text(unsafe { bytes_to_runtime_array(input) }), expected);
+            assert_decoded(rt_bytes_to_text(boxed(input)), expected);
+        }
+    }
+
+    #[test]
+    fn invalid_array_receivers_and_elements_keep_nil_contract() {
+        let text = rt_string_new(b"text".as_ptr(), 4);
+        for receiver in [RuntimeValue::NIL, RuntimeValue::from_int(7), text] {
+            assert!(rt_bytes_to_text(receiver).is_nil());
+        }
+        for invalid in [RuntimeValue::from_int(-1), RuntimeValue::from_int(256), RuntimeValue::NIL, text] {
+            let array = rt_array_new(2);
+            assert!(rt_array_push(array, RuntimeValue::from_int(65)));
+            assert!(rt_array_push(array, invalid));
+            assert!(rt_bytes_to_text(array).is_nil());
         }
     }
 }
