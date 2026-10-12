@@ -52,6 +52,10 @@ HostAuthority's reference verifier is `workbench/distributed_grant_verification_
 
 This is a cold reference path with dynamic message buffers, not a qualified no-allocation capsule command path. Actual activation requires bounded ownership and transfer into the sealed command owner, authenticated publisher/approval-event persistence, no client influence over trust anchors and service wiring that cannot bypass verification. No private-key signing, trust-root loading, opaque token publication or sandbox enforcement is implemented here. Runtime, branch coverage, allocations and signature latency remain unverified.
 
+`distributed_authority_snapshot_v2.spl` stages a HostAuthority-private index from at most 128 protected publisher keys. Publication validation checks closed roles, identifiers, key lengths/revisions, operation lists, scope/budgets, and exact policy/revocation values; competing revisions for the same role/identity reject the whole candidate. Retired keys belong in audit history, not ambiguous live rows. Query selects issuer/approver by role and identity, checks the active service's generation/policy/revocation first, then invokes signature verification with those registered keys. Request data cannot supply the key registry. The index is constructed once on publication; requests do not rescan or reread the full registry.
+
+Staging a validated value is not authenticated or durable publication. The owner must authenticate the trust-root source, commit the replacement generation atomically, retain approval/audit events, and keep expected generation values in its private service context. The reference queries still allocate lookup/message buffers; no no-allocation activation or opaque token guarantee is claimed.
+
 ### F04 — Managed SSH and persistent sessions
 
 | Concern | Design |

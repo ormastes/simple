@@ -1,0 +1,64 @@
+# DBC-005/006/019/020: private authority publication and exact indexed lookup.
+use std.spec.{describe, it, expect}
+use app.llm_caret.workbench.distributed_grant_verification_v2.*
+use app.llm_caret.workbench.distributed_authority_snapshot_v2.*
+use test.fixtures.app.llm_caret.distributed_authority_verification_fixture_v2.*
+
+fn authority_creation_error(keys: [DistributedAuthorityKeyV2]) -> text:
+    match distributed_authority_snapshot_create_v2(keys, 9, 4, 2):
+        case Ok(snapshot): ""
+        case Err(reason): reason
+
+fn authority_query_error(fixture: VerificationFixtureV2, generation: i64) -> text:
+    match distributed_authority_snapshot_create_v2([fixture.issuer, fixture.approver], 9, 4, 2):
+        case Err(reason): reason
+        case Ok(snapshot):
+            match distributed_verify_grant_approval_from_snapshot_v2(snapshot, fixture.signed,
+                    fixture.approval, fixture.request, 100, generation, 4, 2, 3):
+                case Ok(grant): ""
+                case Err(reason): reason
+
+describe "protected authority snapshot publication and query":
+    it "indexes distinct trusted roles and verifies the golden signed operation":
+        val fixture = verification_fixture()
+        match distributed_authority_snapshot_create_v2([fixture.issuer, fixture.approver], 9, 4, 2):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(snapshot):
+                expect(snapshot.keys.len()).to_equal(2)
+                expect(snapshot.generation).to_equal(9)
+                match distributed_verify_grant_approval_from_snapshot_v2(snapshot, fixture.signed,
+                        fixture.approval, fixture.request, 100, 9, 4, 2, 3):
+                    case Err(reason): expect(reason).to_equal("")
+                    case Ok(grant): expect(grant.id).to_equal("grant_1")
+
+    it "rejects competing key revisions instead of selecting by row order":
+        val fixture = verification_fixture()
+        var newer = fixture.issuer
+        newer.revision = 2
+        expect(authority_creation_error([fixture.issuer, newer, fixture.approver])).to_equal("AUTHORITY_KEY_DUPLICATE")
+
+    it "rejects stale service generation before selecting authority":
+        expect(authority_query_error(verification_fixture(), 10)).to_equal("AUTHORITY_SNAPSHOT_STALE")
+
+    it "rejects an unknown issuer without using the first registered key":
+        var fixture = verification_fixture()
+        var signed = fixture.signed
+        signed.issuer_id = "unknown"
+        fixture.signed = signed
+        expect(authority_query_error(fixture, 9)).to_equal("AUTHORITY_KEY_UNAVAILABLE")
+
+    it "rejects foreign signing roles and inconsistent publication policy":
+        val fixture = verification_fixture()
+        var issuer = fixture.issuer
+        issuer.role = "receipt-signer"
+        expect(authority_creation_error([issuer, fixture.approver])).to_equal("AUTHORITY_KEY_ROLE_INVALID")
+        issuer = fixture.issuer
+        issuer.policy_revision = 3
+        expect(authority_creation_error([issuer, fixture.approver])).to_equal("AUTHORITY_KEY_POLICY_MISMATCH")
+
+    it "retains revocation in the snapshot and rejects subsequent key use":
+        var fixture = verification_fixture()
+        var issuer = fixture.issuer
+        issuer.revoked = true
+        fixture.issuer = issuer
+        expect(authority_query_error(fixture, 9)).to_equal("AUTHORITY_KEY_REVOKED")
