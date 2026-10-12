@@ -49,5 +49,8 @@ except BaseException as e:
  if active:active.update(passed=False,status='FAIL',reason='timeout' if isinstance(e,(subprocess.TimeoutExpired,queue.Empty)) else type(e).__name__)
  raise
 finally:
- executables=[x for x in [a.basic,a.controlled,a.descriptor] if x]
- (out/'receipt.json').write_text(json.dumps({'status':status,'failure':failure,'expected_cases':expected_count,'completed_cases':sum(x['passed'] for x in rows),'cases':rows,'executables':{x:hashlib.sha256(Path(x).read_bytes()).hexdigest() for x in executables},'scope':'portable basic byte cases; Windows controlled transport/CRLF/GUI CRT descriptor cases; C FILE owner only, no Rust ordering claim'},indent=2))
+ executables=[x for x in [a.basic,a.controlled,a.descriptor] if x];identities={}
+ for x in executables:
+  try:identities[x]={'sha256':hashlib.sha256(Path(x).read_bytes()).hexdigest()}
+  except OSError as error:identities[x]={'error':str(error)};status='FAIL'
+ (out/'receipt.json').write_text(json.dumps({'status':status,'failure':failure,'expected_cases':expected_count,'completed_cases':sum(x['passed'] for x in rows),'cases':rows,'executables':identities,'scope':'portable basic byte cases; Windows controlled transport/CRLF/GUI CRT descriptor cases; C FILE owner only, no Rust ordering claim'},indent=2))
