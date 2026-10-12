@@ -2,7 +2,8 @@
 
 `driver_hir_archive_cold_capture_v1(driver, boundary)` derives the selected
 source plan from actual context and immutable SCV inventory. It obtains the
-genuine weave use through its closed replayer; public boundary or capture
+genuine weave use through the actual streaming semantic prerequisite's closed
+replayer; public boundary or capture
 records are not admission authority. Each body read belongs to that use's
 registered pin and one transient lease.
 
@@ -15,7 +16,8 @@ before full-inventory count and emission checks.
 The second pass preserves the retained order: expected full count, then each
 receipt's target CFG decision, SMF module owner, emission and live witness.
 It retains the SMF owner refusal when a logical alias differs from the
-canonical HIR name. A final genuine weave replay must succeed before compact
+canonical HIR name. A final closed semantic prerequisite use, including the
+genuine weave replay, must succeed before compact
 receipts and emissions are assigned to the context. Disabled capture leaves
 those context roots untouched. No full body or borrowed warning graph escapes
 the receipt or emission lease.
@@ -31,10 +33,11 @@ The owning production controller must append each failure diagnostic, retain
 its original logging/reset behavior, and invoke the actual capture. A supplied
 capture record cannot satisfy quiet/current-registration/mono/final-MIR
 prerequisites. The complete production route remains inactive pending those
-owners and the route-specific semantic prerequisite integration.
+quiet/current/mono/final-MIR owners. The semantic prerequisite supports only
+the actual streaming route; the nonstreaming route remains unadmitted.
 
 Source review and environment guards passed. The native weave launcher selects
 the actual `main.spl` and `provider.spl` and requires the fixture's exact
-41-check marker; those checks remain UNRUN. Canonical compiler admission,
+49-check marker; those checks remain UNRUN. Canonical compiler admission,
 Hello World, full runner behavior, largest archive-frame measurement, lifetime
 and peak RSS qualification remain required.

@@ -7,6 +7,9 @@ use compiler.driver.cache.driver_hir_archive_weave_boundary_v1.{
     DriverHirArchiveWeaveBoundaryV1, DriverHirArchiveWeaveBoundaryUseV1,
     driver_hir_archive_weave_boundary_use_v1,
     driver_hir_archive_weave_boundary_load_in_owned_scope_v1}
+use compiler.driver.cache.driver_hir_archive_semantic_prerequisite_v1.{
+    driver_hir_archive_semantic_prerequisite_capture_v1,
+    driver_hir_archive_semantic_prerequisite_use_v1}
 use compiler.driver.cache.driver_cold_hir_source_capture_plan_v1.{
     DriverColdHirSourceCapturePlanV1, driver_cold_hir_source_capture_plan_v1}
 use compiler.driver.cache.driver_cold_hir_module_capture_v1.{DriverColdHirModuleInputV1}
@@ -187,10 +190,14 @@ pub fn driver_hir_archive_cold_capture_v1(driver: CompilerDriver,
             reason
         return Err(driver_hir_archive_cold_failure_v1(diagnostic))
     val plan = source_plan.unwrap()
-    # This is the real source/config/claim/gate/weave replay, not DTO hashing.
-    val used = driver_hir_archive_weave_boundary_use_v1(driver, boundary)
+    # Capture the actual streaming policy prerequisite; its closed use repeats
+    # the full source/config/claim/gate/weave replay before any typed ABI work.
+    val semantic = driver_hir_archive_semantic_prerequisite_capture_v1(driver, boundary)
+    if semantic.is_err(): return Err(driver_hir_archive_cold_failure_v1(semantic.unwrap_err()))
+    val prerequisite = semantic.unwrap()
+    val used = driver_hir_archive_semantic_prerequisite_use_v1(driver, boundary, prerequisite)
     if used.is_err(): return Err(driver_hir_archive_cold_failure_v1(used.unwrap_err()))
-    val boundary_use = used.unwrap()
+    val boundary_use = used.unwrap().weave_use
     var receipts: [ColdHirTypedReceiptV1] = []
     var errors: [text] = []
     var emissions: Dict<text, RuntimeStdHirModuleEmissionV1> = {}
@@ -230,9 +237,9 @@ pub fn driver_hir_archive_cold_capture_v1(driver: CompilerDriver,
                 index = index + 1
         # Recheck genuine authority before publishing compact context roots.
         # The use owner validates registered pins, not caller cleanliness claims.
-        val final_result = driver_hir_archive_weave_boundary_use_v1(driver, boundary)
+        val final_result = driver_hir_archive_semantic_prerequisite_use_v1(driver, boundary, prerequisite)
         if final_result.is_err(): return Err(driver_hir_archive_cold_failure_v1(final_result.unwrap_err()))
-        val final_use = final_result.unwrap()
+        val final_use = final_result.unwrap().weave_use
         if final_use.boundary_key != boundary_use.boundary_key or
                 final_use.boundary_digest != boundary_use.boundary_digest or
                 final_use.config_binding != boundary_use.config_binding:
