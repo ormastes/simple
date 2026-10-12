@@ -22,7 +22,6 @@ Maintain feature-specific process knowledge for Compiler. Use this skill when wo
   and raw `rt_str_hash` callers. MIR regressions and the native fixture cover
   distinct boundaries; authored assertions do not establish executed SPipe or
   Phase4 qualification.
-
 - [Source](../../../src/compiler/)
 - [Shared compiler source](../../../src/compiler_shared/)
 - [Architecture](../../04_architecture/architecture_modules.md)

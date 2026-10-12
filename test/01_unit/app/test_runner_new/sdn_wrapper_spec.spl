@@ -1,0 +1,151 @@
+# @tag:in-development
+# @req REQ-TRC-003 REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+# Pure transport contracts only. Native process/file ownership fixtures pending.
+use std.spec.*
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use app.test_runner_new.sdn_worker_protocol.{TestRunnerSdnMessage, validate_test_runner_sdn_message}
+use app.test_runner_new.sdn_wrapper.{test_sdn_failure_frame, verify_test_sdn_result_frame, test_sdn_worker_environment, test_sdn_worker_argv, test_sdn_group_retirement_preflight}
+
+fn _wrapper_output(success: bool) -> text:
+    var fields: Dict<text, SdnValue> = {}
+    fields["schema"] = SdnValue.String("simple.test-runner.output/v1")
+    fields["success"] = SdnValue.Bool(success)
+    fields["runner_ok"] = SdnValue.Bool(success)
+    fields["spec"] = SdnValue.Null
+    fields["spl_doctest"] = SdnValue.Null
+    fields["sdoctest"] = SdnValue.Null
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+describe "SDN wrapper pure result-file framing":
+    it "refuses every current provider and does not infer authority from unknown bits":
+        val reason = match test_sdn_group_retirement_preflight(511):
+            case Err(message): message
+            case Ok(_): "unexpected provider admission"
+        expect(reason).to_contain("leader-only retirement")
+        expect(test_sdn_group_retirement_preflight(0).is_err()).to_equal(true)
+        match test_sdn_group_retirement_preflight(1023):
+            case Err(message): expect(message).to_contain("recognized process-group retirement contract")
+            case Ok(_): fail("unknown capability bits authorized group retirement")
+        val frame = test_sdn_failure_frame(reason, -1)
+        expect(frame.exit_code).to_equal(1)
+        match validate_test_runner_sdn_message(frame.document).unwrap():
+            case TestRunnerSdnMessage.Failure(record):
+                expect(record.error).to_contain("process-group retirement is required")
+            case _: fail("unsupported provider was presented as test output")
+
+    it "normalizes only one optional terminal newline and preserves successful zero exit":
+        val canonical = _wrapper_output(true)
+        for suffix in ["", "\n", "\r\n"]:
+            val frame = verify_test_sdn_result_frame(canonical + suffix, 0).unwrap()
+            expect(frame.document).to_equal(canonical)
+            expect(frame.exit_code).to_equal(0)
+
+    it "keeps a failed result nonzero even when the worker incorrectly exits zero":
+        val canonical = _wrapper_output(false)
+        val zero = verify_test_sdn_result_frame(canonical, 0).unwrap()
+        expect(zero.document).to_equal(canonical)
+        expect(zero.exit_code).to_equal(1)
+        val failed = verify_test_sdn_result_frame(canonical, 7).unwrap()
+        expect(failed.document).to_equal(canonical)
+        expect(failed.exit_code).to_equal(7)
+
+    it "rejects contradictory success, unknown process status, logs and multiple frames":
+        val source = _wrapper_output(true)
+        expect(verify_test_sdn_result_frame(source, 5).is_err()).to_equal(true)
+        expect(verify_test_sdn_result_frame(source, -1).is_err()).to_equal(true)
+        expect(verify_test_sdn_result_frame("diagnostic\n" + source, 0).is_err()).to_equal(true)
+        expect(verify_test_sdn_result_frame(source + "\n" + source, 0).is_err()).to_equal(true)
+        expect(verify_test_sdn_result_frame(source + "\n\n", 0).is_err()).to_equal(true)
+        expect(verify_test_sdn_result_frame("", 0).is_err()).to_equal(true)
+
+    it "emits versioned escaped Unicode failures and binds their observed exit":
+        val failure = test_sdn_failure_frame("日本 path: \"result\"\nmissing", 9)
+        expect(failure.exit_code).to_equal(9)
+        val verified = verify_test_sdn_result_frame(failure.document + "\r\n", 9).unwrap()
+        expect(verified.document).to_equal(failure.document)
+        expect(verified.exit_code).to_equal(9)
+        expect(verify_test_sdn_result_frame(failure.document, 8).is_err()).to_equal(true)
+        match validate_test_runner_sdn_message(failure.document).unwrap():
+            case TestRunnerSdnMessage.Failure(record):
+                expect(record.error).to_equal("日本 path: \"result\"\nmissing")
+                expect(record.worker_exit_code).to_equal(9)
+            case _: fail("failure envelope was interpreted as test output")
+
+    it "bounds externally supplied failure diagnostics before canonical encoding":
+        var reason = ""
+        var count = 0
+        while count < 4097:
+            reason = reason + "x"
+            count += 1
+        val frame = test_sdn_failure_frame(reason, -2)
+        expect(frame.exit_code).to_equal(1)
+        match validate_test_runner_sdn_message(frame.document).unwrap():
+            case TestRunnerSdnMessage.Failure(record):
+                expect(record.error).to_equal("SDN worker transport failed")
+                expect(record.worker_exit_code).to_equal(-1)
+            case _: fail("bounded transport error lost its failure schema")
+
+describe "SDN wrapper scoped environment":
+    it "counts the inserted authorization and depth entries inside the final bounds":
+        var snapshot: [(text, text)] = []
+        var count = 0
+        while count < 1022:
+            snapshot.push(("K{count}", "value"))
+            count += 1
+        expect(test_sdn_worker_environment(snapshot).unwrap().len()).to_equal(1024)
+        snapshot.push(("extra", "value"))
+        expect(test_sdn_worker_environment(snapshot).is_err()).to_equal(true)
+        var large = "x"
+        while large.len() < 131072: large = large + large
+        val maximum = 131072 - "SIMPLE_TEST_SDN_WORKER_AUTH".len() - "SIMPLE_TEST_DEPTH".len() - 2 - 1
+        val exact = large.slice(0, maximum)
+        expect(test_sdn_worker_environment([("K", exact)]).unwrap().len()).to_equal(3)
+        expect(test_sdn_worker_environment([("K", exact + "x")]).is_err()).to_equal(true)
+
+    it "sorts preserved entries and replaces worker controls without editing the input":
+        val source = [("Z", "日本"), ("SIMPLE_TEST_SDN_WORKER_AUTH", "stale"), ("A", "value"), ("SIMPLE_TEST_DEPTH", "0")]
+        val result = test_sdn_worker_environment(source).unwrap()
+        expect(result.len()).to_equal(4)
+        expect(result[0].key).to_equal("A")
+        expect(result[0].value).to_equal("value")
+        expect(result[1].key).to_equal("SIMPLE_TEST_DEPTH")
+        expect(result[1].value).to_equal("1")
+        expect(result[2].key).to_equal("SIMPLE_TEST_SDN_WORKER_AUTH")
+        expect(result[2].value).to_equal("1")
+        expect(result[3].key).to_equal("Z")
+        expect(result[3].value).to_equal("日本")
+        expect(source[1].1).to_equal("stale")
+        expect(source[3].1).to_equal("0")
+        # The current scoped provider is POSIX: differently-cased keys remain
+        # distinct user data, not silently discarded as private controls.
+        val lower = test_sdn_worker_environment([("simple_test_depth", "user-value")]).unwrap()
+        expect(lower.len()).to_equal(3)
+        expect(lower[2].key).to_equal("simple_test_depth")
+        expect(lower[2].value).to_equal("user-value")
+
+    it "rejects duplicate, malformed and oversized inherited environment data":
+        expect(test_sdn_worker_environment([("A", "1"), ("A", "2")]).is_err()).to_equal(true)
+        expect(test_sdn_worker_environment([("A=B", "1")]).is_err()).to_equal(true)
+        expect(test_sdn_worker_environment([("", "1")]).is_err()).to_equal(true)
+        expect(test_sdn_worker_environment([("A", "x\0y")]).is_err()).to_equal(true)
+        var snapshot: [(text, text)] = []
+        var count = 0
+        while count < 1025:
+            snapshot.push(("K{count}", "value"))
+            count += 1
+        expect(test_sdn_worker_environment(snapshot).is_err()).to_equal(true)
+
+describe "SDN wrapper complete worker argv bounds":
+    it "preserves Unicode paths and budgets all four provider framing arguments":
+        val args = test_sdn_worker_argv("/bin/simple", "/tmp/日本/result.sdn", ["test/日本_spec.spl"]).unwrap()
+        expect(args).to_equal(["test", "--test-sdn-worker", "--test-sdn-result=/tmp/日本/result.sdn", "test/日本_spec.spl"])
+        var forwarded: [text] = []
+        var count = 0
+        while count < 4092:
+            forwarded.push("x")
+            count += 1
+        expect(test_sdn_worker_argv("/bin/simple", "/tmp/result.sdn", forwarded).unwrap().len()).to_equal(4095)
+        forwarded.push("extra")
+        expect(test_sdn_worker_argv("/bin/simple", "/tmp/result.sdn", forwarded).is_err()).to_equal(true)
+        expect(test_sdn_worker_argv("/bin/simple", "/tmp/result.sdn", ["x\0y"]).is_err()).to_equal(true)
