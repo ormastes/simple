@@ -89,3 +89,7 @@ Added a bounded exact-reference query returning every affected host/role revisio
 ## Rebuilt producer and callback behavioral failure
 
 Producer c27cb117… at frozen source 6ec114562 rebuilt 1,237 modules and passed bootstrap sanity plus receiver/runtime checks; the compiler verification matrix is still live. The exact callback checker compiled and linked but failed execution output: text-returning field printed an integer instead of port, and captured record-returning array-loop callback yielded 0 instead of 20. Evidence and exhausted scoped retry budget are recorded in native_function_field_callback_abi_2026-10-12.md. Successful closure lowering is not successful callback execution. Full runtime qualification, distributed feature testing and landing remain blocked by unresolved tool/runtime evidence; no Phase 3 PASS is claimed.
+
+## Current matrix test-runner failure
+
+The c27cb117… test-runner build failed MIR lowering at 334400 ms with B5b: match has multiple wildcard arms, before native-cache planning. Root cause and source/function location are not established by the emitted diagnostic. This run does not verify the scratch repair's RSS effect. The separate CLI build and overall matrix remain live; no new build/retry was launched. Evidence is recorded in native_test_runner_multiple_wildcard_mir_2026-10-12.md.
