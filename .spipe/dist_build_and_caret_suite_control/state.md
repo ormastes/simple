@@ -46,3 +46,7 @@ Added bounded canonical environment/operation codecs, strict V2 headers and fixe
 ## Admission regression progress
 
 Eight builder admission regressions authored; NOT_RUN. Inspected canonical PureDatabase/segmented-WAL TaskRunner journal for durable operation integration. Runtime gap tracked with owner and unblock condition; no live full-CLI build was found. Full implementation/landing remains incomplete and active.
+
+## Durable operation progress
+
+Operation state and nonce-leased segmented-WAL journal authored, plus six replay/uncertainty regression scenarios. Commit-before-effect interface is available but broker callers, crash tests and power-loss qualification remain incomplete. Full goal active; NOT_RUN.

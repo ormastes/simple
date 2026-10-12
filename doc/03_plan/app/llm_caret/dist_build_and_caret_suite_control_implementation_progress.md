@@ -34,3 +34,9 @@ Inspection found bootstrap_builder/manager.spl is a compatibility facade over ap
 ## Build admission regression increment
 
 Added eight real-call scenarios in test/01_unit/app/buildrunner/distributed_admission_spec.spl. Exact task acceptance is paired with source/argv sabotage, host redirect, resource substitution, monitor-mode memory downgrade, toolchain change and emulated test substitution. Execution remains NOT_RUN. Existing task_runner/journal.spl already provides PureDatabase-backed segmented WAL with owner lock, exact revision and replay validation; next durable operation work must reuse that foundation. Runtime verification gap is tracked in doc/08_tracking/bug/distributed_control_runtime_verification_unavailable_2026-10-12.md.
+
+## Durable operation increment
+
+Added immutable operation state (admitted/executing/outcome-unknown/terminal) and a domain ledger over the existing segmented WAL. It validates nonce-bound parent lease and exact revision, checks transitions before publication, updates the runtime index only after WAL commit and replays bounded history once at open. Exact-envelope duplicates preserve known/unknown outcomes; changed bytes under one ID fail. Six state regression scenarios authored. Runtime/storage crash tests NOT_RUN.
+
+The storage owner explicitly provides process-crash publication recovery, not authenticated power-loss durability. No stronger claim is made. Broker integration must persist admitted and executing transitions before side effects and recover executing records as ownership uncertainty; notifications and cleanup receipts remain to wire. Memory index is rebuildable, never the durable authority. Tests and code remain unqualified/unlanded.
