@@ -75,3 +75,23 @@ source/gate/weave replay. Eight further native controls exercise real capture,
 private-stage/pin substitution, coverage-route refusal and restoration,
 copied-driver refusal, foreign paused leases and post-close reuse. All 49
 controls remain UNRUN; cold/current/final/MIR activation and RSS are unqualified.
+
+`driver_hir_archive_weave_boundary_registered_report_in_owned_scope_v1(owner)`
+returns the actual body-free report after checking the private complete-owner
+pin and immutable transcript. It requires caller-owned active scope1 and
+performs no source, body, semantic-route replay or scope lifecycle. A current
+controller can check this predecessor before cold capture without moving cold
+source-plan diagnostics. The issuer already rejects errors and skipped gates;
+this helper does not broaden issuance to failed reports. The existing positive
+and transcript-substitution behavior groups exercise this read, preserving49
+UNRUN groups.
+
+`test/fixtures/compiler/hir_archive_weave_boundary/support.spl` exposes
+`hir_archive_weave_fixture_setup_v1(path, name, alias_name)` for independent
+native fixtures. It returns the actual driver, selected provider, real source
+and independently authored alias, produced archive, graph-derived capability
+and actual captured weave boundary. It calls the selected closed source
+producer and actual journal/policy/weave factories. It does not construct
+custody or accepted pins and does not produce cold/final authority. The helper
+has no independent check count or executed qualification; the original49
+controls are retained.

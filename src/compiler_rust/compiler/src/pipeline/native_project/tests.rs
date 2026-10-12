@@ -4883,7 +4883,7 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
     let temp = tempfile::tempdir().unwrap();
     let core = build_core_c_runtime_library(&temp.path().join("core")).unwrap();
     let capsule =
-        super::tools::build_bootstrap_mutex_runtime_capsule_archive(&core, &temp.path().join("mutex-capsule")).unwrap();
+        super::tools::build_bootstrap_mutex_runtime_capsule_archive(&core, &temp.path().join("mutex-capsule"), None).unwrap();
     let (defined, undefined) = super::tools::archive_global_symbols(&capsule).unwrap();
     let expected = [
         "spl_mutex_create",

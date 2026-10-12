@@ -1,0 +1,302 @@
+# @tag:in-development
+"""
+## Read the evidence qualification contract
+
+Inspect typed kernel fixtures to understand why linked tests, unfinished runs,
+stale observations and rejected provenance do not grant verified coverage.
+These are pure unit scenarios. They do not invoke the production runner,
+capture a native command, or prove artifact provenance. The fixture admission
+context stands for facts an independent production adapter must establish.
+"""
+# @manual_section "Evidence qualification value contract"
+# @cover src/lib/common/traceability/evidence.spl
+# @cover src/lib/common/traceability/obligations.spl
+# @cover src/lib/common/traceability/markdown.spl
+use std.spec.{describe, it, expect, step}
+use std.common.traceability.model.*
+use std.common.traceability.evidence_model.*
+use std.common.traceability.evidence.*
+use std.common.traceability.obligations.*
+use std.common.traceability.markdown.*
+use std.common.traceability.case_events.*
+
+fn evidence_graph() -> TraceGraph:
+    TraceGraph(
+        subject: SnapshotSubject("repo", "snapshot", "tree", "revision", "tree", "sha256"),
+        input_manifest_id: "inputs",
+        nodes: [TraceNode("req", TraceNodeKind.Requirement, "Requirement"),
+            TraceNode("ac", TraceNodeKind.AcceptanceCriterion, "Acceptance criterion"),
+            TraceNode("acceptance", TraceNodeKind.TestCase, "Acceptance scenario"),
+            TraceNode("unit", TraceNodeKind.TestCase, "Unit scenario")],
+        test_definitions: [TraceTestDefinition("acceptance", TraceTestKind.Acceptance, "acceptance", "", "acceptance-digest"),
+            TraceTestDefinition("unit", TraceTestKind.Unit, "unit", "", "unit-digest")],
+        claims: [], edges: [TraceEdge("decomposes", "req", TraceRelation.DecomposesTo, "ac"),
+            TraceEdge("accepts", "ac", TraceRelation.AcceptedBy, "acceptance"),
+            TraceEdge("verifies", "req", TraceRelation.VerifiedBy, "unit")],
+        edge_origins: [], origins: [], locators: [], diagnostics: [], generation_id: "generation", complete: true)
+
+fn evidence_observation() -> TraceObservation:
+    TraceObservation("obs-1", "run", "acceptance", 1, TraceOutcome.Passed, true, ["artifact-1"])
+
+fn evidence_run() -> TraceRun:
+    TraceRun("run", "snapshot", "inputs", "definitions", "config", "native", "binary", "expectation",
+        ["acceptance"], ["shard"], ["shard"], [evidence_observation()], TraceCompletion.Complete)
+
+fn evidence_context(run: TraceRun) -> AdmissionContext:
+    AdmissionContext("snapshot", "inputs", "definitions", "config", "native", "binary", "expectation", run.observations, [], [])
+
+fn evidence_obligation(id: text, cases: [text], kind: TraceTestKind) -> TraceObligation:
+    TraceObligation(id, "req", "ac", kind, cases, TraceApplicability.Required, TraceSatisfactionPolicy.All, false, false)
+
+describe "Traceability evidence kernel":
+    it "Requires an admitted applicability review before excluding an obligation":
+        # @req REQ-TRC-013 REQ-TRC-019
+        step("Declare a unit exemption beside an observed acceptance obligation")
+        val run = evidence_run()
+        val required = evidence_obligation("required", ["acceptance"], TraceTestKind.Acceptance)
+        var exempt = evidence_obligation("exempt", [], TraceTestKind.Unit)
+        exempt.applicability = TraceApplicability.NotApplicable
+        var context = evidence_context(run)
+        val missing = evaluate_obligations(evidence_graph(), [required, exempt], run, context)
+        expect(missing.complete).to_equal(false)
+        expect(missing.execution_total).to_equal(2)
+        expect(missing.results[1].status).to_equal(TraceQualificationStatus.Incomplete)
+        step("Supply the exact decision from the fixture's independent policy owner")
+        val decision = TraceApplicabilityDecision("exempt", "req", "ac", TraceTestKind.Unit,
+            "snapshot", "inputs", "config", "expectation", "review-1", "Reviewed scope has no unit obligation")
+        context.reviewed_not_applicable = [decision]
+        val admitted = evaluate_obligations(evidence_graph(), [required, exempt], run, context)
+        expect(admitted.complete).to_equal(true)
+        expect(admitted.execution_total).to_equal(1)
+        expect(admitted.execution_covered).to_equal(1)
+        expect(admitted.results[1].status).to_equal(TraceQualificationStatus.NotApplicable)
+        expect(admitted.results[1].selected_observation_ids.len()).to_equal(0)
+        step("Reject a stale policy decision, mismatched kind and duplicate approval")
+        var stale = decision
+        stale.expectation_id = "old-expectation"
+        var wrong_kind = decision
+        wrong_kind.test_kind = TraceTestKind.Component
+        for rejected in [[stale], [wrong_kind], [decision, decision]]:
+            context.reviewed_not_applicable = rejected
+            val denied = evaluate_obligations(evidence_graph(), [required, exempt], run, context)
+            expect(denied.complete).to_equal(false)
+            expect(denied.execution_total).to_equal(2)
+            expect(denied.results[1].status).to_equal(TraceQualificationStatus.Incomplete)
+
+    it "Rejects both duplicate obligations before awarding either execution credit":
+        # @req REQ-TRC-006 REQ-TRC-013
+        step("Give two otherwise eligible obligations the same identity")
+        val run = evidence_run()
+        val obligation = evidence_obligation("duplicate", ["acceptance"], TraceTestKind.Acceptance)
+        val result = evaluate_obligations(evidence_graph(), [obligation, obligation], run, evidence_context(run))
+        expect(result.complete).to_equal(false)
+        expect(result.execution_covered).to_equal(0)
+        expect(result.structural_covered).to_equal(0)
+        expect(result.results[0].status).to_equal(TraceQualificationStatus.Incomplete)
+        expect(result.results[1].status).to_equal(TraceQualificationStatus.Incomplete)
+
+    it "Refuses to hide a duplicate identity behind a not-applicable entry in either order":
+        # @req REQ-TRC-006 REQ-TRC-013 REQ-TRC-019
+        step("Reuse a required obligation identity for a purported exemption")
+        val run = evidence_run()
+        val required = evidence_obligation("duplicate", ["acceptance"], TraceTestKind.Acceptance)
+        var exempt = evidence_obligation("duplicate", [], TraceTestKind.Unit)
+        exempt.applicability = TraceApplicability.NotApplicable
+        val forward = evaluate_obligations(evidence_graph(), [required, exempt], run, evidence_context(run))
+        val reverse = evaluate_obligations(evidence_graph(), [exempt, required], run, evidence_context(run))
+        expect(forward.complete).to_equal(false)
+        expect(reverse.complete).to_equal(false)
+        expect(forward.execution_covered).to_equal(0)
+        expect(reverse.execution_covered).to_equal(0)
+        for result in forward.results:
+            expect(result.status).to_equal(TraceQualificationStatus.Incomplete)
+        for result in reverse.results:
+            expect(result.status).to_equal(TraceQualificationStatus.Incomplete)
+
+    it "Does not grant an exemption with an empty obligation identity":
+        # @req REQ-TRC-007 REQ-TRC-019
+        step("Supply an unidentified not-applicable obligation")
+        val run = evidence_run()
+        var exempt = evidence_obligation("", [], TraceTestKind.Unit)
+        exempt.applicability = TraceApplicability.NotApplicable
+        val result = evaluate_obligations(evidence_graph(), [exempt], run, evidence_context(run))
+        expect(result.complete).to_equal(false)
+        expect(result.results[0].status).to_equal(TraceQualificationStatus.Incomplete)
+        expect(result.execution_covered).to_equal(0)
+
+    it "Refuses to relabel an acceptance definition as a unit verification":
+        # @req REQ-TRC-003 REQ-TRC-013
+        step("Bind a unit obligation to a case declared only as acceptance")
+        val run = evidence_run()
+        val result = evaluate_obligations(evidence_graph(), [evidence_obligation("wrong-kind", ["acceptance"], TraceTestKind.Unit)], run, evidence_context(run))
+        expect(result.structural_covered).to_equal(0)
+        expect(result.results[0].status).to_equal(TraceQualificationStatus.Incomplete)
+
+    it "Keeps linked lower-level tests visibly not run after acceptance-only observations":
+        # @req REQ-TRC-012 REQ-TRC-013
+        # @ac AC-TRC-021
+        step("Prepare a typed graph with acceptance and unit definitions")
+        val run = evidence_run()
+        val obligations = [evidence_obligation("acceptance-obligation", ["acceptance"], TraceTestKind.Acceptance),
+            evidence_obligation("unit-obligation", ["unit"], TraceTestKind.Unit)]
+        step("Evaluate the one actually observed acceptance case")
+        val result = evaluate_obligations(evidence_graph(), obligations, run, evidence_context(run))
+        expect(result.structural_covered).to_equal(2)
+        expect(result.execution_covered).to_equal(1)
+        expect(result.results[0].status).to_equal(TraceQualificationStatus.Verified)
+        expect(result.results[1].status).to_equal(TraceQualificationStatus.NotRun)
+        expect(result.complete).to_equal(false)
+        step("Inspect the report's explicit unit not-run state")
+        val report = render_trace_run_markdown(evidence_graph(), result, run)
+        expect(report).to_contain("unit | not_run")
+        expect(report).to_contain("Eligible execution obligations: 1/2")
+
+    it "Rejects zero-discovery and missing-shard completion claims":
+        # @req REQ-TRC-012 REQ-TRC-013
+        # @ac AC-TRC-022
+        step("Remove actual observations while retaining the frozen case plan")
+        var run = evidence_run()
+        run.observations = []
+        val obligation = evidence_obligation("required", ["acceptance"], TraceTestKind.Acceptance)
+        val empty = evaluate_obligations(evidence_graph(), [obligation], run, evidence_context(run))
+        expect(empty.results[0].status).to_equal(TraceQualificationStatus.Incomplete)
+        step("Restore the observation but omit its completed shard")
+        run.observations = [evidence_observation()]
+        run.completed_shard_ids = []
+        val missing = evaluate_obligations(evidence_graph(), [obligation], run, evidence_context(run))
+        expect(missing.results[0].status).to_equal(TraceQualificationStatus.Incomplete)
+
+    it "Invalidates an unchanged pass when its binary binding changes":
+        # @req REQ-TRC-013 REQ-TRC-018
+        # @ac AC-TRC-023
+        step("Change the independently expected binary identity")
+        val run = evidence_run()
+        var context = evidence_context(run)
+        context.binary_id = "different-binary"
+        val result = evaluate_obligations(evidence_graph(), [evidence_obligation("required", ["acceptance"], TraceTestKind.Acceptance)], run, context)
+        expect(result.results[0].status).to_equal(TraceQualificationStatus.Stale)
+        expect(result.execution_covered).to_equal(0)
+
+    it "Rejects a forged outcome that reuses an admitted observation identifier":
+        # @req REQ-TRC-011 REQ-TRC-013
+        # @ac AC-TRC-024
+        step("Admit a failed observation then alter only its outcome in the candidate")
+        var run = evidence_run()
+        var failed = evidence_observation()
+        failed.outcome = TraceOutcome.Failed
+        var context = evidence_context(run)
+        context.admitted_observations = [failed]
+        val result = evaluate_obligations(evidence_graph(), [evidence_obligation("required", ["acceptance"], TraceTestKind.Acceptance)], run, context)
+        expect(result.results[0].status).to_equal(TraceQualificationStatus.Stale)
+
+    it "Retains retry failures unless the obligation explicitly permits a later passing attempt":
+        # @req REQ-TRC-013
+        # @ac AC-TRC-025
+        step("Keep a failed first attempt and a passing second attempt")
+        var run = evidence_run()
+        var first = evidence_observation()
+        first.outcome = TraceOutcome.Failed
+        var second = evidence_observation()
+        second.id = "obs-2"
+        second.attempt = 2
+        run.observations = [first, second]
+        var obligation = evidence_obligation("required", ["acceptance"], TraceTestKind.Acceptance)
+        val denied = evaluate_obligations(evidence_graph(), [obligation], run, evidence_context(run))
+        expect(denied.results[0].status).to_equal(TraceQualificationStatus.Failed)
+        step("Allow retry satisfaction while retaining the first failure in the report")
+        obligation.allow_retry_pass = true
+        val allowed = evaluate_obligations(evidence_graph(), [obligation], run, evidence_context(run))
+        expect(allowed.results[0].status).to_equal(TraceQualificationStatus.Verified)
+        expect(render_trace_run_markdown(evidence_graph(), allowed, run)).to_contain("attempt 1: failed")
+
+    it "Keeps expected failures separate from unexpected passes":
+        # @req REQ-TRC-013
+        # @ac AC-TRC-025
+        step("Admit an expected failure under an explicit expected-failure policy")
+        var run = evidence_run()
+        var observation = evidence_observation()
+        observation.outcome = TraceOutcome.ExpectedFailure
+        run.observations = [observation]
+        var obligation = evidence_obligation("required", ["acceptance"], TraceTestKind.Acceptance)
+        obligation.allow_expected_failure = true
+        val expected = evaluate_obligations(evidence_graph(), [obligation], run, evidence_context(run))
+        expect(expected.results[0].status).to_equal(TraceQualificationStatus.Verified)
+        step("Change the actual outcome to an unexpected pass")
+        observation.outcome = TraceOutcome.UnexpectedPass
+        run.observations = [observation]
+        val unexpected = evaluate_obligations(evidence_graph(), [obligation], run, evidence_context(run))
+        expect(unexpected.results[0].status).to_equal(TraceQualificationStatus.Failed)
+
+    it "Requires all cases unless an alternative satisfaction policy is explicitly selected":
+        # @req REQ-TRC-013
+        step("Evaluate two linked cases with only acceptance executed")
+        val run = evidence_run()
+        var graph = evidence_graph()
+        graph.test_definitions.push(TraceTestDefinition("unit", TraceTestKind.Acceptance, "unit", "", "unit-digest"))
+        var obligation = evidence_obligation("required", ["acceptance", "unit"], TraceTestKind.Acceptance)
+        val all = evaluate_obligations(graph, [obligation], run, evidence_context(run))
+        expect(all.complete).to_equal(false)
+        step("Select the explicit alternative policy")
+        obligation.policy = TraceSatisfactionPolicy.Alternative
+        val alternative = evaluate_obligations(graph, [obligation], run, evidence_context(run))
+        expect(alternative.complete).to_equal(true)
+
+    it "Does not treat skipped or interrupted observations as eligible execution":
+        # @req REQ-TRC-012 REQ-TRC-013
+        # @ac AC-TRC-022
+        step("Retain a skipped observation in a completed run")
+        var run = evidence_run()
+        var skipped = evidence_observation()
+        skipped.outcome = TraceOutcome.Skipped
+        skipped.executed = false
+        run.observations = [skipped]
+        val obligation = evidence_obligation("required", ["acceptance"], TraceTestKind.Acceptance)
+        val result = evaluate_obligations(evidence_graph(), [obligation], run, evidence_context(run))
+        expect(result.results[0].status).to_equal(TraceQualificationStatus.NotRun)
+        step("Mark the run as interrupted")
+        run.completion = TraceCompletion.Crashed
+        val interrupted = evaluate_obligations(evidence_graph(), [obligation], run, evidence_context(run))
+        expect(interrupted.results[0].status).to_equal(TraceQualificationStatus.Incomplete)
+
+    it "Labels admitted previous evidence without pretending it ran in the current run":
+        # @req REQ-TRC-013 REQ-TRC-018
+        # @ac AC-TRC-023
+        step("Supply owner-admitted previous unit observations")
+        val run = evidence_run()
+        var prior = evidence_observation()
+        prior.id = "prior-observation"
+        prior.run_id = "prior-run"
+        prior.case_id = "unit"
+        var context = evidence_context(run)
+        context.eligible_previous_observations = [prior]
+        val result = evaluate_obligations(evidence_graph(), [evidence_obligation("unit-obligation", ["unit"], TraceTestKind.Unit)], run, context)
+        expect(result.results[0].status).to_equal(TraceQualificationStatus.Verified)
+        expect(result.results[0].reasons.join(" ")).to_contain("not executed in current run")
+
+    it "Escapes hostile identifiers in deterministic Markdown":
+        # @req REQ-TRC-014 REQ-TRC-020
+        # @ac AC-TRC-029
+        step("Project a hostile user-controlled identifier as inert text")
+        expect(trace_markdown_escape("<script>|[x]`\n")).to_equal("&lt;script&gt;\\|\\[x\\]&#96; ")
+        val run = evidence_run()
+        val result = evaluate_obligations(evidence_graph(), [evidence_obligation("required", ["acceptance"], TraceTestKind.Acceptance)], run, evidence_context(run))
+        val outputs = project_trace_markdown(evidence_graph(), result)
+        expect(outputs[0].path).to_equal("traceability.md")
+        expect(outputs[0].content).to_contain("Eligible execution obligations: 1/1")
+
+    it "Preserves actual started and failed events and rejects an interrupted stream":
+        # @req REQ-TRC-012 REQ-TRC-013
+        # @ac AC-TRC-022
+        step("Collect canonical callback records independently of summary text")
+        val started = encode_trace_case_event(TraceCaseEvent("suite > scenario", "started", "not_finished"))
+        val failed = encode_trace_case_event(TraceCaseEvent("suite > scenario", "finished", "failed"))
+        val payload = collect_trace_case_events("unrelated output\nSIMPLE_TRACE_CASE_EVENT " + started + "\nSIMPLE_TRACE_CASE_EVENT " + failed + "\n")
+        val decoded = decode_trace_case_events(payload)
+        match decoded:
+            case Ok(events):
+                expect(events.len()).to_equal(2)
+                expect(events[1].outcome).to_equal("failed")
+                expect(trace_case_events_completed(events).is_ok()).to_equal(true)
+            case Err(_): expect(false).to_equal(true)
+        step("Remove the terminal event to represent interruption")
+        expect(trace_case_events_completed([TraceCaseEvent("suite > scenario", "started", "not_finished")]).is_ok()).to_equal(false)
