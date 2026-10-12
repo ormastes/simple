@@ -492,3 +492,17 @@ Latest release `a95346aaef7a04c2e0935b2816e6157dd497457d` includes the typed
   exists. Recorded for the compiler lane: the ambiguity diagnostic should
   name both colliding declarations (symbol ids + owners), and the
   duplicate-struct dedup should consider Option-record provider layouts.
+- Stage-2 self-build pair (2026-10-12, regression from 43c3f3d979a): (1)
+  archive_borrowed_module_v1.spl — 'struct ANY field symbol' in
+  lower_archive_module_in_owned_scope_v1: MirHirDeclarationRepositoryV1 /
+  MirHirModuleDeclarationsV1 came only through the summary module's nested
+  'export use ... .*' re-export glob, which the seed registry does not
+  materialize one level up; explicit itemized import from
+  hir_declaration_types_v1 added. (2) driver_pipeline_lowering.spl —
+  'Aliasing violation: reference 9 already has Exclusive' in the new
+  publish_runtime_std_mir_emissions_v1: 'val selection = self.ctx....!' held
+  an Exclusive borrow on self.ctx across the source loop while
+  self.ctx.add_error re-acquired Exclusive inside it. Fix: never bind the
+  unwrapped aggregate — hoist its two used scalars via inline '.?.field'
+  chains before the loop (the pattern cold_full_index_producer_v1.spl:139-140
+  already uses and the seed accepts).
