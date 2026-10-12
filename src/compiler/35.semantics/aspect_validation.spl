@@ -110,23 +110,43 @@ fn aspect_missing_obligations(key: text) -> [text]:
         missing.push("@bounded_time")
     missing
 
-fn validate_aspect_contracts(modules: Dict<text, HirModule>) -> [text]:
-    """Prove every recorded `@advice(...)` declaration against the join-point
-    universe of this compilation; return one diagnostic per unproven or
-    unmeasurable claim (empty list = every advice proven)."""
+pub fn validate_aspect_join_points_v1(module_ids: Dict<text, bool>,
+        forwards: [JoinPoint]) -> [text]:
+    validate_aspect_claim_join_points_v1(module_ids, forwards, aspect_contract_claims_v1())
+
+# Actual parser-registry rows, in its original order. These editable scalar
+# rows are replay inputs only; a driver must bind them to admitted source and
+# the real captured policy owner before using them for archive admission.
+struct AspectContractClaimV1:
+    registry_key: text
+    path: text
+    advice_fn: text
+    kind: text
+    selector: text
+    mode: text
+    readonly: bool
+    noalloc: bool
+    bounded_time: bool
+
+pub fn aspect_contract_claims_v1() -> [AspectContractClaimV1]:
+    var claims: [AspectContractClaimV1] = []
+    for key in aspect_registry_claim_keys():
+        claims.push(AspectContractClaimV1(registry_key: key, path: aspect_claim_path(key),
+            advice_fn: aspect_claim_fn(key), kind: aspect_registry_kind_of_key(key),
+            selector: aspect_registry_selector_of_key(key), mode: aspect_registry_mode_of_key(key),
+            readonly: aspect_registry_readonly_of_key(key), noalloc: aspect_registry_noalloc_of_key(key),
+            bounded_time: aspect_registry_bounded_time_of_key(key)))
+    claims
+
+pub fn validate_aspect_claim_join_points_v1(module_ids: Dict<text, bool>,
+        forwards: [JoinPoint], claims: [AspectContractClaimV1]) -> [text]:
     var errors: [text] = []
-    val claim_keys = aspect_registry_claim_keys()
-    if claim_keys.len() == 0:
+    if claims.len() == 0:
         return errors
 
-    val module_ids = aspect_module_identity_index(modules)
-    # Enumerated ONCE for the whole compilation, not per claim: two advice
-    # declarations on the same edge must see the same join-point id.
-    val forwards = forward_join_points(modules)
-
-    for key in claim_keys:
-        val claim_path = aspect_claim_path(key)
-        val advice_fn = aspect_claim_fn(key)
+    for claim in claims:
+        val claim_path = claim.path
+        val advice_fn = claim.advice_fn
         if advice_fn == "":
             continue
         # Out-of-scope advice: recorded for a module that is not part of this
@@ -137,15 +157,18 @@ fn validate_aspect_contracts(modules: Dict<text, HirModule>) -> [text]:
         if not module_ids.contains_key(claim_path):
             continue
 
-        val kind = aspect_registry_kind_of_key(key)
-        val selector = aspect_registry_selector_of_key(key)
-        val mode = aspect_registry_mode_of_key(key)
+        val kind = claim.kind
+        val selector = claim.selector
+        val mode = claim.mode
 
         # --- the three advice obligations ------------------------------------
         # Checked FIRST and independently of the pointcut, so an advice that is
         # both misdeclared and mistargeted reports both problems in one run
         # rather than hiding one behind the other.
-        val missing = aspect_missing_obligations(key)
+        var missing: [text] = []
+        if not claim.readonly: missing.push("@readonly")
+        if not claim.noalloc: missing.push("@noalloc")
+        if not claim.bounded_time: missing.push("@bounded_time")
         if missing.len() > 0:
             errors.push("error[aspect]: advice '" + advice_fn
                 + "' must declare @readonly @noalloc @bounded_time (missing: "
@@ -207,5 +230,15 @@ fn validate_aspect_contracts(modules: Dict<text, HirModule>) -> [text]:
             continue
     errors
 
+fn validate_aspect_contracts(modules: Dict<text, HirModule>) -> [text]:
+    """Prove every recorded `@advice(...)` declaration against the join-point
+    universe of this compilation; return one diagnostic per unproven or
+    unmeasurable claim (empty list = every advice proven)."""
+    if aspect_registry_claim_keys().len() == 0: return []
+    # Enumerate ONCE: all advice sees the same original ordered universe.
+    validate_aspect_join_points_v1(aspect_module_identity_index(modules), forward_join_points(modules))
+
 export validate_aspect_contracts, aspect_module_identities, aspect_module_identity_index, aspect_missing_obligations
+export validate_aspect_join_points_v1
+export AspectContractClaimV1, aspect_contract_claims_v1, validate_aspect_claim_join_points_v1
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
