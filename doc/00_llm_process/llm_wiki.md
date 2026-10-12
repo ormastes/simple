@@ -1208,3 +1208,32 @@ runner, not a newly introduced foreign framework. Start with the
 explicit LLVM/Cranelift AOT commands, retained executables, source-list versus
 binary-owned counts, and the six-product compiler/interpreter/loader matrix.
 Research and repair existing aggregate/list entrypoints before replacing them.
+
+## Protected release drive machinery (rc1, 2026-10-11)
+
+Driving `v1.0.0-rc.1` through the protected convergence/candidate pipeline has
+these hard contracts (full detail: the `release` skill and
+`doc/07_guide/infra/software_release.md`):
+
+- Failed attempts increment a suffix, never rename the version: manifest
+  branches `work/release/1.0.0-rc.1_<N>`, candidates
+  `candidate/v1.0.0-rc.1/aNNN`.
+- The release line ref must satisfy every layer at once: `pr-admission.yml`
+  regex, `convergence-checkpoint.shs` regex, the review broker's
+  base→ruleset case, `candidate.yml` semver→ref derivation, and the
+  `spipe-vcs-v3-release-lines` ruleset conditions. A non-standard line like
+  `release_phase3` needs all five updated on both main and the line.
+- Manifest validator: prunes classifications merged to main, then demands
+  exact equality with `git rev-list origin/main..<release-ref>`. On tip
+  drift, rebind a fresh manifest; never merge-sync a manifest PR.
+- Convergence receipt jq accumulation must stream (`slurpfile`); `--argjson`
+  dies at ~624 rows (MAX_ARG_STRLEN).
+- Candidate refs: `gh api repos/.../git/refs` only; `git push` is blocked.
+- Broker on a fast-moving line fails with "protected base advanced";
+  resync the PR branch and redrive — several cycles are normal.
+- Runner image drift breaks llvm archive fingerprints; verify
+  `llvm-config --libfiles` archives exist (candidate.yml installs
+  `libpolly-18-dev` when `libPolly.a` is missing).
+- FreeBSD QEMU bootstrap: hours-scale timeouts, 4 GiB host headroom per run
+  for a 10–14 GB overlay, guest logs under
+  `.simple/storage/build/bootstrap/logs/`, QEMU_MEM takes a `G` suffix.
