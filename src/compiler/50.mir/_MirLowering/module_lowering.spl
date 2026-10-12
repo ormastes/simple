@@ -1,9 +1,11 @@
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
+use compiler.mir._MirLoweringExpr.function_signature_owner.*
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
 use compiler.hir.hir_operators.{HirBinOp}
 # Part of src/compiler/50.mir/mir_lowering.spl: module/struct/class type lowering, asm target-spec accessors
 use compiler.mir._MirLowering.bootstrap_globals.*
 use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir._MirLowering.declaration_providers_v1.*
 use compiler.mir._MirLowering.provider_globals.*
 use compiler.mir._MirLowering.global_initializer_guard.*
 use compiler.mir._MirLowering.function_lowering.*
@@ -479,6 +481,7 @@ impl MirLowering:
             struct_field_array_element_type_name: {},
             struct_field_array_elem_type: {},
             struct_value_syms: {},
+            optional_record_owners: {},
             result_err_record_owners: {},
             result_err_layout_types: {},
             struct_method_syms: {},
@@ -505,6 +508,7 @@ impl MirLowering:
             array_element_struct_syms: {},
             runtime_value_local_ids: [],
             tagged_text_locals: {},
+            exists_collection_locals: {},
             option_value_locals: {},
             nil_locals: {},
             enum_variant_index: {},
@@ -548,7 +552,12 @@ impl MirLowering:
             consumed_resource_locals: {},
             callable_link_names: {},
             callable_text_value_abi: {},
-            lowering_entry_module: false
+            lowering_entry_module: false,
+            declaration_repository: nil,
+            declaration_parameter_defaults: {},
+            declaration_parameter_defaults_ambiguous: {},
+            declaration_field_defaults: {},
+            declaration_field_default_owners: {}
         )
 
     me use_explicit_semantic_policy():
@@ -633,13 +642,15 @@ impl MirLowering:
         sha256_text(rows.join("\n"))
 
     me register_composite_layout_identity(symbol: HirSymbol, fields: [HirField], layout_attr: LayoutAttr):
+        self.register_composite_layout_digest_v1(symbol, self.canonical_layout_digest(fields, layout_attr))
+
+    me register_composite_layout_digest_v1(symbol: HirSymbol, digest: text):
         val owner = mir_layout_canonical_module_name(symbol.defining_module ?? "")
         if owner == "":
             return
         # Trace identity is deliberately independent of the legacy composite
         # metadata key, whose raw path spelling can differ at import sites.
         val key = "{owner}::{symbol.name}"
-        val digest = self.canonical_layout_digest(fields, layout_attr)
         if self.composite_layout_digests.has(key):
             if self.composite_layout_digests[key] != digest:
                 self.composite_layout_owner_counts[key] = 2
@@ -1176,8 +1187,22 @@ impl MirLowering:
             self.struct_type_param_names[name] = names
 
     me register_composite_field_metadata(name: text, fields: [HirField], symbols: SymbolTable, overwrite: bool):
+        var declaration_names: [text] = []
+        var declaration_types: [HirType] = []
+        var declaration_spans: [Span] = []
+        for raw_field in fields:
+            val field: HirField = raw_field
+            declaration_names.push(field.name)
+            declaration_types.push(field.type_)
+            declaration_spans.push(field.span)
+        self.register_composite_field_metadata_types_v1(name, declaration_names, declaration_types, declaration_spans, symbols, overwrite)
+
+    me register_composite_field_metadata_types_v1(name: text, declaration_names: [text], declaration_types: [HirType], declaration_spans: [Span], symbols: SymbolTable, overwrite: bool):
         """Register name-keyed struct/class field metadata."""
-        self.register_result_err_layout_types(name, fields, symbols)
+        if declaration_names.len() != declaration_types.len() or declaration_names.len() != declaration_spans.len():
+            self.error_fatal("composite declaration field/type inventory mismatch: {name}", nil)
+            return
+        self.register_result_err_layout_types_fields_v1(name, declaration_names, declaration_types, symbols)
         var field_names: [text] = []
         var field_type_names: [text] = []
         var field_type_ownership_keys: [text] = []
@@ -1188,23 +1213,25 @@ impl MirLowering:
         var field_type_params: [text] = []
         var field_over_type_params: [bool] = []
         var fi = 0
-        while fi < fields.len():
-            val field = fields[fi]
-            field_names.push(field.name)
+        while fi < declaration_names.len():
+            val field_type: HirType = declaration_types[fi]
+            field_names.push(declaration_names[fi])
             var field_type_name = ""
             var field_type_ownership_key = ""
             var field_repr_name = ""
             var field_array_element_type_name = ""
             var field_type_param = ""
-            var field_elem_type = HirType(kind: HirTypeKind.Error, span: field.span)
-            var field_hir_type = HirType(kind: HirTypeKind.Error, span: field.span)
-            if field.type_ != nil:
-                field_hir_type = field.type_
-                match field.type_.kind:
+            var field_elem_type = HirType(kind: HirTypeKind.Error, span: declaration_spans[fi])
+            var field_hir_type = HirType(kind: HirTypeKind.Error, span: declaration_spans[fi])
+            if field_type != nil:
+                field_hir_type = field_type
+                match field_type.kind:
                     case Str:
                         field_repr_name = "str"
                     case TypeParam(tp_name, _):
                         field_type_param = tp_name
+                    case Function(_, _, _):
+                        field_type_ownership_key = "function-signature-v1\n" + self.function_signature_ownership_proof(field.type_, symbols)
                     case Named(field_type_sym, _):
                         val field_type_symbol = symbols.get_symbol_raw(field_type_sym.id)
                         if field_type_symbol.?:
@@ -1275,8 +1302,8 @@ impl MirLowering:
             field_elem_types.push(field_elem_type)
             field_type_params.push(field_type_param)
             var field_over_type_param = false
-            if field_type_param == "" and field.type_ != nil:
-                field_over_type_param = self.hir_type_mentions_type_param(field.type_, symbols)
+            if field_type_param == "" and field_type != nil:
+                field_over_type_param = self.hir_type_mentions_type_param(field_type, symbols)
             field_over_type_params.push(field_over_type_param)
             fi = fi + 1
         if overwrite or not self.struct_field_type_param.has(name):
@@ -1432,10 +1459,12 @@ impl MirLowering:
                             val prescan_element = module.symbols.get_symbol_raw(prescan_element_id.id)
                             if prescan_element != nil:
                                 match prescan_element.kind:
-                                    # @workaround bug=phase3_prescan_symbolkind_workaround_2026_10_10 reason=prescan return element owner.
-                                    case SymbolKind.Class | SymbolKind.Struct:
-                                        prescan_element_shape = prescan_element.name
+                                    case SymbolKind.Class:
+                                        prescan_element_shape = mir_class_identity(prescan_element)
                                         prescan_element_identity = self.composite_layout_key(prescan_element)
+                                    case SymbolKind.Struct:
+                                        prescan_element_shape = self.composite_layout_key(prescan_element)
+                                        prescan_element_identity = prescan_element_shape
                                     case _: ()
                         case _: ()
                     # Include scalar arrays in ambiguity detection so a name
@@ -1497,9 +1526,9 @@ impl MirLowering:
                     # POINTER, as the i64 `size`. Resolved HERE, while
                     # `module.symbols` is still the DEFINING module's own
                     # self-consistent table, so no consumer has to dereference a
-                    # foreign per-module SymbolId. Bare name, matching the
-                    # spelling struct_value_syms consumers expect downstream --
-                    # NOT composite_layout_key's module-qualified form.
+                    # foreign per-module SymbolId. Record the defining owner
+                    # for structs as well as classes; a stored Optional must
+                    # not capture an importer declaration with the same leaf.
                     match prescan_optional_inner.kind:
                         case Named(prescan_optional_symbol_id, _):
                             val prescan_optional_symbol = module.symbols.get_symbol_raw(prescan_optional_symbol_id.id)
@@ -1509,7 +1538,7 @@ impl MirLowering:
                                         bootstrap_fn_ret_opt_shape_register(prescan_call_name, mir_class_identity(prescan_optional_symbol))
                                     case Struct:
                                         bootstrap_fn_ret_opt_shape_register(
-                                            prescan_call_name, prescan_optional_symbol.name)
+                                            prescan_call_name, self.composite_layout_key(prescan_optional_symbol))
                                     case _: ()
                         case _: ()
                 case _: ()
@@ -1716,10 +1745,14 @@ impl MirLowering:
         for trait_provider in providers:
             if trait_provider.name != module.name:
                 self.register_native_trait_declarations(trait_provider)
+        if self.declaration_repository != nil:
+            self.register_declaration_provider_traits_v1(module, false)
         self.register_native_trait_implementations(module)
         for trait_provider in providers:
             if trait_provider.name != module.name:
                 self.register_native_trait_implementations(trait_provider)
+        if self.declaration_repository != nil:
+            self.register_declaration_provider_traits_v1(module, true)
         self.exact_extern_signatures = {}
         # E-MIR-TYPE-Error rate limit is per module (see lower_type).
         self.mir_type_error_reports = {}
@@ -1802,7 +1835,13 @@ impl MirLowering:
                     self.register_provider_method(provider_func, provider_module.symbols, provider_links)
         # Before the ambient-bootstrap early return below: the stage3
         # bootstrap-fixed lane lowers through that branch too.
-        self.register_trait_receiver_impls(module, providers)
+        if self.declaration_repository != nil:
+            self.declaration_field_defaults = {}
+            self.declaration_field_default_owners = {}
+            self.register_declaration_provider_layouts_v1(module)
+            self.register_declaration_trait_receiver_impls_v1(module)
+        else:
+            self.register_trait_receiver_impls(module, providers)
         self.global_symbol_ids = {}
         self.imported_global_initializers = {}
         # These mirrors contain module-local SymbolIds just like the owner
@@ -1865,7 +1904,10 @@ impl MirLowering:
         if bootstrap_trace:
             print "[mir-lower] builder-done"
 
-        self.register_imported_global_bindings(module, providers)
+        if self.declaration_repository != nil:
+            self.register_declaration_provider_globals_v1(module)
+        else:
+            self.register_imported_global_bindings(module, providers)
 
         if bootstrap_mode:
             if bootstrap_trace:
