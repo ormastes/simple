@@ -30,7 +30,7 @@ and repeats the actual source, graph, gate and weave execution. Borrowed reads
 require scope state 1 and the exact registered complete use metadata; they do
 not open a nested scope or retain complete HIR outside the body lease.
 
-The native fixture `hir_archive_weave_boundary` contains 40 behavior guards.
+The native fixture `hir_archive_weave_boundary` contains 41 behavior guards.
 It checks two real advice claims over canonical/independently authored alias
 rows, the actual inserted advice call, cessation of pure forwarding, retained
 field default 37 and original empty lowering-warning set, stable repeated uses, later RT
@@ -53,3 +53,5 @@ after this woven owner and before optional quiet method resolution. Original
 semantic validation and collection prerequisites, resolved current-body
 registration, actual mono execution, post-mono policy publication, final read
 admission and bounded MIR activation remain separate required boundaries.
+
+The accepted use binds declaration_order from the verified streaming schedule's layout_source_order source labels. It is distinct from alias-inclusive logical_order and physical_module_keys. The native positive asserts the canonical logical declaration label and the negative substitutes the independently authored alias; registered use bytes must reject that replacement. These controls remain UNRUN.
