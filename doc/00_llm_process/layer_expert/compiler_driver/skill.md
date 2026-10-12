@@ -268,3 +268,8 @@ path, selects eligibility after actual source selection, and revokes the owner
 after every compilation result. An attempted or revoked archive owner cannot
 fall back to retained HIR in the MIR consumer. Native qualification remains
 pending; source checks alone do not establish compiler or runner admission.
+
+Generic archive signatures retain declaration linkage metadata in digest v2.
+Driver archive transport must preserve this field through specialization;
+caller display qualifiers cannot establish the native callee owner. The
+source-reviewed repair requires a fresh generation for native qualification.

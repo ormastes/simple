@@ -148,3 +148,10 @@ the actual MIR consumer, retains specialization provenance for logical aliases,
 and finishes the private owner after compilation. The source review is complete;
 fresh compiler admission, native controls and measured memory qualification are
 still pending. Full-inventory and demand routes retain their existing selection.
+
+Imported generic specialization spelling now uses actual template declaration
+ownership and its extern/export/global/entry linkage metadata. The compact
+signature carries that bit and digest domain v2 binds it, so signature receipts
+invalidate when linkage changes. Free and method calls share the same naming
+rule. Five regression groups are authored and remain unrun; native link and
+execution qualification is still required.
