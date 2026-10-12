@@ -464,6 +464,8 @@ stage2_env_value() {
 }
 stage2_recorded_cold_init=$(bootstrap_stage3_stage2_transcript_cold_init "$stage2_transcript") || \
   bootstrap_stage3_error 'recorded Stage 2 SCV cold-init control is invalid'
+stage2_recorded_compiler_ceiling=$(bootstrap_stage3_transcript_compiler_ceiling "$stage2_transcript") || \
+  bootstrap_stage3_error 'recorded Stage 2 compiler RSS ceiling is invalid'
 # Preserve the original Stage 2 vector. Legacy admitted transcripts had no HIR
 # controls; newer transcripts must carry the complete pair in the same order.
 bootstrap_stage2_hir_env=
@@ -543,6 +545,7 @@ stage2_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=$(stage2_env_value SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT)" \
   "SIMPLE_BINARY=$(stage2_env_value SIMPLE_BINARY)" \
   ${stage2_recorded_cold_init:+"SIMPLE_SCV_INVENTORY_COLD_INIT=$stage2_recorded_cold_init"} \
+  ${stage2_recorded_compiler_ceiling:+"SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$stage2_recorded_compiler_ceiling"} \
   "$@") || exit 1
 bootstrap_stage3_verify_sanity_evidence_receipt \
   "$stage2_sanity" "$stage2_sanity" "$(dirname -- "$stage2_sanity")" \
@@ -840,6 +843,18 @@ case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
   1) stage3_cold_init_env="SIMPLE_SCV_INVENTORY_COLD_INIT=1" ;;
   *) echo "error: SIMPLE_SCV_INVENTORY_COLD_INIT must be unset or exactly 1" >&2; exit 1 ;;
 esac
+stage3_compiler_ceiling_env=$(bootstrap_stage3_compiler_ceiling_environment) || \
+  bootstrap_stage3_error 'invalid new Stage 3 compiler RSS ceiling'
+stage3_compiler_cap=
+if [ -n "$stage3_compiler_ceiling_env" ]; then
+  # systemd user services do not inherit the invoking shell. Admit the
+  # caller's mode/fixture/cap here, then transport its exact cap separately
+  # from the ceiling. The worker re-probes live headroom before execution.
+  . "$root/scripts/bootstrap/lib/tree-rss-policy.shs"
+  bootstrap_tree_rss_resolve "$stage3_threads" "$root" || \
+    bootstrap_stage3_error "$bootstrap_tree_rss_refusal"
+  stage3_compiler_cap=$bootstrap_tree_rss_cap_kib
+fi
 stage3_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
   "SIMPLE_BOOTSTRAP=1" \
@@ -865,6 +880,7 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_NATIVE_BUILD_CACHE_DIR=$stage3_cache" "SIMPLE_RUNTIME_PATH=$runtime" \
   "SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap" "SIMPLE_BINARY=$admitted" \
   ${stage3_diagnostic_env} \
+  ${stage3_compiler_ceiling_env:+"$stage3_compiler_ceiling_env"} \
   native-build --target "$platform" --backend "$stage2_backend" \
   --runtime-bundle core-c-bootstrap --threads "$stage3_threads" \
   ${stage3_timeout_args} --cache-dir "$stage3_cache" \
@@ -893,7 +909,7 @@ if [ "$stage3_guard_watch" = linux-proc-memavailable ] &&
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
     "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" &
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" &
 elif [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
   systemd-run --user --quiet --wait --collect --unit="$stage3_guard_unit" \
     --property=KillMode=control-group \
@@ -906,7 +922,7 @@ elif [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
     "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" &
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" &
 elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
   # Darwin has no cgroup and rejects RLIMIT_AS, so the worker skips `ulimit -v`.
   # The watchdog must honor a Stage 3 process cap configured below the tree
@@ -934,7 +950,7 @@ elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
     "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" &
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" &
 else
   "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
@@ -943,7 +959,7 @@ else
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
     "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" &
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" &
 fi
 stage3_guard_pid=$!
 stage3_guard_tripped=0
