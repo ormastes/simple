@@ -1040,7 +1040,21 @@ jobs:
           import shlex
           script='set -eu\nsource scripts/bootstrap/bootstrap-logged-process.shs\nexport BOOTSTRAP_LOGGED_PROCESS_TIMEOUT_SECONDS=180 BOOTSTRAP_LOGGED_PROCESS_MAX_BYTES=8388608\nbootstrap_logged_windows_cargo '+shlex.quote(str(root))+' '+shlex.quote(str(out/'compile.log'))+' '+' '.join(shlex.quote(v) for v in cmd)+'\n'
           (out/'compile-command.sh').write_text(script)
-          started=time.monotonic();c=subprocess.run(['bash',str(out/'compile-command.sh')],capture_output=True,timeout=200)
+          git_exe=Path(shutil.which('git.exe')).resolve()
+          if git_exe.parent.name.lower()=='cmd':git_root=git_exe.parent.parent
+          elif git_exe.parent.name.lower()=='bin' and git_exe.parent.parent.name.lower() in ['mingw64','mingw32']:git_root=git_exe.parent.parent.parent
+          elif git_exe.parent.name.lower()=='bin':git_root=git_exe.parent.parent
+          else:raise RuntimeError('Unsupported actualgit.exe layout; refuse unrelated Bash')
+          candidates=[git_root/'bin/bash.exe',git_root/'usr/bin/bash.exe']
+          git_bash=None;bash_receipts=[]
+          for candidate in candidates:
+           if not candidate.is_file():continue
+           identity=subprocess.run([str(candidate),'--version'],capture_output=True,timeout=10)
+           row={'path':str(candidate),'sha256':hashlib.sha256(candidate.read_bytes()).hexdigest(),'exit':identity.returncode,'version':identity.stdout.decode(errors='replace')[:500]};bash_receipts.append(row)
+           if identity.returncode==0 and identity.stdout.startswith(b'GNU bash, version '):git_bash=candidate;break
+          (out/'Git-Bash-identity.json').write_text(json.dumps({'git_exe':str(git_exe),'git_exe_sha256':hashlib.sha256(git_exe.read_bytes()).hexdigest(),'git_install_root':str(git_root),'candidates':bash_receipts,'chosen':str(git_bash) if git_bash else None},indent=2)+'\n')
+          assert git_bash is not None,'No actual Git-for-Windows GNU Bash; refuse WSL launcher'
+          started=time.monotonic();c=subprocess.run([str(git_bash),str(out/'compile-command.sh')],capture_output=True,timeout=200)
           (out/'compile.stdout').write_bytes(c.stdout);(out/'compile.stderr').write_bytes(c.stderr);(out/'compile.json').write_text(json.dumps({'argv':cmd,'exit':c.returncode,'seconds':time.monotonic()-started},indent=2)+'\n')
           assert c.returncode==0,('compile',c.returncode)
           # Inspect real emitted objects, not cache copies; select full emitted closure only.
