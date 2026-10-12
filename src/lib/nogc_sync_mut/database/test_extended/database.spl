@@ -5,6 +5,13 @@
 # (bootstrap runtime cannot resolve impl block methods from separate modules)
 
 use std.database.core.{SdnDatabase, SdnTable, SdnRow, StringInterner}
+use std.common.traceability.case_events.{TraceCaseEvent}
+use std.common.traceability.run_plan.{TraceRunPlan}
+use std.common.traceability.run_plan_codec.{encode_trace_run_plan, decode_trace_run_plan}
+use std.common.traceability.run_request.{materialize_trace_run_plan}
+use std.common.traceability.sspec_inventory.{TraceSspecPlannedRequest}
+use std.common.traceability.sspec_inventory_codec.{encode_trace_sspec_planned_request, decode_trace_sspec_planned_request}
+use std.common.traceability.storage_scalar.{encode_trace_storage_scalar, decode_trace_storage_scalar}
 use std.database.stats.{Stats, stats_from_values, is_flaky}
 use std.database.test_extended.stubs.{timestamp_now, process_id, host_name}
 use std.database.test_extended.types.{
@@ -20,6 +27,97 @@ use std.database.test_extended.database_queries.{
 # Most timing runs any single test needs: collect_timing_runs' widest caller
 # asks for 100. Nothing above this is ever read.
 val TIMING_RUNS_PER_TEST_CAP: i64 = 100
+
+struct TraceStoredEvent:
+    event_id: text
+    run_id: text
+    test_path: text
+    ordinal: i64
+    event: TraceCaseEvent
+
+fn trace_event_storage_columns() -> [text]:
+    ["event_id", "schema", "run_id", "test_path", "ordinal", "case_name", "phase", "outcome", "evidence_validity"]
+
+fn trace_event_scope_prefix(run_id: text, test_path: text) -> text:
+    "{run_id.len()}:{run_id}{test_path.len()}:{test_path}:"
+
+# Storage version selects decoding. Never guess from a legacy value's prefix.
+# Surviving v1 rows remain unverified history; missing legacy rows cannot be
+# reconstructed and must never be relabeled as complete evidence.
+fn decode_trace_stored_event(row: SdnRow) -> Result<TraceStoredEvent, text>:
+    val columns = trace_event_storage_columns()
+    if row.fields.len() != columns.len():
+        return Err("unexpected or missing stored trace event fields")
+    for column in columns:
+        if not row.fields.contains_key(column):
+            return Err("missing stored trace event field: " + column)
+    if (row.get("evidence_validity") ?? "") != "unverified":
+        return Err("unsupported stored framework evidence validity")
+    val schema = row.get("schema") ?? ""
+    if schema != "simple.trace.case-event/v1" and schema != "simple.trace.case-event-storage/v2":
+        return Err("unsupported stored framework evidence schema")
+    var event_id = row.get("event_id") ?? ""
+    var run_id = row.get("run_id") ?? ""
+    var test_path = row.get("test_path") ?? ""
+    var name = row.get("case_name") ?? ""
+    if schema == "simple.trace.case-event-storage/v2":
+        event_id = decode_trace_storage_scalar(event_id)?
+        run_id = decode_trace_storage_scalar(run_id)?
+        test_path = decode_trace_storage_scalar(test_path)?
+        name = decode_trace_storage_scalar(name)?
+    if event_id == "" or run_id == "" or test_path == "" or name == "":
+        return Err("stored framework event identity is incomplete")
+    if event_id.len() > 1048576 or run_id.len() > 1048576 or test_path.len() > 1048576 or name.len() > 1048576:
+        return Err("stored framework event field exceeds 1 MiB")
+    val ordinal_text = row.get("ordinal") ?? ""
+    if ordinal_text == "" or ordinal_text.len() > 5:
+        return Err("stored framework event ordinal is invalid")
+    for ch in ordinal_text.chars():
+        if not "0123456789".contains(ch):
+            return Err("stored framework event ordinal must be canonical decimal")
+    val ordinal = ordinal_text.parse_int() ?? -1
+    if ordinal < 0 or ordinal >= 65536 or ordinal.to_text() != ordinal_text:
+        return Err("stored framework event ordinal is noncanonical or exceeds its limit")
+    if event_id != trace_event_scope_prefix(run_id, test_path) + ordinal_text:
+        return Err("stored framework event identity differs from its scope and ordinal")
+    val phase = row.get("phase") ?? ""
+    val outcome = row.get("outcome") ?? ""
+    if phase != "started" and phase != "finished":
+        return Err("invalid stored framework event phase")
+    if phase == "started" and outcome != "not_finished":
+        return Err("stored start event cannot claim an outcome")
+    if phase == "finished" and outcome != "passed" and outcome != "failed" and outcome != "pending":
+        return Err("invalid stored framework outcome")
+    Ok(TraceStoredEvent(event_id: event_id, run_id: run_id, test_path: test_path,
+        ordinal: ordinal, event: TraceCaseEvent(case_name: name, phase: phase, outcome: outcome)))
+
+# One decoder for reads, append ordering and frozen-plan ordering. Decode keys
+# before duplicate detection so v1/v2 representations cannot evade replay guards.
+# TODO REQ-TRC-010/017: an owner mutation-generation index must replace repeated
+# full-history validation. Exposed table replacement makes the old unchecked
+# cache unsound; append/query performance and its NFR budgets remain unqualified.
+fn decode_trace_stored_events(table: SdnTable) -> Result<[TraceStoredEvent], text>:
+    val columns = trace_event_storage_columns()
+    if table.name != "trace_case_events" or table.columns.len() != columns.len():
+        return Err("incompatible trace event table schema")
+    for i in 0..columns.len():
+        if table.columns[i] != columns[i]:
+            return Err("incompatible trace event table columns")
+    var decoded: [TraceStoredEvent] = []
+    var identities: Dict<text, bool> = {}
+    var next_ordinals: Dict<text, i64> = {}
+    for row in table.rows:
+        val stored = decode_trace_stored_event(row)?
+        if identities.contains_key(stored.event_id):
+            return Err("duplicate decoded framework event identity")
+        identities[stored.event_id] = true
+        val scope = trace_event_scope_prefix(stored.run_id, stored.test_path)
+        val expected = next_ordinals[scope] ?? 0
+        if stored.ordinal != expected:
+            return Err("stored framework event order is incomplete")
+        next_ordinals[scope] = expected + 1
+        decoded.push(stored)
+    Ok(decoded)
 
 # Copy of the last `max_count` elements of `runs`.
 fn trim_to_last_f64(runs: [f64], max_count: i64) -> [f64]:
@@ -64,6 +162,226 @@ fn ensure_timing_baseline_schema(input: SdnTable) -> SdnTable:
 
 class TestDatabaseExtended:
     db: SdnDatabase
+
+    # This is an identity/state check, not an ownership lease. A caller that
+    # resumes work must load a fresh persisted owner before using this method.
+    fn validate_trace_run_active(run_id: text) -> Result<(), text>:
+        if run_id == "":
+            return Err("trace run identity is empty")
+        val runs = match self.db.get_table("test_runs"):
+            case Some(table): table
+            case nil: return Err("trace plan requires an existing run table")
+        if runs.name != "test_runs":
+            return Err("trace plan run table identity is invalid")
+        for column in ["run_id", "status", "valid", "end_time"]:
+            if not runs.columns.contains(column):
+                return Err("trace plan run table lacks required state columns")
+        var matching = 0
+        var active = false
+        for row in runs.rows:
+            if (row.get("run_id") ?? "") == run_id:
+                matching += 1
+                if not row.fields.contains_key("end_time"):
+                    return Err("trace run row is missing its terminal state field")
+                active = (row.get("status") ?? "") == "running" and (row.get("valid") ?? "") == "true" and (row.get("end_time") ?? "") == ""
+        if matching != 1:
+            return Err("trace plan requires exactly one existing run row")
+        if not active:
+            return Err("trace plan requires a valid running run without terminal state")
+        Ok(())
+
+    # Validate the entire intent table before returning a historical
+    # plan. Completion of the run does not erase its original frozen intent.
+    # Only scalar-encoded storage is supported: raw nested SDN is unsafe in
+    # the owner's legacy table quoting. Unknown storage versions fail closed.
+    fn get_trace_run_plan(run_id: text) -> Result<Option<TraceRunPlan>, text>:
+        if run_id == "":
+            return Err("trace run plan lookup identity is empty")
+        val table = match self.db.get_table("trace_run_plans"):
+            case Some(existing): existing
+            case nil: return Ok(nil)
+        val columns = ["run_id", "schema", "plan_sdn", "evidence_validity"]
+        if table.name != "trace_run_plans" or table.columns.len() != columns.len():
+            return Err("incompatible trace run plan table schema")
+        for i in 0..columns.len():
+            if table.columns[i] != columns[i]:
+                return Err("incompatible trace run plan table columns")
+        var seen: Dict<text, bool> = {}
+        var found: TraceRunPlan? = nil
+        for row in table.rows:
+            if row.fields.len() != columns.len():
+                return Err("unexpected or missing trace run plan row fields")
+            if (row.get("schema") ?? "") != "simple.trace.run-plan-storage/v1" or (row.get("evidence_validity") ?? "") != "unverified":
+                return Err("unsupported stored trace run plan or evidence validity")
+            val stored_run_id = decode_trace_storage_scalar(row.get("run_id") ?? "")?
+            if stored_run_id == "" or seen.contains_key(stored_run_id):
+                return Err("missing or duplicate stored trace run plan identity")
+            seen[stored_run_id] = true
+            val source = decode_trace_storage_scalar(row.get("plan_sdn") ?? "")?
+            val plan = decode_trace_run_plan(source)?
+            if plan.run_id != stored_run_id:
+                return Err("stored trace run plan identity differs from its row")
+            if encode_trace_run_plan(plan)? != source:
+                return Err("stored trace run plan is not canonical SDN")
+            if stored_run_id == run_id:
+                found = Some(plan)
+        Ok(found)
+
+    # Append immutable execution intent before any observations. This method
+    # mutates memory only; the existing owner must save successfully before
+    # dispatch. It does not authenticate inputs, implement a lease, recover
+    # missing historical rows, or assert complete TraceRun provenance.
+    me record_trace_run_plan(plan: TraceRunPlan) -> Result<(), text>:
+        val canonical = encode_trace_run_plan(plan)?
+        val stored_run_id = encode_trace_storage_scalar(plan.run_id)?
+        val stored_plan = encode_trace_storage_scalar(canonical)?
+        self.validate_trace_run_active(plan.run_id)?
+        match self.get_trace_run_plan(plan.run_id)?:
+            case Some(_): return Err("trace run plan already exists; replacement is forbidden")
+            case nil: pass
+        match self.db.get_table("trace_case_events"):
+            case Some(events):
+                val stored_events = decode_trace_stored_events(events)?
+                for stored in stored_events:
+                    if stored.run_id == plan.run_id:
+                        return Err("trace plan cannot be recorded after run observations")
+            case nil: pass
+        # All validation and encoding precede the single table replacement.
+        var table = match self.db.get_table("trace_run_plans"):
+            case Some(existing): existing
+            case nil: SdnTable.new("trace_run_plans", ["run_id", "schema", "plan_sdn", "evidence_validity"])
+        val row = SdnRow.empty()
+        row.set("run_id", stored_run_id)
+        row.set("schema", "simple.trace.run-plan-storage/v1")
+        row.set("plan_sdn", stored_plan)
+        row.set("evidence_validity", "unverified")
+        table.add_row(row)
+        self.db.set_table("trace_run_plans", table)
+        Ok(())
+
+    # Metadata remains unverified history. Validate every stored row and its
+    # exact plan binding before selecting a run; malformed unrelated rows cannot
+    # disappear behind a lookup filter. The existing owner controls persistence.
+    fn get_trace_sspec_metadata(run_id: text) -> Result<Option<TraceSspecPlannedRequest>, text>:
+        if run_id == "": return Err("trace SSpec metadata lookup identity is empty")
+        val table = match self.db.get_table("trace_sspec_metadata"):
+            case Some(existing): existing
+            case nil: return Ok(nil)
+        val columns = ["run_id", "schema", "metadata_sdn", "evidence_validity"]
+        if table.name != "trace_sspec_metadata" or table.columns.len() != columns.len():
+            return Err("incompatible trace SSpec metadata table schema")
+        for i in 0..columns.len():
+            if table.columns[i] != columns[i]: return Err("incompatible trace SSpec metadata table columns")
+        var seen: Dict<text, bool> = {}
+        var found: TraceSspecPlannedRequest? = nil
+        for row in table.rows:
+            if row.fields.len() != columns.len(): return Err("unexpected trace SSpec metadata row fields")
+            if (row.get("schema") ?? "") != "simple.trace.sspec-metadata-storage/v1" or (row.get("evidence_validity") ?? "") != "unverified":
+                return Err("unsupported trace SSpec metadata storage or validity")
+            val stored_id = decode_trace_storage_scalar(row.get("run_id") ?? "")?
+            if stored_id == "" or seen.contains_key(stored_id): return Err("missing or duplicate trace SSpec metadata run identity")
+            seen[stored_id] = true
+            val source = decode_trace_storage_scalar(row.get("metadata_sdn") ?? "")?
+            val metadata = decode_trace_sspec_planned_request(source)?
+            if encode_trace_sspec_planned_request(metadata)? != source:
+                return Err("stored trace SSpec metadata is not canonical SDN")
+            val plan = match self.get_trace_run_plan(stored_id)?:
+                case Some(existing): existing
+                case nil: return Err("stored trace SSpec metadata has no frozen run plan")
+            val projected = materialize_trace_run_plan(metadata.request, stored_id)?
+            if encode_trace_run_plan(projected)? != encode_trace_run_plan(plan)?:
+                return Err("stored trace SSpec metadata differs from frozen run plan")
+            if stored_id == run_id: found = Some(metadata)
+        Ok(found)
+
+    # Attach definition metadata before observations. All failure-prone work
+    # precedes the single table mutation; callers must save through this owner
+    # before dispatch. This is not a lease or provenance admission.
+    me record_trace_sspec_metadata(run_id: text, metadata: TraceSspecPlannedRequest) -> Result<(), text>:
+        val canonical = encode_trace_sspec_planned_request(metadata)?
+        val stored_id = encode_trace_storage_scalar(run_id)?
+        val stored_metadata = encode_trace_storage_scalar(canonical)?
+        self.validate_trace_run_active(run_id)?
+        val plan = match self.get_trace_run_plan(run_id)?:
+            case Some(existing): existing
+            case nil: return Err("trace SSpec metadata requires a frozen run plan")
+        val projected = materialize_trace_run_plan(metadata.request, run_id)?
+        if encode_trace_run_plan(projected)? != encode_trace_run_plan(plan)?:
+            return Err("trace SSpec metadata differs from frozen run plan")
+        match self.get_trace_sspec_metadata(run_id)?:
+            case Some(_): return Err("trace SSpec metadata already exists; replacement is forbidden")
+            case nil: pass
+        match self.db.get_table("trace_case_events"):
+            case Some(events):
+                val stored_events = decode_trace_stored_events(events)?
+                for observed in stored_events:
+                    if observed.run_id == run_id:
+                        return Err("trace SSpec metadata cannot be recorded after observations")
+            case nil: pass
+        var table = match self.db.get_table("trace_sspec_metadata"):
+            case Some(existing): existing
+            case nil: SdnTable.new("trace_sspec_metadata", ["run_id", "schema", "metadata_sdn", "evidence_validity"])
+        val row = SdnRow.empty()
+        row.set("run_id", stored_id)
+        row.set("schema", "simple.trace.sspec-metadata-storage/v1")
+        row.set("metadata_sdn", stored_metadata)
+        row.set("evidence_validity", "unverified")
+        table.add_row(row)
+        self.db.set_table("trace_sspec_metadata", table)
+        Ok(())
+
+    # Append observed framework events under the existing run identity. This
+    # table shares the owner's single SDN save with summary/resource records.
+    # It is diagnostic history until a frozen plan and provenance admit it.
+    me record_trace_case_events(run_id: text, test_path: text, events: [TraceCaseEvent]) -> Result<(), text>:
+        if run_id == "" or test_path == "" or events.len() == 0 or events.len() > 65536:
+            return Err("invalid trace event append scope")
+        val columns = trace_event_storage_columns()
+        var table = match self.db.get_table("trace_case_events"):
+            case Some(existing): existing
+            case nil: SdnTable.new("trace_case_events", columns)
+        val existing_events = decode_trace_stored_events(table)?
+        for stored in existing_events:
+            if stored.run_id == run_id and stored.test_path == test_path:
+                return Err("trace event scope was already recorded; replay requires an explicit attempt identity")
+        val stored_run_id = encode_trace_storage_scalar(run_id)?
+        val stored_test_path = encode_trace_storage_scalar(test_path)?
+        val prefix = trace_event_scope_prefix(run_id, test_path)
+        var pending: [SdnRow] = []
+        for i in 0..events.len():
+            val event = events[i]
+            val row = SdnRow.empty()
+            row.set("event_id", encode_trace_storage_scalar(prefix + "{i}")?)
+            row.set("schema", "simple.trace.case-event-storage/v2")
+            row.set("run_id", stored_run_id)
+            row.set("test_path", stored_test_path)
+            row.set("ordinal", "{i}")
+            row.set("case_name", encode_trace_storage_scalar(event.case_name)?)
+            row.set("phase", event.phase)
+            row.set("outcome", event.outcome)
+            row.set("evidence_validity", "unverified")
+            # Validate the exact representation that will be stored, including
+            # bounds and event semantics, before changing table rows or indexes.
+            decode_trace_stored_event(row)?
+            pending.push(row)
+        for row in pending:
+            table.add_row(row)
+        self.db.set_table("trace_case_events", table)
+        Ok(())
+
+    # Read framework observations without upgrading their evidence validity.
+    fn get_trace_case_events(run_id: text, test_path: text) -> Result<[TraceCaseEvent], text>:
+        if run_id == "" or test_path == "":
+            return Err("trace event lookup identity is incomplete")
+        var events: [TraceCaseEvent] = []
+        val table = match self.db.get_table("trace_case_events"):
+            case Some(existing): existing
+            case nil: return Ok(events)
+        val stored_events = decode_trace_stored_events(table)?
+        for stored in stored_events:
+            if stored.run_id == run_id and stored.test_path == test_path:
+                events.push(stored.event)
+        Ok(events)
     interner: StringInterner
     next_file_id: i64
     next_suite_id: i64

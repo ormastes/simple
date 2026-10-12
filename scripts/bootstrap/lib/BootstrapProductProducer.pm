@@ -12,7 +12,7 @@ sub validate_product_resources {
     for my $number ($threads, $rss, $timeout) {
         defined($number) && $number =~ /\A(?:0|[1-9][0-9]*)\z/ or die "invalid product resource number\n";
     }
-    $rss > 0 && $rss <= 6835937 or die "invalid product RSS observation limit\n";
+    $rss > 0 && $rss <= 8388608 or die "invalid product RSS observation limit\n";
     if ($mode eq 'qualified') {
         (($threads >= 10 && $threads <= 20) || $threads == 40 || $threads == 80) && $timeout > 0 && $rss_mode eq 'enforce'
             or die "qualified product policy differs\n";

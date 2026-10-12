@@ -1,0 +1,101 @@
+# Strict, bounded native SDN transport for unverified planned SSpec metadata.
+# This codec establishes consistency, never persistence or admission authority.
+# @req REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.parser.{parse_with_spans_and_issues}
+use std.common.traceability.schema.{trace_sdn_preflight}
+use std.common.traceability.run_request_codec.{encode_trace_run_request, decode_trace_run_request}
+use std.common.traceability.sspec_inventory.{TraceSspecCase, TraceSspecPlannedDefinition, TraceSspecPlannedRequest,
+    trace_sspec_definition_record, trace_sspec_request_digest, validate_trace_sspec_planned_request}
+
+fn metadata_record(value: SdnValue, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    match value:
+        case SdnValue.Dict(fields):
+            if fields.len() != names.len(): return Err("SSPEC-METADATA: unexpected or missing record fields")
+            for name in names:
+                if not fields.contains_key(name): return Err("SSPEC-METADATA: missing record field: " + name)
+            Ok(fields)
+        case _: Err("SSPEC-METADATA: expected a native SDN dictionary")
+
+fn metadata_text(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("SSPEC-METADATA: field must be text: " + name)
+
+fn metadata_int(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    match fields[name]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("SSPEC-METADATA: field must be an integer: " + name)
+
+fn metadata_scopes(fields: Dict<text, SdnValue>, name: text) -> Result<[text], text>:
+    val items = match fields[name]:
+        case SdnValue.Array(values): values
+        case _: return Err("SSPEC-METADATA: scope must be an array")
+    if items.len() > 64: return Err("SSPEC-METADATA: scope depth exceeds 64")
+    var result: [text] = []
+    for item in items:
+        match item:
+            case SdnValue.String(value): result.push(value)
+            case _: return Err("SSPEC-METADATA: scope component must be text")
+    Ok(result)
+
+pub fn encode_trace_sspec_planned_request(value: TraceSspecPlannedRequest) -> Result<text, text>:
+    validate_trace_sspec_planned_request(value)?
+    var definitions: [SdnValue] = []
+    for record in value.definitions:
+        var fields: Dict<text, SdnValue> = {}
+        fields["case_id"] = SdnValue.String(record.case_id)
+        fields["test_definition_id"] = SdnValue.String(record.test_definition_id)
+        fields["definition"] = trace_sspec_definition_record(record.source_sha256, record.extractor_version, record.definition)
+        definitions.push(SdnValue.Dict(fields))
+    var root: Dict<text, SdnValue> = {}
+    root["schema"] = SdnValue.String("simple.trace.sspec-planned-request/v1")
+    root["request_sdn"] = SdnValue.String(encode_trace_run_request(value.request)?)
+    root["request_digest"] = SdnValue.String(trace_sspec_request_digest(value.request)?)
+    root["inventory_digest"] = SdnValue.String(value.inventory_digest)
+    root["evidence_validity"] = SdnValue.String(value.evidence_validity)
+    root["definitions"] = SdnValue.Array(definitions)
+    val source = sdn_encode_canonical(SdnValue.Dict(root))
+    if source.len() > 1048576: return Err("SSPEC-METADATA: document exceeds 1 MiB")
+    Ok(source)
+
+pub fn decode_trace_sspec_planned_request(source: text) -> Result<TraceSspecPlannedRequest, text>:
+    trace_sdn_preflight(source)?
+    val parsed = parse_with_spans_and_issues(source)?
+    if parsed.2.len() > 0: return Err("SSPEC-METADATA: invalid or duplicate native SDN fields")
+    val root = metadata_record(parsed.0, ["schema", "request_sdn", "request_digest", "inventory_digest", "evidence_validity", "definitions"])?
+    if metadata_text(root, "schema")? != "simple.trace.sspec-planned-request/v1":
+        return Err("SSPEC-METADATA: unsupported envelope schema")
+    val request_source = metadata_text(root, "request_sdn")?
+    val request = decode_trace_run_request(request_source)?
+    val canonical_request = encode_trace_run_request(request)?
+    if request_source != canonical_request:
+        return Err("SSPEC-METADATA: embedded request must be canonical native SDN")
+    val expected_request_digest = trace_sspec_request_digest(request)?
+    if metadata_text(root, "request_digest")? != expected_request_digest:
+        return Err("SSPEC-METADATA: request digest mismatch")
+    val records = match root["definitions"]:
+        case SdnValue.Array(values): values
+        case _: return Err("SSPEC-METADATA: definitions must be an array")
+    if records.len() == 0 or records.len() > 65536 or records.len() != request.cases.len():
+        return Err("SSPEC-METADATA: definition count differs from request or exceeds budget")
+    var definitions: [TraceSspecPlannedDefinition] = []
+    for record in records:
+        val fields = metadata_record(record, ["case_id", "test_definition_id", "definition"])?
+        val item = metadata_record(fields["definition"], ["schema", "source_sha256", "extractor_version", "test_path", "case_name", "leaf_name",
+            "kind", "suite_path", "context_path", "start_byte", "end_byte", "line", "column"])?
+        if metadata_text(item, "schema")? != "simple.trace.sspec-definition/v1":
+            return Err("SSPEC-METADATA: unsupported definition schema")
+        val definition = TraceSspecCase(test_path: metadata_text(item, "test_path")?, case_name: metadata_text(item, "case_name")?,
+            leaf_name: metadata_text(item, "leaf_name")?, kind: metadata_text(item, "kind")?,
+            suite_path: metadata_scopes(item, "suite_path")?, context_path: metadata_scopes(item, "context_path")?,
+            start_byte: metadata_int(item, "start_byte")?, end_byte: metadata_int(item, "end_byte")?,
+            line: metadata_int(item, "line")?, column: metadata_int(item, "column")?)
+        definitions.push(TraceSspecPlannedDefinition(case_id: metadata_text(fields, "case_id")?,
+            test_definition_id: metadata_text(fields, "test_definition_id")?, source_sha256: metadata_text(item, "source_sha256")?,
+            extractor_version: metadata_text(item, "extractor_version")?, definition: definition))
+    val value = TraceSspecPlannedRequest(request: request, definitions: definitions,
+        inventory_digest: metadata_text(root, "inventory_digest")?, evidence_validity: metadata_text(root, "evidence_validity")?)
+    validate_trace_sspec_planned_request(value)?
+    Ok(value)

@@ -1,0 +1,95 @@
+# Bounded read-only graph projection; cursors bind generation AND query shape.
+# @req REQ-TRC-015 REQ-TRC-016 REQ-TRC-020
+use std.common.traceability.model.*
+
+fn refused(graph: TraceGraph, message: text) -> TraceQueryResult:
+    TraceQueryResult(snapshot_id: graph.subject.snapshot_id, nodes: [], edges: [], total_count: 0, next_cursor: "", complete: false, diagnostics: [trace_diagnostic("TRACE-QUERY-INVALID", graph.subject.snapshot_id, "query", "", "", message)])
+
+pub fn query_trace_graph(graph: TraceGraph, query: TraceQuery) -> TraceQueryResult:
+    if query.snapshot_id != graph.subject.snapshot_id:
+        return refused(graph, "snapshot mismatch; request a complete snapshot resync")
+    if query.limit < 1 or query.limit > 200:
+        return refused(graph, "query limit must be between 1 and 200")
+    if not ["all", "incoming", "outgoing", "both"].contains(query.direction):
+        return refused(graph, "unsupported query direction")
+    if query.selected_id == "" and query.direction != "all":
+        return refused(graph, "a neighborhood query requires a selected identity")
+    if query.selected_id != "" and query.direction == "all":
+        return refused(graph, "all-node query must not include a selected identity")
+    var by_id: Dict<text, TraceNode> = {}
+    for node in graph.nodes:
+        if by_id.contains_key(node.id):
+            return refused(graph, "duplicate node identities; graph needs repair")
+        by_id[node.id] = node
+    if query.selected_id != "" and not by_id.contains_key(query.selected_id):
+        return refused(graph, "selected entity is absent from this snapshot")
+    var edge_ids: Dict<text, bool> = {}
+    for edge in graph.edges:
+        if not by_id.contains_key(edge.from_id) or not by_id.contains_key(edge.to_id) or edge_ids.contains_key(edge.id):
+            return refused(graph, "graph has missing endpoints or duplicate edges; request resync")
+        edge_ids[edge.id] = true
+    var selected: Dict<text, bool> = {}
+    if query.selected_id == "":
+        for node in graph.nodes:
+            selected[node.id] = true
+    else:
+        for edge in graph.edges:
+            if (query.direction == "outgoing" or query.direction == "both") and edge.from_id == query.selected_id:
+                selected[edge.to_id] = true
+            if (query.direction == "incoming" or query.direction == "both") and edge.to_id == query.selected_id:
+                selected[edge.from_id] = true
+    var ids: [text] = []
+    for id in selected.keys():
+        if id != query.selected_id:
+            if not by_id.contains_key(id):
+                return refused(graph, "graph edge endpoint missing; request resync")
+            ids.push(id)
+    ids = trace_sorted_ids(ids)
+    val prefix = graph.generation_id + "|" + query.selected_id + "|" + query.direction + "|"
+    var offset = 0
+    if query.cursor != "":
+        if not query.cursor.starts_with(prefix):
+            return refused(graph, "stale generation or different query cursor; resync required")
+        val digits = query.cursor.slice(prefix.len(), query.cursor.len())
+        if digits == "" or digits.len() > 9:
+            return refused(graph, "malformed page cursor")
+        for ch in digits.chars():
+            if not "0123456789".contains(ch):
+                return refused(graph, "malformed page cursor")
+        offset = digits.to_int()
+        if offset > ids.len():
+            return refused(graph, "cursor exceeds current query result")
+    var budget = query.limit
+    var total = ids.len()
+    var nodes: [TraceNode] = []
+    var page: Dict<text, bool> = {}
+    if query.selected_id != "":
+        nodes.push(by_id[query.selected_id])
+        page[query.selected_id] = true
+        budget = budget - 1
+        total = total + 1
+        if budget == 0 and ids.len() > 0:
+            return refused(graph, "neighborhood pages need limit >= 2 to retain their selected anchor")
+    var end = offset + budget
+    if end > ids.len():
+        end = ids.len()
+    var i = offset
+    while i < end:
+        val id = ids[i]
+        nodes.push(by_id[id])
+        page[id] = true
+        i = i + 1
+    var edge_map: Dict<text, TraceEdge> = {}
+    for edge in graph.edges:
+        if page.contains_key(edge.from_id) and page.contains_key(edge.to_id):
+            edge_map[edge.id] = edge
+    var edges: [TraceEdge] = []
+    for id in trace_sorted_ids(edge_map.keys()):
+        edges.push(edge_map[id])
+    var next_cursor = ""
+    if end < ids.len():
+        next_cursor = prefix + end.to_text()
+    var diagnostics = graph.diagnostics
+    if not graph.complete:
+        diagnostics.push(trace_diagnostic("TRACE-SNAPSHOT-INCOMPLETE", graph.subject.snapshot_id, "query", query.selected_id, "", "displaying an incomplete graph; page completeness is not qualification"))
+    TraceQueryResult(snapshot_id: graph.subject.snapshot_id, nodes: nodes, edges: edges, total_count: total, next_cursor: next_cursor, complete: next_cursor == "", diagnostics: diagnostics)

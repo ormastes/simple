@@ -1,4 +1,5 @@
 # Ordered actual collection publication. No production ownership switch.
+use compiler.hir.hir_mono_symbol_projection_v1.*
 use compiler.mono.mono_archive_registration_types_v1.{MonoArchiveRegistrationRowV1,
     MonoArchiveRootOrderV1, MonoArchiveRegistrationOwnerV1, MonoArchiveRegistrationReceiptV1,
     MonoArchiveCurrentRegistrationOwnerV1, MonoArchiveCurrentRegistrationReceiptV1,
@@ -56,6 +57,8 @@ fn mono_archive_current_registration_scratch_successor_v1(current: MonoArchiveCu
     val owner = current.registration
     val worker = mono_archive_registration_scratch_collector_v1(owner)
     val old = owner.state.facts
+    var projections: Dict<text, text> = {}
+    for name in old.symbol_projections.keys(): projections[name] = old.symbol_projections[name]
     val facts = MonoArchiveFactsV1(body_authority: old.body_authority, feature_policy: old.feature_policy,
         initial_symbol: old.initial_symbol, sym_names: worker.sym_names, fn_returns: worker.fn_returns,
         fn_sigs: worker.fn_sigs, named_types: worker.named_types, named_ambiguous: worker.named_ambiguous,
@@ -66,7 +69,8 @@ fn mono_archive_current_registration_scratch_successor_v1(current: MonoArchiveCu
         generic_type_params: worker.generic_type_params, generic_type_modules: worker.generic_type_modules,
         generic_type_field_names: worker.generic_type_field_names, generic_type_fields: worker.generic_type_fields,
         declared_global_types: worker.declared_global_types, templates: worker.archive_template_signatures,
-        recipes: worker.template_recipes, symbol_identities: worker.archive_symbol_identities)
+        recipes: worker.template_recipes, symbol_identities: worker.archive_symbol_identities,
+        symbol_projections: projections)
     var archives: Dict<text, HirBodyArchiveV1> = {}
     for name in owner.archives.keys(): archives[name] = owner.archives[name]
     var roots: [MonoArchiveRootOrderV1] = []
@@ -209,6 +213,10 @@ fn mono_archive_registration_row_digest_v1(row: MonoArchiveRegistrationRowV1) ->
             for params in [value.canonical_type_params, value.bound_type_params]:
                 w.put_i64(params.len())
                 for param in params: hc_enc_hir_type_param(w, param)
+        case MonoArchiveRegistrationRowV1.SymbolProjection(key, value):
+            w.put_i64(21)
+            w.put_text(key)
+            w.put_text(value)
         case MonoArchiveRegistrationRowV1.SymbolIdentity(key, value):
             w.put_i64(20)
             w.put_text(key)
@@ -399,6 +407,10 @@ fn mono_archive_collect_complete_registration_v1(owner: MonoArchiveRegistrationO
             roots = roots.push(function.symbol.id)
     val facts = owner.state.facts
     var rows: [MonoArchiveRegistrationRowV1] = []
+    val projection = hir_mono_symbol_projection_encode_v1(module.symbols,
+        sha256_text(archive.archive_key + "\n" + hir_module_encode(module)))
+    if projection == "": return Err("registration actual nominal symbol projection refused")
+    rows.push(MonoArchiveRegistrationRowV1.SymbolProjection(module_name, projection))
     for key in worker.sym_names.keys().sort():
         val row = MonoArchiveRegistrationRowV1.SymbolName(key, worker.sym_names[key])
         val changed = not facts.sym_names.has(key) or
@@ -597,6 +609,7 @@ fn mono_archive_registration_install_v1(owner: MonoArchiveRegistrationOwnerV1,
             case MonoArchiveRegistrationRowV1.TemplateSignature(key, value): owner.state.facts.templates[key] = value
             case MonoArchiveRegistrationRowV1.TemplateRecipe(key, value): owner.state.facts.recipes[key] = value
             case MonoArchiveRegistrationRowV1.SymbolIdentity(key, value): owner.state.facts.symbol_identities[key] = value
+            case MonoArchiveRegistrationRowV1.SymbolProjection(key, value): owner.state.facts.symbol_projections[key] = value
     owner.state.next_symbol = receipt.next_symbol
     var facts = owner.state.facts
     facts.initial_symbol = receipt.next_symbol
