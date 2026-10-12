@@ -50,3 +50,7 @@ Eight builder admission regressions authored; NOT_RUN. Inspected canonical PureD
 ## Durable operation progress
 
 Operation state and nonce-leased segmented-WAL journal authored, plus six replay/uncertainty regression scenarios. Commit-before-effect interface is available but broker callers, crash tests and power-loss qualification remain incomplete. Full goal active; NOT_RUN.
+
+## Runtime recovery — native tool selection
+
+Fresh mounted-drive bootstrap passed disk gate and then failed fingerprinting on installed llvm-config-23's symlink. Exact helper reproduction failed before fix; physical native-tool resolution now passes exact and adjacent fixtures while receipt artifact aliases still reject. Tracked bug: bootstrap_native_command_symlink_fingerprint_2026-10-12. Full bootstrap retry pending; no general runtime/test PASS or feature completion.
