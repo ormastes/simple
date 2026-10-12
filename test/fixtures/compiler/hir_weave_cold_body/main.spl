@@ -1,0 +1,167 @@
+# Real full-body weave/cold/quiet mechanics, not final driver admission.
+use provider.{submit_view}
+use compiler.driver.cache.driver_cold_hir_weave_body_v1.*
+use compiler.driver.cache.driver_cold_hir_module_capture_v1.*
+use compiler.driver.cache.hir_body_typecheck_lease_v1.*
+use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_context_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_header, hir_cache_promote_diagnostic_owner_v1, hir_cache_clear_last_warnings}
+use compiler.mono.mono_archive_current_body_v1.*
+use compiler.hir.hir_complete_body_frame_v1.*
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.semantics.aspect_validation.{validate_aspect_contracts}
+use compiler.semantics.aspect_weave.{weave_forward_advice}
+use compiler.semantics.resolve.{resolve_methods_quiet}
+use compiler.common.config.{Logger}
+use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{HirOwnedArtifactContextV1}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1, CompileSourceInventoryV1, compile_source_inventory_digest_v1}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.env.{env_get}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+struct WeaveColdFixtureCapture:
+    weave: DriverColdHirWeaveBodyV1
+    current: MonoArchiveCurrentBodyV1
+    captured: DriverColdHirModuleCaptureV1
+    checks: i64
+
+# The original fa04 writer contract, compared using actual complete HIR bytes.
+fn legacy_resolved_frame(parent: HirBodyArchiveV1, boundary: text, blob: text, warnings: [text]) -> text:
+    var writer = HirCodecWriter.create()
+    writer.put_text("post-hir-resolved-v1")
+    writer.put_text(parent.input.module_name)
+    writer.put_text(parent.input.source_path)
+    writer.put_text(parent.archive_key)
+    writer.put_text(parent.body_digest)
+    writer.put_text(parent.lowering_warnings_digest)
+    writer.put_text(boundary)
+    writer.put_text(boundary)
+    writer.put_text(blob)
+    writer.put_i64(warnings.len())
+    for warning in warnings: writer.put_text(warning)
+    writer.finish()
+
+fn capture_in_scope(context: HirOwnedArtifactContextV1, parent: HirBodyArchiveV1,
+        input: DriverColdHirModuleInputV1) -> Result<WeaveColdFixtureCapture, text>:
+    val module = hir_body_archive_load_in_owned_scope_v1(parent, parent.input)?
+    var modules = {module.name: module}
+    if validate_aspect_contracts(modules).len() != 0: return Err("real advice gate failed")
+    var checks = 1
+    if weave_forward_advice(modules) != 1: return Err("real forward body was not woven")
+    val woven = modules[module.name]
+    val woven_blob = hir_module_encode(woven)
+    if sha256_text(woven_blob) == parent.body_digest: return Err("weave did not change complete bytes")
+    checks = checks + 1
+    val boundary = sha256_text("weave-cold-mechanics-NOT-final-admission")
+    val warnings = ["framing control\nsecond line", "framing control \\ spelling"]
+    val weave = driver_cold_hir_weave_body_store_in_owned_scope_v1(context, parent, boundary, boundary, woven, warnings)?
+    val loaded = driver_cold_hir_weave_body_load_in_owned_scope_v1(context, weave)?
+    if hir_module_encode(loaded.module) != woven_blob or loaded.warnings != warnings:
+        return Err("complete woven body or ordered warning bytes changed")
+    checks = checks + 1
+    # Cold capture actually runs BEFORE the real configured-next quiet step.
+    val captured = driver_cold_hir_capture_weave_body_in_owned_scope_v1(context, weave, input)?
+    val retained = driver_cold_hir_capture_module_in_owned_scope_v1(woven, input)?
+    if captured.typed_receipt.abi_payload != retained.typed_receipt.abi_payload or
+            captured.emission == nil or retained.emission == nil or
+            captured.emission!.semantic_sections != retained.emission!.semantic_sections or
+            captured.emission!.native_emit_witness != retained.emission!.native_emit_witness:
+        return Err("actual cold ABI, semantic files or native witness differ")
+    checks = checks + 1
+    val (quiet, quiet_errors) = resolve_methods_quiet(woven)
+    if quiet_errors.len() != 0: return Err("quiet resolver invariant failed")
+    val current = mono_archive_current_body_store_in_owned_scope_v1(context, parent, boundary, boundary, quiet, warnings)?
+    if current.current_stage != "post-hir-resolved-v1" or weave.stage != "post-hir-weave-v1" or
+            current.current_artifact_key == weave.artifact_key: return Err("distinct stage publication collapsed")
+    checks = checks + 1
+    val quiet_blob = hir_module_encode(quiet)
+    val identity = HirCompleteBodyFrameIdentityV1(stage: "post-hir-resolved-v1", module_name: parent.input.module_name,
+        source_path: parent.input.source_path, original_archive_key: parent.archive_key,
+        original_body_digest: parent.body_digest, original_warnings_digest: parent.lowering_warnings_digest,
+        boundary_key: boundary, boundary_digest: boundary)
+    val old_frame = legacy_resolved_frame(parent, boundary, quiet_blob, warnings)
+    val old_key = sha256_text("mono-current-body-artifact-v1\n" + sha256_text(old_frame) + "\n" +
+        parent.archive_key + "\n" + boundary + "\n" + boundary)
+    if hir_complete_body_frame_encode_v1(identity, quiet_blob, warnings) != old_frame or
+            hir_complete_body_frame_key_v1(identity, old_frame, "mono-current-body-artifact-v1") != old_key or
+            current.current_artifact_key != old_key: return Err("resolved legacy frame or key bytes changed")
+    checks = checks + 1
+    val resolved = mono_archive_current_body_load_in_owned_scope_v1(context, current)?
+    if hir_module_encode(resolved.module) != quiet_blob or resolved.warnings != warnings:
+        return Err("complete quiet body or warning order changed")
+    checks = checks + 1
+    var wrong_current = current
+    wrong_current.current_artifact_key = weave.artifact_key
+    if not mono_archive_current_body_load_in_owned_scope_v1(context, wrong_current).is_err():
+        return Err("weave artifact accepted as resolved body")
+    checks = checks + 1
+    var wrong_weave = weave
+    wrong_weave.artifact_key = current.current_artifact_key
+    if not driver_cold_hir_weave_body_load_in_owned_scope_v1(context, wrong_weave).is_err():
+        return Err("resolved artifact accepted as woven body")
+    checks = checks + 1
+    wrong_weave = weave
+    wrong_weave.boundary_digest = sha256_text("different boundary")
+    if not driver_cold_hir_weave_body_load_in_owned_scope_v1(context, wrong_weave).is_err():
+        return Err("changed transform boundary accepted")
+    checks = checks + 1
+    if not hir_complete_body_frame_decode_v1(old_frame + "trailing-data\n", identity).is_err():
+        return Err("trailing frame data accepted")
+    checks = checks + 1
+    Ok(WeaveColdFixtureCapture(weave: weave, current: current, captured: captured, checks: checks))
+
+fn main() -> i64:
+    if submit_view(41) != 42: return 1
+    val path = "test/fixtures/compiler/hir_weave_cold_body/provider.spl"
+    val source = file_read_nullable(path) ?? ""
+    val parsed = parse_full_frontend(source, path, "weave_cold.provider", Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    val module = lowering.lower_parser_module_unstub(parsed, false)
+    val archived = hir_body_archive_store_v1(HirBodyArchiveInputV1(source_path: path, module_name: module.name,
+        is_entry: false, producer_header: hir_cache_header(), stage: "lowered-unresolved-v1",
+        closure_digest: env_get("SIMPLE_HIR_LEASE_CLOSURE_DIGEST"),
+        runtime_provider_digest: env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_DIGEST"),
+        runtime_provider_receipt_path: env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_RECEIPT")), module, [])
+    if archived.is_err(): return 2
+    val context = hir_owned_artifact_context_v1()
+    val empty = sha256_text("")
+    val entry = CompileSourceInventoryEntryV1("compiler/hir_weave_cold_body/provider.spl", sha256_text(source),
+        empty, empty, empty, empty, source.len())
+    val inventory = CompileSourceInventoryV1(1, 1, [entry])
+    val artifact_root = "build/test/weave-cold-body-v1"
+    if not dir_create_all(artifact_root): return 3
+    val input = DriverColdHirModuleInputV1(module_identity: module.name, source_root: "test/fixtures",
+        source_identity: entry.source_identity, source_digest: entry.content_digest, source_byte_count: entry.byte_count,
+        snapshot_inventory_digest: compile_source_inventory_digest_v1(inventory), inventory_entry: entry,
+        full_inventory: true, artifact_root: artifact_root, target_triple: env_get("SIMPLE_NATIVE_BUILD_TARGET"), backend: "llvm")
+    if not transient_scope_begin(): return 4
+    val result = capture_in_scope(context, archived.unwrap(), input)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not cache_owned or not ended or result.is_err(): return 5
+    val captured = result.unwrap()
+    var checks = captured.checks + 1
+    if not driver_cold_hir_weave_body_load_in_owned_scope_v1(context, captured.weave).is_err() or
+            not mono_archive_current_body_load_in_owned_scope_v1(context, captured.current).is_err(): return 6
+    checks = checks + 1
+    if not transient_scope_begin(): return 7
+    val replayed = driver_cold_hir_capture_weave_body_in_owned_scope_v1(context, captured.weave, input)
+    val replay_ok = replayed.is_ok() and replayed.unwrap().typed_receipt.abi_payload == captured.captured.typed_receipt.abi_payload
+    val replay_paused = transient_scope_pause()
+    val paused_refused = driver_cold_hir_weave_body_load_in_owned_scope_v1(context, captured.weave).is_err()
+    val replay_cache = if replay_paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if replay_paused: hir_cache_clear_last_warnings()
+    if not transient_scope_end() or not replay_ok or not replay_paused or not paused_refused or not replay_cache: return 8
+    checks = checks + 1
+    if checks != 14: return 9
+    print "HIR weave cold body: {checks} checks passed"
+    0

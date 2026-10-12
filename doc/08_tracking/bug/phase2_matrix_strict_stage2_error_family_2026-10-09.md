@@ -256,3 +256,95 @@ are comment-only, skipped). NOT fixed here: the `src/lib/compiler/mir_opt/*`
 stub facades self-reference their own module name (duplicate module-name
 collision with the `60.mir_opt` canonical files) — needs a compiler-lane
 dedup decision.
+
+## 2026-10-12 addendum 5: C7 naming fix LANDED (module_path_naming tier-inner-repeat fold + doubled-spelling migration)
+
+Fix: `_module_path_naming_strip_numbered_dirs`
+(`src/compiler/00.common/module_path_naming.spl`) now folds the redundant
+inner repeat of `NN.name/name/...` tier dirs, so path-derived keys equal the
+import spellings the resolver already maps onto that tree
+(`src/compiler/70.backend/backend/native/mach_inst.spl` now derives
+`compiler.backend.native.mach_inst`, was `compiler.backend.backend.native.*`;
+same for `15.blocks/blocks/*`, `60.mir_opt/mir_opt/*`, `50.mir/mir/*`,
+`35.semantics/semantics/*`, `85.mdsoc/mdsoc/*`, `99.loader/loader/*`).
+Exemption: 17 verified tier-root twins (e.g. `70.backend/backend_types.spl`
+vs `70.backend/backend/backend_types.spl`, both `__init__.spl` pairs) keep
+their doubled inner name — the resolver probes the tier root first, so the
+tier-root file owns the collapsed spelling and collapsing the inner twin too
+would give two physical files one registry key. Tree-wide migration: 639
+`.spl` files rewritten from doubled to single import spellings (exempt twins
+and module-only `compiler.X.X.{...}` imports untouched); dotted dirs
+(`ui.browser`) verified unaffected (sanitizer already preserves `.`).
+
+Validation (admitted stage2 compiler
+`.simple/storage/build/bootstrap/stage3/aarch64-apple-darwin/stage2-admitted/simple`,
+with SDKROOT/MACOSX_DEPLOYMENT_TARGET from `xcrun --sdk macosx`):
+
+- A. Sequential control: `native-build --source src/compiler --source src/lib
+  --entry src/compiler/bootstrap_admission/stage2_module_path_naming.spl
+  --runtime-bundle core-c-bootstrap --runtime-path
+  phase2-runtime-capsules/75f976a0…` — PASS (exit 0, artifact published,
+  binary prints the fixture's three expected module names). `--source
+  plugins` and out-of-tree entries are rejected by SCV admission
+  (`source-inventory-scope-unsupported`); the smf_package phase prints a
+  non-fatal `state=failure` line even on success.
+- A2. mach_inst-as-entry control (sequential): 0 import errors; fails at MIR
+  with 25x "cannot derive module static type from unresolved initializer"
+  (mach_inst.spl:196 module statics) — byte-identical failure at pristine
+  HEAD, pre-existing, unrelated to this change.
+- B. Doubled-dir shard repro (`native_elf.spl` entry, `--low-memory
+  --threads 2`, default roots): still fails with the C7 signature
+  (47 "has no exported item" + 4 "missing module surface", modules keyed
+  doubled, e.g. `module=compiler.blocks.blocks.mod`) — EXPECTED: the
+  admitted binary is PREBUILT with the old derivation, so it cannot exhibit
+  the fix. The fix only takes effect in a compiler built FROM these sources
+  (normal stage-3 rebuild). Full end-to-end B must be re-run after the next
+  bootstrap; the separate shard-index export-drop mechanism
+  (`cold_hir_compiler_publication_v1.spl`) remains a suspect for residual
+  failures and needs its own diagnosis if the family persists post-rebuild.
+- Unit: a check binary built from the new `module_logical_name_from_path`
+  printed all 15 probe paths exactly as designed (collapse for non-twins,
+  doubled preserved for the 17 exempt twins, dotted dirs unchanged).
+- Side fix: 5 pre-existing malformed/misplaced `@workaround` markers in
+  cuda_backend.spl / auto_vectorize_validate.spl / isel_x86_64.spl
+  (missing `reason=`, or separated from their block by comments) failed
+  workaround refresh once the files were touched by the migration; repaired
+  in this commit.
+
+## 2026-10-12 addendum 6: stage-2 gate residual three (db_atomic arity, B5b cascade, aspect_pack_io types)
+
+- db_atomic.spl: `case SdnValue.Table(fields, types, rows):` (3 slots) vs the
+  sibling-changed declaration `Table(headers: [text], rows: [[SdnValue]])`
+  (2 payloads, src/lib/common/sdn/value.spl:36). Fixed to
+  `case SdnValue.Table(headers, rows):` with `columns = headers` (the
+  Option<fields> column-header handling died with the third payload; the
+  sibling change made headers required). Seed validation blocked by a
+  pre-existing gc-boundary policy artifact in standalone mode
+  (nogc_async_mut -> std.nogc_sync_mut.io.time_ops); arity fix verified by
+  inspection against the declaration.
+- B5b ("match has multiple wildcard arms", test_runner_build): the only
+  module named by the error batch is lib.common.sdn.value
+  (`undefined variable SdnValue` + `unresolved method call: Float` both at
+  value.spl:48:9 — the enum's own constructor fails inside its impl, i.e.
+  the enum's symbol IDENTITY was clobbered earlier in the 252-module MIR
+  batch; the B5b check at 50.mir/_MirLoweringExpr/expr_dispatch.spl:6466
+  then fires on a FlatAst-bridge-degraded wildcard arm per the documented
+  mechanism, convert_nodes.spl:1581/1628-1631). value.spl compiles CLEAN
+  standalone (seed semantics + SMF) and contains no match with two wildcard
+  arms (all 20+ matches inspected; every `case _` is single). No source fix
+  is applicable. Compiler-lane hardening proposed: (1) always-eprint a
+  receipt (file:line + expression tag) when convert_flat_pattern degrades a
+  pattern to Wildcard — currently behind SIMPLE_DEBUG_MATCH_PAT, default
+  off; (2) include the lowering module name in the B5b diagnostic.
+- aspect_pack_io.spl: 10x `unresolved type: MappingClosePermitV1/
+  MappingLifetimeLedgerV1/MappingLifetimeRecordV1` (fix-(b) class; owner
+  exec_mapping_cleanup_v1 itemizes the imports but the shard-path
+  owner-scope sweep cannot see them). Cheapest source-side unblock applied:
+  explicit itemized import of all three types added to the IMPORTER
+  (aspect_pack_io.spl) from their declaring module
+  compiler.loader.mapping_lifetime_accounting_v1 — local binding dodges the
+  owner-scope projection the same way the fe1f4ed6d72 workaround imports
+  do. Seed standalone validation blocked by the same sffi_env_get stdlib
+  gap as before; confirmation requires the matrix rerun. If the matrix
+  still reports these after the importer-side import, compiler fix (b)
+  (alias-retry in canonical_callable_dependency_candidate) is unavoidable.

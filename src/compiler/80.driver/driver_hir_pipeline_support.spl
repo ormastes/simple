@@ -20,12 +20,16 @@ use compiler.frontend.aspect_registry.{aspect_registry_reset}
 use compiler.frontend.effect_registry.{effect_registry_reset}
 use compiler.frontend.layer_eq_registry.{layer_eq_registry_reset}
 use compiler.driver.driver_source_pipeline_impl.{driver_end_transient_parse_scope, driver_promote_retained_frontend_owners_v1}
-use compiler.semantics.value_struct_layout.{value_struct_layout_report, value_struct_layout_is_cycle_diagnostic, value_struct_layout_cycle_is_fatal_for}
+use compiler.semantics.value_struct_layout.{ValueStructLayoutModuleV1,
+    value_struct_layout_declarations_v1}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use compiler.semantics.layer_eq_validation.{validate_layer_eq_types}
 use compiler.semantics.effect_validation.{validate_effect_contracts}
 use compiler.semantics.rt_criticality_validation.{validate_rt_criticality_diagnostics}
-use compiler.semantics.rt_criticality.{RtCriticalDiagnosticSeverity}
+use compiler.driver.cache.driver_hir_post_validation_gate_facts_v1.{
+    driver_hir_gate_layout_report_v1, driver_hir_gate_publish_warnings_v1,
+    driver_hir_gate_census_report_v1, driver_hir_gate_publish_census_v1,
+    driver_hir_gate_rt_report_v1, driver_print_post_hir_validation_fatal}
 use compiler.semantics.aspect_validation.{validate_aspect_contracts}
 use compiler.semantics.aspect_weave.{weave_forward_advice}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -249,32 +253,31 @@ fn driver_hir_module_dict_dropped_values(hir_modules: Dict<text, HirModule>) -> 
             dropped = dropped.push(key)
     dropped
 
-# Every post-HIR validation failure is printed here, once, so all three
-# callers report identically (two of them used to add the errors to the
-# context without ever printing the marker).
-fn driver_print_post_hir_validation_fatal(errors: [text]):
-    var shown: i64 = 0
-    for error in errors:
-        if shown < 10:
-            eprint("[post-hir-validation-fatal] {error}")
-            shown = shown + 1
-    if errors.len() > 0:
-        eprint("[post-hir-validation-fatal-count] count={errors.len()} shown={shown}")
-
 pub fn driver_rt_criticality_errors(modules: Dict<text, HirModule>) -> [text]:
     """Route typed RT warnings to diagnostics and errors to the fatal driver result."""
-    var errors: [text] = []
-    for diagnostic in validate_rt_criticality_diagnostics(modules):
-        match diagnostic.severity:
-            case RtCriticalDiagnosticSeverity.Warning:
-                eprint("[post-hir-validation-warning] {diagnostic.message}")
-            case RtCriticalDiagnosticSeverity.Error:
-                errors = errors.push(diagnostic.message)
-    errors
+    val report = driver_hir_gate_rt_report_v1(validate_rt_criticality_diagnostics(modules))
+    driver_hir_gate_publish_warnings_v1(report.warnings)
+    report.errors
 
 pub fn driver_validate_value_struct_layouts(
     module_keys: [text],
     module_values: [HirModule],
+    hir_modules: Dict<text, HirModule>
+) -> [text]:
+    # Compatibility caller: project declarations, never synthesize HIR bodies.
+    var declarations: [ValueStructLayoutModuleV1] = []
+    var index = 0
+    while index < module_values.len():
+        val module = module_values[index]
+        val module_key = if index < module_keys.len(): module_keys[index] else: ""
+        declarations.push(value_struct_layout_declarations_v1(module_key, module.path,
+            module.structs, module.symbols))
+        index = index + 1
+    driver_validate_value_struct_layout_declarations_v1(module_keys, declarations, hir_modules)
+
+pub fn driver_validate_value_struct_layout_declarations_v1(
+    module_keys: [text],
+    module_values: [ValueStructLayoutModuleV1],
     hir_modules: Dict<text, HirModule>
 ) -> [text]:
     var errors: [text] = []
@@ -283,45 +286,26 @@ pub fn driver_validate_value_struct_layouts(
     # 2026-09-05 without naming a step. Gated like every other log_phase
     # (SIMPLE_COMPILER_PHASE_PROFILE=1 / SIMPLE_COMPILER_TRACE=1).
     log_phase("phase3:hir:validate:value_struct_layouts:start")
-    val layout_report = value_struct_layout_report(module_keys, module_values)
     # SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE=warning prints by-value struct cycles
     # and keeps compiling, so out-of-tree code can list all of them in one
     # run instead of failing after a full HIR pass. Default is fatal; the
     # validator's internal errors are never downgraded. DIAGNOSTIC-ONLY: the
     # build then continues into layout and codegen with a struct that has no
     # finite size, so whatever it produces must not be trusted or shipped.
-    val layout_cycles_fatal = value_struct_layout_cycle_is_fatal_for(env_get("SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE"))
-    var layout_cycles_downgraded: i64 = 0
-    for error in layout_report.errors:
-        if not layout_cycles_fatal and value_struct_layout_is_cycle_diagnostic(error):
-            eprint("[post-hir-validation-warning] {error}")
-            layout_cycles_downgraded = layout_cycles_downgraded + 1
-        else:
-            errors = errors.push(error)
-    if layout_cycles_downgraded > 0:
-        eprint("[post-hir-validation-warning] {layout_cycles_downgraded} by-value struct cycle(s) not fatal: SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE=warning is diagnostic-only; do not trust or ship this build output")
+    val layout_report = driver_hir_gate_layout_report_v1(module_keys, module_values,
+        env_get("SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE"))
+    driver_hir_gate_publish_warnings_v1(layout_report.warnings)
+    for error in layout_report.errors: errors = errors.push(error)
     val skipped_struct_edges: i64 = layout_report.skipped_struct_edges
     log_phase("phase3:hir:validate:value_struct_layouts:done errors={errors.len()} skipped_struct_edges={skipped_struct_edges}")
     log_phase("phase3:hir:validate:dict_census:start")
     val dropped = driver_hir_module_dict_dropped_values(hir_modules)
     val census_total: i64 = hir_modules.keys().len()
     log_phase("phase3:hir:validate:dict_census:done dropped={dropped.len()} total={census_total}")
-    if dropped.len() > 0 and dropped.len() == census_total:
-        # Every module rejected is not a plausible loss; it is the predicate
-        # disagreeing with how struct values travel under this codegen. Say so
-        # and keep the old behaviour rather than fail a healthy build.
-        eprint("[post-hir-validation] well-formedness test rejected all {census_total} HIR module value(s); the test is unreliable for this value representation, running the Dict validators unguarded")
-    elif dropped.len() > 0:
-        # Genuine error path that used to print nothing: say it unconditionally,
-        # then fail closed instead of handing the dropped values to passes
-        # that dereference them.
-        eprint("[post-hir-validation-fatal] {dropped.len()} module(s) in the Dict<text, HirModule> view carry no well-formed HIR aggregate; layer-eq, effect, aspect validation and advice weaving are SKIPPED rather than dereferencing them")
-        var dropped_shown = 0
-        for dropped_key in dropped:
-            if dropped_shown < 10:
-                eprint("[post-hir-validation-fatal]   dropped HIR aggregate: {dropped_key}")
-            dropped_shown = dropped_shown + 1
-        errors = errors.push("internal error: {dropped.len()} HIR module(s) lost their aggregate value in Dict<text, HirModule> before post-HIR validation (first: {dropped[0]})")
+    val census_report = driver_hir_gate_census_report_v1(dropped, census_total)
+    driver_hir_gate_publish_census_v1(census_report)
+    for error in census_report.errors: errors = errors.push(error)
+    if census_report.gates_skipped:
         driver_print_post_hir_validation_fatal(errors)
         return errors
     log_phase("phase3:hir:validate:layer_eq:start")
@@ -347,3 +331,6 @@ pub fn driver_validate_value_struct_layouts(
         log_phase("phase3:hir:validate:weave:done")
     driver_print_post_hir_validation_fatal(errors)
     errors
+
+export driver_hir_module_dict_dropped_values
+export use compiler.driver.cache.driver_hir_post_validation_gate_facts_v1.{driver_print_post_hir_validation_fatal}
