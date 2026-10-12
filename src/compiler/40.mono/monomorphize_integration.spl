@@ -2040,8 +2040,9 @@ impl MonomorphizationPass:
         # MIR resolves a direct callee by NAME (`lower_call`'s NamedVar arm
         # uses the baked display name; its Var arm looks the id up in the
         # CALLER's symbol table, where a fresh mono symbol does not exist).
-        # So the repointed callee is a NamedVar carrying the mangled name,
-        # re-qualified exactly as the original callee was.
+        # Imported explicit-generic calls can arrive as Var or a bare
+        # NamedVar. The template owner, not that spelling, determines where
+        # MIR emits the specialization (same contract as method calls).
         val spec_name: text = self.mangled_name(gname, targs)
         # The repointed callee carries the SPECIALIZATION's concrete
         # `fn(params) -> ret`. Its SymbolId is minted outside every module
@@ -2055,7 +2056,12 @@ impl MonomorphizationPass:
             val spp: HirParam = sp
             spec_param_types = spec_param_types.push(spp.type_)
         val spec_sig = HirType(kind: HirTypeKind.Function(spec_param_types, spec_fn.return_type, []), span: callee.span)
-        new_callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId.new(target), mono_requalify(callee, spec_name)),
+        val template_mod: text = self.template_module[gname]
+        # Match MIR provider_metadata.mir_provider_function_name: these
+        # linkage attributes keep physical ABI names independent of module.
+        val global_linkage = spec_fn.is_extern or spec_fn.has_export_attr or spec_fn.func_attr.is_global or spec_fn.func_attr.is_entry
+        val callee_name = if global_linkage or template_mod == self.current_module: spec_name else: "{template_mod}.{spec_name}"
+        new_callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId.new(target), callee_name),
                              has_type_: true,
                              type_: spec_sig,
                              span: callee.span)
