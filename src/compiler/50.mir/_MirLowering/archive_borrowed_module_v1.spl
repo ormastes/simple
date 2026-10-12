@@ -1,0 +1,49 @@
+# Actual borrowed HIR -> MIR mechanics. This is not final-stage admission:
+# the driver must obtain this complete module from its genuine final reader.
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.mir.hir_declaration_summary_v1.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_data.{bootstrap_fn_param_defaults_detach_for_archive_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+
+impl MirLowering:
+    me lower_archive_module_in_owned_scope_v1(module: HirModule,
+            is_entry_module: bool) -> Result<MirModule, text>:
+        # Never acquire, pause, promote or close the caller's lease. A failure
+        # leaves its lifecycle intact; the driver must discard failed output.
+        if transient_array_scope_state_v1() != 1:
+            return Err("borrowed MIR module requires an active unpaused scope")
+        if self.declaration_repository == nil or self.ambient_bootstrap_enabled() or self.trait_impl_provider_modules.len() != 0:
+            return Err("borrowed MIR module requires complete native declarations")
+        if self.finally_stack.len() != 0 or self.lambda_bindings.len() != 0 or self.lambda_capture_snapshot.len() != 0:
+            return Err("borrowed MIR module callable or finally scratch is occupied")
+        val repository: MirHirDeclarationRepositoryV1 = self.declaration_repository.unwrap()
+        if not repository.modules.has(module.name):
+            return Err("borrowed MIR module has no exact declaration owner")
+        val declaration: MirHirModuleDeclarationsV1 = repository.modules[module.name]
+        if declaration.final_repository_authority != repository.final_repository_authority or
+                not mir_hir_module_declarations_valid_v1(declaration) or module.path != declaration.path:
+            return Err("borrowed MIR module declaration identity differs")
+        # Validate the actual retained complete graph, not a recomputed source
+        # guess or a caller-supplied body hash. The reader's final admission is
+        # separate and still required at the driver boundary.
+        val blob = hir_module_encode(module)
+        if blob == "" or sha256_text(blob) != declaration.final_body_digest:
+            return Err("borrowed MIR module complete body differs")
+        val no_body_providers: [HirModule] = []
+        val output: MirModule = self.lower_module(module, no_body_providers, is_entry_module)
+        # Function emission has completed every nested default/capture consumer.
+        # Keep actual MIR contracts/spans and all diagnostics/counters. Only
+        # body-bearing compatibility/scratch roots are detached here.
+        self.struct_field_default_expr = {}
+        self.global_const_exprs = {}
+        self.lambda_bindings = {}
+        self.lambda_capture_snapshot = {}
+        bootstrap_fn_param_defaults_detach_for_archive_v1()
+        if self.finally_stack.len() != 0:
+            return Err("borrowed MIR module left an unfinished finally scope")
+        Ok(output)

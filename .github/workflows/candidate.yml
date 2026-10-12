@@ -125,6 +125,46 @@ jobs:
             done
           fi
 
+      - name: Install pinned LLVM 23.1.1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The line's platform-detect admits exactly LLVM 23.1.1 (23.1.2 only
+          # from native package providers); ubuntu-latest images do not ship it.
+          # Mirror aot-lane-fences: reviewed upstream release bytes + sha256.
+          sudo apt-get update
+          sudo apt-get install -y libfreetype6-dev libunwind-dev
+          llvm_archive="$RUNNER_TEMP/LLVM-23.1.1-Linux-X64.tar.xz"
+          llvm_prefix="$RUNNER_TEMP/llvm-23.1.1"
+          gh release download llvmorg-23.1.1 --repo llvm/llvm-project \
+            --pattern 'LLVM-23.1.1-Linux-X64.tar.xz' --dir "$RUNNER_TEMP"
+          printf '%s  %s\n' \
+            '832aeb58d105de1cabc7b982dd2c65de0610f7377df48ae8fc2dd8e97420a15c' \
+            "$llvm_archive" | sha256sum --check
+          mkdir -p "$llvm_prefix"
+          tar -xJf "$llvm_archive" -C "$llvm_prefix" --strip-components=1
+          rm "$llvm_archive"
+          test "$("$llvm_prefix/bin/llvm-config" --version)" = '23.1.1'
+          # The llvmorg release llvm-config carries the BUILD machine's
+          # compiled-in prefix (/home/runner/work/llvm-project/...), so
+          # --libfiles/--ldflags emit paths that do not exist here and the
+          # seed-inputs fingerprint fails fail-closed ("failed to fingerprint
+          # Rust seed inputs", candidate a014). Bind the compiled prefix to
+          # the extracted tree so every llvm-config path resolves.
+          compiled_prefix=$("$llvm_prefix/bin/llvm-config" --prefix)
+          if [ "$compiled_prefix" != "$llvm_prefix" ]; then
+            sudo mkdir -p "$(dirname "$compiled_prefix")"
+            sudo ln -sfn "$llvm_prefix" "$compiled_prefix"
+          fi
+          missing=""
+          for lib in $("$llvm_prefix/bin/llvm-config" --link-static --libfiles); do
+            [ -f "$lib" ] || missing="$missing $lib"
+          done
+          [ -z "$missing" ] || { echo "llvm-config --libfiles missing archives:$missing" >&2; exit 1; }
+          echo "$llvm_prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_231_PREFIX=$llvm_prefix" >> "$GITHUB_ENV"
+
       - name: Build receipt-free admitted Stage 2 trust root
         env:
           SIMPLE_NO_STUB_FALLBACK: '1'
@@ -304,8 +344,12 @@ jobs:
             test "$(jq -r '.head_branch' <<<"$run_json")" = main
             test "$(jq -r '.actor.id' <<<"$run_json")" = 2378857
             test "$(jq -r '.triggering_actor.id' <<<"$run_json")" = 2378857
+            # Main may advance after the convergence run was dispatched; the
+            # run is bound to its dispatch-time head, so require ancestry
+            # instead of exact tip equality (exact equality fails silently
+            # the moment any other PR merges to main).
             live_main=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
-            test "$run_head" = "$live_main"
+            gh api "repos/${GITHUB_REPOSITORY}/compare/${run_head}...${live_main}" --jq '.status' | grep -Eq '^(behind|identical)$'
             workflow_blob_sha=$(gh api "repos/${GITHUB_REPOSITORY}/contents/.github/workflows/pr-admission.yml?ref=${run_head}" --jq .sha)
             test "$workflow_blob_sha" = "$(jq -er '.workflow.workflow_blob_sha' build/convergence-receipt/review-evidence.json)"
           else
@@ -710,7 +754,7 @@ jobs:
           live_main=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
           live_release=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${release_ref}" --jq .object.sha)
           live_candidate=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${CANDIDATE_REF}" --jq .object.sha)
-          test "$live_main" = "$main_sha"
+          gh api "repos/${GITHUB_REPOSITORY}/compare/${main_sha}...${live_main}" --jq '.status' | grep -Eq '^(behind|identical)$'
           test "$live_release" = "$release_sha"
           test "$live_candidate" = "$COMMIT"
           scripts/release/github-policy.shs verify-live "$GITHUB_REPOSITORY"
@@ -720,7 +764,7 @@ jobs:
             jq -e '((.expires_at|fromdateiso8601)-(.issued_at|fromdateiso8601)) <= 28800 and
               (.expires_at|fromdateiso8601) > now' "$proof" >/dev/null
             run_head=$(jq -er '.workflow.run_head_sha' build/convergence-receipt/review-evidence.json)
-            test "$run_head" = "$live_main"
+            gh api "repos/${GITHUB_REPOSITORY}/compare/${run_head}...${live_main}" --jq '.status' | grep -Eq '^(behind|identical)$'
           else
             test "$authority_class" = external_broker
           fi

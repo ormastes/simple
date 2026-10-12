@@ -25,6 +25,48 @@ fn result_tuple_payload_type(type_: HirType) -> MirType?:
             Some(MirType(kind: MirTypeKind.Tuple(fields)))
         case _: nil
 
+# Match bindings have a separate admission contract from unwrap/? above.
+# A declared wrapper tuple can contain a typed runtime collection handle;
+# those fields require element provenance when projected, never Any erasure.
+# This is native word-slot storage, not LLVM's packed tuple type layout:
+# _MirToLlvm/aggregate_intrinsics Tuple and llvm_get_field_impl use the same
+# native-word GEP stride; Bool loads truncate, Float loads bitcast, and nested
+# Tuple fields are pointer words. cranelift_codegen_adapter likewise allocates
+# N*8 and projects field*8 (load_uniform_i64 preserves Float load types).
+# Str has distinct declared fat-pointer and literal Opaque representations;
+# it and other unadmitted extras retain their pre-existing match route.
+fn wrapper_native_tuple_field_type(type_: HirType) -> MirType?:
+    match type_.kind:
+        case HirTypeKind.Int(64, true): Some(MirType.i64())
+        case HirTypeKind.Bool: Some(MirType.bool())
+        case HirTypeKind.Float(64): Some(MirType.f64())
+        case HirTypeKind.Tuple(_): wrapper_native_tuple_payload_type(type_)
+        case HirTypeKind.Array(element, size):
+            if val field_element = wrapper_native_tuple_field_type(element):
+                Some(MirType(kind: MirTypeKind.Array(field_element, size ?? 0)))
+            else:
+                nil
+        case HirTypeKind.Slice(element):
+            if val field_element = wrapper_native_tuple_field_type(element):
+                Some(MirType(kind: MirTypeKind.Slice(field_element)))
+            else:
+                nil
+        case _: nil
+
+fn wrapper_native_tuple_payload_type(type_: HirType) -> MirType?:
+    match type_.kind:
+        case HirTypeKind.Tuple(elements):
+            if elements.len() == 0:
+                return nil
+            var fields: [MirType] = []
+            for element in elements:
+                if val field_type = wrapper_native_tuple_field_type(element):
+                    fields = fields.push(field_type)
+                else:
+                    return nil
+            Some(MirType(kind: MirTypeKind.Tuple(fields)))
+        case _: nil
+
 impl MirLowering:
     me decode_result_tuple_payload(raw: LocalId, expected: HirType) -> LocalId:
         # Invoked only by lower_try_expr's proven Result success branch.
@@ -50,4 +92,4 @@ impl MirLowering:
         self.builder = builder
         result
 
-export result_tuple_payload_type
+export result_tuple_payload_type, wrapper_native_tuple_payload_type

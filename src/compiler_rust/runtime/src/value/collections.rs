@@ -2140,6 +2140,20 @@ pub extern "C" fn rt_transient_array_scope_begin() -> bool {
     })
 }
 
+/// Read this thread's actual scope; no mutation, allocation or lease grant.
+#[no_mangle]
+pub extern "C" fn rt_transient_array_scope_state_v1() -> i64 {
+    TRANSIENT_HEAP_SCOPE.with(|slot| match slot.borrow().as_ref() {
+        None => 0,
+        Some(scope) if scope.paused => 2,
+        Some(_) => 1,
+    })
+}
+
+#[cfg(test)]
+#[path = "transient_scope_state_tests.rs"]
+mod transient_scope_state_tests;
+
 #[no_mangle]
 pub extern "C" fn rt_transient_array_scope_pause() -> bool {
     TRANSIENT_HEAP_SCOPE.with(|slot| {
@@ -2838,6 +2852,60 @@ pub extern "C" fn rt_any_add(left: RuntimeValue, right: RuntimeValue) -> Runtime
 
     RuntimeValue::from_int(left.as_int() + right.as_int())
 }
+
+/// Proven tagged-value addition, independent of the legacy rt_any_add ABI.
+/// heap_type/as_heap_i64 validate this lane's registry before dereferencing.
+/// Heap headers belong to their selected runtime; C and Rust pointers must
+/// never be exchanged merely because their low tag bits agree.
+#[no_mangle]
+pub extern "C" fn rt_tagged_add(left: RuntimeValue, right: RuntimeValue) -> RuntimeValue {
+    if left.heap_type() == Some(HeapObjectType::String)
+        || right.heap_type() == Some(HeapObjectType::String)
+    {
+        // The admitted C text-coercion contract renders nil as empty text.
+        let text = |value: RuntimeValue| {
+            if value.is_nil() {
+                unsafe { rt_string_new(std::ptr::null(), 0) }
+            } else {
+                rt_to_string(value)
+            }
+        };
+        return rt_string_concat(text(left), text(right));
+    }
+    let signed = |value: RuntimeValue| {
+        value.as_heap_i64().or_else(|| value.is_int().then(|| value.as_int()))
+    };
+    let lhs = signed(left);
+    let rhs = signed(right);
+    if let (Some(lhs), Some(rhs)) = (lhs, rhs) {
+        let sum = lhs.wrapping_add(rhs);
+        let boxed = RuntimeValue::from_int(sum);
+        if signed(boxed) == Some(sum) {
+            return boxed;
+        }
+        tagged_add_fail("rt_tagged_add: lossless integer boxing failed");
+    }
+    if (lhs.is_some() || left.is_float()) && (rhs.is_some() || right.is_float()) {
+        let lhs = if left.is_float() { left.as_float() } else { lhs.unwrap() as f64 };
+        let rhs = if right.is_float() { right.as_float() } else { rhs.unwrap() as f64 };
+        let sum = lhs + rhs;
+        let boxed = RuntimeValue::from_float(sum);
+        if boxed.is_float() && boxed.as_float().to_bits() == sum.to_bits() {
+            return boxed;
+        }
+        tagged_add_fail("rt_tagged_add: lossless float boxing failed");
+    }
+    tagged_add_fail("rt_tagged_add: operands require signed integer, float or text")
+}
+
+fn tagged_add_fail(message: &str) -> ! {
+    eprintln!("panic: {message}");
+    std::process::exit(1)
+}
+
+#[cfg(test)]
+#[path = "tagged_add_tests.rs"]
+mod tagged_add_tests;
 
 /// True when an `any + any`-style binop must take the float lane: either
 /// operand is a float (inline TAG_FLOAT or heap-boxed). Int+int stays int.

@@ -1734,6 +1734,15 @@ int64_t rt_heap_registry_count(void) {
     return (int64_t)atomic_load_explicit(&rt_core_heap_registry_count, memory_order_relaxed);
 }
 
+/* Current owner's context only. Observation neither opens a scope nor grants
+ * a borrowed lease; foreign threads must not observe a global owner's scope. */
+int64_t rt_transient_array_scope_state_v1(void) {
+    if (!rt_core_transient_array_scope_active ||
+            atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
+                (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
+    return rt_core_transient_array_scope_paused ? 2 : 1;
+}
+
 int8_t rt_transient_array_scope_begin(void) {
     if (rt_core_transient_array_scope_active || rt_core_transient_heap_scope_object_len != 0 ||
         rt_core_transient_raw_alloc_len != 0) return 0;
@@ -3792,6 +3801,58 @@ int64_t rt_any_add(int64_t left, int64_t right) {
     return left + right;
 }
 
+/* Compiler-admitted RuntimeValue addition. Unlike the legacy rt_any_add ABI,
+ * both arguments are proven tagged values, never raw numeric/pointer words.
+ * Registered heap guards precede every payload dereference. */
+int64_t rt_tagged_add(int64_t left, int64_t right) {
+    if (rt_core_as_string(left) || rt_core_as_string(right)) {
+        return rt_string_concat(left, right);
+    }
+    RtCoreWideInt* left_wide = rt_core_as_heap_int(left);
+    RtCoreWideInt* right_wide = rt_core_as_heap_int(right);
+    int left_integer = rt_core_is_int(left) || left_wide != NULL;
+    int right_integer = rt_core_is_int(right) || right_wide != NULL;
+    int left_float = rt_core_is_float(left);
+    int right_float = rt_core_is_float(right);
+    if (left_integer && right_integer) {
+        int64_t lhs = left_wide ? left_wide->value : rt_core_as_int(left);
+        int64_t rhs = right_wide ? right_wide->value : rt_core_as_int(right);
+        /* Native unchecked integer Add wraps at 64 bits. Avoid signed C UB;
+         * retain a full-width result when it exceeds the immediate payload. */
+        uint64_t bits = (uint64_t)lhs + (uint64_t)rhs;
+        int64_t sum;
+        memcpy(&sum, &bits, sizeof(sum));
+        int64_t boxed = rt_value_int(sum);
+        RtCoreWideInt* stored_wide = rt_core_as_heap_int(boxed);
+        if ((stored_wide && stored_wide->value == sum) ||
+            (rt_core_is_int(boxed) && rt_core_as_int(boxed) == sum)) {
+            return boxed;
+        }
+        spl_panic("rt_tagged_add: lossless integer boxing failed");
+        return rt_core_nil();
+    }
+    if ((left_integer || left_float) && (right_integer || right_float)) {
+        double lhs = left_float ? rt_core_as_float(left) :
+            (double)(left_wide ? left_wide->value : rt_core_as_int(left));
+        double rhs = right_float ? rt_core_as_float(right) :
+            (double)(right_wide ? right_wide->value : rt_core_as_int(right));
+        double sum = lhs + rhs;
+        int64_t boxed = rt_value_float(sum);
+        double stored = rt_core_as_float(boxed);
+        uint64_t wanted_bits, stored_bits;
+        memcpy(&wanted_bits, &sum, sizeof(wanted_bits));
+        memcpy(&stored_bits, &stored, sizeof(stored_bits));
+        if (rt_core_is_float(boxed) && wanted_bits == stored_bits) return boxed;
+        spl_panic("rt_tagged_add: lossless float boxing failed");
+        return rt_core_nil();
+    }
+    /* UInt has no admitted dynamic arithmetic policy in OperatorValue. Nil,
+     * bool, enum/error and other aggregate values are likewise not numeric.
+     * Never turn their tagged handles into a plausible integer result. */
+    spl_panic("rt_tagged_add: operands require signed integer, float or text");
+    return rt_core_nil();
+}
+
 int64_t rt_len(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
     if (s) return (int64_t)s->len;
@@ -3849,6 +3910,18 @@ int64_t rt_to_string(int64_t value) {
         int64_t n = rt_core_as_int(value);
         int len = snprintf(buf, sizeof(buf), "%lld", (long long)n);
         return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
+    }
+    {
+        RtCoreWideInt* wide = rt_core_as_heap_int(value);
+        if (wide) {
+            int len = snprintf(buf, sizeof(buf), "%lld", (long long)wide->value);
+            return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
+        }
+        RtCoreUInt* unsigned_value = rt_core_as_heap_uint(value);
+        if (unsigned_value) {
+            int len = snprintf(buf, sizeof(buf), "%llu", (unsigned long long)unsigned_value->value);
+            return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
+        }
     }
     {   /* Heap-boxed float (the LOSSLESS form rt_value_float produces): read the
          * stored double. Must precede the legacy inline decode below -- that one
