@@ -1,0 +1,123 @@
+use std.spec.*
+use app.io.collection_profile_run.{
+    collection_run_options, collection_run_publish, collection_run_finish, collection_run_file
+}
+use app.optimize.sprof_collection_profile.{sprof_load_collection_profile_text}
+use std.nogc_sync_mut.sffi.collection_capture.{
+    collection_capture_begin, collection_capture_note_size,
+    collection_capture_note_lookup, collection_capture_note_materialization
+}
+use std.io.{file_read, file_write, file_delete, time_now_unix_micros}
+use std.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.ffi.io.{path_absolute}
+use compiler.frontend.core.collection_feedback.{
+    parser_collection_feedback_install, parser_collection_feedback_active,
+    parser_collection_feedback_clear
+}
+
+describe "collection run capture lifecycle":
+    it "parses both option forms while preserving application arguments after the separator":
+        val options = collection_run_options([
+            "--collection-profile-out=out.sprof", "app.spl",
+            "--collection-workload", "sample", "--collection-target=test-target",
+            "--", "--collection-target=application-value"
+        ])
+        expect(options.error).to_equal("")
+        expect(options.output).to_equal("out.sprof")
+        expect(options.workload).to_equal("sample")
+        expect(options.target).to_equal("test-target")
+        expect(options.args).to_equal(["app.spl", "--", "--collection-target=application-value"])
+
+    it "rejects missing values and append without capture output":
+        expect(collection_run_options(["app.spl", "--collection-profile-out"]).error != "").to_be(true)
+        expect(collection_run_options(["app.spl", "--collection-profile-append"]).error != "").to_be(true)
+        expect(collection_run_options(["app.spl", "--collection-profile-out=a", "--collection-workload=w"]).error != "").to_be(true)
+
+    it "accepts replay with or without simultaneous capture and retains explicit module identity":
+        val replay = collection_run_options(["app.spl", "--collection-profile=p.sprof", "--collection-module=m", "--collection-workload=w", "--collection-target=t"])
+        expect(replay.error).to_equal("")
+        expect(replay.input).to_equal("p.sprof")
+        expect(replay.module_identity).to_equal("m")
+        val both = collection_run_options(["app.spl", "--collection-profile=p.sprof", "--collection-profile-out=q.sprof", "--collection-workload=w", "--collection-target=t"])
+        expect(both.error).to_equal("")
+        expect(both.output).to_equal("q.sprof")
+
+    it "rejects unsupported GC overrides explicitly instead of ignoring them":
+        val options = collection_run_options(["app.spl", "--collection-profile-out=p.sprof", "--collection-workload=w", "--collection-target=t"])
+        expect(collection_run_file(options, true, false)).to_equal(1)
+        expect(collection_run_file(options, false, true)).to_equal(1)
+
+    it "activates cache bypass with an empty target catalog and clears it":
+        expect(parser_collection_feedback_install("capture-target", [])).to_be(true)
+        expect(parser_collection_feedback_active()).to_be(true)
+        parser_collection_feedback_clear()
+        expect(parser_collection_feedback_active()).to_be(false)
+
+    it "rejects output aliasing the source before interpretation":
+        val path = get_temp_dir() + "/simple_capture_source_{time_now_unix_micros()}.spl"
+        val source = "fn main():\n    print 1\n"
+        expect(file_write(path, source)).to_be(true)
+        val output = path_absolute(path)
+        val options = collection_run_options([path, "--collection-profile-out={output}", "--collection-workload=w", "--collection-target=t"])
+        expect(collection_run_file(options)).to_equal(1)
+        expect(file_read(path)).to_equal(source)
+        expect(file_delete(path)).to_be(true)
+
+    it "publishes the real shared-channel snapshot with admitted identity":
+        val path = get_temp_dir() + "/simple_capture_{time_now_unix_micros()}.sprof"
+        val options = collection_run_options(["app.spl", "--collection-profile-out={path}", "--collection-workload=w", "--collection-target=t"])
+        expect(collection_capture_begin("t")).to_be(true)
+        expect(collection_capture_note_size("ast://capture/site#1", "t", 3)).to_be(true)
+        expect(collection_capture_note_lookup("ast://capture/site#1", "t", true)).to_be(true)
+        expect(collection_capture_note_materialization("ast://capture/site#1", "t")).to_be(true)
+        expect(collection_run_finish(options, "module", 0)).to_equal(0)
+        val loaded = sprof_load_collection_profile_text(file_read(path), "module", "w")
+        expect(file_delete(path)).to_be(true)
+        expect(loaded.status).to_equal("loaded")
+        expect(loaded.samples.len()).to_equal(1)
+        expect(loaded.metrics.len()).to_equal(4)
+
+    it "aborts failed execution and leaves the previous output intact":
+        val path = get_temp_dir() + "/simple_capture_failure_{time_now_unix_micros()}.sprof"
+        expect(file_write(path, "previous")).to_be(true)
+        val options = collection_run_options(["app.spl", "--collection-profile-out={path}", "--collection-workload=w", "--collection-target=t"])
+        expect(collection_capture_begin("t")).to_be(true)
+        expect(collection_capture_note_size("ast://capture/fail#1", "t", 2)).to_be(true)
+        expect(collection_run_finish(options, "module", 7)).to_equal(7)
+        expect(file_read(path)).to_equal("previous")
+        expect(file_delete(path)).to_be(true)
+
+    it "clears parser ownership and preserves output after a real source error":
+        val stem = get_temp_dir() + "/simple_capture_parse_{time_now_unix_micros()}"
+        val source_path = "{stem}.spl"
+        val output_path = "{stem}.sprof"
+        expect(file_write(source_path, "fn broken(\n")).to_be(true)
+        expect(file_write(output_path, "previous")).to_be(true)
+        val options = collection_run_options([source_path, "--collection-profile-out={output_path}", "--collection-workload=w", "--collection-target=t"])
+        expect(collection_run_file(options)).to_equal(1)
+        expect(parser_collection_feedback_active()).to_be(false)
+        expect(file_read(output_path)).to_equal("previous")
+        expect(file_delete(source_path)).to_be(true)
+        expect(file_delete(output_path)).to_be(true)
+
+    it "rejects malformed capture and corrupt append before replacing output":
+        val path = get_temp_dir() + "/simple_capture_append_{time_now_unix_micros()}.sprof"
+        expect(file_write(path, "corrupt")).to_be(true)
+        val options = collection_run_options(["app.spl", "--collection-profile-out={path}", "--collection-workload=w", "--collection-target=t", "--collection-profile-append"])
+        expect(collection_run_publish(options, "module", "malformed")).to_be(false)
+        expect(collection_run_publish(options, "module", "")).to_be(false)
+        expect(file_read(path)).to_equal("corrupt")
+        expect(file_delete(path)).to_be(true)
+
+    it "appends distinct observations and rejects a wrong target before publication":
+        val path = get_temp_dir() + "/simple_capture_distribution_{time_now_unix_micros()}.sprof"
+        val options = collection_run_options(["app.spl", "--collection-profile-out={path}", "--collection-workload=w", "--collection-target=t", "--collection-profile-append"])
+        val sample = "collection;sample=0;site=ast://capture/site#1;target=t;samples=1;size_p95=3;lookup_p95=1;hits_p95=1;misses_p95=0"
+        expect(collection_run_publish(options, "module", sample)).to_be(true)
+        expect(collection_run_publish(options, "module", sample)).to_be(true)
+        val previous = file_read(path)
+        val loaded = sprof_load_collection_profile_text(previous, "module", "w")
+        expect(loaded.samples.len()).to_equal(2)
+        expect(collection_run_publish(options, "module", sample.replace("target=t", "target=other"))).to_be(false)
+        expect(file_read(path)).to_equal(previous)
+        expect(file_delete(path)).to_be(true)

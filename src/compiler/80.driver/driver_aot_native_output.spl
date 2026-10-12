@@ -38,6 +38,10 @@ use compiler.driver.native_relocatable_link.{native_relocatable_link_plan,
 use compiler.driver.driver_log_helpers.{log_phase, log_error}
 use compiler.driver.native_aot_artifacts.{
     native_aot_object_path_v1, native_aot_finish_diagnostics_v1}
+use compiler.driver.driver_collection_native_receipt.{
+    collection_native_bind_capsule_v1, collection_native_publish_v1,
+    collection_native_retain_link_inputs_v1,
+    collection_native_link_inputs_valid_v1}
 use compiler.backend.backend_plugin.session_authority_v2.{BackendSessionOwnedLeaseV2, BackendSessionAuthorityErrorV2}
 use compiler.driver.driver_backend_plugin_selection.{
     driver_aot_uses_versioned_backend, driver_aot_backend_plugin_request_v1,
@@ -1492,10 +1496,40 @@ fn driver_native_launch_metadata_trailer(ctx: CompileContext) -> [u8]:
     out = out.concat(driver_native_launch_trailer_magic())
     out
 
-fn driver_native_success_with_launch_metadata(ctx: CompileContext, output: text) -> CompileResult:
+fn driver_native_collection_link_inputs_cleanup_v1(directory: text) -> bool:
+    if directory.len() <= 0: return true
+    dir_remove(directory, true)
+
+fn driver_native_collection_link_input_directory_v1(output: text) -> text:
+    val parent = dirname(output)
+    if parent.len() <= 0 or not dir_create_all(parent): return ""
+    secure_temp_dir_raw(parent, "simple-collection-link-inputs")
+
+fn driver_native_success_with_launch_metadata(ctx: CompileContext, output: text,
+    collection_bindings: [text] = [], collection_objects: [text] = [],
+    collection_link_input_dir: text = "") -> CompileResult:
     # Native launch metadata is optional. Keep native-build self-hostable even
     # when the byte-range file API is unavailable in the pure Simple runtime.
+    if ctx.options.collection_memory_budget_bytes >= 0:
+        val request = ctx.config["collection-native-request-identity"] ?? ""
+        val verdict = collection_native_publish_v1(output, request, collection_bindings, collection_objects)
+        if verdict != "":
+            val _ = driver_native_collection_link_inputs_cleanup_v1(collection_link_input_dir)
+            return CompileResult.CodegenError("native collection receipt publication failed: {verdict}")
+    val _ = driver_native_collection_link_inputs_cleanup_v1(collection_link_input_dir)
     CompileResult.Success(output)
+
+fn driver_native_collection_link_cleanup_error_v1(
+    directory: text, result: CompileResult
+) -> CompileResult:
+    val _ = driver_native_collection_link_inputs_cleanup_v1(directory)
+    result
+
+fn driver_native_collection_link_inputs_current_v1(
+    bindings: [text], objects: [text]
+) -> bool:
+    if bindings.len() == 0: return true
+    collection_native_link_inputs_valid_v1(bindings, objects)
 
 # ============================================================================
 # Unimplemented-extern link diagnostic
@@ -1668,6 +1702,35 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
         "", is_release, driver_opt_level, "", nil, entry_module_name)
     match direct_result:
         case Ok(obj_path):
+            var direct_objects = [obj_path]
+            var direct_bindings: [text] = []
+            var direct_link_input_dir = ""
+            if ctx.options.collection_memory_budget_bytes >= 0:
+                val capsule = frozen_native_capsule_batch_find_v1(
+                    capsules, entry_module_name)
+                if not capsule.ok or driver_native_capsule_result_reason_v1(capsule) != "":
+                    return CompileResult.CodegenError(
+                        "native collection direct capsule admission failed")
+                val binding = match collection_native_bind_capsule_v1(capsule):
+                    case Ok(value): value
+                    case Err(reason):
+                        return CompileResult.CodegenError(
+                            "native collection direct binding failed: {reason}")
+                direct_bindings = [binding]
+                direct_link_input_dir =
+                    driver_native_collection_link_input_directory_v1(output)
+                if direct_link_input_dir.len() <= 0:
+                    return CompileResult.CodegenError(
+                        "native collection direct link-input directory creation failed")
+                val retained = collection_native_retain_link_inputs_v1(
+                    direct_bindings, direct_link_input_dir)
+                if retained.is_err():
+                    val reason = retained.unwrap_err()
+                    val _ = driver_native_collection_link_inputs_cleanup_v1(
+                        direct_link_input_dir)
+                    return CompileResult.CodegenError(
+                        "native collection direct link-input admission failed: {reason}")
+                direct_objects = retained.unwrap()
             if effective_backend == "llvm" or effective_backend == "llvm-lib":
                 val llvm_opts = NativeLinkOptions(
                     libraries: ctx.options.native_libraries,
@@ -1682,11 +1745,19 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
                     stage4_compiler_hash: native_build_compiler_identity(),
                     target_triple: ctx.native_target
                 )
-                match link_llvm_native([obj_path], output, llvm_opts):
+                if not driver_native_collection_link_inputs_current_v1(
+                        direct_bindings, direct_objects):
+                    return driver_native_collection_link_cleanup_error_v1(
+                        direct_link_input_dir,
+                        CompileResult.CodegenError("native collection direct link input changed before LLVM link"))
+                match link_llvm_native(direct_objects, output, llvm_opts):
                     case Ok(_):
-                        return driver_native_success_with_launch_metadata(ctx, output)
+                        return driver_native_success_with_launch_metadata(ctx, output,
+                            direct_bindings, direct_objects, direct_link_input_dir)
                     case Err(e):
-                        return driver_native_link_failure_result(ctx, "LLVM native linking failed", e)
+                        return driver_native_collection_link_cleanup_error_v1(
+                            direct_link_input_dir,
+                            driver_native_link_failure_result(ctx, "LLVM native linking failed", e))
             val hosted_opts = NativeLinkOptions(
                 libraries: ctx.options.native_libraries,
                 library_paths: ctx.options.native_library_paths,
@@ -1701,11 +1772,19 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
                 stage4_compiler_hash: native_build_compiler_identity(),
                 target_triple: ctx.native_target
             )
-            match link_llvm_native([obj_path], output, hosted_opts):
+            if not driver_native_collection_link_inputs_current_v1(
+                    direct_bindings, direct_objects):
+                return driver_native_collection_link_cleanup_error_v1(
+                    direct_link_input_dir,
+                    CompileResult.CodegenError("native collection direct link input changed before hosted link"))
+            match link_llvm_native(direct_objects, output, hosted_opts):
                 case Ok(_):
-                    return driver_native_success_with_launch_metadata(ctx, output)
+                    return driver_native_success_with_launch_metadata(ctx, output,
+                        direct_bindings, direct_objects, direct_link_input_dir)
                 case Err(e):
-                    return driver_native_link_failure_result(ctx, "Hosted native linking failed", e)
+                    return driver_native_collection_link_cleanup_error_v1(
+                        direct_link_input_dir,
+                        driver_native_link_failure_result(ctx, "Hosted native linking failed", e))
         case Err(e):
             return CompileResult.CodegenError(e)
 
@@ -1898,6 +1977,8 @@ impl CompilerDriver:
 
         # Compile all modules and collect object files
         var object_files: [text] = []
+        var collection_bindings: [text] = []
+        val collection_receipt_requested = ctx.options.collection_memory_budget_bytes >= 0
 
         # Lane non-vacuity receipt (driver_pass_receipt.spl). These are counts
         # of work this function already does; `SIMPLE_LANE_RECEIPT=off` skips
@@ -1919,6 +2000,8 @@ impl CompilerDriver:
         var native_group: NativeGroupManifestV1? = nil
         var group_name_by_source: {text: text} = {}
         if native_group_request_path_v1() != "":
+            if collection_receipt_requested:
+                return CompileResult.CodegenError("artifact-bound collection receipts are not yet supported for grouped native publication")
             val admitted_group = match native_group_request_v1():
                 case Ok(value): value
                 case Err(reason):
@@ -2076,6 +2159,7 @@ impl CompilerDriver:
                     # candidate to the CURRENT MIR/storage capsule receipt.
                     var capsule_matches = false
                     var cached_capsule_identity = ""
+                    var cached_collection_binding = ""
                     if all_in_scope and scoped_outputs.len() == 1 and outputs_exist:
                         val cached_capsules = ctx.freeze_native_module_capsules_v1(
                             [name], object_base, backend_name, native_target,
@@ -2087,6 +2171,10 @@ impl CompilerDriver:
                                 and driver_native_capsule_result_valid_v1(cached_capsule)
                             if capsule_matches:
                                 cached_capsule_identity = cached_capsule.capsule_identity
+                                if collection_receipt_requested:
+                                    cached_collection_binding = match collection_native_bind_capsule_v1(cached_capsule):
+                                        case Ok(value): value
+                                        case Err(reason): return CompileResult.CodegenError("native collection cache binding failed: {reason}")
                     if capsule_matches:
                         val handoff_reason = driver_cold_hir_record_verified_object_v1(
                             ctx, name, scoped_outputs[0], cached_capsule_identity)
@@ -2101,6 +2189,8 @@ impl CompilerDriver:
                             BuildUnitOutcome.ok(module_unit_id, name, 0, 0))
                         for obj in scoped_outputs:
                             object_files = object_files.push(obj)
+                        if collection_receipt_requested:
+                            collection_bindings = collection_bindings.push(cached_collection_binding)
                         if native_group.? and scoped_outputs.len() == 1:
                             group_object_paths[name] = scoped_outputs[0]
                         if low_memory:
@@ -2375,6 +2465,11 @@ impl CompilerDriver:
                         return CompileResult.CodegenError(handoff_reason)
                     reconstructed_outputs = reconstructed_outputs.push(obj_path)
                     object_files = object_files.push(obj_path)
+                    if collection_receipt_requested:
+                        val binding = match collection_native_bind_capsule_v1(capsule):
+                            case Ok(value): value
+                            case Err(reason): return CompileResult.CodegenError("native collection object binding failed: {reason}")
+                        collection_bindings = collection_bindings.push(binding)
                     if native_group.?: group_object_paths[name] = obj_path
                     if ctx.demand_scc_publication != nil:
                         var publication = ctx.demand_scc_publication!
@@ -2657,34 +2752,78 @@ impl CompilerDriver:
             return CompileResult.CodegenError(
                 "cold HIR native object publication failed: {cold_object_reason}")
 
+        # Preserve the original cache filenames above for cache ownership and
+        # cold-HIR handoff. Only now, after every module is admitted, create
+        # private immutable-by-ownership copies for the actual linker arguments.
+        var collection_link_input_dir = ""
+        if collection_receipt_requested:
+            collection_link_input_dir =
+                driver_native_collection_link_input_directory_v1(output)
+            if collection_link_input_dir.len() <= 0:
+                return CompileResult.CodegenError(
+                    "native collection link-input directory creation failed")
+            val retained = collection_native_retain_link_inputs_v1(
+                collection_bindings, collection_link_input_dir)
+            if retained.is_err():
+                val reason = retained.unwrap_err()
+                val _ = driver_native_collection_link_inputs_cleanup_v1(
+                    collection_link_input_dir)
+                return CompileResult.CodegenError(
+                    "native collection link-input admission failed: {reason}")
+            object_files = retained.unwrap()
+
         if emit_object_requested:
             if object_files.len() == 0:
-                return CompileResult.CodegenError("emit-object requested but no object files were produced")
+                return driver_native_collection_link_cleanup_error_v1(
+                    collection_link_input_dir,
+                    CompileResult.CodegenError("emit-object requested but no object files were produced"))
             if object_files.len() == 1:
+                if not driver_native_collection_link_inputs_current_v1(
+                        collection_bindings, object_files):
+                    return driver_native_collection_link_cleanup_error_v1(
+                        collection_link_input_dir,
+                        CompileResult.CodegenError("native collection link input changed before emit-object copy"))
                 if not _sffi_file_copy(object_files[0], output):
-                    return CompileResult.CodegenError("emit-object failed to copy {object_files[0]} to {output}")
+                    return driver_native_collection_link_cleanup_error_v1(
+                        collection_link_input_dir,
+                        CompileResult.CodegenError("emit-object failed to copy {object_files[0]} to {output}"))
             else:
                 val plan = match native_relocatable_link_plan(
                     native_target, get_host_os(), get_host_arch(), object_files, output):
                     case Ok(value): value
-                    case Err(reason): return CompileResult.CodegenError(reason)
+                    case Err(reason):
+                        return driver_native_collection_link_cleanup_error_v1(
+                            collection_link_input_dir, CompileResult.CodegenError(reason))
                 val linker = match _native_relocatable_linker_resolve(plan):
                     case Ok(value): value
-                    case Err(reason): return CompileResult.CodegenError(reason)
+                    case Err(reason):
+                        return driver_native_collection_link_cleanup_error_v1(
+                            collection_link_input_dir, CompileResult.CodegenError(reason))
+                if not driver_native_collection_link_inputs_current_v1(
+                        collection_bindings, object_files):
+                    return driver_native_collection_link_cleanup_error_v1(
+                        collection_link_input_dir,
+                        CompileResult.CodegenError("native collection link input changed before relocatable link"))
                 val result = sosix_run(linker, plan.args)
                 if result.exit_code != 0:
-                    return CompileResult.CodegenError("emit-object relocatable link failed ({linker}): {result.stderr}{result.stdout}")
+                    return driver_native_collection_link_cleanup_error_v1(
+                        collection_link_input_dir,
+                        CompileResult.CodegenError("emit-object relocatable link failed ({linker}): {result.stderr}{result.stdout}"))
             driver_log_info(log, "Native object written to {output}")
-            return driver_native_success_with_launch_metadata(ctx, output)
+            return driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files, collection_link_input_dir)
 
         if emit_archive_requested:
             val archiver = find_archive_portable()
             if archiver == "":
-                return CompileResult.CodegenError("emit-archive requires llvm-ar, ar, or lib.exe")
+                return driver_native_collection_link_cleanup_error_v1(
+                    collection_link_input_dir,
+                    CompileResult.CodegenError("emit-archive requires llvm-ar, ar, or lib.exe"))
             val host_os = get_host_os()
             val system_ar = archiver == "ar" or archiver.ends_with("/ar")
             if effective_backend == "cranelift" and host_os == "macos" and system_ar:
-                return CompileResult.CodegenError("Cranelift Mach-O archives require llvm-ar")
+                return driver_native_collection_link_cleanup_error_v1(
+                    collection_link_input_dir,
+                    CompileResult.CodegenError("Cranelift Mach-O archives require llvm-ar"))
             val msvc_lib = archiver == "lib" or archiver.ends_with("lib.exe")
             var args: [text] = []
             if msvc_lib:
@@ -2694,22 +2833,36 @@ impl CompilerDriver:
                 args = [archive_flags, output]
             for obj in object_files:
                 args = args.push(obj)
+            if not driver_native_collection_link_inputs_current_v1(
+                    collection_bindings, object_files):
+                return driver_native_collection_link_cleanup_error_v1(
+                    collection_link_input_dir,
+                    CompileResult.CodegenError("native collection link input changed before archive creation"))
             val (_stdout, stderr, code) = process_run(archiver, args)
             if code != 0:
-                return CompileResult.CodegenError("emit-archive failed: {stderr}")
+                return driver_native_collection_link_cleanup_error_v1(
+                    collection_link_input_dir,
+                    CompileResult.CodegenError("emit-archive failed: {stderr}"))
             driver_log_info(log, "Native archive written to {output}")
-            return driver_native_success_with_launch_metadata(ctx, output)
+            return driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files, collection_link_input_dir)
 
         if emit_shared_requested:
             var shared_config = NativeLinkConfig.default()
             shared_config.pie = false
             shared_config.verbose = ctx.options.verbose
+            if not driver_native_collection_link_inputs_current_v1(
+                    collection_bindings, object_files):
+                return driver_native_collection_link_cleanup_error_v1(
+                    collection_link_input_dir,
+                    CompileResult.CodegenError("native collection link input changed before shared link"))
             match link_to_shared(object_files, output, shared_config):
                 case Ok(_):
                     driver_log_info(log, "Native shared library written to {output}")
-                    return driver_native_success_with_launch_metadata(ctx, output)
+                    return driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files, collection_link_input_dir)
                 case Err(e):
-                    return CompileResult.CodegenError("shared-library link failed: {e}")
+                    return driver_native_collection_link_cleanup_error_v1(
+                        collection_link_input_dir,
+                        CompileResult.CodegenError("shared-library link failed: {e}"))
 
         if trace:
             print "[NATIVE] linking {object_files.len()} object files..."
@@ -2737,15 +2890,22 @@ impl CompilerDriver:
             )
             if trace:
                 print "[NATIVE] calling link_llvm_native..."
+            if not driver_native_collection_link_inputs_current_v1(
+                    collection_bindings, object_files):
+                return driver_native_collection_link_cleanup_error_v1(
+                    collection_link_input_dir,
+                    CompileResult.CodegenError("native collection link input changed before LLVM link"))
             match link_llvm_native(object_files, output, llvm_opts):
                 case Ok(_):
                     log_build_progress("link", "objects", object_files.len(),
                         object_files.len(), output, 6, 6, 0,
                         cache_hit_count, "succeeded")
                     driver_log_info(log, "Native executable written to {output} (backend: LLVM)")
-                    return driver_native_success_with_launch_metadata(ctx, output)
+                    return driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files, collection_link_input_dir)
                 case Err(e):
-                    driver_native_link_failure_result(ctx, "LLVM native linking failed", e)
+                    driver_native_collection_link_cleanup_error_v1(
+                        collection_link_input_dir,
+                        driver_native_link_failure_result(ctx, "LLVM native linking failed", e))
         else:
             # Hosted native binaries need the same runtime objects and C `main`
             # entry shim regardless of which backend produced user objects.
@@ -2764,15 +2924,22 @@ impl CompilerDriver:
                 runtime_path: env_get_nullable("SIMPLE_RUNTIME_PATH") ?? "",
                 runtime_bundle: env_get_nullable("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
             )
+            if not driver_native_collection_link_inputs_current_v1(
+                    collection_bindings, object_files):
+                return driver_native_collection_link_cleanup_error_v1(
+                    collection_link_input_dir,
+                    CompileResult.CodegenError("native collection link input changed before hosted link"))
             match link_llvm_native(object_files, output, hosted_opts):
                 case Ok(_):
                     log_build_progress("link", "objects", object_files.len(),
                         object_files.len(), output, 6, 6, 0,
                         cache_hit_count, "succeeded")
                     driver_log_info(log, "Native executable written to {output} (backend: {effective_backend})")
-                    driver_native_success_with_launch_metadata(ctx, output)
+                    driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files, collection_link_input_dir)
                 case Err(e):
-                    driver_native_link_failure_result(ctx, "Hosted native linking failed", e)
+                    driver_native_collection_link_cleanup_error_v1(
+                        collection_link_input_dir,
+                        driver_native_link_failure_result(ctx, "Hosted native linking failed", e))
 
     # --------------------------------------------------------------------------
     # Linker Helper (legacy - kept for compatibility, delegates to linker_wrapper)

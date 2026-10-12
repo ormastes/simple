@@ -4,6 +4,7 @@ use app.cli._CliMain.args_and_os_commands.{GlobalFlags, get_cli_args, get_versio
     print_error, print_error_with_help, run_dashboard, run_llm_dashboard}
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.env_ops.{env_get, env_set}
+use app.io.args_ops.{get_args}
 use app.io.aspect_params_env.{aspect_params_from_env}
 use common.plugin.aspect_params.{aspect_coverage_cutover_policy_v1}
 use common.plugin.instrumentation_aspect_pack.{
@@ -62,6 +63,11 @@ use plugins.backend_registry.full_static_backend_registry.{
 use compiler.driver.bootstrap_k1_selected.{
     install_selected_k1_backend_table_v1, selected_k1_backend_policy_v1}
 use app.compiler_entrypoint.admission.{compiler_entrypoint_admit_v1}
+use app.cli.bootstrap_internal_worker_routing.{
+    bootstrap_internal_worker_run_v1, bootstrap_internal_worker_is_parse_v1,
+    bootstrap_internal_worker_args_v1}
+use app.cli.parse_shard_main.{run_parse_shard}
+use app.cli.native_build_worker_entry.{run_native_build_worker_entry}
 use app.startup.dynsmf_status.{run_product_dynsmf_status}
 use app.build_progress.cli.{run_build_progress_cli}
 use app.lock.main.{run_lock_command}
@@ -316,6 +322,24 @@ fn cli_main_with_execution_mode(force_interpreter: bool) -> i64:
             not install_full_static_backends_for_k1_policy_v1(selected_k1_policy):
         _cli_eprint("PLUG-E-TABLE: invalid policy-bound full-CLI backend composition")
         return 1
+
+    # Coordinator children keep their process boundary, but dispatch their two
+    # fixed worker entrypoints to this compiled binary instead of interpreting
+    # the worker source. The marker and allowlist select this route; source
+    # admission and policy validation still run. Ordinary `run` continues below.
+    if not force_interpreter:
+        val process_args = get_args()
+        val worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
+        if bootstrap_internal_worker_run_v1(process_args, worker_marker):
+            val worker_payload = bootstrap_internal_worker_args_v1(
+                process_args, worker_marker)
+            val admission = compiler_entrypoint_admit_v1(["src"])
+            if not admission.valid:
+                _cli_eprint("SCV-E-ADMISSION: " + admission.reason)
+                return 1
+            if bootstrap_internal_worker_is_parse_v1(process_args, worker_marker):
+                return run_parse_shard(worker_payload)
+            return run_native_build_worker_entry(worker_payload)
 
     # These app commands own option names also recognized by the shared CLI
     # (`--tui`, `--surface`, `--count`, `--timeout`, and `--json`). Delegate

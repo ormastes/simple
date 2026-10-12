@@ -1,0 +1,39 @@
+# Standalone native probe; no SSpec runner or compiler worker source imports.
+use app.cli.bootstrap_internal_worker_routing.{
+    bootstrap_internal_worker_run_v1, bootstrap_internal_worker_is_parse_v1,
+    bootstrap_internal_worker_args_v1}
+
+fn route_check(condition: bool, label: text) -> i64:
+    if condition: return 0
+    print "FAIL: {label}"
+    1
+
+fn main() -> i64:
+    var failures: i64 = 0
+    val native = ["simple", "run", "src/app/cli/native_build_worker.spl", "--progress", "none", "--internal-environment-variant-policy-v1=opaque"]
+    failures = failures + route_check(not bootstrap_internal_worker_run_v1(native, ""), "unmarked admission")
+    failures = failures + route_check(bootstrap_internal_worker_args_v1(native, "").len() == 0, "unmarked payload")
+    val unknown = ["simple", "run", "user/main.spl", "--threads", "1"]
+    failures = failures + route_check(not bootstrap_internal_worker_run_v1(unknown, "1"), "unknown admission")
+    failures = failures + route_check(bootstrap_internal_worker_args_v1(unknown, "1").len() == 0, "unknown payload")
+    failures = failures + route_check(bootstrap_internal_worker_run_v1(native, "1"), "native admission")
+    failures = failures + route_check(not bootstrap_internal_worker_is_parse_v1(native, "1"), "native route")
+    val native_payload = bootstrap_internal_worker_args_v1(native, "1")
+    failures = failures + route_check(native_payload.len() == 3, "native payload length")
+    if native_payload.len() == 3:
+        failures = failures + route_check(native_payload[0] == "--progress" and native_payload[1] == "none" and native_payload[2] == "--internal-environment-variant-policy-v1=opaque", "native payload bytes")
+    val parse = ["simple", "run", "C:/project/src/app/cli/parse_shard_main.spl", "--parse-shard=0/1", "--source", "src"]
+    failures = failures + route_check(bootstrap_internal_worker_is_parse_v1(parse, "1"), "parse route")
+    val parse_payload = bootstrap_internal_worker_args_v1(parse, "1")
+    failures = failures + route_check(parse_payload.len() == 3, "parse payload length")
+    if parse_payload.len() == 3:
+        failures = failures + route_check(parse_payload[0] == "--parse-shard=0/1" and parse_payload[1] == "--source" and parse_payload[2] == "src", "parse payload bytes")
+    val empty = ["simple", "run", "src/app/cli/native_build_worker.spl"]
+    failures = failures + route_check(bootstrap_internal_worker_run_v1(empty, "1"), "empty admitted request")
+    failures = failures + route_check(bootstrap_internal_worker_args_v1(empty, "1").len() == 0, "empty payload")
+    failures = failures + route_check(not bootstrap_internal_worker_run_v1(["simple", "run"], "1"), "truncated admission")
+    failures = failures + route_check(bootstrap_internal_worker_args_v1([], "1").len() == 0, "truncated payload")
+    failures = failures + route_check(not bootstrap_internal_worker_run_v1(["simple", "test", "src/app/cli/native_build_worker.spl"], "1"), "wrong verb")
+    if failures == 0:
+        print "PASS: native worker routing checks=16"
+    failures
