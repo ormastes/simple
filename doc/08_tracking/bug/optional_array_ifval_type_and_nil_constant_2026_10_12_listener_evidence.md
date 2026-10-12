@@ -2,7 +2,7 @@
 
 Canonical OPEN bug: [optional_array_ifval_type_and_nil_constant_2026_10_12](optional_array_ifval_type_and_nil_constant_2026_10_12.md). This appendix adds an independent listener witness; it does not reset the original three-cycle stop or add a second bug ID.
 
-The unchanged source reads one TCP byte through the SOSIX network facade, whose declared return is `[u8]?`. After `if val bytes = payload`, it checks `bytes.len() == 1` before constructing `[bytes[0], 0, 82]` and writing the counted response. The actual native object's `__simple_main` calls `io_tcp_read`, `rt_is_some`, and `rt_unwrap_or_self`, then calls **rt_string_len** on the unwrapped array word at relocation **0x1cd**. It compares that result to one and branches past response construction/write on mismatch. The independent supervisor proves the child owns a live IPv4 listener, sends `Q`, and observes early EOF; the child exits **9**, with quiescence confirmed. No protocol PASS is claimed.
+The unchanged source reads one TCP byte through the SOSIX network facade, whose declared return is `[u8]?`. After `if val bytes = payload`, it checks `bytes.len() == 1` before constructing `[bytes[0], 0, 82]` and writing the counted response. The actual native object's `__simple_main` calls `io_tcp_read`, `rt_is_some`, and `rt_unwrap_or_self`, then calls **rt_string_len** on the unwrapped array word at relocation **0x1cd**. The emitted control flow compares that result to one and gates response construction/write on equality. This is a static array-metadata erasure diagnosis; no executed branch or write-callee trace was collected. The independent supervisor proves the child owns a live IPv4 listener, sends `Q`, and observes early EOF; the child exits **9**, proving its `written != 3` failure, with quiescence confirmed. The receipts do not prove which gated response instructions executed. No protocol PASS is claimed.
 
 Relevant actual object excerpt:
 
@@ -34,7 +34,7 @@ Relevant actual object excerpt:
      1dc: 48 8b 38                     	movq	(%rax), %rdi
 ```
 
-The original address-rendering criterion also remains FAIL: native cycle1 exited4 after3.026s, printing numeric `LISTENER1041501185` instead of the concrete address. Its object routes the optional text payload through `rt_raw_i64_to_string`. That separate payload provenance witness is not repaired by socket discovery. Banner pre-accept flushing remains unqualified.
+The original address-rendering criterion also remains FAIL: native cycle1 exited4 after3.026s, printing numeric `LISTENER:1041501185` instead of the concrete address. Its object routes the optional text payload through `rt_raw_i64_to_string`. That separate payload provenance witness is not repaired by socket discovery. Banner pre-accept flushing remains unqualified.
 
 The [adjacent evidence](optional_array_ifval_type_and_nil_constant_2026_10_12_listener_evidence.json) binds source a21cbc83..., producer9fd9aaf8... (old-DAE literal-only facet), objectee6df1c0..., ELF ed7fcb9c..., same-core-C runtime4fbddc7e... and unchanged backfill935f7267..., plus exact local receipt/disassembly hashes. Actual strict link exits0 with no unresolved runtime/Simple strong symbols. This proves linkability and the specific native failure, not complete compiler/core/Redis behavior.
 
