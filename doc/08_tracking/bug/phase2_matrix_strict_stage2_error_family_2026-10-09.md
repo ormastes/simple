@@ -527,3 +527,25 @@ Latest release `a95346aaef7a04c2e0935b2816e6157dd497457d` includes the typed
   failures in those runs are the old binary's builtin-class receipts
   (Option/Result/Dict, fixed in fe1f4ed6d72) and shard-inventory
   infrastructure, not these files.
+- Full-closure-safe restructures (2026-10-12, on top of a791b5e5cd1): the
+  single-file entry-closure passes were necessary but not sufficient — the
+  interference is bulk-context registry/borrow state. (1)
+  archive_borrowed_module_v1.spl: every registry-projection element is now
+  bound to an explicitly annotated local before any field read — 'val
+  primary: MirHirModuleDeclarationsV1 = ...', and the nested globals loops
+  rewritten to index-based iteration with 'val global/own_global:
+  MirHirGlobalDeclarationV1 = ...[i]' (for-in element types degrade to ANY
+  in the bulk closure; the annotation pins the real type).
+  MirHirGlobalDeclarationV1 added to the itemized import. (2)
+  driver_pipeline_lowering.spl: the source loop is now index-based
+  ('while source_idx < sources.len(): val source = sources[source_idx]'),
+  keeping the six field snapshots — the for-iterator itself held the
+  Exclusive borrow (reference 9) across the body. (3) Preventive scan of the
+  43c3f3d979a/4bec5687ee6 sibling files: declaration_default_bindings_v1
+  already annotates its element bindings; declaration_default_rewrite_v1
+  iterates only local collections; mir_lowering_types.spl:914 iterates a
+  self field but never touches self inside the loop — all safe, no changes.
+  Entry-closure validation (admitted cd1601c9, snapshots c24e5dd2 / file-2
+  snapshot contain the restructures): 0 'cannot infer field type' and 0
+  'Capability error/Aliasing' lines respectively. Real confirmation: next
+  bulk build.

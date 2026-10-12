@@ -14,7 +14,7 @@ use compiler.mir.hir_declaration_summary_v1.*
 # MirHirModuleDeclarationsV1 unresolved here, so the annotated bindings below
 # typed as ANY and 'declaration.globals[..].symbol' failed seed HIR with
 # "struct 'ANY' field 'symbol'" (same visibility family as HirConst).
-use compiler.mir.hir_declaration_types_v1.{MirHirDeclarationRepositoryV1, MirHirModuleDeclarationsV1}
+use compiler.mir.hir_declaration_types_v1.{MirHirDeclarationRepositoryV1, MirHirModuleDeclarationsV1, MirHirGlobalDeclarationV1}
 use compiler.mir.hir_declaration_variant_identity_v1.{mir_hir_global_variant_identity_v1}
 use compiler.hir.hir_function_record_identity_v1.{mono_complete_function_digest_v1}
 use compiler.mir._MirLowering.module_lowering.*
@@ -74,20 +74,34 @@ impl MirLowering:
             if is_entry_module or primary_globals == nil or primary_symbols == nil or primary_logical_key == "" or
                     not repository.modules.has(primary_logical_key):
                 return Err("selected archive functions require an actual primary emission owner")
-            val primary = repository.modules[primary_logical_key]
+            # Annotate: the bare binding inherits the dict value type through
+            # the registry projection, which the bulk closure can degrade to
+            # ANY; the explicit annotation pins the element type.
+            val primary: MirHirModuleDeclarationsV1 = repository.modules[primary_logical_key]
             if not mir_hir_declarations_same_physical_source_v1(primary, declaration) or
                     primary.globals.len() != declaration.globals.len() or
                     primary.needs_initialization != declaration.needs_initialization:
                 return Err("selected archive functions differ from primary storage owner")
-            for global in declaration.globals:
+            var global_idx = 0
+            while global_idx < declaration.globals.len():
+                # Bind each element to an explicitly annotated local BEFORE any
+                # field read: in the bulk closure the for-in element type can
+                # degrade to ANY through the registry projection, and
+                # 'global.symbol' then fails seed HIR with "struct 'ANY' field
+                # 'symbol'". The annotation pins the real element type.
+                val global: MirHirGlobalDeclarationV1 = declaration.globals[global_idx]
                 val global_bytes = mir_hir_global_variant_identity_v1(global)
                 var matches = 0
-                for own_global in primary.globals:
+                var own_idx = 0
+                while own_idx < primary.globals.len():
+                    val own_global: MirHirGlobalDeclarationV1 = primary.globals[own_idx]
                     if own_global.symbol.id == global.symbol.id and
                             mir_hir_global_variant_identity_v1(own_global) == global_bytes:
                         matches = matches + 1
+                    own_idx = own_idx + 1
                 if global_bytes == "" or matches != 1:
                     return Err("selected archive functions have conflicting global storage")
+                global_idx = global_idx + 1
             var symbols: [i64] = []
             var seen: Dict<i64, bool> = {}
             for selection in selections:

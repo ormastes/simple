@@ -463,7 +463,16 @@ impl CompilerDriver:
             val native_target = self.ctx.native_target
             val hir_emissions = self.ctx.runtime_std_hir_emissions
             var emissions: Dict<text, RuntimeStdMirModuleEmissionV1> = {}
-            for source in sources:
+            # Index-based iteration, not for-in: the for-iterator held an
+            # Exclusive borrow on the iterated value for the whole loop body,
+            # so any self.ctx access inside re-acquired a live reference and
+            # the seed capability checker rejected it ("reference 9 already
+            # has Exclusive capability"). Indexing borrows only for the
+            # expression, and the six field snapshots above keep every other
+            # self.ctx field read out of the body entirely.
+            var source_idx = 0
+            while source_idx < sources.len():
+                val source = sources[source_idx]
                 val name = source.module_name
                 var found_index = -1
                 var receipt_index = 0
@@ -502,6 +511,7 @@ impl CompilerDriver:
                     self.ctx.add_error("full inventory cold MIR emission failed for {name}: {emitted.unwrap_err()}")
                     return false
                 emissions[seed.source_identity] = emitted.unwrap()
+                source_idx = source_idx + 1
             if emissions.len() != sources.len():
                 self.ctx.add_error("full inventory cold MIR emission count mismatch")
                 return false
