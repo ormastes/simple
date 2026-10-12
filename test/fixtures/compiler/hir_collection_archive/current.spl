@@ -1,4 +1,7 @@
 use support.*
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_collection_planner.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
 use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveV1}
 use compiler.driver.cache.collection_current_archive_analysis_v1.{CollectionCurrentArchiveAnalysisV1,
     collection_current_archive_capture_v1, collection_current_archive_load_analysis_in_owned_scope_v1}
@@ -100,6 +103,44 @@ fn collection_current_controls_v1(archive: HirBodyArchiveV1, source: text,
     checks = checks + 1
     if not collection_current_archive_load_analysis_in_owned_scope_v1(descriptor).is_err():
         return Err("current inactive replay")
+    checks = checks + 1
+    var options = driver_core_compile_options_default()
+    options.backend = "llvm"
+    val driver = CompilerDriver.create(options)
+    driver.collection_current_archived_analyses["stale"] = descriptor
+    if not driver.analyze_collections_before_current_monomorphize_v1({}, []) or
+            driver.collection_current_archived_analyses.len() != 0:
+        return Err("current unconfigured reset")
+    checks = checks + 1
+    if driver.configure_collection_registry(source, bindings).is_err(): return Err("current driver registry")
+    driver.ctx.hir_module_count_value = 1
+    val modules = {input.logical_name: input}
+    if not driver.analyze_collections_before_current_monomorphize_v1(modules, [input.logical_name]) or
+            driver.collection_current_archived_analyses.len() != 1 or
+            driver.collection_analyses.len() != 0 or driver.collection_archived_analyses.len() != 0:
+        return Err("current driver publication")
+    val actual = current_observe(driver.collection_current_archived_analyses[input.logical_name])?
+    if actual.digest != expected.digest: return Err("current driver plan parity")
+    checks = checks + 1
+    val aliases = {input.logical_name: input, alias.logical_name: alias}
+    if driver.analyze_collections_before_current_monomorphize_v1(aliases, [input.logical_name, alias.logical_name]) or
+            driver.collection_current_archived_analyses.len() != 0 or
+            not driver.ctx.errors.join("\n").contains("collection-analysis-module-path-ambiguous"):
+        return Err("current duplicate path was waived")
+    checks = checks + 1
+    # The earlier actual ABI error must outrank a later missing owner, as in
+    # retained configured-binding order rather than module/capture order.
+    var bad = bindings[0]
+    bad.symbol_id = bindings[1].symbol_id
+    var missing = bindings[1]
+    missing.module_path = "test/fixtures/compiler/hir_collection_archive/absent.spl"
+    if driver.configure_collection_registry(source, [bad, missing]).is_err(): return Err("binding order fixture config")
+    val previous_errors = driver.ctx.errors.len()
+    if driver.analyze_collections_before_current_monomorphize_v1(modules, [input.logical_name]) or
+            driver.ctx.errors.len() != previous_errors + 1 or
+            driver.ctx.errors[previous_errors] != "collection-binding-typed-signature-mismatch" or
+            driver.collection_current_archived_analyses.len() != 0:
+        return Err("current binding order")
     checks = checks + 1
     Ok(checks)
 

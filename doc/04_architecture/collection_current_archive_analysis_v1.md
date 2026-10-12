@@ -20,12 +20,26 @@ whole-inventory, unique-path, binding and publication checks, including the
 duplicate-physical-path error across logical aliases when collection analysis
 is configured. Physical deduplication cannot waive that error.
 
-The native fixture retains the original twenty checks and adds ten controls.
+The actual driver method resets retained/original/current analysis maps, reads
+the driver's configured registry recipe and validates the complete logical
+inventory and provider tuple before capture. No analysis is published until
+every current capture succeeds. Its unconfigured fast return remains intact;
+configured aliases with duplicate physical paths fail before body analysis.
+The genuine final factory must invoke this method on its issued current inputs;
+the method's boolean alone grants no prerequisite authority.
+
+Configured bindings are validated against complete current bodies in the
+retained global binding order before any plan analysis. An earlier actual ABI
+failure keeps precedence over a later missing module owner.
+
+The native fixture retains the original twenty checks and adds fourteen controls.
 It stores a complete current frame with callback/loop values 97/29, compares
 its full plan observation with the actual retained analyzer and rejects the
 old 43/17 observation. Other controls cover input/source/counter/body/backend
 tampering, fresh alias capture, forbidden unresolved fallback and active,
 paused or absent leases. Parser setup occurs outside frame storage's transient
 lease. The launcher includes the new fixture source and expects exactly thirty
-checks. These controls are authored and UNRUN; no RSS improvement or compiler
+four checks, including unconfigured reset, actual driver plan parity,
+duplicate-path refusal and binding-error precedence with discarded pending publication. These controls
+are authored and UNRUN; no RSS improvement or compiler
 admission follows from source review.

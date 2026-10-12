@@ -3,6 +3,13 @@
 Status: open; source workaround prepared. Bug database reconciliation is
 pending a qualified full CLI; this dated record does not claim a DB update.
 Background repair owner: `/root/runner_mir_repair`, Rust seed parser dispatch.
+The reviewed parser repair was integrated as `9fc4b70a52c516653fb7cf61f3e27bffb4af6370`
+(exported owner commit `6e309bc3fc388cc62a736d0fafe8ddddb7aef041`).
+Its bounded support baseline reproduced comparison failures; the changed-source
+run passed all four actual AST regression groups, preserving context DSL
+syntax. Peak RSS was 547,792 KiB and the terminal process receipt confirms
+quiescence. This is Rust parser support evidence; the fresh canonical producer
+still needs admission before the explicit-return workaround can be retired.
 
 Canonical Windows attempt11 froze source at
 `36df8df31c639e19d6b4947b3e5fa8aad0c32c75`. All four Rust support builds,
