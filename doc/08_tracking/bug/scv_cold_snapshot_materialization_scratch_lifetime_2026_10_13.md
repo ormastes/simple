@@ -1,8 +1,37 @@
 # Cold SCV snapshot materialization lacks a per-file scratch owner
 
-Status: current-source ownership gap; private repair proposal UNRUN. Native
-growth, reclamation and performance qualification are pending. Bug DB writer
-reconciliation is pending; no database state is claimed.
+Status: ownership gap in the older local workspace source. The coherent source
+cut and remote branch already include a per-file scratch implementation; its
+native qualification is pending. Hold the duplicate private repair proposal.
+Bug DB writer reconciliation is pending; no database state is claimed.
+
+## Source identity and existing repair
+
+The originally inspected local workspace remains at HEAD
+`2fbcf0cf3e01ed48ec3f4952a030fae89858a6e2`; the inspected local owner has SHA-256
+`17d43cbc94fea1c4d2d0ffc647563fb43e402f825ce2d31e566513d689b8a7ce`.
+That observation must not be presented as a missing implementation on the
+remote branch or in a newer compiler binary.
+
+The coherent source cut `cce267e717684e7f87aea1603df3da7c0745258d` and reviewed
+remote `release_phase3` revision
+`e703d29ccfdd75336a5fc72c83131ebdb2daa3d4` contain
+`scv_compile_snapshot_materialize_source_v1` at line 398, called per entry at
+line 484. The reviewed remote owner blob is
+`b0a7213872bb02e599ec2082157f994c890a3e58`. It imports the canonical
+`std.nogc_sync_mut.sffi.transient` surface and performs begin, pause, promotion
+and end around the production materialization result.
+
+The existing implementation fails safely when scope acquisition fails, whereas
+the duplicate private proposal below retained an unscoped fallback. They are
+different policies and must not be silently combined. First qualify the
+existing implementation with its real native provider, retained result/error
+roots, nested-epoch behavior and identical cold/warm inputs. Source existence
+alone does not prove reclamation, performance or inclusion in the admitted f2
+binary. Do not add another provider or replace the existing owner merely to
+make a private diagnostic compile.
+
+## Original local-source finding
 
 Shared compiler entrypoint admission calls inventory refresh, snapshot acquire,
 and source-authority binding validation before native-build dispatch. Current
