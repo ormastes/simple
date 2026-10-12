@@ -611,3 +611,16 @@ Seed repro command (all three now exit 0):
    SEED-VERIFIED: exit=0, 0 'Capability error'.
 3. declaration_providers_v1.spl (earlier HirConst itemization):
    SEED-VERIFIED: exit=0, 0 'cannot infer field type', 0 HirConst mentions.
+- Stage-3 E-MONO-032 batch (2026-10-13): 160 errors / 147 unique sites / 20
+  callees — all annotated with explicit generic type arguments. walk_hir_* /
+  walk_ast_* recursive sites got '<C>' (generator fold_gen.spl fixed to emit
+  '<C>' so generated files don't regress; generated files patched to match).
+  _sffi_* / _driver_vhdl_* / h_* / transient_heap_promote_v1 sites annotated
+  with the argument's concrete enum/record type (MirInstKind, HirExprKind,
+  HirTypeKind, MirTypeKind, HirUnaryOp, MirOperandKind, Result<...>,
+  CompileSourceEventV1, BlockDefinition, i64/text keys). Ambiguous choices:
+  _sffi_tuple_get over raw i64 encodings uses the PAYLOAD target type
+  (LocalId/text); the local non-generic _sffi_tuple_get in
+  llvm_lib_translate_expr.spl was renamed _sffi_tuple_get_i64 to dodge the
+  generic twin in expr_dispatch.spl (co-compiled duplicate confusion).
+  Seed standalone parity on all touched files (same artifact as pristine).
