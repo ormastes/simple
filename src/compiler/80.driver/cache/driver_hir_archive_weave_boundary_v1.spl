@@ -11,6 +11,7 @@ use compiler.driver.cache.driver_hir_archive_weave_encoding_v1.{driver_hir_weave
     driver_hir_weave_boundary_bytes_v1}
 use compiler.driver.cache.driver_hir_post_validation_policy_v1.{
     DriverHirPostValidationPolicyOwnerV1, driver_hir_policy_live_capabilities_match_in_owned_scope_v1}
+use compiler.driver.cache.driver_hir_post_validation_gate_facts_v1.{DriverHirPostValidationGateReportV1}
 use compiler.driver.cache.driver_cold_hir_weave_body_v1.{DriverColdHirWeaveBodyLoadV1,
     driver_cold_hir_weave_body_load_in_owned_scope_v1}
 use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{hir_owned_artifact_store_blob_v1,
@@ -47,24 +48,24 @@ fn driver_hir_weave_publish_borrowed_v1(replay: DriverHirArchiveWeaveReplayV1
     if transient_array_scope_state_v1() != 1 or replay.report.errors.len() != 0 or replay.report.gates_skipped:
         return Err("weave owner requires actual successful complete execution")
     val inputs = replay.inputs
-    var use = DriverHirArchiveWeaveBoundaryUseV1(cache: inputs.policy.cache,
+    var accepted_use = DriverHirArchiveWeaveBoundaryUseV1(cache: inputs.policy.cache,
         boundary_key: "", boundary_digest: "", source_binding: inputs.journal.source_binding,
         schedule_digest: inputs.schedule.schedule_digest, policy_key: inputs.policy.artifact_key,
         config_binding: inputs.config_binding, physical_inventory: inputs.inventory,
         declaration_order: inputs.layout_keys,
         logical_order: inputs.journal.logical_order, logical_frames: replay.logical_frames,
         physical_module_keys: inputs.inventory.ordered_modules, physical_frames: replay.physical_frames)
-    var owner = DriverHirArchiveWeaveBoundaryV1(use: use, policy: inputs.policy,
+    var owner = DriverHirArchiveWeaveBoundaryV1(use: accepted_use, policy: inputs.policy,
         gate_report: replay.report, gate_parent_key: replay.parent.key,
         gate_parent_digest: replay.parent.digest, woven_count: replay.woven_count)
     val bytes = driver_hir_weave_boundary_bytes_v1(owner)
     if bytes == "": return Err("weave complete owner encoding refused")
     val digest = sha256_text(bytes)
-    val key = sha256_text("driver-hir-weave-registered-owner-artifact-v1\n" + digest + "\n" + use.cache.producer_header)
-    use.boundary_key = key
-    use.boundary_digest = digest
-    owner.use = use
-    val stored = hir_owned_artifact_store_blob_v1(use.cache, key, bytes)?
+    val key = sha256_text("driver-hir-weave-registered-owner-artifact-v1\n" + digest + "\n" + accepted_use.cache.producer_header)
+    accepted_use.boundary_key = key
+    accepted_use.boundary_digest = digest
+    owner.use = accepted_use
+    val stored = hir_owned_artifact_store_blob_v1(accepted_use.cache, key, bytes)?
     if not stored: return Err("weave completed owner publication refused")
     var writer = HirCodecWriter.create()
     writer.put_text(inputs.journal.last_key)
@@ -72,11 +73,11 @@ fn driver_hir_weave_publish_borrowed_v1(replay: DriverHirArchiveWeaveReplayV1
     writer.put_text(inputs.schedule.schedule_digest)
     writer.put_text(inputs.policy.artifact_key)
     writer.put_text(inputs.config_binding)
-    writer.put_text(use.cache.directory)
-    writer.put_text(use.cache.producer_header)
+    writer.put_text(accepted_use.cache.directory)
+    writer.put_text(accepted_use.cache.producer_header)
     val context_key = sha256_text("driver-hir-weave-real-context-v1\n" + writer.finish())
     Ok(DriverHirArchiveWeavePublicationV1(owner: owner,
-        use_digest: sha256_text(driver_hir_weave_use_bytes_v1(use)), context_key: context_key))
+        use_digest: sha256_text(driver_hir_weave_use_bytes_v1(accepted_use)), context_key: context_key))
 
 fn driver_hir_weave_publish_v1(replay: DriverHirArchiveWeaveReplayV1
 ) -> Result<DriverHirArchiveWeavePublicationV1, text>:
@@ -167,6 +168,17 @@ pub fn driver_hir_archive_weave_boundary_load_in_owned_scope_v1(
     if not use.logical_frames.has(module_key): return Err("weave registered logical body absent")
     driver_cold_hir_weave_body_load_in_owned_scope_v1(use.cache, use.logical_frames[module_key])
 
+# Metadata-only predecessor check for the closed cold/current controller.
+# No source replay, semantic routing or body read occurs here, so checking the
+# actual registered gate report does not reorder cold source-plan failures.
+# The caller owns scope1 and must retain the returned DTO if it escapes.
+pub fn driver_hir_archive_weave_boundary_registered_report_in_owned_scope_v1(
+        owner: DriverHirArchiveWeaveBoundaryV1
+) -> Result<DriverHirPostValidationGateReportV1, text>:
+    val verified = driver_hir_weave_validate_owner_borrowed_v1(owner)?
+    Ok(owner.gate_report)
+
 export DriverHirArchiveWeaveBoundaryV1, DriverHirArchiveWeaveBoundaryUseV1
 export driver_hir_archive_weave_boundary_capture_v1, driver_hir_archive_weave_boundary_use_v1
 export driver_hir_archive_weave_boundary_load_in_owned_scope_v1
+export driver_hir_archive_weave_boundary_registered_report_in_owned_scope_v1
