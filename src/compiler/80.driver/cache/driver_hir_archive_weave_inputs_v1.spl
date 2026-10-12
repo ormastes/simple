@@ -1,0 +1,144 @@
+# Derive inputs from the actual driver, never from a caller-supplied inventory,
+# declaration graph, report or successful-gate flag.
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_hir_pipeline_lowering.{driver_hir_source_body_custody_matches_in_owned_scope_v1}
+use compiler.driver.driver_hir_archive_schedule_owner_v1.*
+use compiler.driver.cache.driver_hir_archive_schedule_v1.{DriverHirArchiveScheduleV1}
+use compiler.driver.cache.driver_hir_archive_journal_v1.{DriverHirArchiveJournalV1,
+    driver_hir_archive_journal_verify_v1, driver_hir_archive_journal_inventory_v1}
+use compiler.driver.cache.driver_hir_archive_inventory_v1.{DriverHirArchiveInventoryV1}
+use compiler.driver.cache.driver_hir_post_validation_policy_v1.{DriverHirPostValidationPolicyOwnerV1}
+use compiler.driver.cache.driver_hir_archive_weave_encoding_v1.{driver_hir_weave_config_binding_in_owned_scope_v1}
+use compiler.driver.cache.driver_hir_archive_weave_facts_v1.{DriverHirArchiveWeaveFactsV1,
+    driver_hir_weave_declaration_v1, driver_hir_weave_append_declaration_v1,
+    driver_hir_weave_body_v1, driver_hir_weave_append_body_v1}
+use compiler.driver.cache.driver_hir_weave_source_policy_v1.{driver_hir_weave_source_policy_v1}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+
+struct DriverHirArchiveWeaveInputsV1:
+    journal: DriverHirArchiveJournalV1
+    schedule: DriverHirArchiveScheduleV1
+    policy: DriverHirPostValidationPolicyOwnerV1
+    inventory: DriverHirArchiveInventoryV1
+    config_binding: text
+    layout_keys: [text]
+
+fn driver_hir_weave_bind_inputs_borrowed_v1(driver: CompilerDriver,
+        journal: DriverHirArchiveJournalV1, schedule: DriverHirArchiveScheduleV1,
+        policy: DriverHirPostValidationPolicyOwnerV1, inventory: DriverHirArchiveInventoryV1
+) -> Result<DriverHirArchiveWeaveInputsV1, text>:
+    if transient_array_scope_state_v1() != 1 or schedule.shard_mode or
+            journal.events.len() != schedule.visit_order.len() or
+            journal.logical_order != schedule.logical_publication_order or
+            journal.source_binding != policy.source_binding or
+            policy.schedule_digest != schedule.schedule_digest or policy.journal_key != journal.last_key or
+            policy.registration_digest != journal.registration_digest or policy.registration_epoch != journal.registration_epoch or
+            policy.selection_digest != journal.selection.selection_digest or
+            policy.cache.directory != journal.artifacts.directory or
+            policy.cache.producer_header != journal.artifacts.producer_header or not policy.cache.enabled or
+            inventory.logical_rows.len() != driver.ctx.source_module_names_owner.len():
+        return Err("weave actual complete driver publication or policy predecessor differs")
+    var index = 0
+    while index < journal.events.len():
+        val source = schedule.visit_order[index]
+        val event = journal.events[index]
+        if event.source_index != source or event.logical_name != schedule.logical_publication_order[index] or
+                event.alias != (schedule.first_source_for_visit[index] != source) or
+                event.archive.input.closure_digest != schedule.closure_digest or
+                event.archive.input.provider_selection_digest != journal.selection.selection_digest or
+                event.archive.input.producer_header != policy.cache.producer_header:
+            return Err("weave publication changed actual visit or alias schedule")
+        # Public raw-cache/archive/journal integrity is not source-to-HIR
+        # producer admission. Each canonical body must have been issued by
+        # this driver's actual forced-source selected parse/lower transaction.
+        # Alias rows already prove the identical earlier canonical archive;
+        # independently authored alias spellings do not change its producer.
+        if not event.alias and not driver_hir_source_body_custody_matches_in_owned_scope_v1(
+                driver, event.archive, event.source_index):
+            return Err("weave original body lacks actual selected source-to-HIR producer custody")
+        index = index + 1
+    var layout_keys: [text] = []
+    for source in schedule.layout_source_order:
+        if source < 0 or source >= driver.ctx.source_module_names_owner.len():
+            return Err("weave actual layout source index invalid")
+        layout_keys.push(driver.ctx.source_module_names_owner[source])
+    if layout_keys.len() != schedule.layout_module_order.len(): return Err("weave layout label coverage differs")
+    val binding = driver_hir_weave_config_binding_in_owned_scope_v1(driver.ctx, policy)?
+    Ok(DriverHirArchiveWeaveInputsV1(journal, schedule, policy, inventory, binding, layout_keys))
+
+pub fn driver_hir_weave_inputs_v1(driver: CompilerDriver) -> Result<DriverHirArchiveWeaveInputsV1, text>:
+    if transient_array_scope_state_v1() != 0 or driver.ctx.modules.len() != 0 or
+            driver.ctx.hir_modules.len() != 0 or env_get("SIMPLE_BOOTSTRAP") == "1" or
+            driver.ctx.error_count_value > 0 or driver.ctx.poisoned_modules.len() != 0:
+        return Err("weave requires closed clean frontend and archived parser boundary")
+    val scheduled = driver.verify_hir_archive_full_publication_schedule_v1()?
+    if val Some(journal) = driver.hir_archive_publication_journal:
+        if val Some(schedule) = driver.hir_archive_schedule:
+            if val Some(policy) = driver.hir_archive_post_validation_policy:
+                val verified = driver_hir_archive_journal_verify_v1(journal, driver.ctx)?
+                val inventory = driver_hir_archive_journal_inventory_v1(journal, driver.ctx)?
+                if not transient_scope_begin(): return Err("weave input binding lease unavailable")
+                val result = driver_hir_weave_bind_inputs_borrowed_v1(driver, journal, schedule, policy, inventory)
+                val paused = transient_scope_pause()
+                val owned = if paused: transient_promote(result) else: false
+                val ended = transient_scope_end()
+                if not paused or not owned or not ended: panic("weave input binding ownership failed")
+                return result
+    Err("weave actual driver journal, schedule or captured policy unavailable")
+
+fn driver_hir_weave_source_identities_borrowed_v1(inputs: DriverHirArchiveWeaveInputsV1,
+        canonical_index: i64, facts: DriverHirArchiveWeaveFactsV1) -> Result<[text], text>:
+    if transient_array_scope_state_v1() != 1 or canonical_index < 0 or
+            canonical_index >= inputs.journal.events.len(): return Err("weave source identity lease or canonical index invalid")
+    val canonical = inputs.journal.events[canonical_index]
+    if canonical.alias: return Err("weave source identity requires actual canonical publication")
+    var identities: [text] = []
+    for event in inputs.journal.events:
+        if event.archive.archive_key != canonical.archive.archive_key: continue
+        if not facts.declarations.has(event.logical_name): return Err("weave source declaration coverage missing")
+        for identity in facts.declarations[event.logical_name].row.module_identities:
+            if not identities.contains(identity): identities.push(identity)
+    Ok(identities)
+
+fn driver_hir_weave_source_identities_v1(inputs: DriverHirArchiveWeaveInputsV1,
+        canonical_index: i64, facts: DriverHirArchiveWeaveFactsV1) -> Result<[text], text>:
+    if not transient_scope_begin(): return Err("weave source identity lease unavailable")
+    val result = driver_hir_weave_source_identities_borrowed_v1(inputs, canonical_index, facts)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: panic("weave source identity ownership failed")
+    result
+
+pub fn driver_hir_weave_recollect_facts_v1(driver: CompilerDriver, inputs: DriverHirArchiveWeaveInputsV1
+) -> Result<DriverHirArchiveWeaveFactsV1, text>:
+    if transient_array_scope_state_v1() != 0: return Err("weave collection foreign lease occupied")
+    val facts = DriverHirArchiveWeaveFactsV1()
+    # Complete declaration barrier precedes every body graph. Append order is
+    # the actual verified journal's logical insertion order, including aliases.
+    for name in inputs.journal.logical_order:
+        val declaration = driver_hir_weave_declaration_v1(name, inputs.journal.logical_archives[name], inputs.policy)?
+        val appended = driver_hir_weave_append_declaration_v1(facts, name, declaration)?
+    var index = 0
+    for event in inputs.journal.events:
+        if not event.alias:
+            val identities = driver_hir_weave_source_identities_v1(inputs, index, facts)?
+            val proven = driver_hir_weave_source_policy_v1(driver, inputs.policy, event.archive, event.source_index, identities)?
+        index = index + 1
+    # The retained partial-census branch refuses before any dereferencing
+    # layer/effect/RT/aspect body walk. Source obligations and the complete
+    # declaration barrier still precede that refusal. Do not fabricate empty
+    # body rows: the aggregate gate consumes the actual declaration census.
+    var dropped = 0
+    for name in inputs.journal.logical_order:
+        if facts.declarations[name].dropped: dropped = dropped + 1
+    if dropped > 0 and dropped < inputs.journal.logical_order.len(): return Ok(facts)
+    for name in inputs.journal.logical_order:
+        val body = driver_hir_weave_body_v1(name, inputs.journal.logical_archives[name], inputs.policy, facts)?
+        val appended = driver_hir_weave_append_body_v1(facts, name, body)?
+    Ok(facts)
+
+export DriverHirArchiveWeaveInputsV1, driver_hir_weave_inputs_v1, driver_hir_weave_recollect_facts_v1

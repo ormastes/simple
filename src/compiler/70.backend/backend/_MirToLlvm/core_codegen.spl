@@ -1,7 +1,7 @@
 use std.common.binary_io.{f64_to_bits}
 use std.common.math.ieee754_bits.{math_f64_round_to_f32_bits, math_f32_widen_bits}
 # Part 1 of src/compiler/70.backend/backend/mir_to_llvm.spl
-use compiler.backend.backend.mir_to_llvm.*
+use compiler.backend.mir_to_llvm.*
 # MIR to LLVM IR Translation
 #
 # MirToLlvm class that translates MIR to LLVM IR.
@@ -25,9 +25,9 @@ use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_funct
 # These implementation helpers belong to the SSA transform owner. The public
 # facade also exports them; its separate native-resolution regression remains
 # covered by mir_opt_facade_ssa_owner_spec.spl.
-use compiler.mir_opt.mir_opt.var_reassign_ssa.{ssa_var_transform_blocks, ssa_alloca_transform_blocks}
+use compiler.mir_opt.var_reassign_ssa.{ssa_var_transform_blocks, ssa_alloca_transform_blocks}
 use compiler.backend.backend_api.*
-use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
+use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.llvm_type_mapper.LlvmTypeMapper
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
     llvm_ir_builder_build, llvm_ir_builder_handle,
@@ -465,6 +465,8 @@ impl MirTextCodegen for MirToLlvm:
                     # constructor owner yet. Static startup boxing remains a
                     # separate unresolved path.
                     match init_const.value:
+                        case Int(word): g_init = self.translate_integer_constant_operand(word, g_ty)
+                        case Zero: g_init = if g_ty == "ptr": "null" else: self.translate_const_value(init_const.value)
                         case FloatLexeme(decimal): g_init = llvm_float_lexeme_constant(decimal, g_ty)
                         case _: g_init = self.translate_const_value(init_const.value)
                     # A Str initializer renders as a `getelementptr` PTR
@@ -1965,7 +1967,18 @@ impl MirTextCodegen for MirToLlvm:
 
         match value:
             case Int(v):
-                self.builder.emit("  {dest_name} = add {llvm_ty} {v}, 0  ; const int")
+                if llvm_ty == "ptr":
+                    # Aggregate/reference locals carry runtime words in LLVM
+                    # pointers. Preserve target-word bits, including nil 3;
+                    # integer arithmetic is never valid on an LLVM ptr.
+                    self.mark_ptr_local(dest_id)
+                    val nit = self.native_int()
+                    val word = self.pointer_constant_word(v)
+                    self.builder.emit("  {dest_name} = inttoptr {nit} {word} to ptr  ; const word")
+                elif is_integer_type(llvm_ty) or llvm_ty == "i1":
+                    self.builder.emit("  {dest_name} = add {llvm_ty} {v}, 0  ; const int")
+                else:
+                    self.codegen_error("E-BACKEND-LLVM-CONST-TYPE: integer constant cannot define {llvm_ty}; use an explicit MIR Cast for numeric conversion")
             case FloatLexeme(v):
                 val fv = llvm_float_lexeme_constant(v, llvm_ty)
                 if llvm_ty == "float":
@@ -2616,7 +2629,7 @@ impl MirTextCodegen for MirToLlvm:
         match operand.kind:
             case Const(value, const_ty):
                 match value:
-                    case Int(v): "{v}"
+                    case Int(v): self.translate_integer_constant_operand(v, self.valid_llvm_type(self.llvm_type_text(const_ty)))
                     case FloatLexeme(v): llvm_float_lexeme_constant(v, self.llvm_type_text(const_ty))
                     case Float(v): "{v}"
                     case Bool(v): if v: "1" else: "0"
@@ -2629,7 +2642,7 @@ impl MirTextCodegen for MirToLlvm:
                             val str_len = escaped_string_byte_len(v) + 1
                             val nit = self.native_int()
                             "getelementptr inbounds ([{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0)"
-                    case Zero: "0"
+                    case Zero: if self.llvm_type_text(const_ty) == "ptr": "null" else: "0"
                     case Array(elements): "zeroinitializer  ; array ({elements.len()} elements)"
                     case Tuple(elements): "zeroinitializer  ; tuple ({elements.len()} elements)"
                     case Struct(_): "zeroinitializer  ; struct"
@@ -2665,6 +2678,12 @@ impl MirTextCodegen for MirToLlvm:
                 val local_id = self.local_id_value(local)
                 self.local_value_text(local_id)
             case Const(const_val, const_ty):
+                match const_val:
+                    case Int(word):
+                        return self.translate_integer_constant_operand(word, self.valid_llvm_type(self.llvm_type_text(const_ty)))
+                    case Zero:
+                        if self.llvm_type_text(const_ty) == "ptr": return "null"
+                    case _: ()
                 # For function references, return @name directly. An
                 # ordinary named call (this path) must resolve to a
                 # colliding LOCAL definition's mangled symbol, not the bare
@@ -2701,6 +2720,26 @@ impl MirTextCodegen for MirToLlvm:
                             case _: self.translate_const_value(const_val)
                     case _:
                         self.translate_const_value(const_val)
+
+    me pointer_constant_word(word: i64) -> i64:
+        # MIR stores i64 literals even when targeting 32-bit pointer words.
+        # Normalize to their signed low32 spelling instead of handing LLVM
+        # an out-of-width native integer literal or changing the runtime tag.
+        if self.native_int() == "i32":
+            val low = word & 0xFFFFFFFF
+            return if low >= 0x80000000: low - 0x100000000 else: low
+        word
+
+    me translate_integer_constant_operand(word: i64, llvm_ty: text) -> text:
+        # Typed operands/globals need an LLVM constant expression, while
+        # translate_const defines an SSA value with an inttoptr instruction.
+        if llvm_ty == "ptr":
+            val nit = self.native_int()
+            val native_word = self.pointer_constant_word(word)
+            return "inttoptr ({nit} {native_word} to ptr)"
+        if is_integer_type(llvm_ty) or llvm_ty == "i1": return "{word}"
+        self.codegen_error("E-BACKEND-LLVM-CONST-TYPE: integer constant cannot initialize {llvm_ty}; use an explicit MIR Cast for numeric conversion")
+        "0"
 
     me translate_const_value(value: MirConstValue) -> text:
         """Translate an untyped LLVM constant.

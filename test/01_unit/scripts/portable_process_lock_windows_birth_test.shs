@@ -1,0 +1,59 @@
+#!/bin/sh
+# Exercise real native birth observation with changing emulated start ticks.
+set -eu
+case "${1:-}" in ''|--legacy-only) ;; *) exit 64 ;; esac
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) echo 'SKIPPED: Windows birth regression requires MSYS/Cygwin'; exit 0 ;; esac
+mkdir -p "$root/build/native_probe"
+work=$(mktemp -d "$root/build/native_probe/windows-lock-birth.XXXXXX")
+mkdir -p "$work/scripts/check/lib" "$work/scripts/resource"
+cp "$root/scripts/resource/windows-process-observer.ps1" "$work/scripts/resource/"
+# Inject a boot-origin shift only into this private copy. Product observation
+# still uses the actual Windows process handle and creation timestamp.
+perl -pe 's/my \$start = \$fields\[19\];/my \$start = \$fields[19] + (\$ENV{LOCK_TEST_TICK_DRIFT} \/\/ 0);/' \
+    "$root/scripts/check/lib/portable-hardlink-lock.pl" \
+    >"$work/scripts/check/lib/portable-hardlink-lock.pl"
+PORTABLE_LOCK_ATOMIC_HELPER_PATH="$work/scripts/check/lib/portable-hardlink-lock.pl"
+export PORTABLE_LOCK_ATOMIC_HELPER_PATH
+. "$root/scripts/check/lib/portable-process-lock.shs"
+fail() { echo "FAIL: $*; evidence=$work" >&2; exit 1; }
+portable_lock_acquire "$work/locks" birth 3 || fail acquire
+claim=$PORTABLE_LOCK_HANDLE
+trap 'saved=$?; portable_lock_release "$claim" || exit 99; exit "$saved"' EXIT
+if [ "${1:-}" = --legacy-only ]; then
+    perl "$PORTABLE_LOCK_ATOMIC_HELPER_PATH" claim-state \
+        "$PORTABLE_LOCK_OWNER_PID" 00 "$PORTABLE_LOCK_OWNER_PGID" >"$work/legacy-state"
+    [ "$(cat "$work/legacy-state")" = live ] || fail 'legacy identity reclaimed a live group'
+    printf 'PASS: legacy identity cannot reclaim a live native group; evidence=%s\n' "$work"
+    exit 0
+fi
+case "$(printf '%s' "$PORTABLE_LOCK_OWNER_START_HEX" | cut -c1-16)" in
+    77696e646f77733a) ;; *) fail 'claim did not use native birth identity' ;;
+esac
+export LOCK_TEST_TICK_DRIFT=50000
+portable_lock_handle_is_owned "$claim" || fail 'boot-origin shift lost live ownership'
+cp "$claim" "$work/original.claim"
+# Alter the birth identity on the same linked inode: an owner must reject it.
+perl -e '
+    open(my $read, "<", $ARGV[0]) or die $!;
+    local $/; my $bytes = <$read>; close($read) or die $!;
+    $bytes =~ s/^owner_start_hex=.*/owner_start_hex=77696e646f77733a303a31/m;
+    open(my $write, ">", $ARGV[0]) or die $!;
+    print {$write} $bytes; close($write) or die $!;
+' "$claim"
+if portable_lock_handle_is_owned "$claim"; then fail 'changed birth admitted'; fi
+cat "$work/original.claim" >"$claim"
+portable_lock_handle_is_owned "$claim" || fail 'restored birth rejected'
+if sh -c '
+    . "$1/scripts/check/lib/portable-process-lock.shs"
+    portable_lock_release "$2"
+' sh "$root" "$claim"; then fail 'foreign process released owner lock'; fi
+portable_lock_handle_is_owned "$claim" || fail 'foreign attempt damaged owner'
+perl "$PORTABLE_LOCK_ATOMIC_HELPER_PATH" claim-state \
+    "$PORTABLE_LOCK_OWNER_PID" "$PORTABLE_LOCK_OWNER_START_HEX" \
+    "$PORTABLE_LOCK_OWNER_PGID" >"$work/state"
+[ "$(cat "$work/state")" = live ] || fail 'native owner not live'
+perl "$PORTABLE_LOCK_ATOMIC_HELPER_PATH" claim-state \
+    "$PORTABLE_LOCK_OWNER_PID" 00 "$PORTABLE_LOCK_OWNER_PGID" >"$work/legacy-state"
+[ "$(cat "$work/legacy-state")" = live ] || fail 'legacy identity reclaimed a live group'
+printf 'PASS: native birth survives boot-origin drift; changed birth and foreign release rejected; evidence=%s\n' "$work"

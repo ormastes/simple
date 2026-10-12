@@ -466,6 +466,8 @@ void     rt_exit(int64_t code);
 void     rt_cli_exit(int64_t code);
 int64_t  rt_heap_registry_count(void);
 int8_t rt_transient_array_scope_begin(void);
+/* Read current scope:0 inactive,1 active/unpaused,2 active/paused. No lease. */
+int64_t rt_transient_array_scope_state_v1(void);
 int8_t rt_transient_array_scope_pause(void);
 int8_t rt_transient_array_scope_end(void);
 /* Graph-operation success for a supported root in an active paused scope,
@@ -554,6 +556,7 @@ int64_t  rt_tls_get_protocol_version(int64_t handle);
 int8_t   rt_tls_client_close(int64_t handle);
 int64_t  rt_strcat_tagged(int64_t left, int64_t right);
 int64_t  rt_any_add(int64_t left, int64_t right);
+int64_t  rt_tagged_add(int64_t left, int64_t right);
 int64_t  rt_len(int64_t value);
 int64_t  rt_to_string(int64_t value);
 int64_t  rt_raw_u64_to_string(int64_t raw);

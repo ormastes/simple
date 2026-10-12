@@ -1,4 +1,6 @@
 # @req REQ-SSPEC-COMPILER
+# @req REQ-GENERIC-ANNOTATION-FIELD
+# @req REQ-GENERIC-ANNOTATION-DIAGNOSTIC
 # @tag: unit, compiler, mir, mono, generics
 #
 # A generic struct's field can hold its type parameter directly (`item: T`,
@@ -25,7 +27,7 @@ use compiler.hir.hir_types.{HirModule}
 use compiler.mir.mir.*
 use compiler.common.driver_core_types.{driver_core_compile_options_default}
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
-use compiler.backend.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.mono.monomorphize_integration.{run_monomorphization_with_report}
 
@@ -273,36 +275,26 @@ describe "a generic fn returning a declared type: caller and callee agree":
             "    val xs = listed(\"s\")\n" +
             "    xs.len()\n"), "listed$str")
 
-fn warned(s: Shaped, code: text, needle: text) -> bool:
-    for w in s.warnings:
-        val wt: text = w
-        if wt.contains(code) and wt.contains(needle):
-            return true
-    false
-
-# The arguments of a same-module annotation (`b: Bag<text>`) are dropped
-# before HIR, so a container field read through a PARAMETER has no known
-# element type and an operator on the element is lowered on the raw word --
-# right for an integer element, wrong for text. That cannot be refused
-# outright (`Bag<i64>` code relying on it compiles and runs correctly today),
-# so it is flagged: E-MONO-040, a warning by default, an error under
-# `SIMPLE_MONO_LEVELS=E-MONO-040=error`. Never silent.
-describe "container field through a receiver of unknown instance is flagged":
-    it "[T] elements through a parameter: E-MONO-040 names the field":
+# Same-module annotations retain their arguments through the flat parser.
+# These assertions used to accept E-MONO-040 plus an integer add of text.
+describe "container field through an annotated generic receiver":
+    it "[T] elements through a text parameter concatenate":
         val s = shape(
             "fn probe(b: Bag<text>) -> text:\n" +
             "    b.items[0] + b.items[1]\n")
         expect(s.errors.len()).to_equal(0)
-        expect(warned(s, "E-MONO-040", "field `items`")).to_equal(true)
+        expect(s.warnings.len()).to_equal(0)
+        expect(verdict(s, "probe")).to_equal("concat")
 
-    it "T? payload through a parameter: E-MONO-040 names the field":
+    it "T? payload through a text parameter concatenates":
         val s = shape(
             "fn probe(b: Bag<text>) -> text:\n" +
             "    (b.first ?? \"z\") + (b.first ?? \"y\")\n")
         expect(s.errors.len()).to_equal(0)
-        expect(warned(s, "E-MONO-040", "field `first`")).to_equal(true)
+        expect(s.warnings.len()).to_equal(0)
+        expect(verdict(s, "probe")).to_equal("concat")
 
-    it "is reported once per field, not once per read":
+    it "repeated text element reads stay typed without an unknown-instance warning":
         val s = shape(
             "fn probe(b: Bag<text>) -> text:\n" +
             "    b.items[0] + b.items[1] + b.items[2]\n")
@@ -311,7 +303,15 @@ describe "container field through a receiver of unknown instance is flagged":
             val wt: text = w
             if wt.contains("E-MONO-040"):
                 count = count + 1
-        expect(count).to_equal(1)
+        expect(count).to_equal(0)
+        expect(verdict(s, "probe")).to_equal("concat")
+
+    it "integer parameter elements retain integer arithmetic":
+        val s = shape(
+            "fn probe(b: Bag<i64>) -> i64:\n" +
+            "    b.items[0] + b.items[1]\n")
+        expect(s.warnings.len()).to_equal(0)
+        expect(verdict(s, "probe")).to_equal("add")
 
     it "a known instance is not flagged":
         val s = shape(
@@ -320,10 +320,7 @@ describe "container field through a receiver of unknown instance is flagged":
             "    b.items[0] + b.items[1]\n")
         expect(s.warnings.len()).to_equal(0)
 
-    it "a field read on a call result is refused: only the RETURN is typed":
-        # `boxit("t")` is `call ptr` (the return is typed), but its `Box<T>`
-        # annotation carries no arguments into HIR, so `.item` has no instance
-        # type and the operator is refused, as on any unknown instance.
+    it "a generic call result carries its instance arguments to a field read":
         val s = shape(
             "fn boxit<T>(x: T) -> Box<T>:\n" +
             "    Box(item: x)\n" +
@@ -331,4 +328,15 @@ describe "container field through a receiver of unknown instance is flagged":
             "fn probe() -> text:\n" +
             "    val b = boxit(\"t\")\n" +
             "    b.item + b.item\n")
-        expect(verdict(s, "probe").contains("operator overload for struct T")).to_equal(true)
+        expect(verdict(s, "probe")).to_equal("concat")
+
+    it "does not erase an invalid local generic argument to Any":
+        val file = "testdata/gcf_invalid_annotation.spl"
+        val source = PRELUDE + "fn probe(b: Bag<MissingType>) -> i64:\n    0\n"
+        var lowering = HirLowering.with_filename(file)
+        lowering.lower_module(parse_full_frontend(source, file, MODULE, Logger(level: 0)))
+        expect(lowering.errors.len()).to_be_greater_than(0)
+        var messages: [text] = []
+        for diagnostic in lowering.errors:
+            messages.push(diagnostic.message)
+        expect(messages.join("\n")).to_contain("MissingType")

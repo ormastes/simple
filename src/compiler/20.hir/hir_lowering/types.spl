@@ -9,6 +9,7 @@ use compiler.common.visibility.{effective_visibility}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.core.types.{custom_primitive_bind_symbol, custom_primitive_is_name}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.hir.hir_lowering.phase_memo_ownership.{HirPhaseMemoRoot, hir_phase_memo_promote_roots}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.io_runtime.{env_get_opt}
 
@@ -904,78 +905,68 @@ impl HirLowering:
             union_owners_ok
 
     me promote_phase_memo_transient_owners() -> bool:
-        # These phase-wide registry and memo families intentionally survive
-        # module boundaries.
-        # Their containers can first grow while a retained-parser HIR scope is
-        # active; promote every Dict and scalar-chain backing array before the
-        # scope ends or the next module reads a dangling phase-wide memo.
-        val package_dep_ok = rt_transient_heap_promote(self.field_package_dep_memo)
-        val package_name_ok = rt_transient_heap_promote(self.surface_package_name_memo)
-        val package_name_keys_ok = rt_transient_heap_promote(self.surface_package_name_memo_keys)
-        val package_name_values_ok = rt_transient_heap_promote(self.surface_package_name_memo_values)
-        val package_name_buckets_ok = rt_transient_heap_promote(self.surface_package_name_memo_hash_buckets)
-        val package_name_next_ok = rt_transient_heap_promote(self.surface_package_name_memo_hash_next)
-        val decl_owners_ok = rt_transient_heap_promote(self.surface_decl_owners)
-        val decl_names_ok = rt_transient_heap_promote(self.surface_decl_pair_names)
-        val decl_surfaces_ok = rt_transient_heap_promote(self.surface_decl_pair_surfaces)
-        val decl_buckets_ok = rt_transient_heap_promote(self.surface_decl_pair_hash_buckets)
-        val decl_next_ok = rt_transient_heap_promote(self.surface_decl_pair_hash_next)
-        val sibling_names_ok = rt_transient_heap_promote(self.package_sibling_names)
-        val sibling_canons_ok = rt_transient_heap_promote(self.package_sibling_canons)
-        val surface_index_ok = rt_transient_heap_promote(self.surface_index_by_name)
-        val explicit_target_ok = rt_transient_heap_promote(self.explicit_dep_target_memo)
-        val explicit_item_ok = rt_transient_heap_promote(self.explicit_dep_item_memo)
-        val explicit_keys_ok = rt_transient_heap_promote(self.explicit_dep_target_memo_keys)
-        val explicit_targets_ok = rt_transient_heap_promote(self.explicit_dep_target_memo_target_values)
-        val explicit_items_ok = rt_transient_heap_promote(self.explicit_dep_target_memo_item_values)
-        val explicit_buckets_ok = rt_transient_heap_promote(self.explicit_dep_target_memo_hash_buckets)
-        val explicit_next_ok = rt_transient_heap_promote(self.explicit_dep_target_memo_hash_next)
-        val payload_miss_ok = rt_transient_heap_promote(self.payload_origin_miss_memo)
-        val payload_keys_ok = rt_transient_heap_promote(self.payload_origin_miss_memo_keys)
-        val payload_buckets_ok = rt_transient_heap_promote(self.payload_origin_miss_memo_hash_buckets)
-        val payload_next_ok = rt_transient_heap_promote(self.payload_origin_miss_memo_hash_next)
-        val impl_built_ok = rt_transient_heap_promote(self.impl_index_built)
-        val impl_positions_ok = rt_transient_heap_promote(self.impl_index_positions)
-        val impl_methods_ok = rt_transient_heap_promote(self.impl_method_name_index)
-        val impl_traits_ok = rt_transient_heap_promote(self.impl_trait_name_index)
-        val name_built_ok = rt_transient_heap_promote(self.name_index_built)
-        val name_positions_ok = rt_transient_heap_promote(self.name_index_positions)
-        val name_keys_ok = rt_transient_heap_promote(self.name_index_keys)
-        val name_values_ok = rt_transient_heap_promote(self.name_index_positions_values)
-        val name_buckets_ok = rt_transient_heap_promote(self.name_index_hash_buckets)
-        val name_next_ok = rt_transient_heap_promote(self.name_index_hash_next)
-        val name_built_keys_ok = rt_transient_heap_promote(self.name_index_built_keys)
-        val name_built_buckets_ok = rt_transient_heap_promote(self.name_index_built_buckets)
-        val name_built_next_ok = rt_transient_heap_promote(self.name_index_built_next)
-        val glob_dict_ok = rt_transient_heap_promote(self.glob_reachable_miss_memo)
-        val glob_keys_ok = rt_transient_heap_promote(self.glob_reachable_miss_memo_keys)
-        val glob_buckets_ok = rt_transient_heap_promote(self.glob_reachable_miss_memo_hash_buckets)
-        val glob_next_ok = rt_transient_heap_promote(self.glob_reachable_miss_memo_hash_next)
-        # Text alias of module_filename (persistent) or the "" literal: nothing
-        # transient to own. "" may be an unregistered literal, so skip it.
+        # Phase memos survive module boundaries. A fresh native promotion walk
+        # visits persistent containers too; walking 49 owners separately repeats
+        # shared key/value graphs after every module. Batch exactly those owners
+        # so the provider's one seen set deduplicates their reachable children.
+        # Do not include the lowerer itself: module-local scratch must still die.
+        val roots: [HirPhaseMemoRoot] = [
+            HirPhaseMemoRoot.IndexMap(self.field_package_dep_memo),
+            HirPhaseMemoRoot.TextMap(self.surface_package_name_memo),
+            HirPhaseMemoRoot.Texts(self.surface_package_name_memo_keys),
+            HirPhaseMemoRoot.Texts(self.surface_package_name_memo_values),
+            HirPhaseMemoRoot.Ints(self.surface_package_name_memo_hash_buckets),
+            HirPhaseMemoRoot.Ints(self.surface_package_name_memo_hash_next),
+            HirPhaseMemoRoot.IndexLists(self.surface_decl_owners),
+            HirPhaseMemoRoot.Texts(self.surface_decl_pair_names),
+            HirPhaseMemoRoot.Ints(self.surface_decl_pair_surfaces),
+            HirPhaseMemoRoot.Ints(self.surface_decl_pair_hash_buckets),
+            HirPhaseMemoRoot.Ints(self.surface_decl_pair_hash_next),
+            HirPhaseMemoRoot.TextLists(self.package_sibling_names),
+            HirPhaseMemoRoot.TextLists(self.package_sibling_canons),
+            HirPhaseMemoRoot.IndexMap(self.surface_index_by_name),
+            HirPhaseMemoRoot.IndexMap(self.explicit_dep_target_memo),
+            HirPhaseMemoRoot.TextMap(self.explicit_dep_item_memo),
+            HirPhaseMemoRoot.Texts(self.explicit_dep_target_memo_keys),
+            HirPhaseMemoRoot.Ints(self.explicit_dep_target_memo_target_values),
+            HirPhaseMemoRoot.Texts(self.explicit_dep_target_memo_item_values),
+            HirPhaseMemoRoot.Ints(self.explicit_dep_target_memo_hash_buckets),
+            HirPhaseMemoRoot.Ints(self.explicit_dep_target_memo_hash_next),
+            HirPhaseMemoRoot.FlagMap(self.payload_origin_miss_memo),
+            HirPhaseMemoRoot.Texts(self.payload_origin_miss_memo_keys),
+            HirPhaseMemoRoot.Ints(self.payload_origin_miss_memo_hash_buckets),
+            HirPhaseMemoRoot.Ints(self.payload_origin_miss_memo_hash_next),
+            HirPhaseMemoRoot.FlagMap(self.impl_index_built),
+            HirPhaseMemoRoot.IndexLists(self.impl_index_positions),
+            HirPhaseMemoRoot.TextLists(self.impl_method_name_index),
+            HirPhaseMemoRoot.TextMap(self.impl_trait_name_index),
+            HirPhaseMemoRoot.FlagMap(self.name_index_built),
+            HirPhaseMemoRoot.IndexMap(self.name_index_positions),
+            HirPhaseMemoRoot.Texts(self.name_index_keys),
+            HirPhaseMemoRoot.Ints(self.name_index_positions_values),
+            HirPhaseMemoRoot.Ints(self.name_index_hash_buckets),
+            HirPhaseMemoRoot.Ints(self.name_index_hash_next),
+            HirPhaseMemoRoot.Texts(self.name_index_built_keys),
+            HirPhaseMemoRoot.Ints(self.name_index_built_buckets),
+            HirPhaseMemoRoot.Ints(self.name_index_built_next),
+            HirPhaseMemoRoot.FlagMap(self.glob_reachable_miss_memo),
+            HirPhaseMemoRoot.Texts(self.glob_reachable_miss_memo_keys),
+            HirPhaseMemoRoot.Ints(self.glob_reachable_miss_memo_hash_buckets),
+            HirPhaseMemoRoot.Ints(self.glob_reachable_miss_memo_hash_next),
+            HirPhaseMemoRoot.IndexMap(self.reexport_root_memo_index),
+            HirPhaseMemoRoot.TextMap(self.reexport_root_memo_item),
+            HirPhaseMemoRoot.Texts(self.reexport_root_memo_keys),
+            HirPhaseMemoRoot.Ints(self.reexport_root_memo_index_values),
+            HirPhaseMemoRoot.Texts(self.reexport_root_memo_item_values),
+            HirPhaseMemoRoot.Ints(self.reexport_root_memo_hash_buckets),
+            HirPhaseMemoRoot.Ints(self.reexport_root_memo_hash_next),
+        ]
+        val memos_ok = hir_phase_memo_promote_roots(roots)
+        # Keep the scalar text guard: the empty literal may be unregistered.
+        # Evaluate this even when the collection batch fails, as before.
         val glob_importer_owner_ok = self.glob_reachable_importer_owner == "" or
             rt_transient_heap_promote(self.glob_reachable_importer_owner)
-        val reexport_index_ok = rt_transient_heap_promote(self.reexport_root_memo_index)
-        val reexport_item_ok = rt_transient_heap_promote(self.reexport_root_memo_item)
-        val reexport_keys_ok = rt_transient_heap_promote(self.reexport_root_memo_keys)
-        val reexport_indices_ok = rt_transient_heap_promote(self.reexport_root_memo_index_values)
-        val reexport_items_ok = rt_transient_heap_promote(self.reexport_root_memo_item_values)
-        val reexport_buckets_ok = rt_transient_heap_promote(self.reexport_root_memo_hash_buckets)
-        val reexport_next_ok = rt_transient_heap_promote(self.reexport_root_memo_hash_next)
-        package_dep_ok and package_name_ok and package_name_keys_ok and
-            package_name_values_ok and package_name_buckets_ok and package_name_next_ok and
-            decl_owners_ok and decl_names_ok and decl_surfaces_ok and decl_buckets_ok and
-            decl_next_ok and sibling_names_ok and sibling_canons_ok and surface_index_ok and
-            explicit_target_ok and explicit_item_ok and explicit_keys_ok and explicit_targets_ok and
-            explicit_items_ok and explicit_buckets_ok and explicit_next_ok and payload_miss_ok and
-            payload_keys_ok and payload_buckets_ok and payload_next_ok and impl_built_ok and
-            impl_positions_ok and impl_methods_ok and impl_traits_ok and name_built_ok and
-            name_positions_ok and name_keys_ok and name_values_ok and name_buckets_ok and
-            name_next_ok and name_built_keys_ok and name_built_buckets_ok and name_built_next_ok and
-            glob_dict_ok and glob_keys_ok and glob_buckets_ok and glob_next_ok and glob_importer_owner_ok and
-            reexport_index_ok and reexport_item_ok and reexport_keys_ok and
-            reexport_indices_ok and reexport_items_ok and reexport_buckets_ok and
-            reexport_next_ok
+        memos_ok and glob_importer_owner_ok
 
     me lower_type(t: Type) -> HirType:
         # Typed rebind before matching. On the stage4 unstub path `t` can arrive
@@ -1139,56 +1130,22 @@ impl HirLowering:
     me lower_named_instance_kind(name: text, args: [Type], span: Span) -> HirTypeKind:
         """`Name<args>` annotation of a user type.
 
-        Until the parser learned to keep `Name<args>` for a name imported by
-        an explicit `use` item, every such annotation reached HIR as `Any`:
-        neither the base nor its ARGUMENTS were ever resolved, so a file
-        could spell one whose base is not resolvable here (a re-export chain
-        this module cannot follow) or whose argument is not in scope, and
-        still compile. Keeping the instance must not turn such a file into
-        an error: when the annotation does not lower cleanly, every
-        diagnostic it raised is withdrawn and it stays `Any`, as before.
-        The builtin generics (`Option`, `Result`, `Dict`) always reached HIR
-        with their arguments and keep their own diagnostics."""
+        Resolve the base and arguments without erasing ownership or hiding
+        invalid arguments. Imported declarations follow the same rule as
+        local declarations; an unresolved surface remains a diagnostic."""
         val errors_before = self.errors.len()
         self.named_instance_kind_or_any(name, self.lower_type_list(args), span, errors_before)
 
     me named_instance_kind_or_any(name: text, hir_args: [HirType], span: Span, errors_before: i64) -> HirTypeKind:
         """`lower_named_kind` for an annotation whose arguments were lowered
         after `errors_before` diagnostics; see `lower_named_instance_kind`."""
-        val kind = self.lower_named_kind(name, hir_args, span)
-        if hir_args.len() == 0 or name == "Option" or name == "Result" or name == "Dict":
-            return kind
-        if self.errors.len() == errors_before:
-            return kind
-        var kept_errors: [LoweringError] = []
-        var kept_messages: [text] = []
-        var kept_recovered: [bool] = []
-        var i = 0
-        while i < errors_before:
-            kept_errors = kept_errors.push(self.errors[i])
-            kept_messages = kept_messages.push(self.diagnostic_messages[i])
-            kept_recovered = kept_recovered.push(self.diagnostic_recovered[i])
-            i = i + 1
-        self.errors = kept_errors
-        self.diagnostic_messages = kept_messages
-        self.diagnostic_recovered = kept_recovered
-        HirTypeKind.Any
+        self.lower_named_kind(name, hir_args, span)
 
     me lower_resolved_named_kind(symbol_id: SymbolId, hir_args: [HirType], span: Span) -> HirTypeKind:
         """Named type whose base resolved to `symbol_id`.
 
-        The parser keeps `Name<args>` for ANY name a file imports by an
-        explicit `use` item -- it cannot know the kind of an imported name.
-        Only an imported class or struct (or an alias, expanded below) is an
-        instantiation whose identity and arguments carry on; an imported
-        trait or enum applied to arguments keeps the erased `Any` it had
-        before that parser rule existed."""
-        if hir_args.len() > 0 and self.type_alias_position(symbol_id) < 0:
-            if val named_info = self.symbols.get_symbol_raw(symbol_id.id):
-                val named_owner = named_info.defining_module ?? ""
-                if named_owner != "" and named_owner != self.module_filename:
-                    if named_info.kind == SymbolKind.Trait or named_info.kind == SymbolKind.Enum:
-                        return HirTypeKind.Any
+        Imported enum and trait instances retain their arguments just like
+        local ones. Type aliases expand through the common named path."""
         self.lower_named_symbol_kind(symbol_id, hir_args, span)
 
     me lower_named_kind(name: text, hir_args: [HirType], span: Span) -> HirTypeKind:
