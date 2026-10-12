@@ -70,6 +70,8 @@ Authenticate → validate schema → authorize → match environment → durably
 | Owner and algorithm | Boundary: `src/app/bootstrap_builder/transport.spl`. Algorithm/change: Capture files and links consistently with digest manifest; stage through typed broker; retain existing DAG/retry owner; allocate exclusive attempt root and resource lease; parent admits only declared validated outputs. |
 | Rejection evidence | Failure verification: AT-13,15,19,20; two-host build and failure/cancel/reap receipts. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
+Execution-provider implementation dependency: the existing `builder_worker_memory_admit_v1` in `src/app/bootstrap_builder/worker.spl` rejects every positive enforced-memory request, publishes a no-child-started receipt and settles capacity as no-parent-owned. Its process-observation request uses zero enforced bytes and `None`; this worker therefore cannot satisfy distributed enforced-memory admission. The build capsule must select a separately qualified cgroup/Job worker through its host facet before accepting dispatch. Provider qualification must demonstrate the actual per-tree memory limit, descendant containment, cancel/reap evidence and retained cleanup uncertainty. Do not reinterpret monitor-only execution as enforcement or treat a provider rejection as successful execution. The journal execution claim is only the durable authority boundary; it supplies no enforcement by itself. Implementation and real provider verification remain open.
+
 ### F08 — Shared CAS, quotas and grouped compiler state
 
 | Concern | Design |

@@ -59,6 +59,10 @@ fn submit_fixture(owner: DistributedOperationJournalV2, request: OperationEnvelo
     distributed_build_submit_v2(owner, admission_grant(), request, task,
         admission_host(), admission_environment(), admission_environment(), now, 4, 2, 3)
 
+fn begin_fixture(owner: DistributedOperationJournalV2, now: i64) -> Result<DistributedOperationJournalV2, text>:
+    distributed_build_begin_v2(owner, admission_grant(), admission_request(), admission_task(),
+        admission_host(), admission_environment(), admission_environment(), now, 4, 2, 3)
+
 describe "managed build durable submission":
     it "commits once and retains exact duplicate admission after reopen":
         val root = secure_temp_dir("build", "managed-build-admission").unwrap()
@@ -90,6 +94,11 @@ describe "managed build durable submission":
             case Ok(value): expect(value).to_be_nil()
             case Err(reason): expect(reason).to_equal("OPERATION_PAYLOAD_MISMATCH")
         expect(distributed_operation_journal_lookup_v2(admitted.journal, "operation_1").unwrap().state).to_equal("admitted")
+        match distributed_build_begin_v2(admitted.journal, admission_grant(), request, changed,
+                admission_host(), admission_environment(), admission_environment(), 100, 4, 2, 3):
+            case Ok(value): expect(value).to_be_nil()
+            case Err(reason): expect(reason).to_equal("OPERATION_PAYLOAD_MISMATCH")
+        expect(distributed_operation_journal_lookup_v2(admitted.journal, "operation_1").unwrap().state).to_equal("admitted")
         expect(distributed_operation_journal_close_v2(admitted.journal).unwrap()).to_equal(true)
         expect(dir_remove(root, true)).to_equal(true)
 
@@ -108,9 +117,7 @@ describe "managed build durable submission":
         val root = secure_temp_dir("build", "managed-build-uncertainty").unwrap()
         val owner = distributed_operation_journal_open_v2(root, "a".repeat(64), "b".repeat(64), 32).unwrap()
         val admitted = submit_fixture(owner, admission_request(), admission_task(), 100).unwrap()
-        val initial = distributed_operation_journal_lookup_v2(admitted.journal, "operation_1").unwrap()
-        val executing = distributed_operation_transition_v2(initial, "executing", "").unwrap()
-        val started = distributed_operation_journal_commit_v2(admitted.journal, executing).unwrap()
+        val started = begin_fixture(admitted.journal, 100).unwrap()
         expect(distributed_operation_journal_close_v2(started).unwrap()).to_equal(true)
         val replacement = distributed_operation_journal_open_v2(root, "a".repeat(64), "c".repeat(64), 32).unwrap()
         val recovered = distributed_operation_journal_recover_execution_v2(replacement, "operation_1").unwrap()
@@ -125,4 +132,38 @@ describe "managed build durable submission":
         val reopened = distributed_operation_journal_open_v2(root, "a".repeat(64), "d".repeat(64), 32).unwrap()
         expect(distributed_operation_journal_lookup_v2(reopened, "operation_1").unwrap().state).to_equal("outcome-unknown")
         expect(distributed_operation_journal_close_v2(reopened).unwrap()).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "reauthorizes execution and commits its claim only once":
+        val root = secure_temp_dir("build", "managed-build-execution").unwrap()
+        val owner = distributed_operation_journal_open_v2(root, "a".repeat(64), "b".repeat(64), 32).unwrap()
+        val admitted = submit_fixture(owner, admission_request(), admission_task(), 100).unwrap()
+        match begin_fixture(admitted.journal, 200):
+            case Ok(value): expect(value).to_be_nil()
+            case Err(reason): expect(reason).to_equal("GRANT_EXPIRED")
+        expect(distributed_operation_journal_lookup_v2(admitted.journal, "operation_1").unwrap().state).to_equal("admitted")
+        val started = begin_fixture(admitted.journal, 100).unwrap()
+        expect(started.sequence).to_equal(2)
+        match begin_fixture(started, 100):
+            case Ok(value): expect(value).to_be_nil()
+            case Err(reason): expect(reason).to_equal("ALREADY_EXECUTING")
+        expect(distributed_operation_journal_lookup_v2(started, "operation_1").unwrap().state).to_equal("executing")
+        expect(distributed_operation_journal_close_v2(started).unwrap()).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "preserves execution authority when recovery exhausts the journal bound":
+        val root = secure_temp_dir("build", "managed-build-journal-full").unwrap()
+        val owner = distributed_operation_journal_open_v2(root, "a".repeat(64), "b".repeat(64), 2).unwrap()
+        val admitted = submit_fixture(owner, admission_request(), admission_task(), 100).unwrap()
+        val started = begin_fixture(admitted.journal, 100).unwrap()
+        expect(distributed_operation_journal_close_v2(started).unwrap()).to_equal(true)
+        val replacement = distributed_operation_journal_open_v2(root, "a".repeat(64), "c".repeat(64), 2).unwrap()
+        match distributed_operation_journal_recover_execution_v2(replacement, "operation_1"):
+            case Ok(value): expect(value).to_be_nil()
+            case Err(reason): expect(reason).to_equal("OPERATION_JOURNAL_FULL")
+        expect(distributed_operation_journal_lookup_v2(replacement, "operation_1").unwrap().state).to_equal("executing")
+        match begin_fixture(replacement, 100):
+            case Ok(value): expect(value).to_be_nil()
+            case Err(reason): expect(reason).to_equal("ALREADY_EXECUTING")
+        expect(distributed_operation_journal_close_v2(replacement).unwrap()).to_equal(true)
         expect(dir_remove(root, true)).to_equal(true)
