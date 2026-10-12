@@ -1,0 +1,246 @@
+# Native-only fixture: genuine selected managed provider/tool owners, actual
+# parsed source surfaces, registration publication, and frozen source replay.
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_hir_archive_schedule_owner_v1.*
+use compiler.driver.driver_hir_post_validation_policy_owner_v1.*
+use compiler.driver.cache.driver_hir_archive_weave_boundary_v1.*
+use compiler.driver.cache.driver_cold_hir_weave_body_v1.{DriverColdHirWeaveBodyV1}
+use compiler.driver.cache.driver_hir_post_validation_policy_v1.{DriverHirPostValidationPolicyOwnerV1}
+use compiler.driver.cache.driver_hir_managed_runtime_selection_v1.*
+use compiler.driver.cache.driver_hir_archive_journal_v1.*
+use compiler.driver.cache.hir_body_typecheck_lease_v1.*
+use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1, hir_cache_clear_last_warnings}
+use compiler.mono.mono_archive_registration_v1.*
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirStmtKind, HirExprKind}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder, ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_registry.*
+use compiler.common.config.{Logger}
+use compiler.semantics.join_point_model.{join_point_is_forwarder}
+use compiler.semantics.rt_criticality_validation.*
+use compiler.semantics.rt_criticality.{RtBoundCapability, RT_EFFECT_ALLOC,
+    rt_closure_digest, rt_bound_manifest_replace, rt_bound_manifest_capabilities}
+use std.common.crypto.sha256.{sha256_text}
+use std.env.{env_get}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+extern fn rt_hash_text(content: text) -> i64
+
+struct WeaveObservedV1:
+    module_name: text
+    advice_name: text
+    statements: i64
+    forwarder: bool
+    default_value: i64
+    warnings: [text]
+
+fn actual_capability(module: HirModule) -> Result<RtBoundCapability, text>:
+    val declarations = rt_module_function_declarations_v1(module.name, module)
+    val names = rt_unambiguous_declaration_names_v1(declarations)
+    var rows: [RtCriticalFunctionFactsV1] = []
+    var root = ""
+    for func in module.functions.values():
+        val row = rt_function_facts_v1(module.name, module, func, names)
+        rows.push(row)
+        if func.name == "submit_view": root = rt_stable_fn_id(row.declaration.module_key, row.declaration.symbol_id)
+    if root == "": return Err("fixture actual submit_view root absent")
+    Ok(RtBoundCapability(subject_id: root,
+        closure_digest: rt_closure_digest(root, rt_criticality_graph_facts_v1(rows)),
+        effect: RT_EFFECT_ALLOC, max_units: 0, review_id: "FIXTURE-WEAVE-ACTUAL-SUBMIT"))
+
+fn registration(journal: DriverHirArchiveJournalV1, archive: HirBodyArchiveV1) -> Result<MonoArchiveRegistrationReceiptV1, text>:
+    if not transient_scope_begin(): return Err("fixture registration lease refused")
+    val loaded = hir_body_archive_load_in_owned_scope_v1(archive, archive.input)
+    val result: Result<MonoArchiveRegistrationReceiptV1, text> = if loaded.is_err(): Err(loaded.unwrap_err()) else:
+        mono_archive_collect_registration_in_owned_scope_v1(journal.registration, loaded.unwrap(), archive.input.module_name, archive)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val memo = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not memo or not ended: panic("fixture registration ownership")
+    result
+
+fn observe_borrowed(accepted: DriverHirArchiveWeaveBoundaryUseV1, key: text) -> Result<WeaveObservedV1, text>:
+    val loaded = driver_hir_archive_weave_boundary_load_in_owned_scope_v1(accepted, key)?
+    var advice = ""
+    var statements = -1
+    var forwarder = true
+    var default_value = -1
+    for func in loaded.module.functions.values():
+        if func.name != "submit_view": continue
+        statements = func.body.stmts.len()
+        forwarder = join_point_is_forwarder(func)
+        if statements != 1: return Err("fixture expected one woven statement before original tail")
+        match func.body.stmts[0].kind:
+            case HirStmtKind.Expr(expr):
+                match expr.kind:
+                    case HirExprKind.Call(callee, _, _):
+                        match callee.kind:
+                            case HirExprKind.NamedVar(_, name): advice = name
+                            case _: return Err("fixture advice callee is not named")
+                    case _: return Err("fixture first statement is not advice call")
+            case _: return Err("fixture first statement is not expression")
+    for declaration in loaded.module.structs.values():
+        if declaration.name != "View": continue
+        for field in declaration.fields:
+            if field.name != "width" or not field.has_default: continue
+            match field.default.kind:
+                case HirExprKind.IntLit(value, _): default_value = value
+                case _: return Err("fixture original default body changed")
+    Ok(WeaveObservedV1(loaded.module.name, advice, statements, forwarder, default_value, loaded.warnings))
+
+fn observe(accepted: DriverHirArchiveWeaveBoundaryUseV1, key: text) -> Result<WeaveObservedV1, text>:
+    if not transient_scope_begin(): return Err("fixture observation lease refused")
+    val result = observe_borrowed(accepted, key)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: panic("fixture woven observation ownership")
+    result
+
+fn main() -> i64:
+    val selected_result = driver_hir_capture_managed_runtime_selection_v1("llvm",
+        env_get("SIMPLE_NATIVE_BUILD_TARGET"), env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE"))
+    if selected_result.is_err(): return 1
+    val selected = selected_result.unwrap()
+    val path = "test/fixtures/compiler/hir_archive_weave_boundary/provider.spl"
+    val name = "weave.provider"
+    val alias_name = "weave.logical_alias"
+    val loaded_source = SourceFile.load(path)
+    val alternate = SourceFile.load("./" + path)
+    if loaded_source.is_err() or alternate.is_err(): return 2
+    val source = SourceFile(..loaded_source.unwrap(), module_name: name)
+    val alias = SourceFile(..alternate.unwrap(), module_name: alias_name)
+    if source.authored_path == alias.authored_path or source.content != alias.content: return 3
+    val parsed = parse_full_frontend(source.content, path, name, Logger(level: 0))
+    val builder = ModuleSurfaceBuilder.new()
+    if builder.add_parsed(parsed, source, 0).is_err() or builder.add_alias(alias).is_err(): return 4
+    val surfaces = ModuleSurfacesByName.empty()
+    if builder.finish_into(surfaces) != "": return 5
+    val driver = CompilerDriver.create(driver_core_compile_options_default())
+    driver.ctx.source_paths_owner = [source.path, alias.path]
+    driver.ctx.source_authored_paths_owner = [source.authored_path, alias.authored_path]
+    driver.ctx.source_module_names_owner = [name, alias_name]
+    driver.ctx.source_identities_owner = [sha256_text(source.content), sha256_text(source.content)]
+    driver.ctx.source_byte_lengths_owner = [source.content.len(), source.content.len()]
+    val raw_hash = rt_hash_text(source.content)
+    val retained_hash = if raw_hash == 0: 1 else: raw_hash
+    driver.ctx.source_content_hashes_owner = [retained_hash, retained_hash]
+    driver.streaming_module_surfaces_owner = surfaces
+    driver.streaming_surface_owner_ready = true
+    driver.streaming_entry_source_index_owner = -1
+    val schedule_result = driver.capture_hir_archive_streaming_schedule_v1()
+    if schedule_result.is_err(): return 6
+    val schedule = schedule_result.unwrap()
+    var lowering = HirLowering.with_filename(path)
+    val module = lowering.lower_parser_module_unstub(parsed, false)
+    val granted = actual_capability(module)
+    if granted.is_err(): return 7
+    rt_bound_manifest_replace([granted.unwrap()])
+    val input = HirBodyArchiveInputV1(source_path: path, module_name: name, is_entry: false,
+        closure_digest: schedule.closure_digest, runtime_provider_receipt_path: selected.provider.snapshot.path,
+        runtime_provider_digest: selected.provider.snapshot.digest, producer_header: selected.producer_header,
+        stage: "lowered-unresolved-v1", provider_selection_digest: selected.selection_digest,
+        source_content_digest: sha256_text(source.content), source_authored_path: source.authored_path)
+    val stored = hir_body_archive_store_v1(input, module, ["weave retained lowering warning"])
+    if stored.is_err(): return 8
+    val archive = stored.unwrap()
+    val journal_result = driver_hir_archive_journal_create_v1(driver.ctx, selected)
+    if journal_result.is_err(): return 9
+    val journal = journal_result.unwrap()
+    driver.hir_archive_publication_journal = Some(journal)
+    val registered = registration(journal, archive)
+    if registered.is_err() or driver_hir_archive_journal_publish_v1(journal, driver.ctx, 0, name, registered.unwrap()).is_err(): return 10
+    if driver_hir_archive_journal_alias_v1(journal, driver.ctx, 1, alias_name, name).is_err(): return 11
+    if driver.capture_hir_archive_post_validation_policy_v1().is_err(): return 12
+    val captured = driver_hir_archive_weave_boundary_capture_v1(driver)
+    if captured.is_err():
+        print "weave capture failed: {captured.unwrap_err()}"
+        return 13
+    val boundary = captured.unwrap()
+    var checks = 0
+    if boundary.woven_count != 1 or boundary.gate_report.weave_claims.len() != 2 or
+            boundary.gate_report.errors.len() != 0 or boundary.gate_report.gates_skipped: return 14
+    checks = checks + 1
+    if rt_bound_manifest_capabilities().len() != 0: return 15
+    checks = checks + 1
+    val used = driver_hir_archive_weave_boundary_use_v1(driver, boundary)
+    if used.is_err(): return 16
+    val accepted = used.unwrap()
+    if accepted.logical_order != [name, alias_name] or accepted.physical_module_keys != [name] or
+            accepted.physical_inventory.logical_rows[1].authored_path != alias.authored_path or
+            accepted.physical_inventory.representative_indices != [0]: return 17
+    checks = checks + 1
+    val canonical_observed = observe(accepted, name)
+    val alias_observed = observe(accepted, alias_name)
+    if canonical_observed.is_err() or alias_observed.is_err(): return 18
+    val actual = canonical_observed.unwrap()
+    val alias_actual = alias_observed.unwrap()
+    if actual.advice_name != "trace_first" or actual.statements != 1 or actual.forwarder or actual.default_value != 37 or
+            actual.warnings != ["weave retained lowering warning"] or alias_actual.advice_name != actual.advice_name or
+            alias_actual.default_value != 37 or alias_actual.warnings != actual.warnings: return 19
+    checks = checks + 1
+    if accepted.logical_frames[name].artifact_key != accepted.logical_frames[alias_name].artifact_key or
+            accepted.logical_frames[name].body_digest == archive.body_digest: return 20
+    checks = checks + 1
+    # A later compilation's real grant is untouched by read-use replay.
+    val next_grant = RtBoundCapability(..granted.unwrap(), review_id: "FIXTURE-NEXT-COMPILATION")
+    rt_bound_manifest_replace([next_grant])
+    val repeated = driver_hir_archive_weave_boundary_use_v1(driver, boundary)
+    if repeated.is_err() or repeated.unwrap().boundary_key != accepted.boundary_key or
+            rt_bound_manifest_capabilities().len() != 1 or rt_bound_manifest_capabilities()[0].review_id != next_grant.review_id:
+        return 21
+    checks = checks + 1
+    if observe(accepted, alias_name).is_err(): return 22
+    checks = checks + 1
+    val wrong_report = DriverHirArchiveWeaveBoundaryV1(..boundary, woven_count: 0)
+    if not driver_hir_archive_weave_boundary_use_v1(driver, wrong_report).is_err(): return 23
+    checks = checks + 1
+    val wrong_policy = DriverHirArchiveWeaveBoundaryV1(..boundary,
+        policy: DriverHirPostValidationPolicyOwnerV1(..boundary.policy, artifact_digest: sha256_text("different policy")))
+    if not driver_hir_archive_weave_boundary_use_v1(driver, wrong_policy).is_err(): return 24
+    checks = checks + 1
+    val wrong_pin = DriverHirArchiveWeaveBoundaryUseV1(..accepted, boundary_key: sha256_text("unregistered owner"))
+    if not observe(wrong_pin, name).is_err(): return 25
+    checks = checks + 1
+    val wrong_warning = DriverColdHirWeaveBodyV1(..accepted.logical_frames[name], warnings_digest: sha256_text("dropped warning"))
+    val wrong_frame = DriverHirArchiveWeaveBoundaryUseV1(..accepted, logical_frames: {name: wrong_warning, alias_name: wrong_warning})
+    if not observe(wrong_frame, name).is_err(): return 26
+    checks = checks + 1
+    val wrong_order = DriverHirArchiveWeaveBoundaryUseV1(..accepted, logical_order: [alias_name, name])
+    if not observe(wrong_order, name).is_err(): return 27
+    checks = checks + 1
+    val old_author = driver.ctx.source_authored_paths_owner[1]
+    driver.ctx.source_authored_paths_owner[1] = source.authored_path
+    val alias_refused = driver_hir_archive_weave_boundary_use_v1(driver, boundary).is_err()
+    driver.ctx.source_authored_paths_owner[1] = old_author
+    if not alias_refused or driver_hir_archive_weave_boundary_use_v1(driver, boundary).is_err(): return 28
+    checks = checks + 1
+    val old_identity = driver.ctx.source_identities_owner[0]
+    driver.ctx.source_identities_owner[0] = sha256_text("changed captured physical bytes")
+    val source_refused = driver_hir_archive_weave_boundary_use_v1(driver, boundary).is_err()
+    driver.ctx.source_identities_owner[0] = old_identity
+    if not source_refused or driver_hir_archive_weave_boundary_use_v1(driver, boundary).is_err(): return 29
+    checks = checks + 1
+    val old_backend = driver.ctx.options.backend
+    driver.ctx.options.backend = "interpreter"
+    val config_refused = driver_hir_archive_weave_boundary_use_v1(driver, boundary).is_err()
+    driver.ctx.options.backend = old_backend
+    if not config_refused or driver_hir_archive_weave_boundary_use_v1(driver, boundary).is_err(): return 30
+    checks = checks + 1
+    if not transient_scope_begin() or not transient_scope_pause(): return 31
+    val foreign = driver_hir_archive_weave_boundary_use_v1(driver, boundary).is_err()
+    val borrowed = driver_hir_archive_weave_boundary_load_in_owned_scope_v1(accepted, name).is_err()
+    if not foreign or not borrowed or transient_array_scope_state_v1() != 2 or not transient_scope_end(): return 32
+    checks = checks + 1
+    if observe(accepted, name).is_err() or transient_array_scope_state_v1() != 0: return 33
+    checks = checks + 1
+    if checks != 17: return 34
+    print "HIR archive weave boundary: {checks} checks passed"
+    0
