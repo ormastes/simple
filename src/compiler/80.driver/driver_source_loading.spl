@@ -1389,6 +1389,16 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
         return mapped
     ""
 
+fn _driver_nested_compiler_owner_rel_v1(module_path: text) -> text:
+    # These declared compiler families retain same-name nested owners behind
+    # their compatibility facades. Do not invent nested fallback for libraries
+    # or arbitrary packages, and do not duplicate an explicit nested spelling.
+    for family in ["blocks", "mir_opt", "backend", "loader"]:
+        val prefix = "compiler." + family + "."
+        if module_path.starts_with(prefix) and not module_path.starts_with(prefix + family + "."):
+            return family + "/" + family + "/" + module_path.substring(prefix.len()).replace(".", "/")
+    ""
+
 pub fn _driver_resolve_source_root_entry_import_v1(module_path: text, source_roots: [text]) -> SourceRootResolutionV1:
     # Match native-build's ordered explicit-root contract before probing the
     # checkout. A composition overlay is authoritative for the module it owns;
@@ -1398,6 +1408,7 @@ pub fn _driver_resolve_source_root_entry_import_v1(module_path: text, source_roo
     var probe = module_path
     while probe != "":
         val segments = probe.split(".")
+        val nested = _driver_nested_compiler_owner_rel_v1(probe)
         for source_root in source_roots:
             if source_root.ends_with(".spl"): continue
             var root = source_root
@@ -1414,11 +1425,9 @@ pub fn _driver_resolve_source_root_entry_import_v1(module_path: text, source_roo
                     case SourceRootResolutionV1.Found(_): return selected
                     case SourceRootResolutionV1.Ambiguous(_): return selected
                     case SourceRootResolutionV1.Missing: ()
-                # The loader compatibility spelling omits its nested owner
-                # directory. Probe that leaf before truncating to the facade;
-                # otherwise a preloaded relative leaf disagrees with authority.
-                if probe.starts_with("compiler.loader.") and not probe.starts_with("compiler.loader.loader."):
-                    val nested = "loader/loader/" + probe.substring("compiler.loader.".len()).replace(".", "/")
+                # Probe the declared nested leaf before parent stripping can
+                # incorrectly alias its package facade to the requested leaf.
+                if root_name == "compiler" and nested != "":
                     val nested_selected = _driver_try_numbered_entry_import_rel_checked_v1(root, nested)
                     match nested_selected:
                         case SourceRootResolutionV1.Found(_): return nested_selected
@@ -1429,9 +1438,8 @@ pub fn _driver_resolve_source_root_entry_import_v1(module_path: text, source_roo
                 case SourceRootResolutionV1.Found(_): return selected
                 case SourceRootResolutionV1.Ambiguous(_): return selected
                 case SourceRootResolutionV1.Missing: ()
-            if probe.starts_with("compiler.loader.") and not probe.starts_with("compiler.loader.loader."):
-                val nested = "compiler/loader/loader/" + probe.substring("compiler.loader.".len()).replace(".", "/")
-                val nested_selected = _driver_try_numbered_entry_import_rel_checked_v1(root, nested)
+            if nested != "":
+                val nested_selected = _driver_try_numbered_entry_import_rel_checked_v1(root, "compiler/" + nested)
                 match nested_selected:
                     case SourceRootResolutionV1.Found(_): return nested_selected
                     case SourceRootResolutionV1.Ambiguous(_): return nested_selected
