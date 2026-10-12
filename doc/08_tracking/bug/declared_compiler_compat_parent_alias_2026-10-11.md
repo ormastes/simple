@@ -1,0 +1,7 @@
+# Declared compiler compatibility owner preempted by parent facade
+
+C33 whole-build evidence reports four failed source modules: compile_options and targets cannot import compiler.mir_opt.mod symbols, while bootstrap_k1_selected and bootstrap_k1_full_static cannot import compiler.backend.codegen_types symbols. The real providers are src/compiler/60.mir_opt/mir_opt/mod.spl and src/compiler/70.backend/backend/codegen_types.spl. The failed import diagnostics identify the shorter mir_opt.__init__ and backend.__init__ facades instead.
+
+The checked declared-root resolver shortened the full import before the existing checkout compatibility mapping could resolve the nested owner. This is separate from the std family ordering repair. Share the existing ordered compiler rewrite candidates with the declared-root resolver, probe only admitted roots after all direct roots, and propagate ambiguity before shortening. Do not consult live checkout paths or rewrite export tables.
+
+Regression specs assert real physical ownership for both providers, parent source-root support, later exact overlay precedence, terminal item ownership, terminal ambiguity, and missing declared authority. Source validation is pending review; runtime specs remain unexecuted until a qualified pure-Simple runner is available. Other C33 whole failures (bare predicate imports and ImplBlock binding) remain separately unproven and outside this patch.

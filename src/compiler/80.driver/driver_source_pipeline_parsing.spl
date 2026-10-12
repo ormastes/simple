@@ -11,6 +11,8 @@ use compiler.common.driver_core_modes.{CompileMode}
 use compiler.frontend.frontend.{parse_full_frontend_with_advisory_policy_v1, parse_full_frontend_in_borrowed_scope_with_advisory_policy_v1}
 use compiler.frontend.frontend.{parse_full_frontend_target_receipted_v1,
     parse_full_frontend_target_receipted_in_borrowed_scope_v1}
+use compiler.frontend.frontend.{parse_full_frontend_target_receipted_uncached_in_borrowed_scope_v1,
+    parse_full_frontend_uncached_in_borrowed_scope_with_advisory_policy_v1}
 use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.frontend.core.lexer_struct.{core_token_text_intern_reset}
@@ -404,13 +406,20 @@ impl CompilerDriver:
         rt_transient_heap_promote(self.ctx.runtime_std_cfg_decisions[identity])
 
     me parse_target_cfg_selected_v1(source_content: text, source_path: text,
-        source_module_name: text, borrowed_scope: bool) -> Result<ParserModule, text>:
+        source_module_name: text, borrowed_scope: bool,
+        allow_cached_parse: bool = true) -> Result<ParserModule, text>:
+        if not borrowed_scope and not allow_cached_parse:
+            return Err("uncached target cfg replay requires the parent's borrowed scope")
         if not self.ctx.runtime_std_cfg_source_identity_by_path.has(source_path) or
                 not self.ctx.runtime_std_cfg_source_digest_by_path.has(source_path):
             return Err("full inventory target cfg source authority missing: {source_path}")
         val identity = self.ctx.runtime_std_cfg_source_identity_by_path[source_path]
         val source_digest = self.ctx.runtime_std_cfg_source_digest_by_path[source_path]
-        val parsed = if borrowed_scope:
+        val parsed = if borrowed_scope and not allow_cached_parse:
+            parse_full_frontend_target_receipted_uncached_in_borrowed_scope_v1(
+                source_content, source_path, source_module_name, self.ctx.logger,
+                identity, source_digest, self.ctx.native_target)
+        elif borrowed_scope:
             parse_full_frontend_target_receipted_in_borrowed_scope_v1(
                 source_content, source_path, source_module_name, self.ctx.logger,
                 identity, source_digest, self.ctx.native_target)
@@ -488,16 +497,38 @@ impl CompilerDriver:
 
     me parse_full_frontend_in_borrowed_scope_selected_v1(source_content: text, source_path: text,
         source_module_name: text) -> Result<ParserModule, text>:
+        self.parse_full_frontend_in_borrowed_scope_selected_cache_policy_v1(
+            source_content, source_path, source_module_name, true)
+
+    # Same actual selected frontend pipeline, with private/shared flat-AST
+    # restoration disabled for genuine source-to-HIR producer admission.
+    me parse_full_frontend_in_borrowed_scope_selected_uncached_v1(source_content: text, source_path: text,
+        source_module_name: text) -> Result<ParserModule, text>:
+        self.parse_full_frontend_in_borrowed_scope_selected_cache_policy_v1(
+            source_content, source_path, source_module_name, false)
+
+    me parse_full_frontend_in_borrowed_scope_selected_cache_policy_v1(source_content: text, source_path: text,
+        source_module_name: text, allow_cached_parse: bool) -> Result<ParserModule, text>:
         if self.ctx.runtime_std_full_inventory_selection != nil:
             return self.parse_target_cfg_selected_v1(source_content, source_path,
-                source_module_name, true)
-        match parse_full_frontend_in_borrowed_scope_with_advisory_policy_v1(source_content,
+                source_module_name, true, allow_cached_parse)
+        val selected = if allow_cached_parse:
+            parse_full_frontend_in_borrowed_scope_with_advisory_policy_v1(source_content,
                 source_path, source_module_name, self.ctx.logger,
                 self.ctx.frontend_advisory_policy,
                 self.ctx.environment_variant_frontend_owner_id,
                 self.ctx.environment_variant_frontend_session_id,
                 self.ctx.environment_variant_frontend_generation,
-                self.ctx.environment_variant_frontend_cache_identity):
+                self.ctx.environment_variant_frontend_cache_identity)
+        else:
+            parse_full_frontend_uncached_in_borrowed_scope_with_advisory_policy_v1(source_content,
+                source_path, source_module_name, self.ctx.logger,
+                self.ctx.frontend_advisory_policy,
+                self.ctx.environment_variant_frontend_owner_id,
+                self.ctx.environment_variant_frontend_session_id,
+                self.ctx.environment_variant_frontend_generation,
+                self.ctx.environment_variant_frontend_cache_identity)
+        match selected:
             case Ok(module): Ok(module)
             case Err(_): Err(
                 "required environment variant frontend provider unavailable for {source_path}")
@@ -509,7 +540,8 @@ impl CompilerDriver:
         source_content: text,
         source_module_name: text,
         source_index: i64,
-        canonical_path: text
+        canonical_path: text,
+        force_source_parse: bool = false
     ) -> Result<ModuleSurfaceBuilder, text>:
         if builder.frozen:
             return Err("module surface builder is frozen")
@@ -525,8 +557,12 @@ impl CompilerDriver:
             content: source_content,
             module_name: source_module_name)
         log_module_surface_stage(source_path, "parse-start")
-        val selected_module = self.parse_full_frontend_in_borrowed_scope_selected_v1(
-            source_content, source_path, source_module_name)
+        val selected_module = if force_source_parse:
+            self.parse_full_frontend_in_borrowed_scope_selected_uncached_v1(
+                source_content, source_path, source_module_name)
+        else:
+            self.parse_full_frontend_in_borrowed_scope_selected_v1(
+                source_content, source_path, source_module_name)
         val module = match selected_module:
             case Ok(value): value
             case Err(error):

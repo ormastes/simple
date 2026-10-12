@@ -1,0 +1,82 @@
+# Native only. Add hir_archive_production as an additional source root
+# for its genuine selected-source/weave fixture support.
+use support.*
+use compiler.driver.driver_pipeline_lowering.*
+use compiler.driver.driver_hir_archive_production_controller_v1.*
+use compiler.driver.cache.hir_mir_archive_consumer_v1.{mir_archive_try_production_repository_v1}
+use compiler.semantics.rt_criticality.{rt_bound_manifest_replace}
+use compiler.driver.cache.hir_mono_final_repository_v1.*
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1, hir_cache_clear_last_warnings}
+use compiler.mir._MirLowering.global_initializer_guard.{mir_global_initializer_wrapper_name}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+fn main() -> i64:
+    val setup_result = hir_archive_weave_fixture_prepare_v1(
+        "test/fixtures/compiler/hir_mir_archived_consumer/provider.spl", "mir.actual", "mir.actual.alias")
+    if setup_result.is_err(): return 1
+    val setup = setup_result.unwrap()
+    if not driver_hir_archive_production_begin_v1(setup.driver): return 2
+    setup.driver.hir_archive_managed_runtime_selection = Some(setup.selected)
+    rt_bound_manifest_replace([setup.capability])
+    if not driver_hir_archive_production_phase3_v1(setup.driver) or
+            not driver_hir_archive_production_phase4_v1(setup.driver, false, true): return 2
+    val captured = mir_archive_try_production_repository_v1(setup.driver)
+    if captured.is_err() or captured.unwrap() == nil: return 2
+    val final_ = captured.unwrap().unwrap()
+    if final_.schedule_kind != "normal-native-physical-v1" or
+            final_.emission_rows.len() != 1 or final_.ordered_inventory.len() != 2: return 3
+    # The real full0 MIR consumer must retain the first physical output while
+    # adding actual specialization-only definitions from the later logical key.
+    val target = driver_mir_target_context(setup.driver.ctx.options)
+    if setup.driver.ctx.hir_modules.len() != 0 or
+            not setup.driver.lower_to_mir_with_target_context(target, false, true) or
+            setup.driver.ctx.error_count_value != 0: return 4
+    if setup.driver.ctx.mir_modules.len() != 1 or transient_array_scope_state_v1() != 0: return 5
+    val emission = final_.emission_rows[0]
+    val output = setup.driver.ctx.mir_modules[emission.emission_name]
+    if not transient_scope_begin(): return 6
+    val selected = mono_archive_final_specialization_selections_in_owned_scope_v1(
+        setup.driver, final_, final_.ordered_inventory[1])
+    var found = 0
+    var exact = selected.is_ok()
+    if selected.is_ok():
+        for publication in selected.unwrap():
+            var matches = 0
+            for symbol in output.functions.keys():
+                if symbol.id == publication.target_symbol:
+                    matches = matches + 1
+            if matches != 1: exact = false
+            found = found + matches
+    val paused = transient_scope_pause()
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not cache_owned or not ended or not exact or found < 3: return 7
+    # Count actual emitted initializer functions, not a guessed source flag.
+    val initializer = mir_global_initializer_wrapper_name(emission.hir_owner_name)
+    var initializer_count = 0
+    for function in output.functions.values():
+        if function.name == initializer: initializer_count = initializer_count + 1
+    if initializer_count != 1 or output.statics.len() == 0: return 8
+    if not setup.driver.verify_lowered_mir_v1(): return 9
+    val errors_before = setup.driver.ctx.error_count_value
+    if not transient_scope_begin(): return 10
+    val active_refused = not setup.driver.lower_to_mir_with_target_context(target, false, true)
+    val active_preserved = transient_array_scope_state_v1() == 1
+    val foreign_paused = transient_scope_pause()
+    val paused_refused = if foreign_paused:
+        not setup.driver.lower_to_mir_with_target_context(target, false, true)
+    else:
+        false
+    val paused_preserved = transient_array_scope_state_v1() == 2
+    val foreign_ended = transient_scope_end()
+    if not active_refused or not active_preserved or not foreign_paused or not paused_refused or
+            not paused_preserved or not foreign_ended or
+            setup.driver.ctx.error_count_value != errors_before or setup.driver.ctx.mir_modules.len() != 1: return 10
+    if not driver_hir_archive_production_finish_v1(setup.driver) or
+            setup.driver.lower_to_mir_with_target_context(target, false, true) or
+            setup.driver.ctx.error_count_value != errors_before + 1: return 11
+    print "archived MIR consumer: 11 guards passed"
+    0

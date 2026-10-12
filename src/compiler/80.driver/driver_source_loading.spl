@@ -12,7 +12,7 @@ use compiler.common.module_path_naming.{module_logical_name_from_path}
 use compiler.common.source_root_resolution.{SourceRootResolutionV1,
     source_root_numbered_candidate_v1, source_root_numbered_match_v1}
 use compiler.types.type_infer.*
-use compiler.types.dim_constraints_types.{DimError}
+use compiler.types.type_infer.format_error.{format_type_infer_error_v1}
 use compiler.borrow.borrow_check.*
 use compiler.borrow.borrow_check.nll.{NLLError, nllerror_format_related}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
@@ -1089,95 +1089,52 @@ fn _driver_resolve_relative_entry_import(module_path: text, entry_dir: text) -> 
     val rel = module_path.substring(dots).replace(".", "/")
     _driver_try_entry_import_rel(rel, base_dir)
 
-fn _driver_resolve_numbered_compiler_import(module_path: text, entry_dir: text) -> text:
-    # Compiler imports dominate Stage4's entry closure. Resolve their canonical
-    # numbered layout before probing every generic stdlib family.
-    # The exact compatibility facade is intentionally owned by src/lib.
-    # PERF NOTE (doc/08_tracking/bug/native_build_entry_closure_slow_2026-07-31.md):
-    # measured via a temporary rt_file_exists probe counter that this
-    # function is a complete no-op (0 probes, `is_numbered` always false)
-    # when called from the --entry-closure BFS in compile_targets.spl
-    # (_native_build_entry_closure -> _nb_resolve_segs -> _driver_resolve_entry_import).
-    # That caller builds module_path via `_nb_join_segments` (slash-joined,
-    # e.g. "compiler/driver/foo"), never the dotted form ("compiler.driver.foo")
-    # this function's `is_numbered` gate checks for -- so the up-to-18-candidate
-    # cascade below never runs a single rt_file_exists on that path; the BFS's
-    # numbered-directory resolution actually happens earlier, in
-    # _nb_resolve_under_root via _nb_resolve_segs's own fallback loop. This
-    # function is real (and does pay the full candidate-then-rt_file_exists
-    # cost) only for dotted-module_path callers elsewhere in the driver, e.g.
-    # the phase1:load_sources closure scan in driver_source_pipeline_loading.spl.
-    # Confirmed with 31/31 sampled BFS calls at 0 probes; not the BFS bottleneck.
-    if module_path == "compiler.mir_opt":
-        return ""
+# One ordered compatibility mapping for both checkout and admitted-root lookup.
+# Full candidates must be exhausted before interpreting a suffix as an item.
+fn _driver_numbered_compiler_candidates_v1(module_path: text) -> [text]:
+    # The exact compiler.mir_opt facade is intentionally owned by src/lib.
+    if module_path == "compiler.mir_opt": return []
     val is_numbered = module_path.starts_with("compiler.") or module_path == "monomorphize" or module_path.starts_with("monomorphize.") or module_path == "linker" or module_path.starts_with("linker.")
-    if not is_numbered:
-        return ""
-    var mapped = _driver_resolve_rewritten_import(module_path, "compiler.common", "compiler/00.common", entry_dir)
-    if mapped != "":
-        return mapped
-    mapped = _driver_resolve_rewritten_import(module_path, "compiler.core", "compiler/10.frontend/core", entry_dir)
-    if mapped != "":
-        return mapped
-    mapped = _driver_resolve_rewritten_import(module_path, "compiler.frontend", "compiler/10.frontend", entry_dir)
-    if mapped != "":
-        return mapped
-    # File-direct spelling `compiler.blocks.blocks.<m>` (= 15.blocks/blocks/<m>.spl,
-    # used by parser_types_expr.spl and friends to avoid the package facade)
-    # must be tried before `compiler.blocks`: otherwise it maps to the
-    # nonexistent 15.blocks/blocks/blocks/<m>.spl, the parent-strip fallback
-    # lands on 15.blocks/blocks.spl, and the alias collides with the real
-    # value.spl ("native module name collision ... compiler.blocks.value",
-    # stage-2 in-process run, 2026-09-25).
-    mapped = _driver_resolve_rewritten_import(module_path, "compiler.blocks.blocks", "compiler/15.blocks/blocks", entry_dir)
-    if mapped != "":
-        return mapped
-    mapped = _driver_resolve_rewritten_import(module_path, "compiler.blocks", "compiler/15.blocks/blocks", entry_dir)
-    if mapped != "":
-        return mapped
-    mapped = _driver_resolve_rewritten_import(module_path, "compiler.hir", "compiler/20.hir", entry_dir)
-    if mapped != "":
-        return mapped
-    mapped = _driver_resolve_rewritten_import(module_path, "compiler.traits", "compiler/25.traits", entry_dir)
-    if mapped != "":
-        return mapped
-    mapped = _driver_resolve_rewritten_import(module_path, "compiler.types", "compiler/30.types", entry_dir)
-    if mapped != "":
-        return mapped
-    mapped = _driver_resolve_rewritten_import(module_path, "compiler.semantics", "compiler/35.semantics", entry_dir)
-    if mapped != "":
-        return mapped
-    mapped = _driver_resolve_rewritten_import(module_path, "compiler.monomorphize", "compiler/40.mono/monomorphize", entry_dir)
-    if mapped != "":
-        return mapped
-    mapped = _driver_resolve_rewritten_import(module_path, "monomorphize", "compiler/40.mono/monomorphize", entry_dir)
-    if mapped != "":
-        return mapped
-    mapped = _driver_resolve_rewritten_import(module_path, "compiler.mir", "compiler/50.mir", entry_dir)
-    if mapped != "":
-        return mapped
-    mapped = _driver_resolve_rewritten_import(module_path, "compiler.borrow", "compiler/55.borrow", entry_dir)
-    if mapped != "":
-        return mapped
-    mapped = _driver_resolve_rewritten_import(module_path, "compiler.mir_opt", "compiler/60.mir_opt/mir_opt", entry_dir)
-    if mapped != "":
-        return mapped
-    mapped = _driver_resolve_rewritten_import(module_path, "compiler.backend", "compiler/70.backend", entry_dir)
-    if mapped != "":
-        return mapped
-    mapped = _driver_resolve_rewritten_import(module_path, "compiler.driver", "compiler/80.driver", entry_dir)
-    if mapped != "":
-        return mapped
-    mapped = _driver_resolve_rewritten_import(module_path, "compiler.shb", "compiler/80.driver/shb", entry_dir)
-    if mapped != "":
-        return mapped
-    mapped = _driver_resolve_rewritten_import(module_path, "compiler.interpreter", "compiler/95.interp/interpreter", entry_dir)
-    if mapped != "":
-        return mapped
-    mapped = _driver_resolve_rewritten_import(module_path, "linker", "compiler/70.backend/linker", entry_dir)
-    if mapped != "":
-        return mapped
-    _driver_resolve_rewritten_import(module_path, "compiler.backend", "compiler/70.backend/backend", entry_dir)
+    if not is_numbered: return []
+    var candidates: [text] = []
+    val mappings: [[text]] = [
+        ["compiler.common", "compiler/00.common"],
+        ["compiler.core", "compiler/10.frontend/core"],
+        ["compiler.frontend", "compiler/10.frontend"],
+        ["compiler.blocks.blocks", "compiler/15.blocks/blocks"],
+        ["compiler.blocks", "compiler/15.blocks/blocks"],
+        ["compiler.hir", "compiler/20.hir"],
+        ["compiler.traits", "compiler/25.traits"],
+        ["compiler.types", "compiler/30.types"],
+        ["compiler.semantics", "compiler/35.semantics"],
+        ["compiler.monomorphize", "compiler/40.mono/monomorphize"],
+        ["monomorphize", "compiler/40.mono/monomorphize"],
+        ["compiler.mir", "compiler/50.mir"],
+        ["compiler.borrow", "compiler/55.borrow"],
+        ["compiler.mir_opt", "compiler/60.mir_opt/mir_opt"],
+        ["compiler.loader", "compiler/99.loader"],
+        ["compiler.backend", "compiler/70.backend"],
+        ["compiler.driver", "compiler/80.driver"],
+        ["compiler.shb", "compiler/80.driver/shb"],
+        ["compiler.interpreter", "compiler/95.interp/interpreter"],
+        ["linker", "compiler/70.backend/linker"],
+        ["compiler.backend", "compiler/70.backend/backend"],
+        ["compiler.loader", "compiler/99.loader/loader"]
+    ]
+    for mapping in mappings:
+        val prefix = mapping[0]
+        if module_path == prefix or module_path.starts_with(prefix + "."):
+            var relative = mapping[1]
+            if module_path.len() > prefix.len():
+                relative = relative + "/" + module_path.substring(prefix.len() + 1).replace(".", "/")
+            candidates = candidates.push(relative)
+    candidates
+
+fn _driver_resolve_numbered_compiler_import(module_path: text, entry_dir: text) -> text:
+    for relative in _driver_numbered_compiler_candidates_v1(module_path):
+        val selected = _driver_try_entry_import_rel(relative, entry_dir)
+        if selected != "": return selected
+    ""
 
 fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> text:
     val relative = _driver_resolve_relative_entry_import(module_path, entry_dir)
@@ -1400,6 +1357,9 @@ fn _driver_nested_compiler_owner_rel_v1(module_path: text) -> text:
     ""
 
 pub fn _driver_resolve_source_root_entry_import_v1(module_path: text, source_roots: [text]) -> SourceRootResolutionV1:
+    _driver_resolve_source_root_entry_import_from_v1(module_path, source_roots, "")
+
+pub fn _driver_resolve_source_root_entry_import_from_v1(module_path: text, source_roots: [text], entry_dir: text) -> SourceRootResolutionV1:
     # Match native-build's ordered explicit-root contract before probing the
     # checkout. A composition overlay is authoritative for the module it owns;
     # re-resolving that name in src/ silently restores an excluded provider.
@@ -1422,7 +1382,8 @@ pub fn _driver_resolve_source_root_entry_import_v1(module_path: text, source_roo
                 val stripped = segments.slice(1, segments.len()).join("/")
                 val selected = _driver_try_numbered_entry_import_rel_checked_v1(root, stripped)
                 match selected:
-                    case SourceRootResolutionV1.Found(_): return selected
+                    case SourceRootResolutionV1.Found(path):
+                        if _driver_source_root_hit_allowed_v1(path, probe == module_path): return selected
                     case SourceRootResolutionV1.Ambiguous(_): return selected
                     case SourceRootResolutionV1.Missing: ()
                 # Probe the declared nested leaf before parent stripping can
@@ -1435,7 +1396,8 @@ pub fn _driver_resolve_source_root_entry_import_v1(module_path: text, source_roo
                         case SourceRootResolutionV1.Missing: ()
             val selected = _driver_try_numbered_entry_import_rel_checked_v1(root, probe.replace(".", "/"))
             match selected:
-                case SourceRootResolutionV1.Found(_): return selected
+                case SourceRootResolutionV1.Found(path):
+                    if _driver_source_root_hit_allowed_v1(path, probe == module_path): return selected
                 case SourceRootResolutionV1.Ambiguous(_): return selected
                 case SourceRootResolutionV1.Missing: ()
             if nested != "":
@@ -1444,8 +1406,29 @@ pub fn _driver_resolve_source_root_entry_import_v1(module_path: text, source_roo
                     case SourceRootResolutionV1.Found(_): return nested_selected
                     case SourceRootResolutionV1.Ambiguous(_): return nested_selected
                     case SourceRootResolutionV1.Missing: ()
+        # Parent stripping (`use module.item`) must not outrank the checkout
+        # resolver at the SAME spelling. The checkout owns layout rewrites the
+        # roots cannot see (`compiler.backend.X` -> 70.backend/backend/X,
+        # `compiler.mir_opt.X` -> 60.mir_opt/mir_opt/X). Stripping first
+        # answered such a module with its ancestor facade
+        # (70.backend/__init__.spl) and bound the import spelling to it.
+        # Rule: a root wins for a spelling that exists under it; after
+        # stripping it may answer only with a module FILE (`use module.item`),
+        # never a package facade (_driver_source_root_hit_allowed_v1);
+        # once the checkout resolves the current spelling, report Missing so
+        # the fallback selects that file.
+        if _driver_resolve_entry_import_exact(probe, entry_dir) != "":
+            return SourceRootResolutionV1.Missing
         probe = _driver_entry_import_parent(probe)
     SourceRootResolutionV1.Missing
+
+fn _driver_source_root_hit_allowed_v1(path: text, exact_spelling: bool) -> bool:
+    # A stripped spelling names `module.item`. Its module is a file. A
+    # package facade reached that way is an ANCESTOR of the module that was
+    # asked for (`backend.env` -> 70.backend/__init__.spl): binding it pulls
+    # the whole facade into the closure under the wrong name.
+    if exact_spelling: return true
+    not (path.ends_with("/mod.spl") or path.ends_with("/__init__.spl"))
 
 pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
     """File path backing a Simple import path, or "" when none exists.
@@ -1710,43 +1693,7 @@ pub fn _driver_collect_sources_via_find(paths: [text]) -> [SourceFile]:
 # appended as "|||HELP:message".
 
 pub fn _format_type_infer_error(err: TypeInferError) -> text:
-    """Format a TypeInferError into a structured error string with related info."""
-    val span = err.span()
-    val msg = err.message()
-    var result = "{span.line}:{span.col}: {msg}"
-    # Add related information based on error variant
-    match err:
-        case TypeInferError.Mismatch(expected, found, s):
-            if expected.span.line > 0:
-                result = result + "|||RELATED:{expected.span.line}:{expected.span.col}:expected type defined here"
-            if found.span.line > 0 and found.span.line != s.line:
-                result = result + "|||RELATED:{found.span.line}:{found.span.col}:found type originates here"
-        case TypeInferError.OccursCheck(var_id, ty, s):
-            if ty.span.line > 0:
-                result = result + "|||RELATED:{ty.span.line}:{ty.span.col}:recursive type reference here"
-            result = result + "|||HELP:break the recursive type by using an explicit type annotation"
-        case TypeInferError.TraitNotImplemented(ty, trait_name, s):
-            if ty.span.line > 0:
-                result = result + "|||RELATED:{ty.span.line}:{ty.span.col}:type that needs to implement '{trait_name}'"
-            result = result + "|||HELP:add an impl block: impl {trait_name} for {ty.kind}"
-        case TypeInferError.DimensionError(dim_err):
-            val de: DimError = dim_err
-            for note in de.notes:
-                match note.span:
-                    case Some(note_span):
-                        result = result + "|||RELATED:{note_span.line}:{note_span.col}:{note.message}"
-                    case nil:
-                        pass
-            match de.help:
-                case Some(help):
-                    result = result + "|||HELP:{help}"
-                case nil:
-                    pass
-        case TypeInferError.Undefined(name, s):
-            result = result + "|||HELP:check spelling or add an import for '{name}'"
-        case TypeInferError.Other(message, s):
-            pass_do_nothing
-    result
+    format_type_infer_error_v1(err)
 
 pub fn _format_nll_error(err: NLLError) -> text:
     """Format an NLLError into a structured error string with related info."""

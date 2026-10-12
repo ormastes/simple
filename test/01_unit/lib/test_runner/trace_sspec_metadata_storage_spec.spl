@@ -1,0 +1,182 @@
+# @tag:in-development
+# @req REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+# Database-owned storage for unverified SSpec metadata; this is not admission evidence.
+use std.spec.*
+use std.io.{dir_create_all, dir_remove, file_delete}
+use std.io_runtime.{getpid, time_now_unix_micros}
+use std.database.test_extended.database.{TestDatabaseExtended, load_test_database_extended}
+use std.database.core.{SdnRow}
+use std.common.traceability.storage_scalar.{encode_trace_storage_scalar}
+use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.traceability.case_events.{TraceCaseEvent}
+use std.common.traceability.run_plan.{TracePlannedCase, TraceRunPlan}
+use std.common.traceability.run_request.{TraceRunRequest}
+use std.common.traceability.sspec_inventory.{TraceSspecCase, TraceSspecPlannedDefinition, TraceSspecPlannedRequest,
+    trace_sspec_definition_id, trace_sspec_planned_case_id, trace_sspec_inventory_digest}
+
+fn _sspec_metadata_fixture_dir(label: text) -> text:
+    val dir = "build/test_fixtures/trace_sspec_metadata_{label}_{getpid()}_{time_now_unix_micros()}"
+    dir_create_all(dir)
+    dir
+
+fn _sspec_source_digest() -> text:
+    val source = "fixture source bytes for trace SSpec metadata storage"
+    var bytes: [u8] = []
+    for byte in source.bytes(): bytes.push(byte)
+    "sha256:" + sha256_u8_hex(bytes)
+
+fn _sspec_metadata_fixture(subject_id: text) -> TraceSspecPlannedRequest:
+    val source_digest = _sspec_source_digest()
+    val extractor = "simple.sspec.literal-ast/v1"
+    val item = TraceSspecCase(
+        test_path: "test/fixtures/trace_sspec_storage_spec.spl",
+        case_name: "suite > context > retains metadata",
+        leaf_name: "retains metadata",
+        kind: "slow",
+        suite_path: ["suite"],
+        context_path: ["context"],
+        start_byte: 31,
+        end_byte: 58,
+        line: 4,
+        column: 9)
+    val definition_id = trace_sspec_definition_id(source_digest, extractor, item)
+    val case_id = trace_sspec_planned_case_id(subject_id, "config:storage", "expectation:storage",
+        "binary:storage", "lane:unit", definition_id)
+    val planned = TracePlannedCase(case_id: case_id, test_path: item.test_path, case_name: item.case_name,
+        test_definition_id: definition_id, lane_id: "lane:unit")
+    val request = TraceRunRequest(subject_id: subject_id, configuration_id: "config:storage",
+        expectation_id: "expectation:storage", binary_id: "binary:storage", cases: [planned])
+    val definition = TraceSspecPlannedDefinition(case_id: case_id, test_definition_id: definition_id,
+        source_sha256: source_digest, extractor_version: extractor, definition: item)
+    val definitions = [definition]
+    TraceSspecPlannedRequest(request: request, definitions: definitions,
+        inventory_digest: trace_sspec_inventory_digest(request, definitions).unwrap(), evidence_validity: "unverified")
+
+fn _sspec_storage_plan(run_id: text, metadata: TraceSspecPlannedRequest) -> TraceRunPlan:
+    TraceRunPlan(run_id: run_id, subject_id: metadata.request.subject_id,
+        configuration_id: metadata.request.configuration_id, expectation_id: metadata.request.expectation_id,
+        binary_id: metadata.request.binary_id, cases: metadata.request.cases)
+
+describe "Trace SSpec metadata database storage":
+    it "should retain source and selector metadata as unverified after save and reload":
+        val path = _sspec_metadata_fixture_dir("roundtrip") + "/test_db.sdn"
+        var db = TestDatabaseExtended.create(path)
+        val run_id = db.start_run()
+        val metadata = _sspec_metadata_fixture("subject:storage")
+        expect(db.record_trace_run_plan(_sspec_storage_plan(run_id, metadata)).is_ok()).to_equal(true)
+        expect(db.record_trace_sspec_metadata(run_id, metadata).is_ok()).to_equal(true)
+        expect(db.save()).to_equal(true)
+
+        match load_test_database_extended(path):
+            case None: fail("metadata database could not be reloaded")
+            case Some(reloaded):
+                match reloaded.get_trace_sspec_metadata(run_id):
+                    case Err(reason): fail("stored metadata failed validation: {reason}")
+                    case Ok(None): fail("stored metadata disappeared after reload")
+                    case Ok(Some(stored)):
+                        expect(stored.evidence_validity).to_equal("unverified")
+                        expect(stored.inventory_digest).to_equal(metadata.inventory_digest)
+                        expect(stored.definitions[0].source_sha256).to_equal(metadata.definitions[0].source_sha256)
+                        expect(stored.definitions[0].definition.kind).to_equal("slow")
+                        expect(stored.definitions[0].definition.start_byte).to_equal(31)
+                        expect(stored.definitions[0].definition.end_byte).to_equal(58)
+                        expect(stored.definitions[0].definition.suite_path).to_equal(["suite"])
+                        expect(stored.definitions[0].definition.context_path).to_equal(["context"])
+
+    it "should save the plan and full metadata through one owner preparation":
+        val path = _sspec_metadata_fixture_dir("owner_roundtrip") + "/test_db.sdn"
+        var owner = RunnerTestDb(db: TestDatabaseExtended.create(path), current_run_id: "")
+        val metadata = _sspec_metadata_fixture("subject:owner")
+        match owner.prepare_trace_sspec_request(metadata):
+            case Err(reason): fail("valid owner preparation failed: {reason}")
+            case Ok(plan):
+                expect(owner.trace_run_is_prepared(plan.run_id)).to_equal(true)
+                match load_test_database_extended(path):
+                    case None: fail("owner-prepared database could not be reloaded")
+                    case Some(reloaded):
+                        match reloaded.get_trace_run_plan(plan.run_id):
+                            case Err(reason): fail("saved plan failed to reload: {reason}")
+                            case Ok(None): fail("saved plan is missing")
+                            case Ok(Some(stored_plan)):
+                                expect(stored_plan.run_id).to_equal(plan.run_id)
+                                match reloaded.get_trace_sspec_metadata(plan.run_id):
+                                    case Err(reason): fail("saved metadata failed to reload: {reason}")
+                                    case Ok(None): fail("saved metadata is missing")
+                                    case Ok(Some(stored)):
+                                        expect(stored.request.cases[0].case_id).to_equal(stored_plan.cases[0].case_id)
+                                        expect(stored.inventory_digest).to_equal(metadata.inventory_digest)
+
+    it "should poison a fresh owner after the combined intent save fails":
+        # An existing directory lets the owner stage its temporary file but
+        # makes the final rename fail through the normal save path.
+        val blocked_path = _sspec_metadata_fixture_dir("save_failure") + "/destination_is_directory"
+        dir_create_all(blocked_path)
+        var owner = RunnerTestDb(db: TestDatabaseExtended.create(blocked_path), current_run_id: "")
+        val metadata = _sspec_metadata_fixture("subject:save_failure")
+        match owner.prepare_trace_sspec_request(metadata):
+            case Ok(_): fail("database save unexpectedly replaced the destination directory")
+            case Err(reason): expect(reason).to_contain("durably prepared")
+        expect(owner.trace_run_is_prepared(owner.current_run_id)).to_equal(false)
+        expect(owner.prepare_trace_sspec_request(metadata).is_err()).to_equal(true)
+        expect(owner.save().is_err()).to_equal(true)
+        expect(owner.start_run()).to_equal("")
+        file_delete(blocked_path + ".tmp")
+        dir_remove(blocked_path, false)
+
+    it "should forbid duplicate metadata without adding another row":
+        val path = _sspec_metadata_fixture_dir("duplicate") + "/test_db.sdn"
+        var db = TestDatabaseExtended.create(path)
+        val run_id = db.start_run()
+        val metadata = _sspec_metadata_fixture("subject:storage")
+        expect(db.record_trace_run_plan(_sspec_storage_plan(run_id, metadata)).is_ok()).to_equal(true)
+        expect(db.record_trace_sspec_metadata(run_id, metadata).is_ok()).to_equal(true)
+        expect(db.record_trace_sspec_metadata(run_id, metadata).is_err()).to_equal(true)
+        match db.db.get_table("trace_sspec_metadata"):
+            case None: fail("metadata table disappeared after duplicate rejection")
+            case Some(table): expect(table.rows.len()).to_equal(1)
+
+    it "should reject a request that differs from the frozen plan before table mutation":
+        val path = _sspec_metadata_fixture_dir("plan_mismatch") + "/test_db.sdn"
+        var db = TestDatabaseExtended.create(path)
+        val run_id = db.start_run()
+        val frozen = _sspec_metadata_fixture("subject:frozen")
+        val wrong = _sspec_metadata_fixture("subject:wrong")
+        expect(db.record_trace_run_plan(_sspec_storage_plan(run_id, frozen)).is_ok()).to_equal(true)
+        expect(db.record_trace_sspec_metadata(run_id, wrong).is_err()).to_equal(true)
+        match db.db.get_table("trace_sspec_metadata"):
+            case Some(_): fail("plan mismatch mutated the metadata table")
+            case None: ()
+
+    it "should reject metadata after observations without creating its table":
+        val path = _sspec_metadata_fixture_dir("observed_first") + "/test_db.sdn"
+        var db = TestDatabaseExtended.create(path)
+        val run_id = db.start_run()
+        val metadata = _sspec_metadata_fixture("subject:storage")
+        expect(db.record_trace_run_plan(_sspec_storage_plan(run_id, metadata)).is_ok()).to_equal(true)
+        expect(db.record_trace_case_events(run_id, metadata.definitions[0].definition.test_path,
+            [TraceCaseEvent(metadata.definitions[0].definition.case_name, "started", "not_finished")]).is_ok()).to_equal(true)
+        expect(db.record_trace_sspec_metadata(run_id, metadata).is_err()).to_equal(true)
+        match db.db.get_table("trace_sspec_metadata"):
+            case Some(_): fail("observed run acquired late metadata")
+            case None: ()
+
+    it "should fail lookup when an unrelated stored metadata row is corrupted":
+        val path = _sspec_metadata_fixture_dir("unrelated_corruption") + "/test_db.sdn"
+        var db = TestDatabaseExtended.create(path)
+        val first_run = db.start_run()
+        val first = _sspec_metadata_fixture("subject:first")
+        expect(db.record_trace_run_plan(_sspec_storage_plan(first_run, first)).is_ok()).to_equal(true)
+        expect(db.record_trace_sspec_metadata(first_run, first).is_ok()).to_equal(true)
+        match db.db.get_table_mut("trace_sspec_metadata"):
+            case None: fail("metadata table missing before corruption fixture")
+            case Some(table):
+                var corrupted = table
+                val invalid_row = SdnRow.empty()
+                invalid_row.set("run_id", encode_trace_storage_scalar("unrelated-run").unwrap())
+                invalid_row.set("schema", "simple.trace.sspec-metadata-storage/v1")
+                invalid_row.set("metadata_sdn", "corrupted unrelated row")
+                invalid_row.set("evidence_validity", "unverified")
+                corrupted.add_row(invalid_row)
+                db.db.set_table("trace_sspec_metadata", corrupted)
+        expect(db.get_trace_sspec_metadata(first_run).is_err()).to_equal(true)

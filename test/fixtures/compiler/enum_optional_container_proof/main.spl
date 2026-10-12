@@ -1,0 +1,68 @@
+# Native diagnostic of the actual enum payload boundary under a remembered-HIR
+# miss. Expected and actual carrier types come from real frontend declarations
+# and the production lower_type owner. No native execution is claimed yet.
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
+
+fn boundary(mut lowering: MirLowering, expected: HirType, actual: MirType) -> bool:
+    var builder = lowering.builder
+    val local = builder.new_temp(actual)
+    lowering.builder = builder
+    # No remembered type or declared expression can mask the MIR fallback.
+    val expression = HirExpr(kind: HirExprKind.Error, has_type_: false,
+        type_: HirType(kind: HirTypeKind.Error, span: Span.empty()), span: Span.empty())
+    lowering.enum_payload_local_compatible(expected, expression, local)
+
+fn main() -> i64:
+    val source = "struct Record:\n    value: i64\nstruct Other:\n    value: i64\nfn contract(records: [Record?], plain: [Record], foreign: [Other?], integers: [i64], flags: [bool?], nested: [[Record?]]):\n    pass\n"
+    val parsed = parse_full_frontend(source, "optional_container_proof.spl",
+        "optional_container_proof", Logger(level: 0))
+    var frontend = HirLowering.with_filename("optional_container_proof.spl")
+    val module = frontend.lower_module(parsed)
+    if frontend.errors.len() != 0 or module.functions.len() != 1: return 1
+    val contract: HirFunction = module.functions.values()[0]
+    if contract.params.len() != 6: return 2
+    var lowering = MirLowering.new(module.symbols)
+    val optional_records = contract.params[0].type_
+    val declared = lowering.lower_type(optional_records)
+    if not boundary(lowering, optional_records, declared): return 3
+    if boundary(lowering, optional_records, lowering.lower_type(contract.params[1].type_)): return 4
+    if boundary(lowering, optional_records, lowering.lower_type(contract.params[2].type_)): return 5
+    if boundary(lowering, optional_records, lowering.lower_type(contract.params[3].type_)): return 6
+    if not boundary(lowering, contract.params[4].type_, lowering.lower_type(contract.params[4].type_)): return 7
+    if boundary(lowering, contract.params[4].type_, declared): return 8
+    if not boundary(lowering, contract.params[5].type_, lowering.lower_type(contract.params[5].type_)): return 9
+    # A real imported alias row has a distinct allocated SymbolId but retains
+    # the exact provider declaration spelling and defining-module owner.
+    var record = module.structs.values()[0]
+    for candidate in module.structs.values():
+        if candidate.name == "Record": record = candidate
+    val original: HirSymbol = module.symbols.symbols[record.symbol.id]
+    val alias_id = module.symbols.define_with_binding("__optional_record_alias", original.kind,
+        original.type_, original.span, original.visibility, original.is_mutable,
+        original.defining_module, true)
+    var alias = original
+    alias.id = alias_id
+    module.symbols.symbols[alias_id.id] = alias
+    val alias_type = HirType(kind: HirTypeKind.Array(HirType(kind: HirTypeKind.Optional(
+        HirType(kind: HirTypeKind.Named(alias_id, []), span: original.span)), span: original.span), nil), span: original.span)
+    if alias_id.id == record.symbol.id or not boundary(lowering, alias_type, declared): return 10
+    # Wrong presence slot and raw integer carrier cannot become optional proof.
+    val wrong_tag = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.Tuple(
+        [MirType.i64(), MirType.i64()])), 0))
+    if boundary(lowering, contract.params[4].type_, wrong_tag): return 11
+    alias.defining_module = Some("foreign.owner")
+    module.symbols.symbols[alias_id.id] = alias
+    if boundary(lowering, alias_type, declared): return 12
+    if lowering.errors.len() != 0: return 13
+    print "enum optional container proof: 13 guards passed"
+    0

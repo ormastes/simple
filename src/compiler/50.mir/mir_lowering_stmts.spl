@@ -1,4 +1,8 @@
+use compiler.mir._MirLoweringExpr.optional_record_owner.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
+use compiler.mir._MirLoweringExpr.lambda_abi.{lambda_abi_type_resolved}
+use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
 # MIR Lowering - Statement and Control Flow Lowering
 #
 # Statement and control flow lowering from HIR to MIR:
@@ -888,7 +892,7 @@ impl MirLowering:
                             # this pipeline's MIR mutates in place, not via SSA
                             # renaming) does not leak into calls of this lambda.
                             self.lambda_capture_snapshot[symbol_value_id] = self.snapshot_lambda_capture(let_init)
-                            val lambda_operand: MirOperand? = self.lower_lambda_value(let_init)
+                            val lambda_operand: MirOperand? = self.lower_lambda_value_for_type(let_init, let_type)
                             if val lifted_lambda = lambda_operand:
                                 match lifted_lambda.kind:
                                     case Const(_, lambda_type):
@@ -1292,6 +1296,7 @@ impl MirLowering:
                                     self.extern_result_locals[local.id] = true
                                 if self.static_scalar_locals.contains(init_local.id):
                                     self.static_scalar_locals[local.id] = true
+                                self.copy_optional_record_owner(init_local.id, local.id)
                                 self.copy_result_err_record_owner(init_local.id, local.id)
                                 val found_init_hir_type = self.find_local_hir_type(init_local.id)
                                 if env_get_opt("SIMPLE_ANYQ_PROBE") == Some("1"):
@@ -1300,7 +1305,18 @@ impl MirLowering:
                                             eprint("[anyq-probe] early-Let remember sym={symbol_value_id} local={local.id} init_hir_type={iht_probe.kind} effective_mir={effective_type.kind}\n")
                                         case nil:
                                             eprint("[anyq-probe] early-Let remember sym={symbol_value_id} local={local.id} init_hir_type=nil effective_mir={effective_type.kind}\n")
-                                if found_init_hir_type.?:
+                                # An explicit iso declaration owns transfer semantics;
+                                # initializer inference must not erase its scalar state.
+                                val declared_isolation_state = if let_type_present:
+                                    match let_type_value.kind:
+                                        case HirTypeKind.Isolated(_): 1
+                                        case _: 2
+                                else:
+                                    0
+                                if declared_isolation_state == 1:
+                                    val declared_resource_state = if self.mir_hir_type_is_resource_direct(let_type_value): 1 else 0
+                                    self.remember_local_hir_type(local.id, let_type_value, 1, declared_resource_state)
+                                elif found_init_hir_type.?:
                                     # Match the ordinary Let arm: keep aggregate
                                     # metadata inside its owner instead of passing
                                     # a returned HirType across the staged ABI.
@@ -1597,9 +1613,19 @@ impl MirLowering:
                                 if has_init and self.static_scalar_locals.contains(init_local.id):
                                     self.static_scalar_locals[local.id] = true
                                 if has_init:
+                                    self.copy_optional_record_owner(init_local.id, local.id)
                                     self.copy_result_err_record_owner(init_local.id, local.id)
                                     val found_init_hir_type = self.find_local_hir_type(init_local.id)
-                                    if found_init_hir_type.?:
+                                    val declared_isolation_state = if type_ != nil:
+                                        match type_.kind:
+                                            case HirTypeKind.Isolated(_): 1
+                                            case _: 2
+                                    else:
+                                        0
+                                    if declared_isolation_state == 1:
+                                        val declared_resource_state = if self.mir_hir_type_is_resource_direct(type_): 1 else 0
+                                        self.remember_local_hir_type(local.id, type_, 1, declared_resource_state)
+                                    elif found_init_hir_type.?:
                                         # AGGREGATE ABI HAZARD -- documented twice in-tree:
                                         # mir_lowering_types.spl:574-581 ("the admitted Stage 2
                                         # native ABI can corrupt an aggregate `HirType` passed
@@ -1772,10 +1798,12 @@ impl MirLowering:
                 b.emit_copy(local, result)
                 self.builder = b
                 self.unmark_runtime_value_local(local.id)
+                self.exists_collection_locals = marker_map_without(self.exists_collection_locals, local.id)
                 self.option_value_locals = marker_map_without(self.option_value_locals, local.id)
                 self.nil_locals = marker_map_without(self.nil_locals, local.id)
                 self.runtime_array_locals = marker_map_without(self.runtime_array_locals, local.id)
                 self.runtime_dict_locals = marker_map_without(self.runtime_dict_locals, local.id)
+                self.invalidate_optional_record_owner(local.id)
                 self.invalidate_result_err_record_owner(local.id)
                 self.forget_local_hir_type(local.id)
             else:
@@ -1811,6 +1839,7 @@ impl MirLowering:
                 else:
                     b.emit_copy(local, assigned_value)
                 self.builder = b
+                self.copy_optional_record_owner(assigned_value.id, local.id)
                 self.assign_result_err_record_owner(assigned_value.id, local.id)
                 if self.is_runtime_value_local(assigned_value.id):
                     self.mark_runtime_value_local(local.id)
@@ -1820,6 +1849,10 @@ impl MirLowering:
                     self.mark_tagged_text_local(local.id)
                 else:
                     self.tagged_text_locals = marker_map_without(self.tagged_text_locals, local.id)
+                if self.exists_collection_locals.contains(assigned_value.id):
+                    self.exists_collection_locals[local.id] = true
+                else:
+                    self.exists_collection_locals = marker_map_without(self.exists_collection_locals, local.id)
                 if self.option_value_locals.contains(assigned_value.id):
                     self.option_value_locals[local.id] = true
                 else:
@@ -2192,7 +2225,8 @@ impl MirLowering:
         """Lower `value` for a slot of DECLARED type `declared` (annotated
         binding, parameter, return type).
 
-        Only one shape is special: a conditional (`if` with `else`, if-chain
+        Function slots propagate their signature into a literal lambda's
+        lift. A conditional (`if` with `else`, if-chain
         with `else`, `match`) flowing into a SCALAR optional. Lowered on its
         own it joins the raw words of its arms -- `if c: 3 else: nil` yields
         the word 3 on BOTH paths -- and no later classification can tell
@@ -2201,6 +2235,27 @@ impl MirLowering:
         a scalar arm becomes Some, a nil arm None, an ambiguous arm is
         classified per arm. Everything else is plain lower_expr.
         doc/08_tracking/bug/optional_scalar_runtime_classified_three_becomes_none_2026-10-11.md"""
+        if value != nil and declared != nil:
+            match declared.kind:
+                case HirTypeKind.Function(_, _, _):
+                    match value.kind:
+                        case HirExprKind.Lambda(_, _, _):
+                            if val lifted = self.lower_lambda_value_for_type(value, Some(declared)):
+                                match lifted.kind:
+                                    case MirOperandKind.Const(_, lambda_type):
+                                        var lambda_builder = self.builder
+                                        val local = lambda_builder.emit_cast(lifted, lambda_type)
+                                        self.builder = lambda_builder
+                                        self.remember_local_hir_type(local.id, declared, 0, 0)
+                                        return local
+                                    case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                                        self.remember_local_hir_type(local.id, declared, 0, 0)
+                                        return local
+                                    case _: ()
+                            self.error_fatal("cannot materialize lambda for its declared function slot", Some(value.span))
+                            return self.builder.emit_const_int(0)
+                        case _: ()
+                case _: ()
         var scalar_optional_slot = false
         if value != nil and declared != nil:
             match declared.kind:
@@ -2919,6 +2974,7 @@ impl MirLowering:
         var shared_struct = ""
         var struct_known = true
         var all_typed = true
+        self.join_optional_record_owners(arm_locals, dest.id)
         self.join_result_err_record_owners(arm_locals, dest.id)
         var arm_i = 0
         while arm_i < arm_locals.len():
@@ -2943,6 +2999,61 @@ impl MirLowering:
         if all_typed and self.find_local_hir_type(dest.id) == nil:
             self.copy_local_hir_type_metadata(arm_locals[0].id, dest.id)
 
+    fn present_collection_binding(cond: HirExpr) -> (i64, LocalId):
+        """Recognize the existing desugared present test, using declared payload
+        provenance rather than the MIR Tuple shape of an Optional value."""
+        val missing = (-1, LocalId(id: -1))
+        match cond.kind:
+            case HirExprKind.Binary(HirBinOp.NotEq, left, right):
+                match right.kind:
+                    case HirExprKind.NilLit: ()
+                    case _: return missing
+                match left.kind:
+                    case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                        # HIR's if-val binding_source_type records the ARRAY
+                        # payload on the binder, while ExistsCheck keeps the
+                        # runtime value Optional until this present edge.
+                        # A source Optional variable must retain its storage:
+                        # assigning it in a hand-written guard cannot write
+                        # only the decoded temporary and disappear at merge.
+                        var binder_is_payload = false
+                        if val declaration = self.symbols.get_symbol_raw(symbol.id):
+                            if declaration.type_.?:
+                                val binder_type = declaration.type_ ?? HirType(kind: HirTypeKind.Error, span: cond.span)
+                                match binder_type.kind:
+                                    case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_): binder_is_payload = true
+                                    case _: ()
+                        if not binder_is_payload: return missing
+                        val raw = self.find_local(symbol.id)
+                        if raw.id < 0 or not self.exists_collection_locals.contains(raw.id): return missing
+                        if val declared = self.find_local_hir_type(raw.id):
+                            match declared.kind:
+                                case HirTypeKind.Optional(payload):
+                                    match payload.kind:
+                                        case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                                            return (symbol.id, raw)
+                                        case _: ()
+                                case _: ()
+                    case _: ()
+            case _: ()
+        missing
+
+    me decode_present_collection(raw: LocalId) -> LocalId:
+        # The present edge already proved this is not nil. Extract into a NEW
+        # local before marking it: neither Optional's original MIR/HIR type
+        # nor its mutable storage may acquire payload collection metadata.
+        if val declared = self.find_local_hir_type(raw.id):
+            match declared.kind:
+                case HirTypeKind.Optional(payload):
+                    match payload.kind:
+                        case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                            val extracted = self.option_payload_or_self(raw)
+                            return self.decode_declared_enum_payload_slot(extracted, payload)
+                        case _: ()
+                case _: ()
+        self.error_fatal("present collection binding lost declared optional payload", nil)
+        raw
+
     me lower_if(cond: HirExpr, then_: HirBlock, else_: HirBlock?, expected_type: HirType?) -> LocalId:
         """Lower if expression."""
         # The If dispatcher decodes and validates its mandatory payloads, but
@@ -2956,6 +3067,7 @@ impl MirLowering:
             self.builder = b_bad_cond
             return bad_cond
         val cond_local = self.lower_mcdc_decision(cond)
+        val collection_binding = self.present_collection_binding(cond)
 
         # `if val v = option.?:` is parser-desugared to a raw binding followed
         # by `v != nil`. Float/bool payloads must stay in that raw i64 binding
@@ -3020,7 +3132,12 @@ impl MirLowering:
         if has_if_val_scalar_binding:
             val decoded_if_val = self.enum_payload_value(if_val_raw_local, if_val_payload_type)
             self.bind_local(if_val_symbol_id, decoded_if_val)
+        if collection_binding.0 >= 0:
+            val decoded_collection = self.decode_present_collection(collection_binding.1)
+            self.bind_local(collection_binding.0, decoded_collection)
         val then_result = self.lower_block_expected(then_, expected_type)
+        if collection_binding.0 >= 0:
+            self.bind_local(collection_binding.0, collection_binding.1)
         if has_if_val_scalar_binding:
             self.bind_local(if_val_symbol_id, if_val_raw_local)
         var b3 = self.builder
@@ -3138,6 +3255,7 @@ impl MirLowering:
             # the previous arm.  Lowering here preserves source-order and
             # short-circuit behavior for condition side effects.
             val cond_local = self.lower_mcdc_decision(arm.cond)
+            val collection_binding = self.present_collection_binding(arm.cond)
 
             # Preserve `if val`'s raw optional-scalar binding contract for each
             # arm.  The condition compares the encoded value with nil; only
@@ -3187,7 +3305,12 @@ impl MirLowering:
             if has_if_val_scalar_binding:
                 val decoded_if_val = self.enum_payload_value(if_val_raw_local, if_val_payload_type)
                 self.bind_local(if_val_symbol_id, decoded_if_val)
+            if collection_binding.0 >= 0:
+                val decoded_collection = self.decode_present_collection(collection_binding.1)
+                self.bind_local(collection_binding.0, decoded_collection)
             val arm_result = self.lower_block_expected(arm.then_, expected_type)
+            if collection_binding.0 >= 0:
+                self.bind_local(collection_binding.0, collection_binding.1)
             if has_if_val_scalar_binding:
                 self.bind_local(if_val_symbol_id, if_val_raw_local)
             var b_then = self.builder
@@ -3954,8 +4077,13 @@ impl MirLowering:
         val decoded_elem = self.decode_runtime_value(elem_local, decode_elem_type)
 
         # Bind loop variable to the (decoded) element
+        var binding_element_type = element_type
+        if for_has_real_struct_name and result_err_layout_identity(fesn) != "":
+            # The call's HIR element Named ID may be provider-local. Preserve
+            # nominal storage using the proven canonical MIR record symbol.
+            binding_element_type = self.canonical_array_record_element_type(fesn)
         var b_bind = self.builder
-        val loop_var = b_bind.new_local(nil, element_type, LocalKind.Var)
+        val loop_var = b_bind.new_local(nil, binding_element_type, LocalKind.Var)
         b_bind.emit_copy(loop_var, decoded_elem)
         self.builder = b_bind
         val loop_var_id = mir_stmt_symbol_id_value(var_)

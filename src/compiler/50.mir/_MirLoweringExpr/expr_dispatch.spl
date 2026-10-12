@@ -7,7 +7,8 @@ use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir._MirLoweringExpr.static_enum_receiver_owner.*
 use compiler.mir._MirLowering.global_initializer_guard.*
 use compiler.mir._MirLowering.provider_globals.mir_global_storage_name
-use compiler.mir._MirLowering.provider_metadata.{mir_class_identity}
+use compiler.mir._MirLowering.provider_metadata.{mir_class_identity, mir_nominal_owner_matches}
+use compiler.mir.nominal_owner_diagnostics.{mir_nominal_profile_take_receipt}
 use compiler.mir._MirLoweringExpr.text_index_ranges.*
 # MIR Lowering - Expression Lowering
 #
@@ -21,6 +22,7 @@ use compiler.mir._MirLoweringExpr.text_index_ranges.*
 # - Field access
 
 use compiler.mir.mir_data.*
+use compiler.mir._MirLoweringExpr.function_signature_owner.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
@@ -858,6 +860,8 @@ impl MirLowering:
         `Error` (= unknown) rather than reuse a foreign id or capture a
         same-named type declared by a different module."""
         match declared.kind:
+            case HirTypeKind.Function(_, _, _):
+                return self.declared_function_field_signature(owner, field_idx, declared)
             case HirTypeKind.Named(declared_sym, declared_args):
                 var owner_key = ""
                 if self.struct_field_type_ownership_key.contains(owner):
@@ -892,15 +896,11 @@ impl MirLowering:
         names: `composite_layout_key` ("<defining_module>::<Name>", or the
         bare name when ownerless) or `mir_class_identity` for classes."""
         val name = self.symbols.symbol_name_scalar_raw(raw)
-        if name == "" or not owner_key.ends_with(name):
-            return false
         val defining_module = self.symbols.symbol_defining_module_scalar_raw(raw)
-        val prefix_len = owner_key.len() - name.len()
-        if prefix_len == 0:
-            return defining_module == ""
-        if defining_module != "" and prefix_len == defining_module.len() + 2 and owner_key.starts_with(defining_module):
-            return true
-        self.symbols.record_owner_identity_scalar_raw(raw) == owner_key
+        if mir_nominal_profile_take_receipt():
+            val agrees = mir_nominal_owner_matches(name, defining_module, owner_key)
+            eprint("[nominal-owner] compare symbol={raw} name={name} module={defining_module} expected={owner_key} agrees={agrees}\n")
+        mir_nominal_owner_matches(name, defining_module, owner_key)
 
     me remember_field_projection_provenance(base: HirExpr, base_local: LocalId, field_idx: i64, result: LocalId):
         """Carry nested aggregate/array identity through a field projection."""
@@ -909,7 +909,26 @@ impl MirLowering:
             if self.struct_field_type_name.contains(name):
                 val nested_types = self.struct_field_type_name[name]
                 if field_idx >= 0 and field_idx < nested_types.len():
-                    val nested_name = nested_types[field_idx]
+                    var nested_name = nested_types[field_idx]
+                    # A struct field's bare display name is not its nominal
+                    # owner. Retain the defining declaration's layout after
+                    # exact consumer-table rebinding, so Result.map can prove
+                    # the projected record without accepting a collided name.
+                    if self.struct_field_hir_type.contains(name) and self.struct_field_type_ownership_key.contains(name):
+                        val field_types = self.struct_field_hir_type[name]
+                        val ownership_keys = self.struct_field_type_ownership_key[name]
+                        if field_types != nil and ownership_keys != nil and field_idx < field_types.len() and field_idx < ownership_keys.len():
+                            val field_hir = self.declared_field_type_in_current_table(name, field_idx, field_types[field_idx])
+                            match field_hir.kind:
+                                case HirTypeKind.Named(field_symbol, _):
+                                    if val declaration = self.symbols.get_symbol_raw(field_symbol.id):
+                                        if declaration.kind == SymbolKind.Struct:
+                                            nested_name = ""
+                                            val ownership_key = ownership_keys[field_idx]
+                                            val layout_key = self.declared_struct_layout_key(ownership_key)
+                                            if ownership_key != "" and self.symbol_matches_ownership_key(field_symbol.id, ownership_key) and self.struct_field_order.has(layout_key):
+                                                nested_name = layout_key
+                                case _: ()
                     if nested_name != "":
                         self.struct_value_syms[result.id] = nested_name
             if self.struct_field_array_element_type_name.contains(name):
@@ -1027,6 +1046,25 @@ impl MirLowering:
         if val base_type = self.find_local_hir_type(base_local.id):
             match base_type.kind:
                 case HirTypeKind.Array(element_type, _) | HirTypeKind.Slice(element_type):
+                    if val stable_owner = self.array_element_struct_syms.get(base_local.id):
+                        val stable_identity = result_err_layout_identity(stable_owner)
+                        if stable_identity != "":
+                            # Stable return metadata wins over a Named ID from
+                            # another table. Only a consumer-owned declaration
+                            # with that exact identity may supply an HIR note.
+                            val checked_owner = self.checked_array_record_layout(stable_owner)
+                            if checked_owner != "": self.struct_value_syms[result.id] = checked_owner
+                            match element_type.kind:
+                                case HirTypeKind.Named(symbol, args):
+                                    if args.len() == 0:
+                                        if val declaration = self.symbols.get_symbol_raw(symbol.id):
+                                            match declaration.kind:
+                                                case SymbolKind.Struct | SymbolKind.Class:
+                                                    if result_err_layout_identity(mir_class_identity(declaration)) == stable_identity:
+                                                        self.remember_local_hir_type(result.id, element_type, 0, 0)
+                                                case _: ()
+                                case _: ()
+                            return
                     # Indexing retains the declared element owner as well as
                     # its storage representation. Imported record methods
                     # resolve through this consumer-owned Named type; a bare
@@ -2330,6 +2368,9 @@ impl MirLowering:
         2026-08-09 (6th/7th layer)."""
         val sym = self.symbols.get_symbol_raw(symbol.id)
         if val found_sym = sym:
+            val provider_name = self.provider_callable_symbol_name(symbol, found_sym.name)
+            if val provider_shape = bootstrap_fn_ret_ok_shape_lookup(provider_name):
+                return Some(provider_shape)
             if val shape = bootstrap_fn_ret_ok_shape_lookup(found_sym.name):
                 return Some(shape)
         nil
@@ -2341,6 +2382,9 @@ impl MirLowering:
         fills at the same point and for the same reason."""
         val sym = self.symbols.get_symbol_raw(symbol.id)
         if val found_sym = sym:
+            val provider_name = self.provider_callable_symbol_name(symbol, found_sym.name)
+            if val provider_shape = bootstrap_fn_ret_opt_shape_lookup(provider_name):
+                return Some(provider_shape)
             if val shape = bootstrap_fn_ret_opt_shape_lookup(found_sym.name):
                 return Some(shape)
         nil
@@ -2587,6 +2631,9 @@ impl MirLowering:
                         # `return v` with `v: i64?` from a `-> i64` function
                         # returns the payload, not the Option handle.
                         result = self.option_scalar_payload_of(result)
+                        if val result_hir = self.find_local_hir_type(result.id):
+                            if result_hir.kind == HirTypeKind.Any and self.is_runtime_value_local(result.id):
+                                result = self.decode_runtime_value(result, self.lower_type(found_return))
                     case _:
                         ()
             br = self.builder
@@ -4033,6 +4080,39 @@ impl MirLowering:
                                 self.array_element_struct_syms[array_cat_local.id] = les
                         return array_cat_local
 
+                # Only authoritative Any + tagged provenance admits dynamic
+                # arithmetic. Array/text handles alone are not Any evidence.
+                var tagged_any_add = false
+                match op:
+                    case Add:
+                        if val left_hir = self.find_local_hir_type(left_local.id):
+                            if left_hir.kind == HirTypeKind.Any and self.is_runtime_value_local(left_local.id):
+                                tagged_any_add = true
+                        if val right_hir = self.find_local_hir_type(right_local.id):
+                            if right_hir.kind == HirTypeKind.Any and self.is_runtime_value_local(right_local.id):
+                                tagged_any_add = true
+                    case _: ()
+                if tagged_any_add:
+                    val runtime_bundle = mir_expr_env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
+                    if runtime_bundle != "core-c-bootstrap" and runtime_bundle != "core_c_bootstrap" and runtime_bundle != "core-c" and runtime_bundle != "core_c":
+                        self.error_fatal("tagged Any addition requires the admitted core-c-bootstrap runtime owner", Some(expr_value.span))
+                        return left_local
+                    val tagged_left = self.box_runtime_value(left_local)
+                    val tagged_right = self.box_runtime_value(right_local)
+                    val tagged_add_fn = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_tagged_add"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var tagged_builder = self.builder
+                    val tagged_result = tagged_builder.emit_call(tagged_add_fn, [mir_operand_copy(tagged_left), mir_operand_copy(tagged_right)], MirType.i64())
+                    self.builder = tagged_builder
+                    if val added = tagged_result:
+                        self.mark_runtime_value_local(added.id)
+                        self.remember_local_hir_type(added.id, HirType(kind: HirTypeKind.Any, span: expr_value.span), 0, 0)
+                        return added
+                    self.error_fatal("unable to emit admitted tagged Any addition", Some(expr_value.span))
+                    return left_local
+
                 var bin_is_str_concat = false
                 match op:
                     case Add:
@@ -4695,6 +4775,11 @@ impl MirLowering:
                     var field_builder = self.builder
                     val field_result = field_builder.emit_get_field(mir_operand_copy(base_local), field_idx, field_type)
                     self.builder = field_builder
+                    if (field_name == "stdout" or field_name == "roots") and mir_nominal_profile_take_receipt():
+                        val field_owner_receipt = projected_struct_name ?? ""
+                        val declared_receipt = self.struct_field_hir_type.has(field_owner_receipt)
+                        val field_text_receipt = self.local_is_str(field_result)
+                        eprint("[nominal-owner] field base={base_local.id} owner={field_owner_receipt} field={field_name} index={field_idx} local={field_result.id} declared={declared_receipt} mir_text={field_text_receipt}\n")
                     if generic_field_resolved:
                         if generic_field_nested_name != "":
                             self.struct_value_syms[field_result.id] = generic_field_nested_name
@@ -4898,6 +4983,27 @@ impl MirLowering:
                     return resolved_named_local
                 if val pre_nv_glob2 = self.try_lower_global_read(pre_nv_id):
                     return pre_nv_glob2
+            # B5b shard-registry family (bug-doc phase2_matrix addendum 7): the
+            # flat short-name entry can name a symbol owned by ANOTHER module
+            # that lowered earlier in this batch (importer pre-registration),
+            # so its id is neither a local here nor a registered global read.
+            # Retry through the declaring owner's qualified scope before giving
+            # up: the declaring module's registration is authoritative over a
+            # foreign flat entry. Without this, `SdnValue.Float(f)` in the
+            # enum's own static degraded to "undefined variable SdnValue" and
+            # every enum pattern over the type collapsed to wildcards.
+            if pre_sym_id >= 0 and pre_named_local.id < 0:
+                if val foreign_symbol = self.symbols.get_symbol_raw(pre_sym_id):
+                    if val foreign_owner = foreign_symbol.defining_module:
+                        if foreign_owner != "" and foreign_owner != self.current_module_id:
+                            val qualified_retry_id = self.symbols.lookup_qualified_type_raw(
+                                foreign_owner, named_var_name)
+                            if qualified_retry_id >= 0 and qualified_retry_id != pre_sym_id:
+                                if val retry_glob = self.try_lower_global_read(qualified_retry_id):
+                                    return retry_glob
+                                val retry_local = self.find_local(qualified_retry_id)
+                                if retry_local.id >= 0:
+                                    return retry_local
             # Built-in nullary Option `None` used as a value (not a
             # call): construct Option.None (disc 1) via rt_enum_new.
             # A local of the same name shadows it (handled above).
@@ -4999,14 +5105,8 @@ impl MirLowering:
                 if has_interps:
                     self.lower_string_interpolation(value, interp_list)
                 else:
-                    # Store string as constant; runtime resolves pointer
-                    var b = self.builder
-                    val dest = b.new_temp(MirType(kind: MirTypeKind.Opaque("str")))
-                    b.emit_const(dest, MirConstValue.Str(value), MirType(kind: MirTypeKind.Opaque("str")))
-                    self.builder = b
-                    # A C-string pointer cannot retain an embedded NUL byte.
-                    # Materialize those literals with the authored byte count
-                    # before any text operation or parameter transport.
+                    # NUL literals need a counted constructor. Its input must
+                    # be raw bytes: backends already box Opaque("str") constants.
                     var literal_has_nul = false
                     var literal_byte = 0
                     val literal_byte_length = value.len()
@@ -5015,13 +5115,18 @@ impl MirLowering:
                             literal_has_nul = true
                             break
                         literal_byte = literal_byte + 1
+                    val literal_type = if literal_has_nul: MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)) else: MirType(kind: MirTypeKind.Opaque("str"))
+                    var b = self.builder
+                    val dest = b.new_temp(literal_type)
+                    b.emit_const(dest, MirConstValue.Str(value), literal_type)
+                    self.builder = b
                     if literal_has_nul:
                         var b_nul = self.builder
                         val literal_length = b_nul.new_temp(MirType.i64())
                         b_nul.emit_const(literal_length, MirConstValue.Int(literal_byte_length), MirType.i64())
                         val literal_new = MirOperand(kind: MirOperandKind.Const(
                             MirConstValue.Str("rt_string_new"),
-                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [literal_type, MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
                         ))
                         val literal_tagged = b_nul.emit_call(literal_new, [mir_operand_copy(dest), mir_operand_copy(literal_length)], MirType.i64())
                         self.builder = b_nul
@@ -5597,6 +5702,13 @@ impl MirLowering:
                     match exists_payload_type.kind:
                         case HirTypeKind.Float(_) | HirTypeKind.Bool:
                             self.remember_local_hir_type(result_local.id, exists_payload_type, 0, 0)
+                        case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                            # ExistsCheck still yields payload-or-nil. Keep an
+                            # Optional type until the authored present edge;
+                            # only that edge may mark a fresh local iterable.
+                            self.exists_collection_locals[result_local.id] = true
+                            val optional_collection = HirType(kind: HirTypeKind.Optional(exists_payload_type), span: base.span)
+                            self.remember_local_hir_type(result_local.id, optional_collection, 0, 0)
                         case HirTypeKind.Named(_, _) | HirTypeKind.DynTrait(_):
                             # The if-val binder carries a raw payload-or-nil
                             # word. Preserve its exact declared trait owner so
@@ -6027,8 +6139,20 @@ impl MirLowering:
             case StaticCall(_, _, _, _):
                 self.unsupported_expr_kind("E-MIR-EXPR-StaticCall", "static/associated method call (`Type::method(..)`)", expr_value.span)
 
-            case StructLit(_, _):
-                self.unsupported_expr_kind("E-MIR-EXPR-StructLit", "struct literal", expr_value.span)
+            case StructLit(struct_type, fields):
+                match struct_type.kind:
+                    case HirTypeKind.Named(struct_symbol, _):
+                        if val literal_owner = self.symbols.get_symbol_raw(struct_symbol.id):
+                            var struct_name = self.declared_struct_layout_key(self.composite_layout_key(literal_owner))
+                            if literal_owner.kind == SymbolKind.Class:
+                                struct_name = mir_class_identity(literal_owner)
+                            if self.struct_field_order.has(struct_name):
+                                var literal_args: [HirCallArg] = []
+                                for field in fields:
+                                    literal_args = literal_args.push(HirCallArg(has_name: true, name: field.0, value: field.1, span: field.1.span))
+                                return self.lower_struct_construct(struct_symbol, struct_name, literal_args)
+                    case _: ()
+                self.unsupported_expr_kind("E-MIR-EXPR-StructLit", "struct literal with unknown record owner", expr_value.span)
 
             case Throw(throw_value):
                 # Evaluate before abandoning the path, then close any active
