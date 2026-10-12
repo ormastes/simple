@@ -1,6 +1,7 @@
 use compiler.mono.mono_archive_publication_identity_v1.{MonoArchiveSelectedFunctionV1,
     mono_archive_selected_record_key_v1, mono_archive_selected_output_key_v1}
-# One real mono function consumer. This is not a whole-module/FIFO driver switch.
+# One real mono function consumer.
+use compiler.driver.cache.hir_mono_nominal_rewrite_v1.*
 use compiler.hir.hir_types.{HirModule, HirType, SymbolId, HirSymbol, SymbolKind, ScopeId, BUILTIN_METHOD_NONE}
 use compiler.hir.hir_definitions.{HirFunction}
 use compiler.common.dependency.visibility.{Visibility}
@@ -263,20 +264,17 @@ fn mono_archive_visit_v1(admission: MonoArchiveAdmissionV1, module_name: text, r
                                     mono_template_signature_digest_v1(mono_template_signature_v1(function)) ==
                                         mono_template_signature_digest_v1(state.spec_signatures[item.mangled_name])
                     if valid:
-                        val worker = mono_archive_scratch_pass_v1(state)
-                        worker.current_module = selected_module
-                        val rewritten = worker.rewrite_function(function)
-                        var output = decoded
-                        output.functions[rewritten.symbol] = rewritten
-                        if queued:
-                            output.symbols.register_preserved_symbol(HirSymbol(id: rewritten.symbol,
-                                name: rewritten.name, kind: SymbolKind.Function, type_: nil,
-                                scope: ScopeId(id: 0), span: rewritten.span,
-                                visibility: Visibility.Private, is_public: false, is_mutable: false,
-                                defining_module: selected_module, builtin_method_tag: BUILTIN_METHOD_NONE))
-                            if output.symbols.next_symbol_id < worker.next_symbol:
-                                output.symbols.next_symbol_id = worker.next_symbol
-                        val delta = mono_archive_delta_v1(state, worker, base, queued)
+                        val replayed = mono_archive_rewrite_complete_in_owned_scope_v1(state, decoded,
+                            selected_module, selected_symbol, request)
+                        if replayed.is_err():
+                            val failure: Result<MonoArchivePublicationV1, text> = Err(replayed.unwrap_err())
+                            val paused = transient_scope_pause()
+                            val owned = if paused: transient_promote(failure) else: false
+                            mono_archive_close_v1(paused, owned, true)
+                            return failure
+                        val output = replayed.unwrap().module
+                        val rewritten = replayed.unwrap().function
+                        val delta = replayed.unwrap().delta
                         val body_digest = sha256_text(hir_module_encode(output))
                         val function_digest = mono_archive_function_digest_v1(rewritten)
                         val delta_digest = mono_archive_delta_digest_v1(delta)
@@ -314,7 +312,6 @@ fn mono_archive_publication_matches_v1(admission: MonoArchiveAdmissionV1, receip
     if receipt.stage != "mono-function-rewrite-v1" or
             delta.base_epoch != state.epoch or delta.base_digest == "" or
             delta.base_digest != mono_archive_state_digest_v1(state) or
-            delta.next_symbol != state.next_symbol + delta.requests.len() or
             delta.specializations_created != delta.requests.len() or
             delta.signatures.len() != delta.requests.len() or
             receipt.delta_digest == "" or receipt.delta_digest != mono_archive_delta_digest_v1(delta) or
@@ -326,37 +323,25 @@ fn mono_archive_publication_matches_v1(admission: MonoArchiveAdmissionV1, receip
     if input_result.is_err(): return false
     val input = input_result.unwrap()
     if receipt.input_archive_key != mono_archive_body_input_key_v1(input) or receipt.input_body_digest != mono_archive_body_input_digest_v1(input): return false
-    # Replay the same actual request allocator against scratch indexes. Merely
-    # checking sequential IDs cannot prove structural mangling/display collision
-    # policy, concrete-type depth, or defining-module selection.
-    val replay = mono_archive_scratch_pass_v1(state)
-    replay.current_module = receipt.module_name
-    var requested: Dict<text, bool> = {}
-    var next = state.next_symbol
-    for item in delta.requests:
-        if item.symbol_id != next or requested.has(item.mangled_name) or state.spec_symbols.has(item.mangled_name) or
-                not state.facts.templates.has(item.template_name) or not delta.signatures.has(item.mangled_name) or
-                not state.facts.template_module.has(item.template_name) or
-                state.facts.template_module[item.template_name] != item.module_name: return false
-        if item.type_args.len() != state.facts.templates[item.template_name].type_params.len(): return false
-        for arg in item.type_args:
-            if not hir_type_is_concrete(arg): return false
-        val exact = mono_specialized_signature_v1(state.facts.templates[item.template_name], item.type_args, item.mangled_name)
-        val exact_digest = mono_template_signature_digest_v1(exact)
-        if exact_digest == "" or exact_digest != mono_template_signature_digest_v1(delta.signatures[item.mangled_name]): return false
-        if replay.request_specialization(item.template_name, item.type_args) != item.symbol_id or
-                replay.archive_requests.len() != requested.len() + 1 or
-                replay.archive_requests[requested.len()].mangled_name != item.mangled_name: return false
-        requested[item.mangled_name] = true
-        next = next + 1
-    for key in delta.reported_once.keys():
-        if not delta.reported_once[key] or state.reported_once.has(key): return false
-    for key in delta.unresolved_templates.keys():
-        if not delta.unresolved_templates[key] or state.unresolved_templates.has(key): return false
-    if delta.spec_display.len() != replay.spec_display.len() - state.spec_display.len(): return false
-    for key in delta.spec_display.keys():
-        if state.spec_display.has(key) or not replay.spec_display.has(key) or
-                delta.spec_display[key] != replay.spec_display[key]: return false
+    # Re-run the actual complete body in its real caller namespace. This
+    # independently reproduces every nominal allocation, transported argument,
+    # caller signature stamp, warning, diagnostic and specialization counter.
+    val loaded = mono_archive_body_input_load_in_owned_scope_v1(input)
+    if loaded.is_err(): return false
+    var request: MonoSpecializationRequestV1? = nil
+    var selected_symbol = receipt.target_symbol
+    if delta.advance_cursor:
+        if state.cursor >= state.queue.len(): return false
+        val item = state.queue[state.cursor]
+        request = Some(item)
+        if not state.facts.recipes.has(item.template_name): return false
+        selected_symbol = state.facts.recipes[item.template_name].original_symbol.id
+    val exact = mono_archive_rewrite_complete_in_owned_scope_v1(state, loaded.unwrap().module,
+        receipt.module_name, selected_symbol, request)
+    if exact.is_err() or mono_archive_delta_digest_v1(exact.unwrap().delta) != receipt.delta_digest or
+            sha256_text(hir_module_encode(exact.unwrap().module)) != receipt.output_body_digest or
+            mono_archive_function_digest_v1(exact.unwrap().function) != receipt.output_function_digest:
+        return false
     if delta.advance_cursor:
         if state.cursor >= state.queue.len(): return false
         val item: MonoSpecializationRequestV1 = state.queue[state.cursor]
@@ -398,6 +383,11 @@ fn mono_archive_apply_v1(admission: MonoArchiveAdmissionV1, receipt: MonoArchive
         state.fn_returns[mono_sym_key(item.module_name, item.symbol_id)] = signature.return_type
         state.sym_names[mono_sym_key(item.module_name, item.symbol_id)] = signature.name
         state.queue = state.queue.push(item)
+    for name in delta.symbol_patches.keys():
+        var patches: [text] = state.symbol_patches[name] ?? []
+        patches.push(delta.symbol_patches[name])
+        state.symbol_patches[name] = patches
+    for key in delta.fn_returns.keys(): state.fn_returns[key] = delta.fn_returns[key]
     for key in delta.spec_display.keys(): state.spec_display[key] = delta.spec_display[key]
     for key in delta.reported_once.keys(): state.reported_once[key] = delta.reported_once[key]
     for key in delta.unresolved_templates.keys(): state.unresolved_templates[key] = delta.unresolved_templates[key]
