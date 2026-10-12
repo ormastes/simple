@@ -1,0 +1,37 @@
+# REQ-006: backend plugin role/capability identity must remain exact.
+use std.spec
+use std.spec.step
+use compiler.common.backend_plugin.model.{BackendRole, BackendCapability, BackendPluginDescriptorV1, backend_plugin_vtable_v1_all_operations, backend_plugin_supports_role, backend_plugin_supports_target, backend_plugin_has_capability}
+
+fn membership_descriptor(roles: [BackendRole], capabilities: [BackendCapability]) -> BackendPluginDescriptorV1:
+    BackendPluginDescriptorV1(1, 9, "probe", "v1", "build", "mir", roles, ["x86_64"], capabilities, backend_plugin_vtable_v1_all_operations())
+
+describe "backend plugin enum membership":
+    it "REQ-006 distinguishes every role pair":
+        step("check both roles against both singleton role lists")
+        val roles = [BackendRole.InterpreterJit, BackendRole.CompilerAot]
+        for left in 0..2:
+            for right in 0..2:
+                val descriptor = membership_descriptor([roles[left]], [])
+                expect(backend_plugin_supports_role(descriptor, roles[right])).to_equal(left == right)
+
+    it "REQ-006 distinguishes all capability pairs":
+        step("check all six capabilities against every singleton capability list")
+        val capabilities = [BackendCapability.JitExecute, BackendCapability.ObjectEmit, BackendCapability.DebugInfo, BackendCapability.Optimization, BackendCapability.CrossTarget, BackendCapability.IncrementalCompilation]
+        for left in 0..6:
+            for right in 0..6:
+                val descriptor = membership_descriptor([], [capabilities[left]])
+                expect(backend_plugin_has_capability(descriptor, capabilities[right])).to_equal(left == right)
+
+    it "REQ-006 preserves empty, duplicate and target membership behavior":
+        step("reject absent members and retain exact target spelling")
+        val empty = membership_descriptor([], [])
+        expect(backend_plugin_supports_role(empty, BackendRole.InterpreterJit)).to_equal(false)
+        expect(backend_plugin_has_capability(empty, BackendCapability.ObjectEmit)).to_equal(false)
+        val many = membership_descriptor([BackendRole.CompilerAot, BackendRole.CompilerAot, BackendRole.InterpreterJit], [BackendCapability.CrossTarget, BackendCapability.DebugInfo, BackendCapability.CrossTarget])
+        expect(backend_plugin_supports_role(many, BackendRole.InterpreterJit)).to_equal(true)
+        expect(backend_plugin_has_capability(many, BackendCapability.DebugInfo)).to_equal(true)
+        expect(backend_plugin_has_capability(many, BackendCapability.JitExecute)).to_equal(false)
+        expect(backend_plugin_supports_target(many, "x86_64")).to_equal(true)
+        expect(backend_plugin_supports_target(many, "X86_64")).to_equal(false)
+        expect(backend_plugin_supports_target(many, "arm")).to_equal(false)
