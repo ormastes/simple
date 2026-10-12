@@ -506,3 +506,24 @@ Latest release `a95346aaef7a04c2e0935b2816e6157dd497457d` includes the typed
   unwrapped aggregate — hoist its two used scalars via inline '.?.field'
   chains before the loop (the pattern cold_full_index_producer_v1.spl:139-140
   already uses and the seed accepts).
+- Closure-verified corrections (2026-10-12, supersedes the masked standalone
+  diagnoses): (1) archive_borrowed_module_v1.spl — the itemized
+  MirHirDeclarationRepositoryV1/MirHirModuleDeclarationsV1 import IS
+  closure-effective (0 'cannot infer field type' in the entry-closure build);
+  the prior 'persists' report was the stale-snapshot bulk build. Root cause
+  remains: hir_declaration_types_v1.spl exports NOTHING and the summary
+  module's 'export use ... .*' re-export does not materialize under the seed.
+  (2) driver_pipeline_lowering.spl — true root: 'for source in
+  self.ctx.sources' holds an Exclusive borrow on self.ctx (reference 9) for
+  the whole loop, so EVERY inner self.ctx access (read probes and
+  self.ctx.add_error alike) re-acquired it. Scalar hoisting of the selection
+  alone could not cure that. Fix: snapshot ALL six self.ctx fields the loop
+  touches into locals BEFORE the loop (sources, cold_hir_typed_receipts,
+  mir_modules, runtime_std_cfg_decisions, native_target,
+  runtime_std_hir_emissions); no self.ctx borrow is live inside the loop, so
+  add_error's Exclusive acquisition is uncontended. Closure-verified: 0
+  'Capability error/Aliasing' lines. Both verified with admitted binary
+  cd1601c9 (sha matches admission.env) via entry-closure builds; the residual
+  failures in those runs are the old binary's builtin-class receipts
+  (Option/Result/Dict, fixed in fe1f4ed6d72) and shard-inventory
+  infrastructure, not these files.

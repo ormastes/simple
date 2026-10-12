@@ -449,47 +449,60 @@ impl CompilerDriver:
             # regression from 43c3f3d979a).
             val selection_inventory_digest = self.ctx.runtime_std_full_inventory_selection.?.source_inventory_digest
             val selection_artifact_root = self.ctx.runtime_std_full_inventory_selection.?.artifact_root
+            # Snapshot every self.ctx field the loop touches into locals BEFORE
+            # the loop. for-in over self.ctx.sources holds an Exclusive borrow
+            # on self.ctx (reference 9) for the whole iteration, so any inner
+            # self.ctx access -- including the read-only dict probes and every
+            # self.ctx.add_error -- re-acquires a reference the iteration still
+            # owns; the seed capability checker rejects that with "reference 9
+            # already has Exclusive capability, cannot acquire Exclusive".
+            val sources = self.ctx.sources
+            val cold_receipts = self.ctx.cold_hir_typed_receipts
+            val mir_modules = self.ctx.mir_modules
+            val cfg_decisions = self.ctx.runtime_std_cfg_decisions
+            val native_target = self.ctx.native_target
+            val hir_emissions = self.ctx.runtime_std_hir_emissions
             var emissions: Dict<text, RuntimeStdMirModuleEmissionV1> = {}
-            for source in self.ctx.sources:
+            for source in sources:
                 val name = source.module_name
                 var found_index = -1
                 var receipt_index = 0
-                while receipt_index < self.ctx.cold_hir_typed_receipts.len():
-                    if self.ctx.cold_hir_typed_receipts[receipt_index].seed.module_identity == name:
+                while receipt_index < cold_receipts.len():
+                    if cold_receipts[receipt_index].seed.module_identity == name:
                         if found_index >= 0:
                             self.ctx.add_error("full inventory cold MIR has duplicate typed source: {name}")
                             return false
                         found_index = receipt_index
                     receipt_index = receipt_index + 1
-                if found_index < 0 or not self.ctx.mir_modules.contains_key(name):
+                if found_index < 0 or not mir_modules.contains_key(name):
                     self.ctx.add_error("full inventory cold MIR source is missing: {name}")
                     return false
-                val receipt = self.ctx.cold_hir_typed_receipts[found_index]
+                val receipt = cold_receipts[found_index]
                 val seed = receipt.seed
-                if not self.ctx.runtime_std_cfg_decisions.has(seed.source_identity) or
+                if not cfg_decisions.has(seed.source_identity) or
                         not frontend_cfg_receipt_valid_v1(
-                            self.ctx.runtime_std_cfg_decisions[seed.source_identity],
+                            cfg_decisions[seed.source_identity],
                             seed.source_identity, seed.source_digest,
-                            self.ctx.native_target):
+                            native_target):
                     self.ctx.add_error("full inventory target cfg MIR source receipt mismatch: {name}")
                     return false
                 if seed.inventory_digest != selection_inventory_digest or
                         emissions.contains_key(seed.source_identity) or
-                        not self.ctx.runtime_std_hir_emissions.contains_key(seed.source_identity):
+                        not hir_emissions.contains_key(seed.source_identity):
                     self.ctx.add_error("full inventory cold MIR source authority mismatch: {name}")
                     return false
-                val hir_emission = self.ctx.runtime_std_hir_emissions[seed.source_identity]
+                val hir_emission = hir_emissions[seed.source_identity]
                 if hir_emission.module_identity != name or
                         hir_emission.source_digest != seed.source_digest:
                     self.ctx.add_error("full inventory cold MIR typed HIR mismatch: {name}")
                     return false
                 val emitted = runtime_std_mir_emit_module_v1(
-                    self.ctx.mir_modules[name], receipt, selection_artifact_root)
+                    mir_modules[name], receipt, selection_artifact_root)
                 if emitted.is_err():
                     self.ctx.add_error("full inventory cold MIR emission failed for {name}: {emitted.unwrap_err()}")
                     return false
                 emissions[seed.source_identity] = emitted.unwrap()
-            if emissions.len() != self.ctx.sources.len():
+            if emissions.len() != sources.len():
                 self.ctx.add_error("full inventory cold MIR emission count mismatch")
                 return false
             self.ctx.runtime_std_mir_emissions = emissions
