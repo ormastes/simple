@@ -348,3 +348,84 @@ with SDKROOT/MACOSX_DEPLOYMENT_TARGET from `xcrun --sdk macosx`):
   gap as before; confirmation requires the matrix rerun. If the matrix
   still reports these after the importer-side import, compiler fix (b)
   (alias-retry in canonical_callable_dependency_candidate) is unavoidable.
+
+## 2026-10-12 addendum 7: aspect_pack_io revert + fix (b) landed + B5b minimal repro and confirmed mechanism
+
+- REVERTED the aspect_pack_io.spl importer-side import (af804c27f33 hunk): in
+  the newest matrix it converted the transitive miss into a hard "module
+  compiler.loader.mapping_lifetime_accounting_v1 has no exported item
+  MappingClosePermitV1" — the structs ARE exported (mapping_lifetime_accounting_
+  v1.spl:518-519), so the shard-path SURFACE PUBLICATION drops them; importing
+  them names the drop as a hard error (54 hir-fatal). Strictly worse than the
+  original 10 transitive errors; reverted.
+- Fix (b) LANDED (module_reexport_materialization.spl,
+  materialize_imported_callable_explicit_dependency_inner): when a frozen
+  import row's import_target_indices[i] is -1, retry the target via
+  module_surface_resolve_absolute_key + module_surface_registry_index against
+  the frozen registry before declaring the route missing. The retry is a pure
+  function of the frozen registry (generation fixed per lowering run), so the
+  RISFACT memo invariant is preserved. Validation: seed semantics identical to
+  pristine (only the pre-existing sffi_env_get standalone artifact);
+  stage2_module_path_naming fixture native-build PASS (exit 0, artifact
+  published, expected fixture output). Full validation = next matrix run.
+- B5b CONFIRMED MECHANISM (decisive minimal repro, writable tree):
+  `native-build src/lib/common/sdn/parser.spl --emit-object --backend=llvm
+  --threads 1` (admitted compiler, fresh HOME) reproduces "B5b: match has
+  multiple wildcard arms" with a 3-module closure (parser + sdn.value +
+  structural_scalar_value_v1). sdn.value ALONE and structural_scalar ALONE
+  compile clean (exit 0, object emitted). db_atomic-as-entry (50-module
+  closure) reproduces B5b + 2x "unsupported Result tuple payload element
+  type". Live-edit marker confirmed the build reads live source.
+  Mechanism (proven by exhaustion): in the streaming/shard MIR path the
+  SdnValue and Result ENUM TYPE REGISTRY ENTRIES are not visible while an
+  IMPORTING module lowers (value.spl's own statics fail identically in larger
+  closures: "undefined variable SdnValue at value.spl:48:9", "unresolved
+  method call: Float"). Every enum pattern over an unregistered enum degrades
+  to a wildcard/binding arm; a two-arm Ok/Err match degrades to TWO wildcards
+  (B5b, expr_dispatch.spl:6466), and a single-arm match degrades to a
+  wildcard PLUS the compiler's synthesized exhaustiveness fallback — also
+  B5b. Converting parser.spl's matches to `if val Ok/Err` form (the rt_hal
+  idiom) does NOT help: `if val` lowers to the same match. Any type position
+  naming the unregistered enum degrades too (v.as_dict() loses Dict typing ->
+  "unresolved method call: keys"). CONCLUSION: not source-fixable module by
+  module; COMPILER-LANE root = enum type registration missing at MIR lowering
+  time for imported enums in the streaming shard path (HIR registers them —
+  HIR phase passes; the MIR-side flat/global symbol handoff drops them).
+  RECOMMENDED COMPILER FIX (recorded, not guessed): in 50.mir
+  _MirLowering/bootstrap_globals, the cross-module symbol accumulator must
+  resolve enum type/constructor symbols through the HIR symbol table's
+  owner-qualified binding (lookup_qualified_type_raw(owner, name)) instead of
+  the flat short-name registry when the short-name entry names a different
+  owner; plus the B5b diagnostic at expr_dispatch.spl:6466 should carry
+  self.current_module_id (the binding-twin at :6506 already does). Hardening
+  also recommended: always-on receipt when a match arm's enum pattern has no
+  registry entry (currently silent degradation).
+
+### Addendum 7 implementation status (c556a66e4fd follow-up)
+
+IMPLEMENTED the recorded B5b compiler fix (pending next admission for
+functional validation — the admitted binary predates the fix, so the fast
+repro cannot flip green until the next stage-2 build):
+1. expr_dispatch.spl NamedVar arm: owner-qualified retry — when the flat
+   short-name resolution yields a symbol id that is neither a local nor a
+   registered global read, and the symbol's defining_module differs from
+   self.current_module_id, retry via symbols.lookup_qualified_type_raw(owner,
+   name) before the "undefined variable" error. Declaring-module registration
+   is authoritative over importer pre-registrations.
+2. expr_dispatch.spl B5b diagnostic now carries self.current_module_id (the
+   binding twin at the :6506-class message already did).
+3. convert_nodes.spl: the match-pattern degradation receipt
+   ([match-pat] convert_flat_pattern DROPPED to wildcard: tag=N) is now
+   ALWAYS ON (was gated behind SIMPLE_DEBUG_MATCH_PAT), so a degraded arm is
+   attributable at parse time instead of surfacing as a location-blind B5b
+   much later.
+
+Controls run with the OLD admitted binary (expected: repro unchanged until
+admission): parser.spl repro exit 1 with B5b (repro intact); sdn/value.spl
+alone exit 0; stage2_module_path_naming fixture exit 0 with correct output;
+db_atomic 50-module closure still shows B5b + 3x "unsupported Result tuple
+payload element type" (the Result-tuple-payload family is tracked separately
+and may need the same owner-qualified treatment in the enum-payload
+materialization path on the next iteration). Seed semantics of all changed
+files identical to pristine (only the pre-existing sffi_env_get standalone
+artifact). Functional validation: next matrix/admission run.
