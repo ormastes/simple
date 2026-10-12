@@ -1,0 +1,163 @@
+# @req REQ-GENERIC-NOMINAL-IDENTITY
+# @tag: unit, compiler, mono, generics
+use std.spec
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.Span
+use compiler.mono.monomorphize_integration.MonomorphizationPass
+use compiler.mono.nominal_type_identity.mono_owned_type_key
+
+fn transport_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn transport_expr(kind: HirExprKind, type_: HirType) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: type_, span: Span.empty())
+
+fn transport_template() -> HirFunction:
+    val t = transport_type(HirTypeKind.TypeParam("T", []))
+    HirFunction(
+        symbol: SymbolId(id: 20), name: "identity",
+        type_params: [HirTypeParam(symbol: SymbolId(id: 21), name: "T", bounds: [], has_default: false, default: nil, span: Span.empty())],
+        params: [HirParam(symbol: SymbolId(id: 22), name: "value", type_: t, has_default: false, default: nil, span: Span.empty(), is_mutable: false)],
+        return_type: t,
+        body: HirBlock(stmts: [], has: true, value: transport_expr(HirExprKind.Var(SymbolId(id: 22)), t), span: Span.empty()),
+        effects: [], visibility: Visibility.Public, is_async: false, is_static: false,
+        is_public: true, is_method: false, is_mutable: false, is_const: false,
+        is_extern: false, func_attr: FunctionAttr.default(), has_export_attr: false,
+        export_attr: nil, has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_suspension: false, has_vhdl_metadata: false, vhdl_metadata: nil,
+        has_doc_comment: false, doc_comment: "", span: Span.empty(),
+        is_gpu_kernel: false, gpu_target: "", gpu_backend_order: "")
+
+fn transport_pass() -> MonomorphizationPass:
+    var pass_ = MonomorphizationPass.create()
+    var caller = SymbolTable.new()
+    caller.define("Packet", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "third")
+    var provider = SymbolTable.new()
+    provider.define("Packet", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "decoy")
+    pass_.module_symbols["caller"] = caller
+    pass_.module_symbols["provider"] = provider
+    pass_.current_module = "caller"
+    pass_.generic_functions["identity"] = transport_template()
+    pass_.template_module["identity"] = "provider"
+    pass_.named_symbol_names["caller#0"] = "Packet"
+    pass_
+
+fn transport_packet() -> HirType:
+    transport_type(HirTypeKind.Named(SymbolId(id: 0), []))
+
+fn transport_module(name: text, symbols: SymbolTable, functions: Dict<SymbolId, HirFunction>) -> HirModule:
+    HirModule(name: name, path: "synthetic/{name}.spl", imports: [], exports: [],
+        domain_blocks: [], symbols: symbols, functions: functions,
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [])
+
+fn transport_nested() -> HirType:
+    transport_type(HirTypeKind.Optional(transport_type(HirTypeKind.Array(transport_packet(), 3))))
+
+fn expect_transport_call(kind: HirExprKind, pass_: MonomorphizationPass, expected: HirType):
+    match kind:
+        case HirExprKind.Call(callee, _, type_args):
+            expect(type_args.len()).to_equal(0)
+            expect(callee.has_type_).to_be(true)
+            match callee.kind:
+                case HirExprKind.NamedVar(id, _): expect(id.id).to_be_greater_than(1125899906842623)
+                case _: expect(false).to_be(true)
+            match callee.type_.kind:
+                case HirTypeKind.Function(params, ret, _):
+                    val wanted = mono_owned_type_key(expected, pass_.module_symbols["caller"], "caller")
+                    expect(wanted.len()).to_be_greater_than(0)
+                    expect(mono_owned_type_key(ret, pass_.module_symbols["caller"], "caller")).to_equal(wanted)
+                    expect(mono_owned_type_key(params[0], pass_.module_symbols["caller"], "caller")).to_equal(wanted)
+                case _: expect(false).to_be(true)
+        case _: expect(false).to_be(true)
+
+describe "generic specialization transports nominal ownership":
+    it "substitutes caller arguments into provider ids and stamps the direct call back into caller ids":
+        var pass_ = transport_pass()
+        val actual = transport_nested()
+        val callee = transport_expr(HirExprKind.NamedVar(SymbolId(id: 20), "provider.identity"), transport_type(HirTypeKind.Any))
+        val rewritten = pass_.rewrite_call(callee, [], [actual])
+        expect_transport_call(rewritten, pass_, actual)
+        expect(pass_.diagnostics.len()).to_equal(0)
+        val name = pass_.mangled_name("identity", [actual])
+        val specialized: HirFunction = pass_.specialized_functions[name]
+        val expected = mono_owned_type_key(actual, pass_.module_symbols["caller"], "caller")
+        expect(mono_owned_type_key(specialized.return_type, pass_.module_symbols["provider"], "provider")).to_equal(expected)
+        expect(pass_.module_symbols["provider"].next_symbol_id).to_equal(2)
+        expect(pass_.module_symbols["caller"].next_symbol_id).to_equal(1)
+        if val nested_return = pass_.fn_return_of(specialized.symbol):
+            expect(mono_owned_type_key(nested_return, pass_.module_symbols["caller"], "caller")).to_equal(expected)
+        else: expect(false).to_be(true)
+
+    it "uses the same caller-owned signature for generic method rewriting":
+        var pass_ = transport_pass()
+        val actual = transport_nested()
+        val receiver_type = transport_type(HirTypeKind.Named(SymbolId(id: 0), [actual]))
+        val receiver = transport_expr(HirExprKind.NamedVar(SymbolId(id: 40), "value"), receiver_type)
+        val rewritten = pass_.rewrite_generic_method_call("identity", receiver, "identity", [], MethodResolution.Unresolved)
+        expect_transport_call(rewritten, pass_, actual)
+        expect(pass_.diagnostics.len()).to_equal(0)
+
+    it "reserves pending specialization ids before allocating nominal imports":
+        var pass_ = transport_pass()
+        val high = pass_.next_symbol
+        pass_.next_symbol = high + 5
+        var provider: SymbolTable = pass_.module_symbols["provider"]
+        provider.next_symbol_id = high
+        pass_.module_symbols["provider"] = provider
+        if val types = pass_.relocate_mono_types([transport_packet()], "caller", "provider", "counter regression"):
+            match types[0].kind:
+                case HirTypeKind.Named(id, _): expect(id.id).to_equal(high + 5)
+                case _: expect(false).to_be(true)
+        else: expect(false).to_be(true)
+        expect(pass_.next_symbol).to_equal(high + 6)
+
+    it "refuses missing target ownership without reserving a display name or symbol":
+        var pass_ = transport_pass()
+        pass_.module_symbols.remove("provider")
+        val before = pass_.next_symbol
+        expect(pass_.request_specialization("identity", [transport_packet()])).to_equal(-1)
+        expect(pass_.spec_display.len()).to_equal(0)
+        expect(pass_.spec_symbols.len()).to_equal(0)
+        expect(pass_.next_symbol).to_equal(before)
+        expect(pass_.diagnostics[0]).to_contain("E-MONO-042")
+
+    it "does not require nominal tables for scalar arguments":
+        var pass_ = MonomorphizationPass.create()
+        val scalar = transport_type(HirTypeKind.Int(64, true))
+        if val types = pass_.relocate_mono_types([scalar], "absent_a", "absent_b", "scalar regression"):
+            expect(types.len()).to_equal(1)
+            expect(types[0].kind).to_equal(HirTypeKind.Int(64, true))
+        else: expect(false).to_be(true)
+        expect(pass_.diagnostics.len()).to_equal(0)
+
+    it "retains imported provider rows and reserves the final counter in a caller without owned specializations":
+        var setup = transport_pass()
+        var caller_symbols: SymbolTable = setup.module_symbols["caller"]
+        val high = setup.next_symbol
+        caller_symbols.next_symbol_id = high
+        var main_fn = transport_template()
+        main_fn.name = "main"
+        main_fn.symbol = SymbolId(id: 30)
+        main_fn.type_params = []
+        main_fn.params = []
+        main_fn.return_type = transport_nested()
+        val callee = transport_expr(HirExprKind.NamedVar(SymbolId(id: 20), "provider.identity"), transport_type(HirTypeKind.Any))
+        main_fn.body.value = transport_expr(HirExprKind.Call(callee, [], [transport_nested()]), transport_nested())
+        val template = transport_template()
+        var caller_functions: Dict<SymbolId, HirFunction> = {}
+        caller_functions[main_fn.symbol] = main_fn
+        var provider_functions: Dict<SymbolId, HirFunction> = {}
+        provider_functions[template.symbol] = template
+        var modules: Dict<text, HirModule> = {}
+        modules["caller"] = transport_module("caller", caller_symbols, caller_functions)
+        modules["provider"] = transport_module("provider", setup.module_symbols["provider"], provider_functions)
+        var pass_ = MonomorphizationPass.create()
+        val result = pass_.run(modules)
+        expect(pass_.diagnostics.len()).to_equal(0)
+        expect(pass_.stats.specializations_created).to_equal(1)
+        expect(result["caller"].symbols.next_symbol_id).to_equal(pass_.next_symbol)
+        expect(result["caller"].symbols.next_symbol_id).to_be_greater_than(high)
+        expect(result["provider"].symbols.lookup_qualified_type_raw("third", "Packet")).to_be_greater_than(0)

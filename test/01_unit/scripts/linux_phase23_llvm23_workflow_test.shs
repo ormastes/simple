@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
+python3 - "$root" <<'PYTEST'
+import os,pathlib,re,shutil,subprocess,sys,tempfile
+root=pathlib.Path(sys.argv[1]);workflow=(root/'.github/workflows/rust-bootstrap-multiplatform.yml').read_text()
+def step(text,name):
+    m=re.search(r'^      - name: '+re.escape(name)+r'\n(.*?)(?=^      - (?:name:|uses:)|\Z)',text,re.M|re.S)
+    assert m,'missing step '+name
+    block=m[1];r=re.search(r'^        run: (.*)$',block,re.M);assert r,'missing run '+name
+    if r[1]=='|':return '\n'.join(l[10:] for l in block[r.end():].splitlines() if l.startswith('          '))
+    return r[1]
+def exercise(text):
+    with tempfile.TemporaryDirectory(prefix='llvm-workflow-wiring.') as d:
+        d=pathlib.Path(d);(d/'bin').mkdir();(d/'scripts/setup').mkdir(parents=True);(d/'scripts/check').mkdir(parents=True)
+        shutil.copyfile(root/'scripts/check/pin-linux-phase23-llvm23.shs',d/'scripts/check/pin-linux-phase23-llvm23.shs')
+        installer=d/'scripts/setup/install-linux-phase23-llvm23.shs'
+        installer.write_text('mkdir -p "$SIMPLE_LINUX_PHASE23_LLVM_PREFIX/bin"; for t in clang clang++ llvm-ar ld.lld llvm-config; do cp "$FAKE_TOOL" "$SIMPLE_LINUX_PHASE23_LLVM_PREFIX/bin/$t"; done; touch "$INSTALL_MARKER"\n')
+        tool=d/'tool';tool.write_text('#!/bin/sh\ncase "${0##*/}:$*" in llvm-config:--prefix) echo "$SIMPLE_LINUX_PHASE23_LLVM_PREFIX";; llvm-config:--version) echo 23.1.1;; rustc:*) echo "LLVM version: 23.1.1";; *) echo "tool version 23.1.1";; esac\n');tool.chmod(0o755);shutil.copy(tool,d/'bin/rustc')
+        sudo=d/'bin/sudo';sudo.write_text('#!/bin/sh\necho "$*" >>"$APT_LOG"\ncase "$1" in apt-get) exit 0;; *) exit 1;; esac\n');sudo.chmod(0o755)
+        env=os.environ.copy();env.update(PATH=str(d/'bin')+':'+env['PATH'],SIMPLE_LINUX_PHASE23_LLVM_PREFIX=str(d/'llvm'),GITHUB_ENV=str(d/'env'),FAKE_TOOL=str(tool),INSTALL_MARKER=str(d/'installed'),APT_LOG=str(d/'apt'))
+        for name in ['Install FreeType (Linux)','Install C tools (Linux Cranelift)','Install exact LLVM authority (Linux LLVM)']:
+            cmd=step(text,name);r=subprocess.run(['sh','-eu','-c',cmd],cwd=d,env=env,capture_output=True);assert r.returncode==0,(name,r.stderr.decode())
+        assert (d/'installed').exists(),'installer never invoked'
+        published=(d/'env').read_text() if (d/'env').exists() else ''
+        assert 'LLVM_SYS_231_PREFIX='+str(d/'llvm') in published,'pin helper never invoked'
+        packages=(d/'apt').read_text()
+        for dep in ['libfreetype6-dev','libunwind-dev','clang-18','lld-18','llvm-18-dev']:assert dep in packages,'missing dependency '+dep
+exercise(workflow)
+mutations=[('pin helper','          sh scripts/check/pin-linux-phase23-llvm23.shs'),('installer','          sh scripts/setup/install-linux-phase23-llvm23.shs'),('FreeType','libfreetype6-dev'),('unwind','libunwind-dev'),('Cranelift Clang','clang-18'),('Cranelift linker','lld-18'),('Cranelift LLVM','llvm-18-dev')]
+for label,needle in mutations:
+    assert needle in workflow
+    altered=workflow.replace(needle,'',1)
+    try:exercise(altered)
+    except (AssertionError,FileNotFoundError):pass
+    else:raise AssertionError('accepted missing '+label)
+print('Actual Linux workflow wiring: valid commands + seven negative removals PASS')
+PYTEST

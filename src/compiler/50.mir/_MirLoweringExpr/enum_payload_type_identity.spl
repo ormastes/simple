@@ -1,0 +1,57 @@
+# Strict enum payload identity inside composite types. The top-level argument
+# conversion policy is separate: changing a container's element type requires
+# an element conversion, not just permission to convert a scalar argument.
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+
+fn enum_payload_nominal_kind(id: SymbolId, symbols: SymbolTable) -> i64:
+    if not id.is_valid() or not symbols.symbols.has(id.id): return 0
+    match symbols.symbols[id.id].kind:
+        case SymbolKind.Class: 1
+        case SymbolKind.Struct: 2
+        case SymbolKind.Enum: 3
+        case SymbolKind.Trait: 4
+        case SymbolKind.TypeAlias: 5
+        case _: 0
+
+fn enum_payload_named_alias_equal(a: SymbolId, b: SymbolId, symbols: SymbolTable) -> bool:
+    # Both IDs are interpreted in the caller's one symbol table, never in two
+    # independently numbered module tables. A missing row is not an identity.
+    val kind_a = enum_payload_nominal_kind(a, symbols)
+    if kind_a == 0 or kind_a != enum_payload_nominal_kind(b, symbols): return false
+    val name_a = symbols.symbol_name_scalar_raw(a.id)
+    if name_a == "" or name_a != symbols.symbol_name_scalar_raw(b.id): return false
+    if a.id == b.id: return true
+    val owner_a = symbols.symbol_defining_module_scalar_raw(a.id)
+    owner_a != "" and owner_a == symbols.symbol_defining_module_scalar_raw(b.id)
+
+fn enum_payload_type_lists_alias_equal(a: [HirType], b: [HirType], symbols: SymbolTable) -> bool:
+    if a.len() != b.len(): return false
+    for index in 0..a.len():
+        if not enum_payload_types_alias_equal(a[index], b[index], symbols): return false
+    true
+
+fn enum_payload_types_alias_equal(a: HirType, b: HirType, symbols: SymbolTable) -> bool:
+    # No whole-type shortcut before the supported nominal/composite cases:
+    # raw equal Named IDs at those positions must still resolve.
+    match (a.kind, b.kind):
+        case (HirTypeKind.Named(sa, aa), HirTypeKind.Named(sb, ab)):
+            enum_payload_named_alias_equal(sa, sb, symbols) and enum_payload_type_lists_alias_equal(aa, ab, symbols)
+        case (HirTypeKind.Array(ea, size_a), HirTypeKind.Array(eb, size_b)):
+            size_a == size_b and enum_payload_types_alias_equal(ea, eb, symbols)
+        case (HirTypeKind.Slice(ea), HirTypeKind.Slice(eb)):
+            enum_payload_types_alias_equal(ea, eb, symbols)
+        case (HirTypeKind.Dict(ka, va), HirTypeKind.Dict(kb, vb)):
+            enum_payload_types_alias_equal(ka, kb, symbols) and enum_payload_types_alias_equal(va, vb, symbols)
+        case (HirTypeKind.Optional(ia), HirTypeKind.Optional(ib)):
+            enum_payload_types_alias_equal(ia, ib, symbols)
+        case (HirTypeKind.Result(oa, ea), HirTypeKind.Result(ob, eb)):
+            enum_payload_types_alias_equal(oa, ob, symbols) and enum_payload_types_alias_equal(ea, eb, symbols)
+        case (HirTypeKind.Tuple(aa), HirTypeKind.Tuple(ab)):
+            enum_payload_type_lists_alias_equal(aa, ab, symbols)
+        case _:
+            # Primitive equality keeps integer width/sign and float width.
+            # Unlike argument compatibility, nested Any is not a wildcard.
+            # Other constructors retain their existing canonical-ID equality;
+            # this boundary does not add alias support or an effects policy.
+            hir_types_equal(a, b)

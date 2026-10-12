@@ -1,0 +1,258 @@
+# @tag:in-development
+# @req REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+use std.spec.*
+use std.io.{dir_create_all, dir_remove, file_delete}
+use std.io_runtime.{getpid, time_now_unix_micros}
+use std.database.core.{SdnRow, SdnTable}
+use std.database.test_extended.database.{TestDatabaseExtended, load_test_database_extended}
+use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
+use std.common.traceability.case_events.{TraceCaseEvent, encode_trace_case_event}
+use std.common.traceability.run_plan.{TracePlannedCase, TraceRunPlan}
+use std.common.traceability.run_request.{TraceRunRequest}
+use std.common.traceability.storage_scalar.{encode_trace_storage_scalar}
+
+fn _preparation_fixture_dir(label: text) -> text:
+    val dir = "build/test_fixtures/trace_run_preparation_{label}_{getpid()}_{time_now_unix_micros()}"
+    dir_create_all(dir)
+    dir
+
+fn _preparation_plan(run_id: text) -> TraceRunPlan:
+    TraceRunPlan(
+        run_id: run_id,
+        subject_id: "subject-1",
+        configuration_id: "config-1",
+        expectation_id: "expectation-1",
+        binary_id: "binary-1",
+        cases: [TracePlannedCase(
+            case_id: "case-1",
+            test_path: "test/trace_spec.spl",
+            case_name: "planned case",
+            test_definition_id: "definition-1",
+            lane_id: "unit")])
+
+fn _trace_event_row(schema: text, event_id: text, run_id: text, test_path: text, ordinal: text, case_name: text, phase: text, outcome: text) -> SdnRow:
+    var row = SdnRow.empty()
+    row.set("event_id", event_id)
+    row.set("schema", schema)
+    row.set("run_id", run_id)
+    row.set("test_path", test_path)
+    row.set("ordinal", ordinal)
+    row.set("case_name", case_name)
+    row.set("phase", phase)
+    row.set("outcome", outcome)
+    row.set("evidence_validity", "unverified")
+    row
+
+fn _trace_event_table() -> SdnTable:
+    SdnTable.new("trace_case_events", ["event_id", "schema", "run_id", "test_path", "ordinal", "case_name", "phase", "outcome", "evidence_validity"])
+
+fn _trace_scalar(value: text) -> text:
+    match encode_trace_storage_scalar(value):
+        case Ok(encoded): encoded
+        case Err(reason): fail("fixture scalar encoding failed: {reason}")
+
+describe "runner frozen trace preparation":
+    it "allocates and persists the identity for a request without a caller run id":
+        val path = _preparation_fixture_dir("request") + "/test_db.sdn"
+        val template = _preparation_plan("unused-template-id")
+        val request = TraceRunRequest(subject_id: template.subject_id,
+            configuration_id: template.configuration_id, expectation_id: template.expectation_id,
+            binary_id: template.binary_id, cases: template.cases)
+        var owner = RunnerTestDb(db: TestDatabaseExtended.create(path), current_run_id: "")
+        match owner.prepare_trace_request(request):
+            case Err(reason): fail("valid owner request failed: {reason}")
+            case Ok(plan):
+                expect(plan.run_id != "").to_equal(true)
+                expect(plan.run_id == "unused-template-id").to_equal(false)
+                expect(owner.trace_run_is_prepared(plan.run_id)).to_equal(true)
+                expect(owner.prepare_trace_request(request).is_err()).to_equal(true)
+
+    it "rejects oversized request transport before allocating a run or changing tables":
+        val template = _preparation_plan("unused-template-id")
+        val huge_case = TracePlannedCase(case_id: "case-1", test_path: "test/trace_spec.spl",
+            case_name: "x".repeat(1048577), test_definition_id: "definition-1", lane_id: "unit")
+        val request = TraceRunRequest(subject_id: template.subject_id,
+            configuration_id: template.configuration_id, expectation_id: template.expectation_id,
+            binary_id: template.binary_id, cases: [huge_case])
+        var owner = RunnerTestDb(db: TestDatabaseExtended.create("unused-oversized-request"), current_run_id: "")
+        val runs_before = match owner.db.db.get_table("test_runs"):
+            case Some(table): table.rows.len()
+            case None: fail("run table unexpectedly missing before preparation")
+        expect(owner.prepare_trace_request(request).is_err()).to_equal(true)
+        expect(owner.current_run_id).to_equal("")
+        match owner.db.db.get_table("test_runs"):
+            case Some(table): expect(table.rows.len()).to_equal(runs_before)
+            case None: fail("run table disappeared after rejected preparation")
+        match owner.db.db.get_table("trace_run_plans"):
+            case Some(_): fail("oversized request created a trace plan table")
+            case None: ()
+
+    it "poisons the owner when active run validation fails after allocation":
+        var db = TestDatabaseExtended.create("unused-invalid-active-run")
+        match db.db.get_table_mut("test_runs"):
+            case None: fail("run table unexpectedly missing")
+            case Some(table):
+                var invalid_table = table
+                invalid_table.columns = ["run_id", "status", "end_time"]
+                db.db.set_table("test_runs", invalid_table)
+        val template = _preparation_plan("unused-template-id")
+        val request = TraceRunRequest(subject_id: template.subject_id,
+            configuration_id: template.configuration_id, expectation_id: template.expectation_id,
+            binary_id: template.binary_id, cases: template.cases)
+        var owner = RunnerTestDb(db: db, current_run_id: "")
+        expect(owner.prepare_trace_request(request).is_err()).to_equal(true)
+        expect(owner.current_run_id != "").to_equal(true)
+        expect(owner.save().is_err()).to_equal(true)
+        expect(owner.start_run()).to_equal("")
+        val encoded_event = encode_trace_case_event(TraceCaseEvent("planned case", "started", "not_finished"))
+        val event_sdn = "[{encoded_event}]"
+        expect(owner.record_trace_case_events(owner.current_run_id, "test/trace_spec.spl", event_sdn).is_err()).to_equal(true)
+
+    it "rejects missing, wrong, and ambiguous active run identities":
+        var db = TestDatabaseExtended.create("unused-trace-preparation-memory")
+        val run_id = db.start_run()
+        expect(db.validate_trace_run_active("").is_err()).to_equal(true)
+        expect(db.validate_trace_run_active("missing-run").is_err()).to_equal(true)
+        expect(db.record_trace_run_plan(_preparation_plan("wrong-run")).is_err()).to_equal(true)
+        match db.db.get_table_mut("test_runs"):
+            case None: fail("run table unexpectedly missing")
+            case Some(table):
+                var duplicate_table = table
+                duplicate_table.add_row(duplicate_table.rows[0].copy())
+                db.db.set_table("test_runs", duplicate_table)
+        expect(db.validate_trace_run_active(run_id).is_err()).to_equal(true)
+
+    it "keeps a stored plan immutable":
+        var db = TestDatabaseExtended.create("unused-trace-plan-order-memory")
+        val run_id = db.start_run()
+        val plan = _preparation_plan(run_id)
+        expect(db.record_trace_run_plan(plan).is_ok()).to_equal(true)
+        expect(db.record_trace_run_plan(plan).is_err()).to_equal(true)
+        match db.get_trace_run_plan(run_id):
+            case Err(reason): fail("stored plan could not be read: {reason}")
+            case Ok(None): fail("stored plan disappeared")
+            case Ok(Some(stored)):
+                expect(stored.run_id).to_equal(run_id)
+                expect(stored.cases[0].case_id).to_equal("case-1")
+
+    it "rejects freezing intent after framework observations have started":
+        var db = TestDatabaseExtended.create("unused-trace-plan-order-memory")
+        val run_id = db.start_run()
+        val observations = [TraceCaseEvent("planned case", "started", "not_finished")]
+        expect(db.record_trace_case_events(run_id, "test/trace_spec.spl", observations).is_ok()).to_equal(true)
+        expect(db.record_trace_run_plan(_preparation_plan(run_id)).is_err()).to_equal(true)
+
+    it "saves prepared intent before dispatch and reloads it from the database file":
+        val path = _preparation_fixture_dir("persist") + "/test_db.sdn"
+        var db = TestDatabaseExtended.create(path)
+        val run_id = db.start_run()
+        var owner = RunnerTestDb(db: db, current_run_id: run_id)
+        match owner.prepare_trace_run(_preparation_plan(run_id)):
+            case Err(reason): fail("valid preparation failed: {reason}")
+            case Ok(_): expect(owner.trace_run_is_prepared(run_id)).to_equal(true)
+        owner.complete_run(run_id, 1, 1, 0, 0)
+        expect(owner.trace_run_is_prepared(run_id)).to_equal(false)
+        match load_test_database_extended(path):
+            case None: fail("prepared database could not be reloaded")
+            case Some(reloaded):
+                expect(reloaded.validate_trace_run_active(run_id).is_ok()).to_equal(true)
+                expect(reloaded.record_trace_run_plan(_preparation_plan(run_id)).is_err()).to_equal(true)
+                match reloaded.get_trace_run_plan(run_id):
+                    case Err(reason): fail("persisted intent could not be read: {reason}")
+                    case Ok(None): fail("persisted intent is missing")
+                    case Ok(Some(plan)):
+                        expect(plan.run_id).to_equal(run_id)
+                        expect(plan.cases[0].test_definition_id).to_equal("definition-1")
+
+    it "poisons the wrapper after a real save failure and refuses retry or run restart":
+        # Use an existing directory as the destination file. Lock creation and
+        # temporary-file writing succeed; the real atomic rename to the
+        # directory fails immediately, exercising the owner's save path.
+        val blocked_path = _preparation_fixture_dir("save_failure") + "/destination_is_directory"
+        dir_create_all(blocked_path)
+        var db = TestDatabaseExtended.create(blocked_path)
+        val run_id = db.start_run()
+        var owner = RunnerTestDb(db: db, current_run_id: run_id)
+        match owner.prepare_trace_run(_preparation_plan(run_id)):
+            case Ok(_): fail("database save unexpectedly replaced the destination directory")
+            case Err(reason): expect(reason).to_contain("durably prepared")
+        expect(owner.trace_run_is_prepared(run_id)).to_equal(false)
+        expect(owner.prepare_trace_run(_preparation_plan(run_id)).is_err()).to_equal(true)
+        expect(owner.save().is_err()).to_equal(true)
+        expect(owner.start_run()).to_equal("")
+        val encoded_event = encode_trace_case_event(TraceCaseEvent("planned case", "started", "not_finished"))
+        val event_sdn = "[{encoded_event}]"
+        expect(owner.record_trace_case_events(run_id, "test/trace_spec.spl", event_sdn).is_err()).to_equal(true)
+        file_delete(blocked_path + ".tmp")
+        dir_remove(blocked_path, false)
+
+describe "trace event storage versions":
+    it "round trips punctuation and Unicode event scope through a real save and reload":
+        val path = _preparation_fixture_dir("event_roundtrip") + "/test_db.sdn"
+        var db = TestDatabaseExtended.create(path)
+        val run_id = db.start_run()
+        val test_path = "test/comma, quote \" slash \\ 日本_spec.spl"
+        val case_name = "case, \"quoted\" \\ 日本\nnext"
+        val events = [TraceCaseEvent(case_name, "started", "not_finished"), TraceCaseEvent(case_name, "finished", "failed")]
+        expect(db.record_trace_case_events(run_id, test_path, events).is_ok()).to_equal(true)
+        expect(db.save()).to_equal(true)
+        match load_test_database_extended(path):
+            case None: fail("event database failed to reload")
+            case Some(reloaded):
+                match reloaded.get_trace_case_events(run_id, test_path):
+                    case Err(reason): fail("stored event scope failed to decode: {reason}")
+                    case Ok(stored):
+                        expect(stored.len()).to_equal(2)
+                        expect(stored[0].case_name).to_equal(case_name)
+                        expect(stored[1].outcome).to_equal("failed")
+                expect(reloaded.record_trace_case_events(run_id, test_path, events).is_err()).to_equal(true)
+
+    it "continues reading unverified legacy v1 event rows through SdnTable reload":
+        var db = TestDatabaseExtended.create("unused-v1-event-memory")
+        val run_id = "legacy-run"
+        val test_path = "test/legacy_spec.spl"
+        var table = _trace_event_table()
+        val legacy_id = "{run_id.len()}:{run_id}{test_path.len()}:{test_path}:0"
+        table.add_row(_trace_event_row("simple.trace.case-event/v1", legacy_id, run_id, test_path, "0", "legacy case", "started", "not_finished"))
+        db.db.set_table("trace_case_events", table)
+        val serialized = table.to_sdn()
+        var reloaded = TestDatabaseExtended.create("unused-v1-event-reload")
+        expect(reloaded.db.import_table_sdn(serialized)).to_equal(true)
+        match reloaded.get_trace_case_events(run_id, test_path):
+            case Err(reason): fail("legacy v1 row failed to read: {reason}")
+            case Ok(events):
+                expect(events.len()).to_equal(1)
+                expect(events[0].case_name).to_equal("legacy case")
+
+    it "detects duplicate logical events across v1 and scalar-encoded v2 rows":
+        var db = TestDatabaseExtended.create("unused-mixed-event-memory")
+        val run_id = "mixed-run"
+        val test_path = "test/mixed_spec.spl"
+        val event = TraceCaseEvent("same case", "started", "not_finished")
+        expect(db.record_trace_case_events(run_id, test_path, [event]).is_ok()).to_equal(true)
+        val v1_id = "{run_id.len()}:{run_id}{test_path.len()}:{test_path}:0"
+        var table = match db.db.get_table("trace_case_events"):
+            case None: fail("v2 event table missing")
+            case Some(existing): existing
+        table.add_row(_trace_event_row("simple.trace.case-event/v1", v1_id, run_id, test_path, "0", "same case", "started", "not_finished"))
+        db.db.set_table("trace_case_events", table)
+        expect(db.get_trace_case_events(run_id, test_path).is_err()).to_equal(true)
+
+    it "rejects malformed v2 scalar, ordinal, and event identity before returning rows":
+        val run_id = "strict-run"
+        val test_path = "test/strict_spec.spl"
+        val name = "case"
+        val event_id = "{run_id.len()}:{run_id}{test_path.len()}:{test_path}:0"
+        var malformed = _trace_event_table()
+        malformed.add_row(_trace_event_row("simple.trace.case-event-storage/v2", "trace-utf8-hex/v1:GG", _trace_scalar(run_id), _trace_scalar(test_path), "0", _trace_scalar(name), "started", "not_finished"))
+        var db = TestDatabaseExtended.create("unused-malformed-event-memory")
+        db.db.set_table("trace_case_events", malformed)
+        expect(db.get_trace_case_events(run_id, test_path).is_err()).to_equal(true)
+        malformed = _trace_event_table()
+        malformed.add_row(_trace_event_row("simple.trace.case-event-storage/v2", _trace_scalar(event_id), _trace_scalar(run_id), _trace_scalar(test_path), "00", _trace_scalar(name), "started", "not_finished"))
+        db.db.set_table("trace_case_events", malformed)
+        expect(db.get_trace_case_events(run_id, test_path).is_err()).to_equal(true)
+        malformed = _trace_event_table()
+        malformed.add_row(_trace_event_row("simple.trace.case-event-storage/v2", _trace_scalar("wrong-id"), _trace_scalar(run_id), _trace_scalar(test_path), "0", _trace_scalar(name), "started", "not_finished"))
+        db.db.set_table("trace_case_events", malformed)
+        expect(db.get_trace_case_events(run_id, test_path).is_err()).to_equal(true)

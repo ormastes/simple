@@ -1,0 +1,79 @@
+# @tag:in-development @req008009017
+# Pure protocol decoder coverage; this does not claim a live Git snapshot ran.
+use std.spec
+use std.common.text_bytes.{text_to_utf8_bytes}
+use app.traceability.snapshot.git_tree.{decode_trace_git_tree}
+
+val oid_a = "1111111111111111111111111111111111111111"
+
+fn tree_error(wire: text, object_format: text, entries: i64, bytes: i64) -> text:
+    match decode_trace_git_tree(text_to_utf8_bytes(wire), object_format, entries, bytes):
+        case Ok(_): "unexpected success"
+        case Err(reason): reason
+
+describe "Git tree inventory framing":
+    it "preserves exact paths with spaces and Unicode":
+        val wire = "100644 blob {oid_a}\t目录/ spaced name.txt\0"
+        match decode_trace_git_tree(text_to_utf8_bytes(wire), "sha1", 8, 4096):
+            case Ok(entries):
+                expect(entries.len()).to_equal(1)
+                expect(entries[0].mode).to_equal("100644")
+                expect(entries[0].kind).to_equal("blob")
+                expect(entries[0].oid).to_equal(oid_a)
+                expect(entries[0].path).to_equal("目录/ spaced name.txt")
+            case Err(reason): fail(reason)
+
+    it "preserves embedded line breaks and tabs in raw Git paths":
+        val path = "line one\nline two\tname.txt"
+        val wire = "100644 blob {oid_a}\t{path}\0"
+        match decode_trace_git_tree(text_to_utf8_bytes(wire), "sha1", 8, 4096):
+            case Ok(entries): expect(entries[0].path).to_equal(path)
+            case Err(reason): fail(reason)
+
+    it "accepts an explicitly successful empty tree result":
+        match decode_trace_git_tree([], "sha256", 1, 4096):
+            case Ok(entries): expect(entries.len()).to_equal(0)
+            case Err(reason): fail(reason)
+
+    it "requires NUL record termination and rejects empty records":
+        expect(tree_error("100644 blob {oid_a}\tfile", "sha1", 8, 4096)).to_contain("unterminated")
+        expect(tree_error("\0", "sha1", 8, 4096)).to_contain("empty tree inventory record")
+
+    it "rejects duplicate paths without losing case distinctions":
+        val first_duplicate = "100644 blob {oid_a}\ta\0"
+        val duplicate = first_duplicate + "100755 blob {oid_a}\ta\0"
+        expect(tree_error(duplicate, "sha1", 8, 4096)).to_contain("duplicate tree entry path")
+        val first_distinct = "100644 blob {oid_a}\tA\0"
+        val distinct = first_distinct + "100644 blob {oid_a}\ta\0"
+        match decode_trace_git_tree(text_to_utf8_bytes(distinct), "sha1", 8, 4096):
+            case Ok(entries): expect(entries.len()).to_equal(2)
+            case Err(reason): fail(reason)
+
+    it "rejects unsupported symbolic links, gitlinks and tree objects":
+        expect(tree_error("120000 blob {oid_a}\tlink\0", "sha1", 8, 4096)).to_contain("symlink and gitlink")
+        expect(tree_error("160000 commit {oid_a}\tmodule\0", "sha1", 8, 4096)).to_contain("symlink and gitlink")
+        expect(tree_error("040000 tree {oid_a}\tdir\0", "sha1", 8, 4096)).to_contain("unsupported tree entry")
+
+    it "validates the selected object format and exact lowercase OID width":
+        expect(tree_error("100644 blob {oid_a}\tfile\0", "unknown", 8, 4096)).to_contain("unsupported Git object format")
+        expect(tree_error("100644 blob {oid_a}\tfile\0", "sha256", 8, 4096)).to_contain("invalid tree entry object identity")
+        expect(tree_error("100644 blob 111111111111111111111111111111111111111A\tfile\0", "sha1", 8, 4096)).to_contain("invalid tree entry object identity")
+
+    it "rejects unsafe paths and invalid UTF-8 bytes":
+        expect(tree_error("100644 blob {oid_a}\t../escape\0", "sha1", 8, 4096)).to_contain("invalid tree entry path")
+        expect(tree_error("100644 blob {oid_a}\tbad\\path\0", "sha1", 8, 4096)).to_contain("invalid tree entry path")
+        var invalid = text_to_utf8_bytes("100644 blob {oid_a}\tfile")
+        invalid.push(255 as u8)
+        invalid.push(0 as u8)
+        match decode_trace_git_tree(invalid, "sha1", 8, 4096):
+            case Ok(_): fail("invalid UTF-8 path was accepted")
+            case Err(reason): expect(reason).to_contain("TRACE-SNAPSHOT-INCOMPLETE")
+
+    it "applies positive bounded entry and byte budgets":
+        expect(tree_error("", "sha1", 0, 4096)).to_contain("invalid tree inventory budgets")
+        expect(tree_error("", "sha1", 1, 0)).to_contain("invalid tree inventory budgets")
+        expect(tree_error("", "sha1", 100001, 4096)).to_contain("invalid tree inventory budgets")
+        expect(tree_error("", "sha1", 1, 16777217)).to_contain("invalid tree inventory budgets")
+        expect(tree_error("100644 blob {oid_a}\ta\0", "sha1", 1, 8)).to_contain("byte budget exhausted")
+        val first = "100644 blob {oid_a}\ta\0"
+        expect(tree_error(first + "100644 blob {oid_a}\tb\0", "sha1", 1, 4096)).to_contain("entry budget exhausted")
