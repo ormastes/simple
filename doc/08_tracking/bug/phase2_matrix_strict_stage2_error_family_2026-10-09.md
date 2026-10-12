@@ -566,3 +566,48 @@ Latest release `a95346aaef7a04c2e0935b2816e6157dd497457d` includes the typed
   builtin-guard and enum-retry fixes fe1f4ed6d72 / 20694e21a1a landed after
   cd1601c9 was admitted) — they confirm at the next admission, not a new
   interference source.
+
+## 2026-10-12 addendum 8: SEED-verified fixes for the two persistent stage-2 failures (repro tool was wrong all along)
+
+Repro tool correction: the stage-2 bulk build is performed by the RUST SEED
+(worktree src/compiler_rust/target/bootstrap/simple, 217MB llvm build with
+SIMPLE_BOOTSTRAP=1), NOT the admitted binary. Prior "passing" validations
+used the admitted binary. Second tool correction: the SCV snapshot tracks
+COMMITTED state only — uncommitted edits never enter the seed build (the
+revision id stayed fixed across working-tree changes); every fix below was
+verified only after commit.
+
+Seed repro command (all three now exit 0):
+  env SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NO_STUB_FALLBACK=1 \
+  src/compiler_rust/target/bootstrap/simple native-build <file> --entry-closure \
+  --source src/compiler --source src/lib --emit-object --backend=llvm --threads 2 \
+  --cache-dir <fresh> -o <out>
+
+1. archive_borrowed_module_v1.spl — "struct 'ANY' field 'symbol'": TRUE root
+   was the `for selection in selections:` loop + `for raw_function in
+   module.functions.values():` — the values()/for-in ELEMENT arrived as ANY
+   from the seed's aggregate typing, and an annotation on an ANY-typed RHS is
+   not authoritative ("seed aggregate typing not authoritative" warning).
+   Fix (239e9e00575): index-based loops with explicitly annotated element
+   locals. Supporting fixes that were necessary but not sufficient:
+   export the MirHir carrier structs (5fe16d201c9); itemize the types in
+   summary/codec/consumer/bindings/providers/artifact (d65deffb, 36de1602)
+   because 'export use ... .*' neither imports into the declaring module's
+   own scope nor propagates one glob level up under the seed.
+   SEED-VERIFIED: exit=0, 0 'cannot infer field type'.
+2. driver_pipeline_lowering.spl — "reference 9 already has Exclusive": TRUE
+   root was the seed capability checker's acquire semantics: `&mut` is the
+   ONLY acquisition site (hir/lower/expr/operators.rs), borrows are released
+   ONLY at function end or the call-argument checkpoint, and that checkpoint
+   applies ONLY to proven_nonescaping_functions (module_pass.rs:482 —
+   requires an all-'pass' body, so real callees never qualify). Four call
+   sites passed `&mut lowering` to callees whose params are by-value
+   `mut lowering: MirLowering` — the `&mut` was redundant (Simple derefs)
+   and the second acquisition on the same local id was the violation.
+   Fix (73fd4189bdb): dropped the redundant `&mut` at all four call sites
+   (driver_pipeline_lowering.spl x3, hir_mir_archive_consumer_v1.spl x1).
+   Also (f4f37c5bec2): renamed the elif-arm measured_execution binding —
+   defensive against the same never-release semantics across branches.
+   SEED-VERIFIED: exit=0, 0 'Capability error'.
+3. declaration_providers_v1.spl (earlier HirConst itemization):
+   SEED-VERIFIED: exit=0, 0 'cannot infer field type', 0 HirConst mentions.
