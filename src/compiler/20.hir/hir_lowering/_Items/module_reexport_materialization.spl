@@ -9,7 +9,7 @@ use compiler.hir.hir_lowering._Items.module_lowering.{HirReexportSource, HirReex
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
-use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
+use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param, ParserTypeParam}
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{StmtKind, Expr}  # explicit: a glob is not an import-origin for surface projection
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
@@ -1274,6 +1274,69 @@ impl HirLowering:
         self.materialize_imported_field_package_dependency(
             imported_mod.physical_index, hir_dependency_type_name(dependency), import_span, materialize_enum)
 
+    me materialize_imported_callable_type_arguments_with_owner(imported_mod: ModuleSurface, imported_mod_name: text, type_: Type, import_span: Span, materialize_enum: bool, owner_type_params: [ParserTypeParam]):
+        # A scalar projection retains the outer name (for example Result),
+        # but its arguments still belong to the declaring owner's scope.
+        for argument in parser_type_kind_named_args(type_.kind):
+            for dependency in parser_type_named_dependencies(argument):
+                self.materialize_imported_callable_dependency_with_owner(
+                    imported_mod, imported_mod_name, dependency,
+                    import_span, materialize_enum, owner_type_params)
+
+    me materialize_imported_callable_type_dependencies_inner_with_owner(imported_mod: ModuleSurface, imported_mod_name: text, callable: ModuleSurfaceCallable, import_span: Span, materialize_enum: bool, owner_type_params: [ParserTypeParam]):
+        # Generic-owner twin of the stable-ABI dependency walk. Keep scalar
+        # projections: retained parser Type carriers can lose nested metadata.
+        for param in callable.params:
+            if param.type_name != "":
+                self.materialize_imported_callable_dependency_with_owner(
+                    imported_mod, imported_mod_name, param.type_name,
+                    import_span, materialize_enum, owner_type_params)
+                self.materialize_imported_callable_type_arguments_with_owner(
+                    imported_mod, imported_mod_name, param.type_, import_span, materialize_enum, owner_type_params)
+            elif param.array_element_name != "":
+                self.materialize_imported_callable_dependency_with_owner(
+                    imported_mod, imported_mod_name, param.array_element_name,
+                    import_span, materialize_enum, owner_type_params)
+                val element = parser_type_kind_array_element(param.type_.kind, param.type_)
+                self.materialize_imported_callable_type_arguments_with_owner(
+                    imported_mod, imported_mod_name, element, import_span, materialize_enum, owner_type_params)
+            else:
+                for dependency in parser_type_named_dependencies(param.type_):
+                    self.materialize_imported_callable_dependency_with_owner(
+                        imported_mod, imported_mod_name, dependency,
+                        import_span, materialize_enum, owner_type_params)
+        if callable.has_return_type:
+            if callable.return_type_name != "":
+                self.materialize_imported_callable_dependency_with_owner(
+                    imported_mod, imported_mod_name, callable.return_type_name,
+                    import_span, materialize_enum, owner_type_params)
+                self.materialize_imported_callable_type_arguments_with_owner(
+                    imported_mod, imported_mod_name, callable.return_type, import_span, materialize_enum, owner_type_params)
+            elif callable.return_array_element_name != "":
+                self.materialize_imported_callable_dependency_with_owner(
+                    imported_mod, imported_mod_name,
+                    callable.return_array_element_name, import_span,
+                    materialize_enum, owner_type_params)
+                val element = parser_type_kind_array_element(callable.return_type.kind, callable.return_type)
+                self.materialize_imported_callable_type_arguments_with_owner(
+                    imported_mod, imported_mod_name, element, import_span, materialize_enum, owner_type_params)
+            else:
+                val composite_deps = parser_type_named_dependencies(callable.return_type)
+                if (hir_module_env_get("SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE") ?? "") == "1":
+                    eprint("[hir-callable-composite-return] owner={imported_mod.module_name} fn={callable.name} deps={composite_deps.len()}")
+                for dependency in composite_deps:
+                    self.materialize_imported_callable_dependency_with_owner(
+                        imported_mod, imported_mod_name, dependency,
+                        import_span, materialize_enum, owner_type_params)
+
+    me materialize_imported_callable_dependency_with_owner(imported_mod: ModuleSurface, imported_mod_name: text, dependency: text, import_span: Span, materialize_enum: bool, owner_type_params: [ParserTypeParam]):
+        val binder_name = hir_dependency_type_name(dependency)
+        for parameter in owner_type_params:
+            if parameter.name == binder_name:
+                return
+        self.materialize_imported_callable_dependency(
+            imported_mod, imported_mod_name, dependency, import_span, materialize_enum)
+
     me register_imported_type_methods(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_owner: SymbolId, import_span: Span, materialize_enum: bool):
         # RE-ENTRANCY BREAKER. This method sits in a three-node cycle:
         #   register_imported_type_methods
@@ -1445,10 +1508,32 @@ impl HirLowering:
                     val impl_ = imported_mod.impls[impl_position]
                     val method = impl_.methods[method_name]
                     val kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
-                    self.materialize_imported_callable_type_dependencies(imported_mod, imported_mod_name, method, import_span, materialize_enum)
+                    # Resolve the declaration's binders only on this cold path.
+                    # A method on GenericRing<Op,Cpl> is generic in those names
+                    # even when the method declares no own type parameters.
+                    var owner_type_params: [ParserTypeParam] = []
+                    val composite_position = module_surface_name_position(
+                        imported_mod.composite_names, imported_name)
+                    if composite_position >= 0:
+                        owner_type_params = imported_mod.composite_values[composite_position].type_params
+                    else:
+                        val enum_position = module_surface_name_position(
+                            imported_mod.enum_names, imported_name)
+                        if enum_position >= 0:
+                            owner_type_params = imported_mod.enum_values[enum_position].type_params
+                    if owner_type_params.len() == 0:
+                        self.materialize_imported_callable_type_dependencies(
+                            imported_mod, imported_mod_name, method, import_span,
+                            materialize_enum)
+                    else:
+                        val dependencies_started = hir_phase_profile_now()
+                        self.materialize_imported_callable_type_dependencies_inner_with_owner(
+                            imported_mod, imported_mod_name, method, import_span,
+                            materialize_enum, owner_type_params)
+                        hir_phase_profile_add(HIR_PROF_RIS_CALLABLE_DEPS, dependencies_started)
                     val sig_started = hir_phase_profile_now()
-                    val method_type = self.declared_imported_surface_callable_type(
-                        method, imported_mod.module_name, Some(local_owner))
+                    val method_type = self.declared_imported_owner_callable_type(
+                        method, imported_mod.module_name, local_owner, owner_type_params)
                     hir_phase_profile_add(HIR_PROF_RIS_SIGTYPE, sig_started)
                     self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
             # IMPLROWCACHE: `contains_key` IS the `has_trait_` test -- the index

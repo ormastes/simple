@@ -11,7 +11,7 @@ use compiler.hir.hir_lowering._Items.lowering_helpers.{ReturnScan, return_scan_e
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
-use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
+use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param, ParserTypeParam}
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{StmtKind, Expr}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
@@ -426,6 +426,27 @@ impl HirLowering:
             val element = self.imported_surface_type(source_element, imported_module_name)
             return HirType(kind: HirTypeKind.Array(element, nil), span: type_.span)
         self.imported_surface_type(type_, imported_module_name)
+
+    me declared_imported_owner_callable_type(callable: ModuleSurfaceCallable, imported_module_name: text, owner_symbol: SymbolId, owner_type_params: [ParserTypeParam]) -> HirType?:
+        # Owner binders belong to the imported declaration, not the importer.
+        # Restore the scope before its method symbol is defined, so that symbol
+        # remains visible after this temporary binder scope is popped.
+        if owner_type_params.len() == 0:
+            return self.declared_imported_surface_callable_type(
+                callable, imported_module_name, Some(owner_symbol))
+        val saved_parameters = self.prescan_type_parameters
+        self.prescan_type_parameters = {}
+        self.symbols.push_scope(ScopeKind.Class)
+        for tp in owner_type_params:
+            val parameter = self.lower_type_param(tp)
+            self.prescan_type_parameters[parameter.symbol.id] = HirType(
+                kind: HirTypeKind.TypeParam(parameter.name, parameter.bounds),
+                span: parameter.span)
+        val callable_type = self.declared_imported_surface_callable_type(
+            callable, imported_module_name, Some(owner_symbol))
+        self.symbols.pop_scope()
+        self.prescan_type_parameters = saved_parameters
+        callable_type
 
     me declared_imported_surface_callable_type(callable: ModuleSurfaceCallable, imported_module_name: text, owner_symbol: SymbolId?) -> HirType?:
         if callable.type_params.len() > 0:
