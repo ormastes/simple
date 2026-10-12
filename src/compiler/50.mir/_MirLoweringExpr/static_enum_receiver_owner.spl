@@ -21,7 +21,22 @@ impl MirLowering:
             case HirExprKind.NamedVar(symbol, name):
                 # This is a lexical lookup in the active module SymbolTable,
                 # never a global variant-name search or a foreign numeric ID.
-                val bound = self.symbols.lookup_or_invalid(name)
+                var bound = self.symbols.lookup_or_invalid(name)
+                if bound.id < 0 and symbol.id >= 0:
+                    # B5b shard-registry family (bug-doc phase2_matrix addendum
+                    # 7): the flat short-name entry can name a foreign owner
+                    # from importer pre-registration and be invisible here.
+                    # Retry through the declaring owner's qualified scope, the
+                    # same owner-qualified resolution as the NamedVar value
+                    # arm in expr_dispatch.spl (`SdnValue.Float(f)` is this
+                    # path: a named-constructor MethodCall, not a NamedVar).
+                    if val foreign_symbol = self.symbols.get_symbol_raw(symbol.id):
+                        if val foreign_owner = foreign_symbol.defining_module:
+                            if foreign_owner != "" and foreign_owner != self.current_module_id:
+                                val qualified_retry = self.symbols.lookup_qualified_type_raw(
+                                    foreign_owner, name)
+                                if qualified_retry >= 0:
+                                    bound = SymbolId(id: qualified_retry)
                 if bound.id < 0: return nil
                 if symbol.id >= 0 and symbol.id != bound.id: return nil
                 raw = bound.id

@@ -1,0 +1,153 @@
+# @tag:in-development
+# Purpose: graph/declaration codec boundary evidence for maintainers.
+# @req REQ-TRC-001 REQ-TRC-003 REQ-TRC-007 REQ-TRC-018
+# research: doc/01_research/local/simple_traceability_sdn_slop.md
+# design: doc/05_design/simple_traceability_sdn_slop.md
+# Lifecycle: doc/03_plan/sys_test/simple_traceability_sdn_slop.md doc/04_architecture/simple_traceability_sdn_slop.md
+import std.spec
+use std.spec.step
+use std.common.traceability.model.*
+use std.common.traceability.schema.*
+use std.common.traceability.sdn_codec.*
+
+fn codec_subject() -> SnapshotSubject:
+    SnapshotSubject(repository_id: "simple", snapshot_id: "snapshot:codec", kind: "git_tree", revision_id: "commit:fixture", tree_id: "tree:fixture", object_format: "sha256")
+
+fn codec_graph() -> TraceGraph:
+    TraceGraph(subject: codec_subject(), input_manifest_id: "inputs:codec", nodes: [TraceNode(id: "feature:codec", kind: TraceNodeKind.Feature, title: "한글, \"quoted\"\nsecond line"), TraceNode(id: "test:codec", kind: TraceNodeKind.TestCase, title: "")], test_definitions: [TraceTestDefinition(node_id: "test:codec", kind: TraceTestKind.Unit, definition_id: "test:codec", parameter_digest: "", definition_digest: "sha256:fixture-definition")], claims: [], edges: [], edge_origins: [], origins: [], locators: [], diagnostics: [], generation_id: "generation:codec", complete: true)
+
+fn codec_rejected(source: text) -> bool:
+    match decode_trace_document(source):
+        case Err(_): true
+        case Ok(_): false
+
+describe "Trace graph SDN schema and canonical codec":
+    # @manual scenario evidence
+    it "round trips Unicode, quoted commas, newline and authored empty text":
+        # @req REQ-TRC-001 REQ-TRC-018
+        # @ac AC-TRC-001
+        step("Encode the typed graph using the production SDN writer")
+        val graph = codec_graph()
+        match encode_trace_document(TraceDocument(schema_name: "simple.trace.graph", schema_version: 1, graph: graph)):
+            case Err(issues):
+                expect(issues.len()).to_equal(0)
+            case Ok(encoded):
+                step("Decode the retained bytes and compare exact authored values")
+                match decode_trace_document(encoded):
+                    case Err(issues): expect(issues.len()).to_equal(0)
+                    case Ok(decoded):
+                        expect(decoded.graph.nodes[0].title).to_equal("한글, \"quoted\"\nsecond line")
+                        expect(decoded.graph.nodes[1].title).to_equal("")
+                        expect(decoded.graph.test_definitions[0].kind).to_equal(TraceTestKind.Unit)
+                        expect(decoded.graph.test_definitions[0].parameter_digest).to_equal("")
+                        expect(decoded.graph.subject.snapshot_id).to_equal("snapshot:codec")
+                        expect(encoded.ends_with("\n")).to_equal(true)
+
+    it "sorts unordered records without mutating node identity":
+        # @req REQ-TRC-014
+        # @ac AC-TRC-029
+        step("Encode the same node set in two extraction orders")
+        var left = codec_graph()
+        var right = codec_graph()
+        right.nodes = [right.nodes[1], right.nodes[0]]
+        val a = encode_trace_document(TraceDocument(schema_name: "simple.trace.graph", schema_version: 1, graph: left))
+        val b = encode_trace_document(TraceDocument(schema_name: "simple.trace.graph", schema_version: 1, graph: right))
+        match a:
+            case Err(issues): expect(issues.len()).to_equal(0)
+            case Ok(first):
+                match b:
+                    case Err(issues): expect(issues.len()).to_equal(0)
+                    case Ok(second): expect(first).to_equal(second)
+
+    it "rejects duplicate keys before a last-wins parser value can be admitted":
+        # @req REQ-TRC-001 REQ-TRC-007
+        # @ac AC-TRC-002
+        step("Submit duplicate schema keys to the production decoder")
+        match decode_trace_document('{schema: {}, schema: {}}'):
+            case Ok(_): assert(false)
+            case Err(issues):
+                expect(issues[0].message).to_contain("duplicate")
+
+    it "rejects unknown schema version and unknown enum instead of defaulting":
+        # @req REQ-TRC-001
+        # @ac AC-TRC-002
+        step("Mutate the version and node kind in an otherwise valid graph")
+        match encode_trace_document(TraceDocument(schema_name: "simple.trace.graph", schema_version: 1, graph: codec_graph())):
+            case Err(issues): expect(issues.len()).to_equal(0)
+            case Ok(encoded):
+                expect(codec_rejected(encoded.replace("version: 1", "version: 2"))).to_equal(true)
+                expect(codec_rejected(encoded.replace("kind: feature", "kind: counterfeit"))).to_equal(true)
+
+    it "rejects absent required data, renamed legacy data and malformed quotes":
+        # @req REQ-TRC-001 REQ-TRC-007
+        # @ac AC-TRC-002 AC-TRC-026
+        step("Check malformed and foreign-shaped input without empty-graph fallback")
+        expect(codec_rejected('schema=old\n---\nstatus=pass')).to_equal(true)
+        expect(codec_rejected('{schema: {name: simple.trace.graph, version: 1}}')).to_equal(true)
+        expect(codec_rejected('{schema: "unterminated}')).to_equal(true)
+        expect(codec_rejected('{schema: "closed" trailing}')).to_equal(true)
+        expect(codec_rejected('|id, id|\na, b')).to_equal(true)
+
+    it "accepts signed integer boundaries and rejects wrapping overflow tokens":
+        # @req REQ-TRC-001
+        # @ac AC-TRC-001
+        step("Validate both signed boundaries before the shared integer decoder")
+        match trace_sdn_preflight("[9223372036854775807, -9223372036854775808]"):
+            case Err(_): assert(false)
+            case Ok(_):
+                match trace_sdn_preflight("[9223372036854775808]"):
+                    case Ok(_): assert(false)
+                    case Err(message): expect(message).to_contain("64-bit")
+        match trace_sdn_preflight("[-9223372036854775809]"):
+            case Ok(_): assert(false)
+            case Err(message): expect(message).to_contain("64-bit")
+
+    it "rejects duplicate canonical nodes and unsafe source locators":
+        # @req REQ-TRC-006 REQ-TRC-020
+        # @ac AC-TRC-009 AC-TRC-040
+        step("Validate duplicated identities and an escaping source path")
+        var graph = codec_graph()
+        graph.nodes = [graph.nodes[0], graph.nodes[0]]
+        expect(validate_trace_graph(graph).len()).to_be_greater_than(0)
+        var located = codec_graph()
+        located.locators = [TraceLocator(entity_id: "feature:codec", path: "../private.txt", locator_kind: "file", locator: "", blob_id: "blob:private")]
+        expect(validate_trace_graph(located).len()).to_be_greater_than(0)
+
+    it "requires distinct parameterized identity and a declared base case":
+        # @req REQ-TRC-003
+        step("Reject a parameterized role without a parameter digest")
+        var graph = codec_graph()
+        graph.nodes = [TraceNode(id: "test:codec", kind: TraceNodeKind.TestCase, title: "Base"), TraceNode(id: "case:parameter", kind: TraceNodeKind.ParameterizedCase, title: "Parameter")]
+        graph.test_definitions = [TraceTestDefinition(node_id: "case:parameter", kind: TraceTestKind.Unit, definition_id: "test:codec", parameter_digest: "", definition_digest: "definition:base")]
+        expect(validate_trace_graph(graph).len()).to_be_greater_than(0)
+
+    it "keeps acceptance and supporting verification roles distinct":
+        # @req REQ-TRC-003 REQ-TRC-013
+        step("Check role eligibility without promoting a unit definition to acceptance")
+        var roles: Dict<text, bool> = {}
+        roles["test:unit|unit"] = true
+        expect(trace_relation_test_role_valid(TraceRelation.AcceptedBy, "test:unit", roles)).to_equal(false)
+        expect(trace_relation_test_role_valid(TraceRelation.VerifiedBy, "test:unit", roles)).to_equal(true)
+        expect(trace_relation_test_role_valid(TraceRelation.VerifiedBy, "test:missing", roles)).to_equal(false)
+
+    it "injects declaration provenance from the immutable snapshot adapter":
+        # @req REQ-TRC-002 REQ-TRC-007
+        # @ac AC-TRC-007
+        step("Decode an owned declaration with no candidate-authored subject")
+        val source = '{schema: {name: simple.trace.declarations, version: 1}, nodes: [{id: "feature:own", kind: feature, title: "REQ-EXAMPLE is prose"}], test_definitions: [], claims: [], origins: [{id: "origin:own", kind: explicit, locator: "line:1"}], locators: [{entity_id: "feature:own", path: "doc/trace/own.trace.sdn", locator_kind: file, locator: ""}]}'
+        match decode_trace_declarations(source, codec_subject(), "doc/trace/own.trace.sdn", "blob:actual"):
+            case Err(issues): expect(issues.len()).to_equal(0)
+            case Ok(facts):
+                expect(facts.origins[0].owner_path).to_equal("doc/trace/own.trace.sdn")
+                expect(facts.locators[0].blob_id).to_equal("blob:actual")
+                expect(facts.subject.snapshot_id).to_equal("snapshot:codec")
+                expect(facts.claims.len()).to_equal(0)
+
+    it "rejects a declaration that impersonates runtime observation authority":
+        # @req REQ-TRC-011 REQ-TRC-013
+        # @ac AC-TRC-024
+        step("Submit a forged runtime origin through the authored-input decoder")
+        val source = '{schema: {name: simple.trace.declarations, version: 1}, nodes: [], test_definitions: [], claims: [], origins: [{id: "origin:forged", kind: runtime_observation, locator: ""}], locators: []}'
+        match decode_trace_declarations(source, codec_subject(), "doc/trace/forged.trace.sdn", "blob:actual"):
+            case Ok(_): assert(false)
+            case Err(issues): expect(issues[0].message).to_contain("authority")
