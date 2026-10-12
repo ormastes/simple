@@ -1,0 +1,186 @@
+# Real HIR assertions; run with a compiler containing the candidate methods.
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolKind, Visibility}
+use compiler.common.diagnostics.span.{Span}
+
+fn imported_owner_scope_lower(extra_owner: text, method: text, extra_consumer: text) -> HirLowering:
+    val logger = Logger(level: 0)
+    val owner_source = extra_owner + "\nclass GenericRing<Op, Cpl>:\n    operations: [Op]\n    completions: [Cpl]\n\nimpl GenericRing<Op, Cpl>:\n" + method
+    val consumer_source = "use generic.owner.\{GenericRing\}\nstruct Holder:\n    ring: GenericRing<i64, text>\n" + extra_consumer + "\nfn main() -> i64:\n    0\n"
+    var modules: Dict<text, ParserModule> = {}
+    modules["generic.owner"] = parse_full_frontend(owner_source, "generic.owner", "generic.owner", logger)
+    val consumer = parse_full_frontend(consumer_source, "generic.consumer", "generic.consumer", logger)
+    val sources = [SourceFile(path: "generic/owner.spl", content: owner_source, module_name: "generic.owner")]
+    val surfaces = module_surfaces_from_modules(modules, sources)
+    expect(surfaces.is_ok()).to_equal(true)
+    var lowering = hirlowering_for_module("generic.consumer", surfaces.unwrap())
+    val hir = lowering.lower_module(consumer)
+    expect(hir.functions.len()).to_be_greater_than(0)
+    lowering
+
+fn imported_owner_scalar_signature(lowering: HirLowering, method: text, expected: text) -> bool:
+    val id = lowering.symbols.lookup_or_invalid("generic.owner.GenericRing::" + method)
+    if not id.is_valid(): return false
+    val symbol = lowering.symbols.get_symbol(id)
+    if not symbol.?: return false
+    val type_ = symbol.unwrap().type_
+    if not type_.?: return false
+    match type_.unwrap().kind:
+        case HirTypeKind.Function(params, result, _):
+            if params.len() < 1: return false
+            val parameter_matches = match params[params.len() - 1].kind:
+                case HirTypeKind.TypeParam(name, _): name == expected
+                case _: false
+            val result_matches = match result.kind:
+                case HirTypeKind.TypeParam(name, _): name == expected
+                case _: false
+            parameter_matches and result_matches
+        case _: false
+
+describe "imported generic owner method binder scope":
+    it "retains owner binders in parameter and return signatures":
+        val lowering = imported_owner_scope_lower("", "    fn pass_operation(value: Op) -> Op:\n        value\n    fn pass_completion(value: Cpl) -> Cpl:\n        value\n", "")
+        expect(lowering.errors.len()).to_equal(0)
+        expect(imported_owner_scalar_signature(lowering, "pass_operation", "Op")).to_equal(true)
+        expect(imported_owner_scalar_signature(lowering, "pass_completion", "Cpl")).to_equal(true)
+        expect(lowering.prescan_type_parameters.len()).to_equal(0)
+        expect(lowering.symbols.lookup_or_invalid("Op").is_valid()).to_equal(false)
+        expect(lowering.symbols.lookup_or_invalid("Cpl").is_valid()).to_equal(false)
+
+    it "shadows same-spelled owner module types with declaration binders":
+        val lowering = imported_owner_scope_lower("struct Op:\n    other: text\nstruct Cpl:\n    other: i64\n", "    fn pass_operation(value: Op) -> Op:\n        value\n", "")
+        expect(lowering.errors.len()).to_equal(0)
+        expect(imported_owner_scalar_signature(lowering, "pass_operation", "Op")).to_equal(true)
+
+    it "rejects a consumer sibling that tries to use an owner binder":
+        val lowering = imported_owner_scope_lower("", "    fn pass_operation(value: Op) -> Op:\n        value\n", "struct Sibling:\n    invalid: Op\n")
+        expect(lowering.errors.len()).to_be_greater_than(0)
+        expect(lowering.symbols.lookup_or_invalid("Op").is_valid()).to_equal(false)
+        expect(imported_owner_scalar_signature(lowering, "pass_operation", "Op")).to_equal(true)
+
+    it "still rejects a missing named method dependency":
+        val lowering = imported_owner_scope_lower("", "    fn broken(value: MissingType) -> i64:\n        0\n", "")
+        expect(lowering.errors.len()).to_be_greater_than(0)
+        expect(lowering.symbols.lookup_qualified_type_raw("generic.owner", "MissingType") >= 0).to_equal(false)
+
+    it "still materializes a concrete sibling method dependency":
+        val lowering = imported_owner_scope_lower("struct Token:\n    number: i64\n", "    fn concrete(value: Token) -> Token:\n        value\n", "")
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.symbols.lookup_qualified_type_raw("generic.owner", "Token") >= 0).to_equal(true)
+        expect(lowering.symbols.lookup_or_invalid("generic.owner.GenericRing::concrete").is_valid()).to_equal(true)
+
+# Constraint cases use the actual surface -> imported method registration path,
+# including a caller binder which must survive both successful and failed import.
+fn imported_owner_constraint_lower(parameters: text, owner_prefix: text, consumer_prefix: text, method: text) -> HirLowering:
+    val logger = Logger(level: 0)
+    val owner_source = owner_prefix + "\nclass GenericRing<" + parameters + ">:\n    number: i64\n\nimpl GenericRing<Op, Cpl>:\n" + method
+    val consumer_source = consumer_prefix + "\nuse generic.owner.\{GenericRing\}\nfn main() -> i64:\n    0\n"
+    var modules: Dict<text, ParserModule> = {}
+    modules["generic.owner"] = parse_full_frontend(owner_source, "generic.owner", "generic.owner", logger)
+    val consumer = parse_full_frontend(consumer_source, "generic.consumer", "generic.consumer", logger)
+    val surfaces = module_surfaces_from_modules(modules, [SourceFile(path: "generic/owner.spl", content: owner_source, module_name: "generic.owner")])
+    expect(surfaces.is_ok()).to_equal(true)
+    var lowering = hirlowering_for_module("generic.consumer", surfaces.unwrap())
+    val span = Span.new(0, 0, 1, 1)
+    val caller = lowering.symbols.define("CallerBinder", SymbolKind.TypeParam, nil, span, Visibility.Private, false, nil)
+    lowering.prescan_type_parameters[caller.id] = HirType(kind: HirTypeKind.TypeParam("CallerBinder", []), span: span)
+    val hir = lowering.lower_module(consumer)
+    expect(hir.functions.len()).to_be_greater_than(0)
+    expect(lowering.symbols.lookup_or_invalid("CallerBinder")).to_equal(caller)
+    expect(lowering.prescan_type_parameters.len()).to_equal(1)
+    expect(lowering.prescan_type_parameters[caller.id].kind).to_equal(HirTypeKind.TypeParam("CallerBinder", []))
+    expect(lowering.symbols.lookup_or_invalid("Op").is_valid()).to_equal(false)
+    expect(lowering.symbols.lookup_or_invalid("Cpl").is_valid()).to_equal(false)
+    lowering
+
+fn imported_owner_result_bound(lowering: HirLowering, method: text = "echo", parameter: text = "Op") -> HirType?:
+    val id = lowering.symbols.lookup_or_invalid("generic.owner.GenericRing::" + method)
+    if not id.is_valid(): return nil
+    if val symbol = lowering.symbols.get_symbol(id):
+        if val signature = symbol.type_:
+            match signature.kind:
+                case HirTypeKind.Function(_, result, _):
+                    match result.kind:
+                        case HirTypeKind.TypeParam(name, bounds):
+                            if name == parameter and bounds.len() == 1: return Some(bounds[0])
+                        case _: ()
+                case _: ()
+    nil
+
+describe "imported owner constraint and default authority":
+    it "imports declaration-only bounds and defaults without importer decoys":
+        val lowering = imported_owner_constraint_lower("Op: Marker = Token, Cpl = Op", "struct Marker:\n    owner: i64\nstruct Token:\n    owner: text\n", "", "    fn echo(value: Op) -> Op:\n        value\n")
+        expect(lowering.errors.len()).to_equal(0)
+        val bound = imported_owner_result_bound(lowering)
+        expect(bound.?).to_equal(true)
+        match bound.unwrap().kind:
+            case HirTypeKind.Named(symbol, args):
+                expect(symbol.id).to_equal(lowering.symbols.lookup_qualified_type_raw("generic.owner", "Marker"))
+                expect(args.len()).to_equal(0)
+            case _: expect(false).to_equal(true)
+        expect(lowering.symbols.lookup_qualified_type_raw("generic.owner", "Token")).to_be_greater_than(-1)
+
+    it "resolves bound and default from the declaration despite importer shadows":
+        val lowering = imported_owner_constraint_lower("Op: Marker = Token, Cpl = Op", "struct Marker:\n    owner: i64\nstruct Token:\n    owner: text\n", "struct Marker:\n    decoy: text\nstruct Token:\n    decoy: i64\n", "    fn echo(value: Op) -> Op:\n        value\n")
+        expect(lowering.errors.len()).to_equal(0)
+        val marker = lowering.symbols.lookup_qualified_type_raw("generic.owner", "Marker")
+        val token = lowering.symbols.lookup_qualified_type_raw("generic.owner", "Token")
+        expect(marker).to_be_greater_than(-1)
+        expect(token).to_be_greater_than(-1)
+        val bound = imported_owner_result_bound(lowering)
+        expect(bound.?).to_equal(true)
+        match bound.unwrap().kind:
+            case HirTypeKind.Named(symbol, args):
+                expect(symbol.id).to_equal(marker)
+                expect(args.len()).to_equal(0)
+                expect(symbol.id == lowering.symbols.lookup_or_invalid("Marker").id).to_equal(false)
+            case _: expect(false).to_equal(true)
+
+    it "rejects missing owner bounds even when the importer declares that name":
+        val lowering = imported_owner_constraint_lower("Op: Missing, Cpl", "", "struct Missing:\n    decoy: i64\n", "    fn ping() -> i64:\n        0\n")
+        expect(lowering.errors.len()).to_be_greater_than(0)
+        expect(lowering.symbols.lookup_qualified_type_raw("generic.owner", "Missing") >= 0).to_equal(false)
+
+    it "rejects missing owner defaults instead of using importer declarations":
+        val lowering = imported_owner_constraint_lower("Op = Missing, Cpl = Op", "", "struct Missing:\n    decoy: i64\n", "    fn ping() -> i64:\n        0\n")
+        expect(lowering.errors.len()).to_be_greater_than(0)
+        expect(lowering.symbols.lookup_qualified_type_raw("generic.owner", "Missing") >= 0).to_equal(false)
+
+    it "predeclares forward and self references without nominal substitution":
+        var case_index = 0
+        for parameters in ["Op: Cpl = Cpl, Cpl: Op = Op", "Op: Op = Op, Cpl: Cpl = Cpl"]:
+            val lowering = imported_owner_constraint_lower(parameters, "", "", "    fn echo(value: Op) -> Op:\n        value\n    fn echo_completion(value: Cpl) -> Cpl:\n        value\n")
+            expect(lowering.errors.len()).to_equal(0)
+            val bound = imported_owner_result_bound(lowering)
+            expect(bound.?).to_equal(true)
+            match bound.unwrap().kind:
+                case HirTypeKind.TypeParam(name, bounds):
+                    expect(name).to_equal(if case_index == 0: "Cpl" else: "Op")
+                    expect(bounds.len()).to_equal(0)
+                case _: expect(false).to_equal(true)
+            val completion_bound = imported_owner_result_bound(lowering, "echo_completion", "Cpl")
+            expect(completion_bound.?).to_equal(true)
+            match completion_bound.unwrap().kind:
+                case HirTypeKind.TypeParam(name, bounds):
+                    expect(name).to_equal(if case_index == 0: "Op" else: "Cpl")
+                    expect(bounds.len()).to_equal(0)
+                case _: expect(false).to_equal(true)
+            case_index = case_index + 1
+
+    it "materializes a composite default in the declaration namespace":
+        val lowering = imported_owner_constraint_lower("Op: Marker = [Token], Cpl = Op", "struct Marker:\n    owner: i64\nstruct Token:\n    owner: i64\n", "struct Marker:\n    decoy: text\nstruct Token:\n    decoy: text\n", "    fn echo(value: Op) -> Op:\n        value\n")
+        expect(lowering.errors.len()).to_equal(0)
+        val bound = imported_owner_result_bound(lowering)
+        expect(bound.?).to_equal(true)
+        match bound.unwrap().kind:
+            case HirTypeKind.Named(symbol, _):
+                expect(symbol.id).to_equal(lowering.symbols.lookup_qualified_type_raw("generic.owner", "Marker"))
+            case _: expect(false).to_equal(true)
+        expect(lowering.symbols.lookup_qualified_type_raw("generic.owner", "Token")).to_be_greater_than(-1)
