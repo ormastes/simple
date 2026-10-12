@@ -1126,8 +1126,17 @@ fn bootstrap_fn_ret_opt_shape_lookup(name: text) -> text?:
 # register pair while the callee read the ABI-correct one (band/policy/dram/
 # target section failures, 2026-07-24).
 var _bootstrap_fn_param_hir_types: Dict<text, [HirType]> = {}
+# This unowned registry must never transport a provider's local SymbolId.
+# Keep parameter rejection separate: a valid scalar return ABI remains valid.
+var _bootstrap_fn_param_hir_rejected: Dict<text, bool> = {}
 
 fn bootstrap_fn_param_hir_types_register(name: text, tys: [HirType]):
+    if _bootstrap_fn_param_hir_rejected.contains_key(name):
+        return
+    for ty in tys:
+        if not hir_type_metadata_symbol_free(ty):
+            _bootstrap_fn_param_hir_rejected[name] = true
+            return
     if _bootstrap_fn_ret_hir_ambig.contains_key(name):
         if _bootstrap_fn_param_hir_types.contains_key(name):
             # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
@@ -1143,10 +1152,18 @@ fn bootstrap_fn_param_hir_types_register(name: text, tys: [HirType]):
     _bootstrap_fn_param_hir_types[name] = tys
 
 fn bootstrap_fn_param_hir_types_lookup(name: text) -> [HirType]?:
+    if _bootstrap_fn_param_hir_rejected.contains_key(name):
+        return nil
     if _bootstrap_fn_ret_hir_ambig.contains_key(name):
         return nil
     if _bootstrap_fn_param_hir_types.contains_key(name):
-        return Some(_bootstrap_fn_param_hir_types[name])
+        val params = _bootstrap_fn_param_hir_types[name]
+        # Admission also covers an existing record; registration is not proof
+        # that an older/restored value owns the active consumer's symbol table.
+        for param in params:
+            if not hir_type_metadata_symbol_free(param):
+                return nil
+        return Some(params)
     nil
 
 # Per-parameter DEFAULT-expression registry.
@@ -1271,13 +1288,14 @@ fn bootstrap_fn_registries_promote() -> bool:
     val ret_opt_shapes_ok = _promote_bootstrap_registry(_bootstrap_fn_ret_opt_shapes)
     val ret_opt_shape_ambig_ok = _promote_bootstrap_registry(_bootstrap_fn_ret_opt_shape_ambig)
     val param_hir_types_ok = _promote_bootstrap_registry(_bootstrap_fn_param_hir_types)
+    val param_hir_rejected_ok = _promote_bootstrap_registry(_bootstrap_fn_param_hir_rejected)
     val param_defaults_ok = _promote_bootstrap_registry(_bootstrap_fn_param_defaults)
     val param_defaults_ambig_ok = _promote_bootstrap_registry(_bootstrap_fn_param_defaults_ambig)
     ret_types_ok and ret_hir_types_ok and ret_hir_ambig_ok and ret_shapes_ok and
         ret_shape_ambig_ok and ret_err_shapes_ok and ret_ok_shapes_ok and ret_ok_shape_ambig_ok and
         ret_opt_shapes_ok and ret_opt_shape_ambig_ok and
         ret_array_element_shapes_ok and ret_array_element_shape_ambig_ok and ret_array_element_identities_ok and
-        param_hir_types_ok and param_defaults_ok and param_defaults_ambig_ok
+        param_hir_types_ok and param_hir_rejected_ok and param_defaults_ok and param_defaults_ambig_ok
 
 export use compiler.mir.mir_instruction_support.{BlockId}
 export use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}

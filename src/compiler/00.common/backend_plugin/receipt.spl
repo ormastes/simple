@@ -130,13 +130,20 @@ fn _validate_backend_plugin_operations(request: BackendPluginRequestV1, vtable: 
     if not vtable.supports_compile_module: return Err(BackendPluginError.ProviderRejected("missing compile_module operation"))
     if not vtable.supports_diagnostics: return Err(BackendPluginError.ProviderRejected("missing diagnostics operation"))
     if not vtable.supports_close_session: return Err(BackendPluginError.ProviderRejected("missing close_session operation"))
-    if request.role == BackendRole.CompilerAot and not vtable.supports_finalize_object: return Err(BackendPluginError.ProviderRejected("missing finalize_object operation"))
-    if request.role == BackendRole.InterpreterJit and not vtable.supports_execute: return Err(BackendPluginError.ProviderRejected("missing execute operation"))
+    # @workaround bug=backend_plugin_result_payload_mir_2026_10_12 recover=12c8aa7fb11b5272b8860094626b2b41a75e30bf reason=exhaustive_matches_preserve_original_error_payload_and_role_checks
+    match request.role:
+        case BackendRole.CompilerAot:
+            if not vtable.supports_finalize_object: return Err(BackendPluginError.ProviderRejected("missing finalize_object operation"))
+        case BackendRole.InterpreterJit:
+            if not vtable.supports_execute: return Err(BackendPluginError.ProviderRejected("missing execute operation"))
     Ok(true)
 
 fn admit_backend_plugin_descriptor(request: BackendPluginRequestV1, descriptor: BackendPluginDescriptorV1) -> Result<BackendProviderReceipt, BackendPluginError>:
     val validated = validate_backend_plugin_request(request)
-    if validated.is_err(): return Err(validated.err().unwrap())
+    # @workaround bug=backend_plugin_result_payload_mir_2026_10_12 recover=12c8aa7fb11b5272b8860094626b2b41a75e30bf reason=exhaustive_matches_preserve_original_error_payload_and_role_checks
+    match validated:
+        case Err(error): return Err(error)
+        case Ok(_): pass
     if descriptor.provider_identity == "": return Err(BackendPluginError.ProviderRejected("provider identity is required"))
     if descriptor.provider_identity != request.backend_name: return Err(BackendPluginError.ProviderRejected("provider identity does not match requested backend"))
     if descriptor.provider_version == "": return Err(BackendPluginError.ProviderVersionMismatch("provider version is required"))
@@ -149,7 +156,10 @@ fn admit_backend_plugin_descriptor(request: BackendPluginRequestV1, descriptor: 
     for required in request.required_capabilities:
         if not backend_plugin_has_capability(descriptor, required): return Err(BackendPluginError.CapabilityMismatch(required.name()))
     val operations = _validate_backend_plugin_operations(request, descriptor.vtable)
-    if operations.is_err(): return Err(operations.err().unwrap())
+    # @workaround bug=backend_plugin_result_payload_mir_2026_10_12 recover=12c8aa7fb11b5272b8860094626b2b41a75e30bf reason=exhaustive_matches_preserve_original_error_payload_and_role_checks
+    match operations:
+        case Err(error): return Err(error)
+        case Ok(_): pass
     Ok(backend_plugin_receipt(descriptor, request))
 
 export BackendPluginError, BackendProviderReceipt, backend_plugin_receipt,
