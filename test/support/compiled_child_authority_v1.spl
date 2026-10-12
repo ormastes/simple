@@ -28,6 +28,41 @@ struct TestCompiledChildResultV1:
     input_sha256: text
     evidence_prefix: text
 
+class TestCompiledChildObservationV1:
+    stdout: [u8] = []
+    stderr: [u8] = []
+    terminal: bool = false
+    reaped: bool = false
+    output_complete: bool = false
+    timed_out: bool = false
+    stdout_truncated: bool = false
+    stderr_truncated: bool = false
+    runtime_error: i64 = -1
+    input_accepted: i64 = -1
+    input_written: i64 = -1
+    input_closed: bool = false
+    input_sha256: text = ""
+    failure_stage: text = ""
+
+fn retain_failure(observed: TestCompiledChildObservationV1, prefix: text, message: text) -> bool:
+    val metadata = "schema=compiled-system-child-v1\nstatus=failed\n" +
+        "terminal={observed.terminal}\nreaped={observed.reaped}\noutput_complete=0\noutput_eof_observed={observed.output_complete}\n" +
+        "timed_out={observed.timed_out}\nstdout_truncated={observed.stdout_truncated}\nstderr_truncated={observed.stderr_truncated}\n" +
+        "runtime_error={observed.runtime_error}\ninput_accepted={observed.input_accepted}\ninput_written={observed.input_written}\n" +
+        "input_closed={observed.input_closed}\ninput_sha256={observed.input_sha256}\nfailure_stage={observed.failure_stage}\n"
+    val out = file_write_bytes(prefix + ".stdout.bin", observed.stdout)
+    val err = file_write_bytes(prefix + ".stderr.bin", observed.stderr)
+    val receipt = file_write_bytes(prefix + ".failure.env", metadata.bytes())
+    val diagnostic = file_write_bytes(prefix + ".failure.txt", message.bytes())
+    out and err and receipt and diagnostic
+
+fn observed_failure(observed: TestCompiledChildObservationV1, prefix: text, stage: text,
+        message: text) -> Result<TestCompiledChildResultV1, text>:
+    observed.failure_stage = stage
+    if not retain_failure(observed, prefix, message):
+        return Err("compiled child failure evidence publication refused: " + message)
+    Err(message)
+
 fn digest_valid(value: text) -> bool:
     if value.len() != 64: return false
     for byte in value.bytes():
@@ -118,17 +153,24 @@ pub fn test_compiled_child_authority_v1(role: text) -> Result<TestCompiledChildA
     Ok(TestCompiledChildAuthorityV1(role, path, digest, receipt, expected, evidence))
 
 fn drain_actual_child(lease: OwnedProcessLease, input: [u8], timeout_ms: i64,
-        prefix: text) -> Result<TestCompiledChildResultV1, text>:
-    var stdout: [u8] = []
-    var stderr: [u8] = []
+        prefix: text, observed: TestCompiledChildObservationV1) -> Result<TestCompiledChildResultV1, text>:
     var terminal = false
     # Native deadline owns TERM/KILL/reap. This extra finite bound refuses a
     # broken provider rather than trusting endless live/terminal metadata.
     val attempts = (timeout_ms + 12000) / 50 + 1
     for index in range(0, attempts):
-        val poll = lease.poll(50, 4096, 4096)?
-        for byte in poll.stdout: stdout.push(byte)
-        for byte in poll.stderr: stderr.push(byte)
+        observed.failure_stage = "poll"
+        val polled = lease.poll(50, 4096, 4096)
+        if polled.is_err(): return Err(polled.unwrap_err())
+        val poll = polled.unwrap()
+        for byte in poll.stdout: observed.stdout.push(byte)
+        for byte in poll.stderr: observed.stderr.push(byte)
+        observed.terminal = poll.terminal
+        observed.reaped = poll.reaped
+        observed.timed_out = poll.timed_out
+        observed.stdout_truncated = poll.stdout_truncated
+        observed.stderr_truncated = poll.stderr_truncated
+        observed.runtime_error = poll.runtime_error
         if poll.runtime_error != 0 or poll.stdout_truncated or poll.stderr_truncated or
                 poll.stdout_delivered != poll.stdout.len() or poll.stderr_delivered != poll.stderr.len():
             return Err("compiled child capture/provider refused")
@@ -136,20 +178,39 @@ fn drain_actual_child(lease: OwnedProcessLease, input: [u8], timeout_ms: i64,
         # retained byte before collecting; empty terminal poll proves EOF.
         if poll.terminal and poll.reaped and poll.stdout.len() == 0 and poll.stderr.len() == 0:
             terminal = true
+            observed.output_complete = true
             break
     if not terminal: return Err("compiled child terminal EOF not observed within finite bound")
-    val accepted_input = lease.input_receipt()?
+    observed.failure_stage = "input-receipt"
+    val received_input = lease.input_receipt()
+    if received_input.is_err(): return Err(received_input.unwrap_err())
+    val accepted_input = received_input.unwrap()
+    observed.runtime_error = accepted_input.runtime_error
+    observed.input_accepted = accepted_input.accepted
+    observed.input_written = accepted_input.written
+    observed.input_closed = accepted_input.stdin_closed
+    observed.input_sha256 = digest_hex(accepted_input.digest)
     if accepted_input.runtime_error != 0 or not accepted_input.stdin_closed or not accepted_input.terminal or
             not accepted_input.reaped or accepted_input.accepted != input.len() or accepted_input.written != input.len() or
             digest_hex(accepted_input.digest) != sha256_u8_hex(input):
         return Err("compiled child complete stdin receipt refused")
-    val result = lease.result()?
+    observed.failure_stage = "terminal-result"
+    val terminal_result = lease.result()
+    if terminal_result.is_err(): return Err(terminal_result.unwrap_err())
+    val result = terminal_result.unwrap()
+    observed.runtime_error = result.runtime_error
+    observed.reaped = result.reaped
+    observed.timed_out = result.timed_out
+    observed.stdout_truncated = result.stdout_truncated
+    observed.stderr_truncated = result.stderr_truncated
     if result.runtime_error != 0 or not result.reaped or not result.identity_revalidated or
             result.stdout_truncated or result.stderr_truncated or
-            result.stdout_seen != stdout.len() or result.stdout_kept != stdout.len() or
-            result.stderr_seen != stderr.len() or result.stderr_kept != stderr.len():
+            result.stdout_seen != observed.stdout.len() or result.stdout_kept != observed.stdout.len() or
+            result.stderr_seen != observed.stderr.len() or result.stderr_kept != observed.stderr.len():
+        observed.output_complete = false
         return Err("compiled child collected identity/output receipt refused")
-    Ok(TestCompiledChildResultV1(stdout, stderr, result.exit_code, result.timed_out,
+    observed.failure_stage = ""
+    Ok(TestCompiledChildResultV1(observed.stdout, observed.stderr, result.exit_code, result.timed_out,
         true, result.reaped, true, digest_hex(accepted_input.digest), prefix))
 
 pub fn test_compiled_child_run_v1(role: text, args: [text], input: [u8], timeout_ms: i64
@@ -159,27 +220,33 @@ pub fn test_compiled_child_run_v1(role: text, args: [text], input: [u8], timeout
     if not dir_create_all(authority.evidence_dir): return Err("compiled child evidence directory refused")
     val owned_directory = secure_temp_dir(authority.evidence_dir, "compiled-child-")?
     val prefix = owned_directory + "/child"
+    val observed = TestCompiledChildObservationV1()
     val argv = json_value_serialize(json_value_str_array(args))
     val context = "role={role}\nexecutable={authority.executable}\nexecutable_sha256={authority.executable_sha256}\n" +
         "owner_receipt={authority.receipt}\nowner_receipt_sha256={authority.receipt_sha256}\nargs={argv}\n"
     if not file_write_bytes(prefix + ".authority.env", context.bytes()) or
             not file_write_bytes(prefix + ".stdin.bin", input):
-        return Err("compiled child input/authority evidence publication refused")
-    val pin = OwnedExecutablePin.pin(authority.executable)?
+        return observed_failure(observed, prefix, "input-authority-publication", "compiled child input/authority evidence publication refused")
+    val acquired = OwnedExecutablePin.pin(authority.executable)
+    if acquired.is_err(): return observed_failure(observed, prefix, "native-pin", acquired.unwrap_err())
+    val pin = acquired.unwrap()
     val pinned = pin.digest()
     if pinned.is_err() or digest_hex(pinned.unwrap()) != authority.executable_sha256:
         val closed = pin.close()
-        return Err("compiled child native pinned executable digest differs")
+        if closed.is_err(): return observed_failure(observed, prefix, "native-digest-cleanup", closed.unwrap_err())
+        return observed_failure(observed, prefix, "native-digest", "compiled child native pinned executable digest differs")
     val native_pin = "pinned=1\nnative_sha256={digest_hex(pinned.unwrap())}\n"
     if not file_write_bytes(prefix + ".native-pin.env", native_pin.bytes()):
         val closed = pin.close()
-        return Err("compiled child native pin evidence publication refused")
+        if closed.is_err(): return observed_failure(observed, prefix, "native-pin-publication-cleanup", closed.unwrap_err())
+        return observed_failure(observed, prefix, "native-pin-publication", "compiled child native pin evidence publication refused")
     val started = pin.start(args, input, timeout_ms, 2000, 4194304)
     if started.is_err():
         val closed = pin.close()
-        return Err(started.unwrap_err())
+        if closed.is_err(): return observed_failure(observed, prefix, "start-cleanup", closed.unwrap_err())
+        return observed_failure(observed, prefix, "start", started.unwrap_err())
     val lease = started.unwrap().lease()
-    val captured = drain_actual_child(lease, input, timeout_ms, prefix)
+    val captured = drain_actual_child(lease, input, timeout_ms, prefix, observed)
     if captured.is_err():
         # Cancellation owns exact child teardown even on capture/provider
         # failure. Never hand its process to a detached shell fallback.
@@ -187,15 +254,27 @@ pub fn test_compiled_child_run_v1(role: text, args: [text], input: [u8], timeout
         val collected = lease.collect()
         val released = lease.release()
         val closed = pin.close()
-        if canceled.is_err() or collected.is_err() or released.is_err() or closed.is_err():
+        val cancel_ok = canceled.is_ok() and canceled.unwrap().accepted and canceled.unwrap().runtime_error == 0
+        val collect_ok = collected.is_ok() and collected.unwrap().reaped and collected.unwrap().runtime_error == 0
+        val cleanup = "cancel_ok={cancel_ok}\ncollect_ok={collect_ok}\nlease_release_ok={released.is_ok()}\npin_close_ok={closed.is_ok()}\n"
+        val cleanup_retained = file_write_bytes(prefix + ".cleanup.env", cleanup.bytes())
+        val retained = retain_failure(observed, prefix, captured.unwrap_err())
+        if not retained or not cleanup_retained: return Err("compiled child partial failure evidence publication refused: " + captured.unwrap_err())
+        if not cancel_ok or not collect_ok or released.is_err() or closed.is_err():
             return Err("compiled child failure cleanup refused: " + captured.unwrap_err())
         return captured
     # The drain checked terminal EOF and a non-consuming actual result. Consume
     # exactly once now; no later publication error may retry collection.
     val collected = lease.collect()
+    # collect may return an unconsumed EAGAIN/EBUSY result. release is a facade
+    # no-op after genuine consumption and must be checked on every branch.
+    val released = lease.release()
     if collected.is_err():
-        val released = lease.release()
         val closed = pin.close()
+        observed.failure_stage = "collect"
+        val retained = retain_failure(observed, prefix, collected.unwrap_err())
+        if released.is_err() or closed.is_err() or not retained:
+            return Err("compiled child collection cleanup/evidence refused: " + collected.unwrap_err())
         return Err("compiled child collection refused: " + collected.unwrap_err())
     val actual_result = collected.unwrap()
     val completed = captured.unwrap()
@@ -205,22 +284,42 @@ pub fn test_compiled_child_run_v1(role: text, args: [text], input: [u8], timeout
             actual_result.stdout_seen != completed.stdout.len() or actual_result.stdout_kept != completed.stdout.len() or
             actual_result.stderr_seen != completed.stderr.len() or actual_result.stderr_kept != completed.stderr.len():
         val closed = pin.close()
+        observed.failure_stage = "collect-result"
+        observed.runtime_error = actual_result.runtime_error
+        observed.reaped = actual_result.reaped
+        observed.timed_out = actual_result.timed_out
+        observed.stdout_truncated = actual_result.stdout_truncated
+        observed.stderr_truncated = actual_result.stderr_truncated
+        observed.output_complete = false
+        val retained = retain_failure(observed, prefix, "compiled child collected terminal result changed")
+        if released.is_err() or closed.is_err() or not retained:
+            return Err("compiled child invalid collection cleanup/evidence refused")
         return Err("compiled child collected terminal result changed")
-    val closed = pin.close()?
-    val current = test_compiled_child_authority_v1(role)?
+    if released.is_err():
+        val closed = pin.close()
+        observed.failure_stage = "release"
+        val retained = retain_failure(observed, prefix, released.unwrap_err())
+        if closed.is_err() or not retained: return Err("compiled child release cleanup/evidence refused")
+        return Err(released.unwrap_err())
+    val closed = pin.close()
+    if closed.is_err(): return observed_failure(observed, prefix, "pin-close", closed.unwrap_err())
+    val reread = test_compiled_child_authority_v1(role)
+    if reread.is_err(): return observed_failure(observed, prefix, "authority-reread", reread.unwrap_err())
+    val current = reread.unwrap()
     if current.receipt_sha256 != authority.receipt_sha256 or current.executable_sha256 != authority.executable_sha256 or
-            current.executable != authority.executable: return Err("compiled child authority changed during execution")
+            current.executable != authority.executable:
+        return observed_failure(observed, prefix, "authority-revalidation", "compiled child authority changed during execution")
     # Collection already consumed the lease. Publication failures here must
     # not cancel or collect that stale handle a second time.
     val output = captured.unwrap()
     if not file_write_bytes(prefix + ".stdout.bin", output.stdout) or not file_write_bytes(prefix + ".stderr.bin", output.stderr):
-        return Err("compiled child raw output evidence publication refused")
+        return observed_failure(observed, prefix, "raw-output-publication", "compiled child raw output evidence publication refused")
     val metadata = "schema=compiled-system-child-v1\nterminal=1\nreaped=1\noutput_complete=1\n" +
         "exit_status={output.exit_code}\ntimed_out={output.timed_out}\n" +
         "input_sha256={output.input_sha256}\ninput_accepted={input.len()}\ninput_written={input.len()}\n" +
         "stdout_seen={output.stdout.len()}\nstderr_seen={output.stderr.len()}\n"
     if not file_write_bytes(prefix + ".process.env", metadata.bytes()):
-        return Err("compiled child process evidence publication refused")
+        return observed_failure(observed, prefix, "process-publication", "compiled child process evidence publication refused")
     captured
 
 pub fn test_compiled_child_text_v1(bytes: [u8]) -> text:
