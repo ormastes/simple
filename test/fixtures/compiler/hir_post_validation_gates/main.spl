@@ -197,6 +197,36 @@ fn main() -> i64:
     if rejected.is_err() or rejected.unwrap().gates_skipped or rejected.unwrap().census_messages.len() == 0 or
             rejected.unwrap().errors.len() == 0 or rejected.unwrap().weave_claims.len() == 0: return 109
     checks = checks + 1
+    # Actual aggregate partial-census branch must not require body rows or
+    # consume the next manifest even with original-consumption requested.
+    val saved_declaration = alias_facts.declarations[name]
+    val saved_alias = alias_facts.declarations["policy.logical_alias"]
+    val saved_bodies = alias_facts.bodies
+    alias_facts.declarations[name] = DriverHirArchiveWeaveDeclarationV1(..saved_declaration, dropped: true)
+    alias_facts.bodies = {}
+    rt_bound_manifest_replace([next])
+    val declarations_only = driver_hir_archive_weave_gate_v1(owner, alias_facts, alias_order, [name], [name], false, true)
+    if declarations_only.is_err() or not declarations_only.unwrap().gates_skipped or
+            declarations_only.unwrap().errors.len() == 0 or declarations_only.unwrap().weave_claims.len() != 0 or
+            rt_bound_manifest_capabilities().len() != 1 or rt_bound_manifest_capabilities()[0].review_id != next.review_id or
+            rt_bound_manifest_capabilities()[0].max_units != 0: return 126
+    checks = checks + 1
+    # All-rejected means the reliability test failed: ordinary real body
+    # coverage must still be required. Missing rows cannot become gate skip.
+    alias_facts.declarations["policy.logical_alias"] = DriverHirArchiveWeaveDeclarationV1(..saved_alias, dropped: true)
+    val missing_all = driver_hir_archive_weave_gate_v1(owner, alias_facts, alias_order, [name], [name], false, true)
+    if not missing_all.is_err() or rt_bound_manifest_capabilities().len() != 1 or
+            rt_bound_manifest_capabilities()[0].review_id != next.review_id: return 127
+    checks = checks + 1
+    alias_facts.bodies = saved_bodies
+    rt_bound_manifest_replace([capability])
+    val all_complete = driver_hir_archive_weave_gate_v1(owner, alias_facts, alias_order, [name], [name], false, true)
+    if all_complete.is_err() or all_complete.unwrap().gates_skipped or all_complete.unwrap().errors.len() == 0 or
+            all_complete.unwrap().census_messages.len() == 0 or all_complete.unwrap().weave_claims.len() == 0 or
+            rt_bound_manifest_capabilities().len() != 0: return 128
+    checks = checks + 1
+    alias_facts.declarations[name] = saved_declaration
+    alias_facts.declarations["policy.logical_alias"] = saved_alias
     if not driver_hir_archive_weave_gate_v1(owner, facts, [], [name], [name], false).is_err() or
             not driver_hir_archive_weave_gate_v1(owner, facts, order, [], [], false).is_err() or
             not driver_hir_archive_weave_gate_v1(owner, alias_facts, alias_order, alias_order, alias_order, false).is_err(): return 110
@@ -241,6 +271,6 @@ fn main() -> i64:
     aspect_registry_reset()
     if transient_array_scope_state_v1() != 0: return 120
     checks = checks + 1
-    if checks != 15: return 121
+    if checks != 18: return 121
     print "HIR post-validation gates: {checks} checks passed"
     0
