@@ -125,14 +125,75 @@ jobs:
             done
           fi
 
+      - name: Install pinned Rust toolchain
+        # The seed fingerprint fail-closes when the channel pinned by
+        # src/compiler_rust/rust-toolchain.toml (nightly-2026-09-15, embedded
+        # LLVM 23.1.1) is absent from rustup (candidates a019/a020). dtolnay's
+        # action defaults to floating "nightly", so pin explicitly.
+        run: |
+          set -euo pipefail
+          rustup toolchain install nightly-2026-09-15 --component rustfmt --component clippy
+          rustup default nightly-2026-09-15
+          rustc --version
+
+      - name: Install pinned LLVM 23.1.1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The line's platform-detect admits exactly LLVM 23.1.1 (23.1.2 only
+          # from native package providers); ubuntu-latest images do not ship it.
+          # Mirror aot-lane-fences: reviewed upstream release bytes + sha256.
+          sudo apt-get update
+          sudo apt-get install -y libfreetype6-dev libunwind-dev
+          llvm_archive="$RUNNER_TEMP/LLVM-23.1.1-Linux-X64.tar.xz"
+          llvm_prefix="$RUNNER_TEMP/llvm-23.1.1"
+          gh release download llvmorg-23.1.1 --repo llvm/llvm-project \
+            --pattern 'LLVM-23.1.1-Linux-X64.tar.xz' --dir "$RUNNER_TEMP"
+          printf '%s  %s\n' \
+            '832aeb58d105de1cabc7b982dd2c65de0610f7377df48ae8fc2dd8e97420a15c' \
+            "$llvm_archive" | sha256sum --check
+          mkdir -p "$llvm_prefix"
+          tar -xJf "$llvm_archive" -C "$llvm_prefix" --strip-components=1
+          rm "$llvm_archive"
+          test "$("$llvm_prefix/bin/llvm-config" --version)" = '23.1.1'
+          # The llvmorg release llvm-config carries the BUILD machine's
+          # compiled-in prefix (/home/runner/work/llvm-project/...), so
+          # --libfiles/--ldflags emit paths that do not exist here and the
+          # seed-inputs fingerprint fails fail-closed ("failed to fingerprint
+          # Rust seed inputs", candidate a014). Bind the compiled prefix to
+          # the extracted tree so every llvm-config path resolves.
+          compiled_prefix=$("$llvm_prefix/bin/llvm-config" --prefix)
+          if [ "$compiled_prefix" != "$llvm_prefix" ]; then
+            sudo mkdir -p "$(dirname "$compiled_prefix")"
+            sudo ln -sfn "$llvm_prefix" "$compiled_prefix"
+          fi
+          missing=""
+          for lib in $("$llvm_prefix/bin/llvm-config" --link-static --libfiles); do
+            [ -f "$lib" ] || missing="$missing $lib"
+          done
+          [ -z "$missing" ] || { echo "llvm-config --libfiles missing archives:$missing" >&2; exit 1; }
+          echo "$llvm_prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_231_PREFIX=$llvm_prefix" >> "$GITHUB_ENV"
+
       - name: Build receipt-free admitted Stage 2 trust root
         env:
           SIMPLE_NO_STUB_FALLBACK: '1'
+          BOOTSTRAP_STAGE3_FINGERPRINT_TRACE: '1'
         run: |
           set -euo pipefail
           SIMPLE_COMPILE_FAIL_FAST=${SIMPLE_COMPILE_FAIL_FAST:-1} sh scripts/bootstrap/bootstrap-from-scratch.sh \
             --backend=llvm --mode=dynload --full-bootstrap \
-            --stop-after-stage2 --no-mcp --jobs=2
+            --stop-after-stage2 --no-mcp --jobs=2 || {
+            status=$?
+            echo '--- rust-authority fingerprint error log ---'
+            find . -name 'rust-authority-fingerprint-error.log' -exec cat {} \; 2>/dev/null
+            echo '--- rust-authority fingerprint observation ---'
+            find . -name 'rust-authority-fingerprint-current.details.env' -not -path './src/compiler_rust/vendor/*' -exec cat {} \; 2>/dev/null
+            echo '--- rust-authority fingerprint tmp trace ---'
+            find . -name 'rust-authority-fingerprint-error.log.raw.*' -exec cat {} \; 2>/dev/null
+            exit $status
+          }
 
       - name: Resume admitted Stage 3 with planner receipt
         run: |

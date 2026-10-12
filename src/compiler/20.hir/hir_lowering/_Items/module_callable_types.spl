@@ -11,7 +11,7 @@ use compiler.hir.hir_lowering._Items.lowering_helpers.{ReturnScan, return_scan_e
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
-use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
+use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param, ParserTypeParam}
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{StmtKind, Expr}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
@@ -123,6 +123,8 @@ impl HirLowering:
         val fn_params: [Param] = fn_decl.params
         val scan = self.scan_ast_block_for_returns(fn_body, fn_params)
         if not scan.found_value_return:
+            if val dynamic_tail = self.dynamic_callback_tail_type(fn_decl):
+                return dynamic_tail
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
         if scan.ambiguous or not scan.resolved_name.?:
             if self.ambient_bootstrap_enabled():
@@ -176,9 +178,16 @@ impl HirLowering:
             # like the generic/import cases above and the sibling
             # `declared_surface_callable_type` below.
             if not raw_param.has_type_:
-                return nil
-            val raw_param_type: Type = raw_param.type_
-            param_types.push(self.lower_type(raw_param_type))
+                # Only publish the dynamic signature when the body proves an
+                # Any callback tail. Other undeclared signatures retain their
+                # existing inference path.
+                if self.dynamic_callback_function_type(fn_decl) == nil:
+                    return nil
+                val callback_type = self.dynamic_callback_param_type(fn_decl, raw_param)
+                param_types.push(callback_type ?? HirType(kind: HirTypeKind.Any, span: raw_param.span))
+            else:
+                val raw_param_type: Type = raw_param.type_
+                param_types.push(self.lower_type(raw_param_type))
             first_raw_param = first_raw_param + 1
 
         val return_type = if fn_decl.has_return_type:
@@ -418,6 +427,27 @@ impl HirLowering:
             return HirType(kind: HirTypeKind.Array(element, nil), span: type_.span)
         self.imported_surface_type(type_, imported_module_name)
 
+    me declared_imported_owner_callable_type(callable: ModuleSurfaceCallable, imported_module_name: text, owner_symbol: SymbolId, owner_type_params: [ParserTypeParam]) -> HirType?:
+        # Owner binders belong to the imported declaration, not the importer.
+        # Restore the scope before its method symbol is defined, so that symbol
+        # remains visible after this temporary binder scope is popped.
+        if owner_type_params.len() == 0:
+            return self.declared_imported_surface_callable_type(
+                callable, imported_module_name, Some(owner_symbol))
+        val saved_parameters = self.prescan_type_parameters
+        self.prescan_type_parameters = {}
+        self.symbols.push_scope(ScopeKind.Class)
+        for tp in owner_type_params:
+            val parameter = self.lower_type_param(tp)
+            self.prescan_type_parameters[parameter.symbol.id] = HirType(
+                kind: HirTypeKind.TypeParam(parameter.name, parameter.bounds),
+                span: parameter.span)
+        val callable_type = self.declared_imported_surface_callable_type(
+            callable, imported_module_name, Some(owner_symbol))
+        self.symbols.pop_scope()
+        self.prescan_type_parameters = saved_parameters
+        callable_type
+
     me declared_imported_surface_callable_type(callable: ModuleSurfaceCallable, imported_module_name: text, owner_symbol: SymbolId?) -> HirType?:
         if callable.type_params.len() > 0:
             return nil
@@ -474,6 +504,62 @@ impl HirLowering:
             projected = HirType(
                 kind: HirTypeKind.Array(element, nil), span: span)
         Some(projected)
+
+    me dynamic_callback_tail_type(fn_decl: ParserFunction) -> HirType?:
+        if fn_decl.has_return_type:
+            return nil
+        if self.dynamic_callback_function_type(fn_decl) != nil:
+            return HirType(kind: HirTypeKind.Any, span: fn_decl.span)
+        nil
+
+    me dynamic_callback_param_type(fn_decl: ParserFunction, param: Param) -> HirType?:
+        if param.has_type_ or param.has_default:
+            return nil
+        if val callback_type = self.dynamic_callback_function_type(fn_decl):
+            val tail_expr: Expr = rt_enum_payload(fn_decl.body.stmts[0].kind)
+            match tail_expr.kind:
+                case ExprKind.Call(callee, _):
+                    match callee.kind:
+                        case ExprKind.Ident(name):
+                            if name == param.name: return callback_type
+                        case _: ()
+                case _: ()
+        nil
+
+    me dynamic_callback_function_type(fn_decl: ParserFunction) -> HirType?:
+        # A default-Any parameter used as a callee has a dynamic Any result.
+        # Do not guess the result of named/typed callees, or override explicit
+        # returns with a tail-only decision.
+        if self.ambient_bootstrap_enabled() or fn_decl.body.stmts.len() != 1:
+            return nil
+        for param in fn_decl.params:
+            if not param.has_type_ and param.has_default:
+                return nil
+        if fn_decl.has_return_type:
+            if self.lower_type(fn_decl.return_type).kind == HirTypeKind.Unit:
+                return nil
+        val scan = self.scan_ast_block_for_returns(fn_decl.body, fn_decl.params)
+        if scan.found_value_return:
+            return nil
+        val tail = fn_decl.body.stmts[fn_decl.body.stmts.len() - 1]
+        val probe = Expr(kind: ExprKind.NilLit, span: tail.span)
+        if rt_enum_discriminant(tail.kind) != rt_enum_discriminant(StmtKind.Expr(probe)):
+            return nil
+        val tail_expr: Expr = rt_enum_payload(tail.kind)
+        match tail_expr.kind:
+            case ExprKind.Call(callee, args):
+                match callee.kind:
+                    case ExprKind.Ident(name):
+                        for param in fn_decl.params:
+                            if param.name == name and not param.has_type_ and not param.has_default:
+                                var argument_types: [HirType] = []
+                                for arg in args:
+                                    if arg.has_name: return nil
+                                    argument_types = argument_types.push(HirType(kind: HirTypeKind.Any, span: arg.span))
+                                return HirType(kind: HirTypeKind.Function(argument_types, HirType(kind: HirTypeKind.Any, span: tail.span), []), span: tail.span)
+                    case _: ()
+            case _: ()
+        nil
 
     me infer_simple_type_name_ast(e: Expr, params: [Param]) -> text?:
         match e.kind:

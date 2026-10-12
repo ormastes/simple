@@ -4,6 +4,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{enum_payload_types_alias_equal}
 use compiler.mir.mir_data.*
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
@@ -26,64 +27,14 @@ fn enum_payload_types_compatible(expected: HirType, actual: HirType) -> bool:
                 case _: return false
         case _: hir_types_equal(expected, actual)
 
-# Cross-module nominal identity for the enum-payload boundary only.
-# hir_types_equal compares Named leaves by RAW SymbolId; a type referenced
-# through an import in the consuming module and the same type as written in
-# the declaring module carry DIFFERENT SymbolIds (per-module symbol tables),
-# so structurally identical payload types compared unequal and the payload
-# check misfired on correctly-typed constructions such as
-# `var fields: Dict<text, SdnValue> = {} ... SdnValue.Dict(fields)`
-# (matrix: 12x 'SdnValue.Dict/Array: payload type mismatch at 0').
-# This fallback resolves Named leaves by (name, defining_module) and keeps
-# every other comparison identical to hir_types_equal. It deliberately does
-# NOT change global type equality semantics.
-fn enum_payload_named_alias_equal(a: SymbolId, b: SymbolId, symbols: SymbolTable) -> bool:
-    if a.id == b.id:
-        return true
-    val name_a = symbols.symbol_name_scalar_raw(a.id)
-    if name_a == "":
-        return false
-    val name_b = symbols.symbol_name_scalar_raw(b.id)
-    if name_a != name_b:
-        return false
-    symbols.symbol_defining_module_scalar_raw(a.id) == symbols.symbol_defining_module_scalar_raw(b.id)
-
 fn enum_payload_types_alias_compatible(expected: HirType, actual: HirType, symbols: SymbolTable) -> bool:
-    if enum_payload_types_compatible(expected, actual):
-        return true
-    match (expected.kind, actual.kind):
-        case (HirTypeKind.Named(sa, args_a), HirTypeKind.Named(sb, args_b)):
-            if not enum_payload_named_alias_equal(sa, sb, symbols):
-                return false
-            if args_a.len() != args_b.len():
-                return false
-            var i = 0
-            while i < args_a.len():
-                if not enum_payload_types_alias_compatible(args_a[i], args_b[i], symbols):
-                    return false
-                i = i + 1
-            true
-        case (HirTypeKind.Dict(ka, va), HirTypeKind.Dict(kb, vb)):
-            enum_payload_types_alias_compatible(ka, kb, symbols) and enum_payload_types_alias_compatible(va, vb, symbols)
-        case (HirTypeKind.Array(ea, _), HirTypeKind.Array(eb, _)):
-            enum_payload_types_alias_compatible(ea, eb, symbols)
-        case (HirTypeKind.Slice(ea), HirTypeKind.Slice(eb)):
-            enum_payload_types_alias_compatible(ea, eb, symbols)
-        case (HirTypeKind.Optional(ia), HirTypeKind.Optional(ib)):
-            enum_payload_types_alias_compatible(ia, ib, symbols)
-        case (HirTypeKind.Tuple(fa), HirTypeKind.Tuple(fb)):
-            if fa.len() != fb.len():
-                return false
-            var i = 0
-            while i < fa.len():
-                if not enum_payload_types_alias_compatible(fa[i], fb[i], symbols):
-                    return false
-                i = i + 1
-            true
-        case (HirTypeKind.Result(oa, ea2), HirTypeKind.Result(ob, eb2)):
-            enum_payload_types_alias_compatible(oa, ob, symbols) and enum_payload_types_alias_compatible(ea2, eb2, symbols)
+    # Preserve established scalar argument conversions, but never apply them
+    # recursively to elements that the constructor does not convert.
+    match expected.kind:
+        case HirTypeKind.Any | HirTypeKind.Int(_, _) | HirTypeKind.Float(_):
+            enum_payload_types_compatible(expected, actual)
         case _:
-            false
+            enum_payload_types_alias_equal(expected, actual, symbols)
 
 # Cross-representation alias-aware comparison for the MIR-evidence fallback:
 # the expected side is a declared HIR payload type, the actual side is the
@@ -93,22 +44,22 @@ fn enum_payload_types_alias_compatible(expected: HirType, actual: HirType, symbo
 # Named/Struct leaves use the same (name, defining_module) rule as
 # enum_payload_named_alias_equal; composites recurse; primitives mirror the
 # existing MIR-evidence arms.
-fn enum_payload_hir_mir_alias_compatible(expected: HirType, actual: MirType, symbols: SymbolTable) -> bool:
+fn enum_payload_hir_mir_alias_compatible(expected: HirType, actual: MirType, symbols: SymbolTable, canonical_owners: Dict<text, i64>) -> bool:
     match expected.kind:
         case HirTypeKind.Dict(ek, ev):
             match actual.kind:
                 case MirTypeKind.Dict(ak, av):
-                    enum_payload_hir_mir_alias_compatible(ek, ak, symbols) and enum_payload_hir_mir_alias_compatible(ev, av, symbols)
+                    enum_payload_hir_mir_alias_compatible(ek, ak, symbols, canonical_owners) and enum_payload_hir_mir_alias_compatible(ev, av, symbols, canonical_owners)
                 case _: return false
         case HirTypeKind.Array(ee, _):
             match actual.kind:
                 case MirTypeKind.Array(ae, _) | MirTypeKind.Slice(ae):
-                    enum_payload_hir_mir_alias_compatible(ee, ae, symbols)
+                    enum_payload_hir_mir_alias_compatible(ee, ae, symbols, canonical_owners)
                 case _: return false
         case HirTypeKind.Slice(ee):
             match actual.kind:
                 case MirTypeKind.Array(ae, _) | MirTypeKind.Slice(ae):
-                    enum_payload_hir_mir_alias_compatible(ee, ae, symbols)
+                    enum_payload_hir_mir_alias_compatible(ee, ae, symbols, canonical_owners)
                 case _: return false
         case HirTypeKind.Tuple(ef):
             match actual.kind:
@@ -117,23 +68,38 @@ fn enum_payload_hir_mir_alias_compatible(expected: HirType, actual: MirType, sym
                         return false
                     var i = 0
                     while i < ef.len():
-                        if not enum_payload_hir_mir_alias_compatible(ef[i], af[i], symbols):
+                        if not enum_payload_hir_mir_alias_compatible(ef[i], af[i], symbols, canonical_owners):
                             return false
                         i = i + 1
                     true
                 case _: return false
         case HirTypeKind.Optional(ei):
             match actual.kind:
-                case MirTypeKind.Struct(_) | MirTypeKind.I64:
-                    # Erased Option carrier: accept when the inner type is a
-                    # nominal whose representation erases (same permissiveness
-                    # as the existing Named MIR-evidence arm).
-                    true
+                case MirTypeKind.Tuple(parts):
+                    # lower_type preserves Optional(T) as (Bool, lower_type(T)).
+                    # Both the presence slot and the recursively declared inner
+                    # owner are required. A raw/boxed word has lost that proof;
+                    # remembered or source HIR must admit it before this path.
+                    if parts.len() != 2: return false
+                    if parts[0].kind != MirTypeKind.Bool: return false
+                    enum_payload_hir_mir_alias_compatible(ei, parts[1], symbols, canonical_owners)
                 case _: return false
         case HirTypeKind.Named(owner, _):
             match actual.kind:
                 case MirTypeKind.Struct(actual_owner):
-                    enum_payload_named_alias_equal(owner, actual_owner, symbols)
+                    if not symbols.symbols.has(owner.id): return false
+                    val declaration: HirSymbol = symbols.symbols[owner.id]
+                    match declaration.kind:
+                        case SymbolKind.Struct | SymbolKind.Class | SymbolKind.Enum: ()
+                        case _: return false
+                    val module_owner = mir_layout_canonical_module_name(declaration.defining_module ?? "")
+                    if module_owner == "" or declaration.name == "": return false
+                    if enum_payload_named_alias_equal(owner, actual_owner, symbols): return true
+                    # lower_type's canonical MIR IDs are not SymbolTable IDs.
+                    # Bind them through the actual lowerer's exact declaration
+                    # owner registry, never a bare name or foreign numeric ID.
+                    val key = "{module_owner}.{declaration.name}"
+                    canonical_owners.has(key) and canonical_owners[key] == actual_owner.id
                 case _: return false
         case HirTypeKind.Str:
             match actual.kind:
@@ -298,7 +264,7 @@ impl MirLowering:
                 # word is a handle, so KIND-shape evidence plus alias-aware
                 # element comparison is sufficient — same rule as the
                 # HIR-side fallback, cross-representation.
-                enum_payload_hir_mir_alias_compatible(expected, actual_mir, self.symbols)
+                enum_payload_hir_mir_alias_compatible(expected, actual_mir, self.symbols, self.canonical_type_symbols)
             case _: return false
 
     me adapt_declared_enum_payload(expected: HirType, local: LocalId) -> LocalId:

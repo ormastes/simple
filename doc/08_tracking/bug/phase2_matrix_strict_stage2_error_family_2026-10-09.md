@@ -310,3 +310,242 @@ with SDKROOT/MACOSX_DEPLOYMENT_TARGET from `xcrun --sdk macosx`):
   (missing `reason=`, or separated from their block by comments) failed
   workaround refresh once the files were touched by the migration; repaired
   in this commit.
+
+## 2026-10-12 addendum 6: stage-2 gate residual three (db_atomic arity, B5b cascade, aspect_pack_io types)
+
+- db_atomic.spl: `case SdnValue.Table(fields, types, rows):` (3 slots) vs the
+  sibling-changed declaration `Table(headers: [text], rows: [[SdnValue]])`
+  (2 payloads, src/lib/common/sdn/value.spl:36). Fixed to
+  `case SdnValue.Table(headers, rows):` with `columns = headers` (the
+  Option<fields> column-header handling died with the third payload; the
+  sibling change made headers required). Seed validation blocked by a
+  pre-existing gc-boundary policy artifact in standalone mode
+  (nogc_async_mut -> std.nogc_sync_mut.io.time_ops); arity fix verified by
+  inspection against the declaration.
+- B5b ("match has multiple wildcard arms", test_runner_build): the only
+  module named by the error batch is lib.common.sdn.value
+  (`undefined variable SdnValue` + `unresolved method call: Float` both at
+  value.spl:48:9 — the enum's own constructor fails inside its impl, i.e.
+  the enum's symbol IDENTITY was clobbered earlier in the 252-module MIR
+  batch; the B5b check at 50.mir/_MirLoweringExpr/expr_dispatch.spl:6466
+  then fires on a FlatAst-bridge-degraded wildcard arm per the documented
+  mechanism, convert_nodes.spl:1581/1628-1631). value.spl compiles CLEAN
+  standalone (seed semantics + SMF) and contains no match with two wildcard
+  arms (all 20+ matches inspected; every `case _` is single). No source fix
+  is applicable. Compiler-lane hardening proposed: (1) always-eprint a
+  receipt (file:line + expression tag) when convert_flat_pattern degrades a
+  pattern to Wildcard — currently behind SIMPLE_DEBUG_MATCH_PAT, default
+  off; (2) include the lowering module name in the B5b diagnostic.
+- aspect_pack_io.spl: 10x `unresolved type: MappingClosePermitV1/
+  MappingLifetimeLedgerV1/MappingLifetimeRecordV1` (fix-(b) class; owner
+  exec_mapping_cleanup_v1 itemizes the imports but the shard-path
+  owner-scope sweep cannot see them). Cheapest source-side unblock applied:
+  explicit itemized import of all three types added to the IMPORTER
+  (aspect_pack_io.spl) from their declaring module
+  compiler.loader.mapping_lifetime_accounting_v1 — local binding dodges the
+  owner-scope projection the same way the fe1f4ed6d72 workaround imports
+  do. Seed standalone validation blocked by the same sffi_env_get stdlib
+  gap as before; confirmation requires the matrix rerun. If the matrix
+  still reports these after the importer-side import, compiler fix (b)
+  (alias-retry in canonical_callable_dependency_candidate) is unavoidable.
+
+## 2026-10-12 addendum 7: aspect_pack_io revert + fix (b) landed + B5b minimal repro and confirmed mechanism
+
+- REVERTED the aspect_pack_io.spl importer-side import (af804c27f33 hunk): in
+  the newest matrix it converted the transitive miss into a hard "module
+  compiler.loader.mapping_lifetime_accounting_v1 has no exported item
+  MappingClosePermitV1" — the structs ARE exported (mapping_lifetime_accounting_
+  v1.spl:518-519), so the shard-path SURFACE PUBLICATION drops them; importing
+  them names the drop as a hard error (54 hir-fatal). Strictly worse than the
+  original 10 transitive errors; reverted.
+- Fix (b) LANDED (module_reexport_materialization.spl,
+  materialize_imported_callable_explicit_dependency_inner): when a frozen
+  import row's import_target_indices[i] is -1, retry the target via
+  module_surface_resolve_absolute_key + module_surface_registry_index against
+  the frozen registry before declaring the route missing. The retry is a pure
+  function of the frozen registry (generation fixed per lowering run), so the
+  RISFACT memo invariant is preserved. Validation: seed semantics identical to
+  pristine (only the pre-existing sffi_env_get standalone artifact);
+  stage2_module_path_naming fixture native-build PASS (exit 0, artifact
+  published, expected fixture output). Full validation = next matrix run.
+- B5b CONFIRMED MECHANISM (decisive minimal repro, writable tree):
+  `native-build src/lib/common/sdn/parser.spl --emit-object --backend=llvm
+  --threads 1` (admitted compiler, fresh HOME) reproduces "B5b: match has
+  multiple wildcard arms" with a 3-module closure (parser + sdn.value +
+  structural_scalar_value_v1). sdn.value ALONE and structural_scalar ALONE
+  compile clean (exit 0, object emitted). db_atomic-as-entry (50-module
+  closure) reproduces B5b + 2x "unsupported Result tuple payload element
+  type". Live-edit marker confirmed the build reads live source.
+  Mechanism (proven by exhaustion): in the streaming/shard MIR path the
+  SdnValue and Result ENUM TYPE REGISTRY ENTRIES are not visible while an
+  IMPORTING module lowers (value.spl's own statics fail identically in larger
+  closures: "undefined variable SdnValue at value.spl:48:9", "unresolved
+  method call: Float"). Every enum pattern over an unregistered enum degrades
+  to a wildcard/binding arm; a two-arm Ok/Err match degrades to TWO wildcards
+  (B5b, expr_dispatch.spl:6466), and a single-arm match degrades to a
+  wildcard PLUS the compiler's synthesized exhaustiveness fallback — also
+  B5b. Converting parser.spl's matches to `if val Ok/Err` form (the rt_hal
+  idiom) does NOT help: `if val` lowers to the same match. Any type position
+  naming the unregistered enum degrades too (v.as_dict() loses Dict typing ->
+  "unresolved method call: keys"). CONCLUSION: not source-fixable module by
+  module; COMPILER-LANE root = enum type registration missing at MIR lowering
+  time for imported enums in the streaming shard path (HIR registers them —
+  HIR phase passes; the MIR-side flat/global symbol handoff drops them).
+  RECOMMENDED COMPILER FIX (recorded, not guessed): in 50.mir
+  _MirLowering/bootstrap_globals, the cross-module symbol accumulator must
+  resolve enum type/constructor symbols through the HIR symbol table's
+  owner-qualified binding (lookup_qualified_type_raw(owner, name)) instead of
+  the flat short-name registry when the short-name entry names a different
+  owner; plus the B5b diagnostic at expr_dispatch.spl:6466 should carry
+  self.current_module_id (the binding-twin at :6506 already does). Hardening
+  also recommended: always-on receipt when a match arm's enum pattern has no
+  registry entry (currently silent degradation).
+
+### Addendum 7 implementation status (c556a66e4fd follow-up)
+
+IMPLEMENTED the recorded B5b compiler fix (pending next admission for
+functional validation — the admitted binary predates the fix, so the fast
+repro cannot flip green until the next stage-2 build):
+1. expr_dispatch.spl NamedVar arm: owner-qualified retry — when the flat
+   short-name resolution yields a symbol id that is neither a local nor a
+   registered global read, and the symbol's defining_module differs from
+   self.current_module_id, retry via symbols.lookup_qualified_type_raw(owner,
+   name) before the "undefined variable" error. Declaring-module registration
+   is authoritative over importer pre-registrations.
+2. expr_dispatch.spl B5b diagnostic now carries self.current_module_id (the
+   binding twin at the :6506-class message already did).
+3. convert_nodes.spl: the match-pattern degradation receipt
+   ([match-pat] convert_flat_pattern DROPPED to wildcard: tag=N) is now
+   ALWAYS ON (was gated behind SIMPLE_DEBUG_MATCH_PAT), so a degraded arm is
+   attributable at parse time instead of surfacing as a location-blind B5b
+   much later.
+
+Controls run with the OLD admitted binary (expected: repro unchanged until
+admission): parser.spl repro exit 1 with B5b (repro intact); sdn/value.spl
+alone exit 0; stage2_module_path_naming fixture exit 0 with correct output;
+db_atomic 50-module closure still shows B5b + 3x "unsupported Result tuple
+payload element type" (the Result-tuple-payload family is tracked separately
+and may need the same owner-qualified treatment in the enum-payload
+materialization path on the next iteration). Seed semantics of all changed
+files identical to pristine (only the pre-existing sffi_env_get standalone
+artifact). Functional validation: next matrix/admission run.
+- Novel cause (2026-10-12, stage-2 seed regression from 4bec5687ee6): the new
+  declaration_{providers,default_bindings,default_rewrite}_v1.spl referenced
+  `HirConst` through a bare `use compiler.hir.hir_definitions.*` glob, but
+  HirConst is neither pub nor exported there — the glob does not provide it
+  under the Rust seed (self-hosted directory-package visibility masked this),
+  so `HirConst(...)` literals in
+  register_provider_global_bindings_with_initializer_policy_v1's callees
+  resolved to struct ANY and seed HIR failed with "cannot infer field type
+  ... struct 'ANY' field 'type_'". Fix: explicit itemized
+  `use compiler.hir.hir_definitions.{HirConst}` in all three files (every
+  other 50.mir consumer already imports it itemized). Also fixed a latent
+  `field.type_` (undefined in scope; now `field_type`) in the extracted
+  register_composite_field_metadata_types_v1.
+
+Canonical Windows attempt13 independently reached this extracted function on
+frozen source `5c891cd74242833f3dee8a88da264a73a242fae1`: the Rust seed compiled
+1,297 files and failed one, `50.mir/_MirLowering/module_lowering.spl`, with
+`cannot infer field type while lowering MirLowering.register_composite_field_metadata_types_v1:
+struct 'ANY' field 'type_'`. All four support builds finished. The native build
+terminated with exit1, quiescent1 and measured peak1,251,560 KiB under the
+5,859,375 KiB enforced process-tree cap (jobs3). No new compiler was admitted;
+fresh Hello, CLI and runner checks were not run. Original logs and hashes are
+retained in `C:/dev/simple-phase3-bootstrap-evidence/attempt13/final-summary.env`.
+Latest release `a95346aaef7a04c2e0935b2816e6157dd497457d` includes the typed
+`field_type` correction. Its actual rebuild/admission remains pending.
+- Novel cause (2026-10-12, candidate_frontend_smoke p2_add admission):
+  runtime_tagged_callback_owner_v1.spl nm-parsed required core-C symbols with
+  EXACT name matching, but Mach-O nm always prepends a leading underscore to C
+  symbols (`_rt_tagged_add`), so no required symbol ever matched on Darwin and
+  the gate failed with 'lacks defined function
+  rt_transient_array_scope_state_v1' even though nm listed it as defined text
+  (added 54908626175). The gate (e98757b4d8e) passed Linux CI (no underscore)
+  and failed on its first macOS run. Fix: strip a leading underscore from the
+  parsed symbol name (matches both ELF/GNU and Mach-O spellings).
+
+### Addendum 7 follow-up (155dc9eb lane): sffi/plugins import fixes + constructor-path retry + executor ambiguity recorded
+
+- runtime.spl: `type RuntimeValuePtr = i64` declared at the point of use —
+  the alias existed only in compiler/70.backend/sffi_minimal.spl, so all 24
+  extern signatures in sffi/runtime.spl failed with 'unresolved type:
+  RuntimeValuePtr' and poisoned every sibling projection. Seed-validated:
+  runtime.spl now compiles standalone.
+- exec_mapping.spl: `export exec_mapping_map_rx, exec_mapping_free` added —
+  both object_mapper files (loader/object_mapper.spl:6 relative,
+  99.loader/object_mapper.spl:5 absolute, both resolving to this module under
+  the collapsed naming) imported items the module never exported (HirConst-
+  class visibility bug).
+- B5b constructor-path extension: static_enum_receiver_owner.spl
+  (try_lower_declared_enum_static_call) now applies the same owner-qualified
+  retry as the NamedVar arm — when the flat lexical lookup misses and the HIR
+  node's symbol names a foreign defining_module, retry via
+  lookup_qualified_type_raw(owner, name). `SdnValue.Float(f)` is a
+  named-constructor MethodCall (this path), not a NamedVar. Pending
+  validation: next admission (3-module parser.spl repro must flip green).
+- executor.spl:65 'Optional record has ambiguous current provider
+  declaration' (test_runner_build): the text? Some-record's layout identity
+  matches TWO Struct/Class symbols in the lowering symbol table
+  (optional_record_owner.spl:64-68). Registry-level duplicate-declaration
+  family; every Some-destructuring of that Option in the module hits it, and
+  `.?`/if val lower through the same machinery, so no safe source workaround
+  exists. Recorded for the compiler lane: the ambiguity diagnostic should
+  name both colliding declarations (symbol ids + owners), and the
+  duplicate-struct dedup should consider Option-record provider layouts.
+- Stage-2 self-build pair (2026-10-12, regression from 43c3f3d979a): (1)
+  archive_borrowed_module_v1.spl — 'struct ANY field symbol' in
+  lower_archive_module_in_owned_scope_v1: MirHirDeclarationRepositoryV1 /
+  MirHirModuleDeclarationsV1 came only through the summary module's nested
+  'export use ... .*' re-export glob, which the seed registry does not
+  materialize one level up; explicit itemized import from
+  hir_declaration_types_v1 added. (2) driver_pipeline_lowering.spl —
+  'Aliasing violation: reference 9 already has Exclusive' in the new
+  publish_runtime_std_mir_emissions_v1: 'val selection = self.ctx....!' held
+  an Exclusive borrow on self.ctx across the source loop while
+  self.ctx.add_error re-acquired Exclusive inside it. Fix: never bind the
+  unwrapped aggregate — hoist its two used scalars via inline '.?.field'
+  chains before the loop (the pattern cold_full_index_producer_v1.spl:139-140
+  already uses and the seed accepts).
+- Closure-verified corrections (2026-10-12, supersedes the masked standalone
+  diagnoses): (1) archive_borrowed_module_v1.spl — the itemized
+  MirHirDeclarationRepositoryV1/MirHirModuleDeclarationsV1 import IS
+  closure-effective (0 'cannot infer field type' in the entry-closure build);
+  the prior 'persists' report was the stale-snapshot bulk build. Root cause
+  remains: hir_declaration_types_v1.spl exports NOTHING and the summary
+  module's 'export use ... .*' re-export does not materialize under the seed.
+  (2) driver_pipeline_lowering.spl — true root: 'for source in
+  self.ctx.sources' holds an Exclusive borrow on self.ctx (reference 9) for
+  the whole loop, so EVERY inner self.ctx access (read probes and
+  self.ctx.add_error alike) re-acquired it. Scalar hoisting of the selection
+  alone could not cure that. Fix: snapshot ALL six self.ctx fields the loop
+  touches into locals BEFORE the loop (sources, cold_hir_typed_receipts,
+  mir_modules, runtime_std_cfg_decisions, native_target,
+  runtime_std_hir_emissions); no self.ctx borrow is live inside the loop, so
+  add_error's Exclusive acquisition is uncontended. Closure-verified: 0
+  'Capability error/Aliasing' lines. Both verified with admitted binary
+  cd1601c9 (sha matches admission.env) via entry-closure builds; the residual
+  failures in those runs are the old binary's builtin-class receipts
+  (Option/Result/Dict, fixed in fe1f4ed6d72) and shard-inventory
+  infrastructure, not these files.
+- Full-closure-safe restructures (2026-10-12, on top of a791b5e5cd1): the
+  single-file entry-closure passes were necessary but not sufficient — the
+  interference is bulk-context registry/borrow state. (1)
+  archive_borrowed_module_v1.spl: every registry-projection element is now
+  bound to an explicitly annotated local before any field read — 'val
+  primary: MirHirModuleDeclarationsV1 = ...', and the nested globals loops
+  rewritten to index-based iteration with 'val global/own_global:
+  MirHirGlobalDeclarationV1 = ...[i]' (for-in element types degrade to ANY
+  in the bulk closure; the annotation pins the real type).
+  MirHirGlobalDeclarationV1 added to the itemized import. (2)
+  driver_pipeline_lowering.spl: the source loop is now index-based
+  ('while source_idx < sources.len(): val source = sources[source_idx]'),
+  keeping the six field snapshots — the for-iterator itself held the
+  Exclusive borrow (reference 9) across the body. (3) Preventive scan of the
+  43c3f3d979a/4bec5687ee6 sibling files: declaration_default_bindings_v1
+  already annotates its element bindings; declaration_default_rewrite_v1
+  iterates only local collections; mir_lowering_types.spl:914 iterates a
+  self field but never touches self inside the loop — all safe, no changes.
+  Entry-closure validation (admitted cd1601c9, snapshots c24e5dd2 / file-2
+  snapshot contain the restructures): 0 'cannot infer field type' and 0
+  'Capability error/Aliasing' lines respectively. Real confirmation: next
+  bulk build.

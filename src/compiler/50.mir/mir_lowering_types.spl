@@ -1,4 +1,6 @@
+use compiler.mir._MirLoweringExpr.optional_record_owner.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
+use compiler.mir.nominal_owner_diagnostics.{mir_nominal_profile_take_receipt}
 # MIR Lowering - Type Definitions
 #
 # Core struct definitions for MIR lowering.
@@ -16,6 +18,9 @@ use compiler.mir.native_trait_metadata.{NativeTraitLayout, NativeTraitImplementa
 # ============================================================================
 # MIR Lowering Types
 # ============================================================================
+
+use compiler.mir.hir_declaration_types_v1.{MirHirDeclarationRepositoryV1,
+    MirHirCallableDefaultsV1, MirHirFieldDeclarationV1}
 
 struct MirLowering:
     """Lowers HIR to MIR."""
@@ -247,6 +252,7 @@ struct MirLowering:
     struct_value_syms: Dict<i64, text>
     # Exact provider-owned Err record layout on a result or its extracted value.
     # Empty entries are invalidated/conflicting proof and must not fall back.
+    optional_record_owners: Dict<i64, text>
     result_err_record_owners: Dict<i64, text>
     # Semantic field snapshots; only Err-record admission uses this policy.
     result_err_layout_types: Dict<text, text>
@@ -398,6 +404,8 @@ struct MirLowering:
     # MIR locals that hold the canonical Option enum handle (enum id 1).
     # Kept separate from runtime_value_locals so other enum/boxed handles are
     # never mistaken for Option and an existing Option is not double-wrapped.
+    # Only ExistsCheck-derived payload-or-nil collections may narrow on a present edge.
+    exists_collection_locals: Dict<i64, bool>
     option_value_locals: Dict<i64, bool>
     # Raw nil locals (0) that become tagged RuntimeValue nil (3) at collection boundaries.
     nil_locals: Dict<i64, bool>
@@ -612,6 +620,13 @@ struct MirLowering:
     # matches. Level: advisory id E-MIR-MATCH-GUARD.
     match_guards_expected: i64 = 0
     match_guards_lowered: i64 = 0
+    # Only installed by the complete final-archive consumer, never inferred
+    # from environment labels or a partial module graph.
+    declaration_repository: MirHirDeclarationRepositoryV1? = nil
+    declaration_parameter_defaults: Dict<text, MirHirCallableDefaultsV1> = {}
+    declaration_parameter_defaults_ambiguous: Dict<text, bool> = {}
+    declaration_field_defaults: Dict<text, [MirHirFieldDeclarationV1]> = {}
+    declaration_field_default_owners: Dict<text, text> = {}
 
 impl MirLowering:
     fn local_symbol_slot(symbol_id: i64) -> i64:
@@ -682,6 +697,10 @@ impl MirLowering:
     me bind_local(symbol_id: i64, local: LocalId):
         if symbol_id < 0 or local.id < 0:
             return
+        if mir_nominal_profile_take_receipt():
+            val binding_name = self.symbols.symbol_name_scalar_raw(symbol_id)
+            val binding_owner = self.struct_value_syms.get(local.id) ?? ""
+            eprint("[nominal-owner] bind symbol={symbol_id} name={binding_name} local={local.id} owner={binding_owner}\n")
         var existing_slot = self.local_symbol_slot(symbol_id)
         if existing_slot == -2:
             self.rebuild_local_symbol_index(self.local_symbol_ids.len() * 2)
@@ -777,6 +796,9 @@ impl MirLowering:
         Keep both method arguments scalar and copy the aggregate only while it
         remains an element of this owner's aligned local arrays.
         """
+        if self.exists_collection_locals.contains(source_local_id):
+            self.exists_collection_locals[destination_local_id] = true
+        self.copy_optional_record_owner(source_local_id, destination_local_id)
         self.copy_result_err_record_owner(source_local_id, destination_local_id)
         var source_index: i64 = -1
         var i = self.local_hir_type_ids.len() - 1

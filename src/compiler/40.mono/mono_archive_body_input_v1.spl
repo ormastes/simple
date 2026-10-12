@@ -1,0 +1,63 @@
+# Shared complete input mechanics. Current-body identity is not final or driver
+# prerequisite admission. No implicit fallback from current to unresolved HIR.
+use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveV1,
+    hir_body_archive_load_in_owned_scope_v1, hir_body_archive_matches_v1}
+use compiler.mono.mono_archive_current_body_v1.{MonoArchiveCurrentBodyV1,
+    MonoArchiveCurrentBodyLoadV1, mono_archive_current_body_digest_v1,
+    mono_archive_current_body_load_in_owned_scope_v1}
+use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{HirOwnedArtifactContextV1}
+use compiler.driver.driver_hir_cache.{hir_cache_last_warnings}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+
+struct MonoArchiveBodyInputV1:
+    original_parent: HirBodyArchiveV1
+    current_body: MonoArchiveCurrentBodyV1? = nil
+    current_cache: HirOwnedArtifactContextV1? = nil
+    # Collector/worklist dictionary identity; the complete body retains the
+    # independent original_parent.input.module_name physical HIR owner.
+    logical_name: text = ""
+
+fn mono_archive_body_input_module_name_v1(input: MonoArchiveBodyInputV1) -> text:
+    if input.logical_name != "": input.logical_name else: input.original_parent.input.module_name
+
+fn mono_archive_body_input_matches_v1(input: MonoArchiveBodyInputV1) -> bool:
+    if transient_array_scope_state_v1() != 1 or
+            not hir_body_archive_matches_v1(input.original_parent, input.original_parent.input): return false
+    if val body = input.current_body:
+        if val cache = input.current_cache:
+            return cache.enabled and cache.directory != "" and cache.producer_header == input.original_parent.input.producer_header and
+                body.original_parent.archive_key == input.original_parent.archive_key and
+                body.original_parent.body_digest == input.original_parent.body_digest and
+                body.original_parent.input.module_name == input.original_parent.input.module_name and
+                body.original_parent.input.source_path == input.original_parent.input.source_path and
+                mono_archive_current_body_digest_v1(body) != ""
+        return false
+    input.current_cache == nil
+
+fn mono_archive_body_input_key_v1(input: MonoArchiveBodyInputV1) -> text:
+    if not mono_archive_body_input_matches_v1(input): return ""
+    if val body = input.current_body: return body.current_artifact_key
+    input.original_parent.archive_key
+
+fn mono_archive_body_input_digest_v1(input: MonoArchiveBodyInputV1) -> text:
+    if not mono_archive_body_input_matches_v1(input): return ""
+    if val body = input.current_body: return body.current_body_digest
+    input.original_parent.body_digest
+
+fn mono_archive_body_input_warnings_digest_v1(input: MonoArchiveBodyInputV1) -> text:
+    if not mono_archive_body_input_matches_v1(input): return ""
+    if val body = input.current_body: return body.current_warnings_digest
+    input.original_parent.lowering_warnings_digest
+
+fn mono_archive_body_input_load_in_owned_scope_v1(input: MonoArchiveBodyInputV1) -> Result<MonoArchiveCurrentBodyLoadV1, text>:
+    if not mono_archive_body_input_matches_v1(input): return Err("mono complete input scope or mode refused")
+    if val body = input.current_body:
+        if val cache = input.current_cache: return mono_archive_current_body_load_in_owned_scope_v1(cache, body)
+        return Err("mono current input cache unavailable")
+    val module = hir_body_archive_load_in_owned_scope_v1(input.original_parent, input.original_parent.input)?
+    Ok(MonoArchiveCurrentBodyLoadV1(module: module, warnings: hir_cache_last_warnings()))
+
+export MonoArchiveBodyInputV1, mono_archive_body_input_matches_v1
+export mono_archive_body_input_key_v1, mono_archive_body_input_digest_v1, mono_archive_body_input_warnings_digest_v1
+export mono_archive_body_input_load_in_owned_scope_v1
+export mono_archive_body_input_module_name_v1
