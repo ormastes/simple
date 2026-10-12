@@ -2105,7 +2105,7 @@ pub extern "C" fn rt_bytes_to_text(bytes: RuntimeValue) -> RuntimeValue {
     if let Some(packed) = crate::value::collections::packed_byte_array_bytes(bytes) {
         // Text is UTF-8, not an unchecked binary carrier. Cow borrows valid
         // input; malformed sequences use the documented U+FFFD text policy.
-        let text = String::from_utf8_lossy(packed);
+        let text = String::from_utf8_lossy(&packed);
         return rt_string_new(text.as_ptr(), text.len() as u64);
     }
 
