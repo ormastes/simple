@@ -1,0 +1,230 @@
+# Actual compiled children only. This helper reads the controller's immutable
+# owner receipt on every call and never accepts a caller-built execution owner.
+use std.nogc_sync_mut.io_runtime.{env_get, file_read_bytes_result, file_write_bytes, dir_create_all}
+use std.nogc_sync_mut.fs.host_path.{host_path_is_absolute}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io.process_ops.{OwnedExecutablePin, OwnedProcessLease, OwnedProcessResult}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.json.value.{json_value_str_array, json_value_serialize}
+
+extern fn rt_bytes_to_text(data: [u8]) -> text
+
+struct TestCompiledChildAuthorityV1:
+    role: text
+    executable: text
+    executable_sha256: text
+    receipt: text
+    receipt_sha256: text
+    evidence_dir: text
+
+struct TestCompiledChildResultV1:
+    stdout: [u8]
+    stderr: [u8]
+    exit_code: i64
+    timed_out: bool
+    terminal: bool
+    reaped: bool
+    output_complete: bool
+    input_sha256: text
+    evidence_prefix: text
+
+fn digest_valid(value: text) -> bool:
+    if value.len() != 64: return false
+    for byte in value.bytes():
+        if not ((byte >= 48u8 and byte <= 57u8) or (byte >= 97u8 and byte <= 102u8)): return false
+    true
+
+fn digest_hex(bytes: [u8]) -> text:
+    if bytes.len() != 32: return ""
+    val alphabet = "0123456789abcdef"
+    var parts: [text] = []
+    for byte in bytes:
+        val value = byte as i64
+        val high = value / 16
+        val low = value % 16
+        parts.push(alphabet.substring(high, high + 1))
+        parts.push(alphabet.substring(low, low + 1))
+    parts.join("")
+
+fn absolute_path_valid(path: text) -> bool:
+    if path == "" or not host_path_is_absolute(path): return false
+    for byte in path.bytes():
+        if byte == 0u8 or byte == 10u8 or byte == 13u8: return false
+    for part in path.replace("\\", "/").split("/"):
+        if part == "." or part == "..": return false
+    true
+
+fn receipt_fields(bytes: [u8]) -> Result<Dict<text, text>, text>:
+    if bytes.len() == 0 or bytes.len() > 65536: return Err("compiled child owner receipt size refused")
+    var fields: Dict<text, text> = {}
+    val lines = rt_bytes_to_text(bytes).split("\n")
+    var index = 0
+    for raw in lines:
+        val line = if raw.ends_with("\r"): raw.substring(0, raw.len() - 1) else: raw
+        if line == "":
+            if index != lines.len() - 1: return Err("compiled child owner blank field row")
+        else:
+            val equals = line.index_of("=")
+            if equals <= 0: return Err("compiled child owner field framing refused")
+            val key = line.substring(0, equals)
+            if fields.has(key): return Err("compiled child owner duplicate field: " + key)
+            fields[key] = line.substring(equals + 1)
+        index = index + 1
+    Ok(fields)
+
+pub fn test_compiled_child_authority_v1(role: text) -> Result<TestCompiledChildAuthorityV1, text>:
+    if role != "compiler_cli" and role != "test_runner" and role != "mcp_server":
+        return Err("compiled child role refused")
+    if env_get("SIMPLE_NO_BOOTSTRAP_DELEGATE") != "1" or env_get("SIMPLE_NO_STUB_FALLBACK") != "1":
+        return Err("compiled child requires nondelegating real execution")
+    val receipt = env_get("SIMPLE_TEST_COMMAND_OWNER_RECEIPT")
+    val expected = env_get("SIMPLE_TEST_COMMAND_OWNER_RECEIPT_SHA256")
+    val evidence = env_get("SIMPLE_TEST_CHILD_EVIDENCE_DIR")
+    if not absolute_path_valid(receipt) or not absolute_path_valid(evidence) or not digest_valid(expected):
+        return Err("compiled child actual controller authority absent")
+    val bytes = file_read_bytes_result(receipt)?
+    if sha256_u8_hex(bytes) != expected: return Err("compiled child owner receipt digest changed")
+    val fields = receipt_fields(bytes)?
+    for key in ["schema", "status", "phase", "verification_backend", "compiler_snapshot_sha256",
+            "runtime_identity_sha256", "target_source_snapshot_sha256", "tool_input_identity_sha256",
+            "compiler_cli_path", "compiler_cli_sha256", "test_runner_path", "test_runner_sha256",
+            "mcp_server_path", "mcp_server_sha256"]:
+        if not fields.has(key): return Err("compiled child owner field absent: " + key)
+    if fields["schema"] != "simple-bootstrap-command-owners-v3" or fields["status"] != "frozen":
+        return Err("compiled child owner schema or state refused")
+    if not ["stage2", "stage3", "stage4"].contains(fields["phase"]) or
+            not ["llvm", "cranelift"].contains(fields["verification_backend"]):
+        return Err("compiled child owner phase/backend unsupported")
+    if fields["phase"] != env_get("SIMPLE_TEST_OWNER_PHASE") or
+            fields["verification_backend"] != env_get("SIMPLE_TEST_OWNER_BACKEND"):
+        return Err("compiled child actual phase/backend differs")
+    val bindings = [
+        ("compiler_snapshot_sha256", "SIMPLE_TEST_OWNER_COMPILER_SHA256"),
+        ("runtime_identity_sha256", "SIMPLE_TEST_OWNER_RUNTIME_SHA256"),
+        ("target_source_snapshot_sha256", "SIMPLE_TEST_OWNER_SOURCE_SHA256"),
+        ("tool_input_identity_sha256", "SIMPLE_TEST_OWNER_TOOL_INPUT_SHA256")]
+    for binding in bindings:
+        if not digest_valid(fields[binding.0]) or fields[binding.0] != env_get(binding.1):
+            return Err("compiled child selected authority differs: " + binding.0)
+    if fields["compiler_cli_path"] != env_get("SIMPLE_BINARY") or
+            fields["compiler_cli_path"] != env_get("SIMPLE_BIN") or
+            fields["test_runner_path"] != env_get("SIMPLE_TEST_OWNED_RUNNER_PATH") or
+            fields["mcp_server_path"] != env_get("SIMPLE_MCP_TEST_BINARY"):
+        return Err("compiled child tool path differs from actual matrix row")
+    val path = fields[role + "_path"]
+    val digest = fields[role + "_sha256"]
+    if not absolute_path_valid(path) or not digest_valid(digest):
+        return Err("compiled child executable path or digest refused")
+    Ok(TestCompiledChildAuthorityV1(role, path, digest, receipt, expected, evidence))
+
+fn drain_actual_child(lease: OwnedProcessLease, input: [u8], timeout_ms: i64,
+        prefix: text) -> Result<TestCompiledChildResultV1, text>:
+    var stdout: [u8] = []
+    var stderr: [u8] = []
+    var terminal = false
+    # Native deadline owns TERM/KILL/reap. This extra finite bound refuses a
+    # broken provider rather than trusting endless live/terminal metadata.
+    val attempts = (timeout_ms + 12000) / 50 + 1
+    for index in range(0, attempts):
+        val poll = lease.poll(50, 4096, 4096)?
+        for byte in poll.stdout: stdout.push(byte)
+        for byte in poll.stderr: stderr.push(byte)
+        if poll.runtime_error != 0 or poll.stdout_truncated or poll.stderr_truncated or
+                poll.stdout_delivered != poll.stdout.len() or poll.stderr_delivered != poll.stderr.len():
+            return Err("compiled child capture/provider refused")
+        # Native state2 means reaped and both output pipes closed. Drain every
+        # retained byte before collecting; empty terminal poll proves EOF.
+        if poll.terminal and poll.reaped and poll.stdout.len() == 0 and poll.stderr.len() == 0:
+            terminal = true
+            break
+    if not terminal: return Err("compiled child terminal EOF not observed within finite bound")
+    val accepted_input = lease.input_receipt()?
+    if accepted_input.runtime_error != 0 or not accepted_input.stdin_closed or not accepted_input.terminal or
+            not accepted_input.reaped or accepted_input.accepted != input.len() or accepted_input.written != input.len() or
+            digest_hex(accepted_input.digest) != sha256_u8_hex(input):
+        return Err("compiled child complete stdin receipt refused")
+    val result = lease.result()?
+    if result.runtime_error != 0 or not result.reaped or not result.identity_revalidated or
+            result.stdout_truncated or result.stderr_truncated or
+            result.stdout_seen != stdout.len() or result.stdout_kept != stdout.len() or
+            result.stderr_seen != stderr.len() or result.stderr_kept != stderr.len():
+        return Err("compiled child collected identity/output receipt refused")
+    Ok(TestCompiledChildResultV1(stdout, stderr, result.exit_code, result.timed_out,
+        true, result.reaped, true, digest_hex(accepted_input.digest), prefix))
+
+pub fn test_compiled_child_run_v1(role: text, args: [text], input: [u8], timeout_ms: i64
+) -> Result<TestCompiledChildResultV1, text>:
+    if timeout_ms <= 0 or timeout_ms > 3600000: return Err("compiled child finite deadline refused")
+    val authority = test_compiled_child_authority_v1(role)?
+    if not dir_create_all(authority.evidence_dir): return Err("compiled child evidence directory refused")
+    val owned_directory = secure_temp_dir(authority.evidence_dir, "compiled-child-")?
+    val prefix = owned_directory + "/child"
+    val argv = json_value_serialize(json_value_str_array(args))
+    val context = "role={role}\nexecutable={authority.executable}\nexecutable_sha256={authority.executable_sha256}\n" +
+        "owner_receipt={authority.receipt}\nowner_receipt_sha256={authority.receipt_sha256}\nargs={argv}\n"
+    if not file_write_bytes(prefix + ".authority.env", context.bytes()) or
+            not file_write_bytes(prefix + ".stdin.bin", input):
+        return Err("compiled child input/authority evidence publication refused")
+    val pin = OwnedExecutablePin.pin(authority.executable)?
+    val pinned = pin.digest()
+    if pinned.is_err() or digest_hex(pinned.unwrap()) != authority.executable_sha256:
+        val closed = pin.close()
+        return Err("compiled child native pinned executable digest differs")
+    val native_pin = "pinned=1\nnative_sha256={digest_hex(pinned.unwrap())}\n"
+    if not file_write_bytes(prefix + ".native-pin.env", native_pin.bytes()):
+        val closed = pin.close()
+        return Err("compiled child native pin evidence publication refused")
+    val started = pin.start(args, input, timeout_ms, 2000, 4194304)
+    if started.is_err():
+        val closed = pin.close()
+        return Err(started.unwrap_err())
+    val lease = started.unwrap().lease()
+    val captured = drain_actual_child(lease, input, timeout_ms, prefix)
+    if captured.is_err():
+        # Cancellation owns exact child teardown even on capture/provider
+        # failure. Never hand its process to a detached shell fallback.
+        val canceled = lease.cancel()
+        val collected = lease.collect()
+        val released = lease.release()
+        val closed = pin.close()
+        if canceled.is_err() or collected.is_err() or released.is_err() or closed.is_err():
+            return Err("compiled child failure cleanup refused: " + captured.unwrap_err())
+        return captured
+    # The drain checked terminal EOF and a non-consuming actual result. Consume
+    # exactly once now; no later publication error may retry collection.
+    val collected = lease.collect()
+    if collected.is_err():
+        val released = lease.release()
+        val closed = pin.close()
+        return Err("compiled child collection refused: " + collected.unwrap_err())
+    val actual_result = collected.unwrap()
+    val completed = captured.unwrap()
+    if actual_result.runtime_error != 0 or not actual_result.reaped or not actual_result.identity_revalidated or
+            actual_result.stdout_truncated or actual_result.stderr_truncated or
+            actual_result.exit_code != completed.exit_code or actual_result.timed_out != completed.timed_out or
+            actual_result.stdout_seen != completed.stdout.len() or actual_result.stdout_kept != completed.stdout.len() or
+            actual_result.stderr_seen != completed.stderr.len() or actual_result.stderr_kept != completed.stderr.len():
+        val closed = pin.close()
+        return Err("compiled child collected terminal result changed")
+    val closed = pin.close()?
+    val current = test_compiled_child_authority_v1(role)?
+    if current.receipt_sha256 != authority.receipt_sha256 or current.executable_sha256 != authority.executable_sha256 or
+            current.executable != authority.executable: return Err("compiled child authority changed during execution")
+    # Collection already consumed the lease. Publication failures here must
+    # not cancel or collect that stale handle a second time.
+    val output = captured.unwrap()
+    if not file_write_bytes(prefix + ".stdout.bin", output.stdout) or not file_write_bytes(prefix + ".stderr.bin", output.stderr):
+        return Err("compiled child raw output evidence publication refused")
+    val metadata = "schema=compiled-system-child-v1\nterminal=1\nreaped=1\noutput_complete=1\n" +
+        "exit_status={output.exit_code}\ntimed_out={output.timed_out}\n" +
+        "input_sha256={output.input_sha256}\ninput_accepted={input.len()}\ninput_written={input.len()}\n" +
+        "stdout_seen={output.stdout.len()}\nstderr_seen={output.stderr.len()}\n"
+    if not file_write_bytes(prefix + ".process.env", metadata.bytes()):
+        return Err("compiled child process evidence publication refused")
+    captured
+
+pub fn test_compiled_child_text_v1(bytes: [u8]) -> text:
+    rt_bytes_to_text(bytes)
+
+export TestCompiledChildAuthorityV1, TestCompiledChildResultV1
+export test_compiled_child_authority_v1, test_compiled_child_run_v1, test_compiled_child_text_v1
