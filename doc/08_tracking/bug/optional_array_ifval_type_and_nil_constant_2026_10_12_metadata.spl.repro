@@ -1,0 +1,107 @@
+# AUTHORED_UNEXECUTED: requires the changed compiler source and a supported SSpec owner.
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.diagnostics.span.Span
+use compiler.common.dependency.visibility.Visibility
+use compiler.common.driver_core_types.driver_core_compile_options_default
+use compiler.driver.driver_mir_target.driver_mir_target_context
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types_expr.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_lowering.expressions.*
+use compiler.hir.hir_lowering._Expressions.expression_core.*
+use compiler.hir.hir_lowering._Expressions.expression_support.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.MirLowering
+
+fn optional_array_mir_errors(source: text) -> [text]:
+    val parsed = parse_full_frontend(source, "optional_array.spl", "optional_array", Logger(level: 0))
+    var hir_owner = HirLowering.with_filename("optional_array.spl")
+    val hir = hir_owner.lower_module(parsed)
+    var mir_owner = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = mir_owner.lower_module(hir)
+    expect(mir.functions.len()).to_be_greater_than(0)
+    var errors: [text] = []
+    for error in hir_owner.errors:
+        errors.push("HIR: " + error.message)
+    for error in mir_owner.errors:
+        errors.push("MIR: " + error.message)
+    errors
+
+fn optional_array_has_iter_error(errors: [text]) -> bool:
+    for message in errors:
+        if message.contains("for-in over non-array iterables"):
+            return true
+    false
+
+# This exercises actual HIR binding emission; Slice is an IR contract here.
+fn optional_array_binding_shape(payload: HirType, mutable: bool, bind_payload: bool) -> text:
+    val span = Span.empty()
+    val optional = HirType(kind: HirTypeKind.Optional(payload), span: span)
+    var hir = HirLowering.new()
+    hir.symbols.define("input", SymbolKind.Parameter, optional, span, Visibility.Private, false, nil)
+    val base = Expr(kind: ExprKind.Ident("input"), span: span)
+    val checked = Expr(kind: ExprKind.ExistsCheck(base), span: span)
+    val kind = if mutable: StmtKind.Var("items", nil, checked) else: StmtKind.Val("items", nil, checked)
+    val lowered = hir.lower_hir_stmt(Stmt(kind: kind, span: span, bind_optional_payload: bind_payload))
+    expect(hir.errors.len()).to_equal(0)
+    match lowered.kind:
+        case HirStmtKind.Let(symbol, annotation, _):
+            if not bind_payload:
+                expect(annotation).to_be_nil()
+                if val declared = hir.symbols.get_symbol_type_raw(symbol.id):
+                    match declared.kind:
+                        case HirTypeKind.Optional(_): return "absent:optional"
+                        case _: return "wrong-symbol-type"
+                return "missing-symbol-type"
+            if val actual = annotation:
+                match actual.kind:
+                    case HirTypeKind.Array(element, _):
+                        match element.kind:
+                            case HirTypeKind.Any: return "array:any"
+                            case _: return "wrong-array-element"
+                    case HirTypeKind.Slice(element):
+                        match element.kind:
+                            case HirTypeKind.Float(bits): return "slice:f{bits}"
+                            case _: return "wrong-slice-element"
+                    case _: return "wrong-binding-type"
+            "missing-binding-type"
+        case _: "not-let"
+
+describe "optional array existence-check payload metadata":
+    it "lowers mixed boxed-array iteration after an optional function call":
+        val errors = optional_array_mir_errors("fn make() -> [any]?:\n    val items: [any] = [7, \"two\", nil]\n    Some(items)\nfn f() -> i64:\n    var count = 0\n    if val items = make():\n        for item in items:\n            count = count + 1\n    count\n")
+        expect(errors).to_equal([])
+
+    it "retains typed integer-array iteration and indexing":
+        val errors = optional_array_mir_errors("fn f(input: [i64]?) -> i64:\n    var sum = 0\n    if val items = input:\n        for item in items:\n            sum = sum + item\n    sum\n")
+        expect(errors).to_equal([])
+
+    it "does not reinterpret an optional tuple as an array":
+        val errors = optional_array_mir_errors("fn f(input: (i64, i64)?) -> i64:\n    if val items = input:\n        for item in items:\n            return item\n    0\n")
+        expect(optional_array_has_iter_error(errors)).to_equal(true)
+
+    it "does not admit an optional dynamic value without declared array provenance":
+        val errors = optional_array_mir_errors("fn f(input: any?) -> i64:\n    if val items = input:\n        for item in items:\n            return 1\n    0\n")
+        expect(optional_array_has_iter_error(errors)).to_equal(true)
+
+    it "publishes boxed Any payload metadata only for marked val and var bindings":
+        val payload = HirType(kind: HirTypeKind.Array(HirType(kind: HirTypeKind.Any, span: Span.empty()), nil), span: Span.empty())
+        expect(optional_array_binding_shape(payload, false, true)).to_equal("array:any")
+        expect(optional_array_binding_shape(payload, true, true)).to_equal("array:any")
+        expect(optional_array_binding_shape(payload, false, false)).to_equal("absent:optional")
+        expect(optional_array_binding_shape(payload, true, false)).to_equal("absent:optional")
+
+    it "publishes the declared f64 Slice payload only for marked bindings":
+        val payload = HirType(kind: HirTypeKind.Slice(HirType(kind: HirTypeKind.Float(64), span: Span.empty())), span: Span.empty())
+        expect(optional_array_binding_shape(payload, false, true)).to_equal("slice:f64")
+        expect(optional_array_binding_shape(payload, true, true)).to_equal("slice:f64")
+        expect(optional_array_binding_shape(payload, false, false)).to_equal("absent:optional")
+
+    it "rejects unguarded iteration over an ordinary nullable existence-check binding":
+        val errors = optional_array_mir_errors("fn f(input: [any]?) -> i64:\n    val items = input.?\n    for item in items:\n        return 1\n    0\n")
+        expect(optional_array_has_iter_error(errors)).to_equal(true)

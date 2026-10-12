@@ -1,0 +1,133 @@
+# Strict SDN codec for an explicit execution-configuration snapshot.
+# @req REQ-TRC-003 REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse_with_spans_and_issues}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.traceability.schema.{trace_sdn_preflight}
+use std.common.traceability.execution_config.{TraceExecutionConfiguration, validate_trace_execution_configuration_shape}
+
+fn _execution_config_record(names: [text], values: [SdnValue]) -> SdnValue:
+    var fields: Dict<text, SdnValue> = {}
+    var i = 0
+    while i < names.len():
+        fields[names[i]] = values[i]
+        i += 1
+    SdnValue.Dict(fields)
+
+fn _execution_config_text(value: text) -> SdnValue:
+    SdnValue.String(value)
+
+fn _execution_config_checked_record(value: SdnValue, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    match value:
+        case SdnValue.Dict(fields):
+            if fields.len() != names.len():
+                return Err("unexpected or missing trace execution configuration fields")
+            for name in names:
+                if not fields.contains_key(name):
+                    return Err("missing trace execution configuration field: " + name)
+            Ok(fields)
+        case _:
+            Err("trace execution configuration must be an SDN dictionary")
+
+fn _execution_config_text_field(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("trace execution configuration field must be text: " + name)
+
+fn _execution_config_int_field(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    match fields[name]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("trace execution configuration field must be integer: " + name)
+
+fn _execution_config_bool_field(fields: Dict<text, SdnValue>, name: text) -> Result<bool, text>:
+    match fields[name]:
+        case SdnValue.Bool(value): Ok(value)
+        case _: Err("trace execution configuration field must be boolean: " + name)
+
+fn _execution_config_text_array(values: [text]) -> SdnValue:
+    var items: [SdnValue] = []
+    for value in values:
+        items.push(SdnValue.String(value))
+    SdnValue.Array(items)
+
+fn _execution_config_text_array_field(fields: Dict<text, SdnValue>, name: text, max_items: i64) -> Result<[text], text>:
+    val values = match fields[name]:
+        case SdnValue.Array(items): items
+        case _: return Err("trace execution configuration field must be an array: " + name)
+    if values.len() > max_items:
+        return Err("trace execution configuration array exceeds its bound: " + name)
+    var texts: [text] = []
+    for value in values:
+        match value:
+            case SdnValue.String(item): texts.push(item)
+            case _: return Err("trace execution configuration array must contain text: " + name)
+    Ok(texts)
+
+pub fn encode_trace_execution_configuration(config: TraceExecutionConfiguration) -> Result<text, text>:
+    validate_trace_execution_configuration_shape(config)?
+    val names = ["schema", "execution_mode", "backend", "lane_id", "timeout_secs", "timeout_binding", "slow_policy", "seed", "seed_set", "fail_fast", "cache_policy", "parallel", "worker_count", "shard_id", "shard_index", "shard_count", "shard_membership", "unresolved_fields", "unsupported_fields"]
+    val values: [SdnValue] = [
+        _execution_config_text("simple.trace.execution-config/v1"),
+        _execution_config_text(config.execution_mode),
+        _execution_config_text(config.backend),
+        _execution_config_text(config.lane_id),
+        SdnValue.Int(config.timeout_secs),
+        _execution_config_text(config.timeout_binding),
+        _execution_config_text(config.slow_policy),
+        SdnValue.Int(config.seed),
+        SdnValue.Bool(config.seed_set),
+        SdnValue.Bool(config.fail_fast),
+        _execution_config_text(config.cache_policy),
+        SdnValue.Bool(config.parallel),
+        SdnValue.Int(config.worker_count),
+        _execution_config_text(config.shard_id),
+        SdnValue.Int(config.shard_index),
+        SdnValue.Int(config.shard_count),
+        _execution_config_text_array(config.shard_membership),
+        _execution_config_text_array(config.unresolved_fields),
+        _execution_config_text_array(config.unsupported_fields)
+    ]
+    val encoded = sdn_encode_canonical(_execution_config_record(names, values))
+    if encoded.len() > 1048576:
+        return Err("trace execution configuration exceeds 1 MiB")
+    Ok(encoded)
+
+pub fn decode_trace_execution_configuration(source: text) -> Result<TraceExecutionConfiguration, text>:
+    trace_sdn_preflight(source)?
+    val parsed = parse_with_spans_and_issues(source)?
+    if parsed.2.len() > 0:
+        return Err("invalid or duplicate trace execution configuration fields")
+    val fields = _execution_config_checked_record(parsed.0, ["schema", "execution_mode", "backend", "lane_id", "timeout_secs", "timeout_binding", "slow_policy", "seed", "seed_set", "fail_fast", "cache_policy", "parallel", "worker_count", "shard_id", "shard_index", "shard_count", "shard_membership", "unresolved_fields", "unsupported_fields"])?
+    if _execution_config_text_field(fields, "schema")? != "simple.trace.execution-config/v1":
+        return Err("unsupported trace execution configuration schema")
+    val config = TraceExecutionConfiguration(
+        execution_mode: _execution_config_text_field(fields, "execution_mode")?,
+        backend: _execution_config_text_field(fields, "backend")?,
+        lane_id: _execution_config_text_field(fields, "lane_id")?,
+        timeout_secs: _execution_config_int_field(fields, "timeout_secs")?,
+        timeout_binding: _execution_config_text_field(fields, "timeout_binding")?,
+        slow_policy: _execution_config_text_field(fields, "slow_policy")?,
+        seed: _execution_config_int_field(fields, "seed")?,
+        seed_set: _execution_config_bool_field(fields, "seed_set")?,
+        fail_fast: _execution_config_bool_field(fields, "fail_fast")?,
+        cache_policy: _execution_config_text_field(fields, "cache_policy")?,
+        parallel: _execution_config_bool_field(fields, "parallel")?,
+        worker_count: _execution_config_int_field(fields, "worker_count")?,
+        shard_id: _execution_config_text_field(fields, "shard_id")?,
+        shard_index: _execution_config_int_field(fields, "shard_index")?,
+        shard_count: _execution_config_int_field(fields, "shard_count")?,
+        shard_membership: _execution_config_text_array_field(fields, "shard_membership", 65536)?,
+        unresolved_fields: _execution_config_text_array_field(fields, "unresolved_fields", 128)?,
+        unsupported_fields: _execution_config_text_array_field(fields, "unsupported_fields", 128)?)
+    validate_trace_execution_configuration_shape(config)?
+    val canonical = encode_trace_execution_configuration(config)?
+    if source != canonical:
+        return Err("trace execution configuration is not canonical SDN")
+    Ok(config)
+
+pub fn trace_execution_configuration_id(config: TraceExecutionConfiguration) -> Result<text, text>:
+    val encoded = encode_trace_execution_configuration(config)?
+    var bytes: [u8] = []
+    for byte in encoded.bytes(): bytes.push(byte)
+    Ok("sha256:" + sha256_u8_hex(bytes))

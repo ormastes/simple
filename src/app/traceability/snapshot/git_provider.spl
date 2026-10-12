@@ -1,0 +1,208 @@
+# Immutable Git object snapshot provider. The caller supplies the trusted set of
+# repository-relative textual inputs; this module never reads the worktree.
+use std.nogc_sync_mut.io.process_ops.{OwnedProcessLease}
+use app.traceability.snapshot.git_tree.{TraceGitTreeEntry, decode_trace_git_tree}
+use app.traceability.snapshot.git_batch.{decode_trace_git_batch}
+use std.common.traceability.model.{SnapshotSubject, SnapshotArtifact, SnapshotInput}
+use std.common.crypto.sha1.{sha1_u8_hex}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+const TRACE_GIT_TIMEOUT_MS: i64 = 30000
+const TRACE_GIT_OUTPUT_MAX: i64 = 8388608
+
+pub struct GitSnapshotRequest:
+    repository: text
+    selector: text
+    paths: [text]
+    max_entries: i64
+    max_blob_bytes: i64
+    max_total_bytes: i64
+    snapshot_kind: text = "git_commit"
+
+fn git_u8_text(value: text) -> [u8]:
+    var bytes: [u8] = []
+    for byte in value.bytes(): bytes.push(byte)
+    bytes
+
+fn git_text_bytes(value: [u8]) -> Result<text, text>:
+    use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+    validated_utf8_bytes_to_text_linear(value)
+
+# Starts one byte-owned process with all stdin bound at spawn, drains both
+# streams to terminal state, and acknowledges/relinquishes its lease.
+fn git_capture(repository: text, args: [text], input: [u8], limit: i64) -> Result<[u8], text>:
+    if repository == "" or limit < 1 or limit > TRACE_GIT_OUTPUT_MAX:
+        return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid Git process request")
+    var argv = ["-C", repository]
+    for arg in args: argv.push(arg)
+    val start = OwnedProcessLease.start("git", argv, input, TRACE_GIT_TIMEOUT_MS, 1000, limit)?
+    var lease = start.lease()
+    var output: [u8] = []
+    var terminal = false
+    var failure = ""
+    var polls = 0
+    while not terminal:
+        polls = polls + 1
+        if polls > 1201:
+            failure = "TRACE-SNAPSHOT-INCOMPLETE: Git cleanup deadline exhausted"
+            break
+        val polled = lease.poll(25, 65536, 4096)
+        if polled.is_err():
+            failure = "TRACE-SNAPSHOT-INCOMPLETE: Git process poll failed"
+            break
+        val poll = polled.unwrap()
+        if poll.timed_out or poll.stdout_truncated or poll.stderr_truncated or poll.runtime_error != 0:
+            failure = "TRACE-SNAPSHOT-INCOMPLETE: Git process timed out or exceeded limits"
+            break
+        for b in poll.stdout:
+            if output.len() >= limit:
+                failure = "TRACE-SNAPSHOT-INCOMPLETE: Git output budget exhausted"
+                break
+            output.push(b)
+        terminal = poll.terminal
+        if failure != "": break
+    if not terminal:
+        lease.cancel()
+        var drained = false
+        var cleanup_polls = 0
+        while not drained and cleanup_polls < 1201:
+            cleanup_polls = cleanup_polls + 1
+            val polled = lease.poll(25, 4096, 4096)
+            if polled.is_err(): break
+            val poll = polled.unwrap()
+            for b in poll.stdout:
+                if output.len() < limit: output.push(b)
+            drained = poll.terminal
+        if not drained:
+            lease.result()
+            lease.collect()
+            lease.release()
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: Git process cleanup could not be confirmed")
+    val result = lease.result()
+    var failed = failure != ""
+    if result.is_err(): failed = true
+    if result.is_ok():
+        val completed = result.unwrap()
+        if not completed.reaped or completed.timed_out or completed.exit_code != 0 or completed.runtime_error != 0:
+            failed = true
+    val collected = lease.collect()
+    if collected.is_err(): failed = true
+    if collected.is_ok() and not collected.unwrap().reaped: failed = true
+    val released = lease.release()
+    if released.is_err(): failed = true
+    if failed:
+        if failure != "": return Err(failure)
+        return Err("TRACE-SNAPSHOT-INCOMPLETE: Git process failed or lease cleanup incomplete")
+    Ok(output)
+
+fn git_capture_text(repository: text, args: [text]) -> Result<text, text>:
+    git_text_bytes(git_capture(repository, args, [], 4096)?)
+
+fn git_protocol_path_line(source: text) -> Result<text, text>:
+    var path = source
+    if path.ends_with("\n"): path = path.substring(0, path.len() - 1)
+    if path.ends_with("\r"): path = path.substring(0, path.len() - 1)
+    if path == "" or path.contains("\n") or path.contains("\r"):
+        return Err("TRACE-SNAPSHOT-INCOMPLETE: ambiguous Git repository path response")
+    Ok(path)
+
+fn git_oid_valid(value: text, width: i64) -> bool:
+    if value.len() != width: return false
+    for ch in value.bytes():
+        val c = ch.to_i64()
+        if not ((c >= 48 and c <= 57) or (c >= 97 and c <= 102)): return false
+    true
+
+fn git_path_valid(path: text) -> bool:
+    if path == "" or path.starts_with("/") or path.contains("\\") or path.contains("\n") or path.contains("\r"):
+        return false
+    for part in path.split("/"):
+        if part == "" or part == "." or part == "..": return false
+    true
+
+fn git_find_entry(entries: [TraceGitTreeEntry], path: text) -> TraceGitTreeEntry?:
+    for entry in entries:
+        if entry.path == path: return Some(entry)
+    nil
+
+pub fn snapshot_git_inputs(request: GitSnapshotRequest) -> Result<SnapshotInput, text>:
+    if request.snapshot_kind != "git_commit" and request.snapshot_kind != "git_index":
+        return Err("TRACE-SNAPSHOT-INCOMPLETE: unsupported Git snapshot kind")
+    if request.repository == "" or request.selector == "" or request.paths.len() == 0 or request.paths.len() > 256 or request.max_entries < 1 or request.max_entries > 40000 or request.max_blob_bytes < 1 or request.max_blob_bytes > 4194304 or request.max_total_bytes < 1 or request.max_total_bytes > 4194304:
+        return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid snapshot scope")
+    var seen: Dict<text, bool> = {}
+    for path in request.paths:
+        if not git_path_valid(path) or seen.contains_key(path):
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid or duplicate selected path")
+        seen[path] = true
+    val root = git_protocol_path_line(git_capture_text(request.repository, ["rev-parse", "--show-toplevel"])?)?
+    val object_format = git_capture_text(root, ["rev-parse", "--show-object-format"])?.trim()
+    if object_format != "sha1" and object_format != "sha256":
+        return Err("TRACE-SNAPSHOT-INCOMPLETE: unsupported Git object format")
+    val width = if object_format == "sha1": 40 else: 64
+    var revision = ""
+    var tree = ""
+    var kind = request.snapshot_kind
+    if request.snapshot_kind == "git_index":
+        # Freeze the selected Git index, including an inherited alternate index.
+        # write-tree refuses unresolved entries and never reads worktree bytes.
+        kind = "git_index"
+        tree = git_capture_text(root, ["write-tree"])?.trim()
+    else:
+        revision = git_capture_text(root, ["rev-parse", "--verify", "--end-of-options", "{request.selector}^{commit}"])?.trim()
+        if not git_oid_valid(revision, width): return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid revision identity")
+        tree = git_capture_text(root, ["rev-parse", "--verify", "--end-of-options", "{revision}^{tree}"])?.trim()
+    if not git_oid_valid(tree, width): return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid tree identity")
+    var inventory_args = ["ls-tree", "-r", "-z", "--full-tree", tree, "--"]
+    for path in request.paths: inventory_args.push(":(literal){path}")
+    val inventory = git_capture(root, inventory_args, [], TRACE_GIT_OUTPUT_MAX)?
+    val entries = decode_trace_git_tree(inventory, object_format, request.max_entries, TRACE_GIT_OUTPUT_MAX)?
+    for selected in request.paths:
+        var matched = false
+        for entry in entries:
+            if entry.path == selected or entry.path.starts_with("{selected}/"):
+                matched = true
+        if not matched:
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: selected path is absent from immutable tree")
+    var expected: [text] = []
+    var paths: [text] = []
+    for entry in entries:
+        paths.push(entry.path)
+        expected.push(entry.oid)
+    if expected.len() == 0: return Err("TRACE-SNAPSHOT-INCOMPLETE: selected scope contains no supported blobs")
+    var batch_input: [u8] = []
+    for oid in expected:
+        for b in git_u8_text("{oid}\n"): batch_input.push(b)
+    val batch_limit = request.max_total_bytes + expected.len() * 160 + 1
+    if batch_limit > TRACE_GIT_OUTPUT_MAX:
+        return Err("TRACE-SNAPSHOT-INCOMPLETE: selected batch exceeds output budget")
+    val batch = git_capture(root, ["cat-file", "--batch"], batch_input, batch_limit)?
+    val blobs = decode_trace_git_batch(batch, expected, request.max_blob_bytes, batch.len())?
+    var content_bytes: i64 = 0
+    for blob in blobs:
+        content_bytes += blob.byte_size
+        if content_bytes > request.max_total_bytes:
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: selected blob content exceeds scope budget")
+    var artifacts: [SnapshotArtifact] = []
+    for i in 0..blobs.len():
+        val blob = blobs[i]
+        val body = git_u8_text(blob.content)
+        if body.len() != blob.byte_size:
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: blob byte roundtrip changed")
+        var framed: [u8] = []
+        val prefix = git_u8_text("blob {body.len()}")
+        for b in prefix: framed.push(b)
+        framed.push(0)
+        for b in body: framed.push(b)
+        val calculated = if object_format == "sha1": sha1_u8_hex(framed) else: sha256_u8_hex(framed)
+        if calculated != blob.oid:
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: Git blob identity verification failed")
+        artifacts.push(SnapshotArtifact(path: paths[i], blob_id: blob.oid, content: blob.content, visibility: "selected_content"))
+    # This is a local repository-instance identity, not a global SCV identity.
+    # Hashing keeps space/Unicode checkout paths valid and avoids exposing them
+    # in exported subject IDs. Actual path bytes remain unchanged for Git reads.
+    val repository_id = "repository:local:" + sha256_u8_hex(git_u8_text(root))
+    # `complete` is relative only to the caller-declared selected path scope.
+    Ok(SnapshotInput(
+        subject: SnapshotSubject(repository_id: repository_id, snapshot_id: "{repository_id}:{kind}:{object_format}:{tree}", kind: kind, revision_id: revision, tree_id: tree, object_format: object_format),
+        artifacts: artifacts, complete: true))

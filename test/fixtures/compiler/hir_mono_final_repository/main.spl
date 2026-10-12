@@ -1,0 +1,275 @@
+# Real selected raw-source producer, genuine weave/cold/current and actual
+# retained mono parity. These controls require an admitted native producer.
+use support.*
+use compiler.driver.cache.hir_mono_final_repository_v1.*
+use compiler.driver.cache.driver_hir_archive_weave_boundary_v1.*
+use compiler.driver.cache.driver_hir_archive_current_boundary_v1.*
+use compiler.driver.cache.hir_mono_current_passthrough_v1.{mono_archive_current_passthrough_v1}
+use compiler.driver.cache.hir_mono_archive_assembly_v1.*
+use compiler.mono.mono_archive_current_body_v1.*
+use compiler.mono.monomorphize_integration.{MonomorphizationPass}
+use compiler.mono.verify.post_mono_verify.{post_mono_verify_modules}
+use compiler.driver.cache.hir_mono_archive_verify_v1.{mono_archive_post_mono_report_digest_v1}
+use compiler.driver.cache.hir_mono_function_record_v1.{mono_complete_function_digest_v1}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirStruct, HirField, HirExpr, HirExprKind, HirFunction}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_hir_cache.{hir_cache_last_warnings, hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1, hir_cache_store_in_owned_scope}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{env_get, env_set}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+struct ExpectedFinal:
+    digests: Dict<text, text>
+    report_digest: text
+    generic_functions: i64
+    specializations: i64
+
+fn close_fixture(paused: bool, owned: bool):
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not cache_owned or not ended: panic("final fixture ownership")
+
+fn expected(setup: HirArchiveWeaveFixtureSetupV1) -> Result<ExpectedFinal, text>:
+    if not transient_scope_begin(): return Err("expected lease unavailable")
+    val first = setup.boundary.use.logical_order[0]
+    val woven = driver_hir_archive_weave_boundary_load_in_owned_scope_v1(setup.boundary.use, first)
+    var result: Result<ExpectedFinal, text> = Err("actual woven expected body unavailable")
+    if woven.is_ok():
+        # Retained aliases share the SymbolTable class handle, while mono
+        # publishes separate function dictionaries under actual logical keys.
+        var modules: Dict<text, HirModule> = {}
+        for name in setup.boundary.use.logical_order: modules[name] = woven.unwrap().module
+        val worker = MonomorphizationPass.create()
+        val output = worker.process_modules(modules)
+        var digests: Dict<text, text> = {}
+        for name in setup.boundary.use.logical_order: digests[name] = sha256_text(hir_module_encode(output[name]))
+        result = Ok(ExpectedFinal(digests: digests,
+            report_digest: mono_archive_post_mono_report_digest_v1(post_mono_verify_modules(output)),
+            generic_functions: worker.stats.generic_functions_found, specializations: worker.stats.specializations_created))
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    close_fixture(paused, owned)
+    result
+
+fn observe_in_owned_scope(setup: HirArchiveWeaveFixtureSetupV1, repo: MonoArchiveFinalRepositoryV1,
+        expected_: ExpectedFinal) -> Result<bool, text>:
+    if not mono_archive_final_repository_matches_v1(setup.driver, repo): return Err("actual final pin refused")
+    for name in repo.ordered_inventory:
+        val origins = mono_archive_final_specialization_selections_in_owned_scope_v1(setup.driver, repo, name)?
+        val loaded = mono_archive_load_final_module_in_owned_scope_v1(setup.driver, repo, name)?
+        if sha256_text(hir_module_encode(loaded)) != expected_.digests[name] or
+                loaded.name != setup.archive.input.module_name or loaded.path != setup.source.path:
+            return Err("actual retained complete final body parity differs")
+        for origin in origins:
+            if not loaded.functions.has(origin.target_symbol): return Err("actual FIFO-selected function body absent")
+            val function: HirFunction = loaded.functions[origin.target_symbol]
+            if function.name != origin.target_name or mono_complete_function_digest_v1(function) != origin.output_function_digest:
+                return Err("actual FIFO specialization origin/function digest differs")
+        hir_cache_clear_last_warnings()
+    Ok(true)
+
+fn observe(setup: HirArchiveWeaveFixtureSetupV1, repo: MonoArchiveFinalRepositoryV1,
+        expected_: ExpectedFinal) -> Result<bool, text>:
+    if not transient_scope_begin(): return Err("final read lease unavailable")
+    val result = observe_in_owned_scope(setup, repo, expected_)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    close_fixture(paused, owned)
+    result
+
+fn change_default(module: HirModule) -> Result<HirModule, text>:
+    var output = module
+    var changed = false
+    for symbol in output.structs.keys():
+        val declaration: HirStruct = output.structs[symbol]
+        if declaration.name != "View": continue
+        var fields: [HirField] = []
+        for field in declaration.fields:
+            if field.name == "width" and field.has_default:
+                fields = fields.push(HirField(..field, default: HirExpr(..field.default, kind: HirExprKind.IntLit(99, nil))))
+                changed = true
+            else: fields = fields.push(field)
+        output.structs[symbol] = HirStruct(..declaration, fields: fields)
+    if not changed: return Err("actual default37 mutation target absent")
+    Ok(output)
+
+fn stale_current(owner: DriverHirArchiveCurrentBoundaryV1, name: text) -> Result<MonoArchiveCurrentBodyV1, text>:
+    if not transient_scope_begin(): return Err("stale current mutation lease unavailable")
+    val original = owner.registration.bodies[name]
+    val loaded = mono_archive_current_body_load_in_owned_scope_v1(owner.registration.cache, original)
+    var changed: Result<MonoArchiveCurrentBodyV1, text> = Err("actual current body unavailable")
+    if loaded.is_ok():
+        val mutated = change_default(loaded.unwrap().module)
+        if mutated.is_ok():
+            changed = mono_archive_current_body_store_in_owned_scope_v1(owner.registration.cache, original.original_parent,
+                original.parent_boundary_key, original.parent_boundary_digest, mutated.unwrap(), loaded.unwrap().warnings)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(changed) else: false
+    close_fixture(paused, owned)
+    changed
+
+fn substituted_final(setup: HirArchiveWeaveFixtureSetupV1, repo: MonoArchiveFinalRepositoryV1,
+        name: text) -> Result<MonoArchiveAssembledModuleV1, text>:
+    if not transient_scope_begin(): return Err("final substitution lease unavailable")
+    val actual = mono_archive_load_final_module_in_owned_scope_v1(setup.driver, repo, name)
+    var result: Result<MonoArchiveAssembledModuleV1, text> = Err("actual final body unavailable")
+    if actual.is_ok():
+        val changed = change_default(actual.unwrap())
+        if changed.is_ok():
+            var descriptor = repo.modules[name]
+            descriptor.body_digest = sha256_text(hir_module_encode(changed.unwrap()))
+            descriptor.archive_key = mono_archive_assembled_key_v1(descriptor)
+            if descriptor.archive_key != "" and hir_cache_store_in_owned_scope(descriptor.archive_key,
+                    changed.unwrap(), hir_cache_last_warnings()): result = Ok(descriptor)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    close_fixture(paused, owned)
+    result
+
+fn run_case(path: text, name: text, zero: bool) -> Result<i64, text>:
+    var checks = 0
+    val setup = hir_archive_weave_fixture_setup_v1(path, name, name + ".alias")?
+    val retained = expected(setup)?
+    if (retained.generic_functions == 0) != zero or (not zero and retained.specializations < 2):
+        return Err("fixture did not execute required retained generic branch")
+    checks = checks + 1
+    val captured = mono_archive_final_repository_capture_v1(setup.driver, setup.boundary, true, false)
+    if captured.is_err(): return Err("actual final factory: " + captured.unwrap_err().join(" | "))
+    val repo = captured.unwrap()
+    if repo.zero_templates != zero or repo.report_digest != retained.report_digest:
+        return Err("actual final report/zero branch differs from retained")
+    checks = checks + 1
+    if observe(setup, repo, retained).is_err(): return Err("actual full final body parity failed")
+    checks = checks + 1
+    if repo.ordered_inventory != setup.boundary.use.logical_order or repo.declaration_order != setup.boundary.use.declaration_order:
+        return Err("logical mono vs actual declaration order lost")
+    checks = checks + 1
+    if repo.emission_rows.len() != 1 or repo.schedule_kind != "normal-native-physical-v1" or
+            repo.emission_rows[0].source_index != 0 or not repo.emission_rows[0].is_entry or
+            repo.emission_rows[0].hir_owner_name != setup.archive.input.module_name:
+        return Err("actual normal-native physical source schedule differs")
+    checks = checks + 1
+    if zero and (repo.current_parent.registration.registration.state.epoch != 0 or
+            repo.current_parent.registration.registration.state.queue.len() != 0 or repo.verification != nil):
+        return Err("zero-template path rewrote roots or fabricated execution")
+    if not zero and repo.verification == nil: return Err("actual generic ledger capture missing")
+    checks = checks + 1
+    val first_name = repo.ordered_inventory[0]
+    val substituted = substituted_final(setup, repo, first_name)?
+    val saved_descriptor = repo.modules[first_name]
+    repo.modules[first_name] = substituted
+    val substituted_refused = observe(setup, repo, retained).is_err()
+    repo.modules[first_name] = saved_descriptor
+    if not substituted_refused: return Err("valid source-bound public assembled default99 replaced selected final body")
+    checks = checks + 1
+    if zero:
+        val stale = stale_current(repo.current_parent, first_name)?
+        val original_body = repo.current_parent.registration.bodies[first_name]
+        repo.current_parent.registration.bodies[first_name] = stale
+        val stale_refused = mono_archive_current_passthrough_v1(repo.current_parent.registration, repo.ordered_inventory).is_err()
+        repo.current_parent.registration.bodies[first_name] = original_body
+        if not stale_refused: return Err("valid same-parent default99 accepted with stale actual current seal")
+        checks = checks + 1
+    if mono_archive_final_repository_matches_v1(setup.driver, repo): return Err("final matcher accepted inactive scope")
+    checks = checks + 1
+    if not transient_scope_begin(): return Err("final negatives lease unavailable")
+    var specialization_origins = 0
+    for logical in repo.ordered_inventory:
+        val origins = mono_archive_final_specialization_selections_in_owned_scope_v1(setup.driver, repo, logical)?
+        if logical != repo.ordered_inventory[repo.ordered_inventory.len() - 1] and origins.len() != 0:
+            return Err("specialization body moved from actual last template owner")
+        specialization_origins = specialization_origins + origins.len()
+    if (zero and specialization_origins != 0) or (not zero and specialization_origins < 2):
+        return Err("actual zero/generic specialization origin schedule missing")
+    checks = checks + 1
+    val other = CompilerDriver.create(driver_core_compile_options_default())
+    other.ctx = setup.driver.ctx
+    if mono_archive_final_repository_matches_v1(other, repo): return Err("foreign driver accepted copied context")
+    checks = checks + 1
+    var changed = repo
+    changed.report_digest = sha256_text("public forged clean report")
+    changed.authority = sha256_text("public caller resealed final repository")
+    changed.artifact_key = sha256_text("public forged final key")
+    if mono_archive_final_repository_matches_v1(setup.driver, changed): return Err("public clean report/reseal issued final authority")
+    checks = checks + 1
+    changed = repo
+    changed.ordered_inventory = [repo.ordered_inventory[1], repo.ordered_inventory[0]]
+    if mono_archive_final_repository_matches_v1(setup.driver, changed): return Err("reversed logical order accepted")
+    checks = checks + 1
+    changed = repo
+    changed.declaration_order = [repo.ordered_inventory[1]]
+    if mono_archive_final_repository_matches_v1(setup.driver, changed): return Err("alias declaration order accepted")
+    checks = checks + 1
+    val saved_source = setup.driver.ctx.source_identities_owner[0]
+    setup.driver.ctx.source_identities_owner[0] = sha256_text("changed actual source")
+    val source_refused = not mono_archive_final_repository_matches_v1(setup.driver, repo)
+    setup.driver.ctx.source_identities_owner[0] = saved_source
+    if not source_refused: return Err("changed actual source receipt accepted")
+    checks = checks + 1
+    val actual_source = setup.driver.ctx.sources[0]
+    setup.driver.ctx.sources[0] = SourceFile(..actual_source, path: actual_source.path + ".changed")
+    val source_path_refused = not mono_archive_final_repository_matches_v1(setup.driver, repo)
+    setup.driver.ctx.sources[0] = actual_source
+    if not source_path_refused: return Err("changed active MIR source path accepted")
+    checks = checks + 1
+    setup.driver.ctx.sources[0] = SourceFile(..actual_source, module_name: "changed.logical.owner")
+    val source_name_refused = not mono_archive_final_repository_matches_v1(setup.driver, repo)
+    setup.driver.ctx.sources[0] = actual_source
+    if not source_name_refused: return Err("changed active MIR source lookup accepted")
+    checks = checks + 1
+    changed = repo
+    changed.force_all_sources = not repo.force_all_sources
+    if mono_archive_final_repository_matches_v1(setup.driver, changed): return Err("changed issued MIR force policy accepted")
+    checks = checks + 1
+    val actual_row = repo.emission_rows[0]
+    repo.emission_rows[0] = MonoArchiveFinalEmissionRowV1(..actual_row, emission_name: "changed.emission.owner")
+    val emission_refused = not mono_archive_final_repository_matches_v1(setup.driver, repo)
+    repo.emission_rows[0] = actual_row
+    if not emission_refused: return Err("changed actual emitted owner accepted")
+    checks = checks + 1
+    val configured = setup.driver.collection_registry_configured
+    setup.driver.collection_registry_configured = not configured
+    val collection_refused = not mono_archive_final_repository_matches_v1(setup.driver, repo)
+    setup.driver.collection_registry_configured = configured
+    if not collection_refused: return Err("changed actual configured collection mode accepted")
+    checks = checks + 1
+    val occupied = mono_archive_final_repository_capture_v1(setup.driver, setup.boundary, true, false).is_err()
+    val paused = transient_scope_pause()
+    val paused_match = if paused: not mono_archive_final_repository_matches_v1(setup.driver, repo) else: false
+    val ended = transient_scope_end()
+    if not occupied or not paused or not paused_match or not ended: return Err("final occupied/paused lease ownership changed")
+    checks = checks + 1
+    if not transient_scope_begin(): return Err("final churn lease unavailable")
+    var churn: [text] = []
+    var index = 0
+    while index < 2048:
+        churn = churn.push("closed final scratch churn {index}")
+        index = index + 1
+    val churn_paused = transient_scope_pause()
+    val churn_owned = if churn_paused: transient_promote(index) else: false
+    close_fixture(churn_paused, churn_owned)
+    if observe(setup, repo, retained).is_err(): return Err("post-close final selected body replay failed")
+    checks = checks + 1
+    Ok(checks)
+
+fn main() -> i64:
+    val saved_quiet = env_get("SIMPLE_RESOLVE_METHODS")
+    if not env_set("SIMPLE_RESOLVE_METHODS", "0"): return 1
+    val zero = run_case("test/fixtures/compiler/hir_mono_final_repository/provider.spl", "final.zero", true)
+    if zero.is_err():
+        print "final zero failed: {zero.unwrap_err()}"
+        return 2
+    val generic = run_case("test/fixtures/compiler/hir_mono_final_repository/generic.spl", "final.generic", false)
+    if generic.is_err():
+        print "final generic failed: {generic.unwrap_err()}"
+        return 3
+    if not env_set("SIMPLE_RESOLVE_METHODS", saved_quiet): return 4
+    val checks = zero.unwrap() + generic.unwrap()
+    if checks != 43 or transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0: return 5
+    print "HIR genuine final repository: {checks} checks passed"
+    0

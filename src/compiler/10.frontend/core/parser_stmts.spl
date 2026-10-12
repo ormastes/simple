@@ -58,7 +58,8 @@ use compiler.frontend.core.collection_feedback.{parser_collection_site_owner_pus
 use compiler.frontend.core._ParserStmt.match_type_pattern.{parse_match_type_pattern}
 use compiler.frontend.core.lexer.{lex_pop_indent, lex_enable_forced_indentation, lex_disable_forced_indentation}
 use compiler.frontend.core.lexer.{lex_mark_current_token_as_generic_close}
-use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args, expr_set_span}
+use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args, expr_get_span, expr_set_span}
+use compiler.core.types.{span_is_valid, span_start, span_line, span_col}
 use compiler.core.ast.{expr_get_arg_names, expr_call_args_set}
 use compiler.core.ast.{stmt_expr_stmt, stmt_val_decl, stmt_if_val_decl, stmt_lazy_val_decl, stmt_var_decl}
 use compiler.core.ast.{stmt_get_expr, stmt_get_name, module_get_path}
@@ -277,6 +278,10 @@ fn infer_expr_type_from_parse(expr_id: i64) -> i64:
 # leaving the token stream exactly as found (snapshot-restored).
 fn try_parse_bare_ident_string_call() -> (bool, i64):
     val bc_name = par_text_get()
+    val bc_start = lex_token_start_get()
+    val bc_end = lex_token_end_get()
+    val bc_line = par_line_get()
+    val bc_col = par_col_get()
     val bc_snap = lex_snapshot_save()
     val (bc_tok_n, bc_tok_t) = parser_tok_save()
     parser_advance()
@@ -293,22 +298,37 @@ fn try_parse_bare_ident_string_call() -> (bool, i64):
         val next_arg = parse_expr()
         bc_args.push(next_arg)
     lex_snapshot_commit(bc_snap)
-    (true, expr_call(expr_ident(bc_name, 0), bc_args, 0))
+    # Preserve the same source-character coordinate convention as postfix
+    # spans. Consumers needing UTF-8 byte offsets convert against the source.
+    # See sspec_parser_missing_source_spans_2026-10-11.md.
+    val bc_ident_span = flat_span_new(bc_start, bc_end, bc_line, bc_col)
+    val bc_call_span = flat_span_new(bc_start, lex_token_start_get(), bc_line, bc_col)
+    (true, expr_call(expr_ident(bc_name, bc_ident_span), bc_args, bc_call_span))
 
 fn parse_trailing_colon_block_arg(call_expr: i64) -> i64:
+    val cb_start = lex_token_start_get()
+    val cb_line = par_line_get()
+    val cb_col = par_col_get()
+    val call_span = expr_get_span(call_expr)
     parser_expect(TOK_COLON)
     val body_stmts = parse_block()
-    val block_expr = expr_block(body_stmts, -1, 0)
+    # EOF/dedent token starts can still name the preceding token. The end
+    # position is the parser's consumed-source boundary in those cases.
+    val cb_end = if par_kind_get() == TOK_EOF or par_kind_get() == TOK_DEDENT: lex_token_end_get() else: lex_token_start_get()
+    val cb_span = flat_span_new(cb_start, cb_end, cb_line, cb_col)
+    val block_expr = expr_block(body_stmts, -1, cb_span)
     var lambda_body: [i64] = []
     lambda_body.push(block_expr)
     var lambda_params: [i64] = []
-    val lambda_idx = expr_lambda(lambda_params, lambda_body, 0)
+    val lambda_idx = expr_lambda(lambda_params, lambda_body, cb_span)
     expr_mark_colon_block(lambda_idx)
     var cb_args = expr_get_args(call_expr)
     var cb_names = expr_get_arg_names(call_expr)
     cb_args.push(lambda_idx)
     cb_names.push("")
     expr_call_args_set(call_expr, cb_args, cb_names)
+    if span_is_valid(call_span):
+        expr_set_span(call_expr, flat_span_new(span_start(call_span), cb_end, span_line(call_span), span_col(call_span)))
     call_expr
 
 # Can `kind` legally open a FLAT body — a block body written on the NEXT line at

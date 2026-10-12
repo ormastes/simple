@@ -1,0 +1,269 @@
+# Native acceptance only; no SSpec or publication into CompileContext in scope.
+# Run from repository root with private cache + exact producer/runtime identity.
+use provider.{leased_answer}
+use compiler.driver.cache.hir_body_typecheck_lease_v1.*
+use compiler.driver.driver_hir_cache.{hir_cache_header, hir_cache_path, hir_cache_dir,
+    hir_cache_load_in_owned_scope, hir_cache_promote_diagnostic_owner_v1,
+    hir_cache_clear_last_warnings}
+use compiler.driver.hir_typecheck_consumer_v1.{collect_module_typecheck_receipt_v1}
+use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.common.config.{Logger}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use std.env.{env_get}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+
+fn fixture_input(path: text, name: text, runtime: text, stage: text = "lowered-unresolved-v1", producer: text = "", closure: text = "") -> HirBodyArchiveInputV1:
+    HirBodyArchiveInputV1(source_path: path, module_name: name, is_entry: false,
+        closure_digest: if closure == "": env_get("SIMPLE_HIR_LEASE_CLOSURE_DIGEST") else: closure,
+        runtime_provider_digest: runtime,
+        runtime_provider_receipt_path: env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_RECEIPT"),
+        producer_header: if producer == "": hir_cache_header() else: producer,
+        stage: stage)
+
+fn fixture_lower(path: text, name: text) -> HirModule:
+    val source = file_read_nullable(path) ?? ""
+    val parsed = parse_full_frontend(source, path, name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_parser_module_unstub(parsed, false)
+
+fn main() -> i64:
+    val runtime = env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_DIGEST")
+    # Mandatory explicit identities. No hash invented from a fixture label.
+    if runtime.len() != 64 or env_get("SIMPLE_HIR_LEASE_CLOSURE_DIGEST").len() != 64 or hir_cache_header() == "": return 1
+    var checks = 1
+    if leased_answer<i64>(7) != 43: return 2
+    checks = checks + 1
+    val bad_path = "test/fixtures/compiler/hir_body_typecheck_lease/mismatch.spl"
+    val bad_name = "hir_body_typecheck_lease.mismatch"
+    val bad_module = fixture_lower(bad_path, bad_name)
+    val direct = collect_module_typecheck_receipt_v1(bad_name, bad_module, TypecheckPassSeverity.Deny)
+    if direct.errors.len() == 0 or not direct.errors.join("\n").contains("type mismatch:") or not direct.errors.join("\n").contains("[typecheck] " + bad_name + ":"): return 3
+    checks = checks + 1
+    val bad_input = fixture_input(bad_path, bad_name, runtime)
+    val bad_stored = hir_body_archive_store_v1(bad_input, bad_module, ["lowering warning retained"])
+    if bad_stored.is_err(): return 4
+    checks = checks + 1
+    val bad_archive = bad_stored.unwrap()
+    val denied = hir_body_archive_typecheck_lease_v1(bad_archive, bad_input, TypecheckPassSeverity.Deny)
+    if denied.is_err(): return 5
+    checks = checks + 1
+    val retained = denied.unwrap()
+    if retained.diagnostics.messages != direct.messages or retained.diagnostics.errors != direct.errors: return 6
+    checks = checks + 1
+    if retained.lowering_warnings != ["lowering warning retained"] or retained.functions_checked != 1: return 7
+    checks = checks + 1
+    val warned = hir_body_archive_typecheck_lease_v1(bad_archive, bad_input, TypecheckPassSeverity.Warn)
+    if warned.is_err() or warned.unwrap().diagnostics.errors.len() != 0 or warned.unwrap().diagnostics.warnings.len() == 0: return 8
+    checks = checks + 1
+    val advisory = hir_body_archive_typecheck_lease_v1(bad_archive, bad_input, TypecheckPassSeverity.Advisory)
+    if advisory.is_err() or advisory.unwrap().diagnostics.errors.len() != 0 or advisory.unwrap().diagnostics.warnings.len() != 0: return 9
+    checks = checks + 1
+    if advisory.unwrap().diagnostics.messages != direct.messages: return 10
+    checks = checks + 1
+    if not hir_body_archive_typecheck_lease_v1(bad_archive, fixture_input(bad_path, bad_name, sha256_text("foreign-runtime")), TypecheckPassSeverity.Deny).is_err(): return 11
+    checks = checks + 1
+    if not hir_body_archive_typecheck_lease_v1(bad_archive, fixture_input(bad_path, bad_name, runtime, "post-mono-v1"), TypecheckPassSeverity.Deny).is_err(): return 12
+    checks = checks + 1
+    if not hir_body_archive_typecheck_lease_v1(bad_archive, fixture_input(bad_path, bad_name, runtime, "lowered-unresolved-v1", "foreign-producer"), TypecheckPassSeverity.Deny).is_err(): return 13
+    checks = checks + 1
+    if not hir_body_archive_typecheck_lease_v1(bad_archive, fixture_input(bad_path, bad_name, runtime, "lowered-unresolved-v1", "", sha256_text("foreign-closure")), TypecheckPassSeverity.Deny).is_err(): return 14
+    checks = checks + 1
+    # A complete generic provider body is archived, not a signature placeholder.
+    val provider_path = "test/fixtures/compiler/hir_body_typecheck_lease/provider.spl"
+    val provider_name = "hir_body_typecheck_lease.provider"
+    val provider_module = fixture_lower(provider_path, provider_name)
+    val provider_digest = sha256_text(hir_module_encode(provider_module))
+    val provider_input = fixture_input(provider_path, provider_name, runtime)
+    val provider_stored = hir_body_archive_store_v1(provider_input, provider_module, [])
+    if provider_stored.is_err() or provider_stored.unwrap().body_digest != provider_digest: return 15
+    checks = checks + 1
+    val provider_archive = provider_stored.unwrap()
+    val provider_lease = hir_body_archive_typecheck_lease_v1(provider_archive, provider_input, TypecheckPassSeverity.Deny)
+    if provider_lease.is_err() or provider_lease.unwrap().body_digest != provider_digest or provider_lease.unwrap().functions_checked != 1: return 16
+    checks = checks + 1
+    if leased_answer<text>("after completed lease") != 43: return 17
+    checks = checks + 1
+    # Refuse scope theft, and read the earlier receipt after another scope ends.
+    if not transient_scope_begin(): return 18
+    checks = checks + 1
+    val nested_refused = hir_body_archive_typecheck_lease_v1(provider_archive, provider_input, TypecheckPassSeverity.Deny).is_err()
+    var scratch: [text] = []
+    var churn = 0
+    while churn < 64:
+        scratch.push("second-scope-{churn}")
+        churn = churn + 1
+    val scratch_valid = scratch.len() == 64 and scratch[63] == "second-scope-63"
+    if not transient_scope_end(): return 19
+    checks = checks + 1
+    if not scratch_valid or not nested_refused or retained.diagnostics.errors != direct.errors or retained.lowering_warnings[0] != "lowering warning retained": return 20
+    checks = checks + 1
+    var index = 0
+    while index < 8:
+        val repeated = hir_body_archive_typecheck_lease_v1(provider_archive, provider_input, TypecheckPassSeverity.Deny)
+        if repeated.is_err() or repeated.unwrap().body_digest != provider_digest: return 21
+        index = index + 1
+    checks = checks + 1
+    # Corrupt then absent archive must refuse, never return diagnostics success.
+    val archived_path = hir_cache_path(provider_archive.archive_key)
+    val frame = file_read_nullable(archived_path) ?? ""
+    if frame == "" or not file_write(archived_path, "corrupt body frame"): return 22
+    checks = checks + 1
+    if not hir_body_archive_typecheck_lease_v1(provider_archive, provider_input, TypecheckPassSeverity.Deny).is_err(): return 23
+    checks = checks + 1
+    if not file_write(archived_path, frame): return 24
+    checks = checks + 1
+    val missing = HirBodyArchiveV1(input: provider_input, source_key: provider_archive.source_key,
+        body_digest: sha256_text("absent complete body"),
+        lowering_warnings_digest: provider_archive.lowering_warnings_digest,
+        archive_key: hir_body_archive_content_key_v1(hir_body_archive_input_key_v1(provider_input),
+            sha256_text("absent complete body"), provider_archive.lowering_warnings_digest))
+    if not hir_body_archive_typecheck_lease_v1(missing, provider_input, TypecheckPassSeverity.Deny).is_err(): return 25
+    checks = checks + 1
+    # Change actual admitted source bytes, rather than merely forging metadata.
+    # The copied source lives exclusively inside the fixture's private cache.
+    val changing_path = hir_cache_dir() + "/identity-source.spl"
+    val original_source = file_read_nullable(bad_path) ?? ""
+    if original_source == "" or not file_write(changing_path, original_source): return 26
+    checks = checks + 1
+    val changing_name = "hir_body_typecheck_lease.identity_source"
+    val changing_module = fixture_lower(changing_path, changing_name)
+    val changing_input = fixture_input(changing_path, changing_name, runtime)
+    val changing_stored = hir_body_archive_store_v1(changing_input, changing_module, [])
+    if changing_stored.is_err(): return 27
+    checks = checks + 1
+    if not file_write(changing_path, "fn body_mismatch() -> bool:\n    true\n"): return 28
+    checks = checks + 1
+    if not hir_body_archive_typecheck_lease_v1(changing_stored.unwrap(), changing_input, TypecheckPassSeverity.Deny).is_err(): return 29
+    checks = checks + 1
+    if not file_write(changing_path, original_source): return 30
+    checks = checks + 1
+    val restored = hir_body_archive_typecheck_lease_v1(changing_stored.unwrap(), changing_input, TypecheckPassSeverity.Deny)
+    if restored.is_err() or restored.unwrap().diagnostics.errors.len() == 0: return 31
+    checks = checks + 1
+    # Borrowed archive storage must not steal or close the driver's lease.
+    if not hir_body_archive_store_in_owned_scope_v1(provider_input, provider_module, []).is_err(): return 45
+    checks = checks + 1
+    if not transient_scope_begin(): return 32
+    checks = checks + 1
+    val owning_store_refused = hir_body_archive_store_v1(provider_input, provider_module, []).is_err()
+    val borrowed_module = hir_cache_load_in_owned_scope(provider_archive.archive_key)
+    val module_present = borrowed_module != nil
+    var borrowed_result: Result<HirBodyArchiveV1, text> = Err("provider absent")
+    if val Some(module) = borrowed_module:
+        # These input strings are created in scratch too. Promoting only the
+        # four digest fields would leave the returned descriptor dangling.
+        val scratch_input = fixture_input(provider_path.substring(0),
+            provider_name.substring(0), runtime.substring(0))
+        borrowed_result = hir_body_archive_store_in_owned_scope_v1(scratch_input, module, ["borrowed warning"])
+    val borrowed_stored = borrowed_result.is_ok()
+    if not owning_store_refused or not module_present or not borrowed_stored: return 33
+    checks = checks + 1
+    val rejected = hir_body_archive_store_in_owned_scope_v1(
+        fixture_input(provider_path, provider_name, runtime, "post-mono-v1"), provider_module, [])
+    if not rejected.is_err(): return 34
+    checks = checks + 1
+    # A refused publication leaves the caller lease occupied and usable.
+    var lease_scratch: [text] = []
+    var lease_index = 0
+    while lease_index < 64:
+        lease_scratch.push("borrowed-scope-{lease_index}")
+        lease_index = lease_index + 1
+    val lease_usable = lease_scratch.len() == 64 and lease_scratch[63] == "borrowed-scope-63"
+    val lease_still_occupied = not transient_scope_begin()
+    if not lease_usable or not lease_still_occupied: return 35
+    checks = checks + 1
+    if not transient_scope_pause(): return 36
+    checks = checks + 1
+    val paused_refused = hir_body_archive_store_in_owned_scope_v1(provider_input, provider_module, []).is_err()
+    if not paused_refused: return 46
+    checks = checks + 1
+    val descriptor_owned = transient_promote(borrowed_result)
+    val cache_reason_owned = hir_cache_promote_diagnostic_owner_v1()
+    hir_cache_clear_last_warnings()
+    if not descriptor_owned or not cache_reason_owned: return 37
+    checks = checks + 1
+    if not transient_scope_end(): return 38
+    checks = checks + 1
+    # No borrowed_module or module body is promoted, returned, or dereferenced
+    # after close. Only the complete descriptor and scalar observations escape.
+    val borrowed_archive = borrowed_result.unwrap()
+    if borrowed_archive.input.source_path != provider_path or
+            borrowed_archive.input.module_name != provider_name or
+            borrowed_archive.input.runtime_provider_digest != runtime or
+            borrowed_archive.body_digest != provider_digest or
+            not hir_body_archive_matches_v1(borrowed_archive, provider_input): return 39
+    checks = checks + 1
+    val borrowed_consumer = hir_body_archive_typecheck_lease_v1(
+        borrowed_archive, provider_input, TypecheckPassSeverity.Deny)
+    if borrowed_consumer.is_err() or borrowed_consumer.unwrap().lowering_warnings != ["borrowed warning"] or
+            borrowed_consumer.unwrap().functions_checked != 1: return 40
+    checks = checks + 1
+    # Another scratch lease closes before the prior descriptor/diagnostics read.
+    if not transient_scope_begin(): return 41
+    var close_churn: [text] = []
+    var close_index = 0
+    while close_index < 64:
+        close_churn.push("closed-body-churn-{close_index}")
+        close_index = close_index + 1
+    if not transient_scope_end(): return 42
+    if borrowed_archive.input.stage != "lowered-unresolved-v1" or
+            borrowed_consumer.unwrap().body_digest != provider_digest or
+            borrowed_consumer.unwrap().lowering_warnings[0] != "borrowed warning": return 43
+    checks = checks + 1
+    # One sealed runtime snapshot can admit different provider selections.
+    # Their archive identities must remain distinct even for identical HIR.
+    var selected_a = fixture_input(provider_path, provider_name, runtime)
+    selected_a.provider_selection_digest = sha256_text("selected-provider-a")
+    selected_a.source_content_digest = sha256_text(file_read_nullable(provider_path) ?? "")
+    selected_a.source_authored_path = provider_path
+    val selected_a_key = hir_body_archive_input_key_v1(selected_a)
+    if selected_a_key == "": return 47
+    checks = checks + 1
+    var selected_b = fixture_input(provider_path, provider_name, runtime)
+    selected_b.provider_selection_digest = sha256_text("selected-provider-b")
+    selected_b.source_content_digest = selected_a.source_content_digest
+    selected_b.source_authored_path = provider_path
+    if hir_body_archive_input_key_v1(selected_b) == "" or
+            hir_body_archive_input_key_v1(selected_b) == selected_a_key: return 48
+    checks = checks + 1
+    val selected_stored = hir_body_archive_store_v1(selected_a, provider_module, [])
+    if selected_stored.is_err() or not hir_body_archive_matches_v1(selected_stored.unwrap(), selected_a) or
+            hir_body_archive_matches_v1(selected_stored.unwrap(), selected_b): return 49
+    checks = checks + 1
+    var changed_content = fixture_input(provider_path, provider_name, runtime)
+    changed_content.provider_selection_digest = selected_a.provider_selection_digest
+    changed_content.source_content_digest = sha256_text("wrong rewritten body")
+    changed_content.source_authored_path = provider_path
+    if hir_body_archive_input_key_v1(changed_content) != "": return 50
+    checks = checks + 1
+    if hir_body_archive_load_in_owned_scope_v1(provider_archive, provider_input).is_ok(): return 51
+    checks = checks + 1
+    if not transient_scope_begin(): return 52
+    val original_loaded = hir_body_archive_load_in_owned_scope_v1(provider_archive, provider_input)
+    if original_loaded.is_err(): return 53
+    if original_loaded.unwrap().functions.len() != 1 or
+            sha256_text(hir_module_encode(original_loaded.unwrap())) != provider_digest: return 54
+    checks = checks + 1
+    hir_cache_clear_last_warnings()
+    var forged_body = provider_archive
+    forged_body.body_digest = sha256_text("unadmitted complete HIR")
+    if not hir_body_archive_load_in_owned_scope_v1(forged_body, provider_input).is_err() or
+            transient_array_scope_state_v1() != 1: return 55
+    checks = checks + 1
+    if not transient_scope_pause(): return 56
+    if not hir_body_archive_load_in_owned_scope_v1(provider_archive, provider_input).is_err() or
+            transient_array_scope_state_v1() != 2: return 57
+    if not hir_cache_promote_diagnostic_owner_v1() or not transient_scope_end(): return 58
+    checks = checks + 1
+    if checks != 51: return 44
+    print "HIR body typecheck lease: {checks} checks passed"
+    0

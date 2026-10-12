@@ -1,0 +1,76 @@
+# Real HIR assertions; run with a compiler containing the candidate methods.
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirTypeKind}
+
+fn imported_owner_scope_lower(extra_owner: text, method: text, extra_consumer: text) -> HirLowering:
+    val logger = Logger(level: 0)
+    val owner_source = extra_owner + "\nclass GenericRing<Op, Cpl>:\n    operations: [Op]\n    completions: [Cpl]\n\nimpl GenericRing<Op, Cpl>:\n" + method
+    val consumer_source = "use generic.owner.\{GenericRing\}\nstruct Holder:\n    ring: GenericRing<i64, text>\n" + extra_consumer + "\nfn main() -> i64:\n    0\n"
+    var modules: Dict<text, ParserModule> = {}
+    modules["generic.owner"] = parse_full_frontend(owner_source, "generic.owner", "generic.owner", logger)
+    val consumer = parse_full_frontend(consumer_source, "generic.consumer", "generic.consumer", logger)
+    val sources = [SourceFile(path: "generic/owner.spl", content: owner_source, module_name: "generic.owner")]
+    val surfaces = module_surfaces_from_modules(modules, sources)
+    expect(surfaces.is_ok()).to_equal(true)
+    var lowering = hirlowering_for_module("generic.consumer", surfaces.unwrap())
+    val hir = lowering.lower_module(consumer)
+    expect(hir.functions.len()).to_be_greater_than(0)
+    lowering
+
+fn imported_owner_scalar_signature(lowering: HirLowering, method: text, expected: text) -> bool:
+    val id = lowering.symbols.lookup_or_invalid("generic.owner.GenericRing::" + method)
+    if not id.is_valid(): return false
+    val symbol = lowering.symbols.get_symbol(id)
+    if not symbol.?: return false
+    val type_ = symbol.unwrap().type_
+    if not type_.?: return false
+    match type_.unwrap().kind:
+        case HirTypeKind.Function(params, result, _):
+            if params.len() < 1: return false
+            val parameter_matches = match params[params.len() - 1].kind:
+                case HirTypeKind.TypeParam(name, _): name == expected
+                case _: false
+            val result_matches = match result.kind:
+                case HirTypeKind.TypeParam(name, _): name == expected
+                case _: false
+            parameter_matches and result_matches
+        case _: false
+
+describe "imported generic owner method binder scope":
+    it "retains owner binders in parameter and return signatures":
+        val lowering = imported_owner_scope_lower("", "    fn pass_operation(value: Op) -> Op:\n        value\n    fn pass_completion(value: Cpl) -> Cpl:\n        value\n", "")
+        expect(lowering.errors.len()).to_equal(0)
+        expect(imported_owner_scalar_signature(lowering, "pass_operation", "Op")).to_equal(true)
+        expect(imported_owner_scalar_signature(lowering, "pass_completion", "Cpl")).to_equal(true)
+        expect(lowering.prescan_type_parameters.len()).to_equal(0)
+        expect(lowering.symbols.lookup_or_invalid("Op").is_valid()).to_equal(false)
+        expect(lowering.symbols.lookup_or_invalid("Cpl").is_valid()).to_equal(false)
+
+    it "shadows same-spelled owner module types with declaration binders":
+        val lowering = imported_owner_scope_lower("struct Op:\n    other: text\nstruct Cpl:\n    other: i64\n", "    fn pass_operation(value: Op) -> Op:\n        value\n", "")
+        expect(lowering.errors.len()).to_equal(0)
+        expect(imported_owner_scalar_signature(lowering, "pass_operation", "Op")).to_equal(true)
+
+    it "rejects a consumer sibling that tries to use an owner binder":
+        val lowering = imported_owner_scope_lower("", "    fn pass_operation(value: Op) -> Op:\n        value\n", "struct Sibling:\n    invalid: Op\n")
+        expect(lowering.errors.len()).to_be_greater_than(0)
+        expect(lowering.symbols.lookup_or_invalid("Op").is_valid()).to_equal(false)
+        expect(imported_owner_scalar_signature(lowering, "pass_operation", "Op")).to_equal(true)
+
+    it "still rejects a missing named method dependency":
+        val lowering = imported_owner_scope_lower("", "    fn broken(value: MissingType) -> i64:\n        0\n", "")
+        expect(lowering.errors.len()).to_be_greater_than(0)
+        expect(lowering.symbols.lookup_qualified_type_raw("generic.owner", "MissingType") >= 0).to_equal(false)
+
+    it "still materializes a concrete sibling method dependency":
+        val lowering = imported_owner_scope_lower("struct Token:\n    number: i64\n", "    fn concrete(value: Token) -> Token:\n        value\n", "")
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.symbols.lookup_qualified_type_raw("generic.owner", "Token") >= 0).to_equal(true)
+        expect(lowering.symbols.lookup_or_invalid("generic.owner.GenericRing::concrete").is_valid()).to_equal(true)
