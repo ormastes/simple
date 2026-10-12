@@ -509,6 +509,21 @@ pub(crate) fn build_import_map(
                         data_exports.insert(mangled);
                     }
                     simple_parser::ast::Node::Struct(s) => {
+                        // HIR synthesizes a real implementation for `struct S(T):`.
+                        // Its constructor therefore has the same vtable header as
+                        // an explicit impl. Include it in the project layout
+                        // inventory used by field accesses and value copies too.
+                        if let Some(trait_name) = s.attributes.iter()
+                            .find(|attribute| attribute.name == "implements")
+                            .and_then(|attribute| attribute.args.as_ref())
+                            .and_then(|arguments| arguments.first())
+                            .and_then(|argument| match argument {
+                                simple_parser::ast::Expr::Identifier(name) => Some(name),
+                                _ => None,
+                            })
+                        {
+                            pending_vtable_impls.push((prefix.clone(), s.name.clone(), trait_name.clone()));
+                        }
                         // Register the bare struct type name so cross-module imports
                         // resolve to the defining module's symbol, not the importer's.
                         let type_mangled = format!("{}__{}", prefix, s.name);

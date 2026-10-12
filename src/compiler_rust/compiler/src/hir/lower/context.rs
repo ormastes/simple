@@ -108,6 +108,7 @@ impl FunctionContext {
             name: name.clone(),
             ty,
             type_name_hint,
+            trait_dispatch_owner: None,
             mutability,
             inject,
             is_ghost,

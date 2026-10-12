@@ -1904,6 +1904,10 @@ impl Lowerer {
                 Node::Function(f) => {
                     let ret_ty = self.resolve_type_opt(&f.return_type).unwrap_or(TypeId::ANY);
                     self.method_return_types.insert(f.name.clone(), ret_ty);
+                    // Local declarations override imported/global names, including
+                    // unannotated returns (Any must not inherit a trait owner).
+                    let dispatch = f.return_type.as_ref().and_then(|t| self.declared_trait_dispatch(t));
+                    self.declared_function_returns.insert(f.name.clone(), dispatch);
                 }
                 Node::Class(c) => {
                     for method in &c.methods {
@@ -2045,22 +2049,57 @@ impl Lowerer {
                             .resolve_type(&simple_parser::ast::Type::Simple(s.name.clone()))
                             .unwrap_or(TypeId::ANY);
                         let mut methods_map = HashMap::new();
-                        let own: std::collections::HashSet<&str> = s.methods.iter().map(|m| m.name.as_str()).collect();
-                        for method in &s.methods {
-                            methods_map.insert(method.name.clone(), format!("{}.{}", s.name, method.name));
+                        let implementation_methods = implicit_struct_trait_methods(
+                            s, &ast_module.items, &self.flatten_owner_import_bindings)?;
+                        let own: std::collections::HashSet<&str> = implementation_methods
+                            .iter().map(|(m, _)| m.name.as_str()).collect();
+                        for (method, symbol) in &implementation_methods {
+                            methods_map.insert(method.name.clone(), symbol.clone());
                         }
-                        if let Some(trait_def) = select_impl_trait(
-                            &ast_module.items,
-                            &trait_name,
-                            &own,
-                            methods_owner(&s.methods).as_deref(),
-                            &self.flatten_owner_import_bindings,
-                        ) {
+                        {
+                            let struct_owner = declaration_owner(&s.attributes, &s.methods);
+                            let selected_ast_trait = select_implicit_struct_trait(
+                                &ast_module.items, &trait_name,
+                                struct_owner.as_deref(),
+                                &self.flatten_owner_import_bindings,
+                            );
+                            // Per-file native lowering loads imported declarations through
+                            // the resolver without copying Node::Trait into this AST. Use
+                            // the SAME retained declaration/alias authority as dispatch.
+                            // Never let that fallback override a local/flattened ambiguity.
+                            let imported_trait = if selected_ast_trait.is_none()
+                                && struct_owner.is_none()
+                                && !ast_module.items.iter().any(|item|
+                                    matches!(item, Node::Trait(t) if t.name == trait_name))
+                            {
+                                self.trait_declaration_for_current_owner(&trait_name)
+                            } else { None };
+                            let trait_def = selected_ast_trait.cloned()
+                                .or_else(|| imported_trait.as_ref().map(|t| t.declaration.clone()))
+                                .ok_or_else(|| LowerError::Unsupported(format!(
+                                "implicit trait implementation {} for {} has missing or ambiguous trait owner",
+                                trait_name, s.name)))?;
+                            // Keep the existing register_trait direct-slot contract here.
+                            // Inherited-slot publication is a separate owner limitation;
+                            // this repair must not reject previously accepted supertraits.
+                            for required in &trait_def.methods {
+                                if required.is_abstract && !own.contains(required.name.as_str()) {
+                                    return Err(LowerError::Unsupported(format!(
+                                        "implicit trait implementation {} for {} lacks required method {}",
+                                        trait_name, s.name, required.name)));
+                                }
+                            }
                             for default_method in &trait_def.methods {
                                 if default_method.is_abstract || own.contains(default_method.name.as_str()) {
                                     continue;
                                 }
-                                let hir_func = self.lower_function(default_method, Some(&s.name))?;
+                                let previous_file = self.current_file.clone();
+                                if let Some(declaration) = &imported_trait {
+                                    self.current_file = Some(declaration.source_file.clone());
+                                }
+                                let lowered = self.lower_function(default_method, Some(&s.name));
+                                self.current_file = previous_file;
+                                let hir_func = lowered?;
                                 self.module.functions.push(hir_func);
                                 methods_map.insert(
                                     default_method.name.clone(),
@@ -2729,4 +2768,100 @@ fn struct_implements_trait(s: &simple_parser::ast::StructDef) -> Option<String> 
             _ => None,
         })
     })
+}
+
+// Use the same flattener identity as methods; do not infer an empty struct's
+// owner from a same-spelled implementation in an unrelated imported module.
+fn declaration_owner(attributes: &[ast::Attribute], methods: &[ast::FunctionDef]) -> Option<String> {
+    Lowerer::flatten_owner_of(attributes.iter().map(|a| a.name.as_str()))
+        .or_else(|| methods_owner(methods))
+}
+
+fn implicit_struct_trait_methods<'a>(
+    structure: &'a ast::StructDef,
+    items: &'a [Node],
+    bindings: &HashMap<String, HashMap<String, (String, String)>>,
+) -> LowerResult<Vec<(&'a ast::FunctionDef, String)>> {
+    let owner = declaration_owner(&structure.attributes, &structure.methods);
+    let mut methods: Vec<_> = structure.methods.iter()
+        .map(|m| (m, format!("{}.{}", structure.name, m.name))).collect();
+    let mut names: std::collections::HashSet<_> = methods.iter().map(|(m, _)| m.name.as_str()).collect();
+    for item in items {
+        let Node::Impl(implementation) = item else { continue };
+        if implementation.trait_name.is_some() { continue; }
+        let target = match &implementation.target_type {
+            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => name,
+            _ => continue,
+        };
+        let impl_owner = declaration_owner(&implementation.attributes, &implementation.methods);
+        let imported = impl_owner.as_ref().and_then(|o| bindings.get(o)).and_then(|b| b.get(target));
+        let matches = if let Some((source_owner, source_name)) = imported {
+            owner.as_ref() == Some(source_owner) && structure.name == *source_name
+        } else {
+            owner == impl_owner && structure.name == *target
+        };
+        if !matches { continue; }
+        for method in &implementation.methods {
+            if !names.insert(method.name.as_str()) {
+                return Err(LowerError::Unsupported(format!(
+                    "duplicate implicit trait implementation method {}.{}", structure.name, method.name)));
+            }
+            // Match Node::Impl's lower_function(method, Some(target)) exactly.
+            methods.push((method, format!("{}.{}", target, method.name)));
+        }
+    }
+    Ok(methods)
+}
+
+
+// Implicit implementation publication must not use method-overlap heuristics
+// to pick among unrelated flattened trait declarations.
+fn select_implicit_struct_trait<'a>(
+    items: &'a [Node], name: &str, owner: Option<&str>,
+    bindings: &HashMap<String, HashMap<String, (String, String)>>,
+) -> Option<&'a ast::TraitDef> {
+    let imported = owner.and_then(|o| bindings.get(o)).and_then(|b| b.get(name));
+    let wanted_name = imported.map(|(_, n)| n.as_str()).unwrap_or(name);
+    let wanted_owner = imported.map(|(o, _)| o.as_str()).or(owner);
+    let candidates: Vec<_> = items.iter().filter_map(|item| match item {
+        Node::Trait(t) if t.name == wanted_name => Some(t),
+        _ => None,
+    }).collect();
+    let mut exact = candidates.iter().copied().filter(|t|
+        methods_owner(&t.methods).as_deref() == wanted_owner);
+    let first = exact.next();
+    if exact.next().is_some() { return None; }
+    if first.is_some() { return first; }
+    // An unflattened native-project owner can materialize one imported trait
+    // without tags. Accept only a unique declaration, never an ambiguous name.
+    if owner.is_none() && imported.is_none() && candidates.len() == 1 {
+        return candidates.first().copied();
+    }
+    None
+}
+
+#[cfg(test)]
+mod implicit_trait_owner_tests {
+    use super::*;
+    #[test]
+    fn empty_struct_does_not_take_same_named_foreign_impl() {
+        let mut parsed = simple_parser::Parser::new(
+            "trait Probe:\n    fn read() -> i64\n\nstruct Device(Probe):\n    pass\n\nimpl Device:\n    fn read() -> i64:\n        37\n").parse().unwrap();
+        let mut structure = match parsed.items.remove(1) { Node::Struct(s) => s, _ => panic!("struct") };
+        let mut local = match parsed.items.pop().unwrap() { Node::Impl(i) => i, _ => panic!("impl") };
+        let tag = |span, owner: &str| ast::Attribute { span,
+            name: format!("{}{}", crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX, owner),
+            value: None, args: None, named_args: None };
+        structure.attributes.push(tag(structure.span, "/a.spl"));
+        local.attributes.push(tag(local.span, "/a.spl"));
+        let mut foreign = local.clone();
+        foreign.attributes = vec![tag(foreign.span, "/b.spl")];
+        foreign.methods[0].name = "foreign_only".into();
+        let items = vec![Node::Impl(foreign), Node::Impl(local)];
+        let selected = implicit_struct_trait_methods(&structure, &items, &HashMap::new()).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].0.name, "read");
+        let wrong_only = &items[..1];
+        assert!(implicit_struct_trait_methods(&structure, wrong_only, &HashMap::new()).unwrap().is_empty());
+    }
 }
