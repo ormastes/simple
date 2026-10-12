@@ -2,6 +2,7 @@ use compiler.driver.cache.hir_mono_archive_consumer_v1.{mono_archive_selected_fu
 use compiler.driver.cache.hir_mono_replay_selection_v1.{MonoArchiveSelectedFunctionV1,
     mono_archive_reassemble_body_input_in_owned_scope_v1}
 use compiler.mono.mono_archive_body_input_v1.*
+use compiler.mono.mono_archive_current_body_v1.{MonoArchiveCurrentBodyLoadV1}
 # Complete module assembly is explicitly unverified until aggregate post-mono
 # validators and the driver's existing diagnostic policy admit it.
 use compiler.hir.hir_types.{HirModule}
@@ -57,8 +58,40 @@ fn mono_archive_assembled_key_v1(descriptor: MonoArchiveAssembledModuleV1) -> te
             writer.put_bool(cache.enabled)
         else:
             return ""
+        if input.logical_name != "": writer.put_text(input.logical_name)
     if not writer.ok: return ""
+    if val input = descriptor.body_input:
+        if input.logical_name != "": return sha256_text("mono-logical-assembled-module-key-v1\n" + writer.finish())
     sha256_text("mono-assembled-module-key-v1\n" + writer.finish())
+
+fn mono_archive_assembled_module_name_v1(descriptor: MonoArchiveAssembledModuleV1) -> text:
+    if val input = descriptor.body_input: return mono_archive_body_input_module_name_v1(input)
+    descriptor.input_archive.input.module_name
+
+# The retained pass inserts symbol rows in module order, then specialization
+# publication order. Equal complete input artifacts represent the same actual
+# alias-shared body owner; a name or SymbolId match alone is never sufficient.
+fn mono_archive_shared_symbol_publications_v1(owner: MonoArchiveExecutionV1,
+        input: MonoArchiveBodyInputV1) -> Result<[MonoArchiveSelectedFunctionV1], text>:
+    var rows: [MonoArchiveSelectedFunctionV1] = []
+    if input.logical_name == "": return Ok(rows)
+    if not owner.admission.repository.logical_mode or input.current_body == nil:
+        return Err("mono shared symbol repository mode refused")
+    val current = input.current_body.unwrap()
+    for root in owner.roots:
+        if not owner.admission.repository.current_bodies.has(root.module_name) or
+                not owner.admission.repository.modules.has(root.module_name): return Err("mono shared symbol input missing")
+        # Completed-execution validation owns whole repository admission. This
+        # grouping compares pinned compact identities only, avoiding corpus
+        # source reads or complete body loads per alias. Selected rows are read
+        # and validated against the complete input by the assembly consumer.
+        val candidate = owner.admission.repository.current_bodies[root.module_name]
+        if owner.admission.repository.modules[root.module_name].archive_key != input.original_parent.archive_key or
+                candidate.current_artifact_key != current.current_artifact_key or
+                candidate.current_body_digest != current.current_body_digest: continue
+        for receipt in owner.specialization_records:
+            if receipt.module_name == root.module_name: rows = rows.push(mono_archive_selected_function_v1(receipt))
+    Ok(rows)
 
 fn mono_archive_module_coverage_v1(owner: MonoArchiveExecutionV1, name: text) -> text:
     var writer = HirCodecWriter.create()
@@ -123,8 +156,11 @@ fn mono_archive_assemble_module_v1(owner: MonoArchiveExecutionV1,
         var emitted: [text] = []
         for item in owner.admission.state.queue:
             if owner.admission.state.emitted.has(item.mangled_name): emitted = emitted.push(item.template_name)
-        val reassembled = mono_archive_reassemble_body_input_in_owned_scope_v1(input,
-            roots, specializations, unresolved, emitted, owner.admission.state.next_symbol)
+        val shared = mono_archive_shared_symbol_publications_v1(owner, input)
+        var reassembled: Result<MonoArchiveCurrentBodyLoadV1, text> = Err("mono shared symbol schedule refused")
+        if shared.is_ok():
+            reassembled = mono_archive_reassemble_body_input_in_owned_scope_v1(input,
+                roots, specializations, unresolved, emitted, owner.admission.state.next_symbol, shared.unwrap())
         if reassembled.is_ok():
             val output = reassembled.unwrap().module
             val valid = true
@@ -166,3 +202,4 @@ fn mono_archive_load_assembled_module_in_owned_scope_v1(descriptor: MonoArchiveA
 
 export MonoArchiveAssembledModuleV1
 export mono_archive_assemble_module_v1, mono_archive_load_assembled_module_in_owned_scope_v1
+export mono_archive_assembled_module_name_v1, mono_archive_shared_symbol_publications_v1

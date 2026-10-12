@@ -38,6 +38,7 @@ struct MonoArchiveRepositoryV1:
     current_cache: HirOwnedArtifactContextV1? = nil
     current_order: [text] = []
     current_mode: bool = false
+    logical_mode: bool = false
 
 struct MonoArchiveAdmissionV1:
     repository: MonoArchiveRepositoryV1
@@ -59,7 +60,7 @@ struct MonoArchivePublicationV1:
     delta_digest: text
     function_archive_key: text
 
-fn mono_archive_repository_authority_v1(modules: Dict<text, HirBodyArchiveV1>) -> text:
+fn mono_archive_repository_authority_v1(modules: Dict<text, HirBodyArchiveV1>, logical_mode: bool = false) -> text:
     if modules.len() == 0: return ""
     var w = HirCodecWriter.create()
     w.put_i64(modules.len())
@@ -70,7 +71,8 @@ fn mono_archive_repository_authority_v1(modules: Dict<text, HirBodyArchiveV1>) -
     var provider_selection = ""
     for name in modules.keys().sort():
         val archive: HirBodyArchiveV1 = modules[name]
-        if name != archive.input.module_name or not hir_body_archive_matches_v1(archive, archive.input): return ""
+        if name == "" or (not logical_mode and name != archive.input.module_name) or
+                not hir_body_archive_matches_v1(archive, archive.input): return ""
         if closure == "":
             closure = archive.input.closure_digest
             producer = archive.input.producer_header
@@ -89,8 +91,9 @@ fn mono_archive_repository_authority_v1(modules: Dict<text, HirBodyArchiveV1>) -
         w.put_text(archive.input.stage)
         w.put_text(archive.input.provider_selection_digest)
         w.put_text(archive.input.runtime_provider_receipt_path)
+        if logical_mode: w.put_text(archive.input.module_name)
     if not w.ok: return ""
-    sha256_text("mono-archive-repository-v2\n" + w.finish())
+    sha256_text((if logical_mode: "mono-logical-archive-repository-v1\n" else: "mono-archive-repository-v2\n") + w.finish())
 
 fn mono_archive_repository_input_v1(repository: MonoArchiveRepositoryV1,
         name: text) -> Result<MonoArchiveBodyInputV1, text>:
@@ -99,14 +102,16 @@ fn mono_archive_repository_input_v1(repository: MonoArchiveRepositoryV1,
         if not repository.current_bodies.has(name) or repository.current_cache == nil:
             return Err("mono current input missing; unresolved fallback refused")
         return Ok(MonoArchiveBodyInputV1(original_parent: repository.modules[name],
-            current_body: Some(repository.current_bodies[name]), current_cache: repository.current_cache))
+            current_body: Some(repository.current_bodies[name]), current_cache: repository.current_cache,
+            logical_name: if repository.logical_mode: name else: ""))
     if repository.current_bodies.len() != 0 or repository.current_cache != nil or repository.current_order.len() != 0:
         return Err("mono unresolved repository carries ambiguous current inputs")
     Ok(MonoArchiveBodyInputV1(original_parent: repository.modules[name]))
 
 fn mono_archive_repository_digest_v1(repository: MonoArchiveRepositoryV1) -> text:
     if repository.current_mode and transient_array_scope_state_v1() != 1: return ""
-    val original = mono_archive_repository_authority_v1(repository.modules)
+    if repository.logical_mode and not repository.current_mode: return ""
+    val original = mono_archive_repository_authority_v1(repository.modules, repository.logical_mode)
     if original == "": return ""
     if not repository.current_mode:
         if repository.current_bodies.len() != 0 or repository.current_cache != nil or repository.current_order.len() != 0: return ""
@@ -129,7 +134,7 @@ fn mono_archive_repository_digest_v1(repository: MonoArchiveRepositoryV1) -> tex
             writer.put_text(name)
             writer.put_text(mono_archive_current_body_digest_v1(body))
         if not writer.ok: return ""
-        return sha256_text("mono-current-repository-mechanical-v1\n" + writer.finish())
+        return sha256_text((if repository.logical_mode: "mono-logical-current-repository-v1\n" else: "mono-current-repository-mechanical-v1\n") + writer.finish())
     ""
 
 fn mono_archive_admit_v1(modules: Dict<text, HirBodyArchiveV1>, collector: MonomorphizationPass) -> Result<MonoArchiveAdmissionV1, text>:
@@ -234,7 +239,7 @@ fn mono_archive_visit_v1(admission: MonoArchiveAdmissionV1, module_name: text, r
             val input = input_result.unwrap()
             val decoded = loaded.unwrap().module
             val warnings = loaded.unwrap().warnings
-            if decoded.name == selected_module and decoded.path == archive.input.source_path and
+            if decoded.name == archive.input.module_name and mono_archive_body_input_module_name_v1(input) == selected_module and decoded.path == archive.input.source_path and
                     sha256_text(hir_module_encode(decoded)) == mono_archive_body_input_digest_v1(input) and
                     hir_body_archive_warnings_digest_v1(warnings) == mono_archive_body_input_warnings_digest_v1(input):
                 if val original = mono_archive_find_function_v1(decoded, selected_symbol):
@@ -356,7 +361,7 @@ fn mono_archive_publication_matches_v1(admission: MonoArchiveAdmissionV1, receip
         if item.module_name != receipt.module_name or item.symbol_id != receipt.target_symbol or
                 item.mangled_name != receipt.target_name or state.emitted.has(item.mangled_name): return false
     if val output = hir_cache_load_in_owned_scope(receipt.output_archive_key):
-        if output.name != receipt.module_name or output.path != archive.input.source_path or
+        if output.name != archive.input.module_name or output.path != archive.input.source_path or
                 sha256_text(hir_module_encode(output)) != receipt.output_body_digest or
                 hir_body_archive_warnings_digest_v1(hir_cache_last_warnings()) != mono_archive_body_input_warnings_digest_v1(input): return false
         if val function = mono_archive_find_function_v1(output, receipt.target_symbol):
