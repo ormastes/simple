@@ -1,0 +1,179 @@
+# Pure SSpec metadata and content bindings. No compiler, process or database
+# imports. These records never authenticate sources or admit execution evidence.
+# @req REQ-TRC-003 REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+use std.common.traceability.run_request.{TraceRunRequest, validate_trace_run_request}
+use std.common.traceability.run_request_codec.{encode_trace_run_request}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+pub struct TraceSspecCase:
+    test_path: text
+    case_name: text
+    leaf_name: text
+    kind: text
+    suite_path: [text]
+    context_path: [text]
+    start_byte: i64
+    end_byte: i64
+    line: i64
+    column: i64
+
+pub struct TraceSspecInventory:
+    test_path: text
+    source_sha256: text
+    extractor_version: text
+    evidence_validity: text
+    cases: [TraceSspecCase]
+
+pub struct TraceSspecPlannedDefinition:
+    case_id: text
+    test_definition_id: text
+    source_sha256: text
+    extractor_version: text
+    definition: TraceSspecCase
+
+pub struct TraceSspecPlannedRequest:
+    request: TraceRunRequest
+    definitions: [TraceSspecPlannedDefinition]
+    inventory_digest: text
+    evidence_validity: text
+
+fn sspec_digest(source: text) -> text:
+    var bytes: [u8] = []
+    for byte in source.bytes(): bytes.push(byte)
+    "sha256:" + sha256_u8_hex(bytes)
+
+fn sspec_texts(values: [text]) -> SdnValue:
+    var result: [SdnValue] = []
+    for value in values: result.push(SdnValue.String(value))
+    SdnValue.Array(result)
+
+fn sspec_digest_valid(value: text) -> bool:
+    if value.len() != 71 or not value.starts_with("sha256:"): return false
+    val bytes = value.bytes()
+    for i in 7..bytes.len():
+        val byte = bytes[i].to_i64()
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)): return false
+    true
+
+pub fn trace_sspec_definition_record(source_sha256: text, extractor_version: text, item: TraceSspecCase) -> SdnValue:
+    var fields: Dict<text, SdnValue> = {}
+    fields["schema"] = SdnValue.String("simple.trace.sspec-definition/v1")
+    fields["extractor_version"] = SdnValue.String(extractor_version)
+    fields["source_sha256"] = SdnValue.String(source_sha256)
+    fields["test_path"] = SdnValue.String(item.test_path)
+    fields["case_name"] = SdnValue.String(item.case_name)
+    fields["leaf_name"] = SdnValue.String(item.leaf_name)
+    fields["kind"] = SdnValue.String(item.kind)
+    fields["suite_path"] = sspec_texts(item.suite_path)
+    fields["context_path"] = sspec_texts(item.context_path)
+    fields["start_byte"] = SdnValue.Int(item.start_byte)
+    fields["end_byte"] = SdnValue.Int(item.end_byte)
+    fields["line"] = SdnValue.Int(item.line)
+    fields["column"] = SdnValue.Int(item.column)
+    SdnValue.Dict(fields)
+
+pub fn trace_sspec_definition_id(source_sha256: text, extractor_version: text, item: TraceSspecCase) -> text:
+    "trace-definition:" + sspec_digest(sdn_encode_canonical(trace_sspec_definition_record(source_sha256, extractor_version, item)))
+
+pub fn trace_sspec_planned_case_id(subject_id: text, configuration_id: text, expectation_id: text, binary_id: text, lane_id: text, definition_id: text) -> text:
+    var fields: Dict<text, SdnValue> = {}
+    fields["schema"] = SdnValue.String("simple.trace.sspec-planned-case/v1")
+    fields["subject_id"] = SdnValue.String(subject_id)
+    fields["configuration_id"] = SdnValue.String(configuration_id)
+    fields["expectation_id"] = SdnValue.String(expectation_id)
+    fields["binary_id"] = SdnValue.String(binary_id)
+    fields["lane_id"] = SdnValue.String(lane_id)
+    fields["test_definition_id"] = SdnValue.String(definition_id)
+    "trace-case:" + sspec_digest(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+pub fn trace_sspec_request_digest(request: TraceRunRequest) -> Result<text, text>:
+    Ok(sspec_digest(encode_trace_run_request(request)?))
+
+# Retains the planner's existing versioned digest format and ordered IDs.
+pub fn trace_sspec_inventory_digest(request: TraceRunRequest, definitions: [TraceSspecPlannedDefinition]) -> Result<text, text>:
+    var ids: [text] = []
+    for definition in definitions: ids.push(definition.test_definition_id)
+    var fields: Dict<text, SdnValue> = {}
+    fields["schema"] = SdnValue.String("simple.trace.sspec-planned-inventory/v1")
+    fields["request_sdn"] = SdnValue.String(encode_trace_run_request(request)?)
+    fields["definition_ids"] = sspec_texts(ids)
+    fields["evidence_validity"] = SdnValue.String("unverified")
+    Ok(sspec_digest(sdn_encode_canonical(SdnValue.Dict(fields))))
+
+pub fn validate_trace_sspec_planned_request(value: TraceSspecPlannedRequest) -> Result<(), text>:
+    if value.evidence_validity != "unverified": return Err("SSPEC-METADATA: evidence validity must remain unverified")
+    if value.definitions.len() == 0 or value.definitions.len() > 65536 or value.definitions.len() != value.request.cases.len():
+        return Err("SSPEC-METADATA: definition count differs from request or exceeds budget")
+    for identity in [value.request.subject_id, value.request.configuration_id, value.request.expectation_id, value.request.binary_id]:
+        if identity == "" or identity.len() > 4096: return Err("SSPEC-METADATA: invalid request identity")
+    # Budget all caller-authored metadata before canonical serialization/hash.
+    var metadata_bytes: i64 = 0
+    for i in 0..value.definitions.len():
+        val record = value.definitions[i]
+        val item = record.definition
+        val planned = value.request.cases[i]
+        if item.suite_path.len() == 0 or item.suite_path.len() > 64 or item.context_path.len() > 64:
+            return Err("SSPEC-METADATA: missing or excessive literal scopes")
+        var texts = [record.case_id, record.test_definition_id, record.source_sha256, record.extractor_version,
+            item.test_path, item.case_name, item.leaf_name, item.kind, planned.case_id, planned.test_path,
+            planned.case_name, planned.test_definition_id, planned.lane_id]
+        for part in item.suite_path: texts.push(part)
+        for part in item.context_path: texts.push(part)
+        for text_value in texts:
+            if text_value == "" or text_value.len() > 4096 or text_value.len() > 1048576 - metadata_bytes:
+                return Err("SSPEC-METADATA: missing value or 1 MiB metadata budget exceeded")
+            metadata_bytes += text_value.len()
+    validate_trace_run_request(value.request)?
+    var definition_ids: Dict<text, bool> = {}
+    var sources: Dict<text, text> = {}
+    var ends: Dict<text, i64> = {}
+    var last_path = ""
+    for i in 0..value.definitions.len():
+        val record = value.definitions[i]
+        val item = record.definition
+        val planned = value.request.cases[i]
+        if record.extractor_version != "simple.sspec.literal-ast/v1" or not sspec_digest_valid(record.source_sha256):
+            return Err("SSPEC-METADATA: unsupported extractor or malformed source digest")
+        if record.case_id != planned.case_id or record.test_definition_id != planned.test_definition_id or item.test_path != planned.test_path or item.case_name != planned.case_name:
+            return Err("SSPEC-METADATA: definition projection differs from exact ordered request")
+        if definition_ids.contains_key(record.test_definition_id): return Err("SSPEC-METADATA: duplicate definition ID")
+        definition_ids[record.test_definition_id] = true
+        if item.kind != "normal" and item.kind != "test" and item.kind != "example" and item.kind != "slow":
+            return Err("SSPEC-METADATA: unsupported declaration kind")
+        if item.start_byte < 0 or item.end_byte <= item.start_byte or item.end_byte > 1048576 or item.line < 1 or item.line > 1048576 or item.column < 1 or item.column > 1048576:
+            return Err("SSPEC-METADATA: invalid byte span or source location")
+        if item.test_path.starts_with("/") or item.test_path.contains("\\") or item.test_path.contains(":"):
+            return Err("SSPEC-METADATA: source path is not repository-relative")
+        for part in item.test_path.split("/"):
+            if part == "" or part == "." or part == "..": return Err("SSPEC-METADATA: noncanonical source path")
+        for byte in item.test_path.bytes():
+            if byte == 0 or byte == 10 or byte == 13: return Err("SSPEC-METADATA: invalid source path byte")
+        var selector = item.suite_path[item.suite_path.len() - 1] + " > "
+        if item.context_path.len() > 0: selector += item.context_path[item.context_path.len() - 1] + " > "
+        selector += item.leaf_name
+        if selector != item.case_name: return Err("SSPEC-METADATA: runtime selector differs from literal scopes")
+        if item.leaf_name.contains("{") or item.leaf_name.contains("}"):
+            return Err("SSPEC-METADATA: unsupported interpolated literal name")
+        for part in item.suite_path:
+            if part.contains("{") or part.contains("}"): return Err("SSPEC-METADATA: unsupported interpolated suite")
+        for part in item.context_path:
+            if part.contains("{") or part.contains("}"): return Err("SSPEC-METADATA: unsupported interpolated context")
+        if sources.contains_key(item.test_path):
+            if sources[item.test_path] != record.source_sha256 or last_path != item.test_path or item.start_byte < ends[item.test_path]:
+                return Err("SSPEC-METADATA: inconsistent source digest or declaration ordering")
+        else:
+            if sources.len() >= 256: return Err("SSPEC-METADATA: file count exceeds 256")
+            sources[item.test_path] = record.source_sha256
+        ends[item.test_path] = item.end_byte
+        last_path = item.test_path
+        if record.test_definition_id != trace_sspec_definition_id(record.source_sha256, record.extractor_version, item):
+            return Err("SSPEC-METADATA: definition digest mismatch")
+        val expected_case = trace_sspec_planned_case_id(value.request.subject_id, value.request.configuration_id,
+            value.request.expectation_id, value.request.binary_id, planned.lane_id, record.test_definition_id)
+        if record.case_id != expected_case: return Err("SSPEC-METADATA: planned case digest mismatch")
+    val expected_inventory = trace_sspec_inventory_digest(value.request, value.definitions)?
+    if not sspec_digest_valid(value.inventory_digest) or value.inventory_digest != expected_inventory:
+        return Err("SSPEC-METADATA: inventory digest mismatch")
+    Ok(())

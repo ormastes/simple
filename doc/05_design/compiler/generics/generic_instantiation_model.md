@@ -83,6 +83,26 @@ nested positions, which spells `Result`/`Slice`/`Ref`/a function type `unknown`,
 
 ## 4. Specialization identity
 
+### Executable model key encoding
+
+The model's `mk_key` uses a separate structural encoding rather than
+`mt_render` display text. A text component is its decimal length, `:` and its
+unchanged contents. Types start with `v` (variable), `c` (constant), or `a`
+(application); applications include a framed constructor name followed by
+`l<arity>:` and recursively encoded children. The complete key frames module
+and function names independently, then includes the encoded type-argument list.
+This disambiguates delimiter-bearing names, empty applications, nesting and
+argument boundaries. For example, `m::f<i64>` has model key `m1:mf1:fl1:c3:i64`.
+
+The motivating counterexample is closed `Con("Box<i64>")` versus
+`App("Box", [Con("i64")])`: their display text is identical. Owner `a::b` with
+function `c` also shared the old key with owner `a` and function `b::c`.
+The law spec now compares structural keys in the finite universe and adds
+explicit adversarial regressions. These are pending executable validation on an
+admitted self-hosted runner; no arbitrary-term key proof is claimed. Production
+key encodings remain separate: differential assertions compare identity
+equivalence or distinctness, not byte-for-byte equality with model key text.
+
 - One specialization per (template, structural `type_key` of the type arguments). The display
   (symbol) name is the old mangling; when two different instantiations mangle alike
   (`keep<Result<i64, E>>` / `keep<Result<bool, E>>` are both `keep$unknown`) the later one is
@@ -330,3 +350,43 @@ zero bypasses. An independent project copy with `example : False := by decide`
 appended to the manual file failed the default build at `GenericsConstraints`.
 The empty-substitution, closed-type and idempotence proofs use Lean's `propext`;
 the distinct-owner proof reports no axioms. This is reduced-model evidence only.
+
+## H-ANNOT repair candidate, 2026-10-11 — verification pending
+
+The implementation candidate retains `Name<args>` for registered local names
+and forward references, using the existing named-instance flat-pool layout.
+The `List<T>` array alias and explicitly imported class precedence remain in the
+parser. HIR preserves diagnostics for locally resolved declarations; unresolved
+import surfaces retain their existing recovery rule.
+
+Preserving those arguments exposes module-local symbol ids to inference.
+`NominalBindingContext` carries the template and caller symbol tables and owner
+names. Recursive matching resolves each nominal base through its own table and
+compares the declaration's module and name before matching its arguments. It
+does not equate nominal bases merely because their raw ids or display names
+agree. Existing context-free model tests retain their single-table API.
+
+Acceptance is specified in
+`doc/02_requirements/feature/generic_annotation_preservation.md`. The field-path
+specs now require concatenation for annotated text instances, integer addition
+for annotated integer instances, and refusal only for a genuinely argumentless
+receiver. This supersedes the intended H-ANNOT behavior in section 8, but **does
+not yet supersede its verified status**: the candidate has not run on an admitted
+self-hosted test runtime or rebuilt native compiler. No formal proof of this
+parser-to-native path is claimed.
+
+## H-NAMED key repair candidate, 2026-10-11 — verification pending
+
+Specialization identity now includes each nominal type's canonical declaration
+module and original name, with length-delimited boundaries. Display mangling is
+unchanged; different identities that display alike still receive `_k<n>`.
+Unknown ownership propagates failure through nested types and produces
+E-MONO-041 instead of registering a specialization by raw symbol id or short
+name. Context-bearing inference validates fixed nominal parameters too.
+
+Requirements and execution limits are recorded in
+`doc/02_requirements/feature/generic_nominal_identity.md` and
+`doc/09_report/generic_nominal_identity_candidate_2026-10-11.md`.
+These source changes are not yet an executed acceptance of H-NAMED. They also
+do not relocate caller/provider nominal ids across specialization bodies or
+return signatures; H-XMOD/H-RET32 remain separate obligations.

@@ -31,7 +31,7 @@ my %opt = ( 'max-rss-kib' => 5859375, 'interval-ms' => 100,
 my %explicit;
 while (@ARGV && $ARGV[0] ne '--') {
     my $arg = shift @ARGV;
-    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode|budget-scope|aggregate-workers|compiler-jobs|cap-source|cap-bound)=(.+)$/
+    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode|budget-scope|aggregate-workers|compiler-jobs|compiler-ceiling-kib|cap-source|cap-bound)=(.+)$/
         or die "rss-guard: invalid option\n";
     my ($key, $value) = ($1, $2);
     $explicit{$key}++ and die "rss-guard: duplicate $key\n";
@@ -46,7 +46,7 @@ for my $key (qw(max-rss-kib interval-ms timeout-seconds term-grace-seconds)) {
 # Compiler policy is unchanged. An explicitly admitted parallel test tree has
 # a separate aggregate budget: one parent reserve plus the ordinary compile
 # target per worker. This does not raise any nested compiler guard's limit.
-my $compiler_ceiling_kib = 6835937;
+my $compiler_ceiling_kib = 8388608;
 my $worker_target_kib = 976562;
 my $budget_ceiling_kib = $compiler_ceiling_kib;
 $opt{'budget-scope'} =~ /\A(?:compiler|aggregate-tests)\z/
@@ -71,17 +71,30 @@ if ($opt{'budget-scope'} eq 'aggregate-tests') {
 # ceiling therefore applies only while the owner declares no worker count.
 # A declared count raises the HARD ceiling to reserve + jobs * per-job
 # ceiling, never above 3/4 of host physical RAM, and not at all when host RAM
-# cannot be read. These constants are deliberately not configurable: the
-# tunable budget lives in scripts/bootstrap/lib/tree-rss-policy.shs (host
-# config tree_rss_*) and must fit under this ceiling.
+# cannot be read. These default constants are not configurable. An explicit
+# --compiler-ceiling-kib is a separate enforced compiler-only admission below:
+# it requires fresh real host total/available evidence and an explicit cap.
+# Ordinary host-config tree_rss_* knobs still fit under the default ceiling.
 my $compiler_jobs = 0;
 my $jobs_reserve_kib = 3145728;
-my $jobs_per_job_ceiling_kib = 262144;
+my $jobs_per_job_ceiling_kib = 1048576;
 my $host_total_kib = 0;
 # Where host_total_kib came from: undeclared (no worker count, never read),
 # proc-meminfo, sysctl, unknown (unreadable: the ceiling does not move) or
 # fixture. The receipt records it so a widened ceiling is always attributable.
 my $host_total_source = 'undeclared';
+my $ceiling_request_kib = 0;
+my $ceiling_previous_kib = $compiler_ceiling_kib;
+my $available_kib = 0;
+my $available_source = 'unknown';
+my $ceiling_admission = 'default';
+sub ceiling_receipt {
+    return "compiler_ceiling_request_kib=$ceiling_request_kib\n" .
+        "compiler_ceiling_previous_kib=$ceiling_previous_kib\n" .
+        "compiler_ceiling_admitted_kib=" . ($ceiling_admission eq 'refused' ? 0 : $budget_ceiling_kib) . "\n" .
+        "compiler_available_kib=$available_kib\ncompiler_available_source=$available_source\n" .
+        "compiler_ceiling_admission=$ceiling_admission\n";
+}
 # Recorded verbatim so a receipt says which policy layer chose the cap.
 for my $key (qw(cap-source cap-bound)) {
     $opt{$key} //= 'unspecified';
@@ -94,6 +107,26 @@ sub read_meminfo_total {
         return $1 if $line =~ /\AMemTotal:\s+([1-9][0-9]{0,17})\s+kB\s*\z/;
     }
     return 0;
+}
+
+# The elevated policy never reads a fixture path. Tests exercise this parser
+# separately; the admission call below supplies only the real host file.
+sub read_headroom_facts {
+    my ($path) = @_;
+    open(my $fh, '<', $path) or return;
+    my (%values, %seen);
+    while (my $line = <$fh>) {
+        next unless $line =~ /\A(MemTotal|MemAvailable|MemFree):/;
+        my $key = $1;
+        return if $seen{$key}++;
+        $line =~ /\A\Q$key\E:\s+([1-9][0-9]{0,14})\s+kB\s*\z/ or return;
+        $values{$key} = $1;
+    }
+    close($fh) or return;
+    my $source = exists($values{MemAvailable}) ? 'MemAvailable' : 'MemFree';
+    return unless $values{MemTotal} && $values{$source} && $values{$source} <= $values{MemTotal};
+    return if exists($values{MemFree}) && $values{MemFree} > $values{MemTotal};
+    return ($values{MemTotal}, $values{$source}, "$source:");
 }
 # SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH substitutes host RAM and can therefore
 # raise the hard ceiling. It is a TEST hook only: it needs the explicit
@@ -129,12 +162,13 @@ sub host_total_kib {
 # the receipt as well as stderr so a file-reading stage diagnosis can say why.
 sub refuse_policy {
     my ($reason) = @_;
+    $ceiling_admission = 'refused' if $explicit{'compiler-ceiling-kib'};
     if (defined $opt{receipt} && open(my $fh, '>', "$opt{receipt}.tmp.$$")) {
         print {$fh} "status=policy-refused\nexit_status=125\nmax_rss_kib=$opt{'max-rss-kib'}\n" .
             "budget_scope=$opt{'budget-scope'}\nbudget_ceiling_kib=$budget_ceiling_kib\n" .
             "compiler_jobs=$compiler_jobs\nhost_total_kib=$host_total_kib\n" .
             "host_total_source=$host_total_source\n" .
-            "cap_source=$opt{'cap-source'}\ncap_bound=$opt{'cap-bound'}\nrefusal_reason=$reason\n";
+            "cap_source=$opt{'cap-source'}\ncap_bound=$opt{'cap-bound'}\nrefusal_reason=$reason\n" . ceiling_receipt();
         close($fh) && rename("$opt{receipt}.tmp.$$", $opt{receipt});
     }
     print STDERR "rss-guard: $reason\n";
@@ -152,6 +186,33 @@ if ($explicit{'compiler-jobs'}) {
     my $host_max = int($host_total_kib / 4) * 3;
     $scaled = $host_max if $scaled > $host_max;
     $budget_ceiling_kib = $scaled if $scaled > $budget_ceiling_kib;
+}
+$ceiling_previous_kib = $budget_ceiling_kib;
+if ($explicit{'compiler-ceiling-kib'}) {
+    $ceiling_admission = 'refused';
+    $opt{'compiler-ceiling-kib'} =~ /\A[1-9][0-9]{0,14}\z/
+        or refuse_policy('compiler ceiling must be canonical positive decimal (at most 15 digits)');
+    $ceiling_request_kib = $opt{'compiler-ceiling-kib'};
+    $opt{'budget-scope'} eq 'compiler' && $opt{'rss-cap-mode'} eq 'enforce' &&
+        $explicit{'compiler-jobs'} && $compiler_jobs > 0 && $explicit{'max-rss-kib'} &&
+        $opt{'max-rss-kib'} =~ /\A[1-9][0-9]{0,14}\z/
+        or refuse_policy('compiler ceiling requires enforced compiler scope and explicit real jobs and cap');
+    for my $name (qw(BOOTSTRAP_TREE_RSS_MEMINFO_PATH BOOTSTRAP_TREE_RSS_TEST_FIXTURE
+                     SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE)) {
+        !exists($ENV{$name}) or refuse_policy('compiler ceiling refuses memory fixture hooks');
+    }
+    my @facts = read_headroom_facts('/proc/meminfo');
+    @facts == 3 or refuse_policy('real host headroom is unavailable or contradictory');
+    ($host_total_kib, $available_kib, $available_source) = @facts;
+    $host_total_source = 'proc-meminfo';
+    my $total_bound = int($host_total_kib / 4) * 3;
+    my $available_bound = int($available_kib / 4) * 3;
+    $ceiling_request_kib > $ceiling_previous_kib &&
+        $ceiling_request_kib <= $total_bound && $ceiling_request_kib <= $available_bound &&
+        $opt{'max-rss-kib'} <= $ceiling_request_kib
+        or refuse_policy("compiler ceiling refused (requested=$ceiling_request_kib previous=$ceiling_previous_kib total_bound=$total_bound available_bound=$available_bound)");
+    $budget_ceiling_kib = $ceiling_request_kib;
+    $ceiling_admission = 'elevated';
 }
 $opt{'max-rss-kib'} > 0 && $opt{'max-rss-kib'} <= $budget_ceiling_kib
     or refuse_policy("cap $opt{'max-rss-kib'} KiB must be between 1 and $budget_ceiling_kib KiB" .
@@ -1112,7 +1173,7 @@ sub receipt {
         "budget_scope=$opt{'budget-scope'}\nbudget_ceiling_kib=$budget_ceiling_kib\n" .
         "aggregate_workers=" . ($opt{'aggregate-workers'} // 0) . "\n" .
         "compiler_jobs=$compiler_jobs\nhost_total_kib=$host_total_kib\n" .
-        "host_total_source=$host_total_source\n" .
+        "host_total_source=$host_total_source\n" . ceiling_receipt() .
         "cap_source=$opt{'cap-source'}\ncap_bound=$opt{'cap-bound'}\n" .
         "interval_ms=$opt{'interval-ms'}\nsample_gap_max_ms=$sample_gap_max_ms\n" .
         "observation_budget_ms=$observation_budget_ms\n" .

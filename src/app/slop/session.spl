@@ -1,0 +1,272 @@
+# Pure typed actions wrapped by the actual native UISession. No private graph writer.
+use std.common.traceability.model.{TraceGraph, TraceQuery, TraceQueryResult, SourceSlice, SnapshotInput}
+use std.common.traceability.query.{query_trace_graph}
+use std.common.traceability.evidence_model.{TraceQualification}
+use app.slop.evidence.{slop_evidence_text}
+use app.slop.source.{slop_source_slice}
+use app.slop.projection.{SlopAlias, slop_aliases, slop_draw_edges}
+use app.slop.view.{slop_build_tree}
+use common.ui.draw_ir.{DrawEdge}
+use common.ui.widget.{UIEvent}
+use nogc_sync_mut.ui.session.{UISession}
+
+class SlopSession:
+    prefix: text
+    graph: TraceGraph
+    page: TraceQueryResult
+    active_query: TraceQuery
+    aliases: [SlopAlias]
+    collapsed: [text]
+    selected_id: text
+    focused_alias: text
+    source: SourceSlice?
+    source_status: text
+    source_pending: bool
+    event_status: text
+    evidence_status: text
+    qualification: TraceQualification?
+    ui: UISession
+
+    static fn new(graph: TraceGraph, prefix: text) -> SlopSession:
+        val page = query_trace_graph(graph, TraceQuery(snapshot_id: graph.subject.snapshot_id,
+            selected_id: "", direction: "all", limit: 200, cursor: ""))
+        val aliases = slop_aliases(page, prefix)
+        val source_status = "Select a source location; pinned source has not been requested"
+        val evidence_status = "Execution qualification unavailable; graph links do not prove test execution"
+        val tree = slop_build_tree(prefix, graph, page, aliases, [], "", nil, source_status, evidence_status)
+        SlopSession(prefix: prefix, graph: graph, page: page,
+            active_query: TraceQuery(snapshot_id: graph.subject.snapshot_id, selected_id: "", direction: "all", limit: 200, cursor: ""),
+            aliases: aliases, collapsed: [],
+            selected_id: "", focused_alias: "", source: nil, source_status: source_status,
+            source_pending: false, event_status: "",
+            evidence_status: evidence_status, qualification: nil, ui: UISession.new(tree))
+
+    me refresh():
+        if val qualification = me.qualification:
+            me.evidence_status = slop_evidence_text(qualification, me.selected_id)
+        val tree = slop_build_tree(me.prefix, me.graph, me.page, me.aliases, me.collapsed,
+            me.selected_id, me.source, me.source_status, me.evidence_status, me.focused_alias, me.event_status)
+        var ui = me.ui
+        ui.update_tree(tree)
+        val focus_target = if me.focused_alias != "": me.focused_alias else: me.prefix
+        ui.dispatch(UIEvent.FocusEvent(focus_target, "focus"))
+        me.ui = ui
+
+    me accept_qualification(qualification: TraceQualification) -> Result<text, text>:
+        if qualification.subject_id != me.graph.subject.snapshot_id:
+            return Err("qualification snapshot mismatch")
+        me.qualification = qualification
+        me.refresh()
+        Ok(qualification.run_id)
+
+    me select_alias(widget_id: text) -> Result<text, text>:
+        for alias in me.aliases:
+            if alias.widget_id == widget_id:
+                me.selected_id = alias.canonical_id
+                me.focused_alias = alias.widget_id
+                me.source = nil
+                me.source_pending = true
+                me.source_status = "Pinned source has not been requested for " + alias.canonical_id
+                me.refresh()
+                return Ok(alias.canonical_id)
+        Err("unknown tree alias")
+
+    me toggle_alias(widget_id: text) -> Result<bool, text>:
+        var known = false
+        for alias in me.aliases:
+            if alias.widget_id == widget_id:
+                known = true
+        if not known:
+            return Err("unknown tree alias")
+        var next: [text] = []
+        var was_collapsed = false
+        for item in me.collapsed:
+            if item == widget_id:
+                was_collapsed = true
+            else:
+                next.push(item)
+        if not was_collapsed:
+            next.push(widget_id)
+        me.collapsed = next
+        if not was_collapsed:
+            for alias in me.aliases:
+                if alias.widget_id == me.focused_alias and alias.parent_id == widget_id:
+                    me.focused_alias = widget_id
+        me.refresh()
+        Ok(was_collapsed)
+
+    me show_query(query: TraceQuery) -> Result<i64, text>:
+        if query.snapshot_id != me.graph.subject.snapshot_id:
+            me.event_status = "Query rejected: snapshot mismatch; previous view retained"
+            me.refresh()
+            return Err("query snapshot mismatch")
+        val next = query_trace_graph(me.graph, query)
+        # Graph diagnostics describe displayable incomplete facts. Only query
+        # refusal prevents navigation; retain the last view and expose the error.
+        for diagnostic in next.diagnostics:
+            if diagnostic.code == "TRACE-QUERY-INVALID":
+                me.event_status = "Query rejected: " + diagnostic.message + "; previous view retained"
+                me.refresh()
+                return Err(diagnostic.code)
+        me.page = next
+        me.active_query = query
+        me.aliases = slop_aliases(next, me.prefix)
+        me.collapsed = []
+        me.focused_alias = ""
+        me.source = nil
+        var selection_present = false
+        for node in next.nodes:
+            if node.id == me.selected_id:
+                selection_present = true
+        if not selection_present:
+            me.selected_id = ""
+        me.source_pending = me.selected_id != ""
+        me.source_status = if me.source_pending: "Query changed; pinned source must be requested again" else: "Select a node in this page to inspect pinned source"
+        me.event_status = "Query updated"
+        me.refresh()
+        Ok(next.nodes.len())
+
+    me accept_source(requested_entity_id: text, slice: SourceSlice) -> Result<text, text>:
+        if requested_entity_id != me.selected_id or slice.snapshot_id != me.graph.subject.snapshot_id:
+            return Err("stale source response")
+        var pinned = false
+        for locator in me.graph.locators:
+            if locator.entity_id == requested_entity_id and locator.path == slice.path and locator.blob_id == slice.blob_id:
+                pinned = true
+        if not pinned or slice.blob_id == "":
+            return Err("source response does not match selected entity locator")
+        me.source = slice
+        me.source_pending = false
+        me.source_status = "Pinned source loaded"
+        me.refresh()
+        Ok(slice.blob_id)
+
+    me load_source(snapshot: SnapshotInput, start_line: i64, end_line: i64) -> Result<text, text>:
+        me.source = nil
+        me.source_pending = false
+        # Multiple locators are not resolved by silently choosing the first.
+        var matches: i64 = 0
+        for locator in me.graph.locators:
+            if locator.entity_id == me.selected_id:
+                matches = matches + 1
+        if matches != 1:
+            me.source_status = if matches == 0: "No pinned source locator" else: "Multiple source locations; choose an explicit locator"
+            me.refresh()
+            return Err(me.source_status)
+        for locator in me.graph.locators:
+            if locator.entity_id == me.selected_id:
+                match slop_source_slice(snapshot, me.graph.subject.snapshot_id, locator, start_line, end_line):
+                    case Ok(slice): return me.accept_source(me.selected_id, slice)
+                    case Err(message):
+                        me.source_status = message
+                        me.refresh()
+                        return Err(message)
+        Err("source locator unavailable")
+
+    me source_unavailable(message: text):
+        me.source = nil
+        me.source_pending = false
+        me.source_status = message
+        me.refresh()
+
+    me record_event_result(result: Result<text, text>):
+        match result:
+            case Ok(message): me.event_status = message
+            case Err(message):
+                if not me.event_status.starts_with("Query rejected:"):
+                    me.event_status = "Action rejected: " + message
+        me.refresh()
+
+    fn visible_alias_ids() -> [text]:
+        var visible: [text] = []
+        for alias in me.aliases:
+            if alias.parent_id == "":
+                visible.push(alias.widget_id)
+                var expanded = true
+                for collapsed in me.collapsed:
+                    if collapsed == alias.widget_id:
+                        expanded = false
+                if expanded:
+                    for child in me.aliases:
+                        if child.parent_id == alias.widget_id:
+                            visible.push(child.widget_id)
+        visible
+
+    me key_press(key: text) -> Result<text, text>:
+        val visible = me.visible_alias_ids()
+        if visible.len() == 0:
+            return Err("tree has no visible nodes")
+        var focus_index: i64 = 0
+        var focus_found = false
+        for index in 0..visible.len():
+            if visible[index] == me.focused_alias:
+                focus_index = index
+                focus_found = true
+        if key == "down" or key == "tab":
+            if focus_found and focus_index + 1 < visible.len():
+                focus_index = focus_index + 1
+        elif key == "up":
+            if focus_index > 0:
+                focus_index = focus_index - 1
+        elif key == "home":
+            focus_index = 0
+        elif key == "end":
+            focus_index = visible.len() - 1
+        elif key == "enter":
+            return me.select_alias(visible[focus_index])
+        elif key == "left" or key == "right":
+            val focused = visible[focus_index]
+            var collapsed = false
+            for item in me.collapsed:
+                if item == focused:
+                    collapsed = true
+            if (key == "left" and not collapsed) or (key == "right" and collapsed):
+                me.toggle_alias(focused)
+            else:
+                for alias in me.aliases:
+                    if alias.widget_id == focused and key == "left" and alias.parent_id != "":
+                        me.focused_alias = alias.parent_id
+                        me.refresh()
+                        return Ok(alias.parent_id)
+        else:
+            return Err("key has no Slop navigation action")
+        me.focused_alias = visible[focus_index]
+        me.refresh()
+        Ok(me.focused_alias)
+
+    fn draw_edges() -> [DrawEdge]:
+        slop_draw_edges(me.page)
+
+    me dispatch(event: UIEvent) -> Result<text, text>:
+        match event:
+            case UIEvent.KeyPress(key):
+                me.key_press(key)
+            case UIEvent.Action(name):
+                if name == "slop.forward" or name == "slop.reverse" or name == "slop.all" or name == "slop.next":
+                    var query = me.active_query
+                    query.cursor = ""
+                    if name == "slop.next":
+                        if me.page.next_cursor == "":
+                            return Err("no next page")
+                        query.cursor = me.page.next_cursor
+                    elif name == "slop.all":
+                        query.selected_id = ""
+                        query.direction = "all"
+                    else:
+                        if me.selected_id == "":
+                            return Err("select a node before tracing relations")
+                        query.selected_id = me.selected_id
+                        query.direction = if name == "slop.forward": "outgoing" else: "incoming"
+                    match me.show_query(query):
+                        case Ok(count): return Ok("Showing {count} nodes")
+                        case Err(message): return Err(message)
+                for alias in me.aliases:
+                    if name == "slop.select:" + alias.widget_id:
+                        return me.select_alias(alias.widget_id)
+                    if name == "slop.toggle:" + alias.widget_id:
+                        match me.toggle_alias(alias.widget_id):
+                            case Ok(expanded): return Ok(if expanded: "expanded" else: "collapsed")
+                            case Err(message): return Err(message)
+                Err("unknown Slop action")
+            case _:
+                Err("event is not an implemented Slop action")
