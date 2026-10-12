@@ -1,0 +1,66 @@
+# Deterministic test keys and independent golden signature messages; no service trust roots.
+use std.common.contracts.distributed_control_v2.*
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.contracts.distributed_authority_v2.*
+use app.llm_caret.workbench.distributed_grant_verification_v2.*
+
+struct VerificationFixtureV2:
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+    issuer: DistributedAuthorityKeyV2
+    approver: DistributedAuthorityKeyV2
+    request: OperationEnvelopeV2
+
+fn verification_bytes(message: text) -> [u8]:
+    var out: [u8] = []
+    for i in 0..message.len(): out.push(message.byte_at(i) as u8)
+    out
+
+fn verification_seed(offset: i64) -> [u8]:
+    var seed: [u8] = []
+    for i in 0..32: seed.push((i + offset) as u8)
+    seed
+
+fn verification_key(identity: text, role: text, public_key: [u8]) -> DistributedAuthorityKeyV2:
+    DistributedAuthorityKeyV2(identity: identity, role: role, revision: 1,
+        public_key: public_key, principal: "user_1", project: "project_1", host_id: "worker_1",
+        operations: ["build"], maximum_memory_bytes: 2048, maximum_duration_ms: 2000,
+        policy_revision: 4, revocation_epoch: 2, expires_at: 300, revoked: false)
+
+fn verification_fixture() -> VerificationFixtureV2:
+    val grant_wire = "DBC_EXECUTION_GRANT_V2\ngrant_1\nuser_1\nproject_1\nworker_1\n" +
+        "a".repeat(64) + "\n4\n2\n200\n1024\n1000\n1\nbuild\n"
+    val request_wire = "DBC_OPERATION_V2\noperation_1\n" + "b".repeat(64) +
+        "\nuser_1\nproject_1\nworker_1\nbuild\n" + "a".repeat(64) + "\n4\n2\n3\n512\n500\n"
+    # Independent golden signing bytes, not the message builders under test.
+    val grant_message = "DBC_GRANT_SIGNATURE_V2\nissuer_1\n1\n" + grant_wire.replace("\n", "%0A") + "\n"
+    val grant_digest = sha256_text(grant_wire)
+    val request_digest = sha256_text(request_wire)
+    val approval_message = "DBC_APPROVAL_SIGNATURE_V2\napprover_1\n1\n" + grant_digest +
+        "\n" + request_digest + "\n4\n3\n190\n"
+    val issuer_signature = pure_ed25519_sign_from_seed_v1(verification_seed(1), verification_bytes(grant_message))
+    val approval_signature = pure_ed25519_sign_from_seed_v1(verification_seed(65), verification_bytes(approval_message))
+    val grant = ExecutionGrantV2(id: "grant_1", principal: "user_1", project: "project_1",
+        host_id: "worker_1", operations: ["build"], environment_digest: "a".repeat(64),
+        policy_revision: 4, revocation_epoch: 2, expires_at: 200,
+        maximum_memory_bytes: 1024, maximum_duration_ms: 1000)
+    val signed = DistributedSignedGrantV2(grant: grant, issuer_id: "issuer_1", key_revision: 1,
+        signature: issuer_signature.signature)
+    val approval = DistributedSignedApprovalV2(approver_id: "approver_1", key_revision: 1,
+        grant_digest: grant_digest, request_digest: request_digest, policy_revision: 4,
+        session_generation: 3, expires_at: 190, signature: approval_signature.signature)
+    val request = OperationEnvelopeV2(version: 2, id: "operation_1", payload_digest: "b".repeat(64),
+        principal: "user_1", project: "project_1", host_id: "worker_1", operation: "build",
+        environment_digest: "a".repeat(64), policy_revision: 4, revocation_epoch: 2,
+        session_generation: 3, memory_bytes: 512, duration_ms: 500)
+    VerificationFixtureV2(signed: signed, approval: approval,
+        issuer: verification_key("issuer_1", "grant-issuer", issuer_signature.public_key),
+        approver: verification_key("approver_1", "human-approver", approval_signature.public_key), request: request)
+
+fn verification_error(fixture: VerificationFixtureV2) -> text:
+    match distributed_verify_grant_approval_v2(fixture.signed, fixture.approval, fixture.issuer,
+            fixture.approver, fixture.request, 100, 4, 2, 3):
+        case Ok(grant): ""
+        case Err(reason): reason
+

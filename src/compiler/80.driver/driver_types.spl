@@ -10,6 +10,9 @@ use compiler.driver.native_aot_artifacts.{native_aot_object_path_v1}
 
 use compiler.hir.hir.*
 use std.env.{env_get}
+use std.nogc_sync_mut.sffi.transient.{
+    transient_scope_begin, transient_scope_pause, transient_scope_end,
+    transient_promote}
 use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
@@ -422,6 +425,20 @@ fn native_capsule_function_metadata_identity_v1(function: MirFunction) -> text:
     "generic={storage_identity_text_v1(generic_rows.join(";"))}|template={function.is_generic_template}|specialization={specialization}|bindings={storage_identity_text_v1(binding_rows.join(";"))}|layout={layout_identity}|kernel={function.is_kernel}:{storage_identity_text_v1(function.gpu_target)}:{storage_identity_text_v1(function.gpu_backend_order)}|export={function.is_export_c}:{storage_identity_text_v1(function.export_name)}|manifest={function.has_driver_manifest_attr}:{manifest_kind}:{manifest_driver_class}:{manifest_vendor}:{storage_identity_text_v1(device_rows.join(";"))}:{storage_identity_text_v1(manifest_version)}:{storage_identity_text_v1(manifest_abi)}|vhdl={function.has_vhdl_metadata}:{function.vhdl_metadata.is_hardware}:{storage_identity_text_v1(vhdl_generic_rows.join(";"))}:{function.vhdl_metadata.has_clocked}:{storage_identity_text_v1(function.vhdl_metadata.clocked.clock_signal)}:{storage_identity_text_v1(function.vhdl_metadata.clocked.reset_signal)}:{function.vhdl_metadata.clocked.has_reset}:{reset_polarity}:{reset_synchrony}:{storage_identity_text_v1(function.vhdl_metadata.clocked.domain)}:{function.vhdl_metadata.clocked.is_valid}:{storage_identity_text_v1(validation_rows.join(";"))}:{storage_identity_text_v1(return_rows.join(";"))}:{function.vhdl_metadata.flatten_struct_output}|fast-math={function.has_fast_math}|fpga={function.unroll_factor}:{function.pipeline_ii}:{function.memory_banks}"
 
 pub fn native_capsule_mir_identity_v1(module: MirModule) -> text:
+    # Canonical serialization is scratch, not a retained build graph. Keep only
+    # the digest after releasing intermediate JSON/identity rows. Missing owner
+    # support is a build error, never an empty identity or a cache bypass.
+    if not transient_scope_begin():
+        panic("native capsule MIR identity scratch scope unavailable")
+    val digest = native_capsule_mir_identity_in_owned_scope_v1(module)
+    val paused = transient_scope_pause()
+    val promoted = paused and transient_promote(digest)
+    val ended = transient_scope_end()
+    if not paused or not promoted or not ended:
+        panic("native capsule MIR identity scratch ownership failed")
+    digest
+
+fn native_capsule_mir_identity_in_owned_scope_v1(module: MirModule) -> text:
     var rows: [text] = ["module|{storage_identity_text_v1(module.name)}"]
     for symbol in native_capsule_sorted_symbol_ids_v1(module.functions.keys()):
         val function = module.functions[symbol]
@@ -1516,7 +1533,7 @@ class CompileContext:
 
 fn compute_options_hash(opts: CompileOptions) -> CompileOptionsHash:
     val opt_level = compileoptions_effective_mir_opt_level(opts)
-    compile_options_hash_compute(opts.backend, opt_level, opts.release, opts.debug_info, opts.gc_off, opts.profile, opts.allowed_families, opts.native_libraries, opts.native_library_paths, opts.native_linker_flags)
+    compile_options_hash_compute(opts.backend, opt_level, opts.release, opts.debug_info, opts.gc_off, opts.profile, opts.allowed_families, opts.native_libraries, opts.native_library_paths, opts.native_linker_flags, opts.collection_policy, opts.collection_memory_budget_bytes, opts.native_target)
 
 # ============================================================================
 # Exports

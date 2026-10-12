@@ -21,6 +21,42 @@ fn factory_literal(value: text) -> HirExpr:
         type_: HirType(kind: HirTypeKind.Str, span: factory_span), span: factory_span)
 
 describe "attributed collection factory admission":
+    it "should reject a typed variable from another adaptive family":
+        # @req REQ-PSC-001 REQ-PSC-005
+        step("Retain typed initializer evidence even when it is not a factory call")
+        var lowering = HirLowering.new()
+        val set_id = lowering.symbols.define("AdaptiveTextSet", SymbolKind.Struct, nil,
+            factory_span, Visibility.Private, false, Some(text_set_module))
+        val map_id = lowering.symbols.define("AdaptiveTextMap", SymbolKind.Struct, nil,
+            factory_span, Visibility.Private, false, Some(text_map_module))
+        val source = HirExpr(kind: HirExprKind.Var(map_id), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Named(map_id, []), span: factory_span), span: factory_span)
+        val receiver = HirExpr(kind: HirExprKind.Var(set_id), type_: nil, span: factory_span)
+        lowering.validate_attributed_collection_factory(receiver, "attributed_at_site", [
+            factory_arg(source), factory_arg(factory_literal("hash")),
+            factory_arg(factory_literal("ast://typed-variable"))], factory_span)
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.diagnostic_messages[0]).to_contain("factory returns AdaptiveTextMap, expected AdaptiveTextSet")
+
+    it "should reject resolved generic key mismatches in an attributed initializer":
+        # @req REQ-PSC-002 REQ-PSC-005
+        step("Compare key and value arguments before MIR erases generic type metadata")
+        var lowering = HirLowering.new()
+        val map_id = lowering.symbols.define("AdaptiveMap", SymbolKind.Struct, nil,
+            factory_span, Visibility.Private, false,
+            Some("lib.nogc_sync_mut.src.collections.adaptive_map"))
+        val integer = HirType(kind: HirTypeKind.Int(64, true), span: factory_span)
+        val string = HirType(kind: HirTypeKind.Str, span: factory_span)
+        val source = HirExpr(kind: HirExprKind.Var(map_id), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Named(map_id, [string, string]), span: factory_span), span: factory_span)
+        val receiver = HirExpr(kind: HirExprKind.Var(map_id), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Named(map_id, [integer, string]), span: factory_span), span: factory_span)
+        lowering.validate_attributed_collection_factory(receiver, "attributed_at_site", [
+            factory_arg(source), factory_arg(factory_literal("ordered")),
+            factory_arg(factory_literal("ast://typed-generic"))], factory_span)
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.diagnostic_messages[0]).to_contain("generic arguments do not match AdaptiveMap")
+
     it "should reject a resolved factory from another adaptive family":
         # @req REQ-PSC-001 REQ-PSC-005
         step("Declare distinct adaptive set and map types and a typed map factory")
@@ -43,6 +79,55 @@ describe "attributed collection factory admission":
         expect(lowering.errors.len()).to_equal(1)
         expect(lowering.diagnostic_messages[0]).to_contain(
             "factory returns AdaptiveTextMap, expected AdaptiveTextSet")
+
+    it "should preserve matching generic arguments and ignore absent type metadata":
+        # @req REQ-PSC-002 REQ-PSC-005
+        step("Admit equal concrete instantiations without reading a placeholder type")
+        var lowering = HirLowering.new()
+        val map_id = lowering.symbols.define("AdaptiveMap", SymbolKind.Struct, nil,
+            factory_span, Visibility.Private, false,
+            Some("lib.nogc_sync_mut.src.collections.adaptive_map"))
+        val integer = HirType(kind: HirTypeKind.Int(64, true), span: factory_span)
+        val string = HirType(kind: HirTypeKind.Str, span: factory_span)
+        val map_type = HirType(kind: HirTypeKind.Named(map_id, [integer, string]), span: factory_span)
+        val receiver = HirExpr(kind: HirExprKind.Var(map_id), has_type_: true,
+            type_: map_type, span: factory_span)
+        val matching = HirExpr(kind: HirExprKind.Var(map_id), has_type_: true,
+            type_: map_type, span: factory_span)
+        val placeholder = HirExpr(kind: HirExprKind.Var(map_id), has_type_: false,
+            type_: string, span: factory_span)
+        val unresolved_key = HirType(kind: HirTypeKind.TypeParam("K", []), span: factory_span)
+        val unresolved = HirExpr(kind: HirExprKind.Var(map_id), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Named(map_id, [unresolved_key, string]), span: factory_span), span: factory_span)
+        for source in [matching, placeholder, unresolved]:
+            lowering.validate_attributed_collection_factory(receiver, "attributed_at_site", [
+                factory_arg(source), factory_arg(factory_literal("auto")),
+                factory_arg(factory_literal("ast://generic-preserved"))], factory_span)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "should reject generic payload mismatches from a resolved factory signature":
+        # @req REQ-PSC-002 REQ-PSC-005
+        step("Read generic return arguments from the resolved function symbol")
+        var lowering = HirLowering.new()
+        val map_id = lowering.symbols.define("AdaptiveMap", SymbolKind.Struct, nil,
+            factory_span, Visibility.Private, false,
+            Some("lib.nogc_sync_mut.src.collections.adaptive_map"))
+        val integer = HirType(kind: HirTypeKind.Int(64, true), span: factory_span)
+        val string = HirType(kind: HirTypeKind.Str, span: factory_span)
+        val returned = HirType(kind: HirTypeKind.Named(map_id, [integer, integer]), span: factory_span)
+        val make_id = lowering.symbols.define("make_map", SymbolKind.Function,
+            HirType(kind: HirTypeKind.Function([], returned, []), span: factory_span),
+            factory_span, Visibility.Private, false, nil)
+        val source = HirExpr(kind: HirExprKind.Call(
+            HirExpr(kind: HirExprKind.Var(make_id), type_: nil, span: factory_span), [], []),
+            type_: nil, span: factory_span)
+        val receiver = HirExpr(kind: HirExprKind.Var(map_id), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Named(map_id, [integer, string]), span: factory_span), span: factory_span)
+        lowering.validate_attributed_collection_factory(receiver, "attributed_at_site", [
+            factory_arg(source), factory_arg(factory_literal("hash")),
+            factory_arg(factory_literal("ast://factory-generic"))], factory_span)
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.diagnostic_messages[0]).to_contain("generic arguments do not match AdaptiveMap")
 
     it "should admit a matching typed factory at two distinct sites":
         # @req REQ-PSC-001 REQ-PSC-003

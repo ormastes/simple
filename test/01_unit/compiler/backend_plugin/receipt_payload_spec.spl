@@ -1,0 +1,200 @@
+use std.spec
+use std.spec.step
+# Actual production receipt admission and exact payload regression.
+use compiler.common.backend_plugin.model.{BackendRole, BackendCapability, BackendPluginRequestV1, BackendPluginDescriptorV1, backend_plugin_vtable_v1_all_operations}
+use compiler.common.backend_plugin.receipt.{BackendPluginError, BackendProviderReceipt, admit_backend_plugin_descriptor}
+
+fn _request() -> BackendPluginRequestV1:
+    BackendPluginRequestV1(BackendRole.CompilerAot, "llvm", "x86_64", "host", ["aes", "sha"], "release", "mir-v1", [BackendCapability.ObjectEmit], "", false)
+
+fn _descriptor() -> BackendPluginDescriptorV1:
+    BackendPluginDescriptorV1(1, 9, "llvm", "v1", "build", "mir-v1", [BackendRole.CompilerAot, BackendRole.InterpreterJit], ["x86_64"], [BackendCapability.ObjectEmit], backend_plugin_vtable_v1_all_operations())
+
+fn _error_matches(result: Result<BackendProviderReceipt, BackendPluginError>, code: text, detail: text) -> bool:
+    match result:
+        case Err(error): error.code() == code and error.diagnostic() == detail
+        case Ok(_): false
+
+fn _value_matches(error: BackendPluginError, code: text, detail: text) -> bool:
+    error.code() == code and error.diagnostic() == detail
+
+fn _valid(result: Result<BackendProviderReceipt, BackendPluginError>, role: text) -> bool:
+    match result:
+        case Err(_): false
+        case Ok(receipt):
+            receipt.provider_identity == "llvm" and receipt.provider_version == "v1" and receipt.build_id == "build" and receipt.abi_version == 1 and receipt.mir_abi_digest == "mir-v1" and receipt.target == "x86_64" and receipt.features.len() == 2 and receipt.features[0] == "aes" and receipt.features[1] == "sha" and receipt.role.name() == role and receipt.optimization == "release" and receipt.plugin_path_policy == "builtin"
+
+fn receipt_semantic_checks() -> i64:
+    var checked: i64 = 0
+    if not (_valid(admit_backend_plugin_descriptor(_request(), _descriptor()), "compiler_aot")): return -1
+    checked = checked + 1
+    var jit = _request()
+    jit.role = BackendRole.InterpreterJit
+    if not (_valid(admit_backend_plugin_descriptor(jit, _descriptor()), "interpreter_jit")): return -2
+    checked = checked + 1
+    var request_bad_0 = _request()
+    request_bad_0.backend_name = ""
+    if not (_error_matches(admit_backend_plugin_descriptor(request_bad_0, _descriptor()), "BACKEND_PLUGIN_PROVIDER_REJECTED", "backend_name is required")): return -3
+    checked = checked + 1
+    var request_bad_1 = _request()
+    request_bad_1.target = ""
+    if not (_error_matches(admit_backend_plugin_descriptor(request_bad_1, _descriptor()), "BACKEND_PLUGIN_PROVIDER_REJECTED", "target is required")): return -4
+    checked = checked + 1
+    var request_bad_2 = _request()
+    request_bad_2.cpu = ""
+    if not (_error_matches(admit_backend_plugin_descriptor(request_bad_2, _descriptor()), "BACKEND_PLUGIN_PROVIDER_REJECTED", "cpu is required")): return -5
+    checked = checked + 1
+    var request_bad_3 = _request()
+    request_bad_3.optimization = ""
+    if not (_error_matches(admit_backend_plugin_descriptor(request_bad_3, _descriptor()), "BACKEND_PLUGIN_PROVIDER_REJECTED", "optimization is required")): return -6
+    checked = checked + 1
+    var request_bad_4 = _request()
+    request_bad_4.mir_abi_digest = ""
+    if not (_error_matches(admit_backend_plugin_descriptor(request_bad_4, _descriptor()), "BACKEND_PLUGIN_PROVIDER_REJECTED", "MIR ABI digest is required")): return -7
+    checked = checked + 1
+    var request_bad_5 = _request()
+    request_bad_5.has_plugin_path = true
+    if not (_error_matches(admit_backend_plugin_descriptor(request_bad_5, _descriptor()), "BACKEND_PLUGIN_PROVIDER_REJECTED", "plugin path is required when selected")): return -8
+    checked = checked + 1
+    var request_bad_6 = _request()
+    request_bad_6.plugin_path = "unexpected"
+    if not (_error_matches(admit_backend_plugin_descriptor(request_bad_6, _descriptor()), "BACKEND_PLUGIN_PROVIDER_REJECTED", "plugin path requires explicit selection")): return -9
+    checked = checked + 1
+    var request_bad_7 = _request()
+    request_bad_7.features = ["aes", ""]
+    if not (_error_matches(admit_backend_plugin_descriptor(request_bad_7, _descriptor()), "BACKEND_PLUGIN_PROVIDER_REJECTED", "CPU feature names must not be empty")): return -10
+    checked = checked + 1
+    var request_bad_8 = _request()
+    request_bad_8.features = ["aes", "aes"]
+    if not (_error_matches(admit_backend_plugin_descriptor(request_bad_8, _descriptor()), "BACKEND_PLUGIN_PROVIDER_REJECTED", "CPU features must not contain duplicates")): return -11
+    checked = checked + 1
+    var descriptor_bad_0 = _descriptor()
+    descriptor_bad_0.provider_identity = ""
+    if not (_error_matches(admit_backend_plugin_descriptor(_request(), descriptor_bad_0), "BACKEND_PLUGIN_PROVIDER_REJECTED", "provider identity is required")): return -12
+    checked = checked + 1
+    var descriptor_bad_1 = _descriptor()
+    descriptor_bad_1.provider_identity = "other"
+    if not (_error_matches(admit_backend_plugin_descriptor(_request(), descriptor_bad_1), "BACKEND_PLUGIN_PROVIDER_REJECTED", "provider identity does not match requested backend")): return -13
+    checked = checked + 1
+    var descriptor_bad_2 = _descriptor()
+    descriptor_bad_2.provider_version = ""
+    if not (_error_matches(admit_backend_plugin_descriptor(_request(), descriptor_bad_2), "BACKEND_PLUGIN_PROVIDER_VERSION", "provider version is required")): return -14
+    checked = checked + 1
+    var descriptor_bad_3 = _descriptor()
+    descriptor_bad_3.build_id = ""
+    if not (_error_matches(admit_backend_plugin_descriptor(_request(), descriptor_bad_3), "BACKEND_PLUGIN_PROVIDER_REJECTED", "provider build ID is required")): return -15
+    checked = checked + 1
+    var descriptor_bad_4 = _descriptor()
+    descriptor_bad_4.abi_version = 2
+    if not (_error_matches(admit_backend_plugin_descriptor(_request(), descriptor_bad_4), "BACKEND_PLUGIN_ABI_MISMATCH", "backend ABI mismatch")): return -16
+    checked = checked + 1
+    var descriptor_bad_5 = _descriptor()
+    descriptor_bad_5.descriptor_size = 8
+    if not (_error_matches(admit_backend_plugin_descriptor(_request(), descriptor_bad_5), "BACKEND_PLUGIN_DESCRIPTOR_SIZE", "backend descriptor is smaller than the v1 prefix")): return -17
+    checked = checked + 1
+    var descriptor_bad_6 = _descriptor()
+    descriptor_bad_6.mir_abi_digest = "other"
+    if not (_error_matches(admit_backend_plugin_descriptor(_request(), descriptor_bad_6), "BACKEND_PLUGIN_MIR_DIGEST", "backend MIR ABI digest mismatch")): return -18
+    checked = checked + 1
+    var descriptor_bad_7 = _descriptor()
+    descriptor_bad_7.roles = [BackendRole.InterpreterJit]
+    if not (_error_matches(admit_backend_plugin_descriptor(_request(), descriptor_bad_7), "BACKEND_PLUGIN_ROLE", "compiler_aot")): return -19
+    checked = checked + 1
+    var descriptor_bad_8 = _descriptor()
+    descriptor_bad_8.targets = ["arm"]
+    if not (_error_matches(admit_backend_plugin_descriptor(_request(), descriptor_bad_8), "BACKEND_PLUGIN_TARGET", "x86_64")): return -20
+    checked = checked + 1
+    var descriptor_bad_9 = _descriptor()
+    descriptor_bad_9.capabilities = []
+    if not (_error_matches(admit_backend_plugin_descriptor(_request(), descriptor_bad_9), "BACKEND_PLUGIN_CAPABILITY", "object_emit")): return -21
+    checked = checked + 1
+    var operations_0 = backend_plugin_vtable_v1_all_operations()
+    operations_0.supports_open_session = false
+    var missing_0 = _descriptor()
+    missing_0.vtable = operations_0
+    if not (_error_matches(admit_backend_plugin_descriptor(_request(), missing_0), "BACKEND_PLUGIN_PROVIDER_REJECTED", "missing open_session operation")): return -22
+    checked = checked + 1
+    var operations_1 = backend_plugin_vtable_v1_all_operations()
+    operations_1.supports_compile_module = false
+    var missing_1 = _descriptor()
+    missing_1.vtable = operations_1
+    if not (_error_matches(admit_backend_plugin_descriptor(_request(), missing_1), "BACKEND_PLUGIN_PROVIDER_REJECTED", "missing compile_module operation")): return -23
+    checked = checked + 1
+    var operations_2 = backend_plugin_vtable_v1_all_operations()
+    operations_2.supports_diagnostics = false
+    var missing_2 = _descriptor()
+    missing_2.vtable = operations_2
+    if not (_error_matches(admit_backend_plugin_descriptor(_request(), missing_2), "BACKEND_PLUGIN_PROVIDER_REJECTED", "missing diagnostics operation")): return -24
+    checked = checked + 1
+    var operations_3 = backend_plugin_vtable_v1_all_operations()
+    operations_3.supports_close_session = false
+    var missing_3 = _descriptor()
+    missing_3.vtable = operations_3
+    if not (_error_matches(admit_backend_plugin_descriptor(_request(), missing_3), "BACKEND_PLUGIN_PROVIDER_REJECTED", "missing close_session operation")): return -25
+    checked = checked + 1
+    var operations_4 = backend_plugin_vtable_v1_all_operations()
+    operations_4.supports_finalize_object = false
+    var missing_4 = _descriptor()
+    missing_4.vtable = operations_4
+    if not (_error_matches(admit_backend_plugin_descriptor(_request(), missing_4), "BACKEND_PLUGIN_PROVIDER_REJECTED", "missing finalize_object operation")): return -26
+    checked = checked + 1
+    var operations_5 = backend_plugin_vtable_v1_all_operations()
+    operations_5.supports_execute = false
+    var missing_5 = _descriptor()
+    missing_5.vtable = operations_5
+    if not (_error_matches(admit_backend_plugin_descriptor(jit, missing_5), "BACKEND_PLUGIN_PROVIDER_REJECTED", "missing execute operation")): return -27
+    checked = checked + 1
+    var aot_ignores_execute = _descriptor()
+    var no_execute = backend_plugin_vtable_v1_all_operations()
+    no_execute.supports_execute = false
+    aot_ignores_execute.vtable = no_execute
+    if not (_valid(admit_backend_plugin_descriptor(_request(), aot_ignores_execute), "compiler_aot")): return -28
+    checked = checked + 1
+    var jit_ignores_finalize = _descriptor()
+    var no_finalize = backend_plugin_vtable_v1_all_operations()
+    no_finalize.supports_finalize_object = false
+    jit_ignores_finalize.vtable = no_finalize
+    if not (_valid(admit_backend_plugin_descriptor(jit, jit_ignores_finalize), "interpreter_jit")): return -29
+    checked = checked + 1
+    if not (_value_matches(BackendPluginError.NotFound("payload:NotFound:tail"), "BACKEND_PLUGIN_NOT_FOUND", "payload:NotFound:tail")): return -30
+    checked = checked + 1
+    if not (_value_matches(BackendPluginError.LoadFailed("payload:LoadFailed:tail"), "BACKEND_PLUGIN_LOAD_FAILED", "payload:LoadFailed:tail")): return -31
+    checked = checked + 1
+    if not (_value_matches(BackendPluginError.MissingSymbol("payload:MissingSymbol:tail"), "BACKEND_PLUGIN_MISSING_SYMBOL", "payload:MissingSymbol:tail")): return -32
+    checked = checked + 1
+    if not (_value_matches(BackendPluginError.AbiMismatch("payload:AbiMismatch:tail"), "BACKEND_PLUGIN_ABI_MISMATCH", "payload:AbiMismatch:tail")): return -33
+    checked = checked + 1
+    if not (_value_matches(BackendPluginError.DescriptorTooSmall("payload:DescriptorTooSmall:tail"), "BACKEND_PLUGIN_DESCRIPTOR_SIZE", "payload:DescriptorTooSmall:tail")): return -34
+    checked = checked + 1
+    if not (_value_matches(BackendPluginError.ProviderVersionMismatch("payload:ProviderVersionMismatch:tail"), "BACKEND_PLUGIN_PROVIDER_VERSION", "payload:ProviderVersionMismatch:tail")): return -35
+    checked = checked + 1
+    if not (_value_matches(BackendPluginError.MirDigestMismatch("payload:MirDigestMismatch:tail"), "BACKEND_PLUGIN_MIR_DIGEST", "payload:MirDigestMismatch:tail")): return -36
+    checked = checked + 1
+    if not (_value_matches(BackendPluginError.RoleUnsupported("payload:RoleUnsupported:tail"), "BACKEND_PLUGIN_ROLE", "payload:RoleUnsupported:tail")): return -37
+    checked = checked + 1
+    if not (_value_matches(BackendPluginError.TargetUnsupported("payload:TargetUnsupported:tail"), "BACKEND_PLUGIN_TARGET", "payload:TargetUnsupported:tail")): return -38
+    checked = checked + 1
+    if not (_value_matches(BackendPluginError.CapabilityMismatch("payload:CapabilityMismatch:tail"), "BACKEND_PLUGIN_CAPABILITY", "payload:CapabilityMismatch:tail")): return -39
+    checked = checked + 1
+    if not (_value_matches(BackendPluginError.ProviderRejected("payload:ProviderRejected:tail"), "BACKEND_PLUGIN_PROVIDER_REJECTED", "payload:ProviderRejected:tail")): return -40
+    checked = checked + 1
+    if not (_value_matches(BackendPluginError.TeardownFailed("payload:TeardownFailed:tail"), "BACKEND_PLUGIN_TEARDOWN_FAILED", "payload:TeardownFailed:tail")): return -41
+    checked = checked + 1
+    var first_bad = _request()
+    first_bad.backend_name = ""
+    val first_error = admit_backend_plugin_descriptor(first_bad, _descriptor())
+    var second_bad = _request()
+    second_bad.target = ""
+    val second_error = admit_backend_plugin_descriptor(second_bad, _descriptor())
+    if not (_error_matches(first_error, "BACKEND_PLUGIN_PROVIDER_REJECTED", "backend_name is required") and _error_matches(second_error, "BACKEND_PLUGIN_PROVIDER_REJECTED", "target is required")): return -42
+    checked = checked + 1
+    var order_bad = _descriptor()
+    order_bad.abi_version = 2
+    if not (_error_matches(admit_backend_plugin_descriptor(first_bad, order_bad), "BACKEND_PLUGIN_PROVIDER_REJECTED", "backend_name is required")): return -43
+    checked = checked + 1
+    checked
+
+describe "backend plugin receipt error payloads":
+    it "REQ-006 preserves request and descriptor rejection, operation checks and all error categories":
+        step("exercise 43 actual receipt admission and payload conditions")
+        expect(receipt_semantic_checks()).to_equal(43)

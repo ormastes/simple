@@ -1,0 +1,128 @@
+# Actual production registry and MIR call-signature resolver regression tests.
+# @req REQ-COMPILER-IMPORTED-PARAMETER-IDENTITY
+# Execution is pending a source-bound compiler/test-runner closure.
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolKind, SymbolTable}
+use compiler.mir.mir_data.{bootstrap_fn_param_hir_types_register, bootstrap_fn_param_hir_types_lookup, bootstrap_fn_ret_hir_type_register, bootstrap_fn_ret_hir_type_lookup}
+use compiler.mir.mir_lowering.{MirLowering}
+
+fn imported_identity_named(id: i64) -> HirType:
+    HirType(kind: HirTypeKind.Named(SymbolId(id: id), []), span: Span.empty())
+
+fn imported_identity_integer_bits(type_: HirType) -> i64:
+    match type_.kind:
+        case HirTypeKind.Int(bits, _): bits
+        case _: -1
+
+fn imported_identity_named_id(type_: HirType) -> i64:
+    match type_.kind:
+        case HirTypeKind.Named(symbol, _): symbol.id
+        case _: -1
+
+describe "imported parameter signatures retain symbol-table ownership":
+    it "rejects provider-local Named IDs without losing the scalar return ABI":
+        step("Register a foreign nominal parameter with an independent i32 return")
+        val key = "identity.spec.foreign_named"
+        bootstrap_fn_ret_hir_type_register(key, HirType.named("i32"))
+        bootstrap_fn_param_hir_types_register(key, [imported_identity_named(7)])
+        expect(bootstrap_fn_param_hir_types_lookup(key) == nil).to_equal(true)
+        val ret = bootstrap_fn_ret_hir_type_lookup(key)
+        expect(ret != nil).to_equal(true)
+        if val found = ret:
+            expect(imported_identity_integer_bits(found)).to_equal(32)
+
+    it "rejects a Named ID nested inside array tuple optional shapes":
+        step("Keep recursive nominal ownership through every enclosing shape")
+        val named = imported_identity_named(9)
+        val optional = HirType(kind: HirTypeKind.Optional(named), span: Span.empty())
+        val tuple = HirType(kind: HirTypeKind.Tuple([HirType.named("i64"), optional]), span: Span.empty())
+        val array = HirType(kind: HirTypeKind.Array(tuple, nil), span: Span.empty())
+        val key = "identity.spec.nested_named"
+        bootstrap_fn_param_hir_types_register(key, [array])
+        expect(bootstrap_fn_param_hir_types_lookup(key) == nil).to_equal(true)
+
+    it "rejects dynamic trait IDs and inference variables":
+        step("Do not interpret provider trait and inference IDs in a consumer table")
+        val trait_type = HirType(kind: HirTypeKind.DynTrait(SymbolId(id: 13)), span: Span.empty())
+        val infer_type = HirType(kind: HirTypeKind.Infer(17, 0), span: Span.empty())
+        bootstrap_fn_param_hir_types_register("identity.spec.trait", [trait_type])
+        bootstrap_fn_param_hir_types_register("identity.spec.infer", [infer_type])
+        expect(bootstrap_fn_param_hir_types_lookup("identity.spec.trait") == nil).to_equal(true)
+        expect(bootstrap_fn_param_hir_types_lookup("identity.spec.infer") == nil).to_equal(true)
+
+    it "does not resurrect an earlier scalar signature after a rejected registration":
+        step("A conflicting foreign declaration cannot expose stale scalar parameters")
+        val key = "identity.spec.rejected_stays_rejected"
+        bootstrap_fn_ret_hir_type_register(key, HirType.named("i32"))
+        bootstrap_fn_param_hir_types_register(key, [HirType.named("i32")])
+        bootstrap_fn_param_hir_types_register(key, [imported_identity_named(7)])
+        bootstrap_fn_param_hir_types_register(key, [HirType.named("i64")])
+        expect(bootstrap_fn_param_hir_types_lookup(key) == nil).to_equal(true)
+        val ret = bootstrap_fn_ret_hir_type_lookup(key)
+        expect(ret != nil).to_equal(true)
+        if val found = ret:
+            expect(imported_identity_integer_bits(found)).to_equal(32)
+
+    it "preserves the mixed-width primitive ABI fallback for an untyped callable":
+        step("Resolve real production parameter fallback without erasing i32 to i64")
+        val key = "identity.spec.primitive_fallback"
+        bootstrap_fn_param_hir_types_register(key, [HirType.named("i32"), HirType.named("i64")])
+        var symbols = SymbolTable.new()
+        val callable = symbols.define(key, SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, "identity.provider")
+        var lowering = MirLowering.new(symbols)
+        val params = lowering.resolved_call_hir_param_types(callable)
+        expect(params.len()).to_equal(2)
+        if params.len() == 2:
+            expect(imported_identity_integer_bits(params[0])).to_equal(32)
+            expect(imported_identity_integer_bits(params[1])).to_equal(64)
+
+    it "uses the translated consumer signature when provider and consumer IDs collide":
+        step("Build two actual symbol tables with unrelated declarations at the same ID")
+        var provider = SymbolTable.new()
+        val provider_config = provider.define("DuplicationConfig", SymbolKind.Class, nil, Span.empty(), Visibility.Public, false, "identity.provider")
+        var consumer = SymbolTable.new()
+        val unrelated_trait = consumer.define("Close", SymbolKind.Trait, nil, Span.empty(), Visibility.Public, false, "identity.traits")
+        val consumer_config = consumer.define("DuplicationConfig", SymbolKind.Class, nil, Span.empty(), Visibility.Public, false, "identity.provider")
+        expect(provider_config.id).to_equal(unrelated_trait.id)
+        expect(consumer_config.id == unrelated_trait.id).to_equal(false)
+        val key = "identity.spec.translated_signature"
+        bootstrap_fn_param_hir_types_register(key, [imported_identity_named(provider_config.id)])
+        val signature = HirType(kind: HirTypeKind.Function([imported_identity_named(consumer_config.id)], HirType.named("bool"), []), span: Span.empty())
+        val callable = consumer.define(key, SymbolKind.Function, signature, Span.empty(), Visibility.Public, false, "identity.provider")
+        var lowering = MirLowering.new(consumer)
+        val params = lowering.resolved_call_hir_param_types(callable)
+        expect(params.len()).to_equal(1)
+        if params.len() == 1:
+            expect(imported_identity_named_id(params[0])).to_equal(consumer_config.id)
+
+    it "keeps declared mixed-width primitive ABI over an erased local signature":
+        step("A local all-i64 signature cannot override declared i32/i64 ABI")
+        val key = "identity.spec.erased_local"
+        bootstrap_fn_param_hir_types_register(key, [HirType.named("i32"), HirType.named("i64")])
+        var symbols = SymbolTable.new()
+        val signature = HirType(kind: HirTypeKind.Function([HirType.named("i64"), HirType.named("i64")], HirType.named("bool"), []), span: Span.empty())
+        val callable = symbols.define(key, SymbolKind.Function, signature, Span.empty(), Visibility.Public, false, "identity.provider")
+        var lowering = MirLowering.new(symbols)
+        val params = lowering.resolved_call_hir_param_types(callable)
+        expect(params.len()).to_equal(2)
+        if params.len() == 2:
+            expect(imported_identity_integer_bits(params[0])).to_equal(32)
+            expect(imported_identity_integer_bits(params[1])).to_equal(64)
+
+    it "uses local parameters when the global declaration name is ambiguous":
+        step("Two provider declarations cannot publish a bare-name ABI")
+        val key = "identity.spec.ambiguous"
+        bootstrap_fn_ret_hir_type_register(key, HirType.named("i32"))
+        bootstrap_fn_ret_hir_type_register(key, HirType.named("i64"))
+        bootstrap_fn_param_hir_types_register(key, [HirType.named("i32")])
+        expect(bootstrap_fn_param_hir_types_lookup(key) == nil).to_equal(true)
+        var symbols = SymbolTable.new()
+        val signature = HirType(kind: HirTypeKind.Function([HirType.named("i64")], HirType.named("bool"), []), span: Span.empty())
+        val callable = symbols.define(key, SymbolKind.Function, signature, Span.empty(), Visibility.Public, false, "identity.local")
+        var lowering = MirLowering.new(symbols)
+        val params = lowering.resolved_call_hir_param_types(callable)
+        expect(params.len()).to_equal(1)
+        if params.len() == 1:
+            expect(imported_identity_integer_bits(params[0])).to_equal(64)

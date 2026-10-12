@@ -1,0 +1,89 @@
+"""Omitted slice endpoints survive the flat parser/bridge boundary.
+
+Bug: doc/08_tracking/bug/omitted_text_slice_end_2026-10-12.md
+These inspect the real parser result; numeric endpoint values alone cannot
+distinguish an omitted endpoint from a user-written negative expression.
+"""
+
+use std.spec.*
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types_expr.*
+
+fn bridged_slice(expression: text) -> Expr:
+    val source = "fn probe():\n    " + expression + "\n"
+    val parsed = parse_and_build_module(source, "omitted_text_slice_fixture.spl")
+    val function = parsed.functions["probe"] ?? panic("missing probe")
+    for statement in function.body.stmts:
+        match statement.kind:
+            case StmtKind.Expr(expression): return expression
+            case _: pass
+    panic("missing slice expression")
+
+fn slice_argument_count(expression: text) -> i64:
+    val bridged = bridged_slice(expression)
+    match bridged.kind:
+        case ExprKind.MethodCall(_, method, args):
+            expect(method).to_equal("slice")
+            return args.len()
+        case _: panic("slice did not become a method call")
+
+describe "omitted text slice end in the flat AST bridge":
+    it "keeps omission for start zero":
+        expect(slice_argument_count("\"abc\"[0:]")).to_equal(1)
+
+    it "keeps omission for a nonzero start":
+        expect(slice_argument_count("\"abc\"[1:]")).to_equal(1)
+
+    it "keeps omission at the end of the string":
+        expect(slice_argument_count("\"abc\"[3:]")).to_equal(1)
+
+    it "keeps omission beyond the end of the string":
+        expect(slice_argument_count("\"abc\"[4:]")).to_equal(1)
+
+    it "keeps omission for an empty receiver":
+        expect(slice_argument_count("\"\"[0:]")).to_equal(1)
+
+    it "keeps omission at a UTF-8 byte boundary":
+        expect(slice_argument_count("\"é한Z\"[2:]")).to_equal(1)
+
+    it "retains an explicit negative endpoint as a unary expression":
+        val bridged = bridged_slice("\"abc\"[0:-1]")
+        match bridged.kind:
+            case ExprKind.MethodCall(_, _, args):
+                expect(args.len()).to_equal(2)
+                match args[1].value.kind:
+                    case ExprKind.Unary(_, operand):
+                        match operand.kind:
+                            case ExprKind.IntLit(value): expect(value).to_equal(1)
+                            case _: panic("negative endpoint lost its operand")
+                    case _: panic("explicit negative endpoint lost its unary expression")
+            case _: panic("missing slice method call")
+
+    it "retains parenthesized explicit negative and zero endpoints":
+        expect(slice_argument_count("\"abc\"[0:(-1)]")).to_equal(2)
+        expect(slice_argument_count("\"abc\"[0:0]")).to_equal(2)
+
+    it "retains explicit positive bounds":
+        expect(slice_argument_count("\"abc\"[1:3]")).to_equal(2)
+        expect(slice_argument_count("\"abc\"[1:99]")).to_equal(2)
+
+    it "retains an explicit endpoint expression that evaluates to negative one":
+        expect(slice_argument_count("\"abc\"[0:(1 - 2)]")).to_equal(2)
+
+    it "keeps a call receiver once without synthesizing a second length receiver":
+        val bridged = bridged_slice("next_text()[1:]")
+        match bridged.kind:
+            case ExprKind.MethodCall(receiver, _, args):
+                expect(args.len()).to_equal(1)
+                match receiver.kind:
+                    case ExprKind.Call(callee, call_args):
+                        expect(call_args.len()).to_equal(0)
+                        match callee.kind:
+                            case ExprKind.Ident(name): expect(name).to_equal("next_text")
+                            case _: panic("receiver callee changed")
+                    case _: panic("receiver call changed")
+                match args[0].value.kind:
+                    case ExprKind.IntLit(value): expect(value).to_equal(1)
+                    case _: panic("slice start changed")
+            case _: panic("missing slice method call")

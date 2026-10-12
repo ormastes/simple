@@ -1,0 +1,44 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.driver_types.{native_capsule_mir_identity_v1}
+use compiler.mir.mir_data.{MirModule}
+use compiler.mir.mir_types.{MirConstant, MirType, MirConstValue}
+use compiler.hir.hir_types.{SymbolId}
+
+describe "native capsule MIR identity scratch ownership":
+    it "preserves nonempty constant canonical bytes and the original payload":
+        val symbol = SymbolId(id: 11)
+        var constants: Dict<SymbolId, MirConstant> = {}
+        constants[symbol] = MirConstant(symbol: symbol, name: "answer",
+            type_: MirType.i64(), value: MirConstValue.Int(42))
+        val module = MirModule(name: "scratch", functions: {}, statics: {},
+            constants: constants, types: {})
+        val expected = sha256_text("module|7:scratch\nconst|11|6:answer|\"I64\"|2:42")
+        expect(native_capsule_mir_identity_v1(module)).to_equal(expected)
+        expect(module.constants[symbol].name).to_equal("answer")
+        expect(native_capsule_mir_identity_v1(module)).to_equal(expected)
+
+    it "preserves exact canonical bytes and retains the digest across later scopes":
+        val module = MirModule(name: "scratch", functions: {}, statics: {},
+            constants: {}, types: {})
+        val expected = sha256_text("module|7:scratch")
+        val first = native_capsule_mir_identity_v1(module)
+        expect(first).to_equal(expected)
+        val other = MirModule(name: "other", functions: {}, statics: {},
+            constants: {}, types: {})
+        expect(native_capsule_mir_identity_v1(other)).to_equal(
+            sha256_text("module|5:other"))
+        # The first digest and borrowed input must survive scope reclamation.
+        expect(first).to_equal(expected)
+        expect(module.name).to_equal("scratch")
+        expect(native_capsule_mir_identity_v1(module)).to_equal(expected)
+
+    it "retains the length prefix separating ambiguous module names":
+        val left = MirModule(name: "a|2:bc", functions: {}, statics: {},
+            constants: {}, types: {})
+        val right = MirModule(name: "a|bc", functions: {}, statics: {},
+            constants: {}, types: {})
+        expect(native_capsule_mir_identity_v1(left)).to_equal(
+            sha256_text("module|6:a|2:bc"))
+        expect(native_capsule_mir_identity_v1(right)).to_equal(
+            sha256_text("module|4:a|bc"))

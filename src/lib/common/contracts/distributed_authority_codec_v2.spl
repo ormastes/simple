@@ -1,0 +1,98 @@
+# Public signed frames remain untrusted until HostAuthority verifies them.
+use std.common.contracts.distributed_authority_v2.*
+use std.common.contracts.distributed_control_codec_v2.*
+use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.binary_inspect.{bytes_to_hex_canonical, hex_to_bytes}
+
+fn distributed_grant_issuer_metadata_validate_v2(value: DistributedSignedGrantV2) -> text:
+    if not builder_identifier_valid_v1(value.issuer_id) or value.key_revision <= 0 or
+            value.key_revision > DISTRIBUTED_WIRE_INTEGER_MAX_V2:
+        return "ISSUER_IDENTITY_INVALID"
+    ""
+
+fn distributed_approval_metadata_validate_v2(value: DistributedSignedApprovalV2) -> text:
+    if not builder_identifier_valid_v1(value.approver_id) or
+            not builder_digest_valid_v1(value.grant_digest) or not builder_digest_valid_v1(value.request_digest):
+        return "APPROVAL_IDENTITY_INVALID"
+    for number in [value.key_revision, value.policy_revision, value.session_generation, value.expires_at]:
+        if number <= 0 or number > DISTRIBUTED_WIRE_INTEGER_MAX_V2:
+            return "APPROVAL_INTEGER_INVALID"
+    ""
+
+fn distributed_signature_hex_v2(signature: [u8]) -> Result<text, text>:
+    if signature.len() != 64: return Err("SIGNATURE_INVALID")
+    var bytes: [i64] = []
+    for byte in signature: bytes.push(byte as i64)
+    Ok(bytes_to_hex_canonical(bytes))
+
+fn distributed_signature_from_hex_v2(value: text) -> Result<[u8], text>:
+    if value.len() != 128: return Err("SIGNATURE_INVALID")
+    val bytes = hex_to_bytes(value)
+    if bytes.len() != 64 or bytes_to_hex_canonical(bytes) != value:
+        return Err("SIGNATURE_NONCANONICAL")
+    var signature: [u8] = []
+    for byte in bytes: signature.push(byte as u8)
+    Ok(signature)
+
+fn distributed_encode_signed_grant_v2(value: DistributedSignedGrantV2) -> Result<text, text>:
+    val metadata_error = distributed_grant_issuer_metadata_validate_v2(value)
+    if metadata_error != "": return Err(metadata_error)
+    val body = distributed_encode_grant_v2(value.grant)?
+    val signature = distributed_signature_hex_v2(value.signature)?
+    val payload = builder_wire_line_v1("DBC_SIGNED_GRANT_V2") + builder_wire_line_v1(value.issuer_id) +
+        builder_wire_line_v1("{value.key_revision}") + builder_wire_line_v1(body) + builder_wire_line_v1(signature)
+    if payload.len() > DISTRIBUTED_WIRE_MAX_BYTES_V2: return Err("WIRE_TOO_LARGE")
+    Ok(payload)
+
+fn distributed_decode_signed_grant_v2(payload: text) -> Result<DistributedSignedGrantV2, text>:
+    if payload.len() > DISTRIBUTED_WIRE_MAX_BYTES_V2: return Err("WIRE_TOO_LARGE")
+    val reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "DBC_SIGNED_GRANT_V2": return Err("VERSION_UNSUPPORTED")
+    val identity = reader.scalar()
+    val revision = reader.number(DISTRIBUTED_WIRE_INTEGER_MAX_V2, false)
+    val body = reader.scalar()
+    val signature_hex = reader.scalar()
+    val wire_error = reader.complete_error()
+    if wire_error != "": return Err(wire_error)
+    val grant = distributed_decode_grant_v2(body)?
+    val signature = distributed_signature_from_hex_v2(signature_hex)?
+    val value = DistributedSignedGrantV2(grant: grant, issuer_id: identity,
+        key_revision: revision, signature: signature)
+    val canonical = distributed_encode_signed_grant_v2(value)?
+    if canonical != payload: return Err("WIRE_NONCANONICAL")
+    Ok(value)
+
+fn distributed_encode_signed_approval_v2(value: DistributedSignedApprovalV2) -> Result<text, text>:
+    val metadata_error = distributed_approval_metadata_validate_v2(value)
+    if metadata_error != "": return Err(metadata_error)
+    val signature = distributed_signature_hex_v2(value.signature)?
+    var pieces: [text] = [builder_wire_line_v1("DBC_SIGNED_APPROVAL_V2")]
+    for field in [value.approver_id, "{value.key_revision}", value.grant_digest, value.request_digest,
+            "{value.policy_revision}", "{value.session_generation}", "{value.expires_at}", signature]:
+        pieces.push(builder_wire_line_v1(field))
+    val payload = pieces.join("")
+    if payload.len() > DISTRIBUTED_WIRE_MAX_BYTES_V2: return Err("WIRE_TOO_LARGE")
+    Ok(payload)
+
+fn distributed_decode_signed_approval_v2(payload: text) -> Result<DistributedSignedApprovalV2, text>:
+    if payload.len() > DISTRIBUTED_WIRE_MAX_BYTES_V2: return Err("WIRE_TOO_LARGE")
+    val reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "DBC_SIGNED_APPROVAL_V2": return Err("VERSION_UNSUPPORTED")
+    val identity = reader.scalar()
+    val revision = reader.number(DISTRIBUTED_WIRE_INTEGER_MAX_V2, false)
+    val grant_digest = reader.scalar()
+    val request_digest = reader.scalar()
+    val policy = reader.number(DISTRIBUTED_WIRE_INTEGER_MAX_V2, false)
+    val generation = reader.number(DISTRIBUTED_WIRE_INTEGER_MAX_V2, false)
+    val expiry = reader.number(DISTRIBUTED_WIRE_INTEGER_MAX_V2, false)
+    val signature_hex = reader.scalar()
+    val wire_error = reader.complete_error()
+    if wire_error != "": return Err(wire_error)
+    val signature = distributed_signature_from_hex_v2(signature_hex)?
+    val value = DistributedSignedApprovalV2(approver_id: identity, key_revision: revision,
+        grant_digest: grant_digest, request_digest: request_digest, policy_revision: policy,
+        session_generation: generation, expires_at: expiry, signature: signature)
+    val canonical = distributed_encode_signed_approval_v2(value)?
+    if canonical != payload: return Err("WIRE_NONCANONICAL")
+    Ok(value)

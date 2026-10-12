@@ -17,6 +17,8 @@
 #      is not verified capability. Collapsing them is how a UI reports
 #      "Connected" over a session that never handshook.
 
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+
 # ============================================================================
 # Identity
 # ============================================================================
@@ -150,3 +152,105 @@ fn is_reconcilable(view: SessionView) -> bool:
         case ProcessLifecycle.Exited: false
         case ProcessLifecycle.Failed: false
         case _: true
+
+# Persistent metadata, not a native lease or permission to adopt a PID.
+# Session/smux owners retain the live opaque process/PTY authority separately.
+struct SessionExecutionBindingV2:
+    session: SessionId
+    host_id: text
+    host_boot_digest: text
+    service_instance_digest: text
+    request_id_high: i64
+    request_id_low: i64
+    ticket_high: i64
+    ticket_low: i64
+    pid: i64
+    process_started_ns: i64
+
+fn session_execution_binding_validate_v2(value: SessionExecutionBindingV2) -> text:
+    # Session IDs are existing opaque values; do not narrow them to host syntax.
+    if value.session.value == "" or value.session.value.len() > 256 or value.session.generation <= 0:
+        return "SESSION_ID_INVALID"
+    if not builder_identifier_valid_v1(value.host_id) or
+            not builder_digest_valid_v1(value.host_boot_digest) or not builder_digest_valid_v1(value.service_instance_digest):
+        return "SESSION_HOST_BINDING_INVALID"
+    if value.request_id_high <= 0 or value.request_id_low <= 0 or value.ticket_high <= 0 or
+            value.ticket_low <= 0 or value.pid <= 0 or value.process_started_ns <= 0:
+        return "SESSION_PROCESS_BINDING_INVALID"
+    ""
+
+fn session_execution_binding_match_v2(requested: SessionExecutionBindingV2,
+        observed: SessionExecutionBindingV2) -> text:
+    val request_error = session_execution_binding_validate_v2(requested)
+    if request_error != "": return request_error
+    val observed_error = session_execution_binding_validate_v2(observed)
+    if observed_error != "": return observed_error
+    if not same_session(requested.session, observed.session): return "SESSION_GENERATION_STALE"
+    if requested.host_id != observed.host_id or requested.host_boot_digest != observed.host_boot_digest:
+        return "SESSION_HOST_CHANGED"
+    if requested.service_instance_digest != observed.service_instance_digest:
+        return "SESSION_SERVICE_CHANGED"
+    if requested.request_id_high != observed.request_id_high or requested.request_id_low != observed.request_id_low or
+            requested.ticket_high != observed.ticket_high or requested.ticket_low != observed.ticket_low or
+            requested.pid != observed.pid or requested.process_started_ns != observed.process_started_ns:
+        return "SESSION_PROCESS_CHANGED"
+    ""
+
+enum SessionControlActionV2:
+    DetachClient
+    CancelTurn
+    CancelJob
+    TerminateSession
+    DeleteHistory
+    SendInput
+    Resize
+
+fn session_control_scope_v2(action: SessionControlActionV2) -> text:
+    match action:
+        case SessionControlActionV2.DetachClient: "session_detach"
+        case SessionControlActionV2.CancelTurn: "session_cancel_turn"
+        case SessionControlActionV2.CancelJob: "build_cancel"
+        case SessionControlActionV2.TerminateSession: "session_terminate"
+        case SessionControlActionV2.DeleteHistory: "session_history_delete"
+        case SessionControlActionV2.SendInput: "session_input"
+        case SessionControlActionV2.Resize: "session_resize"
+
+fn session_control_domain_v2(action: SessionControlActionV2) -> text:
+    if action == SessionControlActionV2.CancelJob: "build" else: "session"
+
+enum SessionControlLeaseKindV2:
+    Input
+    Geometry
+
+struct SessionControlLeaseV2:
+    binding: SessionExecutionBindingV2
+    kind: SessionControlLeaseKindV2
+    holder_id: text
+    client_id: text
+    nonce_digest: text
+    revision: i64
+    expires_monotonic_ns: i64
+
+# Metadata authorization is additional to the authenticated grant check.
+# Current lease/binding/revision must come from the Session/smux owner.
+fn session_control_lease_check_v2(lease: SessionControlLeaseV2,
+        observed: SessionExecutionBindingV2, required_kind: SessionControlLeaseKindV2,
+        holder_id: text, client_id: text, current_nonce: text,
+        current_revision: i64, now_monotonic_ns: i64) -> text:
+    val binding_error = session_execution_binding_match_v2(lease.binding, observed)
+    if binding_error != "": return binding_error
+    if not builder_identifier_valid_v1(lease.holder_id) or lease.client_id == "" or lease.client_id.len() > 128 or
+            not builder_digest_valid_v1(lease.nonce_digest):
+        return "SESSION_LEASE_INVALID"
+    if lease.kind != required_kind: return "SESSION_LEASE_KIND_DENIED"
+    if lease.holder_id != holder_id or lease.client_id != client_id: return "SESSION_LEASE_HOLDER_DENIED"
+    if current_revision <= 0 or lease.revision != current_revision or lease.nonce_digest != current_nonce:
+        return "SESSION_LEASE_STALE"
+    if now_monotonic_ns <= 0 or lease.expires_monotonic_ns <= now_monotonic_ns: return "SESSION_LEASE_EXPIRED"
+    ""
+
+# EOF/detach does not terminate the child or cancel an active provider turn.
+fn session_detach_view_v2(view: SessionView) -> SessionView:
+    var detached = view
+    detached.transport = Transport.Disconnected
+    detached

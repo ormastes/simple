@@ -4167,6 +4167,11 @@ impl MirLowering:
                     val cat_res = b_cat.emit_call(cat_func, [cat_left, cat_right], MirType(kind: MirTypeKind.Opaque("str")))
                     self.builder = b_cat
                     if val cat_local = cat_res:
+                        # rt_strcat_tagged really returns tagged text, even
+                        # though this temporary has nominal Opaque("str") type.
+                        # Reassignment into an i64 renderer-result slot must
+                        # preserve that provenance instead of re-rendering it.
+                        self.mark_tagged_text_local(cat_local.id)
                         return cat_local
 
                 # #148: untyped/native-path text `==`/`!=` must compare
@@ -6588,8 +6593,13 @@ impl MirLowering:
             match arm.pattern.kind:
                 case Wildcard:
                     if has_default_body:
+                        # Keep rejection strict, but identify its owner even
+                        # when the lowered arm span has no source location.
+                        var duplicate_wildcard_fn_name = "?"
+                        if val duplicate_wildcard_fn = self.builder.current_function:
+                            duplicate_wildcard_fn_name = duplicate_wildcard_fn.name
                         self.error(
-                            "B5b: match has multiple wildcard arms (module {self.current_module_id})",
+                            "B5b: match has multiple wildcard arms (arm {idx} in fn {duplicate_wildcard_fn_name}, module {self.current_module_id})",
                             Some(arm.span)
                         )
                         var b_err2 = self.builder
