@@ -310,3 +310,41 @@ with SDKROOT/MACOSX_DEPLOYMENT_TARGET from `xcrun --sdk macosx`):
   (missing `reason=`, or separated from their block by comments) failed
   workaround refresh once the files were touched by the migration; repaired
   in this commit.
+
+## 2026-10-12 addendum 6: stage-2 gate residual three (db_atomic arity, B5b cascade, aspect_pack_io types)
+
+- db_atomic.spl: `case SdnValue.Table(fields, types, rows):` (3 slots) vs the
+  sibling-changed declaration `Table(headers: [text], rows: [[SdnValue]])`
+  (2 payloads, src/lib/common/sdn/value.spl:36). Fixed to
+  `case SdnValue.Table(headers, rows):` with `columns = headers` (the
+  Option<fields> column-header handling died with the third payload; the
+  sibling change made headers required). Seed validation blocked by a
+  pre-existing gc-boundary policy artifact in standalone mode
+  (nogc_async_mut -> std.nogc_sync_mut.io.time_ops); arity fix verified by
+  inspection against the declaration.
+- B5b ("match has multiple wildcard arms", test_runner_build): the only
+  module named by the error batch is lib.common.sdn.value
+  (`undefined variable SdnValue` + `unresolved method call: Float` both at
+  value.spl:48:9 — the enum's own constructor fails inside its impl, i.e.
+  the enum's symbol IDENTITY was clobbered earlier in the 252-module MIR
+  batch; the B5b check at 50.mir/_MirLoweringExpr/expr_dispatch.spl:6466
+  then fires on a FlatAst-bridge-degraded wildcard arm per the documented
+  mechanism, convert_nodes.spl:1581/1628-1631). value.spl compiles CLEAN
+  standalone (seed semantics + SMF) and contains no match with two wildcard
+  arms (all 20+ matches inspected; every `case _` is single). No source fix
+  is applicable. Compiler-lane hardening proposed: (1) always-eprint a
+  receipt (file:line + expression tag) when convert_flat_pattern degrades a
+  pattern to Wildcard — currently behind SIMPLE_DEBUG_MATCH_PAT, default
+  off; (2) include the lowering module name in the B5b diagnostic.
+- aspect_pack_io.spl: 10x `unresolved type: MappingClosePermitV1/
+  MappingLifetimeLedgerV1/MappingLifetimeRecordV1` (fix-(b) class; owner
+  exec_mapping_cleanup_v1 itemizes the imports but the shard-path
+  owner-scope sweep cannot see them). Cheapest source-side unblock applied:
+  explicit itemized import of all three types added to the IMPORTER
+  (aspect_pack_io.spl) from their declaring module
+  compiler.loader.mapping_lifetime_accounting_v1 — local binding dodges the
+  owner-scope projection the same way the fe1f4ed6d72 workaround imports
+  do. Seed standalone validation blocked by the same sffi_env_get stdlib
+  gap as before; confirmation requires the matrix rerun. If the matrix
+  still reports these after the importer-side import, compiler fix (b)
+  (alias-retry in canonical_callable_dependency_candidate) is unavoidable.

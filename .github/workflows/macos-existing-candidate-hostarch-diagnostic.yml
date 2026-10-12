@@ -1,0 +1,110 @@
+name: Existing macOS candidate host-query diagnostic
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnose:
+    runs-on: macos-15
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: frozen-source
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          path: diagnostic-tools
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 5e022fd399102085cc93f04a2fe257311f54846f
+          persist-credentials: false
+          path: frozen-source
+      - name: Recover immutable rejected candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build/hostarch-diagnostic/artifact
+          gh run download 38161323992 --repo ormastes/simple --name macos-phase23-evidence-38161323992-1 --dir build/hostarch-diagnostic/artifact
+          candidate=build/hostarch-diagnostic/artifact/.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected
+          printf '%s  %s\n' 4040420a1d187b9c3e011be92565387b04d319a4f2f5df432d65ab94836ecf81 "$candidate" | shasum -a 256 -c -
+          chmod +x "$candidate"
+          printf '%s\n' qualification=REJECTED_UNADMITTED diagnostic_only=true > build/hostarch-diagnostic/qualification.env
+      - name: Restore frozen LLVM tool authority
+        run: |
+          channel=$(python3 -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("src/compiler_rust/rust-toolchain.toml").read_text())["toolchain"]["channel"])')
+          rustup toolchain install "$channel" --profile minimal
+          rustup override set "$channel"
+          sh scripts/setup/install-macos-phase23-llvm23.shs
+          sh scripts/check/pin-macos-phase23-llvm23.shs
+          brew install coreutils
+      - name: Record native baseline and debugger boundary
+        run: |
+          set +e
+          /usr/bin/uname -m > build/hostarch-diagnostic/native-uname.stdout 2> build/hostarch-diagnostic/native-uname.stderr
+          printf 'absolute_status=%s\n' "$?" > build/hostarch-diagnostic/native-shell.env
+          /bin/sh -c 'uname -m' > build/hostarch-diagnostic/native-shell.stdout 2> build/hostarch-diagnostic/native-shell.stderr
+          printf 'native_shell_status=%s\n' "$?" >> build/hostarch-diagnostic/native-shell.env
+          set -e
+          candidate="$PWD/build/hostarch-diagnostic/artifact/.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected"
+          frozen_lib="$PWD/src"
+          frozen_probe="$PWD/src/compiler/bootstrap_admission/p2_add.spl"
+          fixture="$PWD/build/hostarch-diagnostic/minimal-source"
+          mkdir -p "$fixture/src/compiler/bootstrap_admission"
+          cp "$frozen_probe" "$fixture/src/compiler/bootstrap_admission/p2_add.spl"
+          cmp "$frozen_probe" "$fixture/src/compiler/bootstrap_admission/p2_add.spl"
+          shasum -a 256 "$frozen_probe" "$fixture/src/compiler/bootstrap_admission/p2_add.spl" > build/hostarch-diagnostic/source-projection.sha256
+          git -C "$fixture" init -q
+          git -C "$fixture" add src/compiler/bootstrap_admission/p2_add.spl
+          git -C "$fixture" -c user.name=Diagnostic -c user.email=diagnostic@invalid commit -qm 'Frozen one-file diagnostic source projection'
+          printf '%s\n' tag=WORKAROUND_MAC_HOSTQUERY_FINITE_SOURCE_PROJECTION qualification=UNADMITTED source_file_count=1 full_compiler_admission=false >> build/hostarch-diagnostic/qualification.env
+
+          cat > build/hostarch-diagnostic/commands.lldb <<LLDB
+          settings set auto-confirm true
+          settings set target.process.stop-on-sharedlibrary-events false
+          breakpoint set --name src__lib__nogc_sync_mut__io_runtime__host_arch
+          process launch --stop-at-entry
+          command script import "$GITHUB_WORKSPACE/diagnostic-tools/scripts/check/diagnose_macos_existing_hostarch.py"
+          script diagnose_macos_existing_hostarch.run(lldb.debugger)
+          LLDB
+          diagnostic_root="$PWD/build/hostarch-diagnostic"
+          cd "$fixture"
+          set +e
+          HOSTARCH_DIAGNOSTIC_RECEIPT="$diagnostic_root/boundary.json" SIMPLE_BINARY="$candidate" SIMPLE_BIN="$candidate" SIMPLE_BOOTSTRAP_DRIVER="$candidate" SIMPLE_FRONTEND_DELEGATE="$candidate" SIMPLE_FRONTEND_DELEGATED=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_BUILD_FORCE_WORKER=0 SIMPLE_EXECUTION_MODE=native SIMPLE_BOOTSTRAP=0 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_LIB="$frozen_lib"             gtimeout --kill-after=10s 120 /usr/bin/lldb --batch --source "$diagnostic_root/commands.lldb" -- "$candidate" native-build --source src/compiler/bootstrap_admission --backend llvm --runtime-bundle core-c-bootstrap --entry-closure --entry src/compiler/bootstrap_admission/p2_add.spl --cache-dir "$diagnostic_root/minimal-cache" --mode one-binary --output "$diagnostic_root/p2_add" > "$diagnostic_root/debugger.log" 2>&1
+          status=$?
+          cd "$diagnostic_root/../.."
+          printf 'debugger_status=%s\n' "$status" > build/hostarch-diagnostic/debugger.env
+          # An unresolved breakpoint, debugger entitlement denial, child escape,
+          # or missing tool authority is diagnostic evidence, never admission.
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo 'FAIL: debugger failed or timed out; retained receipts are incomplete' >&2
+            exit "$status"
+          fi
+          python3 - <<'RECEIPT'
+          import json
+          from pathlib import Path
+          receipt=Path('build/hostarch-diagnostic/boundary.json')
+          if not receipt.exists():
+              raise SystemExit('FAIL: debugger produced no boundary receipt')
+          data=json.loads(receipt.read_text())
+          if data.get('capture') != 'COMPLETE':
+              raise SystemExit('FAIL: actual host query capture incomplete')
+          print('actual process tuple and host architecture captured; candidate remains UNADMITTED')
+          RECEIPT
+          tail -n 3 build/hostarch-diagnostic/debugger.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-existing-candidate-hostarch-${{ github.run_id }}
+          path: |
+            frozen-source/build/hostarch-diagnostic/*.json
+            frozen-source/build/hostarch-diagnostic/*.sha256
+            frozen-source/build/hostarch-diagnostic/*.env
+            frozen-source/build/hostarch-diagnostic/*.stdout
+            frozen-source/build/hostarch-diagnostic/*.stderr
+            frozen-source/build/hostarch-diagnostic/*.log
+            frozen-source/build/hostarch-diagnostic/*.lldb
+          if-no-files-found: error
+          retention-days: 14

@@ -136,6 +136,7 @@ pub use collections::{
     rt_array_len_safe, rt_array_new, rt_array_new_with_cap_u64, rt_array_pop, rt_array_push, rt_array_push_i64_raw,
     rt_array_set, rt_array_set_len_known, rt_array_set_len_known_text, rt_array_set_text,
     rt_transient_array_scope_begin, rt_transient_array_scope_end, rt_transient_array_scope_pause,
+    rt_transient_array_scope_state_v1,
     rt_transient_heap_promote, transient_heap_scope_paused, rt_byte_array_new, rt_byte_array_new_len, rt_bytes_u32_le_at, rt_bytes_u64_le_at,
     rt_bytes_u8_at, rt_bytes_u8_set, rt_collection_set, rt_contains, rt_cstring_to_text, rt_hash_text, rt_for_iterable, rt_index_get,
     rt_index_set, rt_len, rt_range, rt_range_inclusive, rt_slice, rt_string_char_at, rt_interp_cstr, rt_string_bytes,
@@ -160,7 +161,7 @@ pub use collections::{
 };
 pub(crate) use collections::{byte_array_bytes, byte_array_write, word_array_le_bytes};
 pub use collections::{
-    rt_any_add, rt_array_all, rt_array_any, rt_array_each, rt_array_filter, rt_array_find, rt_array_map,
+    rt_any_add, rt_tagged_add, rt_array_all, rt_array_any, rt_array_each, rt_array_filter, rt_array_find, rt_array_map,
     rt_array_reduce, rt_map,
 };
 pub use utf8_kernels::{

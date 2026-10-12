@@ -38,10 +38,11 @@ set -eu
 # a clear reason and does NOT fail the run — a missing nightly is not a defect.
 #
 # SMOKE vs FULL:
-#   --smoke (default) : feasible-now fast signal. Runtime = compile every
-#       self-contained runtime TU under the sanitizer (build-clean proof) plus a
-#       generated self-check harness that is COMPILED AND RUN clean (runtime
-#       proof). Seed = a nightly-capability probe (compile+run a tiny Rust TU
+#   --smoke (default) : feasible-now fast signal. Runtime = compile eligible
+#       runtime TUs under the sanitizer, with explicit exclusions and per-TU
+#       logs, plus a separately reported generated allocation harness. Runtime
+#       objects are NOT linked or executed. Seed = a nightly-capability probe
+#       (compile+run a tiny Rust TU
 #       under the per-kind flags); the heavy full-workspace seed build/test is
 #       deferred to --full / nightly cron.
 #   --full  : the real sweep — `cargo +nightly build` of the seed workspace and a
@@ -186,8 +187,8 @@ runtime_selfcontained_tus() {
 }
 
 # ------------------------------------------------------- generated C harnesses --
-# A clean harness: every byte initialized, no OOB, no overflow -> clean under
-# every sanitizer. Proves the instrumented runtime actually RUNS.
+# A clean standalone allocation harness. It does NOT link project runtime
+# objects: its execution is reported separately from their compilation.
 gen_clean_harness() {
     cat > "$1" <<'EOF'
 #include <stdlib.h>
@@ -270,35 +271,63 @@ runtime_smoke() {
     _bdir="$REPO_ROOT/build/runtime-san-$_short"
     mkdir -p "$_bdir"
 
-    # (1) run-clean proof: compile + RUN the generated self-check harness.
+    # (1) Standalone allocation probe, not execution of project runtime code.
     _hc="$_bdir/selfcheck.c"; _hb="$_bdir/selfcheck"
     gen_clean_harness "$_hc"
     if ! "$_cc" $_cflags "$_hc" -o "$_hb" >"$_bdir/harness_build.log" 2>&1; then
-        row "$_kind" runtime SKIP "sanitizer harness build failed (see $_bdir/harness_build.log)"
-        return 0
+        row "$_kind" allocation-harness FAIL "sanitizer harness build failed (see $_bdir/harness_build.log)"
+        return 1
     fi
     if ! run_short "$_hb" >"$_bdir/harness_run.log" 2>&1; then
-        row "$_kind" runtime FAIL "self-check harness aborted/hung under $_short (see $_bdir/harness_run.log)"
+        row "$_kind" allocation-harness FAIL "self-check harness aborted/hung under $_short (see $_bdir/harness_run.log)"
         return 1
     fi
+    row "$_kind" allocation-harness PASS "standalone allocation probe ran clean; no project runtime objects linked"
 
-    # (2) build-clean proof: compile every self-contained runtime TU with -c.
-    _n_ok=0; _n_skip=0; _fail_list=""
-    for _tu in $(runtime_selfcontained_tus); do
-        _obj="$_bdir/$(basename "$_tu").o"
-        if "$_cc" $_cflags -c "$_tu" -o "$_obj" 2>"$_bdir/last_tu.log"; then
+    # (2) Compilation only. Retain every exclusion and compiler diagnostic.
+    # Relative paths avoid collisions between equal basenames in subdirectories.
+    find "$REPO_ROOT/src/runtime" -name '*.c' ! -path '*/vendor/*' | sort >"$_bdir/translation-units.list"
+    : >"$_bdir/exclusions.tsv"
+    _n_ok=0; _n_skip=0; _n_fail=0
+    while IFS= read -r _tu; do
+        _rel=${_tu#"$REPO_ROOT/src/runtime/"}
+        _reason=""
+        case "$_rel" in
+            *.inc.c) _reason="include fragment requires its parent translation unit" ;;
+            scv_wasm_shim.c) _reason="optional wasmtime/tree-sitter SDK closure is outside smoke scope" ;;
+            tests/directx_submission_lifecycle_harness.c)
+                case "$(uname -s)" in
+                    MINGW*|MSYS*|CYGWIN*) : ;;
+                    *) _reason="Windows-only harness requires windows.h" ;;
+                esac ;;
+        esac
+        if [ -z "$_reason" ] && grep -q '#include "' "$_tu"; then
+            _reason="project-header closure is outside standalone smoke scope"
+        fi
+        if [ -n "$_reason" ]; then
+            printf '%s\t%s\n' "$_rel" "$_reason" >>"$_bdir/exclusions.tsv"
+            _n_skip=$((_n_skip + 1))
+            continue
+        fi
+        _obj="$_bdir/objects/$_rel.o"
+        _log="$_bdir/logs/$_rel.log"
+        mkdir -p "$(dirname "$_obj")" "$(dirname "$_log")"
+        if "$_cc" $_cflags -c "$_tu" -o "$_obj" >"$_log" 2>&1; then
             _n_ok=$((_n_ok + 1))
         else
-            # A compile failure here is almost always a platform-gated TU
-            # (windows.h / Cocoa) rather than a sanitizer finding; count as SKIP.
-            _n_skip=$((_n_skip + 1))
+            _n_fail=$((_n_fail + 1))
+            row "$_kind" runtime-objects FAIL "unclassified compilation failure: $_rel (see $_log)"
         fi
-    done
-    if [ -n "$_fail_list" ]; then
-        row "$_kind" runtime FAIL "$_fail_list"
-        return 1
+    done <"$_bdir/translation-units.list"
+    if [ "$_n_skip" -gt 0 ]; then
+        row "$_kind" runtime-objects SKIP "$_n_skip explicitly excluded TU(s); reasons: $_bdir/exclusions.tsv"
     fi
-    row "$_kind" runtime PASS "harness ran clean; $_n_ok TU(s) instrumented, $_n_skip platform-gated skipped (build/runtime-san-$_short)"
+    [ "$_n_fail" -eq 0 ] || return 1
+    if [ "$_n_ok" -eq 0 ]; then
+        row "$_kind" runtime-objects SKIP "no project runtime TU compiled"
+        return 0
+    fi
+    row "$_kind" runtime-objects PASS "$_n_ok TU(s) compiled with instrumentation; project runtime NOT linked or executed"
     return 0
 }
 
