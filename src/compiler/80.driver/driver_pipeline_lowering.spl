@@ -744,9 +744,15 @@ impl CompilerDriver:
                 return false
             self.ctx.demand_compile_execution = Some(measured_execution)
         elif self.ctx.demand_mir_input != nil:
-            var measured_execution = self.ctx.demand_compile_execution!
+            # Seed capability checker: `&mut` borrows are never released at
+            # branch end (only at function end / call-argument checkpoint), so
+            # re-borrowing the if-arm's 'measured_execution' here would be a
+            # second Exclusive acquisition on the same reference ("reference 9
+            # already has Exclusive capability"). A fresh binding per arm gets
+            # a distinct reference id.
+            var measured_execution_input = self.ctx.demand_compile_execution!
             val demand_admission = demand_mir_integrate_measured_v1(
-                self.ctx.demand_mir_input!, &mut measured_execution.counters,
+                self.ctx.demand_mir_input!, &mut measured_execution_input.counters,
                 true)
             if demand_admission.is_err():
                 self.ctx.add_error(
@@ -755,11 +761,11 @@ impl CompilerDriver:
             self.ctx.demand_mir_admission = Some(
                 demand_admission.unwrap().admission)
             if not demand_compile_bind_mir_admission_v1(
-                    &mut measured_execution, self.ctx.demand_mir_admission!):
+                    &mut measured_execution_input, self.ctx.demand_mir_admission!):
                 self.ctx.add_error(
                     "backend demand authority rejected MIR admission")
                 return false
-            self.ctx.demand_compile_execution = Some(measured_execution)
+            self.ctx.demand_compile_execution = Some(measured_execution_input)
         if self.ctx.demand_mir_admission != nil and
                 self.ctx.demand_dirty_modules.len() > 0:
             val indexed = package_module_index_read_current_v1(
