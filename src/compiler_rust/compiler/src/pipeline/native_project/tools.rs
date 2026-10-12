@@ -2421,11 +2421,8 @@ pub(crate) fn build_stage4_rust_runtime_projection_archive(
 /// `libsimple_native_all` remains the compiler/native-build owner. Localizing
 /// every non-requested core-C definition makes the supplement disjoint instead of
 /// relying on the linker's multiple-definition tolerance.
-pub(crate) fn build_bootstrap_mutex_runtime_capsule_archive(
-    core_archive: &Path,
-    temp_dir: &Path,
-) -> Result<PathBuf, String> {
-    let requested = [
+pub(super) fn bootstrap_mutex_runtime_requested_symbols() -> Vec<String> {
+    [
         "spl_mutex_create",
         "spl_mutex_lock",
         "spl_mutex_try_lock",
@@ -2442,8 +2439,16 @@ pub(crate) fn build_bootstrap_mutex_runtime_capsule_archive(
     ]
     .into_iter()
     .map(str::to_string)
-    .collect::<Vec<_>>();
-    let native_all_owned = [
+    .collect::<Vec<_>>()
+}
+
+pub(crate) fn build_bootstrap_mutex_runtime_capsule_archive(
+    core_archive: &Path,
+    temp_dir: &Path,
+    native_all_archive: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let requested = bootstrap_mutex_runtime_requested_symbols();
+    let mut native_all_owned = [
         "rt_heap_live_bytes",
         "rt_heap_peak_bytes",
         "rt_array_bytes_validate",
@@ -2452,6 +2457,16 @@ pub(crate) fn build_bootstrap_mutex_runtime_capsule_archive(
         .into_iter()
         .map(str::to_string)
         .collect::<Vec<_>>();
+    let mut requested = requested;
+    if let Some(native_all) = native_all_archive {
+        if safe_canonicalize(core_archive) == safe_canonicalize(native_all) {
+            return Err("bootstrap core-C supplement and native-all authority must differ".to_string());
+        }
+        // Use the exact selected link archive. Inspection failure is fatal;
+        // an empty fallback would silently restore overlapping ownership.
+        let (defined, _) = archive_global_symbols(native_all)?;
+        (requested, native_all_owned) = bootstrap_capsule_symbol_ownership(&requested, &defined)?;
+    }
     project_stage4_archive_closure(
         &[core_archive],
         &requested,
@@ -2459,6 +2474,166 @@ pub(crate) fn build_bootstrap_mutex_runtime_capsule_archive(
         temp_dir,
         "bootstrap_mutex_runtime",
     )
+}
+
+/// Split bootstrap exports against the actual selected native-all authority.
+fn bootstrap_capsule_symbol_ownership(
+    requested: &[String],
+    native_defined: &BTreeMap<String, usize>,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut canonical = BTreeMap::<String, usize>::new();
+    for (name, count) in native_defined {
+        let name = canonical_archive_symbol(name);
+        if name.starts_with("rt_") || name.starts_with("spl_") {
+            *canonical.entry(name.to_string()).or_default() += count;
+        }
+    }
+    let mut supplement = Vec::new();
+    for name in requested {
+        match canonical.get(name).copied().unwrap_or(0) {
+            0 => supplement.push(name.clone()),
+            1 => (),
+            count => return Err(format!("bootstrap native-all authority `{name}` has {count} definitions")),
+        }
+    }
+    Ok((supplement, canonical.into_keys().collect()))
+}
+
+#[cfg(test)]
+mod bootstrap_capsule_ownership_tests {
+    use super::bootstrap_capsule_symbol_ownership;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn mixed_native_all_keeps_its_abi_file_and_snapshot_exports() {
+        let owned = ["rt_simple_abi_version", "rt_simple_abi_version_deferred", "rt_file_sync",
+            "rt_file_create_excl", "rt_mem_snapshot_open", "rt_mem_snapshot_record", "rt_mem_snapshot_close"];
+        let mut requested: Vec<String> = owned.iter().map(|name| name.to_string()).collect();
+        requested.extend(["spl_mutex_create".to_string(), "rt_sosix_directory_pair_check_v1".to_string()]);
+        let defined = owned.into_iter().map(|name| (name.to_string(), 1)).collect::<BTreeMap<_, _>>();
+        let (supplement, external) = bootstrap_capsule_symbol_ownership(&requested, &defined).unwrap();
+        assert_eq!(supplement, ["spl_mutex_create", "rt_sosix_directory_pair_check_v1"]);
+        for name in owned { assert!(external.iter().any(|export| export == name)); }
+    }
+
+    #[test]
+    fn core_only_missing_native_exports_remain_requested() {
+        let requested = vec!["rt_simple_abi_version".to_string(), "rt_file_sync".to_string()];
+        let (supplement, external) = bootstrap_capsule_symbol_ownership(&requested, &BTreeMap::new()).unwrap();
+        assert_eq!(supplement, requested);
+        assert!(external.is_empty());
+    }
+
+    #[test]
+    fn duplicate_native_authority_is_rejected() {
+        let requested = vec!["rt_file_sync".to_string()];
+        let defined = BTreeMap::from([("rt_file_sync".to_string(), 2)]);
+        assert!(bootstrap_capsule_symbol_ownership(&requested, &defined).unwrap_err().contains("has 2 definitions"));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macho_underscore_ownership_matches_unprefixed_requested_exports() {
+        let requested = vec!["rt_file_sync".to_string(), "spl_mutex_create".to_string()];
+        let defined = BTreeMap::from([("_rt_file_sync".to_string(), 1)]);
+        let (supplement, external) = bootstrap_capsule_symbol_ownership(&requested, &defined).unwrap();
+        assert_eq!(supplement, ["spl_mutex_create"]);
+        assert_eq!(external, ["rt_file_sync"]);
+    }
+
+    #[test]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "freebsd", target_os = "macos"))]
+    fn actual_archives_link_mixed_and_core_only_without_duplicate_ownership() {
+        let directory = std::env::temp_dir().join(format!("bootstrap-capsule-ownership-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let owned = ["rt_simple_abi_version", "rt_simple_abi_version_deferred", "rt_file_sync",
+            "rt_file_create_excl", "rt_mem_snapshot_open", "rt_mem_snapshot_record", "rt_mem_snapshot_close"];
+        let compile_archive = |stem: &str, source: &str| {
+            let c = directory.join(format!("{stem}.c"));
+            let object = directory.join(format!("{stem}.o"));
+            let archive = directory.join(format!("lib{stem}.a"));
+            std::fs::write(&c, source).unwrap();
+            let status = std::process::Command::new(super::find_c_compiler())
+                .args(["-c", "-ffunction-sections", "-fdata-sections"]).arg(&c).arg("-o").arg(&object).status().unwrap();
+            assert!(status.success());
+            let ar = super::find_archive_tool().unwrap();
+            let status = super::archive_create_command(&ar, &archive, &[object], false, true).status().unwrap();
+            assert!(status.success());
+            archive
+        };
+        let mut core_source = String::new();
+        let mut native_source = String::new();
+        for name in owned {
+            core_source.push_str(&format!("long {name}(void) {{ return 1; }}\n"));
+            native_source.push_str(&format!("long {name}(void) {{ return 10; }}\n"));
+        }
+        core_source.push_str(&format!("long spl_mutex_create(void) {{ return {}; }}\n", owned.iter().map(|name| format!("{name}()")).collect::<Vec<_>>().join(" + ")));
+        for name in ["spl_mutex_lock", "spl_mutex_try_lock", "spl_mutex_unlock", "spl_mutex_destroy"] {
+            core_source.push_str(&format!("long {name}(void) {{ return 1; }}\n"));
+        }
+        core_source.push_str("long rt_sosix_directory_pair_check_v1(void) { return 5 + rt_file_sync(); }\n");
+        native_source.push_str("long rt_native_authority_anchor(void) { return 3; }\n");
+        let core = compile_archive("core", &core_source);
+        let native = compile_archive("native", &native_source);
+        for mixed in [false, true] {
+            let suffix = if mixed { "mixed" } else { "core-only" };
+            let capsule = super::build_bootstrap_mutex_runtime_capsule_archive(
+                &core, &directory.join(suffix), if mixed { Some(native.as_path()) } else { None },
+            ).unwrap();
+            let (defined, _) = super::archive_global_symbols(&capsule).unwrap();
+            let weak = super::archive_weak_global_symbols(&capsule).unwrap();
+            for name in owned {
+                let raw = if cfg!(target_os = "macos") { format!("_{name}") } else { name.to_string() };
+                if mixed { assert!(!defined.contains_key(&raw) || weak.contains(&raw)); }
+                else { assert_eq!(defined.get(&raw), Some(&1)); }
+            }
+            let source = directory.join(format!("{suffix}-main.c"));
+            let exe = directory.join(format!("{suffix}-probe"));
+            // Match native_project's actual native-all-before-supplement order.
+            // Explicit overlap retention roots require extraction of the
+            // authoritative provider member; no unrelated native anchor.
+            let native_check = "";
+            let native_condition = "";
+            std::fs::write(&source, format!("{native_check} extern long spl_mutex_create(void); extern long rt_sosix_directory_pair_check_v1(void); int main(void) {{ return {native_condition}spl_mutex_create() == {} && rt_sosix_directory_pair_check_v1() == {} ? 0 : 1; }}\n", if mixed { 70 } else { 7 }, if mixed { 15 } else { 6 })).unwrap();
+            let mut command = std::process::Command::new(super::find_c_compiler());
+            command.arg(&source);
+            if mixed {
+                // No unrelated native-only anchor: the production overlap
+                // roots alone must extract the authoritative provider member.
+                let (defined, _) = super::archive_global_symbols(&native).unwrap();
+                for name in super::bootstrap_mutex_runtime_requested_symbols() {
+                    let raw = if cfg!(target_os = "macos") { format!("_{name}") } else { name.clone() };
+                    if defined.contains_key(&raw) { command.arg(format!("-Wl,-u,{raw}")); }
+                }
+                command.arg(&native);
+            }
+            command.arg(&capsule);
+            let result = command.arg("-o").arg(&exe).output().unwrap();
+            assert!(result.status.success(), "strict link failed: {}", String::from_utf8_lossy(&result.stderr));
+            assert!(std::process::Command::new(&exe).status().unwrap().success());
+        }
+        assert!(super::build_bootstrap_mutex_runtime_capsule_archive(&core, &directory.join("unreadable"), Some(&directory.join("missing.a"))).unwrap_err().contains("failed to inspect archive"));
+        let duplicate_object = directory.join("duplicate.o");
+        let duplicate_source = directory.join("duplicate.c");
+        std::fs::write(&duplicate_source, "long rt_file_sync(void) { return 20; }\n").unwrap();
+        assert!(std::process::Command::new(super::find_c_compiler()).arg("-c").arg(&duplicate_source).arg("-o").arg(&duplicate_object).status().unwrap().success());
+        let ar = super::find_archive_tool().unwrap();
+        let duplicate = directory.join("duplicate.a");
+        assert!(super::archive_create_command(&ar, &duplicate, &[directory.join("native.o"), duplicate_object], false, true).status().unwrap().success());
+        assert!(super::build_bootstrap_mutex_runtime_capsule_archive(&core, &directory.join("duplicate-rejected"), Some(&duplicate)).unwrap_err().contains("has 2 definitions"));
+        let incomplete = compile_archive("incomplete", "long spl_mutex_create(void) { return 1; }\n");
+        assert!(super::build_bootstrap_mutex_runtime_capsule_archive(&incomplete, &directory.join("missing-root"), Some(&native)).unwrap_err().contains("has 0 archive definitions"));
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn non_runtime_exports_are_not_admitted_as_runtime_dependencies() {
+        let defined = BTreeMap::from([("compiler_private".to_string(), 1)]);
+        let requested = vec!["rt_file_sync".to_string()];
+        let (supplement, external) = bootstrap_capsule_symbol_ownership(&requested, &defined).unwrap();
+        assert_eq!(supplement, requested);
+        assert!(external.is_empty());
+    }
 }
 
 fn project_stage4_archive_closure(
@@ -4315,7 +4490,7 @@ mod llvm_tool_policy_tests {
         let core = super::build_core_c_runtime_library(&directory.path().join("core"))
             .expect("compile the real core runtime");
         let capsule = super::build_bootstrap_mutex_runtime_capsule_archive(
-            &core, &directory.path().join("capsule"),
+            &core, &directory.path().join("capsule"), None,
         ).expect("project the native bootstrap runtime capsule");
         let (defined, _) = super::archive_global_symbols(&capsule).unwrap();
         let weak = super::archive_weak_global_symbols(&capsule).unwrap();
