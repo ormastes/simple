@@ -1378,6 +1378,8 @@ bool        rt_process_write_stdin(int64_t pid, const char* data);
 int64_t     rt_process_write_stdin_some(int64_t pid, const char* data, int64_t data_len, int64_t offset, int64_t max_bytes);
 const char* rt_process_read_stdout(int64_t pid);
 bool        rt_process_is_alive(int64_t pid);
+/* 0=stdout open/deferred, 1=observed EOF, -1=unknown/terminal error. */
+int64_t     rt_process_stdout_state(int64_t pid);
 bool        rt_process_close_piped(int64_t pid);
 int64_t     rt_editor_spawn_simple_dap(void);
 bool        rt_editor_start_simple_dap(int64_t pid);
