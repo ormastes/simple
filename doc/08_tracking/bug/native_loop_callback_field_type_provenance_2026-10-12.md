@@ -23,3 +23,14 @@ not run: the general self-hosted test runtime is not yet qualified.
 Scoped `git diff --check` passed. This does not establish that the candidate
 fully repairs the matrix failure; the rebuilt producer must reproduce and
 verify the original entry-closure build before closing this report.
+
+Further matrix evidence includes typed parameter/local callbacks in
+`nogc_sync_mut/rt_hal/parallel_executor.spl` and `process_task_arena.spl`.
+Their declared-record recovery supplied method identity `module.Name`, which
+is nonempty and therefore suppressed the old callback-owner fallback, while
+field-layout tables use `module::Name`. The candidate now prefers the declared
+registered composite layout even when a method-identity hint is nonempty.
+It does not normalize all layout keys or override configured provider families;
+the existing construction/read namespace collision remains separately tracked.
+A typed-parameter record-returning callback lowering regression is authored,
+also NOT_RUN.

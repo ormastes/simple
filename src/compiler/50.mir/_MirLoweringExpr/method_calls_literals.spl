@@ -1537,7 +1537,7 @@ impl MirLowering:
 
     me fn_field_declared_owner(receiver: HirExpr, receiver_local: LocalId) -> text:
         # Declared-type owner recovery for the fn-field callee fallback: only
-        # consulted when struct_value_syms has no entry for the receiver.
+        # consulted when resolving a callback field's layout owner.
         # Tried in the same order the surrounding recovery paths trust:
         # remembered HIR type on the lowered local, then the receiver
         # expression's declared type (param/local annotation). Returns the
@@ -1557,6 +1557,11 @@ impl MirLowering:
         if owner_sym.id < 0:
             return ""
         if val owner_symbol = self.symbols.get_symbol_raw(owner_sym.id):
+            # Field tables use composite_layout_key, whereas method identity
+            # uses module.Name. Those namespaces must not be interchanged.
+            val layout_key = self.composite_layout_key(owner_symbol)
+            if self.struct_field_order.has(layout_key):
+                return layout_key
             if owner_symbol.kind == SymbolKind.Class:
                 return mir_class_identity(owner_symbol)
             if owner_symbol.name != "":
@@ -4352,17 +4357,12 @@ impl MirLowering:
                 # closure/raw indirect-call diamond `(h.f)(4)` already takes).
                 # Bug native_capturing_lambda_closure_conversion_2026-08-22.
                 var field_owner = unresolved_struct_name ?? ""
-                if field_owner == "":
-                    # Defensive fallback (seed-native registry miss documented
-                    # in doc/08_tracking/bug/seed_codegen_interp_native_divergence
-                    # _2026-10-12.md): the struct_value_syms entry for the
-                    # receiver local is absent on the native lane, but the
-                    # owner is recoverable from the receiver's DECLARED type
-                    # (an annotated param like `arena: RtHalTaskArenaPort` --
-                    # the same declared-type evidence param setup used to
-                    # compute the missing entry). Registry path stays primary;
-                    # this fires only on a miss with a declared owner.
-                    field_owner = self.fn_field_declared_owner(receiver, unresolved_receiver_local)
+                val declared_field_owner = self.fn_field_declared_owner(receiver, unresolved_receiver_local)
+                if declared_field_owner != "" and self.struct_field_order.has(declared_field_owner):
+                    # A method-owner identity can be nonempty yet have no
+                    # field layout. Prefer the exact declared layout instead
+                    # of letting that spelling suppress callback recovery.
+                    field_owner = declared_field_owner
                 if field_owner != "":
                     if self.struct_field_order.has(field_owner) and self.struct_field_order[field_owner].contains(method):
                         val field_callee = HirExpr(kind: HirExprKind.Field(receiver, method, nil), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: receiver.span), span: receiver.span)
