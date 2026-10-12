@@ -843,6 +843,15 @@ impl MonomorphizationPass:
             return self.archive_specialized_signatures[name]
         mono_template_signature_v1(self.specialized_functions[name])
 
+    me specialization_callee_name_v1(template_name: text, spec_name: text) -> text:
+        # Original caller spelling may be bare or an import alias. Linkage is
+        # owned by the actual template declaration, shared by both body modes.
+        val signature = self.template_signature_v1(template_name)
+        val owner: text = self.template_module[template_name]
+        if signature.global_linkage or owner == self.current_module:
+            return spec_name
+        "{owner}.{spec_name}"
+
     me symbol_identity_v1(module_name: text, symbol: SymbolId) -> text:
         if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
             val key = mono_sym_key(module_name, symbol.id)
@@ -2338,7 +2347,7 @@ impl MonomorphizationPass:
         # uses the baked display name; its Var arm looks the id up in the
         # CALLER's symbol table, where a fresh mono symbol does not exist).
         # So the repointed callee is a NamedVar carrying the mangled name,
-        # re-qualified exactly as the original callee was.
+        # qualified by the template declaration's actual ABI owner.
         val spec_name: text = self.mangled_name(gname, targs)
         # The repointed callee carries the SPECIALIZATION's concrete
         # `fn(params) -> ret`. Its SymbolId is minted outside every module
@@ -2355,7 +2364,7 @@ impl MonomorphizationPass:
             self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
             self.unresolved_templates[gname] = true
             return HirExprKind.Call(new_callee, new_args, new_type_args)
-        new_callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId.new(target), mono_requalify(callee, spec_name)),
+        new_callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId.new(target), self.specialization_callee_name_v1(gname, spec_name)),
                              has_type_: true,
                              type_: spec_sig,
                              span: callee.span)
@@ -2462,11 +2471,7 @@ impl MonomorphizationPass:
             self.unresolved_templates[gname] = true
             return HirExprKind.MethodCall(new_receiver, method, new_args, resolution)
         val spec_name: text = self.mangled_name(gname, targs)
-        val template_mod: text = self.template_module[gname]
-        # MIR resolves a fresh mono callee by its baked display name; a
-        # specialization placed in another module is spelled `<module>.<fn>`
-        # exactly like HIR's qualified imported-function references.
-        val callee_name = if template_mod == self.current_module: spec_name else: "{template_mod}.{spec_name}"
+        val callee_name = self.specialization_callee_name_v1(gname, spec_name)
         var call_args: [HirCallArg] = [HirCallArg(has_name: false, name: "", value: new_receiver, span: receiver.span)]
         for a in new_args:
             call_args = call_args.push(a)
@@ -3494,18 +3499,6 @@ fn mono_module_matches(qual: text, template_mod: text) -> bool:
     if template_mod.ends_with(".{qual}"):
         return true
     qual.ends_with(".{template_mod}")
-
-# Keep the original callee's module qualifier, swap only the function name.
-fn mono_requalify(callee: HirExpr, spec_name: text) -> text:
-    match callee.kind:
-        case HirExprKind.NamedVar(_, name):
-            val n: text = name
-            val last = mono_last_segment(n)
-            if last == n:
-                return spec_name
-            n.substring(0, n.len() - last.len()) + spec_name
-        case _:
-            spec_name
 
 fn mono_type_identity(symbols: SymbolTable, sym: SymbolId, module_name: text) -> text:
     """Ownership identity `<owner module>.<Name>` of a type symbol, read in
