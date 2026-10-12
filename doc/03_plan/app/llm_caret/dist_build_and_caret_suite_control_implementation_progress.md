@@ -81,3 +81,7 @@ Added `workbench/distributed_host_roles_v2.spl` with bounded snapshot lookup, ex
 ## F02 strict SDN decoding increment
 
 Added an exact versioned host registry decoder over the shared SDN owner, with 64 KiB/128-host limits, structural guarding, duplicate diagnostics, closed fields and scalar types, independent role records and preserved revocation. A bounded second issue-aware parse is confined by design to configuration publication, never the request path. Six real source-fixture scenarios cover nested records, top/nested duplicate keys, unknown/missing fields, wrong types/version, revoke-then-reject and size/capacity/duplicate-host rejection. Tests remain NOT_RUN. The decoder is not yet wired to authenticated configuration publication, enrollment, rotation or SSH, so F02 is still incomplete.
+
+## F02 credential dependency inspection increment
+
+Added a bounded exact-reference query returning every affected host/role revision, including revoked dependencies and shared-reference roles. Stale, duplicate or malformed snapshots reject partial results. Two new source scenarios cover shared SSH/signer references, retained revocation/revision information and stale publication rejection. Tests remain NOT_RUN. This query supplies rotation planning data; authenticated enrollment and atomic rotation/revocation publication, secret-provider integration and SSH caller wiring still remain open.

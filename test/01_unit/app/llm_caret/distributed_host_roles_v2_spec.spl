@@ -56,3 +56,25 @@ describe "distributed host identity and independent credential roles":
         expect(distributed_credential_reference_valid_v2("private-key-bytes")).to_equal(false)
         expect(distributed_credential_reference_valid_v2("secret://../signer")).to_equal(false)
         expect(distributed_credential_reference_valid_v2("secret://roles/ signer")).to_equal(false)
+
+    it "reports every shared reference dependency including revoked roles":
+        var host = enrolled_host()
+        var signer = host.signer_identity
+        signer.credential_reference = host.ssh_account.credential_reference
+        signer.revoked = true
+        signer.revision = 3
+        host.signer_identity = signer
+        match distributed_host_credential_dependents_v2([host], "secret://roles/ssh_user", 7):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(dependencies):
+                expect(dependencies.len()).to_equal(2)
+                expect(dependencies[0].host_id).to_equal("worker_1")
+                expect(dependencies[0].role).to_equal("ssh_account")
+                expect(dependencies[1].role).to_equal("signer_identity")
+                expect(dependencies[1].role_revision).to_equal(3)
+                expect(dependencies[1].revoked).to_equal(true)
+
+    it "rejects dependency inspection against a stale snapshot":
+        match distributed_host_credential_dependents_v2([enrolled_host()], "secret://roles/ssh_user", 8):
+            case Ok(value): expect("accepted stale snapshot").to_equal("HOST_REGISTRY_STALE")
+            case Err(reason): expect(reason).to_equal("HOST_REGISTRY_STALE")

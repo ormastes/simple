@@ -34,6 +34,8 @@ F02 value boundary is `workbench/distributed_host_roles_v2.spl`. An authenticate
 
 Strict configuration decoding is isolated in `workbench/distributed_host_registry_sdn_v2.spl`: schema `distributed-host-registry-v2`, positive registry revision and hosts array; each host requires exactly host_id, host_key_digest and the four named role records; each role requires exactly identity, credential_reference, revision and boolean revoked. Unknown/missing fields, scalar coercions, duplicate keys/IDs and wrong versions fail. Input is bounded to 64 KiB and 128 hosts. The shared untrusted parser runs first for structural limits, followed by its issue-aware parser to reject last-wins duplicate handling. This bounded second parse is justified only on configuration publication; the owner must retain the decoded snapshot and never parse per request. Decoding preserves revoked records; admission rejects their use. Authenticated configuration publication, enrollment and rotation transactions are still required.
 
+Credential dependency inspection is `distributed_host_credential_dependents_v2`: exact reference lookup across the bounded snapshot returns host ID, closed role name, role revision and revocation status for every matching role. Shared references are reported separately per role, and revoked dependencies remain visible for rotation planning. Stale/duplicate/malformed snapshots fail instead of returning a partial list. This read-only value query neither retrieves secrets nor publishes rotation/revocation; publication must remain an authenticated owner transaction with an exact snapshot revision.
+
 ### F03 — Scoped grants and approvals
 
 | Concern | Design |
