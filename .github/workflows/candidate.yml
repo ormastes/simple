@@ -304,12 +304,8 @@ jobs:
             test "$(jq -r '.head_branch' <<<"$run_json")" = main
             test "$(jq -r '.actor.id' <<<"$run_json")" = 2378857
             test "$(jq -r '.triggering_actor.id' <<<"$run_json")" = 2378857
-            # Main may advance after the convergence run was dispatched; the
-            # run is bound to its dispatch-time head, so require ancestry
-            # instead of exact tip equality (exact equality fails silently
-            # the moment any other PR merges to main).
             live_main=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
-            gh api "repos/${GITHUB_REPOSITORY}/compare/${run_head}...${live_main}" --jq '.status' | grep -Eq '^(behind|identical)$'
+            test "$run_head" = "$live_main"
             workflow_blob_sha=$(gh api "repos/${GITHUB_REPOSITORY}/contents/.github/workflows/pr-admission.yml?ref=${run_head}" --jq .sha)
             test "$workflow_blob_sha" = "$(jq -er '.workflow.workflow_blob_sha' build/convergence-receipt/review-evidence.json)"
           else
@@ -328,19 +324,16 @@ jobs:
           main_sha=$(git rev-parse refs/remotes/origin/main)
           release_sha=$(git rev-parse "refs/remotes/origin/$release_ref")
           test "$COMMIT" = "$release_sha"
-          # release_phase3 is the designated main-sync release line under the
-          # owner repoint policy (main fast-forwards onto the release line):
-          # both independence directions are scoped to ordinary release/X.Y
-          # lines and do not apply to it.
-          if [ "$release_ref" != "release_phase3" ]; then
-            if git merge-base --is-ancestor "$release_sha" "$main_sha"; then
-              echo "release head must remain independent from main" >&2
-              exit 1
-            fi
-            if git merge-base --is-ancestor "$main_sha" "$release_sha"; then
-              echo "release head must not absorb the main development line" >&2
-              exit 1
-            fi
+          if git merge-base --is-ancestor "$release_sha" "$main_sha"; then
+            echo "release head must remain independent from main" >&2
+            exit 1
+          fi
+          # release_phase3 is the designated main-sync release line: it
+          # intentionally absorbs main (owner sync policy), so the
+          # absorption check is scoped to ordinary release/X.Y lines.
+          if [ "$release_ref" != "release_phase3" ] && git merge-base --is-ancestor "$main_sha" "$release_sha"; then
+            echo "release head must not absorb the main development line" >&2
+            exit 1
           fi
 
           integration_pr_number=$(jq -r '.provider.integration_pr_number' "$receipt")
@@ -714,7 +707,7 @@ jobs:
           live_main=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
           live_release=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${release_ref}" --jq .object.sha)
           live_candidate=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${CANDIDATE_REF}" --jq .object.sha)
-          gh api "repos/${GITHUB_REPOSITORY}/compare/${main_sha}...${live_main}" --jq '.status' | grep -Eq '^(behind|identical)$'
+          test "$live_main" = "$main_sha"
           test "$live_release" = "$release_sha"
           test "$live_candidate" = "$COMMIT"
           scripts/release/github-policy.shs verify-live "$GITHUB_REPOSITORY"
@@ -724,7 +717,7 @@ jobs:
             jq -e '((.expires_at|fromdateiso8601)-(.issued_at|fromdateiso8601)) <= 28800 and
               (.expires_at|fromdateiso8601) > now' "$proof" >/dev/null
             run_head=$(jq -er '.workflow.run_head_sha' build/convergence-receipt/review-evidence.json)
-            gh api "repos/${GITHUB_REPOSITORY}/compare/${run_head}...${live_main}" --jq '.status' | grep -Eq '^(behind|identical)$'
+            test "$run_head" = "$live_main"
           else
             test "$authority_class" = external_broker
           fi

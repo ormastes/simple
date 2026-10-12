@@ -80,7 +80,6 @@ LLVM_VERSION=""
 LLVM_PREFIX=""
 LLVM_LIBDIR=""
 LLVM_LIB=""
-LLVM_PROVIDER_KIND=""
 
 # Shared-library basenames to look for, by OS, for major version $1.
 _llvm_lib_names() {
@@ -126,35 +125,6 @@ _llvm23_version_admitted() {
   esac
 }
 
-# Explicit native CLI bootstrap can use the same static archives as Cargo.
-# The default remains shared: llvm-lib/SFFI callers must never receive a static
-# archive as SIMPLE_LLVM_PATH. Check the full llvm-config archive set and tools.
-_llvm_try_static_cli_prefix() {
-  [ "${LLVM_PROVIDER_REQUIREMENT:-shared}" = static-cli ] || return 1
-  case "${PLATFORM_UNAME}:${PLATFORM_OS}" in Linux:linux|FreeBSD:freebsd) ;; *) return 1 ;; esac
-  [ "$2" = 23 ] || return 1
-  [ "$("${_prefix_cfg}" --prefix 2>/dev/null)" = "$1" ] || return 1
-  _static_version=$("${_prefix_cfg}" --version 2>/dev/null) || return 1
-  _static_libdir=$("${_prefix_cfg}" --libdir 2>/dev/null) || return 1
-  case "${_static_libdir}" in "$1/lib"|"$1/lib64") ;; *) return 1 ;; esac
-  _static_libnames=$("${_prefix_cfg}" --link-static --libnames 2>/dev/null) || return 1
-  [ -n "${_static_libnames}" ] || return 1
-  for _tool in llc llvm-as opt clang clang++ llvm-ar; do
-    [ -x "$1/bin/${_tool}" ] || return 1
-    _tool_version=$("$1/bin/${_tool}" --version 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\.[0-9]+\.[0-9]+$/){print $i; exit}}')
-    [ "${_tool_version}" = "${_static_version}" ] || return 1
-  done
-  for _archive in ${_static_libnames} libPolly.a libPollyISL.a; do
-    case "${_archive}" in */*|*[!A-Za-z0-9_.+-]*) return 1 ;; lib*.a) ;; *) return 1 ;; esac
-    [ -s "${_static_libdir}/${_archive}" ] || return 1
-    _archive_members=$("$1/bin/llvm-ar" t "${_static_libdir}/${_archive}" 2>/dev/null) || return 1
-    [ -n "${_archive_members}" ] || return 1
-  done
-  LLVM_FOUND=1; LLVM_VERSION="$2"; LLVM_PREFIX="$1"
-  LLVM_LIBDIR="${_static_libdir}"; LLVM_LIB=""; LLVM_PROVIDER_KIND=static-cli
-  return 0
-}
-
 # Try prefix $1 for version $2; on success set LLVM_* and return 0.
 _llvm_try_prefix() {
   [ -n "$1" ] && [ -d "$1" ] || return 1
@@ -177,12 +147,12 @@ _llvm_try_prefix() {
     for _name in $(_llvm_lib_names "$2"); do
       if [ -f "$1/${_ld}/${_name}" ]; then
         LLVM_FOUND=1; LLVM_VERSION="$2"; LLVM_PREFIX="$1"
-        LLVM_LIBDIR="$1/${_ld}"; LLVM_LIB="$1/${_ld}/${_name}"; LLVM_PROVIDER_KIND=shared
+        LLVM_LIBDIR="$1/${_ld}"; LLVM_LIB="$1/${_ld}/${_name}"
         return 0
       fi
     done
   done
-  _llvm_try_static_cli_prefix "$1" "$2"
+  return 1
 }
 
 for _v in ${LLVM_VERSIONS}; do
@@ -229,6 +199,6 @@ if [ "${LLVM_FOUND}" = "1" ]; then
     23) export "LLVM_SYS_231_PREFIX=${LLVM_PREFIX}" ;;
     *) export "LLVM_SYS_${LLVM_VERSION}0_PREFIX=${LLVM_PREFIX}" ;;
   esac
-  [ -n "${SIMPLE_LLVM_PATH:-}" ] || [ -z "${LLVM_LIB}" ] || export SIMPLE_LLVM_PATH="${LLVM_LIB}"
+  [ -n "${SIMPLE_LLVM_PATH:-}" ] || export SIMPLE_LLVM_PATH="${LLVM_LIB}"
 fi
-export LLVM_FOUND LLVM_VERSION LLVM_PREFIX LLVM_LIBDIR LLVM_LIB LLVM_PROVIDER_KIND
+export LLVM_FOUND LLVM_VERSION LLVM_PREFIX LLVM_LIBDIR LLVM_LIB
