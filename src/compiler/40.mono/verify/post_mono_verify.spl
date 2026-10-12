@@ -249,36 +249,43 @@ class PostMonoVerifier:
             val m: HirModule = modules[key]
             if m == nil:
                 continue
-            val mname: text = m.name ?? ""
-            for fkey in m.functions.keys():
-                val f: HirFunction = m.functions[fkey]
-                val fname: text = f.name ?? ""
-                val fs: SymbolId = f.symbol
-                if self.is_template(f.type_params, f.is_generic_template):
-                    # A generic CLASS's method is `is_generic_template` under
-                    # its bare method name (`ready`, `pending`, `get`); keying
-                    # it here made a cross-module call to a non-generic FREE
-                    # function of the same name an E-MONO-036 (real instance:
-                    # std.nogc_async_mut.async_embedded `ready`/`pending`).
-                    # Method templates are reached through a receiver, never
-                    # through a bare callee symbol, so they are not candidates.
-                    if not f.is_method:
-                        self.template_keys["{mname}.{fname}"] = true
-                    continue
-                if not fname.contains("$"):
-                    continue
-                # A specialization lives in its template's module, so the
-                # `$` prefix names a template of THIS module (pruned or not).
-                self.template_keys["{mname}.{fname.split("$")[0]}"] = true
-                if seen_keys.has(fname):
-                    self.symbol = "{mname}.{fname}"
-                    self.chain = "first emitted in {seen_keys[fname]}"
-                    self.r.duplicate_specialization_key = self.r.duplicate_specialization_key + 1
-                    self.record_coded("E-MONO-037", "duplicate specialization key",
-                        "specialization key `{fname}` is emitted more than once (first in {seen_keys[fname]}, again in {mname})")
-                else:
-                    seen_keys[fname] = mname
-                self.spec_ids[fs.id] = fname
+            seen_keys = self.index_module(m, seen_keys)
+
+    me index_module(m: HirModule, prior_seen: Dict<text, text>) -> Dict<text, text>:
+        # The retained and leased paths share this exact closure-index body.
+        var seen_keys = prior_seen
+        if m == nil: return seen_keys
+        val mname: text = m.name ?? ""
+        for fkey in m.functions.keys():
+            val f: HirFunction = m.functions[fkey]
+            val fname: text = f.name ?? ""
+            val fs: SymbolId = f.symbol
+            if self.is_template(f.type_params, f.is_generic_template):
+                # A generic CLASS's method is `is_generic_template` under
+                # its bare method name (`ready`, `pending`, `get`); keying
+                # it here made a cross-module call to a non-generic FREE
+                # function of the same name an E-MONO-036 (real instance:
+                # std.nogc_async_mut.async_embedded `ready`/`pending`).
+                # Method templates are reached through a receiver, never
+                # through a bare callee symbol, so they are not candidates.
+                if not f.is_method:
+                    self.template_keys["{mname}.{fname}"] = true
+                continue
+            if not fname.contains("$"):
+                continue
+            # A specialization lives in its template's module, so the
+            # `$` prefix names a template of THIS module (pruned or not).
+            self.template_keys["{mname}.{fname.split("$")[0]}"] = true
+            if seen_keys.has(fname):
+                self.symbol = "{mname}.{fname}"
+                self.chain = "first emitted in {seen_keys[fname]}"
+                self.r.duplicate_specialization_key = self.r.duplicate_specialization_key + 1
+                self.record_coded("E-MONO-037", "duplicate specialization key",
+                    "specialization key `{fname}` is emitted more than once (first in {seen_keys[fname]}, again in {mname})")
+            else:
+                seen_keys[fname] = mname
+            self.spec_ids[fs.id] = fname
+        seen_keys
 
     me table_symbol_name(sid: i64) -> text?:
         """Name the module symbol table binds to `sid`, if any."""
@@ -630,6 +637,18 @@ class PostMonoVerifier:
             case HirExprKind.Continue(_): pass_do_nothing("control transfer")
             case HirExprKind.Throw(value): self.walk_expr(value)
             case HirExprKind.Try(e): self.walk_expr(e)
+            case HirExprKind.TryCatch(body, clauses, finally_):
+                self.walk_block(body)
+                for clause in clauses:
+                    val catch_clause: HirCatchClause = clause
+                    if catch_clause.has_pattern:
+                        self.walk_pattern(catch_clause.pattern)
+                    if catch_clause.has_type_:
+                        self.walk_type_kind(catch_clause.type_.kind)
+                    self.walk_block(catch_clause.body)
+                if finally_ != nil:
+                    val finally_block: HirBlock = finally_
+                    self.walk_block(finally_block)
             case HirExprKind.Await(e): self.walk_expr(e)
             case HirExprKind.Yield(value): self.walk_opt_expr(value)
             case HirExprKind.StructLit(type_, fields):

@@ -1,0 +1,64 @@
+# Inert, deterministic human projections of evaluator-owned facts.
+use std.common.traceability.model.*
+use std.common.traceability.evidence_model.*
+use std.common.traceability.evidence.*
+use std.common.traceability.obligations.*
+
+pub fn trace_markdown_escape(value: text) -> text:
+    var result = value.replace("&", "&amp;")
+    result = result.replace("<", "&lt;").replace(">", "&gt;")
+    result = result.replace("\\", "\\\\").replace("|", "\\|")
+    result = result.replace("[", "\\[").replace("]", "\\]")
+    result = result.replace("`", "&#96;").replace("*", "\\*").replace("_", "\\_")
+    result.replace("\r", " ").replace("\n", " ")
+
+fn trace_qualification_markdown(qualification: TraceQualification) -> text:
+    var lines: [text] = ["# Traceability run report", ""]
+    lines.push("Subject: " + trace_markdown_escape(qualification.subject_id))
+    lines.push("Run: " + trace_markdown_escape(qualification.run_id))
+    lines.push("")
+    lines.push("Structural obligations: " + qualification.structural_covered.to_string() + "/" + qualification.structural_total.to_string())
+    lines.push("Eligible execution obligations: " + qualification.execution_covered.to_string() + "/" + qualification.execution_total.to_string())
+    lines.push("Qualification: " + (if qualification.complete: "complete" else: "incomplete"))
+    lines.push("A linked test is not an execution. Qualification does not authorize a lifecycle transition.")
+    lines.push("")
+    lines.push("| Obligation | Requirement | Acceptance criterion | Kind | State | Observations |")
+    lines.push("|---|---|---|---|---|---|")
+    for result in qualification.results:
+        lines.push("| " + trace_markdown_escape(result.obligation_id) + " | " +
+            trace_markdown_escape(result.requirement_id) + " | " + trace_markdown_escape(result.criterion_id) + " | " +
+            trace_test_kind_name(result.test_kind) + " | " + trace_qualification_status_name(result.status) + " | " +
+            trace_markdown_escape(result.selected_observation_ids.join(", ")) + " |")
+    for result in qualification.results:
+        lines.push("")
+        lines.push("## " + trace_markdown_escape(result.obligation_id))
+        lines.push("")
+        for reason in result.reasons:
+            lines.push("- " + trace_markdown_escape(reason))
+    lines.join("\n") + "\n"
+
+pub fn render_trace_run_markdown(graph: TraceGraph, qualification: TraceQualification, run: TraceRun) -> text:
+    if (graph.subject.snapshot_id != qualification.subject_id or run.id != qualification.run_id or
+        run.subject_id != graph.subject.snapshot_id or run.input_manifest_id != graph.input_manifest_id):
+        return "# Traceability run report\n\nInfrastructure error: graph, qualification and run identity do not match.\n"
+    var result = trace_qualification_markdown(qualification)
+    result = result + "\n## Run identity and attempts\n\n"
+    result = result + "Input manifest: " + trace_markdown_escape(run.input_manifest_id) + "\n"
+    result = result + "Definition manifest: " + trace_markdown_escape(run.definition_manifest_id) + "\n"
+    result = result + "Configuration: " + trace_markdown_escape(run.configuration_id) + "\n"
+    result = result + "Lane / binary: " + trace_markdown_escape(run.lane_id) + " / " + trace_markdown_escape(run.binary_id) + "\n"
+    result = result + "Planned cases: " + run.planned_case_ids.len().to_string() + "\n"
+    result = result + "Completed shards: " + run.completed_shard_ids.len().to_string() + "/" + run.expected_shard_ids.len().to_string() + "\n\n"
+    result = result + "| Case | Attempt | Outcome | Executed | Observation | Artifacts |\n|---|---|---|---|---|---|\n"
+    for observation in run.observations:
+        result = result + "| " + trace_markdown_escape(observation.case_id) + " | " + observation.attempt.to_string() + " | " +
+            trace_outcome_name(observation.outcome) + " | " + (if observation.executed: "yes" else: "no") + " | " +
+            trace_markdown_escape(observation.id) + " | " + trace_markdown_escape(observation.artifact_ids.join(", ")) + " |\n"
+    result
+
+pub fn project_trace_markdown(graph: TraceGraph, qualification: TraceQualification) -> [TraceOutput]:
+    # Fixed relative filename prevents user-controlled identities becoming paths.
+    # The publication owner supplies a run-scoped directory and atomic writes.
+    if graph.subject.snapshot_id != qualification.subject_id:
+        return [TraceOutput("traceability.md", "# Traceability\n\nInfrastructure error: graph and qualification subjects differ.\n")]
+    [TraceOutput("traceability.md", trace_qualification_markdown(qualification))]

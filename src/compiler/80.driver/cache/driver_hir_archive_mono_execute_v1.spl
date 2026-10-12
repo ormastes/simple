@@ -1,0 +1,61 @@
+# Closed continuation for actual fresh current-body registration. This runs the
+# existing complete-body consumers; it does not grant driver/final admission.
+use compiler.mono.mono_archive_registration_v1.{MonoArchiveCurrentRegistrationOwnerV1}
+use compiler.driver.cache.hir_mono_archive_execution_v1.{MonoArchiveExecutionV1,
+    mono_archive_current_execution_create_v1, mono_archive_roots_complete_v1,
+    mono_archive_execute_next_root_v1, mono_archive_execute_next_specialization_v1,
+    mono_archive_execution_complete_v1}
+use compiler.driver.cache.hir_mono_verification_use_v1.{MonoArchiveVerificationUseResultV1,
+    mono_archive_verification_use_capture_v1, mono_archive_verification_use_v1}
+use compiler.mono.monomorphize_integration.{MonoStats}
+use compiler.driver.driver_hir_cache.{hir_cache_last_warnings}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+
+struct DriverHirArchiveMonoExecutionV1:
+    execution: MonoArchiveExecutionV1
+    verification: MonoArchiveVerificationUseResultV1
+
+fn driver_hir_archive_current_mono_execute_v1(current: MonoArchiveCurrentRegistrationOwnerV1,
+        expected_inventory: Dict<text, text>, mono_order: [text]) -> Result<DriverHirArchiveMonoExecutionV1, text>:
+    val created = driver_hir_archive_current_mono_execute_ledger_v1(current, expected_inventory, mono_order)?
+    val capture = mono_archive_verification_use_capture_v1(created)?
+    val verification = mono_archive_verification_use_v1(capture)?
+    if verification.capture.ordered_inventory != mono_order or
+            verification.capture.epoch != created.expected_epoch or
+            verification.capture.publication_ledger_digest != created.publication_ledger_digest:
+        return Err("current mono captured execution differs")
+    Ok(DriverHirArchiveMonoExecutionV1(execution: created, verification: verification))
+
+# Production policy publishes actual mono diagnostics before running the
+# post-mono verifier. The compatibility continuation above retains its result.
+fn driver_hir_archive_current_mono_execute_ledger_v1(current: MonoArchiveCurrentRegistrationOwnerV1,
+        expected_inventory: Dict<text, text>, mono_order: [text]) -> Result<MonoArchiveExecutionV1, text>:
+    # The genuine driver prerequisite must supply this fresh owner and schedule.
+    # A public owner or successful mechanical run is not final-read authority.
+    if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0:
+        return Err("current mono continuation requires closed leases")
+    val created = mono_archive_current_execution_create_v1(current, expected_inventory, mono_order)?
+    # Finish every non-generic root before consuming any specialization request.
+    while not mono_archive_roots_complete_v1(created):
+        val root = mono_archive_execute_next_root_v1(created)
+        if root.is_err(): return Err("current mono root continuation refused")
+    # Requests may append more requests. The real consumer owns deduplication,
+    # recursive-depth policy, allocation, publication and exactly-once counters.
+    while created.admission.state.cursor < created.admission.state.queue.len():
+        val specialization = mono_archive_execute_next_specialization_v1(created)
+        if specialization.is_err(): return Err("current mono FIFO continuation refused")
+    if not mono_archive_execution_complete_v1(created):
+        return Err("current mono completed ledger refused")
+    Ok(created)
+
+fn driver_hir_archive_mono_stats_v1(execution: MonoArchiveExecutionV1) -> MonoStats:
+    MonoStats(generic_functions_found: execution.generic_functions,
+        generic_structs_found: execution.generic_structs,
+        generic_classes_found: execution.generic_classes,
+        call_sites_found: execution.call_sites_found,
+        specializations_created: execution.specializations_created,
+        unresolved_generic_calls: execution.unresolved_generic_calls)
+
+export DriverHirArchiveMonoExecutionV1, driver_hir_archive_current_mono_execute_v1
+export driver_hir_archive_mono_stats_v1
+export driver_hir_archive_current_mono_execute_ledger_v1

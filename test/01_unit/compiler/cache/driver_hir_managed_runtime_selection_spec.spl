@@ -1,0 +1,58 @@
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_strict_provider_selection_revalidate_v1}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+use compiler.driver.cache.driver_hir_managed_runtime_selection_v1.*
+use compiler.backend.linker.linker_wrapper.{native_runtime_archive_inputs_for_platform}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_header}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+
+describe "Selected managed runtime archive provenance":
+    it "captures and revalidates the actual admitted snapshot and selected archive files":
+        # This is an actual managed native lane test, not synthetic owner data.
+        expect(env_get("SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH") != "").to_equal(true)
+        expect(hir_cache_enabled()).to_equal(true)
+        val bundle = env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE")
+        val target = env_get("SIMPLE_NATIVE_BUILD_TARGET")
+        val captured = driver_hir_capture_managed_runtime_selection_v1("llvm", target, bundle)
+        expect(captured.is_ok()).to_equal(true)
+        val selected = captured.unwrap()
+        expect(selected.provider.pins.len()).to_be_greater_than(0)
+        expect(selected.provider.snapshot.digest.len()).to_equal(64)
+        expect(selected.compiler_digest.len()).to_equal(64)
+        expect(selected.selection_digest.len()).to_equal(64)
+        expect(selected.producer_header).to_equal(hir_cache_header())
+        expect(selected.selection_digest).to_equal(driver_hir_managed_runtime_selection_digest_v1(selected))
+        val inputs = native_runtime_archive_inputs_for_platform(selected.provider.root, bundle, selected.msvc)
+        expect(native_runtime_strict_provider_selection_revalidate_v1(selected.provider, inputs, true).is_ok()).to_equal(true)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        # Repeated owner admission preserves the exact selected identity.
+        val repeated = driver_hir_capture_managed_runtime_selection_v1("llvm", target, bundle)
+        expect(repeated.is_ok()).to_equal(true)
+        expect(repeated.unwrap().selection_digest).to_equal(selected.selection_digest)
+
+    it "refuses another caller's lease and leaves it occupied":
+        expect(transient_scope_begin()).to_equal(true)
+        val refused = driver_hir_capture_managed_runtime_selection_v1("llvm", "", "core-c-bootstrap").is_err()
+        val occupied = transient_array_scope_state_v1() == 1
+        expect(transient_scope_end()).to_equal(true)
+        expect(refused).to_equal(true)
+        expect(occupied).to_equal(true)
+
+    it "does not authorize a selected provider for another backend or target":
+        val bundle = env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE")
+        val target = env_get("SIMPLE_NATIVE_BUILD_TARGET")
+        val selected = driver_hir_capture_managed_runtime_selection_v1("llvm", target, bundle).unwrap()
+        val source = SourceFile(path: "absent.spl", content: "", module_name: "absent")
+        expect(transient_scope_begin()).to_equal(true)
+        val backend_refused = driver_hir_archive_input_from_managed_runtime_in_owned_scope_v1(
+            selected, source, ModuleSurfacesByName.empty(), 0, false, "cranelift", target, bundle).is_err()
+        val target_refused = driver_hir_archive_input_from_managed_runtime_in_owned_scope_v1(
+            selected, source, ModuleSurfacesByName.empty(), 0, false, "llvm", target + "-changed", bundle).is_err()
+        val occupied = transient_array_scope_state_v1() == 1
+        expect(transient_scope_end()).to_equal(true)
+        expect(backend_refused).to_equal(true)
+        expect(target_refused).to_equal(true)
+        expect(occupied).to_equal(true)

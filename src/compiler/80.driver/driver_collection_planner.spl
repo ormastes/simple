@@ -7,43 +7,16 @@ use compiler.semantics.perf_facts.registry.{
     CollectionRegistryBindingV1, collection_registry_parse, collection_registry_bind_modules
 }
 use compiler.semantics.perf.collection_plan_analysis.{analyze_collection_module_v1}
-use compiler.hir.hir_types.{HirModule, SymbolId, SymbolKind}
-use compiler.hir.abi_interface.{hir_abi_function_digest_v1}
-use compiler.semantics.perf_facts.collector.{
-    hir_perf_receiver_kind_for_type, hir_perf_receiver_matches
-}
+use compiler.driver.cache.collection_archive_analysis_types_v1.{CollectionArchiveAnalysisV1}
+use compiler.driver.cache.collection_archive_analysis_v1.{collection_archive_capture_v1}
+use compiler.driver.cache.collection_current_archive_analysis_v1.{CollectionCurrentArchiveAnalysisV1,
+    collection_current_archive_capture_v1, collection_current_archive_validate_binding_v1}
+use compiler.mono.mono_archive_body_input_v1.{MonoArchiveBodyInputV1,
+    mono_archive_body_input_module_name_v1}
+use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveV1}
+use compiler.hir.hir_types.{SymbolId}
 
-fn collection_driver_validate_binding_v1(
-    module: HirModule, binding: CollectionRegistryBindingV1, backend: text
-) -> Result<bool, text>:
-    if module.path == "" or binding.module_path != module.path:
-        return Err("collection-binding-module-owner-mismatch")
-    if backend == "auto" or binding.backend != backend:
-        return Err("collection-binding-backend-mismatch")
-    val symbol_id = SymbolId(id: binding.symbol_id)
-    if not module.functions.contains_key(symbol_id) or not module.symbols.symbols.contains_key(binding.symbol_id):
-        return Err("collection-binding-definition-missing")
-    val function = module.functions[symbol_id]
-    val symbol = module.symbols.symbols[binding.symbol_id]
-    if (function.symbol.id != binding.symbol_id or symbol.id.id != binding.symbol_id or
-            symbol.name != function.name or function.is_extern or
-            function.span.file != module.path or symbol.span.file != module.path):
-        return Err("collection-binding-definition-owner-mismatch")
-    match symbol.kind:
-        case SymbolKind.Function: pass_do_nothing
-        case SymbolKind.Method: pass_do_nothing
-        case _: return Err("collection-binding-symbol-kind-mismatch")
-    if val owner = symbol.defining_module:
-        if owner != module.name:
-            return Err("collection-binding-imported-owner")
-    if function.params.len() == 0 or function.is_static:
-        return Err("collection-binding-receiver-missing")
-    if not hir_perf_receiver_matches(binding.receiver, hir_perf_receiver_kind_for_type(function.params[0].type_)):
-        return Err("collection-binding-typed-receiver-mismatch")
-    val digest = hir_abi_function_digest_v1(module, function)?
-    if digest != binding.signature_fingerprint:
-        return Err("collection-binding-typed-signature-mismatch")
-    Ok(true)
+use compiler.driver.collection_driver_binding_v1.{collection_driver_validate_binding_v1}
 
 impl CompilerDriver:
     me configure_collection_registry(
@@ -53,9 +26,12 @@ impl CompilerDriver:
         self.collection_registries = {}
         self.collection_bindings = []
         self.collection_registry_version = "unconfigured"
+        self.collection_registry_source = ""
         self.collection_registry_configured = true
         self.collection_registry_error = ""
         self.collection_analyses = {}
+        self.collection_archived_analyses = {}
+        self.collection_current_archived_analyses = {}
         val snapshot = match collection_registry_parse(source):
             case Ok(value): value
             case Err(reason):
@@ -66,6 +42,7 @@ impl CompilerDriver:
                 self.collection_registries = registries
                 self.collection_bindings = bindings
                 self.collection_registry_version = snapshot.metadata_version
+                self.collection_registry_source = source
                 Ok(true)
             case Err(reason):
                 self.collection_registry_error = reason
@@ -74,6 +51,8 @@ impl CompilerDriver:
     me analyze_collections_before_monomorphize(hir_phase_admitted: bool) -> bool:
         """Publish fresh analysis snapshots, never lowered/executed receipts."""
         self.collection_analyses = {}
+        self.collection_archived_analyses = {}
+        self.collection_current_archived_analyses = {}
         if not hir_phase_admitted:
             return false
         if not self.collection_registry_configured:
@@ -123,6 +102,141 @@ impl CompilerDriver:
             else:
                 CollectionOperationRegistry.new(self.collection_registry_version)
             self.collection_analyses[name] = analyze_collection_module_v1(module, registry)
+        true
+
+    me analyze_collections_before_archived_monomorphize_v1(
+        hir_phase_admitted: bool, modules: Dict<text, HirBodyArchiveV1>,
+        ordered_inventory: [text]
+    ) -> bool:
+        self.collection_analyses = {}
+        self.collection_archived_analyses = {}
+        self.collection_current_archived_analyses = {}
+        if not hir_phase_admitted: return false
+        if not self.collection_registry_configured: return true
+        if self.collection_registry_error != "":
+            self.ctx.add_error("collection-registry-configuration: " + self.collection_registry_error)
+            return false
+        if modules.len() == 0 or modules.len() != ordered_inventory.len() or
+                self.ctx.hir_module_count_value > modules.len():
+            self.ctx.add_error("collection-analysis-incomplete-hir")
+            return false
+        var seen: Dict<text, bool> = {}
+        var names_by_path: Dict<text, text> = {}
+        var closure = ""
+        var producer = ""
+        var provider = ""
+        var receipt_path = ""
+        var selection = ""
+        for name in ordered_inventory:
+            if seen.has(name) or not modules.has(name):
+                self.ctx.add_error("collection-analysis-incomplete-hir")
+                return false
+            seen[name] = true
+            val archive = modules[name]
+            val input = archive.input
+            if input.module_name != name or input.source_path == "" or names_by_path.has(input.source_path):
+                self.ctx.add_error("collection-analysis-module-path-ambiguous")
+                return false
+            names_by_path[input.source_path] = name
+            if closure == "":
+                closure = input.closure_digest
+                producer = input.producer_header
+                provider = input.runtime_provider_digest
+                receipt_path = input.runtime_provider_receipt_path
+                selection = input.provider_selection_digest
+            if input.closure_digest != closure or input.producer_header != producer or
+                    input.runtime_provider_digest != provider or input.runtime_provider_receipt_path != receipt_path or
+                    input.provider_selection_digest != selection:
+                self.ctx.add_error("collection-analysis-archive-provider-mismatch")
+                return false
+        # Admit every bound owner before publishing even one snapshot. Actual
+        # signature/receiver/arity validation happens over complete leased HIR.
+        for binding in self.collection_bindings:
+            if not names_by_path.has(binding.module_path):
+                self.ctx.add_error("collection-binding-module-missing")
+                return false
+        var pending: Dict<text, CollectionArchiveAnalysisV1> = {}
+        for name in ordered_inventory:
+            val captured = collection_archive_capture_v1(modules[name],
+                self.collection_registry_source, self.collection_bindings, self.ctx.options.backend)
+            if captured.is_err():
+                self.ctx.add_error(captured.unwrap_err())
+                return false
+            pending[name] = captured.unwrap()
+        # Every descriptor owns metadata/scalars. Full plans remain available
+        # through the borrowed replay API, including callbacks and loop origin.
+        self.collection_archived_analyses = pending
+        true
+
+    me analyze_collections_before_current_monomorphize_v1(
+        modules: Dict<text, MonoArchiveBodyInputV1>, ordered_inventory: [text]
+    ) -> bool:
+        """Called internally on genuinely issued quiet/current inputs; no final capability."""
+        self.collection_analyses = {}
+        self.collection_archived_analyses = {}
+        self.collection_current_archived_analyses = {}
+        if not self.collection_registry_configured: return true
+        if self.collection_registry_error != "":
+            self.ctx.add_error("collection-registry-configuration: " + self.collection_registry_error)
+            return false
+        if modules.len() == 0 or modules.len() != ordered_inventory.len() or
+                self.ctx.hir_module_count_value > modules.len():
+            self.ctx.add_error("collection-analysis-incomplete-hir")
+            return false
+        var seen: Dict<text, bool> = {}
+        var names_by_path: Dict<text, text> = {}
+        var closure = ""
+        var producer = ""
+        var provider = ""
+        var receipt_path = ""
+        var selection = ""
+        for name in ordered_inventory:
+            if seen.has(name) or not modules.has(name):
+                self.ctx.add_error("collection-analysis-incomplete-hir")
+                return false
+            seen[name] = true
+            val body = modules[name]
+            val input = body.original_parent.input
+            # Preserve ALL logical path checks. Aliases are not deduplicated
+            # to evade the configured retained planner's ambiguous-path error.
+            if mono_archive_body_input_module_name_v1(body) != name or input.source_path == "" or
+                    names_by_path.has(input.source_path):
+                self.ctx.add_error("collection-analysis-module-path-ambiguous")
+                return false
+            names_by_path[input.source_path] = name
+            if closure == "":
+                closure = input.closure_digest
+                producer = input.producer_header
+                provider = input.runtime_provider_digest
+                receipt_path = input.runtime_provider_receipt_path
+                selection = input.provider_selection_digest
+            if input.closure_digest != closure or input.producer_header != producer or
+                    input.runtime_provider_digest != provider or input.runtime_provider_receipt_path != receipt_path or
+                    input.provider_selection_digest != selection:
+                self.ctx.add_error("collection-analysis-archive-provider-mismatch")
+                return false
+        var pending: Dict<text, CollectionCurrentArchiveAnalysisV1> = {}
+        # Retained binding errors follow configured binding order, independently
+        # of module insertion order. Validate them all before any plan analysis.
+        for binding in self.collection_bindings:
+            if not names_by_path.has(binding.module_path):
+                self.ctx.add_error("collection-binding-module-missing")
+                return false
+            val input = modules[names_by_path[binding.module_path]]
+            val valid = collection_current_archive_validate_binding_v1(input,
+                binding, self.collection_registries, self.ctx.options.backend)
+            if valid.is_err():
+                self.ctx.add_error(valid.unwrap_err())
+                return false
+        for name in ordered_inventory:
+            val captured = collection_current_archive_capture_v1(modules[name],
+                self.collection_registry_source, self.collection_bindings, self.ctx.options.backend)
+            if captured.is_err():
+                self.ctx.add_error(captured.unwrap_err())
+                return false
+            pending[name] = captured.unwrap()
+        # Publish only complete successful compact descriptors, never plans.
+        self.collection_current_archived_analyses = pending
         true
 
 export collection_driver_validate_binding_v1

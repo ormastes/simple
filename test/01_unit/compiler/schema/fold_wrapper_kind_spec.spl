@@ -1,0 +1,59 @@
+# @req: REQ-COMPILER-SCHEMA-001
+# Wrapper kind fields are children unless the dialect dispatches that carrier.
+use std.spec
+use app.compiler_schema.fold_gen.{dialect_hir, dialect_ast, load_dialect, emit_one_walk}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCompClause, HirCompClauseKind, HirComprehensionKind}
+use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind, Effect, EffectKind}
+use compiler.hir.generated.hir_visitor.{HirWalkNode, walk_hir_expr, walk_hir_effect}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind, ComprehensionClause, ComprehensionKind}
+use compiler.frontend.generated.ast_visitor.{AstWalkNode, walk_ast_expr}
+
+fn wrapper_hir_int(value: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(value, "i64"), type_: nil, span: nil, has_type_: false)
+
+fn wrapper_count_hir(node: HirWalkNode, count: i64) -> i64:
+    count + 1
+
+fn wrapper_ast_int(value: i64) -> Expr:
+    Expr(kind: ExprKind.IntLit(value), span: nil)
+
+fn wrapper_count_ast(node: AstWalkNode, count: i64) -> i64:
+    count + 1
+
+describe "fold generator retains wrapper kind recursion":
+    it "emits every HIR wrapper bridge while dispatching carrier kinds only once":
+        val dialect = dialect_hir()
+        val universe = load_dialect(".", dialect)
+        expect(emit_one_walk(universe, dialect, "HirCompClause")).to_contain("acc = walk_hir_comp_clause_kind(node.kind, acc, f)")
+        expect(emit_one_walk(universe, dialect, "DimExpr")).to_contain("acc = walk_hir_dim_expr_kind(node.kind, acc, f)")
+        expect(emit_one_walk(universe, dialect, "Effect")).to_contain("acc = walk_hir_effect_kind(node.kind, acc, f)")
+        val carrier = emit_one_walk(universe, dialect, "HirExpr")
+        expect(carrier).to_contain("match node.kind:")
+        expect(carrier.contains("walk_hir_expr_kind(node.kind")).to_equal(false)
+
+    it "emits the frontend comprehension wrapper bridge":
+        val dialect = dialect_ast()
+        val universe = load_dialect(".", dialect)
+        expect(emit_one_walk(universe, dialect, "ComprehensionClause")).to_contain("acc = walk_ast_comprehension_kind(node.kind, acc, f)")
+        expect(emit_one_walk(universe, dialect, "AsmConstraint")).to_contain("acc = walk_ast_asm_constraint_kind(node.kind, acc, f)")
+
+describe "fold runtime reaches children behind wrapper kinds":
+    it "walks the HIR comprehension iterator and filter exactly once":
+        val iterator = HirExpr(kind: HirExprKind.ArrayLit([wrapper_hir_int(1), wrapper_hir_int(2)], nil), type_: nil, span: nil, has_type_: false)
+        val clauses = [HirCompClause(kind: HirCompClauseKind.For(SymbolId(id: 1), iterator), span: nil),
+                       HirCompClause(kind: HirCompClauseKind.If(wrapper_hir_int(3)), span: nil)]
+        val root = HirExpr(kind: HirExprKind.Comprehension(HirComprehensionKind.List, wrapper_hir_int(9), clauses), type_: nil, span: nil, has_type_: false)
+        expect(walk_hir_expr(root, 40, wrapper_count_hir)).to_equal(46)
+
+    it "walks the frontend comprehension iterator and filter exactly once":
+        val iterator = Expr(kind: ExprKind.ArrayLit([wrapper_ast_int(1), wrapper_ast_int(2)]), span: nil)
+        val clauses = [ComprehensionClause(kind: ComprehensionKind.For("item", iterator), span: nil),
+                       ComprehensionClause(kind: ComprehensionKind.If(wrapper_ast_int(3)), span: nil)]
+        val root = Expr(kind: ExprKind.ListComprehension(wrapper_ast_int(9), clauses), span: nil)
+        expect(walk_ast_expr(root, 40, wrapper_count_ast)).to_equal(46)
+
+    it "walks nested thrown types through the effect wrapper":
+        val inner = HirType(kind: HirTypeKind.Bool, span: nil)
+        val thrown = HirType(kind: HirTypeKind.Optional(inner), span: nil)
+        val effect = Effect(kind: EffectKind.Throws(thrown), span: nil)
+        expect(walk_hir_effect(effect, 40, wrapper_count_hir)).to_equal(42)

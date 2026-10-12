@@ -1,0 +1,100 @@
+# Native managed-owner control. Run under the cold launcher's admitted tool /
+# runtime handoff and the usual private HIR cache; no synthetic selection hash.
+use compiler.driver.cache.driver_hir_archive_inventory_v1.*
+use compiler.driver.cache.driver_hir_managed_runtime_selection_v1.*
+use compiler.driver.cache.hir_body_typecheck_lease_v1.*
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.common.config.{Logger}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use std.common.crypto.sha256.{sha256_text}
+use std.env.{env_get}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end}
+
+fn main() -> i64:
+    val selected_result = driver_hir_capture_managed_runtime_selection_v1("llvm",
+        env_get("SIMPLE_NATIVE_BUILD_TARGET"), env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE"))
+    if selected_result.is_err(): return 1
+    val selected = selected_result.unwrap()
+    val path = "test/fixtures/compiler/hir_archive_inventory/provider.spl"
+    val name = "hir_archive_inventory.provider"
+    val source = file_read_nullable(path) ?? ""
+    if source == "" or selected.producer_header == "" or
+            env_get("SIMPLE_HIR_LEASE_CLOSURE_DIGEST").len() != 64: return 2
+    val parsed = parse_full_frontend(source, path, name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    val module = lowering.lower_parser_module_unstub(parsed, false)
+    val input = HirBodyArchiveInputV1(source_path: path, module_name: name, is_entry: false,
+        closure_digest: env_get("SIMPLE_HIR_LEASE_CLOSURE_DIGEST"),
+        runtime_provider_receipt_path: selected.provider.snapshot.path,
+        runtime_provider_digest: selected.provider.snapshot.digest,
+        producer_header: selected.producer_header, stage: "lowered-unresolved-v1",
+        provider_selection_digest: selected.selection_digest,
+        source_content_digest: sha256_text(source), source_authored_path: path)
+    val stored = hir_body_archive_store_v1(input, module, ["inventory warning"])
+    if stored.is_err(): return 3
+    val archive = stored.unwrap()
+    var checks = 1
+    var ctx = CompileContext.create(driver_core_compile_options_default())
+    ctx.source_paths_owner = [path, path]
+    ctx.source_authored_paths_owner = [path, path]
+    ctx.source_identities_owner = [sha256_text(source), sha256_text(source)]
+    ctx.source_byte_lengths_owner = [source.len(), source.len()]
+    ctx.source_module_names_owner = [name, "logical_alias.provider"]
+    var logical: Dict<text, HirBodyArchiveV1> = {}
+    logical[name] = archive
+    logical["logical_alias.provider"] = archive
+    val captured_result = driver_hir_archive_inventory_from_context_v1(ctx, logical)
+    if captured_result.is_err(): return 4
+    val captured = captured_result.unwrap()
+    if captured.logical_rows.len() != 2 or captured.representative_indices != [0] or
+            captured.ordered_modules != [name] or captured.ordered_archives.len() != 1: return 5
+    checks = checks + 1
+    if captured.logical_rows[1].logical_name != "logical_alias.provider" or
+            captured.logical_rows[1].archive_key != archive.archive_key or
+            captured.inventory_digest.len() != 64 or transient_array_scope_state_v1() != 0: return 6
+    checks = checks + 1
+    if driver_hir_archive_inventory_verify_context_v1(ctx, logical, captured).is_err(): return 7
+    checks = checks + 1
+    if not transient_scope_begin(): return 8
+    val active_refused = driver_hir_archive_inventory_from_context_v1(ctx, logical).is_err()
+    if not transient_scope_pause(): return 9
+    val paused_refused = driver_hir_archive_inventory_from_context_v1(ctx, logical).is_err()
+    if not active_refused or not paused_refused or transient_array_scope_state_v1() != 2 or
+            not transient_scope_end(): return 10
+    checks = checks + 1
+    var missing: Dict<text, HirBodyArchiveV1> = {}
+    missing[name] = archive
+    if not driver_hir_archive_inventory_from_context_v1(ctx, missing).is_err(): return 11
+    checks = checks + 1
+    ctx.source_identities_owner = [sha256_text(source), sha256_text("different source")]
+    if not driver_hir_archive_inventory_from_context_v1(ctx, logical).is_err(): return 12
+    ctx.source_identities_owner = [sha256_text(source), sha256_text(source)]
+    checks = checks + 1
+    var edited = captured
+    edited.representative_indices = [1]
+    if not driver_hir_archive_inventory_verify_context_v1(ctx, logical, edited).is_err(): return 13
+    checks = checks + 1
+    var false_archive = archive
+    var false_input = input
+    false_input.module_name = "other_provider.provider"
+    false_archive.input = false_input
+    var conflicting: Dict<text, HirBodyArchiveV1> = {}
+    conflicting[name] = archive
+    conflicting["logical_alias.provider"] = false_archive
+    if not driver_hir_archive_inventory_from_context_v1(ctx, conflicting).is_err(): return 14
+    checks = checks + 1
+    ctx.source_module_names_owner = ["logical_alias.provider", name]
+    if not driver_hir_archive_inventory_verify_context_v1(ctx, logical, captured).is_err(): return 15
+    ctx.source_module_names_owner = [name, "logical_alias.provider"]
+    checks = checks + 1
+    if driver_hir_archive_inventory_verify_context_v1(ctx, logical, captured).is_err() or
+            transient_array_scope_state_v1() != 0: return 16
+    checks = checks + 1
+    if checks != 11: return 17
+    print "HIR archive inventory: {checks} checks passed"
+    0
