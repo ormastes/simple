@@ -34,3 +34,12 @@ It does not normalize all layout keys or override configured provider families;
 the existing construction/read namespace collision remains separately tracked.
 A typed-parameter record-returning callback lowering regression is authored,
 also NOT_RUN.
+
+The first rebuilt candidate failed closed during bootstrap: the initial loop
+patch referred to `iter` inside `lower_for_array_indexed`, where that name is
+not in scope. The retained native-build diagnostic names the unresolved global
+and rejected the function body; stub fallback remained disabled. Correction
+passes the declared element type explicitly from `lower_for_iterator` after its
+existing Any/Infer/Error filter. Converted text and dictionary iterables pass
+nil and retain their existing behavior. The original callback regressions still
+require execution against the corrected rebuilt producer; no PASS is claimed.

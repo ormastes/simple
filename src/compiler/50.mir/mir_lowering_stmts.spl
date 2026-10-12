@@ -3621,6 +3621,7 @@ impl MirLowering:
         var collection_hir_is_text = false
         var dict_key_hir: HirType? = nil
         var dict_value_hir: HirType? = nil
+        var declared_element_type: HirType? = nil
         if val collection_hir_type = self.for_collection_declared_type(collection_local, iter):
             match collection_hir_type.kind:
                 case HirTypeKind.Dict(dict_key_t, dict_value_t):
@@ -3646,6 +3647,7 @@ impl MirLowering:
                         case HirTypeKind.Any: elem_t_is_placeholder = true
                         case _: ()
                     if not elem_t_is_placeholder:
+                        declared_element_type = Some(elem_t)
                         match elem_t.kind:
                             case HirTypeKind.Str:
                                 element_type = self.bootstrap_text_type()
@@ -3707,7 +3709,8 @@ impl MirLowering:
                     chars_local,
                     MirType(kind: MirTypeKind.Opaque("str")),
                     body,
-                    source_span
+                    source_span,
+                    nil
                 )
 
         if mir_for_elem_trace_on():
@@ -3717,7 +3720,7 @@ impl MirLowering:
         # counted loop over rt_array_len / rt_array_get (mirrors the array
         # index-read call shape in _MirLoweringExpr/expr_dispatch.spl).
         if self.local_is_runtime_array(collection_local) or (collection_is_erased_word and element_type_from_hir):
-            return self.lower_for_array_indexed(var_, collection_local, element_type, body, source_span)
+            return self.lower_for_array_indexed(var_, collection_local, element_type, body, source_span, declared_element_type)
 
         # `for (k, v) in dict` / `for e in dict`: iterate the dict's
         # (key, value) 2-tuples, exactly the form the interpreter yields and
@@ -3758,7 +3761,7 @@ impl MirLowering:
                     self.builtin_dict_entry_field_type(dict_value_hir, entry_value_mir)
                 ]
                 val native_entries = self.builtin_runtime_tuples_to_native(entries_local, entry_fields)
-                return self.lower_for_array_indexed(var_, native_entries, MirType(kind: MirTypeKind.Tuple(entry_fields)), body, source_span)
+                return self.lower_for_array_indexed(var_, native_entries, MirType(kind: MirTypeKind.Tuple(entry_fields)), body, source_span, nil)
 
         # Non-array iterable: no supported lowering (#143). Fail loudly.
         # Diagnostics: `body.span` is frequently (0,0) on this pipeline, which
@@ -3786,7 +3789,7 @@ impl MirLowering:
                     match dict_keys_mir_type.kind:
                         case MirTypeKind.Array(key_elem_type, _): dict_key_elem_type = key_elem_type
                         case _: ()
-                return self.lower_for_array_indexed(var_, dict_keys_local, dict_key_elem_type, body, source_span)
+                return self.lower_for_array_indexed(var_, dict_keys_local, dict_key_elem_type, body, source_span, nil)
 
         val iter_coll_type_text = mir_type_probe_text(self.local_mir_type_of(collection_local))
         val iter_unsupported_msg = "for-in over non-array iterables is not supported by native codegen yet (#143); iterate an array or use while (collection mir type: {iter_coll_type_text}; module: {self.current_module_id})"
@@ -3820,7 +3823,8 @@ impl MirLowering:
         collection_local: LocalId,
         element_type: MirType,
         body: HirBlock,
-        source_span: Span
+        source_span: Span,
+        declared_element_type: HirType?
     ) -> LocalId:
         """Lower `for x in arr` over a runtime array as a counted index loop.
 
@@ -3963,11 +3967,8 @@ impl MirLowering:
             # The loop symbol can be untyped in entry-closure lowering; a
             # bare struct-name hint alone loses the callback signature and
             # the selected owner needed by function-field call lowering.
-            if val bound_collection_type = self.for_collection_declared_type(collection_local, iter):
-                match bound_collection_type.kind:
-                    case HirTypeKind.Array(bound_element_type, _) | HirTypeKind.Slice(bound_element_type):
-                        self.remember_local_hir_type(loop_var.id, bound_element_type, 0, 0)
-                    case _: ()
+            if val bound_element_type = declared_element_type:
+                self.remember_local_hir_type(loop_var.id, bound_element_type, 0, 0)
             # Bug (array-of-structs field misread), CONFLICT-FLAG
             # (mir_lowering_stmts.spl is fenced): `for p in pts` over an
             # array of structs desugars to this counted-index loop, whose
