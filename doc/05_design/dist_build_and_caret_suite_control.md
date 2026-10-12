@@ -44,6 +44,8 @@ Credential dependency inspection is `distributed_host_credential_dependents_v2`:
 | Owner and algorithm | Boundary: `src/app/llm_caret/tools.spl`. Algorithm/change: Pass immutable caller context into permission_decision; enforce project/host/operation/resource scopes at remote admission; bind approval to exact digest; add safe filesystem owner integration and actual account sandbox. |
 | Rejection evidence | Failure verification: AT-03–06,11,26; forged approval, path-race and bypass rejection. Return structured rejection before side effects for bad schema, grant or environment. After side effects, retain ownership/cleanup uncertainty rather than reporting clean success. |
 
+Canonical grant body is `DBC_EXECUTION_GRANT_V2` in the existing shared V2 codec: id, principal, project, host, environment digest, policy revision, revocation epoch, expiry, memory/duration budgets, bounded operation count and ordered operation entries. Encoding and decoding reject invalid identifiers/digests, nonpositive required values, numbers outside the 16-digit bound, duplicate operations and counts beyond 64. Frames are limited to 64 KiB; decoding must re-encode to the exact received bytes. `distributed_grant_digest_v2` hashes those canonical bytes. This is an untrusted body until an authenticated issuer/approval owner independently binds authority, key identity/revision, request and policy. Decoding or presenting the digest does not grant permission, authenticate a principal, or mint a trusted owner token. The signature/approval wrapper and service enforcement remain required.
+
 ### F04 — Managed SSH and persistent sessions
 
 | Concern | Design |

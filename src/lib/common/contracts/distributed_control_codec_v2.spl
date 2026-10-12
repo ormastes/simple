@@ -79,3 +79,71 @@ fn distributed_decode_operation_v2(payload: text) -> Result<OperationEnvelopeV2,
     val reason = distributed_operation_validate_v2(value)
     if reason != "": return Err(reason)
     Ok(value)
+
+# A wire-valid grant is still untrusted. The issuer/approval owner must bind
+# these exact bytes to authenticated authority before exposing the value.
+fn distributed_grant_wire_validate_v2(value: ExecutionGrantV2) -> text:
+    for field in [value.id, value.principal, value.project, value.host_id]:
+        if not builder_identifier_valid_v1(field): return "IDENTITY_INVALID"
+    if not builder_digest_valid_v1(value.environment_digest): return "DIGEST_INVALID"
+    if value.policy_revision <= 0 or value.revocation_epoch < 0 or value.expires_at <= 0 or
+            value.maximum_memory_bytes <= 0 or value.maximum_duration_ms <= 0:
+        return "INTEGER_INVALID"
+    for number in [value.policy_revision, value.revocation_epoch, value.expires_at,
+            value.maximum_memory_bytes, value.maximum_duration_ms]:
+        if number > DISTRIBUTED_WIRE_INTEGER_MAX_V2: return "INTEGER_TOO_LARGE"
+    if value.operations.len() == 0 or value.operations.len() > 64:
+        return "OPERATIONS_INVALID"
+    var seen: [text] = []
+    for operation in value.operations:
+        if not builder_identifier_valid_v1(operation): return "OPERATIONS_INVALID"
+        if seen.contains(operation): return "OPERATIONS_DUPLICATE"
+        seen.push(operation)
+    ""
+
+fn distributed_encode_grant_v2(value: ExecutionGrantV2) -> Result<text, text>:
+    val reason = distributed_grant_wire_validate_v2(value)
+    if reason != "": return Err(reason)
+    var pieces: [text] = [builder_wire_line_v1("DBC_EXECUTION_GRANT_V2")]
+    for field in [value.id, value.principal, value.project, value.host_id,
+            value.environment_digest, "{value.policy_revision}", "{value.revocation_epoch}",
+            "{value.expires_at}", "{value.maximum_memory_bytes}",
+            "{value.maximum_duration_ms}", "{value.operations.len()}"]:
+        pieces.push(builder_wire_line_v1(field))
+    for operation in value.operations:
+        pieces.push(builder_wire_line_v1(operation))
+    val payload = pieces.join("")
+    if payload.len() > DISTRIBUTED_WIRE_MAX_BYTES_V2: return Err("WIRE_TOO_LARGE")
+    Ok(payload)
+
+fn distributed_grant_digest_v2(value: ExecutionGrantV2) -> Result<text, text>:
+    val payload = distributed_encode_grant_v2(value)?
+    Ok(sha256_text(payload))
+
+fn distributed_decode_grant_v2(payload: text) -> Result<ExecutionGrantV2, text>:
+    if payload.len() > DISTRIBUTED_WIRE_MAX_BYTES_V2: return Err("WIRE_TOO_LARGE")
+    val reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "DBC_EXECUTION_GRANT_V2": return Err("VERSION_UNSUPPORTED")
+    val id = reader.scalar()
+    val principal = reader.scalar()
+    val project = reader.scalar()
+    val host_id = reader.scalar()
+    val environment_digest = reader.scalar()
+    val policy_revision = reader.number(DISTRIBUTED_WIRE_INTEGER_MAX_V2, false)
+    val revocation_epoch = reader.number(DISTRIBUTED_WIRE_INTEGER_MAX_V2, false)
+    val expires_at = reader.number(DISTRIBUTED_WIRE_INTEGER_MAX_V2, false)
+    val memory_bytes = reader.number(DISTRIBUTED_WIRE_INTEGER_MAX_V2, false)
+    val duration_ms = reader.number(DISTRIBUTED_WIRE_INTEGER_MAX_V2, false)
+    val count = reader.number(64, false)
+    var operations: [text] = []
+    for i in 0..count:
+        operations.push(reader.scalar())
+    val wire_error = reader.complete_error()
+    if wire_error != "": return Err(wire_error)
+    val value = ExecutionGrantV2(id: id, principal: principal, project: project,
+        host_id: host_id, operations: operations, environment_digest: environment_digest,
+        policy_revision: policy_revision, revocation_epoch: revocation_epoch,
+        expires_at: expires_at, maximum_memory_bytes: memory_bytes, maximum_duration_ms: duration_ms)
+    val canonical = distributed_encode_grant_v2(value)?
+    if canonical != payload: return Err("WIRE_NONCANONICAL")
+    Ok(value)

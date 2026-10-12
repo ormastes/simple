@@ -6,7 +6,7 @@ Source base: c5f33e7b09392200b36b44876aadfac9e5ade251, remote release_phase3. Cu
 |---|---|---|
 | F01 contracts and baseline | Value contracts, codecs, capsule descriptors, WAL admission source; unit/integration scenarios NOT_RUN | Qualified tooling, runtime activation, complete common wire contracts and acceptance |
 | F02 host registry and roles | Bounded pinned-role resolver, closed SDN decoder, dependency query; source tests NOT_RUN | Authenticated enrollment/rotation publication, credential/SSH integration and real host rejection receipts |
-| F03 scoped grants and approvals | Trusted-value scope/budget/expiry/revocation checks | Canonical grant wire, authenticated issuer/approval events, sandbox authority and real containment acceptance |
+| F03 scoped grants and approvals | Trusted-value checks plus canonical grant encode/decode/digest source; tests NOT_RUN | Authenticated issuer/approval events, protected owner token, sandbox authority and real containment acceptance |
 | F04 managed SSH and sessions | Existing owner seams retained; design specified | Fixed typed broker, persistent bindings, reconnect/detach/cancel receipts and remote execution |
 | F05 Caret/model controls | Detail design and planned owner integration | UI/tool caller wiring, independent approval handling, stale-target rejection and captures |
 | F06 exact environments | Exact value matching and actual task/environment admission source | Discovery/placement integration and independent native/emulated mismatch execution evidence |
@@ -116,3 +116,7 @@ Session30186 is terminal: exit1 at stage2-compiler-tests. c27cb117… CLI build 
 ## Durable terminal checkpoint
 
 Terminal c27 compiler matrix evidence is preserved in `/mnt/c/Temp/dbc-c27-terminal-compiler-matrix-evidence-20261012.tar` (452024320 bytes), byte-compared against the retained native tree. No evidence/cache/lineage was deleted. All repair/feature increments have persistent Git bundles beside the recovery archive. The full feature scope is retained above; no feature was narrowed to its currently authored helper or unit fixture.
+
+## F03 canonical grant wire increment
+
+Shared V2 codec now serializes every grant scope, policy/revocation, expiry and budget field plus a bounded distinct operation list; it rejects oversized frames, unsupported versions, trailing fields, invalid/oversized integers and noncanonical bytes. SHA-256 identifies the exact encoded body. Five source scenarios use independently specified golden bytes and explicit negative cases. Execution NOT_RUN; these are not signatures or authenticated approval events. Issuer key/identity binding, authenticated approval wrapper, trusted owner token and service/OS enforcement remain missing, so F03 is incomplete. No failed producer was used for general tests and no bootstrap retry was launched.
