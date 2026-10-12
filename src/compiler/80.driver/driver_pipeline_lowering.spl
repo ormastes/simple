@@ -8,6 +8,7 @@ use compiler.common.assurance.warning_phase.{warning_phase_enabled_for_value, wa
 use compiler.hir.hir.*
 use compiler.mir.mir.*
 use compiler.mir.mir_instructions.{MirModule}
+use compiler.common.build_phase_accounting.{build_phase_record_failed_module_v1}
 use compiler.hir.hir_types.{SymbolTable}
 use compiler.mono.verify.post_mono_verify.{post_mono_archive_admission_v1}
 use driver_types.{CompileContext}
@@ -239,12 +240,23 @@ fn _driver_mir_ice_continue(ctx: CompileContext, name: text, path: text, message
     ctx.mark_module_poisoned(name)
     not ctx.poison_budget_exhausted()
 
+fn driver_mir_error_is_fatal_v1(error: MirError) -> bool:
+    error.fatal or _mir_error_is_fatal(error.message)
+
+fn driver_mir_has_new_fatal_errors_v1(errors: [MirError], start: i64) -> bool:
+    var index = start
+    while index >= 0 and index < errors.len():
+        val error: MirError = errors[index]
+        if driver_mir_error_is_fatal_v1(error): return true
+        index = index + 1
+    false
+
 fn _driver_collect_mir_errors(ctx: CompileContext, errors: [MirError]):
     # `err.fatal` is the site's own explicit declaration and takes precedence.
     # `_mir_error_is_fatal(err.message)` is the deprecated message-text fallback
     # kept so the 99 already-fatal sites behave exactly as before.
     for err in errors:
-        if err.fatal or _mir_error_is_fatal(err.message):
+        if driver_mir_error_is_fatal_v1(err):
             ctx.add_error(_format_mir_error(err))
         else:
             ctx.add_warning(_format_mir_error(err))
@@ -643,6 +655,7 @@ impl CompilerDriver:
                 self.ctx.options.cli_mode_text == "aot" or
                 driver_source_entry_closure_enabled(self.ctx)
             var direct_pos = 0
+            var mir_failed_modules = 0
             # Canonical constructor — do NOT hand-duplicate MirLowering(...) here.
             # A duplicated copy drifted 8 fields behind the class and the seed
             # interpreter silently nil-fills omitted struct-init fields, which
@@ -709,6 +722,8 @@ impl CompilerDriver:
                 val direct_idx = mir_source_indices[direct_pos]
                 val src_direct = self.ctx.sources[direct_idx]
                 val source_lookup_name = src_direct.module_name
+                val module_context_errors_before = self.ctx.error_count_value
+                var module_new_fatal = false
                 val name_direct = if mir_physical_ownership_active:
                     mir_layout_canonical_module_name(self.ctx.hir_modules[source_lookup_name].name)
                 else:
@@ -746,6 +761,7 @@ impl CompilerDriver:
                             ice_message = "MIR lowering transient scope failed for {name_direct}: {scoped_entry.unwrap_err()}"
                             log_phase("aot:lower_to_mir:transient_scope_failed idx={direct_idx} module={name_direct}")
                         else:
+                            module_new_fatal = driver_mir_has_new_fatal_errors_v1(direct_lowering.errors, module_errors_before)
                             lowered_entry = scoped_entry.unwrap()
                             lowered_entry.name = name_direct
                             # The module was lowered and left in order: close its
@@ -761,10 +777,16 @@ impl CompilerDriver:
                                     self.ctx.runtime_std_full_inventory_selection != nil):
                                 self.ctx.add_error(archived_devirt)
                                 log_phase("aot:lower_to_mir:archived_devirtualization idx={direct_idx} module={name_direct}")
+                                mir_failed_modules = build_phase_record_failed_module_v1(mir_failed_modules, true)
+                                log_build_progress("mir", "modules", direct_pos + 1,
+                                    mir_source_indices.len(), name_direct, 4, 6, mir_failed_modules, 0, "running")
                                 return false
                             log_phase("aot:lower_to_mir:module:done idx={direct_idx} module={name_direct} functions={lowered_entry.functions.len()}")
                     if ice_message != "":
                         if not _driver_mir_ice_continue(self.ctx, name_direct, src_direct.path, ice_message, ice_arena_aborted):
+                            mir_failed_modules = build_phase_record_failed_module_v1(mir_failed_modules, true)
+                            log_build_progress("mir", "modules", direct_pos + 1,
+                                mir_source_indices.len(), name_direct, 4, 6, mir_failed_modules, 0, "running")
                             return false
                     lowered_entry
                 else:
@@ -781,10 +803,12 @@ impl CompilerDriver:
                 if name_direct == "app.cli.bootstrap_main":
                     self.ctx.set_bootstrap_entry_mir(name_direct, mir_direct)
                 direct_pos = direct_pos + 1
+                mir_failed_modules = build_phase_record_failed_module_v1(mir_failed_modules,
+                    module_new_fatal or self.ctx.error_count_value > module_context_errors_before)
                 if direct_pos % 64 == 0 or direct_pos == mir_source_indices.len():
                     log_build_progress("mir", "modules", direct_pos,
                         mir_source_indices.len(), name_direct,
-                        4, 6, 0, 0, "running")
+                        4, 6, mir_failed_modules, 0, "running")
             log_phase("aot:mir_diagnostics:errors:start")
             _driver_collect_mir_errors(self.ctx, direct_lowering.errors)
             log_phase("aot:mir_diagnostics:errors:done")
@@ -860,8 +884,11 @@ impl CompilerDriver:
             # any module on the shared MirLowering instance.
             for prescan_module in mir_provider_modules:
                 lowering.prescan_module_struct_names(prescan_module)
+            var fallback_done = 0
+            var fallback_failed = 0
             for hir_module in mir_provider_modules:
                 val typed_hir_module: HirModule = hir_module
+                val module_context_errors_before = self.ctx.error_count_value
                 val name = if mir_physical_ownership_active:
                     mir_layout_canonical_module_name(typed_hir_module.name)
                 else:
@@ -878,8 +905,13 @@ impl CompilerDriver:
                 # reachability from this boundary is unproven) could be live.
                 val ice_gate = ice_boundary_module_start(name, typed_hir_module.path, "mir_lower", "")
                 if ice_gate != "":
-                    if not _driver_mir_ice_continue(self.ctx, name, typed_hir_module.path, ice_gate, ice_message_arena_aborted(ice_gate)):
-                        return false
+                    val may_continue = _driver_mir_ice_continue(self.ctx, name, typed_hir_module.path, ice_gate, ice_message_arena_aborted(ice_gate))
+                    fallback_done = fallback_done + 1
+                    fallback_failed = build_phase_record_failed_module_v1(fallback_failed, true)
+                    if not may_continue or fallback_done % 64 == 0 or fallback_done == mir_provider_modules.len():
+                        log_build_progress("mir", "modules", fallback_done,
+                            mir_provider_modules.len(), name, 4, 6, fallback_failed, 0, "running")
+                    if not may_continue: return false
                     continue
                 val fallback_devirt_before: i64 = lowering.devirtualized_calls
                 val module_errors_before = lowering.errors.len()
@@ -891,6 +923,10 @@ impl CompilerDriver:
                     log_phase("aot:lower_to_mir:transient_scope_failed module={name}")
                     val _ice_stop = _driver_mir_ice_continue(self.ctx, name, typed_hir_module.path,
                         "MIR lowering transient scope failed for {name}: {scoped_fallback.unwrap_err()}", true)
+                    fallback_done = fallback_done + 1
+                    fallback_failed = build_phase_record_failed_module_v1(fallback_failed, true)
+                    log_build_progress("mir", "modules", fallback_done,
+                        mir_provider_modules.len(), name, 4, 6, fallback_failed, 0, "running")
                     return false
                 # Closed BEFORE the E-MONO-038 check below, so that orderly
                 # `return false` leaves no open `start` breadcrumb.
@@ -907,10 +943,21 @@ impl CompilerDriver:
                         self.ctx.runtime_std_full_inventory_selection != nil):
                     self.ctx.add_error(fallback_archived_devirt)
                     log_phase("aot:lower_to_mir:archived_devirtualization module={name}")
+                    fallback_done = fallback_done + 1
+                    fallback_failed = build_phase_record_failed_module_v1(fallback_failed, true)
+                    log_build_progress("mir", "modules", fallback_done,
+                        mir_provider_modules.len(), name, 4, 6, fallback_failed, 0, "running")
                     return false
                 self.ctx.mir_modules[name] = mir_module
                 if name == "app.cli.bootstrap_main":
                     self.ctx.set_bootstrap_entry_mir(name, mir_module)
+                fallback_done = fallback_done + 1
+                fallback_failed = build_phase_record_failed_module_v1(fallback_failed,
+                    driver_mir_has_new_fatal_errors_v1(lowering.errors, module_errors_before) or
+                    self.ctx.error_count_value > module_context_errors_before)
+                if fallback_done % 64 == 0 or fallback_done == mir_provider_modules.len():
+                    log_build_progress("mir", "modules", fallback_done,
+                        mir_provider_modules.len(), name, 4, 6, fallback_failed, 0, "running")
             _driver_collect_mir_errors(self.ctx, lowering.errors)
             driver_collect_mir_advisories(self.ctx, lowering.mir_advisories)
             log_debug("[lower_to_mir] MIR done")
