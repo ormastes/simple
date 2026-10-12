@@ -1,0 +1,74 @@
+#!/bin/sh
+# @req BOOTSTRAP-COMPILER-HEADROOM-001
+# Inert parser parity and policy refusal tests. No compiler workload is run.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+. "$root/scripts/bootstrap/lib/tree-rss-policy.shs"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/compiler-headroom.XXXXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+watchdog=$root/scripts/resource/process-tree-rss-watchdog.pl
+# Extract only the actual pure parser; no test-only admission path is added.
+perl -0777 -ne '(/(sub read_headroom_facts \{.*?\n\})/s) or die "parser missing";
+  print "use strict; use warnings;\n", $1,
+  "\nmy \@facts = read_headroom_facts(\$ARGV[0]); \@facts == 3 or exit 1; print join(q{ }, \@facts), qq{\\n};\n";' \
+  "$watchdog" >"$scratch/parser.pl"
+count=0
+facts() {
+  name=$1 expected=$2 data=$3
+  printf '%b' "$data" >"$scratch/facts"
+  shell=$(bootstrap_tree_rss_headroom_facts "$scratch/facts" 2>/dev/null) || shell=REFUSED
+  native=$(perl "$scratch/parser.pl" "$scratch/facts" 2>/dev/null) || native=REFUSED
+  [ "$shell" = "$expected" ] && [ "$native" = "$expected" ] || {
+    printf 'FAIL %s shell=%s perl=%s expected=%s\n' "$name" "$shell" "$native" "$expected" >&2; exit 1;
+  }
+  count=$((count+1))
+}
+facts available '100000000 60000000 MemAvailable:' 'MemTotal: 100000000 kB\nMemFree: 20000000 kB\nMemAvailable: 60000000 kB\n'
+facts free '100000000 50000000 MemFree:' 'MemTotal: 100000000 kB\nMemFree: 50000000 kB\n'
+facts duplicate REFUSED 'MemTotal: 100000000 kB\nMemTotal: 100000000 kB\nMemFree: 50000000 kB\n'
+facts duplicate_available REFUSED 'MemTotal: 100 kB\nMemAvailable: 60 kB\nMemAvailable: 50 kB\n'
+facts excessive REFUSED 'MemTotal: 100 kB\nMemAvailable: 101 kB\n'
+facts contradictory_free REFUSED 'MemTotal: 100 kB\nMemAvailable: 60 kB\nMemFree: 101 kB\n'
+facts zero REFUSED 'MemTotal: 100 kB\nMemFree: 0 kB\n'
+facts missing REFUSED 'MemTotal: 100 kB\n'
+facts leading_zero REFUSED 'MemTotal: 0100 kB\nMemFree: 50 kB\n'
+facts overflow REFUSED 'MemTotal: 9999999999999999 kB\nMemFree: 50 kB\n'
+facts unit REFUSED 'MemTotal: 100 MB\nMemFree: 50 kB\n'
+facts malformed_unused REFUSED 'MemTotal: 100 kB\nMemAvailable: 60 kB\nMemFree: bad kB\n'
+refuse_shell() {
+  if (export SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$1
+      export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$2
+      export SIMPLE_BOOTSTRAP_RSS_CAP_MODE=$3
+      bootstrap_tree_rss_resolve "$4" "" ); then
+    echo "FAIL shell accepted $1/$2/$3/$4" >&2; exit 1
+  fi
+  count=$((count+1))
+}
+refuse_shell 012582912 12582912 enforce 8
+refuse_shell 0 12582912 enforce 8
+refuse_shell 9999999999999999 12582912 enforce 8
+refuse_shell 12582912 012582912 enforce 8
+refuse_shell 12582912 '' enforce 8
+refuse_shell 12582912 12582912 monitor 8
+refuse_shell 12582912 12582912 enforce 0
+refuse_shell 999999999999999 12582912 enforce 8
+refuse_guard() {
+  name=$1; shift
+  if perl "$watchdog" --receipt="$scratch/$name.env" "$@" -- /bin/sh -c 'exit 99' >"$scratch/$name.log" 2>&1; then
+    echo "FAIL watchdog accepted $name" >&2; exit 1
+  else code=$?; fi
+  [ "$code" -eq 125 ] && grep -q '^status=policy-refused$' "$scratch/$name.env" &&
+    grep -q '^compiler_ceiling_admission=refused$' "$scratch/$name.env" &&
+    grep -q '^compiler_ceiling_admitted_kib=0$' "$scratch/$name.env" || {
+      echo "FAIL refusal evidence $name exit=$code" >&2; exit 1;
+    }
+  count=$((count+1))
+}
+refuse_guard leading --compiler-ceiling-kib=012582912 --compiler-jobs=8 --max-rss-kib=12582912
+refuse_guard overflow --compiler-ceiling-kib=9999999999999999 --compiler-jobs=8 --max-rss-kib=12582912
+refuse_guard no_jobs --compiler-ceiling-kib=12582912 --max-rss-kib=12582912
+refuse_guard no_cap --compiler-ceiling-kib=12582912 --compiler-jobs=8
+refuse_guard monitor --compiler-ceiling-kib=12582912 --compiler-jobs=8 --max-rss-kib=12582912 --rss-cap-mode=monitor
+refuse_guard overhost --compiler-ceiling-kib=999999999999999 --compiler-jobs=8 --max-rss-kib=12582912
+refuse_guard aggregate --compiler-ceiling-kib=12582912 --aggregate-workers=8 --budget-scope=aggregate-tests --max-rss-kib=12582912
+printf 'PASS compiler headroom: %s new parser/policy controls\n' "$count"
