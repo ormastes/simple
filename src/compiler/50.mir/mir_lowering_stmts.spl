@@ -1305,7 +1305,18 @@ impl MirLowering:
                                             eprint("[anyq-probe] early-Let remember sym={symbol_value_id} local={local.id} init_hir_type={iht_probe.kind} effective_mir={effective_type.kind}\n")
                                         case nil:
                                             eprint("[anyq-probe] early-Let remember sym={symbol_value_id} local={local.id} init_hir_type=nil effective_mir={effective_type.kind}\n")
-                                if found_init_hir_type.?:
+                                # An explicit iso declaration owns transfer semantics;
+                                # initializer inference must not erase its scalar state.
+                                val declared_isolation_state = if let_type_present:
+                                    match let_type_value.kind:
+                                        case HirTypeKind.Isolated(_): 1
+                                        case _: 2
+                                else:
+                                    0
+                                if declared_isolation_state == 1:
+                                    val declared_resource_state = if self.mir_hir_type_is_resource_direct(let_type_value): 1 else 0
+                                    self.remember_local_hir_type(local.id, let_type_value, 1, declared_resource_state)
+                                elif found_init_hir_type.?:
                                     # Match the ordinary Let arm: keep aggregate
                                     # metadata inside its owner instead of passing
                                     # a returned HirType across the staged ABI.
@@ -1605,7 +1616,16 @@ impl MirLowering:
                                     self.copy_optional_record_owner(init_local.id, local.id)
                                     self.copy_result_err_record_owner(init_local.id, local.id)
                                     val found_init_hir_type = self.find_local_hir_type(init_local.id)
-                                    if found_init_hir_type.?:
+                                    val declared_isolation_state = if type_ != nil:
+                                        match type_.kind:
+                                            case HirTypeKind.Isolated(_): 1
+                                            case _: 2
+                                    else:
+                                        0
+                                    if declared_isolation_state == 1:
+                                        val declared_resource_state = if self.mir_hir_type_is_resource_direct(type_): 1 else 0
+                                        self.remember_local_hir_type(local.id, type_, 1, declared_resource_state)
+                                    elif found_init_hir_type.?:
                                         # AGGREGATE ABI HAZARD -- documented twice in-tree:
                                         # mir_lowering_types.spl:574-581 ("the admitted Stage 2
                                         # native ABI can corrupt an aggregate `HirType` passed
