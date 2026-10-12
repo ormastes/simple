@@ -53,6 +53,8 @@ Facet names here are proposed interface identities; seal them to stable KpfId128
 | SourceLifecycle / proposed builder mirror adapter | SnapshotCommandV2, SnapshotQueryV2 | ArtifactQueryV2, GrantQueryV2 | snapshots/image generations/mirror refs | F11–13 |
 | Client / workbench facade | ViewQueryV2 | SessionQueryV2, BuildQueryV2, EvidenceQueryV2 | drafts only | F05,16 |
 
+HostAuthority trust publication and signature verification remain separate from client decoding. The cold reference verifier reads only protected publisher key-policy values and checks distinct issuer/approver signatures bound to the canonical grant and complete operation envelope. A client-supplied public key, authenticated flag, approval boolean or permission mode cannot replace that publisher. Approval-event persistence and the service's non-bypassable admission call remain required. Dynamic message/crypto buffers are outside the admitted no-allocation command path; activation must establish bounded ownership/transfer or a separately declared cold boundary before trusting any critical descriptor. Authored static descriptors are not execution or allocation proof.
+
 ## Sealed composition, lifecycle and ADRs
 
 | Decision | Contract and consequence |

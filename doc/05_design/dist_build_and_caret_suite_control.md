@@ -48,6 +48,10 @@ Canonical grant body is `DBC_EXECUTION_GRANT_V2` in the existing shared V2 codec
 
 The existing local tool gate must reject invalid policy modes before read-only/allow-list/allow-all shortcuts, and dispatch only on an exact allow decision. `tools.spl` retains that owner and denies unresolved interactive approval. The invalid-mode regression must prove no bash marker is created, not merely inspect a returned decision. This local configuration gate is not a remote principal or authenticated human approval seam; managed commands must still enter through the separate HostAuthority contract.
 
+HostAuthority's reference verifier is `workbench/distributed_grant_verification_v2.spl`. Trusted key policy is private publisher input, not a field decoded from the client. The grant issuer and human approver have distinct public keys and declared roles, exact key revisions, scope/budgets, policy/revocation and expiry. Issuer signature domain `DBC_GRANT_SIGNATURE_V2` includes issuer identity/revision and canonical grant body. Approval domain `DBC_APPROVAL_SIGNATURE_V2` includes approver identity/revision, exact grant digest and SHA-256 of the entire canonical operation envelope, policy, session generation and expiry. Existing pure Ed25519 verifies both signatures; reject shared keys, changed request IDs/payloads, stale/revoked keys, authority-scope expansion and expired approval. Return the grant only to the internal admission caller after both proofs.
+
+This is a cold reference path with dynamic message buffers, not a qualified no-allocation capsule command path. Actual activation requires bounded ownership and transfer into the sealed command owner, authenticated publisher/approval-event persistence, no client influence over trust anchors and service wiring that cannot bypass verification. No private-key signing, trust-root loading, opaque token publication or sandbox enforcement is implemented here. Runtime, branch coverage, allocations and signature latency remain unverified.
+
 ### F04 — Managed SSH and persistent sessions
 
 | Concern | Design |

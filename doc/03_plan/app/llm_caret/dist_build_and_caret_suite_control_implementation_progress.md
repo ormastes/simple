@@ -124,3 +124,7 @@ Shared V2 codec now serializes every grant scope, policy/revocation, expiry and 
 ## F03 existing permission gate repair
 
 Source inspection found unknown default modes passed through permission_decision and run_tool's deny/ask-only gate to actual dispatch. The existing owner now rejects invalid modes before allow shortcuts and independently requires exact allow before execution. Two regression scenarios include a real bash marker noncreation oracle; execution NOT_RUN. This repairs local gate logic without claiming remote authentication, approval or sandbox enforcement. No runtime/build retry was launched.
+
+## F03 issuer and human-approval verification reference
+
+Added HostAuthority-private cold verification using existing pure Ed25519 and separate canonical issuer/approval domains. Protected publisher key policies bind exact roles, revisions, scopes, budgets, policy/revocation and expiry; the approval binds grant digest and the complete operation envelope, preventing replay under a changed ID or payload. Six source scenarios sign independent golden messages with deterministic test keys and cover forged signatures, changed request binding, revoked/rotated keys, shared authority keys, budget expansion and expired approval. Tests NOT_RUN. Private keys, authenticated trust-root/approval publication, opaque owner-token publication, non-bypassable broker integration, sandbox enforcement and bounded no-allocation activation remain unimplemented/unqualified; F03 is incomplete. No build or exhausted callback retry ran.
