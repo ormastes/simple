@@ -1,0 +1,255 @@
+# Cold receipt and emission capture from the actual admitted weave body owner.
+# Public output records do not grant final repository or MIR admission.
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_source_loading.{_driver_physical_source_key}
+use compiler.driver.cache.driver_hir_archive_weave_boundary_v1.{
+    DriverHirArchiveWeaveBoundaryV1, DriverHirArchiveWeaveBoundaryUseV1,
+    driver_hir_archive_weave_boundary_use_v1,
+    driver_hir_archive_weave_boundary_load_in_owned_scope_v1}
+use compiler.driver.cache.driver_hir_archive_semantic_prerequisite_v1.{
+    driver_hir_archive_semantic_prerequisite_capture_v1,
+    driver_hir_archive_semantic_prerequisite_use_v1}
+use compiler.driver.cache.driver_cold_hir_source_capture_plan_v1.{
+    DriverColdHirSourceCapturePlanV1, driver_cold_hir_source_capture_plan_v1}
+use compiler.driver.cache.driver_cold_hir_module_capture_v1.{DriverColdHirModuleInputV1}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{ColdHirTypedReceiptV1,
+    cold_hir_typed_receipt_from_admitted_digest_v1,
+    cold_hir_source_mismatch_evidence_v1}
+use compiler.driver.cache.driver_cold_hir_emission_lease_v1.{
+    driver_cold_hir_emit_in_owned_scope_v1, DriverColdHirEmissionFailureV1}
+use compiler.driver.smf.runtime_std_hir_emission_types_v1.{RuntimeStdHirModuleEmissionV1}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_last_warnings,
+    hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1}
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+
+# Actual capture output only. A public DTO never grants final admission;
+# the genuine prerequisite factory must derive/replay this capture itself.
+struct DriverHirArchiveColdCaptureV1:
+    source_plan: DriverColdHirSourceCapturePlanV1
+    boundary_key: text
+    boundary_digest: text
+    source_binding: text
+    schedule_digest: text
+    policy_key: text
+    config_binding: text
+    receipts: [ColdHirTypedReceiptV1]
+    emissions: Dict<text, RuntimeStdHirModuleEmissionV1>
+
+# The owning driver adds each diagnostic independently, preserving error
+# counts and the source-evidence diagnostic before the generic capture error.
+struct DriverHirArchiveColdFailureV1:
+    diagnostics: [text]
+
+fn driver_hir_archive_cold_failure_v1(reason: text) -> DriverHirArchiveColdFailureV1:
+    DriverHirArchiveColdFailureV1(diagnostics: [reason])
+
+fn driver_hir_archive_cold_source_evidence_v1(ctx: CompileContext,
+        source_root: text, boundary_use: DriverHirArchiveWeaveBoundaryUseV1) -> text:
+    val root = source_root.replace("\\", "/")
+    var produced: Dict<text, bool> = {}
+    var index = 0
+    while index < ctx.source_paths_owner.len():
+        val source = ctx.source_paths_owner[index].replace("\\", "/")
+        if source.starts_with(root + "/") and produced.has(source):
+            index = index + 1
+            continue
+        val name = if index < ctx.source_module_names_owner.len(): ctx.source_module_names_owner[index] else: ""
+        var actual = ""
+        var module_name_empty = false
+        if name != "" and boundary_use.logical_frames.has(name):
+            # Accepted strict frames bind the actual complete HIR name/path
+            # to these parent fields. This is equivalent evidence without
+            # retaining or hydrating another whole module graph.
+            val parent = boundary_use.logical_frames[name].original_parent
+            actual = parent.input.source_path.replace("\\", "/")
+            module_name_empty = parent.input.module_name == ""
+        if not source.starts_with(root + "/") or actual != source or module_name_empty:
+            val shown_root = if root.len() > 256: root[:256] else: root
+            val shown_source = if source.len() > 256: source[:256] else: source
+            val shown_name = if name.len() > 256: name[:256] else: name
+            val shown_actual = if actual.len() > 256: actual[:256] else: actual
+            return "cold HIR path evidence: index={index} root='{shown_root}' source='{shown_source}' module='{shown_name}' hir='{shown_actual}'"
+        produced[source] = true
+        index = index + 1
+    "cold HIR path evidence: no mismatched lowered source located"
+
+fn driver_hir_archive_cold_receipt_failure_v1(ctx: CompileContext,
+        source_root: text, boundary_use: DriverHirArchiveWeaveBoundaryUseV1,
+        reason: text) -> DriverHirArchiveColdFailureV1:
+    var diagnostics: [text] = []
+    if reason == "cold-hir-module-source-mismatch":
+        diagnostics.push(driver_hir_archive_cold_source_evidence_v1(ctx, source_root, boundary_use))
+    diagnostics.push("cold HIR receipt capture failed: {reason}")
+    DriverHirArchiveColdFailureV1(diagnostics: diagnostics)
+
+fn driver_hir_archive_cold_input_v1(boundary_use: DriverHirArchiveWeaveBoundaryUseV1,
+        input: DriverColdHirModuleInputV1) -> bool:
+    if not boundary_use.logical_frames.has(input.module_identity): return false
+    val parent = boundary_use.logical_frames[input.module_identity].original_parent
+    val physical = _driver_physical_source_key("{input.source_root}/{input.source_identity}")
+    if physical == "" or _driver_physical_source_key(parent.input.source_path) != physical or
+            parent.input.source_content_digest != input.source_digest: return false
+    val rows = boundary_use.physical_inventory.logical_rows
+    if input.source_index < 0 or input.source_index >= rows.len(): return false
+    val row = rows[input.source_index]
+    row.logical_name == input.module_identity and row.physical_path == physical and
+        row.source_digest == input.source_digest and row.source_bytes == input.source_byte_count and
+        row.archive_key == parent.archive_key
+
+fn driver_hir_archive_cold_receipt_borrowed_v1(boundary_use: DriverHirArchiveWeaveBoundaryUseV1,
+        input: DriverColdHirModuleInputV1) -> Result<ColdHirTypedReceiptV1, text>:
+    if not driver_hir_archive_cold_input_v1(boundary_use, input):
+        return Err("cold-hir-module-source-mismatch")
+    val loaded = driver_hir_archive_weave_boundary_load_in_owned_scope_v1(
+        boundary_use, input.module_identity)?
+    # Preserve the retained first-logical seed override. Canonical HIR.name
+    # can differ under an alias; SMF owner refusal belongs to the second pass.
+    cold_hir_typed_receipt_from_admitted_digest_v1(loaded.module,
+        input.module_identity, input.source_root, input.source_identity,
+        input.source_digest, input.source_byte_count, input.snapshot_inventory_digest,
+        input.inventory_entry)
+
+fn driver_hir_archive_cold_receipt_v1(boundary_use: DriverHirArchiveWeaveBoundaryUseV1,
+        input: DriverColdHirModuleInputV1) -> Result<ColdHirTypedReceiptV1, text>:
+    if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0:
+        return Err("cold HIR receipt lease or diagnostic owner occupied")
+    if not transient_scope_begin(): return Err("cold HIR receipt lease unavailable")
+    # Allocate a fresh Result in scratch. No borrowed body/warning graph escapes.
+    val result = driver_hir_archive_cold_receipt_borrowed_v1(boundary_use, input)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not cache_owned or not ended:
+        panic("cold HIR archived receipt ownership failed")
+    result
+
+fn driver_hir_archive_cold_emit_borrowed_v1(boundary_use: DriverHirArchiveWeaveBoundaryUseV1,
+        input: DriverColdHirModuleInputV1
+) -> Result<RuntimeStdHirModuleEmissionV1, DriverColdHirEmissionFailureV1>:
+    if not driver_hir_archive_cold_input_v1(boundary_use, input):
+        return Err(DriverColdHirEmissionFailureV1(kind: "owner", reason: "cold archived source owner differs"))
+    val loaded = driver_hir_archive_weave_boundary_load_in_owned_scope_v1(boundary_use, input.module_identity)
+    if loaded.is_err():
+        return Err(DriverColdHirEmissionFailureV1(kind: "emission", reason: loaded.unwrap_err()))
+    driver_cold_hir_emit_in_owned_scope_v1(loaded.unwrap().module,
+        input.module_identity, input.source_identity, input.source_digest,
+        input.artifact_root, input.target_triple, input.backend)
+
+fn driver_hir_archive_cold_emit_v1(boundary_use: DriverHirArchiveWeaveBoundaryUseV1,
+        input: DriverColdHirModuleInputV1
+) -> Result<RuntimeStdHirModuleEmissionV1, DriverColdHirEmissionFailureV1>:
+    if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0:
+        return Err(DriverColdHirEmissionFailureV1(kind: "ownership", reason: "cold archived emission lease occupied"))
+    if not transient_scope_begin():
+        return Err(DriverColdHirEmissionFailureV1(kind: "ownership", reason: "cold archived emission lease unavailable"))
+    val result = driver_hir_archive_cold_emit_borrowed_v1(boundary_use, input)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not cache_owned or not ended:
+        panic("cold HIR archived emission ownership failed")
+    result
+
+pub fn driver_hir_archive_cold_capture_v1(driver: CompilerDriver,
+        boundary: DriverHirArchiveWeaveBoundaryV1
+) -> Result<DriverHirArchiveColdCaptureV1, DriverHirArchiveColdFailureV1>:
+    if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0:
+        return Err(driver_hir_archive_cold_failure_v1("cold HIR archived capture lease or diagnostic owner occupied"))
+    val source_plan = driver_cold_hir_source_capture_plan_v1(driver.ctx)
+    if source_plan.is_err():
+        val reason = source_plan.unwrap_err()
+        if reason == "cold-hir-module-source-mismatch":
+            val source_root = sosix_env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
+            # Evidence cannot grant admission. Prefer accepted archived parent
+            # fields; if replay itself refuses, inspect only the driver's
+            # guarded current context, preserving the original source error.
+            val replay = driver_hir_archive_weave_boundary_use_v1(driver, boundary)
+            val evidence = if replay.is_ok():
+                driver_hir_archive_cold_source_evidence_v1(driver.ctx, source_root, replay.unwrap())
+            else:
+                cold_hir_source_mismatch_evidence_v1(source_root,
+                    driver.ctx.source_paths_owner, driver.ctx.source_module_names_owner,
+                    driver.ctx.hir_modules)
+            return Err(DriverHirArchiveColdFailureV1(diagnostics: [evidence,
+                "cold HIR receipt capture failed: {reason}"]))
+        # The selected SCV/snapshot owner already uses the retained literal
+        # admission diagnostics. Shared cold source validators use the same
+        # cold-hir-* errors that the retained receipt consumer wraps.
+        val diagnostic = if reason.starts_with("cold-hir-"):
+            "cold HIR receipt capture failed: {reason}"
+        else:
+            reason
+        return Err(driver_hir_archive_cold_failure_v1(diagnostic))
+    val plan = source_plan.unwrap()
+    # Capture the actual streaming policy prerequisite; its closed use repeats
+    # the full source/config/claim/gate/weave replay before any typed ABI work.
+    val semantic = driver_hir_archive_semantic_prerequisite_capture_v1(driver, boundary)
+    if semantic.is_err(): return Err(driver_hir_archive_cold_failure_v1(semantic.unwrap_err()))
+    val prerequisite = semantic.unwrap()
+    val used = driver_hir_archive_semantic_prerequisite_use_v1(driver, boundary, prerequisite)
+    if used.is_err(): return Err(driver_hir_archive_cold_failure_v1(used.unwrap_err()))
+    val boundary_use = used.unwrap().weave_use
+    var receipts: [ColdHirTypedReceiptV1] = []
+    var errors: [text] = []
+    var emissions: Dict<text, RuntimeStdHirModuleEmissionV1> = {}
+    if plan.enabled:
+        for input in plan.inputs:
+            match driver_hir_archive_cold_receipt_v1(boundary_use, input):
+                case Err(reason):
+                    if not reason.starts_with("cold-hir-abi-unresolved:"):
+                        return Err(driver_hir_archive_cold_receipt_failure_v1(
+                            driver.ctx, plan.source_root, boundary_use, reason))
+                    errors.push(reason)
+                case Ok(receipt): receipts.push(receipt)
+        if errors.len() > 0:
+            return Err(driver_hir_archive_cold_failure_v1("cold HIR receipt capture failed: " + errors.join("\n")))
+        if plan.full_inventory:
+            val expected = (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_EXPECTED_SOURCE_COUNT") ?? "").to_i64() ?? -1
+            if expected < 1 or driver.ctx.source_paths_owner.len() != expected or receipts.len() != expected:
+                return Err(driver_hir_archive_cold_failure_v1("full inventory cold HIR receipt count mismatch: expected={expected} sources={driver.ctx.source_paths_owner.len()} receipts={receipts.len()}"))
+            var index = 0
+            for receipt in receipts:
+                val seed = receipt.seed
+                if not driver.ctx.runtime_std_cfg_decisions.has(seed.source_identity) or
+                        not frontend_cfg_receipt_valid_v1(driver.ctx.runtime_std_cfg_decisions[seed.source_identity],
+                            seed.source_identity, seed.source_digest, driver.ctx.native_target):
+                    return Err(driver_hir_archive_cold_failure_v1("full inventory target cfg HIR source receipt mismatch: {seed.source_identity}"))
+                if emissions.has(seed.source_identity) or not boundary_use.logical_frames.has(seed.module_identity):
+                    return Err(driver_hir_archive_cold_failure_v1("full inventory typed HIR emission owner mismatch: {seed.source_identity}"))
+                match driver_hir_archive_cold_emit_v1(boundary_use, plan.inputs[index]):
+                    case Err(failure):
+                        if failure.kind == "owner":
+                            return Err(driver_hir_archive_cold_failure_v1("full inventory typed HIR module identity changed: {seed.source_identity}"))
+                        elif failure.kind == "witness":
+                            return Err(driver_hir_archive_cold_failure_v1("full inventory live HIR native emit witness failed: {failure.reason}"))
+                        else:
+                            return Err(driver_hir_archive_cold_failure_v1("full inventory typed HIR emission failed: {failure.reason}"))
+                    case Ok(value): emissions[seed.source_identity] = value
+                index = index + 1
+        # Recheck genuine authority before publishing compact context roots.
+        # The use owner validates registered pins, not caller cleanliness claims.
+        val final_result = driver_hir_archive_semantic_prerequisite_use_v1(driver, boundary, prerequisite)
+        if final_result.is_err(): return Err(driver_hir_archive_cold_failure_v1(final_result.unwrap_err()))
+        val final_use = final_result.unwrap().weave_use
+        if final_use.boundary_key != boundary_use.boundary_key or
+                final_use.boundary_digest != boundary_use.boundary_digest or
+                final_use.config_binding != boundary_use.config_binding:
+            return Err(driver_hir_archive_cold_failure_v1("cold HIR accepted weave boundary changed before publication"))
+        if plan.full_inventory: driver.ctx.runtime_std_hir_emissions = emissions
+        driver.ctx.cold_hir_typed_receipts = receipts
+    Ok(DriverHirArchiveColdCaptureV1(source_plan: plan,
+        boundary_key: boundary_use.boundary_key, boundary_digest: boundary_use.boundary_digest,
+        source_binding: boundary_use.source_binding, schedule_digest: boundary_use.schedule_digest,
+        policy_key: boundary_use.policy_key, config_binding: boundary_use.config_binding,
+        receipts: receipts, emissions: emissions))
+
+export DriverHirArchiveColdCaptureV1, DriverHirArchiveColdFailureV1, driver_hir_archive_cold_capture_v1

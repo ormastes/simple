@@ -493,8 +493,9 @@ bootstrap_stage3_args_sha256() {
 }
 
 bootstrap_stage3_stage2_canonical_env_names() {
-    [ "$#" -ge 1 ] && [ "$#" -le 2 ] || return 1
+    [ "$#" -ge 1 ] && [ "$#" -le 3 ] || return 1
     case "${2:-}" in ''|1) ;; *) return 1 ;; esac
+    [ -z "${3:-}" ] || bootstrap_stage3_compiler_ceiling_valid "$3" || return 1
     # PATH is in the allowlist because the backend resolves its LLVM tools by
     # name at run time -- find_tool_portable runs `where llc` on Windows and
     # `command -v` elsewhere. Under `env -i` with no PATH that lookup finds
@@ -537,7 +538,39 @@ bootstrap_stage3_stage2_canonical_env_names() {
     esac
     printf ' %s' 'SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT SIMPLE_BINARY'
     [ "${2:-}" != 1 ] || printf ' %s' SIMPLE_SCV_INVENTORY_COLD_INIT
+    [ -z "${3:-}" ] || printf ' %s' SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
     printf '\n'
+}
+
+# Syntax only: live physical/headroom admission belongs to both RSS owners.
+# Limit the canonical decimal before any shell arithmetic or guard launch.
+bootstrap_stage3_compiler_ceiling_valid() {
+    case "$1" in ''|0*|*[!0-9]*) return 1 ;; esac
+    [ "${#1}" -le 15 ]
+}
+
+# Emit an optional NEW invocation binding. An explicitly empty value is not
+# absence. Historical argument reconstruction must instead read its transcript.
+bootstrap_stage3_compiler_ceiling_environment() {
+    [ "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB+x}" = x ] || return 0
+    bootstrap_stage3_compiler_ceiling_valid "$SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB" || return 1
+    printf '%s\n' "SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB"
+}
+
+# Missing means historically absent, never an invitation to inherit a new
+# ambient budget. Reject duplicates, malformed lengths and case aliases.
+bootstrap_stage3_transcript_compiler_ceiling() {
+    [ "$#" -eq 1 ] && [ -f "$1" ] || return 1
+    bootstrap_stage3_ceiling_records=$(grep -ic '^explicit-env:[^:]*:SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=' "$1" || true)
+    case "$bootstrap_stage3_ceiling_records" in
+        0) return 0 ;;
+        1) ;;
+        *) return 1 ;;
+    esac
+    bootstrap_stage3_recorded_ceiling=$(bootstrap_stage3_transcript_explicit_env_value \
+        "$1" SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB) || return 1
+    bootstrap_stage3_compiler_ceiling_valid "$bootstrap_stage3_recorded_ceiling" || return 1
+    printf '%s\n' "$bootstrap_stage3_recorded_ceiling"
 }
 
 # Optional cold initialization is an exact recorded opt-in, never inherited
