@@ -141,3 +141,10 @@ cache identity. The `current-mono` selector requires 20 native checks, unrun.
 The registration facade and extracted schema/identity/seal leaves remain below
 800 lines with unchanged APIs and private unchecked installation. Genuine driver
 prerequisite and final repository admission remain required.
+
+The ordinary strict streaming AOT route now selects the production archive
+controller after source selection. It publishes complete final HIR archives to
+the actual MIR consumer, retains specialization provenance for logical aliases,
+and finishes the private owner after compilation. The source review is complete;
+fresh compiler admission, native controls and measured memory qualification are
+still pending. Full-inventory and demand routes retain their existing selection.

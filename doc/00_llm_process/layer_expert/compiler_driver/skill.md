@@ -262,3 +262,9 @@ the genuine driver prerequisite and final repository owner before MIR use.
   record [stage2_candidate_env_lexer_array_oob_sigill_2026-09-26](../../../08_tracking/bug/stage2_candidate_env_lexer_array_oob_sigill_2026-09-26.md).
   Until the driver guarantees `__module_init_*` runs for every consumer, treat
   every module-level container read in compiler code as possibly-empty.
+
+Production archive activation begins a fresh generation after the no-op fast
+path, selects eligibility after actual source selection, and revokes the owner
+after every compilation result. An attempted or revoked archive owner cannot
+fall back to retained HIR in the MIR consumer. Native qualification remains
+pending; source checks alone do not establish compiler or runner admission.
