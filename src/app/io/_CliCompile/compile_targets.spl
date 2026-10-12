@@ -1,5 +1,6 @@
 # CLI compile — target backends (simpleos/c/cuda/opencl/vhdl/native)
 use app.io._CliCompile.compile_options.{cli_native_default_opt_level, cli_parse_opt_level, cli_print_shared_opt_level_help, cli_print_shared_optimization_inventory}
+use app.cli.collection_planner_options.{collection_planner_options, collection_planner_fingerprint}
 # CLI Compile Functions - Compilation pipeline
 # Extracted from cli_ops.spl for modularity
 # Functions here reference helpers in cli_ops.spl (same directory, no imports needed)
@@ -326,6 +327,8 @@ fn cli_native_build_inline_policy_flag(arg: text) -> bool:
 # publish an output. The compile loop below intentionally stays focused on
 # decoding already-valid options.
 fn cli_native_build_option_error(args: [text], require_entry: bool = false) -> text:
+    val planner = collection_planner_options(args)
+    if planner.error != "": return planner.error
     var i = 0
     var entry_count = 0
     var informational = false
@@ -354,7 +357,7 @@ fn cli_native_build_option_error(args: [text], require_entry: bool = false) -> t
                 return log_error
             i = i + 2
             continue
-        if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--target" or arg == "--cpu" or arg == "--opt-level" or arg == "--collection-profile" or arg == "--collection-workload" or arg == "--collection-target" or cli_native_build_policy_value_flag(arg):
+        if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--target" or arg == "--cpu" or arg == "--opt-level" or arg == "--collection-profile" or arg == "--collection-workload" or arg == "--collection-target" or arg == "--collection-policy" or arg == "--collection-memory-budget" or cli_native_build_policy_value_flag(arg):
             val error = cli_native_build_value_error(args, i, arg, false)
             if error != "":
                 return error
@@ -418,6 +421,9 @@ fn cli_native_build_option_error(args: [text], require_entry: bool = false) -> t
         elif arg.starts_with("--cache-dir="):
             val error = cli_native_build_inline_value_error(arg, "--cache-dir=", "--cache-dir", false)
             if error != "": return error
+        elif arg.starts_with("--collection-policy=") or arg.starts_with("--collection-memory-budget="):
+            # Validated by the shared semantic parser above.
+            pass
         elif arg.starts_with("--collection-profile="):
             val error = cli_native_build_inline_value_error(arg, "--collection-profile=", "--collection-profile", false)
             if error != "": return error
@@ -708,6 +714,7 @@ fn _cli_native_build(
     if option_error != "":
         _cli_eprint("Error: {option_error}")
         return 2
+    val collection_planner = collection_planner_options(args)
     # Check for --backend=llvm-lib flag to use pure Simple LLVM pipeline
     var backend = ""
     var backend_explicit = false
@@ -732,6 +739,8 @@ fn _cli_native_build(
             print "  --collection-profile <path>  Admitted .sprof collection feedback"
             print "  --collection-workload <name>  Matching workload label"
             print "  --collection-target <name>    Matching target profile"
+            print "  --collection-policy <name>    moderate, strict, robust, or critical"
+            print "  --collection-memory-budget <bytes>  Proven extra-storage budget"
             print "  --release            Release build (standard optimization profile)"
             print "  --release-optimized  Max optimization: -O3 + x86-64-v3 + ThinLTO"
             cli_print_shared_opt_level_help()
@@ -889,6 +898,10 @@ fn _cli_native_build(
                     source_dirs = source_dirs.push(args[j])
             elif a.starts_with("--source="):
                 source_dirs = source_dirs.push(a.substring(9))
+            elif a == "--collection-policy" or a == "--collection-memory-budget":
+                j = j + 1
+            elif a.starts_with("--collection-policy=") or a.starts_with("--collection-memory-budget="):
+                pass
             elif a == "--collection-profile":
                 if j + 1 >= args.len():
                     _cli_eprint("Error: --collection-profile requires an argument")
@@ -1137,6 +1150,8 @@ fn _cli_native_build(
             _cli_eprint("Usage: simple native-build --backend=llvm --entry <file.spl> -o <output> [--source <dir>]...")
             return 1
 
+        if collection_planner.specified:
+            cache_dir = cache_dir + "/planner-" + sha256_text(collection_planner_fingerprint(collection_planner))
         if collection_profile_path == "":
             if collection_workload != "" or collection_target != "":
                 _cli_eprint("Error: collection feedback requires --collection-profile, --collection-workload, and --collection-target")
@@ -1341,6 +1356,8 @@ fn _cli_native_build(
             options.release = release
             options.strip_output = strip
             options.opt_level = opt_level
+            options.collection_policy = collection_planner.policy
+            options.collection_memory_budget_bytes = collection_planner.memory_budget_bytes
             options.low_memory = low_memory
             options.target_opt_ctx = _nb_target_opt_ctx
             options = compileoptions_normalize_mir_optimization(options)
@@ -1394,6 +1411,8 @@ fn _cli_native_build(
             options.release = release
             options.strip_output = strip
             options.opt_level = opt_level
+            options.collection_policy = collection_planner.policy
+            options.collection_memory_budget_bytes = collection_planner.memory_budget_bytes
             options.low_memory = low_memory
             options.target_opt_ctx = _nb_target_opt_ctx
             options = compileoptions_normalize_mir_optimization(options)

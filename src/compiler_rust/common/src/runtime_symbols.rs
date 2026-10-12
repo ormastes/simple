@@ -2438,6 +2438,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "spl_collection_capture_note_lookup",
     "spl_collection_capture_note_materialization",
     "spl_collection_capture_note_hash_probe",
+    "spl_collection_capture_note_filter",
+    "spl_collection_capture_note_loop",
     "spl_collection_capture_finish",
     "spl_collection_capture_abort",
     "rt_dict_get_i64_raw",

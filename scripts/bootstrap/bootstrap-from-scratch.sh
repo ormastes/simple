@@ -3975,7 +3975,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # names to a fixed print-only allowlist by bootstrap_stage3_diagnostic_env, so
   # unquoted expansion is safe and no glob character can occur.  Empty by
   # default => both uses are byte-identical to before this existed.
-  stage3_diagnostic_env=$(bootstrap_stage3_diagnostic_env) || exit 1
+  stage3_diagnostic_env=$(bootstrap_stage3_diagnostic_env SIMPLE_MIR_TAG_PROBE) || exit 1
   # Allocatable mission-critical mode for Stage 3 (step 1, 2026-08-28).
   # OPT-IN via SIMPLE_STAGE3_MISSION_CRITICAL=1: pins SIMPLE_SAFETY_PROFILE=
   # critical (read by driver_types.spl into CompileContext.assurance_policy)
@@ -4004,6 +4004,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_K1_COMPOSITION_SHA256_BEFORE=${k1_composition_sha256_before}" \
       "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
       "SIMPLE_STAGE3_STREAMING_SURFACES=1" \
+      "SIMPLE_KEEP_SOURCE_CONTENTS=${SIMPLE_KEEP_SOURCE_CONTENTS:-}" \
+      "SIMPLE_MIR_TAG_PROBE=${SIMPLE_MIR_TAG_PROBE:-}" \
       "SIMPLE_FRONTEND_CACHE=1" \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage3_cache_absolute}/frontend" \
       "SIMPLE_HIR_CACHE=1" \
@@ -5052,6 +5054,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     --threads "${selfhost_jobs}" \
     --cache-dir "${stage3_cache_absolute}" \
     --mode "${bootstrap_mode}" \
+    $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory) \
     --runtime-path "${stage_runtime_absolute}" \
     --entry src/app/cli/bootstrap_main.spl \
     -o "${stage3_bin}"
@@ -5243,6 +5246,25 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     BSTAGE3_STAGE3_LOG="$(absolute_path "${log_dir}/stage3-native-build.log")"
     BSTAGE3_STAGE2_ARGS_SHA256="${stage2_build_args_sha256}"
     BSTAGE3_STAGE3_ARGS_SHA256="${stage3_build_args_sha256}"
+    BSTAGE3_INVOCATION_CONTRACT=full-bootstrap-focused-v1
+    BSTAGE3_FOCUSED_K1_POLICY=${SIMPLE_KERNEL_K1_POLICY}
+    BSTAGE3_FOCUSED_K1_ROOT=${k1_composition_root}
+    BSTAGE3_FOCUSED_K1_SHA256=${k1_composition_sha256_before}
+    BSTAGE3_FOCUSED_CUDA_ROOT=${cuda_composition_root}
+    BSTAGE3_FOCUSED_CUDA_MANIFEST_SHA256=${cuda_manifest_sha256}
+    BSTAGE3_FOCUSED_CUDA_TEMPLATE_SHA256=${cuda_template_sha256}
+    BSTAGE3_FOCUSED_K1_RECEIPT_SHA256=$(bootstrap_stage3_hash_file "${k1_composition_receipt}") || exit 1
+    BSTAGE3_FOCUSED_LOW_MEMORY=${NATIVE_LOW_MEMORY}
+    BSTAGE3_FOCUSED_STAGE2_VERBOSE=0
+    [ -z "${native_verbose_arg}" ] || BSTAGE3_FOCUSED_STAGE2_VERBOSE=1
+    BSTAGE3_FOCUSED_STAGE2_TIMEOUT=${SIMPLE_NATIVE_FILE_TIMEOUT:-}
+    BSTAGE3_FOCUSED_MISSION_CRITICAL=${SIMPLE_STAGE3_MISSION_CRITICAL:-0}
+    export BSTAGE3_INVOCATION_CONTRACT BSTAGE3_FOCUSED_K1_POLICY \
+      BSTAGE3_FOCUSED_K1_ROOT BSTAGE3_FOCUSED_K1_SHA256 BSTAGE3_FOCUSED_CUDA_ROOT \
+      BSTAGE3_FOCUSED_CUDA_MANIFEST_SHA256 BSTAGE3_FOCUSED_CUDA_TEMPLATE_SHA256 \
+      BSTAGE3_FOCUSED_K1_RECEIPT_SHA256 BSTAGE3_FOCUSED_LOW_MEMORY \
+      BSTAGE3_FOCUSED_STAGE2_VERBOSE BSTAGE3_FOCUSED_STAGE2_TIMEOUT \
+      BSTAGE3_FOCUSED_MISSION_CRITICAL
     BSTAGE3_STAGE2_THREADS="${jobs}"
     BSTAGE3_STAGE3_THREADS="${selfhost_jobs}"
     BSTAGE3_STAGE2_CACHE_DIR="${stage2_cache_absolute}"
