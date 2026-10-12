@@ -2,9 +2,12 @@
 # Uses lightweight lsp_query.spl for fast code analysis (no full compiler load).
 # Only falls back to full query.spl for heavy operations (check/diagnostics).
 
-use std.io_runtime.{process_run}
-use std.io_runtime.{env_get}
-use std.io_runtime.{file_exists}
+use std.io_runtime.{env_get, file_exists}
+use std.nogc_sync_mut.lsp.lsp_json.*
+use std.nogc_sync_mut.lsp.lsp_protocol.{lsp_write_notification}
+use std.nogc_sync_mut.lsp.lsp_file_uri.{lsp_file_uri_to_path, lsp_query_file_argument_v1}
+use std.nogc_sync_mut.lsp.lsp_query_command.{lsp_fast_query_command_v1,
+    lsp_heavy_query_command_v1, lsp_visibility_query_command_v1, lsp_run_query_command_v1}
 
 # REQ-LSPVIS-008: Track whether client supports structured visibility metadata.
 # Set during initialize from client capabilities.experimental.simpleVisibility.
@@ -39,27 +42,6 @@ fn _find_simple_binary() -> text:
         return "bin/release/linux-x86_64/simple"
     "bin/simple"
 
-fn _fast_query_cmd(subcmd: text) -> text:
-    # Lightweight query — only imports query_engine (no compiler). Fast startup.
-    val bin = _find_simple_binary()
-    "timeout 30 " + bin + " src/app/lsp/lsp_query.spl " + subcmd
-
-fn _heavy_query_cmd(subcmd: text) -> text:
-    # Full query — imports compiler for check/diagnostics. Slow startup.
-    val bin = _find_simple_binary()
-    "timeout 60 " + bin + " src/app/cli/query.spl " + subcmd
-
-fn _visibility_query_cmd(subcmd: text) -> text:
-    val bin = _find_simple_binary()
-    "timeout 60 " + bin + " src/app/cli/query_visibility.spl " + subcmd
-
-fn _shell_cmd(command: text) -> (text, i64):
-    var stdout = ""
-    var stderr = ""
-    var code: i64 = 0
-    (stdout, stderr, code) = process_run("/bin/sh", ["-c", "export NO_COLOR=1 TERM=dumb; " + command])
-    (stdout, code)
-
 fn lsp_extract_query_json_payload(output: text) -> text:
     """Return the last complete JSON object/array emitted by a query child.
 
@@ -85,9 +67,7 @@ fn _extract_uri(body: text) -> text:
     extract_field(json=td_rest, key="uri")
 
 fn _uri_to_path(uri: text) -> text:
-    if uri.starts_with("file://"):
-        return uri.substring(7)
-    uri
+    lsp_file_uri_to_path(uri)
 
 fn _extract_line(body: text) -> text:
     val pos_search = Q() + "position" + Q() + ":"
@@ -186,10 +166,10 @@ fn _publish_diagnostics(uri: text, file_path: text):
 fn _collect_diagnostics(file_path: text) -> [text]:
     var diags: [text] = []
     # Try structured JSON format first
-    var cmd_json = _heavy_query_cmd("check " + file_path + " --format=json")
+    var cmd_json = lsp_heavy_query_command_v1(["check", lsp_query_file_argument_v1(file_path), "--format=json"])
     var out_json = ""
     var exit_json: i64 = 0
-    (out_json, exit_json) = _shell_cmd(cmd_json)
+    (out_json, exit_json) = lsp_run_query_command_v1(_find_simple_binary(), cmd_json)
     if out_json.trim() != "":
         val lines = out_json.split("\n")
         for line in lines:
@@ -201,10 +181,10 @@ fn _collect_diagnostics(file_path: text) -> [text]:
                 diags.push(diag)
         return diags
     # Fallback to plain text format
-    var cmd = _heavy_query_cmd("check " + file_path)
+    var cmd = lsp_heavy_query_command_v1(["check", lsp_query_file_argument_v1(file_path)])
     var out = ""
     var exit_code: i64 = 0
-    (out, exit_code) = _shell_cmd(cmd)
+    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     if exit_code != 0 and out != "":
         val lines = out.split("\n")
         for line in lines:
@@ -337,10 +317,10 @@ fn lsp_handle_definition(id: text, body: text) -> text:
     val col = _extract_character(body)
     val query_line = str(int(line) + 1)
     val query_col = str(int(col) + 1)
-    var cmd = _fast_query_cmd("definition " + file_path + " " + query_line + " " + query_col)
+    var cmd = lsp_fast_query_command_v1(["definition", lsp_query_file_argument_v1(file_path), query_line, query_col])
     var out = ""
     var exit_code: i64 = 0
-    (out, exit_code) = _shell_cmd(cmd)
+    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id=id, result="null")
     val result = _parse_location(out.trim())
@@ -379,10 +359,10 @@ fn lsp_handle_references(id: text, body: text) -> text:
     val col = _extract_character(body)
     val query_line = str(int(line) + 1)
     val query_col = str(int(col) + 1)
-    var cmd = _fast_query_cmd("references " + file_path + " " + query_line + " " + query_col)
+    var cmd = lsp_fast_query_command_v1(["references", lsp_query_file_argument_v1(file_path), query_line, query_col])
     var out = ""
     var exit_code: i64 = 0
-    (out, exit_code) = _shell_cmd(cmd)
+    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
     val lines = out.split("\n")
@@ -405,10 +385,10 @@ fn lsp_handle_hover(id: text, body: text) -> text:
     val col = _extract_character(body)
     val query_line = str(int(line) + 1)
     val query_col = str(int(col) + 1)
-    var cmd = _visibility_query_cmd("hover " + file_path + " " + query_line + " " + query_col)
+    var cmd = lsp_visibility_query_command_v1(["hover", lsp_query_file_argument_v1(file_path), query_line, query_col])
     var out = ""
     var exit_code: i64 = 0
-    (out, exit_code) = _shell_cmd(cmd)
+    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     val payload = lsp_extract_query_json_payload(out)
     if exit_code != 0 or payload == "":
         return make_json_result(id=id, result="null")
@@ -423,10 +403,10 @@ fn lsp_handle_completion(id: text, body: text) -> text:
     val col = _extract_character(body)
     val query_line = str(int(line) + 1)
     val query_col = str(int(col) + 1)
-    var cmd = _visibility_query_cmd("completions " + file_path + " " + query_line + " " + query_col)
+    var cmd = lsp_visibility_query_command_v1(["completions", lsp_query_file_argument_v1(file_path), query_line, query_col])
     var out = ""
     var exit_code: i64 = 0
-    (out, exit_code) = _shell_cmd(cmd)
+    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     val payload = lsp_extract_query_json_payload(out)
     if exit_code != 0 or payload == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
@@ -439,10 +419,10 @@ fn lsp_handle_document_symbol(id: text, body: text) -> text:
     val file_path = _uri_to_path(uri)
     if file_path == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
-    var cmd = _visibility_query_cmd("symbols " + file_path + " --requester " + file_path)
+    var cmd = lsp_visibility_query_command_v1(["symbols", lsp_query_file_argument_v1(file_path), "--requester", lsp_query_file_argument_v1(file_path)])
     var out = ""
     var exit_code: i64 = 0
-    (out, exit_code) = _shell_cmd(cmd)
+    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
     make_json_result(id=id, result=out.trim())
@@ -473,10 +453,10 @@ fn lsp_handle_implementation(id: text, body: text) -> text:
     val col = _extract_character(body)
     val query_line = str(int(line) + 1)
     val query_col = str(int(col) + 1)
-    var cmd = _fast_query_cmd("implementation " + file_path + " " + query_line + " " + query_col)
+    var cmd = lsp_fast_query_command_v1(["implementation", lsp_query_file_argument_v1(file_path), query_line, query_col])
     var out = ""
     var exit_code: i64 = 0
-    (out, exit_code) = _shell_cmd(cmd)
+    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
     val lines = out.split("\n")
@@ -494,10 +474,10 @@ fn lsp_handle_implementation(id: text, body: text) -> text:
 
 fn lsp_handle_workspace_symbol(id: text, body: text) -> text:
     val query = extract_nested(json=body, key="query")
-    var cmd = _visibility_query_cmd("workspace-symbols --query " + query + " --requester src/")
+    var cmd = lsp_visibility_query_command_v1(["workspace-symbols", "--query", query, "--requester", "src/"])
     var out = ""
     var exit_code: i64 = 0
-    (out, exit_code) = _shell_cmd(cmd)
+    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
     make_json_result(id=id, result=out.trim())
@@ -507,10 +487,10 @@ fn lsp_handle_folding_range(id: text, body: text) -> text:
     val file_path = _uri_to_path(uri)
     if file_path == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
-    var cmd = _fast_query_cmd("folding-range " + file_path)
+    var cmd = lsp_fast_query_command_v1(["folding-range", lsp_query_file_argument_v1(file_path)])
     var out = ""
     var exit_code: i64 = 0
-    (out, exit_code) = _shell_cmd(cmd)
+    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
     val lines = out.split("\n")
@@ -541,10 +521,10 @@ fn lsp_handle_semantic_tokens_full(id: text, body: text) -> text:
     val file_path = _uri_to_path(uri)
     if file_path == "":
         return make_json_result(id=id, result="{\"data\":[]}")
-    var cmd = _visibility_query_cmd("semantic-tokens " + file_path)
+    var cmd = lsp_visibility_query_command_v1(["semantic-tokens", lsp_query_file_argument_v1(file_path)])
     var out = ""
     var exit_code: i64 = 0
-    (out, exit_code) = _shell_cmd(cmd)
+    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id=id, result="{\"data\":[]}")
     make_json_result(id=id, result=out.trim())
@@ -566,10 +546,10 @@ fn lsp_handle_semantic_tokens_range(id: text, body: text) -> text:
         val maybe_end = extract_field(json=tail, key="line")
         if maybe_end != "":
             end_line = maybe_end
-    var cmd = _visibility_query_cmd("semantic-tokens " + file_path + " --start-line " + start_line + " --end-line " + end_line)
+    var cmd = lsp_visibility_query_command_v1(["semantic-tokens", lsp_query_file_argument_v1(file_path), "--start-line", start_line, "--end-line", end_line])
     var out = ""
     var exit_code: i64 = 0
-    (out, exit_code) = _shell_cmd(cmd)
+    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id=id, result="{\"data\":[]}")
     make_json_result(id=id, result=out.trim())
@@ -583,10 +563,10 @@ fn lsp_handle_prepare_call_hierarchy(id: text, body: text) -> text:
     val file_path = _uri_to_path(uri)
     val query_line = str(int(line) + 1)
     val query_col = str(int(col) + 1)
-    var cmd = _fast_query_cmd("hover " + file_path + " " + query_line + " " + query_col)
+    var cmd = lsp_fast_query_command_v1(["hover", lsp_query_file_argument_v1(file_path), query_line, query_col])
     var out = ""
     var exit_code: i64 = 0
-    (out, exit_code) = _shell_cmd(cmd)
+    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
     val first_line = out.split("\n")[0].trim()
@@ -614,10 +594,10 @@ fn lsp_handle_inlay_hint(id: text, body: text) -> text:
     val file_path = _uri_to_path(uri)
     if file_path == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
-    var cmd = _heavy_query_cmd("inlay-hints " + file_path)
+    var cmd = lsp_heavy_query_command_v1(["inlay-hints", lsp_query_file_argument_v1(file_path)])
     var out = ""
     var exit_code: i64 = 0
-    (out, exit_code) = _shell_cmd(cmd)
+    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
     val lines = out.split("\n")
@@ -679,10 +659,10 @@ fn lsp_handle_code_action(id: text, body: text) -> text:
     val query_line = str(int(line) + 1)
     if file_path == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
-    var cmd = _heavy_query_cmd("code-actions " + file_path + " " + query_line)
+    var cmd = lsp_heavy_query_command_v1(["code-actions", lsp_query_file_argument_v1(file_path), query_line])
     var out = ""
     var exit_code: i64 = 0
-    (out, exit_code) = _shell_cmd(cmd)
+    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
     val lines = out.split("\n")
