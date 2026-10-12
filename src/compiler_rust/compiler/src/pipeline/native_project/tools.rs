@@ -423,13 +423,30 @@ pub(crate) fn find_core_c_runtime_source_root() -> Option<PathBuf> {
     None
 }
 
+/// Keep child output inherited, while retaining spawn errors and exit status.
+/// The core-C builder returns Option for its optional callers; diagnostics must
+/// survive that boundary even when native-project tracing is disabled.
+fn run_core_c_command(command: &mut std::process::Command) -> Result<(), String> {
+    let status = command.status().map_err(|error| {
+        format!("core-C command {command:?} could not start: {error}")
+    })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("core-C command {command:?} failed: {status}"))
+    }
+}
+
 fn build_c_runtime_library(
     build_dir: &Path,
     include_stage4_hosted: bool,
     include_cranelift_stubs: bool,
 ) -> Option<PathBuf> {
     let archive = build_dir.join(host_archive_name());
-    let runtime_root = find_core_c_runtime_source_root()?;
+    let runtime_root = find_core_c_runtime_source_root().or_else(|| {
+        eprintln!("native-build: core-C runtime source root was not found");
+        None
+    })?;
     let target = effective_target();
     let mut runtime_inputs = vec![
         "runtime_native.c",
@@ -612,7 +629,9 @@ fn build_c_runtime_library(
         return Some(archive);
     }
 
-    std::fs::create_dir_all(build_dir).ok()?;
+    std::fs::create_dir_all(build_dir).map_err(|error| {
+        eprintln!("native-build: cannot create core-C build directory {}: {error}", build_dir.display());
+    }).ok()?;
 
     // Level-gated identity capture: records the staging directory's inode before
     // any compile runs so a failure can tell "the directory was replaced" apart
@@ -626,7 +645,9 @@ fn build_c_runtime_library(
     let build_dir_ino_before: u64 = 0;
 
     let cc = target_c_compiler(target);
-    let ar = find_archive_tool().ok()?;
+    let ar = find_archive_tool().map_err(|error| {
+        eprintln!("native-build: core-C archive tool discovery failed: {error}");
+    }).ok()?;
     let obj_ext = host_object_extension();
     let mut objects = Vec::new();
 
@@ -676,7 +697,7 @@ fn build_c_runtime_library(
                         .arg("-fPIC")
                         .arg("-std=gnu11");
                 }
-                let ok = command
+                command
                     .args(msvc_c11_atomics_flags(&cc))
                     .arg("-DSIMPLE_CORE_C_STANDALONE=1")
                     // Selects runtime_memory.c as THE memory provider and compiles out
@@ -691,11 +712,10 @@ fn build_c_runtime_library(
                         vec![format!("-Fo{}", object.display())]
                     } else {
                         vec!["-o".to_string(), object.display().to_string()]
-                    })
-                    .status()
-                    .ok()
-                    .map(|status| status.success())
-                    .unwrap_or(false);
+                    });
+                let ok = run_core_c_command(&mut command).map_err(|error| {
+                    eprintln!("native-build: compiling core-C source {source}: {error}");
+                }).is_ok();
                 (source, object, ok)
             })
             .collect()
@@ -748,15 +768,17 @@ fn build_c_runtime_library(
             return None;
     }
 
-    let status = archive_create_command(&ar, &archive, &objects, false, false)
-        .status()
+    run_core_c_command(&mut archive_create_command(&ar, &archive, &objects, false, false))
+        .map_err(|error| eprintln!("native-build: creating core-C archive: {error}"))
         .ok()?;
-    if status.success() && has_nonempty_archive_payload(&archive) {
-        std::fs::write(fingerprint_path, fingerprint).ok()?;
-        Some(archive)
-    } else {
-        None
+    if !has_nonempty_archive_payload(&archive) {
+        eprintln!("native-build: core-C archive {} has no nonempty payload after successful archiver exit", archive.display());
+        return None;
     }
+    std::fs::write(&fingerprint_path, fingerprint).map_err(|error| {
+        eprintln!("native-build: cannot write core-C fingerprint {}: {error}", fingerprint_path.display());
+    }).ok()?;
+    Some(archive)
 }
 
 pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
@@ -4233,6 +4255,32 @@ fn is_known_system_name(name: &str) -> bool {
 #[cfg(test)]
 mod llvm_tool_policy_tests {
     use super::{build_rust_std_shim_for_rlib, is_llvm_archive_tool, missing_llvm_tool_error};
+
+    #[test]
+    fn core_c_command_reports_spawn_error_and_command() {
+        let missing = std::env::temp_dir().join(format!("simple-core-c-missing-tool-{}", std::process::id()));
+        assert!(!missing.exists());
+        let error = super::run_core_c_command(std::process::Command::new(&missing).arg("runtime_native.c"))
+            .expect_err("a missing compiler must fail");
+        assert!(error.contains("could not start"), "{error}");
+        assert!(error.contains("runtime_native.c"), "{error}");
+        assert!(error.contains(missing.to_str().unwrap()), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn core_c_command_reports_nonzero_exit_and_arguments() {
+        let error = super::run_core_c_command(std::process::Command::new("/bin/sh").args(["-c", "exit 7"]))
+            .expect_err("a failing command must fail");
+        assert!(error.contains("exit status: 7"), "{error}");
+        assert!(error.contains("exit 7"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn core_c_command_accepts_successful_exit() {
+        assert!(super::run_core_c_command(std::process::Command::new("/bin/sh").args(["-c", "exit 0"])).is_ok());
+    }
 
     #[cfg(all(target_os = "windows", target_env = "msvc"))]
     #[test]
