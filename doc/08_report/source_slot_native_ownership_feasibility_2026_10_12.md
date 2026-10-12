@@ -2,7 +2,7 @@
 
 Status: native primitive feasibility PASS; production integration and compiler performance remain UNRUN.
 
-On Windows, an import-free Simple fixture compiled through the d958 bootstrap LLVM archive path and linked against the previously admitted strict core-C provider. This is a bootstrap diagnostic, not self-hosted compiler acceptance. Two bounded verification cycles executed one expected-negative control and six positive criteria; unchanged passing criteria were not repeated.
+On Windows, an import-free Simple fixture compiled through the d958 bootstrap LLVM archive path and linked against the previously pinned strict core-C provider used by the final3 native fixture. This is a bootstrap diagnostic, not self-hosted compiler acceptance. Two bounded verification cycles executed one expected-negative control and six positive criteria; unchanged passing criteria were not repeated.
 
 The negative control confirmed that clearing a 32-alias array does not reclaim its source allocation. The positive criteria covered:
 
@@ -12,6 +12,8 @@ The negative control confirmed that clearing a 32-alias array does not reclaim i
 4. Cancellation cleanup before copying.
 5. Cancellation cleanup after copying and before adoption.
 6. Empty and one-byte shared strings: refused frees preserve valid bytes and do not alter allocation counts.
+
+The cancellation criteria exercise deterministic explicit cleanup branches, not asynchronous interruption or concurrent lease handling.
 
 The first cycle's scalar setup incorrectly assumed `repeat(value, 1)` allocates. Inspection of the sealed provider showed it returns the original value. The second cycle corrected only the fixture setup and ran the five remaining criteria; all passed with exit 0. The already-passing alias case was not repeated. All nine child stages terminated with empty Windows Jobs, and input pins remained unchanged.
 
