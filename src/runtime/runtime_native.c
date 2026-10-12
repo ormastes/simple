@@ -2012,6 +2012,13 @@ static void rt_core_transient_raw_clear(void) {
 static void rt_struct_alloc_unregister(void* ptr);
 
 static void rt_core_reclaim_transient_raw(void) {
+    /* Empty scopes must not pay for a prior scope's allocation high water.
+     * Erased entries still need clearing before the next scope; the owned,
+     * borrowed, and guarded allocation paths below are unchanged. */
+    if (rt_core_transient_raw_alloc_len == 0) {
+        if (rt_core_transient_raw_alloc_tombs != 0) rt_core_transient_raw_clear();
+        return;
+    }
     for (size_t i = 0; i < rt_core_transient_raw_alloc_cap; i++) {
         RtCoreTransientRawAlloc* entry = &rt_core_transient_raw_allocs[i];
         if (entry->ptr == 0 || entry->ptr == RT_CORE_TRANSIENT_RAW_TOMBSTONE) continue;
