@@ -146,6 +146,22 @@ jobs:
           tar -xJf "$llvm_archive" -C "$llvm_prefix" --strip-components=1
           rm "$llvm_archive"
           test "$("$llvm_prefix/bin/llvm-config" --version)" = '23.1.1'
+          # The llvmorg release llvm-config carries the BUILD machine's
+          # compiled-in prefix (/home/runner/work/llvm-project/...), so
+          # --libfiles/--ldflags emit paths that do not exist here and the
+          # seed-inputs fingerprint fails fail-closed ("failed to fingerprint
+          # Rust seed inputs", candidate a014). Bind the compiled prefix to
+          # the extracted tree so every llvm-config path resolves.
+          compiled_prefix=$("$llvm_prefix/bin/llvm-config" --prefix)
+          if [ "$compiled_prefix" != "$llvm_prefix" ]; then
+            sudo mkdir -p "$(dirname "$compiled_prefix")"
+            sudo ln -sfn "$llvm_prefix" "$compiled_prefix"
+          fi
+          missing=""
+          for lib in $("$llvm_prefix/bin/llvm-config" --link-static --libfiles); do
+            [ -f "$lib" ] || missing="$missing $lib"
+          done
+          [ -z "$missing" ] || { echo "llvm-config --libfiles missing archives:$missing" >&2; exit 1; }
           echo "$llvm_prefix/bin" >> "$GITHUB_PATH"
           echo "LLVM_SYS_231_PREFIX=$llvm_prefix" >> "$GITHUB_ENV"
 
