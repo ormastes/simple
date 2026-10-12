@@ -5,6 +5,8 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 . "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-cargo-pins.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+# macOS TMPDIR may traverse /var -> /private/var; authority requires canonical paths.
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
 cat > "$tmp/clang" <<'TOOL'
 #!/bin/sh
 printf '%s\n' 'clang version 23.1.1'
@@ -45,6 +47,9 @@ fi
 sed -n '/^run_rust_authority_env() {/,/^}/p' \
     "$root/scripts/bootstrap/bootstrap-from-scratch.sh" > "$tmp/env-function.sh"
 . "$tmp/env-function.sh"
+sed -n '/^run_rust_authority_command() {/,/^}/p' \
+    "$root/scripts/bootstrap/bootstrap-from-scratch.sh" > "$tmp/command-function.sh"
+. "$tmp/command-function.sh"
 sed -n '/^run_rust_authority_cargo() {/,/^}/p' \
     "$root/scripts/bootstrap/bootstrap-from-scratch.sh" > "$tmp/cargo-function.sh"
 . "$tmp/cargo-function.sh"
@@ -62,7 +67,16 @@ CARGO
 chmod +x "$tmp/cargo"
 prepare_rust_authority_workspace() { :; }
 absolute_path() { printf '%s\n' "$1"; }
-run_logged() { shift; "$@"; }
+run_logged() { probe_log=$1; shift; "$@" > "$log_dir/$probe_log.log" 2>&1; }
+log_dir="$tmp"
+rust_llvm_path="$PATH"
+cat > "$tmp/rust-objcopy" <<'OBJCOPY'
+#!/bin/sh
+printf '  LLVM version 23.1.1\n'
+OBJCOPY
+chmod +x "$tmp/rust-objcopy"
+rust_authority_dylib="$tmp/absent-dylib"
+rust_toolchain_authority="$(printf 'rust-helper-library-mode=absent\nrust-objcopy-path=%s\nrust-objcopy-sha256=%s\nrust-helper-llvm-version=23.1.1\n' "$tmp/rust-objcopy" "$(bootstrap_stage3_hash_file "$tmp/rust-objcopy")")"
 os=macos progress_log= rust_authority_home="$tmp" rust_authority_cargo_home="$tmp"
 rust_authority_target="$tmp" rust_authority_tmp="$tmp" rustc_abs=/pin/rustc
 cc_abs="$CC" simple_abi_cflags= jobs=1 mingw_linker= mingw_cc= mingw_ar=
