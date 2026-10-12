@@ -2,6 +2,23 @@
 
 Status: source candidate; pure accounting native PASS, complete driver/compiler integration uncompiled.
 
+Release17c1347 includes the common accounting helpers and fixtures, but its
+actual logger/AOT/module-loop call sites were still unchanged. The Windows
+continuation now connects those actual paths: each scheduled module records
+new fatal diagnostics/context errors/ICE once, MIR success is
+processed-minus-cached-minus-failed in console/events/snapshot, and terminal
+failure reuses only a matching completed parent row. Partial or unclassified
+counts remain unknown. Source review passed; actual compiled behavior remains
+unverified.
+
+An independent logger build using older admitted compiler17d1a40 reached56
+HIR stores and a completed worker, then exceeded the unchanged5,859,375 KiB
+enforced process-tree cap (peak5,916,480 KiB, jobs1, exit88/quiescent1). No
+object was produced and link/run were not attempted. Exact input hashes stayed
+unchanged; evidence is retained at
+`C:/dev/simple-phase3-bootstrap-evidence/attempt14/logger-diagnostic/final-summary.env`.
+This failure does not qualify the logger or the new Phase3 producer.
+
 Reproducer: committed MCP candidate c77645159 with P2 runtime-only successor 027c7579 produces two fatal MIR errors (storage_roots/resolver.spl177 Result.map; common/json/array_ops.spl479 tuple iteration) but the final processed-module row says done141 succeeded141 failed0. The later AOT failure row says unknown counts and failed1, not the two failed modules. Evidence /mnt/c/Temp/simple-manual-lanes-20261011/p2-mcp-qualified-sites-runtime/compile.log. No object published and terminal exit1; this is a reporting bug, not a passing compilation.
 
 Cause: the direct module loop deferred fatal diagnostic collection until after its progress rows and supplied hardcoded failed0. The common logger calculated succeeded=done-cached, omitting failures. The AOT failure branch invented one failure without using the classified module count.
