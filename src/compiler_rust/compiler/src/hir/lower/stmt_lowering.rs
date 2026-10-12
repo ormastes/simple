@@ -1205,6 +1205,26 @@ impl Lowerer {
             }
 
             Node::Expression(expr) => {
+                // The lexer intentionally treats assert( as a callable spelling.
+                // Unshadowed statement calls use the existing assertion owner;
+                // never emit a bare C call that can bind libc's __assert.
+                if let Expr::Call { callee, args } = expr {
+                    if matches!(callee.as_ref(), Expr::Identifier(name) if name == "assert")
+                        && ctx.lookup("assert").is_none()
+                        && self.resolve_import_alias("assert").is_none()
+                        && self.named_callable_value_type("assert").is_none()
+                        && !self.globals.contains_key("assert")
+                        && args.len() == 1
+                        && args[0].name.is_none()
+                    {
+                        let condition = self.lower_condition(&args[0].value, ctx)?;
+                        return Ok(vec![HirStmt::Assert {
+                            condition,
+                            message: None,
+                            span: None,
+                        }]);
+                    }
+                }
                 if matches!(expr, Expr::String(_) | Expr::TypedString(_, _)) {
                     return Ok(vec![]);
                 }

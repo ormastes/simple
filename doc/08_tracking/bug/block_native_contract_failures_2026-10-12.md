@@ -114,3 +114,40 @@ Failure evidence: `/root/simple-return-trait-diagnostic-20261012/{original,annot
 No unchanged failing probe is rerun. Native regression execution with a newly
 built repaired producer, real Hello, Phase2/Phase3 and required core/MCP checks
 remain pending. No changes from this repair lane have landed.
+
+
+## Follow-up executed evidence and narrow repairs (2026-10-12)
+
+Source 0596863c905a26566072da7c5f165a8dc20d130d completed canonical Rust
+seed/runtime build (exit 0, 785.24 seconds) at
+/root/simple-block-repair-canonical-next-20261012. Native Hello compiled and
+ran successfully: seed-hello-prepared records two checked cases. The initial
+Hello attempt lacked its required artifact directory and performed no checks;
+its failed receipt remains intact.
+
+Native collection /root/simple-block-next-regression-zpqdp5cv finished four
+passing and three failing rows. Both registry cases, returned-trait dispatch
+(six values), and missing-required refusal passed. Parser and separate-method
+fixtures compiled but crashed; cross-module extension compilation refused.
+Structural collection rust-structural-tests under the canonical output
+records returned_trait 1 PASS and implicit_trait 6 PASS / 1 FAIL.
+
+Parser diagnosis: shorthand struct trait implementations were absent from
+native-project layout inventory. Constructor stored a vtable header while
+receiver copies omitted that header, loading the wrong closure field.
+Repair registers shorthand implementations with the existing canonical
+vtable-owner resolver and tests receiver-copy header preservation.
+
+Separate-method diagnosis: the trait call returned 111, then assert(bool)
+was suffix-aliased to libc __assert. Repair lowers unshadowed statement
+assert calls through existing HIR assertions and rejects reserved platform
+suffix owners. True, false, and declared-callable fixtures are added.
+
+The extra cross-module inherent-extension positive expectation was unsupported
+on the retained old producer too (compile 0, run 139). Preserve original
+failures and the positive future fixture; separately test exact safe refusal.
+See native_cross_module_inherent_trait_2026-10-12.md. This is OPEN, not a
+claim of cross-module support.
+
+These follow-up layout/assert repairs are authored and unexecuted at this
+snapshot. Phase2, Phase3, full-CLI/MCP qualification and landing remain pending.
