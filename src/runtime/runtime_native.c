@@ -11934,132 +11934,119 @@ int64_t rt_file_read_regular_no_follow_last_failure(void) {
  * (platform/runtime_win_long_path.h, macro alias for rt_win_long_path_widen). This
  * file used to carry its own byte-identical copy here. */
 
-int64_t rt_file_read_regular_no_follow_bounded(
-        const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
-    const int64_t rt_nil = 3;
+/* Read the opened regular file, not an eagerly allocated policy ceiling.
+ * The extra byte still detects growth beyond max_bytes after the handle stat.
+ * Bounded read requests also avoid faulting a policy-sized destination on host
+ * filesystems when a file shrinks between stat and read. */
+static int rt_read_regular_no_follow_buffer(const uint8_t* path_ptr,
+        uint64_t path_len, int64_t max_bytes, uint8_t** out, size_t* out_len) {
     char path[RT_TEXT_PATH_MAX];
+    *out = NULL;
+    *out_len = 0;
     if (max_bytes < 0 || path_len == 0 ||
         !rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) ||
-        (uint64_t)max_bytes >= (uint64_t)SIZE_MAX) return RT_RNF_FAIL(2);
-    size_t capacity = (size_t)max_bytes + 1;
-    uint8_t* bytes = (uint8_t*)malloc(capacity);
-    if (!bytes) return RT_RNF_FAIL(9);
+        (uint64_t)max_bytes >= (uint64_t)SIZE_MAX) return 2;
+#if !defined(_WIN32) && !defined(O_NOFOLLOW)
+    return 9;
+#else
+    const size_t limit = (size_t)max_bytes + 1;
+    size_t capacity;
     size_t total = 0;
+    uint8_t* bytes = NULL;
+    int error = 100;
 #if defined(_WIN32)
     wchar_t* wide_path = rt_widen_long_path_rc(path);
-    if (!wide_path) { free(bytes); return RT_RNF_FAIL(4); }
+    if (!wide_path) return 4;
     HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
         OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     free(wide_path);
-    if (handle == INVALID_HANDLE_VALUE) { free(bytes); return RT_RNF_FAIL(4); }
+    if (handle == INVALID_HANDLE_VALUE) return 4;
     BY_HANDLE_FILE_INFORMATION info;
     LARGE_INTEGER size;
     if (!GetFileInformationByHandle(handle, &info) || !GetFileSizeEx(handle, &size) ||
         (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
         size.QuadPart < 0 || (uint64_t)size.QuadPart > (uint64_t)max_bytes) {
-        CloseHandle(handle); free(bytes); return RT_RNF_FAIL(5);
+        error = 5;
+        goto done;
     }
-    while (total < capacity) {
-        DWORD chunk = (DWORD)((capacity - total) > UINT32_MAX ? UINT32_MAX : (capacity - total));
-        DWORD read_count = 0;
-        if (!ReadFile(handle, bytes + total, chunk, &read_count, NULL)) {
-            CloseHandle(handle); free(bytes); return RT_RNF_FAIL(5);
-        }
-        if (read_count == 0) break;
-        total += (size_t)read_count;
-    }
-    CloseHandle(handle);
-#else
-#ifndef O_NOFOLLOW
-    free(bytes);
-    return RT_RNF_FAIL(9);
+    capacity = (size_t)size.QuadPart + 1;
 #else
     int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0) { free(bytes); return RT_RNF_FAIL(4); }
+    if (fd < 0) return 4;
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
         (uint64_t)st.st_size > (uint64_t)max_bytes) {
-        close(fd); free(bytes); return RT_RNF_FAIL(5);
+        error = 5;
+        goto done;
     }
-    while (total < capacity) {
-        ssize_t count = read(fd, bytes + total, capacity - total);
+    capacity = (size_t)st.st_size + 1;
+#endif
+    bytes = (uint8_t*)malloc(capacity);
+    if (!bytes) { error = 9; goto done; }
+    while (total < limit) {
+        if (total == capacity) {
+            size_t grown = capacity > limit / 2 ? limit : capacity * 2;
+            uint8_t* replacement = (uint8_t*)realloc(bytes, grown);
+            if (!replacement) { error = 9; goto done; }
+            bytes = replacement;
+            capacity = grown;
+        }
+        size_t chunk = capacity - total;
+        if (chunk > 1048576) chunk = 1048576;
+#if defined(_WIN32)
+        DWORD count = 0;
+        if (!ReadFile(handle, bytes + total, (DWORD)chunk, &count, NULL)) {
+            error = 5;
+            goto done;
+        }
+#else
+        ssize_t count = read(fd, bytes + total, chunk);
         if (count < 0 && errno == EINTR) continue;
-        if (count < 0) { close(fd); free(bytes); return RT_RNF_FAIL(9); }
+        if (count < 0) { error = 9; goto done; }
+#endif
         if (count == 0) break;
         total += (size_t)count;
     }
+    if (total > (size_t)max_bytes) error = 7;
+done:
+#if defined(_WIN32)
+    CloseHandle(handle);
+#elif defined(O_NOFOLLOW)
     close(fd);
 #endif
+    if (error != 100) {
+        free(bytes);
+        return error;
+    }
+    *out = bytes;
+    *out_len = total;
+    return 100;
 #endif
-    if (total > (size_t)max_bytes) { free(bytes); return RT_RNF_FAIL(7); }
+}
+
+int64_t rt_file_read_regular_no_follow_bounded(
+        const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
+    const int64_t rt_nil = 3;
+    uint8_t* bytes;
+    size_t total;
+    int status = rt_read_regular_no_follow_buffer(path_ptr, path_len, max_bytes,
+        &bytes, &total);
+    if (status != 100) return RT_RNF_FAIL(status);
     rt_rnf_last_failure = 100;
     int64_t result = rt_string_new(bytes, (uint64_t)total);
     free(bytes);
     return result;
 }
 
-/* Byte-array sibling of rt_file_read_regular_no_follow_bounded for binary
- * payloads (images, archives). Identical admission arms and bound; the
- * content is returned as a [u8] SplArray instead of being UTF-8 decoded,
- * which the text form must reject. Binary image admission
- * (image_to_markdown) reads PNG/JPEG bytes through this form. */
+/* Binary sibling; both result forms share the same handle admission and read
+ * ceiling, including growth after stat and the one-byte oversize sentinel. */
 int64_t rt_file_read_regular_no_follow_bounded_bytes(const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
     const int64_t rt_nil = 3;
-    char path[RT_TEXT_PATH_MAX];
-    if (max_bytes < 0 || path_len == 0 ||
-        !rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) ||
-        (uint64_t)max_bytes >= (uint64_t)SIZE_MAX) return RT_RNF_FAIL(2);
-    size_t capacity = (size_t)max_bytes + 1;
-    uint8_t* bytes = (uint8_t*)malloc(capacity);
-    if (!bytes) return RT_RNF_FAIL(9);
-    size_t total = 0;
-#if defined(_WIN32)
-    wchar_t* wide_path = rt_widen_long_path_rc(path);
-    if (!wide_path) { free(bytes); return RT_RNF_FAIL(4); }
-    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
-        OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-    free(wide_path);
-    if (handle == INVALID_HANDLE_VALUE) { free(bytes); return RT_RNF_FAIL(4); }
-    BY_HANDLE_FILE_INFORMATION info;
-    LARGE_INTEGER size;
-    if (!GetFileInformationByHandle(handle, &info) || !GetFileSizeEx(handle, &size) ||
-        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
-        size.QuadPart < 0 || (uint64_t)size.QuadPart > (uint64_t)max_bytes) {
-        CloseHandle(handle); free(bytes); return RT_RNF_FAIL(5);
-    }
-    while (total < capacity) {
-        DWORD chunk = (DWORD)((capacity - total) > UINT32_MAX ? UINT32_MAX : (capacity - total));
-        DWORD read_count = 0;
-        if (!ReadFile(handle, bytes + total, chunk, &read_count, NULL)) {
-            CloseHandle(handle); free(bytes); return RT_RNF_FAIL(5);
-        }
-        if (read_count == 0) break;
-        total += (size_t)read_count;
-    }
-    CloseHandle(handle);
-#else
-#ifndef O_NOFOLLOW
-    free(bytes);
-    return RT_RNF_FAIL(9);
-#else
-    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0) { free(bytes); return RT_RNF_FAIL(4); }
-    struct stat st;
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
-        (uint64_t)st.st_size > (uint64_t)max_bytes) {
-        close(fd); free(bytes); return RT_RNF_FAIL(5);
-    }
-    while (total < capacity) {
-        ssize_t count = read(fd, bytes + total, capacity - total);
-        if (count < 0 && errno == EINTR) continue;
-        if (count < 0) { close(fd); free(bytes); return RT_RNF_FAIL(9); }
-        if (count == 0) break;
-        total += (size_t)count;
-    }
-    close(fd);
-#endif
-#endif
-    if (total > (size_t)max_bytes) { free(bytes); return RT_RNF_FAIL(7); }
+    uint8_t* bytes;
+    size_t total;
+    int status = rt_read_regular_no_follow_buffer(path_ptr, path_len, max_bytes,
+        &bytes, &total);
+    if (status != 100) return RT_RNF_FAIL(status);
     rt_rnf_last_failure = 100;
     SplArray* result = rt_byte_array_new_len((uint64_t)total);
     if (!result) { free(bytes); return RT_RNF_FAIL(9); }
