@@ -10,6 +10,7 @@ use compiler.driver.cache.hir_mono_current_passthrough_v1.{mono_archive_current_
 use compiler.driver.cache.hir_mono_archive_assembly_v1.*
 use compiler.driver.cache.hir_mono_archive_verify_v1.{mono_archive_verify_assembled_modules_v1, mono_archive_post_mono_report_digest_v1}
 use compiler.driver.cache.hir_mono_verification_use_v1.*
+use compiler.driver.cache.hir_mono_replay_selection_v1.{MonoArchiveSelectedFunctionV1}
 use compiler.driver.driver_mono_publication_v1.*
 use compiler.driver.driver_post_mono_publication_v1.{driver_publish_post_mono_report_v1}
 use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1}
@@ -223,36 +224,38 @@ fn mono_final_bytes_in_owned_scope_v1(repo: MonoArchiveFinalRepositoryV1) -> tex
     if not writer.ok: return ""
     writer.finish()
 
-pub fn mono_archive_final_repository_capture_v1(driver: CompilerDriver, boundary: DriverHirArchiveWeaveBoundaryV1,
+pub fn mono_archive_final_repository_capture_production_v1(driver: CompilerDriver, boundary: DriverHirArchiveWeaveBoundaryV1,
         force_all_sources: bool, allow_bootstrap_shortcuts: bool,
-        allow_ambient_bootstrap_policy: bool = false) -> Result<MonoArchiveFinalRepositoryV1, [text]>:
+        allow_ambient_bootstrap_policy: bool = false) -> Result<MonoArchiveFinalRepositoryV1, MonoArchiveFinalFailureV1>:
     if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0:
-        return Err(["final factory requires closed leases"])
+        return Err(MonoArchiveFinalFailureV1.Unpublished(["final factory requires closed leases"]))
     if not _mono_final_pins_ready_v1:
         _mono_final_pins_v1 = {}
         _mono_final_pins_ready_v1 = true
     # Invoke genuine cold/quiet/current production internally. Supplied current
     # descriptors or candidate reports cannot reach the private issuer.
-    val produced = driver_hir_archive_current_boundary_capture_v1(driver, boundary)?
+    val current_result = driver_hir_archive_current_boundary_capture_v1(driver, boundary)
+    if current_result.is_err(): return Err(MonoArchiveFinalFailureV1.Unpublished(current_result.unwrap_err()))
+    val produced = current_result.unwrap()
     val accepted = driver_hir_archive_semantic_prerequisite_use_v1(driver, boundary, produced.semantic)
-    if accepted.is_err(): return Err([accepted.unwrap_err()])
+    if accepted.is_err(): return Err(MonoArchiveFinalFailureV1.Unpublished([accepted.unwrap_err()]))
     val weave = accepted.unwrap().weave_use
     if weave.logical_order != produced.logical_order or weave.declaration_order != produced.declaration_order:
-        return Err(["final accepted parent order changed"])
+        return Err(MonoArchiveFinalFailureV1.Unpublished(["final accepted parent order changed"]))
     val inputs = mono_final_current_inputs_v1(produced)
     if not driver.analyze_collections_before_current_monomorphize_v1(inputs, produced.logical_order):
-        return Err(["final configured collection admission refused"])
+        return Err(MonoArchiveFinalFailureV1.AlreadyPublished("final configured collection admission refused"))
     # The retained explicit skip returns before report policy. It cannot issue
     # verified final MIR authority through this consumer. Preserve it on the
     # retained route until its separately typed scheduling contract exists.
     if allow_ambient_bootstrap_policy and env_get("SIMPLE_BOOTSTRAP_SKIP_MONO") == "1":
-        return Err(["final verified archive route does not admit explicit mono skip"])
-    if not transient_scope_begin(): return Err(["final current custody lease unavailable"])
+        return Err(MonoArchiveFinalFailureV1.Unpublished(["final verified archive route does not admit explicit mono skip"]))
+    if not transient_scope_begin(): return Err(MonoArchiveFinalFailureV1.Unpublished(["final current custody lease unavailable"]))
     val current_match = driver_hir_archive_current_boundary_matches_in_owned_scope_v1(driver, produced)
     val paused = transient_scope_pause()
     val owned = if paused: transient_promote(current_match) else: false
     mono_final_close_v1(paused, owned)
-    if current_match.is_err(): return Err([current_match.unwrap_err()])
+    if current_match.is_err(): return Err(MonoArchiveFinalFailureV1.Unpublished([current_match.unwrap_err()]))
     val registration = produced.registration.registration
     val zero = registration.generic_functions == 0 and registration.generic_structs == 0 and registration.generic_classes == 0
     var modules: Dict<text, MonoArchiveAssembledModuleV1> = {}
@@ -260,40 +263,40 @@ pub fn mono_archive_final_repository_capture_v1(driver: CompilerDriver, boundary
     var report_digest = ""
     if zero:
         val passthrough = mono_archive_current_passthrough_v1(produced.registration, produced.logical_order)
-        if passthrough.is_err(): return Err([passthrough.unwrap_err()])
+        if passthrough.is_err(): return Err(MonoArchiveFinalFailureV1.Unpublished([passthrough.unwrap_err()]))
         modules = passthrough.unwrap()
         driver_publish_mono_warnings_and_stats_v1(driver.ctx, MonoStats(0, 0, 0, 0, 0, 0), [])
-        if not driver_publish_mono_diagnostics_v1(driver.ctx, [], produced.logical_order.len()): return Err(["final mono diagnostics refused"])
+        if not driver_publish_mono_diagnostics_v1(driver.ctx, [], produced.logical_order.len()): return Err(MonoArchiveFinalFailureV1.AlreadyPublished("final mono diagnostics refused"))
         val report = mono_archive_verify_assembled_modules_v1(modules, produced.logical_order)
-        if report.is_err(): return Err([report.unwrap_err()])
-        if not driver_publish_post_mono_report_v1(driver.ctx, report.unwrap(), produced.logical_order.len()): return Err(["final post-mono policy refused"])
+        if report.is_err(): return Err(MonoArchiveFinalFailureV1.Unpublished([report.unwrap_err()]))
+        if not driver_publish_post_mono_report_v1(driver.ctx, report.unwrap(), produced.logical_order.len()): return Err(MonoArchiveFinalFailureV1.AlreadyPublished("final post-mono policy refused"))
         report_digest = mono_archive_post_mono_report_digest_v1(report.unwrap())
     else:
         val executed = driver_hir_archive_current_mono_execute_ledger_v1(produced.registration, produced.expected_inventory, produced.logical_order)
-        if executed.is_err(): return Err([executed.unwrap_err()])
+        if executed.is_err(): return Err(MonoArchiveFinalFailureV1.Unpublished([executed.unwrap_err()]))
         val execution = executed.unwrap()
         driver_publish_mono_warnings_and_stats_v1(driver.ctx, driver_hir_archive_mono_stats_v1(execution), execution.warnings)
-        if not driver_publish_mono_diagnostics_v1(driver.ctx, execution.diagnostics, produced.logical_order.len()): return Err(["final mono diagnostics refused"])
+        if not driver_publish_mono_diagnostics_v1(driver.ctx, execution.diagnostics, produced.logical_order.len()): return Err(MonoArchiveFinalFailureV1.AlreadyPublished("final mono diagnostics refused"))
         val captured = mono_archive_verification_use_capture_v1(execution)
-        if captured.is_err(): return Err([captured.unwrap_err()])
+        if captured.is_err(): return Err(MonoArchiveFinalFailureV1.Unpublished([captured.unwrap_err()]))
         val replay = mono_archive_verification_use_v1(captured.unwrap())
-        if replay.is_err(): return Err([replay.unwrap_err()])
+        if replay.is_err(): return Err(MonoArchiveFinalFailureV1.Unpublished([replay.unwrap_err()]))
         modules = replay.unwrap().modules
         verification = Some(replay.unwrap().capture)
-        if not driver_publish_post_mono_report_v1(driver.ctx, replay.unwrap().report, produced.logical_order.len()): return Err(["final post-mono policy refused"])
+        if not driver_publish_post_mono_report_v1(driver.ctx, replay.unwrap().report, produced.logical_order.len()): return Err(MonoArchiveFinalFailureV1.AlreadyPublished("final post-mono policy refused"))
         report_digest = mono_archive_post_mono_report_digest_v1(replay.unwrap().report)
     # A borrowed metadata check is not a fresh source admission. Re-run the
     # actual closed source/journal/gates/weave route after mono and policy,
     # before installing any final pin. No full replay occurs in MIR leases.
     val final_accepted = driver_hir_archive_semantic_prerequisite_use_v1(driver, boundary, produced.semantic)
-    if final_accepted.is_err(): return Err([final_accepted.unwrap_err()])
+    if final_accepted.is_err(): return Err(MonoArchiveFinalFailureV1.Unpublished([final_accepted.unwrap_err()]))
     val final_weave = final_accepted.unwrap().weave_use
     if final_weave.boundary_digest != weave.boundary_digest or
             final_weave.source_binding != weave.source_binding or final_weave.schedule_digest != weave.schedule_digest or
             final_weave.policy_key != weave.policy_key or final_weave.config_binding != weave.config_binding or
             final_weave.logical_order != produced.logical_order or final_weave.declaration_order != produced.declaration_order or
             final_weave.physical_inventory.inventory_digest != weave.physical_inventory.inventory_digest:
-        return Err(["final actual source, gates, transforms or inventory changed"])
+        return Err(MonoArchiveFinalFailureV1.Unpublished(["final actual source, gates, transforms or inventory changed"]))
     _mono_final_serial_v1 = _mono_final_serial_v1 + 1
     var repo = MonoArchiveFinalRepositoryV1(authority: "", artifact_key: "", modules: modules,
         ordered_inventory: produced.logical_order, declaration_order: produced.declaration_order,
@@ -302,7 +305,7 @@ pub fn mono_archive_final_repository_capture_v1(driver: CompilerDriver, boundary
         force_all_sources: force_all_sources, allow_bootstrap_shortcuts: allow_bootstrap_shortcuts,
         bootstrap_mode: env_get("SIMPLE_BOOTSTRAP"), report_digest: report_digest,
         collection_digest: "", serial: _mono_final_serial_v1)
-    if not transient_scope_begin(): return Err(["final issuance lease unavailable"])
+    if not transient_scope_begin(): return Err(MonoArchiveFinalFailureV1.Unpublished(["final issuance lease unavailable"]))
     val rows = mono_final_emission_rows_in_owned_scope_v1(driver, repo)
     if rows.is_ok():
         repo.emission_rows = rows.unwrap()
@@ -316,10 +319,19 @@ pub fn mono_archive_final_repository_capture_v1(driver: CompilerDriver, boundary
     val pin_paused = transient_scope_pause()
     val pin_owned = if pin_paused: transient_promote(repo) else: false
     mono_final_close_v1(pin_paused, pin_owned)
-    if not stored: return Err(["final actual context or complete issuance refused"])
+    if not stored: return Err(MonoArchiveFinalFailureV1.Unpublished(["final actual context or complete issuance refused"]))
     _mono_final_pins_v1["{driver as i64}:" + repo.artifact_key] = MonoArchiveFinalPrivatePinV1(driver as i64, repo.serial, repo.authority)
     Ok(repo)
 
+pub fn mono_archive_final_repository_capture_v1(driver: CompilerDriver, boundary: DriverHirArchiveWeaveBoundaryV1,
+        force_all_sources: bool, allow_bootstrap_shortcuts: bool,
+        allow_ambient_bootstrap_policy: bool = false) -> Result<MonoArchiveFinalRepositoryV1, [text]>:
+    val actual = mono_archive_final_repository_capture_production_v1(driver, boundary,
+        force_all_sources, allow_bootstrap_shortcuts, allow_ambient_bootstrap_policy)
+    match actual:
+        case Ok(repo): Ok(repo)
+        case Err(MonoArchiveFinalFailureV1.Unpublished(diagnostics)): Err(diagnostics)
+        case Err(MonoArchiveFinalFailureV1.AlreadyPublished(reason)): Err([reason])
 pub fn mono_archive_final_repository_matches_v1(driver: CompilerDriver, repo: MonoArchiveFinalRepositoryV1) -> bool:
     if transient_array_scope_state_v1() != 1 or not _mono_final_pins_ready_v1: return false
     val lookup = "{driver as i64}:" + repo.artifact_key
@@ -355,5 +367,26 @@ pub fn mono_archive_load_final_module_in_owned_scope_v1(driver: CompilerDriver, 
         return Err("final selected complete body differs from actual verified output")
     Ok(module)
 
+pub fn mono_archive_final_specialization_selections_in_owned_scope_v1(driver: CompilerDriver,
+        repo: MonoArchiveFinalRepositoryV1, logical_name: text) -> Result<[MonoArchiveSelectedFunctionV1], text>:
+    if not mono_archive_final_repository_matches_v1(driver, repo) or not repo.modules.has(logical_name):
+        return Err("final specialization origins require actual issued policy pin")
+    if val capture = repo.verification:
+        return mono_archive_verification_use_specializations_in_owned_scope_v1(capture, logical_name)
+    if not repo.zero_templates: return Err("final specialization recipe missing")
+    Ok([])
+
 export MonoArchiveFinalEmissionRowV1, MonoArchiveFinalRepositoryV1
+export MonoArchiveFinalFailureV1, mono_archive_final_repository_capture_production_v1
 export mono_archive_final_repository_capture_v1, mono_archive_final_repository_matches_v1, mono_archive_load_final_module_in_owned_scope_v1
+
+pub fn mono_archive_final_repository_revoke_driver_v1(driver: CompilerDriver) -> bool:
+    if transient_array_scope_state_v1() != 0: return false
+    if not _mono_final_pins_ready_v1: return true
+    val word = driver as i64
+    for key in _mono_final_pins_v1.keys():
+        if _mono_final_pins_v1[key].driver_identity == word: _mono_final_pins_v1.remove(key)
+    true
+
+export mono_archive_final_repository_revoke_driver_v1
+export mono_archive_final_specialization_selections_in_owned_scope_v1
