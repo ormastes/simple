@@ -12,7 +12,7 @@ use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 
 impl MirLowering:
     me lower_archive_module_in_owned_scope_v1(module: HirModule,
-            is_entry_module: bool) -> Result<MirModule, text>:
+            is_entry_module: bool, logical_key: text = "") -> Result<MirModule, text>:
         # Never acquire, pause, promote or close the caller's lease. A failure
         # leaves its lifecycle intact; the driver must discard failed output.
         if transient_array_scope_state_v1() != 1:
@@ -22,10 +22,13 @@ impl MirLowering:
         if self.finally_stack.len() != 0 or self.lambda_bindings.len() != 0 or self.lambda_capture_snapshot.len() != 0:
             return Err("borrowed MIR module callable or finally scratch is occupied")
         val repository: MirHirDeclarationRepositoryV1 = self.declaration_repository.unwrap()
-        if not repository.modules.has(module.name):
+        val selected_key = if logical_key == "": module.name else: logical_key
+        if not repository.modules.has(selected_key):
             return Err("borrowed MIR module has no exact declaration owner")
-        val declaration: MirHirModuleDeclarationsV1 = repository.modules[module.name]
+        val declaration: MirHirModuleDeclarationsV1 = repository.modules[selected_key]
         if declaration.final_repository_authority != repository.final_repository_authority or
+                mir_hir_declaration_logical_key_v1(declaration) != selected_key or
+                declaration.name != module.name or
                 not mir_hir_module_declarations_valid_v1(declaration) or module.path != declaration.path:
             return Err("borrowed MIR module declaration identity differs")
         # Validate the actual retained complete graph, not a recomputed source
@@ -34,6 +37,16 @@ impl MirLowering:
         val blob = hir_module_encode(module)
         if blob == "" or sha256_text(blob) != declaration.final_body_digest:
             return Err("borrowed MIR module complete body differs")
+        # A public declaration carrier can be edited and resealed. Bind its
+        # actual headers/default selectors back to this selected complete
+        # body before they drive ABI or provider lowering. Projection writers
+        # and temporary descriptors remain inside the caller's scope.
+        val actual = mir_hir_project_module_in_owned_scope_v1(repository.artifact_context,
+            module, repository.final_repository_authority, declaration.final_archive_key,
+            declaration.final_body_digest, declaration.source_binding)
+        if actual.is_err(): return Err(actual.unwrap_err())
+        if actual.unwrap().declaration_digest != declaration.declaration_digest:
+            return Err("borrowed MIR declaration records differ from selected complete body")
         val no_body_providers: [HirModule] = []
         val output: MirModule = self.lower_module(module, no_body_providers, is_entry_module)
         # Function emission has completed every nested default/capture consumer.
