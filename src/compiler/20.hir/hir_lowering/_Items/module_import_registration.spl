@@ -6,6 +6,7 @@ use compiler.hir.hir_lowering._Items.module_lowering.{HirReexportSource, HirReex
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
 
 use compiler.hir.hir_types.*
+use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
@@ -604,11 +605,21 @@ impl HirLowering:
             val composite_define_started = hir_phase_profile_now()
             # Canonical owner/name allocation precedes the local alias.  A
             # second same-named class must never reuse the first short-name ID.
-            val canonical_imported = if kind == SymbolKind.Class:
-                self.symbols.lookup_qualified_type_raw(
-                    imported_mod.module_name, imported_name)
-            else:
-                -1
+            # Struct aliases and superseded transitive bindings must reuse
+            # their declaration too. Allocating by the new lexical spelling
+            # creates distinct IDs for one physical owner after rename.
+            val canonical_imported = self.symbols.lookup_qualified_type_raw(
+                imported_mod.module_name, imported_name)
+            if canonical_imported >= 0:
+                if not self.symbols.symbols.has(canonical_imported):
+                    self.error("imported composite `{imported_name}` has a stale qualified declaration", import_span)
+                    return
+                val declaration: HirSymbol = self.symbols.symbols[canonical_imported]
+                if (declaration.id.id != canonical_imported or declaration.kind != kind or
+                    declaration.name != imported_name or
+                    hir_symbol_owner_module(declaration.defining_module ?? "") != hir_symbol_owner_module(imported_mod.module_name)):
+                    self.error("imported composite `{imported_name}` has a mismatched qualified declaration", import_span)
+                    return
             val imported_type = if canonical_imported >= 0:
                 SymbolId(id: canonical_imported)
             else:
@@ -622,7 +633,7 @@ impl HirLowering:
                 # Bind exactly the requested local spelling only when it has
                 # no competing short spelling.
                 self.symbols.bind_local_type_if_free(local_name, imported_type)
-            if not already_bound and kind != SymbolKind.Class:
+            if canonical_imported < 0 and not already_bound and kind != SymbolKind.Class:
                 self.symbols.rename_symbol(imported_type, imported_name)
             # Repeated visits to the same owner are not a reason to skip its
             # qualified identity or dependency closure. Package prebinding can
