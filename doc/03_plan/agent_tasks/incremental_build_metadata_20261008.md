@@ -1,8 +1,10 @@
 # Parallel implementation plan: incremental build metadata
 
+Status: SUPERSEDED as an execution plan on 2026-10-13. Continue in [Phase 3 and incremental build completion](../compiler/phase3_incremental_build_completion_2026-10-13.md). Retained below as historical requirements and design; this closure does not claim implementation or verification.
+
 <!-- codex-design -->
 
-Status: detailed plan with Astra design-only acceptance after contract corrections. User priority: this optimization design first, bootstrap continues independently. No proposed task is marked implemented by this plan.
+Historical status: detailed plan with Astra design-only acceptance after contract corrections. User priority: this optimization design first, bootstrap continues independently. No proposed task is marked implemented by this plan.
 
 ## Current four-agent allocation
 
