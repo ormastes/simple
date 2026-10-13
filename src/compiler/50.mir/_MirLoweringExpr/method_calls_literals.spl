@@ -10,6 +10,7 @@ use compiler.mir._MirLowering.native_trait_dispatch.*
 use compiler.mir._MirLowering.native_trait_conversion.*
 use compiler.mir._MirLowering.native_trait_calls.*
 use compiler.mir._MirLoweringExpr.builtin_method_extras.*
+use compiler.mir._MirLoweringExpr.collection_literal_membership.*
 # MIR Lowering - Expression Lowering
 #
 # Expression lowering from HIR to MIR:
@@ -510,9 +511,9 @@ impl MirLowering:
         val found = type_
         if found == nil:
             return false
-        val disc = _sffi_method_hir_type_discriminant(found.kind)
-        disc == _sffi_method_hir_type_discriminant(MirTypeKind.I8) or
-            disc == _sffi_method_hir_type_discriminant(MirTypeKind.I16) or
+        val disc = _sffi_method_hir_type_discriminant<MirTypeKind>(found.kind)
+        disc == _sffi_method_hir_type_discriminant<MirTypeKind>(MirTypeKind.I8) or
+            disc == _sffi_method_hir_type_discriminant<MirTypeKind>(MirTypeKind.I16) or
             disc == _sffi_method_hir_type_discriminant(MirTypeKind.I32) or
             disc == _sffi_method_hir_type_discriminant(MirTypeKind.I64) or
             disc == _sffi_method_hir_type_discriminant(MirTypeKind.U8) or
@@ -1716,6 +1717,7 @@ impl MirLowering:
             (method == "map" and args.len() == 1) or
             (method == "map_err" and args.len() == 1) or
             (method == "ok" and args.len() == 0) or
+            (method == "err" and args.len() == 0) or
             (method == "unwrap" and args.len() == 0 and result_ok_type == nil) or
             (method == "unwrap_or" and args.len() == 1 and result_ok_type == nil) or
             (method == "unwrap_err" and args.len() == 0 and result_err_type == nil)
@@ -1850,8 +1852,8 @@ impl MirLowering:
                 val chr_receiver_type = self.receiver_declared_type(receiver)
                 if chr_receiver_type != nil:
                     val found_chr_receiver_type = chr_receiver_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
-                    val named_disc = _sffi_method_hir_type_discriminant(HirTypeKind.Named(SymbolId(id: -1), []))
-                    if _sffi_method_hir_type_discriminant(found_chr_receiver_type.kind) == named_disc:
+                    val named_disc = _sffi_method_hir_type_discriminant<HirTypeKind>(HirTypeKind.Named(SymbolId(id: -1), []))
+                    if _sffi_method_hir_type_discriminant<HirTypeKind>(found_chr_receiver_type.kind) == named_disc:
                         match found_chr_receiver_type.kind:
                             case HirTypeKind.Named(chr_owner_symbol, _):
                                 val chr_owner_definition = self.symbols.get_symbol_raw(chr_owner_symbol.id)
@@ -2191,6 +2193,8 @@ impl MirLowering:
         if receiver_is_dict and (method == "has" or method == "contains" or method == "contains_key") and args.len() == 1:
             val receiver_local = if dict_recv_lowered: dict_recv_local else: self.lower_expr(receiver)
             val key_local = self.lower_dict_key(args[0].value)
+            if val selected = self.lower_collection_literal_membership(receiver, args[0].value, receiver_local, key_local):
+                return selected
             val contains_op = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_dict_contains"),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
@@ -4928,6 +4932,8 @@ impl MirLowering:
         val new_res = b_new.emit_call(new_op, [cap_hint], MirType.i64())
         self.builder = b_new
         if val dict_local = new_res:
+            var collection_operands: [(LocalId, LocalId)] = []
+            val retain_collection_operands = collection_literal_keys(entries)
             for entry in entries:
                 val (key_expr, value_expr) = entry
                 # Bug (native_dict_keys_iter_index): capture the key's type
@@ -4988,10 +4994,13 @@ impl MirLowering:
                 val boxed_value = self.box_runtime_value(value_local)
                 val set_op = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_dict_set"),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType(kind: MirTypeKind.I8), is_variadic: false)))
                 ))
                 var b_set = self.builder
-                b_set.emit_call(set_op, [mir_operand_copy(dict_local), mir_operand_copy(key_local), mir_operand_copy(boxed_value)], MirType.i64())
+                val inserted = b_set.emit_call(set_op, [mir_operand_copy(dict_local), mir_operand_copy(key_local), mir_operand_copy(boxed_value)], MirType(kind: MirTypeKind.I8))
+                if retain_collection_operands:
+                    if val insertion_result = inserted:
+                        collection_operands = collection_operands.push((key_local, insertion_result))
                 self.builder = b_set
             val dict_type = MirType(kind: MirTypeKind.Dict(key_type, value_type))
             var b_typed = self.builder
@@ -5001,6 +5010,8 @@ impl MirLowering:
             self.runtime_dict_locals[typed.id] = true
             if value_context.?:
                 self.runtime_elem_value_type[typed.id] = value_type
+            if retain_collection_operands:
+                self.collection_literal_operands[typed.id] = collection_operands
             self.mark_runtime_value_local(typed.id)
             if value_struct_name != "" and value_struct_name != "__runtime_array__":
                 self.array_element_struct_syms[typed.id] = value_struct_name

@@ -2,6 +2,10 @@
 use compiler.hir.hir_types.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_definitions.*
+# HirConst is not pub/exported in hir_definitions.spl; the bare `.*` glob does
+# not provide it under the Rust seed (self-hosted sibling visibility masked
+# this). Import it explicitly (stage-2 seed regression, 4bec5687ee6).
+use compiler.hir.hir_definitions.{HirConst}
 use compiler.hir.hir_symbol_table_methods.*
 use compiler.hir.hir_symbol_table_methods.{_hir_symbol_owner_module}
 use compiler.hir.hir_codec_support.{HirCodecWriter}
@@ -15,6 +19,11 @@ use compiler.mir.mir_types.*
 use compiler.mir.mir_data.*
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir.hir_declaration_summary_v1.*
+use compiler.mir.hir_declaration_types_v1.{MirHirParamDeclarationV1, MirHirFunctionDeclarationV1,
+    MirHirFieldDeclarationV1, MirHirNominalDeclarationV1, MirHirVariantDeclarationV1,
+    MirHirEnumDeclarationV1, MirHirTraitDeclarationV1, MirHirGlobalDeclarationV1,
+    MirHirDeclarationSourceV1, MirHirModuleDeclarationsV1, MirHirDeclarationRepositoryV1,
+    MirHirCallableDefaultsV1}
 use compiler.mir.hir_expression_artifact_v1.*
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.provider_metadata.*
@@ -24,6 +33,7 @@ use compiler.mir._MirLoweringExpr.function_signature_owner.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use compiler.mir._MirLowering.declaration_default_bindings_v1.*
 use compiler.mir._MirLowering.declaration_default_rewrite_v1.*
+use compiler.mir.hir_declaration_variant_identity_v1.{mir_hir_global_variant_identity_v1}
 use std.common.crypto.sha256.{sha256_text}
 
 fn mir_hir_field_names_v1(fields: [MirHirFieldDeclarationV1]) -> [text]:
@@ -74,6 +84,8 @@ impl MirLowering:
         var owners = mir_global_demanded_owners(demanded)
         for owner in callables.keys(): owners[owner] = true
         var found: Dict<text, bool> = {}
+        var declaration_owners: Dict<text, text> = {}
+        var declaration_records: Dict<text, MirHirGlobalDeclarationV1> = {}
         for name in repository.ordered_modules:
             val provider: MirHirModuleDeclarationsV1 = repository.modules[name]
             if not owners.has(mir_layout_canonical_module_name(provider.name)): continue
@@ -82,6 +94,19 @@ impl MirLowering:
                 val declaration: MirHirGlobalDeclarationV1 = raw_global
                 val key = mir_global_declaration_key(provider.name, declaration.name)
                 if not demanded.has(key): continue
+                if declaration_owners.has(key):
+                    val previous_provider: MirHirModuleDeclarationsV1 = repository.modules[declaration_owners[key]]
+                    val previous: MirHirGlobalDeclarationV1 = declaration_records[key]
+                    val previous_bytes = mir_hir_global_variant_identity_v1(previous)
+                    if mir_hir_declarations_same_physical_source_v1(previous_provider, provider) and
+                            previous.symbol.id == declaration.symbol.id and previous_bytes != "" and
+                            previous_bytes == mir_hir_global_variant_identity_v1(declaration): continue
+                    # Let the real provider owner retain its conflicting
+                    # declaration diagnostic. A logical alias only shares
+                    # storage when its complete declaration contract agrees.
+                else:
+                    declaration_owners[key] = name
+                    declaration_records[key] = declaration
                 if val value = self.load_declaration_raw_expression_v1(name, declaration.initializer):
                     # This is a complete actual declaration record: its genuine
                     # initializer was independently decoded and verified.
@@ -204,7 +229,7 @@ impl MirLowering:
         val expression: HirExpr = raw_expression.unwrap()
         val repository: MirHirDeclarationRepositoryV1 = self.declaration_repository.unwrap()
         val module: MirHirModuleDeclarationsV1 = repository.modules[owner]
-        if mir_layout_canonical_module_name(owner) == self.current_module_id:
+        if mir_layout_canonical_module_name(module.name) == self.current_module_id:
             return Some(expression)
         # Field defaults have no supplied callable parameters, but their
         # complete expression still needs genuine lexical/nominal/global and
@@ -287,6 +312,31 @@ impl MirLowering:
             function.name, function.is_extern, function.is_method, function.is_static,
             function.has_export_attr, function.func_attr, is_entry_module)
 
+    me register_declaration_callable_variant_link_v1(provider: MirHirModuleDeclarationsV1,
+            function: MirHirFunctionDeclarationV1, is_entry_module: bool = false):
+        self.register_declaration_callable_link_v1(provider.name, provider.symbols, function, is_entry_module)
+        if provider.source_binding == nil or self.declaration_repository == nil or
+                not provider.symbols.symbols.has(function.symbol.id): return
+        val definition: HirSymbol = provider.symbols.symbols[function.symbol.id]
+        val actual_owner = definition.defining_module ?? provider.name
+        val logical_key = mir_hir_declaration_logical_key_v1(provider)
+        if _hir_symbol_owner_module(actual_owner) != _hir_symbol_owner_module(logical_key): return
+        val repository: MirHirDeclarationRepositoryV1 = self.declaration_repository.unwrap()
+        if not repository.modules.has(logical_key) or
+                not mir_hir_declarations_same_physical_source_v1(provider, repository.modules[logical_key]): return
+        val display = provider.symbols.symbol_display_name(function.symbol, function.name)
+        val physical_key = mir_provider_callable_key(provider.name, display)
+        if not self.callable_link_names.has(physical_key): return
+        # Mono's actual last logical owner remains in the shared SymbolTable.
+        # Lend its exact binding the existing emitted physical identity only
+        # with the retained source row and real declaration record proof.
+        val link = self.callable_link_names[physical_key]
+        self.callable_link_names[mir_provider_callable_key(actual_owner, display)] = link
+        self.callable_text_value_abi[mir_provider_callable_key(actual_owner, display)] = not function.is_extern
+        if not function.is_method and not function.is_static:
+            self.callable_link_names[mir_provider_callable_key(actual_owner, function.name)] = link
+            self.callable_text_value_abi[mir_provider_callable_key(actual_owner, function.name)] = not function.is_extern
+
     me register_declaration_method_v1(function: MirHirFunctionDeclarationV1,
             symbols: SymbolTable, links: Dict<i64, text>):
         self.register_provider_method_fields_v1(function.symbol, function.is_method,
@@ -367,6 +417,9 @@ impl MirLowering:
                 self.register_declaration_result_err_layout_v1(mir_class_identity(class_symbol), class_def.fields, module.symbols)
                 self.register_composite_layout_digest_v1(class_symbol, class_def.layout_digest)
             psi = psi + 1
+        self.prescan_declaration_callables_v1(module)
+
+    me prescan_declaration_callables_v1(module: MirHirModuleDeclarationsV1):
         # Same ordering gap for CALL RETURN TYPES: the entry module lowers
         # before its dependency modules, so a cross-module call's declared
         # return type was unknown and defaulted to the erased i64 — on
@@ -377,7 +430,7 @@ impl MirLowering:
         # never answered — see mir_data.spl).
         for raw_prescan_fn in module.functions:
             val prescan_fn: MirHirFunctionDeclarationV1 = raw_prescan_fn
-            self.register_declaration_callable_link_v1(module.name, module.symbols, prescan_fn)
+            self.register_declaration_callable_variant_link_v1(module, prescan_fn)
             val prescan_call_name = mir_provider_function_name_declaration_v1(module.name, module.symbols, prescan_fn)
             var prescan_return_shape = ""
             match prescan_fn.return_type.kind:
@@ -487,12 +540,12 @@ impl MirLowering:
             # pre-lowering source for its declared defaults. See
             # bootstrap_fn_param_defaults_register in mir_data.spl and
             # doc/08_tracking/bug/native_trailing_default_param_reads_uninitialized_2026-08-09.md.
-            self.register_declaration_defaults_v1(prescan_fn.name, module.name, prescan_fn)
+            self.register_declaration_defaults_v1(prescan_fn.name, mir_hir_declaration_logical_key_v1(module), prescan_fn)
             if prescan_call_name != prescan_fn.name:
-                self.register_declaration_defaults_v1(prescan_call_name, module.name, prescan_fn)
+                self.register_declaration_defaults_v1(prescan_call_name, mir_hir_declaration_logical_key_v1(module), prescan_fn)
                 val prescan_defaults_sanitized = prescan_call_name.replace("-", "_")
                 if prescan_defaults_sanitized != prescan_call_name:
-                    self.register_declaration_defaults_v1(prescan_defaults_sanitized, module.name, prescan_fn)
+                    self.register_declaration_defaults_v1(prescan_defaults_sanitized, mir_hir_declaration_logical_key_v1(module), prescan_fn)
             # `symbol_to_operand` (method_calls_literals.spl:3207) ALWAYS
             # rewrites the symbol's raw "Owner::method" spelling to
             # "Owner.method" before it ever reaches `direct_call_extern_name`,
@@ -503,7 +556,7 @@ impl MirLowering:
             if prescan_call_name.contains("::"):
                 val prescan_defaults_dotted = prescan_call_name.replace("::", ".")
                 if prescan_defaults_dotted != prescan_call_name:
-                    self.register_declaration_defaults_v1(prescan_defaults_dotted, module.name, prescan_fn)
+                    self.register_declaration_defaults_v1(prescan_defaults_dotted, mir_hir_declaration_logical_key_v1(module), prescan_fn)
             if not prescan_fn.is_method:
                 bootstrap_fn_ret_hir_type_register(prescan_fn.name, prescan_fn.return_type)
             # Cross-module METHOD return types (native_build_cross_module_

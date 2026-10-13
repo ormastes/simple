@@ -1,7 +1,8 @@
 use compiler.mono.mono_archive_nominal_v2.{MonoArchiveNominalDeclV2, mono_archive_nominal_install_v2, mono_archive_nominal_imports_for_module_v2}
 use compiler.mono.mono_archive_publication_identity_v1.{MonoArchiveSelectedFunctionV1,
     mono_archive_selected_record_key_v1, mono_archive_selected_output_key_v1}
-# One real mono function consumer. This is not a whole-module/FIFO driver switch.
+# One real mono function consumer.
+use compiler.driver.cache.hir_mono_nominal_rewrite_v1.*
 use compiler.hir.hir_types.{HirModule, HirType, SymbolId, HirSymbol, SymbolKind, ScopeId, BUILTIN_METHOD_NONE}
 use compiler.hir.hir_definitions.{HirFunction}
 use compiler.common.dependency.visibility.{Visibility}
@@ -39,6 +40,7 @@ struct MonoArchiveRepositoryV1:
     current_cache: HirOwnedArtifactContextV1? = nil
     current_order: [text] = []
     current_mode: bool = false
+    logical_mode: bool = false
 
 struct MonoArchiveAdmissionV1:
     repository: MonoArchiveRepositoryV1
@@ -60,7 +62,7 @@ struct MonoArchivePublicationV1:
     delta_digest: text
     function_archive_key: text
 
-fn mono_archive_repository_authority_v1(modules: Dict<text, HirBodyArchiveV1>) -> text:
+fn mono_archive_repository_authority_v1(modules: Dict<text, HirBodyArchiveV1>, logical_mode: bool = false) -> text:
     if modules.len() == 0: return ""
     var w = HirCodecWriter.create()
     w.put_i64(modules.len())
@@ -71,7 +73,8 @@ fn mono_archive_repository_authority_v1(modules: Dict<text, HirBodyArchiveV1>) -
     var provider_selection = ""
     for name in modules.keys().sort():
         val archive: HirBodyArchiveV1 = modules[name]
-        if name != archive.input.module_name or not hir_body_archive_matches_v1(archive, archive.input): return ""
+        if name == "" or (not logical_mode and name != archive.input.module_name) or
+                not hir_body_archive_matches_v1(archive, archive.input): return ""
         if closure == "":
             closure = archive.input.closure_digest
             producer = archive.input.producer_header
@@ -90,8 +93,9 @@ fn mono_archive_repository_authority_v1(modules: Dict<text, HirBodyArchiveV1>) -
         w.put_text(archive.input.stage)
         w.put_text(archive.input.provider_selection_digest)
         w.put_text(archive.input.runtime_provider_receipt_path)
+        if logical_mode: w.put_text(archive.input.module_name)
     if not w.ok: return ""
-    sha256_text("mono-archive-repository-v2\n" + w.finish())
+    sha256_text((if logical_mode: "mono-logical-archive-repository-v1\n" else: "mono-archive-repository-v2\n") + w.finish())
 
 fn mono_archive_repository_input_v1(repository: MonoArchiveRepositoryV1,
         name: text) -> Result<MonoArchiveBodyInputV1, text>:
@@ -100,14 +104,16 @@ fn mono_archive_repository_input_v1(repository: MonoArchiveRepositoryV1,
         if not repository.current_bodies.has(name) or repository.current_cache == nil:
             return Err("mono current input missing; unresolved fallback refused")
         return Ok(MonoArchiveBodyInputV1(original_parent: repository.modules[name],
-            current_body: Some(repository.current_bodies[name]), current_cache: repository.current_cache))
+            current_body: Some(repository.current_bodies[name]), current_cache: repository.current_cache,
+            logical_name: if repository.logical_mode: name else: ""))
     if repository.current_bodies.len() != 0 or repository.current_cache != nil or repository.current_order.len() != 0:
         return Err("mono unresolved repository carries ambiguous current inputs")
     Ok(MonoArchiveBodyInputV1(original_parent: repository.modules[name]))
 
 fn mono_archive_repository_digest_v1(repository: MonoArchiveRepositoryV1) -> text:
     if repository.current_mode and transient_array_scope_state_v1() != 1: return ""
-    val original = mono_archive_repository_authority_v1(repository.modules)
+    if repository.logical_mode and not repository.current_mode: return ""
+    val original = mono_archive_repository_authority_v1(repository.modules, repository.logical_mode)
     if original == "": return ""
     if not repository.current_mode:
         if repository.current_bodies.len() != 0 or repository.current_cache != nil or repository.current_order.len() != 0: return ""
@@ -130,7 +136,7 @@ fn mono_archive_repository_digest_v1(repository: MonoArchiveRepositoryV1) -> tex
             writer.put_text(name)
             writer.put_text(mono_archive_current_body_digest_v1(body))
         if not writer.ok: return ""
-        return sha256_text("mono-current-repository-mechanical-v1\n" + writer.finish())
+        return sha256_text((if repository.logical_mode: "mono-logical-current-repository-v1\n" else: "mono-current-repository-mechanical-v1\n") + writer.finish())
     ""
 
 fn mono_archive_admit_v1(modules: Dict<text, HirBodyArchiveV1>, collector: MonomorphizationPass) -> Result<MonoArchiveAdmissionV1, text>:
@@ -237,7 +243,7 @@ fn mono_archive_visit_v1(admission: MonoArchiveAdmissionV1, module_name: text, r
             val input = input_result.unwrap()
             val decoded = loaded.unwrap().module
             val warnings = loaded.unwrap().warnings
-            if decoded.name == selected_module and decoded.path == archive.input.source_path and
+            if decoded.name == archive.input.module_name and mono_archive_body_input_module_name_v1(input) == selected_module and decoded.path == archive.input.source_path and
                     sha256_text(hir_module_encode(decoded)) == mono_archive_body_input_digest_v1(input) and
                     hir_body_archive_warnings_digest_v1(warnings) == mono_archive_body_input_warnings_digest_v1(input):
                 if val original = mono_archive_find_function_v1(decoded, selected_symbol):
@@ -259,23 +265,17 @@ fn mono_archive_visit_v1(admission: MonoArchiveAdmissionV1, module_name: text, r
                                     mono_template_signature_digest_v1(mono_template_signature_v1(function)) ==
                                         mono_template_signature_digest_v1(state.spec_signatures[item.mangled_name])
                     if valid:
-                        val worker = mono_archive_scratch_pass_v1(state)
-                        worker.current_module = selected_module
-                        val rewritten = worker.rewrite_function(function)
-                        var output = decoded
-                        output.functions[rewritten.symbol] = rewritten
-                        if queued:
-                            output.symbols.register_preserved_symbol(HirSymbol(id: rewritten.symbol,
-                                name: rewritten.name, kind: SymbolKind.Function, type_: nil,
-                                scope: ScopeId(id: 0), span: rewritten.span,
-                                visibility: Visibility.Private, is_public: false, is_mutable: false,
-                                defining_module: selected_module, builtin_method_tag: BUILTIN_METHOD_NONE))
-                            if output.symbols.next_symbol_id < worker.next_symbol:
-                                output.symbols.next_symbol_id = worker.next_symbol
-                        val declarations = mono_archive_nominal_imports_for_module_v2(worker.archive_nominal_keys,
-                            worker.archive_nominal_imports, selected_module)
-                        val nominal_valid = mono_archive_nominal_install_v2(output.symbols, selected_module, declarations)
-                        val delta = mono_archive_delta_v1(state, worker, base, queued)
+                        val replayed = mono_archive_rewrite_complete_in_owned_scope_v1(state, decoded,
+                            selected_module, selected_symbol, request)
+                        if replayed.is_err():
+                            val failure: Result<MonoArchivePublicationV1, text> = Err(replayed.unwrap_err())
+                            val paused = transient_scope_pause()
+                            val owned = if paused: transient_promote(failure) else: false
+                            mono_archive_close_v1(paused, owned, true)
+                            return failure
+                        val output = replayed.unwrap().module
+                        val rewritten = replayed.unwrap().function
+                        val delta = replayed.unwrap().delta
                         val body_digest = sha256_text(hir_module_encode(output))
                         val function_digest = mono_archive_function_digest_v1(rewritten)
                         val delta_digest = mono_archive_delta_digest_v1(delta)
@@ -287,7 +287,7 @@ fn mono_archive_visit_v1(admission: MonoArchiveAdmissionV1, module_name: text, r
                             delta_digest: delta_digest, function_archive_key: "")
                         receipt.function_archive_key = mono_archive_function_record_key_v1(receipt)
                         receipt.output_archive_key = mono_archive_output_key_v1(receipt)
-                        if nominal_valid and body_digest.len() == 64 and function_digest != "" and delta_digest != "" and
+                        if body_digest.len() == 64 and function_digest != "" and delta_digest != "" and
                                 receipt.output_archive_key != "" and
                                 mono_function_record_store_in_owned_scope_v1(receipt.function_archive_key, rewritten).is_ok() and
                                 hir_cache_store_in_owned_scope(receipt.output_archive_key, output, warnings):
@@ -324,58 +324,31 @@ fn mono_archive_publication_matches_v1(admission: MonoArchiveAdmissionV1, receip
     if input_result.is_err(): return false
     val input = input_result.unwrap()
     if receipt.input_archive_key != mono_archive_body_input_key_v1(input) or receipt.input_body_digest != mono_archive_body_input_digest_v1(input): return false
-    # Replay the actual selected function against the same sealed declaration
-    # facts. This proves allocation/import order and both argument namespaces,
-    # rather than trusting caller-created transport rows or a counter inequality.
+    # Re-run the actual complete body in its real caller namespace. This
+    # independently reproduces every nominal allocation, transported argument,
+    # caller signature stamp, warning, diagnostic and specialization counter.
     val loaded = mono_archive_body_input_load_in_owned_scope_v1(input)
     if loaded.is_err(): return false
-    var original_symbol = receipt.target_symbol
-    var selected_request: MonoSpecializationRequestV1? = nil
+    var request: MonoSpecializationRequestV1? = nil
+    var selected_symbol = receipt.target_symbol
     if delta.advance_cursor:
         if state.cursor >= state.queue.len(): return false
         val item = state.queue[state.cursor]
         if item.module_name != receipt.module_name or item.symbol_id != receipt.target_symbol or
-                item.mangled_name != receipt.target_name or state.emitted.has(item.mangled_name) or
-                item.caller_module == "" or not state.facts.recipes.has(item.template_name): return false
-        original_symbol = state.facts.recipes[item.template_name].original_symbol.id
-        selected_request = Some(item)
-    if val original = mono_archive_find_function_v1(loaded.unwrap().module, original_symbol):
-        var function = original
-        if val item = selected_request:
-            val recipe = state.facts.recipes[item.template_name]
-            val canonical = mono_apply_template_recipe_v1(original, recipe)
-            if recipe.module_name != receipt.module_name or
-                    mono_template_signature_digest_v1(mono_template_signature_v1(canonical)) !=
-                        mono_template_signature_digest_v1(state.facts.templates[item.template_name]): return false
-            function = specialize_function_with_types(canonical, item.type_args)
-            function.name = item.mangled_name
-            function.symbol = SymbolId.new(item.symbol_id)
-        else:
-            if is_generic_function(function) or function.is_generic_template: return false
-        val replay = mono_archive_scratch_pass_v1(state)
-        replay.current_module = receipt.module_name
-        val rewritten = replay.rewrite_function(function)
-        if rewritten.symbol.id != receipt.target_symbol or rewritten.name != receipt.target_name or
-                mono_archive_function_digest_v1(rewritten) != receipt.output_function_digest: return false
-        val exact_delta = mono_archive_delta_v1(state, replay, delta.base_digest, delta.advance_cursor)
-        if mono_archive_delta_digest_v1(exact_delta) != receipt.delta_digest: return false
-        var expected_output = loaded.unwrap().module
-        expected_output.functions[rewritten.symbol] = rewritten
-        if delta.advance_cursor:
-            expected_output.symbols.register_preserved_symbol(HirSymbol(id: rewritten.symbol,
-                name: rewritten.name, kind: SymbolKind.Function, type_: nil,
-                scope: ScopeId(id: 0), span: rewritten.span, visibility: Visibility.Private,
-                is_public: false, is_mutable: false, defining_module: receipt.module_name,
-                builtin_method_tag: BUILTIN_METHOD_NONE))
-            if expected_output.symbols.next_symbol_id < replay.next_symbol:
-                expected_output.symbols.next_symbol_id = replay.next_symbol
-        val declarations = mono_archive_nominal_imports_for_module_v2(replay.archive_nominal_keys,
-            replay.archive_nominal_imports, receipt.module_name)
-        if not mono_archive_nominal_install_v2(expected_output.symbols, receipt.module_name, declarations) or
-                sha256_text(hir_module_encode(expected_output)) != receipt.output_body_digest: return false
-    else: return false
+                item.mangled_name != receipt.target_name or item.caller_module == "" or
+                state.emitted.has(item.mangled_name): return false
+        request = Some(item)
+        if not state.facts.recipes.has(item.template_name): return false
+        selected_symbol = state.facts.recipes[item.template_name].original_symbol.id
+    val exact = mono_archive_rewrite_complete_in_owned_scope_v1(state, loaded.unwrap().module,
+        receipt.module_name, selected_symbol, request)
+    if exact.is_err() or mono_archive_delta_digest_v1(exact.unwrap().delta) != receipt.delta_digest or
+            sha256_text(hir_module_encode(exact.unwrap().module)) != receipt.output_body_digest or
+            mono_archive_function_digest_v1(exact.unwrap().function) != receipt.output_function_digest:
+        return false
+
     if val output = hir_cache_load_in_owned_scope(receipt.output_archive_key):
-        if output.name != receipt.module_name or output.path != archive.input.source_path or
+        if output.name != archive.input.module_name or output.path != archive.input.source_path or
                 sha256_text(hir_module_encode(output)) != receipt.output_body_digest or
                 hir_body_archive_warnings_digest_v1(hir_cache_last_warnings()) != mono_archive_body_input_warnings_digest_v1(input): return false
         if val function = mono_archive_find_function_v1(output, receipt.target_symbol):
@@ -416,6 +389,11 @@ fn mono_archive_apply_v1(admission: MonoArchiveAdmissionV1, receipt: MonoArchive
         state.fn_returns[mono_sym_key(item.module_name, item.symbol_id)] = signature.return_type
         state.sym_names[mono_sym_key(item.module_name, item.symbol_id)] = signature.name
         state.queue = state.queue.push(item)
+    for name in delta.symbol_patches.keys():
+        var patches: [text] = state.symbol_patches[name] ?? []
+        patches.push(delta.symbol_patches[name])
+        state.symbol_patches[name] = patches
+    for key in delta.fn_returns.keys(): state.fn_returns[key] = delta.fn_returns[key]
     for key in delta.spec_display.keys(): state.spec_display[key] = delta.spec_display[key]
     for key in delta.reported_once.keys(): state.reported_once[key] = delta.reported_once[key]
     for key in delta.unresolved_templates.keys(): state.unresolved_templates[key] = delta.unresolved_templates[key]

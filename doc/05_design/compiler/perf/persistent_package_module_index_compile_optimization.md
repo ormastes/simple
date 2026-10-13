@@ -404,3 +404,14 @@ enumeration, test-side graph reconstruction, or fallback subprocess scan.
 Snapshot and metadata success paths are silent. `SCV-E-*` failures and a single
 drift diagnostic are concise; detailed inventory, identity, and ownership
 evidence remains in internal receipts.
+
+## Generated-witness admission for grouped workers
+
+`native_group_warm_route_decode_v1` retains canonical legacy decoding for
+inspection. Operational consumers use `native_group_warm_route_admit_v1`, which
+requires schema V4 after canonical decoding. File-backed route reads use this
+admission before scheduler dependency readiness, retry publication, or compiler
+loading. The worker's already hash-pinned payload also uses admission before
+reading promoted dependency SMFs. An empty dependency set does not exempt a
+legacy route from migration. The SCC inventory spec covers V4 witness retention,
+malformed payload rejection, legacy inspection, and current/legacy file reads.

@@ -20,6 +20,7 @@ use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
 use compiler.hir.hir_lowering.module_surface_types.{module_surface_export_origin_index_lookup, ModuleSurfaceExportOriginLookup}
 use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_syntactically_exports}
+use compiler.hir.hir_lowering.module_surface_registry_index.{module_surface_resolve_absolute_key}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_package_name_from_name}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
@@ -592,6 +593,15 @@ impl HirLowering:
         val payload_local_name = if claimed_short_name: dependency
             else: "{origin.module_name}::{origin.item_name}"
         self.register_imported_symbol(terminal.physical_index, origin.module_key, origin.item_name, payload_local_name, import_span, true)
+        # Payload projection resolves names in the enum's declaring module.
+        # Registration above publishes the terminal owner; retain that same
+        # symbol under the declaring owner's spelling, including import aliases.
+        # Do this before the expansion memo: another enum owner may reach an
+        # already expanded terminal through a different local name.
+        val payload_symbol = self.symbols.lookup_or_invalid(payload_local_name)
+        if payload_symbol.is_valid():
+            self.symbols.bind_qualified_type(
+                imported_mod.module_name, dependency, payload_symbol)
         if expanded: return
         if origin.item_kind != "type_alias":
             self.materialized_payload_origins[identity] = true
@@ -832,7 +842,25 @@ impl HirLowering:
             var selected_rank: i64 = -1
             while import_index < imported_mod.imports.len() and
                   import_index < imported_mod.import_target_indices.len():
-                val target_index = imported_mod.import_target_indices[import_index]
+                var target_index = imported_mod.import_target_indices[import_index]
+                if target_index < 0:
+                    # Freeze-time import-target resolution can leave -1 while
+                    # the module IS present in the frozen registry under a
+                    # spelling the freeze-time resolver did not try (C7
+                    # export-drop family: exec_mapping_cleanup_v1 itemizes
+                    # MappingLifetimeLedgerV1 yet the sweep reported "no
+                    # explicit import"). Retry the target against the frozen
+                    # registry before declaring the route missing. Still a
+                    # pure function of the frozen registry (generation is
+                    # fixed for this lowering run), so the RISFACT memo
+                    # invariant below is preserved.
+                    val retry_name = module_surface_resolve_absolute_key(
+                        self.module_surfaces, imported_mod.imports[import_index].module)
+                    if retry_name != "":
+                        val retry_index = module_surface_registry_index(
+                            self.module_surfaces, retry_name)
+                        if retry_index >= 0:
+                            target_index = retry_index
                 val item_start = imported_mod.import_item_offsets[import_index]
                 val item_end = imported_mod.import_item_offsets[import_index + 1]
                 var item_index: i64 = item_start

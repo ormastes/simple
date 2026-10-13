@@ -1,0 +1,70 @@
+# Actual per-function rewrite shared by producer and independent publication replay.
+# All input/output graphs and reconstructed symbol tables are borrowed scratch.
+use compiler.mono.mono_archive_state_v1.*
+use compiler.mono.mono_archive_types_v1.*
+use compiler.mono.mono_archive_nominal_v2.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_types.{BUILTIN_METHOD_NONE}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_mono_symbol_projection_v1.*
+use compiler.monomorphize.engine.{specialize_function_with_types}
+use compiler.common.dependency.visibility.{Visibility}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+
+struct MonoArchiveScratchRewriteV1:
+    module: HirModule
+    function: HirFunction
+    delta: MonoArchiveDeltaV1
+
+fn mono_archive_rewrite_complete_in_owned_scope_v1(state: MonoArchiveStateV1,
+        decoded: HirModule, module_name: text, selected_symbol: i64,
+        request: MonoSpecializationRequestV1? = nil) -> Result<MonoArchiveScratchRewriteV1, text>:
+    if transient_array_scope_state_v1() != 1: return Err("mono rewrite replay scope")
+    var found: HirFunction? = nil
+    for raw in decoded.functions.values():
+        val candidate: HirFunction = raw
+        if candidate.symbol.id == selected_symbol: found = Some(candidate)
+    if found == nil: return Err("mono rewrite original function missing")
+    var function = found.unwrap()
+    if val item = request:
+        if not state.facts.recipes.has(item.template_name) or not state.facts.templates.has(item.template_name) or
+                not state.spec_symbols.has(item.mangled_name) or state.spec_symbols[item.mangled_name] != item.symbol_id or
+                state.emitted.has(item.mangled_name): return Err("mono queued replay identity")
+        val recipe = state.facts.recipes[item.template_name]
+        val canonical = mono_apply_template_recipe_v1(function, recipe)
+        if recipe.module_name != module_name or recipe.original_symbol.id != selected_symbol or
+                mono_template_signature_digest_v1(mono_template_signature_v1(canonical)) !=
+                    mono_template_signature_digest_v1(state.facts.templates[item.template_name]): return Err("mono queued canonical recipe")
+        function = specialize_function_with_types(canonical, item.type_args)
+        function.name = item.mangled_name
+        function.symbol = SymbolId.new(item.symbol_id)
+        if not state.spec_signatures.has(item.mangled_name) or
+                mono_template_signature_digest_v1(mono_template_signature_v1(function)) !=
+                    mono_template_signature_digest_v1(state.spec_signatures[item.mangled_name]): return Err("mono queued signature")
+    val worker = mono_archive_scratch_pass_v1(state)
+    if not worker.archive_nominal_projection_valid or not worker.module_symbols.has(module_name):
+        return Err("mono actual nominal projections unavailable")
+    worker.current_module = module_name
+    val rewritten = worker.rewrite_function(function)
+    var output = decoded
+    val initial_blob = state.facts.symbol_projections[module_name]
+    val (cohort, _) = hir_mono_symbol_projection_decode_v1(initial_blob)?
+    val projection = hir_mono_symbol_projection_encode_v1(worker.module_symbols[module_name], cohort)
+    if projection == "" or hir_mono_symbol_projection_install_v1(output.symbols, projection).is_err():
+        return Err("mono output nominal declaration transport refused")
+    val declarations = mono_archive_nominal_imports_for_module_v2(worker.archive_nominal_keys,
+        worker.archive_nominal_imports, module_name)
+    if not mono_archive_nominal_install_v2(output.symbols, module_name, declarations):
+        return Err("mono output nominal import overlay refused")
+    output.functions[rewritten.symbol] = rewritten
+    if request != nil:
+        output.symbols.register_preserved_symbol(HirSymbol(id: rewritten.symbol,
+            name: rewritten.name, kind: SymbolKind.Function, type_: nil,
+            scope: ScopeId(id: 0), span: rewritten.span, visibility: Visibility.Private,
+            is_public: false, is_mutable: false, defining_module: module_name,
+            builtin_method_tag: BUILTIN_METHOD_NONE))
+        if output.symbols.next_symbol_id < worker.next_symbol: output.symbols.next_symbol_id = worker.next_symbol
+    Ok(MonoArchiveScratchRewriteV1(module: output, function: rewritten,
+        delta: mono_archive_delta_v1(state, worker, mono_archive_state_digest_v1(state), request != nil)))
+
+export MonoArchiveScratchRewriteV1, mono_archive_rewrite_complete_in_owned_scope_v1

@@ -57,7 +57,7 @@ jobs:
           if test "$EVENT_NAME" = workflow_dispatch; then
             candidate_ref="$REQUESTED_REF"
           fi
-          [[ "$candidate_ref" =~ ^candidate/v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?/a[0-9]{3}$ ]]
+          [[ "$candidate_ref" =~ ^candidate/v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?/a[0-9]{3,}$ ]]
           echo "candidate_ref=$candidate_ref" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -85,7 +85,7 @@ jobs:
           test -n "$version"
           test "${{ steps.identity.outputs.candidate_ref }}" != "candidate/v${version}/a000"
           case "${{ steps.identity.outputs.candidate_ref }}" in
-            candidate/v"$version"/a[0-9][0-9][0-9]) ;;
+            candidate/v"$version"/a[0-9][0-9][0-9]*) ;;
             *) echo "candidate ref/version mismatch" >&2; exit 1 ;;
           esac
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
@@ -125,6 +125,17 @@ jobs:
             done
           fi
 
+      - name: Install pinned Rust toolchain
+        # The seed fingerprint fail-closes when the channel pinned by
+        # src/compiler_rust/rust-toolchain.toml (nightly-2026-09-15, embedded
+        # LLVM 23.1.1) is absent from rustup (candidates a019/a020). dtolnay's
+        # action defaults to floating "nightly", so pin explicitly.
+        run: |
+          set -euo pipefail
+          rustup toolchain install nightly-2026-09-15 --component rustfmt --component clippy
+          rustup default nightly-2026-09-15
+          rustc --version
+
       - name: Install pinned LLVM 23.1.1
         env:
           GH_TOKEN: ${{ github.token }}
@@ -146,17 +157,53 @@ jobs:
           tar -xJf "$llvm_archive" -C "$llvm_prefix" --strip-components=1
           rm "$llvm_archive"
           test "$("$llvm_prefix/bin/llvm-config" --version)" = '23.1.1'
+          # The llvmorg release llvm-config carries the BUILD machine's
+          # compiled-in prefix (/home/runner/work/llvm-project/...), so
+          # --libfiles/--ldflags emit paths that do not exist here and the
+          # seed-inputs fingerprint fails fail-closed ("failed to fingerprint
+          # Rust seed inputs", candidate a014). Bind the compiled prefix to
+          # the extracted tree so every llvm-config path resolves.
+          compiled_prefix=$("$llvm_prefix/bin/llvm-config" --prefix)
+          if [ "$compiled_prefix" != "$llvm_prefix" ]; then
+            sudo mkdir -p "$(dirname "$compiled_prefix")"
+            sudo ln -sfn "$llvm_prefix" "$compiled_prefix"
+          fi
+          missing=""
+          for lib in $("$llvm_prefix/bin/llvm-config" --link-static --libfiles); do
+            [ -f "$lib" ] || missing="$missing $lib"
+          done
+          [ -z "$missing" ] || { echo "llvm-config --libfiles missing archives:$missing" >&2; exit 1; }
           echo "$llvm_prefix/bin" >> "$GITHUB_PATH"
           echo "LLVM_SYS_231_PREFIX=$llvm_prefix" >> "$GITHUB_ENV"
 
       - name: Build receipt-free admitted Stage 2 trust root
         env:
           SIMPLE_NO_STUB_FALLBACK: '1'
+          BOOTSTRAP_STAGE3_FINGERPRINT_TRACE: '1'
+          # Delegated stage-2 spec rows run MC/DC off under the frozen seed
+          # interpreter (owner-approved interim 2026-09-26, see
+          # scripts/bootstrap/bootstrap-phase-verification.shs). The
+          # verification gate requires these four waiver atoms from the
+          # caller; without them every candidate fails the matrix ~5s in
+          # (issue #3435).
+          SIMPLE_MCDC_OFF_WAIVER_REASON: 'interim-delegated-seed-2026-09-26 stage2 spec rows delegate run to the frozen authority seed which cannot execute MC/DC probes'
+          SIMPLE_MCDC_OFF_WAIVER_REVIEWER: 'ormastes'
+          SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID: 'owner-interim-2026-09-26-delegated-seed'
+          SIMPLE_MCDC_OFF_WAIVER_VERSION: '1'
         run: |
           set -euo pipefail
           SIMPLE_COMPILE_FAIL_FAST=${SIMPLE_COMPILE_FAIL_FAST:-1} sh scripts/bootstrap/bootstrap-from-scratch.sh \
             --backend=llvm --mode=dynload --full-bootstrap \
-            --stop-after-stage2 --no-mcp --jobs=2
+            --stop-after-stage2 --no-mcp --jobs=2 || {
+            status=$?
+            echo '--- rust-authority fingerprint error log ---'
+            find . -name 'rust-authority-fingerprint-error.log' -exec cat {} \; 2>/dev/null
+            echo '--- rust-authority fingerprint observation ---'
+            find . -name 'rust-authority-fingerprint-current.details.env' -not -path './src/compiler_rust/vendor/*' -exec cat {} \; 2>/dev/null
+            echo '--- rust-authority fingerprint tmp trace ---'
+            find . -name 'rust-authority-fingerprint-error.log.raw.*' -exec cat {} \; 2>/dev/null
+            exit $status
+          }
 
       - name: Resume admitted Stage 3 with planner receipt
         run: |

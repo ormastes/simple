@@ -1,8 +1,32 @@
 param(
     [int]$RootPid = 0,
     [int]$ExcludePid = 0,
-    [string]$Bridge = ''
+    [string]$Bridge = '',
+    [int]$IdentityPid = 0
 )
+
+# Native creation time is independent of the emulated /proc boot-time origin.
+# Open twice so rapid PID reuse cannot combine two process generations.
+function Get-BootstrapNativeProcessIdentity {
+    param([int]$NativeProcessId)
+    if ($NativeProcessId -le 0) { throw 'positive native process ID required' }
+    $first = $null
+    $second = $null
+    try {
+        $first = [Diagnostics.Process]::GetProcessById($NativeProcessId)
+        $born = $first.StartTime.ToUniversalTime().ToFileTimeUtc()
+        $second = [Diagnostics.Process]::GetProcessById($NativeProcessId)
+        if ($first.HasExited -or $second.HasExited -or
+            $second.StartTime.ToUniversalTime().ToFileTimeUtc() -ne $born) {
+            throw 'native process generation changed'
+        }
+        return ('windows:{0}:{1}' -f $NativeProcessId,
+            $born.ToString([Globalization.CultureInfo]::InvariantCulture))
+    } finally {
+        if ($null -ne $second) { $second.Dispose() }
+        if ($null -ne $first) { $first.Dispose() }
+    }
+}
 
 # Native children of MSYS processes are absent from MSYS /proc. Emit the
 # existing progress watcher's portable process-table format from one native
@@ -174,6 +198,13 @@ function Get-BootstrapProgressRows {
 if ($MyInvocation.InvocationName -ne '.') {
     $ErrorActionPreference = 'Stop'
     try {
+        if ($IdentityPid -ne 0) {
+            if ($RootPid -ne 0 -or $ExcludePid -ne 0 -or $Bridge -ne '') {
+                throw 'identity mode excludes process-tree arguments'
+            }
+            Get-BootstrapNativeProcessIdentity $IdentityPid
+            exit 0
+        }
         if ($RootPid -le 0) { throw 'positive RootPid required' }
         Get-BootstrapProgressRows $RootPid $ExcludePid $Bridge
     } catch {

@@ -1,0 +1,29 @@
+# Result.map rejects declared record payloads
+
+Status: OPEN — six distinct frontend/HIR/MIR cases have Phase1 bootstrap diagnostic PASS evidence across two bounded cycles; changed-producer/native qualification remains UNEXECUTED.
+
+## Evidence and current-source duplicate check
+
+The actual MCP failure receipt is `/mnt/c/Temp/simple-manual-lanes-20261011/p2-mcp-sosix-stdio/mir-failures.json`: 141 HIR modules passed, then `storage_roots/resolver.spl:177` reported unresolved `map` on `inspect_storage_roots(input).map(_.roots)`. That executable is an older compiler. This candidate does not claim its original diagnostic proves execution of the current-source guard.
+
+Current release inspected: `7de247f6bcfa0f3143742f801ba120f20915db38`. `method_calls_literals.spl` and `builtin_method_extras.spl` are unchanged since d4dd079c. Result combinator dispatch exists in this source, but `builtin_result_payload_mir` admits only i64/f64/bool/text. Both `StorageRootResolution` input and `StorageRoots` output are declared records, so the current lowering still cannot admit the required operation. The nearby JSON `array_ops.spl:479` blocker remains separate: `json_to_array` returns `any?`, and the inferred nested local reaches MIR as Tuple. No tuple-as-array coercion is introduced.
+
+## Narrow repair and contracts
+
+Only `Result.map` and `map_err` gain declared Struct/Class record payloads. Owner lookup mirrors `Result.unwrap`: Struct name and canonical Class identity. Payload extraction remains `rt_enum_payload` into an unchanged i64 word, with the declared HIR type and field-owner metadata preserved for inline callback parameter field reads. Mapper output requires declared record HIR and either the established i64 carrier or MirTypeKind.Struct with the exact canonical symbol of that declaration; unknown `any`, tuple, enum, inference or unsupported primitive forms retain rejection. Existing primitive inference and validation remain the fallback. Result.ok and Option.map admission are unchanged.
+
+The existing discriminant split still invokes the mapper only on its selected branch. Other variants forward the original Result handle, retaining the untouched payload/error layout. The selected branch uses the existing rt_enum_new constructor and float-bitcast path. No runtime allocator, free, global ownership, backend ABI, or generic pointer unwrapping changes occur. The additional work is bounded nominal-symbol lookup and local provenance registration; no latency/RSS improvement or native memory qualification is claimed.
+
+## Regression and qualification boundary
+
+The existing real frontend → HIR → MIR suite gains nested record shorthand projection, record-to-primitive, record error mapping, unchanged primitive mapping, and input/output tuple rejection cases. These assert diagnostics plus concrete Result runtime calls/branch labels. The standalone native entry checks full field values, Ok mapper count exactly one, Err mapper count zero, corresponding map_err behavior, and primitive output. Expected stdout is `Result record map: PASS\n`, exit 0; no stubs or Rust seed fallback permitted.
+
+The six frontend/HIR/MIR cases executed through the explicitly authorized immutable Phase1 seed (diagnostic use only). Four passed in cycle1; the two record-output cases exposed the candidate's overly narrow I64-only output condition. Record constructors emit MirStruct with canonical symbol and declared HIR (switch_operators_calls.spl5218–5234), and nested fields use the declared lower_type (expr_dispatch.spl4643–4696). Cycle2 accepts only that exact canonical record symbol and reran only the two failures: both passed. The four green cases were not rerun. Native fixture and changed-producer qualification remain UNEXECUTED; exhausted historical producer/aggregate cycles were not restarted. Required compiler/lib/MCP/LSP checks and smoke gates remain pending. First qualify a source-containing producer with actual Hello, then execute the real MIR suite and the standalone native entry with its admitted runtime/backfill. This repair does not alone qualify the full MCP closure or resolve missing receiver type provenance on another producer.
+
+## Recorded Phase1 diagnostic evidence
+
+- Immutable bootstrap seed SHA256 `49e31ad317c76d9ebf29e60e32d9a8866f9e74b426dfd02b518d75df30fc03a5`; source/config and system runtime/loader SHA256 pins recorded before/after. Source was an isolated exact455 Git projection plus the recorded cycle2 source delta. This use was explicitly authorized for Phase1 diagnostics, never as a production-tool fallback.
+- Cycle1: six cases executed, 4 PASS / 2 FAIL / 0 SKIP, exit1, 97.483s, peak154484KiB. Cycle2: only the two failed cases executed, 2 PASS / 0 FAIL / 0 SKIP, exit0, 67.920s, peak154564KiB. Both stayed within120s/4GiB/jobs1 limits with no authority drift. Timings have different case counts/cache state and are not an optimization comparison.
+- Receipts: `/mnt/c/Temp/simple-result-record-map-phase1-20261012/` and `/mnt/c/Temp/simple-result-record-map-phase1-cycle2-20261012/` contain request, exact command, source/seed/runtime hashes, stdout/stderr, process IDs, RSS samples and terminal JSON.
+- Packing authority: ordinary enum construction already passes MirStruct through bitcast_float_enum_payload to the i64 rt_enum_new slot (switch_operators_calls.spl4837,4868–4873). LLVM maps Struct to ptr and applies the existing ptrtoint argument coercion (core_codegen.spl2475,2582; mir_to_llvm_helpers.spl75). The correction adds no new boxing/cast/ABI route. Canonical symbol matching is required; matching a type name alone is insufficient.
+- This is diagnostic execution of the actual changed Simple lowering functions, not compiled-native producer or backend execution. The actual native mapper-once/mapper-zero assertions must still execute before ready/merge.

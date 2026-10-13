@@ -1305,7 +1305,18 @@ impl MirLowering:
                                             eprint("[anyq-probe] early-Let remember sym={symbol_value_id} local={local.id} init_hir_type={iht_probe.kind} effective_mir={effective_type.kind}\n")
                                         case nil:
                                             eprint("[anyq-probe] early-Let remember sym={symbol_value_id} local={local.id} init_hir_type=nil effective_mir={effective_type.kind}\n")
-                                if found_init_hir_type.?:
+                                # An explicit iso declaration owns transfer semantics;
+                                # initializer inference must not erase its scalar state.
+                                val declared_isolation_state = if let_type_present:
+                                    match let_type_value.kind:
+                                        case HirTypeKind.Isolated(_): 1
+                                        case _: 2
+                                else:
+                                    0
+                                if declared_isolation_state == 1:
+                                    val declared_resource_state = if self.mir_hir_type_is_resource_direct(let_type_value): 1 else 0
+                                    self.remember_local_hir_type(local.id, let_type_value, 1, declared_resource_state)
+                                elif found_init_hir_type.?:
                                     # Match the ordinary Let arm: keep aggregate
                                     # metadata inside its owner instead of passing
                                     # a returned HirType across the staged ABI.
@@ -1605,7 +1616,16 @@ impl MirLowering:
                                     self.copy_optional_record_owner(init_local.id, local.id)
                                     self.copy_result_err_record_owner(init_local.id, local.id)
                                     val found_init_hir_type = self.find_local_hir_type(init_local.id)
-                                    if found_init_hir_type.?:
+                                    val declared_isolation_state = if type_ != nil:
+                                        match type_.kind:
+                                            case HirTypeKind.Isolated(_): 1
+                                            case _: 2
+                                    else:
+                                        0
+                                    if declared_isolation_state == 1:
+                                        val declared_resource_state = if self.mir_hir_type_is_resource_direct(type_): 1 else 0
+                                        self.remember_local_hir_type(local.id, type_, 1, declared_resource_state)
+                                    elif found_init_hir_type.?:
                                         # AGGREGATE ABI HAZARD -- documented twice in-tree:
                                         # mir_lowering_types.spl:574-581 ("the admitted Stage 2
                                         # native ABI can corrupt an aggregate `HirType` passed
@@ -3724,6 +3744,7 @@ impl MirLowering:
         var collection_hir_is_text = false
         var dict_key_hir: HirType? = nil
         var dict_value_hir: HirType? = nil
+        var declared_element_type: HirType? = nil
         if val collection_hir_type = self.for_collection_declared_type(collection_local, iter):
             match collection_hir_type.kind:
                 case HirTypeKind.Dict(dict_key_t, dict_value_t):
@@ -3749,6 +3770,7 @@ impl MirLowering:
                         case HirTypeKind.Any: elem_t_is_placeholder = true
                         case _: ()
                     if not elem_t_is_placeholder:
+                        declared_element_type = Some(elem_t)
                         match elem_t.kind:
                             case HirTypeKind.Str:
                                 element_type = self.bootstrap_text_type()
@@ -3810,7 +3832,8 @@ impl MirLowering:
                     chars_local,
                     MirType(kind: MirTypeKind.Opaque("str")),
                     body,
-                    source_span
+                    source_span,
+                    nil
                 )
 
         if mir_for_elem_trace_on():
@@ -3820,7 +3843,7 @@ impl MirLowering:
         # counted loop over rt_array_len / rt_array_get (mirrors the array
         # index-read call shape in _MirLoweringExpr/expr_dispatch.spl).
         if self.local_is_runtime_array(collection_local) or (collection_is_erased_word and element_type_from_hir):
-            return self.lower_for_array_indexed(var_, collection_local, element_type, body, source_span)
+            return self.lower_for_array_indexed(var_, collection_local, element_type, body, source_span, declared_element_type)
 
         # `for (k, v) in dict` / `for e in dict`: iterate the dict's
         # (key, value) 2-tuples, exactly the form the interpreter yields and
@@ -3861,7 +3884,7 @@ impl MirLowering:
                     self.builtin_dict_entry_field_type(dict_value_hir, entry_value_mir)
                 ]
                 val native_entries = self.builtin_runtime_tuples_to_native(entries_local, entry_fields)
-                return self.lower_for_array_indexed(var_, native_entries, MirType(kind: MirTypeKind.Tuple(entry_fields)), body, source_span)
+                return self.lower_for_array_indexed(var_, native_entries, MirType(kind: MirTypeKind.Tuple(entry_fields)), body, source_span, nil)
 
         # Non-array iterable: no supported lowering (#143). Fail loudly.
         # Diagnostics: `body.span` is frequently (0,0) on this pipeline, which
@@ -3889,7 +3912,7 @@ impl MirLowering:
                     match dict_keys_mir_type.kind:
                         case MirTypeKind.Array(key_elem_type, _): dict_key_elem_type = key_elem_type
                         case _: ()
-                return self.lower_for_array_indexed(var_, dict_keys_local, dict_key_elem_type, body, source_span)
+                return self.lower_for_array_indexed(var_, dict_keys_local, dict_key_elem_type, body, source_span, nil)
 
         val iter_coll_type_text = mir_type_probe_text(self.local_mir_type_of(collection_local))
         val iter_unsupported_msg = "for-in over non-array iterables is not supported by native codegen yet (#143); iterate an array or use while (collection mir type: {iter_coll_type_text}; module: {self.current_module_id})"
@@ -3923,7 +3946,8 @@ impl MirLowering:
         collection_local: LocalId,
         element_type: MirType,
         body: HirBlock,
-        source_span: Span
+        source_span: Span,
+        declared_element_type: HirType?
     ) -> LocalId:
         """Lower `for x in arr` over a runtime array as a counted index loop.
 
@@ -4067,6 +4091,12 @@ impl MirLowering:
             self.error("for loop variable has no resolved symbol", Some(body.span))
         else:
             self.bind_local(loop_var_id, loop_var)
+            # Retain the declared element type on the actual loop binding.
+            # The loop symbol can be untyped in entry-closure lowering; a
+            # bare struct-name hint alone loses the callback signature and
+            # the selected owner needed by function-field call lowering.
+            if val bound_element_type = declared_element_type:
+                self.remember_local_hir_type(loop_var.id, bound_element_type, 0, 0)
             # Bug (array-of-structs field misread), CONFLICT-FLAG
             # (mir_lowering_stmts.spl is fenced): `for p in pts` over an
             # array of structs desugars to this counted-index loop, whose

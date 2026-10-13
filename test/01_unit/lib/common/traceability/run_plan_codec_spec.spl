@@ -1,0 +1,63 @@
+# @tag:in-development
+# @req REQ-TRC-003 REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+use std.spec.*
+use std.common.traceability.run_plan.{TracePlannedCase, TraceRunPlan}
+use std.common.traceability.run_plan_codec.{encode_trace_run_plan, decode_trace_run_plan}
+
+fn _codec_case(id: text, path: text, name: text) -> TracePlannedCase:
+    TracePlannedCase(case_id: id, test_path: path, case_name: name, test_definition_id: "definition-1", lane_id: "lane-unit")
+
+fn _codec_plan(cases: [TracePlannedCase]) -> TraceRunPlan:
+    TraceRunPlan(run_id: "run-1", subject_id: "subject-1", configuration_id: "config-1", expectation_id: "expectation-1", binary_id: "binary-1", cases: cases)
+
+describe "frozen trace run plan SDN codec":
+    it "round trips quoted and Unicode identities while preserving planned order":
+        val plan = _codec_plan([
+            _codec_case("case-α", "test/日本_spec.spl", "says \"hello\""),
+            _codec_case("case-2", "test/other_spec.spl", "second")
+        ])
+        match encode_trace_run_plan(plan):
+            case Err(reason): fail("valid plan failed encoding: {reason}")
+            case Ok(source):
+                match decode_trace_run_plan(source):
+                    case Err(reason): fail("encoded plan failed decoding: {reason}")
+                    case Ok(decoded):
+                        expect(decoded.run_id).to_equal(plan.run_id)
+                        expect(decoded.cases.len()).to_equal(2)
+                        expect(decoded.cases[0].case_id).to_equal("case-α")
+                        expect(decoded.cases[0].test_path).to_equal("test/日本_spec.spl")
+                        expect(decoded.cases[0].case_name).to_equal("says \"hello\"")
+                        expect(decoded.cases[1].case_id).to_equal("case-2")
+
+    it "rejects unsupported schema and duplicate root fields":
+        val wrong_schema = "{schema: \"simple.trace.run-plan/v2\", run_id: \"r\", subject_id: \"s\", configuration_id: \"c\", expectation_id: \"e\", binary_id: \"b\", cases: []}"
+        match decode_trace_run_plan(wrong_schema):
+            case Ok(_): fail("unsupported schema was accepted")
+            case Err(reason): expect(reason).to_contain("unsupported")
+        val duplicate = "{schema: \"simple.trace.run-plan/v1\", run_id: \"r\", run_id: \"other\", subject_id: \"s\", configuration_id: \"c\", expectation_id: \"e\", binary_id: \"b\", cases: []}"
+        match decode_trace_run_plan(duplicate):
+            case Ok(_): fail("duplicate field was accepted")
+            case Err(reason): expect(reason).to_contain("duplicate")
+
+    it "rejects unknown fields and wrong field types":
+        val unknown = "{schema: \"simple.trace.run-plan/v1\", run_id: \"r\", subject_id: \"s\", configuration_id: \"c\", expectation_id: \"e\", binary_id: \"b\", extra: \"x\", cases: []}"
+        match decode_trace_run_plan(unknown):
+            case Ok(_): fail("unknown field was accepted")
+            case Err(reason): expect(reason).to_contain("unexpected")
+        val wrong_type = "{schema: \"simple.trace.run-plan/v1\", run_id: \"r\", subject_id: \"s\", configuration_id: \"c\", expectation_id: \"e\", binary_id: \"b\", cases: [{case_id: 7, test_path: \"test/a.spl\", case_name: \"a\", test_definition_id: \"d\", lane_id: \"l\"}]}"
+        match decode_trace_run_plan(wrong_type):
+            case Ok(_): fail("non-text case id was accepted")
+            case Err(reason): expect(reason).to_contain("must be text")
+
+    it "rejects empty plans and duplicate case identities on both boundaries":
+        match encode_trace_run_plan(_codec_plan([])):
+            case Ok(_): fail("empty plan was encoded")
+            case Err(reason): expect(reason).to_contain("at least one")
+        val duplicate = _codec_plan([_codec_case("same", "test/a.spl", "a"), _codec_case("same", "test/b.spl", "b")])
+        match encode_trace_run_plan(duplicate):
+            case Ok(_): fail("duplicate case IDs were encoded")
+            case Err(reason): expect(reason).to_contain("duplicate planned case id")
+        val duplicate_sdn = "{schema: \"simple.trace.run-plan/v1\", run_id: \"r\", subject_id: \"s\", configuration_id: \"c\", expectation_id: \"e\", binary_id: \"b\", cases: [{case_id: \"same\", test_path: \"test/a.spl\", case_name: \"a\", test_definition_id: \"d\", lane_id: \"l\"}, {case_id: \"same\", test_path: \"test/b.spl\", case_name: \"b\", test_definition_id: \"d\", lane_id: \"l\"}]}"
+        match decode_trace_run_plan(duplicate_sdn):
+            case Ok(_): fail("duplicate case IDs in SDN were accepted")
+            case Err(reason): expect(reason).to_contain("duplicate planned case id")

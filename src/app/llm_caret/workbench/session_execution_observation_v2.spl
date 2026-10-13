@@ -1,0 +1,26 @@
+# Session-owner adapter for common process-observation values.
+# Consumers of basic SessionId do not acquire this process dependency.
+use std.common.process.observation_v4.{ProcessObservationPacketV4,
+    ProcessObservationPacketKindV4, ProcessObservationStatusV4, ProcessObservationExecStateV4,
+    POV4_VALID_REQUEST, POV4_VALID_EXEC_CONFIRMED}
+use app.llm_caret.workbench.session_contract.{SessionId, SessionExecutionBindingV2, session_execution_binding_validate_v2}
+
+# The observation must come from the live owner, never a client-supplied packet.
+fn session_execution_binding_from_observation_v2(session: SessionId, host_id: text,
+        host_boot_digest: text, service_instance_digest: text,
+        observation: ProcessObservationPacketV4) -> Result<SessionExecutionBindingV2, text>:
+    val required = POV4_VALID_REQUEST | POV4_VALID_EXEC_CONFIRMED
+    if observation.packet_kind != ProcessObservationPacketKindV4.Poll or
+            observation.status != ProcessObservationStatusV4.Running or
+            observation.exec_state != ProcessObservationExecStateV4.Confirmed or
+            (observation.validity_bits & required) != required:
+        return Err("SESSION_EXECUTION_NOT_CONFIRMED")
+    val binding = SessionExecutionBindingV2(session: session, host_id: host_id,
+        host_boot_digest: host_boot_digest, service_instance_digest: service_instance_digest,
+        request_id_high: observation.request_id_high, request_id_low: observation.request_id_low,
+        ticket_high: observation.ticket_high, ticket_low: observation.ticket_low,
+        pid: observation.pid, process_started_ns: observation.process_started_ns)
+    val reason = session_execution_binding_validate_v2(binding)
+    if reason != "": return Err(reason)
+    Ok(binding)
+

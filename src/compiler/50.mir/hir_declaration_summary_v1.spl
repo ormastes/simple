@@ -10,6 +10,7 @@ use compiler.mir.hir_expression_artifact_v1.*
 use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{HirOwnedArtifactContextV1}
 use compiler.hir.hir_codec_support.{HirCodecWriter}
 use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.hir.hir_function_record_identity_v1.{mono_complete_function_digest_v1}
 use compiler.hir.hir_symbol_table_methods.*
 use compiler.hir.generated.hir_codec.*
 use compiler.mir._MirLowering.module_lowering.{runtime_module_initializers_in_declaration_order}
@@ -19,6 +20,16 @@ use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 
 use compiler.mir.hir_declaration_binding_contract_v1.{mir_hir_callable_record_binding_valid_v1}
 
+# Itemized for THIS module's own body: 'export use ... .*' re-exports the
+# names to importers but does not import them into this module's scope, so
+# every carrier literal below (MirHirParamDeclarationV1(symbol: ...), ...)
+# resolved to ANY under the seed and failed importing modules with "struct
+# 'ANY' field 'symbol'".
+use compiler.mir.hir_declaration_types_v1.{MirHirParamDeclarationV1, MirHirFunctionDeclarationV1,
+    MirHirFieldDeclarationV1, MirHirNominalDeclarationV1, MirHirVariantDeclarationV1,
+    MirHirEnumDeclarationV1, MirHirTraitDeclarationV1, MirHirGlobalDeclarationV1,
+    MirHirDeclarationSourceV1, MirHirModuleDeclarationsV1, MirHirDeclarationRepositoryV1,
+    MirHirCallableDefaultsV1}
 export use compiler.mir.hir_declaration_types_v1.*
 export use compiler.mir.hir_declaration_codec_v1.*
 
@@ -47,6 +58,8 @@ fn mir_hir_project_parameter_in_owned_scope_v1(context: HirOwnedArtifactContextV
 
 fn mir_hir_project_function_in_owned_scope_v1(context: HirOwnedArtifactContextV1, module: HirModule, authority: text,
         key: text, digest: text, function: HirFunction) -> Result<MirHirFunctionDeclarationV1, text>:
+    val function_digest = mono_complete_function_digest_v1(function)
+    if function_digest == "": return Err("MIR complete function identity could not be encoded")
     var params: [MirHirParamDeclarationV1] = []
     var index = 0
     while index < function.params.len():
@@ -62,7 +75,7 @@ fn mir_hir_project_function_in_owned_scope_v1(context: HirOwnedArtifactContextV1
         is_mutable: function.is_mutable, is_const: function.is_const, is_extern: function.is_extern,
         func_attr: function.func_attr, has_export_attr: function.has_export_attr,
         export_attr: function.export_attr, is_generic_template: function.is_generic_template,
-        span: function.span))
+        span: function.span, complete_function_digest: function_digest))
 
 fn mir_hir_project_fields_in_owned_scope_v1(context: HirOwnedArtifactContextV1, module: HirModule, authority: text,
         key: text, digest: text, declaration_symbol: i64,
@@ -88,7 +101,7 @@ fn mir_hir_project_fields_in_owned_scope_v1(context: HirOwnedArtifactContextV1, 
     Ok(projected)
 
 fn mir_hir_project_module_in_owned_scope_v1(context: HirOwnedArtifactContextV1, module: HirModule, authority: text,
-        key: text, digest: text) -> Result<MirHirModuleDeclarationsV1, text>:
+        key: text, digest: text, source_binding: MirHirDeclarationSourceV1? = nil) -> Result<MirHirModuleDeclarationsV1, text>:
     # Only the final-reader caller supplies authority. Recheck the complete
     # decoded bytes before publishing any expression/declaration artifact.
     if transient_array_scope_state_v1() != 1 or not sha256_lower_hex_valid(authority) or
@@ -219,7 +232,9 @@ fn mir_hir_project_module_in_owned_scope_v1(context: HirOwnedArtifactContextV1, 
         symbols: module.symbols, functions: functions, structs: structs, classes: classes,
         enums: enums, bitfields: module.bitfields.values(), traits: traits, impls: module.impls,
         globals: globals, needs_initialization: needs_initialization, declaration_digest: "",
-        stage: "mir-hir-module-declarations-v1")
+        stage: "mir-hir-module-declarations-v1", source_binding: source_binding)
+    if not mir_hir_declaration_source_valid_v1(result):
+        return Err("MIR declaration source-index provenance is malformed")
     val declaration_digest = mir_hir_module_declaration_digest_v1(result)
     if declaration_digest == "": return Err("MIR declaration digest could not be encoded")
     result.declaration_digest = declaration_digest
@@ -269,6 +284,7 @@ fn mir_hir_fields_valid_v1(module: MirHirModuleDeclarationsV1, symbol: i64,
 
 fn mir_hir_module_declarations_valid_v1(module: MirHirModuleDeclarationsV1) -> bool:
     if module.stage != "mir-hir-module-declarations-v1" or module.name == "" or module.path == "" or
+            not mir_hir_declaration_source_valid_v1(module) or
             not sha256_lower_hex_valid(module.final_repository_authority) or
             not sha256_lower_hex_valid(module.final_archive_key) or
             not sha256_lower_hex_valid(module.final_body_digest) or
@@ -276,14 +292,17 @@ fn mir_hir_module_declarations_valid_v1(module: MirHirModuleDeclarationsV1) -> b
             mir_hir_module_declaration_digest_v1(module) != module.declaration_digest: return false
     for raw_function in module.functions:
         val function: MirHirFunctionDeclarationV1 = raw_function
+        if module.source_binding != nil and not sha256_lower_hex_valid(function.complete_function_digest): return false
         if not mir_hir_callable_defaults_valid_v1(module, function): return false
     for raw_trait_decl in module.traits:
         val trait_decl: MirHirTraitDeclarationV1 = raw_trait_decl
         for raw_method in trait_decl.methods:
             val method: MirHirFunctionDeclarationV1 = raw_method
+            if module.source_binding != nil and not sha256_lower_hex_valid(method.complete_function_digest): return false
             if not mir_hir_callable_defaults_valid_v1(module, method): return false
         for raw_method in trait_decl.defaults:
             val method: MirHirFunctionDeclarationV1 = raw_method
+            if module.source_binding != nil and not sha256_lower_hex_valid(method.complete_function_digest): return false
             if not mir_hir_callable_defaults_valid_v1(module, method): return false
     for raw_declaration in module.structs:
         val declaration: MirHirNominalDeclarationV1 = raw_declaration
@@ -322,6 +341,29 @@ fn mir_hir_declaration_repository_valid_v1(repository: MirHirDeclarationReposito
         if seen.has(name) or not repository.modules.has(name): return false
         seen[name] = true
         val module: MirHirModuleDeclarationsV1 = repository.modules[name]
-        if module.name != name or module.final_repository_authority != repository.final_repository_authority or
+        if mir_hir_declaration_logical_key_v1(module) != name or module.final_repository_authority != repository.final_repository_authority or
                 not mir_hir_module_declarations_valid_v1(module): return false
     true
+
+# The old mechanical route uses the decoded owner as its sole key. Production
+# logical variants carry an explicit source-index key without renaming HIR.
+fn mir_hir_declaration_logical_key_v1(module: MirHirModuleDeclarationsV1) -> text:
+    if val source = module.source_binding: return source.logical_key
+    module.name
+
+fn mir_hir_declaration_source_valid_v1(module: MirHirModuleDeclarationsV1) -> bool:
+    if val source = module.source_binding:
+        return source.logical_key != "" and source.physical_path != "" and
+            source.source_bytes >= 0 and sha256_lower_hex_valid(source.source_digest) and
+            sha256_lower_hex_valid(source.input_archive_key)
+    true
+
+fn mir_hir_declarations_same_physical_source_v1(left: MirHirModuleDeclarationsV1,
+        right: MirHirModuleDeclarationsV1) -> bool:
+    if left.source_binding == nil or right.source_binding == nil: return false
+    val a: MirHirDeclarationSourceV1 = left.source_binding.unwrap()
+    val b: MirHirDeclarationSourceV1 = right.source_binding.unwrap()
+    mir_hir_declaration_source_valid_v1(left) and mir_hir_declaration_source_valid_v1(right) and
+        left.name == right.name and left.path == right.path and
+        a.physical_path == b.physical_path and a.source_digest == b.source_digest and
+        a.source_bytes == b.source_bytes and a.input_archive_key == b.input_archive_key

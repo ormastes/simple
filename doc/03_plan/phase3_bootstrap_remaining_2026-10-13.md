@@ -8,7 +8,9 @@ Finish robust Windows bootstrap based on Claude session
 `75022ee3-ea0e-4bfe-bdb6-3d4b162cae8c`, qualify generic features and implementations,
 logic and memory behavior, and formal verification, then land reviewed fixes on
 the existing `release_phase3` branch. Phase 3 and native Hello World must pass
-before landing compiler changes. Sharing a draft does not satisfy that gate.
+for release qualification. On 2026-10-13 the user explicitly requested landing
+the current source changes before these gates pass. Landing source does not
+constitute compiler admission, deployment qualification, or a passing bootstrap.
 
 The candidate contains 35 individually applied source commits on base
 `40f7ab097a1c1052b266ba4b7f2e9c39729c2510`; its last source commit is
@@ -77,7 +79,41 @@ tests, static review, binary existence, structural CI, or a model-only proof.
 11. Require verification `STATUS: PASS` for all requested acceptance gates.
     Review the exact PR diff, fresh base and comments, resolve real failing
     checks and conflicts without discarding other sessions' work, then ready
-    and merge the PR into `release_phase3`. No direct protected-branch push.
+    and merge subsequent qualification changes into `release_phase3`. The user
+    separately authorized landing the current source checkpoint while these
+    gates remain open. No direct protected-branch push.
+
+## Restart instructions
+
+Start a fresh scoped session; do not resume an oversized rollout. Read this plan
+from the current `release_phase3` branch and use its current commit as the new
+integration base. PR #3465 carries the source checkpoint and this plan.
+
+1. Check the active worktree and sessions before editing. Keep the shared main
+   worktree read-only and create an isolated `work/*` lane. Do not reset or clean
+   retained diagnostic storage or another session's worktree.
+2. Read the local acceptance ledger and composition mapping listed below, then
+   inspect actual terminal receipts and input hashes. Four host attempts are
+   terminal failures; no fifth attempt is live. The twelve passing typed-receipt
+   component tests do not establish production continuation readiness.
+3. Request the required explicit exception for the corrected fifth host run if
+   it has not been authorized. Inspect `request-v5.pending.json`, verify every
+   source/tool/collector pin and the fresh output paths, then execute that exact
+   bounded request only when authorized. Do not blindly rerun an old launcher.
+4. Review and apply the two isolated bootstrap repairs separately; they are not
+   included automatically in the current landed source checkpoint. Check their
+   compatibility against the latest release helpers before enabling production.
+5. Follow the ordered completion plan above. Reuse compatible retained caches
+   and genuine passing evidence; update authority for changed inputs rather than
+   rewriting stamps. Keep stage/producer/entry cache writers separate.
+6. Record fresh source revision, actual argv, tool hashes, exit codes, test totals,
+   output hashes and resource measurements for each new acceptance gate. Stop
+   when each gate passes; escalate concrete failures at the iteration limit.
+
+Suggested restart task: "Read this plan and the retained acceptance ledger;
+continue the unfinished Phase 3 bootstrap/generic/formal qualification from the
+current release_phase3 source. Preserve caches and other sessions. Do not claim
+PASS from the source landing or repeat unchanged green tests."
 
 ## Retained local artifacts and unshared repairs
 

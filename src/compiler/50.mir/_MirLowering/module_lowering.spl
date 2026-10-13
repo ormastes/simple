@@ -503,6 +503,8 @@ impl MirLowering:
             enum_tuple_text_slots: {},
             runtime_array_locals: {},
             runtime_dict_locals: {},
+            collection_literal_operands: {},
+            collection_literal_ordinals: {},
             runtime_elem_value_type: {},
             inferred_array_elem_state: {},
             array_element_struct_syms: {},
@@ -1231,7 +1233,7 @@ impl MirLowering:
                     case TypeParam(tp_name, _):
                         field_type_param = tp_name
                     case Function(_, _, _):
-                        field_type_ownership_key = "function-signature-v1\n" + self.function_signature_ownership_proof(field.type_, symbols)
+                        field_type_ownership_key = "function-signature-v1\n" + self.function_signature_ownership_proof(field_type, symbols)
                     case Named(field_type_sym, _):
                         val field_type_symbol = symbols.get_symbol_raw(field_type_sym.id)
                         if field_type_symbol.?:
@@ -1730,17 +1732,23 @@ impl MirLowering:
             params_known: true)
         self.exact_extern_signatures = signatures
 
-    me lower_module(module: HirModule, providers: [HirModule] = [], is_entry_module: bool = true) -> MirModule:
+    me lower_module(module: HirModule, providers: [HirModule] = [], is_entry_module: bool = true,
+            archive_function_symbols: [i64]? = nil, archive_primary_globals: MirModule? = nil,
+            archive_trait_thunks: [MirFunction] = []) -> MirModule:
         """Lower HIR module to MIR."""
         self.unsafe_depth = 0
         self.current_module_id = mir_layout_canonical_module_name(module.name)
         self.external_layout_traces = []
+        self.collection_literal_operands = {}
+        self.collection_literal_ordinals = {}
         self.symbols = module.symbols
         # Provider SymbolIds are module-local: rebuild and relocate trait
         # metadata whenever the active consumer symbol table changes.
         self.native_trait_layouts = []
         self.native_trait_implementations = []
-        self.native_trait_thunks = []
+        var retained_thunks: [MirFunction] = []
+        for thunk in archive_trait_thunks: retained_thunks.push(thunk)
+        self.native_trait_thunks = retained_thunks
         self.register_native_trait_declarations(module)
         for trait_provider in providers:
             if trait_provider.name != module.name:
@@ -2238,18 +2246,58 @@ impl MirLowering:
         # rationale as the struct/class/enum prep above and the prescan
         # pass right after this).
         val const_vals = module.constants.values()
-        var coni = 0
-        while coni < const_vals.len():
-            self.lower_const(const_vals[coni])
-            coni = coni + 1
-        # Second pass for statics; see the bootstrap-path loop above.
-        coni = 0
-        while coni < const_vals.len():
-            self.lower_static(const_vals[coni])
-            coni = coni + 1
+        if val primary = archive_primary_globals:
+            # The borrowed archive adapter proves equal complete global
+            # declarations before this branch. Reuse actual first emission
+            # storage; never repeat initializer effects or initializer MIR.
+            var module_builder = self.builder
+            var output_module = module_builder.module
+            # Fresh carrier: insertion below cannot mutate the first output's
+            # dictionary, whose child roots may predate this scratch scope.
+            var functions: Dict<SymbolId, MirFunction> = {}
+            for symbol in primary.functions.keys(): functions[symbol] = primary.functions[symbol]
+            output_module.functions = functions
+            var traces: [MirExternalLayoutTraceV1] = []
+            for trace in primary.external_layout_traces: traces.push(trace)
+            self.external_layout_traces = traces
+            var output_types = output_module.types
+            for symbol in primary.types.keys():
+                if not output_types.has(symbol): output_types[symbol] = primary.types[symbol]
+            output_module.types = output_types
+            var constants: Dict<SymbolId, MirConstant> = {}
+            for symbol in primary.constants.keys(): constants[symbol] = primary.constants[symbol]
+            var statics: Dict<SymbolId, MirStatic> = {}
+            for symbol in primary.statics.keys(): statics[symbol] = primary.statics[symbol]
+            output_module.constants = constants
+            output_module.statics = statics
+            module_builder.module = output_module
+            self.builder = module_builder
+            for raw_const in const_vals:
+                val const_: HirConst = raw_const
+                val id = const_.symbol.id
+                if id >= 0:
+                    self.global_symbol_ids[id] = true
+                    if hir_const_is_unit_typed(const_):
+                        self.global_const_exprs[id] = HirExpr(kind: HirExprKind.UnitLit,
+                            has_type_: true, type_: const_.type_, span: const_.value.span)
+                    else:
+                        self.global_const_exprs[id] = const_.value
+                if primary.constants.has(const_.symbol):
+                    self.global_constants_by_id[id] = primary.constants[const_.symbol]
+                if primary.statics.has(const_.symbol):
+                    self.global_statics_by_id[id] = primary.statics[const_.symbol]
+        else:
+            var coni = 0
+            while coni < const_vals.len():
+                self.lower_const(const_vals[coni])
+                coni = coni + 1
+            # Second pass for statics; see the bootstrap-path loop above.
+            coni = 0
+            while coni < const_vals.len():
+                self.lower_static(const_vals[coni])
+                coni = coni + 1
 
-        self.lower_runtime_module_initializers(module, const_vals)
-
+            self.lower_runtime_module_initializers(module, const_vals)
         # Order-independent pre-pass: walk every function body (read-only,
         # no MIR emitted) to seed struct_field_type_name from its real
         # construction sites BEFORE any function is actually lowered. See
@@ -2294,7 +2342,14 @@ impl MirLowering:
         var fni = 0
         while fni < fn_values.len():
             val fn_: HirFunction = fn_values[fni]
-            if fn_.is_generic_template:
+            var selected_for_emission = true
+            if val selected_symbols = archive_function_symbols:
+                selected_for_emission = false
+                for selected_symbol in selected_symbols:
+                    if selected_symbol == fn_.symbol.id: selected_for_emission = true
+            if not selected_for_emission:
+                fni = fni + 1
+            elif fn_.is_generic_template:
                 fni = fni + 1
                 # #158 Phase C: generic templates are non-emittable (see the
                 # function-symbol loop above for the full rationale).

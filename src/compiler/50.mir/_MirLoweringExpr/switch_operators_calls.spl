@@ -3289,10 +3289,10 @@ impl MirLowering:
             var local_disc: i64 = -1
             if val expression_hir = scrutinee_enum_type:
                 if expression_hir != nil:
-                    selected_subject_disc = _sffi_enum_discriminant(expression_hir.kind)
+                    selected_subject_disc = _sffi_enum_discriminant<HirTypeKind>(expression_hir.kind)
             if val local_hir = local_hir_receipt:
                 if local_hir != nil:
-                    local_disc = _sffi_enum_discriminant(local_hir.kind)
+                    local_disc = _sffi_enum_discriminant<HirTypeKind>(local_hir.kind)
             eprint("[nominal-owner] match-subject local={scrut_local.id} selected_subject_hir_disc={selected_subject_disc} local_hir_disc={local_disc}\n")
         var scrut_enum_name = ""
         var scrut_enum_key = ""
@@ -3822,7 +3822,7 @@ impl MirLowering:
                         var payload_disc: i64 = -1
                         if val payload_hir = result_payload_type:
                             if payload_hir != nil:
-                                payload_disc = _sffi_enum_discriminant(payload_hir.kind)
+                                payload_disc = _sffi_enum_discriminant<HirTypeKind>(payload_hir.kind)
                         eprint("[nominal-owner] match-payload subject={scrut_local.id} variant={enum_variants[ci]} hir_disc={payload_disc}\n")
                     # Mechanism #1 fix (native_build_cross_module_result_
                     # payload_struct_name_collision_2026-08-09):
@@ -5470,13 +5470,18 @@ impl MirLowering:
         match body.kind:
             case Var(symbol):
                 val sid = mir_expr_symbol_id_value(symbol)
-                if sid >= 0 and not int_list_contains(param_syms, sid) and not int_list_contains(acc, sid):
+                # A record constructor names a declaration, not a runtime
+                # binding captured from the enclosing activation. Retain the
+                # exact symbol owner; never classify by a bare name.
+                val is_record_declaration = self.symbols.record_owner_identity_scalar_raw(sid) != ""
+                if sid >= 0 and not is_record_declaration and not int_list_contains(param_syms, sid) and not int_list_contains(acc, sid):
                     acc.push(sid)
                 else:
                     acc
             case NamedVar(symbol, name):
                 val sid = mir_expr_symbol_id_value(symbol)
-                if sid >= 0 and not int_list_contains(param_syms, sid) and not self.is_known_top_level_function(name, symbol) and not int_list_contains(acc, sid):
+                val is_record_declaration = self.symbols.record_owner_identity_scalar_raw(sid) != ""
+                if sid >= 0 and not is_record_declaration and not int_list_contains(param_syms, sid) and not self.is_known_top_level_function(name, symbol) and not int_list_contains(acc, sid):
                     acc.push(sid)
                 else:
                     acc
@@ -6058,7 +6063,7 @@ impl MirLowering:
                     case Add | Eq | NotEq:
                         self.any_callable_lambda_body_supported(left) and self.any_callable_lambda_body_supported(right)
                     case _: false
-            case HirExprKind.Call(callee, args):
+            case HirExprKind.Call(callee, args, _):
                 if val callable = self.enum_match_expr_type(callee):
                     match callable.kind:
                         case HirTypeKind.Function(params, result, effects):
@@ -6132,7 +6137,7 @@ impl MirLowering:
                         adapter_params = adapter_params.push(HirParam(symbol: symbol, name: "__any_arg_{index}", type_: params[index], has_default: false, default: arg_expr, span: value.span, is_mutable: false))
                         adapter_args = adapter_args.push(HirCallArg(has_name: false, name: "", value: arg_expr, span: value.span))
                         index = index + 1
-                    val body = HirExpr(kind: HirExprKind.Call(value, adapter_args), has_type_: true, type_: result, span: value.span)
+                    val body = HirExpr(kind: HirExprKind.Call(value, adapter_args, []), has_type_: true, type_: result, span: value.span)
                     val adapter = HirExpr(kind: HirExprKind.Lambda(adapter_params, body, []), has_type_: false, type_: expected, span: value.span)
                     return self.lower_lambda_value(adapter, true)
                 case _: ()
@@ -6256,6 +6261,8 @@ impl MirLowering:
                 lw.bitfield_map = self.bitfield_map
                 lw.struct_field_order = self.struct_field_order
                 lw.struct_field_type_name = self.struct_field_type_name
+                lw.struct_field_type_ownership_key = self.struct_field_type_ownership_key
+                lw.struct_field_hir_type = self.struct_field_hir_type
                 lw.struct_field_repr_name = self.struct_field_repr_name
                 lw.struct_field_array_element_type_name = self.struct_field_array_element_type_name
                 lw.struct_field_array_elem_type = self.struct_field_array_elem_type
@@ -6717,6 +6724,9 @@ impl MirLowering:
                 val str_res = b_str.emit_call(str_op, [mir_operand_copy(str_arg_local)], self.bootstrap_text_type())
                 self.builder = b_str
                 if val str_local = str_res:
+                    # rt_value_to_string is tagged-in/tagged-out. Preserve its
+                    # result marker through existing copy/assignment owners.
+                    self.mark_tagged_text_local(str_local.id)
                     return str_local
                 return str_arg_local
             if direct_name == "int" and args.len() == 1:
@@ -7196,8 +7206,21 @@ impl MirLowering:
         val indirect_result = self.emit_function_value_call(callee_local, arg_operands, sig, ret_type)
         if val result_hir = indirect_hir_return:
             self.remember_local_hir_type(indirect_result.id, result_hir, 0, 0)
-            if result_hir.kind == HirTypeKind.Any:
-                self.mark_runtime_value_local(indirect_result.id)
+            match result_hir.kind:
+                case HirTypeKind.Named(owner, _):
+                    if val declaration = self.symbols.get_symbol_raw(owner.id):
+                        val layout_key = self.composite_layout_key(declaration)
+                        if self.struct_field_order.has(layout_key):
+                            self.struct_value_syms[indirect_result.id] = layout_key
+                case HirTypeKind.Optional(_):
+                    self.option_value_locals[indirect_result.id] = true
+                    self.mark_runtime_value_local(indirect_result.id)
+                case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                    self.runtime_array_locals[indirect_result.id] = true
+                    self.mark_runtime_value_local(indirect_result.id)
+                case HirTypeKind.Any:
+                    self.mark_runtime_value_local(indirect_result.id)
+                case _: ()
         indirect_result
 
     me emit_function_value_call(callee_local: LocalId, arg_operands: [MirOperand], sig: MirSignature, ret_type: MirType) -> LocalId:

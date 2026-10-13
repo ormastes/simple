@@ -287,6 +287,7 @@ pub struct MirLowerer<'a> {
     /// Trait parameters alias to `Any`, but native dispatch still needs the
     /// declared trait owner to select its vtable slot.
     pub(super) local_type_name_hints: HashMap<usize, String>,
+    pub(super) local_trait_dispatch: HashMap<usize, crate::hir::HirTraitDispatch>,
     /// F1/S5 — declaration kind per type name, carried from HIR by S3.
     /// `Some(true)` = declared `struct` (value semantics), `Some(false)` =
     /// declared `class`/`actor` (identity semantics), absent = UNKNOWN.
@@ -396,6 +397,7 @@ impl<'a> MirLowerer<'a> {
             type_registry: None,
             erased_local_class_types: HashMap::new(),
             local_type_name_hints: HashMap::new(),
+            local_trait_dispatch: HashMap::new(),
             type_value_kinds: HashMap::new(),
             trait_infos: None,
             global_trait_impls: None,
@@ -442,6 +444,7 @@ impl<'a> MirLowerer<'a> {
             type_registry: None,
             erased_local_class_types: HashMap::new(),
             local_type_name_hints: HashMap::new(),
+            local_trait_dispatch: HashMap::new(),
             type_value_kinds: HashMap::new(),
             trait_infos: None,
             global_trait_impls: None,
@@ -2176,6 +2179,9 @@ impl<'a> MirLowerer<'a> {
             .chain(func.locals.iter())
             .enumerate()
             .filter_map(|(index, local)| local.type_name_hint.clone().map(|name| (index, name)))
+            .collect();
+        self.local_trait_dispatch = func.params.iter().chain(func.locals.iter()).enumerate()
+            .filter_map(|(index, local)| local.trait_dispatch_owner.clone().map(|info| (index, info)))
             .collect();
 
         let mut mir_func = MirFunction::new(func.name.clone(), func.return_type, func.visibility);

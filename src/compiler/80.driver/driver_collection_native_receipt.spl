@@ -1,0 +1,258 @@
+# Artifact binding for the standalone native publication owner. These receipts
+# record capsule/report/output digests, not runtime differential testing or
+# survival of each instruction after the native linker's dead-code elimination.
+# Link inputs are copied into a private per-build directory and verified against
+# the digest in the admitted capsule receipt before the linker receives them.
+use compiler.driver.driver_types.{FrozenNativeModuleCapsuleV1}
+use compiler.driver.cache.native_noop_admission.{native_noop_exclusive_stage_v1}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.nogc_sync_mut.io_runtime.{file_hash_sha256_or_empty}
+use std.nogc_sync_mut.io.file_ops.{
+    file_read_regular_no_follow_bounded_bytes, file_write_bytes,
+    file_publish_noreplace_raw}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_rename(from_path: text, to_path: text) -> bool
+extern fn rt_file_fsync(path: text) -> bool
+extern fn rt_file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> text?
+
+val COLLECTION_NATIVE_SCHEMA_V1 = "simple-collection-native-receipt-v1"
+val COLLECTION_NATIVE_MAX_BYTES_V1 = 16777216
+val COLLECTION_NATIVE_OBJECT_MAX_BYTES_V1: i64 = 1073741824
+
+fn collection_native_digest_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    for index in 0..value.len():
+        if not "0123456789abcdef".contains(value.substring(index, index + 1)):
+            return false
+    true
+
+fn collection_native_frame_v1(values: [text]) -> text:
+    var framed = ""
+    for value in values:
+        framed = framed + "{value.len()}:{value}"
+    framed
+
+fn collection_native_unframe_v1(value: text) -> Result<[text], text>:
+    if value.len() > COLLECTION_NATIVE_MAX_BYTES_V1: return Err("receipt-too-large")
+    var fields: [text] = []
+    var cursor = 0
+    while cursor < value.len():
+        # Scan only the bounded length prefix, not a copied remaining suffix
+        # for every field. A large receipt with many short fields stays linear.
+        var colon = cursor
+        var extent: i64 = 0
+        while colon < value.len() and value.char_code_at(colon) != 58:
+            val digit = value.char_code_at(colon) - 48
+            if digit < 0 or digit > 9 or colon - cursor >= 16:
+                return Err("frame-length-invalid")
+            if extent > (COLLECTION_NATIVE_MAX_BYTES_V1 - digit) / 10:
+                return Err("frame-length-invalid")
+            extent = extent * 10 + digit
+            colon = colon + 1
+        if colon == cursor or colon >= value.len(): return Err("frame-length-invalid")
+        if colon - cursor > 1 and value.char_code_at(cursor) == 48:
+            return Err("frame-length-invalid")
+        val start = colon + 1
+        if extent > value.len() - start: return Err("frame-truncated")
+        fields = fields.push(value.substring(start, start + extent))
+        cursor = start + extent
+    Ok(fields)
+
+fn collection_native_receipt_path_v1(output: text) -> text:
+    output + ".collection-plan-receipt"
+
+fn collection_native_clear_v1(output: text) -> text:
+    val path = collection_native_receipt_path_v1(output)
+    if rt_file_exists(path) and not rt_file_delete(path):
+        return "stale-receipt-removal-failed"
+    ""
+
+# Called only after the native publication owner admitted this capsule's
+# object receipt. Reports come from CURRENT MIR even on object-cache hits;
+# capsule.mir_identity does not itself include explanation metadata.
+fn collection_native_bind_capsule_v1(capsule: FrozenNativeModuleCapsuleV1) -> Result<text, text>:
+    if not capsule.identity_valid(): return Err("capsule-identity-invalid")
+    val object_bytes = match file_read_regular_no_follow_bounded_bytes(
+            capsule.object_path, COLLECTION_NATIVE_OBJECT_MAX_BYTES_V1):
+        case Ok(value): value
+        case Err(_): return Err("object-digest-unavailable")
+    val object_digest = sha256_u8_hex(object_bytes)
+    if not collection_native_digest_v1(object_digest): return Err("object-digest-unavailable")
+    val capsule_receipt = rt_file_read_regular_no_follow_bounded(
+        capsule.object_path + ".capsule-receipt", 65536)
+    if capsule_receipt == nil: return Err("capsule-receipt-unavailable")
+    val receipt_lines = capsule_receipt!.split("\n")
+    if receipt_lines.len() != 6 or receipt_lines[0] != "native-capsule-result-v1" or
+            receipt_lines[1] != capsule.capsule_identity or
+            receipt_lines[2] != capsule.object_path or
+            (receipt_lines[3].to_i64() ?? -1) != object_bytes.len() or
+            receipt_lines[4] != object_digest or receipt_lines[5] != "":
+        return Err("capsule-object-digest-mismatch")
+    val reports = collection_native_frame_v1(capsule.mir_module.collection_plan_explanations)
+    val fields = [capsule.module_name, capsule.target, capsule.backend_name,
+        capsule.target_cpu, capsule.opt_level.to_text(), capsule.source_identity,
+        capsule.mir_identity, sha256_text(capsule.capsule_identity),
+        capsule.object_path, object_digest, sha256_text(reports), reports]
+    Ok(collection_native_frame_v1(fields))
+
+# Materialize the exact admitted capsule bytes at private, build-owned paths.
+# These paths are passed to every linker mode and remain live through receipt
+# publication. A missing or changed source fails closed instead of binding a
+# new digest to the capsule after admission.
+fn collection_native_retain_link_inputs_v1(bindings: [text], directory: text) -> Result<[text], text>:
+    if directory.len() <= 0 or bindings.len() == 0:
+        return Err("link-input-retention-arguments-invalid")
+    var retained: [text] = []
+    for index in 0..bindings.len():
+        val fields = match collection_native_unframe_v1(bindings[index]):
+            case Ok(values): values
+            case Err(reason): return Err(reason)
+        if not collection_native_binding_valid_v1(bindings[index]) or fields.len() != 12:
+            return Err("capsule-binding-invalid")
+        val source = fields[8]
+        val expected_digest = fields[9]
+        val source_bytes = match file_read_regular_no_follow_bounded_bytes(
+                source, COLLECTION_NATIVE_OBJECT_MAX_BYTES_V1):
+            case Ok(value): value
+            case Err(_): return Err("link-input-object-changed")
+        if sha256_u8_hex(source_bytes) != expected_digest:
+            return Err("link-input-object-changed")
+        val path = "{directory}/object-{index}"
+        val staged = "{path}.stage"
+        if not file_write_bytes(staged, source_bytes):
+            return Err("link-input-retention-write-failed")
+        val staged_bytes = match file_read_regular_no_follow_bounded_bytes(
+                staged, COLLECTION_NATIVE_OBJECT_MAX_BYTES_V1):
+            case Ok(value): value
+            case Err(_): return Err("link-input-retention-verification-failed")
+        if sha256_u8_hex(staged_bytes) != expected_digest:
+            return Err("link-input-retention-digest-mismatch")
+        if file_publish_noreplace_raw(staged, path) != 1:
+            return Err("link-input-retention-publication-failed")
+        retained = retained.push(path)
+    Ok(retained)
+
+fn collection_native_link_inputs_valid_v1(bindings: [text], objects: [text]) -> bool:
+    if bindings.len() == 0 or bindings.len() != objects.len(): return false
+    for index in 0..bindings.len():
+        val fields = match collection_native_unframe_v1(bindings[index]):
+            case Ok(values): values
+            case Err(_): return false
+        if fields.len() != 12 or not collection_native_binding_valid_v1(bindings[index]):
+            return false
+        val bytes = match file_read_regular_no_follow_bounded_bytes(
+                objects[index], COLLECTION_NATIVE_OBJECT_MAX_BYTES_V1):
+            case Ok(value): value
+            case Err(_): return false
+        if sha256_u8_hex(bytes) != fields[9]: return false
+    true
+
+fn collection_native_binding_valid_v1(encoded: text) -> bool:
+    val fields = match collection_native_unframe_v1(encoded):
+        case Ok(values): values
+        case Err(_): return false
+    if fields.len() != 12 or fields[0] == "" or fields[8] == "": return false
+    for index in [6, 7, 9, 10]:
+        if not collection_native_digest_v1(fields[index]): return false
+    if fields[5] != "" and not collection_native_digest_v1(fields[5]): return false
+    if sha256_text(fields[11]) != fields[10]: return false
+    val reports = match collection_native_unframe_v1(fields[11]):
+        case Ok(values): values
+        case Err(_): return false
+    for report in reports:
+        if not report.starts_with("collection-plan-v1\n"): return false
+        if not report.contains("\ntyped_mir=consumed") and not report.contains("\ntyped_mir=original"):
+            return false
+    true
+
+fn collection_native_encode_v1(request: text, artifact_digest: text, bindings: [text]) -> Result<text, text>:
+    if not collection_native_digest_v1(request) or not collection_native_digest_v1(artifact_digest):
+        return Err("build-or-artifact-identity-invalid")
+    if bindings.len() == 0: return Err("admitted-capsules-missing")
+    var report_count = 0
+    for binding in bindings:
+        if not collection_native_binding_valid_v1(binding): return Err("capsule-binding-invalid")
+        val fields = collection_native_unframe_v1(binding).unwrap()
+        report_count = report_count + collection_native_unframe_v1(fields[11]).unwrap().len()
+    # A budget is a ceiling, not a requirement that eligible collections exist.
+    # Empty reports do not attest selection or analysis completeness.
+    val report_scope = if report_count == 0: "no-reported-plans" else: "linked-input-mir"
+    val payload = collection_native_frame_v1(bindings)
+    val body = collection_native_frame_v1([COLLECTION_NATIVE_SCHEMA_V1, request,
+        artifact_digest, report_scope, "runtime-semantics-unverified", payload])
+    val encoded = collection_native_frame_v1([body, sha256_text(body)])
+    if encoded.len() > COLLECTION_NATIVE_MAX_BYTES_V1: return Err("receipt-too-large")
+    Ok(encoded)
+
+fn collection_native_decode_v1(encoded: text, request: text, artifact_digest: text) -> Result<[text], text>:
+    val outer = match collection_native_unframe_v1(encoded):
+        case Ok(values): values
+        case Err(reason): return Err(reason)
+    if outer.len() != 2: return Err("receipt-envelope-invalid")
+    if sha256_text(outer[0]) != outer[1]: return Err("receipt-digest-mismatch")
+    val body = match collection_native_unframe_v1(outer[0]):
+        case Ok(values): values
+        case Err(reason): return Err(reason)
+    if body.len() != 6 or body[0] != COLLECTION_NATIVE_SCHEMA_V1 or
+            (body[3] != "linked-input-mir" and body[3] != "no-reported-plans") or
+            body[4] != "runtime-semantics-unverified":
+        return Err("receipt-schema-invalid")
+    if body[1] != request: return Err("build-request-mismatch")
+    if body[2] != artifact_digest: return Err("artifact-digest-mismatch")
+    val bindings = match collection_native_unframe_v1(body[5]):
+        case Ok(values): values
+        case Err(reason): return Err(reason)
+    val canonical = match collection_native_encode_v1(request, artifact_digest, bindings):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    if canonical != encoded: return Err("receipt-noncanonical")
+    Ok(bindings)
+
+fn collection_native_validate_v1(output: text, request: text) -> text:
+    val encoded = rt_file_read_regular_no_follow_bounded(
+        collection_native_receipt_path_v1(output), COLLECTION_NATIVE_MAX_BYTES_V1)
+    if encoded == nil: return "receipt-missing"
+    val digest = file_hash_sha256_or_empty(output)
+    if not collection_native_digest_v1(digest): return "artifact-digest-unavailable"
+    match collection_native_decode_v1(encoded!, request, digest):
+        case Ok(_): ""
+        case Err(reason): reason
+
+fn collection_native_write_v1(output: text, request: text, encoded: text) -> text:
+    val path = collection_native_receipt_path_v1(output)
+    val staged = native_noop_exclusive_stage_v1(path, encoded, sha256_text(encoded))
+    if staged == "": return "receipt-stage-failed"
+    if not rt_file_fsync(staged) or not rt_file_rename(staged, path):
+        val _ = rt_file_delete(staged)
+        return "receipt-publication-failed"
+    val verdict = collection_native_validate_v1(output, request)
+    if verdict != "":
+        val _ = collection_native_clear_v1(output)
+    verdict
+
+fn collection_native_publish_v1(output: text, request: text, bindings: [text], objects: [text]) -> text:
+    if bindings.len() != objects.len(): return "link-input-capsule-count-mismatch"
+    if not collection_native_link_inputs_valid_v1(bindings, objects):
+        return "link-input-object-changed"
+    val encoded = match collection_native_encode_v1(request,
+            file_hash_sha256_or_empty(output), bindings):
+        case Ok(value): value
+        case Err(reason): return reason
+    collection_native_write_v1(output, request, encoded)
+
+fn collection_native_copy_v1(source: text, destination: text, request: text) -> text:
+    val verdict = collection_native_validate_v1(source, request)
+    if verdict != "": return verdict
+    if source == destination: return ""
+    val encoded = rt_file_read_regular_no_follow_bounded(
+        collection_native_receipt_path_v1(source), COLLECTION_NATIVE_MAX_BYTES_V1)
+    if encoded == nil: return "receipt-missing"
+    collection_native_write_v1(destination, request, encoded!)
+
+export collection_native_frame_v1, collection_native_unframe_v1
+export collection_native_receipt_path_v1, collection_native_clear_v1
+export collection_native_bind_capsule_v1, collection_native_encode_v1, collection_native_decode_v1
+export collection_native_validate_v1, collection_native_publish_v1, collection_native_copy_v1
+export collection_native_retain_link_inputs_v1, collection_native_link_inputs_valid_v1

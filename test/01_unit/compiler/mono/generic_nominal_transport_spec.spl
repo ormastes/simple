@@ -1,6 +1,10 @@
 # @req REQ-GENERIC-NOMINAL-IDENTITY
 # @tag: unit, compiler, mono, generics
 use std.spec
+use compiler.mono.mono_archive_registration_types_v1.{MonoArchiveRegistrationRowV1}
+use compiler.mono.mono_archive_registration_v1.{mono_archive_registration_row_digest_v1}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use std.common.crypto.sha256.{sha256_text}
 use compiler.hir.hir.*
 use compiler.common.diagnostics.span.Span
 use compiler.mono.monomorphize_integration.MonomorphizationPass
@@ -229,15 +233,18 @@ describe "body-free archive nominal specialization":
         expect(pass_.diagnostics.len()).to_equal(0)
 
     it "records import allocation in the delta without retaining worker tables":
-        val collector = transport_archive_collector()
+        var collector = transport_archive_collector()
+        expect(collector.ensure_archive_nominal_table_v2("caller")).to_be(true)
+        expect(collector.ensure_archive_nominal_table_v2("provider")).to_be(true)
         val facts = mono_archive_facts_from_collector_v1(collector,
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap()
+        expect(facts.symbol_projections.len()).to_equal(2)
         val state = mono_archive_state_create_v1(facts)
         val base = mono_archive_state_digest_v1(state)
         expect(base.len()).to_equal(64)
         var worker = mono_archive_scratch_pass_v1(state)
         worker.current_module = "caller"
-        expect(worker.module_symbols.len()).to_equal(0)
+        expect(worker.module_symbols.len()).to_equal(2)
         expect(worker.request_specialization("identity", [transport_nested()])).to_be_greater_than(state.next_symbol)
         val delta = mono_archive_delta_v1(state, worker, base, false)
         expect(delta.nominal_imports.len()).to_equal(1)
@@ -281,3 +288,20 @@ describe "body-free archive nominal specialization":
         expect(destination.next_symbol_id).to_equal(before)
         expect(destination.symbols.len()).to_equal(1)
         expect(destination.symbols[0].defining_module).to_equal("wrong")
+
+# Registration tag 21 remains the nominal DTO; upstream projection is tag 22.
+# The domain changes so persisted pre-merge receipts cannot authenticate v3 rows.
+describe "combined nominal registration protocol":
+    it "binds symbol projections to tag 22 and the v3 row domain":
+        val row = MonoArchiveRegistrationRowV1.SymbolProjection("caller", "projection-bytes")
+        var current = HirCodecWriter.create()
+        current.put_i64(22)
+        current.put_text("caller")
+        current.put_text("projection-bytes")
+        val actual = mono_archive_registration_row_digest_v1(row)
+        expect(actual).to_equal(sha256_text("mono-registration-row-v3\n" + current.finish()))
+        var legacy = HirCodecWriter.create()
+        legacy.put_i64(21)
+        legacy.put_text("caller")
+        legacy.put_text("projection-bytes")
+        expect(actual == sha256_text("mono-registration-row-v2\n" + legacy.finish())).to_be(false)

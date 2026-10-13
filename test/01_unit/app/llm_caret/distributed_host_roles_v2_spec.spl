@@ -1,0 +1,81 @@
+# DBC-003/005/018/020; AT-01/05/11/25. Source regressions are not remote acceptance.
+use std.spec.{describe, it, expect}
+use app.llm_caret.workbench.distributed_host_roles_v2.*
+
+fn host_role(identity: text) -> DistributedCredentialRoleV2:
+    DistributedCredentialRoleV2(identity: identity,
+        credential_reference: "secret://roles/{identity}", revision: 1, revoked: false)
+
+fn enrolled_host() -> DistributedHostRolesV2:
+    DistributedHostRolesV2(host_id: "worker_1", host_key_digest: "a".repeat(64),
+        registry_revision: 7, ssh_account: host_role("ssh_user"),
+        provider_profile: host_role("provider"), node_identity: host_role("node"),
+        signer_identity: host_role("signer"))
+
+fn host_resolution_error(registry: [DistributedHostRolesV2],
+        host_id: text, digest: text, revision: i64) -> text:
+    match distributed_host_roles_resolve_v2(registry, host_id, digest, revision):
+        case Ok(value): ""
+        case Err(reason): reason
+
+describe "distributed host identity and independent credential roles":
+    it "returns each separately enrolled role without deriving one from another":
+        match distributed_host_roles_resolve_v2([enrolled_host()], "worker_1", "a".repeat(64), 7):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(host):
+                expect(host.ssh_account.identity).to_equal("ssh_user")
+                expect(host.provider_profile.credential_reference).to_equal("secret://roles/provider")
+                expect(host.node_identity.identity).to_equal("node")
+                expect(host.signer_identity.identity).to_equal("signer")
+
+    it "rejects an unknown host without implicit enrollment":
+        expect(host_resolution_error([], "worker_1", "a".repeat(64), 7)).to_equal("HOST_NOT_ENROLLED")
+
+    it "rejects a changed host key even with unchanged role identities":
+        expect(host_resolution_error([enrolled_host()], "worker_1", "b".repeat(64), 7)).to_equal("HOST_KEY_CHANGED")
+
+    it "rejects stale rotation and duplicate registry identity":
+        expect(host_resolution_error([enrolled_host()], "worker_1", "a".repeat(64), 8)).to_equal("HOST_REGISTRY_STALE")
+        expect(host_resolution_error([enrolled_host(), enrolled_host()], "worker_1", "a".repeat(64), 7)).to_equal("HOST_REGISTRY_DUPLICATE")
+
+    it "rejects revocation independently in every role":
+        var host = enrolled_host()
+        host.ssh_account.revoked = true
+        expect(host_resolution_error([host], "worker_1", "a".repeat(64), 7)).to_equal("ROLE_REVOKED")
+        host = enrolled_host()
+        host.provider_profile.revoked = true
+        expect(host_resolution_error([host], "worker_1", "a".repeat(64), 7)).to_equal("ROLE_REVOKED")
+        host = enrolled_host()
+        host.node_identity.revoked = true
+        expect(host_resolution_error([host], "worker_1", "a".repeat(64), 7)).to_equal("ROLE_REVOKED")
+        host = enrolled_host()
+        host.signer_identity.revoked = true
+        expect(host_resolution_error([host], "worker_1", "a".repeat(64), 7)).to_equal("ROLE_REVOKED")
+
+    it "requires a reference instead of secret bytes or traversing names":
+        expect(distributed_credential_reference_valid_v2("secret://roles/signer")).to_equal(true)
+        expect(distributed_credential_reference_valid_v2("private-key-bytes")).to_equal(false)
+        expect(distributed_credential_reference_valid_v2("secret://../signer")).to_equal(false)
+        expect(distributed_credential_reference_valid_v2("secret://roles/ signer")).to_equal(false)
+
+    it "reports every shared reference dependency including revoked roles":
+        var host = enrolled_host()
+        var signer = host.signer_identity
+        signer.credential_reference = host.ssh_account.credential_reference
+        signer.revoked = true
+        signer.revision = 3
+        host.signer_identity = signer
+        match distributed_host_credential_dependents_v2([host], "secret://roles/ssh_user", 7):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(dependencies):
+                expect(dependencies.len()).to_equal(2)
+                expect(dependencies[0].host_id).to_equal("worker_1")
+                expect(dependencies[0].role).to_equal("ssh_account")
+                expect(dependencies[1].role).to_equal("signer_identity")
+                expect(dependencies[1].role_revision).to_equal(3)
+                expect(dependencies[1].revoked).to_equal(true)
+
+    it "rejects dependency inspection against a stale snapshot":
+        match distributed_host_credential_dependents_v2([enrolled_host()], "secret://roles/ssh_user", 8):
+            case Ok(value): expect("accepted stale snapshot").to_equal("HOST_REGISTRY_STALE")
+            case Err(reason): expect(reason).to_equal("HOST_REGISTRY_STALE")

@@ -1,0 +1,193 @@
+# Real parser/lowerer/source surfaces + retained/archive mono comparison.
+# Mechanical source-current boundary only; no production final admission.
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, SymbolKind}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.mono.monomorphize_integration.{MonomorphizationPass}
+use compiler.mono.mono_archive_registration_v1.*
+use compiler.mono.mono_archive_current_body_v1.*
+use compiler.mono.mono_archive_body_input_v1.*
+use compiler.driver.cache.hir_body_typecheck_lease_v1.*
+use compiler.driver.cache.hir_mono_archive_execution_v1.*
+use compiler.driver.cache.hir_mono_archive_consumer_v1.*
+use compiler.driver.cache.hir_mono_archive_assembly_v1.*
+use compiler.driver.cache.hir_mono_verification_use_v1.*
+use compiler.driver.cache.hir_mono_archive_verify_v1.{mono_archive_post_mono_report_digest_v1}
+use compiler.mono.verify.post_mono_verify.{post_mono_verify_modules}
+use compiler.driver.driver_hir_cache.{hir_cache_header, hir_cache_last_warnings,
+    hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use std.env.{env_get}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+fn close_fixture(paused: bool, owned: bool):
+    val memo = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not memo or not ended: panic("nominal fixture lifecycle")
+
+fn inputs() -> Result<Dict<text, HirModule>, text>:
+    var sources: [SourceFile] = []
+    var parsed: Dict<text, ParserModule> = {}
+    for name in ["caller", "provider"]:
+        val path = "test/fixtures/compiler/hir_mono_nominal_archive/" + name + ".spl"
+        val content = file_read_nullable(path) ?? ""
+        if content == "": return Err("nominal actual source missing")
+        sources.push(SourceFile(path: path, content: content, module_name: name))
+        parsed[name] = parse_full_frontend(content, path, name, Logger(level: 0))
+    val surfaces = module_surfaces_from_modules(parsed, sources)?
+    var modules: Dict<text, HirModule> = {}
+    for source in sources:
+        var lowering = hirlowering_for_module(source.path, surfaces)
+        val module = lowering.lower_parser_module_unstub(parsed[source.module_name], false)
+        if lowering.errors.len() != 0: return Err("nominal actual HIR lowering refused")
+        modules[source.module_name] = module
+    # The retained operation receives the actual same physical table handle.
+    modules["provider.alias"] = modules["provider"]
+    Ok(modules)
+
+fn capture(owner: MonoArchiveCurrentRegistrationOwnerV1, original: HirBodyArchiveV1,
+        name: text) -> Result<MonoArchiveCurrentRegistrationReceiptV1, text>:
+    if not transient_scope_begin(): return Err("nominal capture lease")
+    var receipt: Result<MonoArchiveCurrentRegistrationReceiptV1, text> = Err("nominal body read")
+    val loaded = hir_body_archive_load_in_owned_scope_v1(original, original.input)
+    if loaded.is_ok():
+        val stored = mono_archive_current_body_store_in_owned_scope_v1(owner.cache, original,
+            sha256_text("nominal mechanical boundary"), sha256_text("nominal mechanical policy"), loaded.unwrap(), [])
+        if stored.is_ok(): receipt = mono_archive_collect_logical_current_registration_in_owned_scope_v1(
+            owner, loaded.unwrap(), name, stored.unwrap(), [])
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(receipt) else: false
+    close_fixture(paused, owned)
+    receipt
+
+struct Observation:
+    bodies: [text]
+    counters: [i64]
+    statistics: [i64]
+    diagnostics: [text]
+    warnings: [text]
+    report: text
+    transported: bool
+
+fn observe(owner: MonoArchiveExecutionV1, replay: MonoArchiveVerificationUseV1?) -> Result<Observation, text>:
+    if not transient_scope_begin(): return Err("nominal observation lease")
+    var result: Result<Observation, text> = Err("nominal selected body unavailable")
+    var modules: Dict<text, HirModule> = {}
+    var valid = true
+    for root in owner.roots:
+        if val captured = replay:
+            val body = mono_archive_verification_use_load_module_in_owned_scope_v1(captured, root.module_name)
+            if body.is_ok(): modules[root.module_name] = body.unwrap() else: valid = false
+        else:
+            val input = mono_archive_repository_input_v1(owner.admission.repository, root.module_name)
+            if input.is_err(): valid = false
+            else:
+                val body = mono_archive_body_input_load_in_owned_scope_v1(input.unwrap())
+                if body.is_ok(): modules[root.module_name] = body.unwrap().module else: valid = false
+    if valid:
+        if replay == nil:
+            # Restore the genuine shared class handle for actual retained aliases.
+            var alias = modules["provider.alias"]
+            alias.symbols = modules["provider"].symbols
+            modules["provider.alias"] = alias
+        val worker = MonomorphizationPass.create()
+        val output = if replay == nil: worker.process_modules(modules) else: modules
+        var bodies: [text] = []
+        var counters: [i64] = []
+        for root in owner.roots:
+            bodies.push(sha256_text(hir_module_encode(output[root.module_name])))
+            counters.push(output[root.module_name].symbols.next_symbol_id)
+        var transported = false
+        for raw_id in output["provider"].symbols.symbols.keys():
+            val row = output["provider"].symbols.symbols[raw_id]
+            if row.name == "Local" and row.kind == SymbolKind.Struct and row.defining_module != nil:
+                transported = true
+        result = Ok(Observation(bodies: bodies, counters: counters,
+            statistics: if replay == nil: [worker.stats.generic_functions_found, worker.stats.generic_structs_found,
+                worker.stats.generic_classes_found, worker.stats.call_sites_found, worker.stats.specializations_created,
+                worker.stats.unresolved_generic_calls] else: [owner.generic_functions, owner.generic_structs,
+                owner.generic_classes, owner.call_sites_found, owner.specializations_created, owner.unresolved_generic_calls],
+            diagnostics: if replay == nil: worker.diagnostics else: owner.diagnostics,
+            warnings: if replay == nil: worker.warnings else: owner.warnings,
+            report: mono_archive_post_mono_report_digest_v1(post_mono_verify_modules(output)), transported: transported))
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    close_fixture(paused, owned)
+    result
+
+fn main() -> i64:
+    var checks = 0
+    val lowered = inputs()
+    if lowered.is_err(): return 1
+    val modules = lowered.unwrap()
+    val created = mono_archive_logical_current_registration_create_v1()
+    if created.is_err(): return 2
+    val owner = created.unwrap()
+    var paths: Dict<text, text> = {}
+    val order = ["caller", "provider", "provider.alias"]
+    var archives: Dict<text, HirBodyArchiveV1> = {}
+    for name in ["caller", "provider"]:
+        val module = modules[name]
+        val archived = hir_body_archive_store_v1(HirBodyArchiveInputV1(source_path: module.path,
+            module_name: module.name, is_entry: false, closure_digest: env_get("SIMPLE_HIR_LEASE_CLOSURE_DIGEST"),
+            runtime_provider_digest: env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_DIGEST"),
+            runtime_provider_receipt_path: env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_RECEIPT"),
+            producer_header: hir_cache_header(), stage: "lowered-unresolved-v1"), module, [])
+        if archived.is_err(): return 3
+        archives[name] = archived.unwrap()
+    archives["provider.alias"] = archives["provider"]
+    for name in order:
+        paths[name] = archives[name].input.source_path
+        val receipt = capture(owner, archives[name], name)
+        if receipt.is_err() or mono_archive_publish_current_registration_v1(owner, receipt.unwrap()).is_err(): return 4
+    checks = checks + 1
+    if owner.registration.state.facts.symbol_projections.len() != 3: return 5
+    checks = checks + 1
+    if mono_archive_current_registration_seal_v1(owner, paths, order).is_err(): return 6
+    val made = mono_archive_current_execution_create_v1(owner, paths, order)
+    if made.is_err(): return 7
+    val execution = made.unwrap()
+    val retained = observe(execution, nil)
+    if retained.is_err() or not retained.unwrap().transported or retained.unwrap().diagnostics.len() != 0 or
+            retained.unwrap().statistics[4] < 2: return 8
+    checks = checks + 1
+    while not mono_archive_roots_complete_v1(execution):
+        if mono_archive_execute_next_root_v1(execution).is_err(): return 9
+    while execution.admission.state.cursor < execution.admission.state.queue.len():
+        if mono_archive_execute_next_specialization_v1(execution).is_err(): return 10
+    if not mono_archive_execution_complete_v1(execution): return 11
+    checks = checks + 1
+    var caller_provenance = false
+    for request in execution.admission.state.queue:
+        if request.caller_module == "caller" and request.caller_type_args.len() == request.type_args.len(): caller_provenance = true
+    if not caller_provenance or execution.admission.state.symbol_patches.len() == 0: return 12
+    checks = checks + 1
+    val capture_ = mono_archive_verification_use_capture_v1(execution)
+    if capture_.is_err(): return 13
+    val current = observe(execution, Some(capture_.unwrap()))
+    if current.is_err(): return 14
+    val a = retained.unwrap()
+    val b = current.unwrap()
+    if a.bodies != b.bodies or a.counters != b.counters or a.statistics != b.statistics or
+            a.diagnostics != b.diagnostics or a.warnings != b.warnings or a.report != b.report or not b.transported: return 15
+    checks = checks + 1
+    # A stale or malformed projection cannot be consumed as a valid next epoch.
+    val state = execution.admission.state
+    val saved = state.symbol_patches["provider"]
+    state.symbol_patches["provider"] = ["not actual nominal declarations"]
+    if mono_archive_execution_complete_v1(execution): return 16
+    state.symbol_patches["provider"] = saved
+    checks = checks + 1
+    if not mono_archive_execution_complete_v1(execution) or hir_cache_last_warnings().len() != 0: return 17
+    checks = checks + 1
+    if checks != 8: return 18
+    print "HIR nominal archive transport: {checks} checks passed"
+    0

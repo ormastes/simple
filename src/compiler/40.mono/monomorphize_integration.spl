@@ -200,6 +200,7 @@ class MonomorphizationPass:
     # Raw IDs repeat in other modules; source names are not type authority.
     declared_global_types: Dict<text, HirType> = {}
     # Explicit consumer ownership, never an ambient production activation flag.
+    archive_nominal_projection_valid: bool = true
     template_body_mode: MonoTemplateBodyModeV1 = MonoTemplateBodyModeV1.Retained
     archive_template_signatures: Dict<text, MonoTemplateSignatureV1> = {}
     archive_specialized_signatures: Dict<text, MonoTemplateSignatureV1> = {}
@@ -433,6 +434,32 @@ impl MonomorphizationPass:
                         val pp: HirParam = p
                         ptys = ptys.push(pp.type_)
                     self.fn_sigs[mono_sym_key(module_name, fsym.id)] = HirType(kind: HirTypeKind.Function(ptys, func.return_type, []), span: func.span)
+
+        # Imported callables are declarations in this module's symbol table,
+        # not bodies in module.functions. Their signatures were lowered in the
+        # caller's type scope by import registration. Preserve that scope: a
+        # callee-module SymbolId or a display-name lookup can alias a different
+        # nominal type (or a shadowed callable) in this module.
+        # declared_imported_surface_callable_type leaves generic imports untyped,
+        # including unused type parameters; never invent a signature for them.
+        if module.symbols != nil:
+            for imported_id in module.symbols.symbols.keys():
+                val imported: HirSymbol = module.symbols.symbols[imported_id]
+                if imported.kind != SymbolKind.Function or imported.type_ == nil:
+                    continue
+                if not imported.defining_module.?:
+                    continue
+                val signature: HirType = imported.type_ ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
+                if not hir_type_is_concrete(signature):
+                    continue
+                val key = mono_sym_key(module_name, imported.id.id)
+                if self.fn_returns.has(key):
+                    continue
+                match signature.kind:
+                    case HirTypeKind.Function(_, ret, _):
+                        self.fn_returns[key] = ret
+                        self.fn_sigs[key] = signature
+                    case _: ()
 
         # Collect generic structs
         val structs = module.structs
@@ -809,6 +836,11 @@ impl MonomorphizationPass:
         self.spec_symbols[mangled] = sym
         var signature = self.template_signature_v1(func_name)
         if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
+            # The archive consumer fulfills this request with
+            # `specialize_function_with_types(canonical, item.type_args)` in
+            # the TEMPLATE module's scope, so the archived arguments must be
+            # the ones transported into that scope, not the caller-scoped
+            # `type_args` (nominal identity is module-scoped).
             signature = mono_specialized_signature_v1(self.template_signature_v1(func_name), local_type_args, mangled)
             self.archive_specialized_signatures[mangled] = signature
             self.archive_requests = self.archive_requests.push(MonoSpecializationRequestV1(
@@ -853,6 +885,15 @@ impl MonomorphizationPass:
         if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
             return self.archive_specialized_signatures[name]
         mono_template_signature_v1(self.specialized_functions[name])
+
+    me specialization_callee_name_v1(template_name: text, spec_name: text) -> text:
+        # Original caller spelling may be bare or an import alias. Linkage is
+        # owned by the actual template declaration, shared by both body modes.
+        val signature = self.template_signature_v1(template_name)
+        val owner: text = self.template_module[template_name]
+        if signature.global_linkage or owner == self.current_module:
+            return spec_name
+        "{owner}.{spec_name}"
 
     me symbol_identity_v1(module_name: text, symbol: SymbolId) -> text:
         if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
@@ -2361,6 +2402,8 @@ impl MonomorphizationPass:
         # symbol lookup; without this stamp the result defaulted to the
         # erased i64 and a `text`/`f64` instance was consumed as an integer
         # (BUG-IT-5).
+        # The stamp's nominal ids must live in the CALLER's module scope, so
+        # the signature is transported out of the specialization's module.
         var spec_sig = HirType(kind: HirTypeKind.Any, span: callee.span)
         if val signature = self.specialization_signature_in_caller(spec_name, callee.span):
             spec_sig = signature
@@ -2368,10 +2411,10 @@ impl MonomorphizationPass:
             self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
             self.unresolved_templates[gname] = true
             return HirExprKind.Call(new_callee, new_args, new_type_args)
-        val physical_signature = self.specialization_signature_v1(spec_name)
-        val template_mod: text = self.template_module[gname]
-        val callee_name = if physical_signature.global_linkage or template_mod == self.current_module: spec_name else: "{template_mod}.{spec_name}"
-        new_callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId.new(target), callee_name),
+        # Physical linkage and template owner survive both body modes;
+        # caller spelling is not declaration ownership. The nominal signature
+        # above remains transported into the caller's symbol table.
+        new_callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId.new(target), self.specialization_callee_name_v1(gname, spec_name)),
                              has_type_: true,
                              type_: spec_sig,
                              span: callee.span)
@@ -2478,17 +2521,14 @@ impl MonomorphizationPass:
             self.unresolved_templates[gname] = true
             return HirExprKind.MethodCall(new_receiver, method, new_args, resolution)
         val spec_name: text = self.mangled_name(gname, targs)
-        val template_mod: text = self.template_module[gname]
-        # MIR resolves a fresh mono callee by its baked display name; a
-        # specialization placed in another module is spelled `<module>.<fn>`
-        # exactly like HIR's qualified imported-function references.
-        val callee_name = if template_mod == self.current_module: spec_name else: "{template_mod}.{spec_name}"
+        val callee_name = self.specialization_callee_name_v1(gname, spec_name)
         var call_args: [HirCallArg] = [HirCallArg(has_name: false, name: "", value: new_receiver, span: receiver.span)]
         for a in new_args:
             call_args = call_args.push(a)
         # Same stamp as `rewrite_call`: the specialization's own signature
         # types the call's result (a `text`-returning `get` is a pointer, not
-        # the erased i64 -- BUG-IT-5 class).
+        # the erased i64 -- BUG-IT-5 class), transported into the caller's
+        # module scope.
         var spec_sig = HirType(kind: HirTypeKind.Any, span: receiver.span)
         if val signature = self.specialization_signature_in_caller(spec_name, receiver.span):
             spec_sig = signature
@@ -3509,18 +3549,6 @@ fn mono_module_matches(qual: text, template_mod: text) -> bool:
     if template_mod.ends_with(".{qual}"):
         return true
     qual.ends_with(".{template_mod}")
-
-# Keep the original callee's module qualifier, swap only the function name.
-fn mono_requalify(callee: HirExpr, spec_name: text) -> text:
-    match callee.kind:
-        case HirExprKind.NamedVar(_, name):
-            val n: text = name
-            val last = mono_last_segment(n)
-            if last == n:
-                return spec_name
-            n.substring(0, n.len() - last.len()) + spec_name
-        case _:
-            spec_name
 
 fn mono_type_identity(symbols: SymbolTable, sym: SymbolId, module_name: text) -> text:
     """Ownership identity `<owner module>.<Name>` of a type symbol, read in
