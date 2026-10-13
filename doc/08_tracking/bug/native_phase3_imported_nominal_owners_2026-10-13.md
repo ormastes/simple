@@ -15,3 +15,7 @@ The consumer imports are compatibility workarounds for a transitive declaration 
 ## Verification boundary
 
 Patch prepared from actual independent failed-module diagnostics. No new native object, executable, or full Phase3 PASS is claimed by this document. Validate failed modules individually with the exact producer/runtime and actual ELF relocatable artifacts, then compile/run Phase3 before landing. Ordinary memory/performance gates remain deferred only for the explicitly authorized diagnostic attempt; full admission is unproven. Full core/MCP/LSP verification remains required for final qualification.
+
+## Isolated manual object findings
+
+The first enum-caller mini passed its own prior missing-helper boundary, but its narrower381-module closure exposed a hidden MirType dependency in optimizer_manifest. The957-module archive mini still reports NominalDeclV2 in the consumer after fixing the owner's brace import. This confirms that named dependency extraction alone does not repair old-producer transitive field materialization. Explicit canonical imports were additionally added to those two consumers. Retain failed receipts; no successful object/Phase3 evidence is inferred from partial lowering or progress counters.
