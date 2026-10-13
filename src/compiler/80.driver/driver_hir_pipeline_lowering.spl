@@ -89,7 +89,7 @@ use compiler.driver.driver_safety_severity.{SafetyPassSeverity, safety_pass_seve
 use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity, typecheck_pass_severity}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line}
-use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_last_warnings, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_last_warnings, hir_cache_parser_binding_v1, hir_cache_last_parser_objectless, hir_cache_load_parsed_v1, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_in_owned_scope, hir_cache_clear_last_warnings}
 use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1}
@@ -445,8 +445,17 @@ impl CompilerDriver:
     # and grows RSS once for every module.  Use the same pause/promote/end
     # protocol as the streaming reparse path, while deliberately keeping the
     # retained parser module itself outside this scope.
+    me native_parser_cache_record_v1(key: text, source: SourceFile, source_index: i64) -> text:
+        if not self.ctx.native_parsed_classifications.has(source.module_name): return ""
+        val binding = hir_cache_parser_binding_v1(key, source.module_name, source.path,
+            self.ctx.source_identities_owner[source_index])
+        if binding == "": return ""
+        val kind = if self.ctx.native_parsed_classifications[source.module_name]: "objectless:" else: "bodyful:"
+        kind + binding
+
     me capture_native_parsed_objectless_v1(parsed_code_less: bool, source: SourceFile):
         self.ctx.native_parsed_objectless_proofs.remove(source.module_name)
+        self.ctx.native_parsed_classifications[source.module_name] = parsed_code_less
         if not parsed_code_less: return
         val proof = driver_native_parsed_objectless_proof_v1(
             source.module_name, source.path, sha256_text(source.content))
@@ -705,8 +714,14 @@ impl CompilerDriver:
         var archived_body: HirBodyArchiveV1? = nil
         var declaration_registration: MonoArchiveRegistrationReceiptV1? = nil
         var source_body_custody: DriverHirSourceBodyCustodyV1? = nil
-        val cache_result = if archive_input == nil: hir_cache_load_in_owned_scope(transaction_cache_key) else: nil
+        val parser_binding = hir_cache_parser_binding_v1(transaction_cache_key,
+            source.module_name, source.path, sha256_text(source.content))
+        var parsed_classification_known = false
+        var parsed_code_less = false
+        val cache_result = if archive_input == nil and parser_binding != "": hir_cache_load_in_owned_scope(transaction_cache_key, parser_binding) else: nil
         if val found = cache_result:
+            parsed_classification_known = true
+            parsed_code_less = hir_cache_last_parser_objectless()
             module = found
             cached = true
             warnings = hir_cache_last_warnings()
@@ -723,6 +738,8 @@ impl CompilerDriver:
                 if par_had_error_get():
                     errors.push(driver_parse_error_message(source.path))
                 else:
+                    parsed_classification_known = true
+                    parsed_code_less = driver_native_parsed_module_has_no_runtime_body_v1(parser_module)
                     module = actual_lowering.lower_parser_module_unstub(parser_module, is_entry)
                     var error_index = 0
                     while error_index < actual_lowering.lowering_error_count():
@@ -749,7 +766,14 @@ impl CompilerDriver:
             else:
                 # Reuse the existing atomic codec writer while OUR scope owns
                 # its scratch. hir_cache_store would try to nest a new scope.
-                stored = hir_cache_store_in_owned_scope(transaction_cache_key, module, warnings)
+                val parser_record = if parsed_classification_known and parser_binding != "":
+                    (if parsed_code_less: "objectless:" else: "bodyful:") + parser_binding
+                else: ""
+                # The selected parser transaction publishes v4 in its private
+                # schema namespace even when it also issues a body archive.
+                # The archive publisher below retains its own generic contract.
+                stored = parser_record != "" and hir_cache_store_in_owned_scope(
+                    transaction_cache_key, module, warnings, parser_record)
                 if not stored:
                     infrastructure_error = "HIR shard cache publication failed for {source.path}"
 
@@ -1046,7 +1070,7 @@ impl CompilerDriver:
                 hir_loop_pos = hir_loop_pos + 1
                 continue
             val hir_stream_cached: HirModule? = if hir_stream_key != "":
-                hir_cache_load(hir_stream_key)
+                hir_cache_load_parsed_v1(hir_stream_key, hir_cache_parser_binding_v1(hir_stream_key, source.module_name, source.path, self.ctx.source_identities_owner[source_index]))
             else:
                 nil
             if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
@@ -1072,6 +1096,7 @@ impl CompilerDriver:
             var hir_module: HirModule = nil
             var hir_cache_stored: bool = hir_stream_cached != nil
             if hir_stream_cached != nil:
+                self.capture_native_parsed_objectless_v1(hir_cache_last_parser_objectless(), source)
                 # A cached HIR root is already persistent; preserve the reset
                 # without opening an otherwise unused parse scope.
                 lowering.begin_module(source.path)
@@ -1193,7 +1218,8 @@ impl CompilerDriver:
                     print hir_codec_roundtrip_line(hir_round_trip, source.path)
                     hir_module = hir_round_trip.module
                 if hir_stream_key != "":
-                    if hir_cache_store(hir_stream_key, hir_module, hir_module_warnings):
+                    val parser_record = self.native_parser_cache_record_v1(hir_stream_key, source, source_index)
+                    if parser_record != "" and hir_cache_store(hir_stream_key, hir_module, hir_module_warnings, parser_record):
                         hir_shard_lowered = hir_shard_lowered + 1
                         hir_cache_stored = true
             if not driver_hir_mem_snapshot(
@@ -1591,7 +1617,7 @@ impl CompilerDriver:
             else:
                 ""
             val hir_cached: HirModule? = if hir_cache_key_value != "":
-                hir_cache_load(hir_cache_key_value)
+                hir_cache_load_parsed_v1(hir_cache_key_value, hir_cache_parser_binding_v1(hir_cache_key_value, src.module_name, src.path, self.ctx.source_identities_owner[source_idx]))
             else:
                 nil
             val hir_cache_hit: bool = hir_cached != nil
@@ -1599,6 +1625,7 @@ impl CompilerDriver:
                 val hir_work = if hir_cache_hit: 0 else: 1
                 print "[M4 lower] module={name} work={hir_work}"
             if hir_cache_hit:
+                self.capture_native_parsed_objectless_v1(hir_cache_last_parser_objectless(), src)
                 # Replay the one global side effect lowering has besides its
                 # return value: the flat HIR rows the bootstrap MIR bridge
                 # reads (module_build.spl's bootstrap_flat_mode block).
@@ -1798,7 +1825,8 @@ impl CompilerDriver:
             driver_log_typed_hir_abi_interface_v1(hir_module, src.path)
             var hir_cache_stored: bool = hir_cache_hit
             if hir_cache_key_value != "" and not hir_cache_hit:
-                if hir_cache_store(hir_cache_key_value, hir_module, hir_module_warnings):
+                val parser_record = self.native_parser_cache_record_v1(hir_cache_key_value, src, source_idx)
+                if parser_record != "" and hir_cache_store(hir_cache_key_value, hir_module, hir_module_warnings, parser_record):
                     hir_shard_lowered = hir_shard_lowered + 1
                     hir_cache_stored = true
             if not hir_shard_finish(src.path, "PASS", hir_cache_stored):

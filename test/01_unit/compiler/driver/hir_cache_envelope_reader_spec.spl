@@ -5,6 +5,8 @@
 use std.spec.*
 use std.common.crypto.sha256.{sha256_text}
 use compiler.driver.hir_cache_envelope_reader.{hir_cache_decode_envelope}
+use compiler.driver.driver_hir_cache.{hir_cache_entry_parse, hir_cache_entry_encode_body}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
 
 fn v3_frame(header: text, warning_lines: [text], body: text) -> text:
     var covered = "W\n{warning_lines.len()}\n"
@@ -14,6 +16,45 @@ fn v3_frame(header: text, warning_lines: [text], body: text) -> text:
     header + "\nC " + sha256_text(covered) + "\n" + covered
 
 describe "HIR cache typed envelope reader":
+    it "retains authenticated warm parser metadata after its decode scope ends":
+        val binding = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val header = "spl-hircache-v4-parser scope"
+        val frame = header + "\n" + hir_cache_entry_encode_body(["kept"], "hir\n", "objectless:" + binding)
+        expect(transient_scope_begin()).to_be(true)
+        val admitted = hir_cache_entry_parse(frame, header, binding)
+        expect(transient_scope_pause()).to_be(true)
+        expect(transient_promote(admitted)).to_be(true)
+        expect(transient_scope_end()).to_be(true)
+        expect(admitted.reason).to_equal("")
+        expect(admitted.parser_classification).to_equal("objectless:" + binding)
+        expect(admitted.warnings).to_equal(["kept"])
+        expect(admitted.blob).to_equal("hir\n")
+
+    it "admits only checksum-covered parser classification bound to the requested source":
+        val binding = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val header = "spl-hircache-v4-parser scope"
+        val body = "hir-header\nbody\n"
+        for kind in ["objectless:", "bodyful:"]:
+            val frame = header + "\n" + hir_cache_entry_encode_body(["warning"], body, kind + binding)
+            val admitted = hir_cache_entry_parse(frame, header, binding)
+            expect(admitted.reason).to_equal("")
+            expect(admitted.parser_classification).to_equal(kind + binding)
+            expect(admitted.warnings).to_equal(["warning"])
+            expect(admitted.blob).to_equal(body)
+            expect(hir_cache_entry_parse(frame, header, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").reason).to_equal("framing")
+            expect(hir_cache_entry_parse(frame, "scope").reason).to_equal("header")
+
+    it "rejects legacy missing unknown and tampered parser classification":
+        val binding = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val header = "spl-hircache-v4-parser scope"
+        val body = "hir-header\nbody\n"
+        expect(hir_cache_entry_parse(v3_frame("scope", [], body), header, binding).reason).to_equal("header")
+        expect(hir_cache_entry_parse(v3_frame(header, [], body), header, binding).reason).to_equal("framing")
+        val unknown = header + "\n" + hir_cache_entry_encode_body([], body, "unknown:" + binding)
+        expect(hir_cache_entry_parse(unknown, header, binding).reason).to_equal("framing")
+        val valid = header + "\n" + hir_cache_entry_encode_body([], body, "objectless:" + binding)
+        expect(hir_cache_entry_parse(valid.replace("objectless:", "bodyful:"), header, binding).reason).to_equal("checksum")
+
     it "reads three escaped warnings without changing any body byte":
         val body = "hir-header\n한글\\n\n\n"
         val frame = v3_frame("scope", ["first\\nsecond", "slash\\\\tail", "한글"], body)
