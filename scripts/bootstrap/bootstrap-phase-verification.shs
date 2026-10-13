@@ -172,6 +172,7 @@ stage3_provenance=""
 compiler=""
 expected_sha=""
 strategy=normal
+repository_test_execution=interpreter
 profile=full
 hash_policy=canonical
 work_root=""
@@ -202,6 +203,7 @@ for arg in "$@"; do
     --compiler=*) compiler=${arg#*=} ;;
     --compiler-sha256=*) expected_sha=${arg#*=} ;;
     --strategy=*) strategy=${arg#*=} ;;
+    --test-execution=*) repository_test_execution=${arg#*=} ;;
     --fail-fast|--keep-going) ;; # Resolved together below, in argument order.
     # --profile=slim is an explicit opt-in, phase=stage2 only (see
     # stage2_slim_profile below). EVERY behavioral effect of slim mode --
@@ -225,6 +227,12 @@ for arg in "$@"; do
 done
 
 bootstrap_compile_failure_policy "$@"
+
+case "$repository_test_execution" in
+  interpreter) ;;
+  native) [ "$phase" = stage3 ] || die "--test-execution=native is stage3-only" ;;
+  *) die "--test-execution requires interpreter or native" ;;
+esac
 
 case "$phase" in stage1|stage2|stage3|stage4) ;; *) die "invalid phase" ;; esac
 [ -z "$stage3_provenance" ] || [ "$phase" = stage3 ] || die "--stage3-provenance is stage3-only"
@@ -514,6 +522,7 @@ stage2_row_delegation_env() {
   echo "phase=$phase"
   echo "verification_backend=$verification_backend"
   echo "strategy=$strategy"
+  echo "repository_test_execution=$repository_test_execution"
   echo "hash_policy=$hash_policy"
   echo "diagnostic_execution=$verification_diagnostic"
   echo "task_timeout_seconds=$timeout_seconds"
@@ -1870,6 +1879,29 @@ run_compiler_unit_tests() {
 # Phase 3 full verification must cover the repository inventory, not only the
 # compiler subtree.  Each spec is terminalized independently so a crash or
 # timeout cannot hide later rows, and --assert-ran rejects zero-example greens.
+run_repository_test_row() {
+  case "$repository_test_execution" in
+    interpreter)
+      run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
+        "$test_runner" "$relative" \
+        --mode=interpreter --unstable --assert-ran --no-cache --no-db \
+        --no-session-daemon --sequential --json
+      ;;
+    native)
+      # Each row retains its invocation receipts, sample binary, and runner log.
+      # The existing suite helper verifies actual AOT execution for this exact
+      # backend/compiler/runtime tuple; JSON or exit zero alone is insufficient.
+      native_row_dir=$(mktemp -d "$row_dir/$spec_count.native.XXXXXX") || return 2
+      run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
+        sh "$source_root/scripts/bootstrap/run-native-aot-suite.shs" \
+        "$source_root" "$verification_backend" "$compiler_cli" "$compiler_cli_sha" \
+        "$test_runner" "$relative" "$native_row_dir" "$build_threads" \
+        "$runtime_path" "$runtime_cache_identity"
+      ;;
+    *) return 2 ;;
+  esac
+}
+
 run_repository_full_tests() {
   test_runner=$1
   full_owner_receipt=$2
@@ -1951,10 +1983,7 @@ run_repository_full_tests() {
           SIMPLE_BINARY="$compiler_cli" \
           SIMPLE_BIN="$compiler_cli" \
           SIMPLE_MCP_TEST_BINARY="$full_mcp_server" \
-          run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
-            "$test_runner" "$relative" \
-            --mode=interpreter --unstable --assert-ran --no-cache --no-db \
-            --no-session-daemon --sequential --json
+          run_repository_test_row
       ) >"$row_output" 2>&1 || status=$?
       cat "$row_output" >>"$log"
       if ! validate_command_owner_receipt "$full_owner_receipt"; then
