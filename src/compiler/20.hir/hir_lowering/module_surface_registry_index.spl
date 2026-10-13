@@ -3,9 +3,10 @@
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, module_surface_allocate_generation, module_surface_export_origin_index_position}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_logical_name_from_path, module_surface_fold_std_alias, module_surface_package_name_from_name}
 use compiler.common.cache.native_resolution_trace.{NativeResolutionProbeV1, NativeResolutionTraceV1}
+use compiler.common.module_path_naming.{module_relative_name_from_path}
 use std.common.crypto.sha256.{sha256_text}
 
-val NATIVE_HIR_IMPORT_RESOLVER_VERSION_V1: text = "hir-module-surface-resolver-v2"
+val NATIVE_HIR_IMPORT_RESOLVER_VERSION_V1: text = "hir-module-surface-resolver-v3"
 
 # Stable bottom-up merge sort: each pass appends every row once instead of
 # rebuilding an ever-longer prefix for every insertion. Keep text `<` and
@@ -150,6 +151,12 @@ pub(package) fn module_surface_resolve_relative_key(
 ) -> text:
     if not name.starts_with("."):
         return module_surface_resolve_absolute_key(registry, name)
+    # Importer normalization can collapse a repeated tier while its sibling
+    # keeps that tier to distinguish a root-level twin. Resolve the physical
+    # sibling first; a miss must not select the unrelated collapsed twin.
+    val physical_name = module_relative_name_from_path(facade.canonical_path, name)
+    if physical_name != "":
+        return module_surface_resolve_absolute_key(registry, physical_name)
     var dots = 0
     while dots < name.len() and name.substring(dots, dots + 1) == ".":
         dots = dots + 1
@@ -230,6 +237,9 @@ pub(package) fn module_surface_import_resolution_trace_with_generation_v1(
             package_name = module_surface_package_name_from_name(package_name)
             package_index = package_index + 1
         base = if package_name == "": tail else: package_name + "." + tail
+        val physical_name = module_relative_name_from_path(facade.canonical_path, import_id)
+        if physical_name != "":
+            base = physical_name
     var candidates: [text] = [base, base + ".__init__", "lib." + base,
         "lib." + base + ".__init__"]
     if base.starts_with("std."):
