@@ -1,3 +1,4 @@
+use compiler.mono.mono_archive_nominal_v2.{MonoArchiveNominalDeclV2, mono_archive_nominal_project_v2, mono_archive_nominal_install_v2}
 # Monomorphization Integration
 #
 # Integrates monomorphization into the compiler pipeline (driver Phase 4).
@@ -149,6 +150,10 @@ class MonomorphizationPass:
     # Specializations whose bodies still have to be walked (FIFO worklist).
     spec_queue: [text]
     # Mangled name -> SymbolId allocated for the specialized function.
+    archive_nominal_rows: Dict<text, MonoArchiveNominalDeclV2> = {}
+    archive_nominal_keys: Dict<text, [text]> = {}
+    archive_nominal_imports: Dict<text, MonoArchiveNominalDeclV2> = {}
+    archive_caller_returns: Dict<text, HirType> = {}
     spec_symbols: Dict<text, i64>
     # Injective instantiation key (`type_key`) -> display name; see `mangled_name`.
     spec_display: Dict<text, text> = {}
@@ -513,6 +518,9 @@ impl MonomorphizationPass:
                 self.stats.generic_classes_found = self.stats.generic_classes_found + 1
 
         if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
+            val nominal = mono_archive_nominal_project_v2(module_name, module.symbols)
+            for key in nominal.keys(): self.archive_nominal_rows[key] = nominal[key]
+            self.archive_nominal_keys[module_name] = nominal.keys().sort()
             for raw_id in module.symbols.symbols.keys():
                 val symbol: HirSymbol = module.symbols.symbols[raw_id]
                 self.archive_symbol_identities[mono_sym_key(module_name, symbol.id.id)] =
@@ -720,6 +728,7 @@ impl MonomorphizationPass:
         display
 
     me type_keys(types: [HirType]) -> text:
+        self.ensure_archive_nominal_table_v2(self.current_module)
         val symbols: SymbolTable? = self.module_symbols[self.current_module] ?? nil
         mono_owned_type_keys(types, symbols, self.current_module)
 
@@ -729,13 +738,34 @@ impl MonomorphizationPass:
 
     me type_key(t: HirType) -> text:
         """Owner-qualified structural identity, or empty if ownership is unknown."""
+        self.ensure_archive_nominal_table_v2(self.current_module)
         val symbols: SymbolTable? = self.module_symbols[self.current_module] ?? nil
         mono_owned_type_key(t, symbols, self.current_module)
+
+    me ensure_archive_nominal_table_v2(module: text) -> bool:
+        if self.template_body_mode != MonoTemplateBodyModeV1.ArchiveRequests: return self.module_symbols.has(module)
+        if self.module_symbols.has(module): return true
+        if not self.module_paths.has(module): return false
+        var rows: Dict<text, MonoArchiveNominalDeclV2> = {}
+        if self.archive_nominal_keys.has(module):
+            for key in self.archive_nominal_keys[module]:
+                if self.archive_nominal_rows.has(key): rows[key] = self.archive_nominal_rows[key]
+                elif self.archive_nominal_imports.has(key): rows[key] = self.archive_nominal_imports[key]
+                else: return false
+        val table = SymbolTable.new()
+        if not mono_archive_nominal_install_v2(table, module, rows): return false
+        # Reserve the globally admitted high range, including pending specializations.
+        if table.next_symbol_id > self.next_symbol: return false
+        table.next_symbol_id = self.next_symbol
+        self.module_symbols[module] = table
+        true
 
     me relocate_mono_types(types: [HirType], source_module: text, target_module: text, site: text) -> [HirType]?:
         # Scalars contain no module-local ids and need no table or allocation.
         if not any_nominal(types):
             return Some(types)
+        self.ensure_archive_nominal_table_v2(source_module)
+        self.ensure_archive_nominal_table_v2(target_module)
         if not self.module_symbols.has(source_module) or not self.module_symbols.has(target_module):
             self.diagnostics = self.diagnostics.push(
                 "E-MONO-042: {site}: nominal type transport lacks source or target symbol table ({source_module} -> {target_module})")
@@ -751,41 +781,28 @@ impl MonomorphizationPass:
             self.diagnostics = self.diagnostics.push("E-MONO-042: {site}: {result.error}")
             return nil
         self.module_symbols[target_module] = result.symbols
+        if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
+            val rows = mono_archive_nominal_project_v2(target_module, result.symbols)
+            for key in rows.keys():
+                if not self.archive_nominal_rows.has(key):
+                    self.archive_nominal_imports[key] = rows[key]
+                    if not self.archive_nominal_keys.has(target_module): self.archive_nominal_keys[target_module] = []
+                    if not self.archive_nominal_keys[target_module].contains(key):
+                        self.archive_nominal_keys[target_module] = self.archive_nominal_keys[target_module].push(key)
         if result.symbols.next_symbol_id > self.next_symbol:
             self.next_symbol = result.symbols.next_symbol_id
         Some(result.types)
 
     me specialization_signature_in_caller(spec_name: text, span: Span) -> HirType?:
-        # Both body modes: the signature's types live in the SPECIALIZATION's
-        # module scope; the call-site stamp needs them in the caller's scope.
-        var params: [HirType] = []
-        var return_type: HirType = HirType(kind: HirTypeKind.Any, span: span)
-        var symbol_id: i64 = -1
-        if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
-            if not self.archive_specialized_signatures.has(spec_name):
-                return nil
-            val archived: MonoTemplateSignatureV1 = self.archive_specialized_signatures[spec_name]
-            params = archived.param_types
-            return_type = archived.return_type
-        else:
-            if not self.specialized_functions.has(spec_name):
-                return nil
-            val specialized: HirFunction = self.specialized_functions[spec_name]
-            for param in specialized.params:
-                val p: HirParam = param
-                params = params.push(p.type_)
-            return_type = specialized.return_type
-            symbol_id = specialized.symbol.id
-        val signature = HirType(kind: HirTypeKind.Function(params, return_type, []), span: span)
+        val specialized = self.specialization_signature_v1(spec_name)
+        val signature = HirType(kind: HirTypeKind.Function(specialized.param_types, specialized.return_type, []), span: span)
         if val transported = self.relocate_mono_types([signature], self.spec_module[spec_name], self.current_module, "signature of `{spec_name}`"):
             val caller_signature: HirType = transported[0]
             match caller_signature.kind:
                 case HirTypeKind.Function(_, ret, _):
-                    if symbol_id < 0:
-                        if self.spec_symbols.has(spec_name):
-                            symbol_id = self.spec_symbols[spec_name]
-                    if symbol_id >= 0:
-                        self.fn_returns[mono_sym_key(self.current_module, symbol_id)] = ret
+                    self.fn_returns[mono_sym_key(self.current_module, self.spec_symbols[spec_name])] = ret
+                    if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
+                        self.archive_caller_returns[mono_sym_key(self.current_module, self.spec_symbols[spec_name])] = ret
                 case _: ()
             return caller_signature
         nil
@@ -1179,6 +1196,7 @@ impl MonomorphizationPass:
             case HirExprKind.NamedVar(sym_id, name):
                 if self.fn_return_of(sym_id) != nil:
                     return nil
+                self.ensure_archive_nominal_table_v2(self.current_module)
                 if not self.module_symbols.has(self.current_module):
                     return nil
                 if self.generic_type_identity(self.current_module, sym_id) != "":
@@ -1303,7 +1321,9 @@ impl MonomorphizationPass:
             file = sp_file
         "{file}:{sp.line}:{sp.col}"
 
-    fn nominal_binding_context(pattern_module: text) -> NominalBindingContext?:
+    me nominal_binding_context(pattern_module: text) -> NominalBindingContext?:
+        self.ensure_archive_nominal_table_v2(pattern_module)
+        self.ensure_archive_nominal_table_v2(self.current_module)
         if not self.module_symbols.has(pattern_module) or not self.module_symbols.has(self.current_module):
             return nil
         NominalBindingContext(
@@ -2372,8 +2392,9 @@ impl MonomorphizationPass:
         # MIR resolves a direct callee by NAME (`lower_call`'s NamedVar arm
         # uses the baked display name; its Var arm looks the id up in the
         # CALLER's symbol table, where a fresh mono symbol does not exist).
-        # So the repointed callee is a NamedVar carrying the mangled name,
-        # qualified by the template declaration's actual ABI owner.
+        # Imported explicit calls may arrive as Var or bare/aliased NamedVar.
+        # The template owner and physical linkage determine the emitted name;
+        # caller spelling does not. The stamped type remains caller-local.
         val spec_name: text = self.mangled_name(gname, targs)
         # The repointed callee carries the SPECIALIZATION's concrete
         # `fn(params) -> ret`. Its SymbolId is minted outside every module

@@ -1302,6 +1302,31 @@ impl HirLowering:
         self.materialize_imported_field_package_dependency(
             imported_mod.physical_index, hir_dependency_type_name(dependency), import_span, materialize_enum)
 
+    me materialize_imported_owner_parameter_dependencies(imported_mod: ModuleSurface, imported_mod_name: text, owner_type_params: [ParserTypeParam], import_span: Span, materialize_enum: bool) -> bool:
+        var valid = true
+        for parameter in owner_type_params:
+            var types: [Type] = []
+            for bound in parameter.bounds:
+                types = types.push(bound)
+            if parameter.has_default:
+                types = types.push(parameter.default)
+            for type_ in types:
+                for dependency in parser_type_named_dependencies(type_):
+                    val name = hir_dependency_type_name(dependency)
+                    var is_binder = false
+                    for binder in owner_type_params:
+                        if binder.name == name: is_binder = true
+                    if not is_binder and not hir_dependency_is_builtin_type(name):
+                        self.materialize_imported_callable_dependency_with_owner(
+                            imported_mod, imported_mod_name, dependency, import_span,
+                            materialize_enum, owner_type_params)
+                        # Never fall back to a same-spelled importer declaration
+                        # when the declaring owner's constraint is unresolved.
+                        if self.qtype_raw_counted(imported_mod.module_name, name) < 0:
+                            self.error("unresolved imported owner type parameter dependency: {name}", type_.span)
+                            valid = false
+        valid
+
     me materialize_imported_callable_type_arguments_with_owner(imported_mod: ModuleSurface, imported_mod_name: text, type_: Type, import_span: Span, materialize_enum: bool, owner_type_params: [ParserTypeParam]):
         # A scalar projection retains the outer name (for example Result),
         # but its arguments still belong to the declaring owner's scope.
@@ -1549,6 +1574,8 @@ impl HirLowering:
                             imported_mod.enum_names, imported_name)
                         if enum_position >= 0:
                             owner_type_params = imported_mod.enum_values[enum_position].type_params
+                    val owner_dependencies_valid = self.materialize_imported_owner_parameter_dependencies(
+                        imported_mod, imported_mod_name, owner_type_params, import_span, materialize_enum)
                     if owner_type_params.len() == 0:
                         self.materialize_imported_callable_type_dependencies(
                             imported_mod, imported_mod_name, method, import_span,
@@ -1560,8 +1587,10 @@ impl HirLowering:
                             materialize_enum, owner_type_params)
                         hir_phase_profile_add(HIR_PROF_RIS_CALLABLE_DEPS, dependencies_started)
                     val sig_started = hir_phase_profile_now()
-                    val method_type = self.declared_imported_owner_callable_type(
-                        method, imported_mod.module_name, local_owner, owner_type_params)
+                    var method_type: HirType? = nil
+                    if owner_dependencies_valid:
+                        method_type = self.declared_imported_owner_callable_type(
+                            method, imported_mod.module_name, local_owner, owner_type_params)
                     hir_phase_profile_add(HIR_PROF_RIS_SIGTYPE, sig_started)
                     self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
             # IMPLROWCACHE: `contains_key` IS the `has_trait_` test -- the index
