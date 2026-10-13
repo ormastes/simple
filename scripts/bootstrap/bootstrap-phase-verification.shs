@@ -172,6 +172,8 @@ stage3_provenance=""
 compiler=""
 expected_sha=""
 strategy=normal
+repository_test_order=lexical
+repository_test_execution=interpreter
 profile=full
 hash_policy=canonical
 work_root=""
@@ -202,6 +204,8 @@ for arg in "$@"; do
     --compiler=*) compiler=${arg#*=} ;;
     --compiler-sha256=*) expected_sha=${arg#*=} ;;
     --strategy=*) strategy=${arg#*=} ;;
+    --test-order=*) repository_test_order=${arg#*=} ;;
+    --test-execution=*) repository_test_execution=${arg#*=} ;;
     --fail-fast|--keep-going) ;; # Resolved together below, in argument order.
     # --profile=slim is an explicit opt-in, phase=stage2 only (see
     # stage2_slim_profile below). EVERY behavioral effect of slim mode --
@@ -225,6 +229,17 @@ for arg in "$@"; do
 done
 
 bootstrap_compile_failure_policy "$@"
+
+case "$repository_test_order" in
+  lexical|simple-first) ;;
+  *) die "--test-order requires lexical or simple-first" ;;
+esac
+
+case "$repository_test_execution" in
+  interpreter) ;;
+  native) [ "$phase" = stage3 ] || die "--test-execution=native is stage3-only" ;;
+  *) die "--test-execution requires interpreter or native" ;;
+esac
 
 case "$phase" in stage1|stage2|stage3|stage4) ;; *) die "invalid phase" ;; esac
 [ -z "$stage3_provenance" ] || [ "$phase" = stage3 ] || die "--stage3-provenance is stage3-only"
@@ -514,6 +529,8 @@ stage2_row_delegation_env() {
   echo "phase=$phase"
   echo "verification_backend=$verification_backend"
   echo "strategy=$strategy"
+  echo "repository_test_order=$repository_test_order"
+  echo "repository_test_execution=$repository_test_execution"
   echo "hash_policy=$hash_policy"
   echo "diagnostic_execution=$verification_diagnostic"
   echo "task_timeout_seconds=$timeout_seconds"
@@ -1870,6 +1887,56 @@ run_compiler_unit_tests() {
 # Phase 3 full verification must cover the repository inventory, not only the
 # compiler subtree.  Each spec is terminalized independently so a crash or
 # timeout cannot hide later rows, and --assert-ran rejects zero-example greens.
+order_repository_test_manifest() {
+  # Input is already lexically sorted. Partition its complete inventory;
+  # classification changes scheduling only, never selection or row authority.
+  case "$3" in
+    lexical) cat "$1" ;;
+    simple-first)
+      LC_ALL=C awk -v root="$2/" '
+        function is_core(name) {
+          return name ~ /^(compiler|language|runtime|lib|stdlib)$/
+        }
+        {
+          relative = substr($0, length(root) + 1)
+          split(relative, part, "/")
+          if (part[1] == "test" && (is_core(part[2]) ||
+              (part[2] ~ /^[0-9][0-9]_/ && is_core(part[3])))) {
+            print
+          } else {
+            remaining[++count] = $0
+          }
+        }
+        END { for (i = 1; i <= count; i++) print remaining[i] }
+      ' "$1"
+      ;;
+    *) return 2 ;;
+  esac
+}
+
+run_repository_test_row() {
+  case "$repository_test_execution" in
+    interpreter)
+      run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
+        "$test_runner" "$relative" \
+        --mode=interpreter --unstable --assert-ran --no-cache --no-db \
+        --no-session-daemon --sequential --json
+      ;;
+    native)
+      # Each row retains its invocation receipts, sample binary, and runner log.
+      # The existing suite helper verifies actual AOT execution for this exact
+      # backend/compiler/runtime tuple; JSON or exit zero alone is insufficient.
+      native_row_dir=$(mktemp -d "$row_dir/$spec_count.native.XXXXXX") || return 2
+      run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
+        sh "$source_root/scripts/bootstrap/run-native-aot-suite.shs" \
+        "$source_root" "$verification_backend" "$compiler_cli" "$compiler_cli_sha" \
+        "$test_runner" "$relative" "$native_row_dir" "$build_threads" \
+        "$runtime_path" "$runtime_cache_identity"
+      ;;
+    *) return 2 ;;
+  esac
+}
+
 run_repository_full_tests() {
   test_runner=$1
   full_owner_receipt=$2
@@ -1890,6 +1957,16 @@ run_repository_full_tests() {
     printf 'task=%s|result=FAIL|status=sort-error|elapsed_seconds=0|log=%s|inventory=%s|spec_count=0\n' \
       "$task" "$log" "$inventory" >>"$summary"
     return 1
+  fi
+  if [ "$repository_test_order" != lexical ]; then
+    ordered_manifest="$tmp/${task}.ordered"
+    if ! order_repository_test_manifest "$manifest" "$source_root" \
+        "$repository_test_order" >"$ordered_manifest" ||
+       ! mv "$ordered_manifest" "$manifest"; then
+      printf 'task=%s|result=FAIL|status=order-error|elapsed_seconds=0|log=%s|inventory=%s|spec_count=0\n' \
+        "$task" "$log" "$inventory" >>"$summary"
+      return 1
+    fi
   fi
   # NOTE: repository_full_tests intentionally does NOT route through the
   # shared run_inventory_rows/run_inventory_row helper used above for
@@ -1951,10 +2028,7 @@ run_repository_full_tests() {
           SIMPLE_BINARY="$compiler_cli" \
           SIMPLE_BIN="$compiler_cli" \
           SIMPLE_MCP_TEST_BINARY="$full_mcp_server" \
-          run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
-            "$test_runner" "$relative" \
-            --mode=interpreter --unstable --assert-ran --no-cache --no-db \
-            --no-session-daemon --sequential --json
+          run_repository_test_row
       ) >"$row_output" 2>&1 || status=$?
       cat "$row_output" >>"$log"
       if ! validate_command_owner_receipt "$full_owner_receipt"; then
