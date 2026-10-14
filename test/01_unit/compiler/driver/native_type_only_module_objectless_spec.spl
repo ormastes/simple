@@ -22,6 +22,9 @@ use compiler.hir.hir_definitions.*
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering.{MirLowering}
 use compiler.driver.driver_aot_output.{driver_native_module_is_export_facade}
+use compiler.driver.driver_types.{driver_native_parsed_module_has_no_runtime_body_v1,
+    driver_native_parsed_objectless_proof_v1, driver_native_parsed_objectless_proof_valid_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end}
 
 val STRUCT_ONLY_SRC = "struct ProcessCompletionV1:\n    pid: i64\n    exit_code: i64\n    tree_reaped: bool\n    stdout_digest: text\n\nexport ProcessCompletionV1\n"
 val CONTRACT_SRC = "pub enum VisibilityV1:\n    Public\n    Private\n\npub struct StatV1:\n    size: i64\n    kind: VisibilityV1\n\npub trait StoreV1:\n    fn stat(path: text) -> StatV1\n"
@@ -39,6 +42,36 @@ fn objectless(src: text, name: text) -> bool:
     driver_native_module_is_export_facade(mir_of(parsed, name), parsed)
 
 describe "type-only modules are objectless in a native build":
+    it "retains only scalar classification across a real transient parser lifetime":
+        val identity = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        var retained: Dict<text, text> = {}
+        expect(transient_scope_begin()).to_be(true)
+        val parsed = parse_full_frontend(STRUCT_ONLY_SRC, "completion.spl", "completion", Logger(level: 0))
+        val code_less = driver_native_parsed_module_has_no_runtime_body_v1(parsed)
+        expect(transient_scope_pause()).to_be(true)
+        expect(transient_scope_end()).to_be(true)
+        # No parser/heap object from the ended scope is inspected here.
+        expect(code_less).to_be(true)
+        retained["completion"] = driver_native_parsed_objectless_proof_v1("completion", "completion.spl", identity)
+        val empty_mir = MirModule(name: "completion", functions: {}, statics: {}, constants: {}, types: {})
+        expect(driver_native_parsed_objectless_proof_valid_v1(retained["completion"], "completion", "completion.spl", identity, empty_mir)).to_be(true)
+
+    it "keeps a source-bound parsed proof after AST eviction and rejects changed authority":
+        val parsed = parse_full_frontend(STRUCT_ONLY_SRC, "completion.spl", "completion", Logger(level: 0))
+        expect(driver_native_parsed_module_has_no_runtime_body_v1(parsed)).to_be(true)
+        val mir = mir_of(parsed, "completion")
+        val identity = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val proof = driver_native_parsed_objectless_proof_v1("completion", "completion.spl", identity)
+        expect(driver_native_parsed_objectless_proof_valid_v1(proof, "completion", "completion.spl", identity, mir)).to_be(true)
+        expect(driver_native_parsed_objectless_proof_valid_v1(proof, "other", "completion.spl", identity, mir)).to_be(false)
+        expect(driver_native_parsed_objectless_proof_valid_v1(proof, "completion", "other.spl", identity, mir)).to_be(false)
+        expect(driver_native_parsed_objectless_proof_valid_v1(proof, "completion", "completion.spl", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", mir)).to_be(false)
+        expect(driver_native_parsed_objectless_proof_valid_v1("", "completion", "completion.spl", identity, mir)).to_be(false)
+
+    it "does not issue a code-less proof for an authored function whose MIR was lost":
+        val parsed = parse_full_frontend("fn answer() -> i64: 42\n", "answer.spl", "answer", Logger(level: 0))
+        expect(driver_native_parsed_module_has_no_runtime_body_v1(parsed)).to_be(false)
+
     it "classifies an empty source as objectless":
         expect(objectless("", "empty")).to_be(true)
 
@@ -69,6 +102,13 @@ describe "type-only modules are objectless in a native build":
 
     it "classifies a struct-only module as objectless":
         expect(objectless(STRUCT_ONLY_SRC, "completion")).to_be(true)
+
+    it "classifies an explicit re-export-only facade without inventing a main symbol":
+        val parsed = parse_full_frontend("export use app.provider.{Completion}\n", "facade.spl", "facade", Logger(level: 0))
+        val mir = mir_of(parsed, "facade")
+        expect(mir.functions.keys().len()).to_equal(0)
+        expect(mir.statics.keys().len()).to_equal(0)
+        expect(driver_native_module_is_export_facade(mir, parsed)).to_be(true)
 
     it "classifies an enum + struct + trait contract module as objectless":
         expect(objectless(CONTRACT_SRC, "contract")).to_be(true)

@@ -3693,6 +3693,7 @@ impl MirLowering:
         # (expected_type nil), leaving the temp i64 — print then decimal-
         # renders text results. Capture the first arm result's MIR type and
         # retype the temp at the merge.
+        var merged_arm_locals: [LocalId] = []
         var inferred_known = false
         var inferred_ty = MirType.i64()
         val merge_block = b.new_block(Some("ematch_merge"))
@@ -4112,6 +4113,7 @@ impl MirLowering:
                     val arm_result_local = arm_result ?? arm_result_fb
                     b_arm2.emit_copy(result, arm_result_local)
                     self.preserve_native_trait_match_result(result, arm_result_local, expected_type, result_defined)
+                    merged_arm_locals.push(arm_result_local)
                     result_defined = true
                     # Struct-value chain fix (native_build_instance_method_dispatch
                     # _unresolved_after_match_bind_2026-08-09.md): an arm body
@@ -4173,6 +4175,7 @@ impl MirLowering:
                     val gd_local = gd_result ?? gd_fb
                     b_gd2.emit_copy(result, gd_local)
                     self.preserve_native_trait_match_result(result, gd_local, expected_type, result_defined)
+                    merged_arm_locals.push(gd_local)
                     result_defined = true
                     if not inferred_known:
                         if val gd_ty = self.local_mir_type_of(gd_local):
@@ -4456,6 +4459,7 @@ impl MirLowering:
                     val drl = dres ?? drl_fb
                     b_d2.emit_copy(result, drl)
                     self.preserve_native_trait_match_result(result, drl, expected_type, result_defined)
+                    merged_arm_locals.push(drl)
                     result_defined = true
                     if not inferred_known:
                         if val drl_ty_found = self.local_mir_type_of(drl):
@@ -4476,6 +4480,21 @@ impl MirLowering:
             self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
         if inferred_known:
             self.builder.set_local_type(result, inferred_ty)
+        # Only live value-producing edges participate: a returning arm has no
+        # value at this merge. Reuse the if/elif all-arm identity join before
+        # admitting collection operations on the copied runtime handle.
+        self.remember_merged_arm_identity(result, merged_arm_locals)
+        if merged_arm_locals.len() > 0 and self.find_local_hir_type(result.id) != nil:
+            var all_arrays = true
+            var all_dicts = true
+            for arm_local in merged_arm_locals:
+                all_arrays = all_arrays and self.runtime_array_locals.contains(arm_local.id)
+                all_dicts = all_dicts and self.runtime_dict_locals.contains(arm_local.id)
+            if all_arrays or all_dicts:
+                val first_arm = merged_arm_locals[0]
+                self.propagate_branch_collection_marks(first_arm, result)
+                if self.runtime_elem_value_type.contains(first_arm.id):
+                    self.runtime_elem_value_type[result.id] = self.runtime_elem_value_type[first_arm.id]
         if val found_expected = expected_type:
             self.remember_local_hir_type(result.id, found_expected, 0, 0)
             match found_expected.kind:

@@ -26,7 +26,7 @@ use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
-use compiler.common.module_path_naming.{module_logical_name_from_path}
+use compiler.common.module_path_naming.{module_logical_name_from_path, module_relative_name_from_path}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
@@ -1104,7 +1104,7 @@ impl HirLowering:
             ci = ci + 1
         ""
 
-    me resolve_module_key_relative(name: text, ctx_name: text) -> text:
+    me resolve_module_key_relative(name: text, ctx_name: text, source_path: text = "") -> text:
         """resolve_module_key, but first normalizes a RELATIVE module path
         (".types", "..pkg.mod") against `ctx_name` — the canonical registered
         key of the module the path appears IN.
@@ -1116,14 +1116,21 @@ impl HirLowering:
         — `export use .types.{X}` written by hand, and `export X from types`,
         which the parser emits as ".types" (e599a617d6ef).
 
-        Normalization matches resolve_import_symbols' relative branch: drop one
-        trailing segment per leading dot, then splice the tail on.
+        A retained source path resolves the physical sibling before tier
+        normalization. Only a logical-only context uses the fallback below:
+        drop one trailing segment per leading dot, then splice the tail on.
         hir_module_package_name drops exactly one segment per call and treats a
         package facade's ".__init__" as that segment, which is the behaviour a
         single dot needs — lib.a.easy_fix.__init__ + ".types" resolves to
         lib.a.easy_fix.types, so a facade needs no special case."""
         if not name.starts_with("."):
             return self.resolve_module_key(name)
+        # Callers with a logical context already retain its surface/path.
+        # Passing that owner avoids an additional per-import registry scan.
+        val physical_name = module_relative_name_from_path(
+            if source_path == "": ctx_name else: source_path, name)
+        if physical_name != "":
+            return self.resolve_module_key(physical_name)
         var rel_dots = 0
         while rel_dots < name.len() and name.substring(rel_dots, rel_dots + 1) == ".":
             rel_dots = rel_dots + 1
@@ -1154,7 +1161,7 @@ impl HirLowering:
         facade forwards from deeper owners.  Redirect only that proven
         self-surface collision; ordinary imports of a same-named module keep
         their existing winner."""
-        var resolved = self.resolve_module_key_relative(name, facade_name)
+        var resolved = self.resolve_module_key_relative(name, facade_name, facade_mod.canonical_path)
         if resolved == "":
             return ""
         val resolved_index = self.surface_index_for_name(resolved)

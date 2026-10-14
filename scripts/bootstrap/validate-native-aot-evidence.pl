@@ -110,17 +110,19 @@ for my $item (@invocations) {
     ref($argv) eq 'ARRAY' && @$argv > 2 && $argv->[0] eq 'native-build' or fail('not a native-build invocation');
     my %opt;
     for (my $i = 1; $i < @$argv; $i++) {
-        if ($argv->[$i] =~ /^--(?:backend|threads|output|entry|source|runtime-bundle|runtime-path|cache-dir)$/) {
+        if ($argv->[$i] =~ /^--(?:backend|threads|output|entry|runtime-bundle|runtime-path|cache-dir)$/) {
             $i + 1 < @$argv or fail('truncated native-build argv');
             push @{$opt{$argv->[$i]}}, $argv->[$i + 1];
             $i++;
-        } elsif ($argv->[$i] eq '--entry-closure' || $argv->[$i] eq '--verbose') {
+        } elsif ($argv->[$i] eq '--entry-closure' || $argv->[$i] eq '--verbose' ||
+                 $argv->[$i] eq '--refresh-source-authority') {
+            !exists $opt{$argv->[$i]} or fail('duplicate native-build switch');
             $opt{$argv->[$i]} = 1;
         } else {
             fail('unexpected native-build argv token');
         }
     }
-    for my $required ('--backend', '--threads', '--output', '--entry', '--source', '--runtime-bundle', '--cache-dir') {
+    for my $required ('--backend', '--threads', '--output', '--entry', '--runtime-bundle', '--cache-dir') {
         ref($opt{$required}) eq 'ARRAY' && @{$opt{$required}} == 1 or fail("missing or duplicate $required");
     }
     $opt{'--backend'}[0] eq $backend or fail('actual compiler argv backend differs');
@@ -133,8 +135,11 @@ for my $item (@invocations) {
     } else {
         !exists $opt{'--runtime-path'} or fail('unexpected compiler runtime path');
     }
-    $opt{'--source'}[0] eq 'src/lib' && $opt{'--runtime-bundle'}[0] eq 'core-c-bootstrap' &&
-        $opt{'--entry-closure'} or fail('native-build closure/runtime arguments differ');
+    # Match native_test_compile_args_with_threads: freshly staged specs require
+    # the coordinator's current default source authority. Restricting discovery
+    # to src/lib omits compiler/app imports and can reuse a stale SCV inventory.
+    $opt{'--refresh-source-authority'} && $opt{'--runtime-bundle'}[0] eq 'core-c-bootstrap' &&
+        $opt{'--entry-closure'} or fail('native-build source authority/closure/runtime arguments differ');
     $output =~ m{\A\Q$tmp_real\E/} or fail('artifact escaped private TMPDIR');
     -f $output && !-l $output && -x $output or fail("native artifact missing or not executable: $output");
     (realpath($output) // '') =~ m{\A\Q$tmp_real\E/} or fail('artifact resolves outside private TMPDIR');
