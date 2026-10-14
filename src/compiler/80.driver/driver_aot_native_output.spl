@@ -94,7 +94,8 @@ use std.nogc_sync_mut.io.sysinfo_ops.{process_peak_rss_kb}
 use compiler.driver.smf_binary_helpers.{smf_u64_to_bytes}
 use driver_types.{CompileResult, CompileContext, FrozenStorageModuleSnapshotV1,
     FrozenNativeModuleCapsuleV1, FrozenNativeModuleCapsuleBatchV1,
-    frozen_native_capsule_batch_find_v1, native_capsule_mir_identity_v1}
+    frozen_native_capsule_batch_find_v1, native_capsule_mir_identity_v1, driver_native_parsed_module_has_no_runtime_body_v1,
+    driver_native_parsed_objectless_proof_v1, driver_native_parsed_objectless_proof_valid_v1}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.common.driver_core_modes.{driver_mir_eviction_enabled}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
@@ -1440,26 +1441,7 @@ pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: Pars
     # A module with any NON-extern parsed function still hard-fails there:
     # HIR had bodies, so an empty MIR is a real lowering bug and must stay
     # loud (bug bootstrap_stage2_empty_mir_bodies_2026-07-05).
-    var only_extern_functions = true
-    for fn_name in parsed.functions.keys():
-        val parsed_fn = parsed.functions[fn_name]
-        if not parsed_fn.is_extern:
-            only_extern_functions = false
-    # `export use backend.{...}` facades produce an ParserImport record but NO
-    # Export record in the flat bridge (only bare `export a, b` emits one),
-    # e.g. std.nogc_async_mut.env.types — accept import-only and trait-only
-    # modules too; neither has standalone code by the decl checks below.
-    # Empty and comments-only modules have the same objectless outcome. Do not
-    # require an import/export/type declaration as a witness: env.utilities is
-    # intentionally empty and can still be reached through a facade. Parser
-    # presence and the body/data guards remain mandatory, so missing lowering
-    # output for a real definition is never silently accepted.
-    (parsed.domain_blocks.len() == 0 and
-        only_extern_functions and parsed.classes.len() == 0 and parsed.actors.len() == 0 and
-        parsed.impls.len() == 0 and
-        parsed.constants.len() == 0 and parsed.static_asserts.len() == 0 and
-        parsed.aop_advices.len() == 0 and parsed.di_bindings.len() == 0 and
-        parsed.arch_rules.len() == 0 and parsed.mock_decls.len() == 0)
+    driver_native_parsed_module_has_no_runtime_body_v1(parsed)
 
 fn driver_native_build_filter_scoped_outputs(cached_outputs: [text], cache_scope_root: text) -> ([text], bool):
     var scoped_outputs: [text] = []
@@ -2075,7 +2057,12 @@ impl CompilerDriver:
                 lane_statics = lane_statics + ctx.mir_modules[name].statics.keys().len()
             # ParserImport/export facades contribute symbols through their imported
             # implementation modules and have no object code of their own.
-            if ctx.modules.has(name) and driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name]):
+            val frozen_objectless = ctx.native_parsed_objectless_proofs.has(name) and
+                driver_native_parsed_objectless_proof_valid_v1(
+                    ctx.native_parsed_objectless_proofs[name], name,
+                    driver_native_module_cache_source(ctx, name),
+                    driver_native_module_source_identity(ctx, name), ctx.mir_modules[name])
+            if frozen_objectless or (ctx.modules.has(name) and driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name])):
                 val objectless_reason = driver_cold_hir_record_objectless_v1(
                     ctx, name)
                 if objectless_reason != "":
