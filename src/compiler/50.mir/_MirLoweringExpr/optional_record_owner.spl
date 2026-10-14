@@ -55,6 +55,26 @@ impl MirLowering:
             self.error_fatal("Optional record has conflicting or unknown provider field types", Some(span))
             return bad
         var matched = -1
+        # A callable's return-type dependency is relocated without a lexical
+        # binding. Its qualified declaration is still owned by this table.
+        # Validate that index before using it; a stale or foreign row must not
+        # authorize a record merely because its field layout happens to match.
+        val separator = identity.rfind("::")
+        val qualified = self.symbols.lookup_qualified_type_raw(
+            identity.substring(0, separator), identity.substring(separator + 2))
+        if qualified >= 0:
+            if not self.symbols.symbols.has(qualified):
+                self.error_fatal("Optional record has a stale qualified provider declaration", Some(span))
+                return bad
+            val declaration: HirSymbol = self.symbols.symbols[qualified]
+            if (declaration.id.id != qualified or
+                (declaration.kind != SymbolKind.Struct and declaration.kind != SymbolKind.Class) or
+                result_err_layout_identity(mir_class_identity(declaration)) != identity):
+                self.error_fatal("Optional record has a mismatched qualified provider declaration", Some(span))
+                return bad
+            matched = qualified
+        # Retain the lexical ambiguity check: the qualified index is
+        # first-write-wins and cannot prove that a conflicting ID is absent.
         for indexed_name in self.symbols.exact_symbols.keys():
             val raw = self.symbols.exact_symbols[indexed_name]
             if val declaration = self.symbols.get_symbol_raw(raw):
