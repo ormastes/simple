@@ -270,7 +270,11 @@ describe "opt-in switch":
         val default_level = any_rules_env_level()
         val default_check = any_rules_mask_from_env()
         env_set_process("SIMPLE_ANY_RULES", "warn")
-        val opted_mask = any_rules_lint_mask(compiler_path, decl_src, false, false, false)
+        val opted_cfg = LintConfig.from_sdn_string("lints:\n  profile: strict\n")
+        val opted_decl = any_rule_relay_level(opted_cfg, "written_any_decl", false, LintLevel.Allow, any_rules_env_level())
+        val opted_fallback = any_rule_relay_level(opted_cfg, "any_fallback_use", false, LintLevel.Allow, any_rules_env_level())
+        val opted_receiver = any_rule_relay_level(opted_cfg, "any_receiver_use", false, LintLevel.Allow, any_rules_env_level())
+        val opted_mask = any_rules_lint_mask(compiler_path, decl_src, opted_decl != LintLevel.Allow, opted_fallback != LintLevel.Allow, opted_receiver != LintLevel.Allow)
         val opted_level = any_rules_env_level()
         val opted_check = any_rules_mask_from_env()
         val opted_outside = any_rules_lint_mask(app_path, decl_src, false, false, false)
@@ -357,3 +361,44 @@ describe "Any relay severity precedence":
     it "explicit family warnings retain priority over environment deny":
         val cfg = LintConfig.from_sdn_string("lints:\n  profile: robust\n  written_any_decl: warn\n  warning_phase: false\n")
         expect(any_rule_relay_level(cfg, "written_any_decl", true, cfg.get_level("written_any_decl"), "deny")).to_equal(LintLevel.Warn)
+
+    it "explicit allow stays disabled under warn and deny while other families run":
+        val before = env_get("SIMPLE_ANY_RULES")
+        val cfg = LintConfig.from_sdn_string("lints:\n  profile: robust\n  written_any_decl: allow\n  warning_phase: false\n")
+        for env_level in ["warn", "deny"]:
+            env_set_process("SIMPLE_ANY_RULES", env_level)
+            val decl_level = any_rule_relay_level(cfg, "written_any_decl", false, LintLevel.Allow, env_level)
+            val fallback_level = any_rule_relay_level(cfg, "any_fallback_use", true, cfg.get_level("any_fallback_use"), env_level)
+            val receiver_level = any_rule_relay_level(cfg, "any_receiver_use", true, cfg.get_level("any_receiver_use"), env_level)
+            val mask = any_rules_lint_mask(compiler_path, decl_src + receiver_src, decl_level != LintLevel.Allow, fallback_level != LintLevel.Allow, receiver_level != LintLevel.Allow)
+            val run = run_mask(compiler_path, decl_src + receiver_src, mask)
+            val relay = any_rules_parse_check_output(any_rules_report_lines(compiler_path, mask, run.findings).join("\n") + "\n")
+            expect(decl_level).to_equal(LintLevel.Allow)
+            expect(mask).to_equal("fr")
+            expect(relay.checked).to_equal(true)
+            expect(relay.findings.len()).to_be_greater_than(0)
+            for finding in relay.findings:
+                expect(finding.code == "W-ANY-DECL-001").to_equal(false)
+            val expected = if env_level == "deny": LintLevel.Deny else: LintLevel.Warn
+            expect(receiver_level).to_equal(expected)
+        env_set_process("SIMPLE_ANY_RULES", before)
+
+    it "explicit deny cannot be lowered by environment warn unless warning phase is enabled":
+        var cfg = LintConfig.from_sdn_string("lints:\n  profile: robust\n  any_receiver_use: deny\n  warning_phase: false\n")
+        expect(any_rule_relay_level(cfg, "any_receiver_use", true, cfg.get_level("any_receiver_use"), "warn")).to_equal(LintLevel.Deny)
+        cfg.set_warning_phase(true)
+        expect(any_rule_relay_level(cfg, "any_receiver_use", true, cfg.get_level("any_receiver_use"), "deny")).to_equal(LintLevel.Warn)
+
+    it "warning phase downgrades environment deny and legacy profiles retain defaults":
+        for profile in ["reliable", "mission-critical", "mission_critical"]:
+            val cfg = LintConfig.from_sdn_string("lints:\n  profile: {profile}\n  warning_phase: true\n")
+            for name in ["written_any_decl", "any_fallback_use", "any_receiver_use"]:
+                expect(cfg.get_level(name)).to_equal(LintLevel.Warn)
+                expect(any_rule_relay_level(cfg, name, true, cfg.get_level(name), "deny")).to_equal(LintLevel.Warn)
+
+    it "missing and failed child reports differ from a checked clean report":
+        expect(any_rules_parse_check_output("").checked).to_equal(false)
+        expect(any_rules_parse_check_output("error: check child failed\n").checked).to_equal(false)
+        val clean = any_rules_parse_check_output(any_rules_report_lines(compiler_path, "dfr", []).join("\n") + "\n")
+        expect(clean.checked).to_equal(true)
+        expect(clean.findings.len()).to_equal(0)

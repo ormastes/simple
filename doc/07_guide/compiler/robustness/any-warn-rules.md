@@ -53,8 +53,11 @@ never taken for, or cached as, a clean file.
 
 All three families default to `warn` in `robust` and `critical`. They remain
 `allow` in `moderate` and `strict`. Explicit family levels override profile defaults. An environment `deny`
-escalates profile-default warnings; an explicit reporting family level keeps
-priority. `SIMPLE_ANY_RULES=off` disables the whole diagnostic run. The existing detectors apply
+escalates profile-default warnings; explicit `allow`, `warn`, and `deny` family
+levels keep priority over environment `warn`/`deny`. Family severity is resolved
+before the checker mask is built, so environment activation cannot revive an
+explicitly allowed family. The existing warning phase still downgrades deny.
+`SIMPLE_ANY_RULES=off` disables the whole diagnostic run. The existing detectors apply
 only to `src/compiler/**`; this change does not widen their source scope.
 
 Enabling HIR-backed lint diagnostics starts a check child. A historical plain

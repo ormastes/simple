@@ -1,4 +1,5 @@
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
+use compiler.mir._MirLoweringExpr.result_tuple_payload.*
 # Part of src/compiler/50.mir/mir_lowering_expr.spl: expression dispatch, match-case, gpu lane, bitfield helpers
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLowering.native_trait_conversion.*
@@ -3116,6 +3117,7 @@ impl MirLowering:
             # the semantic owner/container markers on this fresh projection
             # so destructured records resolve fields and methods by name.
             self.mark_native_tuple_projection(field_local, result_type)
+            self.remember_result_try_tuple_projection(base_local, self.tuple_index_literal(index), field_local)
             field_local
         else:
             var b = self.builder
@@ -3705,6 +3707,14 @@ impl MirLowering:
                 elif op_is_eq_or_neq and left_is_nil_lit and not right_is_nil_lit:
                     if self.nil_compare_operand_is_declared_optional(right, right_local) or self.option_value_locals.contains(right_local.id):
                         nil_check_operand = right_local
+                # A nil literal tests presence, not user struct equality.
+                # Keep raw nil/Option recognition in the existing runtime path.
+                if nil_check_operand.id < 0 and op_is_eq_or_neq and left_is_nil_lit != right_is_nil_lit:
+                    val struct_nil_local = if right_is_nil_lit: left_local else: right_local
+                    if val struct_nil_type = self.local_mir_type_of(struct_nil_local):
+                        match struct_nil_type.kind:
+                            case MirTypeKind.Struct(_): nil_check_operand = struct_nil_local
+                            case _: ()
                 if nil_check_operand.id >= 0:
                     val nil_check_func_name = match op:
                         case Eq: "rt_is_none"

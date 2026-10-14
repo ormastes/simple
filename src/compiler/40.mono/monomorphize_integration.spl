@@ -756,7 +756,8 @@ impl MonomorphizationPass:
             for key in self.archive_nominal_keys[module]:
                 if self.archive_nominal_rows.has(key): rows[key] = self.archive_nominal_rows[key]
                 elif self.archive_nominal_imports.has(key): rows[key] = self.archive_nominal_imports[key]
-                else: return false
+                else:
+                    return false
         val table = SymbolTable.new()
         if not mono_archive_nominal_install_v2(table, module, rows): return false
         # Reserve the globally admitted high range, including pending specializations.
@@ -816,25 +817,61 @@ impl MonomorphizationPass:
         """Specialize `func_name` at `type_args` (deduplicated) and return the
         SymbolId of the specialization, or -1 with a recorded diagnostic when
         the instantiation must be refused."""
+        # Preserve the existing depth diagnostic before any new completion
+        # refusal, including direct calls with symbolic nested type arguments.
         for ta in type_args:
             val tat: HirType = ta
             if hir_type_depth(tat) > MONO_MAX_TYPE_DEPTH:
                 self.diagnostics = self.diagnostics.push(
                     "E-MONO-030: instantiation of `{func_name}` exceeds depth {MONO_MAX_TYPE_DEPTH} (polymorphic recursion); not specialized")
                 return -1
-        val mangled = self.mangled_name(func_name, type_args)
+        # Existing low-level owner-key tests deliberately omit a template.
+        # Keep owner identity refusal ahead of unsafe declaration lookup.
+        if not self.has_template_v1(func_name):
+            val unresolved_name = self.mangled_name(func_name, type_args)
+            if unresolved_name == "": return -1
+            self.diagnostics = self.diagnostics.push("E-MONO-032: generic template `{func_name}` is not registered")
+            return -1
+        val declaration = self.template_signature_v1(func_name)
+        if type_args.len() > declaration.type_params.len():
+            self.diagnostics = self.diagnostics.push("E-MONO-032: `{func_name}` has too many explicit type arguments")
+            return -1
+        var completed_args: [HirType] = type_args
+        # Full direct requests retain their previous checks. Only a newly
+        # omitted suffix enters default completion and its concrete gate.
+        if type_args.len() < declaration.type_params.len():
+            var supplied: Dict<text, HirType> = {}
+            var argument_index = 0
+            for actual in type_args:
+                val tp: HirTypeParam = declaration.type_params[argument_index]
+                supplied[tp.name] = actual
+                argument_index = argument_index + 1
+            val completion = self.complete_template_type_args_v1(declaration, supplied)
+            if completion.is_err():
+                val reason: text = completion.unwrap_err()
+                self.diagnostics = self.diagnostics.push("E-MONO-032: `{func_name}`: {reason}")
+                return -1
+            completed_args = completion.unwrap()
+        if completed_args.len() != type_args.len():
+            for ta in completed_args:
+                val tat: HirType = ta
+                if hir_type_depth(tat) > MONO_MAX_TYPE_DEPTH:
+                    self.diagnostics = self.diagnostics.push(
+                        "E-MONO-030: instantiation of `{func_name}` exceeds depth {MONO_MAX_TYPE_DEPTH} (polymorphic recursion); not specialized")
+                    return -1
+        val mangled = self.mangled_name(func_name, completed_args)
         if mangled == "":
             return -1
         if self.spec_symbols.has(mangled):
             return self.spec_symbols[mangled]
         val spec_mod: text = self.template_module[func_name]
         var local_type_args: [HirType] = []
-        if val transported = self.relocate_mono_types(type_args, self.current_module, spec_mod, "arguments of `{func_name}`"):
+        if val transported = self.relocate_mono_types(completed_args, self.current_module, spec_mod, "arguments of `{func_name}`"):
             local_type_args = transported
         else:
             # A failed transport must not reserve a display alias that a
             # different key may legitimately take before a later retry.
-            self.spec_display.remove("{func_name}${self.type_keys(type_args)}")
+            self.spec_display.remove("{func_name}${self.type_keys(completed_args)}")
             return -1
         val sym = self.next_symbol
         self.next_symbol = self.next_symbol + 1
@@ -851,7 +888,7 @@ impl MonomorphizationPass:
             self.archive_requests = self.archive_requests.push(MonoSpecializationRequestV1(
                 template_name: func_name, module_name: spec_mod,
                 mangled_name: mangled, symbol_id: sym, type_args: local_type_args,
-                caller_module: self.current_module, caller_type_args: type_args))
+                caller_module: self.current_module, caller_type_args: completed_args))
         else:
             val template: HirFunction = self.generic_functions[func_name]
             var specialized: HirFunction = specialize_function_with_types(template, local_type_args)
@@ -870,7 +907,7 @@ impl MonomorphizationPass:
         # Mirror the request into the engine table (its own bookkeeping).
         if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
             var concrete_args: [ConcreteType] = []
-            for ta in type_args:
+            for ta in completed_args:
                 val tat2: HirType = ta
                 concrete_args = concrete_args.push(hir_type_to_concrete(tat2))
             self.monomorphizer.specialize_function_call(func_name, concrete_args)
@@ -1086,10 +1123,10 @@ impl MonomorphizationPass:
                 val names: [text] = self.generic_type_field_names[identity]
                 var bindings: Dict<text, HirType> = {}
                 if type_args != nil and type_args.len() > 0:
-                    if type_args.len() != tps.len() or not all_concrete(type_args):
+                    if type_args.len() > tps.len() or not all_concrete(type_args):
                         return nil
                     var ti = 0
-                    while ti < tps.len():
+                    while ti < type_args.len():
                         val etp: HirTypeParam = tps[ti]
                         bindings[etp.name] = type_args[ti]
                         ti = ti + 1
@@ -1108,6 +1145,9 @@ impl MonomorphizationPass:
                     val at = self.infer_expr_type(mono_arg_value(arg))
                     if at != nil:
                         val att: HirType = at
+                        if not self.call_evidence_is_valid_v1(mono_arg_value(arg), att):
+                            self.diagnostics = self.diagnostics.push("E-MONO-032: constructor `{identity}` has invalid or erased argument type evidence; constructor type not resolved")
+                            return nil
                         # `first: T?` initialised with a bare payload
                         # (`first: "a"`): the value is wrapped, so the
                         # evidence is for the payload type.
@@ -1125,17 +1165,16 @@ impl MonomorphizationPass:
                             return nil
                         if not bind_type_params(pattern, att, bindings, context):
                             return nil
+                    elif not hir_type_is_concrete(declared) and not mono_call_evidence_is_absent_v1(mono_arg_value(arg)):
+                        return nil
                     i = i + 1
-                var targs: [HirType] = []
-                for tp in tps:
-                    val tpt: HirTypeParam = tp
-                    if not bindings.has(tpt.name):
-                        return nil
-                    val bound: HirType = bindings[tpt.name]
-                    if not hir_type_is_concrete(bound):
-                        return nil
-                    targs = targs.push(bound)
-                HirType(kind: HirTypeKind.Named(sym_id, targs), span: callee.span)
+                val owner: text = self.generic_type_modules[identity]
+                val completed = self.complete_declared_type_args_v1(tps, tps, owner, bindings)
+                if completed.is_err():
+                    val reason: text = completed.unwrap_err()
+                    self.diagnostics = self.diagnostics.push("E-MONO-032: constructor `{identity}`: {reason}; constructor type not resolved")
+                    return nil
+                HirType(kind: HirTypeKind.Named(sym_id, completed.unwrap()), span: callee.span)
             case _:
                 not_a_constructor_call()
 
@@ -1341,14 +1380,22 @@ impl MonomorphizationPass:
         self.infer_call_type_args_signature_v1(mono_template_signature_v1(template), args, expected_result)
 
     me infer_call_type_args_signature_v1(template: MonoTemplateSignatureV1, args: [HirCallArg], expected_result: HirType? = nil) -> [HirType]:
-        """Infer the template's type arguments from the call's argument types.
+        val completed = self.resolve_call_type_args_signature_v1(template, args, [], expected_result)
+        if completed.is_err(): return []
+        completed.unwrap()
 
-        Unifies each declared parameter type against the locally inferred
-        type of the matching positional argument. Returns the type arguments
-        in `type_params` order, or an EMPTY list when any parameter stays
-        unbound, two arguments disagree, or an argument type is not fully
-        concrete - fail-closed, never a guess."""
+    me infer_call_bindings_signature_v1(template: MonoTemplateSignatureV1, args: [HirCallArg], explicit_prefix: [HirType], expected_result: HirType? = nil) -> Result<Dict<text, HirType>, text>:
         var bindings: Dict<text, HirType> = {}
+        val tps: [HirTypeParam] = template.type_params
+        if explicit_prefix.len() > tps.len():
+            return Err("too many explicit type arguments")
+        var ti = 0
+        for written in explicit_prefix:
+            val parameter: HirTypeParam = tps[ti]
+            if not hir_type_is_concrete(written):
+                return Err("explicit type argument for `{parameter.name}` is not concrete")
+            bindings[parameter.name] = written
+            ti = ti + 1
         var i = 0
         val params: [HirType] = template.param_types
         val owner_module: text = self.template_module[template.name] ?? self.current_module
@@ -1357,34 +1404,120 @@ impl MonomorphizationPass:
             val pt: HirType = params[i]
             val at: HirCallArg = args[i]
             if at.has_name:
-                return []
+                return Err("named call arguments are not supported by generic inference")
             val arg_ty = self.infer_expr_type(mono_arg_value(at))
             if mono_diag_enabled():
                 if arg_ty == nil:
                     eprint("[mono-diag] infer `{template.name}` arg {i}: no local type for {mono_arg_value(at).kind}")
             if arg_ty != nil:
+                if not self.call_evidence_is_valid_v1(mono_arg_value(at), arg_ty):
+                    return Err("argument inference has invalid or erased type evidence")
                 if nominal_context == nil and (hir_type_has_nominal(pt) or hir_type_has_nominal(arg_ty)):
-                    return []
+                    return Err("generic inference lacks declaration/caller nominal context")
                 if not bind_type_params(pt, arg_ty, bindings, nominal_context):
-                    return []
+                    return Err("argument inference conflicts with another argument or explicit prefix")
+            elif not hir_type_is_concrete(pt) and not mono_call_evidence_is_absent_v1(mono_arg_value(at)):
+                return Err("argument inference has no concrete local type")
             i = i + 1
         if expected_result != nil:
             val expected: HirType = expected_result
             if hir_type_is_concrete(expected):
                 if nominal_context == nil and (hir_type_has_nominal(template.return_type) or hir_type_has_nominal(expected)):
-                    return []
+                    return Err("result inference lacks declaration/caller nominal context")
                 if not bind_type_params(template.return_type, expected, bindings, nominal_context):
-                    return []
-        var out: [HirType] = []
-        for tp in template.type_params:
-            val tpt: HirTypeParam = tp
-            if not bindings.has(tpt.name):
-                return []
-            val bound: HirType = bindings[tpt.name]
-            if not hir_type_is_concrete(bound):
-                return []
-            out = out.push(bound)
-        out
+                    return Err("result inference conflicts with argument bindings")
+        Ok(bindings)
+
+    me complete_declared_type_args_v1(tps: [HirTypeParam], canonical_tps: [HirTypeParam], owner_module: text, bindings: Dict<text, HirType>) -> Result<[HirType], text>:
+        # Binding values arrive in caller scope. Existing complete calls keep
+        # their original values and existing prior type-checker bounds policy.
+        var present_names: [text] = []
+        var present: [HirType] = []
+        var missing = false
+        for raw in tps:
+            val tp: HirTypeParam = raw
+            if bindings.has(tp.name):
+                val actual: HirType = bindings[tp.name]
+                present_names = present_names.push(tp.name)
+                present = present.push(actual)
+            else:
+                missing = true
+        if not missing: return Ok(present)
+        # New omissions require concrete supplied evidence; this must not
+        # change the existing full direct-request validation boundary.
+        if not all_concrete(present):
+            return Err("supplied evidence for generic defaults is not concrete")
+        # Refuse malformed/default-obligation failures before transport can
+        # install any nominal rows. This check only tests shape/substitution;
+        # actual nominal identity is resolved in declaration scope below.
+        val preflight = mono_complete_default_args_v1(tps, canonical_tps, bindings)
+        if preflight.is_err(): return Err(preflight.unwrap_err())
+        var local: [HirType] = []
+        if val transported = self.relocate_mono_types(present, self.current_module, owner_module, "bindings for generic defaults"):
+            local = transported
+        else:
+            return Err("generic default bindings could not enter declaration scope")
+        var local_bindings: Dict<text, HirType> = {}
+        var index = 0
+        for name in present_names:
+            local_bindings[name] = local[index]
+            index = index + 1
+        val completed = mono_complete_default_args_v1(tps, canonical_tps, local_bindings)
+        if completed.is_err(): return Err(completed.unwrap_err())
+        if val caller_args = self.relocate_mono_types(completed.unwrap(), owner_module, self.current_module, "completed generic defaults"):
+            return Ok(caller_args)
+        Err("completed generic defaults could not enter caller scope")
+
+    me complete_template_type_args_v1(template: MonoTemplateSignatureV1, bindings: Dict<text, HirType>) -> Result<[HirType], text>:
+        var canonical_tps: [HirTypeParam] = template.type_params
+        if self.template_recipes.has(template.name):
+            canonical_tps = self.template_recipes[template.name].canonical_type_params
+        val owner: text = self.template_module[template.name] ?? self.current_module
+        self.complete_declared_type_args_v1(template.type_params, canonical_tps, owner, bindings)
+
+    me resolve_call_type_args_signature_v1(template: MonoTemplateSignatureV1, args: [HirCallArg], type_args: [HirType], expected_result: HirType? = nil) -> Result<[HirType], text>:
+        var written: [HirType] = []
+        if type_args != nil: written = type_args
+        # Full explicit calls previously bypassed inference. Preserve that
+        # behavior; earlier type checking remains their validation authority.
+        if written.len() == template.type_params.len() and written.len() > 0:
+            return Ok(written)
+        val inferred = self.infer_call_bindings_signature_v1(template, args, written, expected_result)
+        if inferred.is_err(): return Err(inferred.unwrap_err())
+        self.complete_template_type_args_v1(template, inferred.unwrap())
+
+    me call_evidence_is_valid_v1(expr: HirExpr, actual: HirType) -> bool:
+        if hir_type_is_concrete(actual): return true
+        # Only an actual Ok/Err value has a genuinely absent Result arm.
+        # Raw cast targets and untrusted type stamps cannot create this hole.
+        match expr.kind:
+            case HirExprKind.EnumLit(_, variant, payload):
+                var active: HirType = nil
+                var absent: HirType = nil
+                match actual.kind:
+                    case HirTypeKind.Result(ok, err):
+                        if variant == "Ok":
+                            active = ok
+                            absent = err
+                        elif variant == "Err":
+                            active = err
+                            absent = ok
+                        else: return false
+                    case _: return false
+                if not hir_type_is_concrete(active): return false
+                if absent == nil: return false
+                match absent.kind:
+                    case HirTypeKind.Infer(_, _): ()
+                    case _: return false
+                match payload:
+                    case HirEnumPayload.Tuple(values):
+                        if values.len() != 1: return false
+                        val value: HirExpr = values[0]
+                        val inferred = self.infer_expr_type(value)
+                        if inferred == nil or not hir_type_is_concrete(inferred): return false
+                        self.same_type_key(active, inferred)
+                    case _: false
+            case _: false
 
     me infer_expr_type(expr: HirExpr) -> HirType?:
         """Local, conservative type of an expression: literals, symbols bound
@@ -1704,12 +1837,9 @@ impl MonomorphizationPass:
         self.call_type_args_signature_v1(mono_template_signature_v1(template), args, type_args)
 
     me call_type_args_signature_v1(template: MonoTemplateSignatureV1, args: [HirCallArg], type_args: [HirType]) -> [HirType]:
-        """Type arguments of one call to `template`: the written ones when
-        present, else inferred from the argument types. [] = unresolved."""
-        if type_args != nil:
-            if type_args.len() > 0:
-                return type_args
-        self.infer_call_type_args_signature_v1(template, args)
+        val completed = self.resolve_call_type_args_signature_v1(template, args, type_args)
+        if completed.is_err(): return []
+        completed.unwrap()
 
     me instantiated_return_type(template: HirFunction, targs: [HirType]) -> HirType?:
         self.instantiated_return_type_signature_v1(mono_template_signature_v1(template), targs)
@@ -2366,29 +2496,23 @@ impl MonomorphizationPass:
             return HirExprKind.Call(new_callee, new_args, new_type_args)
         self.stats.call_sites_found = self.stats.call_sites_found + 1
         val template = self.template_signature_v1(gname)
-        var targs: [HirType] = []
-        var explicit = false
-        if type_args != nil:
-            if type_args.len() > 0:
-                explicit = true
-                targs = type_args
-        if not explicit:
-            targs = self.infer_call_type_args_signature_v1(template, new_args, expected_result)
-        val expected: [HirTypeParam] = template.type_params
-        if targs.len() != expected.len():
+        val completed = self.resolve_call_type_args_signature_v1(template, new_args, type_args, expected_result)
+        if completed.is_err():
             self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
             self.unresolved_templates[gname] = true
-            # A callee nested as an argument can carry an empty span
-            # (line 0); the call expression's own span still locates it.
             var site_span: Span = callee.span
             if site_span.line <= 0 and call_span != nil:
                 val cs: Span = call_span
-                if cs.line > 0:
-                    site_span = cs
+                if cs.line > 0: site_span = cs
             val site: text = self.call_site_location(site_span)
+            val reason: text = completed.unwrap_err()
+            var detail: text = reason
+            if type_args == nil or type_args.len() == 0:
+                detail = "has no explicit type arguments and they could not be inferred from its argument types ({reason})"
             self.diagnostics = self.diagnostics.push(
-                "E-MONO-032: call to generic `{gname}` at {site} has no explicit type arguments and they could not be inferred from its argument types; call site not monomorphized")
+                "E-MONO-032: call to generic `{gname}` at {site}: {detail}; call site not monomorphized")
             return HirExprKind.Call(new_callee, new_args, new_type_args)
+        val targs: [HirType] = completed.unwrap()
         val target = self.request_specialization(gname, targs)
         if target < 0:
             self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
@@ -3097,6 +3221,55 @@ fn all_symbolic_evidence(types: [HirType]) -> bool:
         val item: HirType = type_
         if not hir_type_is_symbolic_evidence(item): return false
     true
+
+fn mono_call_evidence_is_absent_v1(expr: HirExpr) -> bool:
+    """Empty literals have no element evidence; later witnesses/defaults may fill it.
+    Unknown expressions are not such a legitimate absence."""
+    if expr == nil: return false
+    match expr.kind:
+        case HirExprKind.ArrayLit(elements, _): elements.len() == 0
+        case HirExprKind.DictLit(entries, _, _): entries.len() == 0
+        case _: false
+
+fn mono_complete_default_args_v1(tps: [HirTypeParam], canonical_tps: [HirTypeParam], supplied: Dict<text, HirType>) -> Result<[HirType], text>:
+    """Complete sparse bindings in declaration scope and declaration order.
+    Supplied values win. Only earlier completed parameters can bind defaults.
+    This bounded implementation refuses newly default-filled bounded parameters
+    until actual trait-obligation validation is connected; explicit/inferred
+    complete lists retain their existing prior bounds validation policy."""
+    val canonical = typesubstitution_canonical(canonical_tps)
+    var names: Dict<text, HirType> = {}
+    var symbols: Dict<i64, HirType> = {}
+    var completed: [HirType] = []
+    for raw in tps:
+        val parameter: HirTypeParam = raw
+        if names.has(parameter.name):
+            return Err("duplicate generic parameter `{parameter.name}`")
+        var actual: HirType = nil
+        if supplied.has(parameter.name):
+            actual = supplied[parameter.name]
+        else:
+            if not parameter.has_default:
+                return Err("missing required type argument `{parameter.name}`")
+            if parameter.default == nil:
+                return Err("default for `{parameter.name}` has no type payload")
+            if parameter.bounds.len() > 0:
+                return Err("default for bounded parameter `{parameter.name}` requires trait-obligation validation")
+            # Canonicalizing this owner-authored payload recognizes both the
+            # impl and method aliases without interpreting caller-local IDs.
+            val declared = substitute_type(parameter.default, canonical)
+            val bound = TypeSubstitution(mapping: names, by_symbol: symbols)
+            actual = substitute_type(declared, bound)
+        if not hir_type_is_concrete(actual):
+            return Err("argument/default for `{parameter.name}` is unresolved, forward, cyclic or invalid")
+        completed = completed.push(actual)
+        names[parameter.name] = actual
+        # Bind only symbols of completed parameters belonging to this owner.
+        for alias_raw in canonical_tps:
+            val alias: HirTypeParam = alias_raw
+            if alias.name == parameter.name:
+                symbols[alias.symbol.id] = actual
+    Ok(completed)
 
 fn hir_type_is_concrete(ty: HirType) -> bool:
     """True when no TypeParam / Infer / Error / Any occurs anywhere in `ty`.
