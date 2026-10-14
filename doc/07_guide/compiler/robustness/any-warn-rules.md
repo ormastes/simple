@@ -1,4 +1,4 @@
-# Any rules (opt-in lints)
+# Any rules (robust-profile warnings)
 
 Robustness item 7b. Part 7a (PR #2829) made a *written* `Any` distinct from
 the parser's fallback and banned it in robust compiled code as a hard error
@@ -51,18 +51,25 @@ never taken for, or cached as, a clean file.
 
 ## Level switch
 
-The rules are opt-in. All three families are `allow` in every lint profile,
-including `robust` and `critical`: `src/compiler/simple.sdn` is `critical`,
-and a profile-implied switch made a plain compiler-file lint 2.5x slower.
-Off skips the work: lint starts no checker process, and `check` without
-`SIMPLE_ANY_RULES` does not scan or walk. They apply to files under
-`src/compiler/**` only; elsewhere nothing runs even when opted in.
+All three families default to `warn` in `robust` and `critical`. They remain
+`allow` in `moderate` and `strict`. Explicit family levels override profile defaults. An environment `deny`
+escalates profile-default warnings; explicit `allow`, `warn`, and `deny` family
+levels keep priority over environment `warn`/`deny`. Family severity is resolved
+before the checker mask is built, so environment activation cannot revive an
+explicitly allowed family. The existing warning phase still downgrades deny.
+`SIMPLE_ANY_RULES=off` disables the whole diagnostic run. The existing detectors apply
+only to `src/compiler/**`; this change does not widen their source scope.
+
+Enabling HIR-backed lint diagnostics starts a check child. A historical plain
+compiler-file lint measurement grew from 23.5 s to 59.0 s when enabled; this
+performance debt is unresolved, and no current latency improvement is claimed.
+`check` still needs `SIMPLE_ANY_RULES` to run these diagnostic families directly.
 
 | Want | How |
 |---|---|
 | on, warning | `SIMPLE_ANY_RULES=warn simple lint ...`, or `<family>: warn` under `lints:` in `simple.sdn` |
 | on, error | `SIMPLE_ANY_RULES=deny`, or `<family>: deny` in `simple.sdn` |
-| off (default) | nothing to do; `SIMPLE_ANY_RULES=off` also overrides a `simple.sdn` level |
+| off | explicit family `allow`, or `SIMPLE_ANY_RULES=off` |
 
 A declaration or use inside an `unsafe:` / `danger:` block is not reported
 (same carve-out as `E-ANY-COMPILE-001`).

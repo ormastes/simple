@@ -26,6 +26,14 @@ pub struct HirCacheEnvelope:
     covered: text
     warnings: [text]
     body: text
+    parser_classification: text = ""
+
+pub fn hir_cache_parser_record_valid_v1(record: text) -> bool:
+    val prefix = if record.starts_with("objectless:"): "objectless:" elif record.starts_with("bodyful:"): "bodyful:" else: ""
+    if prefix == "" or record.len() != prefix.len() + 64: return false
+    for digit in record[prefix.len():]:
+        if not ((digit >= "0" and digit <= "9") or (digit >= "a" and digit <= "f")): return false
+    true
 
 fn _hir_cache_envelope_rejected(reason: text) -> HirCacheEnvelope:
     HirCacheEnvelope(reason: reason, checksum: "", covered: "",
@@ -78,6 +86,12 @@ pub fn hir_cache_envelope_parse(raw: text, expected_header: text) -> HirCacheEnv
     val covered = covered_lines.join("\n")
     # Re-open the cursor over the covered bytes for the framing parse.
     reader = _hir_cache_envelope_open(covered)
+    var parser_classification = ""
+    if expected_header.starts_with("spl-hircache-v4-parser "):
+        if reader.next() != "P": return _hir_cache_envelope_framing(checksum, covered)
+        parser_classification = reader.next()
+        if not hir_cache_parser_record_valid_v1(parser_classification):
+            return _hir_cache_envelope_framing(checksum, covered)
     if reader.next() != "W":
         return _hir_cache_envelope_framing(checksum, covered)
     val warning_count: i64 = reader.next_len()
@@ -99,7 +113,7 @@ pub fn hir_cache_envelope_parse(raw: text, expected_header: text) -> HirCacheEnv
     if not reader.ok or body == "":
         return _hir_cache_envelope_framing(checksum, covered)
     HirCacheEnvelope(reason: "", checksum: checksum, covered: covered,
-        warnings: warnings, body: body)
+        warnings: warnings, body: body, parser_classification: parser_classification)
 
 # Strict admission view: nil for any rejected frame, the envelope when intact.
 pub fn hir_cache_decode_envelope(raw: text, expected_header: text) -> HirCacheEnvelope?:

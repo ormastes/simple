@@ -1,9 +1,14 @@
 # Result tuple payloads use the ordinary raw heap tuple, not rt_tuple_new's
 # multi-argument enum container. Keep unsupported element representations loud.
-use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind, HirSymbol, SymbolKind}
 use compiler.mir.mir_data.*
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.asm_and_targets.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLowering.provider_metadata.{mir_class_identity}
+use compiler.mir._MirLoweringExpr.result_err_record_owner.{result_err_layout_identity}
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
 
 fn result_tuple_payload_type(type_: HirType) -> MirType?:
     match type_.kind:
@@ -68,10 +73,131 @@ fn wrapper_native_tuple_payload_type(type_: HirType) -> MirType?:
         case _: nil
 
 impl MirLowering:
+    me result_try_tuple_nominal_owner(type_: HirType, record: bool) -> text:
+        # These IDs come from a consumer-owned, relocated callable signature.
+        # Relocation establishes origin; an integer ID alone cannot do that.
+        # Here validate the current declaration and its qualified binding.
+        match type_.kind:
+            case HirTypeKind.Named(symbol, args):
+                if args.len() != 0 or not self.symbols.symbols.has(symbol.id): return ""
+                val declaration: HirSymbol = self.symbols.symbols[symbol.id]
+                if declaration.id.id != symbol.id: return ""
+                if record:
+                    if declaration.kind != SymbolKind.Struct and declaration.kind != SymbolKind.Class: return ""
+                elif declaration.kind != SymbolKind.Enum:
+                    return ""
+                val module = mir_layout_canonical_module_name(declaration.defining_module ?? "")
+                if module == "" or self.symbols.lookup_qualified_type_raw(module, declaration.name) != symbol.id: return ""
+                if not record:
+                    val owner = mir_class_identity(declaration)
+                    if not self.enum_runtime_id_index_q.has(owner): return ""
+                    return owner
+                val shape = if declaration.kind == SymbolKind.Class:
+                    mir_class_identity(declaration)
+                else:
+                    self.composite_layout_key(declaration)
+                val owner = self.declared_struct_layout_key(shape)
+                val identity = result_err_layout_identity(owner)
+                if (identity == "" or not self.composite_layout_digests.has(identity) or
+                    (self.composite_layout_owner_counts.get(identity) ?? 0) != 1 or
+                    (self.result_err_layout_types.get(identity) ?? "") == "" or
+                    not self.struct_field_order.has(owner) or not self.struct_field_hir_type.has(owner)):
+                    return ""
+                owner
+            case _: ""
+
+    me result_try_tuple_collection_element(type_: HirType, allow_struct: bool) -> MirType?:
+        # Container metadata does not describe an inline tuple slot. In
+        # particular a text dictionary key remains a runtime string handle.
+        match type_.kind:
+            case HirTypeKind.Int(64, true): Some(MirType.i64())
+            case HirTypeKind.Bool: Some(MirType.bool())
+            case HirTypeKind.Float(64): Some(MirType.f64())
+            case HirTypeKind.Str: Some(self.lower_type(type_))
+            case HirTypeKind.Named(symbol, _):
+                if not self.symbols.symbols.has(symbol.id): return nil
+                val declaration: HirSymbol = self.symbols.symbols[symbol.id]
+                # Dict<Struct> currently loses its full owner in dictionary
+                # value projection. Do not admit that unproven route here.
+                if not allow_struct and declaration.kind != SymbolKind.Class: return nil
+                if self.result_try_tuple_nominal_owner(type_, true) == "": return nil
+                Some(self.lower_type(type_))
+            case _: nil
+
+    me result_try_tuple_field_type(type_: HirType) -> MirType?:
+        match type_.kind:
+            case HirTypeKind.Int(64, true): Some(MirType.i64())
+            case HirTypeKind.Bool: Some(MirType.bool())
+            case HirTypeKind.Float(64): Some(MirType.f64())
+            case HirTypeKind.Tuple(_): self.result_try_tuple_payload_type(type_)
+            case HirTypeKind.Named(_, _):
+                if self.result_try_tuple_nominal_owner(type_, false) == "": return nil
+                Some(self.lower_type(type_))
+            case HirTypeKind.Array(element, size):
+                # Only the unsized runtime-array contract is admitted here.
+                # Fixed arrays and slices need their own carrier proof.
+                if size != nil: return nil
+                if val lowered = self.result_try_tuple_collection_element(element, true):
+                    Some(MirType(kind: MirTypeKind.Array(lowered, 0)))
+                else: nil
+            case HirTypeKind.Dict(key, value):
+                # The observed parser contract is Dict<text, SdnSpan>. Keep
+                # other key representations outside this bounded admission.
+                if key.kind != HirTypeKind.Str: return nil
+                if val lowered = self.result_try_tuple_collection_element(value, false):
+                    Some(MirType(kind: MirTypeKind.Dict(self.lower_type(key), lowered)))
+                else: nil
+            case _: nil
+
+    me result_try_tuple_payload_type(type_: HirType) -> MirType?:
+        match type_.kind:
+            case HirTypeKind.Tuple(elements):
+                if elements.len() == 0: return nil
+                var fields: [MirType] = []
+                for element in elements:
+                    if val field = self.result_try_tuple_field_type(element):
+                        fields.push(field)
+                    else:
+                        return nil
+                Some(MirType(kind: MirTypeKind.Tuple(fields)))
+            case _: nil
+
+    me remember_result_try_tuple_projection(base: LocalId, field: i64, destination: LocalId):
+        # Transfer semantic metadata only; GetField already loaded the native
+        # bits with the stored MIR field type. Never decode a scalar twice or
+        # replace a literal's actual representation with a HIR text layout.
+        if val remembered = self.find_local_hir_type(base.id):
+            match remembered.kind:
+                case HirTypeKind.Tuple(elements):
+                    if field < 0 or field >= elements.len(): return
+                    val expected = elements[field]
+                    if val declared = self.result_try_tuple_field_type(expected):
+                        if val actual = self.local_mir_type_of(destination):
+                            if actual.kind != declared.kind: return
+                        else: return
+                        self.remember_local_hir_type(destination.id, expected, 0, 0)
+                        match expected.kind:
+                            case HirTypeKind.Named(_, _):
+                                self.struct_value_syms[destination.id] = self.result_try_tuple_nominal_owner(expected, false)
+                            case HirTypeKind.Array(element, _):
+                                self.runtime_array_locals[destination.id] = true
+                                self.mark_runtime_value_local(destination.id)
+                                self.runtime_elem_value_type[destination.id] = self.lower_type(element)
+                                val owner = self.result_try_tuple_nominal_owner(element, true)
+                                if owner != "": self.array_element_struct_syms[destination.id] = owner
+                            case HirTypeKind.Dict(_, element):
+                                self.runtime_dict_locals[destination.id] = true
+                                self.mark_runtime_value_local(destination.id)
+                                self.runtime_elem_value_type[destination.id] = self.lower_type(element)
+                                val owner = self.result_try_tuple_nominal_owner(element, true)
+                                if owner != "": self.array_element_struct_syms[destination.id] = owner
+                            case _: ()
+                case _: ()
+
     me decode_result_tuple_payload(raw: LocalId, expected: HirType) -> LocalId:
         # Invoked only by lower_try_expr's proven Result success branch.
         # Custom enum/Option payload decoding keeps its separate contract.
-        if val tuple_type = result_tuple_payload_type(expected):
+        if val tuple_type = self.result_try_tuple_payload_type(expected):
             val value = self.recover_result_tuple_payload(raw, tuple_type)
             self.remember_local_hir_type(value.id, expected, 0, 0)
             return value
