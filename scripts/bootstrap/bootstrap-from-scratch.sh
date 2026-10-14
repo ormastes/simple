@@ -996,8 +996,8 @@ if [ "${bootstrap_strategy}" != adhoc ] && [ "${full_cli}" -eq 1 ] &&
   exit 1
 fi
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-repo_root=$(CDPATH= cd -- "${script_dir}/../.." && pwd)
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+repo_root=$(CDPATH= cd -- "${script_dir}/../.." && pwd -P)
 . "${repo_root}/scripts/bootstrap/bootstrap-cache-policy.shs"
 cd "${repo_root}"
 BOOTSTRAP_STAGE3_FACADE_PATH=\
@@ -4877,7 +4877,11 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       cd "${repo_root}" || exit 125
       BOOTSTRAP_VERIFY_TEST_WORKERS="${stage2_tests_workers}"
       BOOTSTRAP_VERIFY_BUILD_THREADS="${stage2_tests_build_threads}"
-      export BOOTSTRAP_VERIFY_TEST_WORKERS BOOTSTRAP_VERIFY_BUILD_THREADS
+      # Canonical source-derived tests consume their admitted producer, as in
+      # run-release-stage2-qualified.shs. Explicit delegation remains opt-in and
+      # subject to the phase verifier's existing real MC/DC waiver requirements.
+      BOOTSTRAP_STAGE2_TEST_DELEGATE="${BOOTSTRAP_STAGE2_TEST_DELEGATE:-0}"
+      export BOOTSTRAP_VERIFY_TEST_WORKERS BOOTSTRAP_VERIFY_BUILD_THREADS BOOTSTRAP_STAGE2_TEST_DELEGATE
       sh "${repo_root}/scripts/bootstrap/bootstrap-phase-verification.shs" \
         --phase=stage2 \
         --backend="${backend}" \

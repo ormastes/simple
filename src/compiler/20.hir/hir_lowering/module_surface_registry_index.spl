@@ -3,9 +3,10 @@
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, module_surface_allocate_generation, module_surface_export_origin_index_position}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_logical_name_from_path, module_surface_fold_std_alias, module_surface_package_name_from_name}
 use compiler.common.cache.native_resolution_trace.{NativeResolutionProbeV1, NativeResolutionTraceV1}
+use compiler.common.module_path_naming.{module_relative_name_from_path}
 use std.common.crypto.sha256.{sha256_text}
 
-val NATIVE_HIR_IMPORT_RESOLVER_VERSION_V1: text = "hir-module-surface-resolver-v2"
+val NATIVE_HIR_IMPORT_RESOLVER_VERSION_V1: text = "hir-module-surface-resolver-v3"
 
 # Stable bottom-up merge sort: each pass appends every row once instead of
 # rebuilding an ever-longer prefix for every insertion. Keep text `<` and
@@ -150,6 +151,12 @@ pub(package) fn module_surface_resolve_relative_key(
 ) -> text:
     if not name.starts_with("."):
         return module_surface_resolve_absolute_key(registry, name)
+    # Importer normalization can collapse a repeated tier while its sibling
+    # keeps that tier to distinguish a root-level twin. Resolve the physical
+    # sibling first; a miss must not select the unrelated collapsed twin.
+    val physical_name = module_relative_name_from_path(facade.canonical_path, name)
+    if physical_name != "":
+        return module_surface_resolve_absolute_key(registry, physical_name)
     var dots = 0
     while dots < name.len() and name.substring(dots, dots + 1) == ".":
         dots = dots + 1
@@ -164,7 +171,59 @@ pub(package) fn module_surface_resolve_relative_key(
     val absolute_name = if package_name == "": tail else package_name + "." + tail
     if module_surface_registry_index(registry, absolute_name) >= 0:
         return absolute_name
+    # TWIN-TIER PHYSICAL SIBLING (2026-10-13): the entry-closure loader
+    # resolves a relative import against the importer's on-disk DIRECTORY
+    # (driver_source_loading.spl _driver_resolve_relative_entry_import), so a
+    # file inside an `NN.<tier>/<tier>/` inner-repeat dir binds `.x` to the
+    # physically adjacent file. The logical splice above cannot express that:
+    # module_logical_name_from_path COLLAPSES the repeated tier for non-twin
+    # files (99.loader/loader/module_loader.spl -> compiler.loader.module_loader)
+    # so `.object_mapper` splices to the tier-root spelling, while twin-listed
+    # files KEEP the doubled name, so a doubled importer splices one tier too
+    # deep (compiler.loader.loader.exec_mapping for a file registered as
+    # compiler.loader.exec_mapping). Neither spelling is registered when only
+    # the closure-loaded sibling is -- the tier root may not be in the closure
+    # at all -- and the import froze to "", later dying as
+    # "missing module surface for .x" / "unresolved type: X". Derive the
+    # sibling's key from its physical path with the SAME naming derivation
+    # that registered it, which agrees with the closure in both directions.
+    val physical_name = module_surface_physical_sibling_key(
+        registry, facade.canonical_path, tail, dots)
+    if physical_name != "":
+        return physical_name
     module_surface_resolve_absolute_key(registry, absolute_name)
+
+# Registry key of the file the entry-closure loader binds one relative import
+# to, or "" when no such surface is registered. Candidate order mirrors the
+# loader's probes: sibling file, then package facade, then mod.spl.
+fn module_surface_physical_sibling_key(
+    registry: ModuleSurfacesByName, importer_path: text, tail: text, dots: i64
+) -> text:
+    var dir = importer_path
+    var up = 0
+    while up < dots:
+        var cut = -1
+        var scan = 0
+        while scan < dir.len():
+            if dir.substring(scan, scan + 1) == "/":
+                cut = scan
+            scan = scan + 1
+        if cut < 0:
+            return ""
+        dir = dir[0:cut]
+        up = up + 1
+    val rel = tail.replace(".", "/")
+    val file_name = module_surface_logical_name_from_path(dir + "/" + rel + ".spl")
+    if module_surface_registry_index(registry, file_name) >= 0:
+        return file_name
+    val package_name = module_surface_logical_name_from_path(
+        dir + "/" + rel + "/__init__.spl")
+    if module_surface_registry_index(registry, package_name) >= 0:
+        return package_name
+    val mod_name = module_surface_logical_name_from_path(dir + "/" + rel + "/mod.spl")
+    if module_surface_registry_index(registry, mod_name) >= 0:
+        return mod_name
+    ""
 
 pub(package) fn module_surface_resolve_import_key(
     registry: ModuleSurfacesByName,
@@ -230,6 +289,9 @@ pub(package) fn module_surface_import_resolution_trace_with_generation_v1(
             package_name = module_surface_package_name_from_name(package_name)
             package_index = package_index + 1
         base = if package_name == "": tail else: package_name + "." + tail
+        val physical_name = module_relative_name_from_path(facade.canonical_path, import_id)
+        if physical_name != "":
+            base = physical_name
     var candidates: [text] = [base, base + ".__init__", "lib." + base,
         "lib." + base + ".__init__"]
     if base.starts_with("std."):
