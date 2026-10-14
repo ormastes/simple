@@ -1,0 +1,76 @@
+# codex-system-test
+# Acceptance authored before new owner's execution/publication. The root
+# supplies genuinely collected envelopes and independently reviewed code pins.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.env_ops.{env_get, cwd}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256, secure_temp_dir, file_create_exclusive, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+fn bootstrap_memory_composition_arguments_v1() -> [text]:
+    val base = env_get("BOOTSTRAP_VERSION_COMPOSITION_BASE")
+    val helper = env_get("BOOTSTRAP_VERSION_COMPOSITION_HELPER")
+    expect(file_hash_sha256(helper)).to_equal(env_get("BOOTSTRAP_VERSION_COMPOSITION_HELPER_SHA256"))
+    var args = ["-I", "-S", helper, "audit", "--profile", base + "/closed-profile.json",
+        "--candidate", env_get("BOOTSTRAP_VERSION_COMPOSITION_CANDIDATE"), "--root", cwd(),
+        "--source", base + "/current-source.txt", "--git", base + "/current-git.env",
+        "--runtime", base + "/current-runtime.txt", "--tools", base + "/current-tools.txt"]
+    val manifest = env_get("BOOTSTRAP_VERSION_COMPOSITION_OWNER_MANIFEST")
+    if manifest != "":
+        args = args.push("--owner-manifest").push(manifest)
+        args = args.push("--owner-sha").push(env_get("BOOTSTRAP_VERSION_COMPOSITION_OWNER_SHA256"))
+    args
+
+fn bootstrap_memory_replace_argument_v1(args: [text], key: text, value: text) -> [text]:
+    var out = args
+    var i = 0
+    while i + 1 < out.len():
+        if out[i] == key:
+            out[i + 1] = value
+            return out
+        i = i + 1
+    out
+
+fn bootstrap_memory_refusal_v1(args: [text], reason: text):
+    val (output, diagnostic, code) = process_run_bounded("python3", args, 30000, 1048576)
+    expect(code).to_equal(1)
+    expect(diagnostic).to_contain(reason)
+
+describe "Closed remaining-version composition authority":
+    it "authenticates original genuine envelopes without replaying green native controls":
+        val (output, diagnostic, code) = process_run_bounded("python3",
+            bootstrap_memory_composition_arguments_v1(), 30000, 1048576)
+        expect(code).to_equal(0)
+        expect(output).to_contain("original controls authenticated")
+        expect(output).to_contain("no native build or green replay")
+
+    it "rejects another candidate and source/tool drift before composition":
+        val root = secure_temp_dir(cwd() + "/.simple/storage/build", "version-owner-negative-").unwrap()
+        expect(file_create_exclusive(root + "/candidate", "unqualified different compiler")).to_equal(true)
+        bootstrap_memory_refusal_v1(bootstrap_memory_replace_argument_v1(
+            bootstrap_memory_composition_arguments_v1(), "--candidate", root + "/candidate"), "candidate differs")
+        expect(file_create_exclusive(root + "/tools", "different tool authority\n")).to_equal(true)
+        bootstrap_memory_refusal_v1(bootstrap_memory_replace_argument_v1(
+            bootstrap_memory_composition_arguments_v1(), "--tools", root + "/tools"), "tool authority changed")
+        val base = env_get("BOOTSTRAP_VERSION_COMPOSITION_BASE")
+        val source = file_read_regular_no_follow_bounded(base + "/current-source.txt", 16777216).unwrap()
+        expect(file_create_exclusive(root + "/source", source + "unreviewed-source-change\n")).to_equal(true)
+        bootstrap_memory_refusal_v1(bootstrap_memory_replace_argument_v1(
+            bootstrap_memory_composition_arguments_v1(), "--source", root + "/source"), "original source")
+
+    it "rejects forged profile metadata and historical-control substitution":
+        val root = secure_temp_dir(cwd() + "/.simple/storage/build", "version-profile-negative-").unwrap()
+        val base = env_get("BOOTSTRAP_VERSION_COMPOSITION_BASE")
+        val profile = file_read_regular_no_follow_bounded(base + "/closed-profile.json", 1048576).unwrap()
+        for replacement in [profile.replace("cranelift", "llvm"), profile.replace("44ec9406", "00ec9406"), profile.replace("ba38d616", "0038d616")]:
+            val path = root + "/forged-" + str(replacement.len()) + "-" + str(replacement.find("00"))
+            expect(file_create_exclusive(path, replacement)).to_equal(true)
+            bootstrap_memory_refusal_v1(bootstrap_memory_replace_argument_v1(
+                bootstrap_memory_composition_arguments_v1(), "--profile", path), "authority digest differs")
+
+    it "refuses an arbitrary two-field version PASS as complete sanity":
+        val root = secure_temp_dir(cwd() + "/.simple/storage/build", "version-receipt-negative-").unwrap()
+        expect(file_create_exclusive(root + "/fake.env", "canonical_version=1.0.0-rc.1\nversion_match_status=0\n")).to_equal(true)
+        var args = bootstrap_memory_composition_arguments_v1()
+        args[3] = "verify"
+        args = args.push("--composition").push(root + "/fake.env")
+        bootstrap_memory_refusal_v1(args, "schema")

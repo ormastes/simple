@@ -1,0 +1,107 @@
+# @req REQ-IM-001
+# Authored regression; execution with the rebuilt producer is still required.
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.Span
+use compiler.mono.monomorphize_integration.MonomorphizationPass
+use compiler.mono.mono_archive_types_v1.{MonoTemplateRecipeV1,
+    mono_template_recipe_signature_v1, mono_apply_template_recipe_v1,
+    mono_template_signature_v1, mono_template_signature_digest_v1}
+use compiler.hir.hir_function_record_identity_v1.mono_complete_function_digest_v1
+
+fn demand_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn demand_template() -> HirFunction:
+    val t = demand_type(HirTypeKind.Named(SymbolId(id: 21), []))
+    val value = HirExpr(kind: HirExprKind.Var(SymbolId(id: 22)),
+        has_type_: true, type_: t, span: Span.empty())
+    var attrs = FunctionAttr.default()
+    attrs.is_global = true
+    HirFunction(symbol: SymbolId(id: 20), name: "identity",
+        type_params: [HirTypeParam(symbol: SymbolId(id: 21), name: "T",
+            bounds: [], has_default: false, default: nil, span: Span.empty())],
+        params: [HirParam(symbol: SymbolId(id: 22), name: "value", type_: t,
+            has_default: true, default: value, span: Span.empty(), is_mutable: false)],
+        return_type: t,
+        body: HirBlock(stmts: [], has: true, value: value, span: Span.empty()),
+        effects: [], visibility: Visibility.Public, is_async: false, is_static: false,
+        is_public: true, is_method: false, is_mutable: false, is_const: false,
+        is_extern: false, func_attr: attrs, has_export_attr: false,
+        export_attr: nil, has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_suspension: false, has_vhdl_metadata: false, vhdl_metadata: nil,
+        has_doc_comment: false, doc_comment: "", span: Span.empty(),
+        is_gpu_kernel: false, gpu_target: "", gpu_backend_order: "")
+
+fn demand_recipe(function: HirFunction, method: bool) -> MonoTemplateRecipeV1:
+    MonoTemplateRecipeV1(module_name: "provider", original_symbol: function.symbol,
+        template_name: if method: "Box::identity" else: function.name,
+        canonical_type_params: function.type_params,
+        bound_type_params: function.type_params, inherent_method: method)
+
+fn main() -> i64:
+    val original = demand_template()
+    val before = mono_complete_function_digest_v1(original)
+    if before.len() == 0: return 10
+    for method in [false, true]:
+        val recipe = demand_recipe(original, method)
+        val projected = mono_template_recipe_signature_v1(original, recipe)
+        val canonical = mono_apply_template_recipe_v1(original, recipe)
+        if mono_template_signature_digest_v1(projected) != mono_template_signature_digest_v1(mono_template_signature_v1(canonical)): return 11
+        if not projected.global_linkage: return 12
+        if mono_complete_function_digest_v1(original) != before: return 13
+    var narrower = demand_recipe(original, true)
+    narrower.bound_type_params = []
+    if mono_template_signature_digest_v1(mono_template_recipe_signature_v1(original, narrower)) != mono_template_signature_digest_v1(mono_template_signature_v1(mono_apply_template_recipe_v1(original, narrower))): return 14
+    var nested_original = original
+    val parameter = demand_type(HirTypeKind.Named(SymbolId(id: 21), []))
+    val nested = demand_type(HirTypeKind.Optional(demand_type(HirTypeKind.Array(demand_type(HirTypeKind.Named(SymbolId(id: 31), [parameter])), 3))))
+    var param: HirParam = nested_original.params[0]
+    param.type_ = nested
+    nested_original.params = [param]
+    nested_original.return_type = nested
+    val nested_recipe = demand_recipe(nested_original, true)
+    val nested_signature = mono_template_recipe_signature_v1(nested_original, nested_recipe)
+    if mono_template_signature_digest_v1(nested_signature) != mono_template_signature_digest_v1(mono_template_signature_v1(mono_apply_template_recipe_v1(nested_original, nested_recipe))): return 20
+    match nested_signature.return_type.kind:
+        case HirTypeKind.Optional(inner):
+            match inner.kind:
+                case HirTypeKind.Array(element, _):
+                    match element.kind:
+                        case HirTypeKind.Named(owner, args):
+                            val nominal_owner: SymbolId = owner
+                            if nominal_owner.id != 31: return 21
+                            match args[0].kind:
+                                case HirTypeKind.TypeParam(name, _):
+                                    if name != "T": return 22
+                                case _: return 23
+                        case _: return 24
+                case _: return 25
+        case _: return 26
+    var pass_ = MonomorphizationPass.create()
+    val recipe = demand_recipe(original, false)
+    pass_.generic_functions["identity"] = original
+    pass_.template_recipes["identity"] = recipe
+    pass_.archive_template_signatures["identity"] = mono_template_recipe_signature_v1(original, recipe)
+    pass_.template_module["identity"] = "provider"
+    pass_.current_module = "provider"
+    if pass_.specialized_functions.len() != 0: return 30
+    if mono_complete_function_digest_v1(pass_.generic_functions["identity"]) != before: return 31
+    val arg = demand_type(HirTypeKind.Int(64, true))
+    val symbol = pass_.request_specialization("identity", [arg])
+    if symbol < 0: return 32
+    if pass_.request_specialization("identity", [arg]) != symbol: return 33
+    if pass_.specialized_functions.len() != 1: return 34
+    if pass_.spec_queue.len() != 1: return 35
+    if pass_.monomorphizer.generic_functions.len() != 0: return 36
+    if pass_.monomorphizer.table.pending_functions.len() != 0: return 37
+    if mono_complete_function_digest_v1(pass_.generic_functions["identity"]) != before: return 38
+    val name = pass_.mangled_name("identity", [arg])
+    val specialized: HirFunction = pass_.specialized_functions[name]
+    if specialized.type_params.len() != 0: return 39
+    if not specialized.params[0].has_default: return 40
+    match specialized.body.value.type_.kind:
+        case HirTypeKind.Int(bits, signed):
+            if bits != 64 or not signed: return 41
+        case _: return 42
+    print "mono source: signature parity, nominal identity, immutable templates, deduplicated demand passed"
+    0

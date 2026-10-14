@@ -3,7 +3,7 @@ use compiler.hir.hir_types.{HirType, SymbolId}
 use compiler.hir.hir_definitions.{HirFunction, HirTypeParam}
 use compiler.hir.hir_codec_support.{HirCodecWriter}
 use compiler.hir.generated.hir_codec.{hc_enc_hir_type, hc_enc_hir_type_param}
-use compiler.monomorphize.type_subst.{canonicalize_template, substitute_type, typesubstitution_from_params}
+use compiler.monomorphize.type_subst.{canonicalize_template, substitute_type, typesubstitution_from_params, typesubstitution_canonical}
 use std.common.crypto.sha256.{sha256_text}
 
 enum MonoTemplateBodyModeV1:
@@ -83,7 +83,25 @@ fn mono_apply_template_recipe_v1(original: HirFunction, recipe: MonoTemplateReci
     canonical.type_params = recipe.bound_type_params
     canonical
 
+fn mono_template_recipe_signature_v1(original: HirFunction, recipe: MonoTemplateRecipeV1) -> MonoTemplateSignatureV1:
+    # The same canonical substitution as mono_apply_template_recipe_v1, but
+    # discovery/inference needs only types, never a rewritten executable body
+    # or parameter default. Inherent methods canonicalize all impl/own type
+    # parameters before exposing only the recipe's bound parameters.
+    val subst = typesubstitution_canonical(recipe.canonical_type_params)
+    val signature = mono_template_signature_v1(original)
+    var params: [HirType] = []
+    for param in signature.param_types:
+        params = params.push(substitute_type(param, subst))
+    MonoTemplateSignatureV1(
+        name: if recipe.inherent_method: recipe.template_name else: original.name,
+        param_types: params,
+        return_type: substitute_type(signature.return_type, subst),
+        type_params: recipe.bound_type_params,
+        global_linkage: signature.global_linkage)
+
 export MonoTemplateBodyModeV1, MonoTemplateSignatureV1, MonoTemplateRecipeV1, MonoSpecializationRequestV1
 export mono_template_signature_v1, mono_specialized_signature_v1
 export mono_template_signature_digest_v1, mono_apply_template_recipe_v1
+export mono_template_recipe_signature_v1
 export mono_archive_put_type_v1

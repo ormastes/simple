@@ -71,7 +71,12 @@ if [ "${1:-}" = --publish ]; then
   publication_work=$(mktemp -d "$tests_root/.publish.XXXXXX") || die 'publication scratch unavailable'
   trap 'rm -rf "$publication_work"' EXIT HUP INT TERM
   bootstrap_stage3_source_snapshot "$publication_work/source-observed" "$source_root" || die 'source observation failed'
-  cmp -s "$publication_work/source-observed" "$source_snapshot" || die 'frozen source differs from admitted source'
+  if [ "$(field schema "$admission_sanity")" = simple-bootstrap-sanity-version-composition-v1 ]; then
+    bootstrap_stage3_verify_version_only_composition_v1 "$admission_sanity" "$admission_sanity" \
+      "$(dirname -- "$admission_sanity")" "$candidate" "$source_root" || die 'reviewed remaining-owner envelope changed'
+  else
+    cmp -s "$publication_work/source-observed" "$source_snapshot" || die 'frozen source differs from admitted source'
+  fi
   execution=$(awk -F'[=|]' -v sha="$expected_sha" '
     $1 == "schema" { schema++; if ($2 != "bootstrap-phase-verification-v1") bad=1 }
     $1 == "phase" { phases++; if ($2 != "stage2") bad=1 }
@@ -145,7 +150,13 @@ if [ "${1:-}" = --publish ]; then
     printf '%s %s\n' "$test_log_sha" "$test_log" >>"$publication_work/tool-hashes"
   done <"$publication_work/test-logs"
   bootstrap_stage3_source_snapshot "$publication_work/source-after" "$source_root" || die 'source final observation failed'
-  cmp -s "$publication_work/source-after" "$source_snapshot" || die 'source changed during publication'
+  if [ "$(field schema "$admission_sanity")" = simple-bootstrap-sanity-version-composition-v1 ]; then
+    cmp -s "$publication_work/source-after" "$publication_work/source-observed" || die 'reviewed tool envelope changed during publication'
+    bootstrap_stage3_verify_version_only_composition_v1 "$admission_sanity" "$admission_sanity" \
+      "$(dirname -- "$admission_sanity")" "$candidate" "$source_root" || die 'remaining-owner final envelope changed'
+  else
+    cmp -s "$publication_work/source-after" "$source_snapshot" || die 'source changed during publication'
+  fi
   while IFS=' ' read -r pinned_sha pinned_path; do
     [ "$(hash_file "$pinned_path")" = "$pinned_sha" ] || die 'tool or test evidence changed during publication'
   done <"$publication_work/tool-hashes"

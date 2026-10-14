@@ -32,7 +32,8 @@ use std.io_runtime.{env_get}
 use compiler.mono.mono_archive_types_v1.{
     MonoTemplateBodyModeV1, MonoTemplateSignatureV1, MonoTemplateRecipeV1,
     MonoSpecializationRequestV1, mono_template_signature_v1,
-    mono_specialized_signature_v1, mono_apply_template_recipe_v1
+    mono_specialized_signature_v1, mono_apply_template_recipe_v1,
+    mono_template_recipe_signature_v1
 }
 
 fn mono_arg_value(a: HirCallArg) -> HirExpr:
@@ -84,8 +85,12 @@ struct NominalBindingContext:
 
 class MonomorphizationPass:
     """Runs monomorphization on HIR modules."""
+    # Compatibility field for callers constructing the pass. The integration
+    # owns its worklist and emitted bodies below; the legacy engine table is
+    # not populated with a second, never-consumed copy of those bodies.
     monomorphizer: Monomorphizer
-    # Generic function templates, keyed by declared name
+    # Original generic function bodies, keyed by template name. Canonical
+    # signatures are body-free; only demanded specializations rewrite bodies.
     generic_functions: Dict<text, HirFunction>
     generic_structs: Dict<text, HirStruct>
     generic_classes: Dict<text, HirClass>
@@ -202,6 +207,7 @@ class MonomorphizationPass:
     # Explicit consumer ownership, never an ambient production activation flag.
     archive_nominal_projection_valid: bool = true
     template_body_mode: MonoTemplateBodyModeV1 = MonoTemplateBodyModeV1.Retained
+    # Body-free canonical signatures in both retained and archive modes.
     archive_template_signatures: Dict<text, MonoTemplateSignatureV1> = {}
     archive_specialized_signatures: Dict<text, MonoTemplateSignatureV1> = {}
     archive_symbol_identities: Dict<text, text> = {}
@@ -326,7 +332,9 @@ impl MonomorphizationPass:
             rewritten[name] = funcs
         self.drain_worklist()
 
-        # Step 3: place every specialization in its template's module
+        # Steps 3/4: place every specialization and prune its owner after the
+        # fixed point. Pruning consults pass-wide specialization facts only;
+        # it does not need a second complete inventory of unpruned modules.
         var result: Dict<text, HirModule> = {}
         for name in mod_keys:
             val module: HirModule = modules[name]
@@ -355,15 +363,12 @@ impl MonomorphizationPass:
             if (owns_specialization or out.symbols.next_symbol_id >= MONO_SYMBOL_BASE) and out.symbols.next_symbol_id < self.next_symbol:
                 out.symbols.next_symbol_id = self.next_symbol
             out.functions = funcs
-            result[name] = out
+            result[name] = self.prune_consumed_templates(out)
+            # Its function table is now owned by the result. Module iteration
+            # uses the frozen mod_keys list, never the shrinking table keys.
+            rewritten.remove(name)
 
-        # Step 4 (plan 9.3 step 12): drop consumed generic templates
-        var pruned: Dict<text, HirModule> = {}
-        for name in result.keys():
-            val rmod: HirModule = result[name]
-            pruned[name] = self.prune_consumed_templates(rmod)
-
-        pruned
+        result
 
     # ========================================================================
     # Step 1: Collect Generic Definitions
@@ -416,15 +421,11 @@ impl MonomorphizationPass:
                     original_symbol: func.symbol, template_name: func.name,
                     canonical_type_params: func.type_params,
                     bound_type_params: func.type_params, inherent_method: false)
-                val canonical = mono_apply_template_recipe_v1(func, recipe)
-                if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
-                    self.archive_template_signatures[func.name] = mono_template_signature_v1(canonical)
-                else:
-                    self.generic_functions[func.name] = canonical
+                self.archive_template_signatures[func.name] = mono_template_recipe_signature_v1(func, recipe)
+                if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
+                    self.generic_functions[func.name] = func
                 self.template_recipes[func.name] = recipe
                 self.template_module[func.name] = module_name
-                if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
-                    self.monomorphizer.register_generic_function(func.name, func)
                 self.stats.generic_functions_found = self.stats.generic_functions_found + 1
             else:
                 self.fn_returns[mono_sym_key(module_name, fsym.id)] = func.return_type
@@ -472,7 +473,6 @@ impl MonomorphizationPass:
                 self.record_generic_type(module, module_name, s.symbol, s.type_params, s.fields)
                 if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
                     self.generic_structs[s.name] = s
-                    self.monomorphizer.register_generic_struct(s.name, s)
                 self.stats.generic_structs_found = self.stats.generic_structs_found + 1
 
         # Collect enum variant payload types. Enums were not collected at all
@@ -514,7 +514,6 @@ impl MonomorphizationPass:
                 self.record_generic_type(module, module_name, c.symbol, c.type_params, c.fields)
                 if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
                     self.generic_classes[c.name] = c
-                    self.monomorphizer.register_generic_class(c.name, c)
                 self.stats.generic_classes_found = self.stats.generic_classes_found + 1
 
         if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
@@ -612,24 +611,15 @@ impl MonomorphizationPass:
                 if reason != "":
                     self.generic_method_rejected[method_key] = reason
                     continue
-                var as_fn = template
-                as_fn.type_params = all_tps
-                as_fn.is_method = false
-                as_fn.name = gname
                 val recipe = MonoTemplateRecipeV1(module_name: module_name,
                     original_symbol: template.symbol, template_name: gname,
                     canonical_type_params: all_tps, bound_type_params: bound_tps,
                     inherent_method: true)
-                val canonical_fn = mono_apply_template_recipe_v1(template, recipe)
-                as_fn.type_params = bound_tps
-                if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
-                    self.archive_template_signatures[gname] = mono_template_signature_v1(canonical_fn)
-                else:
-                    self.generic_functions[gname] = canonical_fn
+                self.archive_template_signatures[gname] = mono_template_recipe_signature_v1(template, recipe)
+                if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
+                    self.generic_functions[gname] = template
                 self.template_recipes[gname] = recipe
                 self.template_module[gname] = module_name
-                if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
-                    self.monomorphizer.register_generic_function(gname, as_fn)
                 self.generic_methods[method_key] = gname
 
     # ========================================================================
@@ -890,7 +880,12 @@ impl MonomorphizationPass:
                 mangled_name: mangled, symbol_id: sym, type_args: local_type_args,
                 caller_module: self.current_module, caller_type_args: completed_args))
         else:
-            val template: HirFunction = self.generic_functions[func_name]
+            # Deduplication and nominal argument transport have already
+            # admitted this request. Canonicalize the original executable
+            # body only here, then immediately substitute concrete types.
+            var template: HirFunction = self.generic_functions[func_name]
+            if self.template_recipes.has(func_name):
+                template = mono_apply_template_recipe_v1(template, self.template_recipes[func_name])
             var specialized: HirFunction = specialize_function_with_types(template, local_type_args)
             specialized.name = mangled
             specialized.symbol = SymbolId.new(sym)
@@ -904,13 +899,9 @@ impl MonomorphizationPass:
         self.spec_module[mangled] = spec_mod
         self.spec_queue = self.spec_queue.push(mangled)
         self.stats.specializations_created = self.stats.specializations_created + 1
-        # Mirror the request into the engine table (its own bookkeeping).
-        if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
-            var concrete_args: [ConcreteType] = []
-            for ta in completed_args:
-                val tat2: HirType = ta
-                concrete_args = concrete_args.push(hir_type_to_concrete(tat2))
-            self.monomorphizer.specialize_function_call(func_name, concrete_args)
+        # spec_queue is the sole worklist. Mirroring this request into the
+        # legacy engine retained another template body until pass teardown,
+        # although that engine's pending queue is never drained or consumed.
         sym
 
     me has_template_v1(name: text) -> bool:
@@ -921,6 +912,10 @@ impl MonomorphizationPass:
     me template_signature_v1(name: text) -> MonoTemplateSignatureV1:
         if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
             return self.archive_template_signatures[name]
+        if self.archive_template_signatures.has(name):
+            return self.archive_template_signatures[name]
+        # Explicit callers may seed an already-canonical retained template
+        # directly without discovery/recipe registration (legacy API).
         mono_template_signature_v1(self.generic_functions[name])
 
     me specialization_signature_v1(name: text) -> MonoTemplateSignatureV1:

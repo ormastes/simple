@@ -1,0 +1,33 @@
+# Direct-argv transport qualification; does not admit a complete compiler link.
+use std.nogc_sync_mut.io_runtime.{process_run_bounded}
+
+fn long_argument(letter: text) -> text:
+    var block = letter
+    for index in 0..14:
+        block = block + block
+    var argument = ""
+    for index in 0..5:
+        argument = argument + block
+    argument
+
+fn main() -> i64:
+    val first = long_argument("a")
+    val second = long_argument("b")
+    if first.len() != 81920 or second.len() != 81920: return 10
+    # Each argument is below Linux MAX_ARG_STRLEN on 4 KiB-page hosts;
+    # concatenating both into one shell -c command exceeds that limit.
+    val inspect = "import hashlib,sys; print(len(sys.argv)-1); [print(str(len(a))+':'+hashlib.sha256(a.encode()).hexdigest()) for a in sys.argv[1:]]"
+    val (stdout, stderr, code) = process_run_bounded("/usr/bin/python3",
+        ["-c", inspect, first, second, "literal ' $ ; ", ""], 0, 67108864)
+    if code != 0: return 11
+    if stderr != "": return 12
+    val expected = "4\n81920:ccb1ad460f94aeae9df787f0b90c8e48354d51a68eb8cecf9346380bf9619354\n81920:28337689a3fac26fc2e9ea7a8078f3ecfbf2b95d537ebc175e67f336c1ac9e31\n14:c394cd3766b10c5700c61890ab01407faced7a80237aee2d08a52ffec2c4fb37\n0:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n"
+    if stdout != expected:
+        print stdout
+        return 13
+    val (failed_out, failed_err, failed_code) = process_run_bounded(
+        "/usr/bin/python3", ["-c", "import sys; print('tool failure',file=sys.stderr); sys.exit(17)"], 0, 67108864)
+    if failed_code != 17: return 20
+    if failed_out != "" or failed_err != "tool failure\n": return 21
+    print "native link argv: all argument lengths/hashes and failing exit status passed"
+    0
