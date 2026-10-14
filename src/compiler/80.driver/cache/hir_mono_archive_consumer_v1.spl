@@ -1,3 +1,4 @@
+use compiler.mono.mono_archive_nominal_v2.{MonoArchiveNominalDeclV2, mono_archive_nominal_install_v2, mono_archive_nominal_imports_for_module_v2}
 use compiler.mono.mono_archive_publication_identity_v1.{MonoArchiveSelectedFunctionV1,
     mono_archive_selected_record_key_v1, mono_archive_selected_output_key_v1}
 # One real mono function consumer.
@@ -190,7 +191,7 @@ fn mono_archive_function_record_key_v1(publication: MonoArchivePublicationV1) ->
     mono_archive_selected_record_key_v1(mono_archive_selected_function_v1(publication))
 
 fn mono_archive_load_function_in_owned_scope_v1(publication: MonoArchivePublicationV1) -> Result<HirFunction, text>:
-    if publication.stage != "mono-function-rewrite-v1" or
+    if publication.stage != "mono-function-rewrite-v2" or
             publication.function_archive_key != mono_archive_function_record_key_v1(publication) or
             publication.output_archive_key != mono_archive_output_key_v1(publication) or
             publication.delta_digest != mono_archive_delta_digest_v1(publication.delta):
@@ -282,7 +283,7 @@ fn mono_archive_visit_v1(admission: MonoArchiveAdmissionV1, module_name: text, r
                             input_archive_key: mono_archive_body_input_key_v1(input), input_body_digest: mono_archive_body_input_digest_v1(input),
                             output_archive_key: "", output_body_digest: body_digest,
                             output_function_digest: function_digest, target_symbol: rewritten.symbol.id,
-                            target_name: rewritten.name, stage: "mono-function-rewrite-v1", delta: delta,
+                            target_name: rewritten.name, stage: "mono-function-rewrite-v2", delta: delta,
                             delta_digest: delta_digest, function_archive_key: "")
                         receipt.function_archive_key = mono_archive_function_record_key_v1(receipt)
                         receipt.output_archive_key = mono_archive_output_key_v1(receipt)
@@ -309,7 +310,7 @@ fn mono_archive_drain_one_v1(admission: MonoArchiveAdmissionV1) -> Result<MonoAr
 fn mono_archive_publication_matches_v1(admission: MonoArchiveAdmissionV1, receipt: MonoArchivePublicationV1) -> bool:
     val state = admission.state
     val delta = receipt.delta
-    if receipt.stage != "mono-function-rewrite-v1" or
+    if receipt.stage != "mono-function-rewrite-v2" or
             delta.base_epoch != state.epoch or delta.base_digest == "" or
             delta.base_digest != mono_archive_state_digest_v1(state) or
             delta.specializations_created != delta.requests.len() or
@@ -333,6 +334,9 @@ fn mono_archive_publication_matches_v1(admission: MonoArchiveAdmissionV1, receip
     if delta.advance_cursor:
         if state.cursor >= state.queue.len(): return false
         val item = state.queue[state.cursor]
+        if item.module_name != receipt.module_name or item.symbol_id != receipt.target_symbol or
+                item.mangled_name != receipt.target_name or item.caller_module == "" or
+                state.emitted.has(item.mangled_name): return false
         request = Some(item)
         if not state.facts.recipes.has(item.template_name): return false
         selected_symbol = state.facts.recipes[item.template_name].original_symbol.id
@@ -342,11 +346,7 @@ fn mono_archive_publication_matches_v1(admission: MonoArchiveAdmissionV1, receip
             sha256_text(hir_module_encode(exact.unwrap().module)) != receipt.output_body_digest or
             mono_archive_function_digest_v1(exact.unwrap().function) != receipt.output_function_digest:
         return false
-    if delta.advance_cursor:
-        if state.cursor >= state.queue.len(): return false
-        val item: MonoSpecializationRequestV1 = state.queue[state.cursor]
-        if item.module_name != receipt.module_name or item.symbol_id != receipt.target_symbol or
-                item.mangled_name != receipt.target_name or state.emitted.has(item.mangled_name): return false
+
     if val output = hir_cache_load_in_owned_scope(receipt.output_archive_key):
         if output.name != archive.input.module_name or output.path != archive.input.source_path or
                 sha256_text(hir_module_encode(output)) != receipt.output_body_digest or
@@ -376,6 +376,12 @@ fn mono_archive_apply_v1(admission: MonoArchiveAdmissionV1, receipt: MonoArchive
     # Exhaustive publication: only already promoted new rows/types/text and
     # scalar counters enter resident state. No worker, input/output module,
     # full mutable summary clone, or cache warning alias survives the scope.
+    for key in delta.nominal_imports.keys().sort():
+        val row = delta.nominal_imports[key]
+        val prior: [text] = state.nominal_import_keys[row.module_name] ?? []
+        state.nominal_import_keys[row.module_name] = prior.push(key)
+        state.nominal_imports[key] = row
+    for key in delta.caller_returns.keys(): state.fn_returns[key] = delta.caller_returns[key]
     for item in delta.requests:
         state.spec_symbols[item.mangled_name] = item.symbol_id
         state.spec_signatures[item.mangled_name] = delta.signatures[item.mangled_name]

@@ -9,9 +9,13 @@ use compiler.hir.hir_mono_symbol_projection_v1.*
 use std.io_runtime.{env_get}
 use std.common.crypto.sha256.{sha256_text}
 
+use compiler.mono.mono_archive_nominal_v2.{MonoArchiveNominalDeclV2, mono_archive_nominal_rows_put_v2, mono_archive_nominal_project_v2, mono_archive_nominal_index_put_v2}
+
 type MonoDeclaredTypeFactsV1 = Dict<text, HirType>
 
 struct MonoArchiveFactsV1:
+    nominal_rows: Dict<text, MonoArchiveNominalDeclV2> = {}
+    nominal_keys: Dict<text, [text]> = {}
     body_authority: text
     feature_policy: text
     templates: Dict<text, MonoTemplateSignatureV1>
@@ -39,6 +43,8 @@ struct MonoArchiveFactsV1:
     symbol_projections: Dict<text, text> = {}
 
 class MonoArchiveStateV1:
+    nominal_imports: Dict<text, MonoArchiveNominalDeclV2> = {}
+    nominal_import_keys: Dict<text, [text]> = {}
     facts: MonoArchiveFactsV1
     spec_symbols: Dict<text, i64>
     spec_display: Dict<text, text>
@@ -55,6 +61,8 @@ class MonoArchiveStateV1:
     symbol_patches: Dict<text, [text]> = {}
 
 struct MonoArchiveDeltaV1:
+    nominal_imports: Dict<text, MonoArchiveNominalDeclV2> = {}
+    caller_returns: Dict<text, HirType> = {}
     base_digest: text
     base_epoch: i64
     next_symbol: i64
@@ -84,6 +92,14 @@ fn mono_archive_facts_from_collector_v1(pass_: MonomorphizationPass, body_author
     else:
         for name in pass_.generic_functions.keys():
             templates[name] = mono_template_signature_v1(pass_.generic_functions[name])
+    var nominal: Dict<text, MonoArchiveNominalDeclV2> = {}
+    var nominal_keys: Dict<text, [text]> = {}
+    for module in pass_.archive_nominal_keys.keys(): nominal_keys[module] = pass_.archive_nominal_keys[module]
+    for key in pass_.archive_nominal_rows.keys(): nominal[key] = pass_.archive_nominal_rows[key]
+    for module in pass_.module_symbols.keys():
+        val rows = mono_archive_nominal_project_v2(module, pass_.module_symbols[module])
+        for key in rows.keys(): nominal[key] = rows[key]
+        nominal_keys[module] = rows.keys().sort()
     var projections: Dict<text, text> = {}
     var identities: Dict<text, text> = {}
     if pass_.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
@@ -99,7 +115,7 @@ fn mono_archive_facts_from_collector_v1(pass_: MonomorphizationPass, body_author
         for raw_id in symbols.symbols.keys():
             val symbol: HirSymbol = symbols.symbols[raw_id]
             identities[mono_sym_key(module_name, symbol.id.id)] = mono_type_identity(symbols, symbol.id, module_name)
-    Ok(MonoArchiveFactsV1(body_authority: body_authority,
+    Ok(MonoArchiveFactsV1(nominal_rows: nominal, nominal_keys: nominal_keys, body_authority: body_authority,
         feature_policy: env_get("SIMPLE_MONO_LEVELS"), templates: templates,
         recipes: pass_.template_recipes, symbol_identities: identities,
         initial_symbol: pass_.next_symbol,
@@ -149,6 +165,9 @@ fn mono_archive_put_flags_v1(w: HirCodecWriter, values: Dict<text, bool>):
         w.put_bool(values[key])
 
 fn mono_archive_put_request_v1(w: HirCodecWriter, request: MonoSpecializationRequestV1):
+    w.put_text(request.caller_module)
+    w.put_i64(request.caller_type_args.len())
+    for arg in request.caller_type_args: mono_archive_put_type_v1(w, arg)
     w.put_text(request.template_name)
     w.put_text(request.module_name)
     w.put_text(request.mangled_name)
@@ -162,6 +181,10 @@ fn mono_archive_put_request_v1(w: HirCodecWriter, request: MonoSpecializationReq
 fn mono_archive_state_digest_v1(state: MonoArchiveStateV1) -> text:
     var w = HirCodecWriter.create()
     val facts = state.facts
+    mono_archive_nominal_rows_put_v2(w, facts.nominal_rows)
+    mono_archive_nominal_rows_put_v2(w, state.nominal_imports)
+    mono_archive_nominal_index_put_v2(w, facts.nominal_keys, facts.nominal_rows)
+    mono_archive_nominal_index_put_v2(w, state.nominal_import_keys, state.nominal_imports)
     w.put_text(facts.body_authority)
     w.put_text(facts.feature_policy)
     w.put_i64(facts.initial_symbol)
@@ -233,12 +256,21 @@ fn mono_archive_state_digest_v1(state: MonoArchiveStateV1) -> text:
     for request in state.queue: mono_archive_put_request_v1(w, request)
     mono_archive_put_texts_v1(w, state.emitted)
     if not w.ok: return ""
-    sha256_text("mono-archive-state-v1\n" + w.finish())
+    sha256_text("mono-archive-state-v2\n" + w.finish())
 
 fn mono_archive_scratch_pass_v1(state: MonoArchiveStateV1) -> MonomorphizationPass:
     var worker = MonomorphizationPass.create()
     val facts = state.facts
     worker.template_body_mode = MonoTemplateBodyModeV1.ArchiveRequests
+    worker.archive_nominal_rows = facts.nominal_rows
+    for module in facts.nominal_keys.keys(): worker.archive_nominal_keys[module] = facts.nominal_keys[module]
+    for module in state.nominal_import_keys.keys():
+        val prior: [text] = worker.archive_nominal_keys[module] ?? []
+        worker.archive_nominal_keys[module] = prior + state.nominal_import_keys[module]
+    for key in state.nominal_imports.keys(): worker.archive_nominal_imports[key] = state.nominal_imports[key]
+    for request in state.queue:
+        worker.spec_template[request.mangled_name] = request.template_name
+        worker.spec_module[request.mangled_name] = request.module_name
     var cohorts: Dict<text, SymbolTable> = {}
     var cohort_blobs: Dict<text, text> = {}
     var cohort_patches: Dict<text, [text]> = {}
@@ -345,7 +377,10 @@ fn mono_archive_delta_v1(state: MonoArchiveStateV1, worker: MonomorphizationPass
         if not state.reported_once.has(key): once[key] = worker.reported_once[key]
     for key in worker.unresolved_templates.keys():
         if not state.unresolved_templates.has(key): unresolved[key] = worker.unresolved_templates[key]
-    MonoArchiveDeltaV1(base_digest: base, base_epoch: state.epoch,
+    var imports: Dict<text, MonoArchiveNominalDeclV2> = {}
+    for key in worker.archive_nominal_imports.keys():
+        if not state.nominal_imports.has(key): imports[key] = worker.archive_nominal_imports[key]
+    MonoArchiveDeltaV1(nominal_imports: imports, caller_returns: worker.archive_caller_returns, base_digest: base, base_epoch: state.epoch,
         next_symbol: worker.next_symbol, advance_cursor: advance,
         requests: worker.archive_requests, signatures: signatures, spec_display: displays,
         reported_once: once, unresolved_templates: unresolved,
@@ -357,6 +392,8 @@ fn mono_archive_delta_v1(state: MonoArchiveStateV1, worker: MonomorphizationPass
 
 fn mono_archive_delta_digest_v1(delta: MonoArchiveDeltaV1) -> text:
     var w = HirCodecWriter.create()
+    mono_archive_nominal_rows_put_v2(w, delta.nominal_imports)
+    mono_archive_put_types_v1(w, delta.caller_returns)
     w.put_text(delta.base_digest)
     w.put_i64(delta.base_epoch)
     mono_archive_put_texts_v1(w, delta.symbol_patches)
@@ -379,7 +416,7 @@ fn mono_archive_delta_digest_v1(delta: MonoArchiveDeltaV1) -> text:
     w.put_i64(delta.specializations_created)
     w.put_i64(delta.unresolved_generic_calls)
     if not w.ok: return ""
-    sha256_text("mono-archive-delta-v1\n" + w.finish())
+    sha256_text("mono-archive-delta-v2\n" + w.finish())
 
 export MonoArchiveFactsV1, MonoArchiveStateV1, MonoArchiveDeltaV1
 export mono_archive_facts_from_collector_v1, mono_archive_state_create_v1
