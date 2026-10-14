@@ -605,3 +605,72 @@ fn parse_inline_index_assignment_with_multiple_block_elifs_keeps_final_else() {
     assert_eq!(third.else_block.as_ref().unwrap().statements.len(), 1);
     assert!(matches!(items[1], Node::Assignment(_)));
 }
+
+// Regression 2026-10-14 (stage2 link failure, undefined `_return`): a
+// single-line `else: return <expr>` after a non-block if branch was parsed
+// as an EXPRESSION, loading a symbol literally named `return`. Each shape
+// below must parse the else/elif body as a Return STATEMENT.
+#[test]
+fn parse_inline_expression_then_inline_else_return_statement() {
+    // `g()` then-branch takes the expression-if path in `parse_if`.
+    let items = parse("fn f(flag: bool) -> bool:\n    if flag: g()\n    else: return false\n    true\n");
+    let Node::Function(f) = &items[0] else { panic!("expected fn") };
+    let Node::Expression(Expr::If { else_branch: Some(else_expr), .. }) = &f.body.statements[0] else {
+        panic!("expected if expression, got {:?}", f.body.statements[0])
+    };
+    let Expr::DoBlock(else_stmts) = else_expr.as_ref() else {
+        panic!("inline else `return` must wrap a DoBlock, got {:?}", else_expr)
+    };
+    assert!(
+        matches!(else_stmts[0], Node::Return(_)),
+        "inline else `return` must be a Return statement, got {:?}",
+        else_stmts[0]
+    );
+}
+
+#[test]
+fn parse_inline_subscript_assignment_chain_else_return_statement() {
+    // Exact mono archive shape: subscript assignments take
+    // `finish_inline_statement_if`, whose inline else used
+    // `parse_expression_or_assignment` and hit the same mis-parse.
+    let items = parse("fn f(a: bool, b: bool) -> bool:\n    if a: rows[k] = v\n    elif b: rows[k] = w\n    else: return false\n    true\n");
+    let Node::Function(f) = &items[0] else { panic!("expected fn") };
+    let Node::If(first) = &f.body.statements[0] else { panic!("expected if") };
+    let Node::If(second) = &first.else_block.as_ref().unwrap().statements[0] else { panic!("expected elif") };
+    let else_block = second.else_block.as_ref().expect("else present");
+    assert!(
+        matches!(else_block.statements[0], Node::Return(_)),
+        "inline else `return` must be a Return statement, got {:?}",
+        else_block.statements[0]
+    );
+}
+
+#[test]
+fn parse_inline_elif_return_body_statement() {
+    // `elif cond: return x` in the `finish_inline_statement_if` chain.
+    let items = parse("fn f(a: bool, b: bool) -> i64:\n    if a: g()\n    elif b: return 2\n    else: return 3\n");
+    let Node::Function(f) = &items[0] else { panic!("expected fn") };
+    // Expression then-branch: the elif/else chain nests as Expr::If.
+    let Node::Expression(Expr::If { else_branch: Some(elif_expr), .. }) = &f.body.statements[0] else {
+        panic!("expected if expression, got {:?}", f.body.statements[0])
+    };
+    let Expr::If { then_branch, else_branch: Some(else_expr), .. } = elif_expr.as_ref() else {
+        panic!("expected nested elif if-expression, got {:?}", elif_expr)
+    };
+    let Expr::DoBlock(elif_stmts) = then_branch.as_ref() else {
+        panic!("inline elif `return` must wrap a DoBlock, got {:?}", then_branch)
+    };
+    assert!(
+        matches!(elif_stmts[0], Node::Return(_)),
+        "inline elif `return` must be a Return statement, got {:?}",
+        elif_stmts[0]
+    );
+    let Expr::DoBlock(else_stmts) = else_expr.as_ref() else {
+        panic!("inline else `return` must wrap a DoBlock, got {:?}", else_expr)
+    };
+    assert!(
+        matches!(else_stmts[0], Node::Return(_)),
+        "inline else `return` must be a Return statement, got {:?}",
+        else_stmts[0]
+    );
+}
