@@ -148,9 +148,9 @@ struct JitInstantiator:
     compiler_ctx_handle: i64  # Compiler context handle (i64, not CompilerContext to avoid constructor issues)
     loaded_metadata: Dict<text, LoadedMetadata>  # Simplified metadata
     possible_lookup: Dict<text, (text, PossibleInstantiation)>
-    possible_misses: Set<text>
+    possible_misses: Dict<text, bool>
     possible_miss_count: i32
-    in_progress: Set<text>
+    in_progress: Dict<text, bool>
     depth: i32
     compile_count: i32
     cached_count: i32
@@ -212,12 +212,12 @@ impl JitInstantiator:
         self.possible_miss_count = 0
 
     me remember_possible_miss(symbol: text):
-        if self.possible_misses.contains(symbol):
+        if self.possible_misses.has(symbol):
             return
         if self.possible_miss_count >= JIT_POSSIBLE_MISS_LIMIT:
             self.possible_misses = {}
             self.possible_miss_count = 0
-        self.possible_misses = self.possible_misses.insert(symbol)
+        self.possible_misses[symbol] = true
         self.possible_miss_count = self.possible_miss_count + 1
 
     me ensure_compiler_ctx() -> i64:
@@ -349,7 +349,7 @@ impl JitInstantiator:
         """Find possible instantiation for a symbol."""
         if self.possible_lookup.has(symbol):
             return Some(self.possible_lookup[symbol])
-        if self.possible_misses.contains(symbol):
+        if self.possible_misses.has(symbol):
             return nil
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
         for path in self.loaded_metadata.keys():
@@ -383,10 +383,10 @@ impl JitInstantiator:
             )
 
         # Check for cycle
-        if self.in_progress.contains(symbol):
-            # Convert set to list by iterating
+        if self.in_progress.has(symbol):
+            # Snapshot active keys before appending the repeated cycle symbol.
             var cycle: [text] = []
-            for sym in self.in_progress:
+            for sym in self.in_progress.keys():
                 cycle = cycle.push(sym)
             cycle = cycle.push(symbol)  # Add current symbol to show cycle
             return JitInstantiationResult.CircularDependency(cycle)
@@ -401,7 +401,7 @@ impl JitInstantiator:
             case nil: return JitInstantiationResult.NotFound(symbol)
 
         # Start JIT compilation
-        self.in_progress = self.in_progress.insert(symbol)
+        self.in_progress[symbol] = true
         self.depth = self.depth + 1
 
         if self.config.verbose:
@@ -410,7 +410,7 @@ impl JitInstantiator:
         val result = self.do_jit_compile(entry, smf_path)
 
         # Cleanup
-        self.in_progress = self.in_progress.remove(symbol)
+        self.in_progress.remove(symbol)
         self.depth = self.depth - 1
 
         result

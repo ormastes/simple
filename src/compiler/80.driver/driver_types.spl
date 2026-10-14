@@ -98,6 +98,39 @@ class FrozenStorageModuleSnapshotV1:
         self.ok and self.module_identity ==
             frozen_storage_module_identity_v1(self.module_name, self.sites, self.evidence)
 
+# Compact parsed proof survives transient AST eviction without retaining bodies.
+fn driver_native_parsed_module_has_no_runtime_body_v1(parsed: ParserModule) -> bool:
+    var only_extern_functions = true
+    for fn_name in parsed.functions.keys():
+        val parsed_fn = parsed.functions[fn_name]
+        if not parsed_fn.is_extern:
+            only_extern_functions = false
+    # `export use backend.{...}` facades produce an ParserImport record but NO
+    # Export record in the flat bridge (only bare `export a, b` emits one),
+    # e.g. std.nogc_async_mut.env.types — accept import-only and trait-only
+    # modules too; neither has standalone code by the decl checks below.
+    # Empty and comments-only modules have the same objectless outcome. Do not
+    # require an import/export/type declaration as a witness: env.utilities is
+    # intentionally empty and can still be reached through a facade. Parser
+    # presence and the body/data guards remain mandatory, so missing lowering
+    # output for a real definition is never silently accepted.
+    (parsed.domain_blocks.len() == 0 and
+        only_extern_functions and parsed.classes.len() == 0 and parsed.actors.len() == 0 and
+        parsed.impls.len() == 0 and
+        parsed.constants.len() == 0 and parsed.static_asserts.len() == 0 and
+        parsed.aop_advices.len() == 0 and parsed.di_bindings.len() == 0 and
+        parsed.arch_rules.len() == 0 and parsed.mock_decls.len() == 0)
+
+fn driver_native_parsed_objectless_proof_v1(module_name: text, path: text, source_identity: text) -> text:
+    if module_name == "" or path == "" or source_identity.len() != 64: return ""
+    sha256_text("native-parsed-objectless-v1\n" + module_name + "\n" + path + "\n" + source_identity)
+
+fn driver_native_parsed_objectless_proof_valid_v1(proof: text, module_name: text,
+        path: text, source_identity: text, mir: MirModule) -> bool:
+    val expected = driver_native_parsed_objectless_proof_v1(module_name, path, source_identity)
+    expected != "" and proof == expected and mir.name == module_name and
+        mir.functions.len() == 0 and mir.statics.len() == 0 and mir.constants.len() == 0
+
 class FrozenNativeModuleCapsuleV1:
     ok: bool
     module_name: text
@@ -594,6 +627,8 @@ class CompileContext:
     source_identities_owner: [text]
     source_module_names_owner: [text]
     native_sources_fingerprint: text
+    native_parsed_classifications: Dict<text, bool>
+    native_parsed_objectless_proofs: Dict<text, text>
     modules: Dict<text, ParserModule>
     module_surfaces: ModuleSurfacesByName?
     hir_modules: Dict<text, HirModule>
@@ -783,6 +818,8 @@ class CompileContext:
             source_identities_owner: [],
             source_module_names_owner: [],
             native_sources_fingerprint: "",
+            native_parsed_classifications: {},
+            native_parsed_objectless_proofs: {},
             modules: {},
             module_surfaces: nil,
             hir_modules: {},
