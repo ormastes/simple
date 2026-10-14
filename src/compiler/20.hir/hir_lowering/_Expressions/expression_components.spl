@@ -694,8 +694,24 @@ impl HirLowering:
                 # rejects with a genuine "unknown variant" compile error
                 # (verified empirically: build fails loudly, no binary --
                 # never silently wrong), so this branch is purely additive.
-                if enum_ == "" and rt_dict_contains(self.struct_field_order_by_name, variant) and not rt_dict_contains(self.enum_variant_names, variant):
-                    val field_order = self.struct_field_order_by_name[variant]
+                val positional_struct_symbol = self.symbols.lookup_or_invalid(variant)
+                val positional_record_owner = self.symbols.record_owner_identity_scalar_raw(positional_struct_symbol.id)
+                # Qualified declaration identity wins. Local prescan rows use
+                # the authored module spelling; admit those only for this
+                # actual declaration owner, not an imported same-name record.
+                val positional_raw_owner = self.symbols.symbol_defining_module_scalar_raw(positional_struct_symbol.id)
+                val positional_record_name = self.symbols.symbol_name_scalar_raw(positional_struct_symbol.id)
+                val positional_local_key = self.module_filename + "." + positional_record_name
+                val positional_field_key = if positional_record_owner != "" and rt_dict_contains(self.struct_field_order_by_name, positional_record_owner):
+                    positional_record_owner
+                elif positional_record_owner != "" and positional_raw_owner == self.module_filename and rt_dict_contains(self.struct_field_order_by_name, positional_local_key):
+                    positional_local_key
+                elif positional_record_owner != "" and (positional_raw_owner == self.module_filename or positional_raw_owner == "") and positional_record_owner == positional_record_name and rt_dict_contains(self.struct_field_order_by_name, positional_record_name):
+                    positional_record_name
+                else:
+                    ""
+                if enum_ == "" and positional_field_key != "" and not rt_dict_contains(self.enum_variant_names, variant):
+                    val field_order = self.struct_field_order_by_name[positional_field_key]
                     var sub_patterns: [Pattern] = []
                     if val pl_s = payload:
                         match pl_s:
@@ -703,7 +719,7 @@ impl HirLowering:
                                 sub_patterns = patterns_s
                             case Struct(_):
                                 ()
-                    val struct_symbol = self.symbols.lookup_or_invalid(variant)
+                    val struct_symbol = positional_struct_symbol
                     val struct_hir_type = if struct_symbol.is_valid():
                         HirType(kind: HirTypeKind.Named(struct_symbol, []), span: p.span)
                     else:

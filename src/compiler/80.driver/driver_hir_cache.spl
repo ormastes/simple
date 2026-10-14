@@ -52,7 +52,7 @@ use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
 use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, hir_module_decode_stable, hir_codec_header}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_escape}
-use compiler.driver.hir_cache_envelope_reader.{hir_cache_envelope_parse}
+use compiler.common.cache_contract.hir_cache_envelope_reader_v1.{hir_cache_envelope_parse, hir_cache_parser_record_valid_v1}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope}
 use std.common.crypto.sha256.{sha256_text, sha256_runtime_fallback_used}
@@ -148,8 +148,8 @@ fn hir_cache_key(source_path: text, closure_digest: text, is_entry: bool) -> tex
     val source_path_digest = sha256_text(source_path.replace("\\", "/"))
     sha256_text("hir-source-key-v2\n" + source_path_digest + "\n" + source_digest + "\n" + closure_digest + "\n" + entry_flag + "\n" + _hir_cache_env_switches() + hir_codec_header() + "\n")
 
-fn hir_cache_path(key: text) -> text:
-    hir_cache_dir() + "/" + key + ".hir"
+fn hir_cache_path(key: text, parser_selected: bool = false) -> text:
+    hir_cache_dir() + "/" + key + (if parser_selected: ".parser-v4.hir" else: ".hir")
 
 fn hir_cache_header() -> text:
     HIR_CACHE_ENTRY_VERSION + " " + hir_codec_header() + " " + frontend_parse_cache_scope()
@@ -175,32 +175,45 @@ fn hir_cache_header() -> text:
 #   [hir-cache] hits=0 misses=102 stores=102                    (real build)
 # Reproduced identically in the 02:03 build of the same target. On disk, 114 of
 # 216 entries carried a header from a superseded compiler identity.
-fn hir_cache_has(key: text) -> bool:
+fn hir_cache_has(key: text, parser_binding: text = "") -> bool:
     if key == "" or not hir_cache_enabled():
         return false
-    val path = hir_cache_path(key)
+    val path = hir_cache_path(key, parser_binding != "")
     if not file_exists(path):
         return false
     # Validate the whole frame, but retain neither its module nor diagnostics.
     # Preserve any earlier load's warnings before releasing this scratch scope.
     val previous_warnings = _hir_cache_last_warnings
+    val previous_parser_objectless = _hir_cache_last_parser_objectless
     if not transient_scope_begin():
         return false
-    val valid = hir_cache_load_in_owned_scope(key) != nil
+    val valid = hir_cache_load_in_owned_scope(key, parser_binding) != nil
     _hir_cache_last_warnings = previous_warnings
+    _hir_cache_last_parser_objectless = previous_parser_objectless
     val ended = transient_scope_end()
     valid and ended
 
 # nil for a miss, a foreign/corrupt entry, or a truncated one: every one of
 # those is "lower it in process", and the caller must not need to tell them
 # apart.
-fn hir_cache_load(key: text) -> HirModule?:
+var _hir_cache_last_parser_objectless: bool = false
+fn hir_cache_last_parser_objectless() -> bool: _hir_cache_last_parser_objectless
+
+fn hir_cache_load_parsed_v1(key: text, parser_binding: text) -> HirModule?:
+    if parser_binding.len() != 64: return nil
+    hir_cache_load(key, parser_binding)
+
+fn hir_cache_parser_binding_v1(key: text, module_name: text, path: text, source_identity: text) -> text:
+    if key.len() != 64 or module_name == "" or path == "" or source_identity.len() != 64: return ""
+    sha256_text("parser-classification-v1\n" + key + "\n" + module_name + "\n" + sha256_text(path) + "\n" + source_identity + "\n" + hir_cache_header())
+
+fn hir_cache_load(key: text, parser_binding: text = "") -> HirModule?:
     # Initialize the persistent frontend identity before entering scratch.
     if key == "" or not hir_cache_enabled():
         return nil
     if not transient_scope_begin():
         return nil
-    val decoded = hir_cache_load_in_owned_scope(key)
+    val decoded = hir_cache_load_in_owned_scope(key, parser_binding)
     val paused = transient_scope_pause()
     # A miss has no graph to promote: the runtime correctly rejects nil roots.
     # The owned loader only replaces the persistent warning root on a hit.
@@ -214,15 +227,16 @@ fn hir_cache_load(key: text) -> HirModule?:
 
 # HIR shard transactions already own the decode's scratch lifetime. They retain
 # only their small diagnostics/receipts, so no full HIR root is promoted here.
-fn hir_cache_load_in_owned_scope(key: text) -> HirModule?:
+fn hir_cache_load_in_owned_scope(key: text, parser_binding: text = "") -> HirModule?:
     if key == "" or not hir_cache_enabled():
         return nil
-    val path = hir_cache_path(key)
+    val path = hir_cache_path(key, parser_binding != "")
     if not file_exists(path):
         _hir_cache_reject("absent")
         return nil
     val raw = file_read_nullable(path) ?? ""
-    val entry = hir_cache_entry_parse(raw, hir_cache_header())
+    val expected_header = if parser_binding != "": "spl-hircache-v4-parser " + hir_cache_header() else: hir_cache_header()
+    val entry = hir_cache_entry_parse(raw, expected_header, parser_binding)
     if entry.reason != "":
         _hir_cache_reject(entry.reason)
         return nil
@@ -232,6 +246,7 @@ fn hir_cache_load_in_owned_scope(key: text) -> HirModule?:
     if decoded == nil:
         _hir_cache_reject("decode")
         return nil
+    _hir_cache_last_parser_objectless = entry.parser_classification.starts_with("objectless:")
     _hir_cache_last_warnings = entry.warnings
     _hir_cache_hits = _hir_cache_hits + 1
     decoded
@@ -243,6 +258,7 @@ struct HirCacheEntry:
     reason: text
     warnings: [text]
     blob: text
+    parser_classification: text = ""
 
 fn _hir_cache_entry_rejected(reason: text) -> HirCacheEntry:
     HirCacheEntry(reason: reason, warnings: [], blob: "")
@@ -255,7 +271,7 @@ fn _hir_cache_entry_rejected(reason: text) -> HirCacheEntry:
 # reader owns framing and byte preservation. The checksum is checked before
 # the framing verdict is trusted, so a truncated or bit-flipped body is
 # reported as `checksum`, never as a framing failure of garbage.
-fn hir_cache_entry_parse(raw: text, expected_header: text) -> HirCacheEntry:
+fn hir_cache_entry_parse(raw: text, expected_header: text, parser_binding: text = "") -> HirCacheEntry:
     val envelope = hir_cache_envelope_parse(raw, expected_header)
     if envelope.reason == "header":
         return _hir_cache_entry_rejected("header")
@@ -264,7 +280,12 @@ fn hir_cache_entry_parse(raw: text, expected_header: text) -> HirCacheEntry:
         return _hir_cache_entry_rejected("checksum")
     if envelope.reason == "framing":
         return _hir_cache_entry_rejected("framing")
-    HirCacheEntry(reason: "", warnings: envelope.warnings, blob: envelope.body)
+    if parser_binding != "" and (parser_binding.len() != 64 or
+            (envelope.parser_classification != "objectless:" + parser_binding and
+             envelope.parser_classification != "bodyful:" + parser_binding)):
+        return _hir_cache_entry_rejected("framing")
+    HirCacheEntry(reason: "", warnings: envelope.warnings, blob: envelope.body,
+        parser_classification: envelope.parser_classification)
 
 # Pure: the exact bytes `hir_cache_entry_parse` accepts back, for a given
 # header, warning list and codec blob.
@@ -272,11 +293,12 @@ fn hir_cache_entry_encode(header: text, warnings: [text], blob: text) -> text:
     header + "\n" + hir_cache_entry_encode_body(warnings, blob)
 
 # Everything after the header line: the checksum line, then the body it covers.
-fn hir_cache_entry_encode_body(warnings: [text], blob: text) -> text:
+fn hir_cache_entry_encode_body(warnings: [text], blob: text, parser_classification: text = "") -> text:
     var parts: [text] = ["W\n{warnings.len()}\n"]
     for w in warnings:
         parts.push(flat_pool_escape(w) + "\n")
-    val body = parts.join("") + blob
+    val prefix = if parser_classification != "": "P\n" + parser_classification + "\n" else: ""
+    val body = prefix + parts.join("") + blob
     HIR_CACHE_CHECKSUM_PREFIX + hir_cache_body_checksum(body) + "\n" + body
 
 # sha256 rather than a pure-Simple CRC: sha256_text is runtime-backed
@@ -347,7 +369,7 @@ fn hir_cache_clear_last_warnings():
 fn hir_cache_promote_diagnostic_owner_v1() -> bool:
     transient_promote(_hir_cache_last_reason)
 
-fn hir_cache_store(key: text, module: HirModule, warnings: [text]) -> bool:
+fn hir_cache_store(key: text, module: HirModule, warnings: [text], parser_classification: text = "") -> bool:
     if key == "" or not hir_cache_enabled():
         return false
     # Eligibility initializes the immutable frontend scope memo before scratch
@@ -355,13 +377,15 @@ fn hir_cache_store(key: text, module: HirModule, warnings: [text]) -> bool:
     # only the scalar store counter escapes. Do not borrow an enclosing scope.
     if not transient_scope_begin():
         return false
-    val stored = hir_cache_store_in_owned_scope(key, module, warnings)
+    val stored = hir_cache_store_in_owned_scope(key, module, warnings, parser_classification)
     # Always close, including codec refusal and failed writes/renames. A
     # short-circuit expression here would leak precisely the failure cases.
     val ended = transient_scope_end()
     stored and ended
 
-fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]) -> bool:
+fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text], parser_classification: text = "") -> bool:
+    if parser_classification != "" and
+            not hir_cache_parser_record_valid_v1(parser_classification): return false
     val blob = hir_module_encode(module)
     if blob == "":
         _hir_cache_refuse("codec")
@@ -389,9 +413,10 @@ fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]
         return false
     val dir = hir_cache_dir()
     val _made = rt_dir_create_all(dir)
-    val final_path = hir_cache_path(key)
+    val final_path = hir_cache_path(key, parser_classification != "")
     val tmp = final_path + ".{rt_getpid()}.tmp"
-    if not rt_file_write_text(tmp, hir_cache_header() + "\n" + hir_cache_entry_encode_body(warnings, blob)):
+    val header = if parser_classification != "": "spl-hircache-v4-parser " + hir_cache_header() else: hir_cache_header()
+    if not rt_file_write_text(tmp, header + "\n" + hir_cache_entry_encode_body(warnings, blob, parser_classification)):
         # A failed write can leave a partial temp (disk full is the measured
         # case, P-INFRA-3); it was never unlinked and never reported.
         val _partial = rt_file_delete(tmp)
@@ -771,3 +796,7 @@ export hir_shard_spec, hir_shard_active, hir_shard_claimed, hir_shard_owns
 export hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary
 export hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block
 export hir_shard_inventory
+
+export hir_cache_parser_binding_v1, hir_cache_last_parser_objectless
+export hir_cache_load_parsed_v1
+export hir_cache_path

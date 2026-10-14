@@ -1,0 +1,152 @@
+# Imported callable return inference uses caller-local canonical HIR signatures.
+# Native red evidence: source-event-inference-20261013 receiver-attempt1,
+# E-MONO-032/E-MONO-033 at the original transient_heap_promote_v1(event) call.
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule, HirSymbol, HirType, HirTypeKind}
+use compiler.mono.monomorphize_integration.{MonomorphizationPass, run_monomorphization}
+use compiler.verify.post_mono_verify.*
+
+fn imported_return_modules(left: text, right: text, caller: text) -> Dict<text, HirModule>:
+    val sources = [
+        SourceFile(path: "infer/left.spl", content: left, module_name: "infer.left"),
+        SourceFile(path: "infer/right.spl", content: right, module_name: "infer.right"),
+        SourceFile(path: "infer/caller.spl", content: caller, module_name: "infer.caller")
+    ]
+    var parsed: Dict<text, Module> = {}
+    for source in sources:
+        parsed[source.module_name] = parse_full_frontend(source.content, source.path, source.module_name, Logger(level: 0))
+    val surfaces = module_surfaces_from_modules(parsed, sources)
+    var result: Dict<text, HirModule> = {}
+    match surfaces:
+        case Ok(registry):
+            for source in sources:
+                var lowering = hirlowering_for_module(source.module_name, registry)
+                val hir = lowering.lower_module(parsed[source.module_name])
+                expect(lowering.errors.len()).to_equal(0)
+                result[source.module_name] = hir
+        case Err(error):
+            expect(error).to_equal("")
+    expect(result.len()).to_equal(3)
+    result
+
+describe "imported non-generic callable signatures in mono":
+    it "infers a local record value from an imported factory without an annotation":
+        step("Lower original source imports and specialize the generic call")
+        val modules = imported_return_modules(
+            "struct Event:\n    count: i64\nfn make() -> Event:\n    Event(count: 7)\nexport Event, make\n",
+            "fn unused() -> i64:\n    0\n",
+            "use infer.left.\{Event, make\}\nfn keep<T>(value: T) -> T:\n    value\nfn main() -> i64:\n    val event = make()\n    val kept = keep(event)\n    kept.count\n")
+        val (out, stats) = run_monomorphization(modules)
+        expect(stats.specializations_created).to_equal(1)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(post_mono_report_total(post_mono_verify_modules(out))).to_equal(0)
+
+    it "does not register generic imports even when their type parameter is unused":
+        step("Preserve canonical nil signatures for used and unused generic parameters")
+        val modules = imported_return_modules(
+            "fn identity<T>(value: T) -> T:\n    value\nfn unused<T>() -> i64:\n    7\nexport identity, unused\n",
+            "fn other() -> i64:\n    0\n",
+            "use infer.left.\{identity, unused\}\nfn main() -> i64:\n    0\n")
+        val caller: HirModule = modules["infer.caller"]
+        var mono_pass = MonomorphizationPass.create()
+        mono_pass.collect_generics(caller, "infer.caller")
+        var checked: i64 = 0
+        for id in caller.symbols.symbols.keys():
+            val symbol: HirSymbol = caller.symbols.symbols[id]
+            if symbol.defining_module == Some("infer.left"):
+                if symbol.name == "identity" or symbol.name == "unused" or symbol.name == "infer.left.identity" or symbol.name == "infer.left.unused":
+                    expect(symbol.type_ == nil).to_equal(true)
+                    expect(mono_pass.fn_returns.has("infer.caller#{symbol.id.id}")).to_equal(false)
+                    checked = checked + 1
+        expect(checked).to_equal(2)
+
+    it "keeps equal nominal names from two factory owners separate":
+        step("Inspect each caller-local return symbol's actual defining module")
+        val modules = imported_return_modules(
+            "struct Event:\n    count: i64\nfn make() -> Event:\n    Event(count: 7)\nexport Event, make\n",
+            "struct Event:\n    label: text\nfn make() -> Event:\n    Event(label: \"right\")\nexport Event, make\n",
+            "use infer.left.\{make as left_make\}\nuse infer.right.\{make as right_make\}\nfn main() -> i64:\n    0\n")
+        val caller: HirModule = modules["infer.caller"]
+        var mono_pass = MonomorphizationPass.create()
+        mono_pass.collect_generics(caller, "infer.caller")
+        var left_id: i64 = -1
+        var right_id: i64 = -1
+        # Resolve the actual aliases used by a caller. Historical import rows
+        # may remain in the table; their count is not callable identity.
+        for binding in ["left_make", "right_make"]:
+            val selected = caller.symbols.lookup_or_invalid(binding)
+            expect(selected.is_valid()).to_equal(true)
+            val symbol: HirSymbol = caller.symbols.symbols[selected.id]
+            val key = "infer.caller#{symbol.id.id}"
+            expect(mono_pass.fn_returns.has(key)).to_equal(true)
+            if mono_pass.fn_returns.has(key):
+                val ret: HirType = mono_pass.fn_returns[key]
+                match ret.kind:
+                    case HirTypeKind.Named(owner_symbol, _):
+                        val owner: HirSymbol = caller.symbols.symbols[owner_symbol.id]
+                        val expected_owner = if binding == "left_make": "infer.left" else: "infer.right"
+                        expect(symbol.defining_module ?? "").to_equal(expected_owner)
+                        expect(owner.defining_module ?? "").to_equal(expected_owner)
+                        if binding == "left_make":
+                            left_id = owner_symbol.id
+                        else:
+                            right_id = owner_symbol.id
+                    case _: expect(false).to_equal(true)
+        expect(left_id >= 0).to_equal(true)
+        expect(right_id >= 0).to_equal(true)
+        expect(left_id != right_id).to_equal(true)
+
+    it "keeps same-named imported factories distinct by their caller symbols":
+        step("Resolve two aliased factories to their different concrete returns")
+        val modules = imported_return_modules(
+            "fn make() -> i64:\n    7\nexport make\n",
+            "fn make() -> text:\n    \"right\"\nexport make\n",
+            "use infer.left.\{make as left_make\}\nuse infer.right.\{make as right_make\}\nfn keep<T>(value: T) -> T:\n    value\nfn main() -> i64:\n    val left = left_make()\n    val right = right_make()\n    val a = keep(left)\n    val b = keep(right)\n    a\n")
+        val (out, stats) = run_monomorphization(modules)
+        expect(stats.specializations_created).to_equal(2)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(post_mono_report_total(post_mono_verify_modules(out))).to_equal(0)
+
+    it "retains the imported return's nominal owner in the caller symbol table":
+        step("Check the actual lowered signature and mono return registry share identity")
+        val modules = imported_return_modules(
+            "struct Event:\n    count: i64\nfn make() -> Event:\n    Event(count: 7)\nexport Event, make\n",
+            "fn unused() -> i64:\n    0\n",
+            "use infer.left.\{Event, make\}\nfn main() -> i64:\n    val event = make()\n    event.count\n")
+        val caller: HirModule = modules["infer.caller"]
+        var mono_pass = MonomorphizationPass.create()
+        mono_pass.collect_generics(caller, "infer.caller")
+        var checked: i64 = 0
+        for id in caller.symbols.symbols.keys():
+            val symbol: HirSymbol = caller.symbols.symbols[id]
+            if symbol.name == "make" or symbol.name == "infer.left.make":
+                val key = "infer.caller#{symbol.id.id}"
+                expect(mono_pass.fn_returns.has(key)).to_equal(true)
+                if mono_pass.fn_returns.has(key):
+                    val ret: HirType = mono_pass.fn_returns[key]
+                    match ret.kind:
+                        case HirTypeKind.Named(owner_symbol, _):
+                            val owner: HirSymbol = caller.symbols.symbols[owner_symbol.id]
+                            expect(owner.name).to_equal("Event")
+                            expect(owner.defining_module ?? "").to_equal("infer.left")
+                            checked = checked + 1
+                        case _: expect(false).to_equal(true)
+        expect(checked).to_equal(1)
+
+    it "preserves local function returns when an imported alias shares their source name":
+        step("Specialize local and imported calls independently")
+        val modules = imported_return_modules(
+            "fn make() -> text:\n    \"imported\"\nexport make\n",
+            "fn unused() -> i64:\n    0\n",
+            "use infer.left.\{make as remote_make\}\nfn make() -> i64:\n    7\nfn keep<T>(value: T) -> T:\n    value\nfn main() -> i64:\n    val remote = remote_make()\n    val local = make()\n    val a = keep(local)\n    val b = keep(remote)\n    a\n")
+        val (out, stats) = run_monomorphization(modules)
+        expect(stats.specializations_created).to_equal(2)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(post_mono_report_total(post_mono_verify_modules(out))).to_equal(0)

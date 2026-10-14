@@ -1,3 +1,4 @@
+use compiler.mono.mono_archive_nominal_v2.{mono_archive_nominal_put_v2, mono_archive_nominal_digest_v2}
 # Ordered actual collection publication. No production ownership switch.
 use compiler.hir.hir_mono_symbol_projection_v1.*
 use compiler.mono.mono_archive_registration_types_v1.{MonoArchiveRegistrationRowV1,
@@ -59,7 +60,7 @@ fn mono_archive_current_registration_scratch_successor_v1(current: MonoArchiveCu
     val old = owner.state.facts
     var projections: Dict<text, text> = {}
     for name in old.symbol_projections.keys(): projections[name] = old.symbol_projections[name]
-    val facts = MonoArchiveFactsV1(body_authority: old.body_authority, feature_policy: old.feature_policy,
+    val facts = MonoArchiveFactsV1(nominal_rows: worker.archive_nominal_rows, nominal_keys: worker.archive_nominal_keys, body_authority: old.body_authority, feature_policy: old.feature_policy,
         initial_symbol: old.initial_symbol, sym_names: worker.sym_names, fn_returns: worker.fn_returns,
         fn_sigs: worker.fn_sigs, named_types: worker.named_types, named_ambiguous: worker.named_ambiguous,
         named_symbol_names: worker.named_symbol_names, field_types: worker.field_types,
@@ -213,8 +214,13 @@ fn mono_archive_registration_row_digest_v1(row: MonoArchiveRegistrationRowV1) ->
             for params in [value.canonical_type_params, value.bound_type_params]:
                 w.put_i64(params.len())
                 for param in params: hc_enc_hir_type_param(w, param)
-        case MonoArchiveRegistrationRowV1.SymbolProjection(key, value):
+        case MonoArchiveRegistrationRowV1.NominalDeclarationV2(key, value):
+            if key != "{value.module_name}#{value.id}" or mono_archive_nominal_digest_v2(value) == "": return ""
             w.put_i64(21)
+            w.put_text(key)
+            mono_archive_nominal_put_v2(w, value)
+        case MonoArchiveRegistrationRowV1.SymbolProjection(key, value):
+            w.put_i64(22)
             w.put_text(key)
             w.put_text(value)
         case MonoArchiveRegistrationRowV1.SymbolIdentity(key, value):
@@ -222,7 +228,7 @@ fn mono_archive_registration_row_digest_v1(row: MonoArchiveRegistrationRowV1) ->
             w.put_text(key)
             w.put_text(value)
     if not w.ok: return ""
-    sha256_text("mono-registration-row-v1\n" + w.finish())
+    sha256_text("mono-registration-row-v3\n" + w.finish())
 
 fn mono_archive_registration_receipt_seal_v1(receipt: MonoArchiveRegistrationReceiptV1) -> text:
     var w = HirCodecWriter.create()
@@ -244,7 +250,7 @@ fn mono_archive_registration_receipt_seal_v1(receipt: MonoArchiveRegistrationRec
         if digest == "": return ""
         w.put_text(digest)
     if not w.ok: return ""
-    sha256_text((if receipt.logical_name != "": "mono-logical-registration-receipt-v1\n" else: "mono-registration-receipt-v1\n") + w.finish())
+    sha256_text((if receipt.logical_name != "": "mono-logical-registration-receipt-v3\n" else: "mono-registration-receipt-v3\n") + w.finish())
 
 fn mono_archive_registration_scratch_collector_v1(owner: MonoArchiveRegistrationOwnerV1) -> MonomorphizationPass:
     var worker = MonomorphizationPass.create()
@@ -274,6 +280,8 @@ fn mono_archive_registration_scratch_collector_v1(owner: MonoArchiveRegistration
     for key in facts.templates.keys(): worker.archive_template_signatures[key] = facts.templates[key]
     for key in facts.recipes.keys(): worker.template_recipes[key] = facts.recipes[key]
     for key in facts.symbol_identities.keys(): worker.archive_symbol_identities[key] = facts.symbol_identities[key]
+    for key in facts.nominal_rows.keys(): worker.archive_nominal_rows[key] = facts.nominal_rows[key]
+    for module in facts.nominal_keys.keys(): worker.archive_nominal_keys[module] = facts.nominal_keys[module]
     worker
 
 fn mono_archive_collect_registration_in_owned_scope_v1(owner: MonoArchiveRegistrationOwnerV1,
@@ -537,6 +545,11 @@ fn mono_archive_collect_complete_registration_v1(owner: MonoArchiveRegistrationO
             mono_archive_registration_row_digest_v1(row) !=
                 mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.SymbolIdentity(key, facts.symbol_identities[key]))
         if changed: rows = rows.push(row)
+    for key in worker.archive_nominal_rows.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.NominalDeclarationV2(key, worker.archive_nominal_rows[key])
+        val changed = not facts.nominal_rows.has(key) or
+            mono_archive_nominal_digest_v2(worker.archive_nominal_rows[key]) != mono_archive_nominal_digest_v2(facts.nominal_rows[key])
+        if changed: rows = rows.push(row)
     var receipt = MonoArchiveRegistrationReceiptV1(archive: archive,
         base_digest: base, base_epoch: owner.epoch, rows: rows, roots: roots,
         next_symbol: worker.next_symbol,
@@ -609,6 +622,11 @@ fn mono_archive_registration_install_v1(owner: MonoArchiveRegistrationOwnerV1,
             case MonoArchiveRegistrationRowV1.TemplateSignature(key, value): owner.state.facts.templates[key] = value
             case MonoArchiveRegistrationRowV1.TemplateRecipe(key, value): owner.state.facts.recipes[key] = value
             case MonoArchiveRegistrationRowV1.SymbolIdentity(key, value): owner.state.facts.symbol_identities[key] = value
+            case MonoArchiveRegistrationRowV1.NominalDeclarationV2(key, value):
+                if not owner.state.facts.nominal_rows.has(key):
+                    val prior: [text] = owner.state.facts.nominal_keys[value.module_name] ?? []
+                    owner.state.facts.nominal_keys[value.module_name] = prior.push(key)
+                owner.state.facts.nominal_rows[key] = value
             case MonoArchiveRegistrationRowV1.SymbolProjection(key, value): owner.state.facts.symbol_projections[key] = value
     owner.state.next_symbol = receipt.next_symbol
     var facts = owner.state.facts
