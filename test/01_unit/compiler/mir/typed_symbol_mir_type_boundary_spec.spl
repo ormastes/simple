@@ -1,0 +1,69 @@
+use std.spec.*
+use compiler.common.diagnostics.span.Span
+use compiler.common.dependency.visibility.Visibility
+use compiler.hir.hir_types.{SymbolTable, SymbolId, SymbolKind, HirSymbol}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.mir.mir_types.{MirType, MirTypeKind, mir_type_is_text,
+    mir_type_probe_text, mir_type_probe_shallow}
+
+describe "typed symbol optional and MIR type boundaries":
+    it "keeps zero valid and distinguishes absent, missing, and nonfunction rows":
+        var table = SymbolTable.new()
+        val zero = table.define("zero", SymbolKind.Function, nil,
+            Span.empty(), Visibility.Private, false, nil)
+        val variable = table.define("variable", SymbolKind.Variable, nil,
+            Span.empty(), Visibility.Private, false, nil)
+        expect(zero.id).to_equal(0)
+        expect(variable.id).to_equal(1)
+        val observed: HirSymbol? = table.get_symbol(Some(zero))
+        expect(observed != nil).to_equal(true)
+        if val payload = observed:
+            val symbol: HirSymbol = payload
+            expect(symbol.id.id).to_equal(0)
+            expect(symbol.name).to_equal("zero")
+        expect(table.get_symbol(nil) == nil).to_equal(true)
+        expect(table.get_symbol(Some(SymbolId.new(999))) == nil).to_equal(true)
+        expect(table.get_symbol(Some(SymbolId.new(-1))) == nil).to_equal(true)
+        expect(table.is_function(zero)).to_equal(true)
+        expect(table.is_function(variable)).to_equal(false)
+        expect(table.is_function(SymbolId.new(999))).to_equal(false)
+
+    it "renames zero while retaining scope lookup and missing-row fallbacks":
+        var table = SymbolTable.new()
+        val zero = table.define("original", SymbolKind.Function, nil,
+            Span.empty(), Visibility.Private, false, nil)
+        expect(table.symbol_display_name(zero, "fallback")).to_equal("original")
+        table.rename_symbol(zero, "module.original")
+        expect(table.symbol_display_name(zero, "fallback")).to_equal("module.original")
+        expect(table.lookup_or_invalid("original").id).to_equal(0)
+        expect(table.lookup_or_invalid("module.original").id).to_equal(-1)
+        expect(table.exact_symbols.has("module.original")).to_equal(true)
+        val exact_id: i64 = table.exact_symbols["module.original"]
+        expect(exact_id).to_equal(0)
+        expect(table.symbol_display_name(SymbolId.new(999), "fallback")).to_equal("fallback")
+        expect(table.symbol_display_name(nil, "absent")).to_equal("absent")
+        val exact_count = table.exact_symbols.len()
+        table.rename_symbol(SymbolId.new(999), "missing")
+        table.rename_symbol(nil, "absent")
+        expect(table.symbols.len()).to_equal(1)
+        expect(table.exact_symbols.len()).to_equal(exact_count)
+        expect(table.symbol_display_name(zero, "fallback")).to_equal("module.original")
+
+    it "recognizes both pointer mutabilities without accepting nontext kinds":
+        val byte = MirType(kind: MirTypeKind.I8)
+        val text = MirType.ptr(byte, false)
+        expect(mir_type_is_text(text)).to_equal(true)
+        expect(mir_type_is_text(MirType.ptr(byte, true))).to_equal(true)
+        expect(mir_type_is_text(MirType.ptr(MirType.i64(), false))).to_equal(false)
+        expect(mir_type_is_text(MirType.i64())).to_equal(false)
+        expect(mir_type_is_text(MirType(kind: MirTypeKind.Opaque("str")))).to_equal(false)
+
+    it "retains absent and nested probe text without struct equality":
+        expect(mir_type_probe_text(nil)).to_equal("nil")
+        expect(mir_type_probe_shallow(nil)).to_equal("nil")
+        val array = MirType(kind: MirTypeKind.Array(MirType.i64(), 3))
+        val dict = MirType(kind: MirTypeKind.Dict(MirType.i32(), MirType.bool()))
+        expect(mir_type_probe_text(array)).to_equal("Array(I64,3)")
+        expect(mir_type_probe_shallow(array)).to_equal("Array")
+        expect(mir_type_probe_text(dict)).to_equal("Dict(I32,Bool)")
+        expect(mir_type_probe_shallow(dict)).to_equal("Dict")
