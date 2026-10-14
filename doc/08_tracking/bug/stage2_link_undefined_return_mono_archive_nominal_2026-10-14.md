@@ -1,6 +1,6 @@
 # Site 18: Stage 2 does not LINK on `release_phase3` — undefined `_return` from `MonomorphizationPass.ensure_archive_nominal_table_v2`
 
-## Status: WORKAROUND LANDED (source), ROOT CAUSE OPEN (Rust seed parser), 2026-10-14
+## Status: ROOT CAUSE FIXED (Rust seed parser, PR #3484); source workaround PR #3483; 2026-10-14
 
 ## Symptom
 
@@ -72,13 +72,21 @@ exists in the compiled tree (exactly one `unresolved call 'return'` warning
 across the whole stage2 build). This unblocks the stage2 link; it does NOT
 fix the seed parser.
 
-## Remaining root-cause work (seed-owned)
+## Root cause fix (landed)
 
-Fix the Rust seed's parse/lowering of single-line `else: return <expr>`
-(suspect: the same-line statement parser used for the `if` branch is reused
-for the `else` branch but `return` is only a statement keyword in block
-position). Until fixed, every cold bootstrap compiles this language shape
-wrong. A seed regression test should cover the minimal repro above.
+PR #3484 (`fix/seed-parser-inline-else-return-20261014`): the inline
+expression-if path in `parse_if` and the inline elif/else bodies in
+`finish_inline_statement_if` parsed their body with `parse_expression` /
+`parse_expression_or_assignment`, treating `return` as an identifier;
+`parse_if_expr` already had the Return/Break/Continue guard. The fix applies
+the same guard (DoBlock wrap) at the three missing sites, with parser
+regression tests. Verified: the minimal repro compiles and runs correctly
+under the rebuilt seed; the full simple-parser suite passes (one
+error_recovery failure pre-exists on unmodified release_phase3).
+
+PR #3483's block-form source workaround remains valid for the CURRENT
+admitted seed and can be reverted once a seed built from PR #3484 is
+admitted.
 
 Gate reminder (from `doc/03_plan/phase3_bootstrap_remaining_2026-10-13.md`):
 Phase 3 and native Hello World must pass before landing compiler changes;
