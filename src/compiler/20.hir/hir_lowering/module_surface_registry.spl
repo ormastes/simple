@@ -8,6 +8,7 @@ use compiler.hir.hir_lowering.module_surface_declarations.{module_surface_from_m
 use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_name_index_build}
 use compiler.hir.hir_lowering.module_surface_registry_index.{module_surfaces_freeze, module_surfaces_frozen_alignment, module_surfaces_frozen_alignment_error, module_surfaces_validate_index_alignment}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_fold_std_alias, module_surface_declaration_matches}
+use std.io_runtime.{hash_text}
 
 extern fn rt_hash_text(content: text) -> i64
 extern fn rt_transient_heap_promote<T>(value: T) -> bool
@@ -57,7 +58,53 @@ impl ModuleSurfaceBuilder:
     static fn new() -> ModuleSurfaceBuilder:
         ModuleSurfaceBuilder(
             surfaces: [], index_by_name: {}, index_by_path: {},
-            ordered_names: [], ordered_indices: [], frozen: false)
+            ordered_names: [], ordered_indices: [], frozen: false,
+            index_by_path_keys: [], index_by_path_values: [],
+            index_by_path_hash_buckets: [], index_by_path_hash_next: [],
+            index_by_path_hash_mask: 0)
+
+    me index_by_path_lookup(path: text) -> i64:
+        """Slot of `path` in the scalar path->index chain table, or -1. Never
+        reads the {text: i64} Dict: contains_key on it false-positives under
+        stage-2 native codegen (BOOT-20 family, 2026-10-13 compiler_cli_build
+        victims; see the field comment on ModuleSurfaceBuilder)."""
+        if self.index_by_path_hash_buckets.len() == 0:
+            return -1
+        val bucket = hash_text(path) & self.index_by_path_hash_mask
+        var index = self.index_by_path_hash_buckets[bucket]
+        while index >= 0:
+            if self.index_by_path_keys[index] == path:
+                return index
+            index = self.index_by_path_hash_next[index]
+        -1
+
+    me index_by_path_lookup_index(path: text) -> i64:
+        """Surface index for `path`, or -1. Scalar authority; the Dict is not
+        consulted (same native defect class as index_by_path_lookup)."""
+        val slot = self.index_by_path_lookup(path)
+        if slot < 0:
+            return -1
+        self.index_by_path_values[slot]
+
+    me index_by_path_record(path: text, surface_index: i64):
+        """Append one path -> surface index row to the scalar chain table; the
+        legacy Dict is written in lockstep so its shape stays spec-visible."""
+        if self.index_by_path_hash_buckets.len() == 0:
+            # 4096 buckets, built once per builder: bounded by the closure's
+            # source count, chains absorb the alias volume.
+            val path_bucket_count: i64 = 4096
+            self.index_by_path_hash_mask = path_bucket_count - 1
+            var fill = 0
+            while fill < path_bucket_count:
+                self.index_by_path_hash_buckets = self.index_by_path_hash_buckets.push(-1)
+                fill = fill + 1
+        val bucket = hash_text(path) & self.index_by_path_hash_mask
+        self.index_by_path_hash_next = self.index_by_path_hash_next.push(
+            self.index_by_path_hash_buckets[bucket])
+        self.index_by_path_hash_buckets[bucket] = self.index_by_path_keys.len()
+        self.index_by_path_keys = self.index_by_path_keys.push(path)
+        self.index_by_path_values = self.index_by_path_values.push(surface_index)
+        self.index_by_path[path] = surface_index
 
     me add_indexed_name(name: text, surface_index: i64) -> Result<(), text>:
         if self.frozen:
@@ -118,10 +165,10 @@ impl ModuleSurfaceBuilder:
         Ok(())
 
     me has_path(path: text) -> bool:
-        self.index_by_path.contains_key(module_surface_canonical_path(path))
+        self.index_by_path_lookup_index(module_surface_canonical_path(path)) >= 0
 
     me has_canonical_path(canonical_path: text) -> bool:
-        self.index_by_path.contains_key(canonical_path)
+        self.index_by_path_lookup_index(canonical_path) >= 0
 
     me add_parsed(module: ParserModule, source: SourceFile, source_index: i64) -> Result<(), text>:
         val canonical_path = module_surface_canonical_path(source.path)
@@ -130,7 +177,7 @@ impl ModuleSurfaceBuilder:
     me add_parsed_canonical(module: ParserModule, source: SourceFile, source_index: i64, canonical_path: text) -> Result<(), text>:
         if self.frozen:
             return Err("module surface builder is frozen")
-        if self.index_by_path.contains_key(canonical_path):
+        if self.index_by_path_lookup_index(canonical_path) >= 0:
             return Err("module surface already exists for physical source: {canonical_path}")
         val surface_result = module_surface_from_module(module, source, source_index)
         if surface_result.is_err():
@@ -155,7 +202,7 @@ impl ModuleSurfaceBuilder:
     ) -> Result<(), text>:
         if self.frozen:
             return Err("module surface builder is frozen")
-        if self.index_by_path.contains_key(canonical_path):
+        if self.index_by_path_lookup_index(canonical_path) >= 0:
             return Err("module surface already exists for physical source: {canonical_path}")
         val surface_index = self.surfaces.len()
         val name_result = self.add_indexed_canonical_identity(
@@ -163,7 +210,7 @@ impl ModuleSurfaceBuilder:
         if name_result.is_err():
             return Err(name_result.unwrap_err())
         self.surfaces = self.surfaces.push(surface)
-        self.index_by_path[canonical_path] = surface_index
+        self.index_by_path_record(canonical_path, surface_index)
         Ok(())
 
     me add_alias(source: SourceFile) -> Result<(), text>:
@@ -179,9 +226,10 @@ impl ModuleSurfaceBuilder:
     ) -> Result<(), text>:
         if self.frozen:
             return Err("module surface builder is frozen")
-        if not self.index_by_path.contains_key(canonical_path):
+        val alias_slot = self.index_by_path_lookup(canonical_path)
+        if alias_slot < 0:
             return Err("missing physical module surface for alias: {canonical_path}")
-        val surface_index = self.index_by_path[canonical_path]
+        val surface_index = self.index_by_path_values[alias_slot]
         if surface_index < 0 or surface_index >= self.surfaces.len():
             return Err("invalid physical module surface index for alias: path={canonical_path} index={surface_index} len={self.surfaces.len()}")
         val surface = self.surfaces[surface_index]
@@ -287,7 +335,7 @@ pub fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: 
             return Err("invalid parsed module for source: {source.module_name}")
         val canonical_path = module_surface_canonical_path(source.path)
         if builder.has_canonical_path(canonical_path):
-            val surface = builder.surfaces[builder.index_by_path[canonical_path]]
+            val surface = builder.surfaces[builder.index_by_path_lookup_index(canonical_path)]
             if not module_surface_declaration_matches(surface, module):
                 return Err("conflicting declaration metadata for physical source: {canonical_path}")
             val alias_result = builder.add_alias_canonical(source, canonical_path)
@@ -309,8 +357,9 @@ pub fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: 
         # Resolve that identity before declaration-shape matching: unrelated
         # physical modules may expose the same API.
         val parsed_path = module_surface_canonical_path(module.name)
-        if builder.index_by_path.contains_key(parsed_path):
-            val physical_index = builder.index_by_path[parsed_path]
+        val parsed_slot = builder.index_by_path_lookup(parsed_path)
+        if parsed_slot >= 0:
+            val physical_index = builder.index_by_path_values[parsed_slot]
             val canonical_result = builder.add_indexed_canonical_identity(
                 alias, physical_index,
                 builder.surfaces[physical_index].canonical_name)
