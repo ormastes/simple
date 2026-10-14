@@ -1,5 +1,7 @@
 # MIR instruction graph and function/module owners.
 
+use std.common.math.math.{math_pow}
+
 use compiler.hir.hir_types.{SymbolId, HirType}
 use compiler.hir.hir_definitions.{HirContractBlock}
 use compiler.common.diagnostics.span.{Span}
@@ -12,6 +14,11 @@ use compiler.mir.mir_instruction_kinds.*
 use compiler.mir.mir_types.{MirType}
 use compiler.mir.mir_instruction_support.{mir_operand_const_int}
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
+
+# Match runtime.h: integer folding uses the existing signed i64 power ABI.
+# An explicit call also records the extern signature for older LLVM producers.
+@unsafe(reason: "existing integer power runtime ABI", capabilities: [ffi])
+extern fn __simple_pow(base: i64, exp: i64) -> i64
 
 struct MirInst:
     """MIR instruction."""
@@ -152,21 +159,22 @@ impl MirBlock:
                 if value == nil:
                     0
                 else:
-                    val payload = value ?? mir_operand_const_int(0)
+                    val payload: MirOperand = value ?? mir_operand_const_int(0)
                     match payload.kind:
-                        case Copy(_): 1
-                        case Move(_): 2
-                        case Const(_, _): 3
+                        case MirOperandKind.Copy(_): 1
+                        case MirOperandKind.Move(_): 2
+                        case MirOperandKind.Const(_, _): 3
             case _: -1
 
+    # Name every operand variant: future enum additions must be classified.
     fn bootstrap_ret_local_id() -> i64:
         match self.terminator:
             case Ret(value):
                 if value != nil:
-                    val payload = value ?? mir_operand_const_int(0)
+                    val payload: MirOperand = value ?? mir_operand_const_int(0)
                     match payload.kind:
-                        case Copy(local) | Move(local): local.id
-                        case _: -1
+                        case MirOperandKind.Copy(local) | MirOperandKind.Move(local): local.id
+                        case MirOperandKind.Const(_, _): -1
                 else:
                     -1
             case _: -1
@@ -176,20 +184,20 @@ impl MirBlock:
         match self.terminator:
             case Ret(value):
                 if value != nil:
-                    val payload = value ?? mir_operand_const_int(0)
+                    val payload: MirOperand = value ?? mir_operand_const_int(0)
                     match payload.kind:
-                        case Const(const_value, _):
+                        case MirOperandKind.Const(const_value, _):
                             match const_value:
-                                case Int(_): 1
-                                case FloatLexeme(_): 2
-                                case Float(_): 2
-                                case Bool(_): 3
-                                case Str(_): 4
-                                case Zero: 5
-                                case Array(_): 6
-                                case Tuple(_): 7
-                                case Struct(_): 8
-                        case _: 0
+                                case MirConstValue.Int(_): 1
+                                case MirConstValue.FloatLexeme(_): 2
+                                case MirConstValue.Float(_): 2
+                                case MirConstValue.Bool(_): 3
+                                case MirConstValue.Str(_): 4
+                                case MirConstValue.Zero: 5
+                                case MirConstValue.Array(_): 6
+                                case MirConstValue.Tuple(_): 7
+                                case MirConstValue.Struct(_): 8
+                        case MirOperandKind.Copy(_) | MirOperandKind.Move(_): 0
                 else:
                     0
             case _: 0
@@ -198,20 +206,20 @@ impl MirBlock:
         match self.terminator:
             case Ret(value):
                 if value != nil:
-                    val payload = value ?? mir_operand_const_int(0)
+                    val payload: MirOperand = value ?? mir_operand_const_int(0)
                     match payload.kind:
-                        case Const(const_value, _):
+                        case MirOperandKind.Const(const_value, _):
                             match const_value:
-                                case Int(v): "{v}"
-                                case FloatLexeme(v): v
-                                case Float(v): "{v}"
-                                case Bool(v): if v: "1" else: "0"
-                                case Str(v): v
-                                case Zero: "0"
-                                case Array(_): "zeroinitializer"
-                                case Tuple(_): "zeroinitializer"
-                                case Struct(_): "zeroinitializer"
-                        case _: "0"
+                                case MirConstValue.Int(v): "{v}"
+                                case MirConstValue.FloatLexeme(v): v
+                                case MirConstValue.Float(v): "{v}"
+                                case MirConstValue.Bool(v): if v: "1" else: "0"
+                                case MirConstValue.Str(v): v
+                                case MirConstValue.Zero: "0"
+                                case MirConstValue.Array(_): "zeroinitializer"
+                                case MirConstValue.Tuple(_): "zeroinitializer"
+                                case MirConstValue.Struct(_): "zeroinitializer"
+                        case MirOperandKind.Copy(_) | MirOperandKind.Move(_): "0"
                 else:
                     "0"
             case _: "0"
@@ -386,7 +394,7 @@ impl MirBody:
 
 fn mir_fold_binop(op: MirBinOp, left: MirConstValue, right: MirConstValue) -> MirConstValue?:
     match (left, right):
-        case (Int(l), Int(r)):
+        case (MirConstValue.Int(l), MirConstValue.Int(r)):
             var has_result = true
             var result = 0
             match op:
@@ -403,7 +411,9 @@ fn mir_fold_binop(op: MirBinOp, left: MirConstValue, right: MirConstValue) -> Mi
                         result = l % r
                     else:
                         has_result = false
-                case Pow: result = l ** r
+                case Pow:
+                    unsafe(capabilities: [ffi]):
+                        result = __simple_pow(l, r)
                 case BitAnd: result = l & r
                 case BitOr: result = l | r
                 case BitXor: result = l xor r
@@ -420,7 +430,7 @@ fn mir_fold_binop(op: MirBinOp, left: MirConstValue, right: MirConstValue) -> Mi
                 return nil
             Some(MirConstValue.Int(result))
 
-        case (Float(l), Float(r)):
+        case (MirConstValue.Float(l), MirConstValue.Float(r)):
             var has_result = true
             var result = 0.0
             match op:
@@ -432,7 +442,7 @@ fn mir_fold_binop(op: MirBinOp, left: MirConstValue, right: MirConstValue) -> Mi
                         result = l / r
                     else:
                         has_result = false
-                case Pow: result = l ** r
+                case Pow: result = math_pow(l, r)
                 case _: has_result = false
             if not has_result:
                 return nil

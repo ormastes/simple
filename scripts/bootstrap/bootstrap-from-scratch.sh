@@ -996,8 +996,8 @@ if [ "${bootstrap_strategy}" != adhoc ] && [ "${full_cli}" -eq 1 ] &&
   exit 1
 fi
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-repo_root=$(CDPATH= cd -- "${script_dir}/../.." && pwd)
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+repo_root=$(CDPATH= cd -- "${script_dir}/../.." && pwd -P)
 . "${repo_root}/scripts/bootstrap/bootstrap-cache-policy.shs"
 cd "${repo_root}"
 BOOTSTRAP_STAGE3_FACADE_PATH=\
