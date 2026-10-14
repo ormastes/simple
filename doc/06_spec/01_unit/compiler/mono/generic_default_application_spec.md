@@ -5,7 +5,14 @@ Executable specification: `test/01_unit/compiler/mono/generic_default_applicatio
 
 The caller supplies explicit arguments first. Positional arguments and an expected
 result can infer remaining bindings. An inference conflict or unknown argument
-type refuses completion. Defaults fill only still-unbound parameters in declaration
+type refuses completion. Empty array/dictionary literals provide legitimate absent
+element evidence: later arguments may bind it, otherwise a declared default may
+fill it. An actual Ok/Err enum value can carry an Infer placeholder for its absent
+arm only; its active payload must infer a concrete type matching the active arm.
+Both-arm holes and erased active payloads refuse. Its known arm still binds.
+Any/Error and unresolved declaration types, including
+nested erasure and nonconcrete cast/conversion targets, refuse instead of letting a
+default conceal them. Defaults fill only still-unbound parameters in declaration
 order. Earlier completed parameters substitute dependent defaults. Values travel
 into declaration scope before completion and back into caller scope before keying.
 

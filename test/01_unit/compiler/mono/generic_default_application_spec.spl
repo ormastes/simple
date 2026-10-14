@@ -8,7 +8,7 @@ use compiler.frontend.frontend.parse_full_frontend
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable, SymbolKind, Visibility}
-use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg, HirFunction, HirTypeParam}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg, HirFunction, HirTypeParam, HirEnumPayload}
 use compiler.mono.monomorphize_integration.MonomorphizationPass
 use compiler.mono.mono_archive_types_v1.{MonoTemplateSignatureV1, MonoTemplateBodyModeV1}
 
@@ -44,6 +44,96 @@ fn default_test_pass(mode: MonoTemplateBodyModeV1) -> MonomorphizationPass:
     pass_
 
 describe "generic defaults complete actual caller-owned specialization keys":
+    it "keeps empty literal absence until a later witness or declared default":
+        var pass_ = MonomorphizationPass.create()
+        pass_.current_module = "provider"
+        val integer = default_test_type(HirTypeKind.Int(64, true))
+        val boolean = default_test_type(HirTypeKind.Bool)
+        val parameter = default_test_parameter(701, "T", boolean)
+        val pattern = default_test_type(HirTypeKind.TypeParam("T", []))
+        val array_pattern = default_test_type(HirTypeKind.Array(pattern, nil))
+        val empty = HirExpr(kind: HirExprKind.ArrayLit([], nil), has_type_: false, type_: nil, span: Span.empty())
+        val empty_argument = HirCallArg(has_name: false, name: "", value: empty, span: Span.empty())
+        val value = HirExpr(kind: HirExprKind.IntLit(9, "i64"), has_type_: true, type_: integer, span: Span.empty())
+        val witness = HirCallArg(has_name: false, name: "", value: value, span: Span.empty())
+        val signature = MonoTemplateSignatureV1(name: "first_or", param_types: [array_pattern, pattern], return_type: pattern, type_params: [parameter])
+        val completed = pass_.resolve_call_type_args_signature_v1(signature, [empty_argument, witness], [])
+        expect(completed.is_ok()).to_be(true)
+        expect(completed.unwrap()[0].kind == HirTypeKind.Int(64, true)).to_be(true)
+        val only_empty = MonoTemplateSignatureV1(name: "empty_default", param_types: [array_pattern], return_type: integer, type_params: [parameter])
+        val defaulted = pass_.resolve_call_type_args_signature_v1(only_empty, [empty_argument], [])
+        expect(defaulted.is_ok()).to_be(true)
+        expect(defaulted.unwrap()[0].kind == HirTypeKind.Bool).to_be(true)
+        val required = default_test_parameter(701, "T", nil)
+        val no_default = MonoTemplateSignatureV1(name: "empty_required", param_types: [array_pattern], return_type: integer, type_params: [required])
+        expect(pass_.resolve_call_type_args_signature_v1(no_default, [empty_argument], []).is_err()).to_be(true)
+
+    it "rejects invalid explicit target evidence without defaulting or publication":
+        var pass_ = default_test_pass(MonoTemplateBodyModeV1.ArchiveRequests)
+        val signature = pass_.template_signature_v1("identity")
+        val integer = default_test_type(HirTypeKind.Int(64, true))
+        val value = HirExpr(kind: HirExprKind.IntLit(1, "i64"), has_type_: true, type_: integer, span: Span.empty())
+        val invalid_types = [default_test_type(HirTypeKind.Any), default_test_type(HirTypeKind.Error), default_test_type(HirTypeKind.Infer(1, 0)), default_test_type(HirTypeKind.Array(default_test_type(HirTypeKind.Any), nil)), default_test_type(HirTypeKind.Result(integer, default_test_type(HirTypeKind.Error)))]
+        val before = pass_.next_symbol
+        for target in invalid_types:
+            val casts = [HirExprKind.Cast(value, target), HirExprKind.As(value, target), HirExprKind.ConvertCall(value, target)]
+            for kind in casts:
+                val cast = HirExpr(kind: kind, has_type_: false, type_: nil, span: Span.empty())
+                val argument = HirCallArg(has_name: false, name: "", value: cast, span: Span.empty())
+                val result = pass_.resolve_call_type_args_signature_v1(signature, [argument], [])
+                expect(result.is_err()).to_be(true)
+                expect(result.unwrap_err()).to_contain("invalid or erased")
+                val original = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: 0), "identity"), has_type_: false, type_: nil, span: Span.empty())
+                pass_.rewrite_call(original, [argument], [])
+                expect(pass_.spec_symbols.len()).to_equal(0)
+                expect(pass_.archive_requests.len()).to_equal(0)
+                expect(pass_.stats.specializations_created).to_equal(0)
+                expect(pass_.next_symbol).to_equal(before)
+
+    it "retains valid Result missing-arm evidence without accepting nested erasure":
+        var pass_ = MonomorphizationPass.create()
+        pass_.current_module = "provider"
+        val integer = default_test_type(HirTypeKind.Int(64, true))
+        val boolean = default_test_type(HirTypeKind.Bool)
+        val t = default_test_parameter(801, "T", boolean)
+        val e = default_test_parameter(802, "E", boolean)
+        val pattern = default_test_type(HirTypeKind.Result(default_test_type(HirTypeKind.TypeParam("T", [])), default_test_type(HirTypeKind.TypeParam("E", []))))
+        val signature = MonoTemplateSignatureV1(name: "consume", param_types: [pattern], return_type: integer, type_params: [t, e])
+        val value = HirExpr(kind: HirExprKind.IntLit(1, "i64"), has_type_: true, type_: integer, span: Span.empty())
+        val partial = default_test_type(HirTypeKind.Result(integer, default_test_type(HirTypeKind.Infer(1, 0))))
+        val ok = HirExpr(kind: HirExprKind.EnumLit(partial, "Ok", HirEnumPayload.Tuple([value])), has_type_: false, type_: nil, span: Span.empty())
+        val argument = HirCallArg(has_name: false, name: "", value: ok, span: Span.empty())
+        val completed = pass_.resolve_call_type_args_signature_v1(signature, [argument], [])
+        expect(completed.is_ok()).to_be(true)
+        expect(completed.unwrap()[0].kind == HirTypeKind.Int(64, true)).to_be(true)
+        expect(completed.unwrap()[1].kind == HirTypeKind.Bool).to_be(true)
+        val invalid = default_test_type(HirTypeKind.Result(integer, default_test_type(HirTypeKind.Any)))
+        val invalid_ok = HirExpr(kind: HirExprKind.EnumLit(invalid, "Ok", HirEnumPayload.Tuple([value])), has_type_: false, type_: nil, span: Span.empty())
+        val invalid_argument = HirCallArg(has_name: false, name: "", value: invalid_ok, span: Span.empty())
+        expect(pass_.resolve_call_type_args_signature_v1(signature, [invalid_argument], []).is_err()).to_be(true)
+        for target in [default_test_type(HirTypeKind.Any), default_test_type(HirTypeKind.Error), default_test_type(HirTypeKind.Infer(2, 0))]:
+            val erased = HirExpr(kind: HirExprKind.Cast(value, target), has_type_: false, type_: nil, span: Span.empty())
+            val lying_ok = HirExpr(kind: HirExprKind.EnumLit(partial, "Ok", HirEnumPayload.Tuple([erased])), has_type_: false, type_: nil, span: Span.empty())
+            val lying_argument = HirCallArg(has_name: false, name: "", value: lying_ok, span: Span.empty())
+            expect(pass_.resolve_call_type_args_signature_v1(signature, [lying_argument], []).is_err()).to_be(true)
+        val both_holes = default_test_type(HirTypeKind.Result(default_test_type(HirTypeKind.Infer(3, 0)), default_test_type(HirTypeKind.Infer(4, 0))))
+        val unknown_ok = HirExpr(kind: HirExprKind.EnumLit(both_holes, "Ok", HirEnumPayload.Tuple([value])), has_type_: false, type_: nil, span: Span.empty())
+        expect(pass_.resolve_call_type_args_signature_v1(signature, [HirCallArg(has_name: false, name: "", value: unknown_ok, span: Span.empty())], []).is_err()).to_be(true)
+        val string_type = default_test_type(HirTypeKind.Str)
+        val text_value = HirExpr(kind: HirExprKind.StringLit("failure", nil), has_type_: true, type_: string_type, span: Span.empty())
+        val partial_error = default_test_type(HirTypeKind.Result(default_test_type(HirTypeKind.Infer(5, 0)), string_type))
+        val err = HirExpr(kind: HirExprKind.EnumLit(partial_error, "Err", HirEnumPayload.Tuple([text_value])), has_type_: false, type_: nil, span: Span.empty())
+        val error_argument = HirCallArg(has_name: false, name: "", value: err, span: Span.empty())
+        val error_completed = pass_.resolve_call_type_args_signature_v1(signature, [error_argument], [])
+        expect(error_completed.is_ok()).to_be(true)
+        expect(error_completed.unwrap()[0].kind == HirTypeKind.Bool).to_be(true)
+        expect(error_completed.unwrap()[1].kind == HirTypeKind.Str).to_be(true)
+        val later_pattern = MonoTemplateSignatureV1(name: "consume_witness", param_types: [pattern, default_test_type(HirTypeKind.TypeParam("T", []))], return_type: integer, type_params: [t, e])
+        val later = HirCallArg(has_name: false, name: "", value: value, span: Span.empty())
+        val witnessed = pass_.resolve_call_type_args_signature_v1(later_pattern, [error_argument, later], [])
+        expect(witnessed.is_ok()).to_be(true)
+        expect(witnessed.unwrap()[0].kind == HirTypeKind.Int(64, true)).to_be(true)
+
     it "deduplicates omitted and equivalent explicit scalar defaults in both modes":
         for mode in [MonoTemplateBodyModeV1.Retained, MonoTemplateBodyModeV1.ArchiveRequests]:
             var pass_ = default_test_pass(mode)
@@ -227,6 +317,11 @@ describe "generic defaults complete actual caller-owned specialization keys":
         val missing = HirCallArg(has_name: true, name: "value", value: unknown, span: Span.empty())
         pass_.generic_type_fields["{identity}::value"] = default_test_type(HirTypeKind.TypeParam("T", []))
         expect(pass_.generic_constructor_type(callee, [missing], []) == nil).to_be(true)
+        for target in [default_test_type(HirTypeKind.Any), default_test_type(HirTypeKind.Error)]:
+            val cast = HirExpr(kind: HirExprKind.Cast(value, target), has_type_: false, type_: nil, span: Span.empty())
+            val invalid_field = HirCallArg(has_name: true, name: "value", value: cast, span: Span.empty())
+            expect(pass_.generic_constructor_type(callee, [invalid_field], []) == nil).to_be(true)
+        expect(pass_.diagnostics.join("\n")).to_contain("invalid or erased")
 
     it "uses completed imported archive arguments for caller and owner metadata":
         var pass_ = default_test_pass(MonoTemplateBodyModeV1.ArchiveRequests)

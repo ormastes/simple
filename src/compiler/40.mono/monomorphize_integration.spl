@@ -1140,6 +1140,9 @@ impl MonomorphizationPass:
                     val at = self.infer_expr_type(mono_arg_value(arg))
                     if at != nil:
                         val att: HirType = at
+                        if not self.call_evidence_is_valid_v1(mono_arg_value(arg), att):
+                            self.diagnostics = self.diagnostics.push("E-MONO-032: constructor `{identity}` has invalid or erased argument type evidence; constructor type not resolved")
+                            return nil
                         # `first: T?` initialised with a bare payload
                         # (`first: "a"`): the value is wrapped, so the
                         # evidence is for the payload type.
@@ -1157,7 +1160,7 @@ impl MonomorphizationPass:
                             return nil
                         if not bind_type_params(pattern, att, bindings, context):
                             return nil
-                    elif not hir_type_is_concrete(declared):
+                    elif not hir_type_is_concrete(declared) and not mono_call_evidence_is_absent_v1(mono_arg_value(arg)):
                         return nil
                     i = i + 1
                 val owner: text = self.generic_type_modules[identity]
@@ -1402,11 +1405,13 @@ impl MonomorphizationPass:
                 if arg_ty == nil:
                     eprint("[mono-diag] infer `{template.name}` arg {i}: no local type for {mono_arg_value(at).kind}")
             if arg_ty != nil:
+                if not self.call_evidence_is_valid_v1(mono_arg_value(at), arg_ty):
+                    return Err("argument inference has invalid or erased type evidence")
                 if nominal_context == nil and (hir_type_has_nominal(pt) or hir_type_has_nominal(arg_ty)):
                     return Err("generic inference lacks declaration/caller nominal context")
                 if not bind_type_params(pt, arg_ty, bindings, nominal_context):
                     return Err("argument inference conflicts with another argument or explicit prefix")
-            elif not hir_type_is_concrete(pt):
+            elif not hir_type_is_concrete(pt) and not mono_call_evidence_is_absent_v1(mono_arg_value(at)):
                 return Err("argument inference has no concrete local type")
             i = i + 1
         if expected_result != nil:
@@ -1475,6 +1480,39 @@ impl MonomorphizationPass:
         val inferred = self.infer_call_bindings_signature_v1(template, args, written, expected_result)
         if inferred.is_err(): return Err(inferred.unwrap_err())
         self.complete_template_type_args_v1(template, inferred.unwrap())
+
+    me call_evidence_is_valid_v1(expr: HirExpr, actual: HirType) -> bool:
+        if hir_type_is_concrete(actual): return true
+        # Only an actual Ok/Err value has a genuinely absent Result arm.
+        # Raw cast targets and untrusted type stamps cannot create this hole.
+        match expr.kind:
+            case HirExprKind.EnumLit(_, variant, payload):
+                var active: HirType = nil
+                var absent: HirType = nil
+                match actual.kind:
+                    case HirTypeKind.Result(ok, err):
+                        if variant == "Ok":
+                            active = ok
+                            absent = err
+                        elif variant == "Err":
+                            active = err
+                            absent = ok
+                        else: return false
+                    case _: return false
+                if not hir_type_is_concrete(active): return false
+                if absent == nil: return false
+                match absent.kind:
+                    case HirTypeKind.Infer(_, _): ()
+                    case _: return false
+                match payload:
+                    case HirEnumPayload.Tuple(values):
+                        if values.len() != 1: return false
+                        val value: HirExpr = values[0]
+                        val inferred = self.infer_expr_type(value)
+                        if inferred == nil or not hir_type_is_concrete(inferred): return false
+                        self.same_type_key(active, inferred)
+                    case _: false
+            case _: false
 
     me infer_expr_type(expr: HirExpr) -> HirType?:
         """Local, conservative type of an expression: literals, symbols bound
@@ -3178,6 +3216,15 @@ fn all_symbolic_evidence(types: [HirType]) -> bool:
         val item: HirType = type_
         if not hir_type_is_symbolic_evidence(item): return false
     true
+
+fn mono_call_evidence_is_absent_v1(expr: HirExpr) -> bool:
+    """Empty literals have no element evidence; later witnesses/defaults may fill it.
+    Unknown expressions are not such a legitimate absence."""
+    if expr == nil: return false
+    match expr.kind:
+        case HirExprKind.ArrayLit(elements, _): elements.len() == 0
+        case HirExprKind.DictLit(entries, _, _): entries.len() == 0
+        case _: false
 
 fn mono_complete_default_args_v1(tps: [HirTypeParam], canonical_tps: [HirTypeParam], supplied: Dict<text, HirType>) -> Result<[HirType], text>:
     """Complete sparse bindings in declaration scope and declaration order.
