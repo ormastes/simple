@@ -1,7 +1,8 @@
 # Any rules — runner and lint/check transport (robustness item 7b).
 #
-# Three warn-first families, `allow` in EVERY lint profile. Opt-in only:
-# SIMPLE_ANY_RULES=warn|deny, or an explicit family level in simple.sdn.
+# Three warn-first families: warn in robust/critical, allow in moderate/strict.
+# Explicit reporting levels take priority over SIMPLE_ANY_RULES=warn|deny;
+# the environment level otherwise overrides the profile default.
 # All three apply to files under src/compiler/** only:
 #
 #   written_any_decl   W-ANY-DECL-001   a WRITTEN `Any`/`any` in a declaration
@@ -78,9 +79,9 @@ pub fn any_rules_env_off() -> bool:
     val raw = env_get(any_rules_env_var())
     raw == "off" or raw == "0"
 
-# The opt-in switch for lint: `SIMPLE_ANY_RULES=warn` (or `deny`) turns all
-# three families on at that level. "" = the environment does not opt in. No
-# lint profile implies the rules (see config_and_model.build_default_levels).
+# The opt-in switch for lint: `SIMPLE_ANY_RULES=warn` (or `deny`) enables
+# unconfigured families at that level. "" = no environment override. No
+# moderate/strict profile implies the rules; robust/critical default to warn.
 pub fn any_rules_env_level() -> text:
     val raw = env_get(any_rules_env_var())
     if raw == "warn" or raw == "warning":
@@ -103,8 +104,8 @@ pub fn any_rules_mask_from_env() -> text:
     any_rules_mask(raw.contains("d"), raw.contains("f"), raw.contains("r"))
 
 # The mask lint needs a checker run for; "" = do not start one. `want_*` are
-# the families an explicit simple.sdn level turned on; the environment level
-# turns all three on. The rules are about the compiler's own code: outside
+# the families enabled after profile/explicit/environment severity resolution.
+# The mask must not revive an explicitly allowed family. Outside
 # src/compiler/** nothing runs. R1 alone needs no run when nothing is written.
 pub fn any_rules_lint_mask(
     path: text, source: text,
@@ -112,10 +113,9 @@ pub fn any_rules_lint_mask(
 ) -> text:
     if any_rules_env_off() or not any_rule_path_is_compiler_source(path):
         return ""
-    val env_on = any_rules_env_level() != ""
-    var decl_on = want_decl or env_on
-    val fallback_on = want_fallback or env_on
-    val receiver_on = want_receiver or env_on
+    var decl_on = want_decl
+    val fallback_on = want_fallback
+    val receiver_on = want_receiver
     if decl_on and not fallback_on and not receiver_on:
         decl_on = scan_written_any(source).len() > 0
     any_rules_mask(decl_on, fallback_on, receiver_on)
