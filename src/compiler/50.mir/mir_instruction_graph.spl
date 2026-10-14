@@ -1,5 +1,7 @@
 # MIR instruction graph and function/module owners.
 
+use std.common.math.math.{math_pow}
+
 use compiler.hir.hir_types.{SymbolId, HirType}
 use compiler.hir.hir_definitions.{HirContractBlock}
 use compiler.common.diagnostics.span.{Span}
@@ -12,6 +14,11 @@ use compiler.mir.mir_instruction_kinds.*
 use compiler.mir.mir_types.{MirType}
 use compiler.mir.mir_instruction_support.{mir_operand_const_int}
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
+
+# Match runtime.h: integer folding uses the existing signed i64 power ABI.
+# An explicit call also records the extern signature for older LLVM producers.
+@unsafe(reason: "existing integer power runtime ABI", capabilities: [ffi])
+extern fn __simple_pow(base: i64, exp: i64) -> i64
 
 struct MirInst:
     """MIR instruction."""
@@ -404,7 +411,9 @@ fn mir_fold_binop(op: MirBinOp, left: MirConstValue, right: MirConstValue) -> Mi
                         result = l % r
                     else:
                         has_result = false
-                case Pow: result = l ** r
+                case Pow:
+                    unsafe(capabilities: [ffi]):
+                        result = __simple_pow(l, r)
                 case BitAnd: result = l & r
                 case BitOr: result = l | r
                 case BitXor: result = l xor r
@@ -433,7 +442,7 @@ fn mir_fold_binop(op: MirBinOp, left: MirConstValue, right: MirConstValue) -> Mi
                         result = l / r
                     else:
                         has_result = false
-                case Pow: result = l ** r
+                case Pow: result = math_pow(l, r)
                 case _: has_result = false
             if not has_result:
                 return nil
