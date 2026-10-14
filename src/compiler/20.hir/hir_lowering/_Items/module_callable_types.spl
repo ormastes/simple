@@ -437,16 +437,46 @@ impl HirLowering:
         val saved_parameters = self.prescan_type_parameters
         self.prescan_type_parameters = {}
         self.symbols.push_scope(ScopeKind.Class)
-        for tp in owner_type_params:
-            val parameter = self.lower_type_param(tp)
-            self.prescan_type_parameters[parameter.symbol.id] = HirType(
-                kind: HirTypeKind.TypeParam(parameter.name, parameter.bounds),
-                span: parameter.span)
+        self.project_imported_owner_type_parameters(owner_type_params, imported_module_name)
         val callable_type = self.declared_imported_surface_callable_type(
             callable, imported_module_name, Some(owner_symbol))
         self.symbols.pop_scope()
         self.prescan_type_parameters = saved_parameters
         callable_type
+
+    # Caller owns the temporary Class scope and has materialized dependencies.
+    # Shared by imported composite fields and imported method signatures.
+    me project_imported_owner_type_parameters(owner_type_params: [ParserTypeParam], imported_module_name: text) -> [HirTypeParam]:
+        var owner_symbols: [SymbolId] = []
+        # Reserve EVERY binder before projecting any constraint/default. Self
+        # and forward references must be TypeParam, never importer Named rows.
+        for tp in owner_type_params:
+            val symbol = self.symbols.define(tp.name, SymbolKind.TypeParam, nil,
+                tp.span, Visibility.Private, false, nil)
+            owner_symbols = owner_symbols.push(symbol)
+            self.prescan_type_parameters[symbol.id] = HirType(
+                kind: HirTypeKind.TypeParam(tp.name, []), span: tp.span)
+        var parameters: [HirTypeParam] = []
+        var parameter_index = 0
+        for tp in owner_type_params:
+            var bounds: [HirType] = []
+            for bound in tp.bounds:
+                bounds = bounds.push(self.imported_surface_type(bound, imported_module_name))
+            val default_ = if tp.has_default:
+                self.imported_surface_type(tp.default, imported_module_name)
+            else:
+                HirType(kind: HirTypeKind.Unit, span: tp.span)
+            parameters = parameters.push(HirTypeParam(symbol: owner_symbols[parameter_index],
+                name: tp.name, bounds: bounds, has_default: tp.has_default,
+                default: default_, span: tp.span))
+            parameter_index = parameter_index + 1
+        # Publish together: constraint references remain finite binder leaves,
+        # independent of declaration order, including mutually recursive bounds.
+        for parameter in parameters:
+            self.prescan_type_parameters[parameter.symbol.id] = HirType(
+                kind: HirTypeKind.TypeParam(parameter.name, parameter.bounds),
+                span: parameter.span)
+        parameters
 
     me declared_imported_surface_callable_type(callable: ModuleSurfaceCallable, imported_module_name: text, owner_symbol: SymbolId?) -> HirType?:
         if callable.type_params.len() > 0:
