@@ -1,0 +1,72 @@
+# Parser proof captured before transient AST reclamation. No MIR/backend imports:
+# the phase-2 parser must not acquire the native codegen dependency closure.
+use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner}
+use compiler.hir.hir_lowering.module_surface.{module_surface_canonical_path}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.common.driver_core_types.{SourceFile}
+use std.common.crypto.sha256.{sha256_text}
+
+pub fn driver_native_parser_is_declaration_only(owner: ModuleSurfaceParserOwner) -> bool:
+    # Extern-only declaration modules (e.g. std.nogc_sync_mut.env.types: only
+    # `extern fn rt_env_*` + export) legitimately lower to a MIR module with
+    # zero functions — the externs resolve at link time. Treat them like the
+    # bodyless facades below instead of failing "MIR module has no functions".
+    # A module with any NON-extern parsed function still hard-fails there:
+    # HIR had bodies, so an empty MIR is a real lowering bug and must stay
+    # loud (bug bootstrap_stage2_empty_mir_bodies_2026-07-05).
+    var only_extern_functions = true
+    for fn_name in owner.value.functions.keys():
+        val parsed_fn = owner.value.functions[fn_name]
+        if not parsed_fn.is_extern:
+            only_extern_functions = false
+    # `export use backend.{...}` facades produce an ParserImport record but NO
+    # Export record in the flat bridge (only bare `export a, b` emits one),
+    # e.g. std.nogc_async_mut.env.types — accept import-only and trait-only
+    # modules too; neither has standalone code by the decl checks below.
+    # Empty and comments-only modules have the same objectless outcome. Do not
+    # require an import/export/type declaration as a witness: env.utilities is
+    # intentionally empty and can still be reached through a facade. Parser
+    # presence and the body/data guards remain mandatory, so missing lowering
+    # output for a real definition is never silently accepted.
+    (owner.value.domain_blocks.len() == 0 and
+        only_extern_functions and owner.value.classes.len() == 0 and owner.value.actors.len() == 0 and
+        owner.value.impls.len() == 0 and
+        owner.value.constants.len() == 0 and owner.value.static_asserts.len() == 0 and
+        owner.value.aop_advices.len() == 0 and owner.value.di_bindings.len() == 0 and
+        owner.value.arch_rules.len() == 0 and owner.value.mock_decls.len() == 0)
+
+
+# Persist a stricter fact than the legacy retained-parser compatibility path:
+# trait default method bodies require independent emission authority and must
+# not become trusted merely because both parser and MIR bodies disappeared.
+pub fn driver_native_parser_can_persist_objectless(owner: ModuleSurfaceParserOwner) -> bool:
+    if not driver_native_parser_is_declaration_only(owner):
+        return false
+    for trait_name in owner.value.traits.keys():
+        for method in owner.value.traits[trait_name].methods:
+            if not method.body.stmts.is_empty():
+                return false
+    # Struct defaults are HirField metadata, evaluated by constructor lowering
+    # in the consumer. They do not imply standalone provider code (see #3028).
+    true
+
+
+pub fn driver_native_objectless_proof_key(module_name: text, canonical_path: text) -> text:
+    "{module_name.len()}:{module_name}{canonical_path.len()}:{canonical_path}"
+
+# Ordinary parsing also evicts its AST under --low-memory. Capture only after
+# a successful phase-2 commit, while the exact parsed source bytes are alive.
+# Both cold parsing and validated frontend-cache hits use this same boundary.
+pub fn driver_native_retained_objectless_proofs(
+    modules: Dict<text, ParserModule>, sources: [SourceFile]
+) -> Dict<text, text>:
+    var proofs: Dict<text, text> = {}
+    for source in sources:
+        if modules.has(source.module_name):
+            val owner = ModuleSurfaceParserOwner.new(modules[source.module_name])
+            if driver_native_parser_can_persist_objectless(owner):
+                val canonical_path = module_surface_canonical_path(source.path)
+                if canonical_path != "" and source.module_name != "":
+                    val key = driver_native_objectless_proof_key(source.module_name, canonical_path)
+                    proofs[key] = sha256_text(source.content)
+    proofs

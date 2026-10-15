@@ -1658,13 +1658,50 @@ mkdir -p "${cuda_composition_root}/plugins/backend_registry"
 if [ ! -f "${cuda_composition_file}" ]; then
   cp "${cuda_composition_template}" "${cuda_composition_file}"
 fi
-[ "$(bootstrap_stage3_hash_file "${cuda_composition_file}")" = "${cuda_template_sha256}" ] || {
+[ -f "${cuda_composition_file}" ] && [ ! -L "${cuda_composition_file}" ] &&
+  [ "$(bootstrap_stage3_hash_file "${cuda_composition_file}")" = "${cuda_template_sha256}" ] || {
   echo 'error: selected CUDA composition content differs from its identity' >&2; exit 1;
 }
-# SCV admits checkout src/test selectors, not generated output directories.
-# Keep the publication copy and its identity, but compile the same tracked bytes.
-[ "$(bootstrap_stage3_hash_file "${cuda_composition_template}")" = "${cuda_template_sha256}" ] || {
-  echo 'error: selected CUDA template changed during publication' >&2; exit 1;
+# BUG-SCV-BOOTSTRAP-COMPOSITION-SCOPE-20261011: SCV inventory families own
+# committed source records, not ignored generated build roots. Retain the
+# generated identity/evidence above, but compile its exact canonical bytes.
+# This also lets an admitted older producer build the pure-Simple alias fix.
+cuda_source_root="${repo_root}/src/compositions/cuda_${cuda_mode}"
+cuda_source_file="${cuda_source_root}/plugins/backend_registry/selected_cuda_backend.spl"
+[ -f "${cuda_source_file}" ] && [ ! -L "${cuda_source_file}" ] &&
+  [ "$(bootstrap_stage3_hash_file "${cuda_source_file}")" = "${cuda_template_sha256}" ] &&
+  [ "$(bootstrap_stage3_hash_file "${compiler_backend_manifest}")" = "${cuda_manifest_sha256}" ] || {
+  echo 'error: canonical CUDA composition differs from selected manifest/template identity' >&2; exit 1;
+}
+bootstrap_cuda_source_snapshot_require() {
+  # Bind selection to the captured source authority, not a later live reread.
+  # The existing before/after drift gates protect the remainder of the build.
+  bootstrap_cuda_template_relative="src/compositions/cuda_${cuda_mode}/plugins/backend_registry/selected_cuda_backend.spl"
+  if [ "${cuda_mode}" = static ]; then
+    bootstrap_cuda_template_relative=src/plugins/backend_registry/selected_cuda_backend.spl
+  fi
+  perl -e '
+    use strict; use warnings;
+    my ($snapshot, $manifest_sha, $template_sha, $mode, $template) = @ARGV;
+    my %expected = (
+      "src/compiler/simple.sdn" => $manifest_sha,
+      "src/compositions/cuda_$mode/plugins/backend_registry/selected_cuda_backend.spl" => $template_sha,
+      $template => $template_sha,
+    );
+    my %seen;
+    open my $in, "<", $snapshot or die "CUDA source authority snapshot unreadable\n";
+    while (my $line = <$in>) {
+      next unless $line =~ /^file-hex:(\d+):([0-9a-f]+):[01]:([0-9a-f]{64})$/;
+      my ($length, $hex, $sha) = ($1, $2, $3);
+      my $path = pack("H*", $hex);
+      next unless exists $expected{$path};
+      length($path) == $length && $sha eq $expected{$path} && !$seen{$path}++
+        or die "CUDA source authority snapshot identity mismatch\n";
+    }
+    close $in or die "CUDA source authority snapshot read failed\n";
+    keys(%seen) == keys(%expected) or die "CUDA source authority snapshot member missing\n";
+  ' "$1" "${cuda_manifest_sha256}" "${cuda_template_sha256}" "${cuda_mode}" \
+    "${bootstrap_cuda_template_relative}"
 }
 case "${SIMPLE_KERNEL_K1_POLICY:-unselected}" in
   llvm-cranelift)
@@ -1867,13 +1904,17 @@ bootstrap_cache_stage4_context() {
   # snapshots. Normal staged runs reuse the already checked source/runtime.
   if [ -n "${stage3_source_before:-}" ] && [ -f "${stage3_source_before}" ] &&
     [ -n "${runtime_admitted_snapshot:-}" ] && [ -f "${runtime_admitted_snapshot}" ] &&
-    [ -n "${tool_authority_before:-}" ] && [ -f "${tool_authority_before}" ]; then return 0; fi
+    [ -n "${tool_authority_before:-}" ] && [ -f "${tool_authority_before}" ]; then
+    bootstrap_cuda_source_snapshot_require "${stage3_source_before}"
+    return $?
+  fi
   cache_context_dir="${output_dir}/cache-context-${PLATFORM}/attempt-$(date -u '+%Y%m%dT%H%M%S')-$$"
   mkdir -p "${cache_context_dir}" || return 1
   stage3_source_before="${cache_context_dir}/source.txt"
   runtime_admitted_snapshot="${cache_context_dir}/runtime.txt"
   tool_authority_before="${cache_context_dir}/tools.txt"
   bootstrap_stage3_source_snapshot "${stage3_source_before}" "${repo_root}" &&
+    bootstrap_cuda_source_snapshot_require "${stage3_source_before}" &&
     bootstrap_stage3_directory_snapshot "${runtime_admitted_snapshot}" "${stage_runtime_absolute}" &&
     bootstrap_stage3_tool_authority_snapshot "${tool_authority_before}" "${PATH}" "${repo_root}"
 }
@@ -2476,7 +2517,7 @@ bootstrap_native_build_main() {
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" --source examples/10_tooling \
+    --source "${cuda_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" --source examples/10_tooling \
     --entry-closure \
     --timeout "${NATIVE_FILE_TIMEOUT_SECONDS}" \
     $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory)
@@ -3367,13 +3408,18 @@ bootstrap_step_mark cargo-build-or-skip
 # pure-Simple compiler stage starts. The cleanup traps and output lock are
 # already active here, making every refusal release ownership correctly.
 bootstrap_preflight_bindings=
+stage2_preflight_context_env=
+stage2_preflight_context_recorded=
 if [ "${full_bootstrap}" -eq 1 ]; then
   bootstrap_progress_mark bootstrap-preflight ""
   bootstrap_preflight_receipt="${output_dir}/bootstrap-preflight.env"
   bootstrap_preflight_bindings="${output_dir}/bootstrap-preflight-bindings"
   rm -f "${bootstrap_preflight_receipt}"
   rm -rf "${bootstrap_preflight_bindings}"
-  bootstrap_preflight_config="platform=${PLATFORM};backend=${backend};mode=${bootstrap_mode};lane=full-bootstrap;cargo_profile=bootstrap;cargo_target=${PLATFORM_RUST_TRIPLE};cargo_features=${llvm_features}"
+  . "${repo_root}/scripts/bootstrap/lib/preflight-configuration.shs"
+  bootstrap_preflight_config=$(bootstrap_preflight_configuration_v1 \
+    "${PLATFORM}" "${backend}" "${bootstrap_mode}" \
+    "${PLATFORM_RUST_TRIPLE}" "${llvm_features}") || exit 1
   run_rust_authority_command bootstrap-preflight default \
     sh "${repo_root}/scripts/check/check-bootstrap-preflight.shs" \
     --cargo-bin="${cargo_abs}" --cargo-profile=bootstrap --cargo-target="${PLATFORM_RUST_TRIPLE}" \
@@ -3384,6 +3430,8 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     echo "error: authoritative bootstrap preflight failed; no pure-Simple stage was started" >&2
     exit 1
   }
+  stage2_preflight_context_env="SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1=${bootstrap_preflight_config}"
+  stage2_preflight_context_recorded=1
   SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT=${bootstrap_preflight_receipt}
   SIMPLE_BOOTSTRAP_PREFLIGHT_EXPECTED_CONFIG=${bootstrap_preflight_config}
   export SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT \
@@ -3791,6 +3839,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       exit 1
     }
   fi
+  bootstrap_cuda_source_snapshot_require "${stage3_source_before}" || exit 1
   bootstrap_step_mark source-inputs-before
 
   # Stage 2: the admitted parent compiles bootstrap_main.spl.
@@ -3965,7 +4014,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ${stage2_diagnostic_env} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
-      ${k1_composition_source_args} --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib \
+      ${k1_composition_source_args} --source "${cuda_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
       --entry-closure --threads "${jobs}" \
       ${native_verbose_arg} \
       ${stage2_timeout_args} \
@@ -4049,8 +4098,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ${compiler_ceiling_env:+"${compiler_ceiling_env}"} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
-      ${k1_composition_source_args} --source "${cuda_composition_source_root}" \
-      --source src/compiler --source src/app --source src/lib \
+      ${k1_composition_source_args} --source "${cuda_source_root}" \
+      --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
       --entry-closure --threads "${selfhost_jobs}" \
       --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
       $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory) \
@@ -4184,7 +4233,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    ${k1_composition_source_args} --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib \
+    ${k1_composition_source_args} --source "${cuda_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
     --entry-closure \
     --threads "${jobs}" \
     ${native_verbose_arg} \
@@ -5076,8 +5125,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    ${k1_composition_source_args} --source "${cuda_composition_source_root}" \
-    --source src/compiler --source src/app --source src/lib \
+    ${k1_composition_source_args} --source "${cuda_source_root}" \
+    --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
     --entry-closure \
     --threads "${selfhost_jobs}" \
     --cache-dir "${stage3_cache_absolute}" \
@@ -5632,7 +5681,7 @@ run_logged stage4b-ui-backend env RUST_LOG="${RUST_LOG:-error}" \
   SIMPLE_BINARY="$(absolute_path "${full_bin}")" \
   "${full_bin}" native-build \
     --backend "${backend}" \
-  --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
+  --source "${cuda_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
   --entry-closure --threads "${jobs}" --cache-dir "${native_cache_dir}" \
   --mode "${bootstrap_mode}" --entry src/app/ui/main.spl \
   --runtime-path "${stage_runtime_absolute}" \
@@ -5675,7 +5724,7 @@ if [ "${build_mcp}" -eq 1 ]; then
       SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
       "${stage_for_build}" native-build \
       --backend "${backend}" \
-      --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
+      --source "${cuda_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
       --entry-closure \
       --threads "${jobs}" \
       --cache-dir "${native_cache_dir}" \

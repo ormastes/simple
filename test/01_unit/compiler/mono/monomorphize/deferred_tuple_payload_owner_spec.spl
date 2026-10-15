@@ -1,0 +1,91 @@
+use std.spec.*
+use compiler.mono.monomorphize.deferred.{DeferredMonomorphizer, GenericTemplate}
+use compiler.mono.monomorphize.deferred_subst.{InstantiationMode, deferred_last_error, deferred_clear_error}
+
+fn tuple_owner_append(left: [u8], right: [u8]) -> [u8]:
+    var result = left
+    for byte in right:
+        result = result.push(byte)
+    result
+
+fn tuple_owner_record(kind: i64) -> [u8]:
+    # Independently encoded empty-body records with distinct one-byte names.
+    # All counts are little-endian u32 zero; the generic flag is true.
+    var record: [u8] = []
+    if kind == 3:
+        record = [69u8, 78u8, 86u8, 50u8]  # ENV2
+    val names: [u8] = [70u8, 83u8, 67u8, 69u8, 84u8]  # F/S/C/E/T
+    record = tuple_owner_append(record, [1u8, 0u8, 0u8, 0u8, names[kind], 0u8, 0u8, 0u8, 0u8])
+    record = tuple_owner_append(record, [0u8, 0u8, 0u8, 0u8]) # params/fields/variants/methods
+    if kind == 0:
+        record = tuple_owner_append(record, [0u8, 0u8, 0u8, 0u8, 0u8]) # no return; empty body
+    elif kind == 2:
+        record = tuple_owner_append(record, [0u8, 0u8, 0u8, 0u8]) # empty methods
+    record = record.push(1u8)
+    if kind != 4:
+        record = tuple_owner_append(record, [0u8, 0u8, 0u8, 0u8, 0u8]) # no specialization; empty bindings
+    if kind == 3:
+        # Eight empty parallel lists, then complete_open/dyn_open flags.
+        for _ in 0..8:
+            record = tuple_owner_append(record, [0u8, 0u8, 0u8, 0u8])
+        record = tuple_owner_append(record, [0u8, 0u8])
+    record
+
+fn tuple_owner_kind(template: GenericTemplate) -> i64:
+    match template:
+        case GenericTemplate.Function(_): 0
+        case GenericTemplate.Struct(_): 1
+        case GenericTemplate.Class(_): 2
+        case GenericTemplate.Enum(_): 3
+        case GenericTemplate.Trait(_): 4
+
+describe "deferred optional tuple payload owners":
+    it "retains all five definition owners and exact nonzero consumed offsets":
+        var mono = DeferredMonomorphizer.new(InstantiationMode.LinkTime)
+        val names = ["F", "S", "C", "E", "T"]
+        val lengths = [24, 19, 23, 57, 14]
+        for kind in 0..5:
+            deferred_clear_error()
+            val record = tuple_owner_record(kind)
+            expect(record.len()).to_equal(lengths[kind])
+            var bytes = tuple_owner_append([170u8, 187u8], record)
+            bytes = bytes.push(204u8)
+            if val pair = mono.deserialize_full_template(kind as u8, bytes, 2):
+                val template: GenericTemplate = pair.0
+                expect(tuple_owner_kind(template)).to_equal(kind)
+                expect(template.name()).to_equal(names[kind])
+                expect(template.generic_params().len()).to_equal(0)
+                expect(pair.1).to_equal(lengths[kind] + 2)
+            else:
+                fail("valid template record was rejected")
+            expect(deferred_last_error).to_equal("")
+
+    it "retains all names when the section loader consumes optional template pairs":
+        var mono = DeferredMonomorphizer.new(InstantiationMode.LinkTime)
+        var section: [u8] = [71u8, 84u8, 80u8, 76u8, 2u8, 0u8, 5u8, 0u8, 0u8, 0u8]
+        for kind in 0..5:
+            section = section.push(kind as u8)
+            section = tuple_owner_append(section, tuple_owner_record(kind))
+        expect(mono.deserialize_templates(section)).to_equal(true)
+        expect(mono.template_cache.len()).to_equal(5)
+        for name in ["F", "S", "C", "E", "T"]:
+            expect(mono.has_template(name)).to_equal(true)
+        expect(deferred_last_error).to_equal("")
+
+    it "preserves nil and diagnostics for truncated records and unknown kinds":
+        var mono = DeferredMonomorphizer.new(InstantiationMode.LinkTime)
+        for kind in 0..5:
+            deferred_clear_error()
+            expect(mono.deserialize_full_template(kind as u8, [0u8], 0)).to_be_nil()
+            expect(deferred_last_error.len()).to_be_greater_than(0)
+        deferred_clear_error()
+        expect(mono.deserialize_full_template(99u8, [], 0)).to_be_nil()
+        expect(deferred_last_error).to_equal("Unknown template kind: 99")
+
+    it "returns false when a present section has a failing optional record":
+        var mono = DeferredMonomorphizer.new(InstantiationMode.LinkTime)
+        val section: [u8] = [71u8, 84u8, 80u8, 76u8, 2u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8]
+        expect(mono.deserialize_templates(section)).to_equal(false)
+        expect(mono.template_cache.len()).to_equal(0)
+        expect(deferred_last_error.len()).to_be_greater_than(0)
+        deferred_clear_error()

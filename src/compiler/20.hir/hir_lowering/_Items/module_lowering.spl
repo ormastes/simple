@@ -13,6 +13,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
+use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_declares_item}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}  # explicit: a glob is not an import-origin for surface projection
 # Same reason as the line above, for the four surface types used in DECLARATION
 # position in this module's own signatures: hir_surface_param_to_param(param:
@@ -436,8 +437,19 @@ impl HirLowering:
             self.build_surface_decl_index()
         if self.surface_decl_owners.contains_key(name):
             return self.surface_decl_owners[name]
-        val empty: [i64] = []
-        empty
+        # CHAINTABLE-HARDEN (cycle-36 sweep): surface_decl_owners is a
+        # {text: [i64]} Dict -- the exact BOOT-20 corruptible shape -- and a
+        # false-negative contains_key here silently drops the unique-owner
+        # answer ('unresolved name' in body lowering, missed field-package
+        # dependency). The negative path pays the authoritative full-registry
+        # sweep this index replaced.
+        var sweep_indices: [i64] = []
+        var sweep_surface = 0
+        while sweep_surface < self.module_surfaces.surfaces.len():
+            if module_surface_declares_item(self.module_surfaces.surfaces[sweep_surface], name):
+                sweep_indices = sweep_indices.push(sweep_surface)
+            sweep_surface = sweep_surface + 1
+        sweep_indices
 
     me build_package_sibling_index():
         """One pass over the registry KEYS: canonical package name -> the

@@ -3846,6 +3846,12 @@ impl MirLowering:
                         scrutinee_payload_struct = self.optional_record_owners.get(scrut_local.id) ?? ""
                     elif exact_err_record:
                         scrutinee_payload_struct = self.checked_result_err_record_owner(scrut_local.id, scrutinee.span)
+                    elif enum_variants[ci] == "Some" and self.option_inner_hir_type_for_local(scrutinee, scrut_local) != nil and self.struct_value_syms.contains(scrut_local.id):
+                        # mcp_record_array_owner_loss_2026_10_11 (#3079).
+                        # An optional call stored in a local retains its exact
+                        # provider layout; the bare Some payload registry is
+                        # shared by unrelated optional record instantiations.
+                        scrutinee_payload_struct = self.struct_value_syms[scrut_local.id]
                     elif val safe_payload_name = self.result_variant_payload_struct_name(scrutinee, enum_variants[ci]):
                         # Cross-module-safe: resolved by NAME
                         # (bootstrap_fn_ret_ok_shape_*), never by dereferencing
@@ -4988,6 +4994,19 @@ impl MirLowering:
         self.mark_runtime_value_local(typed.id)
         typed
 
+    me explicit_some_payload_hir_type(local: LocalId, expression: HirExpr) -> HirType?:
+        # Retain the actual payload owner, never the outer slot's expected type.
+        # An opaque enum carrier alone cannot prove Optional<T> compatibility.
+        if val known = self.find_local_hir_type(local.id):
+            match known.kind:
+                case HirTypeKind.Infer(_, _) | HirTypeKind.Error: ()
+                case _: return Some(known)
+        if val known = self.enum_match_expr_type(expression):
+            match known.kind:
+                case HirTypeKind.Infer(_, _) | HirTypeKind.Error: ()
+                case _: return Some(known)
+        self.option_map_value_hir_type(local, expression.span)
+
     me lower_enum_construct_named(enum_name: text, variant: text, args: [HirCallArg]) -> LocalId:
         """Same as lower_enum_lit but entered from the MethodCall path, where
         `Shape.Circle(7)` arrives as receiver=`Shape`, method=`Circle`. The enum
@@ -5030,6 +5049,7 @@ impl MirLowering:
         b.emit_const(disc_local, MirConstValue.Int(disc), MirType(kind: MirTypeKind.I32))
         self.builder = b
         var payload_local = LocalId(id: 0)
+        var option_payload_type: HirType? = nil
         if args.len() == 1:
             payload_local = if typed_slots:
                 self.lower_declared_enum_payload_expression(self.enum_variant_payload_types[metadata_key][0], args[0].value)
@@ -5041,6 +5061,8 @@ impl MirLowering:
                     self.error_fatal("enum construction '{metadata_key}': payload type mismatch at 0", Some(args[0].span))
                     return self.builder.emit_const_int(0)
                 payload_local = self.adapt_declared_enum_payload(expected, payload_local)
+            if enum_name == "Option" and variant == "Some":
+                option_payload_type = self.explicit_some_payload_hir_type(payload_local, args[0].value)
             val payload_ty = self.local_mir_type_of(payload_local)
             if payload_ty != nil and (payload_ty ?? MirType.i64()).kind == MirTypeKind.U64:
                 payload_local = self.box_u64_runtime_value(payload_local)
@@ -6298,6 +6320,9 @@ impl MirLowering:
                 lw.current_function_names = self.current_function_names
                 lw.current_function_symbols = self.current_function_symbols
                 lw.exact_extern_signatures = self.exact_extern_signatures
+                # Lifted bodies resolve the same imported declarations as the
+                # enclosing body; local/capture lookup precedence is unchanged.
+                lw.callable_link_names = self.callable_link_names
                 lw.callable_text_value_abi = self.callable_text_value_abi
                 lw.field_map = self.field_map
                 lw.bitfield_map = self.bitfield_map
@@ -6586,21 +6611,25 @@ impl MirLowering:
         arg_local
 
     me lower_call(callee: HirExpr, args: [HirCallArg]) -> LocalId:
+        self.lower_call_with_value(callee, args, nil)
+
+    me lower_call_with_value(callee: HirExpr, args: [HirCallArg], prelowered_callee: LocalId?) -> LocalId:
         """Lower function call.
 
         Handles both direct calls (Var) and indirect calls (closures, function pointers).
         Intercepts GPU intrinsic calls (gpu_global_id, etc.) and emits MIR GPU instructions.
         """
-        val bitfield_construct = self.try_lower_bitfield_construct(callee, args)
-        if val bf_local = bitfield_construct:
-            return bf_local
+        if not prelowered_callee.?:
+            val bitfield_construct = self.try_lower_bitfield_construct(callee, args)
+            if val bf_local = bitfield_construct:
+                return bf_local
 
         val callee_disc = _sffi_enum_discriminant(callee.kind)
         val fallback_symbol = SymbolId(id: -1)
         var direct_symbol = fallback_symbol
         var direct_name = ""
         var is_direct = false
-        if callee_disc == _sffi_enum_discriminant(HirExprKind.Var(fallback_symbol)):
+        if not prelowered_callee.? and callee_disc == _sffi_enum_discriminant(HirExprKind.Var(fallback_symbol)):
             match callee.kind:
                 case HirExprKind.Var(symbol):
                     direct_symbol = symbol
@@ -6609,7 +6638,7 @@ impl MirLowering:
                     is_direct = true
                 case _:
                     self.payload_decode_failed("HirExprKind.Var", callee.span)
-        elif callee_disc == _sffi_enum_discriminant(HirExprKind.NamedVar(fallback_symbol, "")):
+        elif not prelowered_callee.? and callee_disc == _sffi_enum_discriminant(HirExprKind.NamedVar(fallback_symbol, "")):
             match callee.kind:
                 case HirExprKind.NamedVar(symbol, name):
                     # `name` already carries a --entry-closure cross-module
@@ -6632,7 +6661,7 @@ impl MirLowering:
                     is_direct = true
                 case _:
                     self.payload_decode_failed("HirExprKind.NamedVar", callee.span)
-        elif callee_disc == _sffi_enum_discriminant(HirExprKind.Lambda([], callee, [])):
+        elif not prelowered_callee.? and callee_disc == _sffi_enum_discriminant(HirExprKind.Lambda([], callee, [])):
             # IIFE: a raw lambda literal used directly as the call callee,
             # `(\x: x + 1)(5)`. try_inline_lambda_call below only fires for a
             # `Var`/`NamedVar` callee resolved through `lambda_bindings` (a
@@ -7221,7 +7250,18 @@ impl MirLowering:
                         ()
             return result
 
-        val callee_local = self.lower_expr(callee)
+        # Field-method fallback can supply the projected callable so its
+        # receiver is not evaluated a second time. Argument lowering above
+        # remains shared with ordinary calls.
+        val callee_local = if val supplied = prelowered_callee: supplied else: self.lower_expr(callee)
+        var function_type = self.find_local_hir_type(callee_local.id)
+        if not function_type.?:
+            function_type = self.enum_match_expr_type(callee)
+        self.emit_typed_function_value_call(callee_local, arg_operands, function_type, callee.span)
+
+    me emit_typed_function_value_call(callee_local: LocalId, arg_operands: [MirOperand], function_type: HirType?, call_span: Span) -> LocalId:
+        # Keep the existing word-parameter/closure ABI. Only the declared
+        # return type and its provenance are different from the old path.
         var param_types: [MirType] = []
         var indirect_param_index = 0
         for arg_op in arg_operands:

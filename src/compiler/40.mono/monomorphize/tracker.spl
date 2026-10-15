@@ -12,9 +12,9 @@ use .types (ConcreteType)
 use .note_sdn (
     NoteSdnMetadata, InstantiationEntry, PossibleInstantiationEntry,
     TypeInferenceEntry, DependencyEdge, DependencyKind, InstantiationStatus,
-    CircularError, CircularWarning
+    CircularError, CircularWarning, BuildMetadata
 )
-use .cycle_detector (detect_cycles, analyze_and_update_cycles)
+use .cycle_detector (detect_cycles)
 
 # ============================================================================
 # Instantiation Tracker
@@ -66,7 +66,7 @@ struct InstantiationTracker:
 fn instantiationtracker_new(source_file: text, obj_file: text) -> InstantiationTracker:
         """Create a new tracker for a compilation unit."""
         InstantiationTracker(
-            metadata: notesdnmetadata_new(),
+            metadata: NoteSdnMetadata.new(),
             next_inst_id: 0,
             tracked_names: {},
             current_file: source_file,
@@ -83,13 +83,72 @@ fn instantiationtracker_finalize(self: InstantiationTracker) -> NoteSdnMetadata:
 
         ROBUSTNESS: Ensures all tracking is complete before returning.
         """
-        # Flush any remaining pending deps
-        self.flush_pending_deps()
+        # Finalization returns an independent snapshot: callers can retain
+        # the tracker while inspecting or modifying the returned metadata.
+        var metadata = instantiationtracker_metadata_snapshot(self.metadata)
+        for dependency in self.pending_deps:
+            if self.tracked_names.contains_key(dependency.0):
+                metadata.add_dependency(DependencyEdge(
+                    from_inst: dependency.0, to_inst: dependency.1,
+                    dep_kind: dependency.2))
+        val cycles = detect_cycles(metadata)
+        for error in cycles.errors:
+            metadata.add_circular_error(error)
+        for warning in cycles.warnings:
+            metadata.add_circular_warning(warning)
+        metadata
 
-        # Analyze cycles
-        self.analyze_cycles()
+fn instantiationtracker_text_snapshot(values: [text]) -> [text]:
+    # text is immutable; copy the mutable array container, retain text values.
+    var result: [text] = []
+    for value in values:
+        result = result.push(value)
+    result
 
-        self.metadata.clone()
+fn instantiationtracker_metadata_snapshot(source: NoteSdnMetadata) -> NoteSdnMetadata:
+    # Reconstruct rows as well as arrays; no mutable collection/record aliases.
+    # This is a snapshot, not a second publication of specialization facts.
+    var instantiations: [InstantiationEntry] = []
+    for entry in source.instantiations:
+        instantiations = instantiations.push(InstantiationEntry(
+            template_name: entry.template_name, type_args: entry.type_args,
+            mangled_name: entry.mangled_name, from_file: entry.from_file,
+            from_loc: entry.from_loc, output_file: entry.output_file, status: entry.status))
+    var possible: [PossibleInstantiationEntry] = []
+    for entry in source.possible:
+        possible = possible.push(PossibleInstantiationEntry(
+            template_name: entry.template_name, type_args: entry.type_args,
+            mangled_name: entry.mangled_name, required_by: entry.required_by, can_defer: entry.can_defer))
+    var type_inferences: [TypeInferenceEntry] = []
+    for entry in source.type_inferences:
+        type_inferences = type_inferences.push(TypeInferenceEntry(
+            inferred_type: entry.inferred_type, expr: entry.expr, ctx: entry.ctx,
+            from_file: entry.from_file, from_loc: entry.from_loc))
+    var dependencies: [DependencyEdge] = []
+    for entry in source.dependencies:
+        dependencies = dependencies.push(DependencyEdge(
+            from_inst: entry.from_inst, to_inst: entry.to_inst, dep_kind: entry.dep_kind))
+    var warnings: [CircularWarning] = []
+    for entry in source.circular_warnings:
+        warnings = warnings.push(CircularWarning(cycle_path: entry.cycle_path, severity: entry.severity))
+    var errors: [CircularError] = []
+    for entry in source.circular_errors:
+        errors = errors.push(CircularError(cycle_path: entry.cycle_path, error_code: entry.error_code))
+    var build: BuildMetadata? = nil
+    # #3016: explicit arms avoid ExistsCheck's pointer-typed nil constant.
+    # @workaround bug=native_optional_struct_pointer_nil_2026_10_11 reason=explicit Some and nil arms avoid pointer-typed integer nil materialization
+    match source.build_metadata:
+        case Some(entry):
+            build = Some(BuildMetadata(target: entry.target, cpu: entry.cpu,
+                optimization: entry.optimization,
+                features: instantiationtracker_text_snapshot(entry.features),
+                linker_flags: instantiationtracker_text_snapshot(entry.linker_flags),
+                compiler_version: entry.compiler_version, build_timestamp: entry.build_timestamp))
+        case nil: ()
+    NoteSdnMetadata(instantiations: instantiations, possible: possible,
+        type_inferences: type_inferences, dependencies: dependencies,
+        circular_warnings: warnings, circular_errors: errors, build_metadata: build)
+
 
 
 # ============================================================================

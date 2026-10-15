@@ -101,6 +101,24 @@ impl HirLowering:
         HirReexportSource(found: false, module_index: -1,
             module_name: "", item_name: "")
 
+    # Spliced class-aggregate read mitigation (cycle-36): the stage2 native
+    # backend miscompiles class-value array reads -- a fresh
+    # `surfaces[physical_index]` can return identity fields spliced from an
+    # adjacent row (observed: idx 871 read as module_name=lib.compiler.* with
+    # preferred=compiler.*, while every freeze-time observation of the same
+    # registry was clean and no post-freeze writer exists). The sibling-
+    # inference arm's PACKAGE therefore must not come from the facade row's
+    # identity fields; it is re-derived from the registry's SCALAR ordered
+    # alias arrays (text/i64 element reads), which are not class aggregates.
+    me surface_registry_name_by_physical_index(physical_index: i64) -> text:
+        var alias_index = 0
+        while alias_index < self.module_surfaces.ordered_names.len() and
+              alias_index < self.module_surfaces.ordered_indices.len():
+            if self.module_surfaces.ordered_indices[alias_index] == physical_index:
+                return self.module_surfaces.ordered_names[alias_index]
+            alias_index = alias_index + 1
+        ""
+
     me find_reexport_source_walk(
         facade_index: i64, wanted: text, depth: i64,
         state: HirReexportWalkState
@@ -287,7 +305,25 @@ impl HirLowering:
                     # siblings declare the same short name, return not-found
                     # rather than guess, matching the payload path's stance on
                     # package inference (`resolve_materialized_enum_payload_*`).
-                    val facade_package = self.cached_surface_package_name(facade_mod.module_name)
+                    val facade_package = if facade_mod.physical_index >= 0 and
+                            facade_mod.physical_index < self.module_surfaces.surfaces.len():
+                        # Name-derived package: scalar alias arrays only (see
+                        # surface_registry_name_by_physical_index above).
+                        self.cached_surface_package_name(
+                            self.surface_registry_name_by_physical_index(facade_mod.physical_index))
+                    else:
+                        self.cached_surface_package_name(facade_mod.module_name)
+                    if (rt_env_get("SIMPLE_HIR_SIBPROBE") ?? "") == "1":
+                        var sibprobe_count = -1
+                        if facade_package != "":
+                            sibprobe_count = self.package_sibling_registry_names(facade_package).len()
+                        var sibprobe_fresh_module = "<oob>"
+                        var sibprobe_fresh_preferred = "<oob>"
+                        if facade_mod.physical_index >= 0 and facade_mod.physical_index < self.module_surfaces.surfaces.len():
+                            val sibprobe_fresh = self.module_surfaces.surfaces[facade_mod.physical_index]
+                            sibprobe_fresh_module = sibprobe_fresh.module_name
+                            sibprobe_fresh_preferred = sibprobe_fresh.preferred_registry_name
+                        eprint("[sibprobe] facade={facade_mod.preferred_registry_name} module_name={facade_mod.module_name} canonical={facade_mod.canonical_name} package={facade_package} siblings={sibprobe_count} wanted={wanted} depth={depth} idx={facade_mod.physical_index} fresh_module={sibprobe_fresh_module} fresh_preferred={sibprobe_fresh_preferred} reg_gen={self.module_surfaces.generation} reg_frozen={self.module_surfaces.frozen}")
                     if facade_package != "":
                         val sibling_names = self.package_sibling_registry_names(facade_package)
                         var sibling_match_index = -1
@@ -325,6 +361,8 @@ impl HirLowering:
                                 module_index: sibling_match_index,
                                 module_name: terminal.preferred_registry_name,
                                 item_name: wanted)
+                        if (rt_env_get("SIMPLE_HIR_SIBPROBE") ?? "") == "1":
+                            eprint("[sibprobe-miss] facade={facade_mod.preferred_registry_name} wanted={wanted} matches={sibling_match_count} depth={depth} complete={state.complete} valid={state.valid}")
             route_index = route_index + 1
 
         HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
@@ -1034,11 +1072,27 @@ impl HirLowering:
         so one computation per surface is enough. BOOT-20 (2026-09-18):
         answered from the scalar chain table; the {text: text} Dict corrupts
         values on a hit under Stage-2 native codegen (the driver.spl
-        9h/100%-CPU/flat-RSS wedge)."""
+        9h/100%-CPU/flat-RSS wedge).
+
+        VALIDATED (2026-10-13, cycle-34 compiler_cli_build 'unresolved type:
+        MirType'): the scalar chain table itself still CROSS-HITS under the
+        stage2 candidate -- observed via SIMPLE_HIR_SIBPROBE, the facade
+        compiler.mir_opt.optimization_passes answered package
+        lib.compiler.mir_opt (the real src/lib/compiler/mir_opt tree, whose
+        sibling bucket holds 2 modules instead of the compiler.mir_opt
+        package's 40). The re-export chase's package-sibling inference then
+        found no declarant, memoized a chase negative, and innocent importers
+        died with hard 'unresolved type' errors. The computation is a pure
+        segment split/join, so the memoized value is now CHECKED against the
+        pure computation; a mismatch returns the computed truth (record
+        counts are unchanged, keeping the pinned memo oracle stable)."""
+        val computed = module_surface_package_name_from_name(module_name)
         val package_slot = self.surface_package_name_memo_lookup(module_name)
         if package_slot >= 0:
-            return self.surface_package_name_memo_values[package_slot]
-        val computed = module_surface_package_name_from_name(module_name)
+            val cached = self.surface_package_name_memo_values[package_slot]
+            if cached == computed:
+                return cached
+            return computed
         self.surface_package_name_memo_record(module_name, computed)
         computed
 

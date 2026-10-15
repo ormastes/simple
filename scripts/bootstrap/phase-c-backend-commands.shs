@@ -26,9 +26,29 @@ bootstrap_phase_c_validate_backend_receipt() {
 bootstrap_phase_c_apply_frontend_policy() {
   . "$source_root/scripts/bootstrap/lib/tree-rss-policy.shs" || return 1
   . "$source_root/scripts/bootstrap/lib/product-frontend-policy.shs" || return 1
-  bootstrap_tree_rss_resolve "$pure_tool_threads" "$source_root" || return 1
+  bootstrap_tree_rss_resolve "$pure_tool_threads" "$source_root" || {
+    printf 'bootstrap-phase-verification: frontend tree RSS policy refused: %s\n' \
+      "$bootstrap_tree_rss_refusal" >&2
+    return 1
+  }
   pcb_frontend_rows=$(bootstrap_product_frontend_policy qualified \
-    "$bootstrap_tree_rss_cap_kib" "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}") || return 1
+    "$bootstrap_tree_rss_cap_kib" "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
+    "$bootstrap_tree_rss_ceiling_kib") || {
+    printf 'bootstrap-phase-verification: frontend product policy refused: cap_kib=%s ceiling_kib=%s workers=%s\n' \
+      "$bootstrap_tree_rss_cap_kib" "$bootstrap_tree_rss_ceiling_kib" "$pure_tool_threads" >&2
+    # Refusal-cause evidence (stderr only; stdout must stay empty on refusal).
+    # The product policy fails closed on three inputs the cap/ceiling/workers
+    # line above does not name, and each has burned a campaign cycle by
+    # masquerading as an RSS kill (cycle 22: an inherited
+    # SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB=4194304 refused every
+    # artifact build with status 88 at elapsed 0 while the real RSS watchdog
+    # was never reached). Name all three with their observed values.
+    printf 'bootstrap-phase-verification: frontend product policy refusal evidence: frontend_budget_kib=%s (pinned maximum 3000000; larger values refuse by design) inherited_shard_knobs(SIMPLE_SHARD_MEM_CLAMP=%s SIMPLE_PARSE_SHARD_MAX=%s SIMPLE_PARSE_SHARD_WORKER_KB=%s SIMPLE_HIR_SHARD_WORKER_KB=%s; each must be unset or exactly 1/1/1650000/3000000)\n' \
+      "${SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB:-3000000}" \
+      "${SIMPLE_SHARD_MEM_CLAMP:-unset}" "${SIMPLE_PARSE_SHARD_MAX:-unset}" \
+      "${SIMPLE_PARSE_SHARD_WORKER_KB:-unset}" "${SIMPLE_HIR_SHARD_WORKER_KB:-unset}" >&2
+    return 1
+  }
   while IFS= read -r pcb_frontend_setting; do
     export "$pcb_frontend_setting" || return 1
     printf 'verification_frontend_policy=%s\n' "$pcb_frontend_setting"
@@ -56,7 +76,7 @@ bootstrap_phase_c_run_module_build() {
   bootstrap_phase_c_backend_valid "$pcb_backend" || return 2
   # The coordinator derives output kind from argv and replaces the inherited
   # driver environment. An object filename or EMIT_OBJECT alone is insufficient.
-  set -- "$pcb_compiler" native-build "$pcb_entry" --emit-object "--backend=$pcb_backend" --threads "$pcb_threads" -o "$pcb_output"
+  set -- "$pcb_compiler" native-build "$pcb_entry" --emit-object "--backend=$pcb_backend" --target "$target_c_platform" --threads "$pcb_threads" -o "$pcb_output"
   printf '%s\n' 'SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1' "$@" >"$pcb_log_dir/command.argv" || return 1
   run_task module_compile_object "$@"
 }

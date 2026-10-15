@@ -5,6 +5,8 @@ use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_log
 use compiler.common.cache.native_resolution_trace.{NativeResolutionProbeV1, NativeResolutionTraceV1}
 use compiler.common.module_path_naming.{module_relative_name_from_path}
 use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
 val NATIVE_HIR_IMPORT_RESOLVER_VERSION_V1: text = "hir-module-surface-resolver-v3"
 
@@ -74,25 +76,22 @@ pub(package) fn module_surfaces_validate_index_alignment(
        dict_names.len() != ordered_names.len():
         return Err("module surface name/index representation is inconsistent")
 
+    # This is a construction-time check while the compatibility Dict is live.
+    # Hash lookups replace two full scans per alias; frozen lookup helpers
+    # below must still use their retained scalar arrays, never this Dict.
+    # contains_key + indexing avoids the native Dict.get() boxed-i64 defect.
+    var seen_names: Dict<text, bool> = {}
     var i = 0
     while i < ordered_names.len():
         if ordered_indices[i] < 0 or ordered_indices[i] >= surfaces.len():
             return Err("module surface index out of range for {ordered_names[i]}")
-        var prior = 0
-        while prior < i:
-            if ordered_names[prior] == ordered_names[i]:
-                return Err("duplicate ordered module surface name: {ordered_names[i]}")
-            prior = prior + 1
-        var dict_position = 0
-        var found = false
-        while dict_position < dict_names.len():
-            if dict_names[dict_position] == ordered_names[i]:
-                if dict_indices[dict_position] != ordered_indices[i]:
-                    return Err("module surface name maps to conflicting indices: {ordered_names[i]}")
-                found = true
-            dict_position = dict_position + 1
-        if not found:
+        if seen_names.contains_key(ordered_names[i]):
+            return Err("duplicate ordered module surface name: {ordered_names[i]}")
+        seen_names[ordered_names[i]] = true
+        if not index_by_name.contains_key(ordered_names[i]):
             return Err("module surface ordered name missing from compatibility index: {ordered_names[i]}")
+        if index_by_name[ordered_names[i]] != ordered_indices[i]:
+            return Err("module surface name maps to conflicting indices: {ordered_names[i]}")
         i = i + 1
     Ok(())
 
@@ -123,8 +122,18 @@ pub(package) fn module_surface_resolve_absolute_key(
         return name
     var candidates: [text] = []
     candidates = candidates.push(name + ".__init__")
-    candidates = candidates.push("lib." + name)
-    candidates = candidates.push("lib." + name + ".__init__")
+    # NEVER fall back to `lib.<name>` for an unresolved non-std name: when a
+    # same-suffixed module exists under BOTH roots (src/compiler/... and the
+    # src/lib/compiler/... mirror tree), that fallback cross-wires the chase
+    # onto the WRONG physical module -- observed cycle-35/36 compiler_cli
+    # 'unresolved type: MirType': a shard-child registry that failed the
+    # exact-name scan for compiler.mir_opt.optimization_passes routed to the
+    # lib.compiler.mir_opt.optimization_passes STUB FACADE, whose package
+    # bucket (2) instead of the compiler.mir_opt bucket (~40) made the
+    # re-export chase's sibling inference miss and memoize a false negative.
+    # A loud miss (empty string -> chase-unresolved receipt) is correct here;
+    # a silent wrong-module route is the bug. The std.-spelled fold below is
+    # the only legitimate lib. fallback and is unchanged.
     if name.starts_with("std."):
         val std_tail = name.substring(4)
         val lib_tail = "lib." + std_tail
@@ -501,6 +510,18 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
         if preferred_result.is_err():
             return Err(preferred_result.unwrap_err())
         surface.preferred_registry_name = preferred_result.unwrap()
+        if (env_get_opt("SIMPLE_HIR_SURFACE_IDENT_DUMP") ?? "") == "1":
+            # Cross-wire detector (cycle-35/36 compiler_cli 'unresolved type'):
+            # dump every surface whose registry alias disagrees with its
+            # admission-time module_name or whose path-derived truth disagrees
+            # with its re-derived canonical name. Runs in EVERY process that
+            # freezes a registry (the parent AND each HIR shard child, which
+            # build their own registries); the shard tag attributes rows.
+            val ident_truth = module_surface_logical_name_from_path(surface.canonical_path)
+            val ident_shard = env_get_opt("SIMPLE_HIR_SHARD_OWNER") ?? env_get_opt("SIMPLE_HIR_SHARD") ?? env_get_opt("SIMPLE_PARSE_SHARD") ?? "parent"
+            if surface.module_name != surface.preferred_registry_name or
+                    surface.canonical_name != module_surface_fold_std_alias(ident_truth):
+                eprint("[surface-ident] shard={ident_shard} idx={surface_index} module_name={surface.module_name} logical={surface.logical_name} canonical={surface.canonical_name} preferred={surface.preferred_registry_name} package={surface.package_name} path={surface.canonical_path} path_truth={ident_truth}")
 
         # Per-file promotion keeps these projections readable until freeze,
         # but their backing arrays still belong to the file scope. Publish
@@ -733,6 +754,32 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
         surface.frozen = true
         surface.export_origin_index.frozen = true
         registry.surfaces[surface_index] = surface
+        surface_index = surface_index + 1
+    # Preferred-identity repair pass, reading the STORED rows. The per-row
+    # freeze loop above copies each ModuleSurface aggregate, mutates it, and
+    # writes it back; under the stage2 native aggregate-copy miscompilation
+    # family a neighbouring iteration's write-back can smear one row's
+    # preferred_registry_name onto another (observed cycle-35/36: the lib
+    # compiler/mir_opt re-export FACADE stored
+    # preferred=compiler.mir_opt.optimization_passes while its module_name/
+    # canonical stayed lib.*, so the re-export chase's package-sibling
+    # inference searched the 2-member lib bucket, memoized a false negative,
+    # and innocent importers died with hard 'unresolved type: MirType').
+    # preferred is a pure function of (ordered aliases, physical_index), so
+    # re-applying it from the stored row repairs a pure field smear without
+    # touching anything the first pass computed from file content.
+    surface_index = 0
+    while surface_index < registry.surfaces.len():
+        var stored = registry.surfaces[surface_index]
+        if stored.physical_index == surface_index:
+            val repair_preferred = module_surface_preferred_registry_name(registry, stored)
+            if repair_preferred.is_err():
+                return Err(repair_preferred.unwrap_err())
+            if stored.preferred_registry_name != repair_preferred.unwrap():
+                if (env_get_opt("SIMPLE_HIR_SURFACE_IDENT_DUMP") ?? "") == "1":
+                    eprint("[surface-ident-repair] idx={surface_index} module_name={stored.module_name} smeared_preferred={stored.preferred_registry_name} repaired={repair_preferred.unwrap()}")
+                stored.preferred_registry_name = repair_preferred.unwrap()
+                registry.surfaces[surface_index] = stored
         surface_index = surface_index + 1
     registry.generation = generation
     registry.frozen = true

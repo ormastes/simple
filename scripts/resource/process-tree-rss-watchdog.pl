@@ -7,9 +7,11 @@ use warnings;
 use POSIX qw(setsid setpgid WNOHANG);
 use Time::HiRes qw(sleep alarm clock_gettime CLOCK_MONOTONIC);
 
-# @workaround bug=bootstrap_watchdog_wall_clock_budget_2026_10_11
+# @workaround bug=bootstrap_watchdog_wall_clock_budget_2026_10_11 gh=#3136
 # Elapsed budgets must not follow civil-clock steps; require a monotonic host clock.
 sub monotonic_time { return clock_gettime(CLOCK_MONOTONIC); }
+# Only startup validation may die directly, before any helper/workload exists.
+sub checked_monotonic_startup_time { my $now = monotonic_time(); defined($now) && $now >= 0 or die "CLOCK_MONOTONIC unavailable before workload\n"; return $now; }
 use Cwd qw(abs_path);
 use File::Basename qw(dirname);
 use File::Temp qw(tempdir);
@@ -27,11 +29,11 @@ $SIG{PIPE} = 'IGNORE';
 my %opt = ( 'max-rss-kib' => 5859375, 'interval-ms' => 100,
             'timeout-seconds' => 0, 'term-grace-seconds' => 1, 'session-mode' => 'new',
             'rss-cap-mode' => ($ENV{SIMPLE_BOOTSTRAP_RSS_CAP_MODE} // 'enforce'),
-            'budget-scope' => 'compiler' );
+            'budget-scope' => 'compiler', 'scope-group' => 0 );
 my %explicit;
 while (@ARGV && $ARGV[0] ne '--') {
     my $arg = shift @ARGV;
-    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode|budget-scope|aggregate-workers|compiler-jobs|compiler-ceiling-kib|cap-source|cap-bound)=(.+)$/
+    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode|budget-scope|aggregate-workers|compiler-jobs|compiler-ceiling-kib|cap-source|cap-bound|scope-group)=(.+)$/
         or die "rss-guard: invalid option\n";
     my ($key, $value) = ($1, $2);
     $explicit{$key}++ and die "rss-guard: duplicate $key\n";
@@ -40,13 +42,25 @@ while (@ARGV && $ARGV[0] ne '--') {
 @ARGV > 1 && shift(@ARGV) eq '--' or die "rss-guard: missing command\n";
 $opt{'session-mode'} =~ /\A(?:new|inherit)\z/ or die "rss-guard: invalid session mode\n";
 $opt{'rss-cap-mode'} =~ /\A(?:enforce|monitor)\z/ or die "rss-guard: invalid RSS cap mode\n";
+$opt{'scope-group'} =~ /\A[01]\z/ or die "rss-guard: invalid scope-group\n";
 for my $key (qw(max-rss-kib interval-ms timeout-seconds term-grace-seconds)) {
     $opt{$key} =~ /^\d+$/ or die "rss-guard: invalid $key\n";
 }
 # Compiler policy is unchanged. An explicitly admitted parallel test tree has
 # a separate aggregate budget: one parent reserve plus the ordinary compile
 # target per worker. This does not raise any nested compiler guard's limit.
-my $compiler_ceiling_kib = 8388608;
+# Widened 2026-10-13 on positive evidence: stage2 full-CLI artifact builds
+# (AOT emission, threads=4) measured peak_rss_kib=6842388 against the old
+# 6835937 ceiling (watchdog receipts, stage2-compiler-tests campaigns). 8 GiB
+# keeps ~1.2 GiB headroom over the measured peak. Keep in sync with
+# scripts/bootstrap/lib/tree-rss-policy.shs (same constant, same rationale).
+# Second widening 2026-10-13 (cycle 25 receipt: compiler_cli > 8 GiB at
+# 2 threads). Keep in sync with tree-rss-policy.shs.
+# Third widening 2026-10-13 (cycle-31 group-scoped cli peak 10.5 GiB at
+# 73% HIR). Keep in sync with tree-rss-policy.shs.
+# Fourth widening 2026-10-13 (cycle-33 1-thread cli peak 12591996 KiB).
+# Keep in sync with tree-rss-policy.shs.
+my $compiler_ceiling_kib = 16777216;
 my $worker_target_kib = 976562;
 my $budget_ceiling_kib = $compiler_ceiling_kib;
 $opt{'budget-scope'} =~ /\A(?:compiler|aggregate-tests)\z/
@@ -242,7 +256,7 @@ my %groups;
 my $identity_lost = 0;
 my ($peak, $samples, $child_status, $interrupted);
 $peak = $samples = $interrupted = 0;
-my $started = monotonic_time();
+my $started = checked_monotonic_startup_time();
 my $last = {};
 my $ps_pid = 0;
 my ($previous_sample, $sample_gap_max_ms) = (0, 0);
@@ -1059,6 +1073,30 @@ sub finish_snapshot {
 sub members {
     my ($all) = @_;
     return grep { !$all->{$_}{zombie} } keys %$all if $freebsd;
+    # Per-task group scoping (SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP=1 via
+    # run-process-group-timeout.shs --scope-group=1): a serialized artifact
+    # build shares the campaign session with co-resident sibling builds
+    # (tool_build_concurrency=2), and whole-session/descendant accounting
+    # counted their trees into THIS build's cap -- the cycle-27 ratchet
+    # (mcp_build receipt peak=cap+476 KiB with a 2.07 GiB own tree; lsp_build
+    # killed at 64 s the same way). Scoped to the leader's process group, the
+    # watchdog measures and kills only the build it guards; forked children
+    # share the leader's group, so group equality covers the whole build. The
+    # top-level campaign watchdog never sets this flag and keeps whole-tree
+    # accounting, so total-tree containment (and the session-escape check) is
+    # unchanged. See doc/08_tracking/bug/session_escape_check_flags_nested_
+    # tool_builds_2026-10-13.md for why the new-session alternative was
+    # abandoned.
+    if ($opt{'scope-group'}) {
+        my %selected;
+        my $scope = exists $all->{$leader} ? $all->{$leader}{group} : -1;
+        for my $pid (keys %$all) {
+            $selected{$pid} = 1 if $pid == $leader || $all->{$pid}{group} == $scope;
+        }
+        delete $selected{$$};
+        for my $pid (keys %selected) { $known{$pid} = $all->{$pid}{identity}; }
+        return grep { !$all->{$_}{zombie} } keys %selected;
+    }
     for my $group (keys %groups) {
         my @current = grep { $all->{$_}{group} == $group } keys %$all;
         my $anchor = exists($all->{$group}) &&
@@ -1193,6 +1231,7 @@ sub receipt {
         "rss_limit_kib=" . ($opt{'rss-cap-mode'} eq 'enforce' ? $opt{'max-rss-kib'} : 'unlimited') . "\n" .
         "session_id=$session_id\nsession_checks=$session_checks\n" .
         "session_mode=$opt{'session-mode'}\nsession_admission=$session_admission\n" .
+        "scope_group=$opt{'scope-group'}\n" .
         "parent_session_admission_sha256=$parent_admission_sha\n" .
         "ordinary_compile_rss_target_bytes=1000000000\n" .
         "session_helper=" . ($session_helper // '') . "\n" .

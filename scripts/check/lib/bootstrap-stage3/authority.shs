@@ -495,7 +495,15 @@ bootstrap_stage3_args_sha256() {
 bootstrap_stage3_stage2_canonical_env_names() {
     [ "$#" -ge 1 ] && [ "$#" -le 4 ] || return 1
     case "${2:-}" in ''|1) ;; *) return 1 ;; esac
-    [ -z "${3:-}" ] || bootstrap_stage3_compiler_ceiling_valid "$3" || return 1
+    # $3 is dual-mode, merged from both lines: the historical
+    # preflight-context flag ('' or the literal 1) or, from the RSS ceiling
+    # line, a canonical KiB decimal. A literal 1 stays the flag; any other
+    # non-empty value must be a valid ceiling.
+    case "${3:-}" in
+        ''|1) ;;
+        *[!0-9]*) return 1 ;;
+        *) bootstrap_stage3_compiler_ceiling_valid "$3" || return 1 ;;
+    esac
     bootstrap_stage3_stage2_diagnostic_names_valid "${4:-}" || return 1
     # PATH is in the allowlist because the backend resolves its LLVM tools by
     # name at run time -- find_tool_portable runs `where llc` on Windows and
@@ -539,7 +547,14 @@ bootstrap_stage3_stage2_canonical_env_names() {
     esac
     printf ' %s' 'SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT SIMPLE_BINARY'
     [ "${2:-}" != 1 ] || printf ' %s' SIMPLE_SCV_INVENTORY_COLD_INIT
-    [ -z "${3:-}" ] || printf ' %s' SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+    case "${3:-}" in
+        ''|1)
+            [ "${3:-}" != 1 ] || printf ' %s' SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1
+            ;;
+        *)
+            printf ' %s' SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+            ;;
+    esac
     [ -z "${4:-}" ] || printf ' %s' "$4"
     printf '\n'
 }
@@ -682,6 +697,19 @@ bootstrap_stage3_stage2_transcript_cold_init() {
             "$1" SIMPLE_SCV_INVENTORY_COLD_INIT) || return 1
         [ "$bootstrap_stage2_recorded_cold_init" = 1 ] || return 1
         printf '1\n'
+    fi
+}
+
+# An optional new-parent binding. Absence preserves legacy transcript shape;
+# duplicates, malformed lengths, and empty recorded values never mean absence.
+bootstrap_stage3_stage2_transcript_preflight_context() {
+    [ "$#" -eq 1 ] && [ -f "$1" ] || return 1
+    if grep -q '^explicit-env:[^:]*:SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1=' "$1"; then
+        [ "$(grep -c '^explicit-env:[^:]*:SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1=' "$1")" = 1 ] || return 1
+        bootstrap_stage2_preflight_context=$(bootstrap_stage3_transcript_explicit_env_value \
+            "$1" SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1) || return 1
+        [ -n "$bootstrap_stage2_preflight_context" ] || return 1
+        printf '%s\n' "$bootstrap_stage2_preflight_context"
     fi
 }
 

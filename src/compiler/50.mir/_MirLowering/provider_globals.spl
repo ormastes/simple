@@ -15,6 +15,14 @@ fn mir_global_storage_name(owner: text, name: text) -> text:
 fn mir_global_declaration_key(owner: text, name: text) -> text:
     "{mir_layout_canonical_module_name(owner)}::{name}"
 
+fn imported_private_literal_is_inline(constant: HirConst) -> bool:
+    if constant.is_mutable or not constant.visibility.is_private(): return false
+    match constant.value.kind:
+        case HirExprKind.IntLit(_, _) | HirExprKind.FloatLit(_, _) |
+             HirExprKind.FloatLexeme(_, _) | HirExprKind.BoolLit(_): true
+        case HirExprKind.StringLit(_, _): not runtime_module_initializer_supported(constant)
+        case _: false
+
 fn mir_global_demanded_owners(demanded: Dict<text, [i64]>) -> Dict<text, bool>:
     var owners: Dict<text, bool> = {}
     for key in demanded.keys():
@@ -168,6 +176,22 @@ impl MirLowering:
             if val definition = provider_symbols.get_symbol_raw(constant.symbol.id):
                 definition_owner = definition.defining_module ?? provider_name
             val storage_name = mir_global_storage_name(definition_owner, constant.name)
+            if imported_private_literal_is_inline(constant):
+                # The provider deliberately gives private literals no static.
+                # Import their exact scalar value, never an invented zero or
+                # a provider expression containing foreign SymbolIds.
+                if val value = self.lower_const_expr(constant.value):
+                    for imported_id in demanded[key]:
+                        self.global_symbol_ids[imported_id] = true
+                        self.global_constants_by_id[imported_id] = MirConstant(
+                            symbol: SymbolId(id: imported_id), name: constant.name,
+                            type_: storage_type, value: value)
+                        # Do not put provider expressions in global_const_exprs:
+                        # that map proves a local declaration owns storage;
+                        # these imported values remain inline-only.
+                        if needs_initialization:
+                            self.imported_global_initializers[imported_id] = mir_global_initializer_wrapper_name(provider_name)
+                    continue
             for imported_id in demanded[key]:
                 val declaration = MirStatic(symbol: SymbolId(id: imported_id), name: storage_name,
                     type_: storage_type, init: nil, is_mutable: constant.is_mutable,

@@ -7,7 +7,7 @@ use compiler.common.cache.native_resolution_trace.{NativeResolutionTraceV1}
 use compiler.hir.hir_lowering.module_surface_declarations.{module_surface_from_module}
 use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_name_index_build}
 use compiler.hir.hir_lowering.module_surface_registry_index.{module_surfaces_freeze, module_surfaces_frozen_alignment, module_surfaces_frozen_alignment_error, module_surfaces_validate_index_alignment}
-use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_fold_std_alias, module_surface_declaration_matches}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_fold_std_alias, module_surface_declaration_matches, module_surface_logical_name_from_path}
 use std.io_runtime.{hash_text}
 
 extern fn rt_hash_text(content: text) -> i64
@@ -204,6 +204,54 @@ impl ModuleSurfaceBuilder:
             return Err("module surface builder is frozen")
         if self.index_by_path_lookup_index(canonical_path) >= 0:
             return Err("module surface already exists for physical source: {canonical_path}")
+        # ADMISSION NAME VALIDATION, CANONICAL LANE ONLY (cycle-37, evidence in
+        # doc/08_tracking/bug/compiler_cli_unresolved_mirtype_chase_nondeterminism_2026-10-13):
+        # a source row admitted with a module_name that disagrees with its
+        # OWN path's logical derivation cross-maps the registry's name->index
+        # routing (observed: compiler.mir_opt.optimization_passes routed to
+        # the lib.compiler.* stub facade, surf_idx 871, all-zero declaration
+        # arrays, hard 'has no exported item' for every consumer). The check
+        # runs ONLY on canonical admissions (a NEW physical source): the
+        # first spelling of a path is path-derived by construction
+        # (_driver_collect_entry_import_source_untimed lists the canonical
+        # spelling first), so a divergent canonical row is mis-tagged by
+        # definition. The ALIAS lane deliberately has NO such check:
+        # module_surface_numbered_path_spec pins derivation-divergent alias
+        # names as legal (std.editor.alias_types on the types.spl path), and
+        # the entry-closure dual-tree import walk registers exactly such rows
+        # (a lib-tree file walked under a compiler.* import spelling). The
+        # bad alias row is registry-indistinguishable from those legal rows;
+        # the durable fix for its class belongs at the closure/inventory
+        # selection layer, not here.
+        # Scope: src/ trees ONLY. Non-src roots (examples/, test/, doc/) are
+        # admitted under their own naming conventions -- the cli closure
+        # resolves examples/10_tooling/trace32_tools/t32_cli/mod.spl as
+        # app.t32_cli.mod (cycle-39 verifier regression: this check rejected
+        # that admission and killed the whole cli closure at parse). The
+        # dual-tree mis-tagging the check targets only exists under src/.
+        val admit_in_src_tree = canonical_path.starts_with("src/") or canonical_path.contains("/src/")
+        # Mirror-layout carve-out: vendored crates at src/lib/<crate>/src/ use
+        # crate-relative module names (loader-authoritative: collections.hashmap
+        # for src/lib/nogc_sync_mut/src/collections/hashmap.spl), which this
+        # check's repo-relative derivation cannot reproduce -- the cycle-40
+        # verifier fired it as a false positive on every nogc_sync_mut module,
+        # killing the cli closure. The check's target class (a lib-tree file
+        # mis-tagged with a compiler.* name) can never match on these paths:
+        # the derivation yields lib.<crate>.src.*, never compiler.*, so the
+        # comparison is vacuous here anyway.
+        var admit_path_rest = canonical_path
+        if admit_path_rest.starts_with("src/"):
+            admit_path_rest = admit_path_rest.substring(4)
+        else:
+            val src_at = admit_path_rest.index_of("/src/")
+            if src_at >= 0:
+                admit_path_rest = admit_path_rest.substring(src_at + 5)
+        val admit_is_mirror_layout = admit_path_rest.starts_with("lib/") and admit_path_rest.contains("/src/")
+        if admit_in_src_tree and not admit_is_mirror_layout:
+            val admit_derived = module_surface_fold_std_alias(
+                module_surface_logical_name_from_path(canonical_path))
+            if module_surface_fold_std_alias(module_name) != admit_derived:
+                return Err("module surface name disagrees with its path derivation: path={canonical_path} module_name={module_name} derived={admit_derived}")
         val surface_index = self.surfaces.len()
         val name_result = self.add_indexed_canonical_identity(
             module_name, surface_index, surface.canonical_name)
@@ -226,6 +274,17 @@ impl ModuleSurfaceBuilder:
     ) -> Result<(), text>:
         if self.frozen:
             return Err("module surface builder is frozen")
+        # NO admission name validation in the alias lane, deliberately:
+        # module_surface_numbered_path_spec pins derivation-divergent alias
+        # names as legal (std.editor.alias_types admitted for the
+        # types.spl path, fold-std derivation lib.editor.alias_types), and
+        # the entry-closure dual-tree import walk depends on them (a lib-tree
+        # file walked under a compiler.* import spelling registers exactly
+        # such an alias row). The cross-map row observed in cycle-37
+        # (facade path + compiler.mir_opt.optimization_passes, surf_idx 871)
+        # is registry-indistinguishable from those legal rows -- any
+        # derivation check here breaks the spec. See the canonical-lane
+        # comment in add_surface_canonical_identity and the bug doc.
         val alias_slot = self.index_by_path_lookup(canonical_path)
         if alias_slot < 0:
             return Err("missing physical module surface for alias: {canonical_path}")

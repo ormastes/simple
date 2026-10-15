@@ -1,0 +1,48 @@
+# Authored regression: NOT EXECUTED. No runtime qualification claimed.
+# Both physical providers are present; the short alias belongs to the app.
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+use std.spec.{describe, it, expect}
+
+fn string_builder_owner_surfaces() -> ModuleSurfacesByName:
+    val log = Logger(level: 0)
+    val app_source = "class StringBuilder:\n    parts: [text]"
+    val lib_source = "class RtStringBuilder:\n    handle: i64"
+    val app = parse_full_frontend(app_source, "common.string_builder", "src/app/common/string_builder.spl", log)
+    val lib = parse_full_frontend(lib_source, "lib.common.string_builder", "src/lib/common/string_builder.spl", log)
+    var modules: Dict<text, Module> = {}
+    modules["common.string_builder"] = app
+    modules["lib.common.string_builder"] = lib
+    val result = module_surfaces_from_test_modules(modules, [
+        SourceFile(path: "src/app/common/string_builder.spl", content: app_source, module_name: "common.string_builder"),
+        SourceFile(path: "src/lib/common/string_builder.spl", content: lib_source, module_name: "lib.common.string_builder")
+    ])
+    expect(result.is_ok()).to_equal(true)
+    result.unwrap()
+
+describe "spreadsheet string builder explicit owner":
+    it "resolves the std owner while the short alias names the app provider":
+        val surfaces = string_builder_owner_surfaces()
+        val app_index = surfaces.index_by_name["common.string_builder"]
+        val lib_index = surfaces.index_by_name["lib.common.string_builder"]
+        expect(app_index == lib_index).to_equal(false)
+        expect(surfaces.surfaces[app_index].canonical_name).to_equal("app.common.string_builder")
+        expect(surfaces.surfaces[lib_index].canonical_name).to_equal("lib.common.string_builder")
+        val source = "use std.common.string_builder.\{RtStringBuilder\}\nfn keep(value: RtStringBuilder) -> RtStringBuilder:\n    value"
+        val consumer = parse_full_frontend(source, "app.office.sheets.ascii_width", "src/app/office/sheets/ascii_width.spl", Logger(level: 0))
+        var lowering = hirlowering_for_module("app.office.sheets.ascii_width", surfaces)
+        val hir = lowering.lower_module(consumer)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("RtStringBuilder") != nil).to_equal(true)
+
+    it "does not search the library to forgive an item missing from the short owner":
+        val surfaces = string_builder_owner_surfaces()
+        val source = "use common.string_builder.\{RtStringBuilder\}\nfn main() -> i64:\n    0"
+        val consumer = parse_full_frontend(source, "app.office.sheets.ascii_width", "src/app/office/sheets/ascii_width.spl", Logger(level: 0))
+        var lowering = hirlowering_for_module("app.office.sheets.ascii_width", surfaces)
+        lowering.lower_module(consumer)
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].message).to_contain("module common.string_builder has no exported item RtStringBuilder")

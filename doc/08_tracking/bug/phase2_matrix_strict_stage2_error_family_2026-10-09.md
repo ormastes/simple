@@ -187,6 +187,22 @@ receiver-proof `cannot establish invocation ledger` failures on 2026-10-11
 runs 2-4. Nondeterministic shard-owner startup under multi-lane host load;
 needs compiler-lane diagnosis of the shard owner startup/claim path.
 
+
+## Phase 3 Table owner transfer, 2026-10-12
+
+The actual frozen V7 full-CLI HIR pass reports four errors in async db_atomic
+(group 92): the current SDN owner declares `Table(headers, rows)`, but the
+consumer destructures obsolete `(fields, types, rows)` payloads.
+The narrow async correction reuses upstream `af804c27f33b2104c30355323e78f5474e43b3ba`;
+the same obsolete sync pattern is corrected separately. Required headers,
+row order, scalar formatting, and existing non-table/missing-key errors remain.
+
+Independent source review accepted both hunks and twelve production-helper
+regressions. Those regressions remain AUTHORED_UNEXECUTED. Actual regenerated
+HIR, MIR, object generation, native behavior, and whole Phase 3 tests are pending;
+this transfer is not a bootstrap PASS. The live build uses its prior immutable
+source and does not exercise these newly committed repairs.
+
 ## 2026-10-12 addendum 4: C7 — shard-path module-registry doubled-key + app-layer surface errors (full-CLI build)
 
 Manual full-CLI build of the `src/app/cli/_CliMain/main_and_help.spl` closure

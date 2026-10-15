@@ -1278,11 +1278,22 @@ impl MirLowering:
                                     # canonical owner, not a bare layout name.
                                     # Keep the separate HIR rebinding key above.
                                     field_type_name = mir_class_identity(field_type_symbol)
+                    case HirTypeKind.Function(_, field_return, _):
+                        # The callback value is not a record, but its named
+                        # return type still belongs to the declaring table.
+                        # Retain that exact owner for importer-side rebinding.
+                        match field_return.kind:
+                            case HirTypeKind.Named(return_symbol, _):
+                                if val return_owner = symbols.get_symbol_raw(return_symbol.id):
+                                    field_type_ownership_key = self.composite_layout_key(return_owner)
+                                    if return_owner.kind == SymbolKind.Class:
+                                        field_type_ownership_key = mir_class_identity(return_owner)
+                            case _: ()
                     case Array(field_element_type, _):
                         # Bug (native_class_array_field_mutation_segfault /
                         # native_bool_array_element_interpolation_special_garbage,
                         # 2026-07-17): field_array_element_type_name above
-                        # only preserves a NAME (a nested-array sentinel, or a
+                        # only preserves a NAME (a nested-array sentinel or a
                         # struct/class symbol name) -- not enough to tell a
                         # primitive bool/text/i64/f64 element apart from any
                         # other, so a primitive-element array field's reads
@@ -1295,31 +1306,34 @@ impl MirLowering:
                         # for split()-produced arrays.
                         field_elem_type = field_element_type
                         match field_element_type.kind:
-                            case Named(field_element_sym, _):
-                                val field_element_symbol = symbols.get_symbol_raw(field_element_sym.id)
-                                if field_element_symbol.?:
-                                    field_array_element_type_name = field_element_symbol.name
-                                    if field_element_symbol.kind == SymbolKind.Class:
-                                        field_array_element_type_name = mir_class_identity(field_element_symbol)
                             # This describes the ELEMENT, not the outer field.
                             # Marking [u16] as nested made index reads decode a
                             # numeric slot as an array handle/pointer; scalar/
                             # text elements must not be decoded or copied as
                             # nested array handles.
-                            case Array(_, _) | Slice(_):
+                            case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
                                 field_array_element_type_name = "__runtime_array__"
+                            case Named(field_element_sym, _):
+                                val field_element_symbol = symbols.get_symbol_raw(field_element_sym.id)
+                                if field_element_symbol.?:
+                                    # mcp_record_array_owner_loss_2026_10_11 (#3079): provider-owned element identity.
+                                    field_array_element_type_name = self.composite_layout_key(field_element_symbol)
+                                    if field_element_symbol.kind == SymbolKind.Class:
+                                        field_array_element_type_name = mir_class_identity(field_element_symbol)
+                                    field_type_ownership_key = field_array_element_type_name
                             case _: ()
                     case Slice(field_slice_element_type):
                         field_elem_type = field_slice_element_type
                         match field_slice_element_type.kind:
+                            case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                                field_array_element_type_name = "__runtime_array__"
                             case Named(field_slice_element_sym, _):
                                 val field_slice_element_symbol = symbols.get_symbol_raw(field_slice_element_sym.id)
                                 if field_slice_element_symbol.?:
-                                    field_array_element_type_name = field_slice_element_symbol.name
+                                    field_array_element_type_name = self.composite_layout_key(field_slice_element_symbol)
                                     if field_slice_element_symbol.kind == SymbolKind.Class:
                                         field_array_element_type_name = mir_class_identity(field_slice_element_symbol)
-                            case Array(_, _) | Slice(_):
-                                field_array_element_type_name = "__runtime_array__"
+                                    field_type_ownership_key = field_array_element_type_name
                             case _: ()
                     case _: ()
             field_type_names.push(field_type_name)
@@ -2455,7 +2469,12 @@ impl MirLowering:
         # lower_runtime_module_initializers_named).
         if hir_const_is_unit_typed(const_):
             return
-        val folded = self.lower_const_expr(const_.value)
+        var folded = self.lower_const_expr(const_.value)
+        match const_.value.kind:
+            case StringLit(_, _):
+                if runtime_module_initializer_supported(const_):
+                    folded = nil
+            case _: ()
         if folded.?:
             if not const_.is_mutable and const_.visibility.is_private():
                 return
@@ -2488,11 +2507,7 @@ impl MirLowering:
                     case _: self.lower_type(const_.type_)
             case _:
                 match const_.value.kind:
-                    case StringLit(_, interps):
-                        if string_literal_has_runtime_interpolations(interps):
-                            MirType(kind: MirTypeKind.Opaque("str"))
-                        else:
-                            self.lower_type(const_.type_)
+                    case StringLit(_, _): self.bootstrap_text_type()
                     case Binary(_, _, _):
                         # A runtime module initializer overwrites this static
                         # later on the ordinary path, but bootstrap functions

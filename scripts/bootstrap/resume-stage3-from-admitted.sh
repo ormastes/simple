@@ -71,6 +71,13 @@ trap 'bootstrap_resume_trap HUP' HUP
 trap 'bootstrap_resume_trap INT' INT
 trap 'bootstrap_resume_trap TERM' TERM
 
+# systemd user services do not inherit the launcher's environment. Transfer
+# this reserved watchdog policy as a typed worker argument, never command-env.
+stage3_rss_cap_mode=${SIMPLE_BOOTSTRAP_RSS_CAP_MODE-enforce}
+case "$stage3_rss_cap_mode" in enforce|monitor) ;; *)
+  bootstrap_stage3_error 'invalid Stage 3 RSS cap mode' ;;
+esac
+
 BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
@@ -416,16 +423,6 @@ stage2_link_compat=$(bootstrap_stage3_transcript_explicit_env_value \
 case "$stage2_backend" in llvm|llvm-lib|cranelift) ;; *) exit 1 ;; esac
 case "$stage2_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
 case "$stage2_compile_stack_mib" in ''|*[!0-9]*|0) stage2_compile_stack_mib='' ;; esac
-bootstrap_preflight_receipt=${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT:-"$output/bootstrap-preflight.env"}
-bootstrap_preflight_expected_config="platform=${platform};backend=${stage2_backend};mode=dynload;lane=full-bootstrap"
-sh "$root/scripts/check/check-bootstrap-preflight.shs" \
-  --seed="$seed" --expect-config="$bootstrap_preflight_expected_config" \
-  --verify-receipt="$bootstrap_preflight_receipt" || {
-  echo "bootstrap-policy-error: admitted Stage 3 resume lacks current authoritative preflight evidence" >&2
-  exit 64
-}
-SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT=$bootstrap_preflight_receipt
-export SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT
 # The Stage-2 build-args vector is reconstructed from the RECORDED transcript --
 # every env VALUE and the argv verbatim -- not from a hand-written copy of
 # bootstrap-from-scratch.sh:2827. The hand-written copy was stale in both halves
@@ -464,6 +461,8 @@ stage2_env_value() {
 }
 stage2_recorded_cold_init=$(bootstrap_stage3_stage2_transcript_cold_init "$stage2_transcript") || \
   bootstrap_stage3_error 'recorded Stage 2 SCV cold-init control is invalid'
+stage2_preflight_context=$(bootstrap_stage3_stage2_transcript_preflight_context "$stage2_transcript") || \
+  bootstrap_stage3_error 'recorded Stage 2 preflight context is invalid'
 stage2_recorded_compiler_ceiling=$(bootstrap_stage3_transcript_compiler_ceiling "$stage2_transcript") || \
   bootstrap_stage3_error 'recorded Stage 2 compiler RSS ceiling is invalid'
 stage2_recorded_diagnostics=$(bootstrap_stage3_stage2_transcript_diagnostics "$stage2_transcript") || \
@@ -564,6 +563,40 @@ bootstrap_stage3_verify_stage2_admission_receipt \
   "$(dirname -- "$stage2_sanity")" "$stage2_receiver" "$stage2_receiver" \
   "$stage2_receiver_log" "$stage2_receiver_log" "$root"
 resume_abi_receipt_sha=$(bootstrap_stage3_hash_file "$stage2_admission") || exit 1
+# Parent admission authenticated the in-memory Stage 2 argv above. Transfer
+# only its ordered sources and closure policy; never rediscover current policy.
+. "$root/scripts/bootstrap/lib/stage3-source-policy.shs"
+stage3_source_policy=$(bootstrap_stage3_source_policy stage2 "$@") ||
+  bootstrap_stage3_error 'authenticated Stage 2 source policy is missing or malformed'
+set --
+while IFS= read -r stage3_policy_arg; do
+  set -- "$@" "$stage3_policy_arg"
+done <<EOF_STAGE3_SOURCE_POLICY
+$stage3_source_policy
+EOF_STAGE3_SOURCE_POLICY
+# Parent admission above authenticates the context as part of build_args_sha256.
+# Cargo feature selection cannot be inferred from backend or the current shell.
+bootstrap_preflight_receipt=${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT:-"$output/bootstrap-preflight.env"}
+if [ -n "$stage2_preflight_context" ]; then
+  . "$root/scripts/bootstrap/lib/preflight-configuration.shs"
+  bootstrap_preflight_expected_config=$(bootstrap_preflight_configuration_from_parent_v1 \
+    "$stage2_preflight_context" "$platform" "$stage2_backend" dynload) || {
+    echo 'bootstrap-policy-error: admitted Stage 2 preflight context is incompatible' >&2
+    exit 64
+  }
+else
+  # Legacy parents contain no authenticated Cargo dimensions. Retain their
+  # existing exact base-config contract; never adopt richer receipt bytes.
+  bootstrap_preflight_expected_config="platform=${platform};backend=${stage2_backend};mode=dynload;lane=full-bootstrap"
+fi
+sh "$root/scripts/check/check-bootstrap-preflight.shs" \
+  --seed="$seed" --expect-config="$bootstrap_preflight_expected_config" \
+  --verify-receipt="$bootstrap_preflight_receipt" || {
+  echo 'bootstrap-policy-error: admitted Stage 3 resume lacks current authoritative preflight evidence' >&2
+  exit 64
+}
+SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT=$bootstrap_preflight_receipt
+export SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT
 path=$(bootstrap_stage3_transcript_host_value "$stage2_transcript" PATH)
 cmp -s "$runtime_origin_before" "$runtime_origin_after"
 cmp -s "$runtime_origin_after" "$runtime_admitted"
@@ -888,7 +921,7 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   --runtime-bundle core-c-bootstrap --threads "$stage3_threads" \
   ${stage3_timeout_args} --cache-dir "$stage3_cache" \
   --mode dynload --runtime-path "$runtime" -o "$candidate" \
-  src/app/cli/bootstrap_main.spl)
+  "$@" src/app/cli/bootstrap_main.spl)
 
 bootstrap_planner_v2_verify_parent_compiler_binding \
   "$planner_admission" "$stage2" "$admitted" || exit 64
@@ -942,7 +975,7 @@ elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
   stage3_darwin_rss_session_mode=$(bootstrap_stage3_memory_darwin_session_mode)
   perl "$root/scripts/resource/process-tree-rss-watchdog.pl" \
     --session-mode="$stage3_darwin_rss_session_mode" \
-    --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
+    --rss-cap-mode="$stage3_rss_cap_mode" \
     --max-rss-kib="$stage3_darwin_rss_cap_kib" \
     --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
     --receipt="$stage3_log.rss.env" -- \

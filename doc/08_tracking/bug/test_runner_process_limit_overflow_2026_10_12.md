@@ -15,3 +15,11 @@ The first native validator probe exposed a distinct omitted-end slice contract d
 Final native probe source06e14b6c uses the exact production validator bytes plus the preserved test/fixtures/bootstrap/process_limit_native_boundary/main.spl. To reproduce its isolated source closure, copy resource_policy.spl and this main.spl into a private src/app directory, commit it before SCV admission, compile with --source src/app --emit-object --backend=llvm --jobs=1, generate startup from the canonical compile_entry_point_c owner and manually strict-link the paired runtime archives. Exact Phase2 producer d3563806c3babfe69358380aa752a0b90b65f7119a7b83cb441a97a969ca9791 compiled object11040B in8.786s; strict link0, execution0,16 real assertions PASS, stderr0. The earlier omitted-end native execution remains failed in the evidence. No green tests were repeated after convergence.
 
 The five Phase1 groups qualified the original lexical-bound candidate; the16 native assertions qualify its tagged explicit-end revision. Full check src/compiler, check src/lib and MCP/LSP checks remain unavailable on the current compiler-only Phase3 entry. No full verifier or release PASS is claimed.
+
+## Local composition qualification
+
+Transferred from upstream PR #3312 onto local release_phase3 `15616ab39c5bb206e6976dd520e3d09b257fa915`.
+Production repairs and regression files in this composed candidate are
+AUTHORED_UNEXECUTED. Historical upstream receipts above are not execution
+evidence for this source composition or the current ARM/RISC-V compiler.
+Status remains OPEN; full Phase3 and required verification remain pending.

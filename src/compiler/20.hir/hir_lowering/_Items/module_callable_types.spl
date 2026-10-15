@@ -269,6 +269,36 @@ impl HirLowering:
                 imported_module_name, source_name)
             if raw_symbol_id >= 0:
                 return HirType(kind: self.lower_named_symbol_kind(SymbolId(id: raw_symbol_id), arguments, type_.span), span: type_.span)
+            # SINGLETON-DECLARER REPAIR (cycle-37 endgame, doc
+            # compiler_cli_unresolved_mirtype_chase_nondeterminism_2026-10-13,
+            # outcome c): the qualified lookup in the callable owner's scope
+            # missed, but the frozen registry knows EXACTLY ONE surface that
+            # declares this name (probe evidence: `[strict-gate] name=...
+            # decl_count=1 decl_first=<owner>` immediately before a hard
+            # `unresolved type`). The declaring surface was present and
+            # declaring, yet it was never materialized into THIS importer's
+            # symbol table. Do that lazily, exactly as
+            # materialize_imported_callable_declared_dependency does:
+            # qualified local `{owner}::{name}`, register, qualified bind,
+            # then retry the raw lookup under the same qualifier. Deliberately
+            # conservative: only when the initial lookup failed AND the
+            # declarer is unique; anything else falls through to the
+            # historical behavior below, unchanged.
+            val singleton_owners = self.surface_decl_owner_indices(source_name)
+            if singleton_owners.len() == 1:
+                val singleton_surface = self.module_surfaces.surfaces[singleton_owners[0]]
+                val singleton_local = "{singleton_surface.module_name}::{source_name}"
+                self.register_imported_symbol(
+                    singleton_surface.physical_index, singleton_surface.module_name,
+                    source_name, singleton_local, type_.span, false)
+                val singleton_symbol = self.symbols.lookup_or_invalid(singleton_local)
+                if singleton_symbol.is_valid():
+                    self.symbols.bind_qualified_type(
+                        singleton_surface.module_name, source_name, singleton_symbol)
+                    val retry_symbol_id = self.symbols.lookup_qualified_type_raw(
+                        singleton_surface.module_name, source_name)
+                    if retry_symbol_id >= 0:
+                        return HirType(kind: self.lower_named_symbol_kind(SymbolId(id: retry_symbol_id), arguments, type_.span), span: type_.span)
             # Level-gated OWNER probe (default off). This fall-through hands the
             # type to `lower_type`, which resolves in the IMPORTER's scope; the
             # resulting `unresolved type: X` carries a SYNTHESIZED span
@@ -319,6 +349,19 @@ impl HirLowering:
         # src/compiler restore in fcbec1c3b62; restored elementwise here, next
         # to the current name-based Array arm rather than replacing it.
         # Ratcheted by scripts/check/check-type-walk-constructor-parity.shs.
+        # Optional payloads also belong to the declaring module. Never reuse
+        # the outer node as the accessor fallback: that would recurse forever.
+        if parser_type_kind_is_optional(type_.kind):
+            val invalid_inner = Type(kind: TypeKind.Error, span: type_.span)
+            val inner = parser_type_kind_optional_inner(type_.kind, invalid_inner)
+            match inner.kind:
+                case TypeKind.Error:
+                    self.error("invalid imported Optional payload type", type_.span)
+                    return HirType(kind: HirTypeKind.Error, span: type_.span)
+                case _: pass
+            return HirType(
+                kind: HirTypeKind.Optional(self.imported_surface_type(inner, imported_module_name)),
+                span: type_.span)
         # A borrowed parameter's inner type belongs to the declaring module,
         # just like a pointer's pointee. Falling through to lower_type would
         # instead look up that name in the importing module's scope.
