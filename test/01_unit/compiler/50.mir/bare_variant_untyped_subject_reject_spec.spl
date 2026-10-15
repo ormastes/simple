@@ -35,7 +35,7 @@ val data_source = "pub enum Op:\n    Eq\n    Ne\n    Lt\n\npub enum Inst:\n    B
 
 val facade_source = "use lib.data.*\n\nexport use lib.data.\{Op, Cmp, Inst, Kind, Proj, Term, Loc, Place, Fn\}\n"
 
-fn lower_facade_consumer(body: text) -> text:
+fn lower_facade_consumer_mir(body: text) -> (MirModule, text):
     val consumer_source = "use lib.facade.*\n\n" + body
     val log = Logger(level: 0)
     val data_ast = parse_full_frontend(data_source, "lib/data.spl", "lib.data", log)
@@ -63,7 +63,25 @@ fn lower_facade_consumer(body: text) -> text:
     for e in mir_lowering.errors:
         out = out + "mir: " + e.message + "\n"
     print "errors: [{out}]"
-    out
+    (mir, out)
+
+fn lower_facade_consumer(body: text) -> text:
+    val (mir, diagnostics) = lower_facade_consumer_mir(body)
+    diagnostics
+
+fn expect_only_outer_inst_variant_tests(mir: MirModule):
+    var found = false
+    var variant_tests = 0
+    for function in mir.functions.values():
+        if function.name == "k2" or function.name.ends_with(".k2"):
+            found = true
+            for block in function.blocks:
+                if (block.label ?? "").contains("ematch_arm"):
+                    variant_tests = variant_tests + 1
+    expect(found).to_equal(true)
+    # Bin and Nop are the only variant tests. Return must be a binding,
+    # so the nested match cannot add a Kind.Return discriminant test.
+    expect(variant_tests).to_equal(2)
 
 describe "bare names that must NOT become a silent variant test":
     it "known non-enum subject binds: fn h(x: i64): match x: case Var:":
@@ -78,9 +96,11 @@ describe "bare names that must NOT become a silent variant test":
     it "a variant of an unrelated enum on a known-enum payload binds, never borrows":
         # op: Op; `Return` exists only in Kind. No enum test may name
         # `Return` (that would be Kind's discriminant); HIR warns on stderr.
-        val all = lower_facade_consumer("fn k2(i: Inst) -> i64:\n    match i:\n        case Bin(d, op):\n            match op:\n                case Return:\n                    1\n                case _:\n                    0\n        case Nop:\n            2\n")
+        val (mir, all) = lower_facade_consumer_mir("fn k2(i: Inst) -> i64:\n    match i:\n        case Bin(d, op):\n            match op:\n                case Return:\n                    if Return == Op.Eq: 1 else: 0\n                case _:\n                    0\n        case Nop:\n            2\n")
         expect(all.contains("'Return'")).to_equal(false)
         expect(all.contains("ambiguous")).to_equal(false)
+        expect(all.contains("unresolved")).to_equal(false)
+        expect_only_outer_inst_variant_tests(mir)
 
     it "a genuinely untyped parameter: unique variant name is a variant test":
         # Pinned divergence: the seed binds here; stage2 tests the variant
