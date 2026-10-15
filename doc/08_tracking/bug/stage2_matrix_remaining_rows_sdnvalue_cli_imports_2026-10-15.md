@@ -215,3 +215,21 @@ metadata-owner fix (enum_constructor_metadata_owner) stays: it hardens a
 genuinely wrong ambiguity call for the constructor path, but it is not the
 B5b consumer. Remaining fix belongs in the FlatAstBridge enum-subject
 resolution (one identity layer above the two MIR fixes already landed).
+
+## Addendum 2026-10-16 (third layer): B5b replays from the mono archive
+
+Ruled out, with evidence: (a) the FlatAstPattern catch-all degradation
+fired only for tags 33 (EXPR_UNIT, 21x), 26 (EXPR_LAMBDA, 17x), 13
+(EXPR_ARRAY_LIT, 4x) across the closure — never EXPR_IDENT, so
+`case Null:` was not dropped at the bridge; (b) MIR's reclassification
+failure path keeps the arm a Binding (expr_dispatch.spl:6562), and the
+scalar gate tolerates Binding+Wildcard without B5b. The only remaining
+route for arm 0 to BE a Wildcard at the scalar gate is that the arms were
+READ AS Wildcard from materialized state: the mono archive captures
+module bodies in ArchiveRequests mode while the enum subject is
+unresolved (the same unresolvable `Dict<text, SdnValue>` seam), degrading
+`case Null:` at capture time; every later lowering replays the poisoned
+archive body. Fix direction: make enum variant names resolve during
+archive body capture (the ensure_archive_nominal_table_v2 /
+MonoTemplateBodyModeV1.ArchiveRequests path in 40.mono), so archived
+bodies retain Enum patterns for their own module's variants.
