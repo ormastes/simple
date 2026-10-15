@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -335,3 +335,20 @@ Tests covering declared enum payload contextual containers, declared enum collec
 
 
 </details>
+
+## Authored optional nominal payload extension
+
+The four scenarios below are authored additions to `test/01_unit/compiler/mir/contextual_enum_payload_spec.spl`. SSpec execution and docgen for this extension are UNRUN; the table counts executable scenarios, not passing results. Existing generated scenario content above is preserved.
+
+| Requirement | Step | Actual assertion |
+| --- | --- | --- |
+| REQ-ENUM-OPTIONAL-OWNER-001 | Retain the proven nominal Some payload owner | Parse and lower a real record, optional enum payload, and `Some(record)` construction; require zero collected HIR/MIR errors and a lowered function. |
+| REQ-ENUM-OPTIONAL-OWNER-002 | Preserve the declared optional nil path | Parse and lower the same optional nominal slot with literal `nil`; require zero errors. |
+| REQ-ENUM-OPTIONAL-OWNER-003 | Reject a foreign nominal Some payload owner | Lower a distinct nominal type with identical fields into the slot; require exactly one enum payload type-mismatch diagnostic. |
+| REQ-ENUM-OPTIONAL-OWNER-003 | Reject a scalar Some payload for a nominal slot | Lower `Some(41)` into the nominal slot; require exactly one payload mismatch instead of accepting its runtime carrier. |
+
+These tests call the existing actual source-to-HIR-to-MIR helper. The separate native fixture additionally uses two modules defining the same type spelling, preserving the distinction between type names and declaration owners. On the baseline producer, owned `Some(record)` fails while `nil` executes correctly and the foreign owner is rejected. The final changed-producer native check passed for owned Some and foreign-owner rejection; see `doc/08_tracking/bug/optional_nominal_enum_payload_provenance.md` for exact retained receipts.
+
+The narrow source change handles existing nominal symbols at type uses with zero type arguments. This is not a claim of generic-declaration arity validation or general nested/generic optional support. No admitted full-host, runtime SSpec, or memory target PASS follows from static review.
+
+The final native result is bound by `phase3-mir-owner-scratch-cycle3-20261016/optional-payload-result.json` (SHA256 `527e7fd093712b732be235e15b1fc75414af452b46111ee27b80fe037f7269b9`). Owned `Some(record)` compiled and executed with value 41; the cross-module same-name record was rejected. The nil baseline PASS was preserved without replay. These outcomes verify the small native behavior; this SSpec extension and its scalar-negative scenario remain UNRUN on an admitted test host.
