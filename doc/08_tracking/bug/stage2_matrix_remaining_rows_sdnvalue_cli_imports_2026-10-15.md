@@ -200,3 +200,18 @@ the enum owner the same way — register/look up variants under the folded
 dotted module name so a re-materialized enum declaration resolves by the same
 key its match arms use. The bisection table and the construction-side fix
 evidence above carry over unchanged.
+
+## Addendum 2026-10-16 (final): B5b degrades in the frontend bridge, not MIR
+
+Combined campaign (owner-canonicalization + metadata-owner + both backend
+fixes): `payload type mismatch` count is ZERO — the construction side is
+fixed. B5b persists. Reading expr_dispatch.spl:6490-6541: MIR's wildcard
+duplicate check fires only when the FIRST arm is already a Wildcard kind.
+`case Null:` must therefore arrive at MIR as Wildcard — it is degraded in
+the frontend FlatAstBridge (convert_nodes.spl:1593-1652, the documented
+"B5b shard-registry family" site), which cannot resolve the enum-variant
+name against the subject type at bridge time in this closure. The
+metadata-owner fix (enum_constructor_metadata_owner) stays: it hardens a
+genuinely wrong ambiguity call for the constructor path, but it is not the
+B5b consumer. Remaining fix belongs in the FlatAstBridge enum-subject
+resolution (one identity layer above the two MIR fixes already landed).
