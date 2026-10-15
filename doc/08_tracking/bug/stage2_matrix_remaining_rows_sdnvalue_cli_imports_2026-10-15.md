@@ -102,3 +102,11 @@ Diagnosis per residual:
    as the landed hir_definitions named-import family; unblocks four rows.
 2. SdnValue MIR payload identity (Row 1) — needs the advisory-to-error
    chain established in the test-runner closure first.
+
+## Tooling note (found while landing this record)
+
+`check-no-conflict-markers-push.shs` fails closed with "changed 1 path(s) but
+0 were scanned (1 deletion(s))" on a deletion-only commit, blocking an
+otherwise clean push. A deletion cannot introduce a conflict marker; the
+gate should PASS on ranges whose only changes are deletions. Left as a
+recorded defect for the hook owner rather than bypassed with --no-verify.
