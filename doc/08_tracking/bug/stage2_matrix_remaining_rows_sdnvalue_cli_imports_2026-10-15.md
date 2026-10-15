@@ -233,3 +233,16 @@ archive body. Fix direction: make enum variant names resolve during
 archive body capture (the ensure_archive_nominal_table_v2 /
 MonoTemplateBodyModeV1.ArchiveRequests path in 40.mono), so archived
 bodies retain Enum patterns for their own module's variants.
+
+## Severity note (2026-10-16)
+
+src/lib/common/sdn/value.spl alone has ~15 bare-variant match arms
+(`case Null:`, `case Bool(_):`, ...) across is_null/is_bool/is_number/
+as_bool/as_int/... plus 19 `case _:` arms. If enum-subject resolution
+fails for the module the way is_null evidences, EVERY one of those matches
+degrades; B5b trips only on the first `variant + case _` pair and is the
+fail-closed tripwire — without it the module would compile to silently
+wrong predicates. Treat the archive-capture fix as correctness-critical,
+not a single-function anomaly. The serialized parser-v4 HIR cache
+(*.parser-v4.hir under the row cache dir) holds the post-bridge arms and
+is the fastest place to confirm the degraded shape once a decoder lands.
