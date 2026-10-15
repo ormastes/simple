@@ -3,6 +3,7 @@
 # an element conversion, not just permission to convert a scalar argument.
 use compiler.hir.hir_types.*
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
 
 fn enum_payload_nominal_kind(id: SymbolId, symbols: SymbolTable) -> i64:
     if not id.is_valid() or not symbols.symbols.has(id.id): return 0
@@ -22,8 +23,19 @@ fn enum_payload_named_alias_equal(a: SymbolId, b: SymbolId, symbols: SymbolTable
     val name_a = symbols.symbol_name_scalar_raw(a.id)
     if name_a == "" or name_a != symbols.symbol_name_scalar_raw(b.id): return false
     if a.id == b.id: return true
-    val owner_a = symbols.symbol_defining_module_scalar_raw(a.id)
-    owner_a != "" and owner_a == symbols.symbol_defining_module_scalar_raw(b.id)
+    # Fold both owner spellings onto one dotted name before comparing:
+    # DECLARATION-populated symbols carry a repo-relative file path
+    # (src/lib/common/sdn/value.spl) while IMPORT-populated symbols carry the
+    # dotted logical module (lib.common.sdn.value). One physical enum
+    # re-materialized through an unresolvable builtin-container payload
+    # (Dict<text, SdnValue>, site-19) reaches the payload comparison with
+    # element owners from BOTH namespaces, and the raw-spelling compare
+    # rejected identical types — same root cause as
+    # mir_qualified_field_key_namespace_mismatch_2026-08-08, which
+    # mir_layout_canonical_module_name exists to fold away.
+    val owner_a = mir_layout_canonical_module_name(symbols.symbol_defining_module_scalar_raw(a.id))
+    if owner_a == "": return false
+    owner_a == mir_layout_canonical_module_name(symbols.symbol_defining_module_scalar_raw(b.id))
 
 fn enum_payload_type_lists_alias_equal(a: [HirType], b: [HirType], symbols: SymbolTable) -> bool:
     if a.len() != b.len(): return false

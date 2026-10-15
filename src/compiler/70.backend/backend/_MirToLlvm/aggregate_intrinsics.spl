@@ -85,7 +85,14 @@ impl MirToLlvm:
         val base_ptr = self.value_as_type(base_val, self.get_operand_type(base), "ptr")
         var index_vals: [text] = []
         for idx in indices:
-            index_vals = index_vals.push(self.translate_operand(idx))
+            # Convert every index to the builder's integer size type before
+            # emit_gep declares it `{size_type} {idx}`: a ptr-typed index
+            # (e.g. a widened handle reaching a dead post-ret block) was
+            # emitted raw and llc rejected `getelementptr ... i64 %lN` where
+            # %lN is a ptr parameter — see
+            # doc/08_tracking/bug/stage2_matrix_remaining_rows_sdnvalue_cli_imports_2026-10-15.md
+            val idx_val = self.translate_operand(idx)
+            index_vals = index_vals.push(self.value_as_type(idx_val, self.get_operand_type(idx), self.builder.size_type))
         val base_ty = self.valid_llvm_type(self.get_operand_type(base))
         self.mark_ptr_local(dest_id)
         self.builder.emit_gep(dest_name, base_ty, base_ptr, index_vals)
