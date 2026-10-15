@@ -136,3 +136,38 @@ someone cloning the draft PR:
 
 The existing shared `C:/dev/simple` worktree contains other sessions' changes.
 Preserve them; this plan and candidate are authored in an isolated worktree.
+
+## Measured state addendum — 2026-10-16 (macOS stage1→2 campaign lane)
+
+Canonical local runs (llvm/dynload, full waiver atoms, 8 GiB RSS cap) on
+release_phase3 a1d66e52 and fix branches; details and retained logs in
+doc/08_tracking/bug/stage2_matrix_remaining_rows_sdnvalue_cli_imports_2026-10-15.md
+(site-19).
+
+ALWAYS GREEN on every run: stage1 seed build, stage2 native compile
+(1348 modules), LINK, sanity probes, struct-receiver proof, all 8 `_cg`
+module-compile rows.
+
+Rows and their fixes (PR numbers against release_phase3):
+- test_runner_build: two stage2 backend ICEs FIXED and campaign-verified
+  (PR #3487: GEP index conversion; void-to-integer materialization).
+  `SdnValue::Array` payload mismatch FIXED and campaign-verified
+  (PR #3488: owner canonicalization + metadata-owner disambiguation).
+  Remaining: B5b "multiple wildcard arms" in `SdnValue.is_null` —
+  `case Null:` reaches MIR as Wildcard; bridge and MIR reclassification
+  ruled out with receipts; diagnosis points at mono-archive body capture
+  (ArchiveRequests) while the enum subject is unresolved through the
+  `Dict<text, SdnValue>` payload seam. Owner: mono archive lane.
+- compiler_cli_build: `Span` import FIXED (PR #3486). Remaining:
+  fabricated-position `BackendKind` (owner-walk diagnosis needed) and
+  missing `_pci_ecam_base` arm64/riscv64 helper (needs SimpleOS PCI
+  driver owner; provider carries `PciHostConfig.ecam_base`).
+- compiler_bootstrap_tests / interpreter_interpreter_tests /
+  loader_interpreter_tests: cascades of the two build rows.
+
+Operational notes for future runs: manual runs need the four
+SIMPLE_MCDC_OFF_WAIVER_* atoms; rerun with --invalidate-cache=stage2 on
+source change; admitted caches seal read-only (chmod u+w for local
+cleanup); source-edit experiments drift build/scv — clear it afterwards;
+the test campaign runs a sharded-frontend policy (see
+verification_frontend_policy lines in row logs).
