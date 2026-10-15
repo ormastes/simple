@@ -246,3 +246,16 @@ wrong predicates. Treat the archive-capture fix as correctness-critical,
 not a single-function anomaly. The serialized parser-v4 HIR cache
 (*.parser-v4.hir under the row cache dir) holds the post-bridge arms and
 is the fastest place to confirm the degraded shape once a decoder lands.
+
+## Minimization probes (2026-10-16)
+
+With the GEP/void/owner fixes in the stage2 compiler, neither
+`--entry src/lib/common/sdn/strict_v1.spl` (the enum's main consumer, compile
+phases clean; only the ad-hoc harness link-provider limitation fires) nor
+`--entry src/lib/nogc_sync_mut/test_runner/test_db.spl` reproduces B5b or
+the payload mismatch. Only the full
+`--entry src/app/test_runner_new/main.spl` 265-module closure reproduces.
+The mono-archive capture context that degrades the arms therefore
+activates at whole-entry scale, not at consumer-module scale — debugging
+needs the full closure or an archive-body dump, both owned by the mono
+lane's infrastructure.
