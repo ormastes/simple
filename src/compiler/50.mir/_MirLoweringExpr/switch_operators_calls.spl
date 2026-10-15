@@ -14,7 +14,6 @@ use compiler.mir._MirLowering.native_trait_conversion.*
 use compiler.mir._MirLowering.native_trait_registration.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
-use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{enum_payload_named_alias_equal}
 use compiler.mir._MirLowering.global_initializer_guard.*
 # MIR Lowering - Expression Lowering
 #
@@ -5068,24 +5067,7 @@ impl MirLowering:
                 self.lower_expr(args[0].value)
             if typed_slots:
                 val expected = self.enum_variant_payload_types[metadata_key][0]
-                var payload_compatible = self.enum_payload_local_compatible(expected, args[0].value, payload_local)
-                # The seed-native ABI can corrupt a composite HirType passed
-                # into the helper above even though both call-site aggregates
-                # still carry valid declaration identities. Recover only the
-                # exact recursive-array case, comparing scalar SymbolIds in
-                # this frame before either aggregate crosses another method
-                # boundary. Wrong owners and non-array shapes still fail.
-                if not payload_compatible:
-                    match (expected.kind, args[0].value.type_.kind):
-                        case (HirTypeKind.Array(expected_element, expected_size), HirTypeKind.Array(actual_element, actual_size)):
-                            if expected_size == actual_size:
-                                match (expected_element.kind, actual_element.kind):
-                                    case (HirTypeKind.Named(expected_owner, expected_args), HirTypeKind.Named(actual_owner, actual_args)):
-                                        if expected_args.len() == actual_args.len() and enum_payload_named_alias_equal(expected_owner, actual_owner, self.symbols):
-                                            payload_compatible = true
-                                    case _: ()
-                        case _: ()
-                if not payload_compatible:
+                if not self.enum_payload_local_compatible(expected, args[0].value, payload_local):
                     self.error_fatal("enum construction '{metadata_key}': payload type mismatch at 0", Some(args[0].span))
                     return self.builder.emit_const_int(0)
                 payload_local = self.adapt_declared_enum_payload(expected, payload_local)
