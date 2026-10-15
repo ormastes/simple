@@ -38,6 +38,7 @@ use compiler.backend.backend_helpers.{compile_module_with_backend,
 use compiler.backend.backend.backend_types.{CompiledModule, CompileError}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
 use compiler.backend.llvm_capability.{find_archive_portable}
+use compiler.backend.runtime_compiler.{find_c_compiler, _is_msvc_cc}
 use std.platform.{get_host_os, get_host_arch}
 use std.nogc_async_mut.sosix.host_facade.{sosix_run}
 use compiler.driver.native_relocatable_link.{native_relocatable_link_plan,
@@ -211,8 +212,6 @@ fn driver_publish_demand_scc_outputs_v1(ctx: CompileContext) -> bool:
     ctx.demand_compile_execution = Some(execution)
     true
 use compiler.frontend.parser_types.{ParserModule}
-use compiler.driver.driver_native_objectless_proof.{driver_native_parser_is_declaration_only, driver_native_objectless_proof_key}
-use compiler.hir.hir_lowering.module_surface.{module_surface_canonical_path, ModuleSurfaceParserOwner}
 use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity,
 
     native_module_cache_shadow_mismatch_v1,
@@ -969,28 +968,10 @@ pub fn driver_native_frozen_source_lookup(
     # keyed by source path, so sharing that entry would let one alias reuse the
     # other alias's object. Fail closed for aliases instead of guessing.
     var path_count = 0
-    var alias_identity_conflict = false
-    var alias_index = 0
-    while alias_index < source_paths.len():
-        if source_paths[alias_index] == found_path:
+    for source_path in source_paths:
+        if source_path == found_path:
             path_count = path_count + 1
-            if source_identities[alias_index] != identity:
-                alias_identity_conflict = true
-        alias_index = alias_index + 1
     if path_count == 1:
-        return (found_path, identity)
-    # Duplicate inventory rows for the SAME physical file -- same path AND the
-    # same captured whole-content sha -- are SCV-snapshot inventory
-    # duplication (the closure scan and the snapshot admission both list the
-    # snapshot copy), not module aliasing: every duplicate names the same
-    # bytes, so this read-only path/identity lookup and the per-path cache
-    # key still resolve to one correct object. Measured on the stage2
-    # artifact builds: pure export-shim facades (lib.io_runtime et al.) were
-    # rejected here with path_count=2, misclassified as code-bearing, sent to
-    # the capsule worker, and hard-failed there with "MIR module has no
-    # functions or static data". A conflicting captured sha under one path
-    # stays fail-closed: that would cross-alias distinct objects.
-    if path_count > 1 and not alias_identity_conflict:
         return (found_path, identity)
     ("", "")
 
@@ -1492,25 +1473,14 @@ pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: Pars
     if parsed_module == nil:
         return false
     val parsed = parsed_module
+    # Extern-only declaration modules (e.g. std.nogc_sync_mut.env.types: only
+    # `extern fn rt_env_*` + export) legitimately lower to a MIR module with
+    # zero functions — the externs resolve at link time. Treat them like the
+    # bodyless facades below instead of failing "MIR module has no functions".
+    # A module with any NON-extern parsed function still hard-fails there:
+    # HIR had bodies, so an empty MIR is a real lowering bug and must stay
+    # loud (bug bootstrap_stage2_empty_mir_bodies_2026-07-05).
     driver_native_parsed_module_has_no_runtime_body_v1(parsed)
-
-# A streaming parse releases ParserModule and ModuleSurface graphs before
-# native emission. Admit only the parser fact retained for these frozen bytes;
-# empty MIR alone never proves that a body was legitimately absent (#3028).
-pub fn driver_native_module_is_objectless(ctx: CompileContext, name: text, mir: MirModule) -> bool:
-    if mir.functions.len() > 0 or mir.statics.len() > 0 or mir.constants.len() > 0:
-        return false
-    if ctx.modules.has(name):
-        return driver_native_module_is_export_facade(mir, ctx.modules[name])
-    val (path, identity) = driver_native_frozen_source_lookup(
-        ctx.source_paths_owner, ctx.source_identities_owner,
-        ctx.source_module_names_owner, name)
-    if path == "" or identity == "":
-        return false
-    val key = driver_native_objectless_proof_key(name, module_surface_canonical_path(path))
-    ctx.native_objectless_decl_proofs.has(key) and
-        ctx.native_objectless_decl_proofs[key] == identity
-
 
 fn driver_native_build_filter_scoped_outputs(cached_outputs: [text], cache_scope_root: text) -> ([text], bool):
     var scoped_outputs: [text] = []
@@ -2265,8 +2235,7 @@ impl CompilerDriver:
                     ctx.native_parsed_objectless_proofs[name], name,
                     driver_native_module_cache_source(ctx, name),
                     driver_native_module_source_identity(ctx, name), ctx.mir_modules[name])
-            if frozen_objectless or driver_native_module_is_objectless(ctx, name, ctx.mir_modules[name]) or
-                (ctx.modules.has(name) and driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name])):
+            if frozen_objectless or (ctx.modules.has(name) and driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name])):
                 val objectless_reason = driver_cold_hir_record_objectless_v1(
                     ctx, name)
                 if objectless_reason != "":
@@ -3644,7 +3613,9 @@ fn _runtime_std_compile_members_with_session_v1(
                 (not allow_static_only or
                     ctx.mir_modules[name].statics.len() == 0):
             return Err("runtime/std native source needs typed objectless or target outcome: " + member.source_identity)
-        if driver_native_module_is_objectless(ctx, name, ctx.mir_modules[name]):
+        if ctx.modules.has(name) and
+                driver_native_module_is_export_facade(ctx.mir_modules[name],
+                    ctx.modules[name]):
             return Err("runtime/std native export facade needs typed objectless outcome: " + member.source_identity)
         module_names.push(name)
     if ctx.freeze_storage_registry() == "invalid":
@@ -4133,10 +4104,35 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
     if (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1":
         print "[NATIVE] select module:done"
     if mir_module.functions.keys().len() == 0 and
-            mir_module.statics.keys().len() == 0 and
-            mir_module.constants.keys().len() == 0:
-        return _aot_compile_failure(name,
-            "MIR module has no functions or static data")
+            mir_module.statics.keys().len() == 0:
+        # Entry-closure builds compile pure re-export facades (and
+        # type/trait-only modules) as standalone units; their MIR is
+        # legitimately empty. Emit an empty translation unit so the downstream
+        # object/receipt contract (path equality, size, fingerprint,
+        # native-group manifests) is still satisfied. Dormant until the
+        # test-runner tool build reached them (58 "MIR module has no
+        # functions or static data" ICEs, 2026-10-16).
+        val empty_obj_path = native_aot_object_path_v1(output_base, name)
+        val empty_c_path = empty_obj_path + ".empty_module.c"
+        val empty_symbol = "simple_empty_module_" + name.replace(".", "_")
+        if not _sffi_file_write_text(empty_c_path,
+                "int {empty_symbol} = 0;\n"):
+            return _aot_compile_failure(name,
+                "failed to write empty module C file {empty_c_path}")
+        val empty_cc = find_c_compiler()
+        if empty_cc == "":
+            return _aot_compile_failure(name,
+                "no C compiler available for empty module object {empty_c_path}")
+        val empty_args: [text] = if _is_msvc_cc(empty_cc):
+            ["/nologo", "/c", "/Fo{empty_obj_path}", empty_c_path]
+        else:
+            ["-c", "-o", empty_obj_path, empty_c_path]
+        val (_empty_out, empty_err, empty_code) = process_run(empty_cc, empty_args)
+        if empty_code != 0 or
+                not file_is_regular_no_follow(empty_obj_path):
+            return _aot_compile_failure(name,
+                "empty module object compile failed: {empty_err}")
+        return Ok(empty_obj_path)
     val empty_native_obj = env_get_nullable("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? ""
     if empty_native_obj == "1":
         val obj_path = native_aot_object_path_v1(output_base, name)

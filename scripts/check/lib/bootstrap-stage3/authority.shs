@@ -5026,7 +5026,7 @@ public static class Stage3MaterializedConsumer {
         // children are listed and the receipt row count check below can never
         // match a real checkout (all 66 materialized links live below root).
         foreach (string row in Nul(Git(root, "ls-tree", "-rz", "-r", "--full-tree", head))) {
-            if (++entries > MaxEntries) throw new IOException("bound.entries");
+            if (++entries > MaxEntries) throw new IOException("bound.entries count=" + entries + " max=" + MaxEntries);
             int tab = row.IndexOf('\t'); if (tab < 0) throw new IOException("git.tree-format");
             string path = row.Substring(tab + 1); CheckPath(path);
             if (!cases.Add(path)) throw new IOException("path.case-collision");
@@ -5161,20 +5161,92 @@ public static class Stage3MaterializedConsumer {
         // Runtime bytes remain the committed-seed owner's content-admission job;
         // hashing them here would consume the source audit's bounded byte budget.
     }
+    // Batched `git check-ignore` over one directory's children (a single git
+    // fork per directory; per-walk-entry IsGitIgnored probes would fork
+    // thousands of times). exit 1 means "none ignored" and is a clean empty
+    // set, not an error.
+    //
+    // Two levels are probed (the root's children, then each remaining child
+    // directory's children): git refuses to call a directory ignored while
+    // it contains tracked files (e.g. build/ holds tracked review artifacts
+    // alongside 60k+ regenerable cache entries), so a single-level probe
+    // cannot skip such directories even though their bulk is ignorable cache
+    // (build/scv, build/c). One batched probe per top-level directory keeps
+    // the fork count bounded at walk start.
+    static HashSet<string> IgnoredChildren(string root, string relativeDir) {
+        var ignored = new HashSet<string>(StringComparer.Ordinal);
+        string abs = relativeDir.Length == 0 ? root : Path.Combine(root, relativeDir.Replace('/', '\\'));
+        var children = new List<string>();
+        foreach (string item in Directory.EnumerateFileSystemEntries(abs)) {
+            string name = item.Substring(abs.Length + 1).Replace('\\','/');
+            if (name.Length == 0 || name == ".git") continue;
+            children.Add(name);
+        }
+        if (children.Count == 0) return ignored;
+        // Path prefix: git runs with cwd=root, so a nested directory's
+        // children must be probed as "<dir>/<name>" to match ignore patterns
+        // like "build/" (a bare "scv" probe would match nothing).
+        string probePrefix = relativeDir.Length == 0 ? "" : relativeDir + "/";
+        // Chunk the probe: argv joins into one command-line string with a
+        // ~32k character Windows limit (build/ alone holds 850+ hash-named
+        // children), so probe in bounded batches.
+        for (int batchStart = 0; batchStart < children.Count; batchStart += 50) {
+            int batchEnd = batchStart + 50; if (batchEnd > children.Count) batchEnd = children.Count;
+            var argv = new List<string>();
+            for (int bi = batchStart; bi < batchEnd; bi++) argv.Add(probePrefix + children[bi]);
+            argv.Insert(0, "--");
+            argv.Insert(0, "check-ignore");
+            byte[] output;
+            try { output = Git(root, argv.ToArray()); }
+            catch (IOException e) {
+                if (e.Message != null && e.Message.StartsWith("command.failed:1")) continue;
+                throw;
+            }
+            foreach (string line in Text(output).Split('\n')) {
+                string name = line.TrimEnd('\r');
+                if (name.Length > probePrefix.Length && name.StartsWith(probePrefix))
+                    name = name.Substring(probePrefix.Length);
+                if (name.Length > 0) ignored.Add(name);
+            }
+        }
+        return ignored;
+    }
     static void AuditTree(string root, Dictionary<string,string> aliases, Dictionary<string,string> gitlinks,
         HashSet<string> inspectedGitlinks, HashSet<string> initializedGitlinks,
         List<string> generatedAuthorities, List<SafeFileHandle> held) {
         var todo = new Stack<string>(); todo.Push(root);
         Parents(Path.Combine(root, "leaf"), false, held);
         var cases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Git-ignored subtrees (build/, .simple/, target/) are regenerable
+        // output caches, never tracked content: the audit cannot bind what
+        // git itself excludes from the tree. Without this exclusion their
+        // entries (measured: build/scv alone ~62k, build/c ~10k) count
+        // against MaxEntries and trip bound.entries on every post-build
+        // admission walk, and each walked entry retains an open handle (see
+        // stage3_walk_retains_handle_per_entry_2026-09-25.md).
+        var ignoredTop = IgnoredChildren(root, "");
+        var ignoredSecond = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        foreach (string item in Directory.EnumerateFileSystemEntries(root)) {
+            string name = item.Substring(root.Length + 1).Replace('\\','/');
+            if (name.Length == 0 || name == ".git" || ignoredTop.Contains(name)) continue;
+            if (Directory.Exists(item))
+                ignoredSecond[name] = IgnoredChildren(root, name);
+        }
         while (todo.Count != 0) {
             Tick(); string dir = todo.Pop();
             // Enumerate one ordinary directory at a time, never recurse through
             // an alias, even if Git would eventually classify it as ignored.
             foreach (string item in Directory.EnumerateFileSystemEntries(dir)) {
-                if (++entries > MaxEntries) throw new IOException("bound.entries");
                 string relative = item.Substring(root.Length + 1).Replace('\\','/');
-                if (relative == ".git") continue;
+                if (relative == ".git") { entries++; continue; }
+                if (ignoredTop.Contains(relative)) continue;
+                int firstSlash = relative.IndexOf('/');
+                if (firstSlash > 0) {
+                    HashSet<string> secondSet;
+                    if (ignoredSecond.TryGetValue(relative.Substring(0, firstSlash), out secondSet)
+                        && secondSet.Contains(relative.Substring(firstSlash + 1))) continue;
+                }
+                if (++entries > MaxEntries) throw new IOException("bound.entries count=" + entries + " max=" + MaxEntries);
                 CheckPath(relative);
                 if (!cases.Add(relative)) throw new IOException("path.case-collision");
                 if (Path.GetFileName(item).Equals(".git", StringComparison.OrdinalIgnoreCase)) {
