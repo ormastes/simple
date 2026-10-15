@@ -62,3 +62,12 @@ and runtime execution remain pending.
 target/Host agreement are separate unresolved requirements of this same
 record. Qualified bug-DB tool reconciliation is pending; no DB row or CRC
 was changed by this repair.
+
+An actual pure-Simple A174 native qualification of the production parser and
+a fail-fast 152-case fixture completed HIR 21/21, then the frozen final
+attempt exceeded its 4 GiB process-tree cap (guard exit 88). No executable or
+behavioral result was produced. Three attempts are exhausted, with no baseline
+build or fourth retry. See
+`doc/08_tracking/bug/async_header_native_qualification_rss_2026-10-16.md`
+for exact command, producer and source identities, cache reuse and evidence
+limitations. This does not change the OPEN or AUTHORED_UNEXECUTED status.
