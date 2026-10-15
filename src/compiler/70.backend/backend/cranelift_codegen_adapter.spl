@@ -80,6 +80,7 @@ val CRANELIFT_STATIC_MAX_ALIGNMENT: i64 = 4096
 # Takes the MirStatic (both callers pass one): the original signature took a
 # bare Visibility, so matching a MirStatic against it fell through every arm.
 fn cranelift_static_linkage(static_: MirStatic) -> i64:
+    if static_.is_external: return CL_LINKAGE_IMPORT
     match static_.visibility:
         case Visibility.Public: CL_LINKAGE_EXPORT
         case Visibility.Private: CL_LINKAGE_LOCAL
@@ -327,6 +328,8 @@ fn build_signature(sig: MirSignature, is_main: bool) -> i64:
 # returns from live-interpreted compiler code are unreliable (same seed
 # interpreter bug as STATICS_FAILED_KEY above).
 fn cranelift_static_init_supported(static_: MirStatic) -> bool:
+    # Imported declarations never own initial storage bytes.
+    if static_.is_external and static_.init.?: return false
     match static_.type_.kind:
         case F32 | F64:
             if not static_.init.?:
@@ -336,8 +339,11 @@ fn cranelift_static_init_supported(static_: MirStatic) -> bool:
                 case _: return false
         case I8 | U8 | I16 | U16 | I32 | U32 | I64 | U64 | Bool:
             ()
-        case Opaque(name):
-            return name == "str" and not static_.init.?
+        case Ptr(_, _) | Ref(_, _) | FuncPtr(_) | Opaque(_) |
+                Struct(_) | Enum(_) | Array(_, _) | Dict(_, _) | Slice(_) | Tuple(_):
+            # These MIR values use one runtime handle, matching mir_type_to_cl.
+            # Their guarded module initializer stores the actual value later.
+            return not static_.init.?
         case _:
             return false
     if not static_.init.?:
@@ -366,12 +372,6 @@ val STATICS_FAILED_KEY: i64 = -1
 fn declare_module_statics(cl_module: i64, module: MirModule) -> Dict<i64, i64>:
     var handles: Dict<i64, i64> = {}
     for static_ in module.statics.values():
-        # The current data SFFI combines declaration and definition. An import
-        # cannot use it without creating a second owner, so reject explicitly.
-        if static_.is_external:
-            print "[cranelift] imported global declarations require declaration-only data support: '{static_.name}'"
-            handles[STATICS_FAILED_KEY] = 1
-            return handles
         if not cranelift_static_init_supported(static_):
             print "[cranelift] unsupported module static '{static_.name}' (non-scalar type or non-const init)"
             handles[STATICS_FAILED_KEY] = 1
