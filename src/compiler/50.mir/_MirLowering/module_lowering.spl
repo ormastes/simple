@@ -49,7 +49,6 @@ use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, Fiel
 use compiler.types.type_layout.{LayoutAttr}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.common.native_layout_trace.{MirExternalLayoutTraceV1}
-use std.array.{array_sort_by}
 use compiler.common._Attributes.decl_attrs.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.cache.reverse_reference_facts.{
@@ -375,13 +374,23 @@ fn runtime_module_initializers_in_declaration_order(consts: [HirConst]) -> [HirC
     for const_ in consts:
         if runtime_module_initializer_supported(const_):
             dynamic.push(const_)
-    array_sort_by(dynamic, \a, b:
-        if a.span.start < b.span.start: -1
-        elif a.span.start > b.span.start: 1
-        elif a.symbol.id < b.symbol.id: -1
-        elif a.symbol.id > b.symbol.id: 1
-        else: 0
-    )
+    # Keep this compiler authority path concrete: the generic comparator
+    # currently fails native inference (and its historical closure ABI).
+    # Stable insertion sort is O(n^2) in this module's dynamic globals only.
+    var i = 1
+    while i < dynamic.len():
+        val current = dynamic[i]
+        var j = i - 1
+        while j >= 0:
+            val previous = dynamic[j]
+            val before = current.span.start < previous.span.start or
+                (current.span.start == previous.span.start and current.symbol.id < previous.symbol.id)
+            if not before: break
+            dynamic[j + 1] = previous
+            j = j - 1
+        dynamic[j + 1] = current
+        i = i + 1
+    dynamic
 
 fn mir_layout_canonical_module_name(name: text) -> text:
     """Fold every spelling of ONE physical module onto a single dotted name.
@@ -2677,7 +2686,12 @@ impl MirLowering:
         self.finish_global_initializer_guard(initializer_guard)
         var finish = self.builder
         finish.terminate_return(nil)
-        val init_function = finish.end_function()
+        var init_function = finish.end_function()
+        # The native startup owner discovers this canonical C ABI name.
+        # Preserve it across backend nonentry-module qualification, as the
+        # generated initializer wrapper already does.
+        init_function.is_export_c = true
+        init_function.export_name = init_name
         var result_module = finish.module
         # Compact provisional/replacement struct keys once per module, not
         # once per initializer: work stays linear in static storage count.
