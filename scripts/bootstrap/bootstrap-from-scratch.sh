@@ -150,6 +150,12 @@ case "${1:-}" in
 esac
 . "${bootstrap_entry_dir}/lib/host-shared-cache.shs"
 simple_host_cache_configure
+# Full bootstrap can transiently deschedule a valid host-wide /proc walk while
+# the native producer is CPU-bound. Keep that observation bounded, but give the
+# owner enough headroom to distinguish scheduler delay from failed measurement.
+# This does not change the 100 ms target cadence or the enforced RSS ceiling.
+SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS="${SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS:-60000}"
+export SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS
 . "${bootstrap_early_repo_root}/scripts/check/lib/bootstrap-planner-admission-bound.shs"
 kernel_policy_manifest="${bootstrap_early_repo_root}/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn"
 kernel_policy_value() {
