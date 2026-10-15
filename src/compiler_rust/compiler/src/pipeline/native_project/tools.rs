@@ -569,6 +569,19 @@ fn build_c_runtime_library(
         // see the TU header; behavioural tests in
         // src/runtime/test/rt_core_exports_behaviour_selfcheck.c.
         "runtime_core_exports.c",
+        // Standalone owner of the intrinsic runtime ABI (__simple_pow and the
+        // __simple_intrinsic_* family), selected by the pure-Simple backend's
+        // own list (src/compiler/70.backend/backend/runtime_compiler.spl) but
+        // never carried here: the only other includer of
+        // runtime_core_intrinsics_impl.h is runtime.c ("exactly one selected
+        // C provider per runtime composition"), which is deliberately NOT in
+        // this list (53/69 collision class). Without this TU the Windows
+        // Stage 2 link fails with `undefined symbol: __simple_pow` referenced
+        // from compiler__mir__mir_instruction_graph__mir_fold_binop (MIR
+        // constant folding, 2026-10-15). Verified collision-free against every
+        // existing member (llvm-nm, 2026-10-15): only MSVC CRT COMDAT names
+        // overlap, which every clang-cl TU shares.
+        "runtime_core_intrinsics.c",
         // Backend-plugin transport (spl_backend_plugin_run_v1), backing
         // compiler.backend.backend_plugin.transport. Same never-an-archive-member
         // class as runtime_terminal.c and runtime_simd_case.c above: the symbol
