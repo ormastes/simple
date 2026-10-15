@@ -259,3 +259,22 @@ The mono-archive capture context that degrades the arms therefore
 activates at whole-entry scale, not at consumer-module scale — debugging
 needs the full closure or an archive-body dump, both owned by the mono
 lane's infrastructure.
+
+## Fifth layer (2026-10-16): the registry itself is absent in replay
+
+PR #3493 (unique-owner fallback also when the subject route misses) was
+campaign-verified: B5b PERSISTS. The fallback is never reached because
+`variant_owner_keys("Null")` does not yield exactly one owner in the
+archive-replay lowering instance — the MIR enum variant registry
+(enum_variant_index_q) is never populated for modules whose bodies are
+lowered from the mono archive in ArchiveRequests mode; the registry is
+built only when a MirLowerer instance processes the enum's HirEnum
+declaration, which body-only replay does not do. Fix direction (mono
+archive owner): at the replay/lowering boundary, register the replayed
+module's enum variants into the MIR registry from the archive nominal
+rows (mono_archive_nominal_*), or re-lower the enum declarations
+alongside the bodies. The scalar-gate message "multiple wildcard arms"
+for is_null was emitted from the WILDCARD branch: arm 0 (`case Null:`)
+is an unresolved Binding that consumed the default slot, arm 1 (`case _:`)
+then collided — the text names the wrong arm kind (diagnostic polish,
+separate).
