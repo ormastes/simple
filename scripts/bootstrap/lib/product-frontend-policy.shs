@@ -2,6 +2,13 @@
 # conservative share on every host; codegen parallelism remains independent.
 bootstrap_product_frontend_policy() {
     product_policy_mode=$1 product_policy_cap=$2 product_policy_rss_mode=$3
+    # Optional 4th argument: the job-scaled hard ceiling the caller resolved
+    # through tree-rss-policy.shs (same contract as
+    # bootstrap_stage3_windows_frontend_environment's 4th parameter). Absent,
+    # the static tree ceiling holds -- which refuses every cap above 8 GiB,
+    # breaking elevated-admission tool builds (frontend policy failure, exit
+    # 88 in ~1s with no row log).
+    product_policy_ceiling=${4:-8388608}
     product_policy_share=${SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB:-}
     if [ "$product_policy_mode" = diagnostic ]; then
         [ -n "$product_policy_share" ] || {
@@ -11,16 +18,9 @@ bootstrap_product_frontend_policy() {
     else
         product_policy_share=${product_policy_share:-3000000}
     fi
-    # Phase C already resolves a job-scaled ceiling. Preserve that authority
-    # instead of rechecking a valid cap against the historical fixed default.
-    # Other callers keep the frontend owner's conservative default.
-    if [ "$#" -ge 4 ]; then
-        product_policy_rows=$(bootstrap_stage3_windows_frontend_environment \
-            "$product_policy_cap" "$product_policy_rss_mode" "$product_policy_share" "$4") || return 1
-    else
-        product_policy_rows=$(bootstrap_stage3_windows_frontend_environment \
-            "$product_policy_cap" "$product_policy_rss_mode" "$product_policy_share") || return 1
-    fi
+    product_policy_rows=$(bootstrap_stage3_windows_frontend_environment \
+        "$product_policy_cap" "$product_policy_rss_mode" "$product_policy_share" \
+        "$product_policy_ceiling") || return 1
     # Reject inherited contradictory scheduling requests rather than quietly
     # masking them. No eval, host-memory query, or unchecked fanout override.
     [ "${SIMPLE_SHARD_MEM_CLAMP:-1}" = 1 ] &&
