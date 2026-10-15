@@ -180,3 +180,23 @@ entry (test_runner_new/main.spl, 265-module closure) with
 --cache-dir per experiment, ~5 min per run; the separately recorded
 runner_lifecycle void->i64 ICE remains after the GEP fix and is its own
 defect in the same module family.
+
+## Addendum 2026-10-16 (late): owner-canonicalization fix measured; B5b root cause read from the code
+
+PR #3488 (fold enum payload owner spellings through
+mir_layout_canonical_module_name in enum_payload_named_alias_equal) was
+verified in a full stage1->2 campaign: the `SdnValue::Array` payload type
+mismatch is GONE. The B5b error REMAINS, and reading expr_dispatch.spl:6594-6615
+shows exactly why: `is_null` has one wildcard arm (`case _:`); B5b fires only
+when an arm DEGRADES to wildcard. `case Null:` degrades when the enum variant
+`Null` is not found in the lowering's variant registry — the same two-spelling
+identity split, one consumer over: the enum's variant/discriminant registry
+lookup by bare name misses for the re-materialized enum, so the arm falls back
+to wildcard and collides with `case _:`.
+
+Remaining fix: make the enum variant registry (enum_variant_index_q /
+enum_variant_discriminant registration in module_lowering.spl) canonicalize
+the enum owner the same way — register/look up variants under the folded
+dotted module name so a re-materialized enum declaration resolves by the same
+key its match arms use. The bisection table and the construction-side fix
+evidence above carry over unchanged.
