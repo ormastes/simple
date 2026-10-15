@@ -110,3 +110,40 @@ Diagnosis per residual:
 otherwise clean push. A deletion cannot introduce a conflict marker; the
 gate should PASS on ranges whose only changes are deletions. Left as a
 recorded defect for the hook owner rather than bypassed with --no-verify.
+
+## Addendum 2026-10-15: second stage2-only codegen defect in the same closure
+
+Reproducing the test_runner_build row outside the campaign env
+(same admitted stage2 binary, same entry/sources/threads) dies EARLIER
+than the campaign's SdnValue MIR error, at an LLVM codegen ICE in the
+same module family:
+
+```
+error: unsupported LLVM value conversion from void to i64
+       function=lib.nogc_sync_mut.test_runner.runner_lifecycle.cleanup_and_exit
+error: 2 module(s) failed with ICE:
+       lib.nogc_sync_mut.test_runner.runner_lifecycle (codegen, caught),
+       lib.nogc_sync_mut.test_runner.test_runner_mcdc_formal_context (codegen, caught)
+```
+
+The retained llc diagnostic (build/native_cache/s98b3bcc*/simple-aot-
+diagnostic-*/message) shows the true failure is a missing ptr->i64
+conversion in a DEAD block emitted after the function's `ret`:
+
+```
+define i64 @...runner_mcdc_eval_program_cached(ptr %l1, ptr %l2, ptr %l3):
+  ...
+  ret i64 %l32
+bb2:                                  ; unreachable, still emitted
+  %l28 = getelementptr ptr, ptr %l3, i64 %l1   ; %l1 is ptr — needs ptrtoint
+```
+
+The live block correctly emits `ptrtoint ptr %l1 to i64` before use; the
+post-ret block bb2 uses the ptr parameter directly as the GEP index.
+Seed compiles this module fine (stage2 native compile passed) — the
+defect is stage2 MIR->LLVM only. Likely the same bb2-emission path feeds
+the `cleanup_and_exit` void->i64 poisoning. Reaching the campaign's
+SdnValue MIR error requires the campaign's exact env (unreconciled:
+sharded-frontend policy alone did not suffice), so row-level work should
+fix or suppress the dead-block emission path first — it may unblock the
+build to the point where the SdnValue error becomes directly reachable.
