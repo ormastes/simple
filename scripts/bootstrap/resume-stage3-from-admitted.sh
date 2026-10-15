@@ -466,6 +466,8 @@ stage2_recorded_cold_init=$(bootstrap_stage3_stage2_transcript_cold_init "$stage
   bootstrap_stage3_error 'recorded Stage 2 SCV cold-init control is invalid'
 stage2_recorded_compiler_ceiling=$(bootstrap_stage3_transcript_compiler_ceiling "$stage2_transcript") || \
   bootstrap_stage3_error 'recorded Stage 2 compiler RSS ceiling is invalid'
+stage2_recorded_diagnostics=$(bootstrap_stage3_stage2_transcript_diagnostics "$stage2_transcript") || \
+  bootstrap_stage3_error 'recorded Stage 2 diagnostics are invalid'
 # Preserve the original Stage 2 vector. Legacy admitted transcripts had no HIR
 # controls; newer transcripts must carry the complete pair in the same order.
 bootstrap_stage2_hir_env=
@@ -546,6 +548,7 @@ stage2_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_BINARY=$(stage2_env_value SIMPLE_BINARY)" \
   ${stage2_recorded_cold_init:+"SIMPLE_SCV_INVENTORY_COLD_INIT=$stage2_recorded_cold_init"} \
   ${stage2_recorded_compiler_ceiling:+"SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$stage2_recorded_compiler_ceiling"} \
+  ${stage2_recorded_diagnostics} \
   "$@") || exit 1
 bootstrap_stage3_verify_sanity_evidence_receipt \
   "$stage2_sanity" "$stage2_sanity" "$(dirname -- "$stage2_sanity")" \

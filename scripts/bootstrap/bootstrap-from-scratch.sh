@@ -3911,6 +3911,14 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     1) stage2_cold_init_env=SIMPLE_SCV_INVENTORY_COLD_INIT=1 ;;
     *) echo 'error: SIMPLE_SCV_INVENTORY_COLD_INIT must be unset or exactly 1' >&2; exit 1 ;;
   esac
+  stage2_diagnostic_env=$(bootstrap_stage3_stage2_diagnostic_environment "${NATIVE_LOW_MEMORY}") || {
+    echo 'error: invalid Stage 2 diagnostics: require paired safe snapshot/run ID, private absent destination, low-memory=1, and M4 unset or 1' >&2
+    exit 1
+  }
+  stage2_diagnostic_names=
+  if [ -n "$stage2_diagnostic_env" ]; then
+    stage2_diagnostic_names=$(bootstrap_stage3_env_assignment_names ${stage2_diagnostic_env}) || exit 1
+  fi
   stage2_build_args_sha256=$(
     bootstrap_stage3_args_sha256 \
       "SIMPLE_LLVM_BIN=${SIMPLE_LLVM_BIN:-}" \
@@ -3954,6 +3962,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
       ${stage2_cold_init_env:+"${stage2_cold_init_env}"} \
       ${compiler_ceiling_env:+"${compiler_ceiling_env}"} \
+      ${stage2_diagnostic_env} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
       ${k1_composition_source_args} --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib \
@@ -4066,6 +4075,18 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   stage2_refusal_log="${stage2_native_log}.refusal"
   rm -f "${stage2_native_log}" "${stage2_refusal_log}"
   bootstrap_run_stage2_native() {
+    # Recheck the captured destination immediately before execution; do not read
+    # a changed ambient diagnostic vector after computing its command identity.
+    for stage2_diagnostic_assignment in ${stage2_diagnostic_env}; do
+      case "$stage2_diagnostic_assignment" in
+        SIMPLE_MEM_SNAPSHOT_FILE=*)
+          bootstrap_stage3_stage2_snapshot_destination_valid "${stage2_diagnostic_assignment#*=}" "${NATIVE_LOW_MEMORY}" || {
+            echo 'error: stage2 pre-exec refusal: snapshot destination is no longer exclusive' > "${stage2_refusal_log}"
+            cat "${stage2_refusal_log}" >&2
+            return 1
+          } ;;
+      esac
+    done
     set -- \
       "SIMPLE_LLVM_BIN=${SIMPLE_LLVM_BIN:-}" \
       "SIMPLE_LLVM_PATH=${SIMPLE_LLVM_PATH:-}" \
@@ -4107,7 +4128,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
       ${stage2_cold_init_env:+"${stage2_cold_init_env}"} \
-      ${compiler_ceiling_env:+"${compiler_ceiling_env}"}
+      ${compiler_ceiling_env:+"${compiler_ceiling_env}"} \
+      ${stage2_diagnostic_env}
     # These three guards are the ONLY pre-exec refusal on this path, and they
     # used to be bare `|| return 1`. A mismatch therefore produced no build log
     # and no reason anywhere, and the script's own failure diagnosis correctly
@@ -4124,7 +4146,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       cat "${stage2_refusal_log}" >&2
       return 1
     }
-    stage2_expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "${PLATFORM}" "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-}") || {
+    stage2_expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "${PLATFORM}" "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-}" "${stage2_diagnostic_names}") || {
       echo "error: stage2 pre-exec refusal: no canonical stage2 env name list for ${PLATFORM}" \
         > "${stage2_refusal_log}"
       cat "${stage2_refusal_log}" >&2
