@@ -1,0 +1,118 @@
+# Native behavioral regression for required MC/DC decision-token locals.
+# Compile with the admitted pure producer and run the resulting native binary.
+# A malformed Copy(nil) must fail here or in the real MIR verifier, never pass.
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_verify.{mir_verify_module}
+
+fn probe_call_name(operand: MirOperand) -> text:
+    match operand.kind:
+        case MirOperandKind.Const(value, type_):
+            match value:
+                case MirConstValue.Str(name): return name
+                case _: return ""
+        case _: return ""
+
+fn check_mcdc_token(mode: i64, path: text = "mcdc_required_token.spl",
+        include_csv: text = "", exclude_csv: text = "", eligible: bool = true, logical_op: text = "and") -> bool:
+    val source = "fn check(a: bool, b: bool) -> bool:\n    if a {logical_op} b:\n        true\n    else:\n        false\n"
+    val ast = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(ast)
+    var lowering = MirLowering.new(hir.symbols)
+    # Missing constructor fields become NIL on the native lane, not zero.
+    if lowering.mcdc_mode != 0 or lowering.mcdc_active_decision_id != 0 or
+            lowering.mcdc_next_condition_ordinal != 0 or lowering.mcdc_next_runtime_id != 1 or
+            lowering.mcdc_active_dynamic_token.id != -1 or lowering.mcdc_active_tokens.len() != 0:
+        return false
+    lowering.configure_mcdc_mode(mode, include_csv: include_csv, exclude_csv: exclude_csv)
+    val mir = lowering.lower_module(hir)
+    if lowering.mcdc_active_decision_id != 0 or lowering.mcdc_active_dynamic_token.id != -1 or
+            lowering.mcdc_active_tokens.len() != 0:
+        return false
+    # Exercise the exact verifier that crashed in the real bootstrap receiver.
+    val report = mir_verify_module(mir)
+    if report.fatal_count() != 0 or report.functions_checked == 0:
+        return false
+    val prefix = if mode == 2: "mcdc_dynamic_probe_" else: "mcdc_static_probe_"
+    var found = false
+    for function in mir.functions.values():
+        if function.name != "check" and not function.name.ends_with(".check"):
+            continue
+        found = true
+        var token = -1
+        var begins = 0
+        var conditions = 0
+        var ends = 0
+        var masks = 0
+        var all_probes = 0
+        for block in function.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.Call(dest, callee, args):
+                        val name = probe_call_name(callee)
+                        if name.starts_with("mcdc_"):
+                            all_probes = all_probes + 1
+                        if name == prefix + "begin":
+                            begins = begins + 1
+                            if args.len() != 1: return false
+                            if val local = dest:
+                                token = local.id
+                            else:
+                                return false
+                    case _: ()
+        if mode == 0 or not eligible:
+            if all_probes != 0: return false
+            continue
+        if begins != 1 or token < 0: return false
+        for block in function.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.Call(dest, callee, args):
+                        val name = probe_call_name(callee)
+                        var expected_args = 0
+                        if name == prefix + "condition":
+                            conditions = conditions + 1
+                            expected_args = 3
+                        elif name == prefix + "end":
+                            ends = ends + 1
+                            expected_args = 2
+                        elif name == prefix + "mask_range":
+                            masks = masks + 1
+                            expected_args = 5
+                        if expected_args > 0:
+                            if args.len() != expected_args: return false
+                            match args[0].kind:
+                                case MirOperandKind.Copy(local):
+                                    if local.id != token: return false
+                                case _: return false
+                    case _: ()
+        if conditions != 2 or ends != 1 or masks == 0: return false
+    found
+
+fn main() -> i32:
+    for mode in [0, 1, 2]:
+        if not check_mcdc_token(mode) or not check_mcdc_token(mode, logical_op: "or"):
+            print "mcdc_required_token=FAIL mode={mode}"
+            return 1
+    for mode in [1, 2]:
+        # Same short-circuit shape as the receiver, whose compiler path is
+        # excluded by the existing production default instrumentation policy.
+        if not check_mcdc_token(mode, path: "src/compiler/bootstrap_admission/token_guard.spl", eligible: false) or
+                not check_mcdc_token(mode, path: "src/compiler/bootstrap_admission/token_guard.spl", eligible: false, logical_op: "or"):
+            print "mcdc_required_token=FAIL default-exclusion mode={mode}"
+            return 1
+        if not check_mcdc_token(mode, exclude_csv: "mcdc_required_token", eligible: false) or
+                not check_mcdc_token(mode, exclude_csv: "mcdc_required_token", eligible: false, logical_op: "or"):
+            print "mcdc_required_token=FAIL explicit-exclusion mode={mode}"
+            return 1
+        if not check_mcdc_token(mode, path: "src/compiler/bootstrap_admission/token_guard.spl", include_csv: "token_guard") or
+                not check_mcdc_token(mode, path: "src/compiler/bootstrap_admission/token_guard.spl", include_csv: "token_guard", logical_op: "or"):
+            print "mcdc_required_token=FAIL explicit-inclusion mode={mode}"
+            return 1
+    print "mcdc_required_token=PASS modes=off,static,dynamic verifier=checked"
+    0

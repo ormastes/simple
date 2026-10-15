@@ -49,6 +49,35 @@ fn compiler_coverage_inventory_reset(enabled: bool, mcdc_include_csv: text = "",
     inventory_mcdc_include_csv = mcdc_include_csv
     inventory_mcdc_exclude_csv = mcdc_exclude_csv
 
+# The cumulative manifests and cross-module collision maps outlive each
+# borrowed parser scope. Walk the actual roots, including children appended to
+# already-persistent containers; promoting a copied record cannot retain them.
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+
+pub fn compiler_coverage_inventory_promote_transient_owner() -> bool:
+    if not inventory_enabled: return true
+    val decisions_ok = rt_transient_heap_promote(inventory_decisions)
+    val conditions_ok = rt_transient_heap_promote(inventory_conditions)
+    val obligations_ok = rt_transient_heap_promote(inventory_mcdc_obligations)
+    val contexts_ok = rt_transient_heap_promote(inventory_mcdc_contexts)
+    val fingerprints_ok = rt_transient_heap_promote(inventory_mcdc_context_fingerprint_by_id)
+    val identities_ok = rt_transient_heap_promote(inventory_mcdc_semantic_by_runtime_id)
+    val decision_locations_ok = rt_transient_heap_promote(inventory_decision_location_by_key)
+    val condition_locations_ok = rt_transient_heap_promote(inventory_condition_location_by_key)
+    # A carrier handles persistent scalar strings on both runtime owners.
+    val text_ok = rt_transient_heap_promote([
+        inventory_error, inventory_mcdc_include_csv, inventory_mcdc_exclude_csv])
+    decisions_ok and conditions_ok and obligations_ok and contexts_ok and
+        fingerprints_ok and identities_ok and decision_locations_ok and
+        condition_locations_ok and text_ok
+
+# Call after scope end: these are per-module traversal scratch, not manifests.
+pub fn compiler_coverage_inventory_release_parse_scratch():
+    inventory_seen_decl = {}
+    inventory_seen_stmt = {}
+    inventory_seen_expr = {}
+    inventory_seen_arm = {}
+
 fn inventory_row_available() -> bool:
     if inventory_decisions.len() + inventory_conditions.len() >= COMPILER_COVERAGE_ROW_CAP:
         inventory_error = "compiler coverage inventory exceeds bounded row cap"

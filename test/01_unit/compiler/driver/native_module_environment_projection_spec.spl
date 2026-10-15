@@ -1,0 +1,40 @@
+use std.spec.{describe, it, expect}
+use compiler.driver.cache.native_build_environment_identity.{
+    native_build_environment_snapshot_fingerprint_v1,
+    native_build_module_environment_snapshot_fingerprint_v1}
+
+describe "native module delivery-intent projection":
+    it "shares executable and entry module facets but keeps final action intent":
+        val baseline: [(text, text)] = [("PATH", "/usr/bin"), ("SIMPLE_TYPECHECK_WARN", "0")]
+        val entry: [(text, text)] = [("PATH", "/usr/bin"), ("SIMPLE_TYPECHECK_WARN", "0"),
+            ("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", "entry")]
+        val executable_module = native_build_module_environment_snapshot_fingerprint_v1(baseline)
+        val entry_module = native_build_module_environment_snapshot_fingerprint_v1(entry)
+        expect(executable_module.valid).to_equal(true)
+        expect(entry_module.valid).to_equal(true)
+        expect(entry_module.digest).to_equal(executable_module.digest)
+        expect(native_build_environment_snapshot_fingerprint_v1(entry).digest ==
+            native_build_environment_snapshot_fingerprint_v1(baseline).digest).to_equal(false)
+
+    it "preserves codegen options and tool search changes":
+        val baseline: [(text, text)] = [("PATH", "/usr/bin"), ("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", "entry")]
+        val original = native_build_module_environment_snapshot_fingerprint_v1(baseline)
+        val symbol_change = native_build_module_environment_snapshot_fingerprint_v1(
+            [("PATH", "/usr/bin"), ("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", "entry"),
+                ("SIMPLE_NATIVE_BUILD_NO_MANGLE", "1")])
+        val tool_change = native_build_module_environment_snapshot_fingerprint_v1(
+            [("PATH", "/other-tools"), ("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", "entry")])
+        expect(symbol_change.digest == original.digest).to_equal(false)
+        expect(tool_change.digest == original.digest).to_equal(false)
+
+    it "keeps other output scopes distinct and refuses duplicate intent capture":
+        val ordinary = native_build_module_environment_snapshot_fingerprint_v1([])
+        for mode in ["1", "archive", "shared"]:
+            val other = native_build_module_environment_snapshot_fingerprint_v1(
+                [("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", mode)])
+            expect(other.valid).to_equal(true)
+            expect(other.digest == ordinary.digest).to_equal(false)
+        val duplicate = native_build_module_environment_snapshot_fingerprint_v1(
+            [("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", ""), ("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", "entry")])
+        expect(duplicate.valid).to_equal(false)
+        expect(duplicate.reason).to_contain("environment-field-duplicate")

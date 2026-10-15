@@ -234,6 +234,31 @@ fn native_build_environment_fingerprint_rows_v1(
     NativeBuildEnvironmentFingerprintV1(
         true, sha256_text(native_build_environment_frame_v1(rows)), "ok")
 
+# Final delivery intent does not change an executable/entry module's native
+# codegen. Project only this known field, after validating the complete capture.
+# Every other compiler/tool/provider/config/source field remains conservative.
+fn native_build_module_environment_snapshot_fingerprint_v1(
+    snapshot: [(text, text)]
+) -> NativeBuildEnvironmentFingerprintV1:
+    val complete = native_build_environment_snapshot_fingerprint_v1(snapshot)
+    if not complete.valid: return complete
+    var projected: [(text, text)] = []
+    for pair in snapshot:
+        if pair.0 == "SIMPLE_NATIVE_BUILD_EMIT_OBJECT" and
+                (pair.1 == "" or pair.1 == "entry"):
+            continue
+        projected = projected.push(pair)
+    val module_capture = native_build_environment_snapshot_fingerprint_v1(projected)
+    if not module_capture.valid: return module_capture
+    NativeBuildEnvironmentFingerprintV1(true,
+        sha256_text("simple-native-module-environment-v1\n" + module_capture.digest), "ok")
+
+fn native_build_module_environment_fingerprint_v1() -> NativeBuildEnvironmentFingerprintV1:
+    match env_list_checked():
+        case Err(reason): NativeBuildEnvironmentFingerprintV1(
+            false, "", "module-environment-snapshot-unavailable:" + reason)
+        case Ok(snapshot): native_build_module_environment_snapshot_fingerprint_v1(snapshot)
+
 fn native_build_environment_fingerprint_v1() ->
         NativeBuildEnvironmentFingerprintV1:
     match env_list_checked():
@@ -249,3 +274,6 @@ export native_build_environment_field_known_v1
 export native_build_environment_fingerprint_rows_v1
 export native_build_environment_snapshot_fingerprint_v1
 export native_build_environment_fingerprint_v1
+
+export native_build_module_environment_snapshot_fingerprint_v1
+export native_build_module_environment_fingerprint_v1

@@ -10,6 +10,8 @@ use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_active_v1,
     driver_admitted_epoch_error_v1}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.cache.native_source_interface_index.{
+    native_source_interface_index_from_sources_with_digests_v1}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.common.source_root_resolution.{SourceRootResolutionV1}
 use compiler.driver.driver_build.native_source_root_handoff.{
@@ -1226,6 +1228,16 @@ impl CompilerDriver:
         self.ctx.source_content_hashes_owner = owned_content_hashes
         self.ctx.source_identities_owner = owned_identities
         self.ctx.source_module_names_owner = owned_module_names
+        # Capture compact public facets from the actual admitted source list,
+        # before either boxed or streaming source buffers are reclaimed. The
+        # adapter validates raw alias ambiguity and reuses phase-1 SHA owners.
+        match native_source_interface_index_from_sources_with_digests_v1(
+                all_sources, owned_paths, owned_identities):
+            case Ok(index): self.ctx.native_source_interface_index_v1 = Some(index)
+            case Err(reason):
+                self.ctx.add_error("native source interface index refused: " + reason)
+                return (self.ctx, false)
+        self.ctx.native_module_input_fact_snapshots_v1 = {}
         # Canonical phase-1 owners now retain the source bodies. Drop the
         # duplicate scan payloads before parsing/lowering grows compiler RSS.
         driver_entry_scan_cache_release()

@@ -90,3 +90,22 @@ The seed-produced Stage 2 candidate compiled 1,344 objects and linked; that is p
 New feature SSpecs remain UNRUN; independent static review does not establish physical RSS reclamation, all-object membership, final link/Hello, or the latency target. Compiler/core/lib and MCP/LSP readiness checks remain pending. No STATUS: PASS, merge, release, or push is authorized by this checkpoint.
 
 Committing changes Git provenance, even when source bytes remain identical. The old closed-profile resumption must not be presented as valid against the new Git state without a reviewed provenance transition. Original receipts, pre-commit state, and exact patch are retained in ignored local landing evidence.
+
+## Authorized corrected matrix attempt — 2026-10-15
+
+The user requested “go fix land”. The exact commit-only provenance bridge and corrected matrix launcher passed independent static review. The real nondelegated MC/DC matrix reached full CLI compilation under the canonical enforced 8 GiB root supervisor. It failed with exit 88 at parse progress 816/2673, peak tree RSS 8,390,944 KiB. The supervisor reported quiescent=1 and no unexpected session PIDs. No full CLI/test host was produced, no test suites ran, and no all-object/link or performance acceptance was established. The authorized extra qualification attempt is exhausted; no automatic retry or landing follows.
+
+Evidence: `.simple/storage/build/phase3-producer-refresh-linkfix/remaining-admission-owner/checkpoint-bridge-20261015/root-launch-corrected.json`, `root-supervisor-checkpoint-owned.env`, and the matrix `verification/logs/compiler_cli_build.log`. A redundant explicit ceiling elevation was refused before any child launch, then removed; the actual run retained the same enforced 8 GiB cap.
+
+The reviewed canonical provenance hook remains an owned working change. Twelve optimization bundles remain ignored drafts pending actual runtime qualification. Recovery C04 now has a direct CLI fixture accepted statically, but its native assertions remain UNRUN. Full compiler/app body-artifact consumption also remains an implementation gap; ABI-only receipts do not authorize code generation. Target `release_phase3` has not been merged or pushed.
+
+
+## Parallel repair and manual LLVM artifact — 2026-10-15
+
+Three bounded producer repair cycles completed. The final candidate `48a67ecf546f6083283cb4f0d43275bc347c2ef67a4f6fa673ab1a10cd4ead30` reused 1,344 bootstrap objects and compiled four, then linked in 43.7 seconds. This is bootstrap cache evidence, not acceptance of the new pure-Simple object-cache feature. Initializing all eleven MC/DC lowering fields and guarding inactive masks removed the actual verifier SIGSEGV. Cranelift then reported seven successful and four failed receiver modules because enum-backed static initializers were unsupported; its receiver qualification remains failed.
+
+Using the same candidate, LLVM compiled all eleven receiver modules, linked, and passed receiver execution. The subsequent positional route failed before compilation because its helper explicitly requested streaming while MC/DC was enabled. Overall qualification remains failed; LLVM receiver success does not qualify the full Phase 3 inventory or a general test host.
+
+A separate retained-object manual Hello completion passed: 52 ordered object inputs were strictly linked after removing the permissive duplicate-definition flag, and the resulting AArch64 binary executed once with expected output and exit zero. The sole missing entry object was regenerated from the pinned canonical entry-C generator; it was not recovered from the deleted original C file. Receipt: `.simple/storage/build/phase3-producer-refresh-parse-ownerfix-20261015/manual-hello-48a-llvm/attempt/completion/receipt.json`; binary SHA-256 `e22bb6845ab7010d03e86d8fa4da6d41e54d50e836ad5a45fc6a49d11a940a41`. The enclosing 8 GiB/120-second owner exited zero. The original failed manual attempt is preserved separately.
+
+The user subsequently authorized parallel Astra fixes and per-object/manual-link work. Astra owns the Cranelift static-initializer fix; the producer lane owns the streaming/MC/DC route correction and full-object plan, with independent review. New SSpecs, core/MCP checks, full inventory and performance acceptance remain unverified. No target landing or push has occurred.

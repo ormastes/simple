@@ -37,21 +37,23 @@ bootstrap_verification_campaign_run() {
     "$bc_work" "$bc_started" "$BOOTSTRAP_VERIFY_CAMPAIGN_DEADLINE" "$bc_seconds" "$$" >"$BOOTSTRAP_VERIFY_CAMPAIGN_TOKEN"
   export BOOTSTRAP_VERIFY_CAMPAIGN_TOKEN BOOTSTRAP_VERIFY_CAMPAIGN_DEADLINE
   bc_row_rss_mode=${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}
-  # Keep a surrounding bootstrap session intact. The nested watchdog validates
-  # the inherited admission and owns only its child process group. Standalone
-  # campaigns create a session; partial contracts fail closed in the watchdog.
-  # This guard owns time, while the child restores the unchanged row RSS policy.
+  # Keep an actual registered enclosing execution owner. Presence of either
+  # field chooses strict native admission; malformed/partial contracts fail
+  # closed in the watchdog rather than starting a foreign nested session.
   bc_session_mode=new
   if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
     bc_session_mode=inherit
   fi
+  bc_campaign_rss_cap=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}
+  # The canonical watchdog validates this cap against its compiler ceiling.
+  # Campaign and rows keep the caller's actual enforcement policy.
   bc_status=0 bc_guard=
   bc_cancel() {
     [ -z "$bc_guard" ] || kill -TERM "$bc_guard" 2>/dev/null || :
   }
   trap 'bc_cancel' 1 2 15
   TMPDIR="$bc_attempt/tmp" perl "$bc_owner/../resource/process-tree-rss-watchdog.pl" \
-    --session-mode="$bc_session_mode" --rss-cap-mode=monitor --max-rss-kib=5859375 \
+    --session-mode="$bc_session_mode" --rss-cap-mode="$bc_row_rss_mode" --max-rss-kib="$bc_campaign_rss_cap" \
     --timeout-seconds="$bc_seconds" --term-grace-seconds=2 \
     --receipt="$bc_attempt/process.env" -- \
     env "SIMPLE_BOOTSTRAP_RSS_CAP_MODE=$bc_row_rss_mode" sh "$bc_script" "$@" &
