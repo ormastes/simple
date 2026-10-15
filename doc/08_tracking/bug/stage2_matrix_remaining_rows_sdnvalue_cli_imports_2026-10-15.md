@@ -147,3 +147,36 @@ SdnValue MIR error requires the campaign's exact env (unreconciled:
 sharded-frontend policy alone did not suffice), so row-level work should
 fix or suppress the dead-block emission path first — it may unblock the
 build to the point where the SdnValue error becomes directly reachable.
+
+## Addendum 2026-10-16: SdnValue trigger bisected (three 5-minute closure runs)
+
+Hypothesis-tested by editing only the enum's Dict variant in
+src/lib/common/sdn/value.spl and re-running the exact test_runner_build
+row entry against the GEP-fixed stage2 compiler:
+
+| Enum Dict-variant shape | `SdnValue::Array` payload mismatch? |
+| --- | --- |
+| `Dict(Dict<text, SdnValue>)` (authored) | YES (plus fabricated B5b wildcard) |
+| `Dict(Dict<text, i64>)` (builtin container, no recursion) | NO |
+| `DictPlaceholder(i64)` (plain payload) | NO |
+
+Trigger: a recursive enum reference routed THROUGH a builtin generic
+container payload (`Dict<text, SdnValue>`). Direct recursion
+(`Array([SdnValue])`) is fine; the builtin container alone is fine; the
+combination breaks stage2 MIR payload validation, and the failure is
+REPORTED against the sibling Array construction (value.spl:54), so the
+enum's whole registration identity is poisoned, not just the Dict slot.
+Consistent with the `[hir-payload-origin-unresolved] payload=Dict`
+advisory seam: the cross-module materialization walk cannot name a
+declaring module for builtin containers, and the recursive element inside
+that unresolved payload never canonicalizes to the enum's own symbol.
+
+Fix direction: canonicalize builtin-container payload ELEMENT types to
+the declaring enum's recursive symbol during enum payload registration
+(module_lowering.spl:900-946) or in the alias comparison
+(enum_constructor_payload.spl:216), so an unresolvable container hop no
+longer poisons sibling payload slots. Fast iteration harness: exact row
+entry (test_runner_new/main.spl, 265-module closure) with
+--cache-dir per experiment, ~5 min per run; the separately recorded
+runner_lifecycle void->i64 ICE remains after the GEP fix and is its own
+defect in the same module family.
