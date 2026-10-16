@@ -462,7 +462,7 @@ impl MonomorphizationPass:
                 self.next_symbol = module.symbols.next_symbol_id
         val function_keys: [SymbolId] = functions.keys()
         for sym_id in function_keys:
-            self.collect_function_entry_v1(module_name, functions, sym_id)
+            self.collect_function_entry_v1(module_name, module, sym_id)
 
         # Imported callables are declarations in this module's symbol table,
         # not bodies in module.functions. Their signatures were lowered in the
@@ -561,16 +561,21 @@ impl MonomorphizationPass:
             self.module_symbols[module_name] = module.symbols
         self.collect_generic_impl_methods(module, module_name)
 
-    # Cycle-87: this body was inlined in collect_generics, whose draw
-    # corrupts both the inline dict-index rebind (cycles 85/86) and the
-    # by-value return bind of mono_genuine_function_v1 (cycle-87 shim: fault
-    # at the field-0 load on the helper's return value -- return transport
-    # of a large composite into this caller is the defective class). The
-    # body draws fresh here; no large composite crosses a function boundary
-    # (self.* dicts are references; scalars/text and genuine field reads
-    # only).
-    me collect_function_entry_v1(module_name: text, functions: Dict<SymbolId, HirFunction>, sym_id: SymbolId):
-        val func: HirFunction = functions[sym_id]
+    # Cycles 85-88: this body was inlined in collect_generics, whose draw
+    # corrupts the dict-index rebind (85/86), the by-value return bind of
+    # mono_genuine_function_v1 (87: fault at the field-0 load on the helper's
+    # return value), AND the bare-dict-param index inside this fresh method
+    # itself (88: same fault at the extraction rebind -- functions[sym_id]
+    # through a dict PARAM/LOCAL is the corrupting shape; module.functions[dk]
+    # through a field expression is the proven-clean draw, see the codec
+    # helpers). The signature therefore takes the MODULE and indexes the
+    # field expression directly.
+    me collect_function_entry_v1(module_name: text, module: HirModule, sym_id: SymbolId):
+        # Index through the module field, not a dict param/local: the
+        # bare-dict-variable index draw is defective (cycles 82/85-88),
+        # the module.functions[dk] field-expression draw is the proven
+        # clean one (codec helpers, hir_module_has_rt_hal).
+        val func: HirFunction = module.functions[sym_id]
         # Record the symbol -> name edge for call-site resolution, and keep
         # the fresh-symbol counter past every id already in use.
         val fsym: SymbolId = func.symbol
