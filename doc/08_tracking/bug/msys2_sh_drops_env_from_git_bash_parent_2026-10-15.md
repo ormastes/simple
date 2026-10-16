@@ -55,3 +55,12 @@ env, coreutils) should either be excluded or shadowed by Git Bash's own
 `/usr/bin`, so config-bearing child shells keep Git Bash's environment
 semantics. Needs care: some entries (perl, clang) may be intentionally
 msys2-provided.
+
+## Status (2026-10-16): fixed for DESKTOP-VMF96U6 via host config
+
+`config/host/DESKTOP-VMF96U6.sdn` now lists Git Bash's own `/usr/bin` ahead
+of `/c/dev/tool/msys2/usr/bin`. After `host_env_apply_path`: `sh`, `bash`,
+`env` resolve to `/usr/bin/*` and the detection one-liner prints `probe`
+(before: `/c/dev/tool/msys2/usr/bin/sh`, `MISSING`). msys2 still provides
+tools Git Bash lacks. Other Windows hosts with an msys2 `usr/bin` prepend
+need the same ordering.

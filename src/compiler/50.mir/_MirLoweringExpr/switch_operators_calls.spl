@@ -7254,12 +7254,9 @@ impl MirLowering:
         # receiver is not evaluated a second time. Argument lowering above
         # remains shared with ordinary calls.
         val callee_local = if val supplied = prelowered_callee: supplied else: self.lower_expr(callee)
-        var function_type = self.find_local_hir_type(callee_local.id)
-        if not function_type.?:
-            function_type = self.enum_match_expr_type(callee)
-        self.emit_typed_function_value_call(callee_local, arg_operands, function_type, callee.span)
+        self.emit_typed_function_value_call(callee_local, arg_operands, indirect_return, call_param_types, args.len(), callee.span)
 
-    me emit_typed_function_value_call(callee_local: LocalId, arg_operands: [MirOperand], function_type: HirType?, call_span: Span) -> LocalId:
+    me emit_typed_function_value_call(callee_local: LocalId, arg_operands: [MirOperand], indirect_return: HirType?, call_param_types: [HirType], arg_count: i64, call_span: Span) -> LocalId:
         # Keep the existing word-parameter/closure ABI. Only the declared
         # return type and its provenance are different from the old path.
         var param_types: [MirType] = []
@@ -7276,14 +7273,14 @@ impl MirLowering:
             if val callee_mir = self.local_mir_type_of(callee_local):
                 match callee_mir.kind:
                     case MirTypeKind.FuncPtr(legacy_signature):
-                        if legacy_signature.params.len() == args.len() and not legacy_signature.is_variadic:
+                        if legacy_signature.params.len() == arg_count and not legacy_signature.is_variadic:
                             param_types = legacy_signature.params
                             ret_type = legacy_signature.return_type
                             indirect_signature_proven = true
                     case _: ()
         if not indirect_signature_proven:
-            self.error_fatal("indirect callable lacks a proven function signature", Some(callee.span))
-            return self.lower_expr(HirExpr(kind: HirExprKind.IntLit(0, nil), has_type_: true, type_: HirType(kind: HirTypeKind.Int(64, true), span: callee.span), span: callee.span))
+            self.error_fatal("indirect callable lacks a proven function signature", Some(call_span))
+            return self.lower_expr(HirExpr(kind: HirExprKind.IntLit(0, nil), has_type_: true, type_: HirType(kind: HirTypeKind.Int(64, true), span: call_span), span: call_span))
         val sig = MirSignature(params: param_types, return_type: ret_type, is_variadic: false)
         val indirect_result = self.emit_function_value_call(callee_local, arg_operands, sig, ret_type)
         if val result_hir = indirect_hir_return:
