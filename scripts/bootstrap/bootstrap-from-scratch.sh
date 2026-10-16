@@ -4997,6 +4997,15 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # subject to the phase verifier's existing real MC/DC waiver requirements.
       BOOTSTRAP_STAGE2_TEST_DELEGATE="${BOOTSTRAP_STAGE2_TEST_DELEGATE:-0}"
       export BOOTSTRAP_VERIFY_TEST_WORKERS BOOTSTRAP_VERIFY_BUILD_THREADS BOOTSTRAP_STAGE2_TEST_DELEGATE
+      # This phase wraps whole tool builds; the compile-worker budget floors
+      # at 5.59 GiB and killed it (exit 88) on large hosts. An explicit cap
+      # still wins. See bootstrap_tree_rss_phase_cap_kib.
+      if [ -z "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-}" ]; then
+        bootstrap_tree_rss_resolve "${stage2_tests_build_threads}" "${repo_root}" || exit 125
+        SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$(bootstrap_tree_rss_phase_cap_kib "${repo_root}") || exit 125
+        export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+        echo "stage2-compiler-tests tree RSS cap: ${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB} KiB (whole-build phase)"
+      fi
       sh "${repo_root}/scripts/bootstrap/bootstrap-phase-verification.shs" \
         --phase=stage2 \
         --backend="${backend}" \
