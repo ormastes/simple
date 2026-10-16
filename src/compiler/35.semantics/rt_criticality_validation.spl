@@ -725,23 +725,47 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
     val ordered = rt_sort_criticality_diagnostics(diagnostics)
     ordered
 
-fn validate_rt_criticality_diagnostics_blobs(blobs: [text], fallback: [HirModule]) -> [RtCriticalDiagnostic]:
+fn validate_rt_criticality_diagnostics_blobs(blobs: [text], fallback: [HirModule],
+        has_rt_hal_flags: [bool] = [], claim_counts: [i64] = []) -> [RtCriticalDiagnostic]:
     """Decode-and-validate entry (cycle-78r3). Encoded module bytes are the
     only transport that preserves a HirModule-sized struct; decode rebuilds
     genuine structs via the allocator, bypassing every erased element path.
-    Falls back to the array entry when no blobs were threaded."""
+    Falls back to the array entry when no blobs were threaded.
+    Cycle-81 CLEAN escalation: cycle-80's inline scalar scan on the decoded
+    struct FAULTED -- a HirFunction extracted from a genuine decoded module
+    is still a large-composite element copy, and those corrupt in EVERY
+    element copy in this compiled code. The early-exit facts therefore arrive
+    as PRODUCER-SIDE PARALLEL SCALAR arrays (computed at the blobs push site,
+    where reads demonstrably work); on the no-claims path not a single field
+    is read off a decoded HirModule and the decode is skipped entirely. When
+    the scalar arrays were not threaded (compat callers), the predicate
+    conservatively falls through to the claims path."""
     if blobs.len() == 0:
         return validate_rt_criticality_diagnostics_array(fallback)
-    # Cycle-80 branch (a), confirmed by 'decoded=1 verified=1' + crash: the
-    # decoded module is genuine (its re-encode digest matched), so the
-    # remaining corruptor is ANY [HirModule] element transport -- including
-    # the array entry's own modules_vals push. This entry therefore runs the
-    # policy's early-exit scan INLINE on each freshly decoded struct (decode
-    # and encode already touched every field safely) and NEVER stores a
-    # HirModule in an array or dict. Only when a module genuinely carries rt
-    # claims (rare) does it fall back to the array entry.
+    var facts_threaded = has_rt_hal_flags.len() >= blobs.len() and
+        claim_counts.len() >= blobs.len()
+    var any_rt_hal = false
+    var any_claims = false
+    if facts_threaded:
+        for raw_flag in has_rt_hal_flags:
+            # [bool] element: small composite, scalar-safe rebind.
+            val flag: bool = raw_flag
+            if flag: any_rt_hal = true
+        for raw_count in claim_counts:
+            # [i64] element: scalar transport.
+            val count: i64 = raw_count
+            if count > 0: any_claims = true
+    if facts_threaded and not any_rt_hal and not any_claims:
+        if (env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+            eprint("[enum-reg] rt-criticality blobs: scalar-exit blobs={blobs.len()} any_rt_hal={any_rt_hal} any_claims={any_claims}")
+        rt_bound_manifest_clear()
+        return []
+    # Claims path (rare) or unthreaded scalars (compat): the full policy still
+    # moves HirModules through element transports; flagged for a
+    # per-scalar-facts rework. Best effort: digest-verified decode into the
+    # array entry.
     var verified = 0
-    var has_rt_hal = false
+    var modules_list: [HirModule] = []
     for raw_blob in blobs:
         # [text] element: scalar transport; decode allocates a fresh module.
         val blob: text = raw_blob
@@ -749,23 +773,9 @@ fn validate_rt_criticality_diagnostics_blobs(blobs: [text], fallback: [HirModule
             val restored: HirModule = decoded
             if hir_module_encode(restored) == blob:
                 verified = verified + 1
-                for fn_key0 in restored.functions.keys():
-                    val fn0: HirFunction = restored.functions[fn_key0]
-                    if fn0.func_attr.is_rt_hal: has_rt_hal = true
+                modules_list.push(restored)
     if (env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
-        eprint("[enum-reg] rt-criticality blobs: decoded={blobs.len()} verified={verified} has_rt_hal={has_rt_hal}")
-    if rt_criticality_claim_keys().len() == 0 and not has_rt_hal:
-        rt_bound_manifest_clear()
-        return []
-    # Rare path: genuine rt-criticality claims. The full policy still moves
-    # HirModules through element transports; flagged for a per-scalar-facts
-    # rework. Best effort: re-decode into the array entry.
-    var modules_list: [HirModule] = []
-    for raw_blob2 in blobs:
-        val blob2: text = raw_blob2
-        if val decoded2 = hir_module_decode(blob2):
-            val restored2: HirModule = decoded2
-            modules_list.push(restored2)
+        eprint("[enum-reg] rt-criticality blobs: decoded={blobs.len()} verified={verified} threaded={facts_threaded}")
     validate_rt_criticality_diagnostics_array(modules_list)
 
 fn validate_rt_criticality_diagnostics_array(modules_list: [HirModule]) -> [RtCriticalDiagnostic]:
