@@ -614,6 +614,21 @@ impl HirLowering:
             # consumer already has in scope is still lowerable, so failing the
             # build here would be a regression, not a fix.
             # See doc/08_tracking/bug/hir_enum_payload_blockvalue_unresolved_2026-08-21.md
+            # Builtin-container spellings that NO module in this compilation
+            # declares (Option/Result/Dict/Map/HashMap) resolve in
+            # lower_named_kind without any owner materialization, so this
+            # owner-miss can never change a lowering outcome -- the advisory
+            # (and its downstream fabricated-position hard error, in closures
+            # where the name is load-bearing) is the defect here, not a real
+            # missing import. A DECLARED container spelling never reaches this
+            # branch: hir_compilation_declares_nominal keeps the walk chasing
+            # user declarations, which must win. Spellings lower_named_kind
+            # cannot resolve without a symbol (Array/List/Set/Vec) stay
+            # loud: an undeclared one is a genuine error. See
+            # hir_dependency_is_builtin_type's docstring (measured evidence).
+            if hir_dependency_is_builtin_container(dependency) and
+                    not hir_compilation_declares_nominal(self.module_surfaces, dependency):
+                return
             eprint("[hir-payload-origin-unresolved] owner={imported_mod.module_name} owner_key={imported_mod_name} payload={dependency}: no declaration, re-export hop, or explicit import of this name in the owner; a later `unresolved type: {dependency}` will be reported against an importing module instead")
             return
         val claimed_short_name = self.claim_materialized_payload_binding(dependency, origin, import_span)
@@ -990,6 +1005,14 @@ impl HirLowering:
                 self.payload_origin_miss_skip_count = self.payload_origin_miss_skip_count + 1
             if not hir_dependency_is_builtin_type(dependency) and not callable_already_advised:
                 self.payload_origin_miss_memo_record(callable_miss_key)
+                # Same builtin-container rule as the payload miss handler
+                # above: an undeclared Option/Result/Dict/Map/HashMap resolves
+                # in lower_named_kind without owner materialization, so stay
+                # quiet; a declared spelling (user declarations must win) and
+                # non-builtin names (genuinely unresolved) keep the receipt.
+                if hir_dependency_is_builtin_container(dependency) and
+                        not hir_compilation_declares_nominal(self.module_surfaces, dependency):
+                    return
                 eprint("[hir-callable-dep-origin-unresolved] owner={imported_mod.module_name} dependency={dependency}: no declaration, re-export hop, or explicit import of this name in the owner; a later `unresolved type: {dependency}` will be reported against an importing module instead")
             return
         val terminal = self.module_surfaces.surfaces[selected_target]
@@ -1714,7 +1737,27 @@ fn hir_dependency_is_builtin_type(dependency: text) -> bool:
     Filtering them is not merely cosmetic: `lower_named_kind` resolves every
     name here from its own primitive arms BEFORE any symbol lookup, so
     materializing them was never capable of changing a lowering outcome.
-    See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md"""
+    See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+
+    CONTAINER SPELLINGS (Option/Result/Dict/Set/Map/List/Array/Vec) stay
+    unfiltered HERE on purpose -- a user module may declare the name and must
+    win. Since 2026-10-16 the miss handlers below additionally treat a
+    container spelling as resolved-without-owner when NO module surface in
+    the current compilation declares it (hir_dependency_is_builtin_container
+    + hir_compilation_declares_nominal): lower_named_kind resolves
+    Option/Result/Dict/Map/HashMap without any declaration, so chasing them
+    through the owner's import table can only produce the
+    `[hir-payload-origin-unresolved]` / `[hir-callable-dep-origin-unresolved]`
+    / `[hir-reexport-chase-unresolved]` advisory and, in closures where the
+    name is load-bearing, a fabricated-position hard `unresolved name/type`.
+    Measured on the manual stage3 per-module object sweep: this family is
+    the dominant residual advisory storm and produces en-masse per-module
+    `unresolved name: Result/Option/Dict` hard failures (site-19,
+    doc/08_tracking/bug/stage2_matrix_remaining_rows_sdnvalue_cli_imports_2026-10-15.md).
+    Spellings lower_named_kind does NOT resolve without a symbol (Array,
+    List, Set, Vec) are deliberately excluded from that set: an undeclared
+    one is a genuine error and stays fail-closed, attributed at the real
+    annotation site."""
     if dependency == "": return true
     # DELIBERATELY lowercase-only, plus `Any`. The CAPITALIZED dialect aliases
     # (Int/Bool/Char/String/Float) and the container spellings
@@ -1751,6 +1794,42 @@ fn hir_dependency_is_builtin_type(dependency: text) -> bool:
     # doc/08_tracking/bug/hir_bare_fn_callable_dep_fabricated_position_2026-08-29.md
     if dependency == "fn":
         return true
+    false
+
+fn hir_dependency_is_builtin_container(dependency: text) -> bool:
+    """True for the builtin-container spellings lower_named_kind resolves
+    WITHOUT any module declaring them. Intersected with the language
+    surface on purpose: only spellings with a real no-symbol lowering arm
+    are here. Option/Result/Dict resolve in arms BEFORE the symbol lookup
+    (hir_lowering/types.spl lower_named_kind); Map/HashMap resolve to a
+    dynamic dict AFTER the symbol lookup, so a DECLARED Map still wins.
+    Array/List/Set/Vec are deliberately NOT listed -- lower_named_kind has
+    no arm for them, so an undeclared spelling is a genuine hard error and
+    must stay fail-closed rather than being silenced into a skipped
+    materialization. See hir_dependency_is_builtin_type's docstring for the
+    declared-wins rule these feed."""
+    dependency == "Option" or dependency == "Result" or dependency == "Dict" or
+    dependency == "Map" or dependency == "HashMap"
+
+fn hir_compilation_declares_nominal(surfaces: ModuleSurfacesByName, name: text) -> bool:
+    """True when any module surface in this compilation declares `name` as a
+    composite (struct/class), enum, or trait. The "is X declared anywhere in
+    this compilation" predicate for the builtin-container rule: the walk may
+    only treat a container spelling as resolved-without-owner when the
+    spelling names NO user declaration, otherwise materializing it would
+    silently stop materializing a real user type. Scans the declaration-name
+    lists only (never values), and runs at most once per (owner, name): both
+    miss handlers memo the owner-miss before consulting this predicate."""
+    var nominal_scan_i = 0
+    while nominal_scan_i < surfaces.surfaces.len():
+        val nominal_scan_surface = surfaces.surfaces[nominal_scan_i]
+        if module_surface_name_position(nominal_scan_surface.composite_names, name) >= 0:
+            return true
+        if module_surface_name_position(nominal_scan_surface.enum_names, name) >= 0:
+            return true
+        if module_surface_name_position(nominal_scan_surface.trait_names, name) >= 0:
+            return true
+        nominal_scan_i = nominal_scan_i + 1
     false
 
 fn hir_dependency_type_name(dependency: text) -> text:
