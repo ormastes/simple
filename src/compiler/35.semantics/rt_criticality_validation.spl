@@ -359,7 +359,9 @@ fn rt_module_matches(module_key: text, module: HirModule, claim_path: text) -> b
 fn rt_unambiguous_symbol_names(modules: Dict<text, HirModule>) -> Dict<i64, text>:
     var declarations: [RtCriticalFunctionDeclarationV1] = []
     for module_key in modules.keys():
-        for declaration in rt_module_function_declarations_v1(module_key, modules[module_key]):
+        # ANY-transport: declaration structs cross a by-value return; rebind.
+        for raw_declaration in rt_module_function_declarations_v1(module_key, modules[module_key]):
+            val declaration: RtCriticalFunctionDeclarationV1 = raw_declaration
             declarations.push(declaration)
     rt_unambiguous_declaration_names_v1(declarations)
 
@@ -367,7 +369,8 @@ pub fn rt_unambiguous_declaration_names_v1(
         declarations: [RtCriticalFunctionDeclarationV1]) -> Dict<i64, text>:
     var names: Dict<i64, text> = {}
     var owners: Dict<i64, text> = {}
-    for declaration in declarations:
+    for raw_declaration in declarations:
+        val declaration: RtCriticalFunctionDeclarationV1 = raw_declaration
         val id = declaration.symbol_id
         if owners.contains_key(id) and owners[id] != declaration.module_key:
             names[id] = "__rt_ambiguous_symbol__"
@@ -383,7 +386,9 @@ fn rt_admit_with_capabilities_v1(root_id: text, facts: [RtCriticalFact],
         capabilities: [RtBoundCapability]) -> [text]:
     val digest = rt_closure_digest(root_id, facts)
     var adjusted: [RtCriticalFact] = []
-    for fact in facts:
+    for raw_fact in facts:
+        # ANY-transport: annotated rebind (cycle-71).
+        val fact: RtCriticalFact = raw_fact
         val reviewed = rt_reviewed_bound_mask(fact.name, digest,
             rt_fact_observed_units(fact), capabilities)
         adjusted.push(RtCriticalFact(name: fact.name,
@@ -397,7 +402,9 @@ fn rt_hal_facts_with_reviewed_intrinsic(root_id: text,
     facts: [RtCriticalFact]) -> [RtCriticalFact]:
     val intrinsic_id = root_id + "::__rt_hal_boundary_enqueue_intrinsic"
     var out: [RtCriticalFact] = []
-    for fact in facts:
+    for raw_fact in facts:
+        # ANY-transport: annotated rebind (cycle-71).
+        val fact: RtCriticalFact = raw_fact
         if fact.name == root_id:
             var callees = fact.callees
             callees.push(intrinsic_id)
@@ -492,7 +499,10 @@ pub fn rt_function_facts_v1(module_key: text, module: HirModule,
         own = own | RT_EFFECT_DISPATCH | RT_EFFECT_UNKNOWN
         units[RT_EFFECT_DISPATCH] = 1
     var unbounded_loop_count: i64 = 0
-    for loop in effect_block_loops(fn_.body):
+    for raw_loop in effect_block_loops(fn_.body):
+        # ANY-transport: loop facts cross a by-value return; rebind before reads.
+        # LoopSite per effect_validation.spl:277.
+        val loop: LoopSite = raw_loop
         if loop.bound_kind == LOOP_BOUND_NONE or loop.grows_container:
             own = own | RT_EFFECT_LOOP
             unbounded_loop_count = unbounded_loop_count + 1
@@ -554,7 +564,9 @@ pub fn rt_criticality_graph_facts_v1(functions: [RtCriticalFunctionFactsV1]) -> 
     # never alias silently: their edges become unknown and fail closed.
     var unique_ids: Dict<text, text> = {}
     var ambiguous: Dict<text, bool> = {}
-    for fn_ in functions:
+    for raw_fn in functions:
+        # ANY-transport: annotated rebind (cycle-71).
+        val fn_: RtCriticalFunctionFactsV1 = raw_fn
         val declaration = fn_.declaration
         val stable = rt_stable_fn_id(declaration.module_key, declaration.symbol_id)
         if unique_ids.contains_key(declaration.name):
@@ -562,7 +574,9 @@ pub fn rt_criticality_graph_facts_v1(functions: [RtCriticalFunctionFactsV1]) -> 
         else:
             unique_ids[declaration.name] = stable
     var facts: [RtCriticalFact] = []
-    for fn_ in functions:
+    for raw_fn in functions:
+        # ANY-transport: annotated rebind (cycle-71).
+        val fn_: RtCriticalFunctionFactsV1 = raw_fn
         val declaration = fn_.declaration
         var stable_callees: [text] = []
         for raw_callee in fn_.raw_callees:
@@ -582,7 +596,9 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
         claims: [RtCriticalContractClaimV1], implicit_profile_error: bool) -> [RtCriticalDiagnostic]:
     var diagnostics: [RtCriticalDiagnostic] = []
     var has_rt_hal = false
-    for fn_ in functions:
+    for raw_fn in functions:
+        # ANY-transport: annotated rebind (cycle-71).
+        val fn_: RtCriticalFunctionFactsV1 = raw_fn
         if fn_.declaration.is_rt_hal: has_rt_hal = true
     if claims.len() == 0 and not has_rt_hal:
         return diagnostics
@@ -592,13 +608,17 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
     # critical or verified dependency.
     var claim_roots: Dict<text, text> = {}
     var declared_ranks: Dict<text, i64> = {}
-    for claim in claims:
+    for raw_claim in claims:
+        # ANY-transport: annotated rebind (cycle-71).
+        val claim: RtCriticalContractClaimV1 = raw_claim
         val key = claim.registry_key
         if not module_ids.contains(claim.path): continue
         val fn_name = claim.fn_name
         val profile = claim.profile
         var root_id = ""
-        for fn_ in functions:
+        for raw_fn in functions:
+        # ANY-transport: annotated rebind (cycle-71).
+        val fn_: RtCriticalFunctionFactsV1 = raw_fn
             val declaration = fn_.declaration
             if not rt_declaration_matches_v1(declaration, claim.path): continue
             if declaration.name == fn_name:
@@ -608,7 +628,9 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
         val rank = rt_profile_assurance_rank(profile)
         if root_id != "" and rank > (declared_ranks[root_id] ?? 0):
             declared_ranks[root_id] = rank
-    for fn_ in functions:
+    for raw_fn in functions:
+        # ANY-transport: annotated rebind (cycle-71).
+        val fn_: RtCriticalFunctionFactsV1 = raw_fn
         val declaration = fn_.declaration
         if declaration.is_rt_hal:
             val root_id = rt_stable_fn_id(declaration.module_key, declaration.symbol_id)
@@ -621,7 +643,9 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
         fact_positions[facts[fact_position].name] = fact_position
         fact_position = fact_position + 1
     var admitted_roots: Dict<text, bool> = {}
-    for claim in claims:
+    for raw_claim in claims:
+        # ANY-transport: annotated rebind (cycle-71).
+        val claim: RtCriticalContractClaimV1 = raw_claim
         val key = claim.registry_key
         if not claim_roots.contains_key(key): continue
         val fn_name = claim.fn_name
@@ -681,7 +705,9 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
     # Non-flat/full frontend routes preserve @rt(hal) directly in FunctionAttr
     # and do not emit the flat parser's inert criticality marker. Admit those
     # roots here with the same default critical closure, exactly once.
-    for fn_ in functions:
+    for raw_fn in functions:
+        # ANY-transport: annotated rebind (cycle-71).
+        val fn_: RtCriticalFunctionFactsV1 = raw_fn
         val declaration = fn_.declaration
         if not declaration.is_rt_hal: continue
         val root_id = rt_stable_fn_id(declaration.module_key, declaration.symbol_id)
@@ -697,12 +723,13 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
 fn validate_rt_criticality_diagnostics(modules: Dict<text, HirModule>) -> [RtCriticalDiagnostic]:
     """Validate RT roots while retaining warning/error severity for callers."""
     var has_rt_hal = false
-    for raw_module in modules.values():
-        # ANY-transport hazard: annotated rebinds of composite elements
-        # (cycle-70: validate_rt_criticality_diagnostics SIGSEGV).
-        val module: HirModule = raw_module
-        for raw_fn in module.functions.values():
-            val fn_: HirFunction = raw_fn
+    # ANY-transport (cycle-71): .values() element rebinds did NOT restore the
+    # erased HirModule words (same class as cycle-65's else_opt); the proven
+    # workaround is keys() + annotated dict extraction.
+    for module_key0 in modules.keys():
+        val module: HirModule = modules[module_key0]
+        for fn_key0 in module.functions.keys():
+            val fn_: HirFunction = module.functions[fn_key0]
             if fn_.func_attr.is_rt_hal: has_rt_hal = true
     if rt_criticality_claim_keys().len() == 0 and not has_rt_hal:
         rt_bound_manifest_clear()
@@ -711,8 +738,8 @@ fn validate_rt_criticality_diagnostics(modules: Dict<text, HirModule>) -> [RtCri
     var functions: [RtCriticalFunctionFactsV1] = []
     for module_key in modules.keys():
         val module: HirModule = modules[module_key]
-        for raw_fn in module.functions.values():
-            val fn_: HirFunction = raw_fn
+        for fn_key in module.functions.keys():
+            val fn_: HirFunction = module.functions[fn_key]
             functions.push(rt_function_facts_v1(module_key, module, fn_, names))
     validate_rt_criticality_facts_v1(rt_module_ids(modules), functions)
 
