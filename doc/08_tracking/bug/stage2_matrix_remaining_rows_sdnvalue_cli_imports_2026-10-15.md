@@ -278,3 +278,32 @@ for is_null was emitted from the WILDCARD branch: arm 0 (`case Null:`)
 is an unresolved Binding that consumed the default slot, arm 1 (`case _:`)
 then collided — the text names the wrong arm kind (diagnostic polish,
 separate).
+
+## Stage3 frontier (2026-10-17): mono passes; MIR enum-construction registration divergence
+
+With the mono fix (#3588) and the 20 GiB ceiling (#3589), stage3 on macOS
+builds past the mono phase (peak 13.9 GiB, status=complete) and fails in MIR
+lowering:
+
+```
+MIR lowering error: enum construction: missing runtime identity for 'Option'
+MIR lowering error: enum construction: unregistered declaration
+  'compiler.common.driver_core_modes.CompileMode'
+  at src/app/cli/bootstrap_main.spl:380:20 and :550:20
+```
+
+SEED-WORKS / STAGE2-FAILS DIVERGENCE: stage2's own build compiled the same
+entry (bootstrap_main.spl) with the same construction sites successfully —
+stage2 was built by the Rust seed; stage3 is built by the stage2 (pure-Simple)
+compiler. The self-hosted compiler does not register what the seed registers
+for enum constructions reached through mono-specialized/generic contexts
+(Option's runtime identity; a qualified enum key from an imported module at
+the entry's construction sites).
+
+Checked and ruled out: register_module_enum_inventory_v1 (#3527) and the
+provider-enum paths DO call register_enum_variants, which registers runtime
+ids — so the gap is in which modules/instantiations those passes cover in the
+stage3 schedule, or in mono's minted instantiations needing their own runtime
+registration (#3521/#3526 family). Owner: self-host divergence lane.
+Repro: the stage3 resume command in /tmp/resume34-cap12.sh (final-push
+worktree); HIR is cached so the mono/MIR phases re-run in ~15 min.
