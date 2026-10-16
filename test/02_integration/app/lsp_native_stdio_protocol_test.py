@@ -76,7 +76,7 @@ def extract(buffer, mode):
     return payload[:size], payload[size:]
 
 
-def run_mode(binary, mode, timeout):
+def run_mode(binary, mode, timeout, tool_validator=None):
     start = time.monotonic()
     result = {"mode": mode, "pass": False, "response_count": 0,
               "stdin_open_during_responses": False, "failure": None}
@@ -129,8 +129,13 @@ def run_mode(binary, mode, timeout):
             if request["method"] == "initialize":
                 if not reply["result"]["serverInfo"]["name"]:
                     raise ValueError("missing server name")
-            elif not reply["result"]["tools"]:
-                raise ValueError("empty tools/list")
+            else:
+                tools = reply["result"]["tools"]
+                if not tools:
+                    raise ValueError("empty tools/list")
+                if tool_validator is not None:
+                    tool_validator(tools)
+                result["tool_count"] = len(tools)
             result["response_count"] += 1
         result["stdin_open_during_responses"] = not process.stdin.closed
     except Exception as error:
@@ -175,7 +180,7 @@ def run_mode(binary, mode, timeout):
     return result
 
 
-def main():
+def main(tool_validator=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--receipt", required=True, type=Path)
@@ -189,7 +194,7 @@ def main():
     if args.receipt.resolve() == binary:
         parser.error("receipt must not overwrite the tested binary")
     before = digest(binary)
-    results = [run_mode(binary, mode, args.timeout) for mode in ("jsonl", "content-length")]
+    results = [run_mode(binary, mode, args.timeout, tool_validator) for mode in ("jsonl", "content-length")]
     after = digest(binary)
     passed = before == after and all(item["pass"] for item in results)
     receipt = {"binary": str(binary), "sha256_before": before, "sha256_after": after,
