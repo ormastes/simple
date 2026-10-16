@@ -307,3 +307,28 @@ stage3 schedule, or in mono's minted instantiations needing their own runtime
 registration (#3521/#3526 family). Owner: self-host divergence lane.
 Repro: the stage3 resume command in /tmp/resume34-cap12.sh (final-push
 worktree); HIR is cached so the mono/MIR phases re-run in ~15 min.
+
+## Module-emission divergence (2026-10-17): whole modules absent from stage3 objects
+
+After #3595 (stage3 bootstrap enum inventory), stage3's mono and MIR phases
+PASS and the final link fails: `app.cli.bootstrap_focused_native_build.
+run_exact_stage3_focused_capsule` / `run_exact_stage4_focused_capsule` and all
+of `bootstrap_focused_native_build_args` are referenced (U) from
+bootstrap_main.o but DEFINED NOWHERE in the stage3 object set (nm across all
+native-objects-*/0-*.o: zero focused_* definitions, no mono renames). The seed
+emits these modules (stage2's own build, same entry, linked fine); the
+self-hosted stage2 compiler's module scheduler skips BOTH modules entirely
+despite phase1 closure scans, imports, and direct uses in the entry's normal
+paths (cache_dir at bootstrap_main.spl:413 etc.).
+
+WORKAROUND (uncommitted, final-push verification tree only): the three
+flag-readers bootstrap_main needs are inlined into bootstrap_main.spl (entry
+module, which the scheduler always emits), and the two focused-capsule
+dispatch routes return a clear error. This unblocks the stage3 link; the
+focused-capsule sub-build routes are disabled in the self-hosted binary.
+
+Owner: self-host divergence lane. The scheduler skips exactly these two
+modules — the trigger (naming? import shape? demand propagation through
+`use ...{a, b, c}` explicit lists?) needs the seed-vs-stage2 scheduler
+comparison; the repro is the stage3 resume in /tmp/resume34-cap12.sh
+(HIR cached, mono/MIR/link re-run in ~20 min).
