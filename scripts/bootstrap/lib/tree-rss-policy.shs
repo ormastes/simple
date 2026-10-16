@@ -23,7 +23,7 @@
 #     cap = min(cap, hard ceiling)
 # Default hard ceiling (process-tree-rss-watchdog.pl recomputes the same
 # value from --compiler-jobs and refuses anything above it):
-#     ceiling = max(16777216, min(3145728 + jobs * 1048576, host_total_kib * 3/4))
+#     ceiling = max(25165824, min(3145728 + jobs * 1048576, host_total_kib * 3/4))
 # With no worker count, or with host RAM unreadable, the ceiling stays at the
 # historical 6835937 KiB, widened on positive evidence: 8388608 KiB on
 # 2026-10-12 measured compiler peaks, then 16777216 KiB on 2026-10-13
@@ -77,7 +77,13 @@ BOOTSTRAP_TREE_RSS_FLOOR_KIB=5859375
 # footprint is the compiler's own working set over the 2546-module closure,
 # not shard workers. 16 GiB on a 127 GiB host, one build at a time. Keep in
 # sync with process-tree-rss-watchdog.pl.
-BOOTSTRAP_TREE_RSS_STATIC_CEILING_KIB=16777216
+# Fifth widening 2026-10-16: cycle-44 peak 16792808 KiB (8 compiler jobs) and
+# cycle-46 peak 16777468 KiB (4 jobs) — both killed by the watchdog at the
+# 16 GiB ceiling. The plateau is baseline-dominated (resident compiler daemon
+# + shared LLVM over the SCV closure), so job reduction cannot fit 16 GiB.
+# 24 GiB leaves ~7 GiB headroom over the measured plateau. Keep in sync with
+# process-tree-rss-watchdog.pl.
+BOOTSTRAP_TREE_RSS_STATIC_CEILING_KIB=25165824
 BOOTSTRAP_TREE_RSS_RESERVE_KIB=3145728
 BOOTSTRAP_TREE_RSS_PER_JOB_CEILING_KIB=1048576
 BOOTSTRAP_TREE_RSS_BASE_MIB_DEFAULT=3072
@@ -438,22 +444,22 @@ bootstrap_tree_rss__selftest() {
     fi
   }
   # Historical behaviour is unchanged while no worker count is declared.
-  btr_st_expect undeclared-keeps-floor big 0 '' 5859375:16777216:floor:default
-  btr_st_expect few-jobs-keep-floor big 19 '' 5859375:23068672:floor:default
+  btr_st_expect undeclared-keeps-floor big 0 '' 5859375:25165824:floor:default
+  btr_st_expect few-jobs-keep-floor big 19 '' 5859375:25165824:floor:default
   # The incident: 80 jobs needs more than the old 6 GB / 7 GB pair.
   btr_st_expect eighty-jobs-scale big 80 '' 11010048:87031808:budget:default
   btr_st_expect forty-jobs-scale big 40 '' 7077888:45088768:budget:default
   # Monotone in the worker count.
   btr_st_expect hard-max-jobs big 128 '' 15728640:100570674:budget:default
   # Host fraction: a 16 GB host never hands half its RAM plus to one tree.
-  btr_st_expect small-host-fraction small 80 '' 8000000:16777216:host-fraction:default
+  btr_st_expect small-host-fraction small 80 '' 8000000:25165824:host-fraction:default
   # Unknown host RAM is no evidence: the job-scaled budget applies, but nothing
 # widens the ceiling beyond the static value.
-  btr_st_expect unknown-host-fails-closed none 80 '' 11010048:16777216:budget:default
+  btr_st_expect unknown-host-fails-closed none 80 '' 11010048:25165824:budget:default
   # Explicit cap: honoured under the ceiling, refused (not clamped) above it.
   btr_st_expect explicit-under-ceiling big 80 20000000 20000000:87031808:explicit:explicit-env
   btr_st_expect explicit-over-ceiling-refused big 80 87031809 REFUSED
-  btr_st_expect explicit-over-static-refused big 0 17000000 REFUSED
+  btr_st_expect explicit-over-static-refused big 0 26000000 REFUSED
   btr_st_expect explicit-garbage-refused big 80 lots REFUSED
   # Knob overrides, and their fail-closed validation.
   btr_st_expect knob-per-job big 80 '' 19529728:87031808:budget:env-knobs SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=200
@@ -463,7 +469,7 @@ bootstrap_tree_rss__selftest() {
   btr_st_expect knob-garbage-refused big 80 '' REFUSED SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=many
   btr_st_expect jobs-out-of-range-refused big 129 '' REFUSED
   # Leading zeros: 08/09 used to crash $(( )) and 040 was read as octal 32.
-  btr_st_expect jobs-leading-zero-08 big 08 '' 5859375:16777216:floor:default
+  btr_st_expect jobs-leading-zero-08 big 08 '' 5859375:25165824:floor:default
   btr_st_expect jobs-leading-zero-040 big 040 '' 7077888:45088768:budget:default
   btr_st_expect jobs-leading-zero-0080 big 0080 '' 11010048:87031808:budget:default
   btr_st_expect jobs-junk-refused big 8x '' REFUSED
@@ -488,7 +494,7 @@ bootstrap_tree_rss__selftest() {
   fi
   # Whole-build phase cap: host fraction clamped to the jobs-scaled ceiling on
   # a large host; a small host keeps its host-fraction bound.
-  for btr_st_pc in big:16777216 small:8000000; do
+  for btr_st_pc in big:25165824 small:8000000; do
     btr_st_n=$((btr_st_n + 1))
     btr_st_got=$(
       unset SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_HOST_PCT SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE
