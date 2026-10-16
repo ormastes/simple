@@ -127,6 +127,16 @@ impl MirLowering:
         for local_class in module.classes.values(): consumer_names[local_class.name] = true
         for name in repository.ordered_modules:
             val provider: MirHirModuleDeclarationsV1 = repository.modules[name]
+            # Enums register for EVERY provider including the module's own
+            # records: in mono ArchiveRequests mode the lowered HirModule
+            # carries no module.enums (only archive nominal rows), so without
+            # the own-record pass the module's match arms find an empty
+            # variant registry (measured B5b in lib.common.sdn.value's own
+            # pass, site-19). Identical re-registration in non-archive mode
+            # is quiet by the existing dedup rules.
+            for raw_enum in provider.enums:
+                val enum_declaration: MirHirEnumDeclarationV1 = raw_enum
+                self.register_provider_enum_from_declarations_v1(enum_declaration, provider.symbols)
             if provider.name == module.name: continue
             for raw_struct in provider.structs:
                 val declaration: MirHirNominalDeclarationV1 = raw_struct
@@ -700,6 +710,100 @@ impl MirLowering:
                 concrete_type: self.relocate_provider_type(implementation.type_, module.symbols),
                 concrete_name: concrete.name, reference_semantics: concrete.kind == SymbolKind.Class,
                 signatures: signatures))
+
+    me register_provider_enum_from_declarations_v1(enum_def: MirHirEnumDeclarationV1, provider: SymbolTable):
+        """Register an archived provider enum's variants into the MIR enum
+        registry, mirroring register_enum_variants for body-free declaration
+        records.
+
+        Provider registration sites (module_lowering.spl step c and this
+        file's provider pass) gated on `provider.enums.len() > 0` but never
+        registered the enums themselves: structs, classes, and methods were
+        registered; enum variants were not. A consumer module whose match
+        arms name a provider enum's variants then found an EMPTY registry
+        (variant_owner_keys returned no owners), a bare `case Variant:` arm
+        stayed an unresolved Binding, and a trailing `case _:` tripped the
+        scalar gate's multiple-default check — the measured B5b in
+        lib.common.sdn.value.SdnValue.is_null (site-19, fifth layer).
+
+        Payload types are relocated into the consumer table exactly like the
+        struct/class providers (provider Named ids name unrelated consumer
+        symbols otherwise). Explicit-discriminant variants are skipped for
+        now (the record carries an expression artifact, not a folded const);
+        skipping preserves the previous unregistered behavior for those
+        enums instead of registering wrong discriminants. Sequential
+        variants (the measured case) register fully."""
+        if not provider.symbols.has(enum_def.symbol.id):
+            return
+        if provider.get_symbol_raw(enum_def.symbol.id) == nil:
+            return
+        var names: [text] = []
+        var discriminants: [i64] = []
+        var next_value: i64 = 0
+        var vi = 0
+        var skipped_explicit = false
+        while vi < enum_def.variants.len():
+            val variant: MirHirVariantDeclarationV1 = enum_def.variants[vi]
+            if variant.has_discriminant:
+                skipped_explicit = true
+                vi = vi + 1
+                continue
+            val value = next_value
+            names = names.push(variant.name)
+            discriminants = discriminants.push(value)
+            var full_types: [HirType] = []
+            var full_names: [text] = []
+            var payload_kind = "unit"
+            if variant.kind == "tuple":
+                payload_kind = "tuple"
+                for raw_t in variant.tuple_types:
+                    val t: HirType = raw_t
+                    full_types = full_types.push(self.relocate_provider_type(t, provider))
+                    full_names = full_names.push("")
+            elif variant.kind == "struct":
+                payload_kind = "struct"
+                for raw_f in variant.fields:
+                    val f: MirHirFieldDeclarationV1 = raw_f
+                    full_types = full_types.push(self.relocate_provider_type(f.type_, provider))
+                    full_names = full_names.push(f.name)
+            val payload_key = "{enum_def.name}::{variant.name}"
+            self.enum_variant_payload_types[payload_key] = full_types
+            self.enum_variant_payload_names[payload_key] = full_names
+            self.enum_variant_payload_kind[payload_key] = payload_kind
+            if full_types.len() == 1:
+                self.enum_single_payload_types[payload_key] = full_types[0]
+            if enum_def.runtime_name != "":
+                val qualified_payload_key = "{enum_def.runtime_name}::{variant.name}"
+                self.enum_variant_payload_types[qualified_payload_key] = full_types
+                self.enum_variant_payload_names[qualified_payload_key] = full_names
+                self.enum_variant_payload_kind[qualified_payload_key] = payload_kind
+                if full_types.len() == 1:
+                    self.enum_single_payload_types[qualified_payload_key] = full_types[0]
+            next_value = value + 1
+            vi = vi + 1
+        if names.len() == 0:
+            if skipped_explicit:
+                eprint("[provider-enum] no sequential variants registered for {enum_def.runtime_name} (explicit discriminants pending)")
+            return
+        if skipped_explicit:
+            eprint("[provider-enum] skipped explicit-discriminant variants for {enum_def.runtime_name}")
+        val generic_constructor = enum_def.type_params.len() > 0 or enum_def.is_generic_template
+        self.generic_enum_constructor_owners[enum_def.name] = generic_constructor
+        if enum_def.runtime_name != "":
+            self.generic_enum_constructor_owners[enum_def.runtime_name] = generic_constructor
+        self.register_enum_runtime_name(enum_def.runtime_name, enum_def.name, Some(enum_def.span))
+        if self.enum_variant_index.has(enum_def.name):
+            val prior_names = self.enum_variant_index[enum_def.name]
+            if not _text_list_eq(prior_names, names):
+                val prior_text = prior_names.join(", ")
+                val new_text = names.join(", ")
+                self.enum_bare_name_collisions[enum_def.name] = "previously registered as [{prior_text}], now overwritten by [{new_text}] (runtime_name '{enum_def.runtime_name}')"
+                self.enum_bare_ambiguous[enum_def.name] = true
+        self.enum_variant_index_q[enum_def.runtime_name] = names
+        self.enum_variant_discriminants_q[enum_def.runtime_name] = discriminants
+        self.enum_runtime_to_bare[enum_def.runtime_name] = enum_def.name
+        self.enum_variant_index[enum_def.name] = names
+        self.enum_variant_discriminants[enum_def.name] = discriminants
 
     me register_provider_struct_from_declarations_v1(struct_def: MirHirNominalDeclarationV1, provider: SymbolTable, consumer_owns_name: bool):
         # prescan_module_struct_names registers every module's struct field
