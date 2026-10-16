@@ -46,4 +46,3 @@ still checks failure. Source review and whitespace validation only; native
 qualification remains pending. Workaround implementation: 405e0968b9d069f9f4eea1ddc1b12c7afcbeb49a.
 Intended-code recovery reference: 5c3e501759ae833a828b14b4e23c9238c73b76a6.
 Bug database reconciliation remains pending qualified tooling.
-
