@@ -72,7 +72,6 @@ use compiler.driver.driver_hir_pipeline_support.{
     driver_shown_fatal_count,
     driver_collect_hir_errors,
     driver_dict_entry_count,
-    driver_dict_has_rt_hal,
     driver_validate_value_struct_layout_declarations_v1,
     driver_rollback_flat_hir_row_or_abort,
     driver_finish_failed_parse_scope,
@@ -90,7 +89,7 @@ use compiler.semantics.value_struct_layout.{ValueStructLayoutModuleV1, value_str
 use compiler.driver.driver_safety_severity.{SafetyPassSeverity, safety_pass_severity_phased}
 use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity, typecheck_pass_severity}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line, hir_module_encode}
+use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line, hir_module_encode, hir_module_has_rt_hal}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_last_warnings, hir_cache_parser_binding_v1, hir_cache_last_parser_objectless, hir_cache_load_parsed_v1, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_in_owned_scope, hir_cache_clear_last_warnings}
@@ -2028,17 +2027,18 @@ impl CompilerDriver:
                     # Codec transport twin: encoding happens HERE, in the lane
                     # whose reads work (same lane as the HIR cache store).
                     self.ctx.validation_module_blobs = self.ctx.validation_module_blobs.push(hir_module_encode(hir_module_copy))
-                    # Cycle-81 CLEAN escalation: producer-side scalar facts
-                    # parallel to the blobs. The extraction runs inside the
-                    # support-unit callee (driver_dict_has_rt_hal), mirroring
-                    # driver_dict_entry_count two hundred lines above -- every
-                    # working large-aggregate read in this campaign happened
-                    # inside a callee, never inlined at this call site. The
-                    # blobs validation entry must NEVER read a field off a
-                    # decoded HirModule: even a genuine decoded struct corrupts
-                    # in a HirFunction element copy (cycle-81 shim: fault
-                    # inside the blobs loop's scalar scan).
-                    val validation_has_rt_hal: bool = driver_dict_has_rt_hal(hir_module.functions)
+                    # Cycle-81 CLEAN escalation (revised cycle-82): producer-side
+                    # scalar facts parallel to the blobs. Cycle-82 shim proved
+                    # even a support-unit callee's Dict value reads of
+                    # HirFunction arrive erased in this lane (fault at the
+                    # +120 field load on rt_index_get's result); the ONLY
+                    # context that demonstrably walks module.functions values
+                    # is the codec unit's (the generated encoder reads
+                    # node.functions[dk3] on every encode), so the extraction
+                    # lives there (hir_module_has_rt_hal). The blobs
+                    # validation entry must NEVER read a field off a decoded
+                    # HirModule.
+                    val validation_has_rt_hal: bool = hir_module_has_rt_hal(hir_module)
                     self.ctx.validation_module_has_rt_hal = self.ctx.validation_module_has_rt_hal.push(validation_has_rt_hal)
                     val validation_claim_count: i64 = rt_criticality_claim_keys().len()
                     self.ctx.validation_module_claim_counts = self.ctx.validation_module_claim_counts.push(validation_claim_count)
