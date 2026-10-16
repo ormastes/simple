@@ -1,0 +1,258 @@
+use compiler.blocks.definition.*
+use compiler.blocks.value.{BlockValue, JsonKind}
+use compiler.blocks.context.{BlockContext, BlockError}
+use compiler.blocks.registry.{BlockRegistry, block_registry, register_block, reset_blocks}
+use compiler.blocks.builtin_blocks_data.{JsonBlockDef}
+use compiler.blocks.builtin_blocks_math.{MathBlockDef}
+use compiler.blocks.builtin_blocks_helpers.{parse_json, json_to_const}
+use compiler.blocks.unicode_classification_v17.*
+use compiler.blocks.unicode_properties_v17.{block_unicode_numeric_v17}
+use compiler.frontend.block_types.{LexerMode, SyntaxFeatures, BlockToken, PreLexInfo, BlockSkipPolicy, BlockOutlineInfo, prelexinfo_empty, blockoutlineinfo_opaque}
+use compiler.frontend.core.lexer_types.{lex_span_new}
+use compiler.frontend.treesitter_types.{BlockOutline}
+use compiler.frontend.treesitter.outline_lexer.{TreeSitter}
+use compiler.frontend.treesitter.outline.*
+use compiler.common.diagnostics.span.{Span}
+
+struct OutlineControlBlockV1:
+    policy: BlockSkipPolicy
+
+impl BlockDefinition for OutlineControlBlockV1:
+    fn kind() -> text: "outline_control"
+    fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        Ok(BlockValue.Raw(payload))
+    fn treesitter_outline(payload: text, pre_lex: PreLexInfo) -> BlockOutlineInfo:
+        BlockOutlineInfo(kind: "custom-dispatched", identifiers: [payload], external_refs: [], has_structure_kind: true, structure_kind: "control", is_opaque: false)
+    fn skip_policy() -> BlockSkipPolicy: self.policy
+    fn parse_full(payload: text, pre_lex: PreLexInfo, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        self.parse_payload(payload, ctx)
+    fn lexer_mode() -> LexerMode:
+        block_default_lexer_mode_v1()
+    fn syntax_features() -> SyntaxFeatures:
+        block_default_syntax_features_v1()
+    fn lex(payload: text, pre_lex: PreLexInfo, ctx: BlockContext) -> Result<[BlockToken], BlockError>:
+        block_default_lex_v1(payload, pre_lex, ctx)
+    fn highlight(payload: text) -> [HighlightToken]:
+        block_default_highlight_v1(payload)
+    fn completions(payload: text, cursor: i64) -> [Completion]:
+        block_default_completions_v1(payload, cursor)
+    fn hover(payload: text, cursor: i64) -> HoverInfo?:
+        block_default_hover_v1(payload, cursor)
+    fn signature_help(payload: text, cursor: i64) -> SignatureHelp?:
+        block_default_signature_help_v1(payload, cursor)
+    fn validate(value: BlockValue, ctx: BlockContext) -> [BlockError]:
+        block_default_validate_v1(value, ctx)
+    fn eval_const(value: BlockValue) -> ConstValue?:
+        block_default_eval_const_v1(value)
+    fn result_type(value: BlockValue) -> BlockType?:
+        block_default_result_type_v1(value)
+    fn description() -> text:
+        block_default_description_v1()
+    fn examples() -> [BlockExample]:
+        block_default_examples_v1()
+
+fn outline_unicode_controls_v17() -> text:
+    if not block_text_is_alphabetic_v17("é漢") or not block_text_is_alphabetic_v17("ͅ"):
+        return "Unicode Alphabetic lost non-ASCII/combining members"
+    if not block_text_is_alphanumeric_v17("Ⅷ²٣"):
+        return "Unicode alphanumeric lost Nl/No/Nd members"
+    if not block_unicode_numeric_v17(178) or not block_unicode_numeric_v17(8547):
+        return "Unicode Numeric category coverage differs"
+    if not block_text_is_whitespace_v17(" "):
+        return "Unicode White_Space lost NBSP/NEL"
+    if block_text_is_whitespace_v17("​") or block_text_is_alphanumeric_v17("a!"):
+        return "Unicode negative membership widened"
+    if block_text_is_alphabetic_v17("") or block_text_is_alphanumeric_v17("") or block_text_is_whitespace_v17("") or block_text_is_digit_v17(""):
+        return "empty text classification became true"
+    if not block_text_is_digit_v17("019") or block_text_is_digit_v17("٣"):
+        return "ASCII digit contract changed"
+    val multibyte = "é"
+    if block_text_is_alphabetic_v17(multibyte[0]):
+        return "invalid one-byte UTF8 fragment accepted"
+    ""
+
+fn outline_json_controls_v1() -> text:
+    match parse_json("{{\"key\": [null, true, 2, \"text\", {{\"nested\": false}}]}}"):
+        case Ok(value):
+            match value.kind:
+                case JsonKind.Object(fields):
+                    if fields.len() != 1 or fields[0].0 != "key": return "typed JSON object key lost"
+                    match fields[0].1.kind:
+                        case JsonKind.Array(elements):
+                            if elements.len() != 5: return "typed JSON nested array lost"
+                            match elements[0].kind:
+                                case JsonKind.Null: ()
+                                case _: return "typed JSON null member lost"
+                            match elements[1].kind:
+                                case JsonKind.Bool(flag):
+                                    if not flag: return "typed JSON true member lost"
+                                case _: return "typed JSON bool member lost"
+                            match elements[2].kind:
+                                case JsonKind.Number(number):
+                                    if number != 2.0: return "typed JSON numeric payload differs"
+                                case _: return "typed JSON number member lost"
+                            match elements[3].kind:
+                                case JsonKind.String(string):
+                                    if string != "text": return "typed JSON string payload differs"
+                                case _: return "typed JSON string member lost"
+                            match elements[4].kind:
+                                case JsonKind.Object(nested):
+                                    if nested.len() != 1 or nested[0].0 != "nested": return "nested object lost"
+                                    match nested[0].1.kind:
+                                        case JsonKind.Bool(flag):
+                                            if flag: return "nested false value lost"
+                                        case _: return "nested boolean type lost"
+                                case _: return "nested object type lost"
+                        case _: return "typed JSON array type lost"
+                case _: return "typed JSON object type lost"
+            match json_to_const(value):
+                case Some(constant): return "unsupported JSON object invented constant"
+                case nil: ()
+        case Err(message): return "valid nested JSON rejected: {message}"
+    match parse_json("{{\"first\": 1, \"second\": true, \"first\": 3}}"):
+        case Ok(value):
+            match value.kind:
+                case JsonKind.Object(fields):
+                    if fields.len() != 2 or fields[0].0 != "first" or fields[1].0 != "second":
+                        return "JSON duplicate-key first-position order changed"
+                    match fields[0].1.kind:
+                        case JsonKind.Number(number):
+                            if number != 3.0: return "JSON duplicate key did not preserve last value"
+                        case _: return "JSON duplicate-key numeric type changed"
+                    match fields[1].1.kind:
+                        case JsonKind.Bool(flag):
+                            if not flag: return "JSON unrelated second field changed"
+                        case _: return "JSON unrelated second field type changed"
+                case _: return "JSON duplicate-key object shape changed"
+        case Err(message): return "valid duplicate-key JSON rejected"
+    for malformed in ["[1,]", "{{\"key\":}}", "false true"]:
+        match parse_json(malformed):
+            case Ok(value): return "malformed JSON accepted"
+            case Err(message):
+                if message == "": return "JSON parse error erased"
+    val ctx = BlockContext(source: "", block_kind: "json", span: Span.empty(), payload_span: Span.empty())
+    val handler = JsonBlockDef.new()
+    match handler.parse_payload("[null,true,2,\"text\"]", ctx):
+        case Ok(value):
+            match handler.eval_const(value):
+                case Some(constant):
+                    match constant:
+                        case ConstValue.Array(elements):
+                            if elements.len() != 4: return "JSON constant array length differs"
+                            match elements[0]:
+                                case ConstValue.Nil: ()
+                                case _: return "JSON null constant lost"
+                            match elements[1]:
+                                case ConstValue.Bool(flag):
+                                    if not flag: return "JSON true constant lost"
+                                case _: return "JSON bool constant lost"
+                            match elements[2]:
+                                case ConstValue.Float(number):
+                                    if number != 2.0: return "JSON number constant differs"
+                                case _: return "JSON numeric model differs"
+                            match elements[3]:
+                                case ConstValue.String(string):
+                                    if string != "text": return "JSON string constant differs"
+                                case _: return "JSON string constant lost"
+                        case _: return "JSON array constant type lost"
+                case nil: return "supported JSON constant missing"
+        case Err(message): return "actual JSON builtin rejected supported array"
+    match parse_json("[1,{{\"key\":2}}]"):
+        case Ok(value):
+            match json_to_const(value):
+                case Some(constant): return "unsupported nested object constant invented"
+                case nil: ()
+        case Err(message): return "valid nested unsupported JSON rejected"
+    ""
+
+fn outline_registry_dispatch_controls_v1() -> text:
+    reset_blocks()
+    val default_registry = block_registry()
+    if default_registry.all_keywords().len() != 8: return "default registry lost builtin registrations"
+    for keyword in ["m", "loss", "nograd", "sh", "sql", "re", "json", "md"]:
+        match default_registry.lookup(keyword):
+            case Some(handler):
+                if handler.kind() != keyword: return "builtin lookup owner differs"
+                if handler.hover("", 0).?: return "canonical absent hover default differs"
+                if handler.signature_help("", 0).?: return "canonical absent signature default differs"
+            case nil: return "builtin lookup missing"
+    if not register_block(OutlineControlBlockV1(policy: BlockSkipPolicy.OutlineRequired)):
+        return "custom block registration lost"
+    if register_block(OutlineControlBlockV1(policy: BlockSkipPolicy.AlwaysFull)):
+        return "duplicate custom block accepted"
+    val before_reset = block_registry()
+    for policy in [BlockSkipPolicy.Skippable, BlockSkipPolicy.OutlineRequired, BlockSkipPolicy.AlwaysFull]:
+        var registry = BlockRegistry.new()
+        registry.register(OutlineControlBlockV1(policy: policy))
+        var parser = TreeSitter.new("")
+        parser.has_registry = true
+        parser.registry = registry
+        parser.fast_mode = true
+        val block = BlockOutline(kind: "outline_control", payload: "actual-payload", payload_span: lex_span_new(0, 14, 1, 1), span: lex_span_new(0, 14, 1, 1), has_parent_context: false, parent_context: "", has_pre_lex_info: false, pre_lex_info: prelexinfo_empty(), has_outline_info: false, outline_info: BlockOutlineInfo(kind: "", identifiers: [], external_refs: [], has_structure_kind: false, structure_kind: "", is_opaque: true))
+        val fast = parser.apply_outline_policy(block)
+        if not fast.has_outline_info: return "actual custom policy failed to write outline presence"
+        match policy:
+            case BlockSkipPolicy.Skippable:
+                if not fast.outline_info.is_opaque or fast.outline_info.kind != "outline_control": return "fast skippable policy ignored"
+            case _:
+                if fast.outline_info.is_opaque or fast.outline_info.kind != "custom-dispatched": return "custom outline override ignored"
+                if not fast.outline_info.has_structure_kind or fast.outline_info.structure_kind != "control": return "custom outline metadata lost"
+                if fast.outline_info.identifiers.len() != 1 or fast.outline_info.identifiers[0] != "actual-payload": return "custom payload not forwarded"
+        parser.fast_mode = false
+        val normal = parser.apply_outline_policy(block)
+        if not normal.has_outline_info or normal.outline_info.kind != "custom-dispatched" or normal.outline_info.is_opaque:
+            return "normal mode ignored actual custom handler"
+    reset_blocks()
+    if block_registry().is_block_keyword("outline_control"): return "reset retained custom handler"
+    if not before_reset.is_block_keyword("outline_control"): return "reset mutated previous registry value snapshot"
+    if block_registry().all_keywords().len() != 8: return "reset failed to restore builtins"
+    # Inspect actual builtin results, rather than comparing source-shaped records.
+    val math_handler = MathBlockDef.new()
+    val math_outline = math_handler.treesitter_outline("alpha", prelexinfo_empty())
+    if not math_outline.has_structure_kind or math_outline.structure_kind != "expression" or math_outline.is_opaque:
+        return "math builtin outline presence/payload differs"
+    if math_outline.identifiers.len() != 1 or math_outline.identifiers[0] != "alpha":
+        return "math actual identifier extraction differs"
+    val opaque = blockoutlineinfo_opaque("control")
+    if opaque.has_structure_kind or opaque.structure_kind != "" or not opaque.is_opaque:
+        return "opaque outline absent metadata differs"
+    for keyword in ["m", "loss", "nograd", "sh", "sql", "re", "json", "md"]:
+        match block_registry().lookup(keyword):
+            case Some(handler):
+                for example in handler.examples():
+                    if example.has_output or example.output != "": return "builtin example absent output differs"
+            case nil: return "builtin metadata handler missing"
+    match block_registry().lookup("sql"):
+        case Some(sql_handler):
+            val completions = sql_handler.completions("", 0)
+            if completions.len() != 6: return "SQL completion count differs"
+            val select = completions[0]
+            if select.label != "SELECT" or not select.has_detail or select.detail != "Query data": return "SELECT detail metadata differs"
+            if not select.has_insert_text or select.insert_text != "SELECT ": return "SELECT insertion metadata differs"
+            if not select.has_documentation or select.documentation != "Select columns from a table": return "SELECT documentation differs"
+            val from_item = completions[1]
+            if from_item.label != "FROM" or not from_item.has_detail or from_item.detail != "Specify table": return "FROM detail metadata differs"
+            if not from_item.has_insert_text or from_item.insert_text != "FROM ": return "FROM insertion metadata differs"
+            if from_item.has_documentation or from_item.documentation != "": return "FROM absent documentation differs"
+            val insert = completions[3]
+            if not insert.has_insert_text or insert.insert_text != r"INSERT INTO ${1:table} (${2:columns}) VALUES (${3:values})":
+                return "SQL snippet placeholder payload changed"
+        case nil: return "SQL completion handler missing"
+    # Existing byte-indexed lexer spans stay byte-indexed.
+    val ctx = BlockContext(source: "", block_kind: "m", span: Span.empty(), payload_span: Span.empty())
+    match MathBlockDef.new().lex("abc 12", prelexinfo_empty(), ctx):
+        case Ok(tokens):
+            if tokens.len() != 3: return "ASCII math lex token count changed"
+            if tokens[0].span.start != 0 or tokens[0].span.end != 3: return "ASCII math identifier span changed"
+            if tokens[2].span.start != 4 or tokens[2].span.end != 6: return "ASCII math number span changed"
+        case Err(message): return "ASCII math lex failed"
+    ""
+
+fn outline_block_prerequisite_controls_v1() -> text:
+    val unicode_failure = outline_unicode_controls_v17()
+    if unicode_failure != "": return unicode_failure
+    val json_failure = outline_json_controls_v1()
+    if json_failure != "": return json_failure
+    outline_registry_dispatch_controls_v1()
+
+export outline_block_prerequisite_controls_v1

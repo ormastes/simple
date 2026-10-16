@@ -17,3 +17,8 @@ Shared real parser controls cover token priming, direct advance, free me state w
 No native build, object, link or runtime result is claimed. Root reviews the exact source and fixture before any frozen qualification attempt; this outline lane has consumed no build attempt and does not reset the separate constructor-feature budget. Additional historical aggregate desugaring issues, if found, require their own evidence and review rather than silent mass rewriting. The global Phase3/compiler deployment objective remains incomplete.
 
 The stronger type oracle and the 19-site constructor inventory were reviewed before freezing, without an intervening build. No all-563-diagnostics-resolved claim is made. Native/BDD controls remain UNRUN.
+
+
+## Native cycle1 follow-up (2026-10-16)
+
+Frozen8642b first native attempt processed96 MIR modules (88 success,8 failed,54 fatal rows), without object generation or linking. The restored lexer owner and actual receiver fixture modules completed MIR, which is not native runtime qualification. Linked block-system prerequisites and qualified-pattern repairs are tracked in outline_block_native_prerequisites_2026_10_16.md. Original41/22 body-proof receipts remain historical proof for8642b, not a claim that subsequent prerequisite edits are mechanically unchanged. Cycle2 remains UNRUN.

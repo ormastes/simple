@@ -15,6 +15,7 @@
 #
 # Outline type definitions are in treesitter_types.spl
 
+use compiler.blocks.definition.{BlockDefinition}
 use compiler.frontend.core.lexer.*
 use compiler.frontend.core.lexer_types.{TokenKind}
 use compiler.frontend.treesitter_types.*
@@ -52,11 +53,11 @@ fn attributes_push(attrs: [AttributeOutline], item: AttributeOutline) -> [Attrib
 fn import_items_push(items: [text], item: text) -> [text]:
         items.push(item)
 
-fn h_skip_policy<H>(h: H) -> BlockSkipPolicy:
-        BlockSkipPolicy.OutlineRequired
+fn h_skip_policy(h: BlockDefinition) -> BlockSkipPolicy:
+        h.skip_policy()
 
-fn h_treesitter_outline<H>(h: H, payload: text, pre_lex: PreLexInfo) -> BlockOutlineInfo:
-        blockoutlineinfo_opaque("")
+fn h_treesitter_outline(h: BlockDefinition, payload: text, pre_lex: PreLexInfo) -> BlockOutlineInfo:
+        h.treesitter_outline(payload, pre_lex)
 
 # ============================================================================
 # Attribute Parsing
@@ -232,31 +233,31 @@ impl TreeSitter:
 
             val item = self.parse_top_level_item()
             match item:
-                case toplevelitem_Import(i):
+                case TopLevelItem.Import(i):
                     module.imports.push(i)
-                case toplevelitem_Export(e):
+                case TopLevelItem.Export(e):
                     module.exports.push(e)
-                case toplevelitem_Function(f):
+                case TopLevelItem.Function(f):
                     module.functions.push(f)
-                case toplevelitem_Class(c):
+                case TopLevelItem.Class(c):
                     module.classes.push(c)
-                case toplevelitem_ActorItem(a):
+                case TopLevelItem.ActorItem(a):
                     module.actors.push(a)
-                case toplevelitem_Struct(s):
+                case TopLevelItem.Struct(s):
                     module.structs.push(s)
-                case toplevelitem_Enum(e):
+                case TopLevelItem.Enum(e):
                     module.enums.push(e)
-                case toplevelitem_Bitfield(b):
+                case TopLevelItem.Bitfield(b):
                     module.bitfields.push(b)
-                case toplevelitem_Trait(t):
+                case TopLevelItem.Trait(t):
                     module.traits.push(t)
-                case toplevelitem_Impl(i):
+                case TopLevelItem.Impl(i):
                     module.impls.push(i)
-                case toplevelitem_TypeAlias(t):
+                case TopLevelItem.TypeAlias(t):
                     module.type_aliases.push(t)
-                case toplevelitem_Const(c):
+                case TopLevelItem.Const(c):
                     module.constants.push(c)
-                case toplevelitem_StaticAssert(a):
+                case TopLevelItem.StaticAssert(a):
                     module.static_asserts.push(a)
                 case TopLevelItem.Error(e):
                     module.errors.push(e)
@@ -302,10 +303,10 @@ impl TreeSitter:
             var depth = 1
             while depth > 0 and not self.is_at_end():
                 match self.peek():
-                    case LParen:
+                    case TokenKind.LParen:
                         depth = depth + 1
                         self.advance()
-                    case RParen:
+                    case TokenKind.RParen:
                         depth = depth - 1
                         if depth > 0:
                             self.advance()
@@ -368,7 +369,7 @@ impl TreeSitter:
         match peeked:
             case KwImport:
                 toplevelitem_Import(self.parse_import())
-            case KwExport:
+            case TokenKind.KwExport:
                 toplevelitem_Export(self.parse_export())
             case KwFn:
                 val f = self.parse_function_outline(visibility, false, doc)
@@ -378,7 +379,7 @@ impl TreeSitter:
                     if attr.name == "gpu" or attr.name == "gpu_kernel":
                         has_gpu_attr = true
                 toplevelitem_Function(if has_gpu_attr: functionoutline_as_kernel(f) else: f)
-            case KwMe:
+            case TokenKind.KwMe:
                 val f = self.parse_function_outline(visibility, true, doc)
                 # Check for @gpu or @gpu_kernel attribute
                 var has_gpu_attr = false
@@ -674,7 +675,7 @@ impl TreeSitter:
                 case LBrace:
                     brace_depth = brace_depth + 1
                     self.advance()
-                case RBrace:
+                case TokenKind.RBrace:
                     brace_depth = brace_depth - 1
                     if brace_depth > 0:
                         self.advance()
@@ -713,11 +714,10 @@ impl TreeSitter:
 
         val reg = self.registry
         val handler = reg.lookup(block.kind)
-        if handler == nil:
-            return block
-
-        val h = handler
-        val policy = h_skip_policy<BlockDefinition>(h)
+        val h = match handler:
+            case Some(found): found
+            case nil: return block
+        val policy = h.skip_policy()
         val pre_lex = if block.has_pre_lex_info:
             block.pre_lex_info
         else:
@@ -734,18 +734,18 @@ impl TreeSitter:
                 case BlockSkipPolicy.OutlineRequired:
                     var b = block
                     b.has_outline_info = true
-                    b.outline_info = h_treesitter_outline<BlockDefinition>(h, block.payload, pre_lex)
+                    b.outline_info = h.treesitter_outline(block.payload, pre_lex)
                     return b
                 case BlockSkipPolicy.AlwaysFull:
                     var b = block
                     b.has_outline_info = true
-                    b.outline_info = h_treesitter_outline<BlockDefinition>(h, block.payload, pre_lex)
+                    b.outline_info = h.treesitter_outline(block.payload, pre_lex)
                     return b
         else:
             # Normal mode: always call treesitter_outline
             var b = block
             b.has_outline_info = true
-            b.outline_info = h_treesitter_outline<BlockDefinition>(h, block.payload, pre_lex)
+            b.outline_info = h.treesitter_outline(block.payload, pre_lex)
             return b
 
         block
@@ -773,7 +773,7 @@ impl TreeSitter:
                     depth = depth + 1
                     payload = treesitter_append_asm_payload(payload, "{")
                     self.advance()
-                case RBrace:
+                case TokenKind.RBrace:
                     depth = depth - 1
                     close_span = self.current.span
                     if depth > 0:
@@ -812,11 +812,11 @@ impl TreeSitter:
 
         while depth > 0 and not self.is_at_end():
             match self.peek():
-                case LParen:
+                case TokenKind.LParen:
                     depth = depth + 1
                     payload = treesitter_append_asm_payload(payload, "(")
                     self.advance()
-                case RParen:
+                case TokenKind.RParen:
                     depth = depth - 1
                     close_span = self.current.span
                     if depth > 0:
