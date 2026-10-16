@@ -24,11 +24,7 @@ Confirmed repairs prepared in this isolated branch:
 - Track the narrow Unit/Nil annotation compatibility repair in
   `ui_c1_unit_nil_type_aliases_native_2026_10_16.md`.
 
-Remaining browser, JS URL helper, hosted renderer, memory and VFS dependencies
-require ownership review. Mutable NVMe/VFS globals must stay with their actual
-owners; importing copied mutable state or exposing private APIs indiscriminately
-would change behavior. No broad private export or kernel dependency removal is
-authorized by this report.
+Source repairs for all 33 diagnostic-source groups are complete and reviewed. Mutable NVMe/VFS state remains with its actual owners; no copied mutable global or broad private export was introduced. Native verification remains UNRUN. The capped preview retained 133 messages from 262 underlying errors, so source readiness does not prove every hidden diagnostic resolved.
 
 Runtime and SDK materialization match frozen C1. The original C1 checkout and
 both UI diagnostic caches remain untouched by source edits. Final cycle 3 is
