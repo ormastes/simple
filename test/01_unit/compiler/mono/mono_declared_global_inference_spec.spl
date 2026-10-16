@@ -53,6 +53,32 @@ describe "mono uses module-owned declared globals":
         expect(stats.specializations_created).to_equal(1)
         expect(stats.unresolved_generic_calls).to_equal(0)
 
+    it "rewrites a generic call in a module global initializer":
+        # `var lock: Mutex = mutex_new(0)` reached MIR as the unspecialized
+        # dotted template name and failed the Stage 2 test-runner link.
+        val source = "fn make<T>(v: T) -> i64:\n    0\nvar boxed: i64 = make(0)\nfn main() -> i64:\n    boxed\n"
+        val parsed = parse_full_frontend(source, "testdata/mono_global_init.spl", "ginit", Logger(level: 0))
+        var lowering = HirLowering.with_filename("testdata/mono_global_init.spl")
+        val module = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        var modules: Dict<text, HirModule> = {}
+        modules["ginit"] = module
+        val (out, stats) = run_monomorphization(modules)
+        expect(stats.call_sites_found).to_equal(1)
+        expect(stats.specializations_created).to_equal(1)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        val rewritten: HirModule = out["ginit"]
+        var callee_name = ""
+        for key in rewritten.constants.keys():
+            val declaration: HirConst = rewritten.constants[key]
+            match declaration.value.kind:
+                case HirExprKind.Call(callee, _, _):
+                    match callee.kind:
+                        case HirExprKind.NamedVar(_, name): callee_name = name
+                        case _: ()
+                case _: ()
+        expect(callee_name.contains("$")).to_be(true)
+
     it "keeps equal numeric declaration IDs separated by their modules":
         val source_a = "var pool: [text] = []\nfn main() -> i64:\n    0\n"
         val parsed_a = parse_full_frontend(source_a, "testdata/mono_global_a.spl", "a", Logger(level: 0))
