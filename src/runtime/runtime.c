@@ -2597,7 +2597,9 @@ int64_t rt_readdir_count(int64_t h) { (void)h; return 0; }
 int64_t rt_readdir_entry(int64_t h, int64_t i) { (void)h; (void)i; return rt_string_new(NULL, 0); }
 void rt_readdir_free(int64_t h) { (void)h; }
 int64_t rt_mkdir(int64_t p, int64_t m) { (void)p; (void)m; return -(int64_t)EINVAL; }
+#if !defined(SIMPLE_CORE_C_STANDALONE)
 int64_t rt_remove(const char* p) { (void)p; return -1; }
+#endif
 #endif
 
 /* Tagged-text ABI (see runtime.h): decode the command, delegate to

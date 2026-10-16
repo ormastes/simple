@@ -10944,6 +10944,10 @@ SPL_CORE_C_WEAK int64_t rt_time_now_seconds(void) {
     return (int64_t)time(NULL);
 }
 
+#if defined(_WIN32)
+#include "platform/runtime_win_long_path.h"
+#endif
+
 /* Same POSIX file-deletion semantics as runtime.c's rt_remove, but NOT its
  * `const char* path` signature: `extern fn rt_remove(path: text) -> i64`
  * (src/lib/nogc_sync_mut/io/dir_entry_ops.spl:13) has no
@@ -10964,6 +10968,29 @@ SPL_CORE_C_WEAK int64_t rt_time_now_seconds(void) {
 SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
     char* path = rt_core_string_to_cpath(path_value);
     if (!path) return -1;
+#if defined(_WIN32) && defined(SIMPLE_CORE_C_STANDALONE)
+    /* Core text is UTF-8; narrow stat/unlink interpret it using the ANSI code
+     * page. Use the shared UTF-16/long-path owner for both files and dirs. */
+    wchar_t* wide = rt_widen_long_path_rc(path);
+    free(path);
+    if (!wide) return -(int64_t)EINVAL;
+    DWORD attributes = GetFileAttributesW(wide);
+    BOOL removed = FALSE;
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        removed = (attributes & FILE_ATTRIBUTE_DIRECTORY)
+            ? RemoveDirectoryW(wide) : DeleteFileW(wide);
+    }
+    DWORD error = removed ? ERROR_SUCCESS : GetLastError();
+    free(wide);
+    if (removed) return 0;
+    switch (error) {
+        case ERROR_FILE_NOT_FOUND: case ERROR_PATH_NOT_FOUND: return -(int64_t)ENOENT;
+        case ERROR_ACCESS_DENIED: case ERROR_SHARING_VIOLATION: return -(int64_t)EACCES;
+        case ERROR_DIR_NOT_EMPTY: return -(int64_t)ENOTEMPTY;
+        case ERROR_INVALID_NAME: case ERROR_INVALID_PARAMETER: return -(int64_t)EINVAL;
+        default: return -(int64_t)EIO;
+    }
+#else
     struct stat st;
     if (stat(path, &st) != 0) { int64_t rc = -(int64_t)errno; free(path); return rc; }
     int64_t rc;
@@ -10974,6 +11001,7 @@ SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
     }
     free(path);
     return rc;
+#endif
 }
 
 #if defined(_WIN32)
