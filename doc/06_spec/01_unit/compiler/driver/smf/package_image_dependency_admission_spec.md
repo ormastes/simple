@@ -36,3 +36,4 @@ mapping, exact closure membership, dependency uniqueness, or full provider
 availability-error parity. Before acceptance, execute the focused spec on the
 admitted self-hosted runner and regenerate this manual using SPipe docgen with
 zero stubs.
+`n## Canonical section-kind comparison regression (authored, UNEXECUTED)`n`nThe new scenario enumerates ten declared section kinds and checks both equality and inequality for all 100 ordered pairs against list-position identity. It qualifies the injective name mapping when executed; no native or interpreter result is claimed.
