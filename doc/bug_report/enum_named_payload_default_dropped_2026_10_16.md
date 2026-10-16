@@ -2,6 +2,7 @@
 
 Status: source-proven transport omission; runtime reproduction NOT EXECUTED.
 Bug DB reconciliation pending: no callable bug DB writer is available here.
+Diagnostic overlay introduced in commit `91f3dc186fac2bc45acfbaf45899324aee0e7712`.
 
 Input: `enum E: Named(count: i64 = 9)` using the normal indented enum body.
 
