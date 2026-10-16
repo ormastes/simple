@@ -4992,6 +4992,16 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       cd "${repo_root}" || exit 125
       BOOTSTRAP_VERIFY_TEST_WORKERS="${stage2_tests_workers}"
       BOOTSTRAP_VERIFY_BUILD_THREADS="${stage2_tests_build_threads}"
+      # Serialize the two full-closure tool builds (verifier default is 2
+      # concurrent, half threads each). Measured 2026-10-16 (cycles 44-48):
+      # each build's group-scoped tree peaks at 10.5-12.6 GiB (watchdog
+      # receipts, cold cache), so two concurrent builds sum past any campaign
+      # cap the policy admits -- the hard ceiling is 24 GiB, priced for "one
+      # build at a time" -- and the campaign watchdog kills the whole matrix
+      # tree at the cap (~10 min into the first heavy task, at ANY cap).
+      # Serial rows keep a single build tree under the cap; each build then
+      # also gets the full build-thread count instead of half.
+      BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY="${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-1}"
       # Canonical source-derived tests consume their admitted producer, as in
       # run-release-stage2-qualified.shs. Explicit delegation remains opt-in and
       # subject to the phase verifier's existing real MC/DC waiver requirements.
