@@ -7,7 +7,7 @@
 use compiler.driver.driver_types.{CompileContext}
 use compiler.driver.driver_source_loading.{_driver_physical_source_key}
 use compiler.driver.cache.driver_hir_managed_runtime_selection_v1.{DriverHirManagedRuntimeSelectionV1,
-    driver_hir_capture_managed_runtime_selection_v1, driver_hir_managed_runtime_selection_digest_v1}
+    driver_hir_capture_managed_runtime_selection_v1}
 use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveV1}
 use compiler.driver.cache.driver_hir_archive_inventory_v1.{DriverHirArchiveInventoryV1,
     driver_hir_archive_inventory_from_context_v1}
@@ -200,8 +200,13 @@ pub fn driver_hir_archive_journal_create_v1(ctx: CompileContext,
         selection: DriverHirManagedRuntimeSelectionV1) -> Result<DriverHirArchiveJournalV1, text>:
     if transient_array_scope_state_v1() != 0: return Err("HIR journal creation lease occupied")
     val actual = driver_hir_capture_managed_runtime_selection_v1(selection.backend, selection.target, selection.runtime_bundle)?
-    if selection.selection_digest != driver_hir_managed_runtime_selection_digest_v1(selection) or
-            selection.selection_digest != actual.selection_digest or selection.producer_header != actual.producer_header:
+    # `selection` crosses the complete phase-2 surface build before journal
+    # creation. Its nested provider aggregate is not an authority here: the
+    # route is recaptured and fully revalidated above, and only that `actual`
+    # value is retained by the journal. Bind the transported scalar receipt to
+    # the recapture instead of re-traversing a stale nested aggregate.
+    if selection.selection_digest != actual.selection_digest or
+            selection.producer_header != actual.producer_header:
         return Err("HIR journal selected managed authority differs")
     val artifacts = hir_owned_artifact_context_v1()
     if not artifacts.enabled or artifacts.producer_header != actual.producer_header:
