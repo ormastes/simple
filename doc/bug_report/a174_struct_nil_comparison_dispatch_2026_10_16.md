@@ -15,3 +15,5 @@ hir_codec_key_order changes only SymbolId left/right guards; scalar i64 special 
 Recovery reference is the actual compiler-owner source fix e458621e87670403385147dd4380acb0b925153d, not a claim that A174 contains it. Remove temporary syntax once a rebuilt producer verifies correct struct nil comparisons and codec round trips. Base source before workaround7b7a326cb5efbbbf0fc5426ae2b63f12e488f921; no automatic checkout/removal authorized.
 
 Qualification: official generator regeneration/freshness UNRUN; native/interpreter tests UNRUN because no qualified runner was available. No fourth tiny probe or authority build. Root review required before candidate freeze. Existing codec nil/roundtrip/key-order fixtures remain authored evidence targets, not passing results. Enum comparisons and separate payload/constructor errors remain unresolved.
+
+Implementation commit: 496b77c9827 (record presence guards and matching generated artifact). Native qualification remains pending.
