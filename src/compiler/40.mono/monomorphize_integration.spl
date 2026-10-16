@@ -235,7 +235,18 @@ struct MonoStats:
     # has a matching entry in `MonomorphizationPass.diagnostics`.
     unresolved_generic_calls: i64
 
+# Cycle-86: collect_generics' inlined dict-index extraction draw is defective
+# (fault at the rebind copy at the identical PC even after the cycle-85
+# loop-header rewrite -- the body draw is stable per function). This fresh
+# minimal helper mirrors the generated codec's node.functions[dk3] read, the
+# campaign's most-walked clean pattern; the by-value return + annotated
+# rebind at the call site is the proven transport (decode -> unwrap -> bind).
+fn mono_genuine_function_v1(functions: Dict<SymbolId, HirFunction>, sym_id: SymbolId) -> HirFunction:
+    val func: HirFunction = functions[sym_id]
+    func
+
 impl MonomorphizationPass:
+
     static fn create() -> MonomorphizationPass:
         MonomorphizationPass(
             monomorphizer: monomorphizer_create(),
@@ -451,7 +462,7 @@ impl MonomorphizationPass:
                 self.next_symbol = module.symbols.next_symbol_id
         val function_keys: [SymbolId] = functions.keys()
         for sym_id in function_keys:
-            val func: HirFunction = functions[sym_id]
+            val func: HirFunction = mono_genuine_function_v1(functions, sym_id)
             # Record the symbol -> name edge for call-site resolution, and keep
             # the fresh-symbol counter past every id already in use.
             val fsym: SymbolId = func.symbol
@@ -602,7 +613,7 @@ impl MonomorphizationPass:
             if not body_index_ready:
                 val body_index_keys: [SymbolId] = module.functions.keys()
                 for dk_29 in body_index_keys:
-                    val f: HirFunction = module.functions[dk_29]
+                    val f: HirFunction = mono_genuine_function_v1(module.functions, dk_29)
                     val fs: SymbolId = f.symbol
                     by_id[fs.id] = f
                 body_index_ready = true
@@ -3114,7 +3125,7 @@ impl MonomorphizationPass:
         var kept: Dict<SymbolId, HirFunction> = {}
         val prune_function_keys: [SymbolId] = module.functions.keys()
         for sym_id in prune_function_keys:
-            val f: HirFunction = module.functions[sym_id]
+            val f: HirFunction = mono_genuine_function_v1(module.functions, sym_id)
             var is_template = false
             val tps: [HirTypeParam] = f.type_params
             if tps != nil:
