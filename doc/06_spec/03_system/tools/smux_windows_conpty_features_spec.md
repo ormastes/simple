@@ -13,7 +13,8 @@ SPipe docgen, zero-stub validation and maintenance scan remain pending.
 2. Set a variable to `READY`, then echo a prefix plus the variable expansion.
    Capture must contain the expanded `SMUX_OUTPUT_READY` token, which was
    absent from the command input. Echoing input alone cannot satisfy it.
-3. Close the PTY; the child must no longer report alive.
+3. Close the PTY with bounded provider cleanup retries; the child must no longer
+   report alive after close succeeds.
 
 ## Background execution and reattach — REQ-SMUX-WIN-001
 
@@ -38,6 +39,9 @@ SPipe docgen, zero-stub validation and maintenance scan remain pending.
 Every output wait has at most five seconds of polling sleeps plus capture and
 runner work; missing output fails an assertion. The detached scenario actively
 polls/drains capture and cannot prove unattended owner progress without polling.
+Each close uses `windows_close_shell`: at most 100 calls with 10 ms sleeps while
+the result is false, followed by one assertion that close returned true. False
+means cancellation/tree cleanup remains pending; it is never accepted as closed.
 Wrong-host execution also fails explicitly. There are three authored
 scenarios, none executed. These checks do not prove independent screen clients,
 daemon persistence, terminal resize delivery, rendered frames or full tmux

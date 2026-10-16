@@ -170,3 +170,22 @@ describe "smux production service named layouts":
             expect(smux_select_layout(ids[0], ids[1], "tiled", 80, 24).is_ok()).to_equal(false)
             expect(smux_window_layout(ids[0], ids[1]).unwrap()).to_equal("manual")
             expect(smux_window_rects(ids[0], ids[1]).len()).to_equal(0)
+
+        it "should reject oversized geometry before narrowing native dimensions or changing state":
+            # @req REQ-SMUX-CORE-005
+            val ids = layout_service_session("native-dimension-bounds")
+            expect(smux_select_layout(ids[0], ids[1], "tiled", 80, 24).is_ok()).to_equal(true)
+            step("Reject a positive width that would wrap to one in a 32 bit ABI slot")
+            val narrowed = smux_resize(ids[0], ids[1], ids[2], 4294967297, 24)
+            expect(narrowed.is_err()).to_equal(true)
+            expect(narrowed.unwrap_err()).to_equal("pane dimensions exceed service limit")
+            step("Reject oversized canvases and areas before allocation or backend calls")
+            expect(smux_select_layout(ids[0], ids[1], "tiled", 4294967297, 24).is_err()).to_equal(true)
+            expect(smux_resize(ids[0], ids[1], ids[2], 1000, 1000).is_err()).to_equal(true)
+            expect(smux_select_layout(ids[0], ids[1], "tiled", 1000, 1000).is_err()).to_equal(true)
+            expect(smux_window_layout(ids[0], ids[1]).unwrap()).to_equal("tiled")
+            val rects = smux_window_rects(ids[0], ids[1])
+            expect(rects.len()).to_equal(1)
+            expect(rects[0].cols).to_equal(80)
+            expect(rects[0].rows).to_equal(24)
+            expect(smux_list_panes(ids[0], ids[1])[0].cols).to_equal(80)

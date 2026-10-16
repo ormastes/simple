@@ -1,0 +1,410 @@
+# Pure-Simple Win64 TCP owner; requires ws2_32.lib and native volatile ABI.
+# Single event-loop owner. Never pass these logical handles between threads.
+# Bounded reusable slots carry generations: stale copies cannot address a later
+# OS SOCKET. fd = generation*4096+slot; overflow retires a slot, never wraps.
+# Exactly one WSAStartup reference belongs to each live slot. Every temporary
+# heap region is freed before return; pointers never enter transport values.
+use std.nogc_sync_mut.io.windows_tcp_abi.*
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, GetTickCount64}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u8, volatile_write_u16, volatile_write_u32, volatile_write_u64, volatile_read_u8, volatile_read_u16, volatile_read_u32}
+use std.common.text_bytes.{text_to_bytes, bytes_to_text}
+
+struct WindowsTcpSlotV1:
+    socket_value: i64
+    pending: [u8]
+    generation: i64
+
+var _windows_tcp_slots_v1: [WindowsTcpSlotV1] = []
+
+fn _tcp_slot(fd: i64) -> i64:
+    if fd < 4096: return -1
+    val index = fd % 4096
+    if index >= _windows_tcp_slots_v1.len(): return -1
+    val state = _windows_tcp_slots_v1[index]
+    if state.generation != fd / 4096 or state.socket_value == -1: return -1
+    index
+
+fn _tcp_socket(fd: i64) -> i64:
+    val index = _tcp_slot(fd)
+    if index < 0: return -1
+    _windows_tcp_slots_v1[index].socket_value
+
+# Read-only diagnostics allow the native fixture to prove actual bounded state.
+fn windows_tcp_registry_slots_v1() -> i64:
+    _windows_tcp_slots_v1.len()
+
+fn windows_tcp_registry_live_v1() -> i64:
+    var count = 0
+    for state in _windows_tcp_slots_v1:
+        if state.socket_value != -1: count = count + 1
+    count
+
+fn _tcp_available_slot() -> i64:
+    for candidate in 0.._windows_tcp_slots_v1.len():
+        val state = _windows_tcp_slots_v1[candidate]
+        if state.socket_value == -1 and state.generation < 2251799813685247:
+            return candidate
+    if _windows_tcp_slots_v1.len() < 4096: return _windows_tcp_slots_v1.len()
+    -1
+
+@unsafe(reason: "bounded zeroed caller-owned Win64 scratch allocation", capabilities: [ffi, raw_ptr])
+fn _tcp_alloc(size: i64) -> i64:
+    if size <= 0 or size > 1048576: return 0
+    HeapAlloc(GetProcessHeap(), 8u32, size as u64)
+
+@unsafe(reason: "release caller-owned Winsock scratch storage", capabilities: [ffi, raw_ptr])
+fn _tcp_free(buffer: i64):
+    if buffer != 0:
+        val _released = HeapFree(GetProcessHeap(), 0u32, buffer)
+
+@unsafe(reason: "acquire one Winsock reference with bounded WSADATA storage", capabilities: [ffi, raw_ptr])
+fn _tcp_start() -> bool:
+    # Admission capacity is reserved by this single owner before OS creation.
+    if _tcp_available_slot() < 0: return false
+    val data = _tcp_alloc(408)
+    if data == 0: return false
+    val status = WSAStartup(514u16, data)
+    _tcp_free(data)
+    status == 0
+
+# Numeric dotted IPv4 plus localhost only. No DNS, IPv6, whitespace or wildcard
+# hostname promises. The octets are already in network order for sockaddr_in.
+fn windows_tcp_address_v1(address: text) -> [i64]?:
+    if address.len() > 32: return nil
+    val pair = address.split(":")
+    if pair.len() != 2: return nil
+    var host = pair[0]
+    if host == "localhost": host = "127.0.0.1"
+    val octets = host.split(".")
+    if octets.len() != 4: return nil
+    var result: [i64] = []
+    for component in octets:
+        val number = _tcp_decimal(component, 255)
+        if number < 0: return nil
+        result.push(number)
+    val port = _tcp_decimal(pair[1], 65535)
+    if port < 0: return nil
+    result.push(port / 256)
+    result.push(port % 256)
+    result
+
+fn _tcp_decimal(value: text, maximum: i64) -> i64:
+    if value.len() == 0 or value.len() > 5: return -1
+    var number: i64 = 0
+    for index in 0..value.len():
+        val digit = value.char_code_at(index) - 48
+        if digit < 0 or digit > 9: return -1
+        number = number * 10 + digit
+        if number > maximum: return -1
+    number
+
+@unsafe(reason: "encode validated IPv4 into an owned sockaddr_in", capabilities: [ffi, raw_ptr])
+fn _tcp_address(address: text) -> i64:
+    val parsed = windows_tcp_address_v1(address)
+    if val octets = parsed:
+        val buffer = _tcp_alloc(16)
+        if buffer == 0: return 0
+        volatile_write_u16(buffer, 2)
+        volatile_write_u8(buffer + 2, octets[4])
+        volatile_write_u8(buffer + 3, octets[5])
+        for index in 0..4:
+            volatile_write_u8(buffer + 4 + index, octets[index])
+        return buffer
+    0
+
+@unsafe(reason: "admit a unique socket lease or close and release its Winsock reference", capabilities: [ffi])
+fn _tcp_admit(raw: i64) -> i64:
+    if raw == -1:
+        val _cleanup = WSACleanup()
+        return -1
+    # _tcp_start checked capacity, and no operation interleaves on this owner.
+    val index = _tcp_available_slot()
+    var generation: i64 = 1
+    if index == _windows_tcp_slots_v1.len():
+        _windows_tcp_slots_v1.push(WindowsTcpSlotV1(socket_value: raw, pending: [], generation: generation))
+    else:
+        generation = _windows_tcp_slots_v1[index].generation + 1
+        _windows_tcp_slots_v1[index] = WindowsTcpSlotV1(socket_value: raw, pending: [], generation: generation)
+    val fd = generation * 4096 + index
+    # Publish ownership before fallible configuration, so close failure retains
+    # the SOCKET and Winsock reference in its slot rather than discarding them.
+    if SetHandleInformation(raw, 1u32, 0u32) == 0:
+        val _closed = io_tcp_close(fd)
+        return -1
+    # Bound ordinary blocking reads/writes; callers may choose other finite
+    # positive timeouts through the stable option API.
+    if not io_tcp_set_read_timeout(fd, 30000) or not io_tcp_set_write_timeout(fd, 30000):
+        val _closed = io_tcp_close(fd)
+        return -1
+    fd
+
+pub fn io_tcp_socket_create(family: i64) -> i64:
+    # Stable runtime family convention: 0=IPv4, 1=IPv6. IPv6 is unsupported.
+    if family != 0 or not _tcp_start(): return -1
+    unsafe(capabilities: [ffi]):
+        _tcp_admit(socket(2i32, 1i32, 6i32))
+
+pub fn io_tcp_bind_fd(fd: i64, address: text) -> bool:
+    val raw = _tcp_socket(fd)
+    if raw == -1: return false
+    unsafe(capabilities: [ffi, raw_ptr]):
+        val buffer = _tcp_address(address)
+        if buffer == 0: return false
+        val status = bind(raw, buffer, 16i32)
+        _tcp_free(buffer)
+        status == 0
+
+pub fn io_tcp_listen(fd: i64, backlog: i64) -> bool:
+    if _tcp_socket(fd) == -1 or backlog < 1 or backlog > 65535: return false
+    unsafe(capabilities: [ffi]):
+        listen(_tcp_socket(fd), backlog as i32) == 0
+
+pub fn io_tcp_bind(address: text) -> i64:
+    val fd = io_tcp_socket_create(0)
+    if fd == -1: return -1
+    if io_tcp_bind_fd(fd, address) and io_tcp_listen(fd, 128): return fd
+    val _closed = io_tcp_close(fd)
+    -1
+
+# WSAPOLLFD x64 = SOCKET@0, short events@8, short revents@10, size16.
+# POLLRDNORM=0x100; POLLWRNORM=0x10; error/hangup also wake the caller.
+@unsafe(reason: "finite single owned SOCKET readiness observation", capabilities: [ffi, raw_ptr])
+fn _tcp_poll(fd: i64, events: i64, ms: i64) -> bool:
+    val raw = _tcp_socket(fd)
+    if raw == -1 or ms <= 0 or ms > 2147483647: return false
+    val descriptor = _tcp_alloc(16)
+    if descriptor == 0: return false
+    volatile_write_u64(descriptor, raw)
+    volatile_write_u16(descriptor + 8, events)
+    val status = WSAPoll(descriptor, 1u32, ms as i32)
+    val observed = volatile_read_u16(descriptor + 10)
+    _tcp_free(descriptor)
+    status > 0 and (observed & (events | 3)) != 0
+
+pub fn io_tcp_accept_timeout(fd: i64, ms: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        if not _tcp_poll(fd, 256, ms) or not _tcp_start(): return -1
+        _tcp_admit(accept(_tcp_socket(fd), 0, 0))
+
+pub fn io_tcp_accept(fd: i64) -> i64:
+    io_tcp_accept_timeout(fd, 30000)
+
+pub fn io_tcp_set_nonblocking(fd: i64, enabled: bool) -> bool:
+    if _tcp_socket(fd) == -1: return false
+    unsafe(capabilities: [ffi, raw_ptr]):
+        val slot = _tcp_alloc(4)
+        if slot == 0: return false
+        if enabled: volatile_write_u32(slot, 1)
+        # FIONBIO = 0x8004667e, signed LONG on Win64.
+        val status = ioctlsocket(_tcp_socket(fd), -2147195266i32, slot)
+        _tcp_free(slot)
+        status == 0
+
+@unsafe(reason: "bounded copied integer option", capabilities: [ffi, raw_ptr])
+fn _tcp_option(fd: i64, level: i64, option: i64, value: i64) -> bool:
+    if _tcp_socket(fd) == -1: return false
+    val slot = _tcp_alloc(4)
+    if slot == 0: return false
+    volatile_write_u32(slot, value)
+    val status = setsockopt(_tcp_socket(fd), level as i32, option as i32, slot, 4i32)
+    _tcp_free(slot)
+    status == 0
+
+pub fn io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool:
+    var value = 0
+    if enabled: value = 1
+    unsafe(capabilities: [ffi, raw_ptr]): _tcp_option(fd, 6, 1, value)
+
+pub fn io_tcp_set_reuseaddr(fd: i64, enabled: bool) -> bool:
+    var value = 0
+    if enabled: value = 1
+    unsafe(capabilities: [ffi, raw_ptr]): _tcp_option(fd, 65535, 4, value)
+
+pub fn io_tcp_set_reuseport(fd: i64, enabled: bool) -> bool:
+    # Windows has no POSIX SO_REUSEPORT equivalent. Disabling the absent
+    # capability is valid on an owned socket; enabling explicitly fails.
+    _tcp_socket(fd) != -1 and not enabled
+
+pub fn io_tcp_set_read_timeout(fd: i64, ms: i64) -> bool:
+    if ms < 1 or ms > 2147483647: return false
+    unsafe(capabilities: [ffi, raw_ptr]): _tcp_option(fd, 65535, 4102, ms)
+
+pub fn io_tcp_set_write_timeout(fd: i64, ms: i64) -> bool:
+    if ms < 1 or ms > 2147483647: return false
+    unsafe(capabilities: [ffi, raw_ptr]): _tcp_option(fd, 65535, 4101, ms)
+
+pub fn io_tcp_connect_timeout(address: text, ms: i64) -> i64:
+    if ms <= 0 or ms > 2147483647: return -1
+    unsafe(capabilities: [ffi, raw_ptr]):
+        val buffer = _tcp_address(address)
+        if buffer == 0: return -1
+        val fd = io_tcp_socket_create(0)
+        var ok = fd != -1
+        if ok: ok = io_tcp_set_nonblocking(fd, true)
+        if ok:
+            val status = connect(_tcp_socket(fd), buffer, 16i32)
+            if status != 0:
+                val failure = WSAGetLastError()
+                ok = (failure == 10035 or failure == 10036) and _tcp_poll(fd, 16, ms)
+        _tcp_free(buffer)
+        if ok:
+            val value = _tcp_alloc(8)
+            if value == 0:
+                ok = false
+            else:
+                volatile_write_u32(value + 4, 4)
+                ok = getsockopt(_tcp_socket(fd), 65535i32, 4103i32, value, value + 4) == 0
+                if ok: ok = volatile_read_u32(value) == 0
+                _tcp_free(value)
+        if ok: ok = io_tcp_set_nonblocking(fd, false)
+        if ok: return fd
+        if fd != -1:
+            val _closed = io_tcp_close(fd)
+        -1
+
+pub fn io_tcp_connect(address: text) -> i64:
+    io_tcp_connect_timeout(address, 30000)
+
+pub fn io_tcp_read(fd: i64, size: i64) -> [u8]?:
+    if _tcp_socket(fd) == -1 or size < 0 or size > 1048576: return nil
+    var result: [u8] = []
+    if size == 0: return result
+    # Pending line bytes remain ordered when callers switch to byte reads.
+    val slot_index = _tcp_slot(fd)
+    var state = _windows_tcp_slots_v1[slot_index]
+    if state.pending.len() > 0:
+        var remaining: [u8] = []
+        for index in 0..state.pending.len():
+            if index < size: result.push(state.pending[index])
+            else: remaining.push(state.pending[index])
+        state.pending = remaining
+        _windows_tcp_slots_v1[slot_index] = state
+        return result
+    unsafe(capabilities: [ffi, raw_ptr]):
+        val buffer = _tcp_alloc(size)
+        if buffer == 0: return nil
+        val count = recv(_tcp_socket(fd), buffer, size as i32, 0i32)
+        if count >= 0:
+            for index in 0..(count as i64):
+                result.push(volatile_read_u8(buffer + index) as u8)
+        _tcp_free(buffer)
+        if count < 0: return nil
+    result
+
+pub fn io_tcp_write(fd: i64, data: [u8]) -> i64:
+    if _tcp_socket(fd) == -1 or data.len() > 1048576: return -1
+    if data.len() == 0: return 0
+    unsafe(capabilities: [ffi, raw_ptr]):
+        val buffer = _tcp_alloc(data.len())
+        if buffer == 0: return -1
+        for index in 0..data.len():
+            volatile_write_u8(buffer + index, data[index] as i64)
+        val count = send(_tcp_socket(fd), buffer, data.len() as i32, 0i32)
+        _tcp_free(buffer)
+        count as i64
+
+pub fn io_tcp_write_text(fd: i64, data: text) -> i64:
+    io_tcp_write(fd, text_to_bytes(data))
+
+pub fn io_tcp_read_line(fd: i64) -> text?:
+    if _tcp_socket(fd) == -1: return nil
+    val slot_index = _tcp_slot(fd)
+    var state = _windows_tcp_slots_v1[slot_index]
+    var bytes = state.pending
+    state.pending = []
+    _windows_tcp_slots_v1[slot_index] = state
+    unsafe(capabilities: [ffi, raw_ptr]):
+        val buffer = _tcp_alloc(1)
+        if buffer == 0:
+            state.pending = bytes
+            _windows_tcp_slots_v1[slot_index] = state
+            return nil
+        val deadline = GetTickCount64() + 30000u64
+        var complete = false
+        var eof = false
+        while bytes.len() < 65536 and GetTickCount64() < deadline:
+            val count = recv(_tcp_socket(fd), buffer, 1i32, 0i32)
+            if count == 0:
+                eof = true
+                break
+            if count < 0: break
+            val byte_value = volatile_read_u8(buffer)
+            bytes.push(byte_value as u8)
+            if byte_value == 10:
+                complete = true
+                break
+        _tcp_free(buffer)
+        if complete or eof or bytes.len() == 65536:
+            if bytes.len() == 0: return nil
+            return bytes_to_text(bytes)
+    # A would-block/timeout preserves the partial line for the next call.
+    state.pending = bytes
+    _windows_tcp_slots_v1[slot_index] = state
+    nil
+
+pub fn io_tcp_drain_line(fd: i64) -> i64:
+    if val line = io_tcp_read_line(fd): return text_to_bytes(line).len()
+    -1
+
+pub fn io_tcp_flush(fd: i64) -> bool:
+    # Winsock send has no userspace output buffer; validate live OS identity
+    # without toggling TCP_NODELAY and changing caller configuration.
+    unsafe(capabilities: [ffi, raw_ptr]):
+        val slot = _tcp_alloc(8)
+        if slot == 0 or _tcp_socket(fd) == -1:
+            _tcp_free(slot)
+            return false
+        volatile_write_u32(slot + 4, 4)
+        val status = getsockopt(_tcp_socket(fd), 65535i32, 4104i32, slot, slot + 4)
+        _tcp_free(slot)
+        status == 0
+
+@unsafe(reason: "bounded caller-owned IPv4 local or peer address observation", capabilities: [ffi, raw_ptr])
+fn _tcp_name(fd: i64, peer: bool) -> text?:
+    if _tcp_socket(fd) == -1: return nil
+    val buffer = _tcp_alloc(24)
+    if buffer == 0: return nil
+    volatile_write_u32(buffer + 16, 16)
+    var status = 0i32
+    if peer: status = getpeername(_tcp_socket(fd), buffer, buffer + 16)
+    else: status = getsockname(_tcp_socket(fd), buffer, buffer + 16)
+    var value: text? = nil
+    if status == 0 and volatile_read_u16(buffer) == 2:
+        val a = volatile_read_u8(buffer + 4)
+        val b = volatile_read_u8(buffer + 5)
+        val c = volatile_read_u8(buffer + 6)
+        val d = volatile_read_u8(buffer + 7)
+        val port = volatile_read_u8(buffer + 2) * 256 + volatile_read_u8(buffer + 3)
+        value = "{a}.{b}.{c}.{d}:{port}"
+    _tcp_free(buffer)
+    value
+
+pub fn io_tcp_local_addr(fd: i64) -> text?:
+    unsafe(capabilities: [ffi, raw_ptr]): _tcp_name(fd, false)
+
+pub fn io_tcp_peer_addr(fd: i64) -> text?:
+    unsafe(capabilities: [ffi, raw_ptr]): _tcp_name(fd, true)
+
+pub fn io_tcp_shutdown(fd: i64, how: i64) -> bool:
+    if _tcp_socket(fd) == -1 or how < 0 or how > 2: return false
+    unsafe(capabilities: [ffi]): shutdown(_tcp_socket(fd), how as i32) == 0
+
+pub fn io_tcp_close(fd: i64) -> bool:
+    val raw = _tcp_socket(fd)
+    if raw == -1: return false
+    unsafe(capabilities: [ffi]):
+        # A failed close preserves ownership so callers can retry cleanup.
+        if closesocket(raw) != 0: return false
+        val index = _tcp_slot(fd)
+        val generation = _windows_tcp_slots_v1[index].generation
+        _windows_tcp_slots_v1[index] = WindowsTcpSlotV1(socket_value: -1, pending: [], generation: generation)
+        WSACleanup() == 0
+
+export windows_tcp_address_v1
+export windows_tcp_registry_slots_v1, windows_tcp_registry_live_v1
+export io_tcp_socket_create, io_tcp_bind, io_tcp_bind_fd, io_tcp_listen
+export io_tcp_accept, io_tcp_accept_timeout, io_tcp_connect, io_tcp_connect_timeout
+export io_tcp_read, io_tcp_read_line, io_tcp_write, io_tcp_write_text, io_tcp_drain_line
+export io_tcp_flush, io_tcp_close, io_tcp_local_addr, io_tcp_peer_addr, io_tcp_shutdown
+export io_tcp_set_nonblocking, io_tcp_set_nodelay, io_tcp_set_reuseaddr, io_tcp_set_reuseport
+export io_tcp_set_read_timeout, io_tcp_set_write_timeout

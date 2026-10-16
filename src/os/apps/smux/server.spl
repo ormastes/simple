@@ -4,6 +4,8 @@
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream, tcp_backend_set_nonblocking}
 use std.common.string_core.{bytes_to_text, text_to_bytes}
 use std.io_runtime.{time_now_monotonic_ms}
+use std.sys.pty.{cleanup_pending as pty_cleanup_pending}
+use std.nogc_sync_mut.io.{thread_sleep_ms}
 use os.apps.smux.api.{smux_poll_output, smux_reset_for_test}
 use os.apps.smux.smux_remote.{smux_remote_dispatch}
 
@@ -86,6 +88,7 @@ pub fn smux_server_serve(address: text, token: text) -> i64:
     var listener = bound.unwrap()
     var clients: [PendingClient] = []
     var stop = false
+    var socket_cleanup_failed = false
     print("smux: owner ready " + address)
     while not stop:
         val _polled = smux_poll_output()
@@ -93,7 +96,8 @@ pub fn smux_server_serve(address: text, token: text) -> i64:
         if accepted.is_ok():
             var stream = accepted.unwrap()
             if clients.len() >= CLIENT_LIMIT or not tcp_backend_set_nonblocking(stream.fd, true):
-                val _closed = stream.close()
+                if stream.close().is_err():
+                    socket_cleanup_failed = true
             else:
                 clients.push(PendingClient(stream: stream, input: [], output: [],
                     offset: 0, deadline: time_now_monotonic_ms() + CLIENT_DEADLINE_MS,
@@ -146,15 +150,25 @@ pub fn smux_server_serve(address: text, token: text) -> i64:
             if finished:
                 if client.stop_owner:
                     stop = true
-                val _closed = client.stream.close()
+                if client.stream.close().is_err():
+                    socket_cleanup_failed = true
             else:
                 pending.push(client)
         clients = pending
     for client in clients:
         var stream = client.stream
-        val _closed = stream.close()
-    val _closed = listener.close()
+        if stream.close().is_err():
+            socket_cleanup_failed = true
+    if listener.close().is_err():
+        socket_cleanup_failed = true
     smux_reset_for_test()
+    val cleanup_deadline = time_now_monotonic_ms() + 2000
+    var cleanup = pty_cleanup_pending()
+    while cleanup > 0 and time_now_monotonic_ms() < cleanup_deadline:
+        thread_sleep_ms(5)
+        cleanup = pty_cleanup_pending()
+    if cleanup != 0 or socket_cleanup_failed:
+        return 1
     return 0
 
 # Each invocation is a disposable client. A partial response or a timeout is
@@ -197,7 +211,8 @@ pub fn smux_server_request(address: text, token: text, command: text) -> Result<
         if read.is_ok():
             val chunk = read.unwrap()
             if chunk.len() == 0:
-                val _closed = stream.close()
+                if stream.close().is_err():
+                    return Err("smux response close failed")
                 if output.len() == 0:
                     return Err("empty smux response")
                 return smux_server_decode_reply(output)

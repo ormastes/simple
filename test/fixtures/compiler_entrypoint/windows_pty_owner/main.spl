@@ -1,0 +1,112 @@
+# Native Windows qualification: compile separately with admitted Phase2/Phase3.
+# Direct provider import requires real kernel32 ConPTY symbols, no interpreter
+# or Rust rt_pty fallback. A printed PASS requires every observed condition.
+use std.nogc_sync_mut.io.windows_pty_owner.{windows_pty_open_v1, windows_pty_spawn_v1, windows_pty_write_some_v1, windows_pty_write_some_bytes_v1, windows_pty_input_pending_v1, windows_pty_read_v1, windows_pty_close_v1, windows_pty_is_running_v1, windows_pty_resize_v1, windows_pty_cleanup_pending_v1, windows_pty_cleanup_proof_v1}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetTickCount64, Sleep}
+
+fn await_output(handle: i32, needle: text) -> bool:
+    var captured = ""
+    for attempt in 0..500:
+        captured = captured + windows_pty_read_v1(handle, 0)
+        if captured.contains(needle): return true
+        if captured.len() > 1048576: return false
+        unsafe(capabilities: [ffi]): Sleep(10u32)
+    false
+
+fn send_all(handle: i32, command: text) -> bool:
+    var offset = 0
+    for attempt in 0..500:
+        if offset < command.len():
+            val accepted = windows_pty_write_some_v1(handle, command[offset:command.len()])
+            if accepted < 0: return false
+            offset = offset + accepted
+        match windows_pty_input_pending_v1(handle):
+            case Err(_reason): return false
+            case Ok(pending):
+                if offset == command.len() and not pending: return true
+        unsafe(capabilities: [ffi]): Sleep(10u32)
+    false
+
+fn check_shell(first: i32, second: i32) -> i64:
+    if windows_pty_spawn_v1(first, "cmd.exe /d /q") <= 0: return 10
+    if windows_pty_spawn_v1(second, "cmd.exe /d /q") <= 0: return 11
+    if not windows_pty_is_running_v1(first) or not windows_pty_is_running_v1(second): return 12
+    if windows_pty_spawn_v1(first, "cmd.exe") != -1: return 13
+    if windows_pty_resize_v1(first, 0, 80): return 14
+    if not windows_pty_resize_v1(first, 30, 120): return 15
+    if not send_all(first, "powershell.exe -NoProfile -Command \"Write-Output ('SIZE_' + [Console]::WindowWidth + 'x' + [Console]::WindowHeight)\"\r\n"): return 39
+    if not await_output(first, "SIZE_120x30"): return 40
+    if not send_all(first, "set SMUX_NATIVE=FIRST\r\n"): return 16
+    if not send_all(first, "echo PTY_%SMUX_NATIVE%\r\n"): return 17
+    if not await_output(first, "PTY_FIRST"): return 18
+    if not send_all(second, "set SMUX_NATIVE=SECOND\r\n"): return 19
+    if not send_all(second, "echo PTY_%SMUX_NATIVE%\r\n"): return 20
+    if not await_output(second, "PTY_SECOND"): return 21
+    if not send_all(first, "echo STILL_%SMUX_NATIVE%\r\n"): return 22
+    if not await_output(first, "STILL_FIRST"): return 23
+    # Child UTF8 response, including a scalar that may straddle ReadFile calls.
+    if not send_all(first, "chcp 65001\r\n"): return 24
+    if not send_all(first, "set SMUX_UNICODE=한글😀\r\n"): return 25
+    if not send_all(first, "echo UTF8_%SMUX_UNICODE%\r\n"): return 26
+    if not await_output(first, "UTF8_한글😀"): return 27
+    0
+
+fn close_bounded(handle: i32) -> bool:
+    for attempt in 0..100:
+        if windows_pty_close_v1(handle): return true
+        unsafe(capabilities: [ffi]): Sleep(1u32)
+    false
+
+@unsafe(reason: "measures bounded nonblocking writes to a real nonreading child", capabilities: [ffi])
+fn check_backpressure(handle: i32) -> i64:
+    if windows_pty_spawn_v1(handle, "cmd.exe /d /q /c ping.exe -n 30 127.0.0.1") <= 0: return 30
+    val chunk: [u8] = [120u8; 4096]
+    val started = GetTickCount64()
+    var accepted_total: i64 = 0
+    var observed_backpressure = false
+    for attempt in 0..4096:
+        val accepted = windows_pty_write_some_bytes_v1(handle, chunk)
+        if accepted < 0: return 31
+        if accepted > 4096: return 32
+        if accepted == 0:
+            observed_backpressure = true
+            break
+        accepted_total = accepted_total + accepted
+        if GetTickCount64() - started > 2000u64: return 33
+    if not observed_backpressure or accepted_total == 0: return 34
+    # A pending request may complete between observations. The crucial facts
+    # are an observed zero and a bounded return without a blocking WriteFile.
+    if GetTickCount64() - started > 2000u64: return 35
+    0
+
+fn main() -> i64:
+    if windows_pty_open_v1(0, 80) != -1: return 1
+    if windows_pty_spawn_v1(-1, "cmd.exe") != -1: return 2
+    if windows_pty_write_some_v1(-1, "x") != -1: return 3
+    val first = windows_pty_open_v1(24, 80)
+    if first < 0: return 4
+    val second = windows_pty_open_v1(24, 80)
+    var code: i64 = 0
+    if second < 0: code = 5
+    if code == 0: code = check_shell(first, second)
+    if not close_bounded(first) and code == 0: code = 6
+    if second >= 0:
+        if not close_bounded(second) and code == 0: code = 7
+    if windows_pty_is_running_v1(first) or windows_pty_write_some_v1(first, "x") != -1:
+        if code == 0: code = 8
+    val later = windows_pty_open_v1(24, 80)
+    if later < 0 or later == first or later == second:
+        if code == 0: code = 9
+    if later >= 0:
+        if code == 0: code = check_backpressure(later)
+        if not close_bounded(later) and code == 0: code = 28
+    if not windows_pty_cleanup_proof_v1(first) or not windows_pty_cleanup_proof_v1(second):
+        if code == 0: code = 36
+    if later >= 0 and not windows_pty_cleanup_proof_v1(later):
+        if code == 0: code = 37
+    if windows_pty_cleanup_pending_v1() != 0 and code == 0: code = 38
+    if code != 0:
+        print "Windows PTY owner FAIL {code}"
+        return code
+    print "Windows PTY owner PASS"
+    0

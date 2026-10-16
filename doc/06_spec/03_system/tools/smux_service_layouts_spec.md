@@ -33,9 +33,14 @@ No children are allocated by this suite and no runtime PASS is claimed.
 4. Remove the final pane. The empty window refuses layout selection and
    publishes no invented rectangles.
 
-There are seven authored scenarios. Named selection atomically updates pane VT
+5. Refuse dimensions which would wrap a 32-bit native ABI slot and canvases
+   exceeding the service area limit. Retain the prior 80x24 pane and plan.
+
+There are eight authored scenarios. Named selection updates pane VT
 grid sizes and complete window metadata while preserving child/focus owners.
-The current PTY provider cannot notify a live child of changed terminal size;
-these service fields must not be presented as ResizePseudoConsole evidence.
+The native-only Windows provider now receives actual resize calls before VT
+state commits. A layout backend failure attempts rollback; rollback failure is
+reported explicitly. Legacy providers without a resize capability remain
+grid-only. None of these unexecuted scenarios proves child-observed size.
 Live child survival across selection is separately authored in
 `smux_windows_conpty_features_spec.spl`, also pending execution.

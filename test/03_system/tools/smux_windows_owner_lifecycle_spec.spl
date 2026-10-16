@@ -7,9 +7,12 @@ isolation, named layout geometry, and authentication before mutation/shutdown.
 SMUX_TEST_BINARY must name the actual compiled Windows smux executable for the
 producer under test. Missing fixture, wrong host, unavailable TCP/ConPTY, absent
 shell output or incomplete owner shutdown fails; nothing builds or skips here.
-These are live-host scenarios, authored but NOT EXECUTED. They do not prove
-interactive renderer input, client-specific viewport/focus, fairness against a
-nonreading child, or full tmux compatibility. All clients are separate processes.
+These are live-host scenarios, authored but NOT EXECUTED. They include a child
+console-size oracle after remote layout, nonreading-child input backpressure,
+and actual scrollback retrieval. They do not prove interactive renderer input,
+client-specific viewport/focus, or full tmux compatibility. All clients are separate processes.
+Execute under an external process-tree watchdog of at most 180 seconds per
+scenario; no executed watchdog/provider fairness evidence is claimed here.
 No request or capture runs during the detached drain interval: a child-written
 file after >1 MiB output proves the child passed pipe backpressure independently.
 # @manual: primary
@@ -20,6 +23,7 @@ Plan: doc/03_plan/sys_test/smux_windows_phase3_features.md
 # codex-system-test
 use std.spec.{describe, it, expect, step}
 use std.nogc_async_mut.sosix.{sosix_platform}
+use std.io_runtime.{time_now_monotonic_ms}
 use app.io.mod.{
     env_get, file_exists, file_read, file_write, file_delete, getpid,
     process_run_bounded, process_spawn_async, process_is_running,
@@ -119,6 +123,17 @@ fn owner_expect_success(replies: [OwnerReply]):
     for reply in replies:
         expect(reply.code).to_equal(0)
         expect(reply.output.len()).to_be_greater_than(0)
+
+# @inline
+fn owner_await_screen(owner: OwnerFixture, session: text, needle: text) -> OwnerReply:
+    var reply = OwnerReply(output: "", errors: "", code: -1)
+    var attempt = 0
+    while attempt < 40 and not reply.output.contains(needle):
+        reply = owner_call(owner, ["screen", session])
+        if not reply.output.contains(needle):
+            thread_sleep_ms(50)
+        attempt = attempt + 1
+    return reply
 
 describe "smux native Windows independent owner lifecycle":
     describe "REQ-SMUX-WIN-002: detached owner drains without request clients":
@@ -315,4 +330,107 @@ describe "smux native Windows independent owner lifecycle":
             expect(screen.output).to_start_with("smux: screen[layout]:\n")
             expect(screen.output).to_contain("SMUX_LAYOUT_ALIVE")
             expect(screen.output).to_contain("SMUX_LEFT_VISIBLE")
+            expect(stopped).to_equal(true)
+
+    describe "REQ-SMUX-WIN-005: application layout reaches the live child console":
+        it "should deliver remote layout dimensions to the actual pane child console":
+            val owner = owner_start(owner_binary(), 5)
+            step("Create a real shell and resize its single-pane layout through a request process")
+            val created = owner_call(owner, ["new", "resize"])
+            val resized = owner_call(owner, ["layout", "resize", "even-horizontal", "120", "30"])
+            step("Ask the actual console child to compute its dimensions")
+            # The expected token is absent from this command; input echo cannot
+            # stand in for Console.WindowWidth/Height from the real ConPTY child.
+            val command = "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"Write-Output ('SMUX_SIZE_' + [Console]::WindowWidth + 'x' + [Console]::WindowHeight)\""
+            val sent = owner_call(owner, ["send", "resize", command])
+            val observed = owner_await_output(owner, "resize", "SMUX_SIZE_120x30")
+            val alive = process_is_running(owner.pid)
+            val stopped = owner_stop(owner)
+            expect(owner.ready).to_equal(true)
+            owner_expect_success([created, resized, sent, observed])
+            expect(created.output).to_contain("shell pid=")
+            expect(resized.output).to_equal("smux: layout even-horizontal")
+            expect(command.contains("SMUX_SIZE_120x30")).to_equal(false)
+            expect(observed.output).to_contain("SMUX_SIZE_120x30")
+            expect(alive).to_equal(true)
+            expect(stopped).to_equal(true)
+
+    describe "REQ-SMUX-WIN-006: owner fairness under real input backpressure":
+        it "should keep another session responsive while one child never reads queued input":
+            val owner = owner_start(owner_binary(), 6)
+            val blocked = owner_call(owner, ["new", "blocked"])
+            val healthy = owner_call(owner, ["new", "healthy"])
+            val configured = owner_call(owner, ["send", "healthy", "set SMUX_FAIR_VALUE=READY"])
+            step("Run a real child that announces readiness then sleeps without reading stdin")
+            val sleeper = "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"Write-Output ('SMUX_NONREAD_' + (6*7)); Start-Sleep -Seconds 120\""
+            val started = owner_call(owner, ["send", "blocked", sleeper])
+            val nonreader = owner_await_output(owner, "blocked", "SMUX_NONREAD_42")
+            var payload = "SMUX_LOAD_"
+            while payload.len() < 3500:
+                payload = payload + "x"
+            step("Offer bounded input until the owner reports capacity refusal and pending delivery")
+            var offered: [OwnerReply] = []
+            var accepted_bytes: i64 = 0
+            var refused = false
+            var status = OwnerReply(output: "", errors: "", code: -1)
+            var attempt = 0
+            val load_deadline = time_now_monotonic_ms() + 20000
+            while attempt < 96 and not refused and time_now_monotonic_ms() < load_deadline:
+                val reply = owner_call(owner, ["send", "blocked", payload])
+                offered.push(reply)
+                if reply.code == 0:
+                    accepted_bytes = accepted_bytes + payload.len() + 1
+                refused = reply.code == 1 and reply.output == "smux: send failed: pane input capacity reached"
+                attempt = attempt + 1
+            status = owner_call(owner, ["input-status", "blocked"])
+            step("Measure unrelated child output while the blocked pane still has pending input")
+            val fair_started = time_now_monotonic_ms()
+            val sent = owner_call(owner, ["send", "healthy", "echo SMUX_FAIR_%SMUX_FAIR_VALUE%"])
+            var observed = OwnerReply(output: "", errors: "", code: -1)
+            var fair_attempt = 0
+            while fair_attempt < 40 and not observed.output.contains("SMUX_FAIR_READY") and time_now_monotonic_ms() - fair_started < 5000:
+                observed = owner_call(owner, ["capture", "healthy"])
+                if not observed.output.contains("SMUX_FAIR_READY"):
+                    thread_sleep_ms(25)
+                fair_attempt = fair_attempt + 1
+            val fair_elapsed = time_now_monotonic_ms() - fair_started
+            val still_pending = owner_call(owner, ["input-status", "blocked"])
+            val stopped = owner_stop(owner)
+            expect(owner.ready).to_equal(true)
+            owner_expect_success([blocked, healthy, configured, started, nonreader, status, sent, observed, still_pending])
+            expect(nonreader.output).to_contain("SMUX_NONREAD_42")
+            expect(accepted_bytes).to_be_greater_than(60000)
+            expect(refused).to_equal(true)
+            for reply in offered:
+                expect(reply.code == 0 or (reply.code == 1 and reply.output == "smux: send failed: pane input capacity reached")).to_equal(true)
+            expect(status.output == "smux: input[blocked]:pending" or status.output.starts_with("smux: input[blocked]:queued:")).to_equal(true)
+            expect(observed.output).to_contain("SMUX_FAIR_READY")
+            expect(fair_elapsed).to_be_less_than(5000)
+            expect(still_pending.output == "smux: input[blocked]:pending" or still_pending.output.starts_with("smux: input[blocked]:queued:")).to_equal(true)
+            expect(stopped).to_equal(true)
+
+    describe "REQ-SMUX-WIN-007: child output survives beyond the visible screen":
+        it "should retrieve computed older child lines through the actual history command":
+            val owner = owner_start(owner_binary(), 7)
+            val created = owner_call(owner, ["new", "history"])
+            step("Generate 160 unique child-computed lines beyond the visible screen")
+            val command = "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"1..160 | ForEach-Object {{ Write-Output ('SMUX_HISTORY_' + (1000+$_)) }}; Write-Output ('SMUX_HISTORY_DONE_' + (80*2))\""
+            val sent = owner_call(owner, ["send", "history", command])
+            val visible = owner_await_screen(owner, "history", "SMUX_HISTORY_DONE_160")
+            step("Request scrollback from an independent client and verify output absent from the screen")
+            val history = owner_call(owner, ["history", "history", "200"])
+            val screen_after = owner_call(owner, ["screen", "history"])
+            val stopped = owner_stop(owner)
+            expect(owner.ready).to_equal(true)
+            owner_expect_success([created, sent, visible, history, screen_after])
+            expect(created.output).to_contain("shell pid=")
+            expect(command.contains("SMUX_HISTORY_1001")).to_equal(false)
+            expect(command.contains("SMUX_HISTORY_1060")).to_equal(false)
+            expect(visible.output).to_contain("SMUX_HISTORY_DONE_160")
+            expect(visible.output.contains("SMUX_HISTORY_1001")).to_equal(false)
+            expect(visible.output.contains("SMUX_HISTORY_1060")).to_equal(false)
+            expect(history.output).to_start_with("smux: history[history]:\n")
+            expect(history.output).to_contain("SMUX_HISTORY_1001")
+            expect(history.output).to_contain("SMUX_HISTORY_1060")
+            expect(screen_after.output.contains("SMUX_HISTORY_1060")).to_equal(false)
             expect(stopped).to_equal(true)

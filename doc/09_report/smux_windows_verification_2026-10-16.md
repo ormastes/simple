@@ -15,9 +15,10 @@ composite capture and centralized command exit-status handling. Astra accepted
 source and authored-manual quality, including Unicode edge tests and real
 external-process scenario designs. No runtime pass follows from that review.
 
-There are 96 authored application scenarios and five new compiler regressions,
-all unexecuted. Existing geometry unit coverage also changed; its manual is an
-authored draft. Paths and traceability are consolidated in
+Additional authored coverage now includes bounded input queues, portable UTF-8
+prefix handling, retained VT scrollback, native provider selection and codecs,
+and child-observed resize. All remain unexecuted. Existing geometry unit
+coverage also changed; its manual is an authored draft. Paths and traceability are consolidated in
 `doc/03_plan/sys_test/smux_windows_phase3_features.md`. Generated manuals,
 zero-stub receipts and maintenance scans remain pending.
 
@@ -30,11 +31,43 @@ actual imported-call fixture; it is fixed in source only. Neither inspected
 compiler contains the patch. The frozen build predates the later owner/layout
 code and cannot validate those new features.
 
+Native Winsock/ConPTY owners and ordered source overlays are now authored.
+Astra found and reviewed source fixes for TCP lifetime connection exhaustion
+and PTY cleanup falsely certifying unreleased resources; no runtime acceptance
+follows. Native queues retain overlapped writes, real resize precedes service
+commit, and finite shutdown checks deferred cleanup. Scrollback is implemented
+in the production VT and exposed through the focused-pane history command.
+
+The immutable rebuilt-compiler campaign includes the MIR fix. Its Rust seed
+build completed successfully in 20m34s and native-all completed in 13m27s.
+The same campaign reached actual Stage 2 native construction, with over 900
+retained objects and a CPU-active builder. This is bootstrap progress, not a Phase 2 product
+or general test result. Current product edits are outside that frozen compiler
+snapshot and require a separate frozen product build with the selected overlays.
+
 Remaining gates include a rebuilt/matching admitted producer, Phase 2 and
-Phase 3 product execution, general SSpec/core/MCP smoke, Windows TCP/ConPTY
-providers, nonblocking PTY input/query replies, independent interactive screens,
-owner console/job-detach semantics, live child resize, and scrollback/copy/input
-compatibility. No merge or release is admitted.
+Phase 3 product execution, general SSpec/core/MCP smoke, executed Windows
+provider fixtures under outer watchdogs, owner fairness under input backpressure,
+independent interactive screens, owner console/job-detach semantics, actual
+child resize, and interactive copy/key-binding behavior. No merge or release
+is admitted. PR 3508 remains an unfinished draft against `release_phase3`.
+
+The interactive continuation adds the same hosted binary's `--attach` mode,
+explicit per-client window/pane targets, safe styled/cursor frames, default
+Ctrl-B commands, incremental copy navigation and line-selection clipboard
+actions. A Win64 console capability saves/restores both console modes and uses
+bounded event reads. The native fixture launches two actual attach clients
+inside distinct ConPTYs; both producer runs remain pending. Astra identified
+batched-copy-key, differing-client-size and bottom-right-wrap defects during
+source review; fixes and regression scenarios are being reviewed. This source
+work does not close any runtime or full tmux parity gate.
+
+Final source-freeze review: Astra accepted the corrections for copy-key
+batching, bottom-right scrolling, differing client dimensions, split/frame
+interleaving and dense history replies. All demonstrated P1 findings from that
+bounded review are resolved in source. Native execution, selected user32 link,
+two-client behavior and mode restoration remain unverified. The source guard,
+patch formatting and executable-spec layout checks are static evidence only.
 
 The earlier checkpoint evidence below is retained as history. The build report
 contains corrected object/ICE evidence beyond the outer timeout logs.

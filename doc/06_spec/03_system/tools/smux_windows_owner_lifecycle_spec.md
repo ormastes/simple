@@ -92,6 +92,74 @@ Named layouts currently use gapless rectangle bands; these assertions do not
 invent separator cells. Querying the composite proves plain-text owner output,
 not an interactive renderer or delivery of a ConPTY resize notification.
 
+## Application layout reaches the live child console
+
+**Requirement:** REQ-SMUX-WIN-005.
+
+1. Start a compiled owner and create a real single-pane shell.
+2. Send `layout resize even-horizontal 120 30` through a separate request process.
+3. Execute Windows PowerShell inside that pane. It computes an output token by
+   concatenating `SMUX_SIZE_`, `[Console]::WindowWidth`, `x`, and
+   `[Console]::WindowHeight`. The submitted command never contains the expected
+   `SMUX_SIZE_120x30` token, so terminal input echo cannot satisfy the assertion.
+4. Poll production capture with the existing finite request/output bounds and
+   require the computed `SMUX_SIZE_120x30` result from the actual child console.
+5. Require that the owner remains alive and shuts down gracefully before
+   evaluating the collected command and output assertions.
+
+When executed successfully, this scenario proves application layout wiring to
+the real ConPTY console dimensions. Service rectangle fields or standalone
+provider resize tests cannot substitute for the child's computed result.
+The scenario is authored and unexecuted; missing resize support must fail.
+
+## Input backpressure preserves owner fairness
+
+**Requirement:** REQ-SMUX-WIN-006.
+
+1. Start independent blocked and healthy sessions. Configure child-owned state
+   in the healthy shell.
+2. In the blocked pane, execute PowerShell that computes `SMUX_NONREAD_42` and
+   then sleeps for 120 seconds without reading stdin. Require its computed
+   readiness marker before loading the input path.
+3. Send 3500-byte payloads from disposable clients, bounded by 96 attempts and
+   a 20-second load deadline. Require more than 60000 accepted bytes and the
+   actual typed `pane input capacity reached` refusal. An unavailable or broken
+   input provider cannot pass as successful acceptance.
+4. Require `input-status` to report queued or pending input. Measure from a new
+   send request to actual expanded output in the healthy pane. The complete
+   request/output path must finish in less than 5000 milliseconds.
+5. Require the blocked pane still to report queued or pending input afterwards.
+   Stop and reap the owner before assertions, including when a client timed out.
+
+The measured clock is monotonic. A bounded request can itself overrun the
+five-second acceptance deadline; that is a failure, never a rounded-down pass.
+The child never reads the offered data during the measured interval. Capacity
+refusal plus pending delivery is required, so merely sending data into an
+uncongested console cannot satisfy this backpressure scenario.
+
+Run the actual native case under an external process-tree/Windows Job watchdog
+of at most 180 seconds, retaining the timeout/termination receipt. Source loops
+and per-client timeouts cannot certify that a broken native provider returns.
+No watchdog run or provider fairness PASS is claimed by this authored scenario.
+
+## Real scrollback survives the visible screen
+
+**Requirement:** REQ-SMUX-WIN-007.
+
+1. Generate 160 lines in the actual child, computing each suffix as `1000 + i`,
+   followed by a separately computed completion marker.
+2. Query the production `screen` command until its bounded wait sees
+   `SMUX_HISTORY_DONE_160`. Neither `SMUX_HISTORY_1001` nor
+   `SMUX_HISTORY_1060` may remain on the visible screen.
+3. Invoke the actual `history SESSION 200` command from another client. Require
+   both older computed lines in its scrollback result. Their complete values
+   are absent from submitted input and cannot come from command echo.
+4. Query the screen again; the older line must remain absent there. Stop/reap
+   the owner before evaluating the collected outcomes.
+
+This scenario requests real production scrollback. It does not replace history
+with repeated capture, reconstruct output in a test buffer, or preload lines.
+
 ## Bounds, cleanup and remaining gates
 
 Each request uses a fresh process with a 7-second timeout and 128-KiB capture
@@ -102,8 +170,9 @@ before assertions. Forced termination fails the graceful-shutdown oracle.
 The async owner emits only bounded startup output. Unexpected harness/runtime
 termination still requires an outer test-process/job cleanup boundary.
 
-All four scenarios remain unexecuted. Required gates are actual admitted native
+All seven scenarios remain unexecuted. Required gates are actual admitted native
 SSpec execution, binary-owned executed counts, generated complete manuals with
-0 stubs, and final highest-capability review. Provider fairness for a child that
-never reads input, multiple interactive screen clients, daemon discovery and
+0 stubs, and final highest-capability review. Nonreading-child fairness and real
+scrollback remain unverified until these exact live scenarios run successfully.
+Multiple interactive screen clients, daemon discovery and
 restart persistence remain separate implementation/verification gaps.

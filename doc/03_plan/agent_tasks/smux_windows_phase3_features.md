@@ -13,6 +13,15 @@
 - Compiler lane: synchronous PTY spawn misclassification in MIR, semantic
   owner-based repair and focused regression; no app alias workaround.
 - Astra: independent high-capability parity, source and authored-manual review.
+- Interactive controller/root: same hosted `--attach`, local view selection,
+  exact input commands and local copy viewport; wire/viewport unit specs.
+- Input lane: pure prefix decoder and chunk/binding specs.
+- Compiler/composition lane: explicit-target interactive protocol and safe
+  styled/cursor snapshot projection; narrowly frozen cursor metadata.
+- Native PTY lane: stable terminal-console facade, Win64 console owner and
+  ordered overlay; save/restore resources and native fixture.
+- Live-host lane continuation: independent ConPTY-hosted interactive clients
+  against the compiled owner; runtime evidence still pending both producers.
 
 Lower-model sidecars: N/A; peer lanes perform the bounded implementation and
 independent review. Root accepts only exact evidence appropriate to each lane.

@@ -15,17 +15,19 @@ use os.apps.smux.api.{
     smux_list_panes,
     smux_pane_spawn_pty,
     smux_send_command,
-    smux_capture,
+    smux_capture, smux_capture_history,
     smux_active_window, smux_focused_pane, smux_focus_window, smux_focus_pane,
     smux_new_window, smux_split_pane, smux_close_pane, smux_resize,
     smux_attach, smux_detach_from,
     smux_select_layout, smux_window_rects,
     smux_capture_cells,
+    smux_input_status,
     smux_reset_for_test
 }
 use std.sys.pty.{platform_default_shell}
 use os.apps.smux.mux_rects.{mux_rect_to_text, MuxRect}
 use os.apps.smux.vt_screen.{vt_cell_width}
+use os.apps.smux.interactive_protocol.{smux_interactive_dispatch}
 
 # Use the tagged-text ABI.  The legacy optional-pointer rt_stdin_read_line ABI
 # is not safe through an interpreter call: its boxed text result can be
@@ -92,6 +94,9 @@ pub fn smux_remote_main():
 # Handles one protocol line and returns the reply line. Exposed so a spec can
 # drive the protocol without a stdin.
 pub fn smux_remote_dispatch(line: text) -> text:
+    val interactive = smux_interactive_dispatch(line)
+    if interactive != "":
+        return interactive
     if line.trim() == "":
         return "smux: usage: VERB session_id [extra]"
     val parts = line.trim().split(" ")
@@ -193,6 +198,11 @@ pub fn smux_remote_dispatch(line: text) -> text:
     if focused.is_err():
         return "smux: no focused pane: " + name
     val p = focused.unwrap()
+    if verb == "input-status":
+        val status = smux_input_status(sid, w.id, p.id)
+        if status.is_err():
+            return "smux: input failed: " + status.unwrap_err()
+        return "smux: input[" + name + "]:" + status.unwrap()
     if verb == "split":
         if parts.len() > 3:
             return "smux: split accepts one direction"
@@ -203,10 +213,14 @@ pub fn smux_remote_dispatch(line: text) -> text:
         val added = split.unwrap()
         val spawned = smux_pane_spawn_pty(sid, w.id, added.id, platform_default_shell())
         if spawned.is_err():
-            val _closed = smux_close_pane(sid, w.id, added.id)
-            val _restored = smux_resize(sid, w.id, p.id, p.cols, p.rows)
+            var rollback_failed = not smux_close_pane(sid, w.id, added.id)
+            if smux_resize(sid, w.id, p.id, p.cols, p.rows).is_err():
+                rollback_failed = true
             if w.layout != "manual":
-                val _layout_restored = smux_select_layout(sid, w.id, w.layout, w.canvas_cols, w.canvas_rows)
+                if smux_select_layout(sid, w.id, w.layout, w.canvas_cols, w.canvas_rows).is_err():
+                    rollback_failed = true
+            if rollback_failed:
+                return "smux: split failed: " + spawned.unwrap_err() + "; rollback incomplete"
             return "smux: split failed: " + spawned.unwrap_err()
         val _focused = smux_focus_pane(sid, w.id, added.id)
         return "smux: split pane " + added.id
@@ -219,6 +233,16 @@ pub fn smux_remote_dispatch(line: text) -> text:
         if sent.is_err():
             return "smux: send failed: " + sent.unwrap_err()
         return "smux: sent to " + name
+    if verb == "history":
+        if parts.len() > 3:
+            return "smux: history requires session and optional line count"
+        val count = if parts.len() == 3: parts[2].to_int() ?? 0 else: 200
+        if count <= 0 or count > 2000:
+            return "smux: history line count must be between 1 and 2000"
+        val cap = smux_capture_history(sid, w.id, p.id, count)
+        if cap.is_err():
+            return "smux: history failed: " + cap.unwrap_err()
+        return "smux: history[" + name + "]:\n" + cap.unwrap().content
     if verb == "capture":
         val cap = smux_capture(sid, w.id, p.id, 20)
         if cap.is_err():
@@ -289,6 +313,8 @@ pub fn smux_remote_reply_ok(reply: text) -> bool:
         reply.starts_with("smux: selected window ") or reply.starts_with("smux: selected pane ") or
         reply.starts_with("smux: attached ") or reply.starts_with("smux: detached ") or
         reply.starts_with("smux: split pane ") or reply.starts_with("smux: sent to ") or
-        reply.starts_with("smux: capture[") or reply == "smux: stopping server")
+        reply.starts_with("smux: capture[") or reply.starts_with("smux: history[") or
+        reply.starts_with("smux: input[") or reply == "smux: input accepted" or
+        reply.starts_with("SMUX-FRAME/1 ") or reply == "smux: stopping server")
 
 export smux_remote_dispatch, smux_remote_reply_ok, smux_composite_cells

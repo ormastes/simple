@@ -348,3 +348,329 @@ ConPTY behavior. No new P0/P1 defect was found in this bounded compiler review.
 This final review accepts the bounded source checkpoint for honest retention.
 It does not change the overall **FAIL for full tmux parity / TEST_BLOCKED for
 Windows qualification** result.
+
+## Native Windows provider source and ABI review (2026-10-16 follow-up)
+
+The new `windows_tcp.spl` / `windows_tcp_abi.spl` and
+`windows_pty_owner.spl` / `windows_pty_abi.spl` / `windows_pty_codec.spl`
+are actual Simple implementations of the Windows boundaries, not success
+stubs. This supersedes the earlier absence-of-provider finding only for a
+native product explicitly composed with `src/providers/windows_native/lib`
+before `src/lib`. The default interpreter facades remain separate. Neither
+source presence nor resolver tests establish that the final executable selected,
+linked or executed these providers. **Native qualification remains TEST_BLOCKED.**
+
+Source inspection finds the Win64 ABI shapes consistent: four-byte COORD by
+value, eight-byte HANDLE/SOCKET and pointer parameters, signed HRESULT return,
+112-byte STARTUPINFOEXW, 32-byte OVERLAPPED with event at byte24, 144-byte job
+extended limits, 48-byte job accounting, 408-byte WSADATA, 16-byte sockaddr_in
+and 16-byte WSAPOLLFD. The pseudoconsole attribute receives the HPCON value,
+matching Microsoft's example, rather than a pointer to a handle variable.
+These are inspected layouts, not compiler ABI execution evidence.
+
+The PTY design supplies synchronous pipe ends to ConPTY while retaining an
+overlapped client write endpoint for the owner. Accepted pending input owns its
+buffer and OVERLAPPED until GetOverlappedResult reports completion; CancelIoEx
+alone does not authorize freeing that memory. Output uses an exclusive reader
+and PeekNamedPipe before bounded reads. Close breaks the output channel before
+ClosePseudoConsole and retains pending requests plus process/job handles until
+completion and process-tree termination are observed. Microsoft documents both
+the cancellation lifetime requirement and the final-output close deadlock;
+these motivate the design, but finite close latency still requires a real
+supervised experiment. See [CancelIoEx](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex)
+and [creating a pseudoconsole session](https://learn.microsoft.com/en-us/windows/console/creating-a-pseudoconsole-session).
+
+The TCP implementation tracks a Winsock startup reference per admitted socket,
+retains partial line bytes, returns actual partial write counts and distinguishes
+EOF's empty byte array from an unavailable read. Its poll flags and layout match
+[WSAPoll](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsapoll);
+the documented readable-listener condition guarantees a subsequent accept will
+not block. No speculative poll/accept race is asserted by this review.
+
+### Findings sent to owners before native admission
+
+- **P1, persistent-owner availability:** `windows_tcp.spl:89-94` bounds a
+  nonreused lifetime slot list at100000, including already closed sockets.
+  The one-connection-per-request server therefore becomes permanently
+  unreachable after100000 accepted requests, about27.8 hours at one per second.
+  Unauthenticated connection churn also consumes slots. Replace the lifetime
+  allocation with bounded reusable slots carrying generation-tagged logical
+  handles; retain a regression that old handles cannot close a recycled socket.
+  Merely increasing the lifetime cap postpones the same failure.
+- **P1, cleanup proof correctness:** the inspected PTY version ignored
+  CloseHandle results for the child thread and source input/output pipe ends
+  (`windows_pty_owner.spl:224,232-235`), and for output in its open-failure
+  unwind (`:129`). Those failures could lose resource ownership while a later
+  cleanup proof reported success. The owner was asked to retain failed handles
+  or propagate release failure into the global cleanup result and per-handle
+  proof. A failed source output close can also interfere with EOF observation.
+  Later fixes must be recorded explicitly; these are not silently waived.
+
+Bare array.push in the TCP provider is not a confirmed defect: native
+`lower_unresolved_array_push` invokes mutating rt_array_push and method
+writeback (`method_calls_literals.spl:1223-1239`). Socket inheritance was raised
+as defense in depth; the reviewed smux PTY CreateProcess uses inheritHandles
+false, and the general Windows process owner restricts inherited handles with
+an explicit allowlist, so no smux socket inheritance leak is demonstrated.
+
+### Required native evidence
+
+Run the real TCP and PTY fixtures separately with each admitted phase2 and
+phase3 producer and retain producer/executable hashes, selected source roots,
+link inputs, exit codes and stdout. Use an external process watchdog: a timer
+checked after WriteFile cannot detect a call that never returns. Required
+oracles include partial writes and EOF, finite idle accept, stale handles after
+slot reuse, actual child-observed resize, independent shell state, fragmented
+UTF-8, input saturation against a nonreading child, pending-write cancellation,
+job emptiness and cleanup proof. Then run the independent smux owner fixture
+with the final native product to prove output draining during its no-request
+interval. The authored fixtures and resolver scenarios are useful source
+coverage; none has been executed by this reviewer. Interactive multi-client
+viewports, copy/key-table parity and full tmux parity remain separate gaps.
+
+### Source corrections reviewed after the findings
+
+Both P1 findings above are **resolved by source inspection**, not by an
+executed regression. TCP now uses at most4096 reusable live slots and encodes
+`fd = generation * 4096 + slot`. Every operation validates the live slot and
+generation; a successful close preserves the generation while releasing its
+socket, and reuse increments it. The maximum generation2251799813685247 keeps
+the largest encoded value within signed i64. Capacity is checked before socket
+creation or accept, so closed slots recover admission capacity. The updated
+native fixture checks three concurrent live sockets, stale-handle rejection
+across reuse and128 real create/close cycles without registry growth. Socket
+inheritance is now explicitly disabled during admission as well.
+
+The PTY owner now retains failed CloseHandle and HeapFree values, including
+thread, source pipe ends and temporary command/attribute allocations. A failed
+post-spawn release aborts admission and enters cleanup. Unpublished open
+failures with retained resources enter the same private quarantine. Release
+does not mark closed until every handle, temporary allocation and arena is
+released; failed output close prevents HPCON close. Global cleanup failure is
+sticky and prevents successful cleanup certification. This addresses the
+identified false-proof path without freeing pending I/O storage.
+
+No additional demonstrated P0/P1 defect was found in this bounded provider
+review. Remaining qualifications include the fixed100000 lifetime PTY-handle
+limit, actual ABI and linker execution, supervised close latency, input queue
+integration, and runtime failure-path coverage. Source/manual checkpoint
+acceptance is conditional on retaining these explicit gates; it is **not a
+Windows runtime PASS**.
+
+## Final queue, history, resize and shutdown source review
+
+This bounded follow-up reviewed current `api.spl`, `input_queue.spl`,
+`window_layout_service.spl`, `server.spl`, `smux_remote.spl`, `vt_history.spl`,
+the relevant `service.spl` projections and native provider overlays. The
+requested shorthand `remote_cmds.spl` refers to `smux_remote.spl`; no new
+parallel command implementation was assumed. No build was restarted and no
+runtime result is claimed.
+
+- **Input ownership:** `input_queue.spl:15-45` caps retained UTF-8 input at65536
+  bytes, retains the original text for the piped-process byte-offset boundary,
+  offers at most4096 bytes per flush and advances only by the provider's actual
+  accepted count. A partial UTF-8 scalar is not replayed by slicing text at a
+  byte offset. `_flush_input` (`api.spl:180`) waits for a prior provider-owned
+  write before offering another chunk; errors are sticky. Terminal query
+  replies use the same ordered queue and cannot create an unbounded secondary
+  accumulator. `smux_send_text` returns acceptance, while input-status exposes
+  pending, queued or idle. The owner tick drains up to eight chunks per pane
+  and offers one queued write; real fairness still requires native execution.
+- **Real resize:** split and direct resize call the capable PTY backend before
+  committing service/VT geometry (`api.spl:390,446`). Named layout validates
+  every rectangle before touching a child and resizes each existing PTY;
+  failure attempts to restore previously changed children and explicitly
+  reports incomplete rollback (`window_layout_service.spl:45-76`). The API
+  commits the new named geometry only after that helper succeeds. This is
+  source support for actual Windows ResizePseudoConsole, not evidence that a
+  child observed it. Noncapable default providers retain their documented
+  grid-only path; native overlay selection is therefore part of admission.
+- **History:** retained primary-screen cell rows now exist with default2000
+  and maximum10000 rows. Full-primary scrolling records displaced cells;
+  alternate-screen activity, partial regions and line editing do not populate
+  primary history. Frozen captures retain history and visible cells together.
+  Capture bounds and session/window/pane ownership are checked before draining;
+  the capture metric commits once (`api.spl:761`). The fallback to piped output
+  is restricted to an actual piped child and excludes alternate or frozen
+  empty frames (`service.spl:96`). This resolves the historical absence of a
+  scrollback implementation at source level, without providing copy mode.
+- **Shutdown:** server cleanup closes remaining sockets, releases service
+  children and then polls provider quarantine with a two-second deadline
+  (`server.spl:158-171`). Nonzero pending cleanup or any recorded socket close
+  failure produces a nonzero server exit. The deadline begins after native
+  close calls in reset: it bounds polling, not total shutdown wall-clock time.
+  An external process-tree watchdog remains mandatory for native qualification.
+
+No new demonstrated P0/P1 defect was found in these bounded paths. Two smaller
+issues were sent to the root: split-spawn failure ignored errors from restoring
+the original pane and named layout (`smux_remote.spl:212-215`), and the remote
+send reply said "sent" while the API promised only acceptance (`:226`). The
+first should disclose incomplete rollback; the second should use acceptance
+wording or document the distinction. History line limits also do not override
+the65536-byte response cap: large captures can fail framing admission. A line
+count is not a guarantee that arbitrarily wide Unicode history fits a reply.
+
+The two newly authored external-owner scenarios have meaningful source
+oracles. WIN-006 requires actual capacity refusal after more than60000 accepted
+bytes, keeps the blocked pane pending while a separate shell produces computed
+output within five seconds, and cleans up before assertions. WIN-007 requires
+computed old child lines to be absent from the real visible screen and present
+in the actual history response. Neither substitutes input echo or a capture
+mock for child output. The96-request saturation bound must be validated against
+real ConPTY buffering. These are accepted authored scenarios, not executed
+tests; their external180-second watchdog requirement remains in force.
+
+### Major tmux gaps still retained
+
+The original feature inventory above remains historical evidence. Later source
+work narrows its gaps but does not turn it into an all-features PASS:
+
+1. The independent foreground owner and disposable request clients provide a
+   plausible persistent ownership path. Real detached output draining, child
+   survival after a request client exits and reconnect from another process
+   remain unqualified until the final native owner fixture runs. Automatic
+   daemon launch, owner discovery and ordinary terminal lifecycle integration
+   are not established by `--serve`/`--request` alone.
+2. Attach records and captured composite screens do not implement a full
+   interactive attached terminal. Continuous terminal input/rendering, client
+   fanout, independent viewport sizing and multi-client input/resize policy
+   remain major gaps. Remote window/pane commands exercise service operations;
+   they do not demonstrate multiple live interactive screens.
+3. Named layouts and child resizing now have implementations. General retained
+   split-tree geometry, neighbor-aware interactive pane resizing and full
+   layout behavior across arbitrary split/close operations remain narrower
+   than tmux; manual edits intentionally invalidate a named plan.
+4. Copy mode, selection and clipboard interaction, mouse support, key-table
+   compatibility, tmux.conf and tmux control mode remain explicitly deferred
+   (`api.spl:668-680`). Bounded history retrieval does not close these gaps.
+5. Runtime correctness and NFR gates remain open: phase2/phase3 provider
+   fixtures, final-product source-root/link identity, externally supervised
+   cancellation and close, child-observed resize, detached draining, Unicode
+   history, queue saturation/fairness, realistic throughput and maximum RSS.
+
+**Result: source checkpoint accepted with the stated limitations;
+TEST_BLOCKED for Windows runtime qualification and FAIL for full tmux parity.**
+
+## Interactive client and native console source audit
+
+The new hosted `--attach` route in `src/app/hosted_apps/smux_client.spl`
+now reaches an actual interactive loop. It reads console input records,
+forwards bounded input to an explicitly named window/pane, requests styled
+frames, and supports local window/pane selection plus default prefix bindings.
+Detach closes the local console lease and removes attachment metadata; it does
+not issue stop-server. This supersedes the historical absence of interactive
+client source. It remains uncompiled/unexecuted in this review.
+
+`interactive_protocol.spl` validates session/window/pane ownership for explicit
+targets. `frame_snapshot.spl` paints cells and SGR attributes from a single
+service snapshot, with the selected client's cursor pane rather than changing
+global focus. Synchronized updates freeze cursor position and visibility with
+the cells and attributes. Cell text rejects C0/C1 controls; SGR accepts bounded
+numeric/semicolon parameters, so arbitrary child escape sequences are not
+replayed into the attached host console.
+
+The console owner uses Win64 INPUT_RECORD size20 and KEY_EVENT payload offsets
+4/8/10/14/16, and a22-byte CONSOLE_SCREEN_BUFFER_INFO with SMALL_RECT at10.
+It duplicates the actual console handles without inheritance, snapshots both
+modes before changing them, disables processed input so Ctrl-C becomes data,
+and retains failed restoration/releases for retry. The codec carries UTF-16
+surrogates and repeat counts between input records. Close attempts both mode
+restorations even if alternate-screen exit fails. The two-second retry loops
+still do not bound an individual native call.
+
+Clipboard writes are explicit copy actions. The provider allocates movable
+zeroed UTF-16 storage, unlocks before SetClipboardData, and never frees a handle
+after successful ownership transfer. Failed native cleanup remains retained.
+The native terminal overlay exports all seven capability operations; the
+default provider refuses unsupported interaction. Actual user32 linkage in
+the selected native product is still an admission gate.
+
+### Interactive findings and reviewed corrections
+
+1. **Copy-key batching:** the first controller compared an entire ordinary
+   input chunk to one key, losing coalesced keys and fragmented arrows. The
+   incremental `client_copy_input.spl` decoder now retains bounded CSI prefixes
+   and emits ordered actions; the controller stops after copy/exit, and a
+   lone Escape uses an explicit100ms deadline. This correction is accepted by
+   source inspection only.
+2. **P1 bottom-right scrolling:** output mode originally preserved immediate
+   end-of-line wrapping. A full viewport paint could scroll the whole screen
+   upon writing its final cell. The mode now includes
+   DISABLE_NEWLINE_AUTO_RETURN (`saved | 13`) and still restores the exact saved
+   mode. The native fixture writes a top-row guard, paints bottom-right, then
+   reads the actual console cells to detect scrolling. The documented behavior
+   is in [SetConsoleMode](https://learn.microsoft.com/en-us/windows/console/setconsolemode).
+   Source correction accepted; this native oracle has not executed.
+3. **P1 differing client dimensions:** local selections were independent, but
+   each client's arrange request initially replaced shared geometry with its
+   own dimensions and frames could overrun another client's viewport. Current
+   `client-size` stores actual dimensions in authoritative attachment records;
+   shared canvas uses the componentwise minimum for that session. Frame
+   requests reflow after detach/size change. Clients reject frames larger than
+   their local viewport and clear stale padding when the canvas or copy view
+   changes. This is a defined shared-size policy, not independent per-client
+   child geometries. Source correction accepted.
+4. **P1 split/frame interleaving:** split temporarily invalidates a named layout
+   before the initiating client sends its separate arrange request. A sibling
+   frame at that point previously failed and detached the sibling. Reflow's
+   equal-dimension fast path now also requires a known named layout; manual
+   geometry is planned as tiled. The added production service/dispatch scenario
+   exercises this exact interleaving without pretending to run two terminals.
+   Source correction accepted.
+5. **P1 dense history copy:** copy mode initially requested2000 lines
+   unconditionally although the response limit is65536 bytes. Ordinary dense
+   80-column history could therefore fail the reply and terminate attachment.
+   A byte-bounded interactive history reply was requested; its final correction
+   and tests require the follow-up recorded below before this finding closes.
+
+The size-arbitration regression's resize_count assertion was also flagged:
+named-layout selection did not increment that metric, so it could not prove
+the absence of redundant backend resize calls. The inspected equal-size
+fast path itself is correct; an uninformative counter assertion is not runtime
+or call-count evidence.
+
+### Remaining interaction and runtime limits
+
+Basic copy mode, line-range selection and an explicit Unicode clipboard action
+now have source implementations, replacing the former blanket copy-mode gap.
+Full tmux key/config/control compatibility, mouse interaction, richer selection
+semantics and application-specific terminal input modes remain narrower or
+deferred. Abrupt client death leaves attachment metadata because no heartbeat
+expiry exists; stale small dimensions can therefore constrain the shared canvas
+until explicit detach/rebind. Automatic owner launch/discovery is still absent.
+
+Native evidence must include two actual attached clients of different sizes in
+one session, local window/pane input and cursor isolation, raw Ctrl-C reaching
+the child, resize arbitration, split/frame interleaving, dense Unicode history
+copy, bottom-right no-scroll behavior, and exact console restoration after
+normal detach and recoverable failures. A fixture using two separate sessions
+does not prove same-session geometry arbitration. All new runtime results,
+selected overlay/link identities and realistic frame latency/RSS remain pending.
+
+### Interactive source checkpoint after corrections
+
+The dense-history P1 is now **resolved by source inspection**.
+`client_history_reply.spl` budgets the complete reply prefix, encoded UTF-8 row
+bytes and newline separators, retaining a contiguous suffix of newest whole
+rows within65536 bytes. It examines at most2000 rows, encodes each inspected
+row once and joins the retained suffix once. A newest row that cannot fit
+produces a typed error instead of invalid UTF-8 or an empty successful copy.
+The production `client-history` dispatch uses this helper; the public explicit
+history command retains its existing semantics. Dense2000-row ASCII and
+variable-width Unicode regressions assert exact retained suffixes and byte
+bounds. These authored assertions have not run.
+
+The uninformative resize_count assertion was removed from the size-arbitration
+scenario. It now claims stable geometry only, with the manual explicitly
+excluding instrumented native resize call-count evidence. The source fast path
+and the manual-state sibling-frame regression remain independently reviewable.
+
+All P1 findings identified in this interactive source pass have source fixes
+reviewed above. No additional demonstrated P0/P1 was found in this bounded
+review. Content-dependent frame/render byte budgets, stale attachment recovery,
+full input-mode/key compatibility and the earlier runtime/NFR gates remain
+limitations; this checkpoint does not expand them into claimed support.
+
+**Interactive source checkpoint accepted for freeze. Native Windows execution,
+two-client behavior and production readiness remain TEST_BLOCKED; full tmux
+parity remains incomplete.**

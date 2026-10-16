@@ -59,6 +59,19 @@ fn windows_await_output(sid: text, wid: text, pid: text, needle: text) -> text:
     expect(output).to_contain(needle)
     return output
 
+# @inline
+fn windows_close_shell(sid: text, wid: text, pid: text):
+    # The provider preserves its token while cancellation/tree cleanup is
+    # pending. Only a true close result proves all owned resources are terminal.
+    var closed = false
+    var attempt = 0
+    while attempt < 100 and not closed:
+        closed = smux_pane_close_pty(sid, wid, pid)
+        if not closed:
+            thread_sleep_ms(10)
+        attempt = attempt + 1
+    expect(closed).to_equal(true)
+
 describe "smux native Windows ConPTY live workflows":
     describe "REQ-SMUX-WIN-001: live output and background continuity":
         it "should execute a child command and capture output beyond input echo":
@@ -71,7 +84,7 @@ describe "smux native Windows ConPTY live workflows":
             expect(smux_send_command(ids[0], ids[1], ids[2], "echo SMUX_OUTPUT_%SMUX_VALUE%").is_ok()).to_equal(true)
             val output = windows_await_output(ids[0], ids[1], ids[2], "SMUX_OUTPUT_READY")
             expect(output).to_contain("SMUX_OUTPUT_READY")
-            expect(smux_pane_close_pty(ids[0], ids[1], ids[2])).to_equal(true)
+            windows_close_shell(ids[0], ids[1], ids[2])
             expect(smux_pane_alive(ids[0], ids[1], ids[2]).unwrap()).to_equal(false)
 
         it "should finish a delayed command with no clients and retain shell state on reattach":
@@ -92,7 +105,7 @@ describe "smux native Windows ConPTY live workflows":
             expect(smux_send_command(ids[0], ids[1], ids[2], "echo SMUX_RETURN_%SMUX_VALUE%").is_ok()).to_equal(true)
             val resumed = windows_await_output(ids[0], ids[1], ids[2], "SMUX_RETURN_SURVIVED")
             expect(resumed).to_contain("SMUX_RETURN_SURVIVED")
-            expect(smux_pane_close_pty(ids[0], ids[1], ids[2])).to_equal(true)
+            windows_close_shell(ids[0], ids[1], ids[2])
 
         it "should refuse a second child and isolate two live pane outputs":
             # @req REQ-SMUX-WIN-001
@@ -123,6 +136,6 @@ describe "smux native Windows ConPTY live workflows":
             val after_second = windows_await_output(ids[0], ids[1], other.id, "SMUX_POST_BETA")
             expect(after_first).to_contain("SMUX_POST_ALPHA")
             expect(after_second).to_contain("SMUX_POST_BETA")
-            expect(smux_pane_close_pty(ids[0], ids[1], ids[2])).to_equal(true)
+            windows_close_shell(ids[0], ids[1], ids[2])
             expect(smux_pane_alive(ids[0], ids[1], other.id).unwrap()).to_equal(true)
-            expect(smux_pane_close_pty(ids[0], ids[1], other.id)).to_equal(true)
+            windows_close_shell(ids[0], ids[1], other.id)
