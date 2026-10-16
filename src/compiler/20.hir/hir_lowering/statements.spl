@@ -84,7 +84,17 @@ impl HirLowering:
         val hir_op = self.lower_hir_assign_op_opt(op)
         val lhs = self.lower_hir_expr(target)
         val rhs = self.lower_hir_expr(value)
-        HirStmtKind.Assign(lhs, hir_op, rhs)
+        # `hir_op` is a plain nullable (lower_hir_assign_op_opt); unwrap it
+        # before the concrete `op` slot of HirStmtKind.Assign -- feeding the
+        # optional through unbroken makes its wrapper read as an operator word
+        # on the native lane (same optional-transport class as
+        # HirStmtKind.Let.type_ above; see lower_hir_assign_op_opt's note). A
+        # plain assignment has no operator at all: literal nil into the flat
+        # slot, the same idiom as the tuple-destructure Assign sites below.
+        if val present_hir_op = hir_op:
+            val concrete_hir_op: HirAssignOp = present_hir_op
+            return HirStmtKind.Assign(lhs, concrete_hir_op, rhs)
+        HirStmtKind.Assign(lhs, nil, rhs)
 
     # True only for the parser's encoded `val/var (a, b) = ...` statement
     # shape. Keep the marker test identical to lower_hir_stmt_multi: the flat
@@ -229,9 +239,11 @@ impl HirLowering:
         self.lower_hir_expr(iter)
 
     me lower_hir_assign_op_opt(op: AssignOp?) -> HirAssignOp?:
-        # Returns a PLAIN NULLABLE, not an Option box. All three call sites (:455,
-        # :482, :538) feed the result straight into `HirStmtKind.Assign`, whose `op`
-        # slot is declared FLAT (`op: HirAssignOp`), and all five readers of that slot
+        # Returns a PLAIN NULLABLE, not an Option box. The one remaining call
+        # site (lower_hir_assignment_kind above) unwraps it with `if val`
+        # before feeding the concrete `op` slot of `HirStmtKind.Assign`
+        # (declared FLAT, `op: HirAssignOp`), and passes literal nil for a
+        # plain assignment; all five readers of that slot
         # (monomorphize_integration.spl:1051, monomorphize/type_subst.spl:302,
         # monomorphize/hir_subst/body_subst.spl:272, mir_lowering_stmts.spl:1352,
         # svmg_lowering.spl:539) bind it positionally -- none tests `case Some(...)`.
