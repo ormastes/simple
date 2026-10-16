@@ -353,6 +353,27 @@ bootstrap_tree_rss_resolve() {
   bootstrap_tree_rss_summary="cap ${bootstrap_tree_rss_cap_kib} KiB (source: ${bootstrap_tree_rss_source}, bound: ${bootstrap_tree_rss_bound}, workers: ${btr_jobs}, hard ceiling: ${bootstrap_tree_rss_ceiling_kib} KiB, host RAM: ${bootstrap_tree_rss_host_total_kib:-unknown} KiB via ${bootstrap_tree_rss_host_total_source}; compiler ceiling admission: ${bootstrap_tree_rss_ceiling_admission}, requested: ${bootstrap_tree_rss_ceiling_request_kib}, previous: ${bootstrap_tree_rss_ceiling_previous_kib}, available: ${bootstrap_tree_rss_available_kib} via ${bootstrap_tree_rss_available_source})"
 }
 
+# Cap for a phase that wraps whole compiler builds (Stage 2 compiler tests:
+# full-CLI + test-runner tool builds plus test workers). The compile-worker
+# budget (base + jobs*96 MiB) prices a worker at a compile-shard's ~60-76 MiB,
+# so for this phase it always falls to the 5.59 GiB floor, while the full-CLI
+# build alone was measured above 12 GiB (see the ceiling widenings above):
+# the default lane could never pass on a large host (exit 88, doc/08_tracking/
+# bug/tree_rss_floor_kills_stage2_compiler_tests_on_large_hosts_2026-10-15.md).
+# Price the phase by the host instead: host_pct of RAM, clamped to
+# [floor, jobs-scaled ceiling]. Small hosts keep the host-fraction bound.
+# Call after bootstrap_tree_rss_resolve JOBS; prints KiB.
+bootstrap_tree_rss_phase_cap_kib() {
+  btr_pc=$BOOTSTRAP_TREE_RSS_FLOOR_KIB
+  if [ -n "${bootstrap_tree_rss_host_total_kib:-}" ]; then
+    bootstrap_tree_rss_knob HOST_PCT tree_rss_host_pct "$BOOTSTRAP_TREE_RSS_HOST_PCT_DEFAULT" 2 "${1:-}" || return 1
+    btr_pc=$((bootstrap_tree_rss_host_total_kib / 100 * btr_k_value))
+    [ "$btr_pc" -ge "$BOOTSTRAP_TREE_RSS_FLOOR_KIB" ] || btr_pc=$BOOTSTRAP_TREE_RSS_FLOOR_KIB
+  fi
+  [ "$btr_pc" -le "$bootstrap_tree_rss_ceiling_kib" ] || btr_pc=$bootstrap_tree_rss_ceiling_kib
+  printf '%s\n' "$btr_pc"
+}
+
 # Worker count of a compiler command line: the value of the last --threads /
 # --jobs (separate or `=` form). Prints 0 when the command declares none.
 bootstrap_tree_rss_command_jobs() {
@@ -465,6 +486,22 @@ bootstrap_tree_rss__selftest() {
     echo 'selftest FAIL: host-env.shs not found; config-file fixtures did not run' >&2
     btr_st_fail=1
   fi
+  # Whole-build phase cap: host fraction clamped to the jobs-scaled ceiling on
+  # a large host; a small host keeps its host-fraction bound.
+  for btr_st_pc in big:16777216 small:8000000; do
+    btr_st_n=$((btr_st_n + 1))
+    btr_st_got=$(
+      unset SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_HOST_PCT SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE
+      SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+      BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/${btr_st_pc%%:*}"
+      BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1
+      bootstrap_tree_rss_resolve 12 '' && bootstrap_tree_rss_phase_cap_kib ''
+    )
+    [ "$btr_st_got" = "${btr_st_pc#*:}" ] || {
+      echo "selftest FAIL: phase-cap-${btr_st_pc%%:*}: want ${btr_st_pc#*:} got $btr_st_got" >&2
+      btr_st_fail=1
+    }
+  done
   # Worker count is read from the command the cap will actually govern.
   btr_st_n=$((btr_st_n + 1))
   [ "$(bootstrap_tree_rss_command_jobs simple native-build --threads 80 -o x)" = 80 ] &&
