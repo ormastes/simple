@@ -44,3 +44,16 @@ a full CLI child, initialize BDD, compare arrays, or use stubs. The production
 repair remains exactly one restored declaration line. This fixture is prepared,
 not compiled or executed; its first native qualification cycle awaits resource
 authorization. A pre-existing fixture path is rejected and never deleted.
+
+## Qualification fixture correction after cycle2
+
+Cycle2 parsed72modules but one HIR entry failed; its terminal ledger records
+query_visibility_boundary_native.spl as FAILED/UNCACHED. The child diagnostic
+text was not retained, so the exact worker reason is not claimed. Independent
+source review found exactly two literal `{Thing}` regions in the newly added
+import-file content string. Ordinary Simple strings treat those as expression
+interpolation. They are corrected to `{{Thing}}` so the emitted fixture file
+contains literal braces. The intentional `{failure}` status interpolation stays.
+This is a mistake in our new control, separate from the product boundary-header,
+range-lowering and trailing-dot issues. No production line changes in this
+correction. A final cycle3 requires owner review; no automatic retry occurred.
