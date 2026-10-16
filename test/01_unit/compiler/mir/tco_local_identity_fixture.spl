@@ -1,0 +1,105 @@
+use compiler.mir.mir_data.{MirBuilder}
+use compiler.mir.mir_instructions.*
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir_opt.tco.{TailCallOptimization}
+
+fn tco_identity_fixture(arguments: [MirOperand], destination: LocalId?, returned: LocalId?, parameter_count: i64) -> MirFunction:
+    val type_ = MirType.i64()
+    var parameters: [MirType] = []
+    var locals: [MirLocal] = []
+    var index = 0
+    while index < parameter_count:
+        parameters.push(type_)
+        val identity = if index == 0: 41 else: 73
+        locals.push(MirLocal(id: LocalId(id: identity), name: nil, type_: type_, kind: LocalKind.Arg(index), is_ghost: false))
+        index = index + 1
+    for identity in [77, 93, 94]:
+        locals.push(MirLocal(id: LocalId(id: identity), name: nil, type_: type_, kind: LocalKind.Temp, is_ghost: false))
+    val signature = MirSignature(params: parameters, return_type: type_, is_variadic: false)
+    var builder = MirBuilder.new()
+    builder.begin_function(SymbolId.new(0), "tco_identity_fixture", signature, nil)
+    val prototype = builder.end_function()
+    val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("tco_identity_fixture"), MirType(kind: MirTypeKind.FuncPtr(signature))))
+    val call = MirInst(kind: MirInstKind.Call(destination, callee, arguments), span: nil)
+    var return_operand: MirOperand? = nil
+    if val return_local = returned:
+        return_operand = Some(MirOperand(kind: MirOperandKind.Copy(return_local)))
+    val first_source = MirInst(kind: MirInstKind.Const(LocalId(id: 93), MirConstValue.Int(13), type_), span: nil)
+    val second_source = MirInst(kind: MirInstKind.Const(LocalId(id: 94), MirConstValue.Int(29), type_), span: nil)
+    val block = MirBlock(id: BlockId(id: 0), label: nil, instructions: [first_source, second_source, call], terminator: MirTerminator.Ret(return_operand))
+    MirFunction(..prototype, locals: locals, blocks: [block], entry_block: BlockId(id: 0))
+
+fn tco_call_preserved_v1(original: MirFunction) -> bool:
+    var pass_ = TailCallOptimization.new()
+    val updated = pass_.run_on_function(original)
+    if pass_.optimized_calls != 0: return false
+    val block: MirBlock = updated.blocks[0]
+    if block.instructions.len() != original.blocks[0].instructions.len(): return false
+    val last: MirInst = block.instructions[block.instructions.len() - 1]
+    match last.kind:
+        case MirInstKind.Call(_, _, _): ()
+        case _: return false
+    match block.terminator:
+        case MirTerminator.Ret(_): true
+        case _: false
+
+fn tco_local_identity_controls() -> text:
+    val argument = MirOperand(kind: MirOperandKind.Copy(LocalId(id: 93)))
+    val original = tco_identity_fixture([argument], Some(LocalId(id: 77)), Some(LocalId(id: 77)), 1)
+    var pass_ = TailCallOptimization.new()
+    val updated = pass_.run_on_function(original)
+    if pass_.optimized_calls != 1: return "ordinary tail call not counted"
+    val block: MirBlock = updated.blocks[0]
+    if block.instructions.len() != 3: return "wrong assignment count"
+    val assignment: MirInst = block.instructions[2]
+    match assignment.kind:
+        case MirInstKind.Copy(destination, source):
+            if destination.id != 41 or source.id != 93: return "signature type used as argument identity"
+        case _: return "missing parameter assignment"
+    match block.terminator:
+        case MirTerminator.Goto(target):
+            if target.id != original.entry_block.id: return "wrong loop target"
+        case _: return "missing loop terminator"
+
+    val swapped = tco_identity_fixture([
+        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 73))),
+        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 41)))
+    ], Some(LocalId(id: 77)), Some(LocalId(id: 77)), 2)
+    var swap_pass = TailCallOptimization.new()
+    val unchanged = swap_pass.run_on_function(swapped)
+    if swap_pass.optimized_calls != 0: return "unsafe permutation counted"
+    val unchanged_block: MirBlock = unchanged.blocks[0]
+    val unchanged_call: MirInst = unchanged_block.instructions[2]
+    match unchanged_call.kind:
+        case MirInstKind.Call(_, _, arguments):
+            if arguments.len() != 2: return "permutation call damaged"
+        case _: return "unsafe sequential permutation"
+    match unchanged_block.terminator:
+        case MirTerminator.Ret(_): ()
+        case _: return "permutation return damaged"
+
+    val void_call = tco_identity_fixture([argument], nil, Some(LocalId(id: 93)), 1)
+    if pass_.is_tail_call_block(void_call.blocks[0], void_call.name):
+        return "void call accepted as value tail call"
+    val wrong_return = tco_identity_fixture([argument], Some(LocalId(id: 77)), Some(LocalId(id: 93)), 1)
+    if pass_.is_tail_call_block(wrong_return.blocks[0], wrong_return.name):
+        return "unrelated return accepted"
+
+    var missing_locals: [MirLocal] = []
+    for local in original.locals:
+        if local.id.id != 41: missing_locals.push(local)
+    val missing = MirFunction(..original, locals: missing_locals)
+    if not tco_call_preserved_v1(missing): return "missing argument local transformed"
+    var duplicate_locals: [MirLocal] = []
+    for local in original.locals:
+        duplicate_locals.push(local)
+    duplicate_locals.push(MirLocal(id: LocalId(id: 55), name: nil, type_: MirType.i64(), kind: LocalKind.Arg(0), is_ghost: false))
+    val duplicate = MirFunction(..original, locals: duplicate_locals)
+    if not tco_call_preserved_v1(duplicate): return "duplicate argument index transformed"
+    val moved = tco_identity_fixture([MirOperand(kind: MirOperandKind.Move(LocalId(id: 93)))], Some(LocalId(id: 77)), Some(LocalId(id: 77)), 1)
+    if not tco_call_preserved_v1(moved): return "move silently converted to copy"
+    val constant = tco_identity_fixture([MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(5), MirType.i64()))], Some(LocalId(id: 77)), Some(LocalId(id: 77)), 1)
+    if not tco_call_preserved_v1(constant): return "constant argument silently dropped"
+    ""
+
+export tco_local_identity_controls
