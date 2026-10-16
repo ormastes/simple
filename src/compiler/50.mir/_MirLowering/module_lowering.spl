@@ -996,6 +996,40 @@ impl MirLowering:
         self.reindex_enum_variant_owners(enum_def.name, prior_variant_names, names)
         self.enum_variant_discriminants[enum_def.name] = discriminants
 
+    me register_module_enum_inventory_v1(modules: [HirModule]):
+        """Register every given module's own enums, up front, before any
+        per-module lowering runs.
+
+        Measured gap (2026-10-16, manual stage3 per-module object sweep):
+        compiling `src/compiler/di.spl` with the admitted stage2 binary failed
+        in `compiler.common.config.CompilerProfile.to_text` with B5b "match
+        has multiple wildcard/binding default arms (binding `Test`)". A
+        two-module fixture (entry declaring a struct with an enum-typed
+        static-fn parameter + a dependency whose own fn matches on its own
+        enum's bare variants) reproduces it in ~4s: the dependency's `case X:`
+        arms degrade to bindings whenever the entry's demand set does not
+        cover the dependency's callables, because the only registration that
+        would reach its enums is the per-module provider pass in lower_module,
+        which skips `provider_module.name == module.name`. When that pass is
+        demand-incomplete (or the module's HirModule no longer carries
+        `module.enums` by the time its turn comes), the module's own match
+        arms find an empty variant registry and the scalar gate rejects them.
+
+        register_enum_variants reads only the HirEnum (no symbol table), and
+        identical re-registration inside lower_module is quiet by the
+        existing dedup rules, so calling this once over all scheduled source
+        modules closes the gap without changing any per-module behaviour.
+        Enum metadata is small (names + discriminants + payload shapes)
+        relative to the struct-name prescan the driver already pays."""
+        var inventory_module_i = 0
+        while inventory_module_i < modules.len():
+            val inventory_enum_values = modules[inventory_module_i].enums.values()
+            var inventory_enum_i = 0
+            while inventory_enum_i < inventory_enum_values.len():
+                self.register_enum_variants(inventory_enum_values[inventory_enum_i])
+                inventory_enum_i = inventory_enum_i + 1
+            inventory_module_i = inventory_module_i + 1
+
     # O(1) inverse of `enum_variant_index`, maintained at every bare-key write.
     # `prior_names` is the variant set this owner previously had registered
     # under the same bare key (empty on a first registration); those entries are
