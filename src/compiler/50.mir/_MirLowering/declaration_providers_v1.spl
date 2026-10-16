@@ -431,8 +431,10 @@ impl MirLowering:
             val bare_layout_was_free = not self.struct_field_order.has(struct_def.name)
             self.register_declaration_fields_v1(struct_def.name, struct_def.fields, module.symbols, false)
             self.register_struct_type_param_names(struct_def.name, struct_def.type_params)
-            val struct_symbol = module.symbols.get_symbol_raw(struct_def.symbol.id)
-            if struct_symbol != nil:
+            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+            val optional_struct_symbol: HirSymbol? = module.symbols.get_symbol_raw(struct_def.symbol.id)
+            if val present_struct_symbol = optional_struct_symbol:
+                val struct_symbol: HirSymbol = present_struct_symbol
                 val struct_key = self.composite_layout_key(struct_symbol)
                 self.register_declaration_result_err_layout_v1(struct_key, struct_def.fields, module.symbols)
                 if bare_layout_was_free:
@@ -447,8 +449,10 @@ impl MirLowering:
         psi = 0
         while psi < prescan_class_values.len():
             val class_def: MirHirNominalDeclarationV1 = prescan_class_values[psi]
-            val class_symbol = module.symbols.get_symbol_raw(class_def.symbol.id)
-            if class_symbol != nil:
+            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+            val optional_class_symbol: HirSymbol? = module.symbols.get_symbol_raw(class_def.symbol.id)
+            if val present_class_symbol = optional_class_symbol:
+                val class_symbol: HirSymbol = present_class_symbol
                 # Types/defaults are relocated after each consumer installs
                 # its own SymbolTable. This prepass only records ID-free layout.
                 self.register_declaration_result_err_layout_v1(mir_class_identity(class_symbol), class_def.fields, module.symbols)
@@ -472,8 +476,10 @@ impl MirLowering:
             var prescan_return_shape = ""
             match prescan_fn.return_type.kind:
                 case Named(prescan_return_symbol_id, _):
-                    val prescan_return_symbol = module.symbols.get_symbol_raw(prescan_return_symbol_id.id)
-                    if prescan_return_symbol != nil:
+                    # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                    val optional_prescan_return_symbol: HirSymbol? = module.symbols.get_symbol_raw(prescan_return_symbol_id.id)
+                    if val present_prescan_return_symbol = optional_prescan_return_symbol:
+                        val prescan_return_symbol: HirSymbol = present_prescan_return_symbol
                         prescan_return_shape = self.composite_layout_key(prescan_return_symbol)
                         if prescan_return_symbol.kind == SymbolKind.Class:
                             prescan_return_shape = mir_class_identity(prescan_return_symbol)
@@ -485,8 +491,10 @@ impl MirLowering:
                     # A caller cannot safely look up an imported element id.
                     match prescan_element_type.kind:
                         case Named(prescan_element_id, _):
-                            val prescan_element = module.symbols.get_symbol_raw(prescan_element_id.id)
-                            if prescan_element != nil:
+                            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                            val optional_prescan_element: HirSymbol? = module.symbols.get_symbol_raw(prescan_element_id.id)
+                            if val present_prescan_element = optional_prescan_element:
+                                val prescan_element: HirSymbol = present_prescan_element
                                 match prescan_element.kind:
                                     # @workaround bug=phase3_prescan_symbolkind_workaround_2026_10_10 reason=prescan return element owner.
                                     case SymbolKind.Class | SymbolKind.Struct:
@@ -522,8 +530,10 @@ impl MirLowering:
                     # can't be deferred to the consumer).
                     match prescan_ok_type.kind:
                         case Named(prescan_ok_symbol_id, _):
-                            val prescan_ok_symbol = module.symbols.get_symbol_raw(prescan_ok_symbol_id.id)
-                            if prescan_ok_symbol != nil:
+                            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                            val optional_prescan_ok_symbol: HirSymbol? = module.symbols.get_symbol_raw(prescan_ok_symbol_id.id)
+                            if val present_prescan_ok_symbol = optional_prescan_ok_symbol:
+                                val prescan_ok_symbol: HirSymbol = present_prescan_ok_symbol
                                 match prescan_ok_symbol.kind:
                                     case Class:
                                         bootstrap_fn_ret_ok_shape_register(prescan_call_name, mir_class_identity(prescan_ok_symbol))
@@ -558,8 +568,10 @@ impl MirLowering:
                     # NOT composite_layout_key's module-qualified form.
                     match prescan_optional_inner.kind:
                         case Named(prescan_optional_symbol_id, _):
-                            val prescan_optional_symbol = module.symbols.get_symbol_raw(prescan_optional_symbol_id.id)
-                            if prescan_optional_symbol != nil:
+                            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                            val optional_prescan_optional_symbol: HirSymbol? = module.symbols.get_symbol_raw(prescan_optional_symbol_id.id)
+                            if val present_prescan_optional_symbol = optional_prescan_optional_symbol:
+                                val prescan_optional_symbol: HirSymbol = present_prescan_optional_symbol
                                 match prescan_optional_symbol.kind:
                                     case Class:
                                         bootstrap_fn_ret_opt_shape_register(prescan_call_name, mir_class_identity(prescan_optional_symbol))
@@ -627,47 +639,50 @@ impl MirLowering:
     me register_native_trait_declarations_from_declarations_v1(module: MirHirModuleDeclarationsV1):
         for raw_declaration in module.traits:
             val declaration: MirHirTraitDeclarationV1 = raw_declaration
-            val symbol = module.symbols.get_symbol_raw(declaration.symbol.id)
-            if symbol == nil: continue
-            val owner = native_trait_qualified_owner(symbol)
-            # A missing declaration identity is not a usable object layout.
-            # Diagnose at conversion, not for an unused generic declaration.
-            if owner == "": continue
-            var slots: [NativeTraitMethodSlot] = []
-            var safe = declaration.type_params.len() == 0 and declaration.assoc_types.len() == 0 and declaration.supertraits.len() == 0
-            val method_names = native_trait_sorted_declaration_method_names_v1(declaration)
-            if method_names.len() != declaration.methods.len() + declaration.defaults.len(): safe = false
-            for method_name in method_names:
-                var selected: MirHirFunctionDeclarationV1? = nil
-                for raw_method in declaration.methods:
-                    val method: MirHirFunctionDeclarationV1 = raw_method
-                    if method.name == method_name: selected = method
-                if selected == nil:
-                    for raw_method in declaration.defaults:
+            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+            val optional_symbol: HirSymbol? = module.symbols.get_symbol_raw(declaration.symbol.id)
+            if optional_symbol == nil: continue
+            if val present_symbol = optional_symbol:
+                val symbol: HirSymbol = present_symbol
+                val owner = native_trait_qualified_owner(symbol)
+                # A missing declaration identity is not a usable object layout.
+                # Diagnose at conversion, not for an unused generic declaration.
+                if owner == "": continue
+                var slots: [NativeTraitMethodSlot] = []
+                var safe = declaration.type_params.len() == 0 and declaration.assoc_types.len() == 0 and declaration.supertraits.len() == 0
+                val method_names = native_trait_sorted_declaration_method_names_v1(declaration)
+                if method_names.len() != declaration.methods.len() + declaration.defaults.len(): safe = false
+                for method_name in method_names:
+                    var selected: MirHirFunctionDeclarationV1? = nil
+                    for raw_method in declaration.methods:
                         val method: MirHirFunctionDeclarationV1 = raw_method
                         if method.name == method_name: selected = method
-                if val method = selected:
-                    if method.is_static or method.type_params.len() != 0: safe = false
-                    var params: [HirType] = []
-                    var parameter_names: [text] = []
-                    var parameter_mutability: [bool] = []
-                    for raw_param in method.params:
-                        val param: MirHirParamDeclarationV1 = raw_param
-                        params.push(self.relocate_provider_type(param.type_, module.symbols))
-                        parameter_names.push(param.name)
-                        parameter_mutability.push(param.is_mutable)
-                    slots.push(NativeTraitMethodSlot(name: method_name, params: params,
-                        parameter_names: parameter_names,
-                        parameter_mutability: parameter_mutability,
-                        result: self.relocate_provider_type(method.return_type, module.symbols),
-                        mutable_receiver: method.is_mutable))
-            val layout = NativeTraitLayout(owner: owner, methods: slots, object_safe: safe)
-            val existing = self.native_trait_layout_index(owner)
-            if existing >= 0:
-                if not self.native_trait_layout_matches(self.native_trait_layouts[existing], layout):
-                    self.error_fatal("conflicting native trait declaration ABI: {owner}", Some(declaration.span))
-            else:
-                self.native_trait_layouts.push(layout)
+                    if selected == nil:
+                        for raw_method in declaration.defaults:
+                            val method: MirHirFunctionDeclarationV1 = raw_method
+                            if method.name == method_name: selected = method
+                    if val method = selected:
+                        if method.is_static or method.type_params.len() != 0: safe = false
+                        var params: [HirType] = []
+                        var parameter_names: [text] = []
+                        var parameter_mutability: [bool] = []
+                        for raw_param in method.params:
+                            val param: MirHirParamDeclarationV1 = raw_param
+                            params.push(self.relocate_provider_type(param.type_, module.symbols))
+                            parameter_names.push(param.name)
+                            parameter_mutability.push(param.is_mutable)
+                        slots.push(NativeTraitMethodSlot(name: method_name, params: params,
+                            parameter_names: parameter_names,
+                            parameter_mutability: parameter_mutability,
+                            result: self.relocate_provider_type(method.return_type, module.symbols),
+                            mutable_receiver: method.is_mutable))
+                val layout = NativeTraitLayout(owner: owner, methods: slots, object_safe: safe)
+                val existing = self.native_trait_layout_index(owner)
+                if existing >= 0:
+                    if not self.native_trait_layout_matches(self.native_trait_layouts[existing], layout):
+                        self.error_fatal("conflicting native trait declaration ABI: {owner}", Some(declaration.span))
+                else:
+                    self.native_trait_layouts.push(layout)
 
     me register_native_trait_implementations_from_declarations_v1(module: MirHirModuleDeclarationsV1):
         # Preserve the no-op path for modules with only inherent impls.
@@ -702,41 +717,44 @@ impl MirLowering:
             val concrete_id = match implementation.type_.kind:
                 case HirTypeKind.Named(id, _): id
                 case _: continue
-            val concrete = module.symbols.get_symbol_raw(concrete_id.id)
-            if concrete == nil: continue
-            val concrete_owner = native_trait_qualified_owner(concrete)
-            if concrete_owner == "": continue
-            var methods: [text] = []
-            var signatures: [NativeTraitMethodSlot] = []
-            for raw_slot in self.native_trait_layouts[index].methods:
-                val slot: NativeTraitMethodSlot = raw_slot
-                val method_id = implementation.methods.get(slot.name)
-                if val target = method_id:
-                    if function_index.has(target.id):
-                        val declaration: MirHirFunctionDeclarationV1 = function_values[function_index[target.id]]
-                        methods.push(mir_provider_function_name_declaration_v1(module.name, module.symbols, declaration))
-                        var params: [HirType] = []
-                        var parameter_names: [text] = []
-                        var parameter_mutability: [bool] = []
-                        for raw_param in declaration.params:
-                            val param: MirHirParamDeclarationV1 = raw_param
-                            params.push(self.relocate_provider_type(param.type_, module.symbols))
-                            parameter_names.push(param.name)
-                            parameter_mutability.push(param.is_mutable)
-                        signatures.push(NativeTraitMethodSlot(name: slot.name, params: params,
-                            parameter_names: parameter_names,
-                            parameter_mutability: parameter_mutability,
-                            result: self.relocate_provider_type(declaration.return_type, module.symbols),
-                            mutable_receiver: declaration.is_mutable))
+            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+            val optional_concrete: HirSymbol? = module.symbols.get_symbol_raw(concrete_id.id)
+            if optional_concrete == nil: continue
+            if val present_concrete = optional_concrete:
+                val concrete: HirSymbol = present_concrete
+                val concrete_owner = native_trait_qualified_owner(concrete)
+                if concrete_owner == "": continue
+                var methods: [text] = []
+                var signatures: [NativeTraitMethodSlot] = []
+                for raw_slot in self.native_trait_layouts[index].methods:
+                    val slot: NativeTraitMethodSlot = raw_slot
+                    val method_id = implementation.methods.get(slot.name)
+                    if val target = method_id:
+                        if function_index.has(target.id):
+                            val declaration: MirHirFunctionDeclarationV1 = function_values[function_index[target.id]]
+                            methods.push(mir_provider_function_name_declaration_v1(module.name, module.symbols, declaration))
+                            var params: [HirType] = []
+                            var parameter_names: [text] = []
+                            var parameter_mutability: [bool] = []
+                            for raw_param in declaration.params:
+                                val param: MirHirParamDeclarationV1 = raw_param
+                                params.push(self.relocate_provider_type(param.type_, module.symbols))
+                                parameter_names.push(param.name)
+                                parameter_mutability.push(param.is_mutable)
+                            signatures.push(NativeTraitMethodSlot(name: slot.name, params: params,
+                                parameter_names: parameter_names,
+                                parameter_mutability: parameter_mutability,
+                                result: self.relocate_provider_type(declaration.return_type, module.symbols),
+                                mutable_receiver: declaration.is_mutable))
+                        else:
+                            methods.push("")
                     else:
                         methods.push("")
-                else:
-                    methods.push("")
-            self.native_trait_implementations.push(NativeTraitImplementation(
-                trait_owner: owner, concrete_owner: concrete_owner, methods: methods,
-                concrete_type: self.relocate_provider_type(implementation.type_, module.symbols),
-                concrete_name: concrete.name, reference_semantics: concrete.kind == SymbolKind.Class,
-                signatures: signatures))
+                self.native_trait_implementations.push(NativeTraitImplementation(
+                    trait_owner: owner, concrete_owner: concrete_owner, methods: methods,
+                    concrete_type: self.relocate_provider_type(implementation.type_, module.symbols),
+                    concrete_name: concrete.name, reference_semantics: concrete.kind == SymbolKind.Class,
+                    signatures: signatures))
 
     me register_provider_enum_from_declarations_v1(enum_def: MirHirEnumDeclarationV1, provider: SymbolTable):
         """Register an archived provider enum's variants into the MIR enum
@@ -854,42 +872,45 @@ impl MirLowering:
         # does for classes.
         if not provider.symbols.has(struct_def.symbol.id):
             return
-        val source = provider.get_symbol_raw(struct_def.symbol.id)
-        if source == nil:
+        # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+        val optional_source: HirSymbol? = provider.get_symbol_raw(struct_def.symbol.id)
+        if optional_source == nil:
             return
-        var fields: [MirHirFieldDeclarationV1] = []
-        var field_names: [text] = []
-        for raw_field in struct_def.fields:
-            val field: MirHirFieldDeclarationV1 = raw_field
-            # Annotated copies: nested struct transports lose their declared
-            # value type on the stage-native lane (module_build.spl pattern).
-            var relocated: MirHirFieldDeclarationV1 = field
-            val field_type: HirType = field.type_
-            relocated.type_ = self.relocate_provider_type(field_type, provider)
-            fields = fields.push(relocated)
-            field_names = field_names.push(field.name)
-        val key = self.composite_layout_key(source)
-        if key != struct_def.name:
-            self.register_declaration_fields_v1(key, fields, self.symbols, true)
-        # The bare-name entry is shared by every same-named struct: replace it
-        # only when the consumer does not declare that name itself and the
-        # recorded bare-layout owner is this provider's declaration -- a
-        # matching field list alone would let the LAST same-named provider win.
-        if consumer_owns_name or not self.struct_field_order.has(struct_def.name):
-            return
-        if not self.struct_bare_layout_owner.has(struct_def.name):
-            return
-        if self.struct_bare_layout_owner[struct_def.name] != key:
-            return
-        val registered_names = self.struct_field_order[struct_def.name]
-        if registered_names.len() != field_names.len():
-            return
-        var i = 0
-        while i < field_names.len():
-            if registered_names[i] != field_names[i]:
+        if val present_source = optional_source:
+            val source: HirSymbol = present_source
+            var fields: [MirHirFieldDeclarationV1] = []
+            var field_names: [text] = []
+            for raw_field in struct_def.fields:
+                val field: MirHirFieldDeclarationV1 = raw_field
+                # Annotated copies: nested struct transports lose their declared
+                # value type on the stage-native lane (module_build.spl pattern).
+                var relocated: MirHirFieldDeclarationV1 = field
+                val field_type: HirType = field.type_
+                relocated.type_ = self.relocate_provider_type(field_type, provider)
+                fields = fields.push(relocated)
+                field_names = field_names.push(field.name)
+            val key = self.composite_layout_key(source)
+            if key != struct_def.name:
+                self.register_declaration_fields_v1(key, fields, self.symbols, true)
+            # The bare-name entry is shared by every same-named struct: replace it
+            # only when the consumer does not declare that name itself and the
+            # recorded bare-layout owner is this provider's declaration -- a
+            # matching field list alone would let the LAST same-named provider win.
+            if consumer_owns_name or not self.struct_field_order.has(struct_def.name):
                 return
-            i = i + 1
-        self.register_declaration_fields_v1(struct_def.name, fields, self.symbols, true)
+            if not self.struct_bare_layout_owner.has(struct_def.name):
+                return
+            if self.struct_bare_layout_owner[struct_def.name] != key:
+                return
+            val registered_names = self.struct_field_order[struct_def.name]
+            if registered_names.len() != field_names.len():
+                return
+            var i = 0
+            while i < field_names.len():
+                if registered_names[i] != field_names[i]:
+                    return
+                i = i + 1
+            self.register_declaration_fields_v1(struct_def.name, fields, self.symbols, true)
 
 # Trait-typed receiver dispatch (bug
 # stage2_trait_typed_receiver_method_unresolved_2026-10-10). A declaration's
@@ -901,42 +922,47 @@ impl MirLowering:
         if not provider.symbols.has(class_def.symbol.id):
             self.error_fatal("class provider symbol is absent from the provider table: {class_def.name}", Some(class_def.span))
             return
-        val source = provider.get_symbol_raw(class_def.symbol.id)
-        if source == nil:
+        # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+        val optional_source: HirSymbol? = provider.get_symbol_raw(class_def.symbol.id)
+        if optional_source == nil:
             self.error_fatal("class provider is missing its declaration symbol: {class_def.name}", Some(class_def.span))
             return
-        val target = self.relocate_provider_type_symbol(class_def.symbol, provider)
-        if target.id < 0:
-            self.error_fatal("cannot relocate class provider: {class_def.name}", Some(class_def.span))
-            return
-        var fields: [MirHirFieldDeclarationV1] = []
-        var flags: [bool] = []
-        for raw_field in class_def.fields:
-            val field: MirHirFieldDeclarationV1 = raw_field
-            # Annotated copies: nested struct transports lose their declared
-            # value type on the stage-native lane (module_build.spl pattern).
-            var relocated: MirHirFieldDeclarationV1 = field
-            val field_type: HirType = field.type_
-            relocated.type_ = self.relocate_provider_type(field_type, provider)
-            fields = fields.push(relocated)
-            flags = flags.push(field.has_default)
-        val canonical = mir_class_identity(source)
-        var keys = [canonical, self.composite_layout_key(source)]
-        # Consumer-owned symbol spelling is an additional legacy raw alias.
-        val consumer_symbol = self.symbols.get_symbol_raw(target.id)
-        if consumer_symbol != nil:
-            keys = keys.push(self.composite_layout_key(consumer_symbol))
-        for key in keys:
-            self.register_declaration_fields_v1(key, fields, self.symbols, true)
-            self.struct_field_has_default[key] = flags
-            self.declaration_field_defaults[key] = class_def.fields
-            self.declaration_field_default_owners[key] = owner_module
-            self.class_type_names[key] = true
-        for method_name in class_def.methods.keys():
-            # Annotated dict extraction — the exact module_build.spl #2693
-            # pattern; unannotated it loses the declared value type on the
-            # stage-native lane.
-            val method_id: SymbolId = class_def.methods[method_name]
-            val method = self.relocate_provider_callable(method_id, provider, links)
-            if method.id >= 0:
-                self.struct_method_syms["{canonical}::{method_name}"] = method
+        if val present_source = optional_source:
+            val source: HirSymbol = present_source
+            val target = self.relocate_provider_type_symbol(class_def.symbol, provider)
+            if target.id < 0:
+                self.error_fatal("cannot relocate class provider: {class_def.name}", Some(class_def.span))
+                return
+            var fields: [MirHirFieldDeclarationV1] = []
+            var flags: [bool] = []
+            for raw_field in class_def.fields:
+                val field: MirHirFieldDeclarationV1 = raw_field
+                # Annotated copies: nested struct transports lose their declared
+                # value type on the stage-native lane (module_build.spl pattern).
+                var relocated: MirHirFieldDeclarationV1 = field
+                val field_type: HirType = field.type_
+                relocated.type_ = self.relocate_provider_type(field_type, provider)
+                fields = fields.push(relocated)
+                flags = flags.push(field.has_default)
+            val canonical = mir_class_identity(source)
+            var keys = [canonical, self.composite_layout_key(source)]
+            # Consumer-owned symbol spelling is an additional legacy raw alias.
+            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+            val optional_consumer_symbol: HirSymbol? = self.symbols.get_symbol_raw(target.id)
+            if val present_consumer_symbol = optional_consumer_symbol:
+                val consumer_symbol: HirSymbol = present_consumer_symbol
+                keys = keys.push(self.composite_layout_key(consumer_symbol))
+            for key in keys:
+                self.register_declaration_fields_v1(key, fields, self.symbols, true)
+                self.struct_field_has_default[key] = flags
+                self.declaration_field_defaults[key] = class_def.fields
+                self.declaration_field_default_owners[key] = owner_module
+                self.class_type_names[key] = true
+            for method_name in class_def.methods.keys():
+                # Annotated dict extraction — the exact module_build.spl #2693
+                # pattern; unannotated it loses the declared value type on the
+                # stage-native lane.
+                val method_id: SymbolId = class_def.methods[method_name]
+                val method = self.relocate_provider_callable(method_id, provider, links)
+                if method.id >= 0:
+                    self.struct_method_syms["{canonical}::{method_name}"] = method
