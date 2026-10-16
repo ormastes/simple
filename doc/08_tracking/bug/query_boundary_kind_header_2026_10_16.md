@@ -31,3 +31,16 @@ already checks the affected result. Test execution, whole compiler/lib/MCP/LSP
 checks and production admission remain UNRUN. No native rebuild was launched:
 the old bootstrap entry's three-build cap is exhausted and no usable full-CLI
 verification runtime has been qualified in this lane.
+
+## Prepared standalone native control
+
+test/01_unit/app/cli/query_visibility_boundary_native.spl exercises the same
+visibility_json adapter already imported by the existing visibility feature
+spec. It uses real fresh caller-selected temporary files and distinct failure
+strings for ordinary boundary/self reachability, open/public reachability,
+sibling denial for an unexported boundary symbol, and bypass/public reachability.
+It does not import boundary_kind directly, change production visibility, invoke
+a full CLI child, initialize BDD, compare arrays, or use stubs. The production
+repair remains exactly one restored declaration line. This fixture is prepared,
+not compiled or executed; its first native qualification cycle awaits resource
+authorization. A pre-existing fixture path is rejected and never deleted.
