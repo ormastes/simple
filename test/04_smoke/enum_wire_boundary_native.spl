@@ -1,0 +1,59 @@
+use std.nogc_sync_mut.io_runtime.{exit}
+use std.nogc_sync_mut.sffi.enum_wire.{enum_wire_nil_slot, enum_wire_restore_nil}
+
+fn require(condition: bool):
+    if not condition:
+        print "ENUM_WIRE_BOUNDARY_FAIL"
+        exit(1)
+
+enum WireCase:
+    Empty
+    Flag(value: bool)
+    Row(label: text, enabled: bool, count: i64)
+    TupleOnly(value: (i64, i64))
+
+@unsafe(reason: "fixture supplies the declared WireCase variant schema", capabilities: [ffi])
+fn require_slot(value: WireCase, arity: i64, index: i64, expected: bool):
+    match enum_wire_nil_slot(value, arity, index):
+        case Ok(actual): require(actual == expected)
+        case Err(_): require(false)
+
+@unsafe(reason: "fixture supplies exact declared variant payload positions", capabilities: [ffi])
+fn main():
+    val original = WireCase.Row("keep", false, 37)
+    match enum_wire_restore_nil(original, 3, [1]):
+        case Ok(restored):
+            require_slot(restored, 3, 1, true)
+            require_slot(original, 3, 1, false)
+            match restored:
+                case WireCase.Row(label, _, count):
+                    require(label == "keep")
+                    require(count == 37)
+                case _: require(false)
+        case Err(_): require(false)
+    match enum_wire_restore_nil(WireCase.Flag(false), 1, [0]):
+        case Ok(restored): require_slot(restored, 1, 0, true)
+        case Err(_): require(false)
+    require_slot(WireCase.Flag(false), 1, 0, false)
+    require_slot(WireCase.Flag(true), 1, 0, false)
+    match enum_wire_restore_nil(WireCase.Empty, 0, []):
+        case Ok(restored):
+            match restored:
+                case WireCase.Empty: ()
+                case _: require(false)
+        case Err(_): require(false)
+    match enum_wire_restore_nil(original, 2, [1]):
+        case Ok(_): require(false)
+        case Err(_): ()
+    match enum_wire_restore_nil(original, 3, [3]):
+        case Ok(_): require(false)
+        case Err(_): ()
+    match enum_wire_restore_nil(WireCase.TupleOnly((7, 9)), 1, []):
+        case Ok(restored):
+            match restored:
+                case WireCase.TupleOnly(pair):
+                    require(pair.0 == 7)
+                    require(pair.1 == 9)
+                case _: require(false)
+        case Err(_): require(false)
+    print "ENUM_WIRE_BOUNDARY_PASS"
