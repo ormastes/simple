@@ -1,0 +1,19 @@
+# FlatPoolReader factory has an instance receiver
+
+Date: 2026-10-16
+Bug: BUG-FLAT-POOL-READER-STATIC-FACTORY-20261016
+Database registration: pending; no admitted database tool available.
+Status: source-only repair and real controls proposed; native/BDD/broader verification UNRUN.
+Base:99b871a431a (full hash in external inverse proof).
+
+The retained main build reports44 fatal rows for driver_hir_post_validation_policy_v1: its first is unresolved method call:new, followed by32 decode_text,6 next_len,4 next_i64 and finish_canonical_frame. The symbol-projection consumer likewise has unresolved new and subsequent reader calls. The source owner is the actual public class compiler.frontend.core.flat_pool_codec.FlatPoolReader; no replacement reader is needed.
+
+Its new factory is declared plain fn new(blob:text)->FlatPoolReader, unlike sibling public static new_canonical/new_bounded factories. The pure-Simple parser fn_struct_decls.spl:1116 dispatches class fn with is_static=false. parser_decls_use.spl:528-534 assigns immutable-instance static_flag0 and prepends a typed self parameter; no new-name exemption exists. The HIR predeclaration assigns Method to a nonstatic member (module_declarations_bootstrap.spl:352). MIR provider_metadata.spl:234-266 registers static dispatch keys only for is_static. The static type receiver fallback in method_calls_literals.spl:3714-3724 accepts only Function symbols. Thus the authored factory declaration fails to describe the type-level API its consumers call. The downstream inferred receiver failures are a plausible cascade; this source review does not prove every reader diagnostic shares that cause.
+
+The minimal production repair changes only the declaration to pub static fn new. Its constructor body, fields, permissive trusted-reader policy, canonical/bounded variants, parser/seal ownership and mutable methods are unchanged. Consumer locals are left inferred pending separate evidence. Reversing only the declaration prefix reproduces the complete baseline codec file byte-for-byte, as recorded externally.
+
+The shared fixture uses the genuine provider factories/methods and is called by both explicit nonzero native main and std.spec. It checks initial public-factory owner state, next_i64/next_len, escaped text, exact mutable cursor advancement, legacy noncanonical integer acceptance, canonical valid finish, missing-newline/noncanonical-integer/trailing-data denials, negative/truncated length denials. Assertions use scalar contents rather than array identity. No substitute implementation, fixture field override, hardcoded PASS or seal bypass is added. All controls are UNRUN.
+
+Comparison bounds: the retained main returned FlatPoolReader provider and hir_codec_support without fatal diagnostics; support has typed FlatPoolReader parameter method calls, not the failing inferred factory pattern. hir_complete_body_frame_v1 and hir_mono_function_record_v1 have no returned-MIR receipt in that attempt, so their absence from fatal rows is NOT a success claim. A later focused TCO build retained an actual FlatPoolReader provider object, but did not qualify imported static-factory dispatch.
+
+Evidence: remote-review-followup/flat-pool-reader-static-factory-source preserves original codec bytes, full base identity and exact inverse proof. Qualification requires review/freeze before a first native attempt. This new genuine factory feature has its own maximum3 bounded cycles; no attempt has run and no exhausted earlier lane is relabeled. Broad compiler/lib/MCP/LSP and BDD gates remain UNRUN; no admission, deployment or Phase3 completion claimed.

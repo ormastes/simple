@@ -1,0 +1,44 @@
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+
+# Actual public factories and mutable reader methods; no substitute cursor.
+fn flat_pool_reader_factory_controls_v1() -> text:
+    var legacy = FlatPoolReader.new("17\n2\nalpha\\nbeta\nomega\n")
+    if not legacy.ok or legacy.bounded or legacy.canonical or legacy.pos != 0:
+        return "legacy factory state"
+    if legacy.next_i64() != 17 or legacy.pos != 1: return "integer cursor"
+    if legacy.next_len() != 2 or legacy.pos != 2: return "length cursor"
+    val first = legacy.decode_text(legacy.next())
+    if first != "alpha\nbeta" or legacy.pos != 3: return "text decode cursor"
+    if legacy.decode_text(legacy.next()) != "omega" or legacy.pos != 4:
+        return "second text cursor"
+    if not legacy.ok: return "legacy valid frame rejected"
+
+    # The trusted legacy path remains permissive for noncanonical integers.
+    var permissive = FlatPoolReader.new("017\n")
+    if permissive.next_i64() != 17 or not permissive.ok:
+        return "legacy noncanonical policy changed"
+
+    var canonical = FlatPoolReader.new_canonical("17\n")
+    if canonical.bounded or not canonical.canonical: return "canonical factory state"
+    if canonical.next_i64() != 17 or canonical.pos != 1:
+        return "canonical integer cursor"
+    if not canonical.finish_canonical_frame() or not canonical.ok:
+        return "canonical valid finish"
+
+    var missing_newline = FlatPoolReader.new_canonical("17")
+    if missing_newline.ok or missing_newline.finish_canonical_frame():
+        return "missing newline admitted"
+    var noncanonical = FlatPoolReader.new_canonical("017\n")
+    val rejected_integer = noncanonical.next_i64()
+    if noncanonical.ok or rejected_integer != 0 or noncanonical.finish_canonical_frame():
+        return "noncanonical integer admitted"
+    var trailing = FlatPoolReader.new_canonical("17\nextra\n")
+    if trailing.next_i64() != 17: return "trailing control integer"
+    if trailing.finish_canonical_frame() or trailing.ok: return "trailing data admitted"
+    var negative = FlatPoolReader.new("-1\n")
+    if negative.next_len() != 0 or negative.ok: return "negative length admitted"
+    var truncated = FlatPoolReader.new("3\nitem\n")
+    if truncated.next_len() != 0 or truncated.ok: return "truncated length admitted"
+    ""
+
+export flat_pool_reader_factory_controls_v1
