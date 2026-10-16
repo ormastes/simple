@@ -1657,6 +1657,9 @@ int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t ex
     return expected_enum_id == 0 || enum_value->enum_id == 0 || enum_value->enum_id == (int32_t)expected_enum_id;
 }
 
+/* Standalone core-C requires the native BDD state and actual assertions.
+ * The legacy hosted compatibility callbacks intentionally do nothing. */
+#if !defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)
 void rt_bdd_describe_start_rv(int64_t name_rv) {
     (void)name_rv;
 }
@@ -1676,6 +1679,7 @@ void rt_bdd_expect_eq_rv(int64_t actual, int64_t expected) {
     (void)actual;
     (void)expected;
 }
+#endif
 
 /* ================================================================
  * Panic
@@ -4102,6 +4106,9 @@ const char* rt_hex_to_wire(const char* hex_str) {
     return (const char*)result;
 }
 
+#if !defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)
+/* Standalone core-C instead selects runtime_native.c's tagged text/array ABI.
+ * Keep these legacy hosted byte-buffer helpers out of that composition. */
 /* ---- Byte array handle for [u8] FFI ----
  * The [u8] type in Simple FFI maps to an opaque int64_t handle.
  * Internally: pointer to { uint8_t* data; int64_t len; int64_t cap; } */
@@ -4147,3 +4154,4 @@ int64_t rt_bytes_to_text(int64_t bytes_value) {
     if (!data) return rt_string_new(NULL, 0);
     return rt_string_new(data, (uint64_t)len);
 }
+#endif
