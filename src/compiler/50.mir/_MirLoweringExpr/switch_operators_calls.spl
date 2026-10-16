@@ -6644,6 +6644,21 @@ impl MirLowering:
                 ()
         arg_local
 
+    me call_has_thread_transfer_boundary(name: text, symbol: SymbolId) -> bool:
+        if name != "spawn" and name != "spawn_actor":
+            return false
+        # An aliased import keeps its declaration name (`spawn`), so spelling
+        # alone also matches std.sys.pty.spawn. That owner launches a child
+        # process using a PTY handle and command line; neither argument is a
+        # task/actor payload. Use the resolved declaration owner, never the
+        # local alias. Preserve the existing transfer contract for all other
+        # spawn calls, including unresolved builtin symbols.
+        if name == "spawn":
+            val owner = self.symbols.symbol_defining_module_scalar_raw(symbol.id)
+            if mir_layout_canonical_module_name(owner) == "lib.sys.pty":
+                return false
+        true
+
     me lower_call(callee: HirExpr, args: [HirCallArg]) -> LocalId:
         self.lower_call_with_value(callee, args, nil)
 
@@ -6908,8 +6923,7 @@ impl MirLowering:
         # several callee shapes (direct/indirect/lambda/bitfield) -- not
         # attempted in this lane; scoped out per binding-transfer-only.
         var arg_operands: [MirOperand] = []
-        val is_thread_boundary = is_direct and (
-            direct_name == "spawn" or direct_name == "spawn_actor")
+        val is_thread_boundary = is_direct and self.call_has_thread_transfer_boundary(direct_name, direct_symbol)
         var call_param_types: [HirType] = []
         # A Var/NamedVar callee keeps its resolved symbol even when it names a
         # local function value and therefore is not a direct call. Recover the

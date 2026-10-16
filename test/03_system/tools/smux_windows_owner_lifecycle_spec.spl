@@ -1,0 +1,318 @@
+"""
+## Purpose and audience
+Run a real compiled smux owner and disposable command clients on native Windows.
+Exercise detached shell progress, independent request processes, window/pane
+isolation, named layout geometry, and authentication before mutation/shutdown.
+## Required fixture and evidence boundary
+SMUX_TEST_BINARY must name the actual compiled Windows smux executable for the
+producer under test. Missing fixture, wrong host, unavailable TCP/ConPTY, absent
+shell output or incomplete owner shutdown fails; nothing builds or skips here.
+These are live-host scenarios, authored but NOT EXECUTED. They do not prove
+interactive renderer input, client-specific viewport/focus, fairness against a
+nonreading child, or full tmux compatibility. All clients are separate processes.
+No request or capture runs during the detached drain interval: a child-written
+file after >1 MiB output proves the child passed pipe backpressure independently.
+# @manual: primary
+# @capture: exec
+Plan: doc/03_plan/sys_test/smux_windows_phase3_features.md
+"""
+
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use std.nogc_async_mut.sosix.{sosix_platform}
+use app.io.mod.{
+    env_get, file_exists, file_read, file_write, file_delete, getpid,
+    process_run_bounded, process_spawn_async, process_is_running,
+    process_kill, process_wait, thread_sleep_ms
+}
+
+class OwnerReply:
+    output: text
+    errors: text
+    code: i64
+
+class OwnerFixture:
+    binary: text
+    endpoint: text
+    token: text
+    pid: i64
+    ready: bool
+
+# @inline
+fn owner_binary() -> text:
+    expect(sosix_platform()).to_equal("windows")
+    val binary = env_get("SMUX_TEST_BINARY")
+    expect(binary.len()).to_be_greater_than(0)
+    expect(binary.ends_with(".exe")).to_equal(true)
+    expect(file_exists(binary)).to_equal(true)
+    return binary
+
+# Every call starts and waits for a fresh compiled client process. The argument
+# array preserves shell metacharacters as data for the owner's real pane shell.
+# @inline
+fn owner_request(binary: text, endpoint: text, token: text, args: [text]) -> OwnerReply:
+    val (output, errors, code) = process_run_bounded(binary,
+        ["--request", endpoint, token] + args, 7000, 131072)
+    return OwnerReply(output: output.replace("\r\n", "\n").trim(), errors: errors, code: code)
+
+# @inline
+fn owner_call(owner: OwnerFixture, args: [text]) -> OwnerReply:
+    return owner_request(owner.binary, owner.endpoint, owner.token, args)
+
+# @inline
+fn owner_start(binary: text, lane: i64) -> OwnerFixture:
+    val endpoint = "127.0.0.1:" + (48000 + getpid() % 8000 + lane).to_text()
+    val token = "smux-live-" + getpid().to_text() + "-" + lane.to_text()
+    val pid = process_spawn_async(binary, ["--serve", endpoint, token])
+    var owner = OwnerFixture(binary: binary, endpoint: endpoint,
+        token: token, pid: pid, ready: false)
+    var attempt = 0
+    while pid > 0 and process_is_running(pid) and attempt < 20 and not owner.ready:
+        val reply = owner_call(owner, ["list"])
+        owner.ready = reply.code == 0 and reply.output == "smux: sessions=0"
+        if not owner.ready:
+            thread_sleep_ms(50)
+        attempt = attempt + 1
+    return owner
+
+# No scenario assertions run while an owned process remains live. A failed
+# readiness/command still reaches authenticated stop, finite wait, then kill.
+# Forced cleanup is never reported as a successful graceful stop.
+# @inline
+fn owner_stop(owner: OwnerFixture) -> bool:
+    if owner.pid <= 0:
+        return false
+    val reply = owner_call(owner, ["stop-server"])
+    val exit_code = process_wait(owner.pid, 3000)
+    val graceful = reply.code == 0 and reply.output == "smux: stopping server" and exit_code == 0
+    if process_is_running(owner.pid):
+        val _killed = process_kill(owner.pid)
+        val _waited = process_wait(owner.pid, 1000)
+    return graceful and not process_is_running(owner.pid)
+
+# @inline
+fn owner_first_id(reply: OwnerReply) -> text:
+    val lines = reply.output.split("\n")
+    if lines.len() < 2:
+        return ""
+    return lines[1].trim().split(" ")[0]
+
+# @inline
+fn owner_created_id(reply: OwnerReply, prefix: text) -> text:
+    if not reply.output.starts_with(prefix):
+        return ""
+    return reply.output[prefix.len():].trim()
+
+# @inline
+fn owner_await_output(owner: OwnerFixture, session: text, needle: text) -> OwnerReply:
+    var reply = OwnerReply(output: "", errors: "", code: -1)
+    var attempt = 0
+    while attempt < 40 and not reply.output.contains(needle):
+        reply = owner_call(owner, ["capture", session])
+        if not reply.output.contains(needle):
+            thread_sleep_ms(50)
+        attempt = attempt + 1
+    return reply
+
+# @inline
+fn owner_expect_success(replies: [OwnerReply]):
+    for reply in replies:
+        expect(reply.code).to_equal(0)
+        expect(reply.output.len()).to_be_greater_than(0)
+
+describe "smux native Windows independent owner lifecycle":
+    describe "REQ-SMUX-WIN-002: detached owner drains without request clients":
+        it "should complete delayed output beyond pipe capacity before any reconnect or capture":
+            val binary = owner_binary()
+            val temp = env_get("TEMP")
+            expect(temp.len()).to_be_greater_than(0)
+            val marker = temp + "/smux-owner-" + getpid().to_text() + ".txt"
+            val release = temp + "/smux-owner-release-" + getpid().to_text() + ".txt"
+            val _deleted = file_delete(marker)
+            val _released_deleted = file_delete(release)
+            expect(file_exists(marker)).to_equal(false)
+            expect(file_exists(release)).to_equal(false)
+            step("Launch a compiled owner independently from request clients")
+            val owner = owner_start(binary, 1)
+            val created = owner_call(owner, ["new", "background"])
+            val attached = owner_call(owner, ["attach", "background", "before"])
+            val configured = owner_call(owner, ["send", "background", "set SMUX_OWNER_VALUE=SURVIVED"])
+            # A release file prevents output from completing before detach even
+            # when starting request processes is slow. This child only waits;
+            # production cmd/ConPTY owns and executes the actual output burst.
+            # /l is interactive cmd syntax, hence single %i; >1 MiB must drain.
+            val release_literal = release.replace("'", "''")
+            val waiter = "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"$n=0; while (-not [IO.File]::Exists('" + release_literal + "') -and $n -lt 600) {{ Start-Sleep -Milliseconds 50; $n++ }}; if (-not [IO.File]::Exists('" + release_literal + "')) {{ exit 1 }}\""
+            val command = waiter + " && (for /l %i in (1,1,12000) do @echo 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz) && echo SMUX_DRAIN_%SMUX_OWNER_VALUE% >\"" + marker + "\" & echo SMUX_RETAINED_%SMUX_OWNER_VALUE%"
+            val queued = owner_call(owner, ["send", "background", command])
+            val detached = owner_call(owner, ["detach", "background", "before"])
+            val completed_before_release = file_exists(marker)
+            step("Wait without any request or capture while the detached child writes its completion file")
+            val released = file_write(release, "release")
+            var attempt = 0
+            var completed_text = ""
+            while attempt < 300 and completed_text.trim() != "SMUX_DRAIN_SURVIVED":
+                # Redirection creates the file before its data is written.
+                # Poll actual child-written contents, never existence alone.
+                if file_exists(marker):
+                    completed_text = file_read(marker)
+                if completed_text.trim() != "SMUX_DRAIN_SURVIVED":
+                    thread_sleep_ms(50)
+                attempt = attempt + 1
+            val completed_without_clients = completed_text.trim() == "SMUX_DRAIN_SURVIVED"
+            val alive_after_client_exit = process_is_running(owner.pid)
+            step("Reconnect from a fresh process and inspect retained shell output and state")
+            val reattached = owner_call(owner, ["attach", "background", "after"])
+            val captured = owner_await_output(owner, "background", "SMUX_RETAINED_SURVIVED")
+            val resumed = owner_call(owner, ["send", "background", "echo SMUX_RETURN_%SMUX_OWNER_VALUE%"])
+            val returned = owner_await_output(owner, "background", "SMUX_RETURN_SURVIVED")
+            val stopped = owner_stop(owner)
+            val _cleaned = file_delete(marker)
+            val _release_cleaned = file_delete(release)
+            expect(owner.ready).to_equal(true)
+            owner_expect_success([created, attached, configured, queued, detached, reattached, captured, resumed, returned])
+            expect(created.output).to_contain("shell pid=")
+            expect(completed_before_release).to_equal(false)
+            expect(released).to_equal(true)
+            expect(completed_without_clients).to_equal(true)
+            expect(completed_text.trim()).to_equal("SMUX_DRAIN_SURVIVED")
+            expect(alive_after_client_exit).to_equal(true)
+            expect(captured.output).to_contain("SMUX_RETAINED_SURVIVED")
+            expect(returned.output).to_contain("SMUX_RETURN_SURVIVED")
+            expect(stopped).to_equal(true)
+
+    describe "REQ-SMUX-WIN-003: separate shells, windows and request clients":
+        it "should preserve distinct pane and window shell state across disposable clients":
+            val owner = owner_start(owner_binary(), 2)
+            step("Create two sessions and attach distinct client identities")
+            val work = owner_call(owner, ["new", "work"])
+            val monitor = owner_call(owner, ["new", "monitor"])
+            val client_a = owner_call(owner, ["attach", "work", "screen-a"])
+            val client_b = owner_call(owner, ["attach", "monitor", "screen-b"])
+            val windows = owner_call(owner, ["windows", "work"])
+            val original_window = owner_first_id(windows)
+            val panes = owner_call(owner, ["panes", "work"])
+            val original_pane = owner_first_id(panes)
+            val first_value = owner_call(owner, ["send", "work", "set SMUX_PANE_VALUE=FIRST"])
+            step("Split vertically and execute in the newly focused shell")
+            val split = owner_call(owner, ["split", "work", "vertical"])
+            val second_pane = owner_created_id(split, "smux: split pane ")
+            val second_value = owner_call(owner, ["send", "work", "set SMUX_PANE_VALUE=SECOND"])
+            val second_send = owner_call(owner, ["send", "work", "echo SMUX_SECOND_%SMUX_PANE_VALUE%"])
+            val second_output = owner_await_output(owner, "work", "SMUX_SECOND_SECOND")
+            val selected_first = owner_call(owner, ["select-pane", "work", original_pane])
+            val first_send = owner_call(owner, ["send", "work", "echo SMUX_FIRST_%SMUX_PANE_VALUE%"])
+            val first_output = owner_await_output(owner, "work", "SMUX_FIRST_FIRST")
+            step("Create an independent window, run its shell, then return to the original pane")
+            val new_window = owner_call(owner, ["new-window", "work", "logs"])
+            val window_value = owner_call(owner, ["send", "work", "set SMUX_WINDOW_VALUE=LOGS"])
+            val window_send = owner_call(owner, ["send", "work", "echo SMUX_WINDOW_%SMUX_WINDOW_VALUE%"])
+            val window_output = owner_await_output(owner, "work", "SMUX_WINDOW_LOGS")
+            val back = owner_call(owner, ["select-window", "work", original_window])
+            val selected_second = owner_call(owner, ["select-pane", "work", second_pane])
+            val retained_send = owner_call(owner, ["send", "work", "echo SMUX_RESELECT_%SMUX_PANE_VALUE%"])
+            val retained = owner_await_output(owner, "work", "SMUX_RESELECT_SECOND")
+            val sessions = owner_call(owner, ["list"])
+            val monitor_send = owner_call(owner, ["send", "monitor", "set SMUX_MONITOR_VALUE=OTHER"])
+            val monitor_echo = owner_call(owner, ["send", "monitor", "echo SMUX_MONITOR_%SMUX_MONITOR_VALUE%"])
+            val monitor_output = owner_await_output(owner, "monitor", "SMUX_MONITOR_OTHER")
+            val alive = process_is_running(owner.pid)
+            val stopped = owner_stop(owner)
+            expect(owner.ready).to_equal(true)
+            owner_expect_success([work, monitor, client_a, client_b, windows, panes, first_value, split, second_value, second_send, second_output, selected_first, first_send, first_output, new_window, window_value, window_send, window_output, back, selected_second, retained_send, retained, sessions, monitor_send, monitor_echo, monitor_output])
+            expect(work.output).to_contain("shell pid=")
+            expect(monitor.output).to_contain("shell pid=")
+            expect(second_pane.len()).to_be_greater_than(0)
+            expect(second_pane == original_pane).to_equal(false)
+            expect(first_output.output).to_contain("SMUX_FIRST_FIRST")
+            expect(first_output.output.contains("SMUX_SECOND_SECOND")).to_equal(false)
+            expect(second_output.output).to_contain("SMUX_SECOND_SECOND")
+            expect(window_output.output).to_contain("SMUX_WINDOW_LOGS")
+            expect(retained.output).to_contain("SMUX_RESELECT_SECOND")
+            expect(sessions.output).to_equal("smux: sessions=2")
+            expect(monitor_output.output).to_contain("SMUX_MONITOR_OTHER")
+            expect(alive).to_equal(true)
+            expect(stopped).to_equal(true)
+
+    describe "REQ-SMUX-WIN-004: authenticated external control":
+        it "should refuse unauthorized mutation and shutdown while accepting a later authorized request":
+            val owner = owner_start(owner_binary(), 3)
+            step("Send mutation and stop commands from separate clients with the wrong token")
+            val mutation = owner_request(owner.binary, owner.endpoint, "wrong-token", ["new", "forbidden"])
+            val stop_attempt = owner_request(owner.binary, owner.endpoint, "wrong-token", ["stop-server"])
+            val alive = process_is_running(owner.pid)
+            val after = owner_call(owner, ["list"])
+            val created = owner_call(owner, ["new", "authorized"])
+            val final_list = owner_call(owner, ["list"])
+            val stopped = owner_stop(owner)
+            expect(owner.ready).to_equal(true)
+            expect(mutation.code).to_equal(1)
+            expect(mutation.output).to_equal("smux: unauthorized")
+            expect(stop_attempt.code).to_equal(1)
+            expect(stop_attempt.output).to_equal("smux: unauthorized")
+            expect(alive).to_equal(true)
+            owner_expect_success([after, created, final_list])
+            expect(after.output).to_equal("smux: sessions=0")
+            expect(created.output).to_contain("shell pid=")
+            expect(final_list.output).to_equal("smux: sessions=1")
+            expect(stopped).to_equal(true)
+
+    describe "REQ-SMUX-LAYOUT-004: live owner named layouts":
+        it "should apply row and column layouts to two live shells and reject invalid geometry without mutation":
+            val owner = owner_start(owner_binary(), 4)
+            val created = owner_call(owner, ["new", "layout"])
+            val first_pane = owner_first_id(owner_call(owner, ["panes", "layout"]))
+            step("Split horizontally and select a named row layout through separate request processes")
+            val split = owner_call(owner, ["split", "layout", "horizontal"])
+            val second_pane = owner_created_id(split, "smux: split pane ")
+            val rows = owner_call(owner, ["layout", "layout", "even-vertical", "80", "24"])
+            val row_rects = owner_call(owner, ["rects", "layout"])
+            step("Change to side-by-side columns and verify exact owner geometry")
+            val columns = owner_call(owner, ["layout", "layout", "even-horizontal", "80", "24"])
+            val column_rects = owner_call(owner, ["rects", "layout"])
+            val refused = owner_call(owner, ["layout", "layout", "even-horizontal", "1", "1"])
+            val after_refusal = owner_call(owner, ["rects", "layout"])
+            val unknown = owner_call(owner, ["layout", "layout", "unknown-layout", "80", "24"])
+            val after_unknown = owner_call(owner, ["rects", "layout"])
+            val main_rows = owner_call(owner, ["layout", "layout", "main-horizontal", "80", "24"])
+            val main_row_rects = owner_call(owner, ["rects", "layout"])
+            val main_columns = owner_call(owner, ["layout", "layout", "main-vertical", "80", "24"])
+            val main_column_rects = owner_call(owner, ["rects", "layout"])
+            val tiled = owner_call(owner, ["layout", "layout", "tiled", "80", "24"])
+            val tiled_rects = owner_call(owner, ["rects", "layout"])
+            val output_send = owner_call(owner, ["send", "layout", "set SMUX_LAYOUT_VALUE=ALIVE"])
+            val output_echo = owner_call(owner, ["send", "layout", "echo SMUX_LAYOUT_%SMUX_LAYOUT_VALUE%"])
+            val output = owner_await_output(owner, "layout", "SMUX_LAYOUT_ALIVE")
+            val select_first = owner_call(owner, ["select-pane", "layout", first_pane])
+            val left_send = owner_call(owner, ["send", "layout", "set SMUX_LEFT_VALUE=VISIBLE"])
+            val left_echo = owner_call(owner, ["send", "layout", "echo SMUX_LEFT_%SMUX_LEFT_VALUE%"])
+            val left_output = owner_await_output(owner, "layout", "SMUX_LEFT_VISIBLE")
+            step("Query the owner composite and verify output from both real shells is visible")
+            val screen = owner_call(owner, ["screen", "layout"])
+            val stopped = owner_stop(owner)
+            expect(owner.ready).to_equal(true)
+            owner_expect_success([created, split, rows, row_rects, columns, column_rects, after_refusal, after_unknown, main_rows, main_row_rects, main_columns, main_column_rects, tiled, tiled_rects, output_send, output_echo, output, select_first, left_send, left_echo, left_output, screen])
+            expect(created.output).to_contain("shell pid=")
+            expect(rows.output).to_equal("smux: layout even-vertical")
+            expect(columns.output).to_equal("smux: layout even-horizontal")
+            expect(first_pane.len()).to_be_greater_than(0)
+            expect(second_pane.len()).to_be_greater_than(0)
+            expect(row_rects.output).to_contain(first_pane + " 0 0 80 12")
+            expect(row_rects.output).to_contain(second_pane + " 0 12 80 12")
+            expect(column_rects.output).to_contain(first_pane + " 0 0 40 24")
+            expect(column_rects.output).to_contain(second_pane + " 40 0 40 24")
+            expect(refused.code).to_equal(1)
+            expect(unknown.code).to_equal(1)
+            expect(after_refusal.output).to_equal(column_rects.output)
+            expect(after_unknown.output).to_equal(column_rects.output)
+            expect(main_rows.output).to_equal("smux: layout main-horizontal")
+            expect(main_row_rects.output).to_equal(row_rects.output)
+            expect(main_columns.output).to_equal("smux: layout main-vertical")
+            expect(main_column_rects.output).to_equal(column_rects.output)
+            expect(tiled.output).to_equal("smux: layout tiled")
+            expect(tiled_rects.output).to_equal(column_rects.output)
+            expect(output.output).to_contain("SMUX_LAYOUT_ALIVE")
+            expect(screen.output).to_start_with("smux: screen[layout]:\n")
+            expect(screen.output).to_contain("SMUX_LAYOUT_ALIVE")
+            expect(screen.output).to_contain("SMUX_LEFT_VISIBLE")
+            expect(stopped).to_equal(true)

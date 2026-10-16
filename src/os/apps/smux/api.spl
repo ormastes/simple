@@ -22,6 +22,9 @@ use os.apps.smux.contract.{
     SmuxMetrics, MuxBackendKind
 }
 use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.vt_screen.{vt_new, vt_feed}
+use os.apps.smux.layout.{smux_plan_split}
+use os.apps.smux.mux_rects.{MuxRect, mux_layout_known, mux_layout_rects}
 use std.sys.pty.{
     open as pty_open,
     spawn as pty_spawn,
@@ -166,11 +169,14 @@ fn _clean_output(raw: text) -> text:
 # colours) is written back to the child right away — a child waiting on that
 # answer prints nothing until it arrives.
 fn _drain(pr0: PaneRecord) -> PaneRecord:
+    return _drain_bounded(pr0, 256)
+
+fn _drain_bounded(pr0: PaneRecord, limit: int) -> PaneRecord:
     var pr = pr0
     var raw = ""
     var reads = 0
     var more = _has_child(pr)
-    while more and reads < 256:
+    while more and reads < limit:
         var chunk = ""
         if _is_pty(pr):
             chunk = pty_read(pr.pty_fd as i32, 0)
@@ -188,6 +194,23 @@ fn _drain(pr0: PaneRecord) -> PaneRecord:
     if raw == "":
         return pr
     return pr.feed(_clean_output(raw))
+
+# The independent service owner calls this on every event-loop turn, even
+# without attached clients. A noisy pane gets eight read chunks per turn.
+# PTY writes (including terminal-query replies) still depend on the provider's
+# blocking policy; bounded reads alone do not qualify input fairness.
+pub fn smux_poll_output() -> int:
+    var st = _svc
+    var live = 0
+    var i = 0
+    while i < st.pane_count:
+        val pane = st.get_pane(i)
+        if _has_child(pane):
+            st = st.replace_pane(i, _drain_bounded(pane, 8))
+            live = live + 1
+        i = i + 1
+    _svc = st
+    return live
 
 fn _closed_record() -> PaneRecord:
     return PaneRecord.create(MuxPane(
@@ -220,7 +243,7 @@ pub fn smux_create_session(name: text) -> MuxSession:
 
     # auto-create initial window and (focused) pane
     val wid = id_text(n + 1)
-    st = st.add_window(MuxWindow(id: wid, session_id: sid, name: "main", is_active: true))
+    st = st.add_window(MuxWindow.create(wid, sid, "main").with_active(true))
     st = st.add_pane(PaneRecord.create(MuxPane.create(id_text(n + 2), wid, sid)).with_focus(true))
 
     _svc = _with_startup(st).with_next_id(n + 3)
@@ -235,16 +258,33 @@ pub fn smux_list_sessions() -> [MuxSession]:
     return result
 
 pub fn smux_attach(session_id: text, client_id: text, cols: int, rows: int) -> MuxClientAttachment:
+    # Refused attachments must not look successful or consume a client slot.
+    val refused = MuxClientAttachment(client_id: client_id, session_id: session_id,
+        attached: false, cols: cols, rows: rows)
+    if _svc.find_session_idx(session_id) < 0 or client_id == "" or cols <= 0 or rows <= 0:
+        return refused
     val existing = _svc.find_client_idx(client_id)
-    if existing >= 0:
-        return _svc.get_client(existing)
+    if existing < 0 and _svc.client_count >= 4:
+        return refused
     val att = MuxClientAttachment.create(client_id, session_id, cols, rows)
-    _svc = _svc.add_client(att)
+    var st = _svc
+    if existing >= 0:
+        st = st.remove_client(existing)
+    _svc = st.add_client(att)
     return att
 
 pub fn smux_detach(client_id: text) -> bool:
     val idx = _svc.find_client_idx(client_id)
     if idx < 0:
+        return false
+    _svc = _svc.remove_client(idx)
+    return true
+
+pub fn smux_detach_from(session_id: text, client_id: text) -> bool:
+    val idx = _svc.find_client_idx(client_id)
+    if idx < 0:
+        return false
+    if _svc.get_client(idx).session_id != session_id:
         return false
     _svc = _svc.remove_client(idx)
     return true
@@ -256,10 +296,10 @@ pub fn smux_detach(client_id: text) -> bool:
 pub fn smux_new_window(session_id: text, name: text) -> MuxWindow:
     if (_svc.find_session_idx(session_id) < 0 or
             _svc.window_count >= SMUX_CAPACITY or _svc.pane_count >= SMUX_CAPACITY):
-        return MuxWindow(id: "", session_id: session_id, name: name, is_active: false)
+        return MuxWindow.create("", session_id, name)
     val n = _svc.next_id
     val wid = id_text(n)
-    val window = MuxWindow(id: wid, session_id: session_id, name: name, is_active: false)
+    val window = MuxWindow.create(wid, session_id, name)
     var st = _svc.add_window(window)
     st = st.add_pane(PaneRecord.create(MuxPane.create(id_text(n + 1), wid, session_id)).with_focus(true))
     _svc = st.with_next_id(n + 2)
@@ -283,8 +323,7 @@ pub fn smux_focus_window(session_id: text, window_id: text) -> bool:
     while i < st.window_count:
         val w = st.get_window(i)
         if w.session_id == session_id:
-            st = st.replace_window(i, MuxWindow(id: w.id, session_id: w.session_id,
-                name: w.name, is_active: w.id == window_id))
+            st = st.replace_window(i, w.with_active(w.id == window_id))
         i = i + 1
     _svc = st
     return true
@@ -311,13 +350,22 @@ pub fn smux_list_panes(session_id: text, window_id: text) -> [MuxPane]:
     return result
 
 pub fn smux_split_pane(session_id: text, window_id: text, pane_id: text, direction: text) -> Result<MuxPane, text>:
-    if _pane_idx(_svc, session_id, window_id, pane_id) < 0:
+    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
+    if idx < 0:
         return Err("unknown pane: " + pane_id)
     if _svc.pane_count >= SMUX_CAPACITY:
         return Err("pane capacity reached")
+    val original = _svc.get_pane(idx)
+    val planned = smux_plan_split(original.pane.cols as i32, original.pane.rows as i32, direction)
+    if planned.is_err():
+        return Err(planned.unwrap_err())
+    val plan = planned.unwrap()
     val n = _svc.next_id
-    val new_pane = MuxPane.create(id_text(n), window_id, session_id)
-    _svc = _svc.add_pane(PaneRecord.create(new_pane)).with_next_id(n + 1)
+    val added = PaneRecord.create(MuxPane.create(id_text(n), window_id, session_id)).resize(plan.new_cols as int, plan.new_rows as int)
+    val resized = original.resize(plan.old_cols as int, plan.old_rows as int)
+    val changed = _svc.replace_pane(idx, resized).add_pane(added).with_next_id(n + 1)
+    _svc = _invalidate_window_layout(changed, session_id, window_id)
+    val new_pane = added.pane
     return Ok(new_pane)
 
 # Closes the pane and reaps its child (pipe close or PTY close both reap).
@@ -326,7 +374,7 @@ pub fn smux_close_pane(session_id: text, window_id: text, pane_id: text) -> bool
     if idx < 0:
         return false
     _release_child(_svc.get_pane(idx))
-    _svc = _svc.remove_pane(idx)
+    _svc = _invalidate_window_layout(_svc.remove_pane(idx), session_id, window_id)
     return true
 
 pub fn smux_focus_pane(session_id: text, window_id: text, pane_id: text) -> bool:
@@ -356,14 +404,17 @@ pub fn smux_resize(session_id: text, window_id: text, pane_id: text, cols: int, 
     val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
         return Err("unknown pane: " + pane_id)
+    if cols <= 0 or rows <= 0:
+        return Err("pane dimensions must be positive")
     val updated = _svc.get_pane(idx).resize(cols, rows)
     val m = _svc.metrics
-    _svc = _svc.replace_pane(idx, updated).with_metrics(SmuxMetrics(
+    val changed = _svc.replace_pane(idx, updated).with_metrics(SmuxMetrics(
         startup_count: m.startup_count,
         last_startup_ns: m.last_startup_ns,
         resize_count: m.resize_count + 1,
         capture_count: m.capture_count
     ))
+    _svc = _invalidate_window_layout(changed, session_id, window_id)
     return Ok(updated.pane)
 
 # =========================================================================
@@ -552,3 +603,90 @@ pub fn smux_is_deferred_feature(feature: text) -> bool:
 
 pub fn smux_metrics() -> SmuxMetrics:
     return _svc.metrics
+
+# A cell-preserving snapshot for composite frames. Wide glyph continuations
+# remain empty cells; reconstructing columns from a flattened text loses them.
+pub fn smux_capture_cells(session_id: text, window_id: text, pane_id: text) -> Result<[[text]], text>:
+    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
+    if idx < 0:
+        return Err("unknown pane: " + pane_id)
+    val drained = _drain(_svc.get_pane(idx))
+    val screen = if _is_pty(drained): drained.screen else: vt_feed(vt_new(drained.pane.rows, drained.pane.cols), drained.tail)
+    val shown = if screen.frozen.len() > 0: screen.frozen else: screen.cells
+    val m = _svc.metrics
+    _svc = _svc.replace_pane(idx, drained).with_metrics(SmuxMetrics(
+        startup_count: m.startup_count, last_startup_ns: m.last_startup_ns,
+        resize_count: m.resize_count, capture_count: m.capture_count + 1))
+    return Ok(shown)
+
+# A directional split, pane removal or arbitrary pane resize invalidates the
+# named plan for this window. Manual mode deliberately exposes no fabricated
+# coordinates; select a named layout again to establish a complete canvas.
+fn _invalidate_window_layout(st: ServiceState, session_id: text, window_id: text) -> ServiceState:
+    val idx = _window_idx(st, session_id, window_id)
+    if idx < 0:
+        return st
+    val window = st.get_window(idx)
+    return st.replace_window(idx, window.with_layout("manual", window.canvas_cols, window.canvas_rows))
+
+pub fn smux_window_layout(session_id: text, window_id: text) -> Result<text, text>:
+    val idx = _window_idx(_svc, session_id, window_id)
+    if idx < 0:
+        return Err("unknown window: " + window_id)
+    return Ok(_svc.get_window(idx).layout)
+
+# Rectangles use production pane IDs and the persisted window canvas. Unknown
+# or manual windows have no named geometry. This never captures child output.
+pub fn smux_window_rects(session_id: text, window_id: text) -> [MuxRect]:
+    var empty: [MuxRect] = []
+    val idx = _window_idx(_svc, session_id, window_id)
+    if idx < 0:
+        return empty
+    val window = _svc.get_window(idx)
+    if not mux_layout_known(window.layout):
+        return empty
+    var ids: [text] = []
+    var i = 0
+    while i < _svc.pane_count:
+        val pane = _svc.get_pane(i).pane
+        if pane.session_id == session_id and pane.window_id == window_id:
+            ids.push(pane.id)
+        i = i + 1
+    return mux_layout_rects(ids, window.canvas_cols as i64, window.canvas_rows as i64, window.layout)
+
+# Commit metadata and pane grids once after complete validation. Child handles,
+# process IDs, focus and output owners are retained by PaneRecord.resize.
+# This updates VT grids only: the current PTY HAL cannot notify a live child of
+# the new terminal size, so this is not evidence of ResizePseudoConsole support.
+pub fn smux_select_layout(session_id: text, window_id: text, name: text, cols: int, rows: int) -> Result<[MuxRect], text>:
+    val wi = _window_idx(_svc, session_id, window_id)
+    if wi < 0:
+        return Err("unknown window: " + window_id)
+    if not mux_layout_known(name):
+        return Err("invalid layout: " + name)
+    if cols <= 0 or rows <= 0:
+        return Err("layout canvas dimensions must be positive")
+    var ids: [text] = []
+    var indices: [int] = []
+    var i = 0
+    while i < _svc.pane_count:
+        val pane = _svc.get_pane(i).pane
+        if pane.session_id == session_id and pane.window_id == window_id:
+            ids.push(pane.id)
+            indices.push(i)
+        i = i + 1
+    if ids.len() == 0:
+        return Err("no panes in window: " + window_id)
+    val rects = mux_layout_rects(ids, cols as i64, rows as i64, name)
+    if rects.len() != ids.len():
+        return Err("layout cannot fit panes in canvas")
+    var st = _svc
+    i = 0
+    while i < rects.len():
+        val rect = rects[i]
+        val pane = st.get_pane(indices[i])
+        st = st.replace_pane(indices[i], pane.resize(rect.cols as int, rect.rows as int))
+        i = i + 1
+    val window = st.get_window(wi)
+    _svc = st.replace_window(wi, window.with_layout(name, cols, rows))
+    return Ok(rects)
