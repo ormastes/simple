@@ -73,7 +73,7 @@ fn codec_use_lines() -> text:
     out = out + "use compiler.common.attributes.{{FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata, VhdlClockedMetadata, VhdlGenericMetadata, VhdlReturnFieldMetadata, VhdlResetPolarity, VhdlResetSynchrony, OptimizationReq, OptimizationReqLevel, OptimizationBackend}}\n"
     out = out + "use compiler.frontend.parser_types_expr.{{AsmTargetSpec, AsmConstraintKind, AsmLocation, Type, TypeKind, Expr}}\n"
     out = out + "use compiler.frontend.core.flat_pool_codec.{{FlatPoolReader, flat_pool_parse_i64, flat_pool_unescape}}\n"
-    out = out + "use compiler.hir.hir_codec_support.{{HirCodecWriter, hc_enc_opaque_expr, hc_dec_opaque_expr, hc_enc_opaque_block_value, hc_dec_opaque_block_value, hc_bad_tag, hc_read_f64}}\n"
+    out = out + "use compiler.hir.hir_codec_support.{{HirCodecWriter, hc_enc_opaque_expr, hc_dec_opaque_expr, hc_enc_opaque_block_value, hc_dec_opaque_block_value, hc_bad_tag, hc_read_f64, hc_enc_enum_bool, hc_enc_enum_text, hc_restore_enum_nil}}\n"
     out = out + "use compiler.hir.hir_codec_key_order.{{hc_order_i64_keys_v1, hc_order_text_keys_v1, hc_order_symbol_id_keys_v1}}\n"
     out
 
@@ -561,8 +561,15 @@ fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
             # Visibility values to hc_bad_tag(..., -1).
             parts.push("        case " + decl.name + "." + row.variant + _codec_binders(fields) + ":\n")
             parts.push("            w.put_i64(" + "{idx}" + ")\n")
+            var field_index = 0
             for f in fields:
-                parts.push(_emit_enc(u, f.type_text, "b_" + f.binder, "            ", c))
+                val shape = u.classify(f.type_text)
+                if shape.cat == "prim_bool" or shape.cat == "prim_text":
+                    val helper = if shape.cat == "prim_bool": "hc_enc_enum_bool" else: "hc_enc_enum_text"
+                    parts.push("            " + helper + "(w, node, " + "{fields.len()}" + ", " + "{field_index}" + ", b_" + f.binder + ")\n")
+                else:
+                    parts.push(_emit_enc(u, f.type_text, "b_" + f.binder, "            ", c))
+                field_index = field_index + 1
             idx = idx + 1
         # Encoding sees live compiler state, not an untrusted cache blob. A
         # malformed/unsupported enum must refuse this cache entry and let the
@@ -587,11 +594,41 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
             val fields = parse_payload_fields(row.payload_schema)
             parts.push("    if tag == " + "{idx}" + ":\n")
             var names: [text] = []
+            var nil_flags: [text] = []
+            var nil_indices: [i64] = []
+            var field_index = 0
             for f in fields:
-                parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "        ", c))
+                val shape = u.classify(f.type_text)
+                if shape.cat == "prim_bool" or shape.cat == "prim_text":
+                    val k = c.next()
+                    val target = "f_" + f.binder
+                    val flag = "wire_nil_" + f.binder
+                    parts.push("        val raw{k} = r.next()\n")
+                    if shape.cat == "prim_bool":
+                        parts.push("        val " + flag + " = raw{k} == \"N\"\n")
+                        parts.push("        val " + target + " = raw{k} == \"1\"\n")
+                    else:
+                        parts.push("        val " + flag + " = raw{k} == \"\\\\N\"\n")
+                        parts.push("        val " + target + " = if " + flag + ": \"\" else: flat_pool_unescape(raw{k})\n")
+                    nil_flags.push(flag)
+                    nil_indices.push(field_index)
+                else:
+                    parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "        ", c))
                 names.push("f_" + f.binder)
+                field_index = field_index + 1
             if fields.len() == 0:
                 parts.push("        return " + decl.name + "." + row.variant + "\n")
+            elif nil_flags.len() > 0:
+                parts.push("        val wire_prototype = " + decl.name + "." + row.variant + "(" + _join(names, ", ") + ")\n")
+                parts.push("        if " + _join(nil_flags, " or ") + ":\n")
+                parts.push("            if not r.reserve(" + "{64 + fields.len() * 16}" + "): return nil\n")
+                parts.push("            var wire_nil_slots: [i64] = []\n")
+                var ni = 0
+                while ni < nil_flags.len():
+                    parts.push("            if " + nil_flags[ni] + ": wire_nil_slots.push(" + "{nil_indices[ni]}" + ")\n")
+                    ni = ni + 1
+                parts.push("            return hc_restore_enum_nil(r, wire_prototype, " + "{fields.len()}" + ", wire_nil_slots)\n")
+                parts.push("        return wire_prototype\n")
             else:
                 parts.push("        return " + decl.name + "." + row.variant + "(" + _join(names, ", ") + ")\n")
             idx = idx + 1

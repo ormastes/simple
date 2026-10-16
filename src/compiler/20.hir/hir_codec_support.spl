@@ -22,6 +22,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{exit}
 use std.common.binary_io.{f64_to_bits, f64_from_bits}
 use std.common.encoding.utf8.{text_byte_len}
+use std.nogc_sync_mut.sffi.enum_wire.{enum_wire_nil_slot, enum_wire_restore_nil}
 
 # CHUNKED: `parts` is the CURRENT chunk and is bounded by HIR_CODEC_CHUNK_LINES;
 # every full chunk is joined once and moved to `chunks`. This is not a style
@@ -382,6 +383,14 @@ class HirCodecWriter:
         val line = if rendered == "true": "1\n" elif rendered == "false": "0\n" else: "N\n"
         self._append_line(line)
 
+    me put_nil_bool_wire():
+        if self._can_append(2, 32, 2):
+            self._append_line("N\n")
+
+    me put_nil_text_wire():
+        if self._can_append(3, 32, 3):
+            self._append_line("\\N\n")
+
     # A declared `text` field can hold nil in a real lowered module (doc
     # comments, gpu targets). The escaper only ever emits `\\` or `\n`
     # after a backslash, so the line `\N` cannot collide with any real value
@@ -491,6 +500,42 @@ fn hc_read_f64(r: FlatPoolReader) -> f64:
         return 0.0
     f64_from_bits(((hi as u64) << 32) | (lo as u64))
 
+# Only the generated enum schema calls these boundaries. It supplies the
+# actual variant arity/index, never an inferred runtime tuple shape.
+fn hc_enc_enum_bool<T>(w: HirCodecWriter, node: T, arity: i64, index: i64, value: bool):
+    if not w._can_append(0, 128, 16): return
+    unsafe(capabilities: [ffi]):
+        match enum_wire_nil_slot(node, arity, index):
+            case Ok(is_nil):
+                if is_nil: w.put_nil_bool_wire()
+                else: w.put_bool(value)
+            case Err(detail): w.reject(detail)
+
+fn hc_enc_enum_text<T>(w: HirCodecWriter, node: T, arity: i64, index: i64, value: text):
+    if not w._can_append(0, 128, 16): return
+    unsafe(capabilities: [ffi]):
+        match enum_wire_nil_slot(node, arity, index):
+            case Ok(is_nil):
+                if is_nil: w.put_nil_text_wire()
+                else: w.put_text(value)
+            case Err(detail): w.reject(detail)
+
+fn hc_restore_enum_nil<T>(r: FlatPoolReader, prototype: T, arity: i64, slots: [i64]) -> T:
+    if not r.ok: return nil
+    # Conservative charges include the extra enum, private tuple and result
+    # wrapper. The generator separately reserves the nil-slot array before allocation.
+    if arity < 0 or arity > 576460752303422981 or slots.len() > arity:
+        r.reject_bounds("enum_wire_arity")
+        return nil
+    if not r.reserve(4096 + arity * 16) or not r.charge_work(16 + arity * 2 + slots.len()):
+        return nil
+    unsafe(capabilities: [ffi]):
+        match enum_wire_restore_nil(prototype, arity, slots):
+            case Ok(restored): return restored
+            case Err(detail):
+                r.reject_malformed(detail)
+                return nil
+
 fn hc_decode_reject(r: FlatPoolReader):
     r.reject_malformed("unknown_tag_or_discriminant")
 
@@ -555,5 +600,6 @@ fn hc_dec_opaque_block_value(r: FlatPoolReader) -> BlockValue:
 
 export HirDecodeLimits, HirDecodeAuditUsage, HirDecodeAuditObserver
 export HirCodecWriter, hc_bad_tag, hc_decode_reject, hc_read_f64
+export hc_enc_enum_bool, hc_enc_enum_text, hc_restore_enum_nil
 export hc_enc_opaque_expr, hc_dec_opaque_expr
 export hc_enc_opaque_block_value, hc_dec_opaque_block_value
