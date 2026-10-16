@@ -24,9 +24,10 @@ incompatible-target errors remain unchanged.
 
 Original evidence is retained at
 `C:/dev/simple-bootstrap-storage/phase3-validation-20261016/phase3-a174-1e93dca4-cli-bootstrap-cycle2/compile.log`
-and its frozen source snapshot and HIR ledger. Workaround commit SHA/link must
-be recorded after the reviewed repair commit exists; no uncommitted SHA is
-claimed. Background owner: compiler HIR import/surface projection lane.
+and its frozen source snapshot and HIR ledger. Workaround implementation commit:
+[`b114fbe355e257f6265b0fa9c738dcc21dea55b7`](https://github.com/ormastes/simple/commit/b114fbe355e257f6265b0fa9c738dcc21dea55b7).
+The commit is not yet landed or runtime qualified. Background owner: compiler
+HIR import/surface projection lane.
 
 Recovery: fix and qualify imported class method/field owner projection, then
 remove only this tagged import and rerun the original CUDA port HIR/native

@@ -22,7 +22,8 @@ parameter signatures in both emitted call arms, arity rejection and unresolved
 parameter rejection, alongside its existing return-owner tests. These scenarios
 are not yet executed; no test success or linked binary is claimed here.
 
+Implementation commit: `b114fbe355e257f6265b0fa9c738dcc21dea55b7` (not yet landed).
 Original evidence is retained externally under
 `phase3-validation-20261016/phase3-a174-1e93dca4-cli-bootstrap-cycle2/`, including
-the three failed ledger rows and fatal diagnostics. Repair commit reference and
-linked-output qualification must be recorded after actual validation and landing.
+the three failed ledger rows and fatal diagnostics. Linked-output qualification
+and landing remain pending.
