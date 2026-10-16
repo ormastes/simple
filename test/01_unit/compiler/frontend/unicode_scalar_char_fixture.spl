@@ -1,0 +1,66 @@
+use std.common.encoding.unicode_scalar.{unicode_scalar_to_char}
+use compiler.hir.hir_definitions.{HirExprKind}
+
+fn unicode_scalar_char_case_v1(codepoint: i64, expected_bytes: [i64], expected_text: text) -> text:
+    val converted = unicode_scalar_to_char(codepoint)
+    if converted.is_err(): return "valid scalar conversion rejected {codepoint}"
+    val character: char = converted.unwrap()
+    if (character as i64) != codepoint: return "native char conversion changed {codepoint}"
+    val kind: HirExprKind = HirExprKind.CharLit(character)
+    match kind:
+        case HirExprKind.CharLit(raw_payload):
+            val payload: char = raw_payload
+            if (payload as i64) != codepoint: return "real CharLit payload changed {codepoint}"
+            val rendered: text = "{payload}"
+            val bytes: [u8] = rendered.bytes()
+            if bytes.len() != expected_bytes.len(): return "rendered byte length {codepoint}"
+            var index: i64 = 0
+            while index < bytes.len():
+                if bytes[index].to_i64() != expected_bytes[index]:
+                    return "rendered byte contents {codepoint}"
+                index = index + 1
+            if expected_text != "" and rendered != expected_text:
+                return "rendered text contents {codepoint}"
+        case _: return "real CharLit variant lost {codepoint}"
+    ""
+
+fn unicode_scalar_char_controls_v1() -> text:
+    var failure = unicode_scalar_char_case_v1(65, [65], "A")
+    if failure != "": return failure
+    failure = unicode_scalar_char_case_v1(233, [195, 169], "é")
+    if failure != "": return failure
+    failure = unicode_scalar_char_case_v1(128512, [240, 159, 152, 128], "😀")
+    if failure != "": return failure
+    failure = unicode_scalar_char_case_v1(0, [0], "")
+    if failure != "": return failure
+    failure = unicode_scalar_char_case_v1(3, [3], "")
+    if failure != "": return failure
+    failure = unicode_scalar_char_case_v1(10, [10], "\n")
+    if failure != "": return failure
+    failure = unicode_scalar_char_case_v1(92, [92], "\\")
+    if failure != "": return failure
+    failure = unicode_scalar_char_case_v1(55295, [237, 159, 191], "")
+    if failure != "": return failure
+    failure = unicode_scalar_char_case_v1(57344, [238, 128, 128], "")
+    if failure != "": return failure
+    failure = unicode_scalar_char_case_v1(1114111, [244, 143, 191, 191], "")
+    if failure != "": return failure
+    failure = unicode_scalar_char_case_v1(65533, [239, 191, 189], "�")
+    if failure != "": return failure
+
+    # Large values would truncate to ASCII if the public guard ran too late.
+    val invalid: [i64] = [-1, 55296, 57343, 1114112, 4294967361, -4294967231, 9223372036854775807]
+    var index: i64 = 0
+    while index < invalid.len():
+        val result = unicode_scalar_to_char(invalid[index])
+        if not result.is_err(): return "invalid scalar admitted {invalid[index]}"
+        val reason: text = result.unwrap_err()
+        val expected = if invalid[index] >= 55296 and invalid[index] <= 57343:
+            "Unicode scalar is a surrogate"
+        else:
+            "Unicode scalar is outside 0..1114111"
+        if reason != expected: return "invalid scalar denial changed {invalid[index]}"
+        index = index + 1
+    ""
+
+export unicode_scalar_char_controls_v1
