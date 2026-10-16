@@ -22,3 +22,8 @@ runtime NOT_RUN pending an admitted compiler/runtime; source assertions or
 documentation are not native qualification. Broader compiler/lib/MCP/LSP and
 release gates remain UNRUN. This isolated repair excludes the separate mono
 alias-placement and initializer-context regressions under review.
+
+The SSpec and standalone type_pool_root_rank_native.spl entry share the same
+reason-returning fixture helper. Native main imports no BDD runner, prints a
+named failure and returns nonzero for a failed lifecycle or retained value.
+The first bounded native qualification is prepared but has not run.
