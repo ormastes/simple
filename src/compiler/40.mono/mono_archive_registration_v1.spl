@@ -252,6 +252,31 @@ fn mono_archive_registration_receipt_seal_v1(receipt: MonoArchiveRegistrationRec
     if not w.ok: return ""
     sha256_text((if receipt.logical_name != "": "mono-logical-registration-receipt-v3\n" else: "mono-registration-receipt-v3\n") + w.finish())
 
+fn mono_archive_registration_receipt_difference_v1(
+        expected: MonoArchiveRegistrationReceiptV1,
+        actual: MonoArchiveRegistrationReceiptV1) -> text:
+    if expected.logical_name != actual.logical_name: return "logical name"
+    if expected.archive.archive_key != actual.archive.archive_key or
+            expected.archive.body_digest != actual.archive.body_digest or
+            expected.archive.lowering_warnings_digest != actual.archive.lowering_warnings_digest:
+        return "archive identity"
+    if expected.base_digest != actual.base_digest or expected.base_epoch != actual.base_epoch:
+        return "predecessor identity"
+    if expected.next_symbol != actual.next_symbol: return "next symbol"
+    if expected.generic_functions != actual.generic_functions or
+            expected.generic_structs != actual.generic_structs or
+            expected.generic_classes != actual.generic_classes:
+        return "generic counts"
+    if expected.roots != actual.roots: return "root order"
+    if expected.rows.len() != actual.rows.len(): return "row count"
+    var index = 0
+    while index < expected.rows.len():
+        if mono_archive_registration_row_digest_v1(expected.rows[index]) !=
+                mono_archive_registration_row_digest_v1(actual.rows[index]):
+            return "row order or payload"
+        index = index + 1
+    "unknown seal component"
+
 fn mono_archive_registration_scratch_collector_v1(owner: MonoArchiveRegistrationOwnerV1) -> MonomorphizationPass:
     var worker = MonomorphizationPass.create()
     worker.template_body_mode = MonoTemplateBodyModeV1.ArchiveRequests
@@ -593,7 +618,9 @@ fn mono_archive_publish_registration_v1(owner: MonoArchiveRegistrationOwnerV1,
                     refusal = "registration exact recollection refused: " + exact.unwrap_err()
                 else:
                     valid = exact.unwrap().seal == receipt.seal
-                    refusal = "registration exact recollection seal differs"
+                    if not valid:
+                        refusal = "registration exact recollection differs: " +
+                            mono_archive_registration_receipt_difference_v1(receipt, exact.unwrap())
         else:
             refusal = "registration archived body decode refused"
     val schedule = if valid: mono_archive_registration_schedule_digest_v1(owner.roots +
