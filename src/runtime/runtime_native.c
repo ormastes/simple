@@ -14313,7 +14313,7 @@ int64_t rt_file_read_text_at_checked(int64_t path_value, int64_t offset, int64_t
     char* path = rt_core_string_to_cpath(path_value);
     if (!path || offset < 0 || size < 0 || (uint64_t)size > SIZE_MAX) {
         if (path) free(path);
-        return 0;
+        return rt_core_nil();
     }
     if (size == 0) {
         free(path);
@@ -14323,12 +14323,14 @@ int64_t rt_file_read_text_at_checked(int64_t path_value, int64_t offset, int64_t
 #if defined(_WIN32)
     /* Binary: text mode translated CRLF and stopped at ^Z, so the same file
      * hashed differently than on POSIX (and than the Rust twin). */
-    int fd = open(path, O_RDONLY | _O_BINARY);
+    /* Reuse the UTF-8 -> UTF-16 fd owner. Narrow CRT open uses the active
+     * code page and cannot reliably open source paths containing Unicode. */
+    int fd = (int)rt_open_fd(path, 0, 0);
 #else
     int fd = open(path, O_RDONLY);
 #endif
     free(path);
-    if (fd < 0) return 0;
+    if (fd < 0) return rt_core_nil();
 
     /* `size` is a caller CAP, not the expected length: the SCV inventory reads
      * every source with a 1 GiB cap, and allocating the cap per file cost
@@ -14347,13 +14349,13 @@ int64_t rt_file_read_text_at_checked(int64_t path_value, int64_t offset, int64_t
     uint8_t* buffer = (uint8_t*)malloc((size_t)size);
     if (!buffer) {
         close(fd);
-        return 0;
+        return rt_core_nil();
     }
     ssize_t bytes_read = rt_file_read_at_fd(fd, buffer, (size_t)size, offset);
     close(fd);
     if (bytes_read < 0) {
         free(buffer);
-        return 0;
+        return rt_core_nil();
     }
     int64_t result = rt_string_new(buffer, (uint64_t)bytes_read);
     free(buffer);
