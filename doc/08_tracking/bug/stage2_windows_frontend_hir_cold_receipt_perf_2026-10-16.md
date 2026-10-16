@@ -77,3 +77,103 @@ String accumulation `x = x + ...` in loops over unbounded rows:
 rows), `00.common/cache/darwin_runtime_provider_manifest.spl:154,190`,
 `80.driver/cache/cas/verified_cas_kind_registry_v1.spl:107`,
 `80.driver/cache/cold_package_scc_v1.spl:34`. Not on the measured hot path.
+
+## Follow-up 2026-10-16: promote re-walk CONFIRMED (mechanism + micro-benchmark); no safe runtime fix yet
+
+### Mechanism (read from source, `origin/release_phase3` @ `a89ae76afd0`)
+
+* `rt_core_transient_classify` (`src/runtime/runtime_native.c:2700-2754`) returns
+  "tracked node" for every *registered* ARRAY/DICT/ENUM/FLOAT/INT/UINT/CLOSURE
+  without reading `transient_scope_id`; only STRING (2742-2748) checks ownership.
+  Under `SIMPLE_RUNTIME_MEMORY_OWNER` (the capsule lane) persistent structs are
+  nodes too: `rt_transient_raw_words` (`runtime_memory.c:171-198`) falls back to
+  `rt_struct_alloc_lookup_size` for structs allocated before the scope.
+* So `rt_transient_heap_promote` (2767-2859) traverses the *entire* reachable
+  graph — persistent part included — every call; the mark loop (2852,
+  `if (*object_scope == scope_id)`) is a no-op on everything already persistent.
+  Per child word: raw-owner hash probe (+ struct-registry probe), immortal-registry
+  probe, then insert into a per-call `calloc`'d seen set that rehashes on every
+  doubling.
+* Rust runtime (`src/compiler_rust/runtime/src/value/collections.rs:2254-2298`,
+  `transient_heap_children` 2172-2215) is the same shape: no scope filter, full walk.
+* Hard cliff, not only slowness: `RT_CORE_TRANSIENT_MAX_NODES = 1<<22`
+  (`runtime_native.c:2651`). Once one root's reachable graph (persistent part
+  included) exceeds ~4.2M nodes, `rt_core_transient_plan_push` returns 0 and the
+  promote FAILS ("... ownership promotion failed for <module>").
+
+### Which call sites are the O(n) term (per module)
+
+* HIR: `lower_streaming_surface_source` / retained lowering
+  (`80.driver/driver_hir_pipeline_lowering.spl:483-582`):
+  `promote_phase_memo_transient_owners` (`20.hir/hir_lowering/types.spl:908`,
+  already batched into one seen set, but the memos accumulate across ALL modules),
+  then `driver_promote_retained_frontend_owners_v1`
+  (`driver_source_pipeline_parsing.spl:298`: 4 registries + parser slots +
+  declaration metadata + resource registry + parse cache + shared-parse rows +
+  coverage inventory — all cross-module). Symbol-table containers
+  (`types.spl:882`) are module-local and are NOT the growing term.
+* MIR (same pattern, explains the ~1.35 s/module floor that scales with closure
+  size): `lower_module_transient_scoped` (`50.mir/_MirLowering/module_lowering.spl:1737-1745`)
+  promotes the module, then `promote_transient_owner`
+  (`_MirLowering/transient_owner.spl:13+`, ~30 SEPARATE walks, one per lowering
+  field incl. `symbols`, `fn_return_types`, `callable_link_names`), then
+  `bootstrap_mir_registries_promote` (`bootstrap_globals.spl:116-155`, 20
+  cross-module arrays) and `bootstrap_fn_registries_promote`
+  (`mir_data.spl:1270`, 17 cross-module dicts). Every one re-walks everything
+  accumulated by earlier modules.
+
+### Micro-benchmark (C runtime, `-DSIMPLE_RUNTIME_MEMORY_OWNER=1`, clang 18, Windows 11)
+
+Persistent registry array created before the first scope; per "module": begin
+scope, append 50 entries (`[ [1,2], 3 ]`) plus 200 garbage entries, pause,
+time one `rt_transient_heap_promote`, end. 2000 modules:
+
+| modules | registry size | promote(registry) | promote(only new entries) |
+|---|---|---|---|
+| 1..400 | ≤20k | 1.69 ms/module | 0.009 ms |
+| 401..800 | ≤40k | 5.27 ms | 0.009 ms |
+| 801..1200 | ≤60k | 13.7 ms | 0.008 ms |
+| 1201..1600 | ≤80k | 21.1 ms | 0.006 ms |
+| 1601..2000 | ≤100k | 34.1 ms | 0.005 ms |
+| total | | **30,334 ms** | **14.7 ms** |
+
+Quadratic in total (and per-call cost is itself slightly superlinear in graph
+size: ~0.17 → ~0.38 µs per entry, seen-set growth / cache misses). The
+"only new entries" column is a COST PROBE ONLY — it is not a correct promote:
+it skips the registry's own backing store, which `rt_array_push` may have
+reallocated inside the scope (see the `bootstrap_globals.spl` docstring).
+
+### Why no fix landed with this follow-up
+
+Pruning the walk at already-persistent containers needs a complete write
+barrier, and one cannot be added in the runtime alone:
+
+* Struct field stores are INLINE in native codegen: Cranelift `SetField`
+  (`70.backend/backend/cranelift_codegen_adapter.spl:715-721`) emits a raw
+  `cranelift_store` — no runtime call to hook. A persistent struct reachable only
+  through a persistent array can receive a transient value with no runtime
+  visibility; pruning that array would free a live object (UAF).
+* Array/dict element stores DO go through runtime calls (`rt_array_set`,
+  `rt_array_push`, `rt_dict_set`, …), so a dirty bit there is possible but not
+  sufficient on its own.
+
+Fix options, in order of safety:
+1. Codegen-emitted barrier: `SetField` on a base whose `transient_scope_id == 0`
+   (or a per-object "persistent" bit) records the base in a per-scope remembered
+   set; runtime mutators (`rt_array_set/push/insert/extend`, `rt_dict_set/remove`,
+   `rt_closure_set_capture`, enum payload writes) do the same. Promote then walks
+   transient nodes + remembered persistent nodes only. Must land in C runtime,
+   Rust runtime, and every backend (Cranelift, LLVM, native isel) together, and
+   be proven by a selfcheck that writes a transient value into a persistent
+   struct reached only via a persistent array.
+2. Call-site incremental promotion for append-only registries of immutable leaves
+   (text/int arrays in `bootstrap_globals.spl`, `mir_data.spl`): promote the new
+   tail plus the container's backing store via a new shallow runtime entry point.
+   Needs per-registry proof that no existing slot is overwritten in place.
+3. Constant-factor only (does not change the curve): batch the ~30 separate
+   MIR-owner walks into one seen set like `promote_phase_memo_transient_owners`.
+
+Unverified: the Stage 2 exe's exact runtime lane (capsule C runtime with
+`SIMPLE_RUNTIME_MEMORY_OWNER` assumed); the share of the real 1294 s parse /
+HIR curve attributable to promote (needs a profiled rebuild with a promote
+timer, not possible from the read-only admitted exe).
