@@ -63,6 +63,220 @@ fn h_treesitter_outline<H>(h: H, payload: text, pre_lex: PreLexInfo) -> BlockOut
 # ============================================================================
 
 me treesitter_parse_attributes(self: TreeSitter) -> [AttributeOutline]:
+        self.parse_attributes()
+
+me treesitter_parse_attribute(self: TreeSitter) -> AttributeOutline:
+        self.parse_attribute()
+
+me treesitter_parse_import_items(self: TreeSitter) -> [text]:
+        self.parse_import_items()
+
+# ============================================================================
+# Top-Level Item Dispatch
+# ============================================================================
+
+me treesitter_parse_top_level_item(self: TreeSitter) -> TopLevelItem:
+        self.parse_top_level_item()
+
+# ============================================================================
+# Import / Export Parsing
+# ============================================================================
+
+me treesitter_parse_import(self: TreeSitter) -> ImportOutline:
+        self.parse_import()
+
+me treesitter_parse_export(self: TreeSitter) -> ExportOutline:
+        self.parse_export()
+
+me treesitter_parse_module_path(self: TreeSitter) -> text:
+        self.parse_module_path()
+
+me treesitter_parse_identifier(self: TreeSitter) -> text:
+        self.parse_identifier()
+
+# ============================================================================
+# Block Outline Parsing
+# ============================================================================
+
+me treesitter_parse_block_outline(self: TreeSitter) -> BlockOutline:
+        self.parse_block_outline()
+
+me treesitter_skip_block_content(self: TreeSitter) -> text:
+        self.skip_block_content()
+
+me treesitter_apply_outline_policy(self: TreeSitter, block: BlockOutline) -> BlockOutline:
+        self.apply_outline_policy(block)
+
+# ============================================================================
+# Inline ASM Outline Parsing
+# ============================================================================
+
+me treesitter_warn_legacy_asm(self: TreeSitter, span: LexSpan):
+        self.warn_legacy_asm(span)
+
+fn treesitter_append_asm_payload(payload: text, piece: text) -> text:
+        if piece == "":
+            return payload
+        if payload == "":
+            return piece
+        if piece == "," or piece == ";" or piece == ")" or piece == "]" or piece == "}":
+            return payload + piece
+        if payload.ends_with("#") or payload.ends_with("{") or payload.ends_with("(") or payload.ends_with("["):
+            return payload + piece
+        if piece == "#":
+            return payload + " " + piece
+        if piece == "{" or piece == "(" or piece == "[":
+            return payload + " " + piece
+        return payload + " " + piece
+
+
+me treesitter_parse_asm_braced_outline(self: TreeSitter, start: LexSpan, is_volatile: bool) -> AsmBlockOutline:
+        self.parse_asm_braced_outline(start, is_volatile)
+
+me treesitter_parse_asm_paren_outline(self: TreeSitter, start: LexSpan, is_volatile: bool) -> AsmBlockOutline:
+        self.parse_asm_paren_outline(start, is_volatile)
+
+me treesitter_parse_asm_colon_outline(self: TreeSitter, start: LexSpan, is_volatile: bool) -> AsmBlockOutline:
+        self.parse_asm_colon_outline(start, is_volatile)
+
+me treesitter_parse_asm_outline(self: TreeSitter) -> AsmBlockOutline:
+        self.parse_asm_outline()
+
+me treesitter_skip_block(self: TreeSitter):
+        self.skip_block()
+
+# ============================================================================
+# Helper Types
+# ============================================================================
+
+"""Friend declaration outline."""
+struct FriendDeclOutline:
+    package_name: text
+    span: LexSpan
+
+"""Internal export declaration outline."""
+struct InternalExportOutline:
+    items: [text]
+    span: LexSpan
+
+"""Parsed top-level item."""
+enum TopLevelItem:
+    Import(ImportOutline)
+    Export(ExportOutline)
+    Function(FunctionOutline)
+    Class(ClassOutline)
+    ActorItem(ActorOutline)
+    Struct(StructOutline)
+    Enum(EnumOutline)
+    Bitfield(BitfieldOutline)
+    Trait(TraitOutline)
+    Impl(ImplOutline)
+    TypeAlias(TypeAliasOutline)
+    Const(ConstOutline)
+    StaticAssert(StaticAssertOutline)
+    FriendDecl(FriendDeclOutline)
+    InternalExportDecl(InternalExportOutline)
+    Error(ParseError)
+
+# ============================================================================
+# Main Entry Point (TreeSitter.parse_outline)
+# ============================================================================
+#
+# NOTE: This was previously defined in the sibling facade file
+# `10.frontend/treesitter.spl`, which shares the exact module path
+# `compiler.frontend.treesitter` with this directory's `__init__.spl`. That
+# file-vs-directory collision meant the directory form silently won module
+# resolution and `treesitter.spl`'s `impl TreeSitter: parse_outline()` was
+# never loaded — every `use compiler.treesitter.*` caller got a `TreeSitter`
+# with no `parse_outline` method. Moved here (the directory package that
+# actually owns `TreeSitter`) and the dead-shadowed facade file removed.
+
+impl TreeSitter:
+    me parse_outline() -> OutlineModule:
+        """Parse source into an outline module.
+
+        This is the main entry point that dispatches to either:
+        - Heuristic mode (line-based, error-tolerant)
+        - Token-based mode (tree-sitter, accurate)
+        """
+
+        # Branch based on mode
+        if self.heuristic_mode:
+            return self.parse_outline_heuristic()
+
+        # Token-based parsing (default)
+        var module = OutlineModule(
+            name: "",
+            imports: [],
+            exports: [],
+            functions: [],
+            classes: [],
+            actors: [],
+            structs: [],
+            enums: [],
+            bitfields: [],
+            traits: [],
+            impls: [],
+            type_aliases: [],
+            constants: [],
+            static_asserts: [],
+            inline_blocks: [],
+            asm_blocks: [],
+            errors: []
+        )
+
+        while not self.is_at_end():
+            self.skip_newlines()
+            if self.is_at_end():
+                break
+
+            val item = self.parse_top_level_item()
+            match item:
+                case toplevelitem_Import(i):
+                    module.imports.push(i)
+                case toplevelitem_Export(e):
+                    module.exports.push(e)
+                case toplevelitem_Function(f):
+                    module.functions.push(f)
+                case toplevelitem_Class(c):
+                    module.classes.push(c)
+                case toplevelitem_ActorItem(a):
+                    module.actors.push(a)
+                case toplevelitem_Struct(s):
+                    module.structs.push(s)
+                case toplevelitem_Enum(e):
+                    module.enums.push(e)
+                case toplevelitem_Bitfield(b):
+                    module.bitfields.push(b)
+                case toplevelitem_Trait(t):
+                    module.traits.push(t)
+                case toplevelitem_Impl(i):
+                    module.impls.push(i)
+                case toplevelitem_TypeAlias(t):
+                    module.type_aliases.push(t)
+                case toplevelitem_Const(c):
+                    module.constants.push(c)
+                case toplevelitem_StaticAssert(a):
+                    module.static_asserts.push(a)
+                case TopLevelItem.Error(e):
+                    module.errors.push(e)
+                case _:
+                    pass
+        module.inline_blocks = self.inline_blocks
+        module.asm_blocks = self.asm_blocks
+        module.errors = self.errors
+        module
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export use compiler.frontend.treesitter.outline_lexer.{TreeSitter}
+export TopLevelItem
+
+# Canonical receiver bodies; free entry points above preserve compatibility.
+impl TreeSitter:
+    me parse_attributes() -> [AttributeOutline]:
         var attrs: [AttributeOutline] = []
         while self.check(TokenKind.At):
             attrs = attributes_push(attrs, self.parse_attribute())
@@ -70,17 +284,19 @@ me treesitter_parse_attributes(self: TreeSitter) -> [AttributeOutline]:
         attrs
 
 
-me treesitter_parse_attribute(self: TreeSitter) -> AttributeOutline:
+    me parse_attribute() -> AttributeOutline:
         """Parse a single attribute: @name or @name(args)."""
         val start = self.current.span
 
         self.advance()  # Consume '@'
 
         val name = self.parse_identifier()
-        var args_span: LexSpan = nil
+        var has_args = false
+        var args_span = lex_span_new(0, 0, 0, 0)
 
         # Check for arguments: @name(arg1, arg2, ...)
         if self.match_token(TokenKind.LParen):
+            has_args = true
             val args_start = self.previous.span.end_pos
             # Skip to matching right paren (handles nested parens)
             var depth = 1
@@ -101,12 +317,13 @@ me treesitter_parse_attribute(self: TreeSitter) -> AttributeOutline:
 
         AttributeOutline(
             name: name,
+            has_args_span: has_args,
             args_span: args_span,
             span: merge_spans(start, self.previous.span)
         )
 
 
-me treesitter_parse_import_items(self: TreeSitter) -> [text]:
+    me parse_import_items() -> [text]:
         var items: [text] = []
         items = import_items_push(items, self.parse_identifier())
         while self.match_token(TokenKind.Comma):
@@ -116,11 +333,7 @@ me treesitter_parse_import_items(self: TreeSitter) -> [text]:
         items
 
 
-# ============================================================================
-# Top-Level Item Dispatch
-# ============================================================================
-
-me treesitter_parse_top_level_item(self: TreeSitter) -> TopLevelItem:
+    me parse_top_level_item() -> TopLevelItem:
         """Parse a top-level item."""
         # Parse attributes before the declaration (@repr, @packed, @align, etc.)
         val attrs: [Attribute] = self.parse_attributes()
@@ -271,11 +484,7 @@ me treesitter_parse_top_level_item(self: TreeSitter) -> TopLevelItem:
                 ))
 
 
-# ============================================================================
-# Import / Export Parsing
-# ============================================================================
-
-me treesitter_parse_import(self: TreeSitter) -> ImportOutline:
+    me parse_import() -> ImportOutline:
         """Parse import declaration."""
         val start = self.current.span
         self.advance()  # Consume 'import'
@@ -289,7 +498,8 @@ me treesitter_parse_import(self: TreeSitter) -> ImportOutline:
 
         val module = self.parse_module_path()
         var items: [text] = []
-        var alias: text = nil
+        var has_alias = false
+        var alias = ""
 
         # import foo.bar.baz
         # import foo.bar.{a, b, c}
@@ -308,6 +518,7 @@ me treesitter_parse_import(self: TreeSitter) -> ImportOutline:
                 items = [id]
 
         if self.match_token(TokenKind.KwAs):
+            has_alias = true
             alias = self.parse_identifier()
 
         self.skip_newlines()
@@ -316,12 +527,13 @@ me treesitter_parse_import(self: TreeSitter) -> ImportOutline:
             module: module,
             items: items,
             is_lazy: is_lazy,
+            has_alias: has_alias,
             alias: alias,
             span: merge_spans(start, self.previous.span)
         )
 
 
-me treesitter_parse_export(self: TreeSitter) -> ExportOutline:
+    me parse_export() -> ExportOutline:
         """Parse export declaration."""
         val start = self.current.span
         self.advance()  # Consume 'export'
@@ -340,7 +552,7 @@ me treesitter_parse_export(self: TreeSitter) -> ExportOutline:
         )
 
 
-me treesitter_parse_module_path(self: TreeSitter) -> text:
+    me parse_module_path() -> text:
         """Parse a.b.c module path."""
         var path = self.parse_identifier()
 
@@ -352,7 +564,7 @@ me treesitter_parse_module_path(self: TreeSitter) -> text:
         path
 
 
-me treesitter_parse_identifier(self: TreeSitter) -> text:
+    me parse_identifier() -> text:
         """Parse an identifier."""
         if self.check(TokenKind.Ident):
             val name = self.current.text
@@ -363,11 +575,7 @@ me treesitter_parse_identifier(self: TreeSitter) -> text:
             "<error>"
 
 
-# ============================================================================
-# Block Outline Parsing
-# ============================================================================
-
-me treesitter_parse_block_outline(self: TreeSitter) -> BlockOutline:
+    me parse_block_outline() -> BlockOutline:
         """Capture block outline without parsing payload.
 
         Called when a BlockStart token is encountered.
@@ -385,9 +593,12 @@ me treesitter_parse_block_outline(self: TreeSitter) -> BlockOutline:
                 payload: "",
                 payload_span: start,
                 span: start,
+                has_parent_context: self.has_current_context,
                 parent_context: self.current_context,
-                pre_lex_info: nil,
-                outline_info: nil
+                has_pre_lex_info: false,
+                pre_lex_info: prelexinfo_empty(),
+                has_outline_info: false,
+                outline_info: blockoutlineinfo_opaque(kind)
             )
 
         # Record payload start
@@ -414,9 +625,12 @@ me treesitter_parse_block_outline(self: TreeSitter) -> BlockOutline:
                 payload: payload,
                 payload_span: payload_span,
                 span: merge_spans(start, self.previous.span),
+                has_parent_context: self.has_current_context,
                 parent_context: self.current_context,
-                pre_lex_info: nil,
-                outline_info: nil
+                has_pre_lex_info: false,
+                pre_lex_info: prelexinfo_empty(),
+                has_outline_info: false,
+                outline_info: blockoutlineinfo_opaque(kind)
             )
 
         # For normal blocks, capture content by skipping
@@ -437,13 +651,16 @@ me treesitter_parse_block_outline(self: TreeSitter) -> BlockOutline:
             payload: payload,
             payload_span: payload_span,
             span: merge_spans(start, self.previous.span),
+            has_parent_context: self.has_current_context,
             parent_context: self.current_context,
-            pre_lex_info: nil,
-            outline_info: nil
+            has_pre_lex_info: false,
+            pre_lex_info: prelexinfo_empty(),
+            has_outline_info: false,
+            outline_info: blockoutlineinfo_opaque(kind)
         )
 
 
-me treesitter_skip_block_content(self: TreeSitter) -> text:
+    me skip_block_content() -> text:
         """Skip block content and return the raw payload text.
 
         Tracks brace depth to handle nested blocks/braces.
@@ -480,7 +697,7 @@ me treesitter_skip_block_content(self: TreeSitter) -> text:
         self.source[start_pos:end_pos]
 
 
-me treesitter_apply_outline_policy(self: TreeSitter, block: BlockOutline) -> BlockOutline:
+    me apply_outline_policy(block: BlockOutline) -> BlockOutline:
         """Apply skip_policy and treesitter_outline based on fast_mode.
 
         In fast mode:
@@ -511,30 +728,30 @@ me treesitter_apply_outline_policy(self: TreeSitter, block: BlockOutline) -> Blo
                 case BlockSkipPolicy.Skippable:
                     # Store opaque outline, don't analyze
                     var b = block
+                    b.has_outline_info = true
                     b.outline_info = blockoutlineinfo_opaque(block.kind)
                     return b
                 case BlockSkipPolicy.OutlineRequired:
                     var b = block
+                    b.has_outline_info = true
                     b.outline_info = h_treesitter_outline<BlockDefinition>(h, block.payload, pre_lex)
                     return b
                 case BlockSkipPolicy.AlwaysFull:
                     var b = block
+                    b.has_outline_info = true
                     b.outline_info = h_treesitter_outline<BlockDefinition>(h, block.payload, pre_lex)
                     return b
         else:
             # Normal mode: always call treesitter_outline
             var b = block
+            b.has_outline_info = true
             b.outline_info = h_treesitter_outline<BlockDefinition>(h, block.payload, pre_lex)
             return b
 
         block
 
 
-# ============================================================================
-# Inline ASM Outline Parsing
-# ============================================================================
-
-me treesitter_warn_legacy_asm(self: TreeSitter, span: LexSpan):
+    me warn_legacy_asm(span: LexSpan):
         self.errors.push(ParseError(
             message: "legacy inline asm syntax; use asm { ... }",
             span: span,
@@ -542,23 +759,7 @@ me treesitter_warn_legacy_asm(self: TreeSitter, span: LexSpan):
         ))
 
 
-fn treesitter_append_asm_payload(payload: text, piece: text) -> text:
-        if piece == "":
-            return payload
-        if payload == "":
-            return piece
-        if piece == "," or piece == ";" or piece == ")" or piece == "]" or piece == "}":
-            return payload + piece
-        if payload.ends_with("#") or payload.ends_with("{") or payload.ends_with("(") or payload.ends_with("["):
-            return payload + piece
-        if piece == "#":
-            return payload + " " + piece
-        if piece == "{" or piece == "(" or piece == "[":
-            return payload + " " + piece
-        return payload + " " + piece
-
-
-me treesitter_parse_asm_braced_outline(self: TreeSitter, start: LexSpan, is_volatile: bool) -> AsmBlockOutline:
+    me parse_asm_braced_outline(start: LexSpan, is_volatile: bool) -> AsmBlockOutline:
         val open_span = self.current.span
         self.advance()  # consume {
 
@@ -600,7 +801,7 @@ me treesitter_parse_asm_braced_outline(self: TreeSitter, start: LexSpan, is_vola
         )
 
 
-me treesitter_parse_asm_paren_outline(self: TreeSitter, start: LexSpan, is_volatile: bool) -> AsmBlockOutline:
+    me parse_asm_paren_outline(start: LexSpan, is_volatile: bool) -> AsmBlockOutline:
         self.warn_legacy_asm(start)
         val open_span = self.current.span
         self.advance()  # consume (
@@ -639,7 +840,7 @@ me treesitter_parse_asm_paren_outline(self: TreeSitter, start: LexSpan, is_volat
         )
 
 
-me treesitter_parse_asm_colon_outline(self: TreeSitter, start: LexSpan, is_volatile: bool) -> AsmBlockOutline:
+    me parse_asm_colon_outline(start: LexSpan, is_volatile: bool) -> AsmBlockOutline:
         self.warn_legacy_asm(start)
         val colon_span = self.current.span
         self.advance()  # consume :
@@ -677,7 +878,7 @@ me treesitter_parse_asm_colon_outline(self: TreeSitter, start: LexSpan, is_volat
         )
 
 
-me treesitter_parse_asm_outline(self: TreeSitter) -> AsmBlockOutline:
+    me parse_asm_outline() -> AsmBlockOutline:
         val start = self.current.span
         self.advance()  # consume asm
 
@@ -717,7 +918,7 @@ me treesitter_parse_asm_outline(self: TreeSitter) -> AsmBlockOutline:
         )
 
 
-me treesitter_skip_block(self: TreeSitter):
+    me skip_block():
         """Skip an indented body while collecting inline asm outlines."""
         if self.check(TokenKind.Indent):
             self.advance()
@@ -750,133 +951,3 @@ me treesitter_skip_block(self: TreeSitter):
                 continue
 
             self.advance()
-
-
-# ============================================================================
-# Helper Types
-# ============================================================================
-
-"""Friend declaration outline."""
-struct FriendDeclOutline:
-    package_name: text
-    span: LexSpan
-
-"""Internal export declaration outline."""
-struct InternalExportOutline:
-    items: [text]
-    span: LexSpan
-
-"""Parsed top-level item."""
-enum TopLevelItem:
-    Import(ImportOutline)
-    Export(ExportOutline)
-    Function(FunctionOutline)
-    Class(ClassOutline)
-    ActorItem(ActorOutline)
-    Struct(StructOutline)
-    Enum(EnumOutline)
-    Bitfield(BitfieldOutline)
-    Trait(TraitOutline)
-    Impl(ImplOutline)
-    TypeAlias(TypeAliasOutline)
-    Const(ConstOutline)
-    StaticAssert(StaticAssertOutline)
-    FriendDecl(FriendDeclOutline)
-    InternalExportDecl(InternalExportOutline)
-    Error(ParseError)
-
-# ============================================================================
-# Main Entry Point (TreeSitter.parse_outline)
-# ============================================================================
-#
-# NOTE: This was previously defined in the sibling facade file
-# `10.frontend/treesitter.spl`, which shares the exact module path
-# `compiler.frontend.treesitter` with this directory's `__init__.spl`. That
-# file-vs-directory collision meant the directory form silently won module
-# resolution and `treesitter.spl`'s `impl TreeSitter: parse_outline()` was
-# never loaded — every `use compiler.treesitter.*` caller got a `TreeSitter`
-# with no `parse_outline` method. Moved here (the directory package that
-# actually owns `TreeSitter`) and the dead-shadowed facade file removed.
-
-impl TreeSitter:
-    me parse_outline() -> OutlineModule:
-        """Parse source into an outline module.
-
-        This is the main entry point that dispatches to either:
-        - Heuristic mode (line-based, error-tolerant)
-        - Token-based mode (tree-sitter, accurate)
-        """
-
-        # Branch based on mode
-        if self.heuristic_mode:
-            return self.parse_outline_heuristic()
-
-        # Token-based parsing (default)
-        var module = OutlineModule(
-            name: "",
-            imports: [],
-            exports: [],
-            functions: [],
-            classes: [],
-            actors: [],
-            structs: [],
-            enums: [],
-            bitfields: [],
-            traits: [],
-            impls: [],
-            type_aliases: [],
-            constants: [],
-            static_asserts: [],
-            inline_blocks: [],
-            asm_blocks: [],
-            errors: []
-        )
-
-        while not self.is_at_end():
-            self.skip_newlines()
-            if self.is_at_end():
-                break
-
-            val item = self.parse_top_level_item()
-            match item:
-                case toplevelitem_Import(i):
-                    module.imports.push(i)
-                case toplevelitem_Export(e):
-                    module.exports.push(e)
-                case toplevelitem_Function(f):
-                    module.functions.push(f)
-                case toplevelitem_Class(c):
-                    module.classes.push(c)
-                case toplevelitem_ActorItem(a):
-                    module.actors.push(a)
-                case toplevelitem_Struct(s):
-                    module.structs.push(s)
-                case toplevelitem_Enum(e):
-                    module.enums.push(e)
-                case toplevelitem_Bitfield(b):
-                    module.bitfields.push(b)
-                case toplevelitem_Trait(t):
-                    module.traits.push(t)
-                case toplevelitem_Impl(i):
-                    module.impls.push(i)
-                case toplevelitem_TypeAlias(t):
-                    module.type_aliases.push(t)
-                case toplevelitem_Const(c):
-                    module.constants.push(c)
-                case toplevelitem_StaticAssert(a):
-                    module.static_asserts.push(a)
-                case TopLevelItem.Error(e):
-                    module.errors.push(e)
-                case _:
-                    pass
-        module.inline_blocks = self.inline_blocks
-        module.asm_blocks = self.asm_blocks
-        module.errors = self.errors
-        module
-
-# ============================================================================
-# Exports
-# ============================================================================
-
-export use compiler.frontend.treesitter.outline_lexer.{TreeSitter}
-export TopLevelItem
