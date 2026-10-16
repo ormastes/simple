@@ -7260,30 +7260,44 @@ impl MirLowering:
         self.emit_typed_function_value_call(callee_local, arg_operands, function_type, callee.span)
 
     me emit_typed_function_value_call(callee_local: LocalId, arg_operands: [MirOperand], function_type: HirType?, call_span: Span) -> LocalId:
-        # Keep the existing word-parameter/closure ABI. Only the declared
-        # return type and its provenance are different from the old path.
+        # The helper receives the declared signature explicitly; the caller's
+        # parameter/return bindings are outside this method's scope.
         var param_types: [MirType] = []
-        var indirect_param_index = 0
-        for arg_op in arg_operands:
-            param_types.push(if indirect_return != nil: self.lower_type(call_param_types[indirect_param_index]) else: MirType.i64())
-            indirect_param_index = indirect_param_index + 1
         var ret_type = MirType.i64()
-        var indirect_hir_return: HirType? = indirect_return
-        var indirect_signature_proven = indirect_return != nil
-        if val typed_return = indirect_return:
-            ret_type = self.lower_type(typed_return)
+        var indirect_hir_return: HirType? = nil
+        var indirect_signature_proven = false
+        if val declared_type = function_type:
+            match declared_type.kind:
+                case HirTypeKind.Function(declared_params, declared_return, _):
+                    if not lambda_abi_type_resolved(declared_return):
+                        self.error_fatal("indirect callable has an unresolved declared return type", Some(call_span))
+                        return self.builder.emit_const_int(0)
+                    if not lambda_abi_type_resolved(declared_type):
+                        self.error_fatal("indirect callable has an unresolved declared parameter type", Some(call_span))
+                        return self.builder.emit_const_int(0)
+                    if declared_params.len() != arg_operands.len():
+                        self.error_fatal("indirect callable argument count differs from declared signature", Some(call_span))
+                        return self.builder.emit_const_int(0)
+                    var indirect_param_index = 0
+                    while indirect_param_index < declared_params.len():
+                        param_types.push(self.lower_type(declared_params[indirect_param_index]))
+                        indirect_param_index = indirect_param_index + 1
+                    ret_type = self.lower_type(declared_return)
+                    indirect_hir_return = Some(declared_return)
+                    indirect_signature_proven = true
+                case _: ()
         if not indirect_signature_proven:
             if val callee_mir = self.local_mir_type_of(callee_local):
                 match callee_mir.kind:
                     case MirTypeKind.FuncPtr(legacy_signature):
-                        if legacy_signature.params.len() == args.len() and not legacy_signature.is_variadic:
+                        if legacy_signature.params.len() == arg_operands.len() and not legacy_signature.is_variadic:
                             param_types = legacy_signature.params
                             ret_type = legacy_signature.return_type
                             indirect_signature_proven = true
                     case _: ()
         if not indirect_signature_proven:
-            self.error_fatal("indirect callable lacks a proven function signature", Some(callee.span))
-            return self.lower_expr(HirExpr(kind: HirExprKind.IntLit(0, nil), has_type_: true, type_: HirType(kind: HirTypeKind.Int(64, true), span: callee.span), span: callee.span))
+            self.error_fatal("indirect callable lacks a proven function signature", Some(call_span))
+            return self.builder.emit_const_int(0)
         val sig = MirSignature(params: param_types, return_type: ret_type, is_variadic: false)
         val indirect_result = self.emit_function_value_call(callee_local, arg_operands, sig, ret_type)
         if val result_hir = indirect_hir_return:
