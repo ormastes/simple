@@ -6,6 +6,15 @@ Host: Windows 11 Pro 10.0.26300 x64, native PowerShell. Source base:
 
 **STATUS: TEST_BLOCKED. Major tmux parity: FAIL. Goal remains incomplete.**
 
+Latest actual build result: the reviewed immutable compiler campaign terminated
+at Stage 2 linking after compiling 1349 modules. `__simple_pow` is unresolved
+from `mir_fold_binop`; no final Stage 2 compiler, Hello/admission, smux binary,
+or Phase 3 result exists for this campaign. The objects and failed link log are
+preserved. See
+`doc/08_tracking/bug/windows_stage2_pow_runtime_owner_missing_2026-10-16.md`.
+Investigation targets the actual runtime composition. No unchanged full-build
+retry or Rust seed application fallback has been performed.
+
 ## Current continuation checkpoint
 
 The branch now also contains an independent foreground owner with bounded

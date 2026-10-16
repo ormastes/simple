@@ -450,6 +450,10 @@ fn build_c_runtime_library(
     let target = effective_target();
     let mut runtime_inputs = vec![
         "runtime_native.c",
+        // LLVM integer Pow and MIR folding use the existing signed-i64 ABI.
+        // Match the Pure-Simple core-C source composition; native_all does not
+        // supply this owner, and adding runtime.c would duplicate other ABIs.
+        "runtime_core_intrinsics.c",
         "runtime_file_view.c",
         "runtime_cache_host_authority_v1.c",
         "runtime_framebuffer.c",
@@ -597,6 +601,7 @@ fn build_c_runtime_library(
         "runtime_backend_plugin.c",
         "runtime_value.h",
         "runtime.h",
+        "runtime_core_intrinsics_impl.h",
         "runtime_shared_parse_cell_private.h",
         "runtime_packed_span.h",
         "runtime_fork.h",
