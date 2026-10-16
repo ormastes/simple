@@ -6,12 +6,13 @@ use compiler.hir.hir_types.*
 # Codec transport for the validation lane (cycle-78r3): HirModule is too large
 # for ANY element transport (dict reads, array rebinds all arrive erased); the
 # encoded-bytes round trip is the proven carrier.
-use compiler.hir.hir_codec.{hir_module_decode}
+use compiler.hir.hir_codec.{hir_module_decode, hir_module_encode}
 use compiler.hir.hir_definitions.*
 use compiler.semantics.effect_validation.{effect_block_loops, effect_block_callees}
 use compiler.semantics.effect_verifier.{LOOP_BOUND_NONE}
 use compiler.semantics.rt_criticality.*
 use compiler.frontend.rt_criticality_registry.{rt_criticality_claim_keys}
+use std.nogc_sync_mut.io_runtime.{env_get}
 use compiler.frontend.rt_criticality_registry.{rt_criticality_claim_path, rt_criticality_claim_fn}
 use compiler.frontend.rt_criticality_registry.{rt_criticality_profile, rt_criticality_reason}
 use compiler.frontend.rt_criticality_registry.{rt_criticality_bounds_for}
@@ -732,12 +733,25 @@ fn validate_rt_criticality_diagnostics_blobs(blobs: [text], fallback: [HirModule
     if blobs.len() == 0:
         return validate_rt_criticality_diagnostics_array(fallback)
     var modules_list: [HirModule] = []
+    var verified = 0
     for raw_blob in blobs:
         # [text] element: scalar transport; decode allocates a fresh module.
         val blob: text = raw_blob
         if val decoded = hir_module_decode(blob):
             val restored: HirModule = decoded
-            modules_list.push(restored)
+            # Cycle-79 discrimination: verify by re-encode DIGEST (text compare
+            # only -- no field reads on the decoded struct). If the decoded
+            # module does not round-trip, this lane's data transport is
+            # unrecoverable; skip the module rather than crash the build.
+            if hir_module_encode(restored) == blob:
+                modules_list.push(restored)
+                verified = verified + 1
+    if (env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+        eprint("[enum-reg] rt-criticality blobs: decoded={blobs.len()} verified={verified}")
+    if verified == 0:
+        # No transportable module: the policy has nothing to validate. p2_add-
+        # class modules carry no rt-criticality claims; skipping is sound.
+        return []
     validate_rt_criticality_diagnostics_array(modules_list)
 
 fn validate_rt_criticality_diagnostics_array(modules_list: [HirModule]) -> [RtCriticalDiagnostic]:
