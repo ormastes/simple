@@ -65,7 +65,11 @@ for my $key (qw(max-rss-kib interval-ms timeout-seconds term-grace-seconds)) {
 # by the resident compiler daemon + shared LLVM, not per-job, so lowering
 # jobs cannot fit the 16 GiB ceiling). 24 GiB leaves ~7 GiB headroom over
 # the measured plateau. Keep in sync with tree-rss-policy.shs.
-my $compiler_ceiling_kib = 25165824;
+# Sixth widening 2026-10-16: serialized single-build probe (cycle 49) -- one
+# full cli closure build (1500+ SCV modules) exceeded 24 GiB; widening to
+# 48 GiB to measure the true single-build plateau before final evidence-based
+# tightening. Keep in sync with tree-rss-policy.shs.
+my $compiler_ceiling_kib = 50331648;
 my $worker_target_kib = 976562;
 my $budget_ceiling_kib = $compiler_ceiling_kib;
 $opt{'budget-scope'} =~ /\A(?:compiler|aggregate-tests)\z/
