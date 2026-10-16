@@ -9,3 +9,5 @@ Workaround reuses existing package_section_kind_name_v1: its exhaustive ten-vari
 Original source reference:6569adf5762d5292650323c0cc92a19c6d3779f2 at those three sites. This is not a compiler-owner repair commit and authorizes no automatic checkout/removal. Actual owner recovery commit remains unknown; optional recover tokens are omitted. Remove workaround only after a rebuilt producer correctly handles nominal enum equality in these positive/negative cases.
 
 The authored regression enumerates all ten declared variants and checks equality and inequality for all100 ordered pairs against independently known distinct list positions. It is UNEXECUTED and does not establish A174 match/enum hydration or full compiler acceptance. No fourth authority build is permitted. The26 HirType.named diagnostics and pathless enum constructor payload mismatches remain unresolved separate evidence; this patch does not claim to fix them.
+
+Implementation candidate: 6ccaf88558fd2190de47e72861bd5779d5bb003c (source identity only, UNEXECUTED).
