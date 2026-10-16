@@ -8,6 +8,10 @@ and MIR APIs; it uses no SSpec runner or final archive admission.
 
 - Rich provider declarations retain explicit discriminants 7 and 12 and implicit
   successor 13, runtime names, generic flags, ordered named fields, and default 9.
+  The default is an explicit temporary HIR overlay from a genuinely parsed
+  `default_count` literal before actual artifact projection. The flat parser
+  drops enum field defaults; this diagnostic does not claim parser support.
+  See `doc/bug_report/enum_named_payload_default_dropped_2026_10_16.md`.
 - Semantic unit classification accepts a real frontend unit; a nonempty tuple
   and absent slot-name metadata cannot classify as units.
 - Prescan retains no provider-local payload HirTypes; unused consumer enums
@@ -32,9 +36,12 @@ cleared, and lifted lambdas inherit the deferred indexes.
 state propagation, which was corrected and re-reviewed. Static review supplies
 no runtime qualification.
 
-The smaller baseline fixture is running separately against A174 and compiler
-source without this repair. An earlier `run` attempt failed at command dispatch,
-before any fixture assertion, and is not a reproduced enum failure. Native
-baseline execution and repaired execution remain pending. A success claim needs
+The smaller baseline fixture's A174 native build timed out after 1,800 seconds
+(guard exit 124). All HIR workers completed without failed or unfinished
+modules; no fixture assertion executed. Postflight confirmed unchanged source
+and fixture. A coordinated read-only LLDB sample detached without catching a
+fault; this run supplies no timing qualification. An earlier `run` attempt
+failed at command dispatch and is not a reproduced enum failure. Baseline
+assertion evidence and repaired execution remain pending. A success claim needs
 all assertions and the final PASS print; process status alone is insufficient.
 No fixed claim or release PASS is established.

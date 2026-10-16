@@ -51,8 +51,44 @@ fn fixture_enum_declaration(module: MirHirModuleDeclarationsV1, name: text) -> M
         if enum_def.name == name: return enum_def
     panic("fixture enum declaration missing")
 
+# @workaround bug=enum_named_payload_default_dropped_2026_10_16 reason= exercise the rich HIR/artifact boundary until flat enum defaults are transported.
+fn fixture_with_named_default(module: HirModule) -> HirModule:
+    var expression: HirExpr? = nil
+    for raw_function in module.functions.values():
+        val function: HirFunction = raw_function
+        if function.name == "default_count" or function.name.ends_with(".default_count"):
+            require(function.body.has, "default witness function has no expression")
+            expression = Some(function.body.value)
+    require(expression != nil, "genuinely parsed default witness missing")
+    match expression.unwrap().kind:
+        case HirExprKind.IntLit(value, _): require(value == 9, "parsed default witness changed")
+        case _: panic("default witness must be the parsed integer literal")
+    var output = module
+    var choice = fixture_enum(module, "Choice")
+    var variants: [HirVariant] = []
+    var changed = false
+    for raw_variant in choice.variants:
+        var variant: HirVariant = raw_variant
+        if variant.name == "Named":
+            match variant.kind:
+                case HirVariantKind.Struct(fields):
+                    require(fields.len() == 2, "named default fixture field count changed")
+                    var updated_fields = fields
+                    var field: HirField = fields[1]
+                    field.has_default = true
+                    field.default = expression.unwrap()
+                    updated_fields[1] = field
+                    variant.kind = HirVariantKind.Struct(updated_fields)
+                    changed = true
+                case _: panic("named default fixture must have structural fields")
+        variants.push(variant)
+    require(changed, "named default overlay was not applied")
+    choice.variants = variants
+    output.enums[choice.symbol] = choice
+    output
+
 fn main():
-    val provider = fixture_module("struct Packet:\n    value: i64\n\nenum Choice:\n    Unit = 7\n    Pair(Packet) = 12\n    Named(packet: Packet, count: i64 = 9)\n\nenum Generic<T>:\n    Value(T)\n\nfn make() -> Choice:\n    val factory = \\: Choice.Pair(Packet(1))\n    factory()\n", "provider")
+    val provider = fixture_with_named_default(fixture_module("struct Packet:\n    value: i64\n\nenum Choice:\n    Unit = 7\n    Pair(Packet) = 12\n    Named(packet: Packet, count: i64)\n\nenum Generic<T>:\n    Value(T)\n\nfn make() -> Choice:\n    val factory = \\: Choice.Pair(Packet(1))\n    factory()\n\nfn default_count() -> i64:\n    9\n", "provider"))
     val first = fixture_module("struct Decoy:\n    value: i64\n", "first")
     val second = fixture_module("struct Decoy:\n    value: i64\n\nstruct Another:\n    value: i64\n\nenum Choice:\n    Shadow\n", "second")
     val enum_def = fixture_enum(provider, "Choice")
