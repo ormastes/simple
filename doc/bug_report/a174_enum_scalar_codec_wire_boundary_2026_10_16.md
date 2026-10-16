@@ -37,3 +37,13 @@ Zero retained objects, no executable, no assertions executed. All three probe
 attempts are exhausted. Neither codec roundtrip nor generic FFI return ABI has
 been proven. Full compiler generation is a separate prerequisite, not a renamed
 fourth probe. The retained A174 executable and caches remain unchanged.
+# Review follow-up
+
+The reconstruction facade now copies all payload words once and then replaces
+each requested nil slot once. Work is O(arity + slot count), matching the
+reader work charge; repeated slots retain the same result. Every tuple write
+still checks failure. Source review and whitespace validation only; native
+qualification remains pending. Workaround implementation: 405e0968b9d069f9f4eea1ddc1b12c7afcbeb49a.
+Intended-code recovery reference: 5c3e501759ae833a828b14b4e23c9238c73b76a6.
+Bug database reconciliation remains pending qualified tooling.
+
