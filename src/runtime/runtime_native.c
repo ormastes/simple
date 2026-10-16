@@ -6777,7 +6777,16 @@ SPL_WEAK SplArray* sys_get_args(void) {
     return rt_cli_get_args();
 }
 
-SPL_WEAK SplArray* rt_cli_get_args(void) {
+/* A COFF archive needs a strong standalone owner. The hosted runtime.c argv
+ * implementation uses incompatible legacy array/value layouts and is omitted
+ * for this lane. Preserve its existing ownership for hosted and Unix builds. */
+#if defined(_WIN32) && defined(SIMPLE_CORE_C_STANDALONE)
+#define SPL_CORE_ARGV_OWNER
+#else
+#define SPL_CORE_ARGV_OWNER SPL_WEAK
+#endif
+
+SPL_CORE_ARGV_OWNER SplArray* rt_cli_get_args(void) {
     int64_t argc = spl_arg_count();
     SplArray* args = rt_array_new(argc);
     if (!args) return (SplArray*)rt_core_nil();
@@ -6789,11 +6798,11 @@ SPL_WEAK SplArray* rt_cli_get_args(void) {
     return args;
 }
 
-SPL_WEAK int64_t rt_cli_arg_count(void) {
+SPL_CORE_ARGV_OWNER int64_t rt_cli_arg_count(void) {
     return spl_arg_count();
 }
 
-SPL_WEAK int64_t rt_cli_arg_at(int64_t index) {
+SPL_CORE_ARGV_OWNER int64_t rt_cli_arg_at(int64_t index) {
     if (index < 0 || index >= spl_arg_count()) {
         return rt_string_new(NULL, 0);
     }
@@ -6801,6 +6810,7 @@ SPL_WEAK int64_t rt_cli_arg_at(int64_t index) {
     if (!arg) arg = "";
     return rt_string_new((const uint8_t*)arg, (uint64_t)strlen(arg));
 }
+#undef SPL_CORE_ARGV_OWNER
 
 int64_t rt_file_preload_pages(int64_t path_value) {
 #if defined(_WIN32)

@@ -2634,7 +2634,7 @@ int64_t rt_shell_output(int64_t cmd_value) {
  * link), but conflicting weak-external defaults are a separate, unforceable
  * rule.
  *
- * Making THIS file the strong owner on Windows fixes it while leaving exactly
+ * Making THIS file the strong owner on hosted Windows fixes it while leaving exactly
  * one weak external (runtime_native.c's), which resolves against a strong
  * definition normally. The reverse -- compiling runtime_native.c's copies out
  * under SIMPLE_CORE_C_STANDALONE -- was tried first and is WRONG: it leaves
@@ -2644,6 +2644,8 @@ int64_t rt_shell_output(int64_t cmd_value) {
  * failed with `simple_runtime.lib(runtime_native.obj) : error LNK2019:
  * unresolved external symbol rt_cli_get_args`.
  *
+ * Standalone core-C instead needs runtime_native.c's registered tagged argv;
+ * its three definitions below are excluded from that composition.
  * CROSS-PLATFORM: off Windows this macro expands to exactly the
  * `__attribute__((weak))` that was here before, so Linux, macOS and FreeBSD
  * are byte-identical. The mingw lane is COFF too and benefits identically. */
@@ -2653,6 +2655,10 @@ int64_t rt_shell_output(int64_t cmd_value) {
 #  define SPL_CLI_ARGS_WEAK __attribute__((weak))
 #endif
 
+/* Standalone core-C uses tagged, registered arrays and scalar words, whereas
+ * these hosted helpers return legacy SplArray/SplValue layouts. Keep the
+ * native core provider as the sole Windows standalone owner. */
+#if !defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)
 SPL_CLI_ARGS_WEAK SplArray* rt_cli_get_args(void) {
     SplArray* arr = spl_array_new();
     for (int i = 0; i < g_argc; i++) {
@@ -2672,6 +2678,7 @@ SPL_CLI_ARGS_WEAK SplValue rt_cli_arg_at(int64_t index) {
     const char* arg = spl_get_arg(index);
     return spl_str(arg ? arg : "");
 }
+#endif
 
 /* rt_ FFI wrappers for prefetch */
 void rt_prefetch_start(const char* path) { spl_prefetch_start(path); }
