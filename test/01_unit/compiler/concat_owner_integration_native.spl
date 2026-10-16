@@ -1,0 +1,222 @@
+# New owner integration controls; the nine passing byte-only controls are not rerun.
+use compiler.hir.hir_lowering.concat_copy_v1.{async_text_concat_copy_v1, async_error_concat_copy_v1, hir_stmt_concat_copy_v1}
+use compiler.hir.hir_lowering.async_errors.{AsyncError, AsyncErrorCode}
+use compiler.hir.hir_definitions.{HirStmt, HirStmtKind, HirExpr, HirExprKind, HirBlock}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.cache.reverse_reference_key.{ReverseReferenceKeyV1, reverse_reference_key_encode_v1}
+use compiler.driver.cache.reverse_reference_receipt.{ReverseReferenceProjectionV1, ReverseReferenceGenerationReceiptV1, ReverseReferenceReceiptReadV1, reverse_reference_receipt_encode_v1, reverse_reference_receipt_decode_v1, reverse_reference_receipt_digest_v1}
+use app.startup.launch_metadata.{LaunchMetadata, launch_metadata_for_native_build, render_launch_metadata_sidecar, render_native_launch_metadata_trailer, has_native_launch_metadata_trailer}
+
+fn owner_span_v1(base: i64, file: text) -> Span:
+    Span(start: base, end: base + 7, line: base + 2, col: base + 3, file: file, length: 7)
+
+fn owner_span_matches_v1(actual: Span, base: i64, file: text) -> bool:
+    actual.start == base and actual.end == base + 7 and actual.line == base + 2 and actual.col == base + 3 and actual.file == file and actual.length == 7
+
+fn owner_async_error_v1(first: bool) -> AsyncError:
+    if first:
+        return AsyncError(code: AsyncErrorCode.E0801, message: "left-message", span: owner_span_v1(10, "left.spl"), has_help: true, help: "left-help", has_note: false, note: "left-note", has_suggestion: true, suggestion: "left-suggestion")
+    AsyncError(code: AsyncErrorCode.E0802, message: "right-message", span: owner_span_v1(20, "right.spl"), has_help: false, help: "right-help", has_note: true, note: "right-note", has_suggestion: false, suggestion: "right-suggestion")
+
+fn owner_async_matches_v1(actual: AsyncError, first: bool) -> bool:
+    if first:
+        return actual.code == AsyncErrorCode.E0801 and actual.message == "left-message" and owner_span_matches_v1(actual.span, 10, "left.spl") and actual.has_help and actual.help == "left-help" and not actual.has_note and actual.note == "left-note" and actual.has_suggestion and actual.suggestion == "left-suggestion"
+    actual.code == AsyncErrorCode.E0802 and actual.message == "right-message" and owner_span_matches_v1(actual.span, 20, "right.spl") and not actual.has_help and actual.help == "right-help" and actual.has_note and actual.note == "right-note" and not actual.has_suggestion and actual.suggestion == "right-suggestion"
+
+fn owner_text_controls_v1() -> text:
+    val left: [text] = ["left-A", "left-B"]
+    val right: [text] = ["right-C"]
+    var result: [text] = async_text_concat_copy_v1(left, right)
+    if result.len() != 3:
+        return "text-length"
+    if result[0] != "left-A" or result[1] != "left-B" or result[2] != "right-C":
+        return "text-order"
+    result[0] = "changed-left"
+    result[2] = "changed-right"
+    val empty: [text] = []
+    var fresh: [text] = async_text_concat_copy_v1(left, empty)
+    fresh[0] = "changed-empty-right"
+    if left.len() != 2 or right.len() != 1 or left[0] != "left-A" or right[0] != "right-C":
+        return "text-input-mutated"
+    ""
+
+fn owner_async_controls_v1() -> text:
+    val left: [AsyncError] = [owner_async_error_v1(true)]
+    val right: [AsyncError] = [owner_async_error_v1(false)]
+    var result: [AsyncError] = async_error_concat_copy_v1(left, right)
+    if result.len() != 2:
+        return "async-length"
+    if not owner_async_matches_v1(result[0], true) or not owner_async_matches_v1(result[1], false):
+        return "async-record-fields"
+    result[0] = owner_async_error_v1(false)
+    result[1] = owner_async_error_v1(true)
+    val empty: [AsyncError] = []
+    var fresh: [AsyncError] = async_error_concat_copy_v1(left, empty)
+    fresh[0] = owner_async_error_v1(false)
+    val alias: [AsyncError] = async_error_concat_copy_v1(left, left)
+    if alias.len() != 2 or not owner_async_matches_v1(alias[0], true) or not owner_async_matches_v1(alias[1], true):
+        return "async-self-alias"
+    if left.len() != 1 or right.len() != 1 or not owner_async_matches_v1(left[0], true) or not owner_async_matches_v1(right[0], false):
+        return "async-input-mutated"
+    ""
+
+fn owner_hir_expr_v1(value: i64) -> HirExpr:
+    val span: Span = owner_span_v1(value, "expr.spl")
+    val type_: HirType = HirType(kind: HirTypeKind.Int(64, true), span: owner_span_v1(value + 1, "type.spl"))
+    HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: true, type_: type_, span: span)
+
+fn owner_hir_stmt_v1(value: i64) -> HirStmt:
+    HirStmt(kind: HirStmtKind.Expr(owner_hir_expr_v1(value)), span: owner_span_v1(value + 2, "stmt.spl"))
+
+fn owner_hir_expr_matches_v1(actual: HirExpr, value: i64) -> bool:
+    if not actual.has_type_ or not owner_span_matches_v1(actual.span, value, "expr.spl"):
+        return false
+    val actual_type: HirType = actual.type_
+    if not owner_span_matches_v1(actual_type.span, value + 1, "type.spl"):
+        return false
+    match actual_type.kind:
+        case HirTypeKind.Int(bits, signed):
+            if bits != 64 or not signed:
+                return false
+        case _:
+            return false
+    match actual.kind:
+        case HirExprKind.IntLit(found, suffix):
+            found == value and suffix == nil
+        case _:
+            false
+
+fn owner_hir_stmt_matches_v1(actual: HirStmt, value: i64) -> bool:
+    if not owner_span_matches_v1(actual.span, value + 2, "stmt.spl"):
+        return false
+    match actual.kind:
+        case HirStmtKind.Expr(expr):
+            owner_hir_expr_matches_v1(expr, value)
+        case _:
+            false
+
+fn owner_hir_controls_v1() -> text:
+    val left: [HirStmt] = [owner_hir_stmt_v1(31)]
+    val right: [HirStmt] = [owner_hir_stmt_v1(47)]
+    var result: [HirStmt] = hir_stmt_concat_copy_v1(left, right)
+    if result.len() != 2 or not owner_hir_stmt_matches_v1(result[0], 31) or not owner_hir_stmt_matches_v1(result[1], 47):
+        return "hir-whole-elements"
+    val block: HirBlock = HirBlock(stmts: result, has: true, value: owner_hir_expr_v1(63), span: owner_span_v1(71, "block.spl"), unsafe_caps: ["ffi", "memory"])
+    if not block.has or not owner_hir_expr_matches_v1(block.value, 63) or not owner_span_matches_v1(block.span, 71, "block.spl"):
+        return "hir-block-metadata"
+    if block.unsafe_caps.len() != 2 or block.unsafe_caps[0] != "ffi" or block.unsafe_caps[1] != "memory":
+        return "hir-block-capabilities"
+    result[0] = owner_hir_stmt_v1(47)
+    val empty: [HirStmt] = []
+    var fresh: [HirStmt] = hir_stmt_concat_copy_v1(left, empty)
+    fresh[0] = owner_hir_stmt_v1(47)
+    val alias: [HirStmt] = hir_stmt_concat_copy_v1(left, left)
+    if alias.len() != 2 or not owner_hir_stmt_matches_v1(alias[0], 31) or not owner_hir_stmt_matches_v1(alias[1], 31):
+        return "hir-self-alias"
+    if left.len() != 1 or right.len() != 1 or not owner_hir_stmt_matches_v1(left[0], 31) or not owner_hir_stmt_matches_v1(right[0], 47):
+        return "hir-input-mutated"
+    ""
+
+fn owner_receipt_key_v1(subject: text, digest: text) -> ReverseReferenceKeyV1:
+    ReverseReferenceKeyV1(registry_kind: "semantic", owner_generation: "owner-1", root_generation: "root-2", subject_identity: subject, projection_kind: "direct-import-export", projection_digest: digest, schema_version: 1)
+
+fn owner_receipt_key_matches_v1(actual: ReverseReferenceKeyV1, subject: text, digest: text) -> bool:
+    actual.registry_kind == "semantic" and actual.owner_generation == "owner-1" and actual.root_generation == "root-2" and actual.subject_identity == subject and actual.projection_kind == "direct-import-export" and actual.projection_digest == digest and actual.schema_version == 1
+
+fn owner_receipt_controls_v1() -> text:
+    val digest_a: text = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    val digest_b: text = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    val key_a: ReverseReferenceKeyV1 = owner_receipt_key_v1("subject-a", digest_a)
+    val key_b: ReverseReferenceKeyV1 = owner_receipt_key_v1("subject-b", digest_b)
+    val projections: [ReverseReferenceProjectionV1] = [ReverseReferenceProjectionV1(key: key_b, consumer_identity: "consumer-b"), ReverseReferenceProjectionV1(key: key_a, consumer_identity: "consumer-a")]
+    val receipt: ReverseReferenceGenerationReceiptV1 = ReverseReferenceGenerationReceiptV1(schema_version: 1, owner_generation: "owner-1", root_generation: "root-2", projections: projections)
+    val encoded: text = reverse_reference_receipt_encode_v1(receipt)
+    val lines: [text] = encoded.split("\n")
+    if lines.len() != 7 or lines[0] != "simple-reverse-reference-generation-receipt-v1" or lines[1] != "schema=1" or lines[2] != "owner=owner-1" or lines[3] != "root=root-2" or lines[4] != "count=2":
+        return "receipt-header"
+    val frame_a: text = reverse_reference_key_encode_v1(key_a)
+    val frame_b: text = reverse_reference_key_encode_v1(key_b)
+    if lines[5] != "{frame_a.len()}:{frame_a}10:consumer-a" or lines[6] != "{frame_b.len()}:{frame_b}10:consumer-b":
+        return "receipt-projection-order"
+    val decoded: ReverseReferenceReceiptReadV1 = reverse_reference_receipt_decode_v1(encoded)
+    if not decoded.valid or decoded.receipt == nil:
+        return "receipt-decode"
+    val roundtrip: ReverseReferenceGenerationReceiptV1 = decoded.receipt.unwrap()
+    if roundtrip.schema_version != 1 or roundtrip.owner_generation != "owner-1" or roundtrip.root_generation != "root-2" or roundtrip.projections.len() != 2:
+        return "receipt-fields"
+    val first: ReverseReferenceProjectionV1 = roundtrip.projections[0]
+    val second: ReverseReferenceProjectionV1 = roundtrip.projections[1]
+    if first.consumer_identity != "consumer-a" or second.consumer_identity != "consumer-b" or not owner_receipt_key_matches_v1(first.key, "subject-a", digest_a) or not owner_receipt_key_matches_v1(second.key, "subject-b", digest_b):
+        return "receipt-key-fields"
+    if reverse_reference_receipt_encode_v1(roundtrip) != encoded or reverse_reference_receipt_digest_v1(receipt) != reverse_reference_receipt_digest_v1(roundtrip):
+        return "receipt-roundtrip-digest"
+    val wrong_header: ReverseReferenceReceiptReadV1 = reverse_reference_receipt_decode_v1(encoded.replace("simple-reverse-reference-generation-receipt-v1", "wrong-header"))
+    val wrong_schema: ReverseReferenceReceiptReadV1 = reverse_reference_receipt_decode_v1(encoded.replace("schema=1", "schema=2"))
+    if wrong_header.valid or wrong_schema.valid:
+        return "receipt-invalid-accepted"
+    ""
+
+fn owner_byte_consumer_controls_v1() -> text:
+    val metadata: LaunchMetadata = launch_metadata_for_native_build("windows", "x86_64", "native")
+    val payload: [u8] = render_launch_metadata_sidecar(metadata).bytes()
+    var trailer: [u8] = render_native_launch_metadata_trailer(metadata)
+    if trailer.len() != payload.len() + 24 or not has_native_launch_metadata_trailer(trailer):
+        return "production-trailer-shape"
+    var index: i64 = 0
+    while index < payload.len():
+        if trailer[index] != payload[index]:
+            return "production-trailer-payload"
+        index = index + 1
+    index = 0
+    while index < 8:
+        val expected: u8 = ((payload.len() >> (index * 8)) & 255).to_u8()
+        if trailer[payload.len() + index] != expected:
+            return "production-trailer-size"
+        index = index + 1
+    val magic: [u8] = [83.to_u8(), 73.to_u8(), 77.to_u8(), 80.to_u8(), 76.to_u8(), 69.to_u8(), 95.to_u8(), 76.to_u8(), 65.to_u8(), 85.to_u8(), 78.to_u8(), 67.to_u8(), 72.to_u8(), 95.to_u8(), 86.to_u8(), 49.to_u8()]
+    index = 0
+    while index < magic.len():
+        if trailer[payload.len() + 8 + index] != magic[index]:
+            return "production-trailer-magic"
+        index = index + 1
+    trailer[trailer.len() - 1] = 0.to_u8()
+    if has_native_launch_metadata_trailer(trailer) or has_native_launch_metadata_trailer(magic):
+        return "production-trailer-denial"
+    if metadata.target_os != "windows" or metadata.target_arch != "x86_64" or metadata.target_abi != "native":
+        return "production-metadata-mutated"
+    ""
+
+fn main() -> i32:
+    var failures: i32 = 0
+    val text_reason: text = owner_text_controls_v1()
+    if text_reason != "":
+        print "FAIL owner-text: {text_reason}"
+        failures = failures + 1
+    else:
+        print "PASS owner-text"
+    val async_reason: text = owner_async_controls_v1()
+    if async_reason != "":
+        print "FAIL owner-async: {async_reason}"
+        failures = failures + 1
+    else:
+        print "PASS owner-async"
+    val hir_reason: text = owner_hir_controls_v1()
+    if hir_reason != "":
+        print "FAIL owner-hir: {hir_reason}"
+        failures = failures + 1
+    else:
+        print "PASS owner-hir"
+    val receipt_reason: text = owner_receipt_controls_v1()
+    if receipt_reason != "":
+        print "FAIL owner-receipt: {receipt_reason}"
+        failures = failures + 1
+    else:
+        print "PASS owner-receipt"
+    val byte_reason: text = owner_byte_consumer_controls_v1()
+    if byte_reason != "":
+        print "FAIL production-byte-consumer: {byte_reason}"
+        failures = failures + 1
+    else:
+        print "PASS production-byte-consumer"
+    failures

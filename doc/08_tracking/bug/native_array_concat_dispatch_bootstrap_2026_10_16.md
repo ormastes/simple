@@ -51,3 +51,11 @@ record ownership/value copying, module resolution and old-producer field ABI.
 The previous record-field bug is a risk to inspect, not proof of failure here.
 Full canonical compiler compilation remains required for all 95 production
 sites and independent downstream failures. No object/link success is claimed.
+
+## Cycle1 scoped result and cycle2 source preparation
+
+Exact0CD6 real byte helper fixture passed nine controls ONCE: exit0, exact PASS stdout, stderr0B; immutable candidate7524ADDBE599442C7BF896F62ED5556D255A07253AC7F4DDF5F3EDFA0155D297. A missing sparse backend ABI header interrupted public linking; genuine frozen header recovery and fresh38-own-runtime-C/manual strictlink completed cycle1 with retained proofs. No passing byte controls are rerun.
+
+Cycle2 SOURCE ONLY, native UNRUN: the actual async text/AsyncError and HirStmt helpers are moved unchanged into compiler.hir.hir_lowering.concat_copy_v1. Original two consumers import these exact functions, retaining calls and metadata. Three normalized body comparisons are exact. This avoids importing the full lowering engines merely to test concrete copies; there are no mirrored helpers or synthetic records.
+
+New concat_owner_integration_native fixture exercises genuine records and every AsyncError/Span field, nested actual HirStmt/HirExpr/HirType payloads, fresh result/input isolation, actual reverse-reference receipt encode/decode/digest plus denials, and actual launch metadata trailer production byte calls. It reports all five independent group outcomes and returns nonzero if any fails. Explicit result/record locals preserve intended type contracts. It does not run lower_hir_block/check_async_function and therefore cannot qualify those whole callers. All95 whole canonical compiler sites and broader gates remain unqualified. Same feature maximum3 cycles, plannedcycle2 not launched.
