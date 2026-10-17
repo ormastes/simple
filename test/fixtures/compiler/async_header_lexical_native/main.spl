@@ -1,0 +1,75 @@
+# Native production-parser qualification; no substitute parser or SSpec runner.
+use std.nogc_async_mut.http_server.parser.{HttpRequestParser}
+use std.common.encoding.utf8.{char_from_codepoint}
+
+fn rejects_header(line: text, message: text) -> bool:
+    var parser = HttpRequestParser.new()
+    if parser.parse_header_line(line):
+        return false
+    parser.error_message == message and parser.headers.len() == 0
+
+fn main() -> i64:
+    var cases: i64 = 0
+    for name in ["Host ", "Host\t", " Host", "\tHost", " "]:
+        if not rejects_header(name + ": value", "400 Invalid header name"):
+            return 10
+        cases = cases + 1
+    val open_brace_name = "X" + char_from_codepoint(123) + "Name"
+    val close_brace_name = "X" + char_from_codepoint(125) + "Name"
+    for name in ["X@Name", "X(Name", "X)Name", "X,Name", "X;Name", "X/Name", "X[Name", "X]Name", "X?Name", "X=Name", open_brace_name, close_brace_name, "X\\Name", "X\"Name", "名"]:
+        if not rejects_header(name + ": value", "400 Invalid header name"):
+            return 11
+        cases = cases + 1
+    for code in 0..32:
+        val control = char_from_codepoint(code)
+        if not rejects_header("X" + control + "Name: value", "400 Invalid header name"):
+            return 12
+        cases = cases + 1
+        if code != 9:
+            for value in [control + "safe", "safe" + control, "safe" + control + "tail"]:
+                if not rejects_header("X-Test: " + value, "400 Invalid header value"):
+                    return 13
+                cases = cases + 1
+    if not rejects_header("X\x7fName: value", "400 Invalid header name"):
+        return 14
+    cases = cases + 1
+    if not rejects_header("X-Test: safe\x7ftail", "400 Invalid header value"):
+        return 15
+    cases = cases + 1
+    var token_parser = HttpRequestParser.new()
+    val token_name = "AZaz09!#$%&'*+-.^_`|~"
+    if not token_parser.parse_header_line(token_name + ": value"):
+        return 16
+    if token_parser.headers.len() != 1:
+        return 17
+    if token_parser.headers[0].0 != token_name or token_parser.headers[0].1 != "value":
+        return 18
+    cases = cases + 1
+    var unicode_parser = HttpRequestParser.new()
+    if not unicode_parser.parse_header_line("X-Test: \t café\t日本語 \t"):
+        return 19
+    if unicode_parser.headers.len() != 1:
+        return 20
+    if unicode_parser.headers[0].1 != "café\t日本語":
+        return 21
+    cases = cases + 1
+    var fragment_parser = HttpRequestParser.new()
+    if fragment_parser.feed("GET / HTTP/1.1\r\nX@Na").is_err():
+        return 22
+    if fragment_parser.feed("me: value\r\n").is_ok():
+        return 23
+    if fragment_parser.error_message != "400 Invalid header name" or not fragment_parser.has_error():
+        return 24
+    if fragment_parser.is_complete() or fragment_parser.headers.len() != 0:
+        return 25
+    if fragment_parser.feed("\r\n").is_ok() or fragment_parser.is_complete():
+        return 26
+    cases = cases + 1
+    for line in ["MissingColon", ": value"]:
+        if not rejects_header(line, "400 Malformed header line"):
+            return 27
+        cases = cases + 1
+    if cases != 152:
+        return 28
+    print("ASYNC_HEADER_LEXICAL_NATIVE_PASS cases=152")
+    0
