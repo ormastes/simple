@@ -853,6 +853,25 @@ impl CompilerDriver:
                 driver_source_entry_closure_enabled(self.ctx),
                 self.ctx.runtime_std_full_inventory_selection != nil,
                 self.ctx.demand_mir_admission != nil or self.ctx.demand_dirty_modules.len() > 0)
+            # lower_module's bootstrap-flat branch returns before the
+            # non-bootstrap tail, so on this fresh lowering instance NO enum
+            # registration exists: not the entry's own module.enums, not the
+            # built-in Option/Result seeds, and (empty provider list) no
+            # dependency enums. Stage3 measured the failure as "enum
+            # construction: missing runtime identity for 'Option'" and
+            # "unregistered declaration 'compiler.common.driver_core_modes.
+            # CompileMode'" at the entry's construction sites (site-19,
+            # stage3 frontier 2026-10-17); the seed seeds a global enum
+            # sidecar across the whole closure before lowering. Register
+            # the closure's enums + runtime ids + builtin seeds up front.
+            var bootstrap_enum_modules: [HirModule] = []
+            var bootstrap_enum_idx = 0
+            while bootstrap_enum_idx < self.ctx.sources.len():
+                val bootstrap_enum_hir = self.ctx.hir_modules[self.ctx.sources[bootstrap_enum_idx].module_name]
+                if bootstrap_enum_hir != nil:
+                    bootstrap_enum_modules = bootstrap_enum_modules.push(bootstrap_enum_hir)
+                bootstrap_enum_idx = bootstrap_enum_idx + 1
+            bootstrap_lowering.register_module_enum_bootstrap_inventory_v1(bootstrap_enum_modules)
             var bootstrap_mir = bootstrap_lowering.lower_bootstrap_entry_module(bootstrap_hir)
             driver_trace_module_mir_errors("app.cli.bootstrap_main", bootstrap_hir.path,
                 bootstrap_lowering.errors, 0)
