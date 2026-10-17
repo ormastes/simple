@@ -2311,12 +2311,21 @@ impl MirLowering:
             val bootstrap_function_count = bootstrap_function_indices.len()
             if bootstrap_trace:
                 print "[mir-lower] functions:count {bootstrap_function_count}"
+            # Cycle-96 discrimination receipt: p2_add lowers through THIS
+            # bootstrap branch (not the main loop below, which returns
+            # unreachable). len=0 -> the .values() materialization or the
+            # symbol-order helper silently failed; per-fn lines absent ->
+            # the skip chain below misfired.
+            if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+                eprint("[enum-reg] bs-fn-keys: module={module.name} len={bootstrap_function_count} values_len={bootstrap_function_values.len()}")
             var bootstrap_fni = 0
             while bootstrap_fni < bootstrap_function_count:
                 if bootstrap_trace:
                     print "[mir-lower] function-index {bootstrap_fni}"
                 val function_index = bootstrap_function_indices[bootstrap_fni]
                 val fn_: HirFunction = bootstrap_function_values[function_index]
+                if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+                    eprint("[enum-reg] bs-fn: module={module.name} fn={fn_.name} generic={fn_.is_generic_template} extern={fn_.is_extern}")
                 if bootstrap_trace:
                     print "[mir-lower] function-symbol"
                 if bootstrap_trace:
@@ -2719,6 +2728,11 @@ impl MirLowering:
         val fn_keys: [SymbolId] = module.functions.keys()
         if bootstrap_trace:
             print "[mir-lower] function-keys"
+        # Cycle-96 discrimination receipt (SIMPLE_ENUM_REG_TRACE=1): an empty
+        # count here means the keys() materialization itself silently failed
+        # (BUG-001 silent-transport class), not the loop or the skip chain.
+        if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+            eprint("[enum-reg] fn-keys: module={module.name} len={fn_keys.len()} dict_len={module.functions.len()}")
         var fni = 0
         # Cycle-95 regression fix: while+index over the materialized keys,
         # NOT for-in -- the for-in draw in this function silently zero-iterates
@@ -2729,6 +2743,8 @@ impl MirLowering:
         # dict-walk extraction shape stays the proven-clean draw).
         while fni < fn_keys.len():
             val fn_key: SymbolId = fn_keys[fni]
+            if fni == 0 and (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+                eprint("[enum-reg] fn-loop-enter: module={module.name} first_key_present={module.functions.has(fn_key)}")
             if module.functions[fn_key] == nil:
                 fni = fni + 1
                 continue
@@ -2752,6 +2768,11 @@ impl MirLowering:
                 fni = fni + 1
                 # skip extern functions
             else:
+                # Cycle-96 discrimination receipt: reaching this line proves
+                # keys materialization AND the skip chain passed; absence with
+                # fn-keys nonzero means a skip branch misfired.
+                if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+                    eprint("[enum-reg] fn-emit: module={module.name} fn={fn_.name} idx={fni}")
                 if bootstrap_trace:
                     print "[mir-lower] function:start"
                 # SIMPLE_ENUM_REG_TRACE=1 progression receipt: names the
