@@ -107,10 +107,21 @@ static int wbuf_arg(wbuf *b, const wchar_t *arg) {
 
 /* Commands may be shell scripts, so they are started through the MSYS shell,
  * exactly as a POSIX exec would resolve them: sh -c 'exec "$0" "$@"' ARGV. */
+/* cmd.exe uses native slash switches that MSYS would rewrite as paths.
+ * Select by exact basename, without interpreting any argument as shell text.
+ * Other commands retain their existing MSYS path conversion behavior. */
+static int command_is_cmd_exe(const wchar_t *command) {
+    const wchar_t *base = command;
+    for (const wchar_t *p = command; *p; ++p)
+        if (*p == L'/' || *p == L'\\') base = p + 1;
+    return _wcsicmp(base, L"cmd.exe") == 0;
+}
 static wchar_t *shell_command_line(const wchar_t *shell, int argc, wchar_t **argv) {
     wbuf b = {0};
     if (!wbuf_arg(&b, shell) || !wbuf_put(&b, L" -c", 3) ||
-        !wbuf_arg(&b, L"exec \"$0\" \"$@\"")) { free(b.text); return NULL; }
+        !wbuf_arg(&b, argc > 0 && command_is_cmd_exe(argv[0]) ?
+            L"MSYS2_ARG_CONV_EXCL='*' exec \"$0\" \"$@\"" :
+            L"exec \"$0\" \"$@\"")) { free(b.text); return NULL; }
     for (int i = 0; i < argc; ++i)
         if (!wbuf_arg(&b, argv[i])) { free(b.text); return NULL; }
     return b.text;
