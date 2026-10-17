@@ -1,3 +1,4 @@
+use compiler.mir._MirLowering.declaration_enum_metadata_v1.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use compiler.mir._MirLoweringExpr.function_signature_owner.*
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
@@ -622,6 +623,9 @@ impl MirLowering:
             callable_text_value_abi: {},
             lowering_entry_module: false,
             declaration_repository: nil,
+            declaration_enum_provider_keys: {},
+            declaration_enum_positions: {},
+            declaration_enum_payload_owner: {},
             declaration_parameter_defaults: {},
             declaration_parameter_defaults_ambiguous: {},
             declaration_field_defaults: {},
@@ -888,6 +892,7 @@ impl MirLowering:
         Index-based counterpart to the arity-1-only
         `enum_single_payload_types` lookup: a caller that needs slot N asks
         this first and then `enum_variant_payload_type_at`."""
+        self.ensure_declaration_enum_payloads_v1(payload_key)
         if val types = self.enum_variant_payload_types.get(payload_key):
             return types.len()
         return 0
@@ -898,6 +903,7 @@ impl MirLowering:
         Slot 0 of an arity-1 Tuple is the same HirType the pre-existing
         `enum_single_payload_types[payload_key]` returns; that map is still
         consulted FIRST by its callers, so its behaviour is unchanged."""
+        self.ensure_declaration_enum_payloads_v1(payload_key)
         if val types = self.enum_variant_payload_types.get(payload_key):
             if index >= 0 and index < types.len():
                 return Some(types[index])
@@ -925,8 +931,10 @@ impl MirLowering:
                 ni = ni + 1
         return -1
 
-    me register_enum_variants(enum_def: HirEnum):
+    me register_enum_variants(enum_def: HirEnum, store_payload_types: bool = true):
         """Register names and resolved portable runtime discriminants."""
+        if store_payload_types and self.declaration_repository != nil:
+            self.declaration_enum_payload_owner[enum_def.name] = enum_def.runtime_name
         # SIMPLE_ENUM_REG_TRACE=1 (cycle-53 discriminator): capture the exact
         # name/runtime_name spellings at write time for the failing enum. A
         # mismatch between this runtime_name and the subject owner key built
@@ -971,7 +979,6 @@ impl MirLowering:
             # keep their exact previous behaviour -- and the three full-arity
             # maps are written alongside it for every variant, so match
             # lowering / payload extraction / layout can index slot N.
-            val payload_key = "{enum_def.name}::{variant.name}"
             var full_types: [HirType] = []
             var full_names: [text] = []
             var payload_kind = "unit"
@@ -983,8 +990,6 @@ impl MirLowering:
                         full_types.push(payload_types[pti])
                         full_names.push("")
                         pti = pti + 1
-                    if payload_types.len() == 1:
-                        self.enum_single_payload_types[payload_key] = payload_types[0]
                 case HirVariantKind.Struct(payload_fields):
                     payload_kind = "struct"
                     var pfi = 0
@@ -993,18 +998,8 @@ impl MirLowering:
                         full_names.push(payload_fields[pfi].name)
                         pfi = pfi + 1
                 case _: ()
-            self.enum_variant_payload_types[payload_key] = full_types
-            self.enum_variant_payload_names[payload_key] = full_names
-            self.enum_variant_payload_kind[payload_key] = payload_kind
-            # Constructor validation must use the same declaration identity as
-            # the qualified variant/discriminant maps. Bare names can collide.
-            if enum_def.runtime_name != "":
-                val qualified_payload_key = "{enum_def.runtime_name}::{variant.name}"
-                self.enum_variant_payload_types[qualified_payload_key] = full_types
-                self.enum_variant_payload_names[qualified_payload_key] = full_names
-                self.enum_variant_payload_kind[qualified_payload_key] = payload_kind
-                if full_types.len() == 1:
-                    self.enum_single_payload_types[qualified_payload_key] = full_types[0]
+            self.register_enum_payload_metadata_v1(enum_def.name, enum_def.runtime_name,
+                variant.name, full_types, full_names, payload_kind, store_payload_types, true)
             next_value = value + 1
             vi = vi + 1
         # Bare-name collision registry (2026-08-01). enum_variant_index is keyed
@@ -1044,6 +1039,29 @@ impl MirLowering:
         self.enum_variant_index[enum_def.name] = names
         self.reindex_enum_variant_owners(enum_def.name, prior_variant_names, names)
         self.enum_variant_discriminants[enum_def.name] = discriminants
+
+<<<<<<< HEAD
+    me register_enum_payload_metadata_v1(enum_name: text, runtime_name: text, variant: text,
+            types: [HirType], names: [text], kind: text, store_types: bool = true, write_bare: bool = true):
+        # Kind/names are ID-free and needed by unit-arm inference even before
+        # a consumer demands nominal payload types. Keep the legacy tuple-only
+        # bare single-slot rule and the qualified any-single-slot rule exact.
+        if write_bare:
+            val key = "{enum_name}::{variant}"
+            self.enum_variant_payload_names[key] = names
+            self.enum_variant_payload_kind[key] = kind
+            if store_types:
+                self.enum_variant_payload_types[key] = types
+                if kind == "tuple" and types.len() == 1:
+                    self.enum_single_payload_types[key] = types[0]
+        if runtime_name != "":
+            val key = "{runtime_name}::{variant}"
+            self.enum_variant_payload_names[key] = names
+            self.enum_variant_payload_kind[key] = kind
+            if store_types:
+                self.enum_variant_payload_types[key] = types
+                if types.len() == 1:
+                    self.enum_single_payload_types[key] = types[0]
 
     me register_module_enum_inventory_v1(modules: [HirModule]):
         """Register every given module's own enums, up front, before any
@@ -2158,6 +2176,13 @@ impl MirLowering:
         self.collection_literal_operands = {}
         self.collection_literal_ordinals = {}
         self.symbols = module.symbols
+        if self.declaration_repository != nil:
+            # These HirTypes contain consumer-local numeric IDs. Scalar enum
+            # identities/kinds and deferred declaration indexes survive; type
+            # arrays are rebound lazily only when this consumer reads them.
+            self.enum_variant_payload_types = {}
+            self.enum_single_payload_types = {}
+            self.declaration_enum_payload_owner = {}
         # Provider SymbolIds are module-local: rebuild and relocate trait
         # metadata whenever the active consumer symbol table changes.
         self.native_trait_layouts = []
