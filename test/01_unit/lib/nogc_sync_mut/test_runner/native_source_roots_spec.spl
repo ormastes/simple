@@ -1,0 +1,126 @@
+"""
+Ordered native SSpec source selectors through production parsing and compile
+contracts. Existing checkout directories are real validation inputs. No compiler
+is launched and no native backend/provider execution is claimed.
+# @manual: primary
+Execution and docgen pending TEST_BLOCKED.
+"""
+use std.spec.{describe, it, expect, step}
+use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_error}
+use std.gc_async_mut.test_runner.test_runner_args.{parse_test_args as parse_gc_args}
+use std.nogc_async_mut.test_runner.test_runner_args.{parse_test_args as parse_async_args}
+use std.test_runner.test_runner_types.{TestExecutionMode}
+use std.test_runner.native_compile_contract.{native_test_compile_args_with_threads,
+    native_test_request_error, native_test_source_roots_error,
+    native_test_source_roots_identity, native_test_compile_source_roots,
+    native_test_invocation_receipt}
+use std.test_runner.test_executor_parsing.{build_child_args}
+
+describe "native SSpec ordered source roots":
+    it "should parse both repeatable flag spellings preserving root order and spec path":
+        # @req REQ-NATIVE-TEST-SOURCE-001
+        val args = ["test/03_system/tools", "--native-source", "src/providers/windows_native/lib", "--native-source=src/lib", "--native-source", "src/os"]
+        step("Validate real checkout directories then parse their ordered selectors")
+        expect(test_args_validation_error(args)).to_equal("")
+        val options = parse_test_args(args)
+        expect(options.native_source_roots).to_equal(["src/providers/windows_native/lib", "src/lib", "src/os"])
+        expect(options.path).to_equal("test/03_system/tools")
+        expect(options.paths).to_equal(["test/03_system/tools"])
+
+    it "should force LLVM native execution and disable unbound result reuse for roots alone":
+        # @req REQ-NATIVE-TEST-SOURCE-001
+        step("Select source roots without separately spelling an AOT backend")
+        val options = parse_test_args(["--session-share", "--session-daemon", "--mode=interpreter", "--native-source=src/lib"])
+        expect(options.native_backend).to_equal("llvm")
+        expect(options.mode).to_equal(TestExecutionMode.Native)
+        expect(options.no_cache).to_equal(true)
+        expect(options.assert_ran).to_equal(true)
+        expect(options.session_share).to_equal(false)
+        expect(options.session_daemon).to_equal(false)
+
+    it "should retain an explicitly selected backend and empty-root legacy behavior":
+        # @req REQ-NATIVE-TEST-SOURCE-001
+        step("Keep backend selection independent from ordered root selection")
+        val selected = parse_test_args(["--native-source=src/lib", "--native-backend=cranelift"])
+        expect(selected.native_backend).to_equal("cranelift")
+        expect(selected.native_source_roots).to_equal(["src/lib"])
+        val legacy = parse_test_args(["--mode=compile"])
+        expect(legacy.native_backend).to_equal("")
+        expect(legacy.native_source_roots.len()).to_equal(0)
+        expect(legacy.mode).to_equal(TestExecutionMode.Compile)
+
+    it "should reject missing empty nonexistent and file-valued root paths":
+        # @req REQ-NATIVE-TEST-SOURCE-001
+        step("Refuse invalid source selection through the existing argument validator")
+        expect(test_args_validation_error(["--native-source"])).to_contain("missing value")
+        expect(test_args_validation_error(["--native-source="])).to_contain("missing value")
+        expect(test_args_validation_error(["--native-source", "--verbose"])).to_contain("missing value")
+        expect(test_args_validation_error(["--native-source", " "])).to_contain("nonempty directory")
+        expect(test_args_validation_error(["--native-source=src/lib/sys/pty.spl"])).to_contain("directory does not exist")
+        expect(test_args_validation_error(["--native-source=src/__missing_native_source_20261016__"])).to_contain("directory does not exist")
+
+    it "should accept five real roots and refuse a sixth instead of dropping it":
+        # @req REQ-NATIVE-TEST-SOURCE-001
+        val roots = ["src/providers/windows_native/lib", "src/app", "src/lib", "src/os", "src/compiler"]
+        step("Validate the complete Windows provider plus workspace namespace recipe")
+        expect(native_test_source_roots_error(roots)).to_equal("")
+        expect(native_test_source_roots_error(roots + ["test"])).to_contain("at most 5")
+        expect(test_args_validation_error(["--native-source=src/app", "--native-source=src/lib", "--native-source=src/os", "--native-source=src/compiler", "--native-source=test", "--native-source=src/providers/windows_native/lib"])).to_contain("at most 5")
+
+    it "should reject source option controls and manually constructed unqualified requests":
+        # @req REQ-NATIVE-TEST-SOURCE-001
+        step("Fail before compiler execution for malformed direct native requests")
+        expect(native_test_source_roots_error(["src/lib\n"])).to_contain("nonempty directory")
+        expect(native_test_source_roots_error(["src/lib\0"])).to_contain("nonempty directory")
+        expect(native_test_request_error("", false, false, ["src/lib"])).to_contain("explicit native backend")
+        expect(native_test_request_error("llvm", false, true, ["src/lib"])).to_contain("cannot be combined")
+        expect(native_test_request_error("llvm", false, false, ["src/lib"])).to_equal("")
+
+    it "should emit every root as a separate ordered source argument before entry":
+        # @req REQ-NATIVE-TEST-SOURCE-001
+        val roots = ["src/providers/windows_native/lib", "src/lib", "src/os"]
+        step("Build actual native compiler arguments without shell token joining")
+        val args = native_test_compile_args_with_threads("test/native-generated/entry.spl", "build/output.exe", "llvm", 4, roots)
+        expect(args).to_equal(["native-build", "--backend", "llvm", "--refresh-source-authority", "--entry-closure", "--source", roots[0], "--source", roots[1], "--source", roots[2], "--entry", "test/native-generated/entry.spl", "--runtime-bundle", "core-c-bootstrap", "--threads", "4", "--cache-dir", "build/output.exe.cache", "--output", "build/output.exe"])
+        expect(native_test_compile_source_roots(args)).to_equal(roots)
+
+    it "should preserve ordered roots through a sequential worker argument boundary":
+        # @req REQ-NATIVE-TEST-SOURCE-001
+        val original = parse_test_args(["--native-backend=cranelift", "--native-source=src/os", "--native-source=src/lib", "--verbose"])
+        step("Generate a real worker invocation and parse its child options")
+        val child_args = build_child_args("fixture.spl", original)
+        expect(child_args[0]).to_equal("test")
+        val child = parse_test_args(child_args[1:])
+        expect(child.native_source_roots).to_equal(["src/os", "src/lib"])
+        expect(child.native_backend).to_equal("cranelift")
+        expect(child.no_cache).to_equal(true)
+        expect(child.assert_ran).to_equal(true)
+        expect(child.verbose).to_equal(true)
+
+    it "should bind root order into invocation and cache selection identity":
+        # @req REQ-NATIVE-TEST-SOURCE-001
+        val first = ["src/os", "src/lib"]
+        val second = ["src/lib", "src/os"]
+        step("Reverse the same roots without collapsing their different resolver precedence")
+        val first_id = native_test_source_roots_identity(first)
+        val second_id = native_test_source_roots_identity(second)
+        expect(first_id == second_id).to_equal(false)
+        expect(first_id).to_equal("native-source-roots-v1|2|6:src/os7:src/lib")
+        val first_args = native_test_compile_args_with_threads("fixture.spl", "fixture.exe", "llvm", 1, first)
+        val second_args = native_test_compile_args_with_threads("fixture.spl", "fixture.exe", "llvm", 1, second)
+        val first_receipt = native_test_invocation_receipt("llvm", "producer", "fixture.spl", "fixture.exe", "compiler.exe", first_args)
+        val second_receipt = native_test_invocation_receipt("llvm", "producer", "fixture.spl", "fixture.exe", "compiler.exe", second_args)
+        expect(first_receipt == second_receipt).to_equal(false)
+        expect(first_receipt).to_contain(first_id)
+        expect(second_receipt).to_contain(second_id)
+
+    it "should expose the same selected field through configured family facades":
+        # @req REQ-NATIVE-TEST-SOURCE-001
+        val args = ["--native-source=src/os", "--native-source=src/lib"]
+        step("Read canonical values through existing GC and async delegates")
+        val gc = parse_gc_args(args)
+        val async_options = parse_async_args(args)
+        expect(gc.native_source_roots).to_equal(["src/os", "src/lib"])
+        expect(async_options.native_source_roots).to_equal(["src/os", "src/lib"])
+        expect(gc.native_backend).to_equal("llvm")
+        expect(async_options.native_backend).to_equal("llvm")

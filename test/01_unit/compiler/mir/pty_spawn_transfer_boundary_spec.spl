@@ -1,0 +1,82 @@
+"""
+Purpose: distinguish a resolved PTY process launcher from task/actor transfer.
+Audience: MIR compiler maintainers. Execution is pending a rebuilt producer;
+the retained Windows Stage2 diagnostic compiler predates this repair.
+"""
+# @req REQ-SMUX-WINDOWS-PTY-SPAWN-OWNER
+# @bug BUG-PTY-SPAWN-THREAD-TRANSFER-2026-10-16
+# Bug: doc/08_tracking/bug/pty_spawn_misclassified_thread_transfer_2026-10-16.md
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+use std.spec.*
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir.mir_json.{serialize_mir_inst_kind}
+
+fn pty_boundary_lower_call(owner: text?, local_alias: text, declaration_name: text, named: bool) -> text:
+    var symbols = SymbolTable.new()
+    val signature = HirType(kind: HirTypeKind.Function([HirType.i64(), HirType.str()], HirType.i64(), []), span: Span.empty())
+    val symbol = symbols.define(local_alias, SymbolKind.Function, signature,
+        Span.empty(), Visibility.Public, false, owner)
+    # Model the import registration owner contract: aliases remain lookup keys
+    # while the stored callable name becomes its physical declaration name.
+    symbols.rename_symbol(symbol, declaration_name)
+    val kind = if named: HirExprKind.NamedVar(symbol, declaration_name) else: HirExprKind.Var(symbol)
+    val callee = HirExpr(kind: kind, has_type_: true, type_: signature, span: Span.empty())
+    val handle = HirExpr(kind: HirExprKind.IntLit(-1, nil), has_type_: true,
+        type_: HirType.i64(), span: Span.empty())
+    val command = HirExpr(kind: HirExprKind.StringLit("cmd.exe", nil), has_type_: true,
+        type_: HirType.str(), span: Span.empty())
+    val args = [
+        HirCallArg(has_name: false, name: "", value: handle, span: Span.empty()),
+        HirCallArg(has_name: false, name: "", value: command, span: Span.empty())
+    ]
+    var lowering = MirLowering.new(symbols)
+    val result = lowering.lower_call(callee, args)
+    var serialized = ""
+    for error in lowering.errors:
+        serialized = serialized + "MIR_ERROR:" + error.message + "\n"
+    for instruction in lowering.builder.instructions:
+        serialized = serialized + serialize_mir_inst_kind(instruction.kind) + "\n"
+    serialized
+
+describe "PTY spawn uses resolved declaration ownership":
+    it "keeps an aliased public PTY spawn on the ordinary call path":
+        step("lower the resolved pty_spawn alias with both arguments")
+        val mir = pty_boundary_lower_call("std.sys.pty", "pty_spawn", "spawn", true)
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(mir).to_contain("\"Call\"")
+        expect(mir.contains("TransferOut")).to_equal(false)
+
+    it "recognizes canonical and physical PTY declaration owners":
+        step("normalize canonical, source leaf, and Windows absolute owner identities")
+        for owner in ["lib.sys.pty", "src/lib/sys/pty.spl", "D:\\dev\\simple\\src\\lib\\sys\\pty.spl"]:
+            val mir = pty_boundary_lower_call(owner, "launch_child", "spawn", false)
+            expect(mir.contains("MIR_ERROR:")).to_equal(false)
+            expect(mir).to_contain("\"Call\"")
+            expect(mir.contains("TransferOut")).to_equal(false)
+
+    it "retains explicit transfer facts for the actor spawn owner":
+        step("lower the real actor spawn declaration without suppressing its transfer")
+        val mir = pty_boundary_lower_call("std.nogc_async_mut.actor.spawn", "new_actor", "spawn", true)
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(mir.split("\"TransferOut\"").len() - 1).to_equal(2)
+        expect(mir).to_contain("\"destination\":\"thread\"")
+
+    it "retains spawn_actor and legacy unresolved builtin transfers":
+        step("keep both prior task and actor transfer entry spellings")
+        val actor = pty_boundary_lower_call("std.nogc_async_mut.actors.actor", "actor", "spawn_actor", true)
+        val builtin = pty_boundary_lower_call(nil, "spawn", "spawn", true)
+        expect(actor.split("\"TransferOut\"").len() - 1).to_equal(2)
+        expect(builtin.split("\"TransferOut\"").len() - 1).to_equal(2)
+
+    it "does not accept an alias or a suffix as the PTY owner":
+        step("reject lookalike identities while preserving existing transfer facts")
+        for owner in ["example.pty", "example.lib.sys.pty", "lib.sys.pty_extra"]:
+            val mir = pty_boundary_lower_call(owner, "pty_spawn", "spawn", true)
+            expect(mir.split("\"TransferOut\"").len() - 1).to_equal(2)
