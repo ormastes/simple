@@ -182,6 +182,16 @@ fn mir_exact_extern_pointee_v1(type_: HirType) -> bool:
         case HirTypeKind.Ptr(inner, _): mir_exact_extern_pointee_v1(inner)
         case _: false
 
+# Local diagnostic decisions only; cleanup/abort return values are not counted.
+# Bits1/2/4/8/16/32/64/128/256: normal begin/pause/module/owner/MIRregistry/
+# functionregistry/seal/end/publish succeeded. Outcome0 precedes fallback work.
+fn mir_scope_trace_selected_v1(selected: text, module_name: text) -> bool:
+    selected != "" and selected == module_name
+
+# eprint adds the sole newline; do not retain arbitrary module/graph text.
+fn mir_scope_decision_trace_line_v1(decisions: i64, outcome: i64) -> text:
+    "[mir-scope-decisions] decisions={decisions} outcome={outcome}"
+
 impl MirLowering:
     me static_scalar_type_from_hir(type_: HirType?) -> MirType?:
         # Presence does not unwrap HirType?: a Some box crossing the concrete
@@ -2098,11 +2108,16 @@ impl MirLowering:
         # when one is already live. Reclamation is an optimisation and must
         # never be the reason a module fails to lower, so a refused scope
         # falls back to exactly today's unscoped behaviour.
+        val scope_trace = mir_scope_trace_selected_v1(mir_lower_env_get("SIMPLE_MIR_SCOPE_TRACE_MODULE") ?? "", module.name)
+        var scope_decisions: i64 = 0
         if not transient_array_scope_begin_v1():
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 0))
             return Ok(self.lower_module(module, providers, is_entry_module))
+        scope_decisions = scope_decisions | 1
         val reverse_token = reverse_reference_module_begin_v1()
         if reverse_token < 0:
             val _ended = transient_array_scope_end_v1()
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 1))
             return Err("transient MIR scope reverse-reference owner unavailable for {module.name}")
         val lowered: MirModule = self.lower_module(module, providers, is_entry_module)
         # Function-local lookup tables are scratch. The completed MIR owns its
@@ -2115,28 +2130,45 @@ impl MirLowering:
         # also refuse to hand `lowered` back.
         if not transient_array_scope_pause_v1():
             val _ended_pause = mir_abort_reverse_reference_scope_v1(reverse_token)
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 2))
             return Err("transient MIR scope pause failed for {module.name}")
+        scope_decisions = scope_decisions | 2
         if not transient_heap_promote_v1(lowered):
             val _ended_module = mir_abort_reverse_reference_scope_v1(reverse_token)
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 3))
             return Err("MIR module ownership promotion failed for {module.name}")
+        scope_decisions = scope_decisions | 4
         if not self.promote_transient_owner():
             val _ended_owner = mir_abort_reverse_reference_scope_v1(reverse_token)
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 4))
             return Err("MIR lowering owner promotion failed for {module.name}")
+        scope_decisions = scope_decisions | 8
         if not bootstrap_mir_registries_promote():
             val _ended_mir_registries = mir_abort_reverse_reference_scope_v1(reverse_token)
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 5))
             return Err("bootstrap MIR registry promotion failed for {module.name}")
+        scope_decisions = scope_decisions | 16
         if not bootstrap_fn_registries_promote():
             val _ended_fn_registries = mir_abort_reverse_reference_scope_v1(reverse_token)
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 6))
             return Err("bootstrap fn registry promotion failed for {module.name}")
+        scope_decisions = scope_decisions | 32
         if not reverse_reference_module_seal_v1(reverse_token):
             val _ended_reverse = mir_abort_reverse_reference_scope_v1(reverse_token)
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 7))
             return Err("reverse-reference ownership promotion failed for {module.name}")
+        scope_decisions = scope_decisions | 64
         if not transient_array_scope_end_v1():
             val _aborted = reverse_reference_module_abort_v1(reverse_token)
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 8))
             return Err("transient MIR scope end failed for {module.name}")
+        scope_decisions = scope_decisions | 128
         if not reverse_reference_module_publish_v1(reverse_token):
             val _aborted = reverse_reference_module_abort_v1(reverse_token)
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 9))
             return Err("reverse-reference publication failed for {module.name}")
+        scope_decisions = scope_decisions | %d
+        if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 10))
         Ok(lowered)
 
     me record_exact_extern_declaration_v1(declaration: HirFunction):
