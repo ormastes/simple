@@ -220,6 +220,27 @@ fn hir_cache_load(key: text, parser_binding: text = "") -> HirModule?:
     var promoted = true
     if paused and decoded != nil:
         promoted = transient_promote(decoded) and transient_promote(_hir_cache_last_warnings)
+        # Cycle-136: the module promotion is SHALLOW. RtCoreDict's entry array
+        # is a separate allocation that stays in this arena and is reclaimed
+        # by transient_scope_end below -- header-live/entries-dead (the
+        # cycle-134/135 hir-final receipt pair: fvals_len=5 from the promoted
+        # header, function value words faulting). Deep-promote every dict the
+        # decoded module carries, the same list as the lowering lane's
+        # cycle-135 block. (If the boxed values themselves still fault, the
+        # next escalation promotes each function object -- see the cycle-135
+        # caveat.)
+        if promoted:
+            val promoted_module: HirModule = decoded
+            promoted = transient_promote(promoted_module.functions) and
+                transient_promote(promoted_module.classes) and
+                transient_promote(promoted_module.structs) and
+                transient_promote(promoted_module.enums) and
+                transient_promote(promoted_module.bitfields) and
+                transient_promote(promoted_module.traits) and
+                transient_promote(promoted_module.constants) and
+                transient_promote(promoted_module.gpu_function_targets) and
+                transient_promote(promoted_module.symbols.symbols) and
+                transient_promote(promoted_module.symbols.scopes)
     val ended = transient_scope_end()
     if not paused or not promoted or not ended:
         panic("HIR cache decode scope ownership failed")

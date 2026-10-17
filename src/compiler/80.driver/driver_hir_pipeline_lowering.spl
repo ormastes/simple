@@ -84,12 +84,13 @@ use compiler.driver.driver_hir_pipeline_passes.{
     run_any_escape_pass,
     run_enum_contract_pass
 }
-use compiler.semantics.resolve.{resolve_methods}
+use compiler.semantics.resolve.{resolve_methods, resolve_methods_module_owner}
 use compiler.semantics.value_struct_layout.{ValueStructLayoutModuleV1, value_struct_layout_declarations_v1}
 use compiler.driver.driver_safety_severity.{SafetyPassSeverity, safety_pass_severity_phased}
 use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity, typecheck_pass_severity}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line, hir_module_encode, hir_module_has_rt_hal}
+use compiler.hir.hir_codec.{hir_module_functions_at_v1, hir_fn_scalars_at_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_last_warnings, hir_cache_parser_binding_v1, hir_cache_last_parser_objectless, hir_cache_load_parsed_v1, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_in_owned_scope, hir_cache_clear_last_warnings}
@@ -485,6 +486,28 @@ impl CompilerDriver:
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("HIR ownership promotion failed for {source_path}")
+        # Cycle-135: the module struct's promotion is SHALLOW. RtCoreDict
+        # stores its entry array as a SEPARATE allocation that stays in the
+        # transient arena, so the nested dicts' entries are reclaimed when
+        # this scope ends -- header-live/entries-dead (the hir-final
+        # fvals_len=5 + deep-fault receipt pair confirmed exactly this:
+        # len reads 5 from the promoted header, value words fault). Deep-
+        # promote every dict the module carries, the same precedent as
+        # promote_symbol_table_transient_owners below (which covers the
+        # symbol table but not these declaration dicts).
+        if not (rt_transient_heap_promote(hir_module.functions) and
+                rt_transient_heap_promote(hir_module.classes) and
+                rt_transient_heap_promote(hir_module.structs) and
+                rt_transient_heap_promote(hir_module.enums) and
+                rt_transient_heap_promote(hir_module.bitfields) and
+                rt_transient_heap_promote(hir_module.traits) and
+                rt_transient_heap_promote(hir_module.constants) and
+                rt_transient_heap_promote(hir_module.gpu_function_targets) and
+                rt_transient_heap_promote(hir_module.symbols.symbols) and
+                rt_transient_heap_promote(hir_module.symbols.scopes)):
+            driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
+            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            return Err("HIR module dict ownership promotion failed for {source_path}")
         if not lowering.promote_diagnostics_transient_owner():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
@@ -1528,7 +1551,10 @@ impl CompilerDriver:
                 bootstrap_lowering.begin_module(name)
                 val hir_module: HirModule = bootstrap_lowering.lower_module(module)
                 driver_collect_hir_errors(self.ctx, name, bootstrap_lowering.errors)
-                val (resolved_module, resolve_errors) = resolve_methods(hir_module)
+                val (_resolved_module_ignored, resolve_errors) = resolve_methods(hir_module)
+                # Cycle-130: the tuple's module slot corrupts at the native
+                # value ABI; the owner carries the authoritative copy.
+                val resolved_module: HirModule = resolve_methods_module_owner.?
                 var err_idx = 0
                 while err_idx < resolve_errors.len():
                     val err = resolve_errors[err_idx]
@@ -2125,7 +2151,14 @@ impl CompilerDriver:
         if (sosix_env_get_nullable("SIMPLE_SDN_RACE_TRACE") ?? "") == "1":
             for race_key in phase_hir_modules.keys():
                 val race_mod: HirModule = phase_hir_modules[race_key]
-                eprint("[race-trace] hir-final module={race_key} enums={race_mod.enums.len()} classes={race_mod.classes.len()} functions={race_mod.functions.len()}")
+                # Cycle-134 length-first probe: print the functions-dict's
+                # VALUES length BEFORE the deep read (separate eprints, so
+                # the length survives a deep-read fault). values_len=0 would
+                # mean the dict handle fails the runtime's as_dict cast (the
+                # empty-array path), reconciling mono's successful dict-index
+                # reads with the .values()-array element faults.
+                eprint("[race-trace] hir-final module={race_key} enums={race_mod.enums.len()} classes={race_mod.classes.len()} functions={race_mod.functions.len()} fvals_len={hir_module_functions_at_v1(phase_hir_modules.values(), 0).values().len()}")
+                eprint("[race-trace] hir-final-deep first_fn_scalars={hir_fn_scalars_at_v1(hir_module_functions_at_v1(phase_hir_modules.values(), 0).values(), 0)[1]}")
         # Same post-loop receipts as the streaming path (see its loop:done
         # comment): a crash between the last file:done and the first pass
         # summary used to leave no marker at all.
