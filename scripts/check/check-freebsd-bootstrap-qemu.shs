@@ -607,18 +607,32 @@ DISK_FLOOR_MARKER="${VM_DIR}/disk-floor-breach.$$.env"
 process_start_token() {
     _identity_pid=$1
     is_positive_integer "$_identity_pid" || return 1
-    [ -r "$PROC_ROOT/$_identity_pid/stat" ] || return 1
-    _identity_token=$(awk '{ sub(/^.*\) /, ""); print $20 }' "$PROC_ROOT/$_identity_pid/stat") || return 1
-    is_positive_integer "$_identity_token" || return 1
+    if [ -r "$PROC_ROOT/$_identity_pid/stat" ]; then
+        _identity_token=$(awk '{ sub(/^.*\) /, ""); print $20 }' "$PROC_ROOT/$_identity_pid/stat") || return 1
+        is_positive_integer "$_identity_token" || return 1
+    else
+        # macOS has no /proc. The start-time string is stable for the
+        # process's lifetime and still distinguishes pid reuse (measured
+        # 2026-10-17: the FreeBSD smoke failed 'QEMU failed to start' on
+        # macOS while the guest had fully booted to a login prompt).
+        _identity_token=$(ps -p "$_identity_pid" -o lstart= 2>/dev/null) || return 1
+        [ -n "$_identity_token" ] || return 1
+    fi
     printf '%s\n' "$_identity_token"
 }
 
 qemu_owned_alive() {
     [ -n "$QEMU_PID" ] && [ -n "$QEMU_START_TOKEN" ] || return 1
     [ "$(process_start_token "$QEMU_PID" 2>/dev/null || true)" = "$QEMU_START_TOKEN" ] || return 1
-    [ -r "$PROC_ROOT/$QEMU_PID/cmdline" ] || return 1
-    tr '\000' '\n' <"$PROC_ROOT/$QEMU_PID/cmdline" |
-        grep -Fqx -- "$QEMU_DRIVE_ARG"
+    if [ -r "$PROC_ROOT/$QEMU_PID/cmdline" ]; then
+        tr '\000' '\n' <"$PROC_ROOT/$QEMU_PID/cmdline" |
+            grep -Fqx -- "$QEMU_DRIVE_ARG"
+    else
+        # macOS fallback (no /proc): match the drive argument in the live
+        # process's argv, same contract as the cmdline scan.
+        ps -p "$QEMU_PID" -o args= 2>/dev/null |
+            grep -Fq -- "$QEMU_DRIVE_ARG"
+    fi
 }
 
 watch_host_free_space() {
@@ -708,7 +722,7 @@ cleanup() {
         fi
     fi
     if [ -n "$QEMU_PID_FILE_ID" ] && [ -f "$PID_FILE" ] &&
-       [ "$(stat -c '%d:%i' "$PID_FILE" 2>/dev/null || true)" = "$QEMU_PID_FILE_ID" ] &&
+       [ "$( (stat -c '%d:%i' "$PID_FILE" 2>/dev/null || stat -f '%d:%i' "$PID_FILE" 2>/dev/null) )" = "$QEMU_PID_FILE_ID" ] &&
        [ "$(cat "$PID_FILE" 2>/dev/null || true)" = "$QEMU_PID" ]; then
         rm -f "$PID_FILE"
     fi
@@ -756,6 +770,8 @@ resolve_efi_fd() {
     _candidates="${QEMU_EFI_FD:-}
 /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
 /usr/share/AAVMF/AAVMF_CODE.fd
+/opt/homebrew/share/qemu/edk2-aarch64-code.fd
+/usr/local/share/qemu/edk2-aarch64-code.fd
 ${HOME}/.simple/qemu/firmware/QEMU_EFI.fd"
     _old_ifs=$IFS; IFS='
 '
@@ -965,7 +981,7 @@ fi
 QEMU_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
 QEMU_START_TOKEN=$(process_start_token "$QEMU_PID" 2>/dev/null || true)
 if qemu_owned_alive; then
-    QEMU_PID_FILE_ID=$(stat -c '%d:%i' "$PID_FILE" 2>/dev/null || true)
+    QEMU_PID_FILE_ID=$( (stat -c '%d:%i' "$PID_FILE" 2>/dev/null || stat -f '%d:%i' "$PID_FILE" 2>/dev/null) )
     [ -n "$QEMU_PID_FILE_ID" ] || fail "Cannot establish QEMU pidfile ownership"
     pass "QEMU started (pid=${QEMU_PID}, accel=${ACCEL})"
 else

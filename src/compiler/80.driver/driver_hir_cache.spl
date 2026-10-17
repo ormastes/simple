@@ -219,6 +219,17 @@ fn hir_cache_load(key: text, parser_binding: text = "") -> HirModule?:
     # The owned loader only replaces the persistent warning root on a hit.
     var promoted = true
     if paused and decoded != nil:
+        # Cycle-137 REVERT of the cycle-136 deep-promotion block: the
+        # runtime's rt_transient_heap_promote is a RECURSIVE plan walker
+        # (runtime_native.c:2776) -- RAW structs scan every word for children,
+        # DICT nodes walk every occupied entry's key AND value, ARRAY nodes
+        # walk elements. The module promote above is therefore already deep;
+        # re-promoting the now-persistent nested dicts classifies them as
+        # non-transient (class 0, not an immortal string) and FAILS, which
+        # tripped the ownership panic. The cycle-134/135 shallow-promotion
+        # diagnosis was wrong; the fvals element fault has another cause
+        # (next: probe with the dict-index read pattern that mono uses, in
+        # place of the .values() chain).
         promoted = transient_promote(decoded) and transient_promote(_hir_cache_last_warnings)
     val ended = transient_scope_end()
     if not paused or not promoted or not ended:
