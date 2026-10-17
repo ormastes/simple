@@ -16,9 +16,7 @@ use compiler.mir.mir.*
 use compiler.mir.mir_instructions.{MirModule}
 use compiler.common.build_phase_accounting.{build_phase_record_failed_module_v1}
 use compiler.hir.hir_types.{SymbolTable}
-use compiler.hir.hir_codec.{hir_module_structs_at_v1, hir_module_classes_at_v1,
-    hir_module_functions_at_v1, hir_module_name_at_v1, hir_module_symbols_at_v1,
-    hir_fn_scalars_at_v1}
+use compiler.hir.hir_codec.{hir_module_functions_at_v1, hir_fn_scalars_at_v1}
 use compiler.mono.verify.post_mono_verify.{post_mono_archive_admission_v1}
 use driver_types.{CompileContext}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
@@ -1021,17 +1019,16 @@ impl CompilerDriver:
                 # with array-index EXPRESSION reads (the hir_module_has_rt_hal
                 # class) feeding the handle/scalar args directly.
                 var prescan_owner_i = 0
-                while prescan_owner_i < self.ctx.mir_feed_modules.len():
-                    # Cycle-128: the five field-expression reads marshal at
-                    # one big call site (the cycle-111 class -- the feed is
-                    # sound, the receipts prove it, but five reads at one
-                    # call corrupt). The codec-pool getters do the reads.
+                # Cycle-144 endgame: dict+key passing straight from
+                # ctx.hir_modules -- the feed array's modules were copy-
+                # corrupted at its construction (cycle-141/144), and the
+                # five-handle marshalling is moot: the callee binds the
+                # module itself (mono's precedent) and walks via the
+                # param-only codec getters.
+                val prescan_owner_keys = self.ctx.hir_modules.keys()
+                while prescan_owner_i < prescan_owner_keys.len():
                     direct_lowering.prescan_module_struct_names(
-                        hir_module_structs_at_v1(self.ctx.mir_feed_modules, prescan_owner_i),
-                        hir_module_classes_at_v1(self.ctx.mir_feed_modules, prescan_owner_i),
-                        hir_module_functions_at_v1(self.ctx.mir_feed_modules, prescan_owner_i),
-                        hir_module_name_at_v1(self.ctx.mir_feed_modules, prescan_owner_i),
-                        hir_module_symbols_at_v1(self.ctx.mir_feed_modules, prescan_owner_i))
+                        self.ctx.hir_modules, prescan_owner_keys[prescan_owner_i])
                     prescan_owner_i = prescan_owner_i + 1
             else:
                 # Cycle-118: the flagged unwrap-bind branch -- same corruptor
@@ -1043,11 +1040,7 @@ impl CompilerDriver:
                     val prescan_key: text = self.ctx.sources[direct_prescan_idx].module_name
                     if self.ctx.hir_modules.has(prescan_key):
                         direct_lowering.prescan_module_struct_names(
-                            self.ctx.hir_modules[prescan_key].?.structs,
-                            self.ctx.hir_modules[prescan_key].?.classes,
-                            self.ctx.hir_modules[prescan_key].?.functions,
-                            self.ctx.hir_modules[prescan_key].?.name,
-                            self.ctx.hir_modules[prescan_key].?.symbols)
+                            self.ctx.hir_modules, prescan_key)
                     direct_prescan_idx = direct_prescan_idx + 1
             # Enum registry completeness, next to the struct-name prescan:
             # the per-module provider pass in lower_module registers only
@@ -1208,13 +1201,10 @@ impl CompilerDriver:
             # any module on the shared MirLowering instance.
             # Cycle-117: same expression-read index loop (no for-in rebind).
             var prescan_provider_i = 0
-            while prescan_provider_i < self.ctx.mir_feed_modules.len():
+            val prescan_provider_keys = self.ctx.hir_modules.keys()
+            while prescan_provider_i < prescan_provider_keys.len():
                 lowering.prescan_module_struct_names(
-                    hir_module_structs_at_v1(self.ctx.mir_feed_modules, prescan_provider_i),
-                    hir_module_classes_at_v1(self.ctx.mir_feed_modules, prescan_provider_i),
-                    hir_module_functions_at_v1(self.ctx.mir_feed_modules, prescan_provider_i),
-                    hir_module_name_at_v1(self.ctx.mir_feed_modules, prescan_provider_i),
-                    hir_module_symbols_at_v1(self.ctx.mir_feed_modules, prescan_provider_i))
+                    self.ctx.hir_modules, prescan_provider_keys[prescan_provider_i])
                 prescan_provider_i = prescan_provider_i + 1
             var fallback_done = 0
             var fallback_failed = 0
