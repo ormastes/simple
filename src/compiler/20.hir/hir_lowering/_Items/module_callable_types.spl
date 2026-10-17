@@ -30,7 +30,10 @@ use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
 extern fn rt_enum_discriminant<T>(value: T) -> i64
-extern fn rt_enum_payload(value: StmtKind) -> Expr
+# Generic payload accessor: the payload is the raw boxed tuple word; extract
+# fields with annotated _sffi_tuple_get<T> (the StmtKind.Expr arm and the
+# cycle-66 If pre-dispatch below both use this shape).
+extern fn rt_enum_payload<T>(value: T) -> i64
 use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
 use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
 use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
@@ -593,7 +596,7 @@ impl HirLowering:
         if param.has_type_ or param.has_default:
             return nil
         if val callback_type = self.dynamic_callback_function_type(fn_decl):
-            val tail_expr: Expr = rt_enum_payload(fn_decl.body.stmts[0].kind)
+            val tail_expr: Expr = _sffi_tuple_get<Expr>(rt_enum_payload(fn_decl.body.stmts[0].kind), 0)
             match tail_expr.kind:
                 case ExprKind.Call(callee, _):
                     match callee.kind:
@@ -626,7 +629,7 @@ impl HirLowering:
         val probe = Expr(kind: ExprKind.NilLit, span: tail.span)
         if rt_enum_discriminant(tail.kind) != rt_enum_discriminant(StmtKind.Expr(probe)):
             return nil
-        val tail_expr: Expr = rt_enum_payload(tail.kind)
+        val tail_expr: Expr = _sffi_tuple_get<Expr>(rt_enum_payload(tail.kind), 0)
         match tail_expr.kind:
             case ExprKind.Call(callee, args):
                 val callee_expr: Expr = callee
@@ -728,7 +731,7 @@ impl HirLowering:
         val stmt_kind = s.kind
         val stmt_disc = rt_enum_discriminant(stmt_kind)
         if stmt_disc >= 0 and stmt_disc == expr_stmt_disc:
-            val expr: Expr = rt_enum_payload(stmt_kind)
+            val expr: Expr = _sffi_tuple_get<Expr>(rt_enum_payload(stmt_kind), 0)
             return self.scan_ast_expr_for_returns(expr, params)
         match s.kind:
             case StmtKind.Val(_, _, init):
@@ -738,8 +741,10 @@ impl HirLowering:
                 self.scan_ast_expr_for_returns(init_expr, params)
             case StmtKind.Var(_, _, init):
                 var var_scan = return_scan_empty()
-                val init_expr: Expr = init
-                if val init_e = init_expr:
+                # ANY-transport: the payload is Expr? (optional); rebind with
+                # the optional type before the if-val destructure (cycle-65).
+                val init_opt: Expr? = init
+                if val init_e = init_opt:
                     var_scan = self.scan_ast_expr_for_returns(init_e, params)
                 var_scan
             case StmtKind.Assign(target, _, value):
@@ -752,8 +757,8 @@ impl HirLowering:
                 merge_result
             case StmtKind.Return(value):
                 var ret_scan = return_scan_empty()
-                val value_expr: Expr = value
-                if val v = value_expr:
+                val value_opt: Expr? = value
+                if val v = value_opt:
                     ret_scan = ReturnScan(found_value_return: true, resolved_name: self.infer_simple_type_name_ast(v, params) ?? "", ambiguous: false)
                 ret_scan
             case StmtKind.For(_, iter, body):
@@ -777,8 +782,8 @@ impl HirLowering:
                 self.scan_ast_block_for_returns(body_block, params)
             case StmtKind.Yield(value):
                 var yield_scan = return_scan_empty()
-                val value_expr: Expr = value
-                if val yv = value_expr:
+                val value_opt: Expr? = value
+                if val yv = value_opt:
                     yield_scan = self.scan_ast_expr_for_returns(yv, params)
                 yield_scan
             case StmtKind.Throw(value):
@@ -807,11 +812,35 @@ impl HirLowering:
         # missing expression at its normal diagnostic boundary.
         if e == nil:
             return return_scan_empty()
+        # ANY-transport hazard (cycle-66): `case ExprKind.If(cond, then_, else_)`
+        # payload sub-bindings arrive ERASED from the enum payload destructure,
+        # and annotated rebinds of the option do not restore them (the raw
+        # tuple payload landmine this file already works around for
+        # StmtKind.Expr below). Dispatch If by discriminant and extract the
+        # payload with annotated tuple gets, exactly like that arm.
+        val e_kind_for_if = e.kind
+        val if_exemplar = ExprKind.If(Expr(kind: ExprKind.NilLit, span: e.span),
+            Block(stmts: [], span: e.span), nil)
+        if rt_enum_discriminant(e_kind_for_if) == rt_enum_discriminant(if_exemplar):
+            val if_payload = rt_enum_payload(e_kind_for_if)
+            val if_cond: Expr = _sffi_tuple_get<Expr>(if_payload, 0)
+            val if_then: Block = _sffi_tuple_get<Block>(if_payload, 1)
+            val if_else: Block? = _sffi_tuple_get<Block?>(if_payload, 2)
+            val cond_scan: ReturnScan = self.scan_ast_expr_for_returns(if_cond, params)
+            val then_scan: ReturnScan = self.scan_ast_block_for_returns(if_then, params)
+            val if_merge: ReturnScan = merge_return_scan(cond_scan, then_scan)
+            var if_acc = if_merge
+            val if_else_opt: Block? = if_else
+            if val if_else_b = if_else_opt:
+                val else_scan: ReturnScan = self.scan_ast_block_for_returns(if_else_b, params)
+                val else_merge: ReturnScan = merge_return_scan(if_acc, else_scan)
+                if_acc = else_merge
+            return if_acc
         match e.kind:
             case ExprKind.Return(value):
                 var ret_scan = return_scan_empty()
-                val value_expr: Expr = value
-                if val v = value_expr:
+                val value_opt: Expr? = value
+                if val v = value_opt:
                     ret_scan = ReturnScan(found_value_return: true, resolved_name: self.infer_simple_type_name_ast(v, params) ?? "", ambiguous: false)
                 ret_scan
             case ExprKind.If(cond, then_, else_):
@@ -821,7 +850,8 @@ impl HirLowering:
                 val merge_arg_1: ReturnScan = self.scan_ast_block_for_returns(then_block, params)
                 val merge_result: ReturnScan = merge_return_scan(merge_arg_0, merge_arg_1)
                 var acc = merge_result
-                if val else_b = else_:
+                val else_opt: Block? = else_
+                if val else_b = else_opt:
                     # ANY-transport: rebind scan results before the by-value merge (cycle-62).
                     val merge_arg_1: ReturnScan = self.scan_ast_block_for_returns(else_b, params)
                     val merge_result: ReturnScan = merge_return_scan(acc, merge_arg_1)
@@ -840,7 +870,8 @@ impl HirLowering:
                     val merge_arg_1: ReturnScan = self.scan_ast_block_for_returns(then_block, params)
                     val merge_result: ReturnScan = merge_return_scan(acc, merge_arg_1)
                     acc = merge_result
-                if val else_b = else_:
+                val else_opt: Block? = else_
+                if val else_b = else_opt:
                     # ANY-transport: rebind scan results before the by-value merge (cycle-62).
                     val merge_arg_1: ReturnScan = self.scan_ast_block_for_returns(else_b, params)
                     val merge_result: ReturnScan = merge_return_scan(acc, merge_arg_1)
@@ -870,7 +901,8 @@ impl HirLowering:
                     val merge_arg_1: ReturnScan = self.scan_ast_block_for_returns(clause.body, params)
                     val merge_result: ReturnScan = merge_return_scan(acc, merge_arg_1)
                     acc = merge_result
-                if val fin_b = finally_:
+                val finally_opt: Block? = finally_
+                if val fin_b = finally_opt:
                     # ANY-transport: rebind scan results before the by-value merge (cycle-62).
                     val merge_arg_1: ReturnScan = self.scan_ast_block_for_returns(fin_b, params)
                     val merge_result: ReturnScan = merge_return_scan(acc, merge_arg_1)
@@ -954,17 +986,20 @@ impl HirLowering:
                 self.scan_ast_expr_for_returns(base_expr, params)
             case ExprKind.Range(start, end, _, step):
                 var acc = return_scan_empty()
-                if val start_e = start:
+                val start_opt: Expr? = start
+                if val start_e = start_opt:
                     # ANY-transport: rebind scan results before the by-value merge (cycle-62).
                     val merge_arg_1: ReturnScan = self.scan_ast_expr_for_returns(start_e, params)
                     val merge_result: ReturnScan = merge_return_scan(acc, merge_arg_1)
                     acc = merge_result
-                if val end_e = end:
+                val end_opt: Expr? = end
+                if val end_e = end_opt:
                     # ANY-transport: rebind scan results before the by-value merge (cycle-62).
                     val merge_arg_1: ReturnScan = self.scan_ast_expr_for_returns(end_e, params)
                     val merge_result: ReturnScan = merge_return_scan(acc, merge_arg_1)
                     acc = merge_result
-                if val step_e = step:
+                val step_opt: Expr? = step
+                if val step_e = step_opt:
                     # ANY-transport: rebind scan results before the by-value merge (cycle-62).
                     val merge_arg_1: ReturnScan = self.scan_ast_expr_for_returns(step_e, params)
                     val merge_result: ReturnScan = merge_return_scan(acc, merge_arg_1)
@@ -975,8 +1010,8 @@ impl HirLowering:
                 self.scan_ast_expr_for_returns(await_expr, params)
             case ExprKind.Yield(value):
                 var yield_scan = return_scan_empty()
-                val value_expr: Expr = value
-                if val yv = value_expr:
+                val value_opt: Expr? = value
+                if val yv = value_opt:
                     yield_scan = self.scan_ast_expr_for_returns(yv, params)
                 yield_scan
             case ExprKind.Throw(value):
