@@ -47,13 +47,19 @@ fn mir_global_reference_ids(functions: [HirFunction], constants: [HirConst]) -> 
     # One bounded-to-this-module traversal; ambient imported declarations that
     # are never referenced must not require their providers to join the closure.
     var pending: [HirNode] = []
-    for function in functions:
+    for raw_function in functions:
+        # Annotated rebind: .values()/for-in elements travel through ANY on
+        # the stage2-compiled compiler; reading fields off the unannotated
+        # binding is the same fault class as the runtime-initializer
+        # index-sort fix (2026-10-16).
+        val function: HirFunction = raw_function
         for node in hir_children_of_block(function.body):
             pending = pending.push(node)
         for param in function.params:
             if param.has_default:
                 pending = pending.push(HirNode.Expr(param.default))
-    for constant in constants:
+    for raw_constant in constants:
+        val constant: HirConst = raw_constant
         pending = pending.push(HirNode.Expr(constant.value))
     var seen: Dict<i64, bool> = {}
     var result: [i64] = []
@@ -127,7 +133,11 @@ impl MirLowering:
     me register_provider_global_bindings(provider_name: text, provider_symbols: SymbolTable, constants: [HirConst], demanded: Dict<text, [i64]>, previous: Dict<text, bool>, callables: Dict<text, [i64]> = {}) -> Dict<text, bool>:
         val owner = mir_layout_canonical_module_name(provider_name)
         var needs_initialization = runtime_module_initializers_in_declaration_order(constants).len() > 0
-        for slot in constants:
+        for raw_slot in constants:
+            # Annotated rebind: composite element through ANY (same hazard
+            # class as the index-sort fix; this loop reads slot.value off
+            # every provider constant while lowering a consumer module).
+            val slot: HirConst = raw_slot
             if slot.is_mutable:
                 match slot.value.kind:
                     case HirExprKind.NamedVar(callable_id, _):

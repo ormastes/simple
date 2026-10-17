@@ -58,11 +58,24 @@ fn main() -> i64:
     ctx.source_identities_owner = [sha256_text(source), sha256_text(source)]
     ctx.source_byte_lengths_owner = [source.len(), source.len()]
     ctx.source_module_names_owner = [name, "journal.logical_alias"]
-    val created = driver_hir_archive_journal_create_v1(ctx, selected)
+    # Journal creation recaptures and revalidates the provider. A nested
+    # aggregate transported across phase 2 is not itself the authority; its
+    # retained scalar digest/header must still bind the genuine recapture.
+    var transported = selected
+    var transported_provider = transported.provider
+    transported_provider.root = "transported nested provider is not authority"
+    transported.provider = transported_provider
+    transported.producer_header = "transported pre-surface header is not authority"
+    val created = driver_hir_archive_journal_create_v1(ctx, transported)
     if created.is_err(): return 4
     val owner = created.unwrap()
-    if driver_hir_archive_journal_verify_v1(owner, ctx).is_err() or owner.events.len() != 0: return 5
-    var checks = 1
+    if driver_hir_archive_journal_verify_v1(owner, ctx).is_err() or owner.events.len() != 0 or
+            owner.selection.provider.root == transported.provider.root or
+            owner.selection.producer_header == transported.producer_header: return 5
+    var tampered_transport = transported
+    tampered_transport.selection_digest = sha256_text("tampered transported selection")
+    if not driver_hir_archive_journal_create_v1(ctx, tampered_transport).is_err(): return 24
+    var checks = 2
     if not transient_scope_begin(): return 6
     val active = driver_hir_archive_journal_verify_v1(owner, ctx).is_err()
     if not transient_scope_pause(): return 7
@@ -125,6 +138,6 @@ fn main() -> i64:
     failed.failed_event_key = ""
     if not driver_hir_archive_journal_verify_v1(failed, ctx).is_err() or transient_array_scope_state_v1() != 0: return 21
     checks = checks + 1
-    if checks != 13: return 22
+    if checks != 14: return 22
     print "HIR archive publication journal: {checks} checks passed"
     0
