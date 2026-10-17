@@ -954,12 +954,20 @@ impl CompilerDriver:
             # (SEGV on `state.driver.width` across modules). Register every
             # module's name-keyed struct layout before lowering any module.
             if mir_physical_ownership_active:
-                for prescan_hir in mir_provider_modules:
-                    # Cycle-110: dict-handle/scalar args (the callee no
-                    # longer takes HirModule by value).
-                    direct_lowering.prescan_module_struct_names(prescan_hir.structs,
-                        prescan_hir.classes, prescan_hir.functions,
-                        prescan_hir.name, prescan_hir.symbols)
+                # Cycle-117: NO for-in element rebind -- the rebind copy of
+                # the HirModule element corrupted the .functions handle
+                # (garbage element words three calls downstream). Index loop
+                # with array-index EXPRESSION reads (the hir_module_has_rt_hal
+                # class) feeding the handle/scalar args directly.
+                var prescan_owner_i = 0
+                while prescan_owner_i < mir_provider_modules.len():
+                    direct_lowering.prescan_module_struct_names(
+                        mir_provider_modules[prescan_owner_i].structs,
+                        mir_provider_modules[prescan_owner_i].classes,
+                        mir_provider_modules[prescan_owner_i].functions,
+                        mir_provider_modules[prescan_owner_i].name,
+                        mir_provider_modules[prescan_owner_i].symbols)
+                    prescan_owner_i = prescan_owner_i + 1
             else:
                 var direct_prescan_idx = 0
                 while direct_prescan_idx < self.ctx.sources.len():
@@ -1128,10 +1136,16 @@ impl CompilerDriver:
             # Same crossmodule struct prepass as the --entry-closure loop
             # above: register all modules' struct layouts before lowering
             # any module on the shared MirLowering instance.
-            for prescan_module in mir_provider_modules:
-                lowering.prescan_module_struct_names(prescan_module.structs,
-                    prescan_module.classes, prescan_module.functions,
-                    prescan_module.name, prescan_module.symbols)
+            # Cycle-117: same expression-read index loop (no for-in rebind).
+            var prescan_provider_i = 0
+            while prescan_provider_i < mir_provider_modules.len():
+                lowering.prescan_module_struct_names(
+                    mir_provider_modules[prescan_provider_i].structs,
+                    mir_provider_modules[prescan_provider_i].classes,
+                    mir_provider_modules[prescan_provider_i].functions,
+                    mir_provider_modules[prescan_provider_i].name,
+                    mir_provider_modules[prescan_provider_i].symbols)
+                prescan_provider_i = prescan_provider_i + 1
             var fallback_done = 0
             var fallback_failed = 0
             for hir_module in mir_provider_modules:
