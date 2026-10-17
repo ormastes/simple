@@ -25,5 +25,10 @@ EVEX register arrays as well as the original x86 immediate cases.
 Evidence: co-located-cycle2/compile.log; actual fatal source line is retained
 inside the admitted source snapshot. Focused cycle three subsequently passed
 MIR65/65 and emitted54 new AMD64 COFF objects after the fix. Runtime discovery
-then failed because the tiny project has no src/runtime, so native behavior
-and broad core qualification remain pending.
+then failed because the tiny project has no src/runtime. Strict manual
+completion reused those54 new objects, the canonical entry and38 verified C1
+runtime objects. The sole execution exited0 with exact80-byte PASS stdout and
+empty stderr, including fourteen checked signed-i32 parser cases. Executable
+pre/post SHA256: 724f23e723bbc4ab8f9f77d57284f6d10f156c225f120d14a95ea884a81024bf.
+The AArch64 OS-file-reading path itself, broad compiler/lib/MCP qualification
+and dedicated BDD execution remain unrun.

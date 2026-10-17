@@ -32,4 +32,11 @@ Focused cycle three passed MIR65/65 and emitted54 new AMD64 COFF objects,
 clearing the original inference failures with both annotations present.
 Compiler exit was1 during runtime discovery because the tiny source checkout
 has no src/runtime; --runtime-path supplies runtime artifacts, not C sources.
-This is codegen evidence, not native behavior or broad core qualification.
+Strict completion then linked those54 new objects with the canonical entry
+and38 independently hash-verified C1 runtime objects. The sole native run
+exited0 and emitted the exact expected PASS line (80 stdout bytes, empty
+stderr), exercising both complete register arrays, original imm64 cases and
+fourteen signed-i32 parser cases. Executable pre/post SHA256:
+724f23e723bbc4ab8f9f77d57284f6d10f156c225f120d14a95ea884a81024bf.
+Production workaround commit: 1c972e8e689. Broad compiler/lib/MCP qualification
+and the dedicated BDD runner remain unrun. The inference owner is still open.
