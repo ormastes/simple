@@ -1,0 +1,43 @@
+# BUG-X86-NEGATIVE-IMM64-20261017: preserve signed immediate bits.
+use std.spec.*
+use compiler.backend.native.encode_x86_64.{emit_i64_bytes, encode_inst, new_encode_context}
+use compiler.backend.native.mach_inst.{new_mach_inst, op_phys, op_imm, X86_OP_MOV_REG_IMM, X86_RAX, X86_R8}
+
+fn expect_bytes(actual: [i64], expected: [i64]):
+    expect(actual.len()).to_equal(expected.len())
+    for index in 0..expected.len():
+        expect(actual[index]).to_equal(expected[index])
+
+describe "x86_64 signed imm64 encoding":
+    it "encodes minus one as eight set bytes":
+        expect_bytes(emit_i64_bytes([], -1), [255, 255, 255, 255, 255, 255, 255, 255])
+
+    it "encodes a negative value just above the low word boundary":
+        expect_bytes(emit_i64_bytes([], -4294967295), [1, 0, 0, 0, 255, 255, 255, 255])
+
+    it "encodes an exact negative word boundary":
+        expect_bytes(emit_i64_bytes([], -4294967296), [0, 0, 0, 0, 255, 255, 255, 255])
+
+    it "encodes a negative value just below the low word boundary":
+        expect_bytes(emit_i64_bytes([], -4294967297), [255, 255, 255, 255, 254, 255, 255, 255])
+
+    it "encodes the minimum signed i64 without overflow":
+        val minimum = -9223372036854775807 - 1
+        expect_bytes(emit_i64_bytes([], minimum), [0, 0, 0, 0, 0, 0, 0, 128])
+
+    it "encodes the maximum signed i64":
+        expect_bytes(emit_i64_bytes([], 9223372036854775807), [255, 255, 255, 255, 255, 255, 255, 127])
+
+    it "retains positive and zero immediates and existing bytes":
+        expect_bytes(emit_i64_bytes([], 0), [0, 0, 0, 0, 0, 0, 0, 0])
+        expect_bytes(emit_i64_bytes([72, 184], 4294967297), [72, 184, 1, 0, 0, 0, 1, 0, 0, 0])
+
+    it "encodes a negative MOV to a low register through the instruction encoder":
+        val inst = new_mach_inst(X86_OP_MOV_REG_IMM, [op_phys(X86_RAX), op_imm(-1)])
+        val encoded = encode_inst(new_encode_context(), inst)
+        expect_bytes(encoded.code, [72, 184, 255, 255, 255, 255, 255, 255, 255, 255])
+
+    it "encodes a negative MOV to an extended register through the instruction encoder":
+        val inst = new_mach_inst(X86_OP_MOV_REG_IMM, [op_phys(X86_R8), op_imm(-4294967297)])
+        val encoded = encode_inst(new_encode_context(), inst)
+        expect_bytes(encoded.code, [73, 184, 255, 255, 255, 255, 254, 255, 255, 255])
