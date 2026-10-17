@@ -234,11 +234,23 @@ impl MethodResolver:
         # Build trait implementation map from impls
         self.build_trait_impls(module.impls)
 
-        # Resolve functions
-        var resolved_functions: Dict<SymbolId, HirFunction> = {}
-        for func in module.functions.values():
-            val resolved_func = self.resolve_function(func)
-            resolved_functions[resolved_func.symbol] = resolved_func
+        # Resolve functions. Cycle-132: with NO impls and NO classes there
+        # are no method-resolution candidates at all, so resolve_function's
+        # per-function rebuild is a field-wise-identical copy -- and that
+        # rebuild is exactly where the corruption enters (the for-in element
+        # rebind of each HirFunction and the fresh constructor copy both draw
+        # corrupted; the cycle-132 deep probe showed the rebuilt functions
+        # poisoned for p2_add). Reuse the ORIGINAL functions dict handle:
+        # the boxed pointers are genuine and resolve would not have changed
+        # a single field. (The impl/class gate is conservative: any module
+        # that could contain a resolvable method call still takes the rebuild
+        # path.)
+        var resolved_functions: Dict<SymbolId, HirFunction> = module.functions
+        if module.impls.len() > 0 or module.classes.len() > 0:
+            resolved_functions = {}
+            for func in module.functions.values():
+                val resolved_func = self.resolve_function(func)
+                resolved_functions[resolved_func.symbol] = resolved_func
 
         # Resolve constants
         var resolved_constants: Dict<SymbolId, HirConst> = {}
