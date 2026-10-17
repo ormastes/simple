@@ -332,3 +332,22 @@ modules — the trigger (naming? import shape? demand propagation through
 `use ...{a, b, c}` explicit lists?) needs the seed-vs-stage2 scheduler
 comparison; the repro is the stage3 resume in /tmp/resume34-cap12.sh
 (HIR cached, mono/MIR/link re-run in ~20 min).
+
+## Emission divergence is systemic (2026-10-17, second stage3 link)
+
+The focused_native_build workaround cleared its two symbols; the next stage3
+link fails on 25 undefined symbols across ~17 modules, including function-
+level gaps in core modules (`lib.nogc_sync_mut.io_runtime.env_get`,
+`dir_create` — not whole-module) and driver modules (`compiler_driver_create`,
+`run_native_build_entry_v1`, K1 backend table, compile-options/result helpers).
+Counting evidence: the stage3 link inputs carry ~44 defined symbols across 40
+fresh objects; the remaining module objects must come from the content-keyed
+native cache, and the missing 25 are functions whose emitting modules produced
+no object in this scope. Stage2's build (by the seed) emitted all of them.
+
+This is NOT module-pair-specific: the stage2-built compiler's emission/cache
+diverges from the seed's across the closure. Inlining is not viable at this
+scope. Owner: self-host divergence lane — the seed's emitter/caching is the
+reference; compare emission+native-cache admission for the 25 named symbols
+(repro: /tmp/fullchain-monofix.sh on the final-push tree; HIR cached, link
+verdict in ~20 min).
