@@ -188,6 +188,16 @@ failed_tool_module_limit=${BOOTSTRAP_VERIFY_FAILED_TOOL_MODULE_LIMIT:-8}
 spec_timeout_seconds=${BOOTSTRAP_VERIFY_SPEC_TIMEOUT_SECONDS:-120}
 native_internal_timeout=${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:-600}
 build_threads=${BOOTSTRAP_VERIFY_BUILD_THREADS:-4}
+# Declare the phase's worker count to the process-tree RSS watchdog for every
+# wrapped command, including rows whose argv carries no --threads/--jobs (the
+# interpreter test runner). Without this, non-build rows fall back to the
+# static 8 GiB ceiling, which a full phase-verification matrix on this branch
+# measurably exceeds (~8.4 GiB peak on a 64 GiB Windows host, 2026-10-15) --
+# see doc/08_tracking/bug/tree_rss_floor_kills_stage2_compiler_tests_on_large_hosts_2026-10-15.md.
+# run-process-group-timeout.shs consumes this only when argv detection finds
+# no worker count, so native-build rows keep their own --threads declaration.
+SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS=$build_threads
+export SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS
 tool_build_concurrency=${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-2}
 case "$tool_build_concurrency" in
   1|2) ;;
@@ -270,6 +280,9 @@ bootstrap_verification_resource_policy "$phase" "$verification_diagnostic" \
   die "invalid verification resource policy (zero deadlines require BOOTSTRAP_VERIFY_DIAGNOSTIC=1; worker pools remain bounded)"
 bootstrap_verification_campaign_policy "$campaign_timeout_seconds" "$failed_tool_module_limit" ||
   die "campaign deadline must be positive and failed-tool module limit nonnegative"
+failed_tool_module_limit=$(bootstrap_verification_module_limit "$strategy" "$profile" \
+  "$SIMPLE_COMPILE_FAIL_FAST" "$failed_tool_module_limit") ||
+  die "invalid module inventory selection policy"
 test_mode_flag=--sequential
 test_worker_flag=
 if [ "$test_workers" -gt 1 ]; then
@@ -894,13 +907,20 @@ run_task() {
         SIMPLE_NATIVE_BUILD_TARGET="$target_c_platform" SIMPLE_BINARY="$compiler_snapshot"
         SIMPLE_PROJECT_ROOT="$source_root" SIMPLE_ABI_POLICY=v1
         SIMPLE_RUNTIME_RISCV64_VECTOR=0
+        # Per-task watchdog scoping: artifact builds run in the campaign's
+        # inherited session alongside co-resident sibling tool builds; without
+        # this, each build's watchdog counts the siblings' trees into its cap
+        # (the cycle-27 ratchet: mcp_build killed at cap+476 KiB with a 2.07
+        # GiB own tree). scope-group measures/kills only the leader's group.
+        SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP=1
         unset SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE SIMPLE_NATIVE_BUILD_WORKER
         SIMPLE_BOOTSTRAP_STAGE3=0 SIMPLE_BOOTSTRAP_STAGE4=0
         export SIMPLE_NATIVE_RUNTIME_BUNDLE SIMPLE_RUNTIME_PATH SIMPLE_NATIVE_BUILD_THREADS \
            SIMPLE_NATIVE_BUILD_CACHE_DIR SIMPLE_FRONTEND_CACHE_DIR SIMPLE_HIR_CACHE_DIR \
            SIMPLE_NATIVE_BUILD_TARGET SIMPLE_BINARY \
            SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_STAGE4 SIMPLE_RT_OBJ_CACHE_DIR \
-           SIMPLE_PROJECT_ROOT SIMPLE_ABI_POLICY SIMPLE_RUNTIME_RISCV64_VECTOR
+           SIMPLE_PROJECT_ROOT SIMPLE_ABI_POLICY SIMPLE_RUNTIME_RISCV64_VECTOR \
+           SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP
          bootstrap_phase_c_apply_frontend_policy || exit 88
         bootstrap_phase_run_command run_with_timeout "$@"
       elif [ "$phase" = stage1 ] && [ "${1:-}" = "$compiler_snapshot" ] && \
@@ -1360,6 +1380,9 @@ snapshot_target_c_inputs() (
   tci_sdk_sha=$(hash_file "$tci_sdk_header") || exit 1
   tci_tool_sha=$(hash_file "$tci_cc") || exit 1
   tci_version_sha=$(hash_file "$tci_record.version") || exit 1
+  # A prior campaign ends with this file chmod 400 (immutable evidence); the
+  # work root is shared across campaigns, so replace rather than truncate.
+  rm -f -- "$tci_record" || exit 1
   {
     echo 'target_runtime_profile=core-c-bootstrap'
     echo 'target_runtime_abi_policy=v1'
@@ -1551,7 +1574,7 @@ run_module_compile_command() (
   exit "$module_status"
 )
 
-run_failed_binary_module_inventory() {
+run_failed_binary_module_inventory() (
   [ "$phase" != stage1 ] || return 0
   module_prior_failure=1
   if [ "${compiler_cli_ready:-0}" = 1 ] && [ "${test_runner_ready:-0}" = 1 ] && \
@@ -1567,12 +1590,39 @@ run_failed_binary_module_inventory() {
   (cd "$source_root" && find src/compositions/kernel_llvm_cranelift src/compiler src/app src/lib \
       -type f -name '*.spl' -print) >"$module_manifest.unsorted" || return 1
   LC_ALL=C sort -u "$module_manifest.unsorted" >"$module_manifest" || return 1
+  # Resume only an exact admitted source/runtime/tool/producer/target lineage.
+  # Source admission snapshots cover transitive imports and compiler sources.
+  case "$phase:${target_c_platform:-}" in
+    stage2:*-linux-*|stage3:*-linux-*) ;;
+    *) printf 'task=module_compile_progress|result=BLOCKED|status=resumable-target-unsupported|log=-\n' >>"$summary"; return 1 ;;
+  esac
+  MODULE_PROGRESS_HELPER="$source_root/scripts/bootstrap/bootstrap-module-progress.py"
+  [ -f "$MODULE_PROGRESS_HELPER" ] && command -v python3 >/dev/null 2>&1 || return 1
+  MODULE_COMPILE_VALIDATE_FULL=1 validate_module_compile_prerequisites || return 1
+  MODULE_PROGRESS_CONTEXT=$(printf '%s\n' module-progress-v1 "$phase" \
+    "$(hash_file "$module_manifest")" "$target_c_source_sha" "$snapshot_sha" \
+    "$runtime_cache_identity" "$tool_input_identity" "$target_c_platform" \
+    "$(hash_file "$MODULE_PROGRESS_HELPER")" | hash_stream) || return 1
+  MODULE_PROGRESS_STATE="$cache_root/module-progress/$MODULE_PROGRESS_CONTEXT"
+  MODULE_PROGRESS_TARGET="$target_c_platform"
+  mkdir -p "$MODULE_PROGRESS_STATE" || return 1
+  # POSIX flock on inherited FD9: the kernel releases it after the campaign and
+  # all workers exit. No PID guessing or stale lock deletion. env-i only resets
+  # environment, not this inherited descriptor; competing writers refuse.
+  [ ! -L "$MODULE_PROGRESS_STATE/writer.lock" ] || return 1
+  exec 9>"$MODULE_PROGRESS_STATE/writer.lock" || return 1
+  python3 "$MODULE_PROGRESS_HELPER" lock 9 || return 1
+  export MODULE_PROGRESS_HELPER MODULE_PROGRESS_STATE MODULE_PROGRESS_CONTEXT MODULE_PROGRESS_TARGET
   module_selected="$work_root/module-compile-selected.txt"
+  module_selection_status=0
   bootstrap_verification_select_modules "$module_manifest" "$module_selected" \
-    "${compiler_cli_ready:-0}" "${test_runner_ready:-0}" "$failed_tool_module_limit" "$summary" || return 1
+    "${compiler_cli_ready:-0}" "${test_runner_ready:-0}" "$failed_tool_module_limit" "$summary" || module_selection_status=$?
+  # Only explicit status3 denotes validated retained failures. Any crash or
+  # refusal is an infrastructure error; never use an old selected manifest.
+  case "$module_selection_status" in 0) ;; 3) matrix_failed=1 ;; *) return 1 ;; esac
   if [ ! -s "$module_selected" ]; then
-    matrix_failed=1
-    return 0
+    [ "$module_selection_status" = 0 ] && [ "$matrix_failed" = 0 ]
+    return $?
   fi
 
   module_effective_workers=$module_workers
@@ -1603,7 +1653,12 @@ run_failed_binary_module_inventory() {
   fi
   unset MODULE_COMPILE_PRIOR_FAILURE
   unset MODULE_COMPILE_PREREQUISITE_BLOCKED
-}
+  # Re-read every seal after the full boundary; pending scope and retained
+  # failures remain nonzero even if this particular batch compiled cleanly.
+  module_final_selected="$module_selected.remaining"
+  python3 "$MODULE_PROGRESS_HELPER" select "$module_manifest" "$module_final_selected" "$MODULE_PROGRESS_STATE" "$MODULE_PROGRESS_CONTEXT" "$MODULE_PROGRESS_TARGET" 0 "$summary" || return 1
+  [ ! -s "$module_final_selected" ] && [ "$matrix_failed" = 0 ]
+)
 
 matrix_should_skip() {
   [ "${SIMPLE_COMPILE_FAIL_FAST:-0}" = 1 ] && [ "$matrix_failed" -ne 0 ]
@@ -2363,7 +2418,10 @@ else
     record_unsupported_task lsp_build host-gpu-hosted-runtime-authority-unavailable
   fi
 
-  run_failed_binary_module_inventory || die "cannot inventory diagnostic modules"
+  if ! run_failed_binary_module_inventory; then
+    printf 'task=module_compile_campaign|result=INCOMPLETE|status=failed-or-unfinished-inventory|log=%s\n' "$work_root/module-compile-inventory.txt" >>"$summary"
+    matrix_failed=1
+  fi
 
   if [ -n "$compiler_cli_sha" ] && [ -n "$test_runner_sha" ]; then
     if [ "$phase" = stage2 ] || [ "$phase" = stage3 ]; then

@@ -1,0 +1,28 @@
+"""C/CUDA transitive MIR owners: runtime qualification pending."""
+use std.spec.{describe, it, expect}
+use compiler.mir.mir_types.{MirType, MirSignature}
+use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget}
+use compiler.backend.gpu_backend_metadata.{gpu_backend_supports_target}
+use plugins.backend_c.c_codegen_adapter.{CCodegenAdapter}
+use plugins.backend_c.c_type_mapper.{CTypeMapper}
+use plugins.backend_cuda.cuda_backend_port.{cuda_backend_port_v1}
+use plugins.backend_cuda.cuda_backend.{CudaBackend}
+
+describe "C and CUDA adapter terminal MIR identity":
+    it "passes terminal signature types through CUDA fields and both mappers":
+        val ty = MirType.i64()
+        val sig = MirSignature(params: [ty], return_type: ty, is_variadic: false)
+        var cuda = CudaBackend.create((8, 6))
+        cuda.function_signatures["owner_probe"] = sig
+        val retained: MirSignature = cuda.function_signatures["owner_probe"]
+        expect(retained.params.len()).to_equal(1)
+        expect(cuda.type_mapper.size_of(retained.params[0])).to_equal(8)
+        val c_mapper = CTypeMapper.create()
+        expect(c_mapper.size_of(retained.return_type)).to_equal(8)
+
+    it "accepts PTX while rejecting CPU target substitutions":
+        expect(gpu_backend_supports_target(BackendKind.Cuda, CodegenTarget.CudaPtx)).to_equal(true)
+        expect(gpu_backend_supports_target(BackendKind.Cuda, CodegenTarget.AArch64)).to_equal(false)
+        expect(gpu_backend_supports_target(BackendKind.Cuda, CodegenTarget.Arm)).to_equal(false)
+        expect(gpu_backend_supports_target(BackendKind.Cuda, CodegenTarget.Riscv64)).to_equal(false)
+        expect(gpu_backend_supports_target(BackendKind.Cuda, CodegenTarget.Riscv32)).to_equal(false)

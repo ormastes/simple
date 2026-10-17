@@ -1,7 +1,7 @@
 # Copy propagation stripped method names regressed
 
-**Bug:** `copy_propagation_stripped_method_regression_2026-10-11`  
-**Status:** FIXED in the linked release PR; authoritative test DB reconciliation pending.  
+**Bug:** `copy_propagation_stripped_method_regression_2026-10-11`
+**Status:** FIXED in the linked release PR; authoritative test DB reconciliation pending.
 **Requirement:** REQ-COPYPROP-DECLARED-NAME — internal calls resolve the actual declared helper while preserving operands and destinations.
 
 Pure-Simple `CopyPropagation` declares `copypropagation_propagate_operand`, `copypropagation_propagate_instruction` and `copypropagation_propagate_terminator`. Fifteen internal calls used the stripped names instead. An actual Stage1 regression execution failed with `semantic: method propagate_operand not found on type CopyPropagation`. This prevented the first optimizer unwind-destination example from reaching its assertions; the other three examples passed. That original four-case feature stopped at its three-attempt limit.

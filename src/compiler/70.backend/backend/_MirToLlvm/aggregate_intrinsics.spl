@@ -83,16 +83,18 @@ impl MirToLlvm:
         val dest_name = self.get_local(dest_id)
         val base_val = self.translate_operand(base)
         val base_ptr = self.value_as_type(base_val, self.get_operand_type(base), "ptr")
+        val nit = self.native_int()
         var index_vals: [text] = []
         for idx in indices:
-            # Convert every index to the builder's integer size type before
-            # emit_gep declares it `{size_type} {idx}`: a ptr-typed index
-            # (e.g. a widened handle reaching a dead post-ret block) was
-            # emitted raw and llc rejected `getelementptr ... i64 %lN` where
-            # %lN is a ptr parameter — see
-            # doc/08_tracking/bug/stage2_matrix_remaining_rows_sdnvalue_cli_imports_2026-10-15.md
-            val idx_val = self.translate_operand(idx)
-            index_vals = index_vals.push(self.value_as_type(idx_val, self.get_operand_type(idx), self.builder.size_type))
+            # Convert every index to the native int width: a pointer-typed
+            # index (e.g. a text key lowering a dict/array element access)
+            # must emit ptrtoint, not appear raw as an i64 operand — llc
+            # rejects `getelementptr ptr, ptr %base, i64 %ptr_index`
+            # ("defined with type 'ptr' but expected 'i64'"). Surfaced by
+            # lib.nogc_sync_mut.test_runner.test_runner_mcdc_formal_context
+            # `cache[program]` in the full-CLI tool build (2026-10-15).
+            val raw_idx = self.translate_operand(idx)
+            index_vals = index_vals.push(self.value_as_type(raw_idx, self.get_operand_type(idx), nit))
         val base_ty = self.valid_llvm_type(self.get_operand_type(base))
         self.mark_ptr_local(dest_id)
         self.builder.emit_gep(dest_name, base_ty, base_ptr, index_vals)

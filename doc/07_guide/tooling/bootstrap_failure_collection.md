@@ -520,6 +520,34 @@ are absent. Existing publications use warm admission, including malformed
 ones; preserve their failures. Do not export cold initialization across an
 entire phase campaign. See the [first-build fix](../../08_tracking/bug/provisional_hello_missing_inventory_init_2026-10-11.md).
 
+## Resuming bounded object campaigns
+
+Failed CLI/runner construction reduces the next campaign's object batch, but it
+never limits the overall source inventory to a permanent prefix. Linux Stage2/3
+object diagnostics keep progress in the verification cache under a digest of the
+full inventory, admitted source snapshot, producer, runtime, tool inputs, target
+and progress helper. A positive failed-tool limit selects that many unfinished
+entries; zero removes the selection limit while the finite campaign watchdog
+still owns the global deadline. Healthy tooling selects all remaining entries.
+
+A kernel flock lease on a subshell-owned descriptor excludes concurrent writers
+and remains held by inherited workers until they exit. Joined batches publish
+atomic per-row seals only after compiler jobs are reaped and full source/runtime
+authority validates. PASS seals bind the original row, log and actual ELF ET_REL
+object, including its architecture/class; FAIL seals bind terminal evidence and
+remain failures of the whole matrix. BLOCKED, skipped and interrupted rows never
+become seals. Malformed, missing or changed sealed evidence refuses resumption.
+Any context change selects a new lineage; no entry-only dependency guesses or
+dummy objects are used. Existing unsealed historical attempts remain evidence,
+but cannot be adopted without the new authority checks.
+
+Unfinished inventory is INCOMPLETE and retained failures keep the overall result
+FAIL. These diagnostic objects do not admit a compiler or permit linking a
+partial build. This first progress protocol supports Linux ELF targets only;
+other platforms report an explicit blocked diagnostic surface while their other
+matrix rows continue. Native bootstrap and cross-target runtime qualification
+remain required independently of the shell/protocol controls.
+
 ## Native tool aliases and receipt artifacts
 
 PATH-selected native tools are resolved to executable physical regular-file targets before hashing (for example Debian llvm-config aliases). Receipt-named compiler artifacts retain strict rejection of symlink leaves. Dangling/cyclic/nonexecutable tool targets fail closed. The focused harness is `sh scripts/check/check-bootstrap-native-command-alias.shs`; it does not qualify Windows execution or a bootstrap stage.

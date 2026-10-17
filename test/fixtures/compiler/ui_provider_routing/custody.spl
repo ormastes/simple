@@ -1,0 +1,65 @@
+# Actual source surfaces, alias custody and ancestor-facade refusal. UNRUN.
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder, ModuleSurfacesByName, module_surface_canonical_path}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+
+fn main() -> i64:
+    val ansi_path = "src/app/ui.render/ansi.spl"
+    val ancestor_path = "src/app/ui/__init__.spl"
+    val consumer_path = "src/app/devhub/output.spl"
+    val ansi_name = "app.ui.render.ansi"
+    val ansi_bytes = file_read_regular_no_follow_bounded(ansi_path, 1048576).unwrap()
+    val ancestor_bytes = file_read_regular_no_follow_bounded(ancestor_path, 1048576).unwrap()
+    val consumer_bytes = file_read_regular_no_follow_bounded(consumer_path, 1048576).unwrap()
+    val log = Logger(level: 0)
+    val ansi = parse_full_frontend(ansi_bytes, ansi_path, ansi_name, log)
+    val ancestor = parse_full_frontend(ancestor_bytes, ancestor_path, "app.ui", log)
+    val consumer = parse_full_frontend(consumer_bytes, consumer_path, "app.devhub.output", log)
+    var builder = ModuleSurfaceBuilder.new()
+    if builder.add_parsed(ansi, SourceFile(path: ansi_path, content: ansi_bytes, module_name: ansi_name), 0).is_err(): return 1
+    if builder.add_parsed(ancestor, SourceFile(path: ancestor_path, content: ancestor_bytes, module_name: "app.ui"), 1).is_err(): return 2
+    val ansi_canonical = module_surface_canonical_path(ansi_path)
+    val ancestor_canonical = module_surface_canonical_path(ancestor_path)
+    # The same alias cannot be reassigned to the actual ancestor's physical owner.
+    val collision = builder.add_alias_canonical_identity(ansi_name, ancestor_bytes, ancestor_canonical)
+    if not collision.is_err(): return 3
+    # Nor may wrong bytes claim the original physical provider's identity.
+    val changed_bytes = builder.add_alias_canonical_identity(ansi_name, ancestor_bytes, ansi_canonical)
+    if not changed_bytes.is_err(): return 4
+    if not changed_bytes.unwrap_err().contains("conflicting physical source"): return 5
+    val registry = ModuleSurfacesByName.empty()
+    if builder.finish_into(registry) != "": return 10
+    val selected = registry.index_by_name[ansi_name]
+    if registry.surfaces[selected].canonical_path != ansi_canonical: return 6
+    var correct = hirlowering_for_module("app.devhub.output", registry)
+    correct.resolve_import_symbols(consumer)
+    val ansi_id = correct.symbols.lookup("ansi_red")
+    if ansi_id == nil: return 11
+    val ansi_symbol = correct.symbols.get_symbol_raw(ansi_id.unwrap().id)
+    if ansi_symbol == nil: return 12
+    val defining_owner = ansi_symbol.unwrap().defining_module
+    if defining_owner == nil: return 13
+    if defining_owner.unwrap() != ansi_name: return 14
+    for error in correct.errors:
+        if error.message.contains("module app.ui.render.ansi has no exported item"): return 7
+
+    # Reproduce the erroneous frozen alias: the actual ancestor is supplied as
+    # the ANSI import target. HIR must reject its absent ANSI export explicitly.
+    var wrong_builder = ModuleSurfaceBuilder.new()
+    if wrong_builder.add_parsed(ancestor, SourceFile(path: ancestor_path, content: ancestor_bytes, module_name: ansi_name), 0).is_err(): return 8
+    val wrong_registry = ModuleSurfacesByName.empty()
+    if wrong_builder.finish_into(wrong_registry) != "": return 15
+    var wrong = hirlowering_for_module("app.devhub.output", wrong_registry)
+    wrong.resolve_import_symbols(consumer)
+    if wrong.symbols.lookup("ansi_red") != nil: return 16
+    var rejected = false
+    for error in wrong.errors:
+        if error.message.contains("module app.ui.render.ansi has no exported item ansi_red"):
+            rejected = true
+    if not rejected: return 9
+    print "UI_PROVIDER_CUSTODY_PASS"
+    0

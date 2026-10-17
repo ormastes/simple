@@ -9,6 +9,7 @@ use compiler.common.visibility.{effective_visibility}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.core.types.{custom_primitive_bind_symbol, custom_primitive_is_name}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_declares_item}
 use compiler.hir.hir_lowering.phase_memo_ownership.{HirPhaseMemoRoot, hir_phase_memo_promote_roots}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.io_runtime.{env_get_opt}
@@ -1002,6 +1003,11 @@ impl HirLowering:
         # each payload in an ISOLATED single-arm guarded match, the idiom proven
         # in expressions.spl / statements.spl.
         val kind_disc_v: i64 = hir_type_kind_disc(lt_kind)
+        # An explicit parser error is not an inference request. Keep it in the
+        # driver's unrecovered diagnostic stream, including through composites.
+        if kind_disc_v == hir_type_kind_disc(TypeKind.Error):
+            self.error("invalid AST type: parser Error", lt.span)
+            return HirType(kind: HirTypeKind.Error, span: lt.span)
         val d_named: i64 = hir_type_kind_disc(TypeKind.Named("", []))
 
         # Extract in the frontend owner module, where HirTypeKind.Named is not
@@ -1122,7 +1128,7 @@ impl HirLowering:
                     pass
             kind = HirTypeKind.Ptr(self.lower_type(pinner), pmutable)
         else:
-            # Infer / Atomic / Error and any unrecognized disc.
+            # Infer / Atomic and any unrecognized disc.
             kind = HirTypeKind.Infer(0, 0)
 
         HirType(kind: kind, span: lt.span)
@@ -1454,6 +1460,21 @@ impl HirLowering:
                         if hir_type_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") == "1" or
                            hir_type_env_get("SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE") == "1":
                             eprint("[hir-unresolved-type-origin] name={name} lowering_module={self.module_filename} span_file={span.file} span_line={span.line} span_col={span.col}")
+                            # PER-SITE probe (cycle-37 endgame): discriminate
+                            # (a) declaring surface absent from THIS process's
+                            # registry, (b) present but declares-list missing
+                            # the item, (c) present+declaring but lookup
+                            # missed. Authoritative sweep, printed per hit.
+                            var gate_decl_count = 0
+                            var gate_decl_first = ""
+                            var gate_i = 0
+                            while gate_i < self.module_surfaces.surfaces.len():
+                                if module_surface_declares_item(self.module_surfaces.surfaces[gate_i], name):
+                                    gate_decl_count = gate_decl_count + 1
+                                    if gate_decl_first == "":
+                                        gate_decl_first = self.module_surfaces.surfaces[gate_i].module_name
+                                gate_i = gate_i + 1
+                            eprint("[strict-gate] name={name} lowering={self.module_filename} surfaces={self.module_surfaces.surfaces.len()} decl_count={gate_decl_count} decl_first={gate_decl_first}")
                         self.error("unresolved type: {name}", span)
                     HirTypeKind.Error
 

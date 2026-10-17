@@ -1,45 +1,112 @@
-use std.spec
+# codex-system-test
+# @req REQ-SSPEC-SYSTEM
+# @cover src/lib/nogc_sync_mut/replay/semantic/trace_events.spl 80%
+# Coverage percentage is an admission target, not measured coverage.
+# @tag:system
+# Pure event model contracts; wire codec and live/native tracing are separate obligations.
+
+use std.spec.{describe, it, expect, step}
 use std.nogc_sync_mut.replay.semantic.trace_events.{SemanticEvent, SemanticEventKind, SEMANTIC_EVENT_SIZE}
+
+fn expect_semantic_kind(kind: SemanticEventKind, code: i32, label: text):
+    expect(kind.to_i32()).to_equal(code)
+    expect(kind.to_text()).to_equal(label)
+    val recovered = SemanticEventKind.from_i32(code)
+    expect(recovered.to_i32()).to_equal(code)
+    expect(recovered.to_text()).to_equal(label)
 
 describe "SemanticEventKind to_i32":
     it "FunctionEnter to_i32 returns 0":
+        step("FunctionEnter to_i32 returns 0")
         val k = SemanticEventKind.FunctionEnter
         expect(k.to_i32()).to_equal(0)
 
     it "FunctionExit to_i32 returns 1":
+        step("FunctionExit to_i32 returns 1")
         val k = SemanticEventKind.FunctionExit
         expect(k.to_i32()).to_equal(1)
 
     it "ObjectAlloc to_i32 returns 3":
+        step("ObjectAlloc to_i32 returns 3")
         val k = SemanticEventKind.ObjectAlloc
         expect(k.to_i32()).to_equal(3)
 
     it "AsyncSpawn to_i32 returns 8":
+        step("AsyncSpawn to_i32 returns 8")
         val k = SemanticEventKind.AsyncSpawn
         expect(k.to_i32()).to_equal(8)
 
 describe "SemanticEventKind from_i32 roundtrip":
     it "from_i32(0) gives FunctionEnter":
+        step("from_i32(0) gives FunctionEnter")
         val k = SemanticEventKind.from_i32(0)
         expect(k.to_i32()).to_equal(0)
 
     it "from_i32(11) gives AsyncComplete":
+        step("from_i32(11) gives AsyncComplete")
         val k = SemanticEventKind.from_i32(11)
         expect(k.to_i32()).to_equal(11)
 
 describe "SemanticEvent create":
     it "create sets kind field correctly":
+        step("create sets kind field correctly")
         val ev = SemanticEvent.create(SemanticEventKind.VariableWrite)
         expect(ev.kind).to_equal(SemanticEventKind.VariableWrite.to_i32())
 
     it "create initialises seq to 0":
+        step("create initialises seq to 0")
         val ev = SemanticEvent.create(SemanticEventKind.ObjectDrop)
         expect(ev.seq).to_equal(0)
 
     it "event_kind() roundtrips back to BorrowStart":
+        step("event_kind() roundtrips back to BorrowStart")
         val ev = SemanticEvent.create(SemanticEventKind.BorrowStart)
         val k = ev.event_kind()
         expect(k.to_i32()).to_equal(6)
 
     it "SEMANTIC_EVENT_SIZE is 68":
+        step("SEMANTIC_EVENT_SIZE is 68")
         expect(SEMANTIC_EVENT_SIZE).to_equal(68)
+
+describe "Complete semantic event model contracts":
+    it "preserves every event identifier and public name in both directions":
+        step("Inspect all twelve production event kinds against their explicit identities")
+        expect_semantic_kind(SemanticEventKind.FunctionEnter, 0, "FunctionEnter")
+        expect_semantic_kind(SemanticEventKind.FunctionExit, 1, "FunctionExit")
+        expect_semantic_kind(SemanticEventKind.VariableWrite, 2, "VariableWrite")
+        expect_semantic_kind(SemanticEventKind.ObjectAlloc, 3, "ObjectAlloc")
+        expect_semantic_kind(SemanticEventKind.ObjectDrop, 4, "ObjectDrop")
+        expect_semantic_kind(SemanticEventKind.OwnershipTransfer, 5, "OwnershipTransfer")
+        expect_semantic_kind(SemanticEventKind.BorrowStart, 6, "BorrowStart")
+        expect_semantic_kind(SemanticEventKind.BorrowEnd, 7, "BorrowEnd")
+        expect_semantic_kind(SemanticEventKind.AsyncSpawn, 8, "AsyncSpawn")
+        expect_semantic_kind(SemanticEventKind.AsyncYield, 9, "AsyncYield")
+        expect_semantic_kind(SemanticEventKind.AsyncResume, 10, "AsyncResume")
+        expect_semantic_kind(SemanticEventKind.AsyncComplete, 11, "AsyncComplete")
+
+    it "uses the existing FunctionEnter fallback for out-of-range identifiers":
+        step("Decode identifiers below and above the defined event range")
+        val negative = SemanticEventKind.from_i32(-1)
+        val past_last = SemanticEventKind.from_i32(12)
+        expect(negative.to_i32()).to_equal(0)
+        expect(negative.to_text()).to_equal("FunctionEnter")
+        expect(past_last.to_i32()).to_equal(0)
+        expect(past_last.to_text()).to_equal("FunctionEnter")
+
+    it "initializes every unused record field to zero without losing the kind":
+        step("Create an async-resume event through the production constructor")
+        val ev = SemanticEvent.create(SemanticEventKind.AsyncResume)
+        expect(ev.kind).to_equal(10)
+        expect(ev.event_kind().to_text()).to_equal("AsyncResume")
+
+        step("Inspect sequence, location, identity and payload defaults")
+        expect(ev.seq).to_equal(0)
+        expect(ev.thread_id).to_equal(0)
+        expect(ev.timestamp_ns).to_equal(0)
+        expect(ev.source_file_id).to_equal(0)
+        expect(ev.source_line).to_equal(0)
+        expect(ev.source_column).to_equal(0)
+        expect(ev.name_id).to_equal(0)
+        expect(ev.object_id).to_equal(0)
+        expect(ev.payload_a).to_equal(0)
+        expect(ev.payload_b).to_equal(0)

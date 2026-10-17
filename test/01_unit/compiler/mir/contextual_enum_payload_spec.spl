@@ -122,3 +122,40 @@ describe "explicit payload type authority":
     it "rejects an empty array cast to another element type":
         val errors = contextual_payload_errors("enum Value:\n    Floats([f64])\nfn make() -> Value:\n    Value.Floats([] as [text])\n")
         expect(errors.len() > 0).to_equal(true)
+
+
+# Native cross-module same-name controls are retained in the separately pinned
+# optional owner fixture. These cases exercise real source -> HIR -> MIR Some
+# construction, not just the payload comparison helper.
+describe "optional nominal enum payload producer provenance":
+    it "retains the actual record owner through Some into its declared optional slot":
+        # @req REQ-ENUM-OPTIONAL-OWNER-001
+        step("Retain the proven nominal Some payload owner")
+        val errors = contextual_payload_errors("struct Payload:\n    value: i64\nenum Packet:\n    Hold(value: Payload?)\nfn make() -> Packet:\n    val value = Payload(value: 41)\n    Packet.Hold(Some(value))\n")
+        expect(errors.len()).to_equal(0)
+
+    it "keeps nil valid for the declared optional record slot":
+        # @req REQ-ENUM-OPTIONAL-OWNER-002
+        step("Preserve the declared optional nil path")
+        val errors = contextual_payload_errors("struct Payload:\n    value: i64\nenum Packet:\n    Hold(value: Payload?)\nfn make() -> Packet:\n    Packet.Hold(nil)\n")
+        expect(errors.len()).to_equal(0)
+
+    it "rejects Some of another nominal owner with an identical field shape":
+        # @req REQ-ENUM-OPTIONAL-OWNER-003
+        step("Reject a foreign nominal Some payload owner")
+        val errors = contextual_payload_errors("struct Payload:\n    value: i64\nstruct ForeignPayload:\n    value: i64\nenum Packet:\n    Hold(value: Payload?)\nfn make() -> Packet:\n    val value = ForeignPayload(value: 99)\n    Packet.Hold(Some(value))\n")
+        var mismatches = 0
+        for error in errors:
+            if error.starts_with("MIR: enum construction") and error.contains("payload type mismatch"):
+                mismatches = mismatches + 1
+        expect(mismatches).to_equal(1)
+
+    it "rejects a primitive Some carrier as evidence of a nominal payload":
+        # @req REQ-ENUM-OPTIONAL-OWNER-003
+        step("Reject a scalar Some payload for a nominal slot")
+        val errors = contextual_payload_errors("struct Payload:\n    value: i64\nenum Packet:\n    Hold(value: Payload?)\nfn make() -> Packet:\n    Packet.Hold(Some(41))\n")
+        var mismatches = 0
+        for error in errors:
+            if error.starts_with("MIR: enum construction") and error.contains("payload type mismatch"):
+                mismatches = mismatches + 1
+        expect(mismatches).to_equal(1)

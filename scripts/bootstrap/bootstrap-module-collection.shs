@@ -16,6 +16,10 @@ bootstrap_module_documentation_only() {
 }
 
 bootstrap_module_object_valid() {
+  if [ -n "${MODULE_PROGRESS_TARGET:-}" ]; then
+    python3 "$MODULE_PROGRESS_HELPER" object "$1" "$MODULE_PROGRESS_TARGET"
+    return $?
+  fi
   # Check the output kind independently of the compiler's status or suffix.
   # ELF ET_REL, COFF (no PE optional header), and Mach-O MH_OBJECT are the
   # supported host object containers. This is not a full object-file verifier.
@@ -133,6 +137,12 @@ run_module_compile_inventory() (
       for mc_job in $mc_jobs; do
         wait "${mc_job%:*}" || { mc_failed=1; mc_stopped=1; }
       done
+      if [ -n "${MODULE_PROGRESS_STATE:-}" ]; then
+        MODULE_COMPILE_VALIDATE_FULL=1 "$mc_validate" >"$mc_attempt/checkpoint-authority.log" 2>&1 || return 2
+        for mc_job in $mc_jobs; do
+          python3 "$MODULE_PROGRESS_HELPER" publish "$MODULE_PROGRESS_STATE" "$MODULE_PROGRESS_CONTEXT" "$MODULE_PROGRESS_TARGET" "$mc_attempt/${mc_job#*:}/row" || return 2
+        done
+      fi
       mc_jobs= mc_batch=0
       # An owner stop raised while a batch ran must prevent its next entry.
       if mc_abort_requested; then break; fi
@@ -141,6 +151,12 @@ run_module_compile_inventory() (
   for mc_job in $mc_jobs; do
     wait "${mc_job%:*}" || mc_failed=1
   done
+  if [ -n "${MODULE_PROGRESS_STATE:-}" ] && [ -n "$mc_jobs" ]; then
+    MODULE_COMPILE_VALIDATE_FULL=1 "$mc_validate" >"$mc_attempt/checkpoint-authority.log" 2>&1 || return 2
+    for mc_job in $mc_jobs; do
+      python3 "$MODULE_PROGRESS_HELPER" publish "$MODULE_PROGRESS_STATE" "$MODULE_PROGRESS_CONTEXT" "$MODULE_PROGRESS_TARGET" "$mc_attempt/${mc_job#*:}/row" || return 2
+    done
+  fi
   # The last batch may be shorter than mc_workers; it has no in-loop join.
   mc_abort_requested || :
   if [ "$mc_count" -eq 0 ] && [ "$mc_abort_rc" -ne 0 ]; then return "$mc_abort_rc"; fi

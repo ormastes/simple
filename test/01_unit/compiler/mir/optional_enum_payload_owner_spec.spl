@@ -1,0 +1,45 @@
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn optional_payload_diagnostics(source: text) -> text:
+    val filename = "optional_payload_owner.spl"
+    val parsed = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var errors: [text] = []
+    for error in hir_lowering.errors:
+        errors = errors.push("HIR: " + error.message)
+    for error in lowering.errors:
+        errors = errors.push("MIR: " + error.message)
+    if mir.functions.len() == 0:
+        errors = errors.push("no lowered functions")
+    errors.join("\n")
+
+describe "explicit Some payload type ownership":
+    it "retains scalar and nominal owners inside positional optional slots":
+        val source = "struct Owner:\n    id: i64\nenum Packet:\n    Pair(i64?, Owner?)\nfn make(value: i64, owner: Owner) -> Packet:\n    Packet.Pair(Some(value), Some(owner))\nfn literal() -> Packet:\n    Packet.Pair(Some(3), nil)\n"
+        expect(optional_payload_diagnostics(source)).to_equal("")
+    it "rejects Some of the wrong primitive type":
+        val source = "enum Packet:\n    Value(i64?)\nfn make() -> Packet:\n    Packet.Value(Some(true))\n"
+        expect(optional_payload_diagnostics(source)).to_contain("payload type mismatch")
+    it "rejects Some of another nominal owner with identical layout":
+        val source = "struct First:\n    id: i64\nstruct Second:\n    id: i64\nenum Packet:\n    Value(First?)\nfn make(value: Second) -> Packet:\n    Packet.Value(Some(value))\n"
+        expect(optional_payload_diagnostics(source)).to_contain("payload type mismatch")
+    it "does not admit a raw integer carrier as an optional payload":
+        val source = "enum Packet:\n    Value(i64?)\nfn make() -> Packet:\n    Packet.Value(3)\n"
+        expect(optional_payload_diagnostics(source)).to_contain("payload type mismatch")
+    it "does not admit an optional value in a mandatory slot":
+        val source = "enum Packet:\n    Value(i64)\nfn make() -> Packet:\n    Packet.Value(Some(3))\n"
+        expect(optional_payload_diagnostics(source)).to_contain("payload type mismatch")
+
+describe "nominal record nil comparison lowering":
+    it "accepts both operand orders without requiring a struct equality overload":
+        val source = "struct Record:\n    value: i64\nfn absent(value: Record) -> bool:\n    value == nil\nfn present(value: Record) -> bool:\n    nil != value\nfn optional(value: Record?) -> bool:\n    value != nil\n"
+        expect(optional_payload_diagnostics(source)).to_equal("")

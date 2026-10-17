@@ -1,0 +1,58 @@
+# Cross-layer nominal Predicate identity and architecture rule configuration.
+# Run the same oracle on ARM; cross-compile it for RISC-V independently.
+use compiler.backend.arch_rules.{ArchRule, RuleAction, archrulesconfig_disabled, archrulesconfig_from_rules}
+use compiler.common.predicate.{Predicate, Selector, MatchContext, match_predicate}
+
+fn module_context(module_path: text) -> MatchContext:
+    MatchContext(
+        has_type_name: false, type_name: "",
+        has_module_path: true, module_path: module_path,
+        attrs: [], has_signature: false, signature: "", effects: []
+    )
+
+fn main() -> i64:
+    val disabled = archrulesconfig_disabled()
+    if disabled.enabled or disabled.rules.len() != 0:
+        return 1
+    val empty = archrulesconfig_from_rules([])
+    if empty.enabled or empty.rules.len() != 0:
+        return 2
+
+    val arm_path = "compiler.backend.native.isel_aarch64"
+    val riscv_path = "compiler.backend.native.isel_riscv64"
+    val arm_rule = ArchRule(
+        action: RuleAction.Forbid,
+        predicate: Predicate.Sel(Selector.Within(arm_path)),
+        priority: 7, has_message: true, message: "ARM boundary"
+    )
+    val riscv_rule = ArchRule(
+        action: RuleAction.Allow,
+        predicate: Predicate.Sel(Selector.Within(riscv_path)),
+        priority: 3, has_message: false, message: ""
+    )
+    val config = archrulesconfig_from_rules([arm_rule, riscv_rule])
+    if not config.enabled or config.rules.len() != 2:
+        return 3
+    if config.rules[0].priority != 7 or config.rules[0].message != "ARM boundary":
+        return 4
+    if not config.rules[0].has_message or config.rules[1].has_message:
+        return 5
+    match config.rules[0].action:
+        case Forbid: pass
+        case _: return 6
+    match config.rules[1].action:
+        case Allow: pass
+        case _: return 7
+
+    val arm_context = module_context(arm_path)
+    val riscv_context = module_context(riscv_path)
+    if not match_predicate(config.rules[0].predicate, arm_context):
+        return 8
+    if match_predicate(config.rules[0].predicate, riscv_context):
+        return 9
+    if not match_predicate(config.rules[1].predicate, riscv_context):
+        return 10
+    if match_predicate(config.rules[1].predicate, arm_context):
+        return 11
+    print "arch_rules_common_owner: PASS"
+    0

@@ -5,8 +5,9 @@ use app.io.file_ops.{path_absolute}
 use app.io.mod.{file_read_regular_no_follow_bounded}
 use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
 use app.compiler_entrypoint.source_manifest_membership.{compiler_source_manifest_membership_v1}
+use app.compiler_entrypoint.derived_composition.{compiler_source_authority_selectors_v1,
+    compiler_source_selector_relative_v1}
 use std.common.crypto.sha256.{sha256_text}
-use std.nogc_sync_mut.path.{normalize as normalize_source_selector}
 use std.scv.compile_snapshot.{ScvCompileSnapshotV1,
     scv_compile_snapshot_acquire_v1, scv_compile_snapshot_open_v1}
 use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1}
@@ -103,7 +104,10 @@ fn compiler_source_authority_validate_v1(
 fn compiler_source_authority_acquire_v1(
     root: text, cache_root: text, source_roots: [text], cold_init: bool
 ) -> CompilerSourceAuthorityV1:
-    val selected_families = compiler_source_authority_inventory_roots_v1(root, source_roots)
+    val resolved = compiler_source_authority_selectors_v1(root, source_roots)
+    if resolved.is_err(): return compiler_source_authority_invalid_v1(resolved.unwrap_err())
+    val selectors = resolved.unwrap()
+    val selected_families = compiler_source_authority_inventory_roots_v1(root, selectors)
     if selected_families.len() == 0:
         return compiler_source_authority_invalid_v1("source-inventory-scope-unsupported")
     var inventory_roots = selected_families
@@ -112,7 +116,7 @@ fn compiler_source_authority_acquire_v1(
         if not inventory_roots.contains("test"): inventory_roots = inventory_roots.push("test")
     val refresh = compiler_inventory_refresh_v1(root, cache_root, inventory_roots, cold_init)
     if not refresh.valid: return compiler_source_authority_invalid_v1(refresh.reason)
-    val snapshot = scv_compile_snapshot_acquire_v1(root, cache_root, source_roots)
+    val snapshot = scv_compile_snapshot_acquire_v1(root, cache_root, selectors)
     if not snapshot.valid: return compiler_source_authority_invalid_v1(snapshot.reason)
     compiler_source_authority_validate_v1(root, cache_root, snapshot,
         refresh.inventory_digest, refresh.inventory_generation, false)
@@ -122,14 +126,7 @@ fn compiler_source_authority_inventory_roots_v1(root: text, source_roots: [text]
     # independent, exact selectors and must never be passed as event scopes.
     var families: [text] = []
     for source_root in source_roots:
-        var relative = source_root.replace("\\", "/")
-        if relative.starts_with(root + "/"):
-            relative = relative.substring(root.len() + 1)
-        # Reject parent traversal before lexical normalization could erase it.
-        # Preserve accepted spellings such as ./src/app and src/./app.
-        if relative.split("/").contains(".."):
-            return []
-        relative = normalize_source_selector(relative)
+        val relative = compiler_source_selector_relative_v1(root, source_root)
         val family = if relative == "src" or relative.starts_with("src/"):
             "src"
         elif relative == "test" or relative.starts_with("test/"):

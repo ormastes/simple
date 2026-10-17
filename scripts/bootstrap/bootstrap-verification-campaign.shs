@@ -6,6 +6,21 @@ bootstrap_verification_campaign_policy() {
   case "$2" in ''|*[!0-9]*) return 2 ;; esac
 }
 
+# Zero means every pending module, not zero work. Full keep-going campaigns
+# must not become eight-module checkpoints merely because a tool build failed.
+# Explicit fail-fast and the opt-in slim profile retain the configured bound.
+bootstrap_verification_module_limit() {
+  case "$1" in normal|full) ;; *) return 2 ;; esac
+  case "$2" in full|slim) ;; *) return 2 ;; esac
+  case "$3" in 0|1) ;; *) return 2 ;; esac
+  case "$4" in ''|*[!0-9]*) return 2 ;; esac
+  if [ "$3" = 0 ] && { [ "$1" = full ] || [ "$2" = full ]; }; then
+    printf '0\n'
+  else
+    printf '%s\n' "$4"
+  fi
+}
+
 bootstrap_verification_campaign_child() {
   [ -n "${BOOTSTRAP_VERIFY_CAMPAIGN_TOKEN:-}" ] &&
     [ -f "$BOOTSTRAP_VERIFY_CAMPAIGN_TOKEN" ] &&
@@ -45,6 +60,34 @@ bootstrap_verification_campaign_run() {
     bc_session_mode=inherit
   fi
   bc_campaign_rss_cap=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}
+  # The campaign watchdog wraps the whole phase tree directly (rows nest
+  # inside it), so it must declare the phase worker count itself: without
+  # --compiler-jobs its ceiling stays at the static 8 GiB, which the full
+  # verification matrix measurably exceeds (~8.4 GiB peak on a 64 GiB Windows
+  # host). The declaration is exported by bootstrap-phase-verification.shs
+  # (SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS = build_threads); same source the
+  # per-row timeout owner consumes.
+  bc_campaign_jobs_arg=
+  case "${SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS:-}" in
+    ''|*[!0-9]*) ;;
+    *) if [ "$SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS" -ge 1 ] &&
+          [ "$SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS" -le 128 ]; then
+         bc_campaign_jobs_arg=--compiler-jobs="$SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS"
+       fi ;;
+  esac
+  # Forward an explicitly admitted elevated compiler ceiling the same way the
+  # per-row owner does for native-build commands (run-process-group-timeout
+  # lines below the same pattern): the watchdog admits it only under 3/4 of
+  # real total AND available host memory, with enforced scope and declared
+  # jobs. Non-build rows unset the pair and keep the default policy.
+  bc_campaign_ceiling_arg=
+  if [ -n "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-}" ]; then
+    case "$SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB" in
+      ''|0*|*[!0-9]*) ;;
+      *) [ -n "$bc_campaign_jobs_arg" ] &&
+           bc_campaign_ceiling_arg=--compiler-ceiling-kib="$SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB" ;;
+    esac
+  fi
   # The canonical watchdog validates this cap against its compiler ceiling.
   # Campaign and rows keep the caller's actual enforcement policy.
   bc_status=0 bc_guard=
@@ -54,6 +97,8 @@ bootstrap_verification_campaign_run() {
   trap 'bc_cancel' 1 2 15
   TMPDIR="$bc_attempt/tmp" perl "$bc_owner/../resource/process-tree-rss-watchdog.pl" \
     --session-mode="$bc_session_mode" --rss-cap-mode="$bc_row_rss_mode" --max-rss-kib="$bc_campaign_rss_cap" \
+    $bc_campaign_jobs_arg \
+    $bc_campaign_ceiling_arg \
     --timeout-seconds="$bc_seconds" --term-grace-seconds=2 \
     --receipt="$bc_attempt/process.env" -- \
     env "SIMPLE_BOOTSTRAP_RSS_CAP_MODE=$bc_row_rss_mode" sh "$bc_script" "$@" &
@@ -99,12 +144,18 @@ bootstrap_verification_campaign_run() {
 bootstrap_verification_select_modules() {
   # Keep the full manifest and explicitly describe unexecuted scope.
   bvm_full=$1 bvm_selected=$2 bvm_cli=$3 bvm_runner=$4 bvm_limit=$5 bvm_summary=$6
+  if [ -n "${MODULE_PROGRESS_STATE:-}" ]; then
+    bvm_effective_limit=$bvm_limit
+    [ "$bvm_cli:$bvm_runner" != 1:1 ] || bvm_effective_limit=0
+    python3 "$MODULE_PROGRESS_HELPER" select "$bvm_full" "$bvm_selected" "$MODULE_PROGRESS_STATE" "$MODULE_PROGRESS_CONTEXT" "$MODULE_PROGRESS_TARGET" "$bvm_effective_limit" "$bvm_summary"
+    return $?
+  fi
   bvm_total=$(awk 'NF { n++ } END { print n+0 }' "$bvm_full") || return 2
   if [ "$bvm_cli" = 1 ] && [ "$bvm_runner" = 1 ]; then
     cp "$bvm_full" "$bvm_selected" || return 2
     bvm_selected_count=$bvm_total
   else
-    awk -v limit="$bvm_limit" 'NF { n++; if (n <= limit) print }' "$bvm_full" >"$bvm_selected" || return 2
+    awk -v limit="$bvm_limit" 'NF { n++; if (limit == 0 || n <= limit) print }' "$bvm_full" >"$bvm_selected" || return 2
     bvm_selected_count=$(awk 'NF { n++ } END { print n+0 }' "$bvm_selected") || return 2
   fi
   bvm_unexecuted=$((bvm_total - bvm_selected_count))
@@ -112,7 +163,7 @@ bootstrap_verification_select_modules() {
     "$bvm_total" "$bvm_selected_count" "$bvm_unexecuted" "$bvm_selected" >>"$bvm_summary"
   if [ "$bvm_unexecuted" -gt 0 ]; then
     awk -v limit="$bvm_selected_count" 'NF { n++; if (n > limit) print }' "$bvm_full" >"$bvm_selected.unexecuted" || return 2
-    printf 'task=module_compile_unexecuted|result=BLOCKED|status=mandatory-cli-runner-unavailable|count=%s|log=%s\n' \
+    printf 'task=module_compile_unexecuted|result=INCOMPLETE|status=bounded-campaign-checkpoint|count=%s|log=%s\n' \
       "$bvm_unexecuted" "$bvm_selected.unexecuted" >>"$bvm_summary"
   fi
 }

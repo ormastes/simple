@@ -1,7 +1,7 @@
 # HIR lowering - Expression collections, operators, and pattern conversion.
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_types.*
-use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_env_get}
+use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_env_get, _hir_expr_symbol_or_invalid}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
@@ -478,6 +478,30 @@ impl HirLowering:
                     hir_payload = Some(HirPatternPayload.Struct(children))
         return Some(HirPattern(kind: HirPatternKind.Enum(enum_type, variant_name, hir_payload), has_type_: true, type_: enum_type, span: p.span))
 
+    fn declared_match_subject_type(subject: HirExpr) -> HirType?:
+        if subject.has_type_ and subject.type_ != nil:
+            return subject.type_
+        val symbol = _hir_expr_symbol_or_invalid(subject.kind)
+        if symbol.is_valid():
+            if val declaration = self.symbols.get_symbol_raw(symbol.id):
+                return declaration.type_
+        # Tuple literals do not carry an inferred HIR annotation on the
+        # native path. Their declared children still identify each slot's
+        # owner. Inspect existing HIR only; never evaluate the subject again.
+        match subject.kind:
+            case HirExprKind.TupleLit(elements):
+                var slot_types: [HirType] = []
+                for element in elements:
+                    if val slot_type = self.declared_match_subject_type(element):
+                        if not declared_pattern_slot_type_is_concrete(slot_type):
+                            return nil
+                        slot_types = slot_types.push(slot_type)
+                    else:
+                        return nil
+                return Some(HirType(kind: HirTypeKind.Tuple(slot_types), span: subject.span))
+            case _: ()
+        nil
+
     me lower_match_pattern(p: Pattern, subject_type: HirType?) -> HirPattern:
         # A bare name is a variant only when the subject's enum owns it.
         # Unrelated enums, mutable bindings and unknown names remain bindings.
@@ -679,10 +703,8 @@ impl HirLowering:
                 # pattern grammar and none is invented here (brace `Point{x,
                 # y}` pattern syntax does not parse either -- matchpat lane
                 # finding). When the unqualified `variant` name is a
-                # REGISTERED STRUCT (struct_field_order_by_name is populated
-                # in the up-front declarations pass before any function body
-                # is lowered -- see try_register_local_struct_type's
-                # identical read of this same map in statements.spl),
+                # REGISTERED STRUCT (the local declarations and import passes
+                # populate field order before any function body is lowered),
                 # reinterpret this pattern as a genuine Struct pattern,
                 # reusing the SAME positional-field-order convention already
                 # established for struct CONSTRUCTION call sites (`Point(3,

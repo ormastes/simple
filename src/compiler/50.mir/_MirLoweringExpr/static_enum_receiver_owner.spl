@@ -37,7 +37,22 @@ impl MirLowering:
                                     foreign_owner, name)
                                 if qualified_retry >= 0:
                                     bound = SymbolId(id: qualified_retry)
-                if bound.id < 0: return nil
+                if bound.id < 0:
+                    # CYCLE-42 LANE (in-vivo, verifier-shaped, single-process,
+                    # cold caches): the receiver NamedVar's lexical lookup
+                    # MISSED a declared enum whose payload (module.enums) and
+                    # numeric-id tables are intact -- only the SymbolTable
+                    # NAME index misses it (the BOOT-20 chain-table family at
+                    # 252-module scale). register_enum_variants (lower_module
+                    # start) keys the bare name from the SAME HirModule enums
+                    # dict, so the MIR enum registry is authoritative here.
+                    # Recover the owner from it, unambiguous bare name only.
+                    if self.enum_variant_index.has(name) and not (self.enum_bare_ambiguous.get(name) ?? false):
+                        for variant in self.enum_variant_names(name):
+                            if variant == method:
+                                return Some(self.lower_enum_construct_named(name, method, args))
+                        return Some(self.lower_method_call(receiver, method, args, resolution, name, -1))
+                    return nil
                 if symbol.id >= 0 and symbol.id != bound.id: return nil
                 raw = bound.id
             case _: return nil

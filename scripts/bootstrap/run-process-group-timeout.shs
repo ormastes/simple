@@ -22,6 +22,20 @@ compiler_jobs=0
 if [ "${2:-}" = native-build ]; then
   compiler_jobs=$(bootstrap_tree_rss_command_jobs "$@")
 fi
+# Phase-level declaration for commands whose argv carries no worker count
+# (e.g. the interpreter test runner): the watchdog scales its ceiling only on
+# evidence of a worker count, and on Windows its host probe is the MSYS
+# /proc/meminfo view, which works -- so an explicit declaration is the only
+# way a wide verification phase (build threads + test workers) gets the same
+# jobs-scaled ceiling a native-build row already gets from its --threads.
+# Validated by the same canonical-uint rule and refused above 128 downstream.
+if [ "$compiler_jobs" -eq 0 ] && [ -n "${SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS:-}" ]; then
+  compiler_jobs=$(bootstrap_tree_rss_canonical_uint "$SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS" 3)
+  [ -n "$compiler_jobs" ] && [ "$compiler_jobs" -ge 1 ] || {
+    echo 'process-timeout-policy-error: invalid SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS (want 1..128)' >&2
+    exit 125
+  }
+fi
 # An elevated compiler budget belongs to an explicit native-build invocation,
 # not to arbitrary verification helpers (or their descendants). Preserve the
 # legacy cap precedence when this optional compiler policy is absent.
@@ -56,8 +70,16 @@ bootstrap_tree_rss_resolve "$compiler_jobs" "$repo" || {
 }
 compiler_jobs_arg=
 [ "$compiler_jobs" -eq 0 ] || compiler_jobs_arg=--compiler-jobs=$compiler_jobs
+# Per-task group scoping for serialized artifact builds inside a shared
+# session: count and kill only the leader's process group, not co-resident
+# sibling builds (see process-tree-rss-watchdog.pl members()).
+scope_group_value=0
+if [ "${SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP:-0}" = 1 ]; then
+  scope_group_value=1
+fi
 exec perl "$runner" \
   --session-mode="$session_mode" \
+  --scope-group="$scope_group_value" \
   --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
   --max-rss-kib="$bootstrap_tree_rss_cap_kib" \
   $compiler_jobs_arg \

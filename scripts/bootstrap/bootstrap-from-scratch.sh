@@ -1526,10 +1526,22 @@ absolute_path() {
 }
 
 if [ -n "${LLVM_PREFIX:-}" ] && [ -d "${LLVM_PREFIX}/bin" ]; then
-  case ":${PATH}:" in
-    *":${LLVM_PREFIX}/bin:"*) ;;
-    *) export PATH="${LLVM_PREFIX}/bin:${PATH}" ;;
+  # llvm-config --prefix reports a native spelling (on Windows a C:/... path);
+  # a drive-letter entry is not a resolvable PATH element for MSYS command
+  # lookup (the "C:" colon splits the entry), which silently leaves the
+  # admitted LLVM provider behind other toolchain dirs on PATH. Prepend the
+  # POSIX spelling so downstream command -v / command scans see it first.
+  bootstrap_llvm_path_prefix="${LLVM_PREFIX}"
+  case "${bootstrap_llvm_path_prefix}" in
+    [A-Za-z]:[\\/]*)
+      bootstrap_llvm_path_prefix=$(cygpath -u "${bootstrap_llvm_path_prefix}") || bootstrap_llvm_path_prefix="" ;;
   esac
+  if [ -n "${bootstrap_llvm_path_prefix}" ]; then
+    case ":${PATH}:" in
+      *":${bootstrap_llvm_path_prefix}/bin:"*) ;;
+      *) export PATH="${bootstrap_llvm_path_prefix}/bin:${PATH}" ;;
+    esac
+  fi
 fi
 
 # Bind builds to existing canonical tool directories. Hosted launchers may
@@ -1658,13 +1670,50 @@ mkdir -p "${cuda_composition_root}/plugins/backend_registry"
 if [ ! -f "${cuda_composition_file}" ]; then
   cp "${cuda_composition_template}" "${cuda_composition_file}"
 fi
-[ "$(bootstrap_stage3_hash_file "${cuda_composition_file}")" = "${cuda_template_sha256}" ] || {
+[ -f "${cuda_composition_file}" ] && [ ! -L "${cuda_composition_file}" ] &&
+  [ "$(bootstrap_stage3_hash_file "${cuda_composition_file}")" = "${cuda_template_sha256}" ] || {
   echo 'error: selected CUDA composition content differs from its identity' >&2; exit 1;
 }
-# SCV admits checkout src/test selectors, not generated output directories.
-# Keep the publication copy and its identity, but compile the same tracked bytes.
-[ "$(bootstrap_stage3_hash_file "${cuda_composition_template}")" = "${cuda_template_sha256}" ] || {
-  echo 'error: selected CUDA template changed during publication' >&2; exit 1;
+# BUG-SCV-BOOTSTRAP-COMPOSITION-SCOPE-20261011: SCV inventory families own
+# committed source records, not ignored generated build roots. Retain the
+# generated identity/evidence above, but compile its exact canonical bytes.
+# This also lets an admitted older producer build the pure-Simple alias fix.
+cuda_source_root="${repo_root}/src/compositions/cuda_${cuda_mode}"
+cuda_source_file="${cuda_source_root}/plugins/backend_registry/selected_cuda_backend.spl"
+[ -f "${cuda_source_file}" ] && [ ! -L "${cuda_source_file}" ] &&
+  [ "$(bootstrap_stage3_hash_file "${cuda_source_file}")" = "${cuda_template_sha256}" ] &&
+  [ "$(bootstrap_stage3_hash_file "${compiler_backend_manifest}")" = "${cuda_manifest_sha256}" ] || {
+  echo 'error: canonical CUDA composition differs from selected manifest/template identity' >&2; exit 1;
+}
+bootstrap_cuda_source_snapshot_require() {
+  # Bind selection to the captured source authority, not a later live reread.
+  # The existing before/after drift gates protect the remainder of the build.
+  bootstrap_cuda_template_relative="src/compositions/cuda_${cuda_mode}/plugins/backend_registry/selected_cuda_backend.spl"
+  if [ "${cuda_mode}" = static ]; then
+    bootstrap_cuda_template_relative=src/plugins/backend_registry/selected_cuda_backend.spl
+  fi
+  perl -e '
+    use strict; use warnings;
+    my ($snapshot, $manifest_sha, $template_sha, $mode, $template) = @ARGV;
+    my %expected = (
+      "src/compiler/simple.sdn" => $manifest_sha,
+      "src/compositions/cuda_$mode/plugins/backend_registry/selected_cuda_backend.spl" => $template_sha,
+      $template => $template_sha,
+    );
+    my %seen;
+    open my $in, "<", $snapshot or die "CUDA source authority snapshot unreadable\n";
+    while (my $line = <$in>) {
+      next unless $line =~ /^file-hex:(\d+):([0-9a-f]+):[01]:([0-9a-f]{64})$/;
+      my ($length, $hex, $sha) = ($1, $2, $3);
+      my $path = pack("H*", $hex);
+      next unless exists $expected{$path};
+      length($path) == $length && $sha eq $expected{$path} && !$seen{$path}++
+        or die "CUDA source authority snapshot identity mismatch\n";
+    }
+    close $in or die "CUDA source authority snapshot read failed\n";
+    keys(%seen) == keys(%expected) or die "CUDA source authority snapshot member missing\n";
+  ' "$1" "${cuda_manifest_sha256}" "${cuda_template_sha256}" "${cuda_mode}" \
+    "${bootstrap_cuda_template_relative}"
 }
 case "${SIMPLE_KERNEL_K1_POLICY:-unselected}" in
   llvm-cranelift)
@@ -1867,13 +1916,17 @@ bootstrap_cache_stage4_context() {
   # snapshots. Normal staged runs reuse the already checked source/runtime.
   if [ -n "${stage3_source_before:-}" ] && [ -f "${stage3_source_before}" ] &&
     [ -n "${runtime_admitted_snapshot:-}" ] && [ -f "${runtime_admitted_snapshot}" ] &&
-    [ -n "${tool_authority_before:-}" ] && [ -f "${tool_authority_before}" ]; then return 0; fi
+    [ -n "${tool_authority_before:-}" ] && [ -f "${tool_authority_before}" ]; then
+    bootstrap_cuda_source_snapshot_require "${stage3_source_before}"
+    return $?
+  fi
   cache_context_dir="${output_dir}/cache-context-${PLATFORM}/attempt-$(date -u '+%Y%m%dT%H%M%S')-$$"
   mkdir -p "${cache_context_dir}" || return 1
   stage3_source_before="${cache_context_dir}/source.txt"
   runtime_admitted_snapshot="${cache_context_dir}/runtime.txt"
   tool_authority_before="${cache_context_dir}/tools.txt"
   bootstrap_stage3_source_snapshot "${stage3_source_before}" "${repo_root}" &&
+    bootstrap_cuda_source_snapshot_require "${stage3_source_before}" &&
     bootstrap_stage3_directory_snapshot "${runtime_admitted_snapshot}" "${stage_runtime_absolute}" &&
     bootstrap_stage3_tool_authority_snapshot "${tool_authority_before}" "${PATH}" "${repo_root}"
 }
@@ -2476,7 +2529,7 @@ bootstrap_native_build_main() {
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" --source examples/10_tooling \
+    --source "${cuda_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" --source examples/10_tooling \
     --entry-closure \
     --timeout "${NATIVE_FILE_TIMEOUT_SECONDS}" \
     $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory)
@@ -2619,12 +2672,21 @@ seed_inputs_hash() {
   # Never overwrite the sidecar bound to the published stamp while deciding
   # whether that stamp is stale.  Current observations remain separate until
   # a rebuilt tuple is committed as a new immutable generation.
+  # Prefer the already-resolved admitted LLVM provider's bin/ over the raw
+  # ambient PATH for the authority scan inside the fingerprint: on hosts with
+  # several llvm-config builds installed (e.g. msys2 LLVM 21 next to the
+  # admitted LLVM 23.1.1), a bare PATH scan binds whichever llvm-config sorts
+  # first and the Windows 23.1.1 admission then refuses ("found <version>").
+  seed_fingerprint_search_path="${PATH}"
+  if [ "${LLVM_FOUND:-0}" = "1" ] && [ -n "${LLVM_PREFIX_POSIX:-}" ]; then
+    seed_fingerprint_search_path="${LLVM_PREFIX_POSIX}/bin:${PATH}"
+  fi
   BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_PATH="${seed_fingerprint_observation_details}" \
   bootstrap_authority_seed_inputs_fingerprint \
     "${seed_fingerprint_phase}" "${seed_fingerprint_tmp}" \
     "${seed_fingerprint_error_manifest}" "${seed_fingerprint_error}" \
     "${repo_root}" \
-    "${backend}" "${llvm_features}" "${PATH}" "${PLATFORM}" || return 1
+    "${backend}" "${llvm_features}" "${seed_fingerprint_search_path}" "${PLATFORM}" || return 1
   # Every phase writes the same observation path, so a `post` run destroys the
   # `pre` categories at exactly the moment the pre/post comparison below needs
   # them -- the refusal could say only THAT an input changed, never WHICH.
@@ -2666,6 +2728,19 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
       exit 1
     fi
     echo "LLVM ${LLVM_VERSION} found: ${LLVM_PREFIX} (provider: ${LLVM_PROVIDER_KIND:-shared}, lib: ${LLVM_LIB})"
+    # llvm-config --prefix reports a native spelling (on Windows a C:/... path);
+    # consumers that validate POSIX absolute path lists (the seed-input
+    # fingerprint) or scan PATH entries need the POSIX form. LLVM_PREFIX
+    # itself stays native for the Rust/llvm-sys binding.
+    LLVM_PREFIX_POSIX="${LLVM_PREFIX}"
+    case "${LLVM_PREFIX_POSIX}" in
+      [A-Za-z]:[\\/]*)
+        LLVM_PREFIX_POSIX=$(cygpath -u "${LLVM_PREFIX_POSIX}") || {
+          echo "error: cannot normalize LLVM prefix ${LLVM_PREFIX}" >&2
+          exit 1
+        } ;;
+    esac
+    export LLVM_PREFIX_POSIX
     # The Rust seed's llvm-sys pins one LLVM major (180 -> LLVM 18), while the
     # pure-Simple llvm backend loads LLVM-C.dll directly and tolerates any
     # recent C API. On hosts whose LLVM major differs from the llvm-sys pin,
@@ -2850,9 +2925,19 @@ if [ "${full_bootstrap}" -eq 1 ]; then
   windows_system_drive="${SystemDrive:-${SYSTEMDRIVE:-}}"
   windows_program_data="${ProgramData:-${PROGRAMDATA:-}}"
   windows_temp="${TEMP:-${rust_authority_tmp}}"
+  # The shared platform detection above already resolved and admitted the LLVM
+  # provider (honoring host config), so put its bin/ ahead of the ambient PATH
+  # for the authority scan: on hosts with several llvm-config builds installed
+  # (e.g. msys2 LLVM 21 next to the admitted LLVM 23.1.1), a bare PATH scan
+  # binds whichever llvm-config sorts first and the Windows 23.1.1 admission
+  # then refuses with "found <other version>".
+  rust_llvm_search_path="${PATH}"
+  if [ "${LLVM_FOUND:-0}" = "1" ] && [ -n "${LLVM_PREFIX_POSIX:-}" ]; then
+    rust_llvm_search_path="${LLVM_PREFIX_POSIX}/bin:${PATH}"
+  fi
   rust_llvm_authority=$(
     bootstrap_stage3_resolve_llvm_build_authority \
-      "${PATH}" "${llvm_features}"
+      "${rust_llvm_search_path}" "${llvm_features}"
   ) || {
     echo "error: could not resolve deterministic LLVM build authority" >&2
     exit 1
@@ -3367,13 +3452,18 @@ bootstrap_step_mark cargo-build-or-skip
 # pure-Simple compiler stage starts. The cleanup traps and output lock are
 # already active here, making every refusal release ownership correctly.
 bootstrap_preflight_bindings=
+stage2_preflight_context_env=
+stage2_preflight_context_recorded=
 if [ "${full_bootstrap}" -eq 1 ]; then
   bootstrap_progress_mark bootstrap-preflight ""
   bootstrap_preflight_receipt="${output_dir}/bootstrap-preflight.env"
   bootstrap_preflight_bindings="${output_dir}/bootstrap-preflight-bindings"
   rm -f "${bootstrap_preflight_receipt}"
   rm -rf "${bootstrap_preflight_bindings}"
-  bootstrap_preflight_config="platform=${PLATFORM};backend=${backend};mode=${bootstrap_mode};lane=full-bootstrap;cargo_profile=bootstrap;cargo_target=${PLATFORM_RUST_TRIPLE};cargo_features=${llvm_features}"
+  . "${repo_root}/scripts/bootstrap/lib/preflight-configuration.shs"
+  bootstrap_preflight_config=$(bootstrap_preflight_configuration_v1 \
+    "${PLATFORM}" "${backend}" "${bootstrap_mode}" \
+    "${PLATFORM_RUST_TRIPLE}" "${llvm_features}") || exit 1
   run_rust_authority_command bootstrap-preflight default \
     sh "${repo_root}/scripts/check/check-bootstrap-preflight.shs" \
     --cargo-bin="${cargo_abs}" --cargo-profile=bootstrap --cargo-target="${PLATFORM_RUST_TRIPLE}" \
@@ -3384,6 +3474,8 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     echo "error: authoritative bootstrap preflight failed; no pure-Simple stage was started" >&2
     exit 1
   }
+  stage2_preflight_context_env="SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1=${bootstrap_preflight_config}"
+  stage2_preflight_context_recorded=1
   SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT=${bootstrap_preflight_receipt}
   SIMPLE_BOOTSTRAP_PREFLIGHT_EXPECTED_CONFIG=${bootstrap_preflight_config}
   export SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT \
@@ -3791,6 +3883,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       exit 1
     }
   fi
+  bootstrap_cuda_source_snapshot_require "${stage3_source_before}" || exit 1
   bootstrap_step_mark source-inputs-before
 
   # Stage 2: the admitted parent compiles bootstrap_main.spl.
@@ -3911,6 +4004,14 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     1) stage2_cold_init_env=SIMPLE_SCV_INVENTORY_COLD_INIT=1 ;;
     *) echo 'error: SIMPLE_SCV_INVENTORY_COLD_INIT must be unset or exactly 1' >&2; exit 1 ;;
   esac
+  stage2_diagnostic_env=$(bootstrap_stage3_stage2_diagnostic_environment "${NATIVE_LOW_MEMORY}") || {
+    echo 'error: invalid Stage 2 diagnostics: require paired safe snapshot/run ID, private absent destination, low-memory=1, and M4 unset or 1' >&2
+    exit 1
+  }
+  stage2_diagnostic_names=
+  if [ -n "$stage2_diagnostic_env" ]; then
+    stage2_diagnostic_names=$(bootstrap_stage3_env_assignment_names ${stage2_diagnostic_env}) || exit 1
+  fi
   stage2_build_args_sha256=$(
     bootstrap_stage3_args_sha256 \
       "SIMPLE_LLVM_BIN=${SIMPLE_LLVM_BIN:-}" \
@@ -3954,9 +4055,10 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
       ${stage2_cold_init_env:+"${stage2_cold_init_env}"} \
       ${compiler_ceiling_env:+"${compiler_ceiling_env}"} \
+      ${stage2_diagnostic_env} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
-      ${k1_composition_source_args} --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib \
+      ${k1_composition_source_args} --source "${cuda_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
       --entry-closure --threads "${jobs}" \
       ${native_verbose_arg} \
       ${stage2_timeout_args} \
@@ -4040,8 +4142,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ${compiler_ceiling_env:+"${compiler_ceiling_env}"} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
-      ${k1_composition_source_args} --source "${cuda_composition_source_root}" \
-      --source src/compiler --source src/app --source src/lib \
+      ${k1_composition_source_args} --source "${cuda_source_root}" \
+      --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
       --entry-closure --threads "${selfhost_jobs}" \
       --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
       $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory) \
@@ -4066,6 +4168,18 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   stage2_refusal_log="${stage2_native_log}.refusal"
   rm -f "${stage2_native_log}" "${stage2_refusal_log}"
   bootstrap_run_stage2_native() {
+    # Recheck the captured destination immediately before execution; do not read
+    # a changed ambient diagnostic vector after computing its command identity.
+    for stage2_diagnostic_assignment in ${stage2_diagnostic_env}; do
+      case "$stage2_diagnostic_assignment" in
+        SIMPLE_MEM_SNAPSHOT_FILE=*)
+          bootstrap_stage3_stage2_snapshot_destination_valid "${stage2_diagnostic_assignment#*=}" "${NATIVE_LOW_MEMORY}" || {
+            echo 'error: stage2 pre-exec refusal: snapshot destination is no longer exclusive' > "${stage2_refusal_log}"
+            cat "${stage2_refusal_log}" >&2
+            return 1
+          } ;;
+      esac
+    done
     set -- \
       "SIMPLE_LLVM_BIN=${SIMPLE_LLVM_BIN:-}" \
       "SIMPLE_LLVM_PATH=${SIMPLE_LLVM_PATH:-}" \
@@ -4107,7 +4221,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
       ${stage2_cold_init_env:+"${stage2_cold_init_env}"} \
-      ${compiler_ceiling_env:+"${compiler_ceiling_env}"}
+      ${compiler_ceiling_env:+"${compiler_ceiling_env}"} \
+      ${stage2_diagnostic_env}
     # These three guards are the ONLY pre-exec refusal on this path, and they
     # used to be bare `|| return 1`. A mismatch therefore produced no build log
     # and no reason anywhere, and the script's own failure diagnosis correctly
@@ -4124,7 +4239,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       cat "${stage2_refusal_log}" >&2
       return 1
     }
-    stage2_expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "${PLATFORM}" "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-}") || {
+    stage2_expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "${PLATFORM}" "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-}" "${stage2_diagnostic_names}") || {
       echo "error: stage2 pre-exec refusal: no canonical stage2 env name list for ${PLATFORM}" \
         > "${stage2_refusal_log}"
       cat "${stage2_refusal_log}" >&2
@@ -4162,7 +4277,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    ${k1_composition_source_args} --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib \
+    ${k1_composition_source_args} --source "${cuda_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
     --entry-closure \
     --threads "${jobs}" \
     ${native_verbose_arg} \
@@ -5054,8 +5169,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    ${k1_composition_source_args} --source "${cuda_composition_source_root}" \
-    --source src/compiler --source src/app --source src/lib \
+    ${k1_composition_source_args} --source "${cuda_source_root}" \
+    --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
     --entry-closure \
     --threads "${selfhost_jobs}" \
     --cache-dir "${stage3_cache_absolute}" \
@@ -5610,7 +5725,7 @@ run_logged stage4b-ui-backend env RUST_LOG="${RUST_LOG:-error}" \
   SIMPLE_BINARY="$(absolute_path "${full_bin}")" \
   "${full_bin}" native-build \
     --backend "${backend}" \
-  --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
+  --source "${cuda_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
   --entry-closure --threads "${jobs}" --cache-dir "${native_cache_dir}" \
   --mode "${bootstrap_mode}" --entry src/app/ui/main.spl \
   --runtime-path "${stage_runtime_absolute}" \
@@ -5653,7 +5768,7 @@ if [ "${build_mcp}" -eq 1 ]; then
       SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
       "${stage_for_build}" native-build \
       --backend "${backend}" \
-      --source "${cuda_composition_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
+      --source "${cuda_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
       --entry-closure \
       --threads "${jobs}" \
       --cache-dir "${native_cache_dir}" \

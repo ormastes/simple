@@ -135,10 +135,26 @@ fn _export_record_reexport_surface(reexport_decl: i64) -> i64:
     (`export use M.*`) carries no item list, so retain its source module as
     `M.*`. HIR's glob-facade expansion already understands that encoding and
     can then register the complete defining surface, including dependencies of
-    enum payloads materialized through the facade."""
+    enum payloads materialized through the facade.
+
+    Braced items are QUALIFIED with the source module (`export use M.{a, b}`
+    records `M.a`, `M.b`): recorded bare, the export route carries no target
+    module (module_lowering only derives a route target from a dotted
+    source), so find_reexport_source has nowhere to chase and every named
+    import through such a facade fails with "module M has no exported item
+    a" — surfaced by the full-CLI tool build on dormant spec modules
+    (compiler.mir_opt.optimization_passes / optimizer_manifest, 2026-10-15).
+    The dotted spelling is the one `export module.Name` already uses."""
     val reexported_items = decl_get_imports(reexport_decl)
     if reexported_items.len() > 0:
-        module_add_decl(decl_export_names(reexported_items, 0))
+        val reexport_source_module = decl_get_name(reexport_decl)
+        if reexport_source_module != "":
+            var qualified_items: [text] = []
+            for reexported_item in reexported_items:
+                qualified_items.push(reexport_source_module + "." + reexported_item)
+            module_add_decl(decl_export_names(qualified_items, 0))
+        else:
+            module_add_decl(decl_export_names(reexported_items, 0))
     else:
         val reexported_module = decl_get_name(reexport_decl)
         if reexported_module != "":

@@ -1,0 +1,57 @@
+use std.spec.*
+use compiler.frontend.ast.{FunctionDef}
+use compiler.mono.monomorphize.types.{ConcreteType, specializationkey_new}
+use compiler.mono.monomorphize.engine.{spec_key_mangled_name, concrete_type_to_text}
+use compiler.mono.monomorphize.metadata.{SpecializationEntry}
+use compiler.mono.monomorphize.deferred.{DeferredMonomorphizer, CompiledCode}
+use compiler.mono.monomorphize.deferred_subst.{InstantiationMode, deferred_last_error, deferred_clear_error}
+
+fn deferred_factory_function(name: text) -> FunctionDef:
+    FunctionDef(name: name, generic_params: [], params: [], has_return_type: true,
+        return_type: "Int", body: ["return 37"], is_generic_template: false,
+        has_specialization_of: false, specialization_of: "", type_bindings: {})
+
+describe "deferred specialization key owners":
+    it "uses the canonical mangler for empty and ordered nested type arguments":
+        val empty = specializationkey_new("identity", [])
+        expect(spec_key_mangled_name(empty)).to_equal("identity")
+        val key = specializationkey_new("map", [ConcreteType.Int, ConcreteType.Array(ConcreteType.String)])
+        expect(key.name).to_equal("map")
+        expect(key.type_args.len()).to_equal(2)
+        expect(spec_key_mangled_name(key)).to_equal("map$Int_Array_String")
+
+    it "copies the outer argument array when constructing a metadata entry":
+        var key = specializationkey_new("identity", [ConcreteType.Int, ConcreteType.Bool])
+        var entry = SpecializationEntry.from_key(key)
+        expect(entry.mangled_name).to_equal("identity$Int_Bool")
+        expect(entry.bindings.len()).to_equal(0)
+        key.type_args[0] = ConcreteType.String
+        expect(concrete_type_to_text(entry.type_args[0])).to_equal("Int")
+        entry.type_args[1] = ConcreteType.Float
+        expect(concrete_type_to_text(key.type_args[1])).to_equal("Bool")
+
+    it "looks up an existing function specialization using the same key factory":
+        var mono = DeferredMonomorphizer.new(InstantiationMode.LinkTime)
+        val key = specializationkey_new("identity", [ConcreteType.Int])
+        mono.specialization_cache[key] = CompiledCode.Function(deferred_factory_function("identity$Int"))
+        expect(mono.has_specialization("identity", [ConcreteType.Int])).to_equal(true)
+        expect(mono.has_specialization("identity", [ConcreteType.String])).to_equal(false)
+        expect(mono.has_specialization("other", [ConcreteType.Int])).to_equal(false)
+        if val result = mono.instantiate_function("identity", [ConcreteType.Int]):
+            expect(result.name).to_equal("identity$Int")
+            expect(result.body[0]).to_equal("return 37")
+        else:
+            fail("cached specialization was not returned")
+
+    it "preserves missing-template diagnostics for all four instantiation paths":
+        var mono = DeferredMonomorphizer.new(InstantiationMode.LinkTime)
+        deferred_clear_error()
+        expect(mono.instantiate_function("missing_function", [])).to_be_nil()
+        expect(deferred_last_error).to_equal("Template not found: missing_function")
+        expect(mono.instantiate_struct("missing_struct", [])).to_be_nil()
+        expect(deferred_last_error).to_equal("Template not found: missing_struct")
+        expect(mono.instantiate_class("missing_class", [])).to_be_nil()
+        expect(deferred_last_error).to_equal("Template not found: missing_class")
+        expect(mono.instantiate_enum("missing_enum", [])).to_be_nil()
+        expect(deferred_last_error).to_equal("Template not found: missing_enum")
+        deferred_clear_error()

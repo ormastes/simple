@@ -533,7 +533,26 @@ impl MirTextCodegen for MirToLlvm:
                 # the signature; lower the body once in the emission loop.
                 val body = MirBody.from_function(fn_)
                 val fn_name = self.llvm_function_symbol_name(fn_.name)
-                val body_return_ty = body.bootstrap_return_type()
+                var body_return_ty = body.bootstrap_return_type()
+                # Untyped fns lower to Unit here while their bodies still
+                # return values (crc32_finalize/crc32_chunked/crc32_verify in
+                # lib.nogc_sync_mut.compression.gzip.crc, params untyped):
+                # the Ret terminators then hit "unsupported LLVM value
+                # conversion <t> to void" and the whole module ICEs. The seed
+                # infers an untyped fn's return from its body; mirror that
+                # minimally -- a Unit-declared body whose Ret terminators
+                # return a local operand becomes word-returning (the canonical
+                # erased/int width). Const-only returns (ret_kind 3) stay
+                # Unit: `return 0` in a genuinely void fn must not change its
+                # ABI, and the crc family always has a local value return too.
+                if body_return_ty.kind == MirTypeKind.Unit:
+                    var blk_i = 0
+                    while blk_i < body.blocks.len():
+                        val ret_kind = body.blocks[blk_i].bootstrap_ret_kind()
+                        if ret_kind == 1 or ret_kind == 2:
+                            body_return_ty = MirType.i64()
+                            blk_i = body.blocks.len()
+                        blk_i = blk_i + 1
                 val ret_ty = self.llvm_type_text(body_return_ty)
                 self.remember_function_return_type(fn_.name, ret_ty)
                 self.remember_function_return_type(fn_name, ret_ty)
@@ -746,7 +765,26 @@ impl MirTextCodegen for MirToLlvm:
             self.bootstrap_return_abi_unsigned = false
             self.bootstrap_return_abi_active = false
         else:
-            val body_return_ty = body.bootstrap_return_type()
+            var body_return_ty = body.bootstrap_return_type()
+            # Untyped fns lower to Unit while their bodies still return
+            # values (crc32_finalize/crc32_chunked/crc32_verify in
+            # lib.nogc_sync_mut.compression.gzip.crc, params untyped): the
+            # Ret terminators then hit "unsupported LLVM value conversion
+            # <t> to void" and the whole module ICEs. The seed infers an
+            # untyped fn's return from its body; mirror that minimally -- a
+            # Unit-declared body whose Ret terminators return a LOCAL
+            # operand becomes word-returning (canonical erased/int width).
+            # Const-only returns (ret_kind 3) stay Unit: `return 0` in a
+            # genuinely void fn must not change its ABI, and the crc family
+            # always also has a local value return.
+            if body_return_ty.kind == MirTypeKind.Unit:
+                var infer_blk_i = 0
+                while infer_blk_i < body.blocks.len():
+                    val infer_ret_kind = body.blocks[infer_blk_i].bootstrap_ret_kind()
+                    if infer_ret_kind == 1 or infer_ret_kind == 2:
+                        body_return_ty = MirType.i64()
+                        infer_blk_i = body.blocks.len()
+                    infer_blk_i = infer_blk_i + 1
             ret_ty = self.llvm_type_text(body_return_ty)
             ret_unsigned = self.is_unsigned_mir_kind(body_return_ty.kind)
         self.set_function_return_type(ret_ty)

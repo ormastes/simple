@@ -7,13 +7,33 @@ use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.provider_metadata.*
 use compiler.mir._MirLowering.global_initializer_guard.*
 use compiler.hir.generated.hir_children.{HirNode, hir_children_of, hir_children_of_block}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
 
 fn mir_global_storage_name(owner: text, name: text) -> text:
-    val safe_owner = owner.replace(".", "_").replace("/", "_").replace("-", "_").replace(":", "_").replace("\\", "_")
+    # Normalize the owner to the repo-relative logical module name BEFORE
+    # mangling: under an SCV freeze the module's raw parsed name is the
+    # absolute snapshot path (D:/dev/.../build/scv/snapshots/<revision>/src/...),
+    # and imported-global REFERENCES are keyed by the canonical logical name —
+    # so the definition's storage symbol and the reference disagree and the
+    # final link fails with an undefined g_D_<snapshot-path>_<name> symbol
+    # (lib.nogc_sync_mut.io.windows_redirected_process WINDOWS_REDIRECTED_TOKEN_BASE,
+    # full-CLI tool build 2026-10-15). module_logical_name_from_path collapses
+    # absolute snapshot spellings, bare relative paths and canonical dotted
+    # names onto one identity, so both sides converge.
+    val logical_owner = module_logical_name_from_path(owner)
+    val safe_owner = logical_owner.replace(".", "_").replace("/", "_").replace("-", "_").replace(":", "_").replace("\\", "_")
     if safe_owner == "": name else: "{safe_owner}__{name}"
 
 fn mir_global_declaration_key(owner: text, name: text) -> text:
     "{mir_layout_canonical_module_name(owner)}::{name}"
+
+fn imported_private_literal_is_inline(constant: HirConst) -> bool:
+    if constant.is_mutable or not constant.visibility.is_private(): return false
+    match constant.value.kind:
+        case HirExprKind.IntLit(_, _) | HirExprKind.FloatLit(_, _) |
+             HirExprKind.FloatLexeme(_, _) | HirExprKind.BoolLit(_): true
+        case HirExprKind.StringLit(_, _): not runtime_module_initializer_supported(constant)
+        case _: false
 
 fn mir_global_demanded_owners(demanded: Dict<text, [i64]>) -> Dict<text, bool>:
     var owners: Dict<text, bool> = {}
@@ -168,6 +188,22 @@ impl MirLowering:
             if val definition = provider_symbols.get_symbol_raw(constant.symbol.id):
                 definition_owner = definition.defining_module ?? provider_name
             val storage_name = mir_global_storage_name(definition_owner, constant.name)
+            if imported_private_literal_is_inline(constant):
+                # The provider deliberately gives private literals no static.
+                # Import their exact scalar value, never an invented zero or
+                # a provider expression containing foreign SymbolIds.
+                if val value = self.lower_const_expr(constant.value):
+                    for imported_id in demanded[key]:
+                        self.global_symbol_ids[imported_id] = true
+                        self.global_constants_by_id[imported_id] = MirConstant(
+                            symbol: SymbolId(id: imported_id), name: constant.name,
+                            type_: storage_type, value: value)
+                        # Do not put provider expressions in global_const_exprs:
+                        # that map proves a local declaration owns storage;
+                        # these imported values remain inline-only.
+                        if needs_initialization:
+                            self.imported_global_initializers[imported_id] = mir_global_initializer_wrapper_name(provider_name)
+                    continue
             for imported_id in demanded[key]:
                 val declaration = MirStatic(symbol: SymbolId(id: imported_id), name: storage_name,
                     type_: storage_type, init: nil, is_mutable: constant.is_mutable,

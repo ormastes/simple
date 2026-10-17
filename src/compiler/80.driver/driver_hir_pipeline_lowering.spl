@@ -897,6 +897,18 @@ impl CompilerDriver:
         var lowered_by_surface: Dict<i64, HirModule> = {}
         var shard_completed_surfaces: Dict<i64, bool> = {}
         var poisoned_by_surface: Dict<i64, bool> = {}
+        # Duplicate-admission guard, keyed by the surface CANONICAL name
+        # (fold-std-alias of the logical name): the same file can be admitted
+        # twice under two source spellings (an SCV snapshot path row and its
+        # authored/alias module-name row). Two lowerings of the same module on
+        # parallel HIR shards each ran register_enum_unit_patterns on the
+        # shared symbol table, and the registration raced the consumer body
+        # lowering -- the SdnValue triple (undefined variable SdnValue /
+        # unresolved method call Float / B5b duplicate wildcard) at
+        # src/lib/common/sdn/value.spl:48. One lowering per canonical name
+        # removes the second registration entirely (doc/08_tracking/bug/
+        # sdn_value_enum_race_parallel_hir_ordering_2026-10-13).
+        var canonical_lowered_modules: Dict<text, HirModule> = {}
         var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
         var validation_module_keys: [text] = []
         # Values are struct/symbol-only HirModule views, not second owners of
@@ -975,6 +987,13 @@ impl CompilerDriver:
                 if not phase_hir_modules.contains_key(source.module_name):
                     streaming_hir_module_count = streaming_hir_module_count + 1
                 phase_hir_modules[source.module_name] = alias_hir
+                # Record the canonical name too: a later row of the same file
+                # under a THIRD spelling must also reuse (cycle-33 lane -- the
+                # alias branch previously recorded nothing, so the canonical
+                # guard could not fire for subsequent spellings).
+                val alias_canonical = surfaces.surfaces[surface_index].canonical_name
+                if alias_canonical != "" and not canonical_lowered_modules.contains_key(alias_canonical):
+                    canonical_lowered_modules[alias_canonical] = alias_hir
                 if not driver_hir_mem_snapshot(
                     "hir-alias-reuse", source_index, source.path,
                     streaming_hir_module_count,
@@ -990,6 +1009,33 @@ impl CompilerDriver:
                 # One physical file is lowered at most once. Compatibility
                 # aliases cannot retry a poisoned surface under another module
                 # spelling or replace its original diagnostic.
+                hir_loop_pos = hir_loop_pos + 1
+                continue
+            # Duplicate-admission reuse: a second source row whose surface
+            # canonical name was already lowered reuses that unit instead of
+            # lowering (and re-registering) a second copy. See the
+            # canonical_lowered_modules declaration above for the race this
+            # removes; keying is by surface canonical name, NOT by
+            # source.module_name, because the two rows of one admitted file
+            # differ exactly in that spelling.
+            val canonical_surface_name = surfaces.surfaces[surface_index].canonical_name
+            if canonical_surface_name != "" and canonical_lowered_modules.contains_key(canonical_surface_name):
+                if (sosix_env_get_nullable("SIMPLE_DBG_HIR_DEDUP") ?? "") == "1":
+                    eprint("[hir-dedup] reuse canonical={canonical_surface_name} as {source.module_name} path={source.path}\n")
+                val reused_hir = canonical_lowered_modules[canonical_surface_name]
+                lowered_by_surface[surface_index] = reused_hir
+                if not phase_hir_modules.contains_key(source.module_name):
+                    streaming_hir_module_count = streaming_hir_module_count + 1
+                phase_hir_modules[source.module_name] = reused_hir
+                if not driver_hir_mem_snapshot(
+                    "hir-canonical-reuse", source_index, source.path,
+                    streaming_hir_module_count,
+                    validation_module_keys.len(), validation_module_values.len(),
+                    lowering.lowered_trait_count_value):
+                    self.ctx.add_error("durable memory snapshot write failed at hir-canonical-reuse")
+                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
+                    mem_snapshot_abort()
+                    return false
                 hir_loop_pos = hir_loop_pos + 1
                 continue
             # Keep the retained surface in its canonical owner. ModuleSurface
@@ -1241,6 +1287,12 @@ impl CompilerDriver:
             if not phase_hir_modules.contains_key(source.module_name):
                 streaming_hir_module_count = streaming_hir_module_count + 1
             phase_hir_modules[source.module_name] = hir_module
+            # Record the canonical name so a second admission spelling of this
+            # same file reuses this unit (see the canonical reuse guard above)
+            # instead of lowering -- and registering -- a duplicate.
+            val stored_canonical_name = surfaces.surfaces[surface_index].canonical_name
+            if stored_canonical_name != "":
+                canonical_lowered_modules[stored_canonical_name] = hir_module
             # An alias source reuses lowered_by_surface above and deliberately
             # does not create another value-layout graph node. The canonical
             # surface name preserves the defining-module provenance.
@@ -2018,6 +2070,23 @@ impl CompilerDriver:
         self.ctx.hir_modules = phase_hir_modules
         self.ctx.hir_module_count_value = retained_hir_module_count
         self.ctx.bootstrap_entry_hir = phase_entry_hir
+        # SIMPLE_SDN_RACE_TRACE=1 (cycle-41 in-vivo discriminator): one line
+        # per module handed to the post-HIR passes, with its declared
+        # enum/class/function counts. The SdnValue triple fires at MIR with
+        # `undefined variable SdnValue` in lib.common.sdn.value's OWN body
+        # while HIR reports the module clean; this line decides where the
+        # declaration ownership is lost:
+        #   enums>=1 for lib.common.sdn.value here -> the module payload is
+        #     intact at handoff; the loss is in monomorphization or MIR's
+        #     scope build (next probe surface).
+        #   enums=0  -> the loss is INSIDE the HIR lowering/reuse lane (the
+        #     canonical-reuse guard handed another unit's payload under this
+        #     name); keying is the bug.
+        # Default off; zero cost beyond one env probe at handoff.
+        if (sosix_env_get_nullable("SIMPLE_SDN_RACE_TRACE") ?? "") == "1":
+            for race_key in phase_hir_modules.keys():
+                val race_mod: HirModule = phase_hir_modules[race_key]
+                eprint("[race-trace] hir-final module={race_key} enums={race_mod.enums.len()} classes={race_mod.classes.len()} functions={race_mod.functions.len()}")
         # Same post-loop receipts as the streaming path (see its loop:done
         # comment): a crash between the last file:done and the first pass
         # summary used to leave no marker at all.

@@ -1,0 +1,138 @@
+# Executable qualification remains pending a rebuilt self-hosted producer.
+use std.spec.*
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.types.{HirLowering, HirDeclaredPatternEnumSlots, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering._Expressions.declared_enum_constructor.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+
+fn named_enum_arg(name: text, value: i64, named: bool = true) -> HirCallArg:
+    val expression = HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: false, span: Span.empty())
+    HirCallArg(has_name: named, name: name, value: expression, span: Span.empty())
+
+fn named_enum_slots(names: [text]) -> HirDeclaredPatternEnumSlots:
+    var types: [HirType] = []
+    for _name in names:
+        types.push(HirType(kind: HirTypeKind.Int(64, true), span: Span.empty()))
+    HirDeclaredPatternEnumSlots(tuple_types: [], field_names: names, field_types: types, is_struct: true)
+
+fn named_enum_expect_payload(expression: HirExpr?, owner: i64, expected: [i64]):
+    if val present = expression:
+        match present.kind:
+            case HirExprKind.EnumLit(type_, variant, payload):
+                expect(variant).to_equal("Float")
+                match type_.kind:
+                    case HirTypeKind.Named(symbol, _): expect(symbol.id).to_equal(owner)
+                    case _: assert(false)
+                if val values = payload:
+                    match values:
+                        case HirEnumPayload.Tuple(children):
+                            expect(children.len()).to_equal(expected.len())
+                            var index = 0
+                            for child in children:
+                                match child.kind:
+                                    case HirExprKind.IntLit(value, _): expect(value).to_equal(expected[index])
+                                    case _: assert(false)
+                                index = index + 1
+                        case _: assert(false)
+                else: assert(false)
+            case _: assert(false)
+    else: assert(false)
+
+fn named_enum_expect_mir(module_: HirModule):
+    var lowering = MirLowering.new(module_.symbols)
+    lowering.use_explicit_semantic_policy()
+    val mir = lowering.lower_module(module_)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(mir.functions.len()).to_be_greater_than(0)
+
+describe "Named enum payloads retain their declared constructor owner":
+    it "retains separate owners when a payload variant spelling collides":
+        step("Construct each Float using its own declared named slot")
+        var hir = HirLowering.new()
+        val first = hir.symbols.define("First", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, Some("left"))
+        val second = hir.symbols.define("Second", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, Some("right"))
+        hir.declared_pattern_enum_slots["{first.id}:Float"] = named_enum_slots(["bits"])
+        hir.declared_pattern_enum_slots["{second.id}:Float"] = named_enum_slots(["precision"])
+        named_enum_expect_payload(hir.declared_enum_constructor_expr(first.id, "Float", [named_enum_arg("bits", 64)], Span.empty()), first.id, [64])
+        named_enum_expect_payload(hir.declared_enum_constructor_expr(second.id, "Float", [named_enum_arg("precision", 32)], Span.empty()), second.id, [32])
+        expect(hir.declared_enum_constructor_expr(second.id, "Float", [named_enum_arg("bits", 64)], Span.empty())).to_be_nil()
+
+    it "preserves all supplied values in declaration order":
+        var hir = HirLowering.new()
+        hir.declared_pattern_enum_slots["3:Float"] = named_enum_slots(["first", "second"])
+        named_enum_expect_payload(hir.declared_enum_constructor_expr(3, "Float", [named_enum_arg("first", 0), named_enum_arg("second", 17)], Span.empty()), 3, [0, 17])
+
+    it "preserves positional slots in a complete ordered mixed call":
+        var hir = HirLowering.new()
+        hir.declared_pattern_enum_slots["3:Float"] = named_enum_slots(["first", "second"])
+        named_enum_expect_payload(hir.declared_enum_constructor_expr(3, "Float", [named_enum_arg("", 0, false), named_enum_arg("second", 17)], Span.empty()), 3, [0, 17])
+
+    it "retains the existing positional route without named-slot metadata":
+        var hir = HirLowering.new()
+        named_enum_expect_payload(hir.declared_enum_constructor_expr(3, "Float", [named_enum_arg("", 64, false)], Span.empty()), 3, [64])
+
+    it "does not erase unknown reordered or duplicate argument names":
+        var hir = HirLowering.new()
+        hir.declared_pattern_enum_slots["3:Float"] = named_enum_slots(["first", "second"])
+        expect(hir.declared_enum_constructor_expr(3, "Float", [named_enum_arg("absent", 0), named_enum_arg("second", 17)], Span.empty())).to_be_nil()
+        expect(hir.declared_enum_constructor_expr(3, "Float", [named_enum_arg("second", 17), named_enum_arg("first", 0)], Span.empty())).to_be_nil()
+        expect(hir.declared_enum_constructor_expr(3, "Float", [named_enum_arg("first", 0), named_enum_arg("first", 17)], Span.empty())).to_be_nil()
+
+    it "keeps missing extra unknown and undeclared payloads on the guarded route":
+        var hir = HirLowering.new()
+        hir.declared_pattern_enum_slots["3:Float"] = named_enum_slots(["bits"])
+        expect(hir.declared_enum_constructor_expr(3, "Float", [named_enum_arg("bits", 64), named_enum_arg("extra", 32)], Span.empty())).to_be_nil()
+        hir.declared_pattern_enum_slots["3:Float"] = named_enum_slots(["bits", "precision"])
+        expect(hir.declared_enum_constructor_expr(3, "Float", [named_enum_arg("bits", 64)], Span.empty())).to_be_nil()
+        expect(hir.declared_enum_constructor_expr(3, "Absent", [named_enum_arg("bits", 64)], Span.empty())).to_be_nil()
+        expect(hir.declared_enum_constructor_expr(4, "Float", [named_enum_arg("bits", 64)], Span.empty())).to_be_nil()
+
+    it "requires aligned named-field metadata rather than guessing tuple names":
+        var hir = HirLowering.new()
+        val int_type = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        hir.declared_pattern_enum_slots["3:Float"] = HirDeclaredPatternEnumSlots(tuple_types: [int_type], field_names: [], field_types: [], is_struct: false)
+        expect(hir.declared_enum_constructor_expr(3, "Float", [named_enum_arg("bits", 64)], Span.empty())).to_be_nil()
+        hir.declared_pattern_enum_slots["3:Float"] = HirDeclaredPatternEnumSlots(tuple_types: [], field_names: ["bits"], field_types: [], is_struct: true)
+        expect(hir.declared_enum_constructor_expr(3, "Float", [named_enum_arg("bits", 64)], Span.empty())).to_be_nil()
+
+    it "lowers actual named source despite a colliding unit variant":
+        step("Run the parser HIR and guarded MIR path with two Float owners")
+        val source = "enum TokenKind:\n    Float\n    End\nenum PayloadKind:\n    Float(bits: i64)\nfn make() -> PayloadKind:\n    PayloadKind.Float(bits: 64)\nfn token() -> TokenKind:\n    TokenKind.Float\n"
+        val parsed = parse_full_frontend(source, "named_collision.spl", "named_collision.spl", Logger(level: 0))
+        var hir = HirLowering.with_filename("named_collision.spl")
+        val module_ = hir.lower_module(parsed)
+        expect(hir.errors.len()).to_equal(0)
+        named_enum_expect_mir(module_)
+
+    it "retains an imported alias declaration in a colliding consumer":
+        step("Import the named payload owner through an alias")
+        val provider_source = "enum Kind:\n    Float(bits: i64)\n"
+        val consumer_source = "use named.owner.\{Kind as Payload\}\nenum TokenKind:\n    Float\nfn make() -> Payload:\n    Payload.Float(bits: 64)\n"
+        val logger = Logger(level: 0)
+        val provider = parse_full_frontend(provider_source, "named.owner", "named.owner", logger)
+        val consumer = parse_full_frontend(consumer_source, "named.consumer", "named.consumer", logger)
+        var modules: Dict<text, Module> = {}
+        modules["named.owner"] = provider
+        modules["named.consumer"] = consumer
+        val sources = [SourceFile(path: "named/owner.spl", content: provider_source, module_name: "named.owner"), SourceFile(path: "named/consumer.spl", content: consumer_source, module_name: "named.consumer")]
+        var surfaces = ModuleSurfacesByName.empty()
+        match module_surfaces_from_modules(modules, sources):
+            case Ok(value): surfaces = value
+            case Err(_): assert(false)
+        var hir = hirlowering_for_module("named.consumer", surfaces)
+        val module_ = hir.lower_module(consumer)
+        expect(hir.errors.len()).to_equal(0)
+        expect(hir.imported_enum_owner_module("Payload")).to_equal("named.owner")
+        named_enum_expect_mir(module_)

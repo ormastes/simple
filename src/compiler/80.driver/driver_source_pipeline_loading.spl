@@ -1051,7 +1051,7 @@ impl CompilerDriver:
                         continue
                     val closure_selected_source = _driver_resolve_source_root_entry_import_from_v1(
                         closure_mp_input, closure_source_roots, closure_dir)
-                    val closure_file = match closure_selected_source:
+                    var closure_file = match closure_selected_source:
                         case SourceRootResolutionV1.Found(path): path
                         case SourceRootResolutionV1.Missing:
                             _driver_resolve_entry_import(closure_mp_input, closure_dir)
@@ -1077,7 +1077,7 @@ impl CompilerDriver:
                         log_phase(
                             "phase1:load_sources:closure:unresolved module={closure_mp} used_in={closure_src.path} dir={closure_dir}")
                         continue
-                    val closure_loaded = if explicit_entry_closure or native_group_inputs.len() > 0:
+                    var closure_loaded = if explicit_entry_closure or native_group_inputs.len() > 0:
                         _driver_collect_explicit_compiler_source(closure_file)
                     else:
                         _driver_collect_entry_import_source(closure_file)
@@ -1091,11 +1091,46 @@ impl CompilerDriver:
                             "phase1:load_sources:closure:excluded module={closure_mp} used_in={closure_src.path} file={closure_file}")
                         continue
                     var closure_has_exact = false
+                    for cs in closure_loaded:
+                        if cs.module_name == closure_mp:
+                            closure_has_exact = true
+                    if not closure_has_exact:
+                        # Source-root resolution picked a file whose NATIVE names
+                        # do not include the import spelling. The observed case
+                        # is a src/lib stub facade shadowing a compiler-tree
+                        # implementation: the declared source roots walk finds
+                        # src/lib/compiler/mir_opt/<name>.spl (whose native names
+                        # are all lib.*) for the import spelling
+                        # compiler.mir_opt.<name>, and the synthesized alias row
+                        # below would tag the ZERO-declaration facade with the
+                        # compiler name -- cross-mapping the registry's
+                        # name->index routing (cycle-38/39 frontier: surfaces
+                        # idx 871/2183/2415, hard 'has no exported item' for
+                        # every consumer). Before synthesizing that tag, give
+                        # the canonical resolver a chance to find a file that
+                        # natively owns the spelling -- e.g. the numbered-layout
+                        # table now reaches src/compiler/60.mir_opt/<name>.spl --
+                        # and prefer it. Genuine relative imports with no native
+                        # owner still fall through to the alias row unchanged.
+                        val native_file = _driver_resolve_entry_import(closure_mp, closure_dir)
+                        if native_file != "" and native_file != closure_file:
+                            val native_loaded = if explicit_entry_closure or native_group_inputs.len() > 0:
+                                _driver_collect_explicit_compiler_source(native_file)
+                            else:
+                                _driver_collect_entry_import_source(native_file)
+                            var native_has_exact = false
+                            for ns in native_loaded:
+                                if ns.module_name == closure_mp:
+                                    native_has_exact = true
+                            if native_has_exact:
+                                log_phase(
+                                    "phase1:load_sources:closure:native-owner-preferred module={closure_mp} shadow={closure_file} owner={native_file}")
+                                closure_file = native_file
+                                closure_loaded = native_loaded
+                                closure_has_exact = true
                     var closure_content = ""
                     for cs in closure_loaded:
                         closure_content = cs.content
-                        if cs.module_name == closure_mp:
-                            closure_has_exact = true
                         val closure_key = cs.path + "::" + cs.module_name
                         if not seen_sources.contains_key(closure_key):
                             seen_sources[closure_key] = true
@@ -1221,6 +1256,7 @@ impl CompilerDriver:
             owned_module_names = owned_module_names.push(
                 driver_source_owner_text_copy(loaded_source.module_name))
         log_phase("phase1:load_sources:owner_copy:done n={all_sources.len()}")
+        self.ctx.native_objectless_decl_proofs = {}
         self.ctx.source_paths_owner = owned_paths
         self.ctx.source_authored_paths_owner = owned_authored_paths
         self.ctx.source_contents_owner = owned_contents

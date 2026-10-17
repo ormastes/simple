@@ -735,7 +735,25 @@ pub(crate) fn build_import_map(
             // Public ambiguous names keep first-wins until all consumers check
             // the `ambiguous` set.
             if !raw.starts_with('_') {
-                map.insert(raw.clone(), mangled_list[0].clone());
+                // Prefer an extern identity binding over first-wins file order.
+                // `Node::Extern` registers `name -> name` (the module asks for
+                // the exact link symbol); a class method registers the same
+                // BARE name towards its mangled `Owner.method`. When both are
+                // present the callee is ambiguous, and pure file-order
+                // first-wins bound path_identity's libc `free` to
+                // RtStringBuilder.free whenever the builder module sorted
+                // first — the freed "/home/..." path pointer then crashed
+                // rt_string_builder_free at candidate startup
+                // (bootstrap_imported_free_method_rebind_2026_10_12, #3352).
+                // An explicit extern declaration is stronger evidence than a
+                // same-named method's bare-name fallback, so it wins
+                // regardless of module order. No extern identity among the
+                // candidates keeps the historical first-wins behavior.
+                let preferred = mangled_list
+                    .iter()
+                    .find(|candidate| candidate.as_str() == raw.as_str())
+                    .unwrap_or(&mangled_list[0]);
+                map.insert(raw.clone(), preferred.clone());
             }
         }
     }

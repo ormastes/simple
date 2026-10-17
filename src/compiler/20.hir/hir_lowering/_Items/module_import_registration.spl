@@ -21,7 +21,7 @@ use compiler.hir.hir_lowering.type_aliases.*
 use compiler.hir.hir_lowering._Items.module_reexport_materialization.{hir_dependency_is_builtin_type, hir_dependency_type_name}
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
-use compiler.hir.hir_lowering.module_surface_types.{module_surface_export_origin_index_lookup}
+use compiler.hir.hir_lowering.module_surface_types.{module_surface_export_origin_index_lookup, module_surface_name_position}
 use compiler.hir.hir_lowering.module_surface_registry_index.{module_surfaces_frozen_alignment}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
@@ -539,12 +539,26 @@ impl HirLowering:
         # NAMEIDX: six Dict probes against the per-surface name index instead
         # of six linear sweeps of the surface's name arrays per registration.
         val surface_key = self.ensure_surface_name_index(imported_mod)
-        val composite_position = self.surface_name_position(surface_key, "C", imported_name)
-        val enum_position = self.surface_name_position(surface_key, "E", imported_name)
-        val trait_position = self.surface_name_position(surface_key, "T", imported_name)
-        val alias_position = self.surface_name_position(surface_key, "A", imported_name)
-        val callable_position = self.surface_name_position(surface_key, "F", imported_name)
-        val constant_position = self.surface_name_position(surface_key, "K", imported_name)
+        var composite_position = self.surface_name_position(surface_key, "C", imported_name)
+        var enum_position = self.surface_name_position(surface_key, "E", imported_name)
+        var trait_position = self.surface_name_position(surface_key, "T", imported_name)
+        var alias_position = self.surface_name_position(surface_key, "A", imported_name)
+        var callable_position = self.surface_name_position(surface_key, "F", imported_name)
+        var constant_position = self.surface_name_position(surface_key, "K", imported_name)
+        # CHAINTABLE-HARDEN (cycle-36 sweep): a false negative from the
+        # NAMEIDX chain tables must not silently drop the registration into
+        # the facade-chase else branch -- re-derive a six-miss from the
+        # authoritative name arrays (same family as surface_declares_item_
+        # indexed, 30ff1033526).
+        if composite_position < 0 and enum_position < 0 and trait_position < 0 and
+                alias_position < 0 and callable_position < 0 and constant_position < 0 and
+                module_surface_declares_item(imported_mod, imported_name):
+            composite_position = module_surface_name_position(imported_mod.composite_names, imported_name)
+            enum_position = module_surface_name_position(imported_mod.enum_names, imported_name)
+            trait_position = module_surface_name_position(imported_mod.trait_names, imported_name)
+            alias_position = module_surface_name_position(imported_mod.type_alias_names, imported_name)
+            callable_position = module_surface_name_position(imported_mod.callable_names, imported_name)
+            constant_position = module_surface_name_position(imported_mod.constant_names, imported_name)
         hir_phase_profile_add(HIR_PROF_RIS_SCAN, scan_started)
         if self.registering_lexical_import and (composite_position >= 0 or
                 enum_position >= 0 or trait_position >= 0 or alias_position >= 0):
@@ -1253,6 +1267,24 @@ impl HirLowering:
                 if verify_index != terminal_index:
                     eprint("[rexmemo-mismatch] facade={facade_index} wanted={wanted} memo={terminal_index} walk={verify_index} complete={verify_state.complete} valid={verify_state.valid}")
             if terminal_index < 0:
+                # CHAINTABLE-HARDEN (cycle-36 sweep): a memoized NEGATIVE can
+                # itself be the false negative (the memo tables share the
+                # stage2 chain-table corruption family), and it poisons every
+                # later chase for this key. A negative hit is therefore
+                # revalidated with one fresh walk; a found result replaces the
+                # memo entry (record appends; readers scan newest-first via the
+                # bucket chain -- see reexport_root_memo_lookup) and a
+                # confirmed negative stays retryable-cheap only until the next
+                # registry generation resets the table.
+                val recheck_state: HirReexportWalkState = HirReexportWalkState.fresh()
+                val recheck: HirReexportSource = self.find_reexport_source_walk(facade_index, wanted, 0, recheck_state)
+                if recheck.found:
+                    self.reexport_root_memo_record(memo_key, recheck.module_index, recheck.item_name)
+                    return HirReexportSource(
+                        found: true,
+                        module_index: recheck.module_index,
+                        module_name: self.module_surfaces.surfaces[recheck.module_index].preferred_registry_name,
+                        item_name: recheck.item_name)
                 return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
             if terminal_index >= self.module_surfaces.surfaces.len():
                 self.reexport_walk_valid = false
@@ -1467,4 +1499,13 @@ impl HirLowering:
         if self.surface_name_position(surface_key, "E", name) >= 0: return true
         if self.surface_name_position(surface_key, "T", name) >= 0: return true
         if self.surface_name_position(surface_key, "A", name) >= 0: return true
-        self.surface_name_position(surface_key, "K", name) >= 0
+        if self.surface_name_position(surface_key, "K", name) >= 0: return true
+        # A FALSE NEGATIVE from the NAMEIDX chain tables must not become a
+        # hard 'module X has no exported item Y' error: cycle-36
+        # compiler_cli fired exactly that against
+        # compiler.mir_opt.optimization_passes, which DOES declare
+        # OptimizationLevel (same stage2 chain-table corruption family as the
+        # surface package-name memo hardened in a804ba111f3). The negative
+        # path is the hard-diagnostic path, so it pays the authoritative
+        # six-array linear sweep; the positive path keeps the index's speed.
+        module_surface_declares_item(target, name)

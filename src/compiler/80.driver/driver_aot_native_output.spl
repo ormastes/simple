@@ -38,6 +38,7 @@ use compiler.backend.backend_helpers.{compile_module_with_backend,
 use compiler.backend.backend.backend_types.{CompiledModule, CompileError}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
 use compiler.backend.llvm_capability.{find_archive_portable}
+use compiler.backend.runtime_compiler.{find_c_compiler, _is_msvc_cc}
 use std.platform.{get_host_os, get_host_arch}
 use std.nogc_async_mut.sosix.host_facade.{sosix_run}
 use compiler.driver.native_relocatable_link.{native_relocatable_link_plan,
@@ -4103,9 +4104,36 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
     if (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1":
         print "[NATIVE] select module:done"
     if mir_module.functions.keys().len() == 0 and
-            mir_module.statics.keys().len() == 0:
-        return _aot_compile_failure(name,
-            "MIR module has no functions or static data")
+            mir_module.statics.keys().len() == 0 and
+            mir_module.constants.keys().len() == 0:
+        # Entry-closure builds compile pure re-export facades (and
+        # type/trait-only modules) as standalone units; their MIR is
+        # legitimately empty. Emit an empty translation unit so the downstream
+        # object/receipt contract (path equality, size, fingerprint,
+        # native-group manifests) is still satisfied. Dormant until the
+        # test-runner tool build reached them (58 "MIR module has no
+        # functions or static data" ICEs, 2026-10-16).
+        val empty_obj_path = native_aot_object_path_v1(output_base, name)
+        val empty_c_path = empty_obj_path + ".empty_module.c"
+        val empty_symbol = "simple_empty_module_" + name.replace(".", "_")
+        if not _sffi_file_write_text(empty_c_path,
+                "int {empty_symbol} = 0;\n"):
+            return _aot_compile_failure(name,
+                "failed to write empty module C file {empty_c_path}")
+        val empty_cc = find_c_compiler()
+        if empty_cc == "":
+            return _aot_compile_failure(name,
+                "no C compiler available for empty module object {empty_c_path}")
+        val empty_args: [text] = if _is_msvc_cc(empty_cc):
+            ["/nologo", "/c", "/Fo{empty_obj_path}", empty_c_path]
+        else:
+            ["-c", "-o", empty_obj_path, empty_c_path]
+        val (_empty_out, empty_err, empty_code) = process_run(empty_cc, empty_args)
+        if empty_code != 0 or
+                not file_is_regular_no_follow(empty_obj_path):
+            return _aot_compile_failure(name,
+                "empty module object compile failed: {empty_err}")
+        return Ok(empty_obj_path)
     val empty_native_obj = env_get_nullable("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? ""
     if empty_native_obj == "1":
         val obj_path = native_aot_object_path_v1(output_base, name)

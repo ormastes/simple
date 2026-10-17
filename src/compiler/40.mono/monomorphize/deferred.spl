@@ -19,11 +19,10 @@
 # RUNTIME COMPATIBILITY: Uses nil-check error pattern instead of Result<T,E>
 
 
-use .types (ConcreteType, SpecializationKey)
+use .types (ConcreteType, SpecializationKey, specializationkey_new)
 use .engine (Monomorphizer)
 use .metadata (MonomorphizationMetadata, SpecializationEntry, GenericFunctionMeta, GenericStructMeta, GenericClassMeta, GenericEnumMeta)
 use compiler.frontend.ast (FunctionDef, StructDef, ClassDef, EnumDef, TraitDef)
-use error (CompileError)
 
 # Import from split files
 use compiler.mono.monomorphize.deferred_subst.*
@@ -237,21 +236,20 @@ impl DeferredMonomorphizer:
 
             # Deserialize full template based on kind
             val result = self.deserialize_full_template(kind, data, offset)
-            if result == nil:
+            # @workaround bug=deferred_optional_tuple_owner_2026_10_11 reason=retain the declared optional tuple payload
+            # owner with one presence binding and an explicit template type.
+            if val pair = result:
+                val template: GenericTemplate = pair.0
+                offset = pair.1
+                val name = template.name()
+                self.template_cache[name] = template
+            else:
                 return false
-            # Double unwrap: the optional tuple reads as nested optionals here
-            # (same idiom as deferred_deserialize._read_def_prefix).
-            val result_opt = result!
-            val pair = result_opt!
-            val template = pair.0
-            offset = pair.1
-
-            val name = template.name()
-            self.template_cache[name] = template
 
         deferred_clear_error()
         true
 
+    # @workaround bug=deferred_optional_tuple_owner_2026_10_11 reason=retain definition owners after optional tuple projection
     fn deserialize_full_template(kind: u8, data: [u8], start_offset: i64) -> (GenericTemplate, i64)?:
         """Deserialize a full template from binary data.
 
@@ -267,37 +265,39 @@ impl DeferredMonomorphizer:
         match kind_i:
             0:  # Function
                 val result = deserialize_function_def(data, start_offset)
-                if result == nil:
-                    return nil
-                val result_opt = result!
-                val pair = result_opt!
-                (GenericTemplate.Function(pair.0), pair.1)
+                if val pair = result:
+                    val definition: FunctionDef = pair.0
+                    (GenericTemplate.Function(definition), pair.1)
+                else:
+                    nil
             1:  # Struct
                 val result = deserialize_struct_def(data, start_offset)
-                if result == nil:
-                    return nil
-                val result_opt = result!
-                val pair = result_opt!
-                (GenericTemplate.Struct(pair.0), pair.1)
+                if val pair = result:
+                    val definition: StructDef = pair.0
+                    (GenericTemplate.Struct(definition), pair.1)
+                else:
+                    nil
             2:  # Class
                 val result = deserialize_class_def(data, start_offset)
-                if result == nil:
-                    return nil
-                (GenericTemplate.Class(result.0), result.1)
+                if val pair = result:
+                    val definition: ClassDef = pair.0
+                    (GenericTemplate.Class(definition), pair.1)
+                else:
+                    nil
             3:  # Enum
                 val result = deserialize_enum_def(data, start_offset)
-                if result == nil:
-                    return nil
-                val result_opt = result!
-                val pair = result_opt!
-                (GenericTemplate.Enum(pair.0), pair.1)
+                if val pair = result:
+                    val definition: EnumDef = pair.0
+                    (GenericTemplate.Enum(definition), pair.1)
+                else:
+                    nil
             4:  # Trait
                 val result = deserialize_trait_def(data, start_offset)
-                if result == nil:
-                    return nil
-                val result_opt = result!
-                val pair = result_opt!
-                (GenericTemplate.Trait(pair.0), pair.1)
+                if val pair = result:
+                    val definition: TraitDef = pair.0
+                    (GenericTemplate.Trait(definition), pair.1)
+                else:
+                    nil
             _:
                 deferred_set_error("Unknown template kind: {kind}")
                 nil
@@ -322,7 +322,7 @@ impl DeferredMonomorphizer:
         - Returns nil if template not found
         - Tracks specialization in metadata
         """
-        val key = SpecializationKey.new(name, type_args)
+        val key = specializationkey_new(name, type_args)
 
         # Check cache
         # NOTE: native dict `.get()` returns a corrupt payload on a hit; use
@@ -386,7 +386,7 @@ impl DeferredMonomorphizer:
         - Substitutes type params in all fields
         - Tracks specialization in metadata
         """
-        val key = SpecializationKey.new(name, type_args)
+        val key = specializationkey_new(name, type_args)
 
         # Check cache
         # NOTE: native dict `.get()` returns a corrupt payload on a hit; use
@@ -450,7 +450,7 @@ impl DeferredMonomorphizer:
         - Substitutes type params in all fields and methods
         - Tracks specialization in metadata
         """
-        val key = SpecializationKey.new(name, type_args)
+        val key = specializationkey_new(name, type_args)
 
         # Check cache
         # NOTE: native dict `.get()` returns a corrupt payload on a hit; use
@@ -514,7 +514,7 @@ impl DeferredMonomorphizer:
         - Substitutes type params in all variants
         - Tracks specialization in metadata
         """
-        val key = SpecializationKey.new(name, type_args)
+        val key = specializationkey_new(name, type_args)
 
         # Check cache
         # NOTE: native dict `.get()` returns a corrupt payload on a hit; use
@@ -638,7 +638,7 @@ impl DeferredMonomorphizer:
 
     fn has_specialization(name: text, type_args: [ConcreteType]) -> bool:
         """Check if a specific specialization is already cached."""
-        val key = SpecializationKey.new(name, type_args)
+        val key = specializationkey_new(name, type_args)
         self.specialization_cache.has(key)
 
     fn metadata() -> MonomorphizationMetadata:

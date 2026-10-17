@@ -152,6 +152,14 @@ class MonomorphizationPass:
     module_paths: Dict<text, text>
     # Function return context is scoped and suspended for nested lambdas.
     current_return_type: HirType?
+    # "<module>#<symbol id>" of every NON-GENERIC function, so a call whose
+    # callee resolved to a LOCAL non-generic function is not misclassified
+    # as a call to a same-short-named generic template collected from another
+    # module (generic_functions is keyed by short name globally; the local
+    # non-generic shadow must win). Cycle-40 frontier: every local call to
+    # plugins/backend_llvm_lib's non-generic `_sffi_tuple_get(i64,i64)->i64`
+    # was flagged unspecialized against 50.mir's `_sffi_tuple_get<T>`.
+    plain_fn_symbols: Dict<text, bool>
     # Specializations whose bodies still have to be walked (FIFO worklist).
     spec_queue: [text]
     # Mangled name -> SymbolId allocated for the specialized function.
@@ -244,6 +252,7 @@ impl MonomorphizationPass:
             current_module: "",
             module_paths: {},
             current_return_type: nil,
+            plain_fn_symbols: {},
             fn_sigs: {},
             named_types: {},
             named_ambiguous: {},
@@ -429,6 +438,7 @@ impl MonomorphizationPass:
                 self.stats.generic_functions_found = self.stats.generic_functions_found + 1
             else:
                 self.fn_returns[mono_sym_key(module_name, fsym.id)] = func.return_type
+                self.plain_fn_symbols[mono_sym_key(module_name, fsym.id)] = true
                 if not func.is_method:
                     var ptys: [HirType] = []
                     for p in func.params:
@@ -1301,6 +1311,14 @@ impl MonomorphizationPass:
             case _:
                 mangle_type(t)
 
+    me callee_local_plain(sym_id: SymbolId) -> bool:
+        """True when the callee symbol is a NON-GENERIC function declared in
+        the module currently being rewritten. The call bound to that local
+        function, so a same-short-named generic template from another module
+        must not claim the site (see plain_fn_symbols)."""
+        val s: SymbolId = sym_id
+        self.plain_fn_symbols.has(mono_sym_key(self.current_module, s.id))
+
     me callee_generic_name(callee: HirExpr) -> text:
         """Template name a call site's callee refers to, or "" when the callee
         is not a generic function known to this pass."""
@@ -1310,14 +1328,20 @@ impl MonomorphizationPass:
             case HirExprKind.Var(sym_id):
                 val name = self.sym_name(sym_id)
                 if self.has_template_v1(name):
+                    if self.callee_local_plain(sym_id):
+                        return ""
                     return name
                 ""
             case HirExprKind.NamedVar(sym_id, name):
                 val by_sym = self.sym_name(sym_id)
                 if self.has_template_v1(by_sym):
+                    if self.callee_local_plain(sym_id):
+                        return ""
                     return by_sym
                 val n: text = name
                 if self.has_template_v1(n):
+                    if self.callee_local_plain(sym_id):
+                        return ""
                     return n
                 # A cross-module import arrives as the qualified
                 # `<module>.<fn>` display name baked in by HIR lowering
@@ -3671,7 +3695,11 @@ fn run_monomorphization_with_report(modules: Dict<text, HirModule>) -> (Dict<tex
 #               from a receiver of unknown instance type.
 fn mono_diag_level(code: text) -> text:
     var level = "error"
-    if code == "E-MONO-034" or code == "E-MONO-040":
+    if code == "E-MONO-034" or code == "E-MONO-040" or code == "E-MONO-036":
+        # E-MONO-036: an erased-bridge default (erased arg, Optional-return
+        # bridge, or return-only param) that monomorphized to the word
+        # representation. The specialization EXISTS; the site is recorded so
+        # the defaulting stays visible, but it does not block the build.
         level = "warning"
     else:
         return level

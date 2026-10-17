@@ -1,9 +1,49 @@
+# Native lifetime gates: the runner must support the real transient owner API.
+# These checks do not substitute for paired whole-build RSS and CPU evidence.
 use std.spec.{describe, it, expect}
 use std.common.crypto.sha256.{sha256_text}
-use compiler.driver.driver_types.{native_capsule_mir_identity_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
+    transient_scope_pause, transient_scope_end, transient_promote}
+use compiler.driver.driver_types.{native_capsule_mir_identity_v1,
+    FrozenNativeModuleCapsuleBatchV1}
 use compiler.mir.mir_data.{MirModule}
 use compiler.mir.mir_types.{MirConstant, MirType, MirConstValue}
 use compiler.hir.hir_types.{SymbolId}
+
+fn identity_probe_module(value: i64) -> MirModule:
+    val constant = MirConstant(symbol: SymbolId(id: 1), name: "answer",
+        type_: MirType.i64(), value: MirConstValue.Int(value))
+    var constants: Dict<SymbolId, MirConstant> = {}
+    constants[constant.symbol] = constant
+    MirModule(name: "probe", functions: {}, statics: {}, constants: constants, types: {})
+
+fn identity_probe_churn() -> bool:
+    if not transient_scope_begin(): return false
+    var rows: [text] = []
+    for index in 0..4096:
+        rows = rows.push("identity-scratch-churn-{index}")
+    val populated = rows.len() == 4096
+    val ended = transient_scope_end()
+    populated and ended
+
+fn identity_probe_nested() -> bool:
+    val expected = sha256_text("module|5:probe\nconst|1|6:answer|\"I64\"|2:42")
+    if not transient_scope_begin(): return false
+    val module = identity_probe_module(42)
+    val digest = native_capsule_mir_identity_v1(module)
+    val correct = digest == expected
+    val stolen = transient_scope_begin()
+    val prematurely_retained = transient_promote<text>(digest)
+    if stolen or prematurely_retained or not correct:
+        transient_scope_end()
+        return false
+    if not transient_scope_pause():
+        transient_scope_end()
+        return false
+    val retained = transient_promote<text>(digest)
+    val ended = transient_scope_end()
+    if not retained or not ended or not identity_probe_churn(): return false
+    digest == expected
 
 describe "native capsule MIR identity scratch ownership":
     it "preserves nonempty constant canonical bytes and the original payload":
@@ -42,3 +82,27 @@ describe "native capsule MIR identity scratch ownership":
             sha256_text("module|6:a|2:bc"))
         expect(native_capsule_mir_identity_v1(right)).to_equal(
             sha256_text("module|4:a|bc"))
+
+describe "native capsule MIR identity scratch":
+    it "keeps canonical bytes and the borrowed module alive after reclamation":
+        val module = identity_probe_module(42)
+        val expected = sha256_text("module|5:probe\nconst|1|6:answer|\"I64\"|2:42")
+        val first = native_capsule_mir_identity_v1(module)
+        expect(first).to_equal(expected)
+        expect(identity_probe_churn()).to_equal(true)
+        expect(first).to_equal(expected)
+        expect(module.constants.len()).to_equal(1)
+        expect(native_capsule_mir_identity_v1(module)).to_equal(first)
+        expect(native_capsule_mir_identity_v1(identity_probe_module(43)) == first).to_equal(false)
+
+    it "leaves an active caller scope unpaused and owned by the caller":
+        # Keep spec-runner assertion allocations outside caller-owned scratch.
+        expect(identity_probe_nested()).to_equal(true)
+
+    it "rejects an empty MIR identity before trusting a capsule":
+        val batch = FrozenNativeModuleCapsuleBatchV1(ok: false,
+            registry_identity: "", capsules: [], reason: "probe")
+        var capsule = batch.find("probe")
+        capsule.ok = true
+        capsule.mir_identity = ""
+        expect(capsule.identity_valid()).to_equal(false)

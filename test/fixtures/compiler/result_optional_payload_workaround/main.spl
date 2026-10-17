@@ -1,0 +1,32 @@
+# Regression for the Result<Option<text>, text> arm used by the RT/HAL host.
+# Keep #2981 open: this exercises the workaround, not nested nil patterns.
+# @workaround bug=native_enum_nil_payload_pattern_2026_10_11 reason=restore text provenance after Result optional binding
+fn stdout_chunk_text(value: text) -> text:
+    value
+
+fn consume(result: Result<text?, text>, output: text, capacity: i64) -> text:
+    match result:
+        Ok(maybe_chunk):
+            if val available_chunk = maybe_chunk:
+                val chunk = stdout_chunk_text(available_chunk)
+                if chunk.len() > capacity - output.len(): return "overflow"
+                return output + chunk
+            return output
+        Err(problem):
+            if problem == "process_stdout_eof": return "eof:" + output
+            return "error:" + problem
+
+fn main() -> i64:
+    val chunk: Result<text?, text> = Ok(Some("bc"))
+    val empty: Result<text?, text> = Ok(Some(""))
+    val waiting: Result<text?, text> = Ok(nil)
+    val eof: Result<text?, text> = Err("process_stdout_eof")
+    val error: Result<text?, text> = Err("read failed")
+    if consume(chunk, "a", 3) != "abc": return 1
+    if consume(chunk, "a", 2) != "overflow": return 2
+    if consume(empty, "abc", 3) != "abc": return 3
+    if consume(waiting, "abc", 3) != "abc": return 4
+    if consume(eof, "abc", 3) != "eof:abc": return 5
+    if consume(error, "abc", 3) != "error:read failed": return 6
+    print "result_optional_payload_workaround: PASS"
+    0

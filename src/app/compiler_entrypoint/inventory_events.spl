@@ -16,6 +16,7 @@ use std.nogc_sync_mut.io.file_ops.{
 }
 use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
 use app.compiler_entrypoint.inventory_scratch.{compiler_inventory_file_event_v1}
+use app.compiler_entrypoint.inventory_aliases.{compiler_inventory_aliases_v1}
 
 struct CompilerInventoryRefreshV1:
     valid: bool
@@ -650,11 +651,32 @@ fn _compiler_inventory_refresh_locked_v1(
     val head = compiler_inventory_git_head_v1(root)
     if head == "":
         return compiler_inventory_invalid_v1("git-event-source-unavailable")
-    val observed = match _compiler_inventory_git_events_traced_v1(
+    val direct = match _compiler_inventory_git_events_traced_v1(
             root, if cursor.valid: cursor.git_head else: head, head,
             source_roots, cold_init, trace):
         case Some(batch): batch
         case _: return compiler_inventory_invalid_v1("git-event-refresh-failed")
+    val aliases = compiler_inventory_aliases_v1(root, source_roots)
+    if aliases == nil:
+        return compiler_inventory_invalid_v1("directory-alias-inventory-invalid")
+    # Alias children have no Git entries in the logical namespace. Bind them
+    # to the same authenticated membership blob as other Git-untracked names,
+    # so deletion/retargeting is reconciled before advancing CURRENT.
+    var logical_members = direct.untracked_paths
+    var logical_seen: Dict<text, bool> = {}
+    for path in logical_members: logical_seen[path] = true
+    for path in aliases!.paths:
+        if not logical_seen.has(path):
+            logical_seen[path] = true
+            logical_members.push(path)
+    logical_members.sort()
+    val logical_digests = compiler_inventory_untracked_digests_v1(
+        logical_members.join("\n"), source_roots)
+    if not logical_digests.valid:
+        return compiler_inventory_invalid_v1("directory-alias-membership-invalid")
+    val observed = CompilerInventoryGitEventsV1(
+        direct.events + aliases!.events, logical_digests.src_digest,
+        logical_digests.test_digest, logical_digests.paths)
     if trace != nil:
         trace!.observed(observed.events.len(), observed.untracked_paths.len(),
             observed.untracked_src_digest, observed.untracked_test_digest)

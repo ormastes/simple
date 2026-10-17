@@ -1,0 +1,147 @@
+# Native fixture: before/after use identical serialized MIR and runtime provider.
+use app.io.env_ops.{env_get}
+use app.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
+    transient_scope_pause, transient_scope_end, transient_promote}
+use compiler.driver.native_capsule_mir_identity.{compute_native_capsule_mir_identity_v1,
+    native_capsule_hir_type_identity_v1, native_capsule_dim_identity_v1,
+    native_capsule_function_metadata_identity_v1}
+use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind, DimExpr, DimExprKind}
+use compiler.common._Attributes.decl_attrs.{DriverManifestAttr, DriverManifestAttrKind,
+    vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_types.{MirType, MirSignature, MirConstant, MirConstValue}
+use compiler.mir.mir_instruction_support.{BlockId, MirTerminator}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_graph.{MirInst, MirBlock, MirFunction, MirModule}
+
+extern fn memory_usage() -> i64
+extern fn rt_heap_registry_count() -> i64
+extern fn rt_heap_live_bytes() -> i64
+extern fn rt_heap_aux_live_bytes() -> i64
+
+fn constant_module(value: i64) -> MirModule:
+    val constant = MirConstant(symbol: SymbolId(id: 1), name: "answer",
+        type_: MirType.i64(), value: MirConstValue.Int(value))
+    var constants: Dict<SymbolId, MirConstant> = {}
+    constants[constant.symbol] = constant
+    MirModule(name: "probe", functions: {}, statics: {}, constants: constants, types: {})
+
+fn identity_probe_function(symbol: i64, name: text, blocks: [MirBlock]) -> MirFunction:
+    # Identity reads nested metadata even when hardware attributes are absent.
+    MirFunction(symbol: SymbolId(id: symbol), name: name,
+        signature: MirSignature(params: [], return_type: MirType.i64(),
+            is_variadic: false, params_known: true),
+        locals: [], blocks: blocks, entry_block: BlockId(id: 0), span: Span.empty(),
+        generic_params: [], is_generic_template: false, specialization_of: nil,
+        type_bindings: {}, layout_phase: nil, is_kernel: false,
+        gpu_target: "", gpu_backend_order: "", is_export_c: false, export_name: "",
+        has_driver_manifest_attr: false, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false,
+        unroll_factor: 0, pipeline_ii: 0, memory_banks: 0)
+
+fn large_module() -> MirModule:
+    var blocks: [MirBlock] = []
+    for block_index in 0..32:
+        var instructions: [MirInst] = []
+        for instruction_index in 0..64:
+            instructions = instructions.push(MirInst(kind: MirInstKind.Nop, span: nil))
+        blocks = blocks.push(MirBlock(id: BlockId(id: block_index), label: nil,
+            instructions: instructions, terminator: MirTerminator.Ret(nil)))
+    val function = identity_probe_function(7, "large", blocks)
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[function.symbol] = function
+    MirModule(name: "large", functions: functions, statics: {}, constants: {}, types: {})
+
+# GH-2983: exercise every explicit integer receiver and absent optional branches.
+fn integer_receiver_controls() -> bool:
+    val element = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+    val fixed = HirType(kind: HirTypeKind.Array(element, Some(7)), span: Span.empty())
+    val dynamic = HirType(kind: HirTypeKind.Array(element, nil), span: Span.empty())
+    if native_capsule_hir_type_identity_v1(fixed) != "array:11:int:64:true:7": return false
+    if native_capsule_hir_type_identity_v1(dynamic) != "array:11:int:64:true:dynamic": return false
+    val bounded = DimExpr(kind: DimExprKind.Named("N", Some(2), Some(9)), span: Span.empty())
+    val unbounded = DimExpr(kind: DimExprKind.Named("N", nil, nil), span: Span.empty())
+    if native_capsule_dim_identity_v1(bounded) != "named:1:N:2:9": return false
+    if native_capsule_dim_identity_v1(unbounded) != "named:1:N:none:none": return false
+    var function = identity_probe_function(8, "manifest", [])
+    function.has_driver_manifest_attr = true
+    function.driver_manifest_attr = DriverManifestAttr(kind: DriverManifestAttrKind.Driver,
+        driver_class: 7, vendor: 8, device_ids: [17, 23], version: "v", abi: "a")
+    val metadata = native_capsule_function_metadata_identity_v1(function)
+    if not metadata.contains("|manifest=true:driver:7:8:5:17;23:1:v:1:a|vhdl="): return false
+    function.driver_manifest_attr = DriverManifestAttr(kind: DriverManifestAttrKind.Driver,
+        driver_class: 7, vendor: 8, device_ids: [23, 17], version: "v", abi: "a")
+    val reversed = native_capsule_function_metadata_identity_v1(function)
+    metadata != reversed and reversed.contains("|manifest=true:driver:7:8:5:23;17:1:v:1:a|vhdl=")
+
+fn churn() -> bool:
+    if not transient_scope_begin(): return false
+    var rows: [text] = []
+    for index in 0..4096:
+        rows = rows.push("identity-native-churn-{index}")
+    val complete = rows.len() == 4096
+    val ended = transient_scope_end()
+    complete and ended
+
+fn nested_lifetime(expected: text) -> bool:
+    if not transient_scope_begin(): return false
+    val module = constant_module(42)
+    val digest = compute_native_capsule_mir_identity_v1(module)
+    val correct = digest == expected
+    val stolen = transient_scope_begin()
+    val prematurely_retained = transient_promote<text>(digest)
+    if stolen or prematurely_retained or not correct:
+        transient_scope_end()
+        return false
+    if not transient_scope_pause():
+        transient_scope_end()
+        return false
+    val retained = transient_promote<text>(digest)
+    val ended = transient_scope_end()
+    if not retained or not ended or not churn(): return false
+    digest == expected
+
+fn main() -> i64:
+    val mode = env_get("MIR_IDENTITY_FIXTURE_MODE") ?? "success"
+    val golden = "7779a92b5536943f5cf785db8ef83004f839d99ea06ae5fcd690eee851016781"
+    val expected = if mode == "negative": "deliberately-wrong-digest" else: golden
+    val simple_module = constant_module(42)
+    val digest = compute_native_capsule_mir_identity_v1(simple_module)
+    if digest != expected:
+        print "FAIL: identity golden mismatch"
+        return 7
+    if not integer_receiver_controls():
+        print "FAIL: integer receiver canonical metadata"
+        return 14
+    if not churn() or digest != golden:
+        print "FAIL: identity after reclamation"
+        return 8
+    if compute_native_capsule_mir_identity_v1(constant_module(43)) == digest:
+        print "FAIL: changed constant preserved identity"
+        return 9
+    if mode == "ownership":
+        if not nested_lifetime(golden):
+            print "FAIL: caller scope or digest lifetime"
+            return 10
+        print "PASS: identity ownership digest={digest}"
+        return 0
+    if mode != "success":
+        print "FAIL: unknown fixture mode"
+        return 11
+    val module = large_module()
+    val initial = compute_native_capsule_mir_identity_v1(module)
+    if initial.len() != 64:
+        print "FAIL: large identity missing"
+        return 12
+    print "IDENTITY_BASELINE digest={initial} functions={module.functions.len()} rss={memory_usage()}"
+    for iteration in 0..12:
+        val started = time_now_unix_micros()
+        val result = compute_native_capsule_mir_identity_v1(module)
+        val elapsed = time_now_unix_micros() - started
+        print "IDENTITY_MEMORY iteration={iteration} elapsed_us={elapsed} rss={memory_usage()} registry={rt_heap_registry_count()} header_live={rt_heap_live_bytes()} aux_live={rt_heap_aux_live_bytes()}"
+        if not churn() or result != initial or module.functions.len() != 1:
+            print "FAIL: repeated identity changed after churn"
+            return 13
+    print "PASS: identity success digest={initial}"
+    0

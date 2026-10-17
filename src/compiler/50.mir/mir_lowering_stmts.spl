@@ -2391,11 +2391,10 @@ impl MirLowering:
                     case MirTypeKind.Slice(element_type):
                         result = element_type
                         resolved_type = true
-                    case MirTypeKind.Dict(_, value_type):
-                        result = value_type
-                        resolved_type = true
                     case _:
-                        ()
+                        if val value_type = self.runtime_dict_value_mir_type(container_mir_type):
+                            result = value_type
+                            resolved_type = true
         if not resolved_type and base.has_type_ == true and base.type_ != nil:
             # Typed rebind before touching `.kind`: matching on a FIELD ACCESS
             # reads through an ANY-erased receiver, which mis-resolves the enum
@@ -2407,11 +2406,10 @@ impl MirLowering:
                 case HirTypeKind.Array(element_type, _) | HirTypeKind.Slice(element_type):
                     result = self.lower_type(element_type)
                     resolved_type = true
-                case HirTypeKind.Dict(_, value_type):
-                    result = self.lower_type(value_type)
-                    resolved_type = true
                 case _:
-                    ()
+                    if val value_type = self.runtime_dict_value_hir_type(base_hir_ty):
+                        result = self.lower_type(value_type)
+                        resolved_type = true
         if not resolved_type:
             val rhs_type = self.local_mir_type_of(value_local)
             if val rhs_mir_type = rhs_type:
@@ -2736,7 +2734,7 @@ impl MirLowering:
                 probe_begin, [mir_operand_copy(decision_local)], MirType.i64()
             )
             self.mcdc_active_dynamic_token = dynamic_token
-            self.mcdc_active_tokens = saved_tokens.push(self.mcdc_active_dynamic_token)
+            self.mcdc_active_tokens = saved_tokens + [self.mcdc_active_dynamic_token]
             self.builder = b_begin
         val result = self.lower_cond_expr(cond)
         var b = self.builder
@@ -3746,6 +3744,11 @@ impl MirLowering:
         # there -- which is why `[i64]` for-in was the one case that worked.
         var element_type_from_hir = false
         var collection_hir_is_text = false
+        # Declared type-erasure slot (`Any` / `Optional(Any)`): the JSON
+        # facade's `any?` accessors are the canonical source. Iterating an
+        # erased value is authored against its runtime shape (a heap
+        # collection word), so it shares the erased-indexed lane below.
+        var collection_hir_erased = false
         var dict_key_hir: HirType? = nil
         var dict_value_hir: HirType? = nil
         var declared_element_type: HirType? = nil
@@ -3754,6 +3757,12 @@ impl MirLowering:
                 case HirTypeKind.Dict(dict_key_t, dict_value_t):
                     dict_key_hir = Some(dict_key_t)
                     dict_value_hir = Some(dict_value_t)
+                case HirTypeKind.Any:
+                    collection_hir_erased = true
+                case HirTypeKind.Optional(erased_inner):
+                    match erased_inner.kind:
+                        case HirTypeKind.Any: collection_hir_erased = true
+                        case _: ()
                 case HirTypeKind.Array(elem_t, _) | HirTypeKind.Slice(elem_t):
                     # `[Any]` / `[Infer]` / `[Error]` name NO element type. An
                     # untyped array literal (`val words = ["alpha", "beta"]`)
@@ -3848,6 +3857,29 @@ impl MirLowering:
         # index-read call shape in _MirLoweringExpr/expr_dispatch.spl).
         if self.local_is_runtime_array(collection_local) or (collection_is_erased_word and element_type_from_hir):
             return self.lower_for_array_indexed(var_, collection_local, element_type, body, source_span, declared_element_type)
+
+        # Erased-collection lane: `for x in v` where v's declared type is the
+        # type-erasure slot (`Any` / `Optional(Any)` — the JSON facade's `any?`
+        # accessors are the canonical source, e.g. lib.common.json.array_ops
+        # `val nested = json_to_array(elem)` iterated unannotated). The
+        # annotated spelling (`val xs: [any] = json_to_array(e)`) already
+        # iterates through the Array(I64) MIR type above, so the unannotated
+        # spelling must not fail louder (#143) than the annotated one; both
+        # decode elements as erased words (the `elem_t_is_unspecific` I64
+        # default the `[Any]` path applies). An Optional(Any) local is a
+        # Tuple(Bool, word): unwrap the payload word first with the same
+        # rt_unwrap_or_self helper narrow_optional_text_receiver uses; the
+        # authored nil guard is the source contract. Never steal a real dict
+        # local (the entries lane below owns those).
+        if collection_hir_erased and not self.local_is_runtime_dict(collection_local):
+            var erased_coll_local = collection_local
+            if not collection_is_erased_word:
+                if val erased_coll_mir = self.local_mir_type_of(collection_local):
+                    match erased_coll_mir.kind:
+                        case MirTypeKind.Tuple(_):
+                            erased_coll_local = self.option_payload_or_self(collection_local)
+                        case _: ()
+            return self.lower_for_array_indexed(var_, erased_coll_local, MirType.i64(), body, source_span)
 
         # `for (k, v) in dict` / `for e in dict`: iterate the dict's
         # (key, value) 2-tuples, exactly the form the interpreter yields and
@@ -4114,6 +4146,10 @@ impl MirLowering:
             # Reuses for_elem_struct_name/fesn computed above the decode.
             if for_has_real_struct_name:
                 self.struct_value_syms[loop_var.id] = fesn
+            # mcp_record_array_owner_loss_2026_10_11 (#3079).
+            # Like indexing, iteration must retain the element declaration on
+            # the binding; an i64 storage word alone cannot resolve row.get.
+            self.remember_array_index_projection_provenance(collection_local, loop_var)
 
         # Lower the loop body
         self.lower_block(body)

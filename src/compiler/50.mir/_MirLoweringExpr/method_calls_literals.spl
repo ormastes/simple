@@ -1537,6 +1537,70 @@ impl MirLowering:
                 case _: ()
         -1
 
+    fn declared_static_method_receiver_symbol_v1(receiver: HirExpr) -> i64:
+        # This receiver is already detached from the outer MethodCall enum
+        # payload. Only a declaration symbol is a type-valued receiver; a
+        # runtime local with a nominal declared type is still an instance.
+        var symbol_id: i64 = -1
+        match receiver.kind:
+            case HirExprKind.Var(symbol): symbol_id = symbol.id
+            case HirExprKind.NamedVar(symbol, _): symbol_id = symbol.id
+            case _: return -1
+        if symbol_id < 0: return -1
+        if val declaration = self.symbols.get_symbol_raw(symbol_id):
+            match declaration.kind:
+                case SymbolKind.Struct | SymbolKind.Class | SymbolKind.Enum:
+                    return symbol_id
+                case _: ()
+        -1
+
+    me reject_unresolved_method_call_v1(receiver: HirExpr, method: text) -> LocalId:
+        # Diagnostics: pass the receiver's span instead of nil so the
+        # driver's _format_mir_error can name the failing site --
+        # every "unresolved method call" used to be location-blind.
+        self.error("unresolved method call: {method}", Some(receiver.span))
+        # Task #145: self.error only COLLECTS -- both the bootstrap
+        # lane (driver_bootstrap.spl reads ctx.errors, never
+        # MirLowering.errors) and the native-build worker drop the
+        # list (see mir_lowering_stmts.spl lower_for_iterator's
+        # belt-and-braces note). The const-0 placeholder below then
+        # ships as SILENT data loss (exit 0, no stderr) -- exactly
+        # how the `.join()` no-op survived undetected. Surface it
+        # loudly at lowering time, naming the method.
+        print "[mir-lower] WARNING: unresolved method call '{method}' lowered to const-0 placeholder (silent-null risk, Task #145)"
+        var b = self.builder
+        val temp = b.new_temp(MirType.i64())
+        # FAIL CLOSED (Task #145). The collected self.error above is
+        # dropped by every pipeline that does not read
+        # MirLowering.errors -- concretely
+        # driver_bootstrap.bootstrap_lower_to_mir_context, which
+        # returns `next_ctx.errors.len() == 0` and never copies the
+        # lowering errors into ctx (unlike the default lane, which
+        # calls _driver_collect_mir_errors in
+        # driver_pipeline.lower_to_mir). In that lane the const-0
+        # placeholder below reached codegen and shipped as a wrong
+        # value under exit 0.
+        #
+        # Emit rt_panic ahead of the placeholder so an unresolved
+        # method can never silently produce data, matching the two
+        # sibling failure sites that already fail closed:
+        # for-in over a non-array (mir_lowering_stmts.spl ~1908) and
+        # the match-guard path (expr_dispatch.spl ~2905). The const-0
+        # def is retained deliberately: returning an undefined temp
+        # produces a use-before-def local (NULL llvm::Value* -> ICmp
+        # SIGSEGV in llvm-lib), so the placeholder still needs a def
+        # even though rt_panic makes it unreachable at runtime.
+        val panic_msg = b.emit_const_str("unresolved method call: {method}")
+        val panic_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_panic"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)))
+        ))
+        b.emit_call(panic_op, [mir_operand_copy(panic_msg)], MirType.unit())
+        b.emit_const(temp, MirConstValue.Int(0), MirType.i64())
+        self.builder = b
+        temp
+
+
     me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution, static_receiver_name_hint: text, static_receiver_symbol_hint: i64) -> LocalId:
         """Lower method call based on resolution.
 
@@ -1681,6 +1745,12 @@ impl MirLowering:
         # this for static custom methods; predicate fallbacks also need it
         # before they consider lowering the receiver as a text value.
         var static_receiver_name = static_receiver_name_hint
+        var resolved_static_receiver_symbol = static_receiver_symbol_hint
+        if static_receiver_name == "" and resolved_static_receiver_symbol < 0:
+            resolved_static_receiver_symbol = self.declared_static_method_receiver_symbol_v1(receiver)
+        if static_receiver_name == "" and resolved_static_receiver_symbol >= 0:
+            if val static_owner = self.symbols.get_symbol_raw(resolved_static_receiver_symbol):
+                static_receiver_name = mir_class_identity(static_owner)
         if mir_mc_trace_state == 1:
             eprint("[mir-method-call] static-owner method={method}\n")
 
@@ -1836,6 +1906,43 @@ impl MirLowering:
                     prelowered_method_receiver = narrowed_text_receiver
                     primitive_text_receiver = true
         val text_builtin_resolution_allowed = primitive_text_receiver
+
+        # Erased-receiver allowance for the primitive text builtin arm below.
+        # `&:method` desugars to `\__p0: __p0.method()` with an UNTYPED lambda
+        # param (frontend primary_expr.spl), and closure conversion lifts that
+        # lambda to a standalone function whose param HIR type stays erased;
+        # `raw_cols.map(&:trim)` in lib.nogc_sync_mut.database.core therefore
+        # arrived here with no static text proof and died as "unresolved
+        # method call: trim" even though the runtime element is text. The seed
+        # dispatches these dynamically, and the erased word already carries
+        # the tagged-value ABI the arm below passes through ensure_tagged_str,
+        # so an erased receiver is admitted EXACTLY when every positive
+        # discriminator is absent: unresolved resolution, no custom owner on
+        # the lowered local, and not a proven runtime array/dict/struct.
+        var erased_receiver_text_builtin = false
+        if primitive_text_method_shape and not resolution_is_static_method and not primitive_text_receiver and resolution_is_unresolved and not predicate_has_custom_owner:
+            var erased_recv_ty_ok = false
+            if val erased_recv_ty = receiver.type_:
+                match erased_recv_ty.kind:
+                    case HirTypeKind.Any: erased_recv_ty_ok = true
+                    case HirTypeKind.Infer(_, _): erased_recv_ty_ok = true
+                    case HirTypeKind.Error: erased_recv_ty_ok = true
+                    case _: ()
+            else:
+                erased_recv_ty_ok = true
+            if erased_recv_ty_ok:
+                if not has_prelowered_method_receiver:
+                    prelowered_method_receiver = self.lower_expr(receiver)
+                    has_prelowered_method_receiver = true
+                if self.local_is_runtime_array(prelowered_method_receiver) or self.local_is_runtime_dict(prelowered_method_receiver):
+                    erased_recv_ty_ok = false
+                if erased_recv_ty_ok:
+                    val erased_struct_owner = self.struct_value_syms.get(prelowered_method_receiver.id)
+                    if erased_struct_owner != nil and erased_struct_owner != "":
+                        erased_recv_ty_ok = false
+                if erased_recv_ty_ok:
+                    erased_receiver_text_builtin = true
+        val text_builtin_resolution_erased_allowed = erased_receiver_text_builtin
 
         # Integer chr/to_char is a language builtin, but an unresolved custom
         # struct method with the same name still owns its receiver. Resolve
@@ -3074,7 +3181,7 @@ impl MirLowering:
         #                  src/lib/text.spl's own last_index_of shares)
         # `to_i64` / `trim_left` are the seed's aliases for to_int /
         # trim_start (codegen/instr/calls.rs sffi_alias_target).
-        if (method == "trim" or method == "strip" or method == "lower" or method == "to_lower" or method == "to_upper" or method == "upper" or method == "chars" or method == "to_float" or method == "split" or method == "partition" or method == "rpartition" or method == "replace" or method == "rfind" or method == "find" or method == "index_of" or method == "contains" or method == "parse_f64" or method == "to_int" or method == "to_i64" or method == "trim_start" or method == "trim_left" or method == "trim_end" or method == "last_index_of" or method == "parse_int" or method == "repeat") and (text_builtin_resolution_allowed or (method == "contains" and predicate_receiver_is_text)) and not contains_recv_is_array and not predicate_has_custom_owner:
+        if (method == "trim" or method == "strip" or method == "lower" or method == "to_lower" or method == "to_upper" or method == "upper" or method == "chars" or method == "to_float" or method == "split" or method == "partition" or method == "rpartition" or method == "replace" or method == "rfind" or method == "find" or method == "index_of" or method == "contains" or method == "parse_f64" or method == "to_int" or method == "to_i64" or method == "trim_start" or method == "trim_left" or method == "trim_end" or method == "last_index_of" or method == "parse_int" or method == "repeat") and (text_builtin_resolution_allowed or text_builtin_resolution_erased_allowed or (method == "contains" and predicate_receiver_is_text)) and not contains_recv_is_array and not predicate_has_custom_owner:
             if mir_mc_trace_state == 1:
                 eprint("[mir-method-call] text-special-enter method={method}\n")
             val ts_arity_ok = match method:
@@ -3594,8 +3701,8 @@ impl MirLowering:
                 # previously re-lowered it) to avoid double-evaluating a
                 # side-effecting receiver expression.
                 val static_method_key = "static::{static_receiver_name}::{method}"
-                val static_receiver_symbol: SymbolId? = if static_receiver_symbol_hint >= 0:
-                    Some(SymbolId(id: static_receiver_symbol_hint))
+                val static_receiver_symbol: SymbolId? = if resolved_static_receiver_symbol >= 0:
+                    Some(SymbolId(id: resolved_static_receiver_symbol))
                 else:
                     nil
                 var static_method_id: SymbolId? = nil
@@ -3691,6 +3798,11 @@ impl MirLowering:
                     self.remember_call_hir_return(static_result, resolved_static_method_id)
                     self.remember_method_return_provenance(static_result, "{static_receiver_name}::{method}")
                     return static_result
+                if resolved_static_receiver_symbol >= 0:
+                    # A recovered nominal declaration has no runtime value.
+                    # Its exact method lookup has failed; do not evaluate the
+                    # type name as a local or try another owner's method.
+                    return self.reject_unresolved_method_call_v1(receiver, method)
 
                 # Keep this aggregate LocalId selection statement-shaped.
                 # The Stage 2 self-host compiler corrupted the result of the
@@ -4364,50 +4476,7 @@ impl MirLowering:
                 # before lowering arguments through its actual signature.
                 if val field_call = self.try_lower_function_field_call(receiver, unresolved_receiver_local, method, args):
                     return field_call
-                # Diagnostics: pass the receiver's span instead of nil so the
-                # driver's _format_mir_error can name the failing site --
-                # every "unresolved method call" used to be location-blind.
-                self.error("unresolved method call: {method}", Some(receiver.span))
-                # Task #145: self.error only COLLECTS -- both the bootstrap
-                # lane (driver_bootstrap.spl reads ctx.errors, never
-                # MirLowering.errors) and the native-build worker drop the
-                # list (see mir_lowering_stmts.spl lower_for_iterator's
-                # belt-and-braces note). The const-0 placeholder below then
-                # ships as SILENT data loss (exit 0, no stderr) -- exactly
-                # how the `.join()` no-op survived undetected. Surface it
-                # loudly at lowering time, naming the method.
-                print "[mir-lower] WARNING: unresolved method call '{method}' lowered to const-0 placeholder (silent-null risk, Task #145)"
-                var b = self.builder
-                val temp = b.new_temp(MirType.i64())
-                # FAIL CLOSED (Task #145). The collected self.error above is
-                # dropped by every pipeline that does not read
-                # MirLowering.errors -- concretely
-                # driver_bootstrap.bootstrap_lower_to_mir_context, which
-                # returns `next_ctx.errors.len() == 0` and never copies the
-                # lowering errors into ctx (unlike the default lane, which
-                # calls _driver_collect_mir_errors in
-                # driver_pipeline.lower_to_mir). In that lane the const-0
-                # placeholder below reached codegen and shipped as a wrong
-                # value under exit 0.
-                #
-                # Emit rt_panic ahead of the placeholder so an unresolved
-                # method can never silently produce data, matching the two
-                # sibling failure sites that already fail closed:
-                # for-in over a non-array (mir_lowering_stmts.spl ~1908) and
-                # the match-guard path (expr_dispatch.spl ~2905). The const-0
-                # def is retained deliberately: returning an undefined temp
-                # produces a use-before-def local (NULL llvm::Value* -> ICmp
-                # SIGSEGV in llvm-lib), so the placeholder still needs a def
-                # even though rt_panic makes it unreachable at runtime.
-                val panic_msg = b.emit_const_str("unresolved method call: {method}")
-                val panic_op = MirOperand(kind: MirOperandKind.Const(
-                    MirConstValue.Str("rt_panic"),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)))
-                ))
-                b.emit_call(panic_op, [mir_operand_copy(panic_msg)], MirType.unit())
-                b.emit_const(temp, MirConstValue.Int(0), MirType.i64())
-                self.builder = b
-                temp
+                self.reject_unresolved_method_call_v1(receiver, method)
 
     me bootstrap_coerce_to_raw_str(local: LocalId) -> LocalId:
         """Bootstrap-only: coerce a lowered value to a raw char* (Opaque
