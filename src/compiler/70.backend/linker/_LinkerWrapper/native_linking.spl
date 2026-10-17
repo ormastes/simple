@@ -2468,7 +2468,24 @@ fn internal_coff_runtime_is_msvc(os: text, mingw_env: bool) -> bool:
 fn link_native_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     native_link_output_v1(link_native_windows_with_engine(object_files, output, config))
 
+fn native_windows_strict_extra_args_error(extra_flags: [text], allow_duplicate_definitions: bool) -> text:
+    """Reject duplicate-policy overrides before either Windows linker engine runs."""
+    if allow_duplicate_definitions: return ""
+    for flag in extra_flags:
+        # Quotes are command-line syntax, not an escape from policy validation.
+        val normalized = flag.replace("\"", "").trim().lower()
+        if normalized == "/force" or normalized == "-force" or normalized.starts_with("/force:") or normalized.starts_with("-force:"):
+            return "strict Windows link rejects FORCE option: {flag}"
+        if normalized == "--allow-multiple-definition" or normalized == "muldefs":
+            return "strict Windows link rejects duplicate-definition option: {flag}"
+        # Nested argv cannot be checked as ordinary direct-linker flags.
+        if normalized.starts_with("@") or normalized.starts_with("-wl,") or normalized == "-xlinker" or normalized == "/link":
+            return "strict Windows link rejects nested linker arguments: {flag}"
+    ""
+
 fn link_native_windows_with_engine(object_files: [text], output: text, config: NativeLinkConfig) -> Result<NativeLinkSuccessV1, text>:
+    val argument_error = native_windows_strict_extra_args_error(config.extra_flags, config.allow_duplicate_definitions)
+    if argument_error != "": return Err(argument_error)
     if requested_linker_override().trim().lower() == "internal":
         val target_arch = _windows_link_arch(config)
         val arm64_target = target_arch == "aarch64" or target_arch == "arm64"
