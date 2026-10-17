@@ -1,0 +1,221 @@
+export value_probe_primitives_v1, value_probe_collections_v1, value_probe_record_carriers_v1, value_probe_option_result_v1
+# Real Value owner probe for the old producer; no replacement enum or raw ABI.
+use compiler.backend.backend_types.{Value, SdnValueKind, FunctionValue, ClosureValue, ObjectValue, backend_value_bool_v1, backend_value_int_v1, backend_value_float_v1, backend_value_string_v1, backend_value_array_v1, backend_value_tuple_v1, backend_value_dict_v1, backend_value_struct_v1, backend_value_function_v1, backend_value_closure_v1, backend_value_object_v1, backend_value_runtime_value_v1, backend_value_option_v1, backend_value_result_v1}
+use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirParam}
+use compiler.common.diagnostics.span.{Span}
+
+fn value_probe_int_v1(actual: Value, expected: i64) -> bool:
+    match actual:
+        case Value.Int(value): value == expected
+        case _: false
+
+fn value_probe_bool_v1(actual: Value, expected: bool) -> bool:
+    match actual:
+        case Value.Bool(value): value == expected
+        case _: false
+
+fn value_probe_primitives_v1() -> text:
+    if not value_probe_bool_v1(backend_value_bool_v1(true), true) or not value_probe_bool_v1(backend_value_bool_v1(false), false):
+        return "bool-payload-or-owner"
+    if not value_probe_int_v1(backend_value_int_v1(-9223372036854775807), -9223372036854775807) or not value_probe_int_v1(backend_value_int_v1(9223372036854775807), 9223372036854775807):
+        return "int-payload-or-owner"
+    val floating: Value = backend_value_float_v1(-3.25)
+    match floating:
+        case Value.Float(value):
+            if value != -3.25:
+                return "float-payload"
+        case _:
+            return "float-owner"
+    val string: Value = backend_value_string_v1("value-λ")
+    match string:
+        case Value.String(value):
+            if value != "value-λ":
+                return "string-payload"
+        case _:
+            return "string-owner"
+    val empty: Value = backend_value_string_v1("")
+    match empty:
+        case Value.String(value):
+            if value != "":
+                return "empty-string-payload"
+        case _:
+            return "empty-string-owner"
+    ""
+
+fn value_probe_collections_v1() -> text:
+    val elements: [Value] = [backend_value_int_v1(17), backend_value_bool_v1(true)]
+    val array: Value = backend_value_array_v1(elements)
+    match array:
+        case Value.Array(values):
+            if values.len() != 2 or not value_probe_int_v1(values[0], 17) or not value_probe_bool_v1(values[1], true):
+                return "array-payload"
+        case _:
+            return "array-owner"
+    val tuple: Value = backend_value_tuple_v1(elements)
+    match tuple:
+        case Value.Tuple(values):
+            if values.len() != 2 or not value_probe_int_v1(values[0], 17) or not value_probe_bool_v1(values[1], true):
+                return "tuple-payload"
+        case _:
+            return "tuple-owner"
+    var entries: Dict<text, Value> = {}
+    entries["number"] = backend_value_int_v1(29)
+    val dict: Value = backend_value_dict_v1(entries)
+    match dict:
+        case Value.Dict(values):
+            if not values.contains_key("number") or not value_probe_int_v1(values["number"], 29):
+                return "dict-payload"
+        case _:
+            return "dict-owner"
+    val structure: Value = backend_value_struct_v1("ProbeRecord", entries)
+    match structure:
+        case Value.Struct(name, fields):
+            if name != "ProbeRecord" or not fields.contains_key("number") or not value_probe_int_v1(fields["number"], 29):
+                return "struct-whole-payload"
+        case _:
+            return "struct-owner"
+    if elements.len() != 2 or not value_probe_int_v1(elements[0], 17) or not value_probe_int_v1(entries["number"], 29):
+        return "collection-input-mutated"
+    ""
+
+fn value_probe_span_matches_v1(actual: Span) -> bool:
+    actual.start == 10 and actual.end == 17 and actual.line == 3 and actual.col == 4 and actual.file == "probe.spl" and actual.length == 7
+
+fn value_probe_record_carriers_v1() -> text:
+    # These are real payload records. This checks carriers, not invocation or FFI.
+    val function: FunctionValue = FunctionValue(symbol: SymbolId(id: 23), name: "probe-function")
+    val function_value: Value = backend_value_function_v1(function)
+    match function_value:
+        case Value.Function(found):
+            if found.symbol.id != 23 or found.name != "probe-function":
+                return "function-record-fields"
+        case _:
+            return "function-owner"
+    val span: Span = Span(start: 10, end: 17, line: 3, col: 4, file: "probe.spl", length: 7)
+    val type_: HirType = HirType(kind: HirTypeKind.Int(64, true), span: span)
+    val body: HirExpr = HirExpr(kind: HirExprKind.IntLit(41, nil), has_type_: true, type_: type_, span: span)
+    val params: [HirParam] = []
+    var captures: Dict<text, Value> = {}
+    captures["captured"] = backend_value_int_v1(43)
+    val closure: ClosureValue = ClosureValue(params: params, body: body, captures: captures)
+    val closure_value: Value = backend_value_closure_v1(closure)
+    match closure_value:
+        case Value.Closure(found):
+            val found_body: HirExpr = found.body
+            if found.params.len() != 0 or not found_body.has_type_ or not value_probe_span_matches_v1(found_body.span):
+                return "closure-record-fields"
+            val found_type: HirType = found_body.type_
+            if not value_probe_span_matches_v1(found_type.span):
+                return "closure-type-span"
+            match found_type.kind:
+                case HirTypeKind.Int(bits, signed):
+                    if bits != 64 or not signed:
+                        return "closure-type-shape"
+                case _:
+                    return "closure-type-kind"
+            match found_body.kind:
+                case HirExprKind.IntLit(value, suffix):
+                    if value != 41 or suffix != nil:
+                        return "closure-body-payload"
+                case _:
+                    return "closure-body-kind"
+            if not found.captures.contains_key("captured") or not value_probe_int_v1(found.captures["captured"], 43):
+                return "closure-captures"
+        case _:
+            return "closure-owner"
+    val object_record: ObjectValue = ObjectValue(class_name: "ProbeObject", handle: 47)
+    val object_value: Value = backend_value_object_v1(object_record)
+    match object_value:
+        case Value.Object(found):
+            if found.class_name != "ProbeObject" or found.handle != 47:
+                return "object-record-fields"
+        case _:
+            return "object-owner"
+    val opaque: Value = backend_value_runtime_value_v1(0)
+    match opaque:
+        case Value.RuntimeValue(ptr):
+            if ptr != 0:
+                return "opaque-carrier-payload"
+        case _:
+            return "opaque-carrier-owner"
+    if function.symbol.id != 23 or object_record.handle != 47 or not value_probe_int_v1(captures["captured"], 43):
+        return "record-input-mutated"
+    ""
+
+fn value_probe_option_result_v1() -> text:
+    val payload: Value = backend_value_int_v1(59)
+    val present: Value? = Some(payload)
+    val absent: Value? = nil
+    val some_value: Value = backend_value_option_v1(present)
+    match some_value:
+        case Value.Option(wrapped):
+            if wrapped == nil:
+                return "option-some-presence"
+            val inner: Value = wrapped.unwrap()
+            if not value_probe_int_v1(inner, 59):
+                return "option-some-payload"
+        case _:
+            return "option-some-owner"
+    val none_value: Value = backend_value_option_v1(absent)
+    match none_value:
+        case Value.Option(wrapped):
+            if wrapped != nil:
+                return "option-none-presence"
+        case _:
+            return "option-none-owner"
+    val ok_value: Value = backend_value_result_v1(present, absent)
+    match ok_value:
+        case Value.Result(ok, err):
+            if ok == nil or err != nil:
+                return "result-ok-presence"
+            val inner: Value = ok.unwrap()
+            if not value_probe_int_v1(inner, 59):
+                return "result-ok-payload"
+        case _:
+            return "result-ok-owner"
+    val err_value: Value = backend_value_result_v1(absent, present)
+    match err_value:
+        case Value.Result(ok, err):
+            if ok != nil or err == nil:
+                return "result-err-presence"
+            val inner: Value = err.unwrap()
+            if not value_probe_int_v1(inner, 59):
+                return "result-err-payload"
+        case _:
+            return "result-err-owner"
+    if present == nil or absent != nil:
+        return "optional-input-presence-mutated"
+    val original: Value = present.unwrap()
+    if not value_probe_int_v1(original, 59):
+        return "optional-input-payload-mutated"
+    ""
+fn main() -> i32:
+    # SdnValueKind is a second genuine visible Bool/Int/Float/String owner.
+    # Both declarations come from the actual provider; no local enum is invented.
+    var failures: i32 = 0
+    val primitive_reason: text = value_probe_primitives_v1()
+    if primitive_reason != "":
+        print "FAIL real-value-primitives: {primitive_reason}"
+        failures = failures + 1
+    else:
+        print "PASS real-value-primitives"
+    val collection_reason: text = value_probe_collections_v1()
+    if collection_reason != "":
+        print "FAIL real-value-collections: {collection_reason}"
+        failures = failures + 1
+    else:
+        print "PASS real-value-collections"
+    val record_reason: text = value_probe_record_carriers_v1()
+    if record_reason != "":
+        print "FAIL real-value-record-carriers: {record_reason}"
+        failures = failures + 1
+    else:
+        print "PASS real-value-record-carriers"
+    val optional_reason: text = value_probe_option_result_v1()
+    if optional_reason != "":
+        print "FAIL real-value-option-result: {optional_reason}"
+        failures = failures + 1
+    else:
+        print "PASS real-value-option-result"
+    failures
