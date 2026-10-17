@@ -3414,7 +3414,7 @@ if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
     "${seed_inputs_fingerprint}" "simple${exe_suffix}" \
     "${archive_prefix}simple_native_all${archive_suffix}" \
     "${archive_prefix}simple_compiler_backfill${archive_suffix}" \
-    "${rust_generation_nonce}" "${PLATFORM}" || {
+    "${rust_generation_nonce}" "${PLATFORM}" "${rust_llvm_authority:-}" || {
     echo "error: could not prepare immutable Rust authority generation" >&2
     exit 1
   }
@@ -3689,7 +3689,7 @@ echo "  mode:     admitted Phase 2 → managed Phase 3 and Phase 4"
       "${archive_prefix}simple_native_all${archive_suffix}" \
       "${archive_prefix}simple_compiler_backfill${archive_suffix}" \
       "${legacy_generation_nonce}" "${rust_target_lock_handle}" \
-      "${legacy_observed_fingerprint}" "${PLATFORM}" || {
+      "${legacy_observed_fingerprint}" "${PLATFORM}" "${rust_llvm_authority:-}" || {
       echo "error: complete legacy Rust authority migration failed" >&2
       exit 1
     }

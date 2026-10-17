@@ -1,0 +1,52 @@
+# Pure incremental copy-mode keys. No bytes are forwarded to the child.
+use std.common.text_bytes.{text_to_bytes, bytes_to_text}
+
+struct ClientCopyInput:
+    pending: text
+
+struct ClientCopyStep:
+    state: ClientCopyInput
+    actions: [text]
+
+pub fn client_copy_new() -> ClientCopyInput:
+    return ClientCopyInput(pending: "")
+
+pub fn client_copy_feed(state: ClientCopyInput, data: text, flush_escape: bool = false) -> ClientCopyStep:
+    var pending = state.pending
+    var actions: [text] = []
+    # The controller sets this after its deadline, rather than treating an
+    # incomplete arrow prefix as an immediate request to leave copy mode.
+    if flush_escape and pending == "\x1b":
+        actions.push("exit")
+        pending = ""
+    if pending.len() > 16:
+        pending = ""
+    for byte in text_to_bytes(data):
+        if pending == "":
+            if byte == 27: pending = "\x1b"
+            elif byte == 107: actions.push("up")
+            elif byte == 106: actions.push("down")
+            elif byte == 113: actions.push("exit")
+            elif byte == 32: actions.push("mark")
+            elif byte == 13 or byte == 10 or byte == 121: actions.push("copy")
+        elif pending == "\x1b":
+            if byte == 91:
+                pending = "\x1b["
+            else:
+                pending = ""
+        else:
+            if byte < 32 or byte > 126:
+                pending = ""
+            else:
+                pending = pending + bytes_to_text([byte])
+                if pending.len() > 16:
+                    pending = ""
+                elif byte >= 64:
+                    if pending == "\x1b[A": actions.push("up")
+                    elif pending == "\x1b[B": actions.push("down")
+                    elif pending == "\x1b[5~": actions.push("page-up")
+                    elif pending == "\x1b[6~": actions.push("page-down")
+                    pending = ""
+    return ClientCopyStep(state: ClientCopyInput(pending: pending), actions: actions)
+
+export ClientCopyInput, ClientCopyStep, client_copy_new, client_copy_feed
