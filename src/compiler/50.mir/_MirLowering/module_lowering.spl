@@ -2,7 +2,7 @@ use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use compiler.mir._MirLoweringExpr.function_signature_owner.*
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
 use compiler.hir.hir_operators.{HirBinOp}
-use compiler.hir.hir_codec.{hir_fn_scalars_v1}
+use compiler.hir.hir_codec.{hir_fn_scalars_at_v1}
 # Part of src/compiler/50.mir/mir_lowering.spl: module/struct/class type lowering, asm target-spec accessors
 use compiler.mir._MirLowering.bootstrap_globals.*
 use compiler.mir._MirLowering.provider_metadata.*
@@ -1709,17 +1709,20 @@ impl MirLowering:
         # the materialized array stays (cycle-105); the lower_module prescan
         # loop re-assigns before its own iteration (per-module reset).
         self.lower_emit_fn_values = functions.values()
-        # Cycle-114: scalar extraction happens in the CODEC UNIT
-        # (hir_fn_scalars_v1) -- the only pool whose HirFunction by-value
-        # param copies draw clean (50.mir hosts corrupt them in every shape,
-        # cycles 106-114). One element crossing, one tuple return (the
-        # hir_module_decode precedent), scalar forwarding from the tuple.
-        for raw_prescan_fn in self.lower_emit_fn_values:
-            val prescan_scalars = hir_fn_scalars_v1(raw_prescan_fn)
+        # Cycle-115: index-based codec extraction. The element never crosses
+        # a boundary as a struct (by-value ARG copies at 50.mir call sites
+        # corrupt too -- cycle-115 shim); the caller passes the array HANDLE
+        # (reference copy) plus a scalar index, and the element bind + field
+        # reads happen only in the codec pool (hir_fn_scalars_at_v1).
+        val prescan_fn_count: i64 = self.lower_emit_fn_values.len()
+        var psi = 0
+        while psi < prescan_fn_count:
+            val prescan_scalars = hir_fn_scalars_at_v1(self.lower_emit_fn_values, psi)
             self.prescan_one_function_v1(module_name, module_symbols,
                 prescan_scalars[0], prescan_scalars[1], prescan_scalars[2],
                 prescan_scalars[3], prescan_scalars[4], prescan_scalars[5],
                 prescan_scalars[6], prescan_scalars[7], prescan_scalars[8])
+            psi = psi + 1
 
     # Cycle-102: per-function prescan body; prescan_fn is the by-value
     # param (no caller-side named bind of the for-in element).
