@@ -1,0 +1,49 @@
+"""Executable source-selection assertions for the explicit Windows native product.
+TEST_BLOCKED: authored; execution awaits the rebuilt qualified runner.
+"""
+# @req REQ-SMUX-WINDOWS-NATIVE-PROVIDER-SELECTION
+use std.spec
+use std.spec.step
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
+use compiler.driver.driver_source_loading.{_driver_resolve_source_root_entry_import_v1}
+
+fn windows_composition_selected(module_name: text, roots: [text]) -> text:
+    match _driver_resolve_source_root_entry_import_v1(module_name, roots):
+        case SourceRootResolutionV1.Found(path): path
+        case SourceRootResolutionV1.Missing: "MISSING"
+        case SourceRootResolutionV1.Ambiguous(_): "AMBIGUOUS"
+
+val WINDOWS_NATIVE_LIB = "src/providers/windows_native/lib"
+
+describe "Windows native provider product composition":
+    it "selects the PTY overlay through the stable std import":
+        step("resolve the exact public PTY module through ordered roots")
+        expect(windows_composition_selected("std.sys.pty", [WINDOWS_NATIVE_LIB, "src/lib"])).to_equal(
+            WINDOWS_NATIVE_LIB + "/sys/pty.spl")
+
+    it "selects the identical PTY owner for the canonical lib spelling":
+        step("resolve the library spelling without changing family selection")
+        expect(windows_composition_selected("lib.sys.pty", [WINDOWS_NATIVE_LIB, "src/lib"])).to_equal(
+            WINDOWS_NATIVE_LIB + "/sys/pty.spl")
+
+    it "selects only the synchronous SOSIX TCP capsule":
+        step("resolve the explicit synchronous family module")
+        expect(windows_composition_selected("std.nogc_sync_mut.sosix.network", [WINDOWS_NATIVE_LIB, "src/lib"])).to_equal(
+            WINDOWS_NATIVE_LIB + "/nogc_sync_mut/sosix/network.spl")
+
+    it "leaves the SFFI network provider outside the selected overlay":
+        step("retain the original HTTP and UDP containing SFFI owner")
+        expect(windows_composition_selected("std.nogc_sync_mut.sffi.net", [WINDOWS_NATIVE_LIB, "src/lib"])).to_equal(
+            "src/lib/nogc_sync_mut/sffi/net.spl")
+
+    it "keeps the default owners when the native overlay is absent":
+        step("resolve the unchanged interpreter and other product source roots")
+        expect(windows_composition_selected("std.sys.pty", ["src/lib"])).to_equal("src/lib/sys/pty.spl")
+        expect(windows_composition_selected("std.nogc_sync_mut.sosix.network", ["src/lib"])).to_equal(
+            "src/lib/nogc_sync_mut/sosix/network.spl")
+
+    it "treats explicit root order as authoritative":
+        step("put the default root first and observe its exact module win")
+        expect(windows_composition_selected("std.sys.pty", ["src/lib", WINDOWS_NATIVE_LIB])).to_equal("src/lib/sys/pty.spl")
+        expect(windows_composition_selected("std.nogc_sync_mut.sosix.network", ["src/lib", WINDOWS_NATIVE_LIB])).to_equal(
+            "src/lib/nogc_sync_mut/sosix/network.spl")

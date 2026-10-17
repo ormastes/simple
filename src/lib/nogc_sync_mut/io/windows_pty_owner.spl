@@ -1,0 +1,448 @@
+# Native Win64 single-threaded ConPTY owner. No pointers escape this module.
+# Each returned index is nonreused; copied handles become invalid on close.
+use std.nogc_sync_mut.io.windows_pty_abi.{CreatePseudoConsole, ResizePseudoConsole, ClosePseudoConsole, CreateNamedPipeW, ConnectNamedPipe, CreatePipe, PeekNamedPipe, WriteFile, GetOverlappedResult, CancelIoEx, CreateEventW, ResetEvent, GetCurrentProcessId}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, CreateFileW, CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CloseHandle, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList, GetLastError, GetTickCount64, Sleep, ReadFile, QueryInformationJobObject}
+use std.nogc_sync_mut.io.windows_process_owner.{_windows_process_wide_v1}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u8, volatile_write_u32, volatile_write_u64, volatile_read_u8, volatile_read_u32, volatile_read_u64}
+use std.nogc_sync_mut.io.windows_pty_codec.{windows_pty_size_valid_v1, windows_pty_coord_v1, windows_pty_decode_v1}
+use std.common.base_encoding.utilities.{text_to_bytes_linear}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetExitCodeProcess}
+
+struct WindowsPtyStateV1:
+    heap: i64
+    arena: i64 = 0
+    console: i64 = 0
+    input_server: i64 = 0
+    input: i64 = 0
+    output_server: i64 = 0
+    output: i64 = 0
+    event: i64 = 0
+    job: i64 = 0
+    process: i64 = 0
+    thread: i64 = 0
+    pid: i64 = 0
+    pending: bool = false
+    pending_size: i64 = 0
+    failed: bool = false
+    closing: bool = false
+    closed: bool = false
+    terminal_observed: bool = false
+    release_failed: bool = false
+    tail: [u8] = []
+    temporaries: [i64] = []
+
+var _windows_pty_slots_v1: [WindowsPtyStateV1] = []
+var _windows_pty_quarantine_v1: [i64] = []
+var _windows_pty_active_v1: i64 = 0
+var _windows_pty_cleanup_failed_v1: bool = false
+
+fn _windows_pty_live_v1(handle: i32) -> bool:
+    handle >= 0 and (handle as i64) < _windows_pty_slots_v1.len() and not _windows_pty_slots_v1[handle as i64].closing and not _windows_pty_slots_v1[handle as i64].closed
+
+# arena offsets: console-out0, pipe-out8/16, available24, read-count32,
+# write-count40, attribute-size48, OVERLAPPED64..95 (hEvent at88), input128..4223,
+# output4224..12415, job-limits12504..12647, STARTUPINFOEX12704..12815,
+# PROCESS_INFORMATION12816..12839, job-accounting12904..12951.
+# Every address is retained until completion.
+@unsafe(reason: "observes completion before reusing retained overlapped memory", capabilities: [ffi, raw_ptr])
+fn _windows_pty_complete_v1(state: WindowsPtyStateV1) -> WindowsPtyStateV1:
+    var next = state
+    if not state.pending: return next
+    val completed = GetOverlappedResult(state.input, state.arena + 64, state.arena + 40, 0)
+    if completed == 0:
+        val error = GetLastError()
+        if error == 996u32: return next
+        if not state.closing or error != 995u32: next.failed = true
+    elif volatile_read_u32(state.arena + 40) != state.pending_size:
+        # Byte-pipe writes are complete or failed; never retry an ambiguous
+        # accepted prefix, which could duplicate user commands.
+        next.failed = true
+    next.pending = false
+    next.pending_size = 0
+    next
+
+@unsafe(reason: "requires retained leader termination and JobObject emptiness before release", capabilities: [ffi, raw_ptr])
+fn _windows_pty_terminal_v1(state: WindowsPtyStateV1) -> bool:
+    if state.terminal_observed: return true
+    if state.process != 0 and WaitForSingleObject(state.process, 0u32) != 0u32: return false
+    if state.job != 0:
+        if QueryInformationJobObject(state.job, 1, state.arena + 12904, 48u32, 0) == 0: return false
+        if volatile_read_u32(state.arena + 12944) != 0: return false
+    true
+
+@unsafe(reason: "retains ownership when native handle release fails", capabilities: [ffi])
+fn _windows_pty_close_handle_v1(handle: i64) -> i64:
+    if handle == 0: return 0
+    if CloseHandle(handle) != 0: return 0
+    _windows_pty_cleanup_failed_v1 = true
+    handle
+
+@unsafe(reason: "retains ownership when native allocation release fails", capabilities: [ffi, raw_ptr])
+fn _windows_pty_free_v1(heap: i64, address: i64) -> i64:
+    if address == 0: return 0
+    if HeapFree(heap, 0u32, address) != 0: return 0
+    _windows_pty_cleanup_failed_v1 = true
+    address
+
+@unsafe(reason: "releases only terminal retained requests and their owned resources", capabilities: [ffi, raw_ptr])
+fn _windows_pty_release_v1(state: WindowsPtyStateV1) -> WindowsPtyStateV1:
+    var next = state
+    if state.pending: return next
+    next.output = _windows_pty_close_handle_v1(next.output)
+    # A failed output close must never enter a potentially blocking HPCON close.
+    if next.output == 0 and next.console != 0:
+        ClosePseudoConsole(next.console)
+        next.console = 0
+    next.input_server = _windows_pty_close_handle_v1(next.input_server)
+    next.input = _windows_pty_close_handle_v1(next.input)
+    next.output_server = _windows_pty_close_handle_v1(next.output_server)
+    next.event = _windows_pty_close_handle_v1(next.event)
+    next.thread = _windows_pty_close_handle_v1(next.thread)
+    next.process = _windows_pty_close_handle_v1(next.process)
+    next.job = _windows_pty_close_handle_v1(next.job)
+    var retained: [i64] = []
+    for address in next.temporaries:
+        val remaining = _windows_pty_free_v1(next.heap, address)
+        if remaining != 0: retained = retained.push(remaining)
+    next.temporaries = retained
+    val handles_released = next.input_server == 0 and next.input == 0 and next.output_server == 0 and next.output == 0 and next.event == 0 and next.thread == 0 and next.process == 0 and next.job == 0 and next.console == 0
+    if handles_released and next.temporaries.len() == 0:
+        next.arena = _windows_pty_free_v1(next.heap, next.arena)
+    next.closed = handles_released and next.temporaries.len() == 0 and next.arena == 0
+    if not next.closed:
+        next.failed = true
+        next.release_failed = true
+    if next.release_failed: _windows_pty_cleanup_failed_v1 = true
+    next.tail = []
+    next
+
+fn _windows_pty_reap_v1():
+    if _windows_pty_quarantine_v1.len() == 0: return
+    var retained: [i64] = []
+    for index in _windows_pty_quarantine_v1:
+        var state = _windows_pty_complete_v1(_windows_pty_slots_v1[index])
+        if state.pending or not _windows_pty_terminal_v1(state):
+            retained = retained.push(index)
+        else:
+            state.terminal_observed = true
+            state = _windows_pty_release_v1(state)
+            if state.closed: _windows_pty_active_v1 = _windows_pty_active_v1 - 1
+            else: retained = retained.push(index)
+        _windows_pty_slots_v1[index] = state
+    _windows_pty_quarantine_v1 = retained
+
+# A negative count is a retained cleanup failure, never a clean-drain receipt.
+pub fn windows_pty_cleanup_pending_v1() -> i64:
+    _windows_pty_reap_v1()
+    if _windows_pty_cleanup_failed_v1: return -1
+    _windows_pty_quarantine_v1.len()
+
+pub fn windows_pty_cleanup_proof_v1(handle: i32) -> bool:
+    _windows_pty_reap_v1()
+    if handle < 0 or (handle as i64) >= _windows_pty_slots_v1.len(): return false
+    val state = _windows_pty_slots_v1[handle as i64]
+    state.closed and state.terminal_observed and not state.release_failed and state.arena == 0 and state.job == 0 and state.process == 0 and state.thread == 0 and state.temporaries.len() == 0 and not state.pending
+
+@unsafe(reason: "unwinds a not-yet-published ConPTY without pending requests", capabilities: [ffi, raw_ptr])
+fn _windows_pty_open_failed_v1(state: WindowsPtyStateV1) -> i32:
+    # Close the read end before HPCON: older Windows can emit a final frame
+    # synchronously from ClosePseudoConsole and otherwise deadlock this owner.
+    var next = state
+    next.closing = true
+    next.terminal_observed = true
+    next = _windows_pty_release_v1(next)
+    if not next.closed:
+        val index = _windows_pty_slots_v1.len()
+        _windows_pty_slots_v1 = _windows_pty_slots_v1.push(next)
+        _windows_pty_quarantine_v1 = _windows_pty_quarantine_v1.push(index)
+        _windows_pty_active_v1 = _windows_pty_active_v1 + 1
+    -1
+
+@unsafe(reason: "creates private noninherited ConPTY pipes and retains exact Win64 storage", capabilities: [ffi, raw_ptr])
+pub fn windows_pty_open_v1(rows: i32, cols: i32) -> i32:
+    _windows_pty_reap_v1()
+    if not windows_pty_size_valid_v1(rows, cols) or _windows_pty_slots_v1.len() >= 100000 or _windows_pty_active_v1 >= 1024:
+        return -1
+    val heap = GetProcessHeap()
+    if heap == 0: return -1
+    var state = WindowsPtyStateV1(heap: heap)
+    state.arena = HeapAlloc(heap, 8u32, 16384u64)
+    if state.arena == 0: return -1
+    val pipe_name = "\\\\.\\pipe\\simple-conpty-" + str(GetCurrentProcessId()) + "-" + str(_windows_pty_slots_v1.len())
+    val name = _windows_process_wide_v1(heap, pipe_name)
+    if name == 0: return _windows_pty_open_failed_v1(state)
+    # Server is synchronous for ConPTY. Only our write client is overlapped.
+    # FIRST_PIPE_INSTANCE prevents attaching to an unrelated existing server;
+    # REJECT_REMOTE_CLIENTS prevents remote access. NULL security is noninherited.
+    state.input_server = CreateNamedPipeW(name, 524289u32, 8u32, 1u32, 4096u32, 4096u32, 0u32, 0)
+    if state.input_server == -1: state.input_server = 0
+    if state.input_server != 0:
+        state.input = CreateFileW(name, 1073741824u32, 0u32, 0, 3u32, 1073741824u32, 0)
+        if state.input == -1: state.input = 0
+    val retained_name = _windows_pty_free_v1(heap, name)
+    if retained_name != 0:
+        state.temporaries = state.temporaries.push(retained_name)
+        state.release_failed = true
+        return _windows_pty_open_failed_v1(state)
+    if state.input_server == 0 or state.input == 0: return _windows_pty_open_failed_v1(state)
+    # The client has connected already; ERROR_PIPE_CONNECTED is success.
+    if ConnectNamedPipe(state.input_server, 0) == 0 and GetLastError() != 535u32:
+        return _windows_pty_open_failed_v1(state)
+    if CreatePipe(state.arena + 8, state.arena + 16, 0, 65536u32) == 0:
+        return _windows_pty_open_failed_v1(state)
+    state.output = volatile_read_u64(state.arena + 8)
+    state.output_server = volatile_read_u64(state.arena + 16)
+    state.event = CreateEventW(0, 1, 0, 0)
+    if state.event == 0: return _windows_pty_open_failed_v1(state)
+    volatile_write_u64(state.arena + 88, state.event)
+    if CreatePseudoConsole(windows_pty_coord_v1(rows, cols), state.input_server, state.output_server, 0u32, state.arena) < 0:
+        return _windows_pty_open_failed_v1(state)
+    state.console = volatile_read_u64(state.arena)
+    if state.console == 0: return _windows_pty_open_failed_v1(state)
+    val index = _windows_pty_slots_v1.len()
+    _windows_pty_slots_v1 = _windows_pty_slots_v1.push(state)
+    _windows_pty_active_v1 = _windows_pty_active_v1 + 1
+    index as i32
+
+@unsafe(reason: "starts a suspended child attached only to the retained HPCON and owned JobObject", capabilities: [ffi, raw_ptr])
+pub fn windows_pty_spawn_v1(handle: i32, command: text) -> i64:
+    _windows_pty_reap_v1()
+    if not _windows_pty_live_v1(handle) or command == "" or command.len() > 32766 or command.contains("\0"): return -1
+    var state = _windows_pty_slots_v1[handle as i64]
+    if state.process != 0 or state.failed: return -1
+    val argv = _windows_process_wide_v1(state.heap, command)
+    if argv == 0: return -1
+    val startup = state.arena + 12704
+    val process_info = state.arena + 12816
+    val limits = state.arena + 12504
+    val _sized = InitializeProcThreadAttributeList(0, 1u32, 0u32, state.arena + 48)
+    val required = volatile_read_u64(state.arena + 48)
+    var attributes: i64 = 0
+    var initialized = false
+    var admitted = required > 0 and required <= 1048576
+    if admitted:
+        attributes = HeapAlloc(state.heap, 8u32, required as u64)
+        admitted = attributes != 0
+    if admitted:
+        initialized = InitializeProcThreadAttributeList(attributes, 1u32, 0u32, state.arena + 48) != 0
+        admitted = initialized
+    if admitted:
+        # PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE=0x20016; lpValue is HPCON itself.
+        admitted = UpdateProcThreadAttribute(attributes, 0u32, 131094u64, state.console, 8u64, 0, 0) != 0
+    if admitted:
+        volatile_write_u32(startup, 112)
+        volatile_write_u64(startup + 104, attributes)
+        volatile_write_u32(limits + 16, 8192)
+        state.job = CreateJobObjectW(0, 0)
+        admitted = state.job != 0
+    if admitted: admitted = SetInformationJobObject(state.job, 9, limits, 144u32) != 0
+    var thread: i64 = 0
+    if admitted:
+        # CREATE_SUSPENDED|EXTENDED_STARTUPINFO_PRESENT, inheritHandles=FALSE.
+        # HPCON is attached through the attribute, never inherited std handles.
+        admitted = CreateProcessW(0, argv, 0, 0, 0, 524292u32, 0, 0, startup, process_info) != 0
+        if admitted:
+            state.process = volatile_read_u64(process_info)
+            thread = volatile_read_u64(process_info + 8)
+            state.pid = volatile_read_u32(process_info + 16)
+            admitted = AssignProcessToJobObject(state.job, state.process) != 0
+            if admitted: admitted = ResumeThread(thread) != 4294967295u32
+    if initialized: DeleteProcThreadAttributeList(attributes)
+    if attributes != 0:
+        val retained_attributes = _windows_pty_free_v1(state.heap, attributes)
+        if retained_attributes != 0:
+            state.temporaries = state.temporaries.push(retained_attributes)
+            state.release_failed = true
+            admitted = false
+    val retained_argv = _windows_pty_free_v1(state.heap, argv)
+    if retained_argv != 0:
+        state.temporaries = state.temporaries.push(retained_argv)
+        state.release_failed = true
+        admitted = false
+    if thread != 0:
+        state.thread = _windows_pty_close_handle_v1(thread)
+        if state.thread != 0:
+            state.release_failed = true
+            admitted = false
+    if admitted:
+        state.input_server = _windows_pty_close_handle_v1(state.input_server)
+        state.output_server = _windows_pty_close_handle_v1(state.output_server)
+        if state.input_server != 0 or state.output_server != 0:
+            state.release_failed = true
+            admitted = false
+    if not admitted:
+        state.failed = true
+        if state.process != 0:
+            val _killed = TerminateProcess(state.process, 125u32)
+        _windows_pty_slots_v1[handle as i64] = state
+        val _closed = windows_pty_close_v1(handle)
+        return -1
+    _windows_pty_slots_v1[handle as i64] = state
+    state.pid
+
+# Positive result means that prefix is now owned by the provider, not that the
+# child has consumed it. A retained write owns both its bytes and OVERLAPPED.
+# Zero is backpressure. Negative is a permanent error. No caller memory is lent.
+@unsafe(reason: "submits at most one bounded retained overlapped write, never waits", capabilities: [ffi, raw_ptr])
+pub fn windows_pty_write_some_bytes_v1(handle: i32, data: [u8]) -> i64:
+    _windows_pty_reap_v1()
+    if not _windows_pty_live_v1(handle): return -1
+    var state = _windows_pty_complete_v1(_windows_pty_slots_v1[handle as i64])
+    _windows_pty_slots_v1[handle as i64] = state
+    if state.failed or state.process == 0: return -1
+    if state.pending or data.len() == 0: return 0
+    val count = if data.len() > 4096: 4096 else: data.len()
+    for index in 0..count:
+        volatile_write_u8(state.arena + 128 + index, data[index] as i64)
+    for index in 0..3: volatile_write_u64(state.arena + 64 + index * 8, 0)
+    volatile_write_u32(state.arena + 40, 0)
+    if ResetEvent(state.event) == 0:
+        state.failed = true
+        _windows_pty_slots_v1[handle as i64] = state
+        return -1
+    val submitted = WriteFile(state.input, state.arena + 128, count as u32, state.arena + 40, state.arena + 64)
+    if submitted != 0:
+        val written = volatile_read_u32(state.arena + 40)
+        if written <= 0 or written > count:
+            state.failed = true
+            _windows_pty_slots_v1[handle as i64] = state
+            return -1
+        return written
+    if GetLastError() != 997u32:
+        state.failed = true
+        _windows_pty_slots_v1[handle as i64] = state
+        return -1
+    state.pending = true
+    state.pending_size = count
+    _windows_pty_slots_v1[handle as i64] = state
+    count
+
+pub fn windows_pty_write_some_v1(handle: i32, data: text) -> i64:
+    windows_pty_write_some_bytes_v1(handle, text_to_bytes_linear(data))
+
+# Compatibility only: false may follow partial delivery. Never blindly retry
+# the whole command. Responsive owners use write_some_bytes + input_pending.
+# Bound both the copied request (1MiB) and the full-delivery attempt (2sec).
+@unsafe(reason: "finite polling of owned asynchronous writes without blocking pipe IO", capabilities: [ffi])
+pub fn windows_pty_write_v1(handle: i32, data: text) -> bool:
+    if data.len() > 1048576 or not _windows_pty_live_v1(handle): return false
+    val bytes = text_to_bytes_linear(data)
+    val deadline = GetTickCount64() + 2000u64
+    var offset = 0
+    while GetTickCount64() < deadline:
+        if offset < bytes.len():
+            val count = if bytes.len() - offset > 4096: 4096 else: bytes.len() - offset
+            var chunk: [u8] = []
+            for index in 0..count: chunk = chunk.push(bytes[offset + index])
+            val accepted = windows_pty_write_some_bytes_v1(handle, chunk)
+            if accepted < 0: return false
+            offset = offset + accepted
+        match windows_pty_input_pending_v1(handle):
+            case Err(_reason): return false
+            case Ok(pending):
+                if offset == bytes.len() and not pending: return true
+        Sleep(1u32)
+    false
+
+pub fn windows_pty_input_pending_v1(handle: i32) -> Result<bool, text>:
+    _windows_pty_reap_v1()
+    if not _windows_pty_live_v1(handle): return Err("invalid or closed Windows PTY handle")
+    val state = _windows_pty_complete_v1(_windows_pty_slots_v1[handle as i64])
+    _windows_pty_slots_v1[handle as i64] = state
+    if state.failed: return Err("Windows PTY input completion failed")
+    Ok(state.pending)
+
+@unsafe(reason: "reads only peeked bytes from the exclusively owned output pipe", capabilities: [ffi, raw_ptr])
+pub fn windows_pty_read_v1(handle: i32, timeout_ms: i32) -> text:
+    _windows_pty_reap_v1()
+    if not _windows_pty_live_v1(handle) or timeout_ms < 0 or timeout_ms > 60000: return ""
+    var state = _windows_pty_slots_v1[handle as i64]
+    val deadline = GetTickCount64() + (timeout_ms as u64)
+    var available: i64 = 0
+    var eof = false
+    while true:
+        if PeekNamedPipe(state.output, 0, 0u32, 0, state.arena + 24, 0) == 0:
+            val error = GetLastError()
+            eof = error == 109u32 or error == 233u32
+            if not eof: state.failed = true
+            break
+        available = volatile_read_u32(state.arena + 24)
+        if available > 0 or GetTickCount64() >= deadline: break
+        Sleep(1u32)
+    var chunk: [u8] = []
+    if available > 0:
+        val count = if available > 8192: 8192 else: available
+        if ReadFile(state.output, state.arena + 4224, count as u32, state.arena + 32, 0) != 0:
+            val received = volatile_read_u32(state.arena + 32)
+            if received <= count:
+                chunk = [0u8; received]
+                for index in 0..received: chunk[index] = volatile_read_u8(state.arena + 4224 + index) as u8
+            else:
+                state.failed = true
+        else:
+            val error = GetLastError()
+            eof = error == 109u32 or error == 233u32
+            if not eof: state.failed = true
+    val decoded = windows_pty_decode_v1(state.tail, chunk, eof)
+    state.tail = decoded.tail
+    _windows_pty_slots_v1[handle as i64] = state
+    decoded.value
+
+@unsafe(reason: "queries the retained process handle without PID reopening", capabilities: [ffi])
+pub fn windows_pty_is_running_v1(handle: i32) -> bool:
+    _windows_pty_reap_v1()
+    if not _windows_pty_live_v1(handle): return false
+    val state = _windows_pty_slots_v1[handle as i64]
+    state.process != 0 and WaitForSingleObject(state.process, 0u32) == 258u32
+
+@unsafe(reason: "reads the exact retained leader exit status only after signaled wait", capabilities: [ffi, raw_ptr])
+pub fn windows_pty_exit_code_v1(handle: i32) -> Result<i64, text>:
+    _windows_pty_reap_v1()
+    if not _windows_pty_live_v1(handle): return Err("invalid or closed Windows PTY handle")
+    val state = _windows_pty_slots_v1[handle as i64]
+    if state.process == 0: return Err("Windows PTY has no child")
+    val waited = WaitForSingleObject(state.process, 0u32)
+    if waited == 258u32: return Err("Windows PTY child still running")
+    if waited != 0u32: return Err("Windows PTY child wait failed")
+    if GetExitCodeProcess(state.process, state.arena + 12960) == 0:
+        return Err("Windows PTY child exit status unavailable")
+    Ok(volatile_read_u32(state.arena + 12960))
+
+@unsafe(reason: "resizes only the retained HPCON with a validated packed COORD", capabilities: [ffi])
+pub fn windows_pty_resize_v1(handle: i32, rows: i32, cols: i32) -> bool:
+    _windows_pty_reap_v1()
+    if not _windows_pty_live_v1(handle) or not windows_pty_size_valid_v1(rows, cols): return false
+    ResizePseudoConsole(_windows_pty_slots_v1[handle as i64].console, windows_pty_coord_v1(rows, cols)) >= 0
+
+@unsafe(reason: "invalidates aliases, breaks output before HPCON release, retains cancelled pending buffers", capabilities: [ffi, raw_ptr])
+pub fn windows_pty_close_v1(handle: i32) -> bool:
+    _windows_pty_reap_v1()
+    if handle < 0 or (handle as i64) >= _windows_pty_slots_v1.len(): return false
+    var state = _windows_pty_slots_v1[handle as i64]
+    if state.closed: return not state.failed
+    if state.closing: return false
+    state.closing = true
+    _windows_pty_slots_v1[handle as i64] = state
+    if state.job != 0:
+        if TerminateJobObject(state.job, 125u32) == 0: state.failed = true
+    if state.output != 0:
+        state.output = _windows_pty_close_handle_v1(state.output)
+        if state.output != 0:
+            state.failed = true
+            state.release_failed = true
+    if state.console != 0 and state.output == 0:
+        ClosePseudoConsole(state.console)
+        state.console = 0
+    if state.pending:
+        val _requested = CancelIoEx(state.input, state.arena + 64)
+        state = _windows_pty_complete_v1(state)
+    if state.pending or not _windows_pty_terminal_v1(state):
+        # No wait, no use-after-free: all request storage remains quarantined.
+        _windows_pty_quarantine_v1 = _windows_pty_quarantine_v1.push(handle as i64)
+    else:
+        state.terminal_observed = true
+        state = _windows_pty_release_v1(state)
+        if state.closed: _windows_pty_active_v1 = _windows_pty_active_v1 - 1
+        else: _windows_pty_quarantine_v1 = _windows_pty_quarantine_v1.push(handle as i64)
+    _windows_pty_slots_v1[handle as i64] = state
+    state.closed and not state.failed

@@ -1,7 +1,9 @@
+use compiler.mir._MirLowering.declaration_enum_metadata_v1.*
 use compiler.mir._MirLoweringExpr.optional_record_owner.*
 use compiler.mir._MirLowering.declaration_providers_v1.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use compiler.mir._MirLoweringExpr.lambda_abi.{lambda_abi_type_resolved}
+use compiler.mir._MirLoweringExpr.lambda_match_scope.{lambda_match_pattern_scope_v1, lambda_match_bound_union_v1}
 use compiler.mir.nominal_owner_diagnostics.{mir_nominal_profile_take_receipt}
 use compiler.mir._MirLoweringExpr.function_signature_owner.*
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
@@ -640,6 +642,9 @@ impl MirLowering:
         val found = self.enum_runtime_id_index.get(enum_name)
         if found != nil:
             return found
+        self.ensure_declaration_enum_runtime_v1(enum_name)
+        if self.enum_runtime_id_index_q.has(enum_name): return self.enum_runtime_id_index_q[enum_name]
+        if self.enum_runtime_id_index.has(enum_name): return self.enum_runtime_id_index[enum_name]
         self.error_fatal("enum construction: missing runtime identity for '{enum_name}'", nil)
         -1
 
@@ -2494,10 +2499,11 @@ impl MirLowering:
         nil
 
     me receiver_declared_type(receiver: HirExpr) -> HirType?:
-        """Narrow receiver-type lookup for enum_match_expr_type's MethodCall
-        arm: only a bare Var/NamedVar receiver (the shape struct-method `?`
-        provenance actually needs -- e.g. `source.maybe()?` where `source` is
-        a typed parameter). Returns via `return Some(...)`/falls through to
+        """Declared receiver type for enum_match_expr_type's MethodCall arm.
+        Recover typed bindings and declared field chains without lowering or
+        evaluating the receiver. Field recursion consumes one base expression
+        per step and retains the exact registered owner/type. Returns via
+        `return Some(...)`/falls through to
         the trailing `nil`, deliberately NOT a `var`-mutated local re-narrowed
         by `if val x = <var>:` -- that pattern was empirically observed to
         misbehave here (a `match Src(v: 9).get(): case Ok(x): ...` build
@@ -2531,6 +2537,8 @@ impl MirLowering:
                 if val found_rs = rs:
                     if found_rs.type_ != nil:
                         return found_rs.type_
+            case Field(base, field_name, _):
+                return self.declared_field_hir_type(base, field_name)
             case _: ()
         nil
 
@@ -2961,11 +2969,18 @@ impl MirLowering:
             case _: ()
         ""
 
+    me enum_payload_metadata_is_unit(payload_key: text) -> bool:
+        val kind = self.enum_variant_payload_kind[payload_key]
+        if kind == "unit": return true
+        # The flat-AST bridge also represents source unit variants as Tuple([]).
+        # Require an actual empty declared slot-name list; absence is no proof.
+        kind == "tuple" and self.enum_variant_payload_names.has(payload_key) and self.enum_variant_payload_names[payload_key].len() == 0
+
     me enum_variant_is_unit(owner_key: text, variant: text) -> bool:
         """True only when the declaration registry proves this is a unit arm."""
         val qualified_payload = "{owner_key}::{variant}"
         if self.enum_variant_payload_kind.has(qualified_payload):
-            return self.enum_variant_payload_kind[qualified_payload] == "unit"
+            return self.enum_payload_metadata_is_unit(qualified_payload)
         # Bare-key fallback through the runtime_name -> bare index. The
         # previous `owner_key == bare` guard refused this fallback for
         # QUALIFIED owner keys, which is inconsistent with the sibling
@@ -2979,7 +2994,7 @@ impl MirLowering:
         val bare = self.enum_bare_of(owner_key)
         val bare_payload = "{bare}::{variant}"
         if self.enum_variant_payload_kind.has(bare_payload):
-            return self.enum_variant_payload_kind[bare_payload] == "unit"
+            return self.enum_payload_metadata_is_unit(bare_payload)
         # The compiler-seeded generic enums are not ordinary HirEnum
         # declarations, so their payload-kind table is intentionally absent.
         # Keep the one payloadless built-in spelling recognizable; Result
@@ -3477,6 +3492,7 @@ impl MirLowering:
                     val tc_syms = enum_pat_binding_syms(epayload)
                     val tc_pos = enum_pat_binding_positions(epayload)
                     var tc_slot_types: [HirType] = []
+                    self.ensure_declaration_enum_payloads_v1("{lookup_key}::{variant}")
                     if val tc_found_types = self.enum_variant_payload_types.get("{lookup_key}::{variant}"):
                         tc_slot_types = tc_found_types
                     var tc_enum_generic = self.generic_enum_constructor_owners.get(lookup_key) ?? false
@@ -5566,6 +5582,20 @@ impl MirLowering:
         never something worse.
         """
         match body.kind:
+            case MatchCase(scrutinee, arms):
+                var collected = self.collect_free_var_syms(scrutinee, param_syms, acc)
+                for arm in arms:
+                    val scope = lambda_match_pattern_scope_v1(arm.pattern)
+                    for expression in scope.expressions:
+                        collected = self.collect_free_var_syms(expression, param_syms, collected)
+                    val arm_bound = lambda_match_bound_union_v1(param_syms, scope.bindings)
+                    if arm.has_guard:
+                        collected = self.collect_free_var_syms(arm.guard, arm_bound, collected)
+                    val body_bound = self.hir_block_bound_syms(arm.body.stmts, arm_bound)
+                    collected = self.hir_block_stmts_free_syms(arm.body.stmts, body_bound, collected)
+                    if arm.body.has:
+                        collected = self.collect_free_var_syms(arm.body.value, body_bound, collected)
+                collected
             case Var(symbol):
                 val sid = mir_expr_symbol_id_value(symbol)
                 # A record constructor names a declaration, not a runtime
@@ -5877,6 +5907,22 @@ impl MirLowering:
         no-silent-wrong invariant for first-class function values.
         """
         match body.kind:
+            case MatchCase(scrutinee, arms):
+                if self.lambda_body_captures(scrutinee, param_syms): return true
+                for arm in arms:
+                    val scope = lambda_match_pattern_scope_v1(arm.pattern)
+                    # The lift's refusal gate is conditional on captures.
+                    # Unsupported patterns must reach that gate even when
+                    # their bodies have no known free variables.
+                    if not scope.supported: return true
+                    for expression in scope.expressions:
+                        if self.lambda_body_captures(expression, param_syms): return true
+                    val arm_bound = lambda_match_bound_union_v1(param_syms, scope.bindings)
+                    if arm.has_guard and self.lambda_body_captures(arm.guard, arm_bound): return true
+                    val body_bound = self.hir_block_bound_syms(arm.body.stmts, arm_bound)
+                    if self.hir_block_stmts_capture(arm.body.stmts, body_bound): return true
+                    if arm.body.has and self.lambda_body_captures(arm.body.value, body_bound): return true
+                false
             case IntLit(_, _): false
             case FloatLit(_, _): false
             case FloatLexeme(_, _): false
@@ -6038,6 +6084,17 @@ impl MirLowering:
     me lambda_capture_scan_supported(body: HirExpr) -> bool:
         """True when collect_free_var_syms traverses the whole expression."""
         match body.kind:
+            case MatchCase(scrutinee, arms):
+                if not self.lambda_capture_scan_supported(scrutinee): return false
+                for arm in arms:
+                    val scope = lambda_match_pattern_scope_v1(arm.pattern)
+                    if not scope.supported: return false
+                    for expression in scope.expressions:
+                        if not self.lambda_capture_scan_supported(expression): return false
+                    if arm.has_guard and not self.lambda_capture_scan_supported(arm.guard): return false
+                    if not self.hir_block_stmts_scan_supported(arm.body.stmts): return false
+                    if arm.body.has and not self.lambda_capture_scan_supported(arm.body.value): return false
+                true
             case IntLit(_, _) | FloatLit(_, _) | FloatLexeme(_, _) | BoolLit(_) | CharLit(_) | UnitLit | NilLit | Var(_) | NamedVar(_, _): true
             case StringLit(_, interps):
                 if val its = interps:
@@ -6403,6 +6460,9 @@ impl MirLowering:
                     # Share only admitted declaration metadata and expression
                     # descriptors. Lifted bodies have their own lambda scratch.
                     lw.declaration_repository = self.declaration_repository
+                    lw.declaration_enum_provider_keys = self.declaration_enum_provider_keys
+                    lw.declaration_enum_positions = self.declaration_enum_positions
+                    lw.declaration_enum_payload_owner = self.declaration_enum_payload_owner
                     lw.declaration_parameter_defaults = self.declaration_parameter_defaults
                     lw.declaration_parameter_defaults_ambiguous = self.declaration_parameter_defaults_ambiguous
                     lw.declaration_field_defaults = self.declaration_field_defaults
@@ -6643,6 +6703,21 @@ impl MirLowering:
             case _:
                 ()
         arg_local
+
+    me call_has_thread_transfer_boundary(name: text, symbol: SymbolId) -> bool:
+        if name != "spawn" and name != "spawn_actor":
+            return false
+        # An aliased import keeps its declaration name (`spawn`), so spelling
+        # alone also matches std.sys.pty.spawn. That owner launches a child
+        # process using a PTY handle and command line; neither argument is a
+        # task/actor payload. Use the resolved declaration owner, never the
+        # local alias. Preserve the existing transfer contract for all other
+        # spawn calls, including unresolved builtin symbols.
+        if name == "spawn":
+            val owner = self.symbols.symbol_defining_module_scalar_raw(symbol.id)
+            if mir_layout_canonical_module_name(owner) == "lib.sys.pty":
+                return false
+        true
 
     me lower_call(callee: HirExpr, args: [HirCallArg]) -> LocalId:
         self.lower_call_with_value(callee, args, nil)
@@ -6908,8 +6983,7 @@ impl MirLowering:
         # several callee shapes (direct/indirect/lambda/bitfield) -- not
         # attempted in this lane; scoped out per binding-transfer-only.
         var arg_operands: [MirOperand] = []
-        val is_thread_boundary = is_direct and (
-            direct_name == "spawn" or direct_name == "spawn_actor")
+        val is_thread_boundary = is_direct and self.call_has_thread_transfer_boundary(direct_name, direct_symbol)
         var call_param_types: [HirType] = []
         # A Var/NamedVar callee keeps its resolved symbol even when it names a
         # local function value and therefore is not a direct call. Recover the
