@@ -5,6 +5,37 @@ When asked for test executables "like GoogleTest", use and repair that existing
 feature. Do not introduce GoogleTest, another foreign framework, or a new test
 registry merely because the requested workflow resembles one.
 
+## Ordered native source roots
+
+Use repeatable `--native-source PATH` or `--native-source=PATH` when a native
+test requires configured provider overlays. The parser preserves up to five
+existing directories in order and emits repeated native-build `--source`
+arguments before the generated entry. Empty, missing, nonexistent, file-valued
+or excessive roots refuse through argument validation. Root selection forces
+Native execution, LLVM unless `--native-backend=cranelift` was selected, no
+result cache reuse, actual-execution assertions and disabled unbound daemon or
+session sharing. A pinned `SIMPLE_BINARY` producer is still required.
+
+For Windows smux, from its matching checkout, the ordered source selection is:
+
+```text
+<admitted-runtime> test <spec> --native-backend=llvm --native-source src/providers/windows_native/lib --native-source src/app --native-source src/lib --native-source src/os --native-source src/compiler --keep-artifacts --verbose
+```
+
+Put the native provider overlay before base libraries. Explicit roots replace
+default source selectors, so include every required namespace. Worker arguments
+preserve root order; invocation receipts record the exact argv and a
+length-framed ordered-root identity. Native artifact/cache names and resource
+cohort identity include that selection, while the compiler's existing snapshot
+and source-root cache authority remain authoritative. `SIMPLE_RUNTIME_PATH`
+selects linked runtime libraries and does not select source overlays.
+
+This contract is source-only pending qualified producer rebuilds and actual
+LLVM/Cranelift execution. The regression spec is
+`test/01_unit/lib/nogc_sync_mut/test_runner/native_source_roots_spec.spl`; its
+authored manual explicitly records TEST_BLOCKED. Do not infer native provider
+execution from parsed flags or generated compiler arguments.
+
 ## Build and run with the existing feature
 
 Use a source-matched self-hosted full CLI or standalone test runner and pin the
