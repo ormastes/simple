@@ -839,3 +839,196 @@ selected-symbol/link ownership, compiler Hello, both producer fixture runs,
 and the existing interactive/session/cleanup/performance gates. The earlier
 full tmux gap inventory is unchanged; this checkpoint is not full parity or
 runtime PASS.
+
+### Actual diagnostic link artifact review (2026-10-17)
+
+The newly executed private diagnostic link has an exit-zero receipt in
+`root-link.exit.txt` and `root-link.job.env`. Independently inspected output
+`simple-diagnostic.exe` is 22,857,216 bytes, SHA256
+`BAD4C7FCED5D4C945A24A3DEB8F601685446A76DBE2ACE5938FEECCAEA1B04A9`.
+These artifacts reside under the frozen checkout's private
+`build/smux-windows-bootstrap/diagnostic-relink` directory.
+
+The public map contains exactly one `__simple_pow` entry (line 31681), with
+owner `intrinsics-helper:runtime_core_intrinsics.obj`. This establishes actual
+selection of the added existing translation unit for this diagnostic link.
+The map contains no public `__simple_intrinsic_bounds_check` entry. The stderr
+warning at line 3093 reports duplicate definitions from native-all's cgu13
+member and the helper object; it does not establish a surviving bounds-check
+body. Dead stripping is a possible explanation, not a demonstrated result.
+The duplicate ownership issue therefore remains open for canonical runtime
+composition rather than being dismissed on successful linking.
+
+The inspected recipe retains its existing `/FORCE:MULTIPLE` and has no
+unresolved-symbol allowance. `root-link.environment.txt` explicitly labels
+the selected MSVC/SDK paths as new diagnostic environment metadata, not the
+uncaptured original environment. This is evidence of a successful diagnostic
+link only. The original canonical build is still failed, and this review does
+not supply compiler Hello, canonical admission, or smux runtime qualification.
+
+### Diagnostic Hello transitive LLVM dependency (2026-10-17)
+
+The diagnostic compiler's cold Hello build failed normally with exit 1 and
+`quiescent=1`, not a timeout. Retained `root-hello-cold-build.stderr.log`
+reports unresolved LLVM C API symbols, including `LLVMAddGlobal` and
+`LLVMBuildIntToPtr`; the latter is referenced by the selected native-all
+archive's Rust compiler cgu12 member. This is a new, concrete link dependency
+failure, not a successful compiler Hello.
+
+Source inspection confirms `native_all_support.spl:27` and line 31 select
+backfill plus native-all for available core-C/auto runtime compositions.
+Changing only the bundle flag therefore does not establish removal of the
+transitive LLVM dependency. Native MSVC dependency selection is consumed in
+`native_linking.spl:2497` and line 2643. A canonical fix should carry the
+selected runtime archive's LLVM dependency through those link paths using
+qualified toolchain authority, with missing-library diagnostics and actual
+link/execution coverage. App source changes or dummy API definitions would
+not repair this ownership contract.
+
+One bounded diagnostic supplying the exact pinned LLVM-C import library via
+the actual linker's `LINK` environment contract is accepted as a test of this
+specific hypothesis. It must record the import-library hash, selected DLL/PATH
+authority and newly supplied environment, preserve the failed attempt, and
+retain ordinary unresolved-symbol errors. This approval is not a result and
+does not replace a canonical source fix or admitted-producer rebuild.
+
+### Discarded print-alias sections: concrete owner diagnosis (2026-10-17)
+
+After adding the pinned LLVM import library, the next actual diagnostic Hello
+link failed on `rt_value_print` and `rt_value_println` relocations into discarded
+sections. The retained full stderr is
+`C:/Users/ormas/AppData/Local/Temp/native-build-stderr-24252-1.log`; lines
+3569–3573 identify references from native-all's Rust runtime cgu11 registry.
+Earlier duplicate warnings at 3037–3063 identify the C runtime_native object
+and Rust cgu10 definitions for `rt_print`, `rt_println`, `rt_print_value`, and
+`rt_println_value`.
+
+Read-only inspection of the actual native-all archive established the cause.
+Its COFF symbol table places `rt_print` and `rt_value_print` at offset zero in
+the same section 433; `rt_println` and `rt_value_println` share section 437.
+Disassembly shows those sections are five-byte tail jumps with relocations to
+`rt_print_value` and `rt_println_value`, respectively. Thus selecting the earlier
+C definitions for the colliding short names discards the Rust sections that
+also own otherwise unique word-order aliases. This is actual object evidence,
+not an assumption about optimizer behavior.
+
+Do not repair this by reversing archive precedence: C `rt_print(const char*)`
+and Rust's `rt_print(RuntimeValue)` have different argument meaning. The narrow
+compatible repair is for the selected C tagged printer owner to also expose
+`rt_value_print(int64_t)` and `rt_value_println(int64_t)` as forwarding exports
+to its existing `rt_print_value`/`rt_println_value`. That reproduces the exact
+tail-call destinations present in the failing Rust object without changing
+printing algorithms or raw-string symbol ownership. The current integrated
+and reviewed remote sources do not contain these C aliases. Merely adding
+`#[inline(never)]` to Rust wrappers is not accepted without optimized COFF proof
+that the aliases survive in independent sections.
+
+ABI evidence is deliberately scoped. Rust `RuntimeValue` is a transparent u64
+(`value/core.rs:42`), and its tag mask, integer, heap, float, special, nil and
+boolean encodings match the C tagged-word constants. This does not establish
+universal heap interoperability: Rust `RuntimeString` includes a hash field
+before its bytes, whereas C `RtCoreString` does not. The repair preserves the
+already selected C canonical printer behavior; it does not resolve that
+separate representation boundary.
+
+A single diagnostic private object containing only the two forwarding exports,
+injected with the pinned LLVM import library while preserving existing object
+order and ordinary unresolved-symbol errors, is accepted to test this precise
+repair. Record source/object hashes, exact injected order and selected ownership;
+then execute the actual produced Hello. Canonical source ownership plus mixed
+C/native-all link-and-call regressions remain required, including tagged nil,
+booleans, integers, strings made by the selected C constructor, and independent
+raw-pointer printing. A private shim link or source review alone supplies no
+canonical admission or smux runtime PASS.
+
+### Mixed-runtime Vulkan failure: diagnostic profile correction (2026-10-17)
+
+The initial mixed-runtime print regression also failed on three Vulkan aliases.
+Actual native-all COFF evidence places `rt_vulkan_device_count`,
+`rt_vulkan_get_device`, `rt_vulkan_provider_device_count`, and
+`rt_vulkan_selected_device_driver_identity_hash` in cgu06 section 335 with
+leader `rt_get_host_target_code`. The mixed-link stderr at line 1537 reports
+the C/Rust duplicate for that leader. This explains why selecting the C
+definition strands the other Rust symbols; it does not imply their distinct
+Vulkan operations can safely be aliased to one another.
+
+The diagnostic compilation supplied `SIMPLE_CORE_C_STANDALONE=1` while linking
+native-all. The C host-target definition already sits inside that guard
+(`runtime_native.c:739–853`). The canonical runtime compiler explicitly omits
+the standalone flag for native-all (`runtime_compiler.spl:809–814`). The
+remote runtime_native diff from f612 contains container-probe fixes, not new
+Vulkan provider definitions. Therefore no Vulkan source patch is warranted
+from this experiment. Correcting the diagnostic compilation profile removes
+the known duplicate owner; actual relink remains the deciding evidence.
+Source confirms C/Rust host architecture code tables agree (0, 1, 2, -1).
+
+### LLVM dependency patch: configured-input review finding (2026-10-17)
+
+The new staging helper checks the producer's declared import-library path and
+hash, copies and rechecks the bytes before the generation seal, and carries
+the library plus receipt through tuple copies. Its pure selector correctly
+rejects a foreign LLVM-C library when that library is in the inspected list.
+These are source findings; shell test outcomes are owned by the implementation
+lane and no Simple execution was performed by this reviewer.
+
+**P1, reported to implementation owner:** the first wiring revision validated
+object inputs and selected runtime archives but omitted already configured
+MSVC libraries. `native_msvc_runtime_libraries` deduplicates by basename, so
+an existing foreign `LLVM-C.lib` could suppress the qualified dependency even
+while preflight validated the correct authority file. Both internal and
+external MSVC paths must validate the combined actual configured/runtime
+inputs before basename deduplication. The four pure selector cases alone do
+not establish this call-site property. Source acceptance is withheld for
+this finding pending the narrow correction and regression review.
+
+### Print owner correction: scoped mixed-ABI evidence accepted (2026-10-17)
+
+The corrected native-all compile profile produced a successful mixed C/Rust
+link and execution. Independently inspected
+`tagged-print-native-all-link.job.env` and `tagged-print-native-all-run.job.env`
+both record complete, exit 0, quiescent 1. The retained stdout exactly matches
+`tagged_print_word_order_alias_regression.expected.stdout` after CRLF
+normalization, and run stderr is zero bytes. No test was rerun by this reviewer.
+
+The map assigns all six names (`rt_print`, `rt_println`, `rt_print_value`,
+`rt_println_value`, `rt_value_print`, `rt_value_println`) to
+`native-all-subset-runtime_native.obj`. The fixture actually calls raw-pointer
+printers separately, and word-order tagged printers with nil, positive and
+negative integers, both booleans and C-constructor strings. The source patch
+only forwards the two new aliases to the existing C tagged printers.
+
+This closes the print-alias P1 for the reviewed source and demonstrated mixed
+ABI composition. It also resolves the Vulkan diagnostic investigation without
+a Vulkan source change: the corrected native-all compilation excludes the
+standalone C section leader. This evidence does not establish Rust-allocated
+heap interchange, canonical rebuilt-producer admission or smux qualification.
+The independently reported configured LLVM-library bypass remains open until
+its implementation correction is reviewed.
+
+### LLVM configured-input correction and IO export review (2026-10-17)
+
+The configured LLVM-library P1 is resolved in the reviewed source revision.
+`native_all_msvc_llvm_link_inputs` combines configured libraries, object inputs
+and selected runtime inputs before invoking the exact-authority validator.
+The external MSVC call at `native_linking.spl:2670` performs this validation
+before basename deduplication, and the internal COFF call at line 2519 includes
+resolved configured library files. The fifth selector scenario uses this actual
+combined planner to reject foreign and bare configured LLVM libraries when
+native-all arrives through runtime or object inputs, and checks the valid
+ordered result. No further demonstrated P0/P1 was found in this bounded
+correction review. Simple compilation/execution remains pending; already
+reported shell custody checks were not rerun.
+
+The separate IO facade correction is also accepted by source inspection.
+`io.spl` directly exports `rt_debug_set_active` from its concrete `debug_stubs`
+owner and removes that name from the problematic self-reexport list. The added
+`ds_is_active` reads the actual state mutated by `ds_set_active`. The native
+fixture imports exactly the same `lib.nogc_sync_mut.io.debug_state` owner used
+by debug_stubs and checks false, true, false transitions with distinct failure
+codes before producing its expected output. This is a meaningful state oracle,
+not a successful-void-call assertion.
+
+The IO bug report correctly distinguishes the implementation lane's observed
+76/76 HIR completion from its bounded timeout before native execution. This
+review accepts the source and fixture for the scoped change; it does not
+convert HIR clearance into a runtime state-transition or smux PASS.

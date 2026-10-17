@@ -58,10 +58,10 @@ for that option. Bare `--native` is not a recognized mode selector in this
 parser and must not be used as proof that a test executed natively.
 
 ```text
-<admitted-runtime> test test/03_system/tools/smux_service_features_spec.spl --native-backend=llvm
-<admitted-runtime> test test/03_system/tools/smux_windows_conpty_features_spec.spl --native-backend=llvm
-<admitted-runtime> test test/03_system/tools/smux_named_layouts_spec.spl --native-backend=llvm
-<admitted-runtime> test test/03_system/tools/smux_service_layouts_spec.spl --native-backend=llvm
+<admitted-runtime> test test/03_system/tools/smux_service_features_spec.spl --native-backend=llvm --native-source src/providers/windows_native/lib --native-source src/app --native-source src/lib --native-source src/os --native-source src/compiler
+<admitted-runtime> test test/03_system/tools/smux_windows_conpty_features_spec.spl --native-backend=llvm --native-source src/providers/windows_native/lib --native-source src/app --native-source src/lib --native-source src/os --native-source src/compiler
+<admitted-runtime> test test/03_system/tools/smux_named_layouts_spec.spl --native-backend=llvm --native-source src/providers/windows_native/lib --native-source src/app --native-source src/lib --native-source src/os --native-source src/compiler
+<admitted-runtime> test test/03_system/tools/smux_service_layouts_spec.spl --native-backend=llvm --native-source src/providers/windows_native/lib --native-source src/app --native-source src/lib --native-source src/os --native-source src/compiler
 <admitted-runtime> spipe-docgen test/03_system/tools/smux_service_features_spec.spl --output doc/06_spec --no-index
 <admitted-runtime> spipe-docgen test/03_system/tools/smux_windows_conpty_features_spec.spl --output doc/06_spec --no-index
 <admitted-runtime> spipe-docgen test/03_system/tools/smux_named_layouts_spec.spl --output doc/06_spec --no-index
@@ -70,7 +70,7 @@ parser and must not be used as proof that a test executed natively.
 <admitted-runtime> sspec-maintain scan test/03_system/tools/smux_windows_conpty_features_spec.spl
 <admitted-runtime> sspec-maintain scan test/03_system/tools/smux_named_layouts_spec.spl
 <admitted-runtime> sspec-maintain scan test/03_system/tools/smux_service_layouts_spec.spl
-<admitted-runtime> test test/03_system/app/testing/feature/ui_sspec_evidence_audit_spec.spl --native-backend=llvm
+<admitted-runtime> test test/03_system/app/testing/feature/ui_sspec_evidence_audit_spec.spl --native-backend=llvm --native-source src/providers/windows_native/lib --native-source src/app --native-source src/lib --native-source src/os --native-source src/compiler
 ```
 
 Compiled mode must execute actual examples; interpreter loading alone cannot
@@ -184,7 +184,7 @@ Execution remains TEST_BLOCKED pending an admitted runner and actual compiled
 application. The additional commands are:
 
 ```text
-SMUX_TEST_BINARY=<actual-phase2-or-phase3-smux.exe> <admitted-runtime> test test/03_system/tools/smux_windows_owner_lifecycle_spec.spl --native-backend=llvm
+SMUX_TEST_BINARY=<actual-phase2-or-phase3-smux.exe> <admitted-runtime> test test/03_system/tools/smux_windows_owner_lifecycle_spec.spl --native-backend=llvm --native-source src/providers/windows_native/lib --native-source src/app --native-source src/lib --native-source src/os --native-source src/compiler
 <admitted-runtime> spipe-docgen test/03_system/tools/smux_windows_owner_lifecycle_spec.spl --output doc/06_spec --no-index
 <admitted-runtime> sspec-maintain scan test/03_system/tools/smux_windows_owner_lifecycle_spec.spl
 ```

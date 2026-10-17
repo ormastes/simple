@@ -73,3 +73,115 @@ The last application operand is supplied only to fixtures that require the real 
 Prepared reconstructed diagnostic argv is retained as `build/smux-windows-bootstrap/diagnostic-relink/reconstructed-link.args.json` and a single-line Clang response file. It preserves retained `_main_stub.o`/`_init_all.o`, NativeAll-before-core-C archive order, 212 actual module-init roots extracted from the module archive (excluding the generic dynamic initializer), three source-derived runtime retention anchors present in NativeAll, all 27 frozen Windows platform libraries, and the exact LLVM 23 compiler builtins/LLVM-C import libraries. It adds a private one-member `intrinsics-helper.lib` after the existing runtime archives and a MAP output; original `/FORCE:MULTIPLE` and `/errorlimit:0` remain, with no unresolved-symbol relaxation or added strip policy. The private helper archive SHA-256 is `51a7d2e67086c6ea7098ffe652f58bd57fe33dfc3211172e11798ce2c9b3b433`. Actual original module/init/archive bytes were hashed into `original-inputs.sha256` (1352 input paths).
 
 A Clang `-###` dry run of that single-line response file exited 0 and selected LLVM 23 `lld-link`, target x86_64-pc-windows-msvc. An earlier multiline response-file layout was rejected by Clang's `/link` line handling and is preserved separately; it did not execute a link. The source-derived recipe is undergoing independent review before actual candidate construction. No candidate/Hello or downstream fixture outcome is claimed.
+
+## 2026-10-17: remote integration and actual diagnostic outcomes
+
+The editing source is now isolated at `D:/dev/simple-smux-upstream-20261017`,
+based on fetched `origin/release_phase3` revision
+`e37c260fe5dfa6d1fdb23ef0793a11999b548d4f`. The reviewed smux changes were
+cherry-picked there. Remote commit `677b77f29073a1c1805299919b19668bfee2e0f9`
+already supplies `runtime_core_intrinsics.c` in the bootstrap manifest;
+integration commit `7a2fa6eee23` removes the duplicate introduced by combining
+the repairs. The private-header fingerprint dependency and actual archive ABI
+regression remain. Commit `5be1e7e7578` carries the ordered native test source
+selector and shared-client fixture. No frozen producer/source was updated.
+
+The source-reviewed reconstructed diagnostic link ran under the existing
+180-second Windows Job supervisor. `root-link.job.env` records complete,
+exit 0, quiescent 1. The resulting `simple-diagnostic.exe` is 22,857,216 bytes,
+SHA-256 `bad4c7fced5d4c945a24a3deb8f601685446a76dbbe2ace5938feeccaea1b04a9`.
+`simple-diagnostic.map` identifies exactly one `__simple_pow` public owner,
+`intrinsics-helper:runtime_core_intrinsics.obj`. The bounds-check overlap has
+a duplicate warning but no public MAP entry; dead stripping is an inference,
+not proof of a surviving body. This binary is diagnostic and unadmitted.
+
+Three actual Hello compile attempts are retained under
+`build/smux-windows-bootstrap/diagnostic-relink/` in the frozen checkout:
+
+| Evidence prefix | Changed input | Actual result |
+| --- | --- | --- |
+| `root-hello-build` | Initial diagnostic producer | Exit 1: SCV compile-event journal missing |
+| `root-hello-cold-build` | Supported `SIMPLE_SCV_INVENTORY_COLD_INIT=1` | Parse/HIR 1/1, then exit 1: native-all has unresolved LLVM APIs |
+| `root-hello-llvm-build` | Same cold-init policy plus exact pinned `LLVM-C.lib` through LINK | Parse/HIR 1/1, then exit 1: relocations against discarded `rt_value_print`/`rt_value_println` sections |
+
+The latter two Job receipts record complete, exit 1 and quiescent 1. They
+are linker failures, not observation timeouts. Full commands, logs, selected
+environment and import-library hash are retained beside the launch scripts.
+The LLVM injection is diagnostic only; canonical source must stage and validate
+the exact producer dependency through its runtime authority. Astra is reviewing
+the newly exposed C/Rust provider collision separately.
+
+Those three attempts produced no Hello output executable. The canonical f612
+campaign remains failed; subsequent diagnostic evidence is separate below.
+
+## Diagnostic Hello gate passed with reviewed ABI forwarding
+
+Astra inspected the actual retained COFF sections and alias relocations.
+The Rust `rt_value_print`/`rt_value_println` forwarding exports share sections
+with `rt_print`/`rt_println`. The selected C raw-string functions discard those
+Rust sections and strand the otherwise unique aliases. Reordering archives
+would change raw-string versus tagged-value ownership. Instead, the reviewed
+private `tagged-print-alias-shim.c` forwards the two aliases to the already
+selected C `rt_print_value`/`rt_println_value`, preserving their actual call
+targets without a new printing algorithm or linker relaxation.
+
+`root-hello-alias-build.job.env` records complete, exit 0, quiescent 1 and
+peak RSS 3,412,368 KiB. The produced `root-hello-alias.exe` then ran under
+`root-hello-alias-run.job.env`: complete, exit 0, quiescent 1, peak RSS 2,560 KiB,
+stdout exactly `windows native hello` plus newline, empty stderr. Actual
+compiler/output hashes are in `root-hello-alias.output.sha256`; shim source,
+object and import-library hashes are in `root-hello-alias.inputs.sha256`.
+This is the first real diagnostic Hello compile/run success, not canonical
+admission. The initial shim compile exposed Git Bash slash-option conversion;
+that failed log is retained, and the corrected command uses dash options.
+
+The same reviewed shim/import-library composition now builds the frozen
+`270d5b30a1acc77fc6157e6202dd1d48934948a7` product under
+`D:/dev/simple-smux-product-270d5b30a1a/build/smux-diagnostic-phase2/`, with
+ordered provider roots and an existing no-breakaway Windows Job watchdog
+(600 seconds, 5,859,375 KiB RSS ceiling). At this entry the build is live, not
+a product PASS. Phase 3, native fixture, SSpec and docgen evidence remain absent.
+
+The canonical C forwarding exports and a mixed-runtime C ABI fixture are
+authored in the integration tree. Initial mixed tests incorrectly enabled
+`SIMPLE_CORE_C_STANDALONE` while linking native-all. Astra traced the resulting
+Vulkan alias errors to the C host-target getter enabled by that flag; this
+was a diagnostic recipe defect, not a remote Vulkan source regression. No
+Vulkan exports or archive-order changes were added.
+
+The corrected mixed test compiles the original 32 selected C TUs (the current
+integration source for `runtime_native.c`, frozen originals for the others)
+with native-all's MSVC flags `/c /O2 /Gy /MD /std:c11` and
+`/DSIMPLE_RUNTIME_MEMORY_OWNER=1`, without standalone/dynload defines. It links
+those real objects with the retained native-all archive and exact LLVM import
+library. `tagged-print-native-all-link.job.env` and
+`tagged-print-native-all-run.job.env` both record complete, exit 0, quiescent 1.
+Actual stdout matches the authored ABI fixture's expected output after CRLF
+normalization; stderr is empty. The fixture exercises raw C-pointer printing,
+nil, positive/negative integers, booleans and C-created tagged strings. The MAP
+identifies all six print names in the actual patched C runtime object.
+This does not establish Rust-created heap string interchange or a full runtime
+admission. No passing check was rerun.
+
+The first frozen-product smux diagnostic is now terminal: complete, exit 1,
+quiescent 1, peak RSS 2,080,916 KiB. It parsed 115 modules and completed HIR for
+114, then refused `src/lib/nogc_sync_mut/io.spl` with `module
+std.nogc_sync_mut.io has no exported item rt_debug_set_active`. The aggregate
+HIR failure blocked backend/publication, so there is no smux executable. This
+is not a timeout or a runtime feature verdict. A direct owner-export repair
+and a real facade/state regression are assigned separately.
+
+The scoped print repair is now merged through PR #3609 into `release_phase3`,
+merge `8bcff950fa620af8af3ec313112a08407db71ca7`. Its isolated exact head was
+`0ccaf2bc4c1e12b6a1a48523b87ef776b72eb4c7`, matching the reviewed source bytes.
+No publication or release tag was created. The larger smux PR remains draft.
+
+Integration checkpoint `28f6ee14653` fixes the I/O concrete owner export and
+adds a real state getter/fixture. Its actual bounded regression cleared HIR
+76/76 with zero failed/unfinished modules, then timed out before output
+publication (124, quiescent 1). There are no native object/ICE artifacts in that
+row and no executed state-transition PASS. Checkpoint `be59642abc6` stages
+the producer-pinned LLVM import dependency and validates combined actual link
+inputs before deduplication in both MSVC routes. Astra accepted both source
+repairs. Shell syntax and byte-custody tests passed; five Simple selector
+scenarios and canonical native qualification remain unexecuted.

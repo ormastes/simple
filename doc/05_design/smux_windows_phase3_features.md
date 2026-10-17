@@ -113,3 +113,20 @@ Manual geometry also reflows before a sibling frame, including the interval
 between a successful split and the requesting client's next layout command.
 Unexpected client crashes can still leave attachment records; heartbeat/lease
 expiry is an outstanding lifecycle gate.
+
+## Native SSpec provider selection
+
+The native runner accepts repeated `--native-source PATH` selectors in order.
+For this cohort, select the Windows overlay before `src/app`, `src/lib`,
+`src/os` and `src/compiler`. The canonical runner owner validates up to five
+existing directories, forces native execution without unbound result reuse,
+and forwards those roots through worker arguments into native-build's ordered
+`--source` arguments. Invocation receipts, native artifact identity and metrics
+cohorts bind the ordered selector identity. Configured family facades continue
+delegating to the common concrete owner; no GC family is globally pinned.
+
+`--native-backend=llvm` alone cannot select the Windows providers, and
+`SIMPLE_LIB` affects interpreter lookup rather than this native AOT path. The
+ten new source-root contract scenarios and their authored manual remain
+unexecuted. Rebuild/admit the actual runner before using the new flags as
+Windows test evidence. See `doc/07_guide/infra/testing/native_test_binary_workflow.md`.

@@ -33,6 +33,7 @@ screens. This is not a selection of new optional requirements.
 | REQ-SMUX-INTERACTIVE-004 | Render real synchronized styled cells and the selected pane cursor at the correct canvas positions | Frame snapshot specs and native terminal captures |
 | REQ-SMUX-INTERACTIVE-005 | Browse retained history in a local copy viewport while protecting child input | Viewport specs and actual terminal interaction |
 | REQ-SMUX-INTERACTIVE-006 | Save and restore both native console modes; detach closes only the client and leaves the owner and sibling client running | Native console fixture and supervised two-client fixture |
+| REQ-NATIVE-TEST-SOURCE-001 | Native SSpec compilation preserves explicitly ordered provider roots through parser, worker, compiler arguments and receipt/cache identities, refusing invalid roots | Native source-root parser/contract regression and actual Windows configured-owner SSpec execution |
 | REQ-SMUX-LAYOUT-001 | Five named layouts, persisted selection, correct rectangles and window isolation | Model and service layout specs |
 | REQ-SMUX-LAYOUT-002 | Model selection survives focus, feed, zoom, resize and pane changes when it fits | Model layout specs |
 | REQ-SMUX-LAYOUT-003 | Model compositing places row/tiled content at the selected rectangles | Model layout specs |
@@ -58,3 +59,12 @@ declare this task complete.
 Execution, generated manuals and traceability are tracked in
 `doc/03_plan/sys_test/smux_windows_phase3_features.md`; all source-only results
 remain unverified until the matching runnable artifact and assertions exist.
+
+Build prerequisite `REQ-WINDOWS-NATIVE-ALL-LLVM-DEPENDENCY` requires MSVC
+native-all consumers to select the exact producer-qualified LLVM import
+library, validate all actual linker inputs before basename deduplication and
+reject foreign configured substitutes. Trace: `native_all_support.spl`, both
+MSVC paths in `native_linking.spl`, the bootstrap authority staging owner,
+`test/01_unit/compiler/linker/windows_native_all_llvm_dependency_spec.spl` and
+its mirrored manual. Shell custody evidence passes; the five Simple cases and
+canonical rebuilt producer/native link remain pending.
