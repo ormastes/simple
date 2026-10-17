@@ -123,13 +123,17 @@ fn hir_module_encode_reason(module: HirModule) -> text:
 # faulted on p2_add's functions dict while mono's dict-index reads of the
 # same dict succeeded. This probe discriminates rt_dict_values as the bug.
 fn hir_module_first_fn_name_v1(module: HirModule) -> text:
-    val ks: [SymbolId] = module.functions.keys()
-    if ks.len() == 0:
-        return ""
-    val k: SymbolId = ks[0]
-    if module.functions[k] == nil:
-        return ""
-    module.functions[k].name
+    # Cycle-139: mono's EXACT shape -- materialized keys + for-in element
+    # used DIRECTLY in the bracket. The annotated key bind (`val k: SymbolId
+    # = ks[0]`, the cycle-138 form) loses aggregate-key identity: the
+    # cycle-139 hir-final-idx verdict printed first_fn_name EMPTY -- the nil
+    # guard fired on the dict's own key. No named key bind anywhere.
+    val ks = module.functions.keys()
+    for raw_k in ks:
+        if module.functions[raw_k] == nil:
+            continue
+        return module.functions[raw_k].name
+    return ""
 
 # Cycle-138: dict-index variant of the scalar extraction. The .values()-array
 # transport draws corrupted for Dict<SymbolId, HirFunction> (the cycle-132-136
@@ -138,17 +142,23 @@ fn hir_module_first_fn_name_v1(module: HirModule) -> text:
 # is the defect, bug record alongside). This walks keys()[position] with the
 # guard-first double access -- the exact pattern mono's collect lane proved.
 fn hir_fn_scalars_at_key_v1(functions: Dict<SymbolId, HirFunction>, position: i64) -> (SymbolId, text, bool, bool, bool, bool, FunctionAttr, HirType, [HirParam]):
-    val ks: [SymbolId] = functions.keys()
-    if position < 0 or position >= ks.len():
-        return (SymbolId(id: 0), "", false, false, false, false, FunctionAttr.default(),
-            HirType(kind: HirTypeKind.Error, span: Span.empty()), [])
-    val k: SymbolId = ks[position]
-    if functions[k] == nil:
-        return (SymbolId(id: 0), "", false, false, false, false, FunctionAttr.default(),
-            HirType(kind: HirTypeKind.Error, span: Span.empty()), [])
-    (functions[k].symbol, functions[k].name, functions[k].is_extern,
-     functions[k].is_method, functions[k].is_static, functions[k].has_export_attr,
-     functions[k].func_attr, functions[k].return_type, functions[k].params)
+    # Cycle-139: same mono shape as hir_module_first_fn_name_v1 -- the for-in
+    # element goes STRAIGHT into the bracket (no `val k` bind; the annotated
+    # bind loses aggregate-key identity and the guard silently nil-skips,
+    # the cycle-139 verdict).
+    val ks = functions.keys()
+    var seen: i64 = 0
+    for raw_k in ks:
+        if seen == position:
+            if functions[raw_k] == nil:
+                return (SymbolId(id: 0), "", false, false, false, false, FunctionAttr.default(),
+                HirType(kind: HirTypeKind.Error, span: Span.empty()), [])
+            return (functions[raw_k].symbol, functions[raw_k].name, functions[raw_k].is_extern,
+                functions[raw_k].is_method, functions[raw_k].is_static, functions[raw_k].has_export_attr,
+                functions[raw_k].func_attr, functions[raw_k].return_type, functions[raw_k].params)
+        seen = seen + 1
+    (SymbolId(id: 0), "", false, false, false, false, FunctionAttr.default(),
+        HirType(kind: HirTypeKind.Error, span: Span.empty()), [])
 
 # Cycle-128: per-field module-handle getters. The MIR prescan feeder used to
 # marshal five field-expression reads off one array element at a single big
