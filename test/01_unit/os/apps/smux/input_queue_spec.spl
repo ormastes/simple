@@ -1,0 +1,159 @@
+﻿"""
+Bounded owner input queue: pure byte offsets, UTF-8 retention and refusal.
+No provider is substituted and no asynchronous delivery/fairness is claimed.
+# @manual: primary
+Execution/docgen pending TEST_BLOCKED: no admitted general runner.
+"""
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.input_queue.{PaneInput, pane_input_new, pane_input_enqueue,
+    pane_input_remaining, pane_input_advance, pane_input_fail}
+use os.apps.smux.service.{PaneRecord}
+use os.apps.smux.contract.{MuxPane}
+
+# @inline
+fn full_input() -> text:
+    var block = "x"
+    var i = 0
+    while i < 16:
+        block = block + block
+        i = i + 1
+    return block
+
+describe "smux bounded input queue ownership":
+    it "should start empty without a deferred error":
+        # @req REQ-SMUX-INPUT-001
+        step("Create production input state")
+        val queue = pane_input_new()
+        expect(queue.original).to_equal("")
+        expect(queue.offset).to_equal(0)
+        expect(queue.error).to_equal("")
+        expect(pane_input_remaining(queue).len()).to_equal(0)
+
+    it "should retain UTF-8 bytes when only the leading byte was accepted":
+        # @req REQ-SMUX-INPUT-001
+        step("Enqueue a two byte Unicode scalar and advance one byte")
+        val queued = pane_input_enqueue(pane_input_new(), "é")
+        expect(queued.is_ok()).to_equal(true)
+        expect(queued.unwrap().bytes).to_equal([195, 169])
+        val advanced = pane_input_advance(queued.unwrap(), 1)
+        expect(advanced.is_ok()).to_equal(true)
+        expect(advanced.unwrap().original).to_equal("é")
+        expect(advanced.unwrap().offset).to_equal(1)
+        expect(pane_input_remaining(advanced.unwrap())).to_equal([169])
+        expect(queued.unwrap().offset).to_equal(0)
+
+    it "should append after a partial UTF-8 scalar without replaying accepted bytes":
+        # @req REQ-SMUX-INPUT-001
+        val queued = pane_input_enqueue(pane_input_new(), "é").unwrap()
+        val advanced = pane_input_advance(queued, 1).unwrap()
+        step("Append an emoji while preserving the existing byte cursor")
+        val appended = pane_input_enqueue(advanced, "😀")
+        expect(appended.is_ok()).to_equal(true)
+        expect(appended.unwrap().original).to_equal("é😀")
+        expect(appended.unwrap().offset).to_equal(1)
+        expect(pane_input_remaining(appended.unwrap())).to_equal([169, 240, 159, 152, 128])
+
+    it "should retain a zero byte acceptance without replay or loss":
+        # @req REQ-SMUX-INPUT-001
+        val queue = pane_input_enqueue(pane_input_new(), "abc").unwrap()
+        step("Advance by zero to represent provider backpressure")
+        val advanced = pane_input_advance(queue, 0)
+        expect(advanced.is_ok()).to_equal(true)
+        expect(advanced.unwrap().offset).to_equal(0)
+        expect(pane_input_remaining(advanced.unwrap())).to_equal([97, 98, 99])
+
+    it "should clear consumed input before accepting a new command":
+        # @req REQ-SMUX-INPUT-001
+        val queue = pane_input_enqueue(pane_input_new(), "abc").unwrap()
+        step("Complete the old input then enqueue another command")
+        val consumed = pane_input_advance(queue, 3).unwrap()
+        expect(consumed.original).to_equal("")
+        expect(consumed.bytes.len()).to_equal(0)
+        expect(consumed.offset).to_equal(0)
+        val next = pane_input_enqueue(consumed, "d").unwrap()
+        expect(next.original).to_equal("d")
+        expect(pane_input_remaining(next)).to_equal([100])
+
+    it "should bound a single provider slice to 4096 bytes":
+        # @req REQ-SMUX-INPUT-001
+        val queue = pane_input_enqueue(pane_input_new(), full_input()).unwrap()
+        step("Read only the next bounded byte prefix")
+        expect(queue.bytes.len()).to_equal(65536)
+        expect(pane_input_remaining(queue).len()).to_equal(4096)
+        val advanced = pane_input_advance(queue, 4096).unwrap()
+        expect(advanced.offset).to_equal(4096)
+        expect(pane_input_remaining(advanced).len()).to_equal(4096)
+
+    it "should refuse queue overflow atomically at the retained byte limit":
+        # @req REQ-SMUX-INPUT-001
+        val queue = pane_input_enqueue(pane_input_new(), full_input()).unwrap()
+        step("Append to a full queue without changing its existing state")
+        val refused = pane_input_enqueue(queue, "x")
+        expect(refused.is_err()).to_equal(true)
+        expect(refused.unwrap_err()).to_equal("pane input capacity reached")
+        expect(queue.bytes.len()).to_equal(65536)
+        expect(queue.offset).to_equal(0)
+        step("Partially consumed original storage still counts toward the bound")
+        val partial = pane_input_advance(queue, 4096).unwrap()
+        expect(pane_input_enqueue(partial, "x").is_err()).to_equal(true)
+        expect(partial.offset).to_equal(4096)
+
+    it "should refuse negative oversized and out of range advance counts":
+        # @req REQ-SMUX-INPUT-001
+        val queue = pane_input_enqueue(pane_input_new(), "abc").unwrap()
+        step("Reject provider counts outside the submitted byte prefix")
+        expect(pane_input_advance(queue, -1).unwrap_err()).to_equal("invalid pane input byte count")
+        expect(pane_input_advance(queue, 4).unwrap_err()).to_equal("invalid pane input byte count")
+        val large = pane_input_enqueue(pane_input_new(), full_input()).unwrap()
+        expect(pane_input_advance(large, 4097).unwrap_err()).to_equal("invalid pane input byte count")
+        expect(queue.offset).to_equal(0)
+
+    it "should reject malformed offsets without slicing beyond retained bytes":
+        # @req REQ-SMUX-INPUT-001
+        step("Validate offsets before advancing enqueueing or extracting a prefix")
+        val negative = PaneInput(original: "a", bytes: [97], offset: -1, error: "")
+        val past_end = PaneInput(original: "a", bytes: [97], offset: 2, error: "")
+        expect(pane_input_advance(negative, 0).unwrap_err()).to_equal("invalid pane input offset")
+        expect(pane_input_enqueue(past_end, "b").unwrap_err()).to_equal("invalid pane input offset")
+        expect(pane_input_remaining(negative).len()).to_equal(0)
+        expect(pane_input_remaining(past_end).len()).to_equal(0)
+
+    it "should retain deferred write errors and refuse subsequent input":
+        # @req REQ-SMUX-INPUT-001
+        val queue = pane_input_enqueue(pane_input_new(), "abc").unwrap()
+        val partial = pane_input_advance(queue, 1).unwrap()
+        step("Latch a real owner reported error in pure queue state")
+        val failed = pane_input_fail(partial, "provider write failed")
+        expect(failed.error).to_equal("provider write failed")
+        expect(failed.original).to_equal("abc")
+        expect(failed.offset).to_equal(1)
+        expect(pane_input_enqueue(failed, "d").unwrap_err()).to_equal("provider write failed")
+        expect(pane_input_advance(failed, 1).unwrap_err()).to_equal("provider write failed")
+        expect(pane_input_fail(failed, "later error").error).to_equal("provider write failed")
+        expect(pane_input_fail(queue, "").error).to_equal("pane input write failed")
+
+    it "should preserve input across focus resize and output transitions":
+        # @req REQ-SMUX-INPUT-001
+        val queue = pane_input_enqueue(pane_input_new(), "é").unwrap()
+        var pane = PaneRecord.create(MuxPane.create("pane", "window", "session"))
+        pane = pane.with_input(pane_input_advance(queue, 1).unwrap())
+        step("Change unrelated production pane state")
+        pane = pane.with_focus(true)
+        pane = pane.resize(12, 6)
+        pane = pane.feed("output")
+        pane = pane.feed_screen("visible")
+        pane = pane.without_replies()
+        expect(pane.input.original).to_equal("é")
+        expect(pane.input.offset).to_equal(1)
+        expect(pane_input_remaining(pane.input)).to_equal([169])
+
+    it "should reset old input when child ownership changes or closes":
+        # @req REQ-SMUX-INPUT-001
+        val queue = pane_input_enqueue(pane_input_new(), "old").unwrap()
+        val original = PaneRecord.create(MuxPane.create("pane", "window", "session"))
+        val pane = original.with_input(queue)
+        step("Transition production child metadata without launching a process")
+        expect(pane.with_child(42).input.bytes.len()).to_equal(0)
+        expect(pane.with_pty(42, 7).input.bytes.len()).to_equal(0)
+        expect(pane.with_pty(-1, -1).input.bytes.len()).to_equal(0)
+        expect(pane.input.original).to_equal("old")
