@@ -69,3 +69,31 @@ remains).
   (argv line) on any admitted release_phase3 Windows lane.
 - Harness base-state failure: stage3-focused-provenance-test.py fails
   6/6 scenarios on pristine 1986eb71e4a (verified via git archive).
+
+## Focused regression repair, 2026-10-17
+
+Remote commit `52b57c0beca` aligned production reconstruction, but left the
+regression fixtures on the old composition paths. On isolated base
+`bf3ce38b521`, the harness still failed all six cases before comparison:
+new optional environment variables inherited invalid `fixture-*` tokens.
+The fixtures now explicitly disable those optional rows, use repo-relative
+K1 plus canonical repo CUDA/plugin source roots, and supply the verified
+disabled-CUDA mode to the reconstruction fixture. Production validation and
+composition hash checks are unchanged.
+
+Each scenario now uses a unique transcript filename so concurrent harness
+processes cannot replace another run's authority between hash and transcript
+checks. The fixture still writes and independently reads the actual production
+length-framed transcript; no comparison or rejection gate is bypassed.
+
+Validation: `python scripts/bootstrap/tests/stage3-focused-provenance-test.py`
+passed all six platform/phase subcases on the Windows host (46.924 seconds).
+The cases reconstruct Linux, Windows/MSVC and Darwin Stage2/Stage3 commands;
+this is command-provenance regression evidence, not native execution on those
+three hosts or full bootstrap admission. `git diff --check` passed. Two repair
+cycles were used; unchanged green checks were not replayed. No compiler build,
+shared cache mutation, release tag or publication was performed.
+
+The active bootstrap owner's separate tuple-helper specialization failures
+remain outside this repair. Full Phase3 qualification still needs its own
+source-bound executable, admission and launch evidence.

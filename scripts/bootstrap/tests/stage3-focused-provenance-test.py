@@ -6,6 +6,7 @@ import re
 import shlex
 import subprocess
 import unittest
+import uuid
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -59,7 +60,12 @@ class FocusedProvenance(unittest.TestCase):
             stage_build_path="/fixture/toolchain/bin:/usr/bin",
             bootstrap_link_library_path="/fixture/link-compat",
             bootstrap_link_compat_sha256="a" * 64,
-            k1_composition_source_args="--source $ROOT/src/compositions/kernel_llvm_cranelift",
+            k1_composition_source_args="--source src/compositions/kernel_llvm_cranelift",
+            cuda_source_root=str(ROOT).replace("\\", "/") + "/src/compositions/cuda_disabled",
+            plugin_policy_source_root=str(ROOT).replace("\\", "/") + "/src/plugins",
+            compiler_ceiling_env="",
+            stage2_preflight_context_env="",
+            stage2_diagnostic_env="",
             cuda_composition_root="/tmp/focused-current-output/compositions/cuda-" + "b" * 64 + "-" + "c" * 64,
             stage2_bin=f"{output}/stage2/{platform}/simple{suffix}",
             stage3_bin=f"{current}/stage3/{platform}/simple{suffix}",
@@ -143,7 +149,10 @@ class FocusedProvenance(unittest.TestCase):
             if name in ("ROOT", "bootstrap_stage3_root", "PATH", "HOME", "TMPDIR", "IFS", "PWD", "SHLVL", "EUID", "UID"):
                 continue
             if name == "k1_composition_source_args":
-                lines.append(f'{name}="--source $ROOT/src/compositions/kernel_llvm_cranelift"')
+                lines.append(f'{name}="--source src/compositions/kernel_llvm_cranelift"')
+            elif name in ("cuda_source_root", "plugin_policy_source_root"):
+                suffix = "src/compositions/cuda_disabled" if name == "cuda_source_root" else "src/plugins"
+                lines.append(f'{name}="$ROOT/{suffix}"')
             else:
                 lines.append(f"{name}={shell_quote(value)}")
         lines.extend(
@@ -198,6 +207,7 @@ class FocusedProvenance(unittest.TestCase):
         setup += f"bootstrap_stage3_manifest=/tmp/focused-manifest.env\n"
         setup += f"bootstrap_stage3_stage2_output_display={shell_quote(values['stage2_output_display'])}\n"
         setup += f"bsfc_policy=llvm-cranelift\n"
+        setup += "bsfc_cuda_mode=disabled\n"
         setup += f"bsfc_k1=\"$ROOT/src/compositions/kernel_llvm_cranelift\"\n"
         setup += f"bsfc_cuda={shell_quote(values['cuda_composition_root'])}\n"
         setup += "bootstrap_stage3_verify_value() { case \"$1\" in focused_low_memory) printf '%s\\n' \"${FIXTURE_LOW:-0}\" ;; focused_stage2_verbose) printf '%s\\n' 1 ;; focused_stage2_timeout) printf '%s\\n' 900 ;; focused_mission_critical) printf '%s\\n' \"${FIXTURE_MC:-0}\" ;; focused_k1_sha256) printf '%s\\n' " + "'" + "a" * 64 + "'" + " ;; stage2_threads) printf '%s\\n' 3 ;; stage3_threads) printf '%s\\n' 2 ;; *) return 1 ;; esac; }\n"
@@ -249,7 +259,9 @@ class FocusedProvenance(unittest.TestCase):
                 with self.subTest(platform=platform, phase=phase):
                     values = self.fixture_values(platform, low_memory, diagnostics, cold_init, mission_critical)
                     vector = self.producer_vector(phase, values)
-                    transcript = f"/tmp/focused-{phase}-{platform}.transcript"
+                    # Concurrent bootstrap lanes must not replace each other's
+                    # transcript between its hash and byte-comparison checks.
+                    transcript = f"/tmp/focused-{phase}-{platform}-{uuid.uuid4().hex}.transcript"
                     setup = self.focused_common(phase, values, transcript, vector)
                     # Hash action returns the exact argument vector passed to the shared hasher.
                     expected = setup + f"bootstrap_stage3_focused_command hash {phase}\n"
