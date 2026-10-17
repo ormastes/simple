@@ -220,16 +220,18 @@ impl MirLowering:
         """Layout for a nominal type already relocated by mono into this table."""
         match type_.kind:
             case HirTypeKind.Named(symbol, _):
-                val row = self.symbols.get_symbol_raw(symbol.id)
-                if row == nil:
+                val optional_row: HirSymbol? = self.symbols.get_symbol_raw(symbol.id)
+                if optional_row == nil:
                     self.error_fatal("E-MIR-MONO-RETURN-OWNER: relocated specialization return has no caller declaration", Some(type_.span))
                     return ""
-                match row.kind:
-                    case SymbolKind.Class:
-                        return mir_class_identity(row)
-                    case SymbolKind.Struct | SymbolKind.Enum:
-                        return self.declared_struct_layout_key(self.composite_layout_key(row))
-                    case _: ()
+                if val present_row = optional_row:
+                    val row: HirSymbol = present_row
+                    match row.kind:
+                        case SymbolKind.Class:
+                            return mir_class_identity(row)
+                        case SymbolKind.Struct | SymbolKind.Enum:
+                            return self.declared_struct_layout_key(self.composite_layout_key(row))
+                        case _: ()
             case _: ()
         ""
 
@@ -1338,8 +1340,11 @@ impl MirLowering:
                     if registered_shape != "":
                         self.struct_value_syms[dest.id] = registered_shape
                     elif struct_symbol != nil:
-                        val struct_sym = self.symbols.get_symbol_raw(struct_symbol.id)
-                        if struct_sym.?:
+                        # Presence alone does not unwrap HirSymbol?: the .name
+                        # read needs the concrete payload (ABI defect class
+                        # 4710b22a991).
+                        if val present_struct_sym = self.symbols.get_symbol_raw(struct_symbol.id):
+                            val struct_sym: HirSymbol = present_struct_sym
                             self.struct_value_syms[dest.id] = struct_sym.name
                 case _: ()
             return dest
@@ -1759,7 +1764,7 @@ impl MirLowering:
         if not self.bitfield_map.has(sym_id):
             return nil
 
-        val fields = self.bitfield_map[sym_id]
+        val fields: [HirBitfieldField] = self.bitfield_map[sym_id]
         var idx = 0
         while idx < fields.len():
             match fields[idx]:
@@ -1932,11 +1937,17 @@ impl MirLowering:
             return MirType.i64()
         # A signature in this SymbolTable is already in the consumer's ID
         # namespace. It takes precedence over shared primitive-shape caches.
-        val consumer_symbol = self.symbols.get_symbol_raw(symbol.id)
-        if consumer_symbol != nil and consumer_symbol.type_ != nil:
-            match consumer_symbol.type_.kind:
-                case HirTypeKind.Function(_, ret, _): return self.lower_type(ret)
-                case _: ()
+        val optional_consumer_symbol: HirSymbol? = self.symbols.get_symbol_raw(symbol.id)
+        if optional_consumer_symbol != nil:
+            if val present_consumer_symbol = optional_consumer_symbol:
+                val consumer_symbol: HirSymbol = present_consumer_symbol
+                # Presence tests alone do not unwrap HirType?: match the
+                # concrete payload kind (ABI defect class 4710b22a991).
+                if val present_consumer_type = consumer_symbol.type_:
+                    val consumer_type: HirType = present_consumer_type
+                    match consumer_type.kind:
+                        case HirTypeKind.Function(_, ret, _): return self.lower_type(ret)
+                        case _: ()
         if (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             # Name-keyed prescan registry: covers callees whose symbol id is
             # invalid at this call site (wildcard imports), where
@@ -2425,8 +2436,13 @@ impl MirLowering:
                     val found_receiver_type = receiver_type ?? HirType(kind: HirTypeKind.Error, span: expr.span)
                     val struct_name = match found_receiver_type.kind:
                         case Named(symbol, _):
-                            val s = self.symbols.get_symbol_raw(symbol.id)
-                            if s.?: s.name else: ""
+                            # Presence alone (.?:) does not unwrap HirSymbol?:
+                            # read .name on the concrete payload.
+                            var s_name = ""
+                            if val present_s = self.symbols.get_symbol_raw(symbol.id):
+                                val s: HirSymbol = present_s
+                                s_name = s.name
+                            s_name
                         case _: ""
                     # Imported inline class methods are registered on their
                     # declared type owner, not the receiver variable symbol.
@@ -2654,8 +2670,13 @@ impl MirLowering:
                     val found_receiver_type = receiver_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
                     val struct_name = match found_receiver_type.kind:
                         case Named(symbol, _):
-                            val s = self.symbols.get_symbol_raw(symbol.id)
-                            if s.?: s.name else: ""
+                            # Presence alone (.?:) does not unwrap HirSymbol?:
+                            # read .name on the concrete payload.
+                            var s_name = ""
+                            if val present_s = self.symbols.get_symbol_raw(symbol.id):
+                                val s: HirSymbol = present_s
+                                s_name = s.name
+                            s_name
                         case _: ""
                     if struct_name != "":
                         val method_key = "{struct_name}::{method}"
@@ -2883,7 +2904,7 @@ impl MirLowering:
             payload_local = pl
         var slot_i = 0
         while slot_i < pats.len():
-            val sub_pat = pats[slot_i]
+            val sub_pat: HirPattern = pats[slot_i]
             var handle_here = false
             match sub_pat.kind:
                 case HirPatternKind.Wildcard:
@@ -3800,7 +3821,7 @@ impl MirLowering:
             var b_arm = self.builder
             b_arm.switch_to_block(arm_block)
             self.builder = b_arm
-            val bind_syms = enum_binds[ci]
+            val bind_syms: [SymbolId] = enum_binds[ci]
             val bind_pos_row = enum_bind_pos[ci]
             # Gate on declared ARITY, not bind count: `A(_,_,v)` has 1 bind
             # but 3 fields — the raw fast path would bind v to the tuple box.
@@ -4061,7 +4082,7 @@ impl MirLowering:
                         val tuple_payload_key = "{tuple_owner_key}::{enum_variants[ci]}"
                         var bound_slot = gl
                         if native_tuple_type != nil:
-                            val declared_field = native_tuple_fields[slot_index]
+                            val declared_field: HirType = native_tuple_fields[slot_index]
                             self.remember_local_hir_type(gl.id, declared_field, 0, 0)
                             self.mark_native_tuple_projection(gl, self.lower_type(declared_field))
                             match declared_field.kind:
@@ -5516,10 +5537,13 @@ impl MirLowering:
         # A class layout key is module-qualified and need not be a lexical
         # symbol-table binding. Re-looking it up later loses constructor owner
         # identity, while canonical_symbol belongs to the MIR-only ID domain.
-        val declaration = self.symbols.get_symbol_raw(symbol.id)
-        if declaration != nil and (declaration.kind == SymbolKind.Class or declaration.kind == SymbolKind.Struct):
-            val constructed_type = HirType(kind: HirTypeKind.Named(symbol, []), span: declaration.span)
-            self.remember_local_hir_type(dest.id, constructed_type, 2, 0)
+        val optional_declaration: HirSymbol? = self.symbols.get_symbol_raw(symbol.id)
+        if optional_declaration != nil:
+            if val present_declaration = optional_declaration:
+                val declaration: HirSymbol = present_declaration
+                if declaration.kind == SymbolKind.Class or declaration.kind == SymbolKind.Struct:
+                    val constructed_type = HirType(kind: HirTypeKind.Named(symbol, []), span: declaration.span)
+                    self.remember_local_hir_type(dest.id, constructed_type, 2, 0)
         if instance_is_generic:
             self.generic_instance_field_types[dest.id] = instance_field_types
             self.generic_instance_field_struct_names[dest.id] = field_type_names
@@ -5738,7 +5762,7 @@ impl MirLowering:
             return nil
         if not self.lambda_bindings.has(sid):
             return nil
-        val lam = self.lambda_bindings[sid]
+        val lam: HirExpr = self.lambda_bindings[sid]
         match lam.kind:
             case Lambda(params, body, _):
                 # Lower each argument expression FIRST, in the caller's live
@@ -5768,7 +5792,7 @@ impl MirLowering:
                     # Re-derive the free-variable list instead of iterating
                     # `snap.keys()`: under the seed interpreter dict keys come
                     # back as strings, and bind_local compares ids as i64.
-                    val snap = self.lambda_capture_snapshot[sid]
+                    val snap: Dict<i64, LocalId> = self.lambda_capture_snapshot[sid]
                     var snap_param_syms: [i64] = []
                     var spi = 0
                     while spi < params.len():
@@ -6083,8 +6107,8 @@ impl MirLowering:
                 resolved = SymbolId(id: self.symbols.exact_symbols[name])
         var callable_name = name
         if resolved.id >= 0:
-            val info = self.symbols.get_symbol_raw(resolved.id)
-            if info != nil:
+            if val present_info = self.symbols.get_symbol_raw(resolved.id):
+                val info: HirSymbol = present_info
                 match info.kind:
                     case SymbolKind.Function | SymbolKind.Method: ()
                     case _: return false
@@ -6533,7 +6557,7 @@ impl MirLowering:
                 val lifted_statics = b3.module.statics.values()
                 var lifted_static_i = 0
                 while lifted_static_i < lifted_statics.len():
-                    val lifted_static = lifted_statics[lifted_static_i]
+                    val lifted_static: MirStatic = lifted_statics[lifted_static_i]
                     host_statics[lifted_static.symbol] = lifted_static
                     self.global_statics_by_id[lifted_static.symbol.id] = lifted_static
                     lifted_static_i = lifted_static_i + 1
@@ -6643,8 +6667,13 @@ impl MirLowering:
             match callee.kind:
                 case HirExprKind.Var(symbol):
                     direct_symbol = symbol
-                    val sym = self.symbols.get_symbol_raw(symbol.id)
-                    direct_name = if sym.?: sym.name else: ""
+                    # Presence alone (.?:) does not unwrap HirSymbol?: read
+                    # .name on the concrete payload.
+                    var direct_sym_name = ""
+                    if val present_sym = self.symbols.get_symbol_raw(symbol.id):
+                        val sym: HirSymbol = present_sym
+                        direct_sym_name = sym.name
+                    direct_name = direct_sym_name
                     is_direct = true
                 case _:
                     self.payload_decode_failed("HirExprKind.Var", callee.span)
@@ -6847,8 +6876,8 @@ impl MirLowering:
             # the legacy bare struct name.
             var constructor_name = direct_name
             if mir_expr_symbol_id_value(direct_symbol) >= 0:
-                val constructor_info = self.symbols.get_symbol_raw(direct_symbol.id)
-                if constructor_info != nil:
+                if val present_constructor_info = self.symbols.get_symbol_raw(direct_symbol.id):
+                    val constructor_info: HirSymbol = present_constructor_info
                     val candidate = mir_class_identity(constructor_info)
                     if constructor_info.kind == SymbolKind.Class:
                         constructor_name = candidate
@@ -7053,12 +7082,14 @@ impl MirLowering:
                         # target NVMe fw failures, 2026-07-24).
                         if declared_width < 64:
                             val declared_mir_ty = self.lower_type(declared_param_type)
-                            val arg_op_ty = self.local_mir_type_of(arg_local)
-                            if arg_op_ty != nil:
-                                if arg_op_ty.kind == MirTypeKind.I64 or arg_op_ty.kind == MirTypeKind.U64:
-                                    var b_narrow = self.builder
-                                    arg_local = b_narrow.emit_cast(mir_operand_copy(arg_local), declared_mir_ty)
-                                    self.builder = b_narrow
+                            val optional_arg_op_ty: MirType? = self.local_mir_type_of(arg_local)
+                            if optional_arg_op_ty != nil:
+                                if val present_arg_op_ty = optional_arg_op_ty:
+                                    val arg_op_ty: MirType = present_arg_op_ty
+                                    if arg_op_ty.kind == MirTypeKind.I64 or arg_op_ty.kind == MirTypeKind.U64:
+                                        var b_narrow = self.builder
+                                        arg_local = b_narrow.emit_cast(mir_operand_copy(arg_local), declared_mir_ty)
+                                        self.builder = b_narrow
                     case HirTypeKind.Any:
                         # any_slot_holds_untagged_scalar_2026-08-05 (pure-Simple
                         # parity gap): a scalar argument passed into an
@@ -7117,8 +7148,12 @@ impl MirLowering:
                 if (_sffi_env_get("SIMPLE_BORROW_REF_CALL_ARGS") ?? "") == "1":
                     match declared_param_type.kind:
                         case HirTypeKind.Named(cls_sym, _):
-                            val cls_rec = self.symbols.get_symbol_raw(cls_sym.id)
-                            val cls_name = if cls_rec.?: cls_rec.name else: ""
+                            # Presence alone (.?:) does not unwrap HirSymbol?:
+                            # read .name on the concrete payload.
+                            var cls_name = ""
+                            if val present_cls_rec = self.symbols.get_symbol_raw(cls_sym.id):
+                                val cls_rec: HirSymbol = present_cls_rec
+                                cls_name = cls_rec.name
                             if cls_name != "" and self.class_type_names.has(cls_name):
                                 var b_ref = self.builder
                                 val ref_ty = self.local_mir_type_of(arg_local) ?? MirType.i64()
@@ -7179,22 +7214,24 @@ impl MirLowering:
                                     # colliding id of another module can never
                                     # lend its layout; otherwise fall back to
                                     # the name-keyed return-shape registry.
-                                    val sr_symbol = self.symbols.get_symbol_raw(sr_sym.id)
+                                    val optional_sr_symbol: HirSymbol? = self.symbols.get_symbol_raw(sr_sym.id)
                                     var sr_accepted = false
-                                    if sr_symbol != nil:
-                                        match sr_symbol.kind:
-                                            case SymbolKind.Struct | SymbolKind.Class | SymbolKind.Enum:
-                                                # ... or the specialization is this
-                                                # module's own: `fn wrap<T>(x: T) -> Acc`
-                                                # names `Acc` in no mangling, and the
-                                                # call was typed i64 against `define ptr`.
-                                                if mono_mangling_names_type(source_name, sr_symbol.name) or mono_callee_is_local_specialization(source_name):
-                                                    return_type = self.lower_type(sr)
-                                                    stamped_return = sr
-                                                    stamped_struct_name = sr_symbol.name
-                                                    sr_accepted = true
-                                            case _:
-                                                ()
+                                    if optional_sr_symbol != nil:
+                                        if val present_sr_symbol = optional_sr_symbol:
+                                            val sr_symbol: HirSymbol = present_sr_symbol
+                                            match sr_symbol.kind:
+                                                case SymbolKind.Struct | SymbolKind.Class | SymbolKind.Enum:
+                                                    # ... or the specialization is this
+                                                    # module's own: `fn wrap<T>(x: T) -> Acc`
+                                                    # names `Acc` in no mangling, and the
+                                                    # call was typed i64 against `define ptr`.
+                                                    if mono_mangling_names_type(source_name, sr_symbol.name) or mono_callee_is_local_specialization(source_name):
+                                                        return_type = self.lower_type(sr)
+                                                        stamped_return = sr
+                                                        stamped_struct_name = sr_symbol.name
+                                                        sr_accepted = true
+                                                case _:
+                                                    ()
                                     if not sr_accepted:
                                         var sr_shape: text = bootstrap_fn_ret_shape_lookup(source_name) ?? ""
                                         if sr_shape == "":
@@ -7273,15 +7310,29 @@ impl MirLowering:
         # Keep the existing word-parameter/closure ABI. Only the declared
         # return type and its provenance are different from the old path.
         var param_types: [MirType] = []
-        var indirect_param_index = 0
-        for arg_op in arg_operands:
-            param_types.push(if indirect_return != nil: self.lower_type(call_param_types[indirect_param_index]) else: MirType.i64())
-            indirect_param_index = indirect_param_index + 1
         var ret_type = MirType.i64()
-        var indirect_hir_return: HirType? = indirect_return
-        var indirect_signature_proven = indirect_return != nil
-        if val typed_return = indirect_return:
-            ret_type = self.lower_type(typed_return)
+        var indirect_hir_return: HirType? = nil
+        var indirect_signature_proven = false
+        if val declared_type = function_type:
+            match declared_type.kind:
+                case HirTypeKind.Function(declared_params, declared_return, _):
+                    if not lambda_abi_type_resolved(declared_return):
+                        self.error_fatal("indirect callable has an unresolved declared return type", Some(call_span))
+                        return self.builder.emit_const_int(0)
+                    if not lambda_abi_type_resolved(declared_type):
+                        self.error_fatal("indirect callable has an unresolved declared parameter type", Some(call_span))
+                        return self.builder.emit_const_int(0)
+                    if declared_params.len() != arg_operands.len():
+                        self.error_fatal("indirect callable argument count differs from declared signature", Some(call_span))
+                        return self.builder.emit_const_int(0)
+                    var indirect_param_index = 0
+                    while indirect_param_index < declared_params.len():
+                        param_types.push(self.lower_type(declared_params[indirect_param_index]))
+                        indirect_param_index = indirect_param_index + 1
+                    ret_type = self.lower_type(declared_return)
+                    indirect_hir_return = Some(declared_return)
+                    indirect_signature_proven = true
+                case _: ()
         if not indirect_signature_proven:
             if val callee_mir = self.local_mir_type_of(callee_local):
                 match callee_mir.kind:

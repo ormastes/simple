@@ -147,6 +147,12 @@ impl MirLowering:
         val link = mir_provider_function_name_fields_v1(owner, symbols, symbol, source_name,
             is_extern, has_export_attr, attr, is_entry_module)
         val name = symbols.symbol_display_name(symbol, source_name)
+        # Nil/empty names must never enter the promoted link registry: the
+        # promotion sort dereferences the key text (0xC0000005 NULL deref).
+        if name == nil or name == "":
+            return
+        if source_name == nil or source_name == "":
+            return
         self.callable_link_names[mir_provider_callable_key(owner, name)] = link
         var text_value_abi = self.callable_text_value_abi
         text_value_abi[mir_provider_callable_key(owner, name)] = not is_extern
@@ -171,8 +177,10 @@ impl MirLowering:
         self.callable_text_value_abi[key]
 
     fn provider_callable_symbol_name(symbol: SymbolId, fallback: text) -> text:
-        val info = self.symbols.get_symbol_raw(symbol.id)
-        if info != nil:
+        # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+        val optional_info: HirSymbol? = self.symbols.get_symbol_raw(symbol.id)
+        if val present_info = optional_info:
+            val info: HirSymbol = present_info
             # Bootstrap predeclarations retain defining_module=nil. They are
             # declarations in the active table, so its module supplies the
             # owner; an imported declaration with an explicit owner keeps it.
@@ -187,11 +195,16 @@ impl MirLowering:
         fallback.replace("::", ".")
 
     fn provider_callable_has_link(symbol: SymbolId) -> bool:
-        val info = self.symbols.get_symbol_raw(symbol.id)
-        if info == nil: return false
-        var owner = info.defining_module ?? ""
-        if owner == "": owner = self.current_module_id
-        self.callable_link_names.has(mir_provider_callable_key(owner, info.name))
+        # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+        val optional_info: HirSymbol? = self.symbols.get_symbol_raw(symbol.id)
+        if optional_info == nil: return false
+        if val present_info = optional_info:
+            val info: HirSymbol = present_info
+            var owner = info.defining_module ?? ""
+            if owner == "": owner = self.current_module_id
+            self.callable_link_names.has(mir_provider_callable_key(owner, info.name))
+        else:
+            false
 
     fn extension_owner_is_known(owner_key: text) -> bool:
         """An extension owner must name a type this closure declares: a
@@ -237,39 +250,44 @@ impl MirLowering:
             return
         if not links.has(function_symbol.id):
             return
-        val source = provider.get_symbol_raw(function_symbol.id)
-        if source == nil:
+        # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+        val optional_source: HirSymbol? = provider.get_symbol_raw(function_symbol.id)
+        if optional_source == nil:
             return
-        # Method dispatch owns the declaring type even when its link spelling
-        # is exempt from qualification by an export/global ABI attribute.
-        val identity = mir_provider_callable_identity(source.defining_module ?? "", source.name)
-        val parts = identity.split(".")
-        if parts.len() < 2:
-            return
-        val method_name = parts[parts.len() - 1]
-        var class_key = identity.substring(0, identity.len() - method_name.len() - 1)
-        if not self.class_type_names.has(class_key):
-            if not mir_provider_declares_value_method_owner(provider, source.defining_module ?? "", parts[parts.len() - 2], class_key):
-                val extension_owner = mir_provider_extension_owner_key(source.defining_module ?? "", source.name)
-                if extension_owner == "" or not self.extension_owner_is_known(extension_owner):
-                    return
-                class_key = extension_owner
-        val method = self.relocate_provider_callable(function_symbol, provider, links)
-        if method.id < 0:
-            return
-        val key = "{class_key}::{method_name}"
-        self.register_owner_method(key, method, source.defining_module ?? "")
-        if is_static:
-            self.register_owner_method("static::{key}", method, source.defining_module ?? "")
-        val ret = self.relocate_provider_type(return_type, provider)
-        match ret.kind:
-            case Named(id, _):
-                val symbol = self.symbols.get_symbol_raw(id.id)
-                if symbol != nil:
-                    self.struct_method_return_names[key] = if symbol.kind == SymbolKind.Class or symbol.kind == SymbolKind.Enum: mir_class_identity(symbol) else: symbol.name
-            case Array(_, _) | Slice(_): self.struct_method_return_is_array[key] = true
-            case Optional(_): self.struct_method_return_is_optional[key] = true
-            case _: ()
+        if val present_source = optional_source:
+            val source: HirSymbol = present_source
+            # Method dispatch owns the declaring type even when its link spelling
+            # is exempt from qualification by an export/global ABI attribute.
+            val identity = mir_provider_callable_identity(source.defining_module ?? "", source.name)
+            val parts = identity.split(".")
+            if parts.len() < 2:
+                return
+            val method_name = parts[parts.len() - 1]
+            var class_key = identity.substring(0, identity.len() - method_name.len() - 1)
+            if not self.class_type_names.has(class_key):
+                if not mir_provider_declares_value_method_owner(provider, source.defining_module ?? "", parts[parts.len() - 2], class_key):
+                    val extension_owner = mir_provider_extension_owner_key(source.defining_module ?? "", source.name)
+                    if extension_owner == "" or not self.extension_owner_is_known(extension_owner):
+                        return
+                    class_key = extension_owner
+            val method = self.relocate_provider_callable(function_symbol, provider, links)
+            if method.id < 0:
+                return
+            val key = "{class_key}::{method_name}"
+            self.register_owner_method(key, method, source.defining_module ?? "")
+            if is_static:
+                self.register_owner_method("static::{key}", method, source.defining_module ?? "")
+            val ret = self.relocate_provider_type(return_type, provider)
+            match ret.kind:
+                case Named(id, _):
+                    # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                    val optional_symbol: HirSymbol? = self.symbols.get_symbol_raw(id.id)
+                    if val present_symbol = optional_symbol:
+                        val symbol: HirSymbol = present_symbol
+                        self.struct_method_return_names[key] = if symbol.kind == SymbolKind.Class or symbol.kind == SymbolKind.Enum: mir_class_identity(symbol) else: symbol.name
+                case Array(_, _) | Slice(_): self.struct_method_return_is_array[key] = true
+                case Optional(_): self.struct_method_return_is_optional[key] = true
+                case _: ()
 
     me relocate_provider_type_symbol(id: SymbolId, provider: SymbolTable) -> SymbolId:
         # Absent-id guard: a SymbolId from a provider-closure expression may
@@ -280,29 +298,37 @@ impl MirLowering:
         # (2026-10-08 test_runner_build SIGSEGV backtrace). Probe has() first.
         if not provider.symbols.has(id.id):
             return SymbolId(id: -1)
-        val source = provider.get_symbol_raw(id.id)
-        if source == nil:
+        # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+        val optional_source: HirSymbol? = provider.get_symbol_raw(id.id)
+        if optional_source == nil:
             return SymbolId(id: -1)
-        val owner = _hir_symbol_owner_module(source.defining_module ?? "")
-        val existing = self.symbols.lookup_qualified_type_raw(owner, source.name)
-        if existing >= 0:
-            return SymbolId(id: existing)
-        match source.kind:
-            case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum | SymbolKind.Trait: ()
-            case _: return SymbolId(id: -1)
-        # Non-class define() retains legacy lexical deduplication. Allocate
-        # through a private qualified spelling, then restore the source name.
-        val allocation_name = mir_class_identity(source)
-        val relocated = self.symbols.define_with_binding(allocation_name, source.kind, nil,
-            source.span, source.visibility, source.is_mutable,
-            Some(owner), false)
-        var copied = self.symbols.get_symbol_raw(relocated.id)
-        if copied == nil:
-            return SymbolId(id: -1)
-        copied.name = source.name
-        self.symbols.symbols[relocated.id] = copied
-        self.symbols.bind_qualified_type(owner, source.name, relocated)
-        relocated
+        if val present_source = optional_source:
+            val source: HirSymbol = present_source
+            val owner = _hir_symbol_owner_module(source.defining_module ?? "")
+            val existing = self.symbols.lookup_qualified_type_raw(owner, source.name)
+            if existing >= 0:
+                return SymbolId(id: existing)
+            match source.kind:
+                case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum | SymbolKind.Trait: ()
+                case _: return SymbolId(id: -1)
+            # Non-class define() retains legacy lexical deduplication. Allocate
+            # through a private qualified spelling, then restore the source name.
+            val allocation_name = mir_class_identity(source)
+            val relocated = self.symbols.define_with_binding(allocation_name, source.kind, nil,
+                source.span, source.visibility, source.is_mutable,
+                Some(owner), false)
+            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+            val optional_copied: HirSymbol? = self.symbols.get_symbol_raw(relocated.id)
+            if optional_copied == nil:
+                return SymbolId(id: -1)
+            if val present_copied = optional_copied:
+                var copied: HirSymbol = present_copied
+                copied.name = source.name
+                self.symbols.symbols[relocated.id] = copied
+            self.symbols.bind_qualified_type(owner, source.name, relocated)
+            relocated
+        else:
+            SymbolId(id: -1)
 
     me relocate_provider_types(types: [HirType], provider: SymbolTable) -> [HirType]:
         var result: [HirType] = []
@@ -358,39 +384,46 @@ impl MirLowering:
         # Same absent-id guard as relocate_provider_type_symbol.
         if not provider.symbols.has(id.id):
             return SymbolId(id: -1)
-        val source = provider.get_symbol_raw(id.id)
-        if source == nil:
+        # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+        val optional_source: HirSymbol? = provider.get_symbol_raw(id.id)
+        if optional_source == nil:
             return SymbolId(id: -1)
-        val owner = _hir_symbol_owner_module(source.defining_module ?? "")
-        var link = ""
-        if links.has(id.id):
-            link = links[id.id]
+        if val present_source = optional_source:
+            val source: HirSymbol = present_source
+            val owner = _hir_symbol_owner_module(source.defining_module ?? "")
+            var link = ""
+            if links.has(id.id):
+                link = links[id.id]
+            else:
+                val key = mir_provider_callable_key(owner, source.name)
+                if self.callable_link_names.has(key):
+                    link = self.callable_link_names[key]
+            if link == "":
+                return SymbolId(id: -1)
+            match source.kind:
+                case SymbolKind.Function | SymbolKind.Method: ()
+                case _: return SymbolId(id: -1)
+            # Index by link spelling too: aliases may bind the source name to a
+            # symbol whose old emission spelling is ambiguous.
+            val existing = self.symbols.lookup_qualified_function_raw(owner, link)
+            if existing >= 0:
+                return SymbolId(id: existing)
+            val target = self.symbols.define_with_binding(link, source.kind, nil, source.span,
+                source.visibility, false, Some(owner), false)
+            self.symbols.bind_qualified_function(owner, link, target)
+            if source.type_ != nil:
+                # Extract HirType from the optional slot before crossing its ABI.
+                val source_type: HirType = source.type_ ?? HirType(kind: HirTypeKind.Error, span: source.span)
+                val relocated_type = self.relocate_provider_type(source_type, provider)
+                # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                val optional_target_symbol: HirSymbol? = self.symbols.get_symbol_raw(target.id)
+                if val present_target_symbol = optional_target_symbol:
+                    var target_symbol: HirSymbol = present_target_symbol
+                    target_symbol.type_ = Some(relocated_type)
+                    self.symbols.symbols[target.id] = target_symbol
+            target
         else:
-            val key = mir_provider_callable_key(owner, source.name)
-            if self.callable_link_names.has(key):
-                link = self.callable_link_names[key]
-        if link == "":
-            return SymbolId(id: -1)
-        match source.kind:
-            case SymbolKind.Function | SymbolKind.Method: ()
-            case _: return SymbolId(id: -1)
-        # Index by link spelling too: aliases may bind the source name to a
-        # symbol whose old emission spelling is ambiguous.
-        val existing = self.symbols.lookup_qualified_function_raw(owner, link)
-        if existing >= 0:
-            return SymbolId(id: existing)
-        val target = self.symbols.define_with_binding(link, source.kind, nil, source.span,
-            source.visibility, false, Some(owner), false)
-        self.symbols.bind_qualified_function(owner, link, target)
-        if source.type_ != nil:
-            # Extract HirType from the optional slot before crossing its ABI.
-            val source_type: HirType = source.type_ ?? HirType(kind: HirTypeKind.Error, span: source.span)
-            val relocated_type = self.relocate_provider_type(source_type, provider)
-            var target_symbol = self.symbols.get_symbol_raw(target.id)
-            if target_symbol != nil:
-                target_symbol.type_ = Some(relocated_type)
-                self.symbols.symbols[target.id] = target_symbol
-        target
+            SymbolId(id: -1)
 
     me relocate_provider_args(args: [HirCallArg], provider: SymbolTable, links: Dict<i64, text>) -> [HirCallArg]:
         var result: [HirCallArg] = []
@@ -449,14 +482,26 @@ impl MirLowering:
                 if not provider.symbols.has(id.id):
                     HirExprKind.Error
                 else:
-                    val source = provider.get_symbol_raw(id.id)
-                    if source != nil and source.kind == SymbolKind.Class:
+                    # Presence does not unwrap HirSymbol?: reading .name/.kind off
+                    # the Some wrapper reads its enum header as a struct header
+                    # (4710b22a991 class).
+                    val optional_source: HirSymbol? = provider.get_symbol_raw(id.id)
+                    var source_name = ""
+                    var class_identity = ""
+                    var source_is_class = false
+                    if val present_source = optional_source:
+                        val source: HirSymbol = present_source
+                        source_name = source.name
+                        if source.kind == SymbolKind.Class:
+                            source_is_class = true
+                            class_identity = mir_class_identity(source)
+                    if source_is_class:
                         val target = self.relocate_provider_type_symbol(id, provider)
-                        HirExprKind.NamedVar(target, mir_class_identity(source))
+                        HirExprKind.NamedVar(target, class_identity)
                     else:
                         val target = self.relocate_provider_callable(id, provider, links)
                         if target.id < 0: HirExprKind.Error
-                        else: HirExprKind.NamedVar(target, self.symbols.symbol_display_name(target, source.name))
+                        else: HirExprKind.NamedVar(target, self.symbols.symbol_display_name(target, source_name))
             case Field(base, field, _):
                 HirExprKind.Field(self.relocate_provider_default(base, provider, links), field, nil)
             case Index(base, index):
@@ -541,50 +586,55 @@ impl MirLowering:
         if not provider.symbols.has(class_def.symbol.id):
             self.error_fatal("class provider symbol is absent from the provider table: {class_def.name}", Some(class_def.span))
             return
-        val source = provider.get_symbol_raw(class_def.symbol.id)
-        if source == nil:
+        # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+        val optional_source: HirSymbol? = provider.get_symbol_raw(class_def.symbol.id)
+        if optional_source == nil:
             self.error_fatal("class provider is missing its declaration symbol: {class_def.name}", Some(class_def.span))
             return
-        val target = self.relocate_provider_type_symbol(class_def.symbol, provider)
-        if target.id < 0:
-            self.error_fatal("cannot relocate class provider: {class_def.name}", Some(class_def.span))
-            return
-        var fields: [HirField] = []
-        var flags: [bool] = []
-        var defaults: [HirExpr] = []
-        for field in class_def.fields:
-            # Annotated copies: nested struct transports lose their declared
-            # value type on the stage-native lane (module_build.spl pattern).
-            var relocated: HirField = field
-            val field_type: HirType = field.type_
-            relocated.type_ = self.relocate_provider_type(field_type, provider)
-            if field.has_default and not local:
-                val field_default: HirExpr = field.default
-                relocated.default = self.relocate_provider_default(field_default, provider, links)
-            fields = fields.push(relocated)
-            flags = flags.push(field.has_default)
-            defaults = defaults.push(relocated.default)
-        val canonical = mir_class_identity(source)
-        var keys = [canonical, self.composite_layout_key(source)]
-        # Consumer-owned symbol spelling is an additional legacy raw alias.
-        val consumer_symbol = self.symbols.get_symbol_raw(target.id)
-        if consumer_symbol != nil:
-            keys = keys.push(self.composite_layout_key(consumer_symbol))
-        if local:
-            keys = keys.push(class_def.name)
-        for key in keys:
-            self.register_composite_field_metadata(key, fields, self.symbols, true)
-            self.struct_field_has_default[key] = flags
-            self.struct_field_default_expr[key] = defaults
-            self.class_type_names[key] = true
-        for method_name in class_def.methods.keys():
-            # Annotated dict extraction — the exact module_build.spl #2693
-            # pattern; unannotated it loses the declared value type on the
-            # stage-native lane.
-            val method_id: SymbolId = class_def.methods[method_name]
-            val method = self.relocate_provider_callable(method_id, provider, links)
-            if method.id >= 0:
-                self.struct_method_syms["{canonical}::{method_name}"] = method
+        if val present_source = optional_source:
+            val source: HirSymbol = present_source
+            val target = self.relocate_provider_type_symbol(class_def.symbol, provider)
+            if target.id < 0:
+                self.error_fatal("cannot relocate class provider: {class_def.name}", Some(class_def.span))
+                return
+            var fields: [HirField] = []
+            var flags: [bool] = []
+            var defaults: [HirExpr] = []
+            for field in class_def.fields:
+                # Annotated copies: nested struct transports lose their declared
+                # value type on the stage-native lane (module_build.spl pattern).
+                var relocated: HirField = field
+                val field_type: HirType = field.type_
+                relocated.type_ = self.relocate_provider_type(field_type, provider)
+                if field.has_default and not local:
+                    val field_default: HirExpr = field.default
+                    relocated.default = self.relocate_provider_default(field_default, provider, links)
+                fields = fields.push(relocated)
+                flags = flags.push(field.has_default)
+                defaults = defaults.push(relocated.default)
+            val canonical = mir_class_identity(source)
+            var keys = [canonical, self.composite_layout_key(source)]
+            # Consumer-owned symbol spelling is an additional legacy raw alias.
+            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+            val optional_consumer_symbol: HirSymbol? = self.symbols.get_symbol_raw(target.id)
+            if val present_consumer_symbol = optional_consumer_symbol:
+                val consumer_symbol: HirSymbol = present_consumer_symbol
+                keys = keys.push(self.composite_layout_key(consumer_symbol))
+            if local:
+                keys = keys.push(class_def.name)
+            for key in keys:
+                self.register_composite_field_metadata(key, fields, self.symbols, true)
+                self.struct_field_has_default[key] = flags
+                self.struct_field_default_expr[key] = defaults
+                self.class_type_names[key] = true
+            for method_name in class_def.methods.keys():
+                # Annotated dict extraction — the exact module_build.spl #2693
+                # pattern; unannotated it loses the declared value type on the
+                # stage-native lane.
+                val method_id: SymbolId = class_def.methods[method_name]
+                val method = self.relocate_provider_callable(method_id, provider, links)
+                if method.id >= 0:
+                    self.struct_method_syms["{canonical}::{method_name}"] = method
 
     me register_provider_struct(struct_def: HirStruct, provider: SymbolTable, consumer_owns_name: bool):
         # prescan_module_struct_names registers every module's struct field
@@ -598,41 +648,44 @@ impl MirLowering:
         # does for classes.
         if not provider.symbols.has(struct_def.symbol.id):
             return
-        val source = provider.get_symbol_raw(struct_def.symbol.id)
-        if source == nil:
+        # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+        val optional_source: HirSymbol? = provider.get_symbol_raw(struct_def.symbol.id)
+        if optional_source == nil:
             return
-        var fields: [HirField] = []
-        var field_names: [text] = []
-        for field in struct_def.fields:
-            # Annotated copies: nested struct transports lose their declared
-            # value type on the stage-native lane (module_build.spl pattern).
-            var relocated: HirField = field
-            val field_type: HirType = field.type_
-            relocated.type_ = self.relocate_provider_type(field_type, provider)
-            fields = fields.push(relocated)
-            field_names = field_names.push(field.name)
-        val key = self.composite_layout_key(source)
-        if key != struct_def.name:
-            self.register_composite_field_metadata(key, fields, self.symbols, true)
-        # The bare-name entry is shared by every same-named struct: replace it
-        # only when the consumer does not declare that name itself and the
-        # recorded bare-layout owner is this provider's declaration -- a
-        # matching field list alone would let the LAST same-named provider win.
-        if consumer_owns_name or not self.struct_field_order.has(struct_def.name):
-            return
-        if not self.struct_bare_layout_owner.has(struct_def.name):
-            return
-        if self.struct_bare_layout_owner[struct_def.name] != key:
-            return
-        val registered_names = self.struct_field_order[struct_def.name]
-        if registered_names.len() != field_names.len():
-            return
-        var i = 0
-        while i < field_names.len():
-            if registered_names[i] != field_names[i]:
+        if val present_source = optional_source:
+            val source: HirSymbol = present_source
+            var fields: [HirField] = []
+            var field_names: [text] = []
+            for field in struct_def.fields:
+                # Annotated copies: nested struct transports lose their declared
+                # value type on the stage-native lane (module_build.spl pattern).
+                var relocated: HirField = field
+                val field_type: HirType = field.type_
+                relocated.type_ = self.relocate_provider_type(field_type, provider)
+                fields = fields.push(relocated)
+                field_names = field_names.push(field.name)
+            val key = self.composite_layout_key(source)
+            if key != struct_def.name:
+                self.register_composite_field_metadata(key, fields, self.symbols, true)
+            # The bare-name entry is shared by every same-named struct: replace it
+            # only when the consumer does not declare that name itself and the
+            # recorded bare-layout owner is this provider's declaration -- a
+            # matching field list alone would let the LAST same-named provider win.
+            if consumer_owns_name or not self.struct_field_order.has(struct_def.name):
                 return
-            i = i + 1
-        self.register_composite_field_metadata(struct_def.name, fields, self.symbols, true)
+            if not self.struct_bare_layout_owner.has(struct_def.name):
+                return
+            if self.struct_bare_layout_owner[struct_def.name] != key:
+                return
+            val registered_names = self.struct_field_order[struct_def.name]
+            if registered_names.len() != field_names.len():
+                return
+            var i = 0
+            while i < field_names.len():
+                if registered_names[i] != field_names[i]:
+                    return
+                i = i + 1
+            self.register_composite_field_metadata(struct_def.name, fields, self.symbols, true)
 
 # Trait-typed receiver dispatch (bug
 # stage2_trait_typed_receiver_method_unresolved_2026-10-10). A declaration's
@@ -682,9 +735,12 @@ impl MirLowering:
                 match trait_kind:
                     case Named(trait_sym, _):
                         if symbols.symbols.has(trait_sym.id):
-                            val trait_symbol = symbols.get_symbol_raw(trait_sym.id)
-                            if trait_symbol != nil and trait_symbol.kind == SymbolKind.Trait:
-                                trait_key = mir_trait_dispatch_identity(trait_symbol, module_name)
+                            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                            val optional_trait_symbol: HirSymbol? = symbols.get_symbol_raw(trait_sym.id)
+                            if val present_trait_symbol = optional_trait_symbol:
+                                val trait_symbol: HirSymbol = present_trait_symbol
+                                if trait_symbol.kind == SymbolKind.Trait:
+                                    trait_key = mir_trait_dispatch_identity(trait_symbol, module_name)
                     case _: ()
             if trait_key != "":
                 # A generic or unnamed implementing type still counts as an
@@ -695,8 +751,10 @@ impl MirLowering:
                 match type_kind:
                     case Named(type_sym, type_args):
                         if impl_def.type_params.len() == 0 and type_args.len() == 0 and symbols.symbols.has(type_sym.id):
-                            val type_symbol = symbols.get_symbol_raw(type_sym.id)
-                            if type_symbol != nil:
+                            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                            val optional_type_symbol: HirSymbol? = symbols.get_symbol_raw(type_sym.id)
+                            if val present_type_symbol = optional_type_symbol:
+                                val type_symbol: HirSymbol = present_type_symbol
                                 owner_key = mir_trait_dispatch_identity(type_symbol, module_name)
                     case _: ()
                 var owners = self.trait_impl_owners.get(trait_key) ?? []
@@ -726,9 +784,12 @@ impl MirLowering:
                 if resolved != nil:
                     val field_id = resolved ?? SymbolId(id: -1)
                     if field_id.id >= 0 and self.symbols.symbols.has(field_id.id):
-                        val field_symbol = self.symbols.get_symbol_raw(field_id.id)
-                        if field_symbol != nil and field_symbol.type_ != nil:
-                            candidates = candidates.push(field_symbol.type_ ?? receiver.type_)
+                        # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                        val optional_field_symbol: HirSymbol? = self.symbols.get_symbol_raw(field_id.id)
+                        if val present_field_symbol = optional_field_symbol:
+                            val field_symbol: HirSymbol = present_field_symbol
+                            if field_symbol.type_ != nil:
+                                candidates = candidates.push(field_symbol.type_ ?? receiver.type_)
                 val field_type = self.declared_field_hir_type(base, field_name)
                 if field_type != nil:
                     candidates = candidates.push(field_type ?? receiver.type_)
@@ -741,9 +802,12 @@ impl MirLowering:
                 case DynTrait(dyn_sym): trait_id = dyn_sym.id
                 case _: ()
             if trait_id >= 0 and self.symbols.symbols.has(trait_id):
-                val trait_symbol = self.symbols.get_symbol_raw(trait_id)
-                if trait_symbol != nil and trait_symbol.kind == SymbolKind.Trait:
-                    return mir_trait_dispatch_identity(trait_symbol, self.current_module_id)
+                # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                val optional_trait_symbol: HirSymbol? = self.symbols.get_symbol_raw(trait_id)
+                if val present_trait_symbol = optional_trait_symbol:
+                    val trait_symbol: HirSymbol = present_trait_symbol
+                    if trait_symbol.kind == SymbolKind.Trait:
+                        return mir_trait_dispatch_identity(trait_symbol, self.current_module_id)
         ""
 
     me declared_field_hir_type(base: HirExpr, field_name: text) -> HirType?:
@@ -757,17 +821,20 @@ impl MirLowering:
             case Named(owner_sym, _):
                 if not self.symbols.symbols.has(owner_sym.id):
                     return nil
-                val owner_symbol = self.symbols.get_symbol_raw(owner_sym.id)
-                if owner_symbol == nil:
+                # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                val optional_owner_symbol: HirSymbol? = self.symbols.get_symbol_raw(owner_sym.id)
+                if optional_owner_symbol == nil:
                     return nil
-                for owner_key in [owner_symbol.name, mir_class_identity(owner_symbol)]:
-                    if self.struct_field_order.has(owner_key) and self.struct_field_hir_type.has(owner_key):
-                        val names = self.struct_field_order[owner_key]
-                        val types = self.struct_field_hir_type[owner_key]
-                        var fi = 0
-                        while fi < names.len() and fi < types.len():
-                            if names[fi] == field_name:
-                                return Some(types[fi])
-                            fi = fi + 1
+                if val present_owner_symbol = optional_owner_symbol:
+                    val owner_symbol: HirSymbol = present_owner_symbol
+                    for owner_key in [owner_symbol.name, mir_class_identity(owner_symbol)]:
+                        if self.struct_field_order.has(owner_key) and self.struct_field_hir_type.has(owner_key):
+                            val names = self.struct_field_order[owner_key]
+                            val types = self.struct_field_hir_type[owner_key]
+                            var fi = 0
+                            while fi < names.len() and fi < types.len():
+                                if names[fi] == field_name:
+                                    return Some(types[fi])
+                                fi = fi + 1
             case _: ()
         nil
