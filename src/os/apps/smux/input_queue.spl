@@ -1,0 +1,58 @@
+# Sole-owner bounded input state. Offsets count bytes, including partial UTF-8
+# scalars. Keep original text for the piped-process byte-offset ABI.
+use std.common.string_core.{text_to_bytes}
+
+struct PaneInput:
+    original: text
+    bytes: [u8]
+    offset: i64
+    error: text
+
+pub fn pane_input_new() -> PaneInput:
+    return PaneInput(original: "", bytes: [], offset: 0, error: "")
+
+pub fn pane_input_enqueue(queue: PaneInput, data: text) -> Result<PaneInput, text>:
+    if queue.error != "":
+        return Err(queue.error)
+    if queue.offset < 0 or queue.offset > queue.bytes.len():
+        return Err("invalid pane input offset")
+    val encoded = text_to_bytes(data)
+    # Count retained storage, not just the unconsumed suffix. Compact only at
+    # completion, because slicing text inside a UTF-8 scalar corrupts replay.
+    if queue.bytes.len() + encoded.len() > 65536:
+        return Err("pane input capacity reached")
+    return Ok(PaneInput(original: queue.original + data, bytes: queue.bytes + encoded,
+        offset: queue.offset, error: ""))
+
+pub fn pane_input_remaining(queue: PaneInput) -> [u8]:
+    if queue.offset < 0 or queue.offset > queue.bytes.len():
+        return []
+    var end = queue.offset + 4096
+    if end > queue.bytes.len():
+        end = queue.bytes.len()
+    return queue.bytes[queue.offset:end]
+
+pub fn pane_input_advance(queue: PaneInput, accepted: i64) -> Result<PaneInput, text>:
+    if queue.error != "":
+        return Err(queue.error)
+    if queue.offset < 0 or queue.offset > queue.bytes.len():
+        return Err("invalid pane input offset")
+    if accepted < 0 or accepted > queue.bytes.len() - queue.offset or accepted > 4096:
+        return Err("invalid pane input byte count")
+    val offset = queue.offset + accepted
+    if offset == queue.bytes.len():
+        return Ok(pane_input_new())
+    return Ok(PaneInput(original: queue.original, bytes: queue.bytes,
+        offset: offset, error: ""))
+
+pub fn pane_input_fail(queue: PaneInput, error: text) -> PaneInput:
+    var reason = error
+    if queue.error != "":
+        reason = queue.error
+    elif reason == "":
+        reason = "pane input write failed"
+    return PaneInput(original: queue.original, bytes: queue.bytes,
+        offset: queue.offset, error: reason)
+
+export PaneInput, pane_input_new, pane_input_enqueue, pane_input_remaining
+export pane_input_advance, pane_input_fail

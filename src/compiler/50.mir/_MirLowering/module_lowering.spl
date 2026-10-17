@@ -2,7 +2,8 @@ use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use compiler.mir._MirLoweringExpr.function_signature_owner.*
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
 use compiler.hir.hir_operators.{HirBinOp}
-use compiler.hir.hir_codec.{hir_fn_scalars_at_v1, hir_fn_scalars_at_key_v1}
+use compiler.hir.hir_codec.{hir_fn_scalars_at_v1, hir_fn_scalars_at_key_v1,
+    hir_fn_scalars_in_v1, hir_module_functions_count_in_v1}
 # Part of src/compiler/50.mir/mir_lowering.spl: module/struct/class type lowering, asm target-spec accessors
 use compiler.mir._MirLowering.bootstrap_globals.*
 use compiler.mir._MirLowering.provider_metadata.*
@@ -1595,16 +1596,19 @@ impl MirLowering:
         if overwrite or not self.struct_field_array_elem_type.has(name):
             self.struct_field_array_elem_type[name] = field_elem_types
 
-    # Cycle-110: dict-handle/scalar transport. The HirModule by-value
-    # param's prologue copy in this host drew corrupted (the .functions
-    # field handle was garbage, faulting three calls downstream on the
-    # values-array element deref -- cycles 91 through 109 fixed symptoms).
-    # Dicts are reference-typed handles; structs/classes are empty for
-    # p2_add-class modules so their inner walks never execute here.
-    me prescan_module_struct_names(structs: Dict<SymbolId, HirStruct>,
-            classes: Dict<SymbolId, HirClass>,
-            functions: Dict<SymbolId, HirFunction>,
-            module_name: text, module_symbols: SymbolTable):
+    # Cycle-144 endgame: dict+key passing. The feed array's modules were
+    # copy-corrupted at the big-host push site (cycle-141/144); the module
+    # is bound HERE (mono's process_modules precedent) from the caller's
+    # dict, and every functions walk goes through the param-only codec
+    # getters (hir_fn_scalars_in_v1 -- the encode-proven access class).
+    me prescan_module_struct_names(modules: Dict<text, HirModule>, module_key: text):
+        if not modules.has(module_key):
+            return
+        val prescan_module_value: HirModule = modules[module_key]
+        val structs: Dict<SymbolId, HirStruct> = prescan_module_value.structs
+        val classes: Dict<SymbolId, HirClass> = prescan_module_value.classes
+        val module_name: text = prescan_module_value.name
+        val module_symbols: SymbolTable = prescan_module_value.symbols
         """Cross-module struct/class-name prepass (field-index SEGV).
 
         Entry-closure lowering iterates modules on ONE shared MirLowering,
@@ -1694,7 +1698,7 @@ impl MirLowering:
         # (the HirModule by-value arg copy at this big call site is the
         # cycle-109 corruptor: the callee's .values() then produced a garbage
         # array, faulting on the first element deref).
-        self.prescan_module_functions_v1(functions, module_name, module_symbols)
+        self.prescan_module_functions_v1(modules, module_key, module_name, module_symbols)
 
     # Cycle-100: the per-function prescan body of prescan_module_struct_names,
     # hosted in a fresh method. Both prior extraction shapes drew corrupted
@@ -1703,7 +1707,7 @@ impl MirLowering:
     # then read through its by-value param (cycle-100 shim, same callee as
     # cycle-91). The module crosses by value (proven transport); no large
     # composite crosses back.
-    me prescan_module_functions_v1(functions: Dict<SymbolId, HirFunction>,
+    me prescan_module_functions_v1(modules: Dict<text, HirModule>, module_key: text,
             module_name: text, module_symbols: SymbolTable):
         # Cycle-129: NO owner-field round-trip. MirLowering's struct header
         # documents that field mutations do not reliably persist (Stage4
@@ -1714,14 +1718,14 @@ impl MirLowering:
         # local, no field, no bind. (The dict HANDLE param transport from
         # cycle-108/109 stays: reference copy at the call site, C-level
         # rt_dict_values.)
-        # Cycle-138: dict-index extraction, NOT .values() -- the values-array
-        # transport draws corrupted for Dict<SymbolId, HirFunction> (mono's
-        # guard-first dict-index reads of the same dict are the proven
-        # pattern; see hir_fn_scalars_at_key_v1).
-        val prescan_fn_count: i64 = functions.keys().len()
+        # Cycle-144: param-only codec extraction via dict+key -- the
+        # encode-proven access class (hir_fn_scalars_in_v1 /
+        # hir_module_functions_count_in_v1). No .values(), no binds of the
+        # module or keys anywhere on this path.
+        val prescan_fn_count: i64 = hir_module_functions_count_in_v1(modules, module_key)
         var psi = 0
         while psi < prescan_fn_count:
-            val prescan_scalars = hir_fn_scalars_at_key_v1(functions, psi)
+            val prescan_scalars = hir_fn_scalars_in_v1(modules, module_key, psi)
             self.prescan_one_function_v1(module_name, module_symbols,
                 prescan_scalars[0], prescan_scalars[1], prescan_scalars[2],
                 prescan_scalars[3], prescan_scalars[4], prescan_scalars[5],
@@ -2531,9 +2535,12 @@ impl MirLowering:
         while module_fn_i < module_fn_values.len():
             # module.functions also contains impl methods; retain their static
             # marker for the separate static receiver lookup below.
-            val module_fn: HirFunction = module_fn_values[module_fn_i]
-            if module_fn.is_static:
-                static_method_symbol_ids[self.symbol_id_value(module_fn.symbol)] = true
+            # workaround(p2_add): values() draws corrupt per read; bind once
+            # via if val, guard and use the same binding.
+            val static_element: HirFunction? = module_fn_values[module_fn_i]
+            if val module_fn = static_element:
+                if module_fn.is_static:
+                    static_method_symbol_ids[self.symbol_id_value(module_fn.symbol)] = true
             module_fn_i = module_fn_i + 1
 
         var impl_mi = 0
@@ -2785,19 +2792,24 @@ impl MirLowering:
         if prescan_trace:
             eprint("[mir-prescan-module] start module={module.name} functions={self.lower_emit_fn_values.len()}")
         while psi < self.lower_emit_fn_values.len():
-            if prescan_trace:
-                eprint("[mir-prescan-function] start module={module.name} index={psi} name={self.lower_emit_fn_values[psi].name}")
-            if not self.lower_emit_fn_values[psi].is_extern:
-                self.prescan_block_for_struct_types(self.lower_emit_fn_values[psi].body)
-            else:
-                # Mark every extern BEFORE any body is lowered. The lowering
-                # loop below also records it, but only when it reaches the
-                # declaration, so a caller lowered earlier saw the extern's
-                # `-> i64` result as a declared scalar: `ext() == nil` folded
-                # to false and `take(ext())` boxed a nil word as Some.
-                self.extern_fn_symbols[self.lower_emit_fn_values[psi].symbol.id] = true
-            if prescan_trace:
-                eprint("[mir-prescan-function] done module={module.name} index={psi} name={self.lower_emit_fn_values[psi].name}")
+            # workaround(p2_add): values() elements draw nil-3 PER READ in this
+            # lane's codegen (smoke8: check-draw non-nil, use-draw nil-3).
+            # Bind ONE draw, unwrap via if val, use that binding throughout.
+            val prescan_element: HirFunction? = self.lower_emit_fn_values[psi]
+            if val prescan_fn = prescan_element:
+                if prescan_trace:
+                    eprint("[mir-prescan-function] start module={module.name} index={psi} name={prescan_fn.name}")
+                if not prescan_fn.is_extern:
+                    self.prescan_block_for_struct_types(prescan_fn.body)
+                else:
+                    # Mark every extern BEFORE any body is lowered. The lowering
+                    # loop below also records it, but only when it reaches the
+                    # declaration, so a caller lowered earlier saw the extern's
+                    # `-> i64` result as a declared scalar: `ext() == nil` folded
+                    # to false and `take(ext())` boxed a nil word as Some.
+                    self.extern_fn_symbols[prescan_fn.symbol.id] = true
+                if prescan_trace:
+                    eprint("[mir-prescan-function] done module={module.name} index={psi} name={prescan_fn.name}")
             psi = psi + 1
         if prescan_trace:
             eprint("[mir-prescan-module] done module={module.name}")
@@ -2855,8 +2867,14 @@ impl MirLowering:
             eprint("[enum-reg] fn-keys: module={module.name} values_len={fn_values_count} dict_len={module.functions.len()}")
         var fni = 0
         while fni < fn_values_count:
-            self.lower_module_emit_fn_v1(module, self.lower_emit_fn_values[fni],
-                    archive_function_symbols, bootstrap_trace, trace_enabled, fni)
+            # workaround(p2_add): values() draws corrupt PER READ (smoke8: the
+            # nil record passed the check-draw and faulted the use-draw at
+            # lower_module_emit_fn_v1's first field read). Bind ONE draw into
+            # an optional, unwrap via if val, pass that binding.
+            val emit_element: HirFunction? = self.lower_emit_fn_values[fni]
+            if val emit_fn = emit_element:
+                self.lower_module_emit_fn_v1(module, emit_fn,
+                        archive_function_symbols, bootstrap_trace, trace_enabled, fni)
             fni = fni + 1
 
     # Cycle-103: per-function emission step for lower_module_emit_all_v1.

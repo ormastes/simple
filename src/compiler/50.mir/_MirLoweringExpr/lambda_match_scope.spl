@@ -1,0 +1,89 @@
+# Match-pattern scope shared by the three closure analysis traversals.
+# @req REQ-SSPEC-COMPILER
+use compiler.hir.hir_definitions.{HirPattern, HirPatternKind, HirPatternPayload, HirExpr}
+
+pub struct LambdaMatchPatternScopeV1:
+    supported: bool
+    bindings: [i64]
+    expressions: [HirExpr]
+
+pub fn lambda_match_bound_union_v1(base: [i64], additions: [i64]) -> [i64]:
+    var result = base
+    for symbol in additions:
+        var found = false
+        for existing in result:
+            if existing == symbol: found = true
+        if not found: result.push(symbol)
+    result
+
+fn lambda_match_scope_merge_v1(left: LambdaMatchPatternScopeV1,
+        right: LambdaMatchPatternScopeV1) -> LambdaMatchPatternScopeV1:
+    var expressions = left.expressions
+    for expression in right.expressions: expressions.push(expression)
+    LambdaMatchPatternScopeV1(supported: left.supported and right.supported,
+        bindings: lambda_match_bound_union_v1(left.bindings, right.bindings),
+        expressions: expressions)
+
+fn lambda_match_scope_children_v1(patterns: [HirPattern]) -> LambdaMatchPatternScopeV1:
+    var result = LambdaMatchPatternScopeV1(supported: true, bindings: [], expressions: [])
+    for pattern in patterns:
+        result = lambda_match_scope_merge_v1(result, lambda_match_pattern_scope_v1(pattern))
+    result
+
+pub fn lambda_match_pattern_scope_v1(pattern: HirPattern) -> LambdaMatchPatternScopeV1:
+    """Collect arm bindings and expressions evaluated before those bindings.
+
+    Unknown/unlowered patterns stay unsupported. Or alternatives must bind
+    the same canonical symbols; their ordering need not be identical.
+    """
+    val empty_scope = LambdaMatchPatternScopeV1(supported: true, bindings: [], expressions: [])
+    match pattern.kind:
+        case HirPatternKind.Wildcard: empty_scope
+        case HirPatternKind.Binding(symbol, _):
+            LambdaMatchPatternScopeV1(supported: symbol.id >= 0, bindings: [symbol.id], expressions: [])
+        case HirPatternKind.Literal(expression):
+            LambdaMatchPatternScopeV1(supported: true, bindings: [], expressions: [expression])
+        case HirPatternKind.Range(start, end, _):
+            LambdaMatchPatternScopeV1(supported: true, bindings: [], expressions: [start, end])
+        case HirPatternKind.Tuple(patterns): lambda_match_scope_children_v1(patterns)
+        case HirPatternKind.Array(patterns, rest):
+            var result = lambda_match_scope_children_v1(patterns)
+            if val rest_symbol = rest:
+                result = lambda_match_scope_merge_v1(result,
+                    LambdaMatchPatternScopeV1(supported: rest_symbol.id >= 0,
+                        bindings: [rest_symbol.id], expressions: []))
+            result
+        case HirPatternKind.Struct(_, fields):
+            var result = empty_scope
+            for field in fields:
+                result = lambda_match_scope_merge_v1(result, lambda_match_pattern_scope_v1(field.1))
+            result
+        case HirPatternKind.Enum(_, _, payload):
+            if val present_payload = payload:
+                match present_payload:
+                    case HirPatternPayload.Tuple(patterns): lambda_match_scope_children_v1(patterns)
+                    case HirPatternPayload.Struct(fields):
+                        var result = empty_scope
+                        for field in fields:
+                            result = lambda_match_scope_merge_v1(result, lambda_match_pattern_scope_v1(field.1))
+                        result
+            else:
+                empty_scope
+        case HirPatternKind.Or(patterns):
+            if patterns.len() == 0:
+                return LambdaMatchPatternScopeV1(supported: false, bindings: [], expressions: [])
+            var result = lambda_match_pattern_scope_v1(patterns[0])
+            var index = 1
+            while index < patterns.len():
+                val alternative = lambda_match_pattern_scope_v1(patterns[index])
+                val combined = lambda_match_bound_union_v1(result.bindings, alternative.bindings)
+                val same_symbols = combined.len() == result.bindings.len() and
+                    combined.len() == alternative.bindings.len()
+                result = lambda_match_scope_merge_v1(result, alternative)
+                result.supported = result.supported and same_symbols
+                index = index + 1
+            result
+        case _:
+            # Error, CompleteRegion, DynRegion and unnormalized TypeTest do
+            # not provide canonical SymbolIds here. Never guess their scope.
+            LambdaMatchPatternScopeV1(supported: false, bindings: [], expressions: [])
