@@ -2177,10 +2177,17 @@ fn transient_heap_children(value: RuntimeValue) -> Option<Vec<RuntimeValue>> {
         HeapObjectType::Array => {
             let ptr = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array)?;
             unsafe {
-                if (*ptr).is_byte_packed() || (*ptr).is_u64_packed() {
+                let array = &*ptr;
+                // Same validated-bound contract as the Dict arm: `as_slice`
+                // iterates `len` element words, so refuse a header whose len
+                // exceeds its capacity instead of overrunning the buffer.
+                if array.len > array.capacity {
+                    return None;
+                }
+                if array.is_byte_packed() || array.is_u64_packed() {
                     Some(Vec::new())
                 } else {
-                    Some((*ptr).as_slice().to_vec())
+                    Some(array.as_slice().to_vec())
                 }
             }
         }
@@ -2191,17 +2198,33 @@ fn transient_heap_children(value: RuntimeValue) -> Option<Vec<RuntimeValue>> {
         HeapObjectType::Dict => {
             let ptr = get_typed_ptr::<RuntimeDict>(value, HeapObjectType::Dict)?;
             unsafe {
-                if (*ptr).data.is_null() {
-                    return Some(Vec::new());
+                let dict = &*ptr;
+                // Validate the open-addressing header BEFORE any slot word is
+                // used as an iteration bound: a corrupt or inflated bound turns
+                // every promote pass into an unbounded walk of the raw entries
+                // allocation (stage3 promotion-registry rewalk livelock,
+                // doc/08_tracking/bug/stage3_promotion_registry_rewalk_livelock_
+                // 2026-10-17.md), so reject the header instead of walking
+                // garbage. The slot table is a raw side allocation owned by
+                // the dict, not a heap container: the walk must never emit its
+                // words as generic elements, and it must never rewrite
+                // `len`/`capacity`/`data` — only occupied (key, value) pairs
+                // are promoted. Iteration is clamped to the validated table
+                // size, and `len` is used only to size the child buffer.
+                if dict.data.is_null()
+                    || dict.len > dict.capacity
+                    || dict.capacity > (1u64 << 32)
+                {
+                    return None;
                 }
-                let mut children = Vec::with_capacity((*ptr).len as usize * 2);
-                for index in 0..(*ptr).capacity as usize {
-                    let key = *(*ptr).data.add(index * 2);
+                let mut children = Vec::with_capacity(dict.len as usize * 2);
+                for index in 0..dict.capacity as usize {
+                    let key = *dict.data.add(index * 2);
                     if key.is_nil() {
                         continue;
                     }
                     children.push(key);
-                    children.push(*(*ptr).data.add(index * 2 + 1));
+                    children.push(*dict.data.add(index * 2 + 1));
                 }
                 Some(children)
             }
@@ -6869,7 +6892,7 @@ mod string_free_contract_tests {
         rt_string_new, rt_string_new_literal, rt_transient_array_scope_begin, rt_transient_array_scope_end,
         rt_transient_array_scope_pause, rt_transient_heap_promote,
     };
-    use crate::value::dict::{rt_dict_get, rt_dict_new, rt_dict_set};
+    use crate::value::dict::{rt_dict_get, rt_dict_len, rt_dict_new, rt_dict_set};
     use crate::value::objects::{
         rt_closure_get_capture, rt_closure_new, rt_closure_set_capture, rt_enum_new, rt_enum_payload,
     };
@@ -7097,6 +7120,43 @@ mod string_free_contract_tests {
             before + 5,
             "only five promoted graph nodes survive"
         );
+    }
+
+    #[test]
+    fn dict_promote_rewalk_never_rewrites_len_and_children_survive() {
+        let _g = GUARD.lock().unwrap();
+        assert!(rt_transient_array_scope_begin());
+        let dict = rt_dict_new(8);
+        assert!(!dict.is_nil());
+        let mut pairs: Vec<(crate::value::RuntimeValue, crate::value::RuntimeValue)> = Vec::new();
+        for i in 0..200u32 {
+            let key = mkstr(&format!("promote rewalk key {i}"));
+            let value = mkstr(&format!("promote rewalk value {i}"));
+            assert!(rt_dict_set(dict, key, value));
+            pairs.push((key, value));
+        }
+        let len_before = rt_dict_len(dict);
+        assert_eq!(len_before, 200);
+        assert!(rt_transient_array_scope_pause());
+        assert!(rt_transient_heap_promote(dict));
+        assert_eq!(
+            rt_dict_len(dict),
+            len_before,
+            "promote must not rewrite dict len"
+        );
+        // The second pass is the per-module rewalk shape that livelocked
+        // stage3 (registry dicts promoted once per module): it must stay
+        // bounded and leave len accounting untouched.
+        assert!(rt_transient_heap_promote(dict));
+        assert_eq!(
+            rt_dict_len(dict),
+            len_before,
+            "rewalk must not rewrite dict len"
+        );
+        assert!(rt_transient_array_scope_end());
+        for (key, value) in pairs {
+            assert_eq!(rt_dict_get(dict, key), value, "promoted child survives");
+        }
     }
 
     #[test]
