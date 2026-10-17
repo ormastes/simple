@@ -1694,24 +1694,39 @@ impl MirLowering:
         # small fresh method; its by-value param copy draws in the
         # callee prologue (the proven has_rt_hal class).
         for raw_prescan_fn in prescan_function_keys_values:
-            self.prescan_one_function_v1(module, raw_prescan_fn)
+            # Cycle-106: expression reads off the for-in element (no named
+            # bind); scalars/small composites cross by value.
+            self.prescan_one_function_v1(module, raw_prescan_fn.symbol, raw_prescan_fn.name,
+                raw_prescan_fn.is_extern, raw_prescan_fn.is_method, raw_prescan_fn.is_static,
+                raw_prescan_fn.has_export_attr, raw_prescan_fn.func_attr,
+                raw_prescan_fn.return_type, raw_prescan_fn.params)
 
     # Cycle-102: per-function prescan body; prescan_fn is the by-value
     # param (no caller-side named bind of the for-in element).
-    me prescan_one_function_v1(module: HirModule, prescan_fn: HirFunction):
-        # Cycle-101: register_provider_callable_link's HirFunction-param
-        # field-read draw is defective -- three consecutive cycles crashed
-        # at its func.symbol load with three different caller transports
-        # (keys+index 91, values for-in 100, this fresh method 101). Read
-        # the fields HERE (the proven draw) and call the fields variant
-        # directly; scalars + one attr struct cross by value.
+    # Cycle-106: scalar-feed signature. The HirFunction by-value param's
+    # prologue copy drew corrupted in this big host (cycle-106 shim: the
+    # register_provider_callable_link_fields_v1 marshalling faulted on the
+    # param spill); the tiny caller now reads every needed field off the
+    # for-in element as EXPRESSIONS (the has_rt_hal class) and only
+    # scalars/small composites cross.
+    me prescan_one_function_v1(module: HirModule, fn_symbol: SymbolId,
+            fn_name: text, fn_is_extern: bool, fn_is_method: bool,
+            fn_is_static: bool, fn_has_export_attr: bool,
+            fn_attr: FunctionAttr, fn_return_type: HirType,
+            fn_params: [HirParam]):
+        # Cycle-101/106: register_provider_callable_link's HirFunction-param
+        # read draw is defective, and the cycle-106 shim proved this big
+        # host's own HirFunction prologue copy corrupts too (the fields_v1
+        # marshalling faulted on the param spill). The caller now feeds
+        # scalars/small composites extracted as element expressions.
         self.register_provider_callable_link_fields_v1(module.name, module.symbols,
-            prescan_fn.symbol, prescan_fn.name, prescan_fn.is_extern,
-            prescan_fn.is_method, prescan_fn.is_static, prescan_fn.has_export_attr,
-            prescan_fn.func_attr, false)
-        val prescan_call_name = mir_provider_function_name(module.name, module.symbols, prescan_fn)
+            fn_symbol, fn_name, fn_is_extern,
+            fn_is_method, fn_is_static, fn_has_export_attr,
+            fn_attr, false)
+        val prescan_call_name = mir_provider_function_name_fields_v1(module.name, module.symbols,
+            fn_symbol, fn_name, fn_is_extern, fn_has_export_attr, fn_attr, false)
         var prescan_return_shape = ""
-        match prescan_fn.return_type.kind:
+        match fn_return_type.kind:
             case Named(prescan_return_symbol_id, _):
                 # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
                 val optional_prescan_return_symbol: HirSymbol? = module.symbols.get_symbol_raw(prescan_return_symbol_id.id)
@@ -1743,7 +1758,7 @@ impl MirLowering:
                     case _: ()
                 # Include scalar arrays in ambiguity detection so a name
                 # collision cannot lend a struct layout to an integer.
-                val array_return_names = [prescan_fn.name, prescan_call_name,
+                val array_return_names = [fn_name, prescan_call_name,
                     prescan_call_name.replace("-", "_"),
                     prescan_call_name.replace("::", "."),
                     prescan_call_name.replace("-", "_").replace("::", ".")]
@@ -1828,12 +1843,12 @@ impl MirLowering:
         # pre-lowering source for its declared defaults. See
         # bootstrap_fn_param_defaults_register in mir_data.spl and
         # doc/08_tracking/bug/native_trailing_default_param_reads_uninitialized_2026-08-09.md.
-        bootstrap_fn_param_defaults_register(prescan_fn.name, prescan_fn.params)
-        if prescan_call_name != prescan_fn.name:
-            bootstrap_fn_param_defaults_register(prescan_call_name, prescan_fn.params)
+        bootstrap_fn_param_defaults_register(fn_name, fn_params)
+        if prescan_call_name != fn_name:
+            bootstrap_fn_param_defaults_register(prescan_call_name, fn_params)
             val prescan_defaults_sanitized = prescan_call_name.replace("-", "_")
             if prescan_defaults_sanitized != prescan_call_name:
-                bootstrap_fn_param_defaults_register(prescan_defaults_sanitized, prescan_fn.params)
+                bootstrap_fn_param_defaults_register(prescan_defaults_sanitized, fn_params)
         # `symbol_to_operand` (method_calls_literals.spl:3207) ALWAYS
         # rewrites the symbol's raw "Owner::method" spelling to
         # "Owner.method" before it ever reaches `direct_call_extern_name`,
@@ -1844,9 +1859,9 @@ impl MirLowering:
         if prescan_call_name.contains("::"):
             val prescan_defaults_dotted = prescan_call_name.replace("::", ".")
             if prescan_defaults_dotted != prescan_call_name:
-                bootstrap_fn_param_defaults_register(prescan_defaults_dotted, prescan_fn.params)
-        if not prescan_fn.is_method:
-            bootstrap_fn_ret_hir_type_register(prescan_fn.name, prescan_fn.return_type)
+                bootstrap_fn_param_defaults_register(prescan_defaults_dotted, fn_params)
+        if not fn_is_method:
+            bootstrap_fn_ret_hir_type_register(fn_name, fn_return_type)
         # Cross-module METHOD return types (native_build_cross_module_
         # result_payload_struct_name_collision_2026-08-09 mechanism #2):
         # a method's SYMBOL name is already owner-qualified
@@ -1858,8 +1873,8 @@ impl MirLowering:
         # before the defining dependency module has been lowered --
         # module.impls/struct_method_syms never carry inline class
         # methods, so this registry is the only pre-lowering source.
-        if prescan_call_name != prescan_fn.name:
-            bootstrap_fn_ret_hir_type_register(prescan_call_name, prescan_fn.return_type)
+        if prescan_call_name != fn_name:
+            bootstrap_fn_ret_hir_type_register(prescan_call_name, fn_return_type)
             # The IMPORTING module's symbol table spells the same method
             # with `_hir_symbol_owner_module`-sanitized module segments
             # (dashes -> underscores), while the defining module's own
@@ -1868,11 +1883,11 @@ impl MirLowering:
             # lookup hits.
             val prescan_sanitized_name = prescan_call_name.replace("-", "_")
             if prescan_sanitized_name != prescan_call_name:
-                bootstrap_fn_ret_hir_type_register(prescan_sanitized_name, prescan_fn.return_type)
+                bootstrap_fn_ret_hir_type_register(prescan_sanitized_name, fn_return_type)
             var prescan_param_tys: [HirType] = []
-            for prescan_param in prescan_fn.params:
+            for prescan_param in fn_params:
                 prescan_param_tys.push(prescan_param.type_)
-            bootstrap_fn_param_hir_types_register(prescan_fn.name, prescan_param_tys)
+            bootstrap_fn_param_hir_types_register(fn_name, prescan_param_tys)
     me register_builtin_enum_seeds():
         """Register the built-in Result/Option variant and runtime-identity
         seeds. Extracted from lower_module's tail (2026-10-17) so lanes that
