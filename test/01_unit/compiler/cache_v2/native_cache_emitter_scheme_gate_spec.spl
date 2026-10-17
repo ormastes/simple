@@ -1,0 +1,84 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Native-cache emitter-scheme gate (H2)
+
+Stage3 link divergence (site-19, emission divergence 2026-10-17): the stage3
+link combined 40 freshly emitted objects (pure-Simple compiler, DOTTED
+cross-module symbols like `_lib.nogc_sync_mut.io_runtime.env_get`) with
+seed-built cache objects (Rust seed, UNDERSCORE symbols like
+`_lib__nogc_sync_mut__io_runtime__env_get`). Both schemes are internally
+consistent, so each lane's own builds link fine; the mixture fails -- 36
+undefined symbols, every one referenced under the dotted spelling with its
+underscore twin present in the reused cache. The reuse path is the per-module
+native-cache witness (`build_cache.get_cached_outputs` admitted by
+`native_module_cache_shadow_mismatch_v1`), NOT the phase2 compatibility
+manifest (the seed publishes none; stage3's manifest slot is a fail-closed
+skip note).
+
+Gate design: `NativeModuleConfigFactV1` gains `emitter_scheme`, folded into
+the witness config fingerprint. A witness recorded without the tag (every
+seed-built and pre-H2 object) can never match a tagged expected witness --
+the required fail-closed rule (unknown emitter = foreign). A witness
+production site that omits the scheme is invalid outright
+("missing-emitter-scheme"), so a missed call site degrades to no-reuse, never
+to an untagged admission. The composed-owner K1 divergence rides the same
+gate: those cache objects are seed-built and untagged, so they are re-emitted
+too.
+
+These probes pin the tag, the fail-closed validation, and the mismatch
+semantics through the public witness API.
+"""
+
+# @tag: unit, compiler, cache, native, witness, emitter-scheme
+
+use std.spec
+use std.io_runtime.{file_read}
+use compiler.driver.cache.action_key.{ActionDep}
+use compiler.driver.cache.native_module_witness.{
+    NATIVE_CACHE_EMITTER_SCHEME_V1, NativeModuleConfigFactV1,
+    native_module_cache_witness_v1}
+use compiler.driver.driver_build.incremental.{native_module_cache_shadow_mismatch_v1}
+
+fn gate_config(scheme: text) -> NativeModuleConfigFactV1:
+    NativeModuleConfigFactV1(compiler_identity: "compiler-a",
+        target_identity: "aarch64-apple-darwin", options_identity: "opt=2",
+        provider_identity: "llvm-a", emitter_scheme: scheme)
+
+describe "native cache emitter scheme gate":
+    it "declares the pure-Simple dotted scheme constant":
+        expect(NATIVE_CACHE_EMITTER_SCHEME_V1).to_equal("pure-simple-dotted-v1")
+
+    it "a different emitter scheme changes the witness (no cross-scheme reuse)":
+        val deps = [ActionDep(module_id: "dep.a", iface_digest: "iface-a")]
+        val dotted = native_module_cache_witness_v1("app.main", "mir-1", deps, [],
+            [], gate_config("pure-simple-dotted-v1"))
+        val seed_like = native_module_cache_witness_v1("app.main", "mir-1", deps, [],
+            [], gate_config("rust-seed-underscore-v1"))
+        expect(dotted.valid).to_equal(true)
+        expect(seed_like.valid).to_equal(true)
+        expect(dotted.digest() == seed_like.digest()).to_equal(false)
+        # The recorded/expected comparison the cache admission uses is string
+        # equality; different schemes mismatch, so the cached object is not
+        # linked and the module is re-emitted under the current scheme.
+        expect(native_module_cache_shadow_mismatch_v1(
+            seed_like.canonical_text(), dotted.canonical_text())).to_equal("witness-mismatch")
+        expect(native_module_cache_shadow_mismatch_v1(
+            dotted.canonical_text(), dotted.canonical_text())).to_equal("match")
+
+    it "an untagged production site is invalid, not silently admitted":
+        val untagged = native_module_cache_witness_v1("app.main", "mir-1",
+            [ActionDep(module_id: "dep.a", iface_digest: "iface-a")], [], [],
+            NativeModuleConfigFactV1(compiler_identity: "compiler-a",
+                target_identity: "aarch64-apple-darwin", options_identity: "opt=2",
+                provider_identity: "llvm-a", emitter_scheme: ""))
+        expect(untagged.valid).to_equal(false)
+        expect(untagged.reason).to_equal("missing-emitter-scheme")
+
+    it "pins the schema field, its fold, and the driver wiring":
+        val source = file_read("src/compiler/80.driver/cache/native_module_witness.spl")
+        expect(source).to_contain("emitter_scheme: text")
+        expect(source).to_contain('canon_field("emitter", canon_str(config.emitter_scheme))')
+        expect(source).to_contain('native_module_cache_witness_invalid_v1("missing-emitter-scheme")')
+        expect(source).to_contain('val NATIVE_CACHE_EMITTER_SCHEME_V1: text = "pure-simple-dotted-v1"')
+        val driver = file_read("src/compiler/80.driver/driver_aot_native_output.spl")
+        expect(driver).to_contain("emitter_scheme: NATIVE_CACHE_EMITTER_SCHEME_V1")
