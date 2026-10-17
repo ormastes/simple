@@ -1,0 +1,53 @@
+# Parsed one-module regression. Each predicate must call the real close once;
+# the global count and field state reject double evaluation or lost writeback.
+var field_result_close_calls: i64 = 0
+
+class FieldResultEndpoint:
+    fails: bool
+    closes: i64
+
+    me close() -> Result<(), text>:
+        field_result_close_calls = field_result_close_calls + 1
+        self.closes = self.closes + 1
+        if self.fails: return Err("close failed")
+        Ok(())
+
+class FieldResultMiddle:
+    stream: FieldResultEndpoint
+
+class FieldResultOwner:
+    stream: FieldResultEndpoint
+    middle: FieldResultMiddle
+
+fn local_control(stream: FieldResultEndpoint) -> bool:
+    stream.close().is_err()
+
+fn direct_ok(owner: FieldResultOwner) -> bool:
+    owner.stream.close().is_ok()
+
+fn direct_err(owner: FieldResultOwner) -> bool:
+    owner.stream.close().is_err()
+
+fn nested_ok(owner: FieldResultOwner) -> bool:
+    owner.middle.stream.close().is_ok()
+
+fn nested_err(owner: FieldResultOwner) -> bool:
+    owner.middle.stream.close().is_err()
+
+fn main() -> i64:
+    val ok = FieldResultEndpoint(fails: false, closes: 0)
+    val failed = FieldResultEndpoint(fails: true, closes: 0)
+    if local_control(ok): return 11
+    if not local_control(failed): return 12
+    var owner = FieldResultOwner(
+        stream: FieldResultEndpoint(fails: false, closes: 0),
+        middle: FieldResultMiddle(stream: FieldResultEndpoint(fails: true, closes: 0)))
+    if not owner.stream.close().is_ok(): return 13
+    if owner.stream.close().is_err(): return 14
+    if owner.middle.stream.close().is_ok(): return 15
+    if not owner.middle.stream.close().is_err(): return 16
+    if field_result_close_calls != 6: return 17
+    if owner.stream.closes != 2: return 18
+    if owner.middle.stream.closes != 2: return 19
+    print "nested-field-result-receiver-pass"
+    0

@@ -1,0 +1,62 @@
+"""Value contracts for native Windows console key decoding and mode transitions."""
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.windows_console_codec.{WindowsConsoleDecoderV1, windows_console_decode_key_v1, windows_console_raw_input_mode_v1, windows_console_vt_output_mode_v1, windows_console_utf16_units_v1}
+
+describe "Windows console key and mode codec":
+    it "disables processed line echo QuickEdit mouse and VT input while preserving other flags":
+        val mode = windows_console_raw_input_mode_v1(1023) as i64
+        expect(mode & 599).to_equal(0)
+        expect(mode & 136).to_equal(136)
+        expect(mode & 32).to_equal(32)
+    it "enables VT output without dropping saved output flags":
+        expect(windows_console_vt_output_mode_v1(18)).to_equal(31u32)
+    it "forwards Ctrl C as byte three even when UnicodeChar is zero":
+        val decoded = windows_console_decode_key_v1(WindowsConsoleDecoderV1(), true, 1, 67, 0, 8)
+        expect(decoded.keys.len()).to_equal(1)
+        expect(decoded.keys[0].value).to_equal("\x03")
+        expect(decoded.keys[0].repeat).to_equal(1)
+    it "emits complete VT arrows and retains repetition as a bounded counter":
+        val decoded = windows_console_decode_key_v1(WindowsConsoleDecoderV1(), true, 65535, 38, 0, 0)
+        expect(decoded.keys.len()).to_equal(1)
+        expect(decoded.keys[0].value).to_equal("\x1b[A")
+        expect(decoded.keys[0].repeat).to_equal(65535)
+    it "ignores key up and modifier-only key down without losing surrogate carry":
+        val high = windows_console_decode_key_v1(WindowsConsoleDecoderV1(), true, 1, 0, 55357, 0)
+        val modifier = windows_console_decode_key_v1(high.decoder, true, 1, 16, 0, 16)
+        val released = windows_console_decode_key_v1(modifier.decoder, false, 1, 0, 56832, 0)
+        expect(modifier.keys.len()).to_equal(0)
+        expect(released.keys.len()).to_equal(0)
+        expect(released.decoder.high).to_equal(55357)
+    it "combines a surrogate pair across OS read batches":
+        val high = windows_console_decode_key_v1(WindowsConsoleDecoderV1(), true, 1, 0, 55357, 0)
+        expect(high.keys.len()).to_equal(0)
+        val low = windows_console_decode_key_v1(high.decoder, true, 1, 0, 56832, 0)
+        expect(low.keys[0].value).to_equal("😀")
+        expect(low.decoder.high).to_equal(0)
+    it "preserves repeated surrogate pairs without expanding the repeat count":
+        val high = windows_console_decode_key_v1(WindowsConsoleDecoderV1(), true, 3, 0, 55357, 0)
+        val partial = windows_console_decode_key_v1(high.decoder, true, 1, 0, 56832, 0)
+        expect(partial.keys[0].value).to_equal("😀")
+        expect(partial.keys[0].repeat).to_equal(1)
+        expect(partial.decoder.repeat).to_equal(2)
+        val rest = windows_console_decode_key_v1(partial.decoder, true, 2, 0, 56832, 0)
+        expect(rest.keys[0].repeat).to_equal(2)
+        expect(rest.decoder.high).to_equal(0)
+    it "replaces an unmatched high surrogate before ordinary input":
+        val high = windows_console_decode_key_v1(WindowsConsoleDecoderV1(), true, 1, 0, 55357, 0)
+        val next = windows_console_decode_key_v1(high.decoder, true, 1, 65, 65, 0)
+        expect(next.keys[0].value).to_equal("�")
+        expect(next.keys[1].value).to_equal("A")
+    it "preserves AltGr printable text rather than turning it into a control shortcut":
+        val decoded = windows_console_decode_key_v1(WindowsConsoleDecoderV1(), true, 1, 81, 64, 9)
+        expect(decoded.keys[0].value).to_equal("@")
+    it "prefixes an Alt character once and produces Shift Tab VT":
+        val alt = windows_console_decode_key_v1(WindowsConsoleDecoderV1(), true, 1, 88, 120, 2)
+        expect(alt.keys[0].value).to_equal("\x1bx")
+        val tab = windows_console_decode_key_v1(WindowsConsoleDecoderV1(), true, 1, 9, 9, 16)
+        expect(tab.keys[0].value).to_equal("\x1b[Z")
+    it "forwards Ctrl Space as NUL and Backspace as DEL":
+        expect(windows_console_decode_key_v1(WindowsConsoleDecoderV1(), true, 1, 32, 0, 8).keys[0].value).to_equal("\0")
+        expect(windows_console_decode_key_v1(WindowsConsoleDecoderV1(), true, 1, 8, 8, 0).keys[0].value).to_equal("\x7f")
+    it "counts UTF16 units including supplementary Unicode and embedded NUL":
+        expect(windows_console_utf16_units_v1("A한😀\0")).to_equal(5)

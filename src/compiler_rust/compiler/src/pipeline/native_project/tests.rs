@@ -2817,6 +2817,10 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
         build_core_c_runtime_library(temp.path()).expect("core-c runtime archive should build")
     });
     let core_c_symbols = archive_defined_symbols(&core_c).expect("core-c runtime symbols should be readable");
+    assert!(
+        core_c_symbols.contains("simple_pow"),
+        "core-c runtime archive must include the existing __simple_pow signed-i64 owner"
+    );
     let missing = simple_common::CORE_REQUIRED_RUNTIME_SYMBOLS
         .iter()
         .filter(|symbol| !core_c_symbols.contains(symbol.trim_start_matches('_')))
@@ -2845,6 +2849,17 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
         .output()
         .expect("nm must inspect the core-c runtime archive");
     assert!(nm.status.success(), "nm failed to inspect the core-c runtime archive");
+    let pow_owners = String::from_utf8_lossy(&nm.stdout)
+        .lines()
+        .filter(|line| {
+            line.split_whitespace().last().map(|symbol| symbol.trim_start_matches('_'))
+                == Some("simple_pow")
+        })
+        .count();
+    assert_eq!(
+        pow_owners, 1,
+        "core-c runtime archive must have exactly one __simple_pow owner"
+    );
     let cpu_count_owners = String::from_utf8_lossy(&nm.stdout)
         .lines()
         .filter(|line| line.split_whitespace().last() == Some("spl_thread_cpu_count"))
