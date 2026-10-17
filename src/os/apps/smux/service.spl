@@ -9,11 +9,14 @@ use os.apps.smux.contract.{
     SmuxMetrics, MuxBackendKind
 }
 use os.apps.smux.vt_screen.{VtScreen, vt_new, vt_feed, vt_resize, vt_text,
-    vt_styled_text, vt_replies, vt_clear_replies, vt_bracketed_paste}
+    vt_styled_text, vt_replies, vt_clear_replies, vt_bracketed_paste,
+    vt_history_text}
 
 # Lines of child output a pane keeps. Large enough for a full agent screen
 # (the caret workbench's right-hand region), small enough to stay cheap to
 # re-split on every capture.
+use os.apps.smux.input_queue.{PaneInput, pane_input_new}
+
 const PANE_TAIL_LINES: i64 = 200
 
 # =========================================================================
@@ -39,16 +42,20 @@ class PaneRecord:
     # screen — what a PTY child currently shows (a full-screen program redraws
     # in place, so its output is applied to a grid, not appended to `tail`).
     screen: VtScreen
+    input: PaneInput
+
+    me with_input(input: PaneInput) -> PaneRecord:
+        return PaneRecord(input: input, pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, screen: me.screen)
 
     me feed_screen(raw: text) -> PaneRecord:
-        return PaneRecord(pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, screen: vt_feed(me.screen, raw))
+        return PaneRecord(input: me.input, pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, screen: vt_feed(me.screen, raw))
 
     me feed(output: text) -> PaneRecord:
         var joined = me.tail + output
         val lines = joined.split("\n")
         if lines.len() > PANE_TAIL_LINES:
             joined = lines[lines.len() - PANE_TAIL_LINES:].join("\n")
-        return PaneRecord(pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: joined, screen: me.screen)
+        return PaneRecord(input: me.input, pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: joined, screen: me.screen)
 
     me resize(c: int, r: int) -> PaneRecord:
         val p = me.pane
@@ -61,16 +68,16 @@ class PaneRecord:
             cols: c,
             rows: r
         )
-        return PaneRecord(pane: np, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, screen: if me.pty_fd >= 0: vt_resize(me.screen, r, c) else: me.screen)
+        return PaneRecord(input: me.input, pane: np, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, screen: if me.pty_fd >= 0: vt_resize(me.screen, r, c) else: me.screen)
 
     me with_focus(f: bool) -> PaneRecord:
-        return PaneRecord(pane: me.pane, focus: f, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, screen: me.screen)
+        return PaneRecord(input: me.input, pane: me.pane, focus: f, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, screen: me.screen)
 
     me with_child(pid: i64) -> PaneRecord:
-        return PaneRecord(pane: me.pane, focus: me.focus, child_pid: pid, pty_fd: me.pty_fd, tail: me.tail, screen: me.screen)
+        return PaneRecord(input: pane_input_new(), pane: me.pane, focus: me.focus, child_pid: pid, pty_fd: me.pty_fd, tail: me.tail, screen: me.screen)
 
     me with_pty(pid: i64, fd: i64) -> PaneRecord:
-        return PaneRecord(pane: me.pane, focus: me.focus, child_pid: pid, pty_fd: fd, tail: me.tail, screen: if fd >= 0: vt_new(me.pane.rows, me.pane.cols) else: me.screen)
+        return PaneRecord(input: pane_input_new(), pane: me.pane, focus: me.focus, child_pid: pid, pty_fd: fd, tail: me.tail, screen: if fd >= 0: vt_new(me.pane.rows, me.pane.cols) else: me.screen)
 
     me capture(max_lines: int) -> MuxCapture:
         # A PTY child's output lives on its screen (only a PTY feeds it); a
@@ -83,6 +90,17 @@ class PaneRecord:
         if max_lines > 0 and lines.len() > max_lines:
             lines = lines[lines.len() - max_lines:]
         return MuxCapture.create(me.pane.id, lines.join("\n"), lines.len())
+
+    # A PTY history capture uses one frozen history+grid snapshot. Never fall
+    # back to the live output tail when that complete snapshot happens empty.
+    me capture_history(max_lines: int) -> MuxCapture:
+        if max_lines <= 0:
+            return MuxCapture.create(me.pane.id, "", 0)
+        var content = vt_history_text(me.screen, max_lines as i64)
+        if me.pty_fd < 0 and me.child_pid > 0 and not me.screen.alt.on and me.screen.frozen.len() == 0 and content == "":
+            content = me.capture(max_lines).content
+        val rows = if content == "": 0 else: content.split("\n").len()
+        return MuxCapture.create(me.pane.id, content, rows)
 
     # Rows of the PTY screen with styling as ANSI SGR runs (the piped tail has
     # no styling, so it is returned plain).
@@ -99,13 +117,13 @@ class PaneRecord:
         return vt_replies(me.screen)
 
     me without_replies() -> PaneRecord:
-        return PaneRecord(pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, screen: vt_clear_replies(me.screen))
+        return PaneRecord(input: me.input, pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, screen: vt_clear_replies(me.screen))
 
     me bracketed_paste() -> bool:
         return me.pty_fd >= 0 and vt_bracketed_paste(me.screen)
 
     static fn create(p: MuxPane) -> PaneRecord:
-        return PaneRecord(pane: p, focus: false, child_pid: -1, pty_fd: -1, tail: "", screen: vt_new(p.rows, p.cols))
+        return PaneRecord(input: pane_input_new(), pane: p, focus: false, child_pid: -1, pty_fd: -1, tail: "", screen: vt_new(p.rows, p.cols))
 
 
 # =========================================================================

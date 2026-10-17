@@ -14,7 +14,7 @@
 #   - test_runner_execute.spl (this file): core execution modes (interpreter, SMF, native, safe)
 
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
-use std.test_runner.native_compile_contract.{native_test_request_error, native_test_compile_threads, native_test_compile_args, native_test_compile_args_with_threads, native_test_invocation_receipt}
+use std.test_runner.native_compile_contract.{native_test_request_error, native_test_compile_threads, native_test_compile_args, native_test_compile_args_with_threads, native_test_invocation_receipt, native_test_source_roots_identity}
 use std.test_runner.native_owned_process.{ScopedChildRun, run_scoped_child as _run_scoped_child}
 export use std.nogc_sync_mut.test_runner.resource_policy.{safe_mode_caps}
 use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines}
@@ -1041,7 +1041,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     val start = time_now_unix_micros()
     val timeout_ms = options.timeout * 1000
     val explicit_aot = options.native_backend != ""
-    val native_request_error = native_test_request_error(options.native_backend, options.coverage, options.safe_mode)
+    val native_request_error = native_test_request_error(options.native_backend, options.coverage, options.safe_mode, options.native_source_roots)
     if native_request_error != "":
         return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
             duration_ms: 0, setup_ms: 0, error: native_request_error,
@@ -1059,6 +1059,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     if explicit_aot:
         env_set("SIMPLE_NO_STUB_FALLBACK", "1")
     val producer_digest = if explicit_aot: file_hash_sha256_or_empty(binary) else: ""
+    val roots_digest = if explicit_aot: sha256_text(native_test_source_roots_identity(options.native_source_roots))[0:16] else: ""
     if explicit_aot and producer_digest.len() != 64:
         return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
             duration_ms: 0, setup_ms: 0, error: "Native backend producer bytes cannot be fingerprinted",
@@ -1115,7 +1116,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         elif mcdc_enabled: ".mcdc-native"
         else: ".smf"
     val smf_path = if explicit_aot:
-            _tp_get_temp_dir() + "/native-" + sha256_text(file_path)[0:16] + "-" + options.native_backend + "-" + producer_digest[0:16] + "-{start}.exe"
+            _tp_get_temp_dir() + "/native-" + sha256_text(file_path)[0:16] + "-" + options.native_backend + "-" + producer_digest[0:16] + "-" + roots_digest + "-{start}.exe"
         else:
             _tp_get_temp_dir() + "/" + file_path.replace("/", "_").replace("\\", "_").replace(":", "_").replace(".spl", artifact_suffix)
     var compile_args: [text] = []
@@ -1123,7 +1124,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         val selected_backend = if explicit_aot: options.native_backend else: "llvm"
         compile_args = ["native-build", "--backend", selected_backend, "--refresh-source-authority", "--entry-closure", "--entry", source_path, "--runtime-bundle", "core-c-bootstrap", "--output", smf_path]
         if explicit_aot:
-            compile_args = native_test_compile_args_with_threads(source_path, smf_path, options.native_backend, native_threads)
+            compile_args = native_test_compile_args_with_threads(source_path, smf_path, options.native_backend, native_threads, options.native_source_roots)
             val selected_runtime_path = env_get("SIMPLE_RUNTIME_PATH") ?? ""
             if selected_runtime_path != "":
                 compile_args.push("--runtime-path")

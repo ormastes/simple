@@ -32,7 +32,7 @@ use compiler.driver.driver_phase_gates.{
 }
 use compiler.driver.driver_mir_target.{driver_mir_target_context, driver_collection_target_options}
 use compiler.driver.driver_mir_error_owner.{driver_trace_module_mir_errors}
-use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1}
+use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1, driver_mir_feed_is_identity_v1}
 use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
 use compiler.driver.driver_source_loading.{_driver_physical_source_key}
 use compiler.common.mir_target_context.{MirTargetContext}
@@ -725,22 +725,20 @@ impl CompilerDriver:
                 self.ctx.add_error(admitted_indices.unwrap_err())
                 return false
             val physical_indices = admitted_indices.unwrap()
-            # Cycle-126: skip the rebuild when the admission is the identity
-            # (same length, index i admitted at position i). The birth array
-            # (self.ctx.hir_modules.values() above) is the proven-sound
-            # transport -- the cycle-124 mir-feed receipt verified its
-            # element -- while every dict-value re-read this lane has tried
-            # (plain, guard-first) arrives erased in this draw and poisons
-            # the rebuilt array. For identity admissions the rebuild is a
-            # no-op semantically, so the sound birth array is kept. Non-
-            # identity admissions still rebuild (flagged: the erased-read
-            # rebuild remains latent for filtered/ordered builds).
-            var feed_needs_rebuild = physical_indices.len() != self.ctx.mir_feed_modules.len()
-            var feed_identity_i = 0
-            while not feed_needs_rebuild and feed_identity_i < physical_indices.len():
-                if physical_indices[feed_identity_i] != feed_identity_i:
-                    feed_needs_rebuild = true
-                feed_identity_i = feed_identity_i + 1
+            # Preserve the birth array only when its actual ordered owners
+            # match the admitted inventory. Equal counts and identity source
+            # indices cannot establish dictionary-values iteration order.
+            # Read names directly from the retained owner array: no HirModule
+            # value copy or dictionary re-read on the valid identity path.
+            var existing_feed_owners: [text] = []
+            var feed_owner_i = 0
+            while feed_owner_i < self.ctx.mir_feed_modules.len():
+                existing_feed_owners = existing_feed_owners.push(self.ctx.mir_feed_modules[feed_owner_i].name)
+                feed_owner_i = feed_owner_i + 1
+            val feed_needs_rebuild = not driver_mir_feed_is_identity_v1(
+                physical_indices, physical_owners, existing_feed_owners)
+            # The remote cycle-126 erased-read defect in the nonidentity
+            # rebuild remains open; this predicate does not repair transport.
             if feed_needs_rebuild:
                 self.ctx.mir_feed_modules = []
                 for physical_index in physical_indices:
@@ -919,6 +917,38 @@ impl CompilerDriver:
                     bootstrap_enum_modules = bootstrap_enum_modules.push(bootstrap_enum_hir)
                 bootstrap_enum_idx = bootstrap_enum_idx + 1
             bootstrap_lowering.register_module_enum_bootstrap_inventory_v1(bootstrap_enum_modules)
+            # Emission coverage (site-19, emission divergence 2026-10-17): this
+            # lane previously lowered ONLY the entry, so the per-module
+            # collection emission iterated just the replayed modules (~40
+            # objects) and the link missed every callable owned by the other
+            # ~1259 closure modules (measured: io_runtime.env_get,
+            # driver_compile_options_default, the K1 table rows, ... undefined
+            # under a scheme-homogeneous link -- not a cache or mangling
+            # problem; the #3608 emitter gate proved that by eliminating every
+            # foreign-scheme object and changing nothing). Lower EVERY
+            # scheduled closure module through this same instance and publish
+            # each MirModule into ctx.mir_modules, the exact shape the direct
+            # lane's per-module loop produces for the collection emission.
+            # Non-entry modules go FIRST: lower_module's bootstrap-flat branch
+            # resets the flat function registry per call, and the flat entry
+            # emission (bootstrap_mir_function_count > 0) reads that registry,
+            # the entry must be the LAST module lowered on this instance.
+            # Modules already in ctx.mir_modules (archive/mono replay) keep
+            # their MIR and are skipped.
+            var bootstrap_closure_idx = 0
+            while bootstrap_closure_idx < self.ctx.sources.len():
+                val bootstrap_closure_source = self.ctx.sources[bootstrap_closure_idx]
+                val bootstrap_closure_name = bootstrap_closure_source.module_name
+                if bootstrap_closure_name != "app.cli.bootstrap_main" and
+                        not self.ctx.mir_modules.contains_key(bootstrap_closure_name):
+                    val bootstrap_closure_hir = self.ctx.hir_modules[bootstrap_closure_name]
+                    if bootstrap_closure_hir != nil:
+                        val bootstrap_closure_mir = bootstrap_lowering.lower_module(
+                            bootstrap_closure_hir, [], false)
+                        bootstrap_closure_mir.name = bootstrap_closure_name
+                        self.ctx.mir_modules[bootstrap_closure_name] = bootstrap_closure_mir
+                        log_phase("aot:bootstrap_fixed:closure_module module={bootstrap_closure_name} functions={bootstrap_closure_mir.functions.len()}")
+                bootstrap_closure_idx = bootstrap_closure_idx + 1
             var bootstrap_mir = bootstrap_lowering.lower_bootstrap_entry_module(bootstrap_hir)
             driver_trace_module_mir_errors("app.cli.bootstrap_main", bootstrap_hir.path,
                 bootstrap_lowering.errors, 0)
@@ -929,7 +959,7 @@ impl CompilerDriver:
                     "app.cli.bootstrap_main", bootstrap_lowering.devirtualized_calls,
                     self.ctx.runtime_std_full_inventory_selection != nil):
                 self.ctx.add_error(archived_devirt)
-            log_phase("aot:bootstrap_fixed:done module=app.cli.bootstrap_main functions={bootstrap_mir.functions.len()}")
+            log_phase("aot:bootstrap_fixed:done module=app.cli.bootstrap_main functions={bootstrap_mir.functions.len()} closure_modules={self.ctx.mir_modules.keys().len()}")
             return self.ctx.error_count_value == 0
 
         if self.ctx.sources.len() > 0:

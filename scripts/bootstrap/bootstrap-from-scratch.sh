@@ -3414,7 +3414,7 @@ if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
     "${seed_inputs_fingerprint}" "simple${exe_suffix}" \
     "${archive_prefix}simple_native_all${archive_suffix}" \
     "${archive_prefix}simple_compiler_backfill${archive_suffix}" \
-    "${rust_generation_nonce}" "${PLATFORM}" || {
+    "${rust_generation_nonce}" "${PLATFORM}" "${rust_llvm_authority:-}" || {
     echo "error: could not prepare immutable Rust authority generation" >&2
     exit 1
   }
@@ -3689,7 +3689,7 @@ echo "  mode:     admitted Phase 2 → managed Phase 3 and Phase 4"
       "${archive_prefix}simple_native_all${archive_suffix}" \
       "${archive_prefix}simple_compiler_backfill${archive_suffix}" \
       "${legacy_generation_nonce}" "${rust_target_lock_handle}" \
-      "${legacy_observed_fingerprint}" "${PLATFORM}" || {
+      "${legacy_observed_fingerprint}" "${PLATFORM}" "${rust_llvm_authority:-}" || {
       echo "error: complete legacy Rust authority migration failed" >&2
       exit 1
     }
@@ -5019,6 +5019,28 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # same explicit headroom as other production builders without changing
       # its 100 ms cadence or RSS ceiling.  Preserve a caller-selected value.
       SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS="${SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS:-10000}"
+      # The AST "expr env mirror" (nodes.spl expr_env_mirror_enabled) activates
+      # under SIMPLE_BOOTSTRAP=1 unless SIMPLE_NATIVE_ARENA_DECLS=1: every
+      # expression-node field write then setenv()s a mirror key, and the
+      # per-setenv environ scan makes parsing large sources (e.g. the 430 KB
+      # office/sheets/formula.spl, tens of thousands of nodes) take minutes
+      # per file. The HIR shard worker re-parses the whole closure and never
+      # reaches its first claim inside the row's 600 s internal timeout
+      # (BLOCKED exit=-2 claimed=0). The stage2 producer build already runs
+      # with SIMPLE_NATIVE_ARENA_DECLS=1 (stage2-command transcript); export
+      # the same flag here so the verification lane matches its producer.
+      SIMPLE_NATIVE_ARENA_DECLS="${SIMPLE_NATIVE_ARENA_DECLS:-1}"
+      export SIMPLE_NATIVE_ARENA_DECLS
+      # Row time budget: a cold full-CLI tool build on this host needs roughly
+      # 10-15 minutes through parse, transient-heap promote, claim, and lower
+      # (measured 2026-10-18: the streaming-surface promote alone --
+      # rt_transient_heap_promote's per-surface full-heap retain scan -- runs
+      # minutes past the 600 s default). The default kills the HIR shard worker
+      # mid-promote with the same BLOCKED exit=-2 claimed=0 signature as the
+      # mirror stall. Size the per-row internal native-build timeout for the
+      # host; callers may override.
+      BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT="${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:-1800}"
+      export BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT
       # Canonical source-derived tests consume their admitted producer, as in
       # run-release-stage2-qualified.shs. Explicit delegation remains opt-in and
       # subject to the phase verifier's existing real MC/DC waiver requirements.

@@ -1,0 +1,98 @@
+"""Production VT/frame and input codec regressions. Execution/docgen pending.
+No native process or terminal is replaced by a fake provider in this spec.
+"""
+# @req REQ-SMUX-INTERACTIVE-004
+# @req REQ-SMUX-INTERACTIVE-002
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.contract.{MuxSession, MuxWindow, MuxPane, MuxBackendKind}
+use os.apps.smux.frame_snapshot.{smux_frame_from_state}
+use os.apps.smux.interactive_protocol.{smux_input_hex_decode}
+
+fn frame_state(raw: text) -> ServiceState:
+    val pane = MuxPane(id: "p", window_id: "w", session_id: "s",
+        backend_kind: MuxBackendKind.NativeShell, state: "running", cols: 8, rows: 3)
+    val record = PaneRecord.create(pane).feed_screen(raw).with_focus(true)
+    var st = ServiceState.empty()
+    st = st.add_session(MuxSession.create("s", "session"))
+    st = st.add_window(MuxWindow.create("w", "s", "window").with_layout("even-horizontal", 8, 3))
+    st = st.add_pane(record)
+    return st
+
+describe "interactive frame and complete input codec":
+    it "preserves exact control and complete Unicode input without appending enter":
+        step("decode LF, ESC, NUL and one supplementary Unicode scalar")
+        expect(smux_input_hex_decode("410a1b00f09f9880").unwrap()).to_equal("A\n\x1b\u{0}\u{1f600}")
+        expect(smux_input_hex_decode("61").unwrap()).to_equal("a")
+        expect(smux_input_hex_decode("c2a2E282AC").unwrap()).to_equal("\u{a2}\u{20ac}")
+
+    it "rejects malformed hex incomplete UTF-8 overlongs surrogates and non-scalars":
+        step("reject invalid bytes before they reach the authoritative pane queue")
+        for bad in ["", "0", "gg", "\u{e4}", "80", "c080", "e08080", "eda080", "f0808080", "f4908080", "f5808080", "f09f98", "e228a1"]:
+            expect(smux_input_hex_decode(bad).is_err()).to_equal(true)
+        var maximum = ""
+        for i in 0..1024: maximum = maximum + "61"
+        expect(smux_input_hex_decode(maximum).unwrap().len()).to_equal(1024)
+        expect(smux_input_hex_decode(maximum + "61").is_err()).to_equal(true)
+
+    it "renders real VT styles wide cells and cursor while discarding child OSC":
+        step("feed production VT with SGR wide text and a title command")
+        val state = frame_state("\x1b[31mA\u{4e2d}\x1b[0m\x1b]0;evil-title\x07\x1b[2;3H")
+        val frame = smux_frame_from_state(state, "s", "w", "p").unwrap()
+        expect(frame).to_start_with("SMUX-FRAME/1 8 3\n")
+        expect(frame).to_contain("\x1b[0;31mA\u{4e2d}")
+        expect(frame).to_end_with("\x1b[2;3H\x1b[?25h")
+        expect(frame.contains("evil-title")).to_equal(false)
+        expect(frame.contains("\x1b]")).to_equal(false)
+
+    it "keeps synchronized cells styles and cursor from the same completed frame":
+        step("move live cursor and hide it during synchronized output")
+        val state = frame_state("A\x1b[2;3H\x1b[?2026h\x1b[HCHANGED\x1b[3;5H\x1b[?25l")
+        val frame = smux_frame_from_state(state, "s", "w", "p").unwrap()
+        expect(frame).to_contain("A")
+        expect(frame.contains("CHANGED")).to_equal(false)
+        expect(frame).to_end_with("\x1b[2;3H\x1b[?25h")
+        val completed = state.replace_pane(0, state.get_pane(0).feed_screen("\x1b[?2026l"))
+        val latest = smux_frame_from_state(completed, "s", "w", "p").unwrap()
+        expect(latest).to_contain("CHANGED")
+        expect(latest.contains("\x1b[?25h")).to_equal(false)
+
+    it "never serializes forged cell controls or style escape strings":
+        step("guard the renderer boundary even against malformed snapshot fields")
+        var state = frame_state("safe")
+        var record = state.get_pane(0)
+        var screen = record.screen
+        var cells = screen.cells
+        var row = cells[0]
+        row[0] = "\x1b]52;clipboard\x07"
+        cells[0] = row
+        screen.cells = cells
+        var attrs = screen.attrs
+        var styles = attrs[0]
+        styles[1] = "31m\x1b]0;injected"
+        attrs[0] = styles
+        screen.attrs = attrs
+        record.screen = screen
+        state = state.replace_pane(0, record)
+        val frame = smux_frame_from_state(state, "s", "w", "p").unwrap()
+        expect(frame.contains("clipboard")).to_equal(false)
+        expect(frame.contains("injected")).to_equal(false)
+        expect(frame.contains("\x1b]")).to_equal(false)
+
+    it "refuses foreign window and pane owners and oversized reply payloads":
+        step("validate the explicit address before rendering a frame")
+        var state = frame_state("hello")
+        expect(smux_frame_from_state(state, "other", "w", "p").is_err()).to_equal(true)
+        expect(smux_frame_from_state(state, "s", "w", "missing").is_err()).to_equal(true)
+        var record = state.get_pane(0)
+        var screen = record.screen
+        var cells = screen.cells
+        var row = cells[0]
+        var oversized = "a"
+        for i in 0..17: oversized = oversized + oversized
+        row[0] = oversized
+        cells[0] = row
+        screen.cells = cells
+        record.screen = screen
+        state = state.replace_pane(0, record)
+        expect(smux_frame_from_state(state, "s", "w", "p").is_err()).to_equal(true)
