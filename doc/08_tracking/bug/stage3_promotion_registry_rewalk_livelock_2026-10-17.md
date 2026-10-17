@@ -126,3 +126,39 @@ multi-GB scope working set. The validation/clamps above fail closed on
 the corrupt-header path; the residual quadratic re-walk cost needs either
 a per-object promoted predicate (Simple-visible runtime API) or a
 single-walk batched promote of all 20 roots — recorded here as follow-up.
+
+## E-LANE-VACUOUS regression attribution (2026-10-17, work/promote-walker-layout-fix)
+
+The stage2 sanity failure (`compiler.bootstrap_admission.p2_add`,
+`functions_emitted=0`) was suspected to be the walker validation firing
+on a non-RustRuntimeDict layout. Analysis exonerated the guard:
+
+- The sanity binary links the RUST runtime exclusively (rustc panic
+  strings present; the C runtime's `[transient-promote] root refused`
+  marker and the PR's C probe-cap strings absent), so the C probe-cap
+  hunks are not even in the failing binary, and `Dict`/`[i64]` values
+  ARE `RuntimeDict`/`RuntimeArray` there.
+- `get_typed_ptr`/`heap_type` (heap.rs/core.rs) require BOTH
+  Rust-registry membership AND an exact type-tag match, so non-RuntimeDict
+  objects take the `None` path in old and new code alike — byte-identical
+  behavior; the "layout confusion" path cannot reach the new guards.
+- Every Rust-runtime dict/array mutator preserves the guarded invariants
+  (grow-before-insert at 3/4 load; typed-words setters bound-check
+  against capacity), and promote runs only while the scope is paused, so
+  no valid mid-operation state can trip the guards.
+- Ordering: in `lower_module_transient_scoped`
+  (module_lowering.spl:2000-2023) the emission loop runs BEFORE any
+  promote; `functions_emitted` is decided before the walker executes, so
+  the walker cannot change it for the module being lowered.
+- The in-tree cycle-94/97/98 receipts (module_lowering.spl:2736-2755)
+  document this exact vacuity from corrupted key-carried dict draws in
+  the compiled host and were fought with the two commits that landed
+  after PR #3603 (6d9894da2e0, e6b68a290bf).
+
+Hard follow-up commit on `work/promote-walker-layout-fix`: guard fires
+now emit a loud stderr diagnostic (corrupt-header leaf restored for the
+benign null-data case to the exact old `Some(vec![])` contract), plus
+tests pinning that valid containers (grown boxed arrays, byte/u64-packed
+arrays, tuples, grow-boundary dicts) are never dropped and that a
+corrupt child is refused without hanging the promote. If the guard ever
+fires in a lane, its log line settles attribution immediately.
