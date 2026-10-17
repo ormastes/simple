@@ -2906,7 +2906,21 @@ bootstrap_stage3_tool_authority_snapshot() (
                 llc|llvm-as|opt|llvm-readobj) bootstrap_stage3_managed_role=$bootstrap_stage3_tool_name ;;
             esac
             if [ -n "$bootstrap_stage3_managed_role" ]; then
-                [ "$bootstrap_stage3_tool_version_status" -eq 0 ] || return 1
+                case "$(bootstrap_stage3_host_platform)" in
+                    *-apple-darwin*)
+                        # Apple ld(1)/ar(1)/ranlib(1) are BSD tools without a
+                        # GNU --version probe (the probe exits nonzero and the
+                        # first line is a diagnostic), so the managed-role
+                        # status==0 pin can never be met with the platform
+                        # linker/archive tools. The executable sha256 plus the
+                        # recorded diagnostic line remain the authoritative
+                        # identity -- the same stance the non-managed probe
+                        # takes for BSD userland tools above. Require a
+                        # nonempty probe output, not a zero status.
+                        [ -s "$bootstrap_stage3_tool_version_output" ] || return 1 ;;
+                    *)
+                        [ "$bootstrap_stage3_tool_version_status" -eq 0 ] || return 1 ;;
+                esac
                 bootstrap_stage3_managed_native_path=$bootstrap_stage3_tool_canonical
                 case "$(bootstrap_stage3_host_platform)" in
                     *windows*) bootstrap_stage3_managed_native_path=$(cygpath -m "$bootstrap_stage3_tool_canonical") || return 1 ;;
@@ -3500,6 +3514,14 @@ bootstrap_stage3_copy_seed_tuple() {
     esac
     set -- "$@" "$bootstrap_stage3_tuple_runtime_name"
     case "$bootstrap_stage3_tuple_target" in
+        *windows-msvc*)
+            # Carry a previously bound LLVM C API dependency with the same
+            # producer tuple; fresh Cargo trees stage it before publication.
+            if [ -e "$bootstrap_stage3_tuple_source/LLVM-C.lib" ] ||
+                [ -e "$bootstrap_stage3_tuple_source/LLVM-C.lib.producer.txt" ]; then
+                set -- "$@" LLVM-C.lib LLVM-C.lib.producer.txt
+            fi
+            ;;
         *apple-darwin*)
             set -- "$@" libsimple_runtime.dylib
             # Preserve optional diagnostic Cocoa candidates in the same copy
@@ -4206,8 +4228,56 @@ bootstrap_stage3_pin_private_authority() {
 
 # Prepare and publish immutable Rust authority generations. The current marker
 # is the commit record; a generation is never mutated after marker admission.
+bootstrap_stage3_stage_windows_llvm_import() (
+    [ "$#" -eq 3 ] || exit 1
+    llvm_stage=$1 llvm_target=$2 llvm_authority=$3
+    case "$llvm_target" in *windows-msvc*) ;; *) exit 0 ;; esac
+    [ -d "$llvm_stage" ] && [ ! -L "$llvm_stage" ] || exit 1
+    llvm_destination=$llvm_stage/LLVM-C.lib
+    llvm_receipt=$llvm_stage/LLVM-C.lib.producer.txt
+    if [ -z "$llvm_authority" ]; then
+        # An admitted parent already owns these bytes. Never rediscover a
+        # different LLVM installation while forwarding its sealed tuple.
+        [ -f "$llvm_destination" ] && [ ! -L "$llvm_destination" ] &&
+            [ -f "$llvm_receipt" ] && [ ! -L "$llvm_receipt" ] || exit 1
+        [ "$(bootstrap_stage3_manifest_value target "$llvm_receipt")" = "$llvm_target" ] &&
+            [ "$(bootstrap_stage3_manifest_value sha256 "$llvm_receipt")" = \
+              "$(bootstrap_stage3_hash_file "$llvm_destination")" ] || exit 1
+        exit 0
+    fi
+    # The current Windows producer authority is the official x64 LLVM 23.1.1
+    # dynamic-C-API package. Other architectures require their own admission.
+    [ "$llvm_target" = x86_64-pc-windows-msvc ] || exit 1
+    for llvm_key in llvm-build-status llvm-link-kind llvm-c-import-lib-path llvm-c-import-lib-sha256; do
+        [ "$(printf '%s\n' "$llvm_authority" | awk -F= -v key="$llvm_key" '$1 == key { n++ } END { print n+0 }')" = 1 ] || exit 1
+    done
+    [ "$(printf '%s\n' "$llvm_authority" | sed -n 's/^llvm-build-status=//p')" = enabled ] &&
+        [ "$(printf '%s\n' "$llvm_authority" | sed -n 's/^llvm-link-kind=//p')" = dynamic-c-api ] || exit 1
+    llvm_source=$(printf '%s\n' "$llvm_authority" | sed -n 's/^llvm-c-import-lib-path=//p')
+    llvm_digest=$(printf '%s\n' "$llvm_authority" | sed -n 's/^llvm-c-import-lib-sha256=//p')
+    bootstrap_stage3_valid_fingerprint "$llvm_digest" || exit 1
+    [ "$llvm_source" = "$(bootstrap_stage3_canonical_file "$llvm_source")" ] || exit 1
+    [ -f "$llvm_source" ] && [ ! -L "$llvm_source" ] &&
+        [ "$(bootstrap_stage3_hash_file "$llvm_source")" = "$llvm_digest" ] || exit 1
+    if [ -e "$llvm_destination" ]; then
+        [ -f "$llvm_destination" ] && [ ! -L "$llvm_destination" ] &&
+            [ -f "$llvm_receipt" ] && [ ! -L "$llvm_receipt" ] &&
+            [ "$(bootstrap_stage3_hash_file "$llvm_destination")" = "$llvm_digest" ] &&
+            [ "$(bootstrap_stage3_manifest_value target "$llvm_receipt")" = "$llvm_target" ] &&
+            [ "$(bootstrap_stage3_manifest_value sha256 "$llvm_receipt")" = "$llvm_digest" ] || exit 1
+        exit 0
+    fi
+    [ ! -e "$llvm_destination" ] && [ ! -L "$llvm_destination" ] || exit 1
+    [ ! -e "$llvm_receipt" ] && [ ! -L "$llvm_receipt" ] || exit 1
+    cp -p -- "$llvm_source" "$llvm_destination" || exit 1
+    [ "$(bootstrap_stage3_hash_file "$llvm_source")" = "$llvm_digest" ] &&
+        [ "$(bootstrap_stage3_hash_file "$llvm_destination")" = "$llvm_digest" ] || exit 1
+    printf 'target=%s\nsha256=%s\nsource=%s\n' "$llvm_target" "$llvm_digest" "$llvm_source" >"$llvm_receipt" || exit 1
+    chmod 400 "$llvm_destination" "$llvm_receipt"
+)
+
 bootstrap_stage3_prepare_seed_generation() {
-    { [ "$#" -eq 7 ] || [ "$#" -eq 8 ]; } || { echo "bootstrap_stage3_prepare_seed_generation: failed check 1" >&2; return 1; }
+    { [ "$#" -eq 7 ] || [ "$#" -eq 8 ] || [ "$#" -eq 9 ]; } || { echo "bootstrap_stage3_prepare_seed_generation: failed check 1" >&2; return 1; }
     bootstrap_stage3_generation_source=$1
     bootstrap_stage3_generation_root=$2
     bootstrap_stage3_generation_inputs=$3
@@ -4239,6 +4309,10 @@ bootstrap_stage3_prepare_seed_generation() {
     # metadata can be added before publication.  Descendant directories and
     # tuple members remain frozen; no marker can admit this staging path.
     chmod 700 "$bootstrap_stage3_generation_staging" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 6" >&2; return 1; }
+    bootstrap_stage3_stage_windows_llvm_import "$bootstrap_stage3_generation_staging" \
+        "$bootstrap_stage3_generation_target" "${9:-}" || {
+        echo "bootstrap_stage3_prepare_seed_generation: producer LLVM import authority missing or changed" >&2; return 1;
+    }
     if [ -n "$bootstrap_stage3_generation_details_source" ]; then
         cp -p -- "$bootstrap_stage3_generation_details_source" \
             "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name.inputs.sha256.details.env" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 7" >&2; return 1; }

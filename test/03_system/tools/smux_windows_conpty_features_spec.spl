@@ -1,0 +1,141 @@
+"""
+## Purpose and audience
+Windows live ConPTY workflows for smux maintainers: actual child output,
+background progress after detach, reattach, and pane input/output separation.
+## Host and evidence boundary
+Run on native Windows with an admitted pure-Simple SSpec runner and ConPTY.
+This spec fails on another host; no conditional body silently passes it.
+Polling has at most five seconds of sleep plus capture/runner work; missing
+output fails an assertion. Detached capture actively drains output and does
+not prove unattended progress without polling.
+It exercises service attachments in one process, not independent terminal
+clients, server daemon restart, rendering, or terminal resize notification.
+# @manual: primary
+# @capture: text
+Plan: doc/03_plan/sys_test/smux_windows_phase3_features.md
+"""
+
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use std.nogc_async_mut.sosix.{sosix_platform}
+use std.nogc_sync_mut.io.{thread_sleep_ms}
+use os.apps.smux.api.{
+    smux_reset_for_test, smux_create_session, smux_list_windows, smux_list_panes,
+    smux_split_pane, smux_pane_spawn_pty, smux_pane_close_pty,
+    smux_pane_alive, smux_send_command, smux_capture, smux_attach, smux_detach,
+    smux_select_layout
+}
+
+# @inline
+fn windows_live_session(name: text) -> [text]:
+    expect(sosix_platform()).to_equal("windows")
+    smux_reset_for_test()
+    val session = smux_create_session(name)
+    expect(session.id.len()).to_be_greater_than(0)
+    val windows = smux_list_windows(session.id)
+    expect(windows.len()).to_equal(1)
+    val panes = smux_list_panes(session.id, windows[0].id)
+    expect(panes.len()).to_equal(1)
+    return [session.id, windows[0].id, panes[0].id]
+
+# @inline
+fn windows_start_shell(sid: text, wid: text, pid: text):
+    val spawned = smux_pane_spawn_pty(sid, wid, pid, "cmd.exe /d /q")
+    expect(spawned.is_ok()).to_equal(true)
+    expect(spawned.unwrap()).to_be_greater_than(0)
+    expect(smux_pane_alive(sid, wid, pid).unwrap()).to_equal(true)
+
+# @inline
+fn windows_await_output(sid: text, wid: text, pid: text, needle: text) -> text:
+    var output = ""
+    var attempt = 0
+    while attempt < 100 and not output.contains(needle):
+        val capture = smux_capture(sid, wid, pid, 200)
+        expect(capture.is_ok()).to_equal(true)
+        output = capture.unwrap().content
+        if not output.contains(needle):
+            thread_sleep_ms(50)
+        attempt = attempt + 1
+    expect(output).to_contain(needle)
+    return output
+
+# @inline
+fn windows_close_shell(sid: text, wid: text, pid: text):
+    # The provider preserves its token while cancellation/tree cleanup is
+    # pending. Only a true close result proves all owned resources are terminal.
+    var closed = false
+    var attempt = 0
+    while attempt < 100 and not closed:
+        closed = smux_pane_close_pty(sid, wid, pid)
+        if not closed:
+            thread_sleep_ms(10)
+        attempt = attempt + 1
+    expect(closed).to_equal(true)
+
+describe "smux native Windows ConPTY live workflows":
+    describe "REQ-SMUX-WIN-001: live output and background continuity":
+        it "should execute a child command and capture output beyond input echo":
+            # @req REQ-SMUX-WIN-001
+            step("Start a real Windows command shell in a pane")
+            val ids = windows_live_session("live-output")
+            windows_start_shell(ids[0], ids[1], ids[2])
+            step("Generate a token by variable expansion in the child")
+            expect(smux_send_command(ids[0], ids[1], ids[2], "set SMUX_VALUE=READY").is_ok()).to_equal(true)
+            expect(smux_send_command(ids[0], ids[1], ids[2], "echo SMUX_OUTPUT_%SMUX_VALUE%").is_ok()).to_equal(true)
+            val output = windows_await_output(ids[0], ids[1], ids[2], "SMUX_OUTPUT_READY")
+            expect(output).to_contain("SMUX_OUTPUT_READY")
+            windows_close_shell(ids[0], ids[1], ids[2])
+            expect(smux_pane_alive(ids[0], ids[1], ids[2]).unwrap()).to_equal(false)
+
+        it "should finish a delayed command with no clients and retain shell state on reattach":
+            # @req REQ-SMUX-WIN-001
+            val ids = windows_live_session("background")
+            windows_start_shell(ids[0], ids[1], ids[2])
+            expect(smux_attach(ids[0], "before", 80, 24).attached).to_equal(true)
+            expect(smux_send_command(ids[0], ids[1], ids[2], "set SMUX_VALUE=SURVIVED").is_ok()).to_equal(true)
+            step("Submit delayed work and detach the last client")
+            expect(smux_send_command(ids[0], ids[1], ids[2], "ping -n 2 127.0.0.1 >nul & echo SMUX_DETACHED_%SMUX_VALUE%").is_ok()).to_equal(true)
+            expect(smux_detach("before")).to_equal(true)
+            val detached = windows_await_output(ids[0], ids[1], ids[2], "SMUX_DETACHED_SURVIVED")
+            expect(detached).to_contain("SMUX_DETACHED_SURVIVED")
+            expect(smux_pane_alive(ids[0], ids[1], ids[2]).unwrap()).to_equal(true)
+            step("Reattach and query a variable owned by the original shell")
+            expect(smux_attach(ids[0], "after", 120, 40).attached).to_equal(true)
+            expect(smux_list_panes(ids[0], ids[1])[0].id).to_equal(ids[2])
+            expect(smux_send_command(ids[0], ids[1], ids[2], "echo SMUX_RETURN_%SMUX_VALUE%").is_ok()).to_equal(true)
+            val resumed = windows_await_output(ids[0], ids[1], ids[2], "SMUX_RETURN_SURVIVED")
+            expect(resumed).to_contain("SMUX_RETURN_SURVIVED")
+            windows_close_shell(ids[0], ids[1], ids[2])
+
+        it "should refuse a second child and isolate two live pane outputs":
+            # @req REQ-SMUX-WIN-001
+            val ids = windows_live_session("isolated")
+            step("Split a window and start one shell per pane")
+            val split = smux_split_pane(ids[0], ids[1], ids[2], "vertical")
+            expect(split.is_ok()).to_equal(true)
+            val other = split.unwrap()
+            windows_start_shell(ids[0], ids[1], ids[2])
+            windows_start_shell(ids[0], ids[1], other.id)
+            expect(smux_pane_spawn_pty(ids[0], ids[1], ids[2], "cmd.exe /d /q").is_ok()).to_equal(false)
+            step("Give each child a distinct variable and command")
+            expect(smux_send_command(ids[0], ids[1], ids[2], "set SMUX_VALUE=ALPHA").is_ok()).to_equal(true)
+            expect(smux_send_command(ids[0], ids[1], other.id, "set SMUX_VALUE=BETA").is_ok()).to_equal(true)
+            expect(smux_send_command(ids[0], ids[1], ids[2], "echo SMUX_PANE_%SMUX_VALUE%").is_ok()).to_equal(true)
+            expect(smux_send_command(ids[0], ids[1], other.id, "echo SMUX_PANE_%SMUX_VALUE%").is_ok()).to_equal(true)
+            val first = windows_await_output(ids[0], ids[1], ids[2], "SMUX_PANE_ALPHA")
+            val second = windows_await_output(ids[0], ids[1], other.id, "SMUX_PANE_BETA")
+            expect(first.contains("SMUX_PANE_BETA")).to_equal(false)
+            expect(second.contains("SMUX_PANE_ALPHA")).to_equal(false)
+            step("Change the live service layout and retain both child-owned variables")
+            expect(smux_select_layout(ids[0], ids[1], "even-vertical", 120, 40).is_ok()).to_equal(true)
+            expect(smux_pane_alive(ids[0], ids[1], ids[2]).unwrap()).to_equal(true)
+            expect(smux_pane_alive(ids[0], ids[1], other.id).unwrap()).to_equal(true)
+            expect(smux_send_command(ids[0], ids[1], ids[2], "echo SMUX_POST_%SMUX_VALUE%").is_ok()).to_equal(true)
+            expect(smux_send_command(ids[0], ids[1], other.id, "echo SMUX_POST_%SMUX_VALUE%").is_ok()).to_equal(true)
+            val after_first = windows_await_output(ids[0], ids[1], ids[2], "SMUX_POST_ALPHA")
+            val after_second = windows_await_output(ids[0], ids[1], other.id, "SMUX_POST_BETA")
+            expect(after_first).to_contain("SMUX_POST_ALPHA")
+            expect(after_second).to_contain("SMUX_POST_BETA")
+            windows_close_shell(ids[0], ids[1], ids[2])
+            expect(smux_pane_alive(ids[0], ids[1], other.id).unwrap()).to_equal(true)
+            windows_close_shell(ids[0], ids[1], other.id)

@@ -395,7 +395,8 @@ class EmitCounter:
         self.n = self.n + 1
         v
 
-fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCounter) -> text:
+fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCounter,
+        required_node: bool = false) -> text:
     """Statements that write one value `v` of `type_text`."""
     val s = u.classify(type_text)
     if s.cat == "prim_i64":
@@ -415,7 +416,10 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
         # @workaround bug=a174_struct_nil_comparison_dispatch_2026_10_16 recover=e458621e87670403385147dd4380acb0b925153d reason=old-producer-record-presence-dispatch
         val record_presence = s.cat == "opaque" or u.is_struct(s.name)
         var out = if record_presence: indent + "if not " + v + ".?:\n" else: indent + "if " + v + " == nil:\n"
-        out = out + indent + "    w.put_i64(0)\n"
+        if required_node:
+            out = out + indent + "    w.reject(\"missing_required_hir_module_function_entry\")\n"
+        else:
+            out = out + indent + "    w.put_i64(0)\n"
         out = out + indent + "else:\n"
         out = out + indent + "    w.put_i64(1)\n"
         out = out + indent + "    " + callee + "(w, " + v + ")\n"
@@ -455,12 +459,13 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
         out = out + indent + "ks{k} = " + order_fn + "(ks{k})\n"
         out = out + indent + "w.put_i64(ks{k}.len())\n"
         out = out + indent + "for dk{k} in ks{k}:\n"
-        out = out + _emit_enc(u, s.a, "dk{k}", indent + "    ", c)
-        out = out + _emit_enc(u, s.b, v + "[dk{k}]", indent + "    ", c)
+        out = out + _emit_enc(u, s.a, "dk{k}", indent + "    ", c, required_node)
+        out = out + _emit_enc(u, s.b, v + "[dk{k}]", indent + "    ", c, required_node)
         return out
     _codec_fail("hir codec generator: unhandled shape {s.cat}")
 
-fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: EmitCounter) -> text:
+fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: EmitCounter,
+        required_node: bool = false) -> text:
     """Statements that read one value of `type_text` into a new local `target`."""
     val s = u.classify(type_text)
     val decl_type = _strip_default(type_text).trim()
@@ -496,6 +501,9 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         var out = indent + "var " + target + ": " + decl_type + "? = nil\n"
         out = out + indent + "if r.next_i64() == 1:\n"
         out = out + indent + "    " + target + " = " + callee + "(r)\n"
+        if required_node:
+            out = out + indent + "else:\n"
+            out = out + indent + "    r.reject_malformed(\"missing_required_hir_module_function_entry\")\n"
         return out
     val k = c.next()
     if s.cat == "opt":
@@ -528,9 +536,26 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         out = out + indent + "val n{k} = r.next_len()\n"
         out = out + indent + "var i{k} = 0\n"
         out = out + indent + "while i{k} < n{k}:\n"
-        out = out + _emit_dec(u, s.a, "dk{k}", indent + "    ", c)
-        out = out + _emit_dec(u, s.b, "dv{k}", indent + "    ", c)
-        out = out + indent + "    " + target + "[dk{k}] = dv{k}\n"
+        out = out + _emit_dec(u, s.a, "dk{k}", indent + "    ", c, required_node)
+        out = out + _emit_dec(u, s.b, "dv{k}", indent + "    ", c, required_node)
+        # Store through a presence bind of the decoded optional value, never
+        # the optional itself: dict[key] = T? stores land erased (nil) on
+        # the stage2 LLVM draw -- the decoded module.functions dict holds
+        # nil HirFunction values while the cache blob is complete, and the
+        # first values()/for-in consumer passes a nil declaration into
+        # record_exact_extern_declaration_v1 (SIGSEGV, EXC_BAD_ACCESS at
+        # 0x70, stage2 p2_add sanity smoke). The presence-guarded concrete
+        # bind is the proven-clean shape; absent values are skipped rather
+        # than stored as nil (the cache re-encode selfcheck already rejects
+        # lossy entries). Kept inside the tip's required_node/r.ok rejection
+        # guard so a rejected decode never reaches the dictionary either.
+        if required_node:
+            out = out + indent + "    if r.ok:\n"
+            out = out + indent + "        if val present_v{k} = dv{k}:\n"
+            out = out + indent + "            " + target + "[dk{k}] = present_v{k}\n"
+        else:
+            out = out + indent + "    if val present_v{k} = dv{k}:\n"
+            out = out + indent + "        " + target + "[dk{k}] = present_v{k}\n"
         out = out + indent + "    i{k} = i{k} + 1\n"
         return out
     _codec_fail("hir codec generator: unhandled shape {s.cat}")
@@ -579,7 +604,10 @@ fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
         return parts.join("")
     var body: [text] = []
     for f in decl.fields:
-        body.push(_emit_enc(u, f.type_text, "node." + f.binder, "    ", c))
+        # A function dictionary entry cannot represent an absent declaration.
+        # Enforce in the actual presence branch, not a separate live-state read.
+        val required_function_entry = decl.name == "HirModule" and f.binder == "functions"
+        body.push(_emit_enc(u, f.type_text, "node." + f.binder, "    ", c, required_function_entry))
     if body.len() == 0:
         body.push("    val _leaf = 0\n")
     parts.join("") + body.join("")
@@ -640,7 +668,8 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
         return parts.join("")
     var names: [text] = []
     for f in decl.fields:
-        parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "    ", c))
+        val required_function_entry = decl.name == "HirModule" and f.binder == "functions"
+        parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "    ", c, required_function_entry))
         names.push(f.binder + ": f_" + f.binder)
     parts.push("    " + decl.name + "(" + _join(names, ", ") + ")\n")
     parts.join("")

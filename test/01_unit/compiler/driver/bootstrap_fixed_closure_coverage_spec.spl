@@ -1,0 +1,56 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Bootstrap-fixed lane emission coverage: lower the whole scheduled closure
+
+Stage3 link divergence, emission-coverage class (site-19, 2026-10-17,
+second link): the bootstrap-fixed lane lowered ONLY app.cli.bootstrap_main,
+so the per-module collection emission iterated just the replayed modules
+(~40 objects) and the link missed every callable owned by the other ~1259
+closure modules -- io_runtime.env_get, driver_compile_options_default, the
+K1 table rows, all undefined under a scheme-homogeneous link. The #3608
+emitter-scheme gate eliminated every foreign-scheme cache object and changed
+nothing, proving the gap was never cache or mangling: those functions were
+never emitted.
+
+Fix: the lane now lowers EVERY scheduled closure module through the same
+MirLowering instance and publishes each MirModule into ctx.mir_modules --
+the shape the direct lane's per-module loop produces for the collection
+emission. Non-entry modules lower FIRST: lower_module's bootstrap-flat
+branch resets the flat function registry per call, and the flat entry
+emission reads that registry, so the entry must be the last module lowered.
+Modules already in ctx.mir_modules (archive/mono replay) are skipped.
+
+The lane only triggers for the stage3 entry under SIMPLE_BOOTSTRAP=1, so
+these probes pin the wiring and ordering in source (the neighboring driver
+spec idiom) and force the seed to compile the edited module via the import.
+"""
+
+# @tag: unit, compiler, driver, bootstrap, stage3, emission
+
+use std.spec
+use std.io_runtime.{file_read}
+# Importing the driver lane forces the seed to compile the edited module.
+use compiler.driver.driver_pipeline_lowering.*
+
+describe "bootstrap-fixed closure coverage":
+    it "lowers every scheduled closure module into ctx.mir_modules before the entry":
+        val source = file_read("src/compiler/80.driver/driver_pipeline_lowering.spl")
+        expect(source).to_contain("Emission coverage (site-19, emission divergence 2026-10-17)")
+        expect(source).to_contain("bootstrap_lowering.lower_module(")
+        expect(source).to_contain("self.ctx.mir_modules[bootstrap_closure_name] = bootstrap_closure_mir")
+        expect(source).to_contain('if bootstrap_closure_name != "app.cli.bootstrap_main" and')
+        expect(source).to_contain("not self.ctx.mir_modules.contains_key(bootstrap_closure_name)")
+        # The closure loop must precede the entry lowering: the bootstrap-flat
+        # branch resets the flat function registry per lower_module call, and
+        # the flat entry emission reads that registry -- entry goes LAST.
+        val closure_pos = source.index_of("bootstrap_closure_idx = 0")
+        val entry_pos = source.index_of("lower_bootstrap_entry_module(bootstrap_hir)")
+        expect(closure_pos >= 0 and entry_pos > closure_pos).to_equal(true)
+
+    it "keeps the entry module excluded from the closure loop and named on store":
+        val source = file_read("src/compiler/80.driver/driver_pipeline_lowering.spl")
+        expect(source).to_contain("bootstrap_closure_mir.name = bootstrap_closure_name")
+        # The enum inventory that #3595 added stays ahead of the closure loop.
+        val enum_pos = source.index_of("register_module_enum_bootstrap_inventory_v1(bootstrap_enum_modules)")
+        val closure_pos = source.index_of("bootstrap_closure_idx = 0")
+        expect(enum_pos >= 0 and closure_pos > enum_pos).to_equal(true)
