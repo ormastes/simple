@@ -344,7 +344,7 @@ fn rt_expr_allocates(expr: HirExpr) -> bool:
 fn rt_module_ids(modules: Dict<text, HirModule>) -> [text]:
     var ids: [text] = []
     for key in modules.keys():
-        val module = modules[key]
+        val module: HirModule = modules[key]
         if not ids.contains(key): ids.push(key)
         if module.path != "" and not ids.contains(module.path): ids.push(module.path)
         if module.name != "" and not ids.contains(module.name): ids.push(module.name)
@@ -473,7 +473,9 @@ struct RtCriticalFunctionFactsV1:
 pub fn rt_module_function_declarations_v1(module_key: text,
         module: HirModule) -> [RtCriticalFunctionDeclarationV1]:
     var declarations: [RtCriticalFunctionDeclarationV1] = []
-    for fn_ in module.functions.values():
+    for raw_fn in module.functions.values():
+        # ANY-transport: annotated rebind (cycle-70 sweep).
+        val fn_: HirFunction = raw_fn
         declarations.push(RtCriticalFunctionDeclarationV1(module_key: module_key,
             module_path: module.path, module_name: module.name, symbol_id: fn_.symbol.id,
             name: fn_.name, is_rt_hal: fn_.func_attr.is_rt_hal, line: fn_.span.line))
@@ -695,8 +697,12 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
 fn validate_rt_criticality_diagnostics(modules: Dict<text, HirModule>) -> [RtCriticalDiagnostic]:
     """Validate RT roots while retaining warning/error severity for callers."""
     var has_rt_hal = false
-    for module in modules.values():
-        for fn_ in module.functions.values():
+    for raw_module in modules.values():
+        # ANY-transport hazard: annotated rebinds of composite elements
+        # (cycle-70: validate_rt_criticality_diagnostics SIGSEGV).
+        val module: HirModule = raw_module
+        for raw_fn in module.functions.values():
+            val fn_: HirFunction = raw_fn
             if fn_.func_attr.is_rt_hal: has_rt_hal = true
     if rt_criticality_claim_keys().len() == 0 and not has_rt_hal:
         rt_bound_manifest_clear()
@@ -704,15 +710,18 @@ fn validate_rt_criticality_diagnostics(modules: Dict<text, HirModule>) -> [RtCri
     val names = rt_unambiguous_symbol_names(modules)
     var functions: [RtCriticalFunctionFactsV1] = []
     for module_key in modules.keys():
-        val module = modules[module_key]
-        for fn_ in module.functions.values():
+        val module: HirModule = modules[module_key]
+        for raw_fn in module.functions.values():
+            val fn_: HirFunction = raw_fn
             functions.push(rt_function_facts_v1(module_key, module, fn_, names))
     validate_rt_criticality_facts_v1(rt_module_ids(modules), functions)
 
 fn validate_rt_criticality(modules: Dict<text, HirModule>) -> [text]:
     """Preserve the existing error-only string adapter for compiler callers."""
     var errors: [text] = []
-    for diagnostic in validate_rt_criticality_diagnostics(modules):
+    for raw_diagnostic in validate_rt_criticality_diagnostics(modules):
+        # ANY-transport: the diagnostic struct crosses a by-value return.
+        val diagnostic: RtCriticalDiagnostic = raw_diagnostic
         if diagnostic.severity == RtCriticalDiagnosticSeverity.Error:
             errors.push(diagnostic.message)
     errors
