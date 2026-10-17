@@ -74,11 +74,20 @@ fn demand_artifact_claim_v1(
     val lease = artifact_service_lease_for_action_v1(service, action_id)
     if lease == nil:
         return BuildActionClaimV1(false, "artifact-service-not-ready", nil, "")
+    # A lookup can return an existing lease when no new claim was admitted.
+    # Never borrow that lease's authority for a different caller or epoch.
+    if lease!.owner_id != route.owner_id or lease!.lease_id != lease_id or
+            lease!.generation != route.lease_generation or lease!.cancelled:
+        return BuildActionClaimV1(false, "artifact-service-owner-mismatch", nil, "")
     var execution = route.execution
     var coordinator = execution.coordinator!
     val claim_transfer = coordinator_claim_v1(coordinator, action_id, lease!.lease_id)
     coordinator = claim_transfer.coordinator
     val claim = claim_transfer.claim
+    # Dependency and pool admission can reject after the service staged a
+    # lease. Publish neither owner state until both layers accept the claim.
+    if not claim.valid:
+        return claim
     execution.coordinator = Some(coordinator)
     route.execution = execution
     route.service = service
