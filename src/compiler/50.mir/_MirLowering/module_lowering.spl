@@ -996,6 +996,123 @@ impl MirLowering:
         self.reindex_enum_variant_owners(enum_def.name, prior_variant_names, names)
         self.enum_variant_discriminants[enum_def.name] = discriminants
 
+    me register_module_enum_inventory_v1(modules: [HirModule]):
+        """Register every given module's own enums, up front, before any
+        per-module lowering runs.
+
+        Measured gap (2026-10-16, manual stage3 per-module object sweep):
+        compiling `src/compiler/di.spl` with the admitted stage2 binary failed
+        in `compiler.common.config.CompilerProfile.to_text` with B5b "match
+        has multiple wildcard/binding default arms (binding `Test`)". A
+        two-module fixture (entry declaring a struct with an enum-typed
+        static-fn parameter + a dependency whose own fn matches on its own
+        enum's bare variants) reproduces it in ~4s: the dependency's `case X:`
+        arms degrade to bindings whenever the entry's demand set does not
+        cover the dependency's callables, because the only registration that
+        would reach its enums is the per-module provider pass in lower_module,
+        which skips `provider_module.name == module.name`. When that pass is
+        demand-incomplete (or the module's HirModule no longer carries
+        `module.enums` by the time its turn comes), the module's own match
+        arms find an empty variant registry and the scalar gate rejects them.
+
+        register_enum_variants reads only the HirEnum (no symbol table), and
+        identical re-registration inside lower_module is quiet by the
+        existing dedup rules, so calling this once over all scheduled source
+        modules closes the gap without changing any per-module behaviour.
+        Enum metadata is small (names + discriminants + payload shapes)
+        relative to the struct-name prescan the driver already pays."""
+        var inventory_module_i = 0
+        while inventory_module_i < modules.len():
+            val inventory_enum_values = modules[inventory_module_i].enums.values()
+            var inventory_enum_i = 0
+            while inventory_enum_i < inventory_enum_values.len():
+                self.register_enum_variants(inventory_enum_values[inventory_enum_i])
+                inventory_enum_i = inventory_enum_i + 1
+            inventory_module_i = inventory_module_i + 1
+
+    me register_module_composite_inventory_v1(modules: [HirModule]):
+        """Register every given module's own struct/class NAME-keyed layout
+        rows, up front, before any per-module lowering runs. Struct/class
+        analog of register_module_enum_inventory_v1 (#3527).
+
+        What the existing up-front coverage already registers: the driver's
+        struct-name prescan (prescan_module_struct_names) writes name-keyed
+        struct field ORDER + declared field types for every module, and
+        ID-free class layout identities. What it deliberately does NOT
+        register, and what only each module's own lower_module pass
+        registers today:
+
+        - struct_field_has_default / struct_field_default_expr for STRUCTS
+          (paren-constructor default fills read these by NAME).
+        - every NAME-keyed CLASS row: class_type_names (bare name,
+          composite layout key, and mir_class_identity) plus
+          struct_field_order / struct_field_has_default /
+          struct_field_default_expr under the same three keys. Param
+          binding and value-method dispatch consult class_type_names to tell
+          a class from a same-named value struct; a class whose module is
+          lowered only AFTER its consumer (the direct lane lowers the entry
+          first) or whose callables the entry never demands leaves those
+          maps empty for exactly the window where the consumer lowers.
+
+        Like the enum inventory, this reads only declaration data through
+        the module's own SymbolTable (composite_layout_key / mir_class_identity
+        take the declaring symbol) and writes NAME-keyed maps only:
+        field_map is keyed by per-module SymbolIds and stays untouched.
+        Rows use keep-first semantics on a name collision, matching the
+        struct-name prescan; the module's own lower_module pass still
+        overwrites unconditionally when its turn comes, so a module's local
+        definition always shadows an imported same-name composite while that
+        module is being lowered."""
+        var composite_module_i = 0
+        while composite_module_i < modules.len():
+            val composite_module = modules[composite_module_i]
+            val composite_struct_values = composite_module.structs.values()
+            var composite_struct_i = 0
+            while composite_struct_i < composite_struct_values.len():
+                val composite_struct: HirStruct = composite_struct_values[composite_struct_i]
+                if not self.struct_field_has_default.has(composite_struct.name):
+                    var struct_has_default: [bool] = []
+                    var struct_default_expr: [HirExpr] = []
+                    var composite_field_i = 0
+                    while composite_field_i < composite_struct.fields.len():
+                        struct_has_default.push(composite_struct.fields[composite_field_i].has_default)
+                        struct_default_expr.push(composite_struct.fields[composite_field_i].default)
+                        composite_field_i = composite_field_i + 1
+                    self.struct_field_has_default[composite_struct.name] = struct_has_default
+                    self.struct_field_default_expr[composite_struct.name] = struct_default_expr
+                composite_struct_i = composite_struct_i + 1
+            val composite_class_values = composite_module.classes.values()
+            var composite_class_i = 0
+            while composite_class_i < composite_class_values.len():
+                val composite_class: HirClass = composite_class_values[composite_class_i]
+                var class_field_names: [text] = []
+                var class_has_default: [bool] = []
+                var class_default_expr: [HirExpr] = []
+                var class_field_i = 0
+                while class_field_i < composite_class.fields.len():
+                    class_field_names.push(composite_class.fields[class_field_i].name)
+                    class_has_default.push(composite_class.fields[class_field_i].has_default)
+                    class_default_expr.push(composite_class.fields[class_field_i].default)
+                    class_field_i = class_field_i + 1
+                var class_keys: [text] = [composite_class.name]
+                val composite_class_symbol = composite_module.symbols.get_symbol_raw(composite_class.symbol.id)
+                if composite_class_symbol != nil:
+                    class_keys.push(self.composite_layout_key(composite_class_symbol))
+                    class_keys.push(mir_class_identity(composite_class_symbol))
+                var class_key_i = 0
+                while class_key_i < class_keys.len():
+                    val class_key: text = class_keys[class_key_i]
+                    self.class_type_names[class_key] = true
+                    if not self.struct_field_order.has(class_key):
+                        self.struct_field_order[class_key] = class_field_names
+                    if not self.struct_field_has_default.has(class_key):
+                        self.struct_field_has_default[class_key] = class_has_default
+                    if not self.struct_field_default_expr.has(class_key):
+                        self.struct_field_default_expr[class_key] = class_default_expr
+                    class_key_i = class_key_i + 1
+                composite_class_i = composite_class_i + 1
+            composite_module_i = composite_module_i + 1
+
     # O(1) inverse of `enum_variant_index`, maintained at every bare-key write.
     # `prior_names` is the variant set this owner previously had registered
     # under the same bare key (empty on a first registration); those entries are
@@ -1316,11 +1433,19 @@ impl MirLowering:
                             case Named(field_element_sym, _):
                                 val field_element_symbol = symbols.get_symbol_raw(field_element_sym.id)
                                 if field_element_symbol.?:
-                                    # mcp_record_array_owner_loss_2026_10_11 (#3079): provider-owned element identity.
-                                    field_array_element_type_name = self.composite_layout_key(field_element_symbol)
-                                    if field_element_symbol.kind == SymbolKind.Class:
-                                        field_array_element_type_name = mir_class_identity(field_element_symbol)
-                                    field_type_ownership_key = field_array_element_type_name
+                                    # Only aggregates carry a provider layout. An
+                                    # enum element (e.g. modifiers:
+                                    # [SdoctestModifier]) has no struct provider
+                                    # layout; recording composite_layout_key for
+                                    # it made the record-array check demand one
+                                    # and fail the build. Enums stay word-tagged
+                                    # values, not runtime arrays.
+                                    if field_element_symbol.kind == SymbolKind.Class or
+                                            field_element_symbol.kind == SymbolKind.Struct:
+                                        field_array_element_type_name = self.composite_layout_key(field_element_symbol)
+                                        if field_element_symbol.kind == SymbolKind.Class:
+                                            field_array_element_type_name = mir_class_identity(field_element_symbol)
+                                        field_type_ownership_key = field_array_element_type_name
                             case _: ()
                     case Slice(field_slice_element_type):
                         field_elem_type = field_slice_element_type
@@ -1330,10 +1455,12 @@ impl MirLowering:
                             case Named(field_slice_element_sym, _):
                                 val field_slice_element_symbol = symbols.get_symbol_raw(field_slice_element_sym.id)
                                 if field_slice_element_symbol.?:
-                                    field_array_element_type_name = self.composite_layout_key(field_slice_element_symbol)
-                                    if field_slice_element_symbol.kind == SymbolKind.Class:
-                                        field_array_element_type_name = mir_class_identity(field_slice_element_symbol)
-                                    field_type_ownership_key = field_array_element_type_name
+                                    if field_slice_element_symbol.kind == SymbolKind.Class or
+                                            field_slice_element_symbol.kind == SymbolKind.Struct:
+                                        field_array_element_type_name = self.composite_layout_key(field_slice_element_symbol)
+                                        if field_slice_element_symbol.kind == SymbolKind.Class:
+                                            field_array_element_type_name = mir_class_identity(field_slice_element_symbol)
+                                        field_type_ownership_key = field_array_element_type_name
                             case _: ()
                     case _: ()
             field_type_names.push(field_type_name)

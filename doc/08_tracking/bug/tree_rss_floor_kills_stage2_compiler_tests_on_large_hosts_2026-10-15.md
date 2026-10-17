@@ -56,3 +56,17 @@ compiler binaries, not compile workers); (c) keep the floor but raise the
 per-worker price for non-compile phases. Any change must keep the documented
 small-host protection and the watchdog's own ceiling recompute in
 process-tree-rss-watchdog.pl consistent.
+
+## Status (2026-10-16): fixed — option (b), phase-priced cap
+
+`bootstrap_tree_rss_phase_cap_kib` (tree-rss-policy.shs) prices the Stage 2
+compiler-tests phase by the host: `host_pct` of RAM clamped to
+[floor, jobs-scaled ceiling]. bootstrap-from-scratch.sh uses it for that
+phase only when no explicit `SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB` is set.
+64 GiB host, 8 build threads: cap 16 GiB (was the 5.59 GiB floor). Small
+hosts keep the host fraction (16 GB host -> 8,000,000 KiB). Selftest: 31
+fixtures PASS incl. both phase-cap cases.
+
+Note: on Windows the watchdog's "RSS" is the job object's commit charge
+(`peak_job_commit_kib`), not working set; sampled working set of the same
+builds stayed ~1-3 GiB while commit reached 5.9 GiB.

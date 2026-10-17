@@ -60,7 +60,7 @@ use compiler.frontend.parser_types.*
 use compiler.driver.driver_source_pipeline_impl.{dtrace, driver_end_transient_parse_scope, driver_promote_frontend_registry_owners, driver_promote_retained_frontend_owners_v1}
 use compiler.driver.driver_phase_gates.{bootstrap_entry_module_name, bootstrap_entry_source_index}
 use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
-use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_warn, log_error, log_phase, log_build_progress}
+use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_warn, log_error, log_phase, log_build_progress, driver_phase_trace_enabled}
 use compiler.driver.driver_mem_snapshot.{mem_snapshot_begin, mem_snapshot_finish, mem_snapshot_finish_with_outcome, mem_snapshot_abort}
 use compiler.driver.driver_hir_pipeline_support.{
     driver_stage3_surface_identity_matches,
@@ -192,7 +192,12 @@ fn driver_hir_failed_shard_receipt_v1(status: i64) -> DriverHirShardTransactionR
     DriverHirShardTransactionReceiptV1(status: status,
         archive: nil, declaration_registration: nil)
 
+# The digest exists only for this trace line. Encoding the full typed ABI of
+# every module is not free (canon text + SHA-256 per module), so skip it when
+# log_phase would drop the line anyway. ABI failures still surface as hard
+# `cold-hir-abi-unresolved` errors in capture_cold_hir_typed_receipts_v1.
 fn driver_log_typed_hir_abi_interface_v1(module: HirModule, path: text):
+    if not driver_phase_trace_enabled(): return
     driver_log_typed_hir_abi_result_v1(module.name,
         driver_hir_abi_interface_digest_v1(module), path)
 
@@ -760,7 +765,9 @@ impl CompilerDriver:
                 module = round_trip.module
             # This transaction already owns the scope. Retain only the receipt;
             # reacquiring a scope here rejects every shard's ABI digest.
-            abi_receipt = (module.name, driver_hir_abi_interface_digest_in_owned_scope_v1(module))
+            # Log-only receipt: skipped unless phase tracing is on.
+            if driver_phase_trace_enabled():
+                abi_receipt = (module.name, driver_hir_abi_interface_digest_in_owned_scope_v1(module))
             if cached:
                 stored = true
             else:
