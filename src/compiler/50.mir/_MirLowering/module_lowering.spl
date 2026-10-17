@@ -1705,21 +1705,19 @@ impl MirLowering:
     # composite crosses back.
     me prescan_module_functions_v1(functions: Dict<SymbolId, HirFunction>,
             module_name: text, module_symbols: SymbolTable):
-        # Cycle-108/109: dict-param transport. The caller passes the functions
-        # dict HANDLE (reference copy, no struct copy at the big call site);
-        # rt_dict_values on the handle is C-level. The owner-field form for
-        # the materialized array stays (cycle-105); the lower_module prescan
-        # loop re-assigns before its own iteration (per-module reset).
-        self.lower_emit_fn_values = functions.values()
-        # Cycle-115: index-based codec extraction. The element never crosses
-        # a boundary as a struct (by-value ARG copies at 50.mir call sites
-        # corrupt too -- cycle-115 shim); the caller passes the array HANDLE
-        # (reference copy) plus a scalar index, and the element bind + field
-        # reads happen only in the codec pool (hir_fn_scalars_at_v1).
-        val prescan_fn_count: i64 = self.lower_emit_fn_values.len()
+        # Cycle-129: NO owner-field round-trip. MirLowering's struct header
+        # documents that field mutations do not reliably persist (Stage4
+        # native reason); the cycle-129 shim faulted on the field-read
+        # handle inside hir_fn_scalars_at_v1 even though the write happened
+        # two lines earlier in the same function. The values array crosses
+        # as a pure EXPRESSION argument straight into the codec pool -- no
+        # local, no field, no bind. (The dict HANDLE param transport from
+        # cycle-108/109 stays: reference copy at the call site, C-level
+        # rt_dict_values.)
+        val prescan_fn_count: i64 = functions.values().len()
         var psi = 0
         while psi < prescan_fn_count:
-            val prescan_scalars = hir_fn_scalars_at_v1(self.lower_emit_fn_values, psi)
+            val prescan_scalars = hir_fn_scalars_at_v1(functions.values(), psi)
             self.prescan_one_function_v1(module_name, module_symbols,
                 prescan_scalars[0], prescan_scalars[1], prescan_scalars[2],
                 prescan_scalars[3], prescan_scalars[4], prescan_scalars[5],
