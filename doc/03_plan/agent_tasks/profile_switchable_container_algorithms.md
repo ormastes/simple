@@ -10,6 +10,16 @@
 
 Merge owner: Codex. Final reviewer: Codex at normal/highest capability after executable evidence exists. Shared interface names: `AdaptiveSetAttribute`, `AdaptiveSetWorkloadProfile`, `SprofCollectionLoad`, `CollectionPlan`; no silent placeholders are permitted.
 
+## Bounded continuation, 2026-10-16
+
+[Current reconciliation and dependency handoff](../../09_report/item7_bounded_continuation_2026-10-16.md):
+PR #3073 is merged into `release_phase3`, but Item 7 remains incomplete and
+TEST_BLOCKED. The shared Phase3 cycle 2 has three HIR failures and no executable.
+Its 1,328 cached HIR successes are not runtime acceptance. The fresh Item 7
+continuation starts no duplicate compiler build and preserves concurrent Item
+2/4 and Phase3 work. Resume the remaining gates only with the required qualified
+runner; historical routing/Hello passes must not be relabeled Phase3 PASS.
+
 ## Isolated completion session, 2026-10-03
 
 Target: `release/1.0`, starting at `eedaa197ae4c16442879607e7dee35c8863691f5`.
