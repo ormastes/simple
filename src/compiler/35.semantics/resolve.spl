@@ -234,11 +234,23 @@ impl MethodResolver:
         # Build trait implementation map from impls
         self.build_trait_impls(module.impls)
 
-        # Resolve functions
-        var resolved_functions: Dict<SymbolId, HirFunction> = {}
-        for func in module.functions.values():
-            val resolved_func = self.resolve_function(func)
-            resolved_functions[resolved_func.symbol] = resolved_func
+        # Resolve functions. Cycle-132: with NO impls and NO classes there
+        # are no method-resolution candidates at all, so resolve_function's
+        # per-function rebuild is a field-wise-identical copy -- and that
+        # rebuild is exactly where the corruption enters (the for-in element
+        # rebind of each HirFunction and the fresh constructor copy both draw
+        # corrupted; the cycle-132 deep probe showed the rebuilt functions
+        # poisoned for p2_add). Reuse the ORIGINAL functions dict handle:
+        # the boxed pointers are genuine and resolve would not have changed
+        # a single field. (The impl/class gate is conservative: any module
+        # that could contain a resolvable method call still takes the rebuild
+        # path.)
+        var resolved_functions: Dict<SymbolId, HirFunction> = module.functions
+        if module.impls.len() > 0 or module.classes.len() > 0:
+            resolved_functions = {}
+            for func in module.functions.values():
+                val resolved_func = self.resolve_function(func)
+                resolved_functions[resolved_func.symbol] = resolved_func
 
         # Resolve constants
         var resolved_constants: Dict<SymbolId, HirConst> = {}
@@ -871,17 +883,33 @@ impl ResolveError:
 # Public API
 # ============================================================================
 
+# Cycle-130: the resolved module's AUTHORITATIVE copy travels through this
+# owner, not the returned tuple. The (HirModule, [ResolveError]) tuple return
+# corrupts the module slot at the Stage-3 native value ABI (the cycle-121
+# lesson, second instance: the driver's reinsertion of the tuple-extracted
+# module poisoned ctx.hir_modules' function values for every later phase).
+# The tuple is kept for call-site compatibility; callers that PERSIST the
+# module must read `resolve_methods_module_owner.?` instead of the tuple
+# slot. Assigned on every entry before return; single-threaded per lane.
+var resolve_methods_module_owner: HirModule? = nil
+
+export resolve_methods_module_owner
+
 fn resolve_methods(module: HirModule) -> (HirModule, [ResolveError]):
     """Resolve all method calls in a module.
 
     This is the main entry point for the resolution pass.
-    Returns the resolved module and any errors encountered.
+    Returns the resolved module and any errors encountered. The resolved
+    module's authoritative copy is also published through
+    `resolve_methods_module_owner` (cycle-130: the tuple slot corrupts at
+    the native value ABI; callers that persist the module read the owner).
     """
     # Receiver-owned methods live in the HIR module's symbol table.  Replacing
     # it with an empty table discarded both type identity and import ownership,
     # making same-named methods fall through to unrelated global candidates.
     val resolver = create_method_resolver(module.symbols)
     val resolved = resolver.resolve_module(module)
+    resolve_methods_module_owner = resolved
     (resolved, resolver.errors)
 
 fn resolve_methods_quiet(module: HirModule) -> (HirModule, [ResolveError]):
@@ -897,6 +925,7 @@ fn resolve_methods_quiet(module: HirModule) -> (HirModule, [ResolveError]):
     var resolver = create_method_resolver(module.symbols)
     resolver.quiet = true
     val resolved = resolver.resolve_module(module)
+    resolve_methods_module_owner = resolved
     (resolved, resolver.errors)
 
 fn resolve_methods_with_solver(module: HirModule, solver: TraitSolver) -> (HirModule, [ResolveError]):
