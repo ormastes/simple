@@ -90,7 +90,7 @@ use compiler.driver.driver_safety_severity.{SafetyPassSeverity, safety_pass_seve
 use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity, typecheck_pass_severity}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line, hir_module_encode, hir_module_has_rt_hal}
-use compiler.hir.hir_codec.{hir_module_functions_at_v1, hir_fn_scalars_at_v1}
+use compiler.hir.hir_codec.{hir_module_functions_at_v1, hir_fn_scalars_at_v1, hir_module_first_fn_name_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_last_warnings, hir_cache_parser_binding_v1, hir_cache_last_parser_objectless, hir_cache_load_parsed_v1, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_in_owned_scope, hir_cache_clear_last_warnings}
@@ -486,6 +486,16 @@ impl CompilerDriver:
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("HIR ownership promotion failed for {source_path}")
+        # Cycle-137 REVERT of the cycle-135 deep-promotion block: the
+        # runtime promote is a recursive plan walker (runtime_native.c:2776 --
+        # RAW structs scan words for children, DICT nodes walk every occupied
+        # entry's key and value, ARRAY nodes walk elements). The module
+        # promote above is already deep; re-promoting the now-persistent
+        # nested dicts fails their non-transient classify (root_class 0, not
+        # an immortal string) and would trip the ownership panic -- exactly
+        # what the cycle-137 cache-lane SIGABRT showed. The cycle-134/135
+        # shallow-promotion diagnosis was wrong; the fvals element fault has
+        # another cause.
         if not lowering.promote_diagnostics_transient_owner():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
@@ -2129,12 +2139,15 @@ impl CompilerDriver:
         if (sosix_env_get_nullable("SIMPLE_SDN_RACE_TRACE") ?? "") == "1":
             for race_key in phase_hir_modules.keys():
                 val race_mod: HirModule = phase_hir_modules[race_key]
-                # Cycle-133 deep bracket: also read the FIRST FUNCTION's
-                # name through the all-codec chain. Fault here -> functions
-                # poisoned at/before HIR completion (lowering insertion or
-                # cache-load decode); a real name here but garbage at
-                # mir-feed-pre -> poisoning in the mono/resolve/weave lanes.
-                eprint("[race-trace] hir-final module={race_key} enums={race_mod.enums.len()} classes={race_mod.classes.len()} functions={race_mod.functions.len()} first_fn_scalars={hir_fn_scalars_at_v1(hir_module_functions_at_v1(phase_hir_modules.values(), 0).values(), 0)[1]}")
+                # Cycle-134 length-first probe: print the functions-dict's
+                # VALUES length BEFORE the deep read (separate eprints, so
+                # the length survives a deep-read fault). values_len=0 would
+                # mean the dict handle fails the runtime's as_dict cast (the
+                # empty-array path), reconciling mono's successful dict-index
+                # reads with the .values()-array element faults.
+                eprint("[race-trace] hir-final module={race_key} enums={race_mod.enums.len()} classes={race_mod.classes.len()} functions={race_mod.functions.len()} fvals_len={hir_module_functions_at_v1(phase_hir_modules.values(), 0).values().len()}")
+                eprint("[race-trace] hir-final-idx first_fn_name={hir_module_first_fn_name_v1(race_mod)}")
+                eprint("[race-trace] hir-final-deep first_fn_scalars={hir_fn_scalars_at_v1(hir_module_functions_at_v1(phase_hir_modules.values(), 0).values(), 0)[1]}")
         # Same post-loop receipts as the streaming path (see its loop:done
         # comment): a crash between the last file:done and the first pass
         # summary used to leave no marker at all.
