@@ -177,7 +177,8 @@ impl MirToLlvm:
                 self.builder.emit("  {agg} = call ptr @rt_alloc(i64 {n * word_bytes})")
                 for i in 0..n:
                     val raw = self.translate_operand(operands[i])
-                    val v = self.store_field_bits(raw, self.get_operand_type(operands[i]), nit)
+                    # Cycle-151: verbatim word store (no value_types re-tag).
+                    val v = self.store_field_bits_verbatim(raw, self.get_operand_type(operands[i]), nit)
                     val fp = self.builder.fresh_local()
                     self.builder.emit("  {fp} = getelementptr inbounds {nit}, ptr {agg}, i32 {i}")
                     self.builder.emit_store(nit, v, fp)
@@ -368,6 +369,26 @@ impl MirToLlvm:
         if ty == "float":
             return "i32"
         ty
+
+    me store_field_bits_verbatim(raw_val: text, operand_ty: text, nit: text) -> text:
+        """Cycle-151 VERBATIM word store for aggregate materialization.
+        store_field_bits consults the STICKY value_types map, which can
+        re-tag a non-pointer word as "ptr" (every struct/array/dict local
+        is ptr-marked) -- value_as_type then emits a getelementptr/ptr
+        reinterpretation that MANGLES the word (the cycle-148/150
+        prologue-copy corruption: one word of the 24+ word struct copy
+        becomes a computed address). This variant stores the operand's
+        bits UNCONDITIONALLY: i64-class operands store as-is; pointer
+        operands go through ptrtoint (bit-preserving). No value_types
+        lookup, no tag conditional."""
+        val src_ty = self.valid_llvm_type(operand_ty)
+        if is_integer_type(src_ty):
+            return raw_val
+        if src_ty == "ptr":
+            val as_int = self.builder.fresh_local()
+            self.builder.emit("  {as_int} = ptrtoint ptr {raw_val} to {nit}")
+            return as_int
+        self.store_field_bits(raw_val, operand_ty, nit)
 
     me store_field_bits(raw_val: text, operand_ty: text, nit: text) -> text:
         """Convert an operand's translated value into the native-int WORD
