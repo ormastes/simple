@@ -1,0 +1,246 @@
+"""Exclusive native Windows interactive console owner; no stdin line reads."""
+use std.nogc_sync_mut.io.windows_console_abi.{GetStdHandle, GetCurrentProcess, DuplicateHandle, GetConsoleMode, SetConsoleMode, GetNumberOfConsoleInputEvents, ReadConsoleInputW, WriteConsoleW, GetConsoleScreenBufferInfo}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, CloseHandle}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u16, volatile_read_u32, volatile_read_u64, volatile_write_u16, volatile_write_u32}
+use std.nogc_sync_mut.io.windows_console_codec.{WindowsConsoleDecoderV1, WindowsConsoleKeyV1, windows_console_decode_key_v1, windows_console_raw_input_mode_v1, windows_console_vt_output_mode_v1, windows_console_utf16_units_v1}
+use std.nogc_sync_mut.io.windows_clipboard_owner.{windows_clipboard_write_v1, windows_clipboard_cleanup_v1}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+
+struct WindowsConsoleStateV1:
+    heap: i64
+    arena: i64
+    input: i64 = 0
+    output: i64 = 0
+    input_mode: i64 = 0
+    output_mode: i64 = 0
+    input_known: bool = false
+    output_known: bool = false
+    input_touched: bool = false
+    output_touched: bool = false
+    alternate: bool = false
+    closing: bool = false
+    closed: bool = false
+    decoder: WindowsConsoleDecoderV1 = WindowsConsoleDecoderV1()
+    keys: [WindowsConsoleKeyV1] = []
+
+var _windows_console_slots_v1: [WindowsConsoleStateV1] = []
+var _windows_console_active_v1: i64 = -1
+
+fn _windows_console_live_v1(handle: i64) -> bool:
+    handle > 0 and handle <= _windows_console_slots_v1.len() and not _windows_console_slots_v1[handle - 1].closing and not _windows_console_slots_v1[handle - 1].closed
+
+# One retained arena: duplicate handle outputs0/8, modes16/20, event-count24,
+# read-count28, write-count32, screen-info40..61, records64..703,
+# UTF16 output4096..135167. Owner serializes every access.
+@unsafe(reason: "copies validated Unicode into bounded retained UTF16 console storage", capabilities: [ffi, raw_ptr])
+fn _windows_console_write_v1(state: WindowsConsoleStateV1, value: text) -> bool:
+    if state.output == 0 or value.len() > 65536: return false
+    val units = windows_console_utf16_units_v1(value)
+    if units < 0: return false
+    if units == 0: return true
+    var ordinal = 0
+    var byte_offset = 0
+    var unit_offset = 0
+    while byte_offset < value.len():
+        val scalar = value.char_code_at(ordinal)
+        if scalar < 65536:
+            volatile_write_u16(state.arena + 4096 + unit_offset * 2, scalar)
+            unit_offset = unit_offset + 1
+        else:
+            val supplementary = scalar - 65536
+            volatile_write_u16(state.arena + 4096 + unit_offset * 2, 55296 + (supplementary >> 10))
+            volatile_write_u16(state.arena + 4096 + (unit_offset + 1) * 2, 56320 + (supplementary & 1023))
+            unit_offset = unit_offset + 2
+        byte_offset = byte_offset + (if scalar < 128: 1 elif scalar < 2048: 2 elif scalar < 65536: 3 else: 4)
+        ordinal = ordinal + 1
+    var written = 0
+    for attempt in 0..16:
+        if written == units: return true
+        volatile_write_u32(state.arena + 32, 0)
+        if WriteConsoleW(state.output, state.arena + 4096 + written * 2, (units - written) as u32, state.arena + 32, 0) == 0:
+            return false
+        val count = volatile_read_u32(state.arena + 32)
+        if count <= 0 or count > units - written: return false
+        written = written + count
+    written == units
+
+@unsafe(reason: "restores both exact console modes and retains failed native releases for retry", capabilities: [ffi, raw_ptr])
+fn _windows_console_release_v1(state: WindowsConsoleStateV1) -> WindowsConsoleStateV1:
+    var next = state
+    next.closing = true
+    if next.alternate and next.output != 0:
+        # A previous close may have restored output mode after a failed write.
+        # Re-enable VT for the exit sequence, then restore the saved mode below.
+        if SetConsoleMode(next.output, windows_console_vt_output_mode_v1(next.output_mode)) != 0:
+            next.output_touched = true
+            if _windows_console_write_v1(next, "\x1b[0m\x1b[?25h\x1b[?1049l"): next.alternate = false
+    # Always attempt both restorations, even if alternate-screen exit failed.
+    if next.input_touched and next.input_known:
+        if SetConsoleMode(next.input, next.input_mode as u32) != 0: next.input_touched = false
+    if next.output_touched and next.output_known:
+        if SetConsoleMode(next.output, next.output_mode as u32) != 0: next.output_touched = false
+    if not next.input_touched and not next.output_touched and not next.alternate:
+        if next.input != 0:
+            if CloseHandle(next.input) != 0: next.input = 0
+        if next.output != 0:
+            if CloseHandle(next.output) != 0: next.output = 0
+        if next.input == 0 and next.output == 0 and next.arena != 0:
+            if HeapFree(next.heap, 0u32, next.arena) != 0: next.arena = 0
+    next.closed = next.input == 0 and next.output == 0 and next.arena == 0
+    if next.closed: next.keys = []
+    next
+
+pub fn windows_console_close_v1(handle: i64) -> bool:
+    if handle <= 0 or handle > _windows_console_slots_v1.len(): return false
+    var state = _windows_console_slots_v1[handle - 1]
+    if state.closed: return windows_clipboard_cleanup_v1()
+    state.closing = true
+    _windows_console_slots_v1[handle - 1] = state
+    state = _windows_console_release_v1(state)
+    _windows_console_slots_v1[handle - 1] = state
+    if state.closed and _windows_console_active_v1 == handle - 1:
+        _windows_console_active_v1 = -1
+    val clipboard_clean = windows_clipboard_cleanup_v1()
+    state.closed and clipboard_clean
+
+@unsafe(reason: "duplicates real console handles and saves exact modes before any transition", capabilities: [ffi, raw_ptr])
+pub fn windows_console_open_v1() -> Result<i64, text>:
+    if not windows_clipboard_cleanup_v1(): return Err("clipboard cleanup pending")
+    if _windows_console_active_v1 >= 0:
+        val current = _windows_console_slots_v1[_windows_console_active_v1]
+        if current.closing:
+            val _retried = windows_console_close_v1(_windows_console_active_v1 + 1)
+        if _windows_console_active_v1 >= 0: return Err("console already owned or restoration pending")
+    if _windows_console_slots_v1.len() >= 100000: return Err("console lifetime lease bound exceeded")
+    val heap = GetProcessHeap()
+    if heap == 0: return Err("Windows process heap unavailable")
+    val arena = HeapAlloc(heap, 8u32, 139264u64)
+    if arena == 0: return Err("console owner allocation failed")
+    var state = WindowsConsoleStateV1(heap: heap, arena: arena)
+    val index = _windows_console_slots_v1.len()
+    _windows_console_slots_v1 = _windows_console_slots_v1.push(state)
+    _windows_console_active_v1 = index
+    val process = GetCurrentProcess()
+    var error = ""
+    val input = GetStdHandle(4294967286u32)
+    val output = GetStdHandle(4294967285u32)
+    if input == 0 or input == -1 or output == 0 or output == -1:
+        error = "interactive standard console handles unavailable"
+    if error == "":
+        if DuplicateHandle(process, input, process, arena, 0u32, 0, 2u32) == 0:
+            error = "console input duplication failed"
+        else: state.input = volatile_read_u64(arena)
+    if error == "":
+        if DuplicateHandle(process, output, process, arena + 8, 0u32, 0, 2u32) == 0:
+            error = "console output duplication failed"
+        else: state.output = volatile_read_u64(arena + 8)
+    if error == "":
+        if GetConsoleMode(state.input, arena + 16) == 0:
+            error = "stdin is not a Windows console"
+        else:
+            state.input_mode = volatile_read_u32(arena + 16)
+            state.input_known = true
+    if error == "":
+        if GetConsoleMode(state.output, arena + 20) == 0:
+            error = "stdout is not a Windows console"
+        else:
+            state.output_mode = volatile_read_u32(arena + 20)
+            state.output_known = true
+    if error == "":
+        state.input_touched = true
+        if SetConsoleMode(state.input, windows_console_raw_input_mode_v1(state.input_mode)) == 0:
+            error = "raw console input mode failed"
+    if error == "":
+        state.output_touched = true
+        if SetConsoleMode(state.output, windows_console_vt_output_mode_v1(state.output_mode)) == 0:
+            error = "VT console output mode failed"
+    if error == "":
+        state.alternate = true
+        if not _windows_console_write_v1(state, "\x1b[?1049h\x1b[?25l"):
+            error = "console alternate screen entry failed"
+    _windows_console_slots_v1[index] = state
+    if error != "":
+        if not windows_console_close_v1(index + 1): error = error + "; restoration pending"
+        return Err(error)
+    Ok(index + 1)
+
+fn _windows_console_take_v1(state: WindowsConsoleStateV1, max_bytes: i64) -> (WindowsConsoleStateV1, Result<text, text>):
+    var next = state
+    if next.keys.len() == 0: return (next, Ok(""))
+    var output: [u8] = [0u8; max_bytes]
+    var length = 0
+    var consumed = 0
+    for index in 0..next.keys.len():
+        var key = next.keys[index]
+        while key.repeat > 0 and length + key.value.len() <= max_bytes:
+            for offset in 0..key.value.len(): output[length + offset] = key.value.byte_at(offset) as u8
+            length = length + key.value.len()
+            key.repeat = key.repeat - 1
+        next.keys[index] = key
+        if key.repeat > 0: break
+        consumed = consumed + 1
+    if consumed > 0:
+        var retained: [WindowsConsoleKeyV1] = []
+        for index in consumed..next.keys.len(): retained = retained.push(next.keys[index])
+        next.keys = retained
+    var complete: [u8] = [0u8; length]
+    for index in 0..length: complete[index] = output[index]
+    (next, validated_utf8_bytes_to_text_linear(complete))
+
+@unsafe(reason: "reads only already counted records using the single exclusive console consumer", capabilities: [ffi, raw_ptr])
+pub fn windows_console_read_v1(handle: i64, max_bytes: i64) -> Result<text, text>:
+    if not _windows_console_live_v1(handle): return Err("invalid or closed console lease")
+    if max_bytes <= 0 or max_bytes > 65536: return Err("console read bound must be 1..65536 bytes")
+    var state = _windows_console_slots_v1[handle - 1]
+    if state.keys.len() == 0:
+        if GetNumberOfConsoleInputEvents(state.input, state.arena + 24) == 0: return Err("console input count failed")
+        val available = volatile_read_u32(state.arena + 24)
+        if available > 0:
+            val count = if available > 32: 32 else: available
+            if ReadConsoleInputW(state.input, state.arena + 64, count as u32, state.arena + 28) == 0:
+                return Err("console input read failed")
+            val received = volatile_read_u32(state.arena + 28)
+            if received > count: return Err("invalid console input count")
+            for index in 0..received:
+                val record = state.arena + 64 + index * 20
+                if volatile_read_u16(record) == 1:
+                    val decoded = windows_console_decode_key_v1(state.decoder,
+                        volatile_read_u32(record + 4) != 0, volatile_read_u16(record + 8),
+                        volatile_read_u16(record + 10), volatile_read_u16(record + 14),
+                        volatile_read_u32(record + 16))
+                    state.decoder = decoded.decoder
+                    for key in decoded.keys: state.keys = state.keys.push(key)
+    val (updated, output) = _windows_console_take_v1(state, max_bytes)
+    _windows_console_slots_v1[handle - 1] = updated
+    output
+
+@unsafe(reason: "reads the actual SMALL_RECT window dimensions from the owned console", capabilities: [ffi, raw_ptr])
+pub fn windows_console_size_v1(handle: i64) -> Result<[i64], text>:
+    if not _windows_console_live_v1(handle): return Err("invalid or closed console lease")
+    val state = _windows_console_slots_v1[handle - 1]
+    if GetConsoleScreenBufferInfo(state.output, state.arena + 40) == 0: return Err("console size unavailable")
+    val left = volatile_read_u16(state.arena + 50)
+    val top = volatile_read_u16(state.arena + 52)
+    val right = volatile_read_u16(state.arena + 54)
+    val bottom = volatile_read_u16(state.arena + 56)
+    if left > right or top > bottom or right > 32767 or bottom > 32767: return Err("invalid console window rectangle")
+    Ok([right - left + 1, bottom - top + 1])
+
+pub fn windows_console_write_v1(handle: i64, value: text) -> Result<bool, text>:
+    if not _windows_console_live_v1(handle): return Err("invalid or closed console lease")
+    if value.len() > 65536: return Err("console write exceeds 65536-byte bound")
+    if not _windows_console_write_v1(_windows_console_slots_v1[handle - 1], value):
+        return Err("console output failed; a prefix may have been written")
+    Ok(true)
+
+# Also repairs a privately retained failed-open lease whose public open returned
+# Err. A live lease is intentionally not closed by this cleanup-only operation.
+pub fn windows_console_cleanup_v1() -> bool:
+    if _windows_console_active_v1 < 0: return windows_clipboard_cleanup_v1()
+    val state = _windows_console_slots_v1[_windows_console_active_v1]
+    if not state.closing: return false
+    windows_console_close_v1(_windows_console_active_v1 + 1)
+
+pub fn windows_console_clipboard_write_v1(handle: i64, value: text) -> Result<bool, text>:
+    if not _windows_console_live_v1(handle): return Err("invalid or closed console lease")
+    windows_clipboard_write_v1(value)

@@ -1,0 +1,50 @@
+# Bridge raw input prefixes to the legacy text-only PTY ABI. A final partial
+# scalar remains queued; malformed UTF-8 is refused, never replaced silently.
+use std.common.text_bytes.{bytes_to_text, text_to_bytes}
+
+struct PtyInputPrefix:
+    content: text
+    accepted: i64
+
+pub fn pty_input_prefix(data: [u8]) -> Result<PtyInputPrefix, text>:
+    var offset: i64 = 0
+    var complete = true
+    while offset < data.len() and complete:
+        val lead = data[offset] as i64
+        var width: i64 = 1
+        if lead >= 194 and lead <= 223:
+            width = 2
+        elif lead >= 224 and lead <= 239:
+            width = 3
+        elif lead >= 240 and lead <= 244:
+            width = 4
+        elif lead >= 128:
+            return Err("invalid UTF-8 pty input")
+        var index: i64 = 1
+        while index < width and offset + index < data.len():
+            val byte = data[offset + index] as i64
+            if byte < 128 or byte > 191:
+                return Err("invalid UTF-8 pty input")
+            if index == 1:
+                if (lead == 224 and byte < 160) or (lead == 237 and byte > 159):
+                    return Err("invalid UTF-8 pty input")
+                if (lead == 240 and byte < 144) or (lead == 244 and byte > 143):
+                    return Err("invalid UTF-8 pty input")
+            index = index + 1
+        if index < width:
+            complete = false
+        else:
+            offset = offset + width
+    val prefix = data[0:offset]
+    val content = bytes_to_text(prefix)
+    val encoded = text_to_bytes(content)
+    if encoded.len() != prefix.len():
+        return Err("UTF-8 pty input roundtrip failed")
+    var index: i64 = 0
+    while index < prefix.len():
+        if encoded[index] != prefix[index]:
+            return Err("UTF-8 pty input roundtrip failed")
+        index = index + 1
+    return Ok(PtyInputPrefix(content: content, accepted: offset))
+
+export PtyInputPrefix, pty_input_prefix
