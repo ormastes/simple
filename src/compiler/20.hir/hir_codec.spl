@@ -19,8 +19,10 @@
 use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_types.{SymbolId}  # explicit: glob is not an import-origin for surface projection
 use compiler.hir.hir_definitions.{HirFunction, HirStruct, HirClass, HirEnum,
-    HirBitfield, HirTrait, HirConst}
+    HirBitfield, HirTrait, HirConst, HirParam}
+use compiler.hir.hir_types.{HirType}  # explicit: glob is not an import-origin for surface projection
 use compiler.hir.abi_interface.{HirAbiInterfaceEncoderV1, HIR_ABI_INTERFACE_DOMAIN_V1}
+use compiler.common.attributes.{FunctionAttr}
 use compiler.common.cache.canonical_identity.{canon_str, canon_nat, canon_field,
     canon_seq, canonical_identity_sort_texts}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader,
@@ -104,6 +106,30 @@ fn hir_module_encode_reason(module: HirModule) -> text:
     if w.ok:
         return ""
     w.unsupported
+
+# Cycle-114: scalar extraction in the proven pool. Every 50.mir host's
+# HirFunction by-value param copy draws corrupted (cycles 106-114 ledger:
+# prescan_module_struct_names, prescan_one_function_v1, prescan_one_extracted_v1
+# all faulted on param-spill field reads); the codec unit's by-value param
+# copies draw clean (hir_module_has_rt_hal receives a full HirModule, 10/10).
+# The element crosses into THIS unit once; the nine scalars/small composites
+# return in one tuple (the hir_module_decode precedent: large composite
+# returns from this unit draw clean).
+# Cycle-115: index-based variant. The by-value HirFunction ARGUMENT copy at
+# 50.mir call sites also draws corrupted (the cycle-115 shim faulted on the
+# untagged param pointer inside this function), so the element never crosses
+# a boundary as a struct: the caller passes the ARRAY HANDLE (reference copy)
+# and a scalar index; the element bind and field reads happen ONLY here, in
+# the codec pool (the codec_abi helper precedent: named binds of extracted
+# HirFunctions draw clean in this unit).
+fn hir_fn_scalars_at_v1(values: [HirFunction], index: i64) -> (SymbolId, text, bool, bool, bool, bool, FunctionAttr, HirType, [HirParam]):
+    # Cycle-116: NO named bind -- the array-index bind of a HirFunction drew
+    # corrupted even here (the cycle-116 shim faulted reading the bind's
+    # fields). Pure expression reads, one rt_array_get per field source, the
+    # hir_module_has_rt_hal shape extended: no bind, no copy, no spill.
+    (values[index].symbol, values[index].name, values[index].is_extern,
+     values[index].is_method, values[index].is_static, values[index].has_export_attr,
+     values[index].func_attr, values[index].return_type, values[index].params)
 
 # Cycle-82: scalar HAL fact for the rt-criticality early-exit predicate.
 # Every non-codec lane's Dict value reads of HirFunction arrive erased (the
@@ -451,6 +477,7 @@ export hir_canonical_codec_generated_available_v1
 export HirDecodeLimits, HirDecodeAuditUsage, HirDecodeAuditObserver, HirDecodeError
 export hir_module_encode, hir_module_encode_canonical, hir_module_encode_reason
 export hir_module_has_rt_hal
+export hir_fn_scalars_at_v1
 export hir_codec_abi_interface_parts_v1, hir_codec_abi_interface_encoded_v1
 export hir_module_decode, hir_module_decode_bounded, hir_module_decode_bounded_audited
 export hir_module_decode_stable
