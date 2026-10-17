@@ -717,17 +717,33 @@ impl CompilerDriver:
                 self.ctx.add_error(admitted_indices.unwrap_err())
                 return false
             val physical_indices = admitted_indices.unwrap()
-            self.ctx.mir_feed_modules = []
-            for physical_index in physical_indices:
-                val logical_name = self.ctx.source_module_names_owner[physical_index]
-                # Cycle-125: guard-first double access (the erased-read class;
-                # the pushed element poisoned the prescan element derefs for
-                # cycles 117-124).
-                if not self.ctx.hir_modules.has(logical_name):
-                    self.ctx.add_error("MIR physical ownership missing HIR for {logical_name}")
-                    return false
-                val feed_hir_module: HirModule = self.ctx.hir_modules[logical_name]
-                self.ctx.mir_feed_modules = self.ctx.mir_feed_modules.push(feed_hir_module)
+            # Cycle-126: skip the rebuild when the admission is the identity
+            # (same length, index i admitted at position i). The birth array
+            # (self.ctx.hir_modules.values() above) is the proven-sound
+            # transport -- the cycle-124 mir-feed receipt verified its
+            # element -- while every dict-value re-read this lane has tried
+            # (plain, guard-first) arrives erased in this draw and poisons
+            # the rebuilt array. For identity admissions the rebuild is a
+            # no-op semantically, so the sound birth array is kept. Non-
+            # identity admissions still rebuild (flagged: the erased-read
+            # rebuild remains latent for filtered/ordered builds).
+            var feed_needs_rebuild = physical_indices.len() != self.ctx.mir_feed_modules.len()
+            var feed_identity_i = 0
+            while not feed_needs_rebuild and feed_identity_i < physical_indices.len():
+                if physical_indices[feed_identity_i] != feed_identity_i:
+                    feed_needs_rebuild = true
+                feed_identity_i = feed_identity_i + 1
+            if feed_needs_rebuild:
+                self.ctx.mir_feed_modules = []
+                for physical_index in physical_indices:
+                    val logical_name = self.ctx.source_module_names_owner[physical_index]
+                    # Cycle-125: guard-first double access (the erased-read
+                    # class).
+                    if not self.ctx.hir_modules.has(logical_name):
+                        self.ctx.add_error("MIR physical ownership missing HIR for {logical_name}")
+                        return false
+                    val feed_hir_module: HirModule = self.ctx.hir_modules[logical_name]
+                    self.ctx.mir_feed_modules = self.ctx.mir_feed_modules.push(feed_hir_module)
             if self.ctx.sources.len() > 0:
                 if self.ctx.sources.len() != self.ctx.source_paths_owner.len():
                     self.ctx.add_error("MIR source scheduling differs from admitted inventory")
