@@ -20,6 +20,7 @@ if parser.is_complete():
 
 use std.http_server.types.{HttpRequestData}
 use std.http_server.error.{HttpServerError}
+use std.common.string_core.{string_bytes}
 # Shared protocol core — same limits and header policy as the sync server
 # (src/lib/common/net/http_core.spl). Enforced DURING parsing, before buffer
 # growth, so an oversized request line/header/body cannot exhaust memory.
@@ -167,7 +168,7 @@ class HttpRequestParser:
                             self.buffer = self.buffer.slice(line_end + 2, self.buffer.len())
                             consumed = consumed + line_end + 2
                             if not self.parse_header_line(line):
-                                return Err(self.fail("400 Malformed header line"))
+                                return Err(self.fail(self.error_message))
                     else:
                         # AC-2: bound buffer growth on a partial header line.
                         if self.buffer.len() > self.max_header_line + 2:
@@ -326,11 +327,30 @@ class HttpRequestParser:
         """
         val colon = line.index_of(":")
         if colon <= 0:
+            self.error_message = "400 Malformed header line"
             return false
-        val name = line.slice(0, colon).trim()
-        if name.len() == 0:
-            return false
-        val value = line.slice(colon + 1, line.len()).trim()
+        # Validate the wire spelling before trimming: whitespace before the
+        # colon and controls at either edge must not disappear during parsing.
+        val name = line.slice(0, colon)
+        for code in string_bytes(name):
+            val alpha = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+            val digit = code >= 48 and code <= 57
+            val symbol = (
+                code == 33 or code == 35 or code == 36 or code == 37 or
+                code == 38 or code == 39 or code == 42 or code == 43 or
+                code == 45 or code == 46 or code == 94 or code == 95 or
+                code == 96 or code == 124 or code == 126
+            )
+            if not alpha and not digit and not symbol:
+                self.error_message = "400 Invalid header name"
+                return false
+        val raw_value = line.slice(colon + 1, line.len())
+        for code in string_bytes(raw_value):
+            # RFC field values allow HTAB, SP, visible ASCII and obs-text.
+            if (code < 32 and code != 9) or code == 127:
+                self.error_message = "400 Invalid header value"
+                return false
+        val value = raw_value.trim()
         self.headers.push((name, value))
         true
 
