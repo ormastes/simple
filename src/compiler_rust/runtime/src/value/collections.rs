@@ -2181,7 +2181,18 @@ fn transient_heap_children(value: RuntimeValue) -> Option<Vec<RuntimeValue>> {
                 // Same validated-bound contract as the Dict arm: `as_slice`
                 // iterates `len` element words, so refuse a header whose len
                 // exceeds its capacity instead of overrunning the buffer.
+                // Valid constructors and mutators always keep len <= capacity
+                // (including the packed lanes, where len/capacity count bytes
+                // or u64 words respectively), so a disagreement here means
+                // corruption; the diagnostic makes the rare fire observable.
                 if array.len > array.capacity {
+                    eprintln!(
+                        "rt_transient_heap_promote: rejecting corrupt array header \
+                         (len={} capacity={} value=0x{:x})",
+                        array.len,
+                        array.capacity,
+                        value.0
+                    );
                     return None;
                 }
                 if array.is_byte_packed() || array.is_u64_packed() {
@@ -2211,10 +2222,22 @@ fn transient_heap_children(value: RuntimeValue) -> Option<Vec<RuntimeValue>> {
                 // `len`/`capacity`/`data` — only occupied (key, value) pairs
                 // are promoted. Iteration is clamped to the validated table
                 // size, and `len` is used only to size the child buffer.
-                if dict.data.is_null()
-                    || dict.len > dict.capacity
-                    || dict.capacity > (1u64 << 32)
-                {
+                // A null table with a live header is the EMPTY dict (previous
+                // contract, unchanged); len/capacity disagreement can only
+                // mean memory corruption, and the loud diagnostic exists so a
+                // lane can prove or rule out this guard from its logs instead
+                // of silently dropping children.
+                if dict.data.is_null() {
+                    return Some(Vec::new());
+                }
+                if dict.len > dict.capacity || dict.capacity > (1u64 << 32) {
+                    eprintln!(
+                        "rt_transient_heap_promote: rejecting corrupt dict header \
+                         (len={} capacity={} value=0x{:x})",
+                        dict.len,
+                        dict.capacity,
+                        value.0
+                    );
                     return None;
                 }
                 let mut children = Vec::with_capacity(dict.len as usize * 2);
@@ -6887,10 +6910,11 @@ mod tests;
 #[cfg(test)]
 mod string_free_contract_tests {
     use super::{
-        byte_array_write, rt_array_bytes_copy_checked, rt_array_bytes_validate, rt_array_free, rt_array_new,
-        rt_array_push, rt_byte_array_new_len, rt_string_concat, rt_string_data, rt_string_free, rt_string_len,
-        rt_string_new, rt_string_new_literal, rt_transient_array_scope_begin, rt_transient_array_scope_end,
-        rt_transient_array_scope_pause, rt_transient_heap_promote,
+        byte_array_write, get_typed_ptr_mut, rt_array_bytes_copy_checked, rt_array_bytes_validate,
+        rt_array_free, rt_array_len, rt_array_new, rt_array_push, rt_byte_array_new_len, rt_string_concat,
+        rt_string_data, rt_string_free, rt_string_len, rt_string_new, rt_string_new_literal,
+        rt_transient_array_scope_begin, rt_transient_array_scope_end, rt_transient_array_scope_pause,
+        rt_transient_heap_promote, rt_tuple_new, rt_tuple_set, HeapObjectType, RuntimeArray,
     };
     use crate::value::dict::{rt_dict_get, rt_dict_len, rt_dict_new, rt_dict_set};
     use crate::value::objects::{
@@ -7157,6 +7181,90 @@ mod string_free_contract_tests {
         for (key, value) in pairs {
             assert_eq!(rt_dict_get(dict, key), value, "promoted child survives");
         }
+    }
+
+    #[test]
+    fn promote_walker_never_drops_valid_container_children() {
+        let _g = GUARD.lock().unwrap();
+        assert!(rt_transient_array_scope_begin());
+
+        // Boxed array grown past several reallocs while holding boxed
+        // children -- the shape of the compiler's flat registries.
+        let grown = rt_array_new(4);
+        let mut kept = Vec::new();
+        for i in 0..300u32 {
+            let s = mkstr(&format!("grown child {i}"));
+            assert!(rt_array_push(grown, s));
+            kept.push(s);
+        }
+
+        // Packed arrays: leaves by representation. Their len words count
+        // bytes / u64 words against a slot-typed capacity, but always within
+        // the allocated buffer, so the validated-bound guard must not fire.
+        let bytes = rt_byte_array_new_len(64);
+        let words = super::rt_array_new_uninit_u64(16);
+
+        // Tuple: inline elements, no capacity/data fields at all.
+        let tuple = rt_tuple_new(1);
+        let tuple_child = mkstr("tuple child");
+        assert!(rt_tuple_set(tuple, 0, tuple_child));
+
+        let root = rt_array_new(4);
+        assert!(rt_array_push(root, grown));
+        assert!(rt_array_push(root, bytes));
+        assert!(rt_array_push(root, words));
+        assert!(rt_array_push(root, tuple));
+
+        assert!(rt_transient_array_scope_pause());
+        assert!(rt_transient_heap_promote(root));
+        assert!(rt_transient_heap_promote(root));
+        assert!(rt_transient_array_scope_end());
+
+        assert_eq!(rt_array_len(grown), 300, "grown array itself survives");
+        for (i, s) in kept.iter().enumerate() {
+            assert_eq!(
+                rt_string_len(*s),
+                format!("grown child {i}").len() as i64,
+                "every boxed child of the grown array survives"
+            );
+        }
+        assert_eq!(rt_array_len(bytes), 64, "byte array untouched");
+        assert_eq!(rt_array_len(words), 0, "u64 array untouched");
+        assert_eq!(rt_string_len(tuple_child), 11, "tuple child survives");
+    }
+
+    #[test]
+    fn promote_walker_rejects_corrupt_child_container_without_hanging() {
+        let _g = GUARD.lock().unwrap();
+        assert!(rt_transient_array_scope_begin());
+        let victim_child = mkstr("victim of corrupt parent");
+        let corrupt = rt_array_new(2);
+        assert!(rt_array_push(corrupt, victim_child));
+
+        // Direct guard semantics, deterministic under parallel tests: a valid
+        // container yields its children; the corrupted header (a wild write,
+        // not any valid mutator state) is refused, not walked.
+        let valid = rt_array_new(2);
+        assert!(rt_array_push(valid, victim_child));
+        let valid_children = super::transient_heap_children(valid).unwrap();
+        assert!(valid_children.contains(&victim_child));
+        let raw = get_typed_ptr_mut::<RuntimeArray>(corrupt, HeapObjectType::Array).unwrap();
+        unsafe {
+            (*raw).len = (*raw).capacity + 1;
+        }
+        assert!(
+            super::transient_heap_children(corrupt).is_none(),
+            "corrupt header must be refused, not walked"
+        );
+
+        let root = rt_array_new(1);
+        assert!(rt_array_push(root, corrupt));
+        assert!(rt_transient_array_scope_pause());
+        assert!(
+            rt_transient_heap_promote(root),
+            "a corrupt child must not fail or hang the whole promote"
+        );
+        assert!(rt_transient_array_scope_end());
     }
 
     #[test]
