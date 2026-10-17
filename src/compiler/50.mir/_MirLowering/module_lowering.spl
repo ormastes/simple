@@ -885,6 +885,13 @@ impl MirLowering:
 
     me register_enum_variants(enum_def: HirEnum):
         """Register names and resolved portable runtime discriminants."""
+        # SIMPLE_ENUM_REG_TRACE=1 (cycle-53 discriminator): capture the exact
+        # name/runtime_name spellings at write time for the failing enum. A
+        # mismatch between this runtime_name and the subject owner key built
+        # by enum_qualified_key is the remaining suspect for the disc=0 /
+        # is_unit=false asymmetry.
+        if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1" and enum_def.name == "SdnValue":
+            eprint("[enum-reg] register-enum module={self.current_module_id} name='{enum_def.name}' runtime_name='{enum_def.runtime_name}' variants={enum_def.variants.len()}")
         val generic_constructor = enum_def.type_params.len() > 0 or enum_def.is_generic_template
         self.generic_enum_constructor_owners[enum_def.name] = generic_constructor
         if enum_def.runtime_name != "":
@@ -1910,6 +1917,11 @@ impl MirLowering:
         """Lower HIR module to MIR."""
         self.unsafe_depth = 0
         self.current_module_id = mir_layout_canonical_module_name(module.name)
+        # SIMPLE_ENUM_REG_TRACE=1 progression receipt (cycle-54/55 MIR livelock
+        # localization): brackets every module's lowering so the next failing
+        # cycle's last printed module is the one whose pass spins.
+        if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+            eprint("[enum-reg] lower-module-start module={module.name} functions={module.functions.len()} enums={module.enums.len()}")
         self.external_layout_traces = []
         self.collection_literal_operands = {}
         self.collection_literal_ordinals = {}
@@ -2222,6 +2234,14 @@ impl MirLowering:
             self.register_enum_variants(enum_def)
             self.register_enum_runtime_id(enum_def)
             ei = ei + 1
+        # SIMPLE_ENUM_REG_TRACE=1 (cycle-51/52 discriminator; next-fire proof):
+        # one receipt per module AFTER local enum registration, showing the
+        # module's own declaration count and the cumulative variant-registry
+        # size. If lib.common.sdn.value lowers with local_enums>=1 while its
+        # SdnValue lookups still miss, the cumulative sizes here prove whether
+        # the registration links fed anything at all.
+        if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+            eprint("[enum-reg] module={module.name} local_enums={enum_values.len()} bare_registry={self.enum_variant_index.len()} q_registry={self.enum_variant_index_q.len()}")
 
         # Register the built-in Result enum so bare-variant construction
         # (`Ok(v)` / `Err(e)`) and `match r: case Ok(v)/Err(e)` resolve the same
@@ -2543,6 +2563,11 @@ impl MirLowering:
             else:
                 if bootstrap_trace:
                     print "[mir-lower] function:start"
+                # SIMPLE_ENUM_REG_TRACE=1 progression receipt: names the
+                # function whose lowering follows. On a livelock the LAST
+                # fn-start line in the log is the spinning function.
+                if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+                    eprint("[enum-reg] fn-start module={module.name} fn={fn_.name} idx={fni}/{fn_values.len()}")
                 var mir_fn = self.lower_function(fn_)
                 if fn_.has_vhdl_metadata:
                     mir_fn.has_vhdl_metadata = true

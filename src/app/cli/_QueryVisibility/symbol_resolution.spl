@@ -9,6 +9,117 @@ use app.cli.query_rich_common.{query_file_read_rich, query_file_exists, query_pr
 use app.cli.query_sanitize.{sanitize_path, sanitize_symbol}
 use common.text_advanced.{escape_json}
 
+# Native bootstrap tail-range workaround; callers pass guarded starts1 or2.
+# Keep empty elements, including trailing separators, exactly as slice.join.
+# @workaround bug=query-native-array-tail-range-20261016 recover=5e9123a377ef9a6278ec1ae6e65954112b84a4de reason=native-range-lowering
+fn query_join_slash_tail_v1(parts: [text], start: i64) -> text:
+    var result = ""
+    var index = start
+    while index < parts.len():
+        if index > start: result = result + "/"
+        result = result + parts[index]
+        index = index + 1
+    result
+
+# Literal-dot suffix removal: preserve internal dots and remove every tail dot.
+# @workaround bug=query-native-trim-end-dot-20261016 recover=5e9123a377ef9a6278ec1ae6e65954112b84a4de reason=native-method-resolution
+fn query_trim_trailing_dots_v1(value: text) -> text:
+    var result = value
+    while result.ends_with("."):
+        result = result.substring(0, result.len() - 1)
+    result
+
+# Declaration-text helpers (moved down from query_commands 2026-10-16):
+# symbol_resolution is the leaf of this package -- query_commands imports
+# it by glob -- but resolve_symbol_file / resolve_symbol_file_and_line and
+# symbol_declaration above reached declaration_line / declaration_name
+# upward, which the manual stage3 per-module object sweep exposed as
+# unresolved-name hard errors (unqualified callees are not importable).
+# The whole helper cluster lives here now; query_commands keeps its access
+# through its existing `use app.cli._QueryVisibility.symbol_resolution.*`.
+
+fn declaration_line(symbol: text, owner_file: text) -> text:
+    if not query_file_exists(owner_file):
+        return ""
+    val content = query_file_read_rich(owner_file) ?? ""
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if declaration_name(trimmed) == symbol:
+            return trimmed
+    ""
+
+fn declaration_name(line: text) -> text:
+    var trimmed = strip_visibility_prefix(line.trim())
+    if trimmed.starts_with("static "):
+        trimmed = trimmed.substring(7).trim()
+    if trimmed.starts_with("async "):
+        trimmed = trimmed.substring(6).trim()
+    if trimmed.starts_with("extern "):
+        trimmed = trimmed.substring(7).trim()
+    if trimmed.starts_with("const "):
+        trimmed = trimmed.substring(6).trim()
+    if trimmed.starts_with("kernel "):
+        trimmed = trimmed.substring(7).trim()
+    if trimmed.starts_with("val "):
+        return declaration_token(trimmed.substring(4))
+    if trimmed.starts_with("var "):
+        return declaration_token(trimmed.substring(4))
+    if trimmed.starts_with("fn "):
+        return declaration_token(trimmed.substring(3))
+    if trimmed.starts_with("me "):
+        return declaration_token(trimmed.substring(3))
+    if trimmed.starts_with("class "):
+        return declaration_token(trimmed.substring(6))
+    if trimmed.starts_with("struct "):
+        return declaration_token(trimmed.substring(7))
+    if trimmed.starts_with("enum "):
+        return declaration_token(trimmed.substring(5))
+    if trimmed.starts_with("trait "):
+        return declaration_token(trimmed.substring(6))
+    val prefixes = ["fn ", "me ", "class ", "struct ", "enum ", "trait ", "val ", "var "]
+    for prefix in prefixes:
+        if trimmed.starts_with(prefix):
+            trimmed = trimmed.substring(prefix.len())
+            break
+    declaration_token(trimmed)
+
+fn declaration_token(rest: text) -> text:
+    var token = rest.trim()
+    val space_parts = token.split(" ")
+    if space_parts.len() > 0:
+        token = space_parts[0]
+    val paren_parts = token.split("(")
+    if paren_parts.len() > 0:
+        token = paren_parts[0]
+    val colon_parts = token.split(":")
+    if colon_parts.len() > 0:
+        token = colon_parts[0]
+    val eq_parts = token.split("=")
+    if eq_parts.len() > 0:
+        token = eq_parts[0]
+    val dot_parts = token.split(".")
+    if dot_parts.len() > 0:
+        token = dot_parts[0]
+    token.trim()
+
+
+fn strip_visibility_prefix(line: text) -> text:
+    var trimmed = line
+    if trimmed.starts_with("pub(peer)"):
+        return trimmed.substring(9).trim()
+    if trimmed.starts_with("pub(up)"):
+        return trimmed.substring(7).trim()
+    if trimmed.starts_with("pub(friend)"):
+        return trimmed.substring(11).trim()
+    if trimmed.starts_with("pub(package)"):
+        return trimmed.substring(12).trim()
+    if trimmed.starts_with("pub "):
+        return trimmed.substring(4).trim()
+    if trimmed.starts_with("pri "):
+        return trimmed.substring(4).trim()
+    trimmed
+
 fn capsule_name(file_path: text) -> text:
     val idx = file_path.index_of("/85.mdsoc/")
     if idx < 0:
@@ -43,11 +154,13 @@ fn parse_imported_modules(file_path: text) -> [text]:
             val rest = trimmed.substring(4)
             val end_idx = rest.index_of("{")
             if end_idx >= 0:
-                modules = modules.push(rest.substring(0, end_idx).trim().trim_end("."))
+                # @workaround bug=query-native-trim-end-dot-20261016 recover=5e9123a377ef9a6278ec1ae6e65954112b84a4de reason=native-method-resolution
+                modules = modules.push(query_trim_trailing_dots_v1(rest.substring(0, end_idx).trim()))
             else:
                 val star_idx = rest.index_of("*")
                 if star_idx >= 0:
-                    modules = modules.push(rest.substring(0, star_idx).trim().trim_end("."))
+                    # @workaround bug=query-native-trim-end-dot-20261016 recover=5e9123a377ef9a6278ec1ae6e65954112b84a4de reason=native-method-resolution
+                    modules = modules.push(query_trim_trailing_dots_v1(rest.substring(0, star_idx).trim()))
                 else:
                     modules = modules.push(rest.trim())
     modules
@@ -58,7 +171,8 @@ fn resolve_module_path(mod_path: text) -> text:
         if slash_parts.len() >= 2 and slash_parts[0].contains("-"):
             val owner_segment = slash_parts[0]
             val owner_domain = owner_segment.replace("-", "_")
-            val type_base = "src/type/" + owner_domain + "/" + slash_parts[1..].join("/")
+            # @workaround bug=query-native-array-tail-range-20261016 recover=5e9123a377ef9a6278ec1ae6e65954112b84a4de reason=native-range-lowering
+            val type_base = "src/type/" + owner_domain + "/" + query_join_slash_tail_v1(slash_parts, 1)
             val type_mod = type_base + "/mod.spl"
             if query_file_exists(type_mod):
                 return type_mod
