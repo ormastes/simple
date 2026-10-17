@@ -3,6 +3,7 @@
 import hashlib
 import importlib.util
 import os
+import py_compile
 from pathlib import Path
 import subprocess
 import sys
@@ -10,12 +11,51 @@ import tempfile
 import unittest
 
 HELPER = Path(__file__).resolve().parents[1] / "run-process-group-bounded-log-windows.py"
-spec = importlib.util.spec_from_file_location("collector", HELPER)
-collector = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(collector)
+def load_module(path=HELPER):
+    spec = importlib.util.spec_from_file_location("collector", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    # Execute the pinned source bytes directly: SourceFileLoader may consume
+    # or create __pycache__, which mutates an immutable bootstrap checkout.
+    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    return module
+
+
+collector = load_module()
 
 
 class RootReapTests(unittest.TestCase):
+    def test_source_loader_preserves_metadata_without_bytecode_cache(self):
+        with tempfile.TemporaryDirectory(prefix="collector-source-loader-") as scope:
+            path = Path(scope) / HELPER.name
+            path.write_bytes(HELPER.read_bytes() + b"\nsource_loader_witness = 917\n")
+            try:
+                loaded = load_module(path)
+                self.assertEqual(loaded.source_loader_witness, 917)
+                self.assertEqual(loaded.__file__, str(path))
+                self.assertEqual(loaded.__spec__.origin, str(path))
+                self.assertIs(sys.modules["collector"], loaded)
+                self.assertFalse((path.parent / "__pycache__").exists())
+                self.assertEqual(sorted(p.name for p in path.parent.iterdir()), [HELPER.name])
+            finally:
+                sys.modules["collector"] = collector
+
+    def test_source_loader_ignores_matching_stale_bytecode(self):
+        with tempfile.TemporaryDirectory(prefix="collector-stale-bytecode-") as scope:
+            path = Path(scope) / HELPER.name
+            path.write_bytes(HELPER.read_bytes() + b"\nsource_loader_witness = 917\n")
+            stamp = path.stat()
+            cache = Path(py_compile.compile(str(path), doraise=True))
+            cached_bytes = cache.read_bytes()
+            path.write_bytes(path.read_bytes().replace(b"source_loader_witness = 917", b"source_loader_witness = 918"))
+            os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+            try:
+                # Timestamp and length still match the cached 917 source.
+                self.assertEqual(load_module(path).source_loader_witness, 918)
+                self.assertEqual(cache.read_bytes(), cached_bytes)
+            finally:
+                sys.modules["collector"] = collector
+
     def test_delayed_signal_uses_remaining_shared_budget(self):
         now, waits = [0.0], []
         def wait(handle, milliseconds):
@@ -77,7 +117,8 @@ class WindowsReceiptTests(unittest.TestCase):
             # Explicit bootstrap-unit fault injection at the root-wait seam.
             driver.write_text("import importlib.util,sys\n"
                 "s=importlib.util.spec_from_file_location('collector',sys.argv[1])\n"
-                "m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\n"
+                "m=importlib.util.module_from_spec(s);sys.modules[s.name]=m\n"
+                "exec(compile(open(sys.argv[1],'rb').read(),sys.argv[1],'exec'),m.__dict__)\n"
                 f"m.reap_root_until=lambda *a: {fault!r}\n"
                 "sys.argv=[sys.argv[1]]+sys.argv[2:];sys.exit(m.main())\n", encoding="utf-8")
             prefix = [sys.executable, str(driver), str(HELPER)]

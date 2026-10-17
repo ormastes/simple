@@ -672,20 +672,23 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
                         source_name = parts[0]
                         if parts.len() > 1:
                             local_name = parts[1]
-                    elif export_item.contains("."):
-                        # QUALIFIED bare export -- `export module.Name`.
-                        # Stored verbatim, the route's local name is the whole
-                        # dotted string, so `find_reexport_source_walk`'s
-                        # `exp_local == wanted` test never matches the short
-                        # name a consumer actually writes and the route is
-                        # skipped outright. That surfaced as the hard
-                        # `unresolved type: CodegenTarget`
+                    if source_name.contains("."):
+                        # QUALIFIED export -- `export module.Name` or, after an
+                        # alias split, `export module.Name:alias` (the braced
+                        # re-export form `export use module.{Name as alias}`
+                        # records exactly that). Stored verbatim, the route's
+                        # local name is the whole dotted string, so
+                        # `find_reexport_source_walk`'s `exp_local == wanted`
+                        # test never matches the short name a consumer actually
+                        # writes and the route is skipped outright. That
+                        # surfaced as the hard `unresolved type: CodegenTarget`
                         # (`src/compiler/70.backend/backend/__init__.spl:326`
                         # spells it `export backend_api.CodegenTarget`), blamed
                         # on an innocent importing module. Split the qualifier
                         # off and record the module it names as the route
                         # target, exactly as the `.*` glob branch already does.
-                        val qualified_parts = export_item.split(".")
+                        # The alias local (if any) is preserved.
+                        val qualified_parts = source_name.split(".")
                         val member_name = qualified_parts[qualified_parts.len() - 1]
                         var qualifier = ""
                         var qualifier_index = 0
@@ -717,7 +720,8 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
                                     registry, qualifier)
                             if route_target_name != "":
                                 source_name = member_name
-                                local_name = member_name
+                                if not export_item.contains(":"):
+                                    local_name = member_name
                     export_route_sources = export_route_sources.push(source_name)
                     export_route_locals = export_route_locals.push(local_name)
                     var route_target_index = -1

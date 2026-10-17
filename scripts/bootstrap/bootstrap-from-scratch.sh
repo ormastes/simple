@@ -1526,10 +1526,22 @@ absolute_path() {
 }
 
 if [ -n "${LLVM_PREFIX:-}" ] && [ -d "${LLVM_PREFIX}/bin" ]; then
-  case ":${PATH}:" in
-    *":${LLVM_PREFIX}/bin:"*) ;;
-    *) export PATH="${LLVM_PREFIX}/bin:${PATH}" ;;
+  # llvm-config --prefix reports a native spelling (on Windows a C:/... path);
+  # a drive-letter entry is not a resolvable PATH element for MSYS command
+  # lookup (the "C:" colon splits the entry), which silently leaves the
+  # admitted LLVM provider behind other toolchain dirs on PATH. Prepend the
+  # POSIX spelling so downstream command -v / command scans see it first.
+  bootstrap_llvm_path_prefix="${LLVM_PREFIX}"
+  case "${bootstrap_llvm_path_prefix}" in
+    [A-Za-z]:[\\/]*)
+      bootstrap_llvm_path_prefix=$(cygpath -u "${bootstrap_llvm_path_prefix}") || bootstrap_llvm_path_prefix="" ;;
   esac
+  if [ -n "${bootstrap_llvm_path_prefix}" ]; then
+    case ":${PATH}:" in
+      *":${bootstrap_llvm_path_prefix}/bin:"*) ;;
+      *) export PATH="${bootstrap_llvm_path_prefix}/bin:${PATH}" ;;
+    esac
+  fi
 fi
 
 # Bind builds to existing canonical tool directories. Hosted launchers may
@@ -2660,12 +2672,21 @@ seed_inputs_hash() {
   # Never overwrite the sidecar bound to the published stamp while deciding
   # whether that stamp is stale.  Current observations remain separate until
   # a rebuilt tuple is committed as a new immutable generation.
+  # Prefer the already-resolved admitted LLVM provider's bin/ over the raw
+  # ambient PATH for the authority scan inside the fingerprint: on hosts with
+  # several llvm-config builds installed (e.g. msys2 LLVM 21 next to the
+  # admitted LLVM 23.1.1), a bare PATH scan binds whichever llvm-config sorts
+  # first and the Windows 23.1.1 admission then refuses ("found <version>").
+  seed_fingerprint_search_path="${PATH}"
+  if [ "${LLVM_FOUND:-0}" = "1" ] && [ -n "${LLVM_PREFIX_POSIX:-}" ]; then
+    seed_fingerprint_search_path="${LLVM_PREFIX_POSIX}/bin:${PATH}"
+  fi
   BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_PATH="${seed_fingerprint_observation_details}" \
   bootstrap_authority_seed_inputs_fingerprint \
     "${seed_fingerprint_phase}" "${seed_fingerprint_tmp}" \
     "${seed_fingerprint_error_manifest}" "${seed_fingerprint_error}" \
     "${repo_root}" \
-    "${backend}" "${llvm_features}" "${PATH}" "${PLATFORM}" || return 1
+    "${backend}" "${llvm_features}" "${seed_fingerprint_search_path}" "${PLATFORM}" || return 1
   # Every phase writes the same observation path, so a `post` run destroys the
   # `pre` categories at exactly the moment the pre/post comparison below needs
   # them -- the refusal could say only THAT an input changed, never WHICH.
@@ -2707,6 +2728,19 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
       exit 1
     fi
     echo "LLVM ${LLVM_VERSION} found: ${LLVM_PREFIX} (provider: ${LLVM_PROVIDER_KIND:-shared}, lib: ${LLVM_LIB})"
+    # llvm-config --prefix reports a native spelling (on Windows a C:/... path);
+    # consumers that validate POSIX absolute path lists (the seed-input
+    # fingerprint) or scan PATH entries need the POSIX form. LLVM_PREFIX
+    # itself stays native for the Rust/llvm-sys binding.
+    LLVM_PREFIX_POSIX="${LLVM_PREFIX}"
+    case "${LLVM_PREFIX_POSIX}" in
+      [A-Za-z]:[\\/]*)
+        LLVM_PREFIX_POSIX=$(cygpath -u "${LLVM_PREFIX_POSIX}") || {
+          echo "error: cannot normalize LLVM prefix ${LLVM_PREFIX}" >&2
+          exit 1
+        } ;;
+    esac
+    export LLVM_PREFIX_POSIX
     # The Rust seed's llvm-sys pins one LLVM major (180 -> LLVM 18), while the
     # pure-Simple llvm backend loads LLVM-C.dll directly and tolerates any
     # recent C API. On hosts whose LLVM major differs from the llvm-sys pin,
@@ -2891,9 +2925,19 @@ if [ "${full_bootstrap}" -eq 1 ]; then
   windows_system_drive="${SystemDrive:-${SYSTEMDRIVE:-}}"
   windows_program_data="${ProgramData:-${PROGRAMDATA:-}}"
   windows_temp="${TEMP:-${rust_authority_tmp}}"
+  # The shared platform detection above already resolved and admitted the LLVM
+  # provider (honoring host config), so put its bin/ ahead of the ambient PATH
+  # for the authority scan: on hosts with several llvm-config builds installed
+  # (e.g. msys2 LLVM 21 next to the admitted LLVM 23.1.1), a bare PATH scan
+  # binds whichever llvm-config sorts first and the Windows 23.1.1 admission
+  # then refuses with "found <other version>".
+  rust_llvm_search_path="${PATH}"
+  if [ "${LLVM_FOUND:-0}" = "1" ] && [ -n "${LLVM_PREFIX_POSIX:-}" ]; then
+    rust_llvm_search_path="${LLVM_PREFIX_POSIX}/bin:${PATH}"
+  fi
   rust_llvm_authority=$(
     bootstrap_stage3_resolve_llvm_build_authority \
-      "${PATH}" "${llvm_features}"
+      "${rust_llvm_search_path}" "${llvm_features}"
   ) || {
     echo "error: could not resolve deterministic LLVM build authority" >&2
     exit 1
