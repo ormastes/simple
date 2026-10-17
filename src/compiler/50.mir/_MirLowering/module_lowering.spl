@@ -2,6 +2,7 @@ use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use compiler.mir._MirLoweringExpr.function_signature_owner.*
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
 use compiler.hir.hir_operators.{HirBinOp}
+use compiler.hir.hir_codec.{hir_fn_scalars_v1}
 # Part of src/compiler/50.mir/mir_lowering.spl: module/struct/class type lowering, asm target-spec accessors
 use compiler.mir._MirLowering.bootstrap_globals.*
 use compiler.mir._MirLowering.provider_metadata.*
@@ -1708,13 +1709,17 @@ impl MirLowering:
         # the materialized array stays (cycle-105); the lower_module prescan
         # loop re-assigns before its own iteration (per-module reset).
         self.lower_emit_fn_values = functions.values()
-        # Cycle-102/106: no named bind; expression reads off the field
-        # element feed the scalar-call directly.
+        # Cycle-114: scalar extraction happens in the CODEC UNIT
+        # (hir_fn_scalars_v1) -- the only pool whose HirFunction by-value
+        # param copies draw clean (50.mir hosts corrupt them in every shape,
+        # cycles 106-114). One element crossing, one tuple return (the
+        # hir_module_decode precedent), scalar forwarding from the tuple.
         for raw_prescan_fn in self.lower_emit_fn_values:
-            self.prescan_one_function_v1(module_name, module_symbols, raw_prescan_fn.symbol, raw_prescan_fn.name,
-                raw_prescan_fn.is_extern, raw_prescan_fn.is_method, raw_prescan_fn.is_static,
-                raw_prescan_fn.has_export_attr, raw_prescan_fn.func_attr,
-                raw_prescan_fn.return_type, raw_prescan_fn.params)
+            val prescan_scalars = hir_fn_scalars_v1(raw_prescan_fn)
+            self.prescan_one_function_v1(module_name, module_symbols,
+                prescan_scalars[0], prescan_scalars[1], prescan_scalars[2],
+                prescan_scalars[3], prescan_scalars[4], prescan_scalars[5],
+                prescan_scalars[6], prescan_scalars[7], prescan_scalars[8])
 
     # Cycle-102: per-function prescan body; prescan_fn is the by-value
     # param (no caller-side named bind of the for-in element).
@@ -1729,6 +1734,19 @@ impl MirLowering:
             fn_is_static: bool, fn_has_export_attr: bool,
             fn_attr: FunctionAttr, fn_return_type: HirType,
             fn_params: [HirParam]):
+        # Cycle-113 inline shield: the MIR FunctionInliner absorbs this body
+        # into prescan_one_extracted_v1 (same 635-line function at cycles
+        # 111/112 despite the cross-unit move -- MIR-level inlining predates
+        # object splitting), recreating the big-host prologue-copy crash.
+        # The inliner NEVER inlines recursive functions (policy.spl
+        # is_recursive: any self-name call matches), so this unreachable
+        # self-reference pins this body as a real call boundary. The sentinel
+        # can never be true: module_name comes from the module path
+        # normalizer and never contains NUL.
+        if module_name == "\u0000inline-shield-self-call":
+            self.prescan_one_function_v1(module_name, module_symbols, fn_symbol,
+                fn_name, fn_is_extern, fn_is_method, fn_is_static,
+                fn_has_export_attr, fn_attr, fn_return_type, fn_params)
         # Cycle-101/106: register_provider_callable_link's HirFunction-param
         # read draw is defective, and the cycle-106 shim proved this big
         # host's own HirFunction prologue copy corrupts too (the fields_v1
