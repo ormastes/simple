@@ -33,11 +33,20 @@ impl CompilerDriver:
         var ctx = self.ctx
 
         for name in ctx.hir_modules.keys():
-            val hir_module = ctx.hir_modules[name]
-            val (resolved_module, resolve_errors) = resolve_methods(hir_module)
+            # Cycle-120: the plain dict-value read arrives erased (the
+            # cycle-76/77 class) and this lane REINSERTS the corrupted value,
+            # poisoning ctx.hir_modules for every later phase. Guard-first
+            # double access (the campaign's 10/10 extraction form) instead;
+            # the resolved module returns in a tuple and is reinserted from
+            # the tuple element without an intermediate named bind.
+            if not ctx.hir_modules.has(name):
+                continue
+            val hir_module: HirModule = ctx.hir_modules[name]
+            val resolve_result = resolve_methods(hir_module)
+            ctx.hir_modules[name] = resolve_result.0
 
             # Update the module with resolved method calls (direct mutation)
-            ctx.hir_modules[name] = resolved_module
+            val resolve_errors = resolve_result.1
 
             # Collect errors
             for err in resolve_errors:
