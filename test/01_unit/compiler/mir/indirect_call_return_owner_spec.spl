@@ -118,3 +118,50 @@ describe "indirect call declared return owner":
         val result = lowering.emit_typed_function_value_call(callable, [], Some(indirect_signature(indirect_type(HirTypeKind.Error))), Span.empty())
         expect(lowering.errors.len()).to_equal(1)
         expect(lowering.errors[0].message).to_contain("unresolved declared return type")
+
+    it "preserves declared narrow parameters in both indirect call arms":
+        var lowering = indirect_lowering()
+        val signature = indirect_type(HirTypeKind.Function(
+            [indirect_type(HirTypeKind.Int(32, true))], indirect_type(HirTypeKind.Bool), []))
+        var builder = lowering.builder
+        val callable = builder.new_temp(MirType.i64())
+        val argument = builder.new_temp(MirType(kind: MirTypeKind.I32))
+        lowering.builder = builder
+        lowering.emit_typed_function_value_call(callable, [mir_operand_copy(argument)], Some(signature), Span.empty())
+        expect(lowering.errors.len()).to_equal(0)
+        var indirect_calls = 0
+        var finished_builder = lowering.builder
+        val function = finished_builder.end_function()
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.CallIndirect(_, _, arguments, declared):
+                        indirect_calls = indirect_calls + 1
+                        expect(declared.return_type.kind).to_equal(MirTypeKind.Bool)
+                        expect(declared.params.len()).to_equal(arguments.len())
+                        expect(declared.params[declared.params.len() - 1].kind).to_equal(MirTypeKind.I32)
+                    case _: ()
+        expect(indirect_calls).to_equal(2)
+
+    it "rejects callback arity mismatch before emitting an indirect call":
+        var lowering = indirect_lowering()
+        val signature = indirect_type(HirTypeKind.Function(
+            [indirect_type(HirTypeKind.Int(32, true))], indirect_type(HirTypeKind.Bool), []))
+        var builder = lowering.builder
+        val callable = builder.new_temp(MirType.i64())
+        lowering.builder = builder
+        lowering.emit_typed_function_value_call(callable, [], Some(signature), Span.empty())
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].message).to_contain("argument count differs from declared signature")
+
+    it "rejects an unresolved declared callback parameter":
+        var lowering = indirect_lowering()
+        val signature = indirect_type(HirTypeKind.Function(
+            [indirect_type(HirTypeKind.Error)], indirect_type(HirTypeKind.Bool), []))
+        var builder = lowering.builder
+        val callable = builder.new_temp(MirType.i64())
+        val argument = builder.new_temp(MirType.i64())
+        lowering.builder = builder
+        lowering.emit_typed_function_value_call(callable, [mir_operand_copy(argument)], Some(signature), Span.empty())
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].message).to_contain("unresolved declared parameter type")
