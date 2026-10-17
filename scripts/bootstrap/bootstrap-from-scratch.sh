@@ -150,6 +150,12 @@ case "${1:-}" in
 esac
 . "${bootstrap_entry_dir}/lib/host-shared-cache.shs"
 simple_host_cache_configure
+# Full bootstrap can transiently deschedule a valid host-wide /proc walk while
+# the native producer is CPU-bound. Keep that observation bounded, but give the
+# owner enough headroom to distinguish scheduler delay from failed measurement.
+# This does not change the 100 ms target cadence or the enforced RSS ceiling.
+SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS="${SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS:-60000}"
+export SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS
 . "${bootstrap_early_repo_root}/scripts/check/lib/bootstrap-planner-admission-bound.shs"
 kernel_policy_manifest="${bootstrap_early_repo_root}/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn"
 kernel_policy_value() {
@@ -5002,11 +5008,22 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # Serial rows keep a single build tree under the cap; each build then
       # also gets the full build-thread count instead of half.
       BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY="${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-1}"
+      # A valid Linux /proc observation can exceed the watchdog's global
+      # one-second default while the full-CLI verifier is CPU- and
+      # memory-bound.  The 2026-10-15 release_phase3 run completed 29,459
+      # samples, stayed below its RSS cap (5,704,716 < 5,859,375 KiB), then
+      # failed closed when two otherwise-complete observations took up to
+      # 7.7 seconds.  Give this bounded, long-running verification lane the
+      # same explicit headroom as other production builders without changing
+      # its 100 ms cadence or RSS ceiling.  Preserve a caller-selected value.
+      SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS="${SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS:-10000}"
       # Canonical source-derived tests consume their admitted producer, as in
       # run-release-stage2-qualified.shs. Explicit delegation remains opt-in and
       # subject to the phase verifier's existing real MC/DC waiver requirements.
       BOOTSTRAP_STAGE2_TEST_DELEGATE="${BOOTSTRAP_STAGE2_TEST_DELEGATE:-0}"
-      export BOOTSTRAP_VERIFY_TEST_WORKERS BOOTSTRAP_VERIFY_BUILD_THREADS BOOTSTRAP_STAGE2_TEST_DELEGATE
+      export BOOTSTRAP_VERIFY_TEST_WORKERS BOOTSTRAP_VERIFY_BUILD_THREADS \
+        BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY BOOTSTRAP_STAGE2_TEST_DELEGATE \
+        SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS
       # This phase wraps whole tool builds; the compile-worker budget floors
       # at 5.59 GiB and killed it (exit 88) on large hosts. An explicit cap
       # still wins. See bootstrap_tree_rss_phase_cap_kib.
