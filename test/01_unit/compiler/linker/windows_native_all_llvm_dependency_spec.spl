@@ -1,0 +1,53 @@
+"""Producer-qualified LLVM import dependency selection. Execution/docgen pending.
+This spec exercises the production pure selector, not a fake native linker.
+"""
+# @req REQ-WINDOWS-NATIVE-ALL-LLVM-DEPENDENCY
+use std.spec.{describe, it, expect, step}
+use compiler.backend.linker._LinkerWrapper.native_all_support.{native_all_msvc_llvm_dependency, native_all_msvc_llvm_link_inputs}
+
+val LLVM_RUNTIME_ROOT = "D:/authority/runtime"
+val LLVM_NATIVE_ALL = LLVM_RUNTIME_ROOT + "/simple_native_all.lib"
+val LLVM_BACKFILL = LLVM_RUNTIME_ROOT + "/simple_compiler_backfill.lib"
+val LLVM_IMPORT = LLVM_RUNTIME_ROOT + "/LLVM-C.lib"
+
+describe "MSVC aggregate LLVM import dependency":
+    it "places the exact sealed import library after the producer archive pair":
+        step("select an x64 MSVC aggregate and its matching producer dependency")
+        val selected = native_all_msvc_llvm_dependency([LLVM_BACKFILL, LLVM_NATIVE_ALL],
+            "x86_64-pc-windows-msvc", LLVM_RUNTIME_ROOT, true)
+        expect(selected.is_ok()).to_equal(true)
+        expect(selected.unwrap()).to_equal([LLVM_BACKFILL, LLVM_NATIVE_ALL, LLVM_IMPORT])
+
+    it "keeps already selected exact dependencies unique and ordered last":
+        step("normalize an earlier exact dependency without altering archive order")
+        val selected = native_all_msvc_llvm_dependency([LLVM_IMPORT, LLVM_NATIVE_ALL, LLVM_IMPORT],
+            "x86_64-pc-windows-msvc", LLVM_RUNTIME_ROOT, true)
+        expect(selected.unwrap()).to_equal([LLVM_NATIVE_ALL, LLVM_IMPORT])
+
+    it "requires no LLVM dependency when the aggregate archive is absent":
+        step("leave ordinary core-only and non-MSVC input lists unchanged")
+        expect(native_all_msvc_llvm_dependency(["main.obj"], "x86_64-unknown-linux-gnu", "", false).unwrap()).to_equal(["main.obj"])
+        expect(native_all_msvc_llvm_dependency([], "", "", false).unwrap()).to_equal([])
+
+    it "checks configured libraries against aggregates selected in another input list":
+        step("use the same combined-input planner as both real MSVC paths before deduplication")
+        val target = "x86_64-pc-windows-msvc"
+        expect(native_all_msvc_llvm_link_inputs(["D:/other/LLVM-C.lib"], ["main.obj"],
+            [LLVM_BACKFILL, LLVM_NATIVE_ALL], target, LLVM_RUNTIME_ROOT, true).is_err()).to_equal(true)
+        expect(native_all_msvc_llvm_link_inputs(["D:/other/LLVM-C.lib"], [LLVM_NATIVE_ALL],
+            [], target, LLVM_RUNTIME_ROOT, true).is_err()).to_equal(true)
+        expect(native_all_msvc_llvm_link_inputs(["LLVM-C.lib"], ["main.obj"],
+            [LLVM_NATIVE_ALL], target, LLVM_RUNTIME_ROOT, true).is_err()).to_equal(true)
+        expect(native_all_msvc_llvm_link_inputs([LLVM_IMPORT, "user32.lib"], ["main.obj"],
+            [LLVM_BACKFILL, LLVM_NATIVE_ALL], target, LLVM_RUNTIME_ROOT, true).unwrap()).to_equal(
+                ["main.obj", "user32.lib", LLVM_BACKFILL, LLVM_NATIVE_ALL, LLVM_IMPORT])
+
+    it "refuses missing bytes relative roots unsupported targets and foreign authorities":
+        step("fail before linking rather than search an ambient LLVM installation")
+        expect(native_all_msvc_llvm_dependency([LLVM_NATIVE_ALL], "x86_64-pc-windows-msvc", LLVM_RUNTIME_ROOT, false).is_err()).to_equal(true)
+        for target in ["", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-gnu", "i686-pc-windows-msvc"]:
+            expect(native_all_msvc_llvm_dependency([LLVM_NATIVE_ALL], target, LLVM_RUNTIME_ROOT, true).is_err()).to_equal(true)
+        for root in ["runtime", "none", "D:/authority/../runtime", "D:/authority/runtime/"]:
+            expect(native_all_msvc_llvm_dependency([LLVM_NATIVE_ALL], "x86_64-pc-windows-msvc", root, true).is_err()).to_equal(true)
+        expect(native_all_msvc_llvm_dependency(["D:/other/simple_native_all.lib"], "x86_64-pc-windows-msvc", LLVM_RUNTIME_ROOT, true).is_err()).to_equal(true)
+        expect(native_all_msvc_llvm_dependency([LLVM_NATIVE_ALL, "D:/other/LLVM-C.lib"], "x86_64-pc-windows-msvc", LLVM_RUNTIME_ROOT, true).is_err()).to_equal(true)

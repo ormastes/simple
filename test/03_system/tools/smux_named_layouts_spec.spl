@@ -1,0 +1,235 @@
+"""
+## Purpose and audience
+Named tmux-shaped layouts for maintainers of the real in-process smux model.
+The pure production geometry and VT screen model are exercised directly.
+## Evidence boundary
+These are executable model scenarios, not PTY, client or window-manager tests.
+No compiled execution or rendered host-terminal capture is claimed until the
+admitted native test runner executes them.
+# @manual: primary
+# @capture: text
+Plan: doc/03_plan/sys_test/smux_windows_phase3_features.md
+"""
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.mux_rects.{MuxRect, mux_layout_rects, mux_layout_known}
+use os.apps.smux.mux_model.{
+    MuxSession, mux_new, mux_add_pane, mux_select_pane, mux_zoom_pane,
+    mux_select_layout, mux_resize, mux_feed_pane, mux_find_pane,
+    mux_pane_rects, mux_render, mux_kill_pane
+}
+use std.common.term.emulator.{term_render_text}
+
+# @inline
+fn layout_session(name: text, count: i64, cols: i64, rows: i64) -> MuxSession:
+    var session = mux_new(name, cols, rows)
+    var i = 0
+    while i < count:
+        val added = mux_add_pane(session, "pane" + i.to_text(), 100 + i, 200 + i)
+        expect(added.1.len()).to_be_greater_than(0)
+        session = added.0
+        i = i + 1
+    return session
+
+# @inline
+fn expect_tiling(rects: [MuxRect], ids: [text], cols: i64, rows: i64):
+    expect(rects.len()).to_equal(ids.len())
+    var area = 0
+    var i = 0
+    while i < rects.len():
+        val r = rects[i]
+        expect(r.pane_id).to_equal(ids[i])
+        expect(r.col >= 0 and r.row >= 0).to_equal(true)
+        expect(r.cols).to_be_greater_than(0)
+        expect(r.rows).to_be_greater_than(0)
+        expect(r.col + r.cols <= cols).to_equal(true)
+        expect(r.row + r.rows <= rows).to_equal(true)
+        area = area + r.cols * r.rows
+        var j = i + 1
+        while j < rects.len():
+            val other = rects[j]
+            val overlap = r.col < other.col + other.cols and other.col < r.col + r.cols and r.row < other.row + other.rows and other.row < r.row + r.rows
+            expect(overlap).to_equal(false)
+            j = j + 1
+        i = i + 1
+    expect(area).to_equal(cols * rows)
+
+describe "smux named layout geometry and real model workflows":
+    describe "REQ-SMUX-LAYOUT-001: five named bounded layouts":
+        it "should tile odd dimensions and pane counts with every named layout":
+            # @req REQ-SMUX-LAYOUT-001
+            step("Plan all five layouts with one through seven panes at 17 by 11")
+            val names = ["even-horizontal", "even-vertical", "main-horizontal", "main-vertical", "tiled"]
+            var ids: [text] = []
+            var count = 1
+            while count <= 7:
+                ids.push("p" + count.to_text())
+                for name in names:
+                    expect(mux_layout_known(name)).to_equal(true)
+                    expect_tiling(mux_layout_rects(ids, 17, 11, name), ids, 17, 11)
+                count = count + 1
+
+        it "should place the main pane above or left of its secondary panes":
+            # @req REQ-SMUX-LAYOUT-001
+            step("Plan a main pane and two secondary panes")
+            val ids = ["main", "one", "two"]
+            val top = mux_layout_rects(ids, 17, 11, "main-horizontal")
+            expect(top[0].cols).to_equal(17)
+            expect(top[0].rows).to_equal(5)
+            expect(top[1].row).to_equal(5)
+            expect(top[2].col).to_equal(8)
+            expect(top[2].cols).to_equal(9)
+            val left = mux_layout_rects(ids, 17, 11, "main-vertical")
+            expect(left[0].cols).to_equal(8)
+            expect(left[0].rows).to_equal(11)
+            expect(left[1].col).to_equal(8)
+            expect(left[2].row).to_equal(5)
+            expect(left[2].rows).to_equal(6)
+
+        it "should adapt tiled geometry to narrow or shallow windows and refuse overflow":
+            # @req REQ-SMUX-LAYOUT-001
+            val ids = ["a", "b", "c", "d", "e"]
+            step("Fit five panes in one column or one row")
+            expect_tiling(mux_layout_rects(ids, 1, 5, "tiled"), ids, 1, 5)
+            expect_tiling(mux_layout_rects(ids, 5, 1, "tiled"), ids, 5, 1)
+            step("Reject unknown names, invalid sizes and insufficient area")
+            expect(mux_layout_known("diagonal")).to_equal(false)
+            expect(mux_layout_rects(ids, 17, 11, "diagonal").len()).to_equal(0)
+            expect(mux_layout_rects(ids, 0, 11, "tiled").len()).to_equal(0)
+            expect(mux_layout_rects(ids, 2, 2, "tiled").len()).to_equal(0)
+            expect(mux_layout_rects(ids, 4, 11, "even-horizontal").len()).to_equal(0)
+            expect(mux_layout_rects(ids, 17, 4, "even-vertical").len()).to_equal(0)
+            expect(mux_layout_rects(ids, 3, 11, "main-horizontal").len()).to_equal(0)
+            expect(mux_layout_rects(ids, 17, 3, "main-vertical").len()).to_equal(0)
+
+    describe "REQ-SMUX-LAYOUT-002: persistent layout selection":
+        it "should retain pane identities handles focus and visible text across layouts":
+            # @req REQ-SMUX-LAYOUT-002
+            var session = layout_session("preserve", 3, 31, 17)
+            val id = session.windows[0].panes[0].pane_id
+            session = mux_feed_pane(session, id, "KEEP")
+            session = mux_select_pane(session, id).0
+            step("Select each named layout through the production model")
+            for name in ["even-horizontal", "even-vertical", "main-horizontal", "main-vertical", "tiled"]:
+                val selected = mux_select_layout(session, session.windows[0].window_id, name)
+                expect(selected.1).to_equal(true)
+                session = selected.0
+                expect(session.windows[0].layout).to_equal(name)
+                expect(session.windows[0].active_pane).to_equal(0)
+                var i = 0
+                while i < 3:
+                    val pane = session.windows[0].panes[i]
+                    expect(pane.pane_id).to_equal("preserve.preserve.w0.p" + i.to_text())
+                    expect(pane.pty_handle).to_equal(100 + i)
+                    expect(pane.pid).to_equal(200 + i)
+                    expect(pane.title).to_equal("pane" + i.to_text())
+                    expect(pane.active).to_equal(i == 0)
+                    i = i + 1
+                expect(mux_find_pane(session, id)!.pane_id).to_equal(id)
+                expect(term_render_text(mux_find_pane(session, id)!.screen)).to_contain("KEEP")
+
+        it "should retain selection through zoom resize focus feed add and kill":
+            # @req REQ-SMUX-LAYOUT-002
+            val initial = layout_session("zoom", 3, 31, 17)
+            val id = initial.windows[0].panes[1].pane_id
+            val selected = mux_select_layout(initial, initial.windows[0].window_id, "even-vertical").0
+            step("Zoom a pane then change layout without clearing zoom")
+            val zoomed = mux_zoom_pane(selected, id).0
+            val changed = mux_select_layout(zoomed, zoomed.windows[0].window_id, "main-vertical")
+            expect(changed.1).to_equal(true)
+            expect(mux_find_pane(changed.0, id)!.zoomed).to_equal(true)
+            expect(mux_pane_rects(changed.0).len()).to_equal(1)
+            val resized = mux_resize(changed.0, 43, 19)
+            expect(mux_pane_rects(resized)[0]).to_equal(id + " 0 0 43 19")
+            step("Unzoom restores the selected layout at the new size")
+            val restored = mux_zoom_pane(resized, id).0
+            expect(restored.windows[0].layout).to_equal("main-vertical")
+            expect(mux_pane_rects(restored)[0]).to_equal(restored.windows[0].panes[0].pane_id + " 0 0 21 19")
+            val fed = mux_feed_pane(restored, id, "X")
+            val focused = mux_select_pane(fed, id).0
+            val added = mux_add_pane(focused, "extra", 555, 666)
+            expect(added.1.len()).to_be_greater_than(0)
+            val killed = mux_kill_pane(added.0, added.1)
+            expect(killed.1).to_equal(true)
+            expect(killed.0.windows[0].layout).to_equal("main-vertical")
+            expect(term_render_text(mux_find_pane(killed.0, id)!.screen)).to_contain("X")
+
+        it "should refuse unknown window names and insufficient zoom-hidden layouts without mutation":
+            # @req REQ-SMUX-LAYOUT-002
+            val initial = layout_session("refusal", 3, 9, 2)
+            val id = initial.windows[0].panes[0].pane_id
+            val zoomed = mux_zoom_pane(initial, id).0
+            step("Invalid selection returns the original layout and pane geometry")
+            val invalid = mux_select_layout(zoomed, zoomed.windows[0].window_id, "unknown")
+            val missing = mux_select_layout(zoomed, "missing", "tiled")
+            val cramped = mux_select_layout(zoomed, zoomed.windows[0].window_id, "even-vertical")
+            expect(invalid.1).to_equal(false)
+            expect(missing.1).to_equal(false)
+            expect(cramped.1).to_equal(false)
+            expect(cramped.0.windows[0].layout).to_equal("even-horizontal")
+            expect(mux_pane_rects(cramped.0)[0]).to_equal(id + " 0 0 9 2")
+            expect(mux_find_pane(cramped.0, id)!.zoomed).to_equal(true)
+            step("A resize that cannot fit hidden panes also preserves the whole session")
+            val resized = mux_resize(zoomed, 2, 2)
+            expect(resized.cols).to_equal(9)
+            expect(resized.rows).to_equal(2)
+            expect(mux_pane_rects(resized)[0]).to_equal(id + " 0 0 9 2")
+
+        it "should change an inactive window without changing the active window or its layout":
+            # @req REQ-SMUX-LAYOUT-002
+            val first = layout_session("one", 2, 19, 11)
+            val second = layout_session("two", 3, 19, 11)
+            val combined = MuxSession(session_id: "multi", windows: [first.windows[0], second.windows[0]], active_window: 0, cols: 19, rows: 11)
+            step("Select a layout on the inactive window")
+            val selected = mux_select_layout(combined, second.windows[0].window_id, "even-vertical")
+            expect(selected.1).to_equal(true)
+            expect(selected.0.active_window).to_equal(0)
+            expect(selected.0.windows[0].layout).to_equal("even-horizontal")
+            expect(selected.0.windows[1].layout).to_equal("even-vertical")
+            expect(mux_pane_rects(selected.0)[0]).to_equal(first.windows[0].panes[0].pane_id + " 0 0 9 11")
+            val resized = mux_resize(selected.0, 23, 13)
+            expect(resized.windows[0].panes[0].screen.cols).to_equal(11)
+            expect(resized.windows[1].panes[0].screen.cols).to_equal(23)
+            expect(resized.windows[1].panes[0].screen.rows).to_equal(4)
+
+    describe "REQ-SMUX-LAYOUT-003: render row and tiled positions":
+        it "should render stacked panes at their planned rows instead of concatenating columns":
+            # @req REQ-SMUX-LAYOUT-003
+            val one = mux_add_pane(mux_new("render", 9, 6), "a very long first pane title", 1, 1)
+            val two = mux_add_pane(one.0, "an even longer second pane title", 2, 2)
+            expect(one.1.len()).to_be_greater_than(0)
+            expect(two.1.len()).to_be_greater_than(0)
+            val initial = two.0
+            val first = initial.windows[0].panes[0].pane_id
+            val second = initial.windows[0].panes[1].pane_id
+            val selected = mux_select_layout(initial, initial.windows[0].window_id, "even-vertical").0
+            val a = mux_feed_pane(selected, first, "TOP")
+            val b = mux_feed_pane(a, second, "BOTTOM")
+            step("Render two vertical bands plus the title summary")
+            val lines = mux_render(b).split("\n")
+            expect(lines[1]).to_equal("TOP      ")
+            expect(lines[4]).to_equal("BOTTOM   ")
+            expect(lines.len()).to_equal(7)
+            for line in lines:
+                expect(line.len()).to_equal(9)
+
+        it "should render a tiled lower pane at the start of its second row band":
+            # @req REQ-SMUX-LAYOUT-003
+            val initial = layout_session("grid", 3, 10, 6)
+            val selected = mux_select_layout(initial, initial.windows[0].window_id, "tiled").0
+            val a = mux_feed_pane(selected, initial.windows[0].panes[0].pane_id, "A")
+            val b = mux_feed_pane(a, initial.windows[0].panes[1].pane_id, "B")
+            val c = mux_feed_pane(b, initial.windows[0].panes[2].pane_id, "C")
+            val lines = mux_render(c).split("\n")
+            expect(lines[1]).to_equal("A    B    ")
+            expect(lines[4]).to_equal("C         ")
+
+        it "should reject adding a pane that cannot fit the selected layout":
+            # @req REQ-SMUX-LAYOUT-003
+            val initial = layout_session("full", 2, 2, 4)
+            step("A third side by side pane has no available column")
+            val refused = mux_add_pane(initial, "overflow", 999, 999)
+            expect(refused.1).to_equal("")
+            expect(refused.0.windows[0].panes.len()).to_equal(2)
+            expect(refused.0.windows[0].active_pane).to_equal(1)
+            expect(refused.0.windows[0].layout).to_equal("even-horizontal")
