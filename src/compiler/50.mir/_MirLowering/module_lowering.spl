@@ -370,27 +370,52 @@ fn runtime_module_initializer_type_fallback(const_: HirConst) -> bool:
         case _: false
 
 fn runtime_module_initializers_in_declaration_order(consts: [HirConst]) -> [HirConst]:
-    var dynamic: [HirConst] = []
-    for const_ in consts:
+    # Sort INDICES over parallel scalar key arrays, never moving composite
+    # HirConst elements between array slots. The previous insertion sort
+    # read AND rewrote `dynamic[j + 1]` element-wise; Stage-2 stores array
+    # elements through ANY (the documented transport hazard behind
+    # expr_dispatch.spl's "Rebind the extracted composite" pattern), and the
+    # stage2-compiled compiler faulted inside THIS function chasing a tagged
+    # word read back from a moved element (reproduced under gdb:
+    # `ldr x10, [x10]` on an untagged element field, SIGSEGV in
+    # register_provider_global_bindings -> lower_module of the entry module,
+    # 2026-10-16). i64 keys and indices are primitive transports; each
+    # composite element is read exactly twice under an explicit annotation.
+    var order: [i64] = []
+    var key_span: [i64] = []
+    var key_symbol: [i64] = []
+    var di = 0
+    while di < consts.len():
+        val const_: HirConst = consts[di]
         if runtime_module_initializer_supported(const_):
-            dynamic.push(const_)
-    # Keep this compiler authority path concrete: the generic comparator
-    # currently fails native inference (and its historical closure ABI).
+            order.push(di)
+            key_span.push(const_.span.start)
+            key_symbol.push(const_.symbol.id)
+        di = di + 1
     # Stable insertion sort is O(n^2) in this module's dynamic globals only.
     var i = 1
-    while i < dynamic.len():
-        val current = dynamic[i]
+    while i < order.len():
+        val cur_order = order[i]
+        val cur_span = key_span[i]
+        val cur_symbol = key_symbol[i]
         var j = i - 1
         while j >= 0:
-            val previous = dynamic[j]
-            val before = current.span.start < previous.span.start or
-                (current.span.start == previous.span.start and current.symbol.id < previous.symbol.id)
+            val before = cur_span < key_span[j] or
+                (cur_span == key_span[j] and cur_symbol < key_symbol[j])
             if not before: break
-            dynamic[j + 1] = previous
+            order[j + 1] = order[j]
+            key_span[j + 1] = key_span[j]
+            key_symbol[j + 1] = key_symbol[j]
             j = j - 1
-        dynamic[j + 1] = current
+        order[j + 1] = cur_order
+        key_span[j + 1] = cur_span
+        key_symbol[j + 1] = cur_symbol
         i = i + 1
-    dynamic
+    var out: [HirConst] = []
+    for ordered_index in order:
+        val selected: HirConst = consts[ordered_index]
+        out.push(selected)
+    out
 
 fn mir_layout_canonical_module_name(name: text) -> text:
     """Fold every spelling of ONE physical module onto a single dotted name.
