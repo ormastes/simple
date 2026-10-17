@@ -17,10 +17,15 @@ use compiler.backend.linker.linker_wrapper.{
     native_direct_platform_flags,
     native_effective_link_os,
     native_linker_abi_for_target,
-    native_msvc_extra_args
+    native_msvc_extra_args,
+    native_windows_strict_extra_args_error,
+    link_native_windows_with_engine,
+    _link_native_mingw
 }
 use compiler.backend.build_native_types.{BuildLinkConfig, BuildOutputFormat, native_link_config_from_build}
 use compiler.backend.llvm_native_link.{NativeLinkOptions}
+use compiler.backend.llvm_native_link_orchestrator.{llvm_hosted_allow_duplicate_definitions}
+use compiler.backend.runtime_compiler.{hosted_c_compiler_plan}
 use compiler.backend.linker.mold.{find_requested_linker, find_size_linker_path, requested_linker_override}
 use compiler.backend.linker.msvc.{MsvcConfig, msvc_strip_unix_rpath_args}
 use testing.{describe, it, expect}
@@ -578,6 +583,49 @@ describe "Native linker hardening":
     it "keeps unresolved Windows symbols fatal":
         expect(msvc_duplicate_symbol_flag()).to_equal("/FORCE:MULTIPLE")
         expect(msvc_duplicate_symbol_flag().contains("UNRESOLVED")).to_equal(false)
+
+    it "selects strict Windows duplicate policy from the link target rather than the host":
+        expect(llvm_hosted_allow_duplicate_definitions("windows", "", false)).to_equal(false)
+        expect(llvm_hosted_allow_duplicate_definitions("windows-mingw", "native", false)).to_equal(false)
+        expect(llvm_hosted_allow_duplicate_definitions("linux", "", false)).to_equal(true)
+        val cross = hosted_c_compiler_plan("x86_64-pc-windows-gnu", "linux", "x86_64")
+        expect(cross.supported).to_equal(true)
+        expect(cross.requires_cross).to_equal(true)
+        expect(llvm_hosted_allow_duplicate_definitions("linux", "x86_64-pc-windows-gnu", false)).to_equal(false)
+        expect(llvm_hosted_allow_duplicate_definitions("windows", "x86_64-pc-windows-msvc", false)).to_equal(false)
+        expect(llvm_hosted_allow_duplicate_definitions("linux", "", true)).to_equal(false)
+
+    it "rejects explicit Windows FORCE variants under strict duplicate policy":
+        for flag in ["/FORCE:MULTIPLE", " /FoRcE:MuLtIpLe ", "-force:multiple", "/FORCE", "-force", "/force:unresolved", "/force:multiple,unresolved", "\"/FORCE:MULTIPLE\""]:
+            expect(native_windows_strict_extra_args_error([flag], false).contains("rejects FORCE option")).to_equal(true)
+
+    it "rejects nested arguments and GNU duplicate overrides in strict Windows links":
+        for flag in ["@nested.rsp", "\"@nested.rsp\"", "-Wl,--allow-multiple-definition", "-Xlinker", "/link", "--allow-multiple-definition", "muldefs"]:
+            expect(native_windows_strict_extra_args_error([flag], false) != "").to_equal(true)
+
+    it "preserves safe Windows flags and an explicitly permissive caller":
+        expect(native_windows_strict_extra_args_error(["/DEBUG:NONE", "/OPT:REF", "/INCLUDE:__simple_main"], false)).to_equal("")
+        expect(native_windows_strict_extra_args_error([], false)).to_equal("")
+        expect(native_windows_strict_extra_args_error(["/FORCE:MULTIPLE", "@legacy.rsp"], true)).to_equal("")
+
+    it "rejects a strict Windows override before reading objects or selecting an engine":
+        var config = NativeLinkConfig.default()
+        config.allow_duplicate_definitions = false
+        config.extra_flags = ["/FORCE:MULTIPLE"]
+        val result = link_native_windows_with_engine([], "unused-strict-link-output.exe", config)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("strict Windows link rejects FORCE option")
+
+    it "rejects a GNU duplicate override at the direct Windows MinGW owner before tool discovery":
+        var config = NativeLinkConfig.default()
+        config.target_triple = "x86_64-pc-windows-gnu"
+        config.linker_abi = "windows-gnu"
+        config.allow_duplicate_definitions = false
+        config.extra_flags = ["-Wl,--allow-multiple-definition"]
+        expect(native_effective_link_os("windows", config.target_triple, config.linker_abi)).to_equal("windows-mingw")
+        val result = _link_native_mingw([], "unused-strict-mingw-output.exe", config)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("strict Windows link rejects nested linker arguments")
 
     it "lets strict links disable duplicate forgiveness and cc fallback":
         val native = rt_file_read_text("src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl") ?? ""

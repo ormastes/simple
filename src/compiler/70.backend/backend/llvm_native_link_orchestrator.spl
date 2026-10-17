@@ -20,7 +20,7 @@ use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
 use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_strict_archives_v1}
-use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error, native_linker_abi_for_target}
+use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error, native_linker_abi_for_target, native_effective_link_os}
 use compiler.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use compiler.common.assurance.policy.{strictness_for_profile_name}
@@ -52,6 +52,12 @@ use compiler.common.cache.darwin_runtime_provider_manifest.{darwin_runtime_provi
 # ============================================================================
 # Main Orchestrator
 # ============================================================================
+
+pub fn llvm_hosted_allow_duplicate_definitions(hosted_os: text, hosted_target: text, stage4_requested: bool) -> bool:
+    """Choose duplicate policy for the selected link platform, including cross targets."""
+    if stage4_requested: return false
+    val link_os = native_effective_link_os(hosted_os, hosted_target, native_linker_abi_for_target(hosted_target))
+    link_os != "windows" and link_os != "windows-mingw" and link_os != "windows-msvc"
 
 fn _llvm_bootstrap_native_all_path(stage4_requested: bool, runtime_path: text,
         runtime_bundle: text, requires_cross: bool, hosted_os: text,
@@ -606,7 +612,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         strip_output: options.strip_output,
         prefer_size_linker: options.opt_level == 1,
         verbose: options.verbose,
-        allow_duplicate_definitions: not stage4_requested,
+        allow_duplicate_definitions: llvm_hosted_allow_duplicate_definitions(hosted_os, hosted_target, stage4_requested),
         allow_cc_fallback: not stage4_requested,
         retained_symbols: retained_symbols,
         extra_flags: llvm_external_provider_rpath_flags(external_providers),
