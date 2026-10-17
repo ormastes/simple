@@ -1238,11 +1238,9 @@ impl MirLowering:
                 verification_contract: nil
             )
         # Cycle-91 playbook form: materialized keys + guard-first double access.
-        val function_keys_39: [SymbolId] = module.functions.keys()
-        for dk_39 in function_keys_39:
-            if module.functions[dk_39] == nil:
-                continue
-            val fn_: HirFunction = module.functions[dk_39]
+        val function_keys_39_values: [HirFunction] = module.functions.values()
+        for raw_fn_ in function_keys_39_values:
+            val fn_: HirFunction = raw_fn_
             val fn_id = self.symbol_id_value(fn_.symbol)
             if fn_id == target_id:
                 return fn_
@@ -1676,11 +1674,22 @@ impl MirLowering:
         # NVMe rv32 fw mask-361, 2026-07-24). Register every free fn's
         # declared HIR return type name-keyed (ambiguous duplicates are
         # never answered — see mir_data.spl).
-        val prescan_function_keys: [SymbolId] = module.functions.keys()
-        for dk_38 in prescan_function_keys:
-            if module.functions[dk_38] == nil:
-                continue
-            val prescan_fn: HirFunction = module.functions[dk_38]
+        # Cycle-100: moved to prescan_module_functions_v1 (fresh-method
+        # draw; both keys+index (cycle-91 crash) and values for-in
+        # (cycle-100 crash) draw corrupted in this function's body).
+        self.prescan_module_functions_v1(module)
+
+    # Cycle-100: the per-function prescan body of prescan_module_struct_names,
+    # hosted in a fresh method. Both prior extraction shapes drew corrupted
+    # inside the caller: keys+index crashed the dict probe (cycle-91) and
+    # values for-in rebind corrupted the element that register_provider_callable_link
+    # then read through its by-value param (cycle-100 shim, same callee as
+    # cycle-91). The module crosses by value (proven transport); no large
+    # composite crosses back.
+    me prescan_module_functions_v1(module: HirModule):
+        val prescan_function_keys_values: [HirFunction] = module.functions.values()
+        for raw_prescan_fn in prescan_function_keys_values:
+            val prescan_fn: HirFunction = raw_prescan_fn
             self.register_provider_callable_link(module.name, module.symbols, prescan_fn)
             val prescan_call_name = mir_provider_function_name(module.name, module.symbols, prescan_fn)
             var prescan_return_shape = ""
@@ -2091,19 +2100,15 @@ impl MirLowering:
         self.exact_extern_signatures = {}
         # E-MIR-TYPE-Error rate limit is per module (see lower_type).
         self.mir_type_error_reports = {}
-        val function_keys_37: [SymbolId] = module.functions.keys()
-        for dk_37 in function_keys_37:
-            if module.functions[dk_37] == nil:
-                continue
-            val declaration: HirFunction = module.functions[dk_37]
+        val function_keys_37_values: [HirFunction] = module.functions.values()
+        for raw_declaration in function_keys_37_values:
+            val declaration: HirFunction = raw_declaration
             self.record_exact_extern_declaration_v1(declaration)
         self.lowering_entry_module = is_entry_module
         var function_names: [text] = []
-        val function_keys_36: [SymbolId] = module.functions.keys()
-        for dk_36 in function_keys_36:
-            if module.functions[dk_36] == nil:
-                continue
-            val func: HirFunction = module.functions[dk_36]
+        val function_keys_36_values: [HirFunction] = module.functions.values()
+        for raw_func in function_keys_36_values:
+            val func: HirFunction = raw_func
             self.register_provider_callable_link(module.name, module.symbols, func, is_entry_module)
             function_names.push(mir_provider_function_name(module.name, module.symbols, func, is_entry_module))
         self.current_function_names = function_names
@@ -2311,12 +2316,21 @@ impl MirLowering:
             val bootstrap_function_count = bootstrap_function_indices.len()
             if bootstrap_trace:
                 print "[mir-lower] functions:count {bootstrap_function_count}"
+            # Cycle-96 discrimination receipt: p2_add lowers through THIS
+            # bootstrap branch (not the main loop below, which returns
+            # unreachable). len=0 -> the .values() materialization or the
+            # symbol-order helper silently failed; per-fn lines absent ->
+            # the skip chain below misfired.
+            if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+                eprint("[enum-reg] bs-fn-keys: module={module.name} len={bootstrap_function_count} values_len={bootstrap_function_values.len()}")
             var bootstrap_fni = 0
             while bootstrap_fni < bootstrap_function_count:
                 if bootstrap_trace:
                     print "[mir-lower] function-index {bootstrap_fni}"
                 val function_index = bootstrap_function_indices[bootstrap_fni]
                 val fn_: HirFunction = bootstrap_function_values[function_index]
+                if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+                    eprint("[enum-reg] bs-fn: module={module.name} fn={fn_.name} generic={fn_.is_generic_template} extern={fn_.is_extern}")
                 if bootstrap_trace:
                     print "[mir-lower] function-symbol"
                 if bootstrap_trace:
@@ -2428,20 +2442,17 @@ impl MirLowering:
         # from struct_value_syms and looks it up here to dispatch the real
         # method instead of failing.
         var static_method_symbol_ids: Dict<i64, bool> = {}
-        # Cycle-93 playbook form: guard-first dict walk. The .values() +
-        # array-index draw over [HirFunction] is the corrupting class
-        # (cycle-92 shim: field read on the element rebind faults).
-        val module_fn_keys: [SymbolId] = module.functions.keys()
+        # Cycle-98: values+index (bootstrap-branch-proven shape). The
+        # keys+index form silently mismatched aggregate SymbolId keys on
+        # re-lookup (cycle-97/98 receipts); values are heap refs whose
+        # rebind draws clean here.
+        val module_fn_values: [HirFunction] = module.functions.values()
         var module_fn_i = 0
         # Cycle-95: while+index, NOT for-in (silent zero-iteration class).
-        while module_fn_i < module_fn_keys.len():
-            val fn_key: SymbolId = module_fn_keys[module_fn_i]
-            if module.functions[fn_key] == nil:
-                module_fn_i = module_fn_i + 1
-                continue
+        while module_fn_i < module_fn_values.len():
             # module.functions also contains impl methods; retain their static
             # marker for the separate static receiver lookup below.
-            val module_fn: HirFunction = module.functions[fn_key]
+            val module_fn: HirFunction = module_fn_values[module_fn_i]
             if module_fn.is_static:
                 static_method_symbol_ids[self.symbol_id_value(module_fn.symbol)] = true
             module_fn_i = module_fn_i + 1
@@ -2563,17 +2574,13 @@ impl MirLowering:
             ci = ci + 1
 
         var local_callable_links: Dict<i64, text> = {}
-        val function_keys_31: [SymbolId] = module.functions.keys()
-        for dk_31 in function_keys_31:
-            if module.functions[dk_31] == nil:
-                continue
-            val local_func: HirFunction = module.functions[dk_31]
+        val function_keys_31_values: [HirFunction] = module.functions.values()
+        for raw_local_func in function_keys_31_values:
+            val local_func: HirFunction = raw_local_func
             local_callable_links[local_func.symbol.id] = self.provider_callable_symbol_name(local_func.symbol, local_func.name)
-        val function_keys_30: [SymbolId] = module.functions.keys()
-        for dk_30 in function_keys_30:
-            if module.functions[dk_30] == nil:
-                continue
-            val local_func: HirFunction = module.functions[dk_30]
+        val function_keys_30_values: [HirFunction] = module.functions.values()
+        for raw_local_func in function_keys_30_values:
+            val local_func: HirFunction = raw_local_func
             self.register_provider_method(local_func, module.symbols, local_callable_links)
 
         val bitfield_values = module.bitfields.values()
@@ -2684,18 +2691,18 @@ impl MirLowering:
         # (`outer`) had not yet been visited by the real lowering loop below.
         # Cycle-94: .values()+array-index over [HirFunction] is the
         # corrupting draw (cycle-92 class); guard-first dict walk instead.
-        val prescan_function_keys: [SymbolId] = module.functions.keys()
+        # Cycle-99: values+index, same as the emission loop below -- the
+        # keys+index form's corrupt aggregate-key re-lookup crashed inside
+        # the dict probe at this site (cycle-99 shim: fault in lower_module
+        # at the prescan region's dict access).
+        val prescan_fn_values: [HirFunction] = module.functions.values()
         var psi = 0
         # Level-gated (default OFF), retained per the log-retention policy.
         val prescan_trace = mir_lower_trace_enabled()
         if prescan_trace:
-            eprint("[mir-prescan-module] start module={module.name} functions={prescan_function_keys.len()}")
-        while psi < prescan_function_keys.len():
-            val prescan_key: SymbolId = prescan_function_keys[psi]
-            if module.functions[prescan_key] == nil:
-                psi = psi + 1
-                continue
-            val prescan_fn: HirFunction = module.functions[prescan_key]
+            eprint("[mir-prescan-module] start module={module.name} functions={prescan_fn_values.len()}")
+        while psi < prescan_fn_values.len():
+            val prescan_fn: HirFunction = prescan_fn_values[psi]
             if prescan_trace:
                 eprint("[mir-prescan-function] start module={module.name} index={psi} name={prescan_fn.name}")
             if not prescan_fn.is_extern:
@@ -2716,23 +2723,47 @@ impl MirLowering:
         # Lower functions (skip extern declarations - they have no body)
         # Cycle-94: same draw fix as the prescan loop above; skip branches
         # become continue + one increment.
-        val fn_keys: [SymbolId] = module.functions.keys()
+        # Cycle-97: the emission loop moved to lower_module_emit_all_v1
+        # (fresh-method draw; see the method header). All key-carried
+        # dict walks draw corrupted inside lower_module itself.
+        self.lower_module_emit_all_v1(module, archive_function_symbols, bootstrap_trace, trace_enabled)
+
+        if bootstrap_trace:
+            print "[mir-lower] lower_module:done"
+        self.publish_native_trait_thunks(false)
+        self.attach_external_layout_traces()
+        self.builder.module
+
+    # Cycle-97: lower_module's per-function emission loop, hosted in a fresh
+    # method. Receipts from the cycle-97 binary proved the loop's dict walks
+    # draw corrupted inside lower_module itself: fn-keys materialized len=5
+    # but module.functions.has(first key) was FALSE at loop entry, so the
+    # nil guard skipped every function and the lane emitted nothing
+    # (E-LANE-VACUOUS). Every clean key-carried extraction draw in this
+    # campaign (10/10) is in a fresh method in the has_rt_hal shape; every
+    # draw inside lower_module corrupts (values+index: cycle-94 crash;
+    # keys+index: cycle-97 silent mismatch). The module crosses by value
+    # (proven transport); no large composite crosses back.
+    me lower_module_emit_all_v1(module: HirModule, archive_function_symbols: [i64]?,
+            bootstrap_trace: bool, trace_enabled: bool):
+        # Cycle-98: values+index (the ORIGINAL main-loop shape, and the same
+        # shape the bootstrap branch uses at self-host scale), NOT keys+index:
+        # the cycle-97/98 receipts proved keys() round-trip corrupts aggregate
+        # SymbolId keys in EVERY compiled host (fn-keys len=5 but
+        # dict.has(first key)=false -> nil guard skipped all). Values are
+        # heap refs whose rebind draws clean here (bootstrap branch evidence);
+        # the first-element receipt converts any residual rebind corruption
+        # from silent-skip to loud.
+        val fn_values: [HirFunction] = module.functions.values()
         if bootstrap_trace:
             print "[mir-lower] function-keys"
+        if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+            eprint("[enum-reg] fn-keys: module={module.name} values_len={fn_values.len()} dict_len={module.functions.len()}")
+            if fn_values.len() > 0:
+                eprint("[enum-reg] fn-loop-enter: module={module.name} first_name={fn_values[0].name}")
         var fni = 0
-        # Cycle-95 regression fix: while+index over the materialized keys,
-        # NOT for-in -- the for-in draw in this function silently zero-iterates
-        # (BUG-001 class: 'tuple destructuring silently produces zero
-        # iterations in compiled mode'), which skipped every function and
-        # emitted nothing. The original elif chain is restored verbatim
-        # inside the guard-first loop (the guard changes no semantics; the
-        # dict-walk extraction shape stays the proven-clean draw).
-        while fni < fn_keys.len():
-            val fn_key: SymbolId = fn_keys[fni]
-            if module.functions[fn_key] == nil:
-                fni = fni + 1
-                continue
-            val fn_: HirFunction = module.functions[fn_key]
+        while fni < fn_values.len():
+            val fn_: HirFunction = fn_values[fni]
             var selected_for_emission = true
             if val selected_symbols = archive_function_symbols:
                 selected_for_emission = false
@@ -2752,13 +2783,18 @@ impl MirLowering:
                 fni = fni + 1
                 # skip extern functions
             else:
+                # Cycle-96 discrimination receipt: reaching this line proves
+                # keys materialization AND the skip chain passed; absence with
+                # fn-keys nonzero means a skip branch misfired.
+                if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+                    eprint("[enum-reg] fn-emit: module={module.name} fn={fn_.name} idx={fni}")
                 if bootstrap_trace:
                     print "[mir-lower] function:start"
                 # SIMPLE_ENUM_REG_TRACE=1 progression receipt: names the
                 # function whose lowering follows. On a livelock the LAST
                 # fn-start line in the log is the spinning function.
                 if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
-                    eprint("[enum-reg] fn-start module={module.name} fn={fn_.name} idx={fni}/{fn_keys.len()}")
+                    eprint("[enum-reg] fn-start module={module.name} fn={fn_.name} idx={fni}/{fn_values.len()}")
                 var mir_fn = self.lower_function(fn_)
                 if fn_.has_vhdl_metadata:
                     mir_fn.has_vhdl_metadata = true
@@ -2779,12 +2815,6 @@ impl MirLowering:
                 if bootstrap_trace:
                     print "[mir-lower] function:added"
                 fni = fni + 1
-
-        if bootstrap_trace:
-            print "[mir-lower] lower_module:done"
-        self.publish_native_trait_thunks(false)
-        self.attach_external_layout_traces()
-        self.builder.module
 
     # mutglobal lane (module-level `var` mutation, see
     # scratchpad/mutglobal_plan.md): `lower_const` (function_lowering.spl,
