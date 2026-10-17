@@ -9,7 +9,7 @@ use std.env.{env_get}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.hir.hir.*
 use compiler.driver.driver_log_helpers.{log_debug}
-use compiler.semantics.resolve.{resolve_methods, resolve_methods_quiet}
+use compiler.semantics.resolve.{resolve_methods, resolve_methods_quiet, resolve_methods_module_owner}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.mono.monomorphize_integration.*
 use compiler.driver.driver_safety_severity.{
@@ -43,7 +43,9 @@ impl CompilerDriver:
                 continue
             val hir_module: HirModule = ctx.hir_modules[name]
             val resolve_result = resolve_methods(hir_module)
-            ctx.hir_modules[name] = resolve_result.0
+            # Cycle-130: persist the owner-published module, not the tuple
+            # slot (the tuple's HirModule corrupts at the native value ABI).
+            ctx.hir_modules[name] = resolve_methods_module_owner.?
 
             # Update the module with resolved method calls (direct mutation)
             val resolve_errors = resolve_result.1
@@ -73,7 +75,8 @@ impl CompilerDriver:
         for quiet_name in quiet_module_names:
             val quiet_hir_module = self.ctx.hir_modules[quiet_name]
             val (quiet_resolved_module, quiet_errors) = resolve_methods_quiet(quiet_hir_module)
-            self.ctx.hir_modules[quiet_name] = quiet_resolved_module
+            # Cycle-130: owner-published module (tuple slot corrupts).
+            self.ctx.hir_modules[quiet_name] = resolve_methods_module_owner.?
             quiet_resolved_count = quiet_resolved_count + 1
             if quiet_errors.len() > 0:
                 # Cannot happen (quiet add_error is a no-op); loud if it does,
