@@ -3323,6 +3323,20 @@ int64_t rt_value_nil(void) {
     return rt_core_nil();
 }
 
+int8_t rt_value_is_nil(int64_t value) {
+    return value == rt_core_nil() ? 1 : 0;
+}
+
+int8_t rt_value_is_bool(int64_t value) {
+    return value == rt_core_from_special(RT_VALUE_SPECIAL_TRUE) ||
+           value == rt_core_from_special(RT_VALUE_SPECIAL_FALSE) ? 1 : 0;
+}
+
+int8_t rt_value_is_int(int64_t value) {
+    return rt_core_is_int(value) || rt_core_as_heap_int(value) != NULL ||
+           rt_core_as_heap_uint(value) != NULL ? 1 : 0;
+}
+
 int64_t rt_function_not_found(const uint8_t* name, uint64_t len) {
     fputs("Simple runtime error: function not found", stderr);
     if (name && len > 0) {

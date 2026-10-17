@@ -18,7 +18,7 @@ use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
 use compiler.common.attributes.{FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata, VhdlClockedMetadata, VhdlGenericMetadata, VhdlReturnFieldMetadata, VhdlResetPolarity, VhdlResetSynchrony, OptimizationReq, OptimizationReqLevel, OptimizationBackend}
 use compiler.frontend.parser_types_expr.{AsmTargetSpec, AsmConstraintKind, AsmLocation, Type, TypeKind, Expr}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_parse_i64, flat_pool_unescape}
-use compiler.hir.hir_codec_support.{HirCodecWriter, hc_enc_opaque_expr, hc_dec_opaque_expr, hc_enc_opaque_block_value, hc_dec_opaque_block_value, hc_bad_tag, hc_read_f64}
+use compiler.hir.hir_codec_support.{HirCodecWriter, hc_enc_opaque_expr, hc_dec_opaque_expr, hc_enc_opaque_block_value, hc_dec_opaque_block_value, hc_bad_tag, hc_read_f64, hc_enc_enum_bool, hc_enc_enum_text, hc_restore_enum_nil}
 use compiler.hir.hir_codec_key_order.{hc_order_i64_keys_v1, hc_order_text_keys_v1, hc_order_symbol_id_keys_v1}
 
 fn hc_enc_asm_constraint_kind(w: HirCodecWriter, node: AsmConstraintKind):
@@ -52,7 +52,7 @@ fn hc_enc_asm_location(w: HirCodecWriter, node: AsmLocation):
             w.put_i64(0)
         case AsmLocation.RegSpec(b_f0):
             w.put_i64(1)
-            w.put_text(b_f0)
+            hc_enc_enum_text(w, node, 1, 0, b_f0)
         case AsmLocation.Mem:
             w.put_i64(2)
         case AsmLocation.Imm:
@@ -65,8 +65,15 @@ fn hc_dec_asm_location(r: FlatPoolReader) -> AsmLocation:
         return AsmLocation.Reg
     if tag == 1:
         val raw0 = r.next()
-        val f_f0 = if raw0 == "\\N": nil else: flat_pool_unescape(raw0)
-        return AsmLocation.RegSpec(f_f0)
+        val wire_nil_f0 = raw0 == "\\N"
+        val f_f0 = if wire_nil_f0: "" else: flat_pool_unescape(raw0)
+        val wire_prototype = AsmLocation.RegSpec(f_f0)
+        if wire_nil_f0:
+            if not r.reserve(80): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_f0: wire_nil_slots.push(0)
+            return hc_restore_enum_nil(r, wire_prototype, 1, wire_nil_slots)
+        return wire_prototype
     if tag == 2:
         return AsmLocation.Mem
     if tag == 3:
@@ -236,7 +243,7 @@ fn hc_enc_dim_expr_kind(w: HirCodecWriter, node: DimExprKind):
             w.put_i64(b_value)
         case DimExprKind.Named(b_name, b_lo, b_hi):
             w.put_i64(1)
-            w.put_text(b_name)
+            hc_enc_enum_text(w, node, 3, 0, b_name)
             if val o0 = b_lo:
                 w.put_i64(1)
                 w.put_i64(o0)
@@ -256,7 +263,7 @@ fn hc_enc_dim_expr_kind(w: HirCodecWriter, node: DimExprKind):
             w.put_i64(4)
         case DimExprKind.ConstParam(b_name):
             w.put_i64(5)
-            w.put_text(b_name)
+            hc_enc_enum_text(w, node, 1, 0, b_name)
         case DimExprKind.Add(b_left, b_right):
             w.put_i64(6)
             if not b_left.?:
@@ -303,7 +310,8 @@ fn hc_dec_dim_expr_kind(r: FlatPoolReader) -> DimExprKind:
         return DimExprKind.Literal(f_value)
     if tag == 1:
         val raw1 = r.next()
-        val f_name = if raw1 == "\\N": nil else: flat_pool_unescape(raw1)
+        val wire_nil_name = raw1 == "\\N"
+        val f_name = if wire_nil_name: "" else: flat_pool_unescape(raw1)
         var f_lo: i64? = nil
         if r.next_i64() == 1:
             val raw3 = r.next()
@@ -314,7 +322,13 @@ fn hc_dec_dim_expr_kind(r: FlatPoolReader) -> DimExprKind:
             val raw5 = r.next()
             val ov4 = if raw5 == "N": nil else: flat_pool_parse_i64(raw5)
             f_hi = Some(ov4)
-        return DimExprKind.Named(f_name, f_lo, f_hi)
+        val wire_prototype = DimExprKind.Named(f_name, f_lo, f_hi)
+        if wire_nil_name:
+            if not r.reserve(112): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_name: wire_nil_slots.push(0)
+            return hc_restore_enum_nil(r, wire_prototype, 3, wire_nil_slots)
+        return wire_prototype
     if tag == 2:
         val raw6 = r.next()
         val f_id = if raw6 == "N": nil else: flat_pool_parse_i64(raw6)
@@ -325,8 +339,15 @@ fn hc_dec_dim_expr_kind(r: FlatPoolReader) -> DimExprKind:
         return DimExprKind.Broadcast
     if tag == 5:
         val raw7 = r.next()
-        val f_name = if raw7 == "\\N": nil else: flat_pool_unescape(raw7)
-        return DimExprKind.ConstParam(f_name)
+        val wire_nil_name = raw7 == "\\N"
+        val f_name = if wire_nil_name: "" else: flat_pool_unescape(raw7)
+        val wire_prototype = DimExprKind.ConstParam(f_name)
+        if wire_nil_name:
+            if not r.reserve(80): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_name: wire_nil_slots.push(0)
+            return hc_restore_enum_nil(r, wire_prototype, 1, wire_nil_slots)
+        return wire_prototype
     if tag == 6:
         var f_left: DimExpr? = nil
         if r.next_i64() == 1:
@@ -449,7 +470,7 @@ fn hc_enc_effect_kind(w: HirCodecWriter, node: EffectKind):
             w.put_i64(5)
         case EffectKind.Custom(b_name):
             w.put_i64(6)
-            w.put_text(b_name)
+            hc_enc_enum_text(w, node, 1, 0, b_name)
         case _: w.reject("unencodable EffectKind enum")
 
 fn hc_dec_effect_kind(r: FlatPoolReader) -> EffectKind:
@@ -471,8 +492,15 @@ fn hc_dec_effect_kind(r: FlatPoolReader) -> EffectKind:
         return EffectKind.Allocates
     if tag == 6:
         val raw0 = r.next()
-        val f_name = if raw0 == "\\N": nil else: flat_pool_unescape(raw0)
-        return EffectKind.Custom(f_name)
+        val wire_nil_name = raw0 == "\\N"
+        val f_name = if wire_nil_name: "" else: flat_pool_unescape(raw0)
+        val wire_prototype = EffectKind.Custom(f_name)
+        if wire_nil_name:
+            if not r.reserve(80): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_name: wire_nil_slots.push(0)
+            return hc_restore_enum_nil(r, wire_prototype, 1, wire_nil_slots)
+        return wire_prototype
     hc_bad_tag("EffectKind", tag)
     hc_dec_effect_kind(r)
 
@@ -2014,7 +2042,7 @@ fn hc_enc_hir_expr_kind(w: HirCodecWriter, node: HirExprKind):
                 w.put_i64(0)
         case HirExprKind.StringLit(b_value, b_interpolations):
             w.put_i64(2)
-            w.put_text(b_value)
+            hc_enc_enum_text(w, node, 2, 0, b_value)
             if val o2 = b_interpolations:
                 w.put_i64(1)
                 w.put_i64(if o2 == nil: 0 else: o2.len())
@@ -2028,10 +2056,10 @@ fn hc_enc_hir_expr_kind(w: HirCodecWriter, node: HirExprKind):
                 w.put_i64(0)
         case HirExprKind.BoolLit(b_value):
             w.put_i64(3)
-            w.put_bool(b_value)
+            hc_enc_enum_bool(w, node, 1, 0, b_value)
         case HirExprKind.CharLit(b_value):
             w.put_i64(4)
-            w.put_text(b_value)
+            hc_enc_enum_text(w, node, 1, 0, b_value)
         case HirExprKind.UnitLit:
             w.put_i64(5)
         case HirExprKind.NilLit:
@@ -2144,7 +2172,7 @@ fn hc_enc_hir_expr_kind(w: HirCodecWriter, node: HirExprKind):
             else:
                 w.put_i64(1)
                 hc_enc_symbol_id(w, b_symbol)
-            w.put_text(b_name)
+            hc_enc_enum_text(w, node, 2, 1, b_name)
         case HirExprKind.Field(b_base, b_field, b_resolved):
             w.put_i64(14)
             if not b_base.?:
@@ -2152,7 +2180,7 @@ fn hc_enc_hir_expr_kind(w: HirCodecWriter, node: HirExprKind):
             else:
                 w.put_i64(1)
                 hc_enc_hir_expr(w, b_base)
-            w.put_text(b_field)
+            hc_enc_enum_text(w, node, 3, 1, b_field)
             if val o12 = b_resolved:
                 w.put_i64(1)
                 if not o12.?:
@@ -2189,7 +2217,7 @@ fn hc_enc_hir_expr_kind(w: HirCodecWriter, node: HirExprKind):
             else:
                 w.put_i64(1)
                 hc_enc_hir_expr(w, b_base)
-            w.put_text(b_field)
+            hc_enc_enum_text(w, node, 2, 1, b_field)
         case HirExprKind.NullCoalesce(b_left, b_right):
             w.put_i64(18)
             if not b_left.?:
@@ -2273,7 +2301,7 @@ fn hc_enc_hir_expr_kind(w: HirCodecWriter, node: HirExprKind):
             else:
                 w.put_i64(1)
                 hc_enc_hir_expr(w, b_receiver)
-            w.put_text(b_method)
+            hc_enc_enum_text(w, node, 4, 1, b_method)
             w.put_i64(if b_args == nil: 0 else: b_args.len())
             for e15 in (b_args ?? []):
                 if not e15.?:
@@ -2293,7 +2321,7 @@ fn hc_enc_hir_expr_kind(w: HirCodecWriter, node: HirExprKind):
             else:
                 w.put_i64(1)
                 hc_enc_hir_type(w, b_type_)
-            w.put_text(b_method)
+            hc_enc_enum_text(w, node, 4, 1, b_method)
             w.put_i64(if b_args == nil: 0 else: b_args.len())
             for e16 in (b_args ?? []):
                 if not e16.?:
@@ -2479,7 +2507,7 @@ fn hc_enc_hir_expr_kind(w: HirCodecWriter, node: HirExprKind):
                 w.put_i64(0)
         case HirExprKind.Break(b_label, b_value):
             w.put_i64(37)
-            w.put_text(b_label)
+            hc_enc_enum_text(w, node, 2, 0, b_label)
             if val o28 = b_value:
                 w.put_i64(1)
                 if not o28.?:
@@ -2550,7 +2578,7 @@ fn hc_enc_hir_expr_kind(w: HirCodecWriter, node: HirExprKind):
             else:
                 w.put_i64(1)
                 hc_enc_hir_type(w, b_type_)
-            w.put_text(b_variant)
+            hc_enc_enum_text(w, node, 3, 1, b_variant)
             if val o32 = b_payload:
                 w.put_i64(1)
                 if o32 == nil:
@@ -2616,7 +2644,7 @@ fn hc_enc_hir_expr_kind(w: HirCodecWriter, node: HirExprKind):
                     hc_enc_hir_expr(w, o34)
             else:
                 w.put_i64(0)
-            w.put_bool(b_inclusive)
+            hc_enc_enum_bool(w, node, 4, 2, b_inclusive)
             if val o35 = b_step:
                 w.put_i64(1)
                 if not o35.?:
@@ -2647,7 +2675,7 @@ fn hc_enc_hir_expr_kind(w: HirCodecWriter, node: HirExprKind):
                     hc_enc_hir_comp_clause(w, e36)
         case HirExprKind.CustomBlock(b_kind, b_value):
             w.put_i64(50)
-            w.put_text(b_kind)
+            hc_enc_enum_text(w, node, 2, 0, b_kind)
             if not b_value.?:
                 w.put_i64(0)
             else:
@@ -2699,7 +2727,7 @@ fn hc_enc_hir_expr_kind(w: HirCodecWriter, node: HirExprKind):
             else:
                 w.put_i64(1)
                 hc_enc_hir_expr(w, b_value)
-            w.put_text(b_type_name)
+            hc_enc_enum_text(w, node, 2, 1, b_type_name)
         case HirExprKind.TryCatch(b_body, b_clauses, b_finally_):
             w.put_i64(58)
             if not b_body.?:
@@ -2725,7 +2753,7 @@ fn hc_enc_hir_expr_kind(w: HirCodecWriter, node: HirExprKind):
                 w.put_i64(0)
         case HirExprKind.FloatLexeme(b_value, b_suffix):
             w.put_i64(59)
-            w.put_text(b_value)
+            hc_enc_enum_text(w, node, 2, 0, b_value)
             if val o40 = b_suffix:
                 w.put_i64(1)
                 w.put_text(o40)
@@ -2754,7 +2782,8 @@ fn hc_dec_hir_expr_kind(r: FlatPoolReader) -> HirExprKind:
         return HirExprKind.FloatLit(f_value, f_suffix)
     if tag == 2:
         val raw5 = r.next()
-        val f_value = if raw5 == "\\N": nil else: flat_pool_unescape(raw5)
+        val wire_nil_value = raw5 == "\\N"
+        val f_value = if wire_nil_value: "" else: flat_pool_unescape(raw5)
         var f_interpolations: [HirInterpolation]? = nil
         if r.next_i64() == 1:
             var ov6: [HirInterpolation] = []
@@ -2767,15 +2796,35 @@ fn hc_dec_hir_expr_kind(r: FlatPoolReader) -> HirExprKind:
                 ov6.push(ev7)
                 i7 = i7 + 1
             f_interpolations = Some(ov6)
-        return HirExprKind.StringLit(f_value, f_interpolations)
+        val wire_prototype = HirExprKind.StringLit(f_value, f_interpolations)
+        if wire_nil_value:
+            if not r.reserve(96): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_value: wire_nil_slots.push(0)
+            return hc_restore_enum_nil(r, wire_prototype, 2, wire_nil_slots)
+        return wire_prototype
     if tag == 3:
         val raw8 = r.next()
-        val f_value = if raw8 == "N": nil else: raw8 == "1"
-        return HirExprKind.BoolLit(f_value)
+        val wire_nil_value = raw8 == "N"
+        val f_value = raw8 == "1"
+        val wire_prototype = HirExprKind.BoolLit(f_value)
+        if wire_nil_value:
+            if not r.reserve(80): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_value: wire_nil_slots.push(0)
+            return hc_restore_enum_nil(r, wire_prototype, 1, wire_nil_slots)
+        return wire_prototype
     if tag == 4:
         val raw9 = r.next()
-        val f_value = if raw9 == "\\N": nil else: flat_pool_unescape(raw9)
-        return HirExprKind.CharLit(f_value)
+        val wire_nil_value = raw9 == "\\N"
+        val f_value = if wire_nil_value: "" else: flat_pool_unescape(raw9)
+        val wire_prototype = HirExprKind.CharLit(f_value)
+        if wire_nil_value:
+            if not r.reserve(80): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_value: wire_nil_slots.push(0)
+            return hc_restore_enum_nil(r, wire_prototype, 1, wire_nil_slots)
+        return wire_prototype
     if tag == 5:
         return HirExprKind.UnitLit
     if tag == 6:
@@ -2872,21 +2921,35 @@ fn hc_dec_hir_expr_kind(r: FlatPoolReader) -> HirExprKind:
         if r.next_i64() == 1:
             f_symbol = hc_dec_symbol_id(r)
         val raw18 = r.next()
-        val f_name = if raw18 == "\\N": nil else: flat_pool_unescape(raw18)
-        return HirExprKind.NamedVar(f_symbol, f_name)
+        val wire_nil_name = raw18 == "\\N"
+        val f_name = if wire_nil_name: "" else: flat_pool_unescape(raw18)
+        val wire_prototype = HirExprKind.NamedVar(f_symbol, f_name)
+        if wire_nil_name:
+            if not r.reserve(96): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_name: wire_nil_slots.push(1)
+            return hc_restore_enum_nil(r, wire_prototype, 2, wire_nil_slots)
+        return wire_prototype
     if tag == 14:
         var f_base: HirExpr? = nil
         if r.next_i64() == 1:
             f_base = hc_dec_hir_expr(r)
         val raw19 = r.next()
-        val f_field = if raw19 == "\\N": nil else: flat_pool_unescape(raw19)
+        val wire_nil_field = raw19 == "\\N"
+        val f_field = if wire_nil_field: "" else: flat_pool_unescape(raw19)
         var f_resolved: SymbolId? = nil
         if r.next_i64() == 1:
             var ov20: SymbolId? = nil
             if r.next_i64() == 1:
                 ov20 = hc_dec_symbol_id(r)
             f_resolved = Some(ov20)
-        return HirExprKind.Field(f_base, f_field, f_resolved)
+        val wire_prototype = HirExprKind.Field(f_base, f_field, f_resolved)
+        if wire_nil_field:
+            if not r.reserve(112): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_field: wire_nil_slots.push(1)
+            return hc_restore_enum_nil(r, wire_prototype, 3, wire_nil_slots)
+        return wire_prototype
     if tag == 15:
         var f_base: HirExpr? = nil
         if r.next_i64() == 1:
@@ -2907,8 +2970,15 @@ fn hc_dec_hir_expr_kind(r: FlatPoolReader) -> HirExprKind:
         if r.next_i64() == 1:
             f_base = hc_dec_hir_expr(r)
         val raw22 = r.next()
-        val f_field = if raw22 == "\\N": nil else: flat_pool_unescape(raw22)
-        return HirExprKind.OptionalChain(f_base, f_field)
+        val wire_nil_field = raw22 == "\\N"
+        val f_field = if wire_nil_field: "" else: flat_pool_unescape(raw22)
+        val wire_prototype = HirExprKind.OptionalChain(f_base, f_field)
+        if wire_nil_field:
+            if not r.reserve(96): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_field: wire_nil_slots.push(1)
+            return hc_restore_enum_nil(r, wire_prototype, 2, wire_nil_slots)
+        return wire_prototype
     if tag == 18:
         var f_left: HirExpr? = nil
         if r.next_i64() == 1:
@@ -2974,7 +3044,8 @@ fn hc_dec_hir_expr_kind(r: FlatPoolReader) -> HirExprKind:
         if r.next_i64() == 1:
             f_receiver = hc_dec_hir_expr(r)
         val raw25 = r.next()
-        val f_method = if raw25 == "\\N": nil else: flat_pool_unescape(raw25)
+        val wire_nil_method = raw25 == "\\N"
+        val f_method = if wire_nil_method: "" else: flat_pool_unescape(raw25)
         var f_args: [HirCallArg] = []
         val n26 = r.next_len()
         var i26 = 0
@@ -2987,13 +3058,20 @@ fn hc_dec_hir_expr_kind(r: FlatPoolReader) -> HirExprKind:
         var f_resolution: MethodResolution? = nil
         if r.next_i64() == 1:
             f_resolution = hc_dec_method_resolution(r)
-        return HirExprKind.MethodCall(f_receiver, f_method, f_args, f_resolution)
+        val wire_prototype = HirExprKind.MethodCall(f_receiver, f_method, f_args, f_resolution)
+        if wire_nil_method:
+            if not r.reserve(128): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_method: wire_nil_slots.push(1)
+            return hc_restore_enum_nil(r, wire_prototype, 4, wire_nil_slots)
+        return wire_prototype
     if tag == 25:
         var f_type_: HirType? = nil
         if r.next_i64() == 1:
             f_type_ = hc_dec_hir_type(r)
         val raw27 = r.next()
-        val f_method = if raw27 == "\\N": nil else: flat_pool_unescape(raw27)
+        val wire_nil_method = raw27 == "\\N"
+        val f_method = if wire_nil_method: "" else: flat_pool_unescape(raw27)
         var f_args: [HirCallArg] = []
         val n28 = r.next_len()
         var i28 = 0
@@ -3006,7 +3084,13 @@ fn hc_dec_hir_expr_kind(r: FlatPoolReader) -> HirExprKind:
         var f_resolution: MethodResolution? = nil
         if r.next_i64() == 1:
             f_resolution = hc_dec_method_resolution(r)
-        return HirExprKind.StaticCall(f_type_, f_method, f_args, f_resolution)
+        val wire_prototype = HirExprKind.StaticCall(f_type_, f_method, f_args, f_resolution)
+        if wire_nil_method:
+            if not r.reserve(128): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_method: wire_nil_slots.push(1)
+            return hc_restore_enum_nil(r, wire_prototype, 4, wire_nil_slots)
+        return wire_prototype
     if tag == 26:
         var f_cond: HirExpr? = nil
         if r.next_i64() == 1:
@@ -3155,14 +3239,21 @@ fn hc_dec_hir_expr_kind(r: FlatPoolReader) -> HirExprKind:
         return HirExprKind.Return(f_value)
     if tag == 37:
         val raw45 = r.next()
-        val f_label = if raw45 == "\\N": nil else: flat_pool_unescape(raw45)
+        val wire_nil_label = raw45 == "\\N"
+        val f_label = if wire_nil_label: "" else: flat_pool_unescape(raw45)
         var f_value: HirExpr? = nil
         if r.next_i64() == 1:
             var ov46: HirExpr? = nil
             if r.next_i64() == 1:
                 ov46 = hc_dec_hir_expr(r)
             f_value = Some(ov46)
-        return HirExprKind.Break(f_label, f_value)
+        val wire_prototype = HirExprKind.Break(f_label, f_value)
+        if wire_nil_label:
+            if not r.reserve(96): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_label: wire_nil_slots.push(0)
+            return hc_restore_enum_nil(r, wire_prototype, 2, wire_nil_slots)
+        return wire_prototype
     if tag == 38:
         var f_label: text? = nil
         if r.next_i64() == 1:
@@ -3214,14 +3305,21 @@ fn hc_dec_hir_expr_kind(r: FlatPoolReader) -> HirExprKind:
         if r.next_i64() == 1:
             f_type_ = hc_dec_hir_type(r)
         val raw52 = r.next()
-        val f_variant = if raw52 == "\\N": nil else: flat_pool_unescape(raw52)
+        val wire_nil_variant = raw52 == "\\N"
+        val f_variant = if wire_nil_variant: "" else: flat_pool_unescape(raw52)
         var f_payload: HirEnumPayload? = nil
         if r.next_i64() == 1:
             var ov53: HirEnumPayload? = nil
             if r.next_i64() == 1:
                 ov53 = hc_dec_hir_enum_payload(r)
             f_payload = Some(ov53)
-        return HirExprKind.EnumLit(f_type_, f_variant, f_payload)
+        val wire_prototype = HirExprKind.EnumLit(f_type_, f_variant, f_payload)
+        if wire_nil_variant:
+            if not r.reserve(112): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_variant: wire_nil_slots.push(1)
+            return hc_restore_enum_nil(r, wire_prototype, 3, wire_nil_slots)
+        return wire_prototype
     if tag == 45:
         var f_expr: HirExpr? = nil
         if r.next_i64() == 1:
@@ -3260,14 +3358,21 @@ fn hc_dec_hir_expr_kind(r: FlatPoolReader) -> HirExprKind:
                 ov55 = hc_dec_hir_expr(r)
             f_end = Some(ov55)
         val raw56 = r.next()
-        val f_inclusive = if raw56 == "N": nil else: raw56 == "1"
+        val wire_nil_inclusive = raw56 == "N"
+        val f_inclusive = raw56 == "1"
         var f_step: HirExpr? = nil
         if r.next_i64() == 1:
             var ov57: HirExpr? = nil
             if r.next_i64() == 1:
                 ov57 = hc_dec_hir_expr(r)
             f_step = Some(ov57)
-        return HirExprKind.Range(f_start, f_end, f_inclusive, f_step)
+        val wire_prototype = HirExprKind.Range(f_start, f_end, f_inclusive, f_step)
+        if wire_nil_inclusive:
+            if not r.reserve(128): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_inclusive: wire_nil_slots.push(2)
+            return hc_restore_enum_nil(r, wire_prototype, 4, wire_nil_slots)
+        return wire_prototype
     if tag == 49:
         var f_kind: HirComprehensionKind? = nil
         if r.next_i64() == 1:
@@ -3287,11 +3392,18 @@ fn hc_dec_hir_expr_kind(r: FlatPoolReader) -> HirExprKind:
         return HirExprKind.Comprehension(f_kind, f_expr, f_clauses)
     if tag == 50:
         val raw59 = r.next()
-        val f_kind = if raw59 == "\\N": nil else: flat_pool_unescape(raw59)
+        val wire_nil_kind = raw59 == "\\N"
+        val f_kind = if wire_nil_kind: "" else: flat_pool_unescape(raw59)
         var f_value: BlockValue? = nil
         if r.next_i64() == 1:
             f_value = hc_dec_opaque_block_value(r)
-        return HirExprKind.CustomBlock(f_kind, f_value)
+        val wire_prototype = HirExprKind.CustomBlock(f_kind, f_value)
+        if wire_nil_kind:
+            if not r.reserve(96): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_kind: wire_nil_slots.push(0)
+            return hc_restore_enum_nil(r, wire_prototype, 2, wire_nil_slots)
+        return wire_prototype
     if tag == 51:
         var f_body: HirBlock? = nil
         if r.next_i64() == 1:
@@ -3330,8 +3442,15 @@ fn hc_dec_hir_expr_kind(r: FlatPoolReader) -> HirExprKind:
         if r.next_i64() == 1:
             f_value = hc_dec_hir_expr(r)
         val raw61 = r.next()
-        val f_type_name = if raw61 == "\\N": nil else: flat_pool_unescape(raw61)
-        return HirExprKind.TypeTest(f_value, f_type_name)
+        val wire_nil_type_name = raw61 == "\\N"
+        val f_type_name = if wire_nil_type_name: "" else: flat_pool_unescape(raw61)
+        val wire_prototype = HirExprKind.TypeTest(f_value, f_type_name)
+        if wire_nil_type_name:
+            if not r.reserve(96): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_type_name: wire_nil_slots.push(1)
+            return hc_restore_enum_nil(r, wire_prototype, 2, wire_nil_slots)
+        return wire_prototype
     if tag == 58:
         var f_body: HirBlock? = nil
         if r.next_i64() == 1:
@@ -3354,13 +3473,20 @@ fn hc_dec_hir_expr_kind(r: FlatPoolReader) -> HirExprKind:
         return HirExprKind.TryCatch(f_body, f_clauses, f_finally_)
     if tag == 59:
         val raw64 = r.next()
-        val f_value = if raw64 == "\\N": nil else: flat_pool_unescape(raw64)
+        val wire_nil_value = raw64 == "\\N"
+        val f_value = if wire_nil_value: "" else: flat_pool_unescape(raw64)
         var f_suffix: text? = nil
         if r.next_i64() == 1:
             val raw66 = r.next()
             val ov65 = if raw66 == "\\N": nil else: flat_pool_unescape(raw66)
             f_suffix = Some(ov65)
-        return HirExprKind.FloatLexeme(f_value, f_suffix)
+        val wire_prototype = HirExprKind.FloatLexeme(f_value, f_suffix)
+        if wire_nil_value:
+            if not r.reserve(96): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_value: wire_nil_slots.push(0)
+            return hc_restore_enum_nil(r, wire_prototype, 2, wire_nil_slots)
+        return wire_prototype
     hc_bad_tag("HirExprKind", tag)
     hc_dec_hir_expr_kind(r)
 
@@ -4555,7 +4681,7 @@ fn hc_enc_hir_pattern_kind(w: HirCodecWriter, node: HirPatternKind):
             else:
                 w.put_i64(1)
                 hc_enc_symbol_id(w, b_symbol)
-            w.put_bool(b_mutable)
+            hc_enc_enum_bool(w, node, 2, 1, b_mutable)
         case HirPatternKind.Tuple(b_elements):
             w.put_i64(3)
             w.put_i64(if b_elements == nil: 0 else: b_elements.len())
@@ -4605,7 +4731,7 @@ fn hc_enc_hir_pattern_kind(w: HirCodecWriter, node: HirPatternKind):
             else:
                 w.put_i64(1)
                 hc_enc_hir_type(w, b_type_)
-            w.put_text(b_variant)
+            hc_enc_enum_text(w, node, 3, 1, b_variant)
             if val o4 = b_payload:
                 w.put_i64(1)
                 if o4 == nil:
@@ -4636,19 +4762,19 @@ fn hc_enc_hir_pattern_kind(w: HirCodecWriter, node: HirPatternKind):
             else:
                 w.put_i64(1)
                 hc_enc_hir_expr(w, b_end)
-            w.put_bool(b_inclusive)
+            hc_enc_enum_bool(w, node, 3, 2, b_inclusive)
         case HirPatternKind.Error:
             w.put_i64(9)
         case HirPatternKind.CompleteRegion(b_binder):
             w.put_i64(10)
-            w.put_text(b_binder)
+            hc_enc_enum_text(w, node, 1, 0, b_binder)
         case HirPatternKind.DynRegion(b_binder):
             w.put_i64(11)
-            w.put_text(b_binder)
+            hc_enc_enum_text(w, node, 1, 0, b_binder)
         case HirPatternKind.TypeTest(b_type_name, b_binder):
             w.put_i64(12)
-            w.put_text(b_type_name)
-            w.put_text(b_binder)
+            hc_enc_enum_text(w, node, 2, 0, b_type_name)
+            hc_enc_enum_text(w, node, 2, 1, b_binder)
         case _: w.reject("unencodable HirPatternKind enum")
 
 fn hc_dec_hir_pattern_kind(r: FlatPoolReader) -> HirPatternKind:
@@ -4665,8 +4791,15 @@ fn hc_dec_hir_pattern_kind(r: FlatPoolReader) -> HirPatternKind:
         if r.next_i64() == 1:
             f_symbol = hc_dec_symbol_id(r)
         val raw0 = r.next()
-        val f_mutable = if raw0 == "N": nil else: raw0 == "1"
-        return HirPatternKind.Binding(f_symbol, f_mutable)
+        val wire_nil_mutable = raw0 == "N"
+        val f_mutable = raw0 == "1"
+        val wire_prototype = HirPatternKind.Binding(f_symbol, f_mutable)
+        if wire_nil_mutable:
+            if not r.reserve(96): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_mutable: wire_nil_slots.push(1)
+            return hc_restore_enum_nil(r, wire_prototype, 2, wire_nil_slots)
+        return wire_prototype
     if tag == 3:
         var f_elements: [HirPattern] = []
         val n1 = r.next_len()
@@ -4716,14 +4849,21 @@ fn hc_dec_hir_pattern_kind(r: FlatPoolReader) -> HirPatternKind:
         if r.next_i64() == 1:
             f_type_ = hc_dec_hir_type(r)
         val raw6 = r.next()
-        val f_variant = if raw6 == "\\N": nil else: flat_pool_unescape(raw6)
+        val wire_nil_variant = raw6 == "\\N"
+        val f_variant = if wire_nil_variant: "" else: flat_pool_unescape(raw6)
         var f_payload: HirPatternPayload? = nil
         if r.next_i64() == 1:
             var ov7: HirPatternPayload? = nil
             if r.next_i64() == 1:
                 ov7 = hc_dec_hir_pattern_payload(r)
             f_payload = Some(ov7)
-        return HirPatternKind.Enum(f_type_, f_variant, f_payload)
+        val wire_prototype = HirPatternKind.Enum(f_type_, f_variant, f_payload)
+        if wire_nil_variant:
+            if not r.reserve(112): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_variant: wire_nil_slots.push(1)
+            return hc_restore_enum_nil(r, wire_prototype, 3, wire_nil_slots)
+        return wire_prototype
     if tag == 7:
         var f_patterns: [HirPattern] = []
         val n8 = r.next_len()
@@ -4743,24 +4883,54 @@ fn hc_dec_hir_pattern_kind(r: FlatPoolReader) -> HirPatternKind:
         if r.next_i64() == 1:
             f_end = hc_dec_hir_expr(r)
         val raw9 = r.next()
-        val f_inclusive = if raw9 == "N": nil else: raw9 == "1"
-        return HirPatternKind.Range(f_start, f_end, f_inclusive)
+        val wire_nil_inclusive = raw9 == "N"
+        val f_inclusive = raw9 == "1"
+        val wire_prototype = HirPatternKind.Range(f_start, f_end, f_inclusive)
+        if wire_nil_inclusive:
+            if not r.reserve(112): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_inclusive: wire_nil_slots.push(2)
+            return hc_restore_enum_nil(r, wire_prototype, 3, wire_nil_slots)
+        return wire_prototype
     if tag == 9:
         return HirPatternKind.Error
     if tag == 10:
         val raw10 = r.next()
-        val f_binder = if raw10 == "\\N": nil else: flat_pool_unescape(raw10)
-        return HirPatternKind.CompleteRegion(f_binder)
+        val wire_nil_binder = raw10 == "\\N"
+        val f_binder = if wire_nil_binder: "" else: flat_pool_unescape(raw10)
+        val wire_prototype = HirPatternKind.CompleteRegion(f_binder)
+        if wire_nil_binder:
+            if not r.reserve(80): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_binder: wire_nil_slots.push(0)
+            return hc_restore_enum_nil(r, wire_prototype, 1, wire_nil_slots)
+        return wire_prototype
     if tag == 11:
         val raw11 = r.next()
-        val f_binder = if raw11 == "\\N": nil else: flat_pool_unescape(raw11)
-        return HirPatternKind.DynRegion(f_binder)
+        val wire_nil_binder = raw11 == "\\N"
+        val f_binder = if wire_nil_binder: "" else: flat_pool_unescape(raw11)
+        val wire_prototype = HirPatternKind.DynRegion(f_binder)
+        if wire_nil_binder:
+            if not r.reserve(80): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_binder: wire_nil_slots.push(0)
+            return hc_restore_enum_nil(r, wire_prototype, 1, wire_nil_slots)
+        return wire_prototype
     if tag == 12:
         val raw12 = r.next()
-        val f_type_name = if raw12 == "\\N": nil else: flat_pool_unescape(raw12)
+        val wire_nil_type_name = raw12 == "\\N"
+        val f_type_name = if wire_nil_type_name: "" else: flat_pool_unescape(raw12)
         val raw13 = r.next()
-        val f_binder = if raw13 == "\\N": nil else: flat_pool_unescape(raw13)
-        return HirPatternKind.TypeTest(f_type_name, f_binder)
+        val wire_nil_binder = raw13 == "\\N"
+        val f_binder = if wire_nil_binder: "" else: flat_pool_unescape(raw13)
+        val wire_prototype = HirPatternKind.TypeTest(f_type_name, f_binder)
+        if wire_nil_type_name or wire_nil_binder:
+            if not r.reserve(96): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_type_name: wire_nil_slots.push(0)
+            if wire_nil_binder: wire_nil_slots.push(1)
+            return hc_restore_enum_nil(r, wire_prototype, 2, wire_nil_slots)
+        return wire_prototype
     hc_bad_tag("HirPatternKind", tag)
     hc_dec_hir_pattern_kind(r)
 
@@ -5402,7 +5572,7 @@ fn hc_enc_hir_type_kind(w: HirCodecWriter, node: HirTypeKind):
         case HirTypeKind.Int(b_bits, b_signed):
             w.put_i64(0)
             w.put_i64(b_bits)
-            w.put_bool(b_signed)
+            hc_enc_enum_bool(w, node, 2, 1, b_signed)
         case HirTypeKind.Float(b_bits):
             w.put_i64(1)
             w.put_i64(b_bits)
@@ -5461,7 +5631,7 @@ fn hc_enc_hir_type_kind(w: HirCodecWriter, node: HirTypeKind):
             else:
                 w.put_i64(1)
                 hc_enc_hir_type(w, b_inner)
-            w.put_bool(b_mutable)
+            hc_enc_enum_bool(w, node, 2, 1, b_mutable)
         case HirTypeKind.Ptr(b_inner, b_mutable):
             w.put_i64(11)
             if not b_inner.?:
@@ -5469,7 +5639,7 @@ fn hc_enc_hir_type_kind(w: HirCodecWriter, node: HirTypeKind):
             else:
                 w.put_i64(1)
                 hc_enc_hir_type(w, b_inner)
-            w.put_bool(b_mutable)
+            hc_enc_enum_bool(w, node, 2, 1, b_mutable)
         case HirTypeKind.Optional(b_inner):
             w.put_i64(12)
             if not b_inner.?:
@@ -5505,7 +5675,7 @@ fn hc_enc_hir_type_kind(w: HirCodecWriter, node: HirTypeKind):
                     hc_enc_hir_type(w, e2)
         case HirTypeKind.TypeParam(b_name, b_bounds):
             w.put_i64(15)
-            w.put_text(b_name)
+            hc_enc_enum_text(w, node, 2, 0, b_name)
             w.put_i64(if b_bounds == nil: 0 else: b_bounds.len())
             for e3 in (b_bounds ?? []):
                 if not e3.?:
@@ -5557,7 +5727,7 @@ fn hc_enc_hir_type_kind(w: HirCodecWriter, node: HirTypeKind):
             else:
                 w.put_i64(1)
                 hc_enc_hir_type(w, b_base)
-            w.put_text(b_assoc_name)
+            hc_enc_enum_text(w, node, 2, 1, b_assoc_name)
         case HirTypeKind.Isolated(b_inner):
             w.put_i64(20)
             if not b_inner.?:
@@ -5622,8 +5792,15 @@ fn hc_dec_hir_type_kind(r: FlatPoolReader) -> HirTypeKind:
         val raw0 = r.next()
         val f_bits = if raw0 == "N": nil else: flat_pool_parse_i64(raw0)
         val raw1 = r.next()
-        val f_signed = if raw1 == "N": nil else: raw1 == "1"
-        return HirTypeKind.Int(f_bits, f_signed)
+        val wire_nil_signed = raw1 == "N"
+        val f_signed = raw1 == "1"
+        val wire_prototype = HirTypeKind.Int(f_bits, f_signed)
+        if wire_nil_signed:
+            if not r.reserve(96): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_signed: wire_nil_slots.push(1)
+            return hc_restore_enum_nil(r, wire_prototype, 2, wire_nil_slots)
+        return wire_prototype
     if tag == 1:
         val raw2 = r.next()
         val f_bits = if raw2 == "N": nil else: flat_pool_parse_i64(raw2)
@@ -5675,15 +5852,29 @@ fn hc_dec_hir_type_kind(r: FlatPoolReader) -> HirTypeKind:
         if r.next_i64() == 1:
             f_inner = hc_dec_hir_type(r)
         val raw6 = r.next()
-        val f_mutable = if raw6 == "N": nil else: raw6 == "1"
-        return HirTypeKind.Ref(f_inner, f_mutable)
+        val wire_nil_mutable = raw6 == "N"
+        val f_mutable = raw6 == "1"
+        val wire_prototype = HirTypeKind.Ref(f_inner, f_mutable)
+        if wire_nil_mutable:
+            if not r.reserve(96): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_mutable: wire_nil_slots.push(1)
+            return hc_restore_enum_nil(r, wire_prototype, 2, wire_nil_slots)
+        return wire_prototype
     if tag == 11:
         var f_inner: HirType? = nil
         if r.next_i64() == 1:
             f_inner = hc_dec_hir_type(r)
         val raw7 = r.next()
-        val f_mutable = if raw7 == "N": nil else: raw7 == "1"
-        return HirTypeKind.Ptr(f_inner, f_mutable)
+        val wire_nil_mutable = raw7 == "N"
+        val f_mutable = raw7 == "1"
+        val wire_prototype = HirTypeKind.Ptr(f_inner, f_mutable)
+        if wire_nil_mutable:
+            if not r.reserve(96): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_mutable: wire_nil_slots.push(1)
+            return hc_restore_enum_nil(r, wire_prototype, 2, wire_nil_slots)
+        return wire_prototype
     if tag == 12:
         var f_inner: HirType? = nil
         if r.next_i64() == 1:
@@ -5713,7 +5904,8 @@ fn hc_dec_hir_type_kind(r: FlatPoolReader) -> HirTypeKind:
         return HirTypeKind.Named(f_symbol, f_args)
     if tag == 15:
         val raw9 = r.next()
-        val f_name = if raw9 == "\\N": nil else: flat_pool_unescape(raw9)
+        val wire_nil_name = raw9 == "\\N"
+        val f_name = if wire_nil_name: "" else: flat_pool_unescape(raw9)
         var f_bounds: [HirType] = []
         val n10 = r.next_len()
         var i10 = 0
@@ -5723,7 +5915,13 @@ fn hc_dec_hir_type_kind(r: FlatPoolReader) -> HirTypeKind:
                 ev10 = hc_dec_hir_type(r)
             f_bounds.push(ev10)
             i10 = i10 + 1
-        return HirTypeKind.TypeParam(f_name, f_bounds)
+        val wire_prototype = HirTypeKind.TypeParam(f_name, f_bounds)
+        if wire_nil_name:
+            if not r.reserve(96): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_name: wire_nil_slots.push(0)
+            return hc_restore_enum_nil(r, wire_prototype, 2, wire_nil_slots)
+        return wire_prototype
     if tag == 16:
         var f_members: [HirType] = []
         val n11 = r.next_len()
@@ -5768,8 +5966,15 @@ fn hc_dec_hir_type_kind(r: FlatPoolReader) -> HirTypeKind:
         if r.next_i64() == 1:
             f_base = hc_dec_hir_type(r)
         val raw14 = r.next()
-        val f_assoc_name = if raw14 == "\\N": nil else: flat_pool_unescape(raw14)
-        return HirTypeKind.Projection(f_base, f_assoc_name)
+        val wire_nil_assoc_name = raw14 == "\\N"
+        val f_assoc_name = if wire_nil_assoc_name: "" else: flat_pool_unescape(raw14)
+        val wire_prototype = HirTypeKind.Projection(f_base, f_assoc_name)
+        if wire_nil_assoc_name:
+            if not r.reserve(96): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_assoc_name: wire_nil_slots.push(1)
+            return hc_restore_enum_nil(r, wire_prototype, 2, wire_nil_slots)
+        return wire_prototype
     if tag == 20:
         var f_inner: HirType? = nil
         if r.next_i64() == 1:
@@ -6725,7 +6930,7 @@ fn hc_enc_type_kind(w: HirCodecWriter, node: TypeKind):
     match node:
         case TypeKind.Named(b_f0, b_f1):
             w.put_i64(0)
-            w.put_text(b_f0)
+            hc_enc_enum_text(w, node, 2, 0, b_f0)
             w.put_i64(if b_f1 == nil: 0 else: b_f1.len())
             for e0 in (b_f1 ?? []):
                 if not e0.?:
@@ -6786,7 +6991,7 @@ fn hc_enc_type_kind(w: HirCodecWriter, node: TypeKind):
             else:
                 w.put_i64(1)
                 hc_enc_type(w, b_f0)
-            w.put_bool(b_f1)
+            hc_enc_enum_bool(w, node, 2, 1, b_f1)
         case TypeKind.Atomic(b_f0):
             w.put_i64(6)
             if not b_f0.?:
@@ -6817,7 +7022,7 @@ fn hc_enc_type_kind(w: HirCodecWriter, node: TypeKind):
             else:
                 w.put_i64(1)
                 hc_enc_type(w, b_f0)
-            w.put_text(b_f1)
+            hc_enc_enum_text(w, node, 2, 1, b_f1)
         case TypeKind.Infer:
             w.put_i64(10)
         case TypeKind.Error:
@@ -6829,7 +7034,7 @@ fn hc_enc_type_kind(w: HirCodecWriter, node: TypeKind):
             else:
                 w.put_i64(1)
                 hc_enc_type(w, b_f0)
-            w.put_bool(b_f1)
+            hc_enc_enum_bool(w, node, 2, 1, b_f1)
         case TypeKind.Weak(b_f0):
             w.put_i64(13)
             if not b_f0.?:
@@ -6843,7 +7048,8 @@ fn hc_dec_type_kind(r: FlatPoolReader) -> TypeKind:
     val tag = r.next_i64()
     if tag == 0:
         val raw0 = r.next()
-        val f_f0 = if raw0 == "\\N": nil else: flat_pool_unescape(raw0)
+        val wire_nil_f0 = raw0 == "\\N"
+        val f_f0 = if wire_nil_f0: "" else: flat_pool_unescape(raw0)
         var f_f1: [Type] = []
         val n1 = r.next_len()
         var i1 = 0
@@ -6853,7 +7059,13 @@ fn hc_dec_type_kind(r: FlatPoolReader) -> TypeKind:
                 ev1 = hc_dec_type(r)
             f_f1.push(ev1)
             i1 = i1 + 1
-        return TypeKind.Named(f_f0, f_f1)
+        val wire_prototype = TypeKind.Named(f_f0, f_f1)
+        if wire_nil_f0:
+            if not r.reserve(96): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_f0: wire_nil_slots.push(0)
+            return hc_restore_enum_nil(r, wire_prototype, 2, wire_nil_slots)
+        return wire_prototype
     if tag == 1:
         var f_f0: [Type] = []
         val n2 = r.next_len()
@@ -6900,8 +7112,15 @@ fn hc_dec_type_kind(r: FlatPoolReader) -> TypeKind:
         if r.next_i64() == 1:
             f_f0 = hc_dec_type(r)
         val raw5 = r.next()
-        val f_f1 = if raw5 == "N": nil else: raw5 == "1"
-        return TypeKind.Reference(f_f0, f_f1)
+        val wire_nil_f1 = raw5 == "N"
+        val f_f1 = raw5 == "1"
+        val wire_prototype = TypeKind.Reference(f_f0, f_f1)
+        if wire_nil_f1:
+            if not r.reserve(96): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_f1: wire_nil_slots.push(1)
+            return hc_restore_enum_nil(r, wire_prototype, 2, wire_nil_slots)
+        return wire_prototype
     if tag == 6:
         var f_f0: Type? = nil
         if r.next_i64() == 1:
@@ -6928,8 +7147,15 @@ fn hc_dec_type_kind(r: FlatPoolReader) -> TypeKind:
         if r.next_i64() == 1:
             f_f0 = hc_dec_type(r)
         val raw7 = r.next()
-        val f_f1 = if raw7 == "\\N": nil else: flat_pool_unescape(raw7)
-        return TypeKind.Projection(f_f0, f_f1)
+        val wire_nil_f1 = raw7 == "\\N"
+        val f_f1 = if wire_nil_f1: "" else: flat_pool_unescape(raw7)
+        val wire_prototype = TypeKind.Projection(f_f0, f_f1)
+        if wire_nil_f1:
+            if not r.reserve(96): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_f1: wire_nil_slots.push(1)
+            return hc_restore_enum_nil(r, wire_prototype, 2, wire_nil_slots)
+        return wire_prototype
     if tag == 10:
         return TypeKind.Infer
     if tag == 11:
@@ -6939,8 +7165,15 @@ fn hc_dec_type_kind(r: FlatPoolReader) -> TypeKind:
         if r.next_i64() == 1:
             f_f0 = hc_dec_type(r)
         val raw8 = r.next()
-        val f_f1 = if raw8 == "N": nil else: raw8 == "1"
-        return TypeKind.Pointer(f_f0, f_f1)
+        val wire_nil_f1 = raw8 == "N"
+        val f_f1 = raw8 == "1"
+        val wire_prototype = TypeKind.Pointer(f_f0, f_f1)
+        if wire_nil_f1:
+            if not r.reserve(96): return nil
+            var wire_nil_slots: [i64] = []
+            if wire_nil_f1: wire_nil_slots.push(1)
+            return hc_restore_enum_nil(r, wire_prototype, 2, wire_nil_slots)
+        return wire_prototype
     if tag == 13:
         var f_f0: Type? = nil
         if r.next_i64() == 1:
