@@ -50,9 +50,57 @@ fn native_source_interface_index_build_v1(
     var digest_count = 0
     for path in paths:
         val content = sources[representatives[path]].content
-        if ambiguous.has(path) or path == "" or content == "":
+        if path == "" or content == "":
             facts[path] = NativeSourceInterfaceFactV1(path, "", "", false,
-                "ambiguous-dependency-source")
+                "ambiguous-dependency-source:{path}")
+        elif ambiguous.has(path):
+            # Duplicated authored path with DIFFERING bytes (a snapshot twin,
+            # a wrapped/unwrapped admission pair, or a double admission of the
+            # same logical file). Measured 2026-10-16 on the manual stage3
+            # per-module object sweep: this invalidated the stored witness of
+            # a large share of closure modules (lib.common.crypto.sha256,
+            # lib.scv.delta, lib.nogc_sync_mut.io.process_ops, ...) and, with
+            # the per-run uncacheable ABI identity, pinned "reused 0 modules;
+            # rebuilt N" on every compile -- each per-module compile re-ran
+            # MIR+codegen for its entire closure (~2-5 min; the 1299-module
+            # entry alone parsed 118/1299 files in 767s before its 600s
+            # timeout), making the manual stage3 object sweep days slower.
+            #
+            # The witness must describe what the compile ACTUALLY consumed,
+            # and phase 1 already retains exactly that: the owner-copy loop
+            # keeps ONE content per physical path and captures its sha256 in
+            # the identity owner this digest map projects. Resolve the
+            # duplicate to the copy whose bytes match that retained identity;
+            # the interface digest then binds to the admitted content, which
+            # is precisely the security intent (reuse only when the exact
+            # compiled inputs match). A duplicate where NO copy matches the
+            # retained identity is a genuine admission inconsistency
+            # (tampering or a reclaimed-body capture): stay invalid, now
+            # NAMING the path so the receipt points at the culprit instead of
+            # a generic reason.
+            val retained = if captured_digests.has(path): captured_digests[path] else: ""
+            var resolved_index = -1
+            if retained != "":
+                var scan_i = 0
+                while scan_i < sources.len():
+                    val scan_path = if sources[scan_i].authored_path == "":
+                        sources[scan_i].path
+                    else:
+                        sources[scan_i].authored_path
+                    if scan_path == path and
+                            sha256_text(sources[scan_i].content) == retained:
+                        resolved_index = scan_i
+                        break
+                    scan_i = scan_i + 1
+            if resolved_index < 0:
+                facts[path] = NativeSourceInterfaceFactV1(path, "", "", false,
+                    "ambiguous-dependency-source:{path}")
+            else:
+                val resolved_content = sources[resolved_index].content
+                val source_digest = if captured_digests.has(path): captured_digests[path] else: sha256_text(resolved_content)
+                facts[path] = NativeSourceInterfaceFactV1(path,
+                    source_digest, interface_digest_of_source(resolved_content), true, "ok")
+                digest_count = digest_count + 1
         else:
             # The supplied digest map is a projection of the existing phase1
             # source owner, not a caller-provided metadata admission shortcut.
