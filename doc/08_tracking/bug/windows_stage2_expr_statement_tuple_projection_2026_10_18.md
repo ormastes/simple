@@ -48,3 +48,25 @@ The original MIR-retention fixture remains the required regression gate.
 The same producer separately compiled and ran real Hello successfully; receipts
 are in `build/smux-astra-oct18/hello-build.job.env` and `hello-run.job.env` in
 the NEXT worktree. That qualifies the diagnostic producer only, not this fix.
+
+## Independent Windows TCP dependency correlation
+
+A six-module capsule of the real Windows TCP-owner fixture, copied byte-for-byte
+from frozen source `c544617c359118efbbb4f3143bfaa75fa21597b8`, also failed under
+that exact rejected producer. It used the concrete `src/lib` owners, normal
+HIR caching and BOOTSTRAP=0. This diagnostic does not qualify provider-overlay
+selection or source-matched bootstrap admission.
+
+The first-AV capture identifies `lib.nogc_sync_mut.io.volatile_ops` as the
+claimed HIR module. Its fault RVA `0x2b8d19`, zero RAX and next three frames
+`0x2b77ca`, `0x2b2352`, `0x2b3452` exactly match the retention capture. The
+existing relocation-masked object mapping therefore applies to this crash too.
+The watchdog recorded peak RSS 977,648 KiB, a 5,859,375 KiB limit, a 180-second
+bound and quiescent processes after capture. CDB exit zero records capture only.
+
+Evidence is retained under
+`D:/dev/simple-smux-next-20261017/build/smux-astra-oct18/tcp-check/cdb`, including
+`correlation.md`, `cdb.log` and `tcp-av.dmp`; capsule identity is
+`cb1aeaf98235b7206605aee27085231841c05cc7`. The separate windows_tcp HIR crash
+and successful rebuilt-producer execution remain unverified. No TCP executable
+was produced or run by these diagnostic attempts.
