@@ -547,6 +547,7 @@ stage2_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_BINARY=$(stage2_env_value SIMPLE_BINARY)" \
   ${stage2_recorded_cold_init:+"SIMPLE_SCV_INVENTORY_COLD_INIT=$stage2_recorded_cold_init"} \
   ${stage2_recorded_compiler_ceiling:+"SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$stage2_recorded_compiler_ceiling"} \
+  ${stage2_preflight_context:+"SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1=$stage2_preflight_context"} \
   ${stage2_recorded_diagnostics} \
   "$@") || exit 1
 bootstrap_stage3_verify_sanity_evidence_receipt \
