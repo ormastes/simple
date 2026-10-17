@@ -3,6 +3,10 @@
 # lowered functions and feeds it once per compilation.
 
 use compiler.hir.hir_types.*
+# Codec transport for the validation lane (cycle-78r3): HirModule is too large
+# for ANY element transport (dict reads, array rebinds all arrive erased); the
+# encoded-bytes round trip is the proven carrier.
+use compiler.hir.hir_codec.{hir_module_decode}
 use compiler.hir.hir_definitions.*
 use compiler.semantics.effect_validation.{effect_block_loops, effect_block_callees}
 use compiler.semantics.effect_verifier.{LOOP_BOUND_NONE}
@@ -720,6 +724,22 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
     val ordered = rt_sort_criticality_diagnostics(diagnostics)
     ordered
 
+fn validate_rt_criticality_diagnostics_blobs(blobs: [text], fallback: [HirModule]) -> [RtCriticalDiagnostic]:
+    """Decode-and-validate entry (cycle-78r3). Encoded module bytes are the
+    only transport that preserves a HirModule-sized struct; decode rebuilds
+    genuine structs via the allocator, bypassing every erased element path.
+    Falls back to the array entry when no blobs were threaded."""
+    if blobs.len() == 0:
+        return validate_rt_criticality_diagnostics_array(fallback)
+    var modules_list: [HirModule] = []
+    for raw_blob in blobs:
+        # [text] element: scalar transport; decode allocates a fresh module.
+        val blob: text = raw_blob
+        if val decoded = hir_module_decode(blob):
+            val restored: HirModule = decoded
+            modules_list.push(restored)
+    validate_rt_criticality_diagnostics_array(modules_list)
+
 fn validate_rt_criticality_diagnostics_array(modules_list: [HirModule]) -> [RtCriticalDiagnostic]:
     """Array-handoff variant (cycle-76): Dict<text, HirModule> value reads
     arrive erased through every read pattern (.values rebind, keys()+[]);
@@ -786,6 +806,7 @@ fn validate_rt_criticality(modules: Dict<text, HirModule>) -> [text]:
 export validate_rt_criticality, rt_name_effects
 export validate_rt_criticality_diagnostics
 export validate_rt_criticality_diagnostics_array
+export validate_rt_criticality_diagnostics_blobs
 export rt_expr_allocates, rt_block_allocates
 export rt_expr_dispatches, rt_block_dispatches
 export rt_direct_callee_dispatches
