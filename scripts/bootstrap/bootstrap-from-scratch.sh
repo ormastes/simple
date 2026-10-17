@@ -5019,6 +5019,18 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # same explicit headroom as other production builders without changing
       # its 100 ms cadence or RSS ceiling.  Preserve a caller-selected value.
       SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS="${SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS:-10000}"
+      # The AST "expr env mirror" (nodes.spl expr_env_mirror_enabled) activates
+      # under SIMPLE_BOOTSTRAP=1 unless SIMPLE_NATIVE_ARENA_DECLS=1: every
+      # expression-node field write then setenv()s a mirror key, and the
+      # per-setenv environ scan makes parsing large sources (e.g. the 430 KB
+      # office/sheets/formula.spl, tens of thousands of nodes) take minutes
+      # per file. The HIR shard worker re-parses the whole closure and never
+      # reaches its first claim inside the row's 600 s internal timeout
+      # (BLOCKED exit=-2 claimed=0). The stage2 producer build already runs
+      # with SIMPLE_NATIVE_ARENA_DECLS=1 (stage2-command transcript); export
+      # the same flag here so the verification lane matches its producer.
+      SIMPLE_NATIVE_ARENA_DECLS="${SIMPLE_NATIVE_ARENA_DECLS:-1}"
+      export SIMPLE_NATIVE_ARENA_DECLS
       # Canonical source-derived tests consume their admitted producer, as in
       # run-release-stage2-qualified.shs. Explicit delegation remains opt-in and
       # subject to the phase verifier's existing real MC/DC waiver requirements.
