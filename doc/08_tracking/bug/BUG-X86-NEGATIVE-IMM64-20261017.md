@@ -1,6 +1,6 @@
 # BUG-X86-NEGATIVE-IMM64-20261017
 
-Date: 2026-10-17. Status: source fix drafted; native qualification UNRUN.
+Date: 2026-10-17. Status: focused native behavior PASS; broad qualification pending.
 Authoritative bug database reconciliation: pending (qualified DB tool unavailable).
 
 Owner: x86_64 native instruction encoder, `emit_i64_bytes`.
@@ -26,11 +26,29 @@ truncating division and signed remainder scenarios. The x86 selector also
 uses signed `idiv` for quotient/remainder.
 
 Regression source: `x86_negative_imm64_spec.spl`, nine scenarios including
-actual instruction encoding to RAX and R8; Simple execution UNRUN.
+actual instruction encoding to RAX and R8; dedicated BDD runner UNRUN.
 Host evidence: `host_integer_oracle.ps1` and `.log`, eight exact integer cases,
 three original counterexamples, corrected bytes match .NET signed-i64 bytes.
 This host oracle does not qualify the compiler or execute the Simple backend.
 
-No temporary workaround or ABI substitution was introduced. Existing
-workarounds must remain until this fix passes native qualification and any
-relevant reproducer. No commit, PR, merge or release has been performed.
+Focused qualification used the genuine co-located source project with the
+separately reviewed SIMD dependency fixes. MIR passed65/65 and emitted54 new
+AMD64 COFF objects. Automatic runtime source discovery then failed because
+that tiny project has no src/runtime; --runtime-path is an artifact/archive
+contract. Strict completion linked those54 new objects, the canonical hosted
+entry and38 hash-verified real C1 runtime objects without FORCE, fabricated
+stubs or old SPL object grafts. Actual map ownership resolves pow through UCRT.
+
+Exactly one native execution exited0 with the exact expected80-byte stdout:
+`X86 NEGATIVE IMM64 PROBE: PASS (12 byte-vector cases; 14 signed32 parser cases)`
+followed by LF; stderr was empty. It exercised all original ten immediate/MOV
+vectors plus both complete EVEX register arrays and fourteen parser cases.
+Executable pre/post SHA256:
+724f23e723bbc4ab8f9f77d57284f6d10f156c225f120d14a95ea884a81024bf.
+An exclusive ledger blocks repeat execution. No fourth SPL build occurred.
+
+The reused runtime pack has a disclosed historical transitive-header closure
+provenance gap; this diagnostic does not claim fresh runtime admission. Broad
+compiler/lib/MCP checks remain unrun, and the source PR remains a draft.
+No merge or release has occurred. Other workarounds remain owned separately.
+Evidence: C:/dev/simple-bootstrap-storage/phase3-validation-20261016/x86-negative-imm64-20261017/co-located-cycle3/strict-link.
