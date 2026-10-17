@@ -1,0 +1,98 @@
+"""Explicit native Unicode clipboard action; no automatic clipboard mutation."""
+use std.nogc_sync_mut.io.windows_console_codec.{windows_console_utf16_units_v1}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetLastError}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16}
+
+@unsafe(reason: "Win64 console-associated clipboard owner HWND", capabilities: [ffi])
+extern fn GetConsoleWindow() -> i64
+@unsafe(reason: "Win64 explicit interactive clipboard acquisition", capabilities: [ffi])
+extern fn OpenClipboard(window: i64) -> i32
+@unsafe(reason: "Win64 explicit interactive clipboard replacement", capabilities: [ffi])
+extern fn EmptyClipboard() -> i32
+@unsafe(reason: "Win64 clipboard data ownership transfer", capabilities: [ffi])
+extern fn SetClipboardData(format: u32, data: i64) -> i64
+@unsafe(reason: "Win64 owned clipboard release", capabilities: [ffi])
+extern fn CloseClipboard() -> i32
+@unsafe(reason: "Win64 movable zeroed clipboard storage", capabilities: [ffi, raw_ptr])
+extern fn GlobalAlloc(flags: u32, bytes: u64) -> i64
+@unsafe(reason: "Win64 movable storage address acquisition", capabilities: [ffi, raw_ptr])
+extern fn GlobalLock(memory: i64) -> i64
+@unsafe(reason: "Win64 movable storage unlock before ownership transfer", capabilities: [ffi])
+extern fn GlobalUnlock(memory: i64) -> i32
+@unsafe(reason: "Win64 untransferred clipboard storage release", capabilities: [ffi])
+extern fn GlobalFree(memory: i64) -> i64
+@unsafe(reason: "Win64 disambiguates successful final GlobalUnlock", capabilities: [ffi])
+extern fn SetLastError(error: u32)
+
+# Exclusive console thread owns this small failure-retry quarantine. A handle
+# transferred to SetClipboardData is never retained or freed by this owner.
+var _windows_clipboard_memory_v1: i64 = 0
+var _windows_clipboard_locked_v1: bool = false
+var _windows_clipboard_open_v1: bool = false
+
+@unsafe(reason: "retains failed releases and never frees clipboard-transferred memory", capabilities: [ffi])
+pub fn windows_clipboard_cleanup_v1() -> bool:
+    if _windows_clipboard_locked_v1:
+        SetLastError(0u32)
+        val unlocked = GlobalUnlock(_windows_clipboard_memory_v1)
+        if unlocked == 0 and GetLastError() == 0u32: _windows_clipboard_locked_v1 = false
+    if _windows_clipboard_memory_v1 != 0 and not _windows_clipboard_locked_v1:
+        if GlobalFree(_windows_clipboard_memory_v1) == 0: _windows_clipboard_memory_v1 = 0
+    if _windows_clipboard_open_v1:
+        if CloseClipboard() != 0: _windows_clipboard_open_v1 = false
+    _windows_clipboard_memory_v1 == 0 and not _windows_clipboard_locked_v1 and not _windows_clipboard_open_v1
+
+@unsafe(reason: "copies bounded full UTF16 and explicitly transfers global storage to Windows clipboard", capabilities: [ffi, raw_ptr])
+pub fn windows_clipboard_write_v1(value: text) -> Result<bool, text>:
+    if value.len() > 1048576 or value.contains("\0"): return Err("clipboard text exceeds bound or contains NUL")
+    if not windows_clipboard_cleanup_v1(): return Err("previous clipboard cleanup pending")
+    val units = windows_console_utf16_units_v1(value)
+    if units < 0: return Err("invalid clipboard Unicode")
+    val window = GetConsoleWindow()
+    # NULL clipboard ownership can make SetClipboardData fail after EmptyClipboard.
+    if window == 0: return Err("clipboard requires an associated console window")
+    _windows_clipboard_memory_v1 = GlobalAlloc(66u32, ((units + 1) * 2) as u64)
+    if _windows_clipboard_memory_v1 == 0: return Err("clipboard allocation failed")
+    val address = GlobalLock(_windows_clipboard_memory_v1)
+    var error = ""
+    if address == 0:
+        error = "clipboard allocation lock failed"
+    else:
+        _windows_clipboard_locked_v1 = true
+        var ordinal = 0
+        var offset = 0
+        var position = 0
+        while offset < value.len():
+            val scalar = value.char_code_at(ordinal)
+            if scalar < 65536:
+                volatile_write_u16(address + position * 2, scalar)
+                position = position + 1
+            else:
+                val supplementary = scalar - 65536
+                volatile_write_u16(address + position * 2, 55296 + (supplementary >> 10))
+                volatile_write_u16(address + (position + 1) * 2, 56320 + (supplementary & 1023))
+                position = position + 2
+            offset = offset + (if scalar < 128: 1 elif scalar < 2048: 2 elif scalar < 65536: 3 else: 4)
+            ordinal = ordinal + 1
+        SetLastError(0u32)
+        val unlocked = GlobalUnlock(_windows_clipboard_memory_v1)
+        if unlocked == 0 and GetLastError() == 0u32:
+            _windows_clipboard_locked_v1 = false
+        else:
+            error = "clipboard storage unlock failed"
+    if error == "":
+        if OpenClipboard(window) == 0:
+            error = "clipboard busy or unavailable"
+        else:
+            _windows_clipboard_open_v1 = true
+    if error == "":
+        if EmptyClipboard() == 0:
+            error = "clipboard replacement failed"
+        elif SetClipboardData(13u32, _windows_clipboard_memory_v1) == 0:
+            error = "clipboard Unicode transfer failed"
+        else:
+            _windows_clipboard_memory_v1 = 0
+    val cleaned = windows_clipboard_cleanup_v1()
+    if not cleaned: return Err(error + "; clipboard cleanup pending")
+    if error != "": return Err(error)
+    Ok(true)
