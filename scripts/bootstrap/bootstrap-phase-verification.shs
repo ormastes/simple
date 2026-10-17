@@ -915,6 +915,20 @@ run_task() {
         SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP=1
         unset SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE SIMPLE_NATIVE_BUILD_WORKER
         SIMPLE_BOOTSTRAP_STAGE3=0 SIMPLE_BOOTSTRAP_STAGE4=0
+        if [ "$phase" = stage2 ]; then
+          [ "$(hash_file "$phase_c_managed_tools")" = "$phase_c_managed_tools_sha" ] || exit 88
+          [ "$(hash_file "$phase_c_runtime_snapshot")" = "$phase_c_runtime_snapshot_sha" ] || exit 88
+          SIMPLE_MANAGED_NATIVE_TOOLS=1
+          SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH=$phase_c_managed_tools
+          SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256=$phase_c_managed_tools_sha
+          SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH=$phase_c_runtime_authority
+          SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH=$phase_c_runtime_snapshot
+          SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256=$phase_c_runtime_snapshot_sha
+          SIMPLE_RUNTIME_PATH=$phase_c_runtime_authority
+          export SIMPLE_MANAGED_NATIVE_TOOLS SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH \
+            SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256 SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH \
+            SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256
+        fi
         export SIMPLE_NATIVE_RUNTIME_BUNDLE SIMPLE_RUNTIME_PATH SIMPLE_NATIVE_BUILD_THREADS \
            SIMPLE_NATIVE_BUILD_CACHE_DIR SIMPLE_FRONTEND_CACHE_DIR SIMPLE_HIR_CACHE_DIR \
            SIMPLE_NATIVE_BUILD_TARGET SIMPLE_BINARY \
@@ -1440,8 +1454,35 @@ prepare_phase_c_tool_binding() {
   snapshot_target_c_inputs "$target_c_binding" || return 1
   target_c_identity=$(hash_file "$target_c_binding") || return 1
   chmod 400 "$target_c_binding" || return 1
+  phase_c_runtime_identity=$runtime_cache_identity
+  if [ "$phase" = stage2 ]; then
+    phase_c_admission=$(dirname "$compiler")/admission.env
+    [ -f "$phase_c_admission" ] && [ ! -L "$phase_c_admission" ] || return 1
+    phase_c_runtime_authority=$(manifest_value runtime_authority_path "$phase_c_admission") || return 1
+    phase_c_runtime_snapshot=$(manifest_value runtime_snapshot_path "$phase_c_admission") || return 1
+    phase_c_runtime_snapshot_sha=$(manifest_value runtime_snapshot_sha256 "$phase_c_admission") || return 1
+    phase_c_legacy_tools=$(manifest_value tool_authority_path "$phase_c_admission") || return 1
+    phase_c_legacy_tools_sha=$(manifest_value tool_authority_sha256 "$phase_c_admission") || return 1
+    [ -d "$phase_c_runtime_authority" ] && [ ! -L "$phase_c_runtime_authority" ] || return 1
+    [ -f "$phase_c_runtime_snapshot" ] && [ ! -L "$phase_c_runtime_snapshot" ] || return 1
+    [ "$(hash_file "$phase_c_runtime_snapshot")" = "$phase_c_runtime_snapshot_sha" ] || return 1
+    [ -f "$phase_c_legacy_tools" ] && [ ! -L "$phase_c_legacy_tools" ] || return 1
+    [ "$(hash_file "$phase_c_legacy_tools")" = "$phase_c_legacy_tools_sha" ] || return 1
+    phase_c_managed_path=$(manifest_value PATH "$phase_c_legacy_tools") || return 1
+    [ -n "$phase_c_managed_path" ] || return 1
+    phase_c_managed_tools="$work_root/target-managed-tools.env"
+    if [ -f "$phase_c_managed_tools" ] && [ ! -L "$phase_c_managed_tools" ]; then
+      chmod u+w "$phase_c_managed_tools" 2>/dev/null || true
+    fi
+    SIMPLE_MANAGED_NATIVE_TOOLS=1 bootstrap_stage3_tool_authority_snapshot \
+      "$phase_c_managed_tools" "$phase_c_managed_path" "$source_root" || return 1
+    phase_c_managed_tools_sha=$(hash_file "$phase_c_managed_tools") || return 1
+    chmod 400 "$phase_c_managed_tools" || return 1
+    phase_c_runtime_identity=$(printf '%s\n' "$runtime_cache_identity" \
+      "$phase_c_runtime_snapshot_sha" "$phase_c_managed_tools_sha" | hash_stream) || return 1
+  fi
   tool_input_identity=$(bootstrap_phase_c_tool_input_identity "$verification_backend" \
-    "$runtime_cache_identity" "$target_c_identity" "$target_c_source_sha") || return 1
+    "$phase_c_runtime_identity" "$target_c_identity" "$target_c_source_sha") || return 1
   write_target_c_receipt_fields >>"$summary"
 }
 
@@ -1450,6 +1491,13 @@ write_target_c_receipt_fields() {
     cat "$target_c_binding" || return 1
     echo "target_runtime_identity_sha256=$target_c_identity"
     echo "tool_input_identity_sha256=$tool_input_identity"
+    if [ "$phase" = stage2 ]; then
+      echo "managed_native_tool_authority_path=$phase_c_managed_tools"
+      echo "managed_native_tool_authority_sha256=$phase_c_managed_tools_sha"
+      echo "managed_runtime_authority_path=$phase_c_runtime_authority"
+      echo "managed_runtime_snapshot_path=$phase_c_runtime_snapshot"
+      echo "managed_runtime_snapshot_sha256=$phase_c_runtime_snapshot_sha"
+    fi
     ;;
   esac
 }
@@ -1477,6 +1525,8 @@ validate_phase_c_tool_binding() (
     pcb_runtime=$(sh "$source_root/scripts/bootstrap/phase2-runtime-binding.shs" resolve \
       "$compiler" "$source_root" "$tmp/phase2-tool-binding") || exit 1
     [ "$pcb_runtime" = "$runtime_path" ] || exit 1
+    [ "$(hash_file "$phase_c_managed_tools")" = "$phase_c_managed_tools_sha" ] || exit 1
+    [ "$(hash_file "$phase_c_runtime_snapshot")" = "$phase_c_runtime_snapshot_sha" ] || exit 1
   fi
   snapshot_target_c_inputs "$tmp/target-c-current.env" || exit 1
   [ "$(hash_file "$tmp/target-c-current.env")" = "$target_c_identity" ] &&

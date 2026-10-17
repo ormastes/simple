@@ -46,6 +46,26 @@ describe "declared enum payload contextual containers":
     it "reject nonempty wrong element":
         val errors = contextual_payload_errors("enum Value:\n    Empty\n    Array([Value])\nfn make() -> Value:\n    Value.Array([1])\n")
         expect(errors.len() > 0).to_equal(true)
+    it "accept nonempty nested enum elements (SdnValue.Table/Dict chain, 2026-10-16)":
+        # Pin for the B5b -> ctor-resolution -> payload-compat chain: once the
+        # enum-constructor reclassification accepts the qualified receiver,
+        # these well-typed constructions with relocated container payload
+        # types ([text], [[SdnValue]], Dict<text, SdnValue>) must lower with
+        # zero diagnostics. An earlier ill-typed probe ([["b"]] where
+        # [[SdnValue]] is declared) produced "payload type mismatch at 1"
+        # here -- correctly; the rejection twin below guards that the check
+        # stays fail-closed.
+        val sdn_shape = "enum SdnValue:\n    Null\n    String(text)\n    Array([SdnValue])\n    Dict(Dict<text, SdnValue>)\n    Table(headers: [text], rows: [[SdnValue]])\n"
+        val table_errors = contextual_payload_errors(sdn_shape + "fn make() -> SdnValue:\n    SdnValue.Table([\"a\"], [[SdnValue.String(\"b\")]])\n")
+        expect(table_errors.len()).to_equal(0)
+        val dict_errors = contextual_payload_errors(sdn_shape + "fn make() -> SdnValue:\n    SdnValue.Dict({\"k\": SdnValue.Null})\n")
+        expect(dict_errors.len()).to_equal(0)
+        val array_errors = contextual_payload_errors(sdn_shape + "fn make() -> SdnValue:\n    SdnValue.Array([SdnValue.Null, SdnValue.String(\"x\")])\n")
+        expect(array_errors.len()).to_equal(0)
+    it "reject ill-typed nested element in the SdnValue shape (stay fail-closed)":
+        val sdn_shape = "enum SdnValue:\n    Null\n    String(text)\n    Table(headers: [text], rows: [[SdnValue]])\n"
+        val errors = contextual_payload_errors(sdn_shape + "fn make() -> SdnValue:\n    SdnValue.Table([\"a\"], [[\"b\"]])\n")
+        expect(errors.len() > 0).to_equal(true)
     it "reject wrong following argument":
         val errors = contextual_payload_errors("enum Value:\n    Pair([i64], text)\nfn make() -> Value:\n    Value.Pair([], 17)\n")
         expect(errors.len() > 0).to_equal(true)

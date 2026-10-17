@@ -130,7 +130,7 @@ impl HirLowering:
         if imported_index < 0 or imported_index >= self.module_surfaces.surfaces.len():
             self.error("invalid imported module surface index {imported_index} for field dependency `{dependency}`", import_span)
             return
-        val imported_mod = self.module_surfaces.surfaces[imported_index]
+        val imported_mod: ModuleSurface = self.module_surfaces.surfaces[imported_index]
         if imported_mod.physical_index != imported_index or
            imported_mod.generation != self.module_surfaces.generation:
             self.error("stale imported module surface index {imported_index} for field dependency `{dependency}`", import_span)
@@ -287,7 +287,7 @@ impl HirLowering:
         if imported_index < 0 or imported_index >= self.module_surfaces.surfaces.len():
             self.error("invalid imported module surface index {imported_index} for `{imported_name}`", import_span)
             return
-        val imported_mod = self.module_surfaces.surfaces[imported_index]
+        val imported_mod: ModuleSurface = self.module_surfaces.surfaces[imported_index]
         if imported_mod.physical_index != imported_index or
            imported_mod.generation != self.module_surfaces.generation:
             self.error("stale imported module surface index {imported_index} for `{imported_name}`", import_span)
@@ -495,7 +495,7 @@ impl HirLowering:
         -1
 
     me register_imported_symbol_inner(imported_index: i64, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
-        val imported_mod = self.module_surfaces.surfaces[imported_index]
+        val imported_mod: ModuleSurface = self.module_surfaces.surfaces[imported_index]
         hir_phase_profile_count_imported_symbol()
         # A frozen facade can carry a materialized declaration payload for a
         # re-export in its ordinary name/value arrays.  Those arrays make the
@@ -521,7 +521,7 @@ impl HirLowering:
                     import_span)
                 return
             if routed_index != imported_index or routed_origin.source_name != imported_name:
-                val routed_surface = self.module_surfaces.surfaces[routed_index]
+                val routed_surface: ModuleSurface = self.module_surfaces.surfaces[routed_index]
                 self.register_imported_symbol(
                     routed_index, routed_surface.preferred_registry_name,
                     routed_origin.source_name, local_name, import_span,
@@ -581,7 +581,9 @@ impl HirLowering:
                 val lexical_enum = hir_surface_enum_to_enum(
                     imported_mod.enum_values[enum_position])
                 self.register_enum_unit_patterns(lexical_enum, local_name)
-                for variant in lexical_enum.variants:
+                for raw_variant in lexical_enum.variants:
+                    # ANY-transport hazard sweep round 3: annotated rebind.
+                    val variant: HirVariant = raw_variant
                     self.enum_variant_names[variant.name] = true
             return
         if composite_position >= 0:
@@ -664,7 +666,9 @@ impl HirLowering:
             # Materialize those identities before lowering the field type so
             # resolution is independent of the consumer's import item order.
             val fields_started = hir_phase_profile_now()
-            for field in composite.fields:
+            for raw_field in composite.fields:
+                # ANY-transport hazard sweep round 3: annotated rebind.
+                val field: ModuleSurfaceField = raw_field
                 # Scalar projections keep the outer spelling only. Resolve
                 # its arguments in the field owner's scope before projection.
                 var argument_type = field.type_
@@ -697,7 +701,8 @@ impl HirLowering:
             self.project_imported_owner_type_parameters(composite.type_params, imported_mod.module_name)
             var imported_field_order: [text] = []
             var imported_field_types: Dict<text, HirType> = {}
-            for field in composite.fields:
+            for raw_field in composite.fields:
+                val field: ModuleSurfaceField = raw_field
                 imported_field_order = imported_field_order.push(field.name)
                 imported_field_types[field.name] = self.imported_surface_type_projected(
                     field.type_, field.type_name, field.array_element_name, imported_mod.module_name)
@@ -846,7 +851,7 @@ impl HirLowering:
             # const branch, never back here), so an `type A = B` / `type B = A`
             # cycle cannot spin. Generic and compound targets retain a lazy
             # template below instead of pretending to be a nominal type.
-            val alias_decl = imported_mod.type_alias_values[alias_position]
+            val alias_decl: ModuleSurfaceTypeAlias = imported_mod.type_alias_values[alias_position]
             val alias_target = parser_type_kind_named_name(alias_decl.type_.kind)
             val alias_target_args = parser_type_kind_named_args(alias_decl.type_.kind)
             if alias_decl.type_params.len() == 0 and alias_target != "" and alias_target_args.len() == 0:
@@ -941,7 +946,7 @@ impl HirLowering:
                 self.symbols.rename_symbol(imported_fn_sym, imported_name)
             self.qualify_imported_function_symbol(imported_fn_sym, imported_mod.module_name, imported_name)
         elif constant_position >= 0:
-            val imported_constant = imported_mod.constant_values[constant_position]
+            val imported_constant: ModuleSurfaceConst = imported_mod.constant_values[constant_position]
             var imported_constant_type: HirType? = nil
             if imported_constant.has_type_:
                 # The type belongs to the declaration owner, including names
@@ -1243,7 +1248,7 @@ impl HirLowering:
                 eprint("[reexport-root-reject] reason=index-bounds index={facade_index} wanted={wanted} surfaces={self.module_surfaces.surfaces.len()}")
             self.reexport_walk_valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
-        val current_facade = self.module_surfaces.surfaces[facade_index]
+        val current_facade: ModuleSurface = self.module_surfaces.surfaces[facade_index]
         if current_facade.physical_index != facade_index:
             if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
                 eprint("[reexport-root-reject] reason=physical-index index={facade_index} actual={current_facade.physical_index} wanted={wanted}")
@@ -1424,7 +1429,7 @@ impl HirLowering:
         if self.glob_reachable_miss_memo_lookup(miss_key):
             return false
         self.glob_reachable_scan_count = self.glob_reachable_scan_count + 1
-        val importer = self.module_surfaces.surfaces[importer_index]
+        val importer: ModuleSurface = self.module_surfaces.surfaces[importer_index]
         var import_idx = 0
         while import_idx < importer.imports.len() and import_idx < importer.import_target_indices.len():
             val item_start = importer.import_item_offsets[import_idx]

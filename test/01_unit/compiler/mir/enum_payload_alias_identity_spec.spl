@@ -4,7 +4,11 @@ use std.spec.{describe, it, expect}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_types.*
-use compiler.mir._MirLoweringExpr.enum_constructor_payload.{enum_payload_types_alias_compatible}
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
 
 fn alias_payload_type(kind: HirTypeKind) -> HirType:
     HirType(kind: kind, span: Span.empty())
@@ -29,6 +33,18 @@ fn alias_payload_wrappers(inner: HirType) -> [HirType]:
      alias_payload_type(HirTypeKind.Result(inner, HirType.str()))]
 
 describe "enum payload aliases preserve container identity":
+    it "falls through a corrupt remembered type to canonical MIR evidence":
+        var lowering = MirLowering.new(SymbolTable.new())
+        var builder = lowering.builder
+        val local = builder.new_temp(MirType(kind: MirTypeKind.Array(MirType.i64(), 0)))
+        lowering.builder = builder
+        val expected = alias_payload_type(HirTypeKind.Array(HirType.i64(), nil))
+        val corrupt = alias_payload_type(HirTypeKind.Array(HirType.str(), nil))
+        lowering.remember_local_hir_type(local.id, corrupt, 0, 0)
+        val expression = HirExpr(kind: HirExprKind.Error, has_type_: false,
+            type_: alias_payload_type(HirTypeKind.Error), span: Span.empty())
+        expect(lowering.enum_payload_local_compatible(expected, expression, local)).to_be(true)
+
     it "rejects differing fixed array lengths even without a nominal leaf":
         val symbols = SymbolTable.new()
         val a = alias_payload_type(HirTypeKind.Array(HirType.i64(), Some(2)))
