@@ -2,6 +2,7 @@ use compiler.mir._MirLoweringExpr.optional_record_owner.*
 use compiler.mir._MirLowering.declaration_providers_v1.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use compiler.mir._MirLoweringExpr.lambda_abi.{lambda_abi_type_resolved}
+use compiler.mir._MirLoweringExpr.lambda_match_scope.{lambda_match_pattern_scope_v1, lambda_match_bound_union_v1}
 use compiler.mir.nominal_owner_diagnostics.{mir_nominal_profile_take_receipt}
 use compiler.mir._MirLoweringExpr.function_signature_owner.*
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
@@ -2494,10 +2495,11 @@ impl MirLowering:
         nil
 
     me receiver_declared_type(receiver: HirExpr) -> HirType?:
-        """Narrow receiver-type lookup for enum_match_expr_type's MethodCall
-        arm: only a bare Var/NamedVar receiver (the shape struct-method `?`
-        provenance actually needs -- e.g. `source.maybe()?` where `source` is
-        a typed parameter). Returns via `return Some(...)`/falls through to
+        """Declared receiver type for enum_match_expr_type's MethodCall arm.
+        Recover typed bindings and declared field chains without lowering or
+        evaluating the receiver. Field recursion consumes one base expression
+        per step and retains the exact registered owner/type. Returns via
+        `return Some(...)`/falls through to
         the trailing `nil`, deliberately NOT a `var`-mutated local re-narrowed
         by `if val x = <var>:` -- that pattern was empirically observed to
         misbehave here (a `match Src(v: 9).get(): case Ok(x): ...` build
@@ -2531,6 +2533,8 @@ impl MirLowering:
                 if val found_rs = rs:
                     if found_rs.type_ != nil:
                         return found_rs.type_
+            case Field(base, field_name, _):
+                return self.declared_field_hir_type(base, field_name)
             case _: ()
         nil
 
@@ -5566,6 +5570,20 @@ impl MirLowering:
         never something worse.
         """
         match body.kind:
+            case MatchCase(scrutinee, arms):
+                var collected = self.collect_free_var_syms(scrutinee, param_syms, acc)
+                for arm in arms:
+                    val scope = lambda_match_pattern_scope_v1(arm.pattern)
+                    for expression in scope.expressions:
+                        collected = self.collect_free_var_syms(expression, param_syms, collected)
+                    val arm_bound = lambda_match_bound_union_v1(param_syms, scope.bindings)
+                    if arm.has_guard:
+                        collected = self.collect_free_var_syms(arm.guard, arm_bound, collected)
+                    val body_bound = self.hir_block_bound_syms(arm.body.stmts, arm_bound)
+                    collected = self.hir_block_stmts_free_syms(arm.body.stmts, body_bound, collected)
+                    if arm.body.has:
+                        collected = self.collect_free_var_syms(arm.body.value, body_bound, collected)
+                collected
             case Var(symbol):
                 val sid = mir_expr_symbol_id_value(symbol)
                 # A record constructor names a declaration, not a runtime
@@ -5877,6 +5895,22 @@ impl MirLowering:
         no-silent-wrong invariant for first-class function values.
         """
         match body.kind:
+            case MatchCase(scrutinee, arms):
+                if self.lambda_body_captures(scrutinee, param_syms): return true
+                for arm in arms:
+                    val scope = lambda_match_pattern_scope_v1(arm.pattern)
+                    # The lift's refusal gate is conditional on captures.
+                    # Unsupported patterns must reach that gate even when
+                    # their bodies have no known free variables.
+                    if not scope.supported: return true
+                    for expression in scope.expressions:
+                        if self.lambda_body_captures(expression, param_syms): return true
+                    val arm_bound = lambda_match_bound_union_v1(param_syms, scope.bindings)
+                    if arm.has_guard and self.lambda_body_captures(arm.guard, arm_bound): return true
+                    val body_bound = self.hir_block_bound_syms(arm.body.stmts, arm_bound)
+                    if self.hir_block_stmts_capture(arm.body.stmts, body_bound): return true
+                    if arm.body.has and self.lambda_body_captures(arm.body.value, body_bound): return true
+                false
             case IntLit(_, _): false
             case FloatLit(_, _): false
             case FloatLexeme(_, _): false
@@ -6038,6 +6072,17 @@ impl MirLowering:
     me lambda_capture_scan_supported(body: HirExpr) -> bool:
         """True when collect_free_var_syms traverses the whole expression."""
         match body.kind:
+            case MatchCase(scrutinee, arms):
+                if not self.lambda_capture_scan_supported(scrutinee): return false
+                for arm in arms:
+                    val scope = lambda_match_pattern_scope_v1(arm.pattern)
+                    if not scope.supported: return false
+                    for expression in scope.expressions:
+                        if not self.lambda_capture_scan_supported(expression): return false
+                    if arm.has_guard and not self.lambda_capture_scan_supported(arm.guard): return false
+                    if not self.hir_block_stmts_scan_supported(arm.body.stmts): return false
+                    if arm.body.has and not self.lambda_capture_scan_supported(arm.body.value): return false
+                true
             case IntLit(_, _) | FloatLit(_, _) | FloatLexeme(_, _) | BoolLit(_) | CharLit(_) | UnitLit | NilLit | Var(_) | NamedVar(_, _): true
             case StringLit(_, interps):
                 if val its = interps:

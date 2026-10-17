@@ -130,3 +130,19 @@ delegating to the common concrete owner; no GC family is globally pinned.
 ten new source-root contract scenarios and their authored manual remain
 unexecuted. Rebuild/admit the actual runner before using the new flags as
 Windows test evidence. See `doc/07_guide/infra/testing/native_test_binary_workflow.md`.
+
+## Precise sleep dependency
+
+The owner and interactive client import `concurrent.thread.thread_sleep` as
+`thread_sleep_ms` directly. This is the same public function formerly selected
+by the I/O facade; the facade has no initialization or wrapper behavior to
+retain. Under the compiler's module-transitive entry closure, this avoids
+unrelated synchronous/asynchronous buffer bodies. Astra accepted this dependency
+design. The diagnostic closure shrank from 117 to 92 modules; that is a source
+inventory observation, not a runtime or performance PASS.
+
+The canonical server retains `client.stream.close().is_err()` for verification
+with the declared-field receiver compiler repair. The private diagnostic's
+local stream-copy substitution is not a product change. Match closure capture
+and field-result typing have separate compiler regressions; unsupported
+cross-trait casts remain an open compiler issue.
