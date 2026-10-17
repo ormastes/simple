@@ -52,11 +52,16 @@ claimed.
 Once an admitted general runtime exists, run each command once, recording
 the exact runner identity, exit code, case counts and artifact paths:
 
+Use `--native-backend=llvm`: the current argument owner explicitly selects
+native mode, disables unbound result-cache reuse and requires executed examples
+for that option. Bare `--native` is not a recognized mode selector in this
+parser and must not be used as proof that a test executed natively.
+
 ```text
-<admitted-runtime> test test/03_system/tools/smux_service_features_spec.spl --native
-<admitted-runtime> test test/03_system/tools/smux_windows_conpty_features_spec.spl --native
-<admitted-runtime> test test/03_system/tools/smux_named_layouts_spec.spl --native
-<admitted-runtime> test test/03_system/tools/smux_service_layouts_spec.spl --native
+<admitted-runtime> test test/03_system/tools/smux_service_features_spec.spl --native-backend=llvm
+<admitted-runtime> test test/03_system/tools/smux_windows_conpty_features_spec.spl --native-backend=llvm
+<admitted-runtime> test test/03_system/tools/smux_named_layouts_spec.spl --native-backend=llvm
+<admitted-runtime> test test/03_system/tools/smux_service_layouts_spec.spl --native-backend=llvm
 <admitted-runtime> spipe-docgen test/03_system/tools/smux_service_features_spec.spl --output doc/06_spec --no-index
 <admitted-runtime> spipe-docgen test/03_system/tools/smux_windows_conpty_features_spec.spl --output doc/06_spec --no-index
 <admitted-runtime> spipe-docgen test/03_system/tools/smux_named_layouts_spec.spl --output doc/06_spec --no-index
@@ -65,7 +70,7 @@ the exact runner identity, exit code, case counts and artifact paths:
 <admitted-runtime> sspec-maintain scan test/03_system/tools/smux_windows_conpty_features_spec.spl
 <admitted-runtime> sspec-maintain scan test/03_system/tools/smux_named_layouts_spec.spl
 <admitted-runtime> sspec-maintain scan test/03_system/tools/smux_service_layouts_spec.spl
-<admitted-runtime> test test/03_system/app/testing/feature/ui_sspec_evidence_audit_spec.spl --native
+<admitted-runtime> test test/03_system/app/testing/feature/ui_sspec_evidence_audit_spec.spl --native-backend=llvm
 ```
 
 Compiled mode must execute actual examples; interpreter loading alone cannot
@@ -215,6 +220,30 @@ ConPTY and console overlays, then run under an external <=180s process-tree/Job
 watchdog with exact producer/artifact hashes and cleanup receipts. No build,
 native execution or watchdog outcome is claimed; the seven owner SSpec cases
 remain unchanged by this fixture addition.
+
+## Canonical shared-client SSpec wrapper addition
+
+`test/03_system/tools/smux_windows_shared_clients_spec.spl` provides one modern
+step-based live-host SSpec scenario for the real standalone shared-client native
+fixture. Its authored manual mirrors under `doc/06_spec/03_system/tools/`.
+It requires Windows and distinct actual prebuilt fixture/product `.exe` paths
+from `SMUX_SHARED_CLIENTS_FIXTURE` and `SMUX_TEST_BINARY`, then invokes the real
+fixture with that product argument through `process_run_timeout(..., 180000)`.
+Actual exit zero and exact PASS stdout are mandatory; no expected-output file
+or source-only condition can pass. Typed execution/log helper bodies preserve
+the observed process result under `build/test-artifacts/03_system/tools/` (or
+the configured cohort-specific `SMUX_SHARED_CLIENTS_EVIDENCE_DIR`).
+
+Trace: REQ-SMUX-INTERACTIVE-003, REQ-SMUX-INTERACTIVE-006 detach portion,
+REQ-SMUX-INTERACTIVE-002, REQ-SMUX-WIN-003 and REQ-SMUX-WIN-005.
+INTERACTIVE-006 console-mode restoration retains its independent native fixture
+gate. WIN-005 child-computed console dimensions and INTERACTIVE-002 Unicode
+delivery retain their existing independent gates; this shared fixture proves
+the actual client resize/control-input portions. Outer <=180s process-tree/Job watchdog and complete cleanup receipts are
+mandatory; the process facade timeout itself does not prove descendant cleanup.
+Both producer executions, SSpec case counts, generated zero-stub manual and
+maintenance scan remain UNEXECUTED/pending. Existing seven owner cases and the
+standalone fixture source are unchanged by this wrapper addition.
 
 ## Bounded input ownership and portable compatibility addition
 

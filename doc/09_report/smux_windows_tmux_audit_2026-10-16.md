@@ -674,3 +674,168 @@ limitations; this checkpoint does not expand them into claimed support.
 **Interactive source checkpoint accepted for freeze. Native Windows execution,
 two-client behavior and production readiness remain TEST_BLOCKED; full tmux
 parity remains incomplete.**
+
+## Stage 2 intrinsic-owner repair and shared-client fixture review
+
+The observed bootstrap failure is a link boundary: the retained Stage 2 build
+compiled1349 modules, then failed to resolve `__simple_pow` from MIR constant
+folding. The compiler executable, its Hello compile/run and smux were not
+admitted by that campaign. The root's detailed failure record is
+[the Stage 2 power-owner bug](../08_tracking/bug/windows_stage2_pow_runtime_owner_missing_2026-10-16.md).
+
+The reviewed repair in
+`src/compiler_rust/compiler/src/pipeline/native_project/tools.rs:452-456`
+adds the **existing** `runtime_core_intrinsics.c` to the seed runtime input
+manifest; its implementation header is also included in the fingerprint inputs
+at`:591`. The compile loop selects `.c` inputs, so the header is tracked as a
+dependency rather than treated as another translation unit. Existing cache
+admission checks both input fingerprint and exact archive membership, preventing
+an old archive without the new owner from satisfying this repaired manifest.
+The monolithic `runtime.c` is not added, avoiding duplicate ownership through
+its inclusion of the same intrinsic implementation header.
+
+This is a bootstrap runtime-composition correction, not a new Rust algorithm,
+new C implementation, LLVM change or rewrite of the failing Simple expression.
+The existing owner has the expected `int64_t (int64_t, int64_t)` C ABI.
+`native_project/tests.rs:2812-2861` builds the actual core-C archive, checks the
+normalized required symbol and counts exactly one definition in `nm -g
+--defined-only` output. The regression is meaningful source coverage but was
+not executed by this review. No demonstrated P0/P1 was found in the scoped
+manifest/test repair; source acceptance does not certify the resulting archive.
+
+The separate one-translation-unit compile and retained-object diagnostic
+relink must keep original archives, object staging and canonical failure
+receipts intact. A successful diagnostic link would prove that candidate's
+missing-provider boundary was repaired. It would not admit the original
+canonical Stage 2 build. Hello needs its own compiler invocation, emitted binary
+identity, exit status and exact observed output; even a successful diagnostic
+Hello would remain provisional until the repaired immutable bootstrap and
+subsequent qualification gates run. No such runtime result is asserted here.
+
+The new `windows_smux_shared_clients/main.spl` fixture was also reviewed at
+source level. It launches two actual attached clients in the same session with
+different ConPTY dimensions; resizing the real smaller terminal must be detected
+by the actual client, without a fixture-issued client-size mutation. Computed
+shell markers and explicit pane-history exclusions check local pane and window
+input routing. A graceful smaller-client exit must release its size constraint
+and let both windows grow. A real120-second child must be interrupted by raw
+Ctrl-C before the retained shell produces a fresh computed marker within five
+seconds. Client and owner exit statuses plus all three lease cleanup results
+precede the PASS print.
+
+These are useful independent-process oracles, unlike separate-session-only
+coverage. Frame headers prove service geometry, not pixel-perfect rendering;
+actual console cell, style, cursor and restoration evidence still belongs to
+the native console/frame gates. Both producer builds, the external watchdog
+receipt and all fixture execution remain pending. **Source checkpoint accepted;
+runtime qualification remains TEST_BLOCKED.**
+
+### Diagnostic intrinsic compilation: additional ownership gate
+
+Subsequent diagnostic evidence narrows the manifest acceptance above. The
+build owner compiled the existing standalone intrinsic translation unit in a
+private directory with exit0, producing a3478-byte object. Its symbol listing
+contains `__simple_pow`, but also a strong `__simple_intrinsic_bounds_check`.
+The inspected archive-1/archive-2 collision listings show bounds-check
+definitions in the other selected runtime archives. The stdio COMDAT overlap
+is distinct from this intrinsic-owner overlap. A successful one-file compile
+therefore does not establish valid final symbol ownership.
+
+The frozen linker source already uses `/FORCE:MULTIPLE` for native-all plus
+core-C supplementation (`native_project/linker.rs:2278-2304`), and explicitly
+records that the intended precedence has lacked measured artifact evidence.
+No new relaxation, and especially no unresolved-symbol allowance, is authorized
+by this diagnostic. A faithful reconstructed link must preserve that existing
+order and expose actual selected owners in a map or equivalent extraction
+receipt for both power and bounds checking. Link exit0 alone cannot discharge
+this requirement or certify the other overlapping runtime symbols.
+
+The diagnostic command uses the GNU-style C flag branch for the pinned
+clang-cl executable. This matches the frozen code: `is_msvc_compiler` in
+`common/src/platform/cc_detect.rs:217` recognizes only cl/cl.exe, while the
+separate atomics helper recognizes clang-cl. The original final linker argv
+was not captured with verbose logging; the prospective diagnostic recipe is
+**reconstructed from source and retained artifacts**, not a preserved original
+argv. At this review boundary no diagnostic executable or Hello result existed.
+
+The minimal manifest change remains a reasonable scoped source repair, but
+runtime-composition acceptance is conditional on the additional owner evidence.
+The original canonical Stage 2 failure remains unchanged and no new compiler
+admission is inferred.
+
+### Bounded reconstructed relink recipe review
+
+The independently inspected diagnostic JSON and single-line response file have
+the same255 arguments in the same order. All absolute inputs and the module
+whole-archive input exist. The recipe retains the main/init objects,
+native-all then core-C ordering,212 distinct module initialization roots,
+three runtime retention roots and27 Windows libraries. It appends the private
+intrinsic helper archive after the existing runtime archives. Executable and
+map outputs stay in the private diagnostic directory.
+
+The dry-run log selects LLVM23 lld-link for native MSVC. No unresolved-symbol
+allowance, new stripping or additional duplicate-symbol relaxation was added;
+the existing `/FORCE:MULTIPLE` and error-limit behavior are recorded explicitly.
+This recipe was cleared for one diagnostic launch under a180-second process
+Job watchdog. That clearance is not a link result, Hello result or canonical
+compiler admission. Actual map/extraction evidence for power and bounds-check
+ownership must precede interpreting any successful diagnostic executable.
+
+### Remote repair and native source-root checkpoint (2026-10-17)
+
+This is a bounded independent source review, not executable qualification.
+The remote reference reviewed was `origin/release_phase3` at `e37c260fe5d`.
+Remote `677b77f2907` already adds the existing
+`runtime_core_intrinsics.c` owner to the Rust bootstrap runtime manifest,
+addressing the missing `__simple_pow` translation unit observed in the frozen
+1349-module failure. Remote `bcc977f537b` separately adds `f32_from_bits` and
+`f64_from_bits` to the intrinsic implementation header. Neither change proves
+the selected cross-archive bounds-check owner; the earlier native-all/Rust
+archive collision finding and actual map requirement remain open.
+
+Naively combining the local and remote manifest changes would select the same
+translation unit twice. The isolated integration at
+`D:/dev/simple-smux-upstream-20261017`, after `7a2fa6eee23`, was inspected:
+`tools.rs:584` has one translation-unit entry and `tools.rs:600` retains the
+local implementation-header fingerprint dependency. The actual archive ABI
+regression must remain part of the integrated change. No frozen diagnostic
+objects or original archives were modified by this review.
+
+The integrated `switch_operators_calls.spl` diff against that remote reference
+contains only the previously reviewed owner classifier and its call site.
+At lines 6647–6660 it reads the resolved symbol's defining module and exempts
+only canonical `lib.sys.pty` for `spawn`; local alias spelling does not choose
+the exception. Other and unresolved `spawn` calls, and `spawn_actor`, retain
+the existing transfer decision. The `TransferOut` emission remains at line
+7182, and remote changes elsewhere in the lowering body remain intact.
+This is source acceptance; the rebuilt compiler and real imported-PTY fixture
+must still establish execution behavior.
+
+The pending native SSpec source-root changes in the original feature checkout
+were also reviewed. `native_compile_contract.spl:7` validates at most five
+existing directories and rejects empty/control-bearing selectors; line 63
+emits separate ordered `--source` arguments before the entry. The parser's
+final normalization (`test_runner_args.spl:668`) selects LLVM when roots alone
+are supplied and disables result/daemon reuse. The executor validates again
+at `test_runner_execute.spl:1044`, includes root order in artifact selection,
+and forwards the roots to the compiler at line 1127. Worker arguments preserve
+the same order (`test_executor_parsing.spl:646`), and invocation receipts plus
+metrics bind the length-framed root identity. Existing family parser facades
+delegate to this canonical implementation. Root identity describes selectors;
+it is not a claim that directory contents were cryptographically inventoried.
+
+The ten `native_source_roots_spec.spl` scenarios use the production parser,
+worker argument builder and compile contract, including invalid paths, the
+five-root limit, explicit backend retention, order-sensitive receipts and
+family delegates. The authored manual correctly labels execution/docgen
+pending, and CLI help matches the implemented selection policy. No
+demonstrated P0/P1 was found in this bounded source review. Remote
+`3d6a3b7a0f6` changes the neighboring lifecycle cleanup return annotation,
+not these root-selection files.
+
+**Checkpoint: source/manual accepted; TEST_BLOCKED.** Required evidence remains
+an admitted compiler executing the specs and native provider overlays, actual
+selected-symbol/link ownership, compiler Hello, both producer fixture runs,
+and the existing interactive/session/cleanup/performance gates. The earlier
+full tmux gap inventory is unchanged; this checkpoint is not full parity or
+runtime PASS.

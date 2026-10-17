@@ -96,8 +96,19 @@ review or whitespace validation.
 
 The build owner may separately compile this one existing C translation unit
 with the retained matching Win64 toolchain/flags and relink the preserved 1349
-module objects using the retained real linker argv. That is a diagnostic new
+module objects using a fully recorded, source-derived reconstructed linker
+command: the original nonverbose campaign did not retain its actual linker
+argv. That is a diagnostic new
 composition and must be labeled unadmitted. It must check all intrinsic-owner
 overlaps, retain new hashes/logs, and require actual Hello compile/run before
 any dependent product phase. The diagnostic relink does not repair the frozen
 source manifest or admit a canonical compiler by itself.
+
+The one-unit collision audit found that both Rust runtime archives also define
+`__simple_intrinsic_bounds_check`. The existing linker recipe already uses
+`/FORCE:MULTIPLE`; no additional duplicate/unresolved-symbol relaxation may be
+introduced for this repair. Source inspection finds the same signed-i64 ABI,
+out-of-range exit and valid-index zero return in both implementations. Actual
+map/extraction evidence must still identify the retained owner; a successful
+link alone cannot close this ownership gate. The minimal manifest change is
+therefore conditional on resolving that gate, not a canonical qualification.
