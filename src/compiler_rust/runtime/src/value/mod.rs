@@ -1137,6 +1137,11 @@ fn clear_global_variables() {
 pub fn clear_all_runtime_registries() {
     numeric_kernels::clear_numeric_kernel_provider_cache();
     collections::clear_collection_provider_cache();
+    // The cached SIMPLE_SIMD_TIER override lives in the simd crate's host
+    // config cache (cached per epoch since 2026-10-18; a per-call getenv was
+    // an O(environ) scan on every kernel dispatch). Every registry clear must
+    // reset it too or a tier-sensitive test sees a stale epoch.
+    simple_simd::clear_host_cpu_config_cache();
 
     // Clear HP collections registries
     clear_hashmap_registry();

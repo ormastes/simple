@@ -540,7 +540,12 @@ fn test_array_invalid_value() {
 fn test_collection_provider_refreshes_when_active_tier_changes() {
     with_simd_tier_override("x86_64_sse2", || {
         assert_eq!(active_collection_simd_tier(), SimdTier::X86_64Sse2);
+        // The env override is cached per provider-cache epoch (a per-call
+        // getenv on this path was an O(environ) scan per text search -- see
+        // read_simd_tier_override_env), so a mid-process change takes effect
+        // on the next epoch reset, same as the host-config tier.
         std::env::set_var("SIMPLE_SIMD_TIER", "scalar");
+        collections::clear_collection_provider_cache();
         assert_eq!(active_collection_simd_tier(), SimdTier::Scalar);
     });
 }
@@ -554,9 +559,12 @@ fn test_collection_provider_resolves_once_per_tier_epoch_and_reset() {
         assert_eq!(collections::collection_provider_resolution_count_for_tests(), 1);
 
         std::env::set_var("SIMPLE_SIMD_TIER", "scalar");
+        // Epoch reset: the provider cache (and its resolution counter) is
+        // cleared, so the new tier resolves once for the new epoch.
+        collections::clear_collection_provider_cache();
         assert_eq!(active_collection_simd_tier(), SimdTier::Scalar);
         assert_eq!(active_collection_simd_tier(), SimdTier::Scalar);
-        assert_eq!(collections::collection_provider_resolution_count_for_tests(), 2);
+        assert_eq!(collections::collection_provider_resolution_count_for_tests(), 1);
 
         collections::clear_collection_provider_cache();
         assert_eq!(collections::collection_provider_resolution_count_for_tests(), 0);
