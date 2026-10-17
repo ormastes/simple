@@ -446,22 +446,31 @@ fn bootstrap_function_names_from_env() -> [text]:
 # is raised instead (route (b)) rather than shipping a body that will crash
 # the backend with a useless message.
 struct ReturnScan:
+    # resolved_name uses "" as the absent sentinel: the former `text?`
+    # optional made this struct cross the stage-native value ABI with a
+    # presence map, and that transport deterministically corrupted copies
+    # (p2_add stage2-sanity SIGSEGV, cycles 60-64). All-scalar fields only.
     found_value_return: bool
-    resolved_name: text?
+    resolved_name: text
     ambiguous: bool
 
 fn return_scan_empty() -> ReturnScan:
-    ReturnScan(found_value_return: false, resolved_name: nil, ambiguous: false)
+    ReturnScan(found_value_return: false, resolved_name: "", ambiguous: false)
 
-fn merge_return_scan(a: ReturnScan, b: ReturnScan) -> ReturnScan:
+fn merge_return_scan(a_raw: ReturnScan, b_raw: ReturnScan) -> ReturnScan:
+    # ANY-transport hazard: ReturnScan crosses the stage-native value ABI
+    # (by-value param/return with an optional text field); rebind before any
+    # field read. p2_add stage2-sanity SIGSEGV traced here (cycle-62).
+    val a: ReturnScan = a_raw
+    val b: ReturnScan = b_raw
     var out = a
     if b.ambiguous:
         out.ambiguous = true
     if b.found_value_return:
         out.found_value_return = true
-        if b.resolved_name.?:
-            if out.resolved_name.?:
-                if out.resolved_name.unwrap() != b.resolved_name.unwrap():
+        if b.resolved_name != "":
+            if out.resolved_name != "":
+                if out.resolved_name != b.resolved_name:
                     out.ambiguous = true
             else:
                 out.resolved_name = b.resolved_name

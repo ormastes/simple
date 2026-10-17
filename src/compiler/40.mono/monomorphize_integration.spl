@@ -999,6 +999,16 @@ impl MonomorphizationPass:
         if not concrete:
             return
         if self.named_types.has(name) or self.named_ambiguous.has(name):
+            # Once a display name collides there is no canonical winner. The
+            # declaration dictionaries can have a different traversal order
+            # after HIR codec round-trip, so retaining the first SymbolId made
+            # archive registration receipts depend on that incidental order.
+            # Rebuild without the key because Dict.remove has incompatible
+            # return semantics on interpreted and native compiler lanes.
+            var unambiguous: Dict<text, HirType> = {}
+            for key in self.named_types.keys():
+                if key != name: unambiguous[key] = self.named_types[key]
+            self.named_types = unambiguous
             self.named_ambiguous[name] = true
             return
         self.named_types[name] = HirType(kind: HirTypeKind.Named(sym, []), span: Span.empty())
@@ -2136,7 +2146,8 @@ impl MonomorphizationPass:
                     self.collect_lets_expr(value)
             case HirExprKind.StructLit(_, fields): self.collect_lets_named_exprs(fields)
             case HirExprKind.EnumLit(_, _, payload):
-                if val contents = payload:
+                val payload_opt: HirEnumPayload? = payload
+                if val contents = payload_opt:
                     match contents:
                         case HirEnumPayload.Tuple(values): self.collect_lets_exprs(values)
                         case HirEnumPayload.Struct(fields): self.collect_lets_named_exprs(fields)
@@ -2252,7 +2263,8 @@ impl MonomorphizationPass:
                 val nb: HirBlock = body
                 self.collect_lets_block(nb)
             case HirExprKind.StringLit(_, interps):
-                if val interpolation_items = interps:
+                val interps_opt: [HirInterpolation]? = interps
+                if val interpolation_items = interps_opt:
                     for item in interpolation_items:
                         val it: HirInterpolation = item
                         self.collect_lets_expr(it.expr)
@@ -2297,9 +2309,11 @@ impl MonomorphizationPass:
                 # (MIR counts in the 64-bit word); other widths stay unbound.
                 var rs_ty: HirType? = nil
                 var re_ty: HirType? = nil
-                if val rs = range_start:
+                val start_opt: HirExpr? = range_start
+                if val rs = start_opt:
                     rs_ty = self.infer_expr_type(rs)
-                if val re = range_end:
+                val end_opt: HirExpr? = range_end
+                if val re = end_opt:
                     re_ty = self.infer_expr_type(re)
                 if rs_ty != nil and re_ty != nil:
                     val rst: HirType = rs_ty
@@ -3026,7 +3040,8 @@ impl MonomorphizationPass:
                 # Fresh HIR can carry a flat list; the generated cache decoder
                 # constructs Some(list). Bind the optional before iterating so
                 # both representations retain their interpolation expressions.
-                if val interpolation_items = interps:
+                val interps_opt: [HirInterpolation]? = interps
+                if val interpolation_items = interps_opt:
                     var new_interps: [HirInterpolation] = []
                     for item in interpolation_items:
                         val it: HirInterpolation = item
