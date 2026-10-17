@@ -3332,6 +3332,20 @@ int64_t rt_value_nil(void) {
     return rt_core_nil();
 }
 
+int8_t rt_value_is_nil(int64_t value) {
+    return value == rt_core_nil() ? 1 : 0;
+}
+
+int8_t rt_value_is_bool(int64_t value) {
+    return value == rt_core_from_special(RT_VALUE_SPECIAL_TRUE) ||
+           value == rt_core_from_special(RT_VALUE_SPECIAL_FALSE) ? 1 : 0;
+}
+
+int8_t rt_value_is_int(int64_t value) {
+    return rt_core_is_int(value) || rt_core_as_heap_int(value) != NULL ||
+           rt_core_as_heap_uint(value) != NULL ? 1 : 0;
+}
+
 int64_t rt_function_not_found(const uint8_t* name, uint64_t len) {
     fputs("Simple runtime error: function not found", stderr);
     if (name && len > 0) {
@@ -6784,7 +6798,16 @@ SPL_WEAK SplArray* sys_get_args(void) {
     return rt_cli_get_args();
 }
 
-SPL_WEAK SplArray* rt_cli_get_args(void) {
+/* A COFF archive needs a strong standalone owner. The hosted runtime.c argv
+ * implementation uses incompatible legacy array/value layouts and is omitted
+ * for this lane. Preserve its existing ownership for hosted and Unix builds. */
+#if defined(_WIN32) && defined(SIMPLE_CORE_C_STANDALONE)
+#define SPL_CORE_ARGV_OWNER
+#else
+#define SPL_CORE_ARGV_OWNER SPL_WEAK
+#endif
+
+SPL_CORE_ARGV_OWNER SplArray* rt_cli_get_args(void) {
     int64_t argc = spl_arg_count();
     SplArray* args = rt_array_new(argc);
     if (!args) return (SplArray*)rt_core_nil();
@@ -6796,11 +6819,11 @@ SPL_WEAK SplArray* rt_cli_get_args(void) {
     return args;
 }
 
-SPL_WEAK int64_t rt_cli_arg_count(void) {
+SPL_CORE_ARGV_OWNER int64_t rt_cli_arg_count(void) {
     return spl_arg_count();
 }
 
-SPL_WEAK int64_t rt_cli_arg_at(int64_t index) {
+SPL_CORE_ARGV_OWNER int64_t rt_cli_arg_at(int64_t index) {
     if (index < 0 || index >= spl_arg_count()) {
         return rt_string_new(NULL, 0);
     }
@@ -6808,6 +6831,7 @@ SPL_WEAK int64_t rt_cli_arg_at(int64_t index) {
     if (!arg) arg = "";
     return rt_string_new((const uint8_t*)arg, (uint64_t)strlen(arg));
 }
+#undef SPL_CORE_ARGV_OWNER
 
 int64_t rt_file_preload_pages(int64_t path_value) {
 #if defined(_WIN32)
@@ -10949,6 +10973,10 @@ SPL_CORE_C_WEAK int64_t rt_time_now_seconds(void) {
     return (int64_t)time(NULL);
 }
 
+#if defined(_WIN32)
+#include "platform/runtime_win_long_path.h"
+#endif
+
 /* Same POSIX file-deletion semantics as runtime.c's rt_remove, but NOT its
  * `const char* path` signature: `extern fn rt_remove(path: text) -> i64`
  * (src/lib/nogc_sync_mut/io/dir_entry_ops.spl:13) has no
@@ -10969,6 +10997,29 @@ SPL_CORE_C_WEAK int64_t rt_time_now_seconds(void) {
 SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
     char* path = rt_core_string_to_cpath(path_value);
     if (!path) return -1;
+#if defined(_WIN32) && defined(SIMPLE_CORE_C_STANDALONE)
+    /* Core text is UTF-8; narrow stat/unlink interpret it using the ANSI code
+     * page. Use the shared UTF-16/long-path owner for both files and dirs. */
+    wchar_t* wide = rt_widen_long_path_rc(path);
+    free(path);
+    if (!wide) return -(int64_t)EINVAL;
+    DWORD attributes = GetFileAttributesW(wide);
+    BOOL removed = FALSE;
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        removed = (attributes & FILE_ATTRIBUTE_DIRECTORY)
+            ? RemoveDirectoryW(wide) : DeleteFileW(wide);
+    }
+    DWORD error = removed ? ERROR_SUCCESS : GetLastError();
+    free(wide);
+    if (removed) return 0;
+    switch (error) {
+        case ERROR_FILE_NOT_FOUND: case ERROR_PATH_NOT_FOUND: return -(int64_t)ENOENT;
+        case ERROR_ACCESS_DENIED: case ERROR_SHARING_VIOLATION: return -(int64_t)EACCES;
+        case ERROR_DIR_NOT_EMPTY: return -(int64_t)ENOTEMPTY;
+        case ERROR_INVALID_NAME: case ERROR_INVALID_PARAMETER: return -(int64_t)EINVAL;
+        default: return -(int64_t)EIO;
+    }
+#else
     struct stat st;
     if (stat(path, &st) != 0) { int64_t rc = -(int64_t)errno; free(path); return rc; }
     int64_t rc;
@@ -10979,6 +11030,7 @@ SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
     }
     free(path);
     return rc;
+#endif
 }
 
 #if defined(_WIN32)
@@ -14290,7 +14342,7 @@ int64_t rt_file_read_text_at_checked(int64_t path_value, int64_t offset, int64_t
     char* path = rt_core_string_to_cpath(path_value);
     if (!path || offset < 0 || size < 0 || (uint64_t)size > SIZE_MAX) {
         if (path) free(path);
-        return 0;
+        return rt_core_nil();
     }
     if (size == 0) {
         free(path);
@@ -14300,12 +14352,14 @@ int64_t rt_file_read_text_at_checked(int64_t path_value, int64_t offset, int64_t
 #if defined(_WIN32)
     /* Binary: text mode translated CRLF and stopped at ^Z, so the same file
      * hashed differently than on POSIX (and than the Rust twin). */
-    int fd = open(path, O_RDONLY | _O_BINARY);
+    /* Reuse the UTF-8 -> UTF-16 fd owner. Narrow CRT open uses the active
+     * code page and cannot reliably open source paths containing Unicode. */
+    int fd = (int)rt_open_fd(path, 0, 0);
 #else
     int fd = open(path, O_RDONLY);
 #endif
     free(path);
-    if (fd < 0) return 0;
+    if (fd < 0) return rt_core_nil();
 
     /* `size` is a caller CAP, not the expected length: the SCV inventory reads
      * every source with a 1 GiB cap, and allocating the cap per file cost
@@ -14324,13 +14378,13 @@ int64_t rt_file_read_text_at_checked(int64_t path_value, int64_t offset, int64_t
     uint8_t* buffer = (uint8_t*)malloc((size_t)size);
     if (!buffer) {
         close(fd);
-        return 0;
+        return rt_core_nil();
     }
     ssize_t bytes_read = rt_file_read_at_fd(fd, buffer, (size_t)size, offset);
     close(fd);
     if (bytes_read < 0) {
         free(buffer);
-        return 0;
+        return rt_core_nil();
     }
     int64_t result = rt_string_new(buffer, (uint64_t)bytes_read);
     free(buffer);
