@@ -24,6 +24,7 @@ use compiler.hir.hir_types.{HirType}  # explicit: glob is not an import-origin f
 use compiler.hir.hir_types.{SymbolTable}  # explicit: class return type for the cycle-128 handle getters
 use compiler.hir.abi_interface.{HirAbiInterfaceEncoderV1, HIR_ABI_INTERFACE_DOMAIN_V1}
 use compiler.common.attributes.{FunctionAttr}
+use compiler.common.diagnostics.span.{Span}
 use compiler.common.cache.canonical_identity.{canon_str, canon_nat, canon_field,
     canon_seq, canonical_identity_sort_texts}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader,
@@ -116,6 +117,49 @@ fn hir_module_encode_reason(module: HirModule) -> text:
 # The element crosses into THIS unit once; the nine scalars/small composites
 # return in one tuple (the hir_module_decode precedent: large composite
 # returns from this unit draw clean).
+# Cycle-138: dict-INDEX probe -- mono's proven access pattern (guard-first
+# functions[key] read), in the codec pool, WITHOUT .values(). The cycle-137
+# verdict reinstated the read-path as the suspect: the .values()-chain probe
+# faulted on p2_add's functions dict while mono's dict-index reads of the
+# same dict succeeded. This probe discriminates rt_dict_values as the bug.
+fn hir_module_first_fn_name_v1(module: HirModule) -> text:
+    # Cycle-139: mono's EXACT shape -- materialized keys + for-in element
+    # used DIRECTLY in the bracket. The annotated key bind (`val k: SymbolId
+    # = ks[0]`, the cycle-138 form) loses aggregate-key identity: the
+    # cycle-139 hir-final-idx verdict printed first_fn_name EMPTY -- the nil
+    # guard fired on the dict's own key. No named key bind anywhere.
+    val ks = module.functions.keys()
+    for raw_k in ks:
+        if module.functions[raw_k] == nil:
+            continue
+        return module.functions[raw_k].name
+    return ""
+
+# Cycle-138: dict-index variant of the scalar extraction. The .values()-array
+# transport draws corrupted for Dict<SymbolId, HirFunction> (the cycle-132-136
+# probe faulted on it while mono's guard-first dict-index reads of the same
+# dict succeeded -- verdict case (a): rt_dict_values on aggregate-keyed dicts
+# is the defect, bug record alongside). This walks keys()[position] with the
+# guard-first double access -- the exact pattern mono's collect lane proved.
+fn hir_fn_scalars_at_key_v1(functions: Dict<SymbolId, HirFunction>, position: i64) -> (SymbolId, text, bool, bool, bool, bool, FunctionAttr, HirType, [HirParam]):
+    # Cycle-139: same mono shape as hir_module_first_fn_name_v1 -- the for-in
+    # element goes STRAIGHT into the bracket (no `val k` bind; the annotated
+    # bind loses aggregate-key identity and the guard silently nil-skips,
+    # the cycle-139 verdict).
+    val ks = functions.keys()
+    var seen: i64 = 0
+    for raw_k in ks:
+        if seen == position:
+            if functions[raw_k] == nil:
+                return (SymbolId(id: 0), "", false, false, false, false, FunctionAttr.default(),
+                HirType(kind: HirTypeKind.Error, span: Span.empty()), [])
+            return (functions[raw_k].symbol, functions[raw_k].name, functions[raw_k].is_extern,
+                functions[raw_k].is_method, functions[raw_k].is_static, functions[raw_k].has_export_attr,
+                functions[raw_k].func_attr, functions[raw_k].return_type, functions[raw_k].params)
+        seen = seen + 1
+    (SymbolId(id: 0), "", false, false, false, false, FunctionAttr.default(),
+        HirType(kind: HirTypeKind.Error, span: Span.empty()), [])
+
 # Cycle-128: per-field module-handle getters. The MIR prescan feeder used to
 # marshal five field-expression reads off one array element at a single big
 # call site (the cycle-111 marshalling class: the reads succeed individually
@@ -501,6 +545,8 @@ export HirDecodeLimits, HirDecodeAuditUsage, HirDecodeAuditObserver, HirDecodeEr
 export hir_module_encode, hir_module_encode_canonical, hir_module_encode_reason
 export hir_module_has_rt_hal
 export hir_fn_scalars_at_v1
+export hir_module_first_fn_name_v1
+export hir_fn_scalars_at_key_v1
 export hir_module_structs_at_v1, hir_module_classes_at_v1, hir_module_functions_at_v1
 export hir_module_name_at_v1, hir_module_symbols_at_v1
 export hir_codec_abi_interface_parts_v1, hir_codec_abi_interface_encoded_v1
