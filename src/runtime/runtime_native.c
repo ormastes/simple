@@ -2670,7 +2670,13 @@ static int rt_core_transient_seen_insert(RtCoreTransientPlan* plan, uintptr_t pt
     }
     size_t mask = plan->seen_cap - 1;
     size_t i = rt_core_immortal_hash_ptr(ptr) & mask;
-    for (;;) {
+    /* Fail closed on a probe cap: the 70% resize guard above keeps the table
+     * below 100% load, so a probe chain that wraps this many times means
+     * corrupted accounting, not growth. Without the cap a full table spins
+     * here forever (stage3 promotion-registry rewalk livelock defense in
+     * depth, 2026-10-17). */
+    size_t probes;
+    for (probes = 0; probes < plan->seen_cap * 4; probes++) {
         if (!plan->seen[i]) {
             plan->seen[i] = ptr;
             plan->seen_len++;
@@ -2679,6 +2685,9 @@ static int rt_core_transient_seen_insert(RtCoreTransientPlan* plan, uintptr_t pt
         if (plan->seen[i] == ptr) return 0;
         i = (i + 1) & mask;
     }
+    fprintf(stderr, "rt_transient: seen-set probe cap exceeded (cap=%llu)\n",
+            (unsigned long long)plan->seen_cap);
+    return -1;
 }
 
 static int rt_core_transient_plan_push(
@@ -10658,7 +10667,12 @@ static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value) {
     int64_t mask = d->cap - 1;
     int64_t idx = (int64_t)(h & (uint64_t)mask);
     int64_t first_tomb = -1;
-    for (;;) {
+    /* Fail closed on a probe cap: the 70% load-factor resize above
+     * guarantees an empty slot, so a probe chain this long means corrupted
+     * len/tombstones accounting (same defense-in-depth rationale as
+     * rt_core_transient_seen_insert, 2026-10-17). */
+    int64_t probes;
+    for (probes = 0; probes < d->cap * 4; probes++) {
         RtCoreDictEntry* e = &d->entries[idx];
         if (e->occupied == 0) {
             if (first_tomb >= 0) {
@@ -10680,6 +10694,9 @@ static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value) {
         }
         idx = (idx + 1) & mask;
     }
+    fprintf(stderr, "rt_dict: probe cap exceeded (cap=%lld len=%lld tombstones=%lld)\n",
+            (long long)d->cap, (long long)d->len, (long long)d->tombstones);
+    return 0;
 }
 
 static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key) {
