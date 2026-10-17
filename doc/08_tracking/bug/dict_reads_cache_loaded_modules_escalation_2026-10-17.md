@@ -97,3 +97,25 @@ stage2 commit introduced the corrupting copy loop by rebuilding
 - The cycle-142 ordered-walk probe (`hir_module_first_fn_name_ordered_in_v1`)
   is the last Simple-level pattern; if it also returns empty, this document
   is the handoff.
+
+## Sibling minimal crash repros (cycle-149 return-scan hunt)
+
+The prologue-copy repro could not reach the corruption regime — the
+modern stage2 crashes FIRST on the probe shapes. Two MORE deterministic
+defects, likely sharing the by-value-struct-param root:
+
+- **Variant H (2 lines):** a file whose ONLY function is `fn main(): print("hello")`
+  deterministically SIGSEGVs (exit 117) in `scan_ast_expr_for_returns`
+  (hir_lowering/_Items/module_callable_types.spl). Adding any second
+  function rescues it.
+- **Variant F (struct construction):** any file constructing a
+  user-defined struct (even with no by-value param, no field read)
+  SIGSEGVs the same scanner. p2_add passes because it defines no structs;
+  the compiler's own sources pass because the PREVIOUS stage compiled them.
+
+Canonical sources: /tmp/b5b-probe/prologue_copy_repro.spl (H, F, and the
+full matrix). Verification question extended: does word 6 of the copied
+struct equal the incoming parameter's word 6 (prologue copy), and does
+the return scanner mis-handle single-function files / struct constructors
+(same function family, draw-dependent)? A single fix in the
+by-value-struct-param path likely clears all three symptom families.
