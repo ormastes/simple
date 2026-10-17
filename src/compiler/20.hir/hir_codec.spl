@@ -131,13 +131,7 @@ fn hir_module_encode_reason(module: HirModule) -> text:
 fn hir_module_first_fn_name_in_v1(modules: Dict<text, HirModule>, key: text) -> text:
     if not modules.has(key):
         return ""
-    val m: HirModule = modules[key]
-    val ks = m.functions.keys()
-    for raw_k in ks:
-        if m.functions[raw_k] == nil:
-            continue
-        return m.functions[raw_k].name
-    return ""
+    hir_module_first_fn_name_p_v1(modules[key])
 
 # Cycle-142 last-resort probe: the GENERATED CODEC's exact walk --
 # hc_order_symbol_id_keys_v1 over the keys, then guard-first bracket. The
@@ -147,13 +141,7 @@ fn hir_module_first_fn_name_in_v1(modules: Dict<text, HirModule>, key: text) -> 
 fn hir_module_first_fn_name_ordered_in_v1(modules: Dict<text, HirModule>, key: text) -> text:
     if not modules.has(key):
         return ""
-    val m: HirModule = modules[key]
-    val ks = hc_order_symbol_id_keys_v1(m.functions.keys())
-    for raw_k in ks:
-        if m.functions[raw_k] == nil:
-            continue
-        return m.functions[raw_k].name
-    return ""
+    hir_module_first_fn_name_p_v1(modules[key])
 
 # Cycle-143 crown-jewel diagnostic: encode the module INSIDE this pool
 # (dict+key safe transports; the module bind and the generated encoder's
@@ -165,6 +153,19 @@ fn hir_module_blob_in_v1(modules: Dict<text, HirModule>, key: text) -> text:
     if not modules.has(key):
         return ""
     hir_module_encode(modules[key])
+
+# Cycle-144 endgame shape: the module is used ONLY as a parameter -- never
+# bound from a dict read. The cycle-144 encode probe (hir_module_blob_in_v1,
+# enc_len=3808) proved the generated walk + param copies sound in this pool
+# while every bind-based read returned empty: encode receives its module by
+# parameter, and that is the one access class that works.
+fn hir_module_first_fn_name_p_v1(module: HirModule) -> text:
+    val ks = module.functions.keys()
+    for raw_k in ks:
+        if module.functions[raw_k] == nil:
+            continue
+        return module.functions[raw_k].name
+    return ""
 
 fn hir_module_first_fn_name_v1(module: HirModule) -> text:
     # Cycle-139: mono's EXACT shape -- materialized keys + for-in element
@@ -203,6 +204,43 @@ fn hir_fn_scalars_at_key_v1(functions: Dict<SymbolId, HirFunction>, position: i6
         seen = seen + 1
     (SymbolId(id: 0), "", false, false, false, false, FunctionAttr.default(),
         HirType(kind: HirTypeKind.Error, span: Span.empty()), [])
+
+# Cycle-144: param-only function-count getter (pair of the scalar getter).
+fn hir_module_functions_count_p_v1(module: HirModule) -> i64:
+    module.functions.len()
+
+fn hir_module_functions_count_in_v1(modules: Dict<text, HirModule>, module_key: text) -> i64:
+    if not modules.has(module_key):
+        return 0
+    hir_module_functions_count_p_v1(modules[module_key])
+
+# Cycle-144: param-only scalar extraction. Same endgame shape as
+# hir_module_first_fn_name_p_v1: the module arrives as a PARAMETER (the
+# encode-proven class); the per-function walk uses the ordered keys +
+# guard-first bracket with the for-in element straight into the bracket.
+# Callers pass (modules, module_key, position) -- no module ever bound.
+fn hir_fn_scalars_p_v1(module: HirModule, position: i64) -> (SymbolId, text, bool, bool, bool, bool, FunctionAttr, HirType, [HirParam]):
+    val ks = hc_order_symbol_id_keys_v1(module.functions.keys())
+    var seen: i64 = 0
+    for raw_k in ks:
+        if seen == position:
+            if module.functions[raw_k] == nil:
+                return (SymbolId(id: 0), "", false, false, false, false, FunctionAttr.default(),
+                    HirType(kind: HirTypeKind.Error, span: Span.empty()), [])
+            return (module.functions[raw_k].symbol, module.functions[raw_k].name,
+                module.functions[raw_k].is_extern, module.functions[raw_k].is_method,
+                module.functions[raw_k].is_static, module.functions[raw_k].has_export_attr,
+                module.functions[raw_k].func_attr, module.functions[raw_k].return_type,
+                module.functions[raw_k].params)
+        seen = seen + 1
+    (SymbolId(id: 0), "", false, false, false, false, FunctionAttr.default(),
+        HirType(kind: HirTypeKind.Error, span: Span.empty()), [])
+
+fn hir_fn_scalars_in_v1(modules: Dict<text, HirModule>, module_key: text, position: i64) -> (SymbolId, text, bool, bool, bool, bool, FunctionAttr, HirType, [HirParam]):
+    if not modules.has(module_key):
+        return (SymbolId(id: 0), "", false, false, false, false, FunctionAttr.default(),
+            HirType(kind: HirTypeKind.Error, span: Span.empty()), [])
+    hir_fn_scalars_p_v1(modules[module_key], position)
 
 # Cycle-128: per-field module-handle getters. The MIR prescan feeder used to
 # marshal five field-expression reads off one array element at a single big
@@ -593,6 +631,8 @@ export hir_module_first_fn_name_v1
 export hir_module_first_fn_name_in_v1
 export hir_module_first_fn_name_ordered_in_v1
 export hir_module_blob_in_v1
+export hir_module_first_fn_name_p_v1, hir_fn_scalars_p_v1, hir_fn_scalars_in_v1
+export hir_module_functions_count_p_v1, hir_module_functions_count_in_v1
 export hir_fn_scalars_at_key_v1
 export hir_module_structs_at_v1, hir_module_classes_at_v1, hir_module_functions_at_v1
 export hir_module_name_at_v1, hir_module_symbols_at_v1
