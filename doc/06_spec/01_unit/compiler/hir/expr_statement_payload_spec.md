@@ -7,10 +7,15 @@ Status: authored; execution pending a rebuilt pure-Simple producer. No test PASS
 
 The three scenarios call `hir_ast_expr_statement_payload_v1` with actual parser
 AST constructors. They verify the string `abc` and all source-position fields,
-reject Return and Break variants, and reject nil statement/expression payloads.
+reject Return and Break variants, preserve an actual `ExprKind.NilLit` payload,
+and reject `StmtKind.Return(nil)`.
 The native entry calls these same controls and exits nonzero on any failure.
 Its successful output must be exactly `PASS expr-statement-payload` plus newline,
 with empty stderr and exit zero.
+
+The helper's defensive nil-input guards are not exercised by these typed AST
+controls: `StmtKind.Expr` requires an Expr, and the helper requires a StmtKind.
+Runtime execution and branch coverage remain unmeasured.
 
 The unchanged end-to-end admission fixture is
 `src/compiler/bootstrap_admission/stage2_mir_retention.spl`: `main` evaluates

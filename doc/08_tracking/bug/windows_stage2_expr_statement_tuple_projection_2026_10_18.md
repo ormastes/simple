@@ -41,6 +41,9 @@ projection and global runtime tuple/enum ABIs remain outside this repair.
 
 Focused AST controls and a native entry are recorded in
 `doc/06_spec/01_unit/compiler/hir/expr_statement_payload_spec.md`.
+The controls use valid AST constructors, including an ExprKind.NilLit expression
+and StmtKind.Return(nil). They do not claim coverage of defensive nil guards
+whose inputs are declared nonoptional; branch coverage remains unmeasured.
 The original MIR-retention fixture remains the required regression gate.
 The same producer separately compiled and ran real Hello successfully; receipts
 are in `build/smux-astra-oct18/hello-build.job.env` and `hello-run.job.env` in
