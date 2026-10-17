@@ -86,6 +86,29 @@ impl HirLowering:
         back: its own enum was never allocated and its own `status: Status`
         fields bound to the foreign type.
         doc/08_tracking/bug/hir_package_sibling_shadows_own_type_2026-10-10.md"""
+        # Imports run before this declaration pass. A callable dependency can
+        # already have materialized THIS struct under a nonlexical owner key.
+        # Reuse that declaration before lexical first-write allocation creates
+        # another ID. A same-owner lexical conflict remains an error.
+        if kind == SymbolKind.Struct and self.module_filename != "":
+            val canonical = self.symbols.lookup_qualified_type_raw(self.module_filename, name)
+            if canonical >= 0:
+                if not self.symbols.symbols.has(canonical):
+                    self.error("own struct has a stale qualified declaration: {name}", span)
+                else:
+                    val declaration: HirSymbol = self.symbols.symbols[canonical]
+                    if declaration.id.id != canonical or declaration.kind != kind or declaration.name != name or
+                            hir_symbol_owner_module(declaration.defining_module ?? "") != hir_symbol_owner_module(self.module_filename):
+                        self.error("own struct has a mismatched qualified declaration: {name}", span)
+                    else:
+                        val bound = self.symbols.local_type_binding_raw(name)
+                        if bound >= 0 and bound != canonical and
+                                hir_symbol_owner_module(self.symbols.symbol_defining_module_scalar_raw(bound)) == hir_symbol_owner_module(self.module_filename):
+                            self.error("own struct has conflicting lexical declarations: {name}", span)
+                            return SymbolId(id: bound)
+                        val retained = SymbolId(id: canonical)
+                        self.symbols.rebind_local_type(name, retained)
+                        return retained
         val defined = self.symbols.define(name, kind, nil, span, visibility, false, mod_name)
         if self.module_filename == "":
             return defined
@@ -103,6 +126,25 @@ impl HirLowering:
             if hir_symbol_owner_module(self.symbols.symbol_defining_module_scalar_raw(bound_raw)) != own_owner:
                 self.symbols.rebind_local_type(name, defined)
         defined
+
+    me publish_own_struct_identity(name: text, declaration: SymbolId, span: Span):
+        # Own structs must participate in the same qualified index consulted
+        # by callable/field dependency materialization. Otherwise importing a
+        # dependency back into its declaring module allocates a second ID.
+        if self.module_filename == "": return
+        if not self.symbols.symbols.has(declaration.id):
+            self.error("own struct has a stale declaration: {name}", span)
+            return
+        val symbol: HirSymbol = self.symbols.symbols[declaration.id]
+        if symbol.kind != SymbolKind.Struct or symbol.name != name or
+                hir_symbol_owner_module(symbol.defining_module ?? "") != hir_symbol_owner_module(self.module_filename):
+            self.error("own struct has a mismatched declaration: {name}", span)
+            return
+        val existing = self.symbols.lookup_qualified_type_raw(self.module_filename, name)
+        if existing >= 0 and existing != declaration.id:
+            self.error("own struct has conflicting qualified declarations: {name}", span)
+            return
+        self.symbols.bind_qualified_type(self.module_filename, name, declaration)
 
     me declare_module_symbols(module: ParserModule):
         # Closure builds need this pass even under SIMPLE_BOOTSTRAP=1 (see the
@@ -156,6 +198,7 @@ impl HirLowering:
             if not module_structs.has(name):
                 idx = idx + 1
                 continue
+            self.publish_own_struct_identity(name, struct_symbol, decl_span)
             val struct_decl: ParserStruct = module_structs[name]
             if struct_decl.type_params.len() == 0:
                 self.nongeneric_record_owners[struct_symbol.id] = true
@@ -185,6 +228,7 @@ impl HirLowering:
         while idx < bf_keys.len():
             val name = bf_keys[idx]
             val bitfield_symbol = self.define_own_module_type(name, SymbolKind.Struct, decl_span, decl_visibility, mod_name)
+            self.publish_own_struct_identity(name, bitfield_symbol, decl_span)
             # A bitfield declaration has no type parameters.
             self.nongeneric_record_owners[bitfield_symbol.id] = true
             idx = idx + 1
