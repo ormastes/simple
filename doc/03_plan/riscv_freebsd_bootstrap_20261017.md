@@ -25,7 +25,11 @@ the work. These requirements come directly from the user's objective.
   `build/worktree-cleanup-archive/20261017/`. Physical C: free space exceeded
   100 GiB at the latest phase check. Removing unused LLVM 23.1.3 sources also
   freed approximately 2.6 GiB inside WSL; this does not imply immediate physical
-  Windows VHD reclamation. Safe recurring retention remains incomplete.
+  Windows VHD reclamation. Guest daily `/tmp` cleanup is now enabled through
+  native `periodic`, with seven-day access/modification/change-age retention.
+  Cron is running and its daily entry is present. Source, toolchain caches and
+  evidence under `/root` are outside that cleanup root. The unsafe repository
+  QEMU cleanup helper remains unused; reboot persistence is not yet verified.
 - FreeBSD 14.4 riscv64 boots under QEMU 10.2.1 with a persistent 64 GiB overlay,
   four virtual CPUs, 6 GiB RAM and working SSH. The official base checksum and
   image integrity passed. Reboot-and-reconnect verification remains pending.
@@ -40,9 +44,20 @@ the work. These requirements come directly from the user's objective.
 - Cross-build recovery required setting CMake's module linker flags to LLD,
   in addition to executable/shared linker flags. Extraction must use
   `tar --no-same-owner` so FreeBSD's loader cache accepts root-owned libraries.
-- Native dependency jobs remain live: pkg, Python/CMake, Perl/libcurl/Git,
-  coreutils/pkgconf/libffi/zstd and rsync. GNU Make installation passed.
-  Do not describe the complete toolset as ready until every required tool passes.
+- Installed guest tools now include pkg 2.8.4, GNU Make 4.4.1, Python 3.13.16,
+  rsync 3.5.1 and CMake/CTest/CPack 3.31.12. Rsync passed a checksum/archive
+  transfer comparison. CMake passed native C/C++ configuration with Clang
+  23.1.2, compilation and execution of a probe producing `42`, before install.
+  Its cross-built archive SHA-256 is
+  `dfcc7d10b6223a376d71b29ac942d6dd84248536924a68fec0dc6403410ad775`.
+  The slower native CMake build was stopped only after qualification; its
+  cache and the completed GNU Make/Python installations were preserved.
+- Perl's Encode extension invoked BSD `make` with GNU jobserver flags. A
+  native isolated fixture reproduced that failure and passed with explicit
+  `MAKE=/usr/local/bin/gmake`. After the original Unicode generator completed,
+  the repair resumed the cached Perl build using that override. Full Perl
+  installation and libcurl/Git/coreutils/pkgconf/libffi/zstd remain pending;
+  no complete-toolset or Simple bootstrap PASS is claimed.
 - PRs #3638 and #3640 merged host/target alignment fixes into `release_phase3`.
   The staged guest source is pinned to
   `070b8181df63f137b7cedd2dd2ab1099db25a375`; actual Git identity validation

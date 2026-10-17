@@ -55,3 +55,44 @@ Extract the verified archive as the guest installer with
 causes FreeBSD's loader cache to ignore the library directory. Require both
 `llvm-config --version` admission and an executed guest Clang output before
 proceeding to the canonical native bootstrap checker.
+
+## Source prerequisites and GNU Make binding
+
+Selecting `gmake` at the top level does not bind every recursive build to it.
+The Perl 5.42.3 Encode makefile selected `MAKE = make`; FreeBSD's BSD make
+then rejected GNU Make 4.4.1 jobserver flags with `to option '-j' must be a
+positive number`. An isolated native fixture reproduced this failure and
+passed when the command-line `MAKE` override selected GNU Make explicitly.
+
+For the cached Perl build, resume with:
+
+```sh
+gmake -j 2 MAKE=/usr/local/bin/gmake
+gmake MAKE=/usr/local/bin/gmake install
+```
+
+Wait for all jobs from the failed invocation to finish before resuming, so
+generated Unicode tables and compiled objects remain reusable. This proves
+the make-binding repair mechanism; require successful installation and an
+executed installed Perl probe before admitting the full prerequisite stage.
+
+CMake 3.31.12 was built against the qualified guest sysroot on Linux and
+then qualified inside FreeBSD by configuring a C/C++ project with Clang
+23.1.2, compiling it and executing output `42`. Install only after that native
+test passes. The installed `cmake`, `ctest` and `cpack` version checks passed.
+Cross-build success or `--version` alone is insufficient qualification.
+
+## Guest temporary-file retention
+
+The persistent guest uses native daily `periodic` maintenance. Configure
+`/etc/periodic.conf` with `daily_clean_tmps_enable="YES"`,
+`daily_clean_tmps_dirs="/tmp"`, `daily_clean_tmps_days="7"` and
+`daily_clean_tmps_verbose="YES"`. Confirm cron is enabled/running and
+`/etc/crontab` schedules `periodic daily`.
+
+The native cleaner requires access, modification and change ages all to exceed
+seven days and retains its default exclusions. Keep source, toolchain caches
+and bootstrap evidence outside `/tmp`; this guest stores them under `/root`.
+This policy does not delete host overlays or worktree recovery archives, and
+does not establish that the repository QEMU cleanup helper is safe to run.
+Reboot-and-reconnect verification remains a separate acceptance gate.
