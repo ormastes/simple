@@ -2546,9 +2546,12 @@ impl MirLowering:
         while module_fn_i < module_fn_values.len():
             # module.functions also contains impl methods; retain their static
             # marker for the separate static receiver lookup below.
-            val module_fn: HirFunction = module_fn_values[module_fn_i]
-            if module_fn.is_static:
-                static_method_symbol_ids[self.symbol_id_value(module_fn.symbol)] = true
+            # workaround(p2_add): values() draws corrupt per read; bind once
+            # via if val, guard and use the same binding.
+            val static_element: HirFunction? = module_fn_values[module_fn_i]
+            if val module_fn = static_element:
+                if module_fn.is_static:
+                    static_method_symbol_ids[self.symbol_id_value(module_fn.symbol)] = true
             module_fn_i = module_fn_i + 1
 
         var impl_mi = 0
@@ -2800,25 +2803,24 @@ impl MirLowering:
         if prescan_trace:
             eprint("[mir-prescan-module] start module={module.name} functions={self.lower_emit_fn_values.len()}")
         while psi < self.lower_emit_fn_values.len():
-            # workaround(p2_add): values() materialization can carry nil-3
-            # elements (ABI draw corruption, cycles 91-149); a nil record has
-            # no body/symbol to prescan. Guard-first idiom, no-op on health.
-            if self.lower_emit_fn_values[psi] == nil:
-                psi = psi + 1
-                continue
-            if prescan_trace:
-                eprint("[mir-prescan-function] start module={module.name} index={psi} name={self.lower_emit_fn_values[psi].name}")
-            if not self.lower_emit_fn_values[psi].is_extern:
-                self.prescan_block_for_struct_types(self.lower_emit_fn_values[psi].body)
-            else:
-                # Mark every extern BEFORE any body is lowered. The lowering
-                # loop below also records it, but only when it reaches the
-                # declaration, so a caller lowered earlier saw the extern's
-                # `-> i64` result as a declared scalar: `ext() == nil` folded
-                # to false and `take(ext())` boxed a nil word as Some.
-                self.extern_fn_symbols[self.lower_emit_fn_values[psi].symbol.id] = true
-            if prescan_trace:
-                eprint("[mir-prescan-function] done module={module.name} index={psi} name={self.lower_emit_fn_values[psi].name}")
+            # workaround(p2_add): values() elements draw nil-3 PER READ in this
+            # lane's codegen (smoke8: check-draw non-nil, use-draw nil-3).
+            # Bind ONE draw, unwrap via if val, use that binding throughout.
+            val prescan_element: HirFunction? = self.lower_emit_fn_values[psi]
+            if val prescan_fn = prescan_element:
+                if prescan_trace:
+                    eprint("[mir-prescan-function] start module={module.name} index={psi} name={prescan_fn.name}")
+                if not prescan_fn.is_extern:
+                    self.prescan_block_for_struct_types(prescan_fn.body)
+                else:
+                    # Mark every extern BEFORE any body is lowered. The lowering
+                    # loop below also records it, but only when it reaches the
+                    # declaration, so a caller lowered earlier saw the extern's
+                    # `-> i64` result as a declared scalar: `ext() == nil` folded
+                    # to false and `take(ext())` boxed a nil word as Some.
+                    self.extern_fn_symbols[prescan_fn.symbol.id] = true
+                if prescan_trace:
+                    eprint("[mir-prescan-function] done module={module.name} index={psi} name={prescan_fn.name}")
             psi = psi + 1
         if prescan_trace:
             eprint("[mir-prescan-module] done module={module.name}")
@@ -2876,13 +2878,14 @@ impl MirLowering:
             eprint("[enum-reg] fn-keys: module={module.name} values_len={fn_values_count} dict_len={module.functions.len()}")
         var fni = 0
         while fni < fn_values_count:
-            # workaround(p2_add): values() elements can draw nil-3; a nil
-            # record is not emittable (guard-first idiom).
-            if self.lower_emit_fn_values[fni] == nil:
-                fni = fni + 1
-                continue
-            self.lower_module_emit_fn_v1(module, self.lower_emit_fn_values[fni],
-                    archive_function_symbols, bootstrap_trace, trace_enabled, fni)
+            # workaround(p2_add): values() draws corrupt PER READ (smoke8: the
+            # nil record passed the check-draw and faulted the use-draw at
+            # lower_module_emit_fn_v1's first field read). Bind ONE draw into
+            # an optional, unwrap via if val, pass that binding.
+            val emit_element: HirFunction? = self.lower_emit_fn_values[fni]
+            if val emit_fn = emit_element:
+                self.lower_module_emit_fn_v1(module, emit_fn,
+                        archive_function_symbols, bootstrap_trace, trace_enabled, fni)
             fni = fni + 1
 
     # Cycle-103: per-function emission step for lower_module_emit_all_v1.
