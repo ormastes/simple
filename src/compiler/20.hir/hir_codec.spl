@@ -21,8 +21,11 @@ use compiler.hir.hir_types.{SymbolId}  # explicit: glob is not an import-origin 
 use compiler.hir.hir_definitions.{HirFunction, HirStruct, HirClass, HirEnum,
     HirBitfield, HirTrait, HirConst, HirParam}
 use compiler.hir.hir_types.{HirType}  # explicit: glob is not an import-origin for surface projection
+use compiler.hir.hir_types.{SymbolTable}  # explicit: class return type for the cycle-128 handle getters
 use compiler.hir.abi_interface.{HirAbiInterfaceEncoderV1, HIR_ABI_INTERFACE_DOMAIN_V1}
 use compiler.common.attributes.{FunctionAttr}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_codec_key_order.{hc_order_symbol_id_keys_v1}
 use compiler.common.cache.canonical_identity.{canon_str, canon_nat, canon_field,
     canon_seq, canonical_identity_sort_texts}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader,
@@ -115,6 +118,178 @@ fn hir_module_encode_reason(module: HirModule) -> text:
 # The element crosses into THIS unit once; the nine scalars/small composites
 # return in one tuple (the hir_module_decode precedent: large composite
 # returns from this unit draw clean).
+# Cycle-138: dict-INDEX probe -- mono's proven access pattern (guard-first
+# functions[key] read), in the codec pool, WITHOUT .values(). The cycle-137
+# verdict reinstated the read-path as the suspect: the .values()-chain probe
+# faulted on p2_add's functions dict while mono's dict-index reads of the
+# same dict succeeded. This probe discriminates rt_dict_values as the bug.
+# Cycle-141: dict+key variant. The by-value module ARGUMENT copy at the
+# probe's call site (a big host) corrupts the nested handles (the
+# cycle-91/102/115 arg-copy class) -- passing the MODULE across was the
+# cycle-140 probe's own corruptor. The dict HANDLE + a text key are the safe
+# transports; every read happens here, in the codec pool.
+fn hir_module_first_fn_name_in_v1(modules: Dict<text, HirModule>, key: text) -> text:
+    if not modules.has(key):
+        return ""
+    hir_module_first_fn_name_p_v1(modules[key])
+
+# Cycle-142 last-resort probe: the GENERATED CODEC's exact walk --
+# hc_order_symbol_id_keys_v1 over the keys, then guard-first bracket. The
+# order helper rebuilds/canonicalizes aggregate keys, which may restore
+# bracket hash identity where raw keys() elements fail (cycles 97-141).
+# Dict+key args (the cycle-141 safe transports); all reads in this pool.
+fn hir_module_first_fn_name_ordered_in_v1(modules: Dict<text, HirModule>, key: text) -> text:
+    if not modules.has(key):
+        return ""
+    hir_module_first_fn_name_p_v1(modules[key])
+
+# Cycle-143 crown-jewel diagnostic: encode the module INSIDE this pool
+# (dict+key safe transports; the module bind and the generated encoder's
+# functions walk all happen here). If the encode produces bytes, the dict is
+# readable by the generated walk and the defect is localized to non-generated
+# Simple-level reads; if it faults, the dict is broken at the runtime level
+# (decoder/promote) -- the handoff's decisive datum.
+fn hir_module_blob_in_v1(modules: Dict<text, HirModule>, key: text) -> text:
+    if not modules.has(key):
+        return ""
+    hir_module_encode(modules[key])
+
+# Cycle-147: the FULL in-pool chain -- blob (encode) -> decode -> unwrap ->
+# while+index walk, ALL inside this small function. Every prior probe either
+# bound/arg-copied the module in a BIG host (the receipt's call site) or
+# skipped a hop; encode's only observed success used exactly this shape:
+# expression evaluation at the call site, value copy in a SMALL callee.
+fn hir_module_first_fn_name_via_decode_v1(modules: Dict<text, HirModule>, key: text) -> text:
+    if not modules.has(key):
+        return ""
+    val decoded_again: HirModule = hir_module_decode(hir_module_blob_in_v1(modules, key)).unwrap()
+    hir_module_first_fn_name_wi_v1(decoded_again)
+
+# Cycle-146 micro-test: while+index walk with ks[i] straight into the
+# bracket -- no key bind (fails, cycles 97-141), no for-in (suspected silent
+# zero-iteration, the cycle-95 class -- every empty probe fell through the
+# loop). If THIS prints a name, the for-in draws zero-iterate and this is
+# the shape for all getters.
+fn hir_module_first_fn_name_wi_v1(module: HirModule) -> text:
+    val ks = module.functions.keys()
+    var wi: i64 = 0
+    while wi < ks.len():
+        if module.functions[ks[wi]] == nil:
+            wi = wi + 1
+            continue
+        return module.functions[ks[wi]].name
+    return ""
+
+# Cycle-144 endgame shape: the module is used ONLY as a parameter -- never
+# bound from a dict read. The cycle-144 encode probe (hir_module_blob_in_v1,
+# enc_len=3808) proved the generated walk + param copies sound in this pool
+# while every bind-based read returned empty: encode receives its module by
+# parameter, and that is the one access class that works.
+fn hir_module_first_fn_name_p_v1(module: HirModule) -> text:
+    val ks = module.functions.keys()
+    for raw_k in ks:
+        if module.functions[raw_k] == nil:
+            continue
+        return module.functions[raw_k].name
+    return ""
+
+fn hir_module_first_fn_name_v1(module: HirModule) -> text:
+    # Cycle-139: mono's EXACT shape -- materialized keys + for-in element
+    # used DIRECTLY in the bracket. The annotated key bind (`val k: SymbolId
+    # = ks[0]`, the cycle-138 form) loses aggregate-key identity: the
+    # cycle-139 hir-final-idx verdict printed first_fn_name EMPTY -- the nil
+    # guard fired on the dict's own key. No named key bind anywhere.
+    val ks = module.functions.keys()
+    for raw_k in ks:
+        if module.functions[raw_k] == nil:
+            continue
+        return module.functions[raw_k].name
+    return ""
+
+# Cycle-138: dict-index variant of the scalar extraction. The .values()-array
+# transport draws corrupted for Dict<SymbolId, HirFunction> (the cycle-132-136
+# probe faulted on it while mono's guard-first dict-index reads of the same
+# dict succeeded -- verdict case (a): rt_dict_values on aggregate-keyed dicts
+# is the defect, bug record alongside). This walks keys()[position] with the
+# guard-first double access -- the exact pattern mono's collect lane proved.
+fn hir_fn_scalars_at_key_v1(functions: Dict<SymbolId, HirFunction>, position: i64) -> (SymbolId, text, bool, bool, bool, bool, FunctionAttr, HirType, [HirParam]):
+    # Cycle-139: same mono shape as hir_module_first_fn_name_v1 -- the for-in
+    # element goes STRAIGHT into the bracket (no `val k` bind; the annotated
+    # bind loses aggregate-key identity and the guard silently nil-skips,
+    # the cycle-139 verdict).
+    val ks = functions.keys()
+    var seen: i64 = 0
+    for raw_k in ks:
+        if seen == position:
+            if functions[raw_k] == nil:
+                return (SymbolId(id: 0), "", false, false, false, false, FunctionAttr.default(),
+                HirType(kind: HirTypeKind.Error, span: Span.empty()), [])
+            return (functions[raw_k].symbol, functions[raw_k].name, functions[raw_k].is_extern,
+                functions[raw_k].is_method, functions[raw_k].is_static, functions[raw_k].has_export_attr,
+                functions[raw_k].func_attr, functions[raw_k].return_type, functions[raw_k].params)
+        seen = seen + 1
+    (SymbolId(id: 0), "", false, false, false, false, FunctionAttr.default(),
+        HirType(kind: HirTypeKind.Error, span: Span.empty()), [])
+
+# Cycle-144: param-only function-count getter (pair of the scalar getter).
+fn hir_module_functions_count_p_v1(module: HirModule) -> i64:
+    module.functions.len()
+
+fn hir_module_functions_count_in_v1(modules: Dict<text, HirModule>, module_key: text) -> i64:
+    if not modules.has(module_key):
+        return 0
+    hir_module_functions_count_p_v1(modules[module_key])
+
+# Cycle-144: param-only scalar extraction. Same endgame shape as
+# hir_module_first_fn_name_p_v1: the module arrives as a PARAMETER (the
+# encode-proven class); the per-function walk uses the ordered keys +
+# guard-first bracket with the for-in element straight into the bracket.
+# Callers pass (modules, module_key, position) -- no module ever bound.
+fn hir_fn_scalars_p_v1(module: HirModule, position: i64) -> (SymbolId, text, bool, bool, bool, bool, FunctionAttr, HirType, [HirParam]):
+    val ks = hc_order_symbol_id_keys_v1(module.functions.keys())
+    var seen: i64 = 0
+    for raw_k in ks:
+        if seen == position:
+            if module.functions[raw_k] == nil:
+                return (SymbolId(id: 0), "", false, false, false, false, FunctionAttr.default(),
+                    HirType(kind: HirTypeKind.Error, span: Span.empty()), [])
+            return (module.functions[raw_k].symbol, module.functions[raw_k].name,
+                module.functions[raw_k].is_extern, module.functions[raw_k].is_method,
+                module.functions[raw_k].is_static, module.functions[raw_k].has_export_attr,
+                module.functions[raw_k].func_attr, module.functions[raw_k].return_type,
+                module.functions[raw_k].params)
+        seen = seen + 1
+    (SymbolId(id: 0), "", false, false, false, false, FunctionAttr.default(),
+        HirType(kind: HirTypeKind.Error, span: Span.empty()), [])
+
+fn hir_fn_scalars_in_v1(modules: Dict<text, HirModule>, module_key: text, position: i64) -> (SymbolId, text, bool, bool, bool, bool, FunctionAttr, HirType, [HirParam]):
+    if not modules.has(module_key):
+        return (SymbolId(id: 0), "", false, false, false, false, FunctionAttr.default(),
+            HirType(kind: HirTypeKind.Error, span: Span.empty()), [])
+    hir_fn_scalars_p_v1(modules[module_key], position)
+
+# Cycle-128: per-field module-handle getters. The MIR prescan feeder used to
+# marshal five field-expression reads off one array element at a single big
+# call site (the cycle-111 marshalling class: the reads succeed individually
+# -- the mir-feed receipts prove it -- but five at one call site corrupt).
+# Each getter takes the ARRAY HANDLE plus a scalar index (the only argument
+# transports that never corrupt) and does the expression read HERE, in the
+# proven pool, returning one reference-typed handle or scalar.
+fn hir_module_structs_at_v1(values: [HirModule], index: i64) -> Dict<SymbolId, HirStruct>:
+    values[index].structs
+
+fn hir_module_classes_at_v1(values: [HirModule], index: i64) -> Dict<SymbolId, HirClass>:
+    values[index].classes
+
+fn hir_module_functions_at_v1(values: [HirModule], index: i64) -> Dict<SymbolId, HirFunction>:
+    values[index].functions
+
+fn hir_module_name_at_v1(values: [HirModule], index: i64) -> text:
+    values[index].name
+
+fn hir_module_symbols_at_v1(values: [HirModule], index: i64) -> SymbolTable:
+    values[index].symbols
+
 # Cycle-115: index-based variant. The by-value HirFunction ARGUMENT copy at
 # 50.mir call sites also draws corrupted (the cycle-115 shim faulted on the
 # untagged param pointer inside this function), so the element never crosses
@@ -478,6 +653,17 @@ export HirDecodeLimits, HirDecodeAuditUsage, HirDecodeAuditObserver, HirDecodeEr
 export hir_module_encode, hir_module_encode_canonical, hir_module_encode_reason
 export hir_module_has_rt_hal
 export hir_fn_scalars_at_v1
+export hir_module_first_fn_name_v1
+export hir_module_first_fn_name_in_v1
+export hir_module_first_fn_name_ordered_in_v1
+export hir_module_blob_in_v1
+export hir_module_first_fn_name_p_v1, hir_fn_scalars_p_v1, hir_fn_scalars_in_v1
+export hir_module_first_fn_name_wi_v1
+export hir_module_first_fn_name_via_decode_v1
+export hir_module_functions_count_p_v1, hir_module_functions_count_in_v1
+export hir_fn_scalars_at_key_v1
+export hir_module_structs_at_v1, hir_module_classes_at_v1, hir_module_functions_at_v1
+export hir_module_name_at_v1, hir_module_symbols_at_v1
 export hir_codec_abi_interface_parts_v1, hir_codec_abi_interface_encoded_v1
 export hir_module_decode, hir_module_decode_bounded, hir_module_decode_bounded_audited
 export hir_module_decode_stable
