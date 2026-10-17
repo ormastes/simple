@@ -74,7 +74,20 @@ impl HirLowering:
         var field_order: [text] = []
         for raw_field in fields:
             val field: HirField = raw_field
-            field_types[field.name] = self.lower_type(field.type_)
+            # Streaming-surface / unstub modules can present a field whose
+            # declared type annotation did not survive the code-less parse
+            # (prescan_composite_field_types runs on the retained lane too;
+            # measured nil draw on the stage2 candidate at
+            # lower_type +424, address 0x0, 2026-10-17). Composite layout
+            # registration needs the field NAME and ORDER (aggregates are
+            # word-boxed); register an explicit Error placeholder instead of
+            # nil-derefing so the prescan completes. Code-ful lanes retain
+            # real types.
+            if field.type_ == nil:
+                field_types[field.name] = HirType(
+                    kind: HirTypeKind.Error, span: field.span)
+            else:
+                field_types[field.name] = self.lower_type(field.type_)
             field_order = field_order.push(field.name)
         self.symbols.pop_scope()
         self.prescan_type_parameters = saved_parameters
