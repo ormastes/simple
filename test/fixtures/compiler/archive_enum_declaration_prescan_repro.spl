@@ -1,0 +1,201 @@
+# Direct fail-fast diagnostic; no SSpec runner or final archive admission.
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.hir_declaration_summary_v1.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.declaration_providers_v1.*
+use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_context_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+fn require(condition: bool, message: text):
+    if not condition: panic(message)
+
+fn fixture_module(source: text, name: text) -> HirModule:
+    val path = "archive_enum_repro/" + name + ".spl"
+    val parsed = parse_full_frontend(source, path, name, Logger(level: 0))
+    var frontend = HirLowering.with_filename(path)
+    val module = frontend.lower_module(parsed)
+    require(frontend.errors.len() == 0, "fixture HIR lowering failed")
+    module
+
+fn require_packet_payload(lowering: MirLowering, key: text, decoy: i64) -> i64:
+    val demanded = lowering.enum_variant_payload_type_at(key, 0)
+    require(demanded != nil, "payload demand failed")
+    require(lowering.enum_variant_payload_types.has(key), "qualified payload metadata missing")
+    val payload = lowering.enum_variant_payload_types[key]
+    require(payload.len() == 1, "payload arity changed")
+    match payload[0].kind:
+        case HirTypeKind.Named(symbol, _):
+            require(symbol.id != decoy, "provider payload borrowed consumer decoy SymbolId")
+            require(lowering.symbols.symbols.has(symbol.id), "payload type has no current-consumer symbol")
+            require(lowering.symbols.symbols[symbol.id].name == "Packet", "payload type resolved to another nominal")
+            symbol.id
+        case _: panic("payload lost its nominal type")
+
+fn fixture_enum(module: HirModule, name: text) -> HirEnum:
+    for raw_enum in module.enums.values():
+        val enum_def: HirEnum = raw_enum
+        if enum_def.name == name: return enum_def
+    panic("fixture enum missing")
+
+fn fixture_enum_declaration(module: MirHirModuleDeclarationsV1, name: text) -> MirHirEnumDeclarationV1:
+    for raw_enum in module.enums:
+        val enum_def: MirHirEnumDeclarationV1 = raw_enum
+        if enum_def.name == name: return enum_def
+    panic("fixture enum declaration missing")
+
+# @workaround bug=enum_named_payload_default_dropped_2026_10_16 reason= exercise the rich HIR/artifact boundary until flat enum defaults are transported.
+fn fixture_with_named_default(module: HirModule) -> HirModule:
+    var expression: HirExpr? = nil
+    for raw_function in module.functions.values():
+        val function: HirFunction = raw_function
+        if function.name == "default_count" or function.name.ends_with(".default_count"):
+            require(function.body.has, "default witness function has no expression")
+            expression = Some(function.body.value)
+    require(expression != nil, "genuinely parsed default witness missing")
+    match expression.unwrap().kind:
+        case HirExprKind.IntLit(value, _): require(value == 9, "parsed default witness changed")
+        case _: panic("default witness must be the parsed integer literal")
+    var output = module
+    var choice = fixture_enum(module, "Choice")
+    var variants: [HirVariant] = []
+    var changed = false
+    for raw_variant in choice.variants:
+        var variant: HirVariant = raw_variant
+        if variant.name == "Named":
+            match variant.kind:
+                case HirVariantKind.Struct(fields):
+                    require(fields.len() == 2, "named default fixture field count changed")
+                    var updated_fields = fields
+                    var field: HirField = fields[1]
+                    field.has_default = true
+                    field.default = expression.unwrap()
+                    updated_fields[1] = field
+                    variant.kind = HirVariantKind.Struct(updated_fields)
+                    changed = true
+                case _: panic("named default fixture must have structural fields")
+        variants.push(variant)
+    require(changed, "named default overlay was not applied")
+    choice.variants = variants
+    output.enums[choice.symbol] = choice
+    output
+
+fn main():
+    val provider = fixture_with_named_default(fixture_module("struct Packet:\n    value: i64\n\nenum Choice:\n    Unit = 7\n    Pair(Packet) = 12\n    Named(packet: Packet, count: i64)\n\nenum Generic<T>:\n    Value(T)\n\nfn make() -> Choice:\n    val factory = \\: Choice.Pair(Packet(1))\n    factory()\n\nfn default_count() -> i64:\n    9\n", "provider"))
+    val first = fixture_module("struct Decoy:\n    value: i64\n", "first")
+    val second = fixture_module("struct Decoy:\n    value: i64\n\nstruct Another:\n    value: i64\n\nenum Choice:\n    Shadow\n", "second")
+    val enum_def = fixture_enum(provider, "Choice")
+    val generic = fixture_enum(provider, "Generic")
+    val packet = provider.structs.values()[0]
+    val first_decoy = first.structs.values()[0]
+    require(packet.symbol.id == first_decoy.symbol.id, "fixture must exercise colliding provider/consumer IDs")
+    val context = hir_owned_artifact_context_v1()
+    val body = hir_module_encode(provider)
+    val digest = sha256_text(body)
+    val authority = sha256_text("archive-enum-diagnostic-NOT-admission\n" + body)
+    require(transient_scope_begin(), "projection scope unavailable")
+    val projection = mir_hir_project_module_in_owned_scope_v1(context, provider, authority, digest, digest)
+    val paused = transient_scope_pause()
+    val promoted = if paused: transient_promote(projection) else: false
+    val ended = transient_scope_end()
+    require(paused and promoted and ended and projection.is_ok(), "real declaration projection failed")
+    val declaration = projection.unwrap()
+    var repository = MirHirDeclarationRepositoryV1(artifact_context: context,
+        final_repository_authority: authority, ordered_modules: [provider.name],
+        modules: {provider.name: declaration}, authority: "")
+    repository.authority = mir_hir_declaration_repository_digest_v1(repository)
+    require(mir_hir_declaration_repository_valid_v1(repository), "diagnostic repository invalid")
+    var lowering = MirLowering.new(first.symbols)
+    lowering.use_explicit_semantic_policy()
+    lowering.declaration_repository = Some(repository)
+    lowering.prescan_module_declarations_v1(declaration)
+    require(lowering.enum_variant_index_q.has(enum_def.runtime_name), "archive prescan omitted qualified provider enum")
+    require(lowering.enum_variant_discriminants_q[enum_def.runtime_name] == [7, 12, 13], "explicit discriminants changed")
+    require(lowering.errors.len() == 0, "enum declaration prescan failed")
+    require(enum_def.runtime_name != "", "provider enum runtime name missing")
+    require(lowering.generic_enum_constructor_owners[generic.runtime_name], "generic owner flag lost")
+    require(lowering.enum_variant_is_unit(enum_def.runtime_name, "Unit"), "frontend unit variant category lost")
+    require(not lowering.enum_variant_is_unit(enum_def.runtime_name, "Pair"), "nonempty tuple payload was misclassified as a unit")
+    lowering.enum_variant_payload_kind["diagnostic::MissingNames"] = "tuple"
+    require(not lowering.enum_payload_metadata_is_unit("diagnostic::MissingNames"), "absent slot metadata was treated as proof of a unit")
+    require(not lowering.enum_variant_payload_types.has(enum_def.runtime_name + "::Pair"), "prescan retained provider-local payload IDs")
+    require(lowering.enum_variant_payload_names[enum_def.runtime_name + "::Named"] == ["packet", "count"], "named payload field order lost")
+    val choice_declaration = fixture_enum_declaration(declaration, "Choice")
+    val prepared = lowering.declaration_enum_definition_v1(declaration, choice_declaration)
+    require(prepared != nil, "exact enum declaration hydration failed")
+    var saw_default = false
+    for variant in prepared.unwrap().variants:
+        if variant.name == "Named":
+            match variant.kind:
+                case HirVariantKind.Struct(fields):
+                    require(fields.len() == 2 and fields[1].has_default, "named field default metadata lost")
+                    match fields[1].default.kind:
+                        case HirExprKind.IntLit(value, _): require(value == 9, "named field default expression changed")
+                        case _: panic("named field default artifact was not loaded exactly")
+                    saw_default = true
+                case _: panic("named variant lost structural payload")
+    require(saw_default, "named variant default oracle was not reached")
+    val first_mir = lowering.lower_module(first, [], false)
+    require(lowering.errors.len() == 0, "first consumer lowering failed")
+    require(not lowering.enum_variant_payload_types.has(enum_def.runtime_name + "::Pair"), "unused consumer eagerly hydrated all provider enums")
+    val first_payload = require_packet_payload(lowering, enum_def.runtime_name + "::Pair", first_decoy.symbol.id)
+    val second_mir = lowering.lower_module(second, [], false)
+    require(lowering.errors.len() == 0, "second consumer lowering failed")
+    require(not lowering.enum_variant_payload_types.has(enum_def.runtime_name + "::Pair"), "second consumer retained previous payload IDs")
+    require(lowering.enum_variant_index["Choice"] == ["Shadow"], "local enum shadow lost")
+    val local_runtime_before = lowering.enum_runtime_id("Choice")
+    val second_payload = require_packet_payload(lowering, enum_def.runtime_name + "::Pair", first_decoy.symbol.id)
+    require(first_payload != second_payload, "qualified payload type was not refreshed for the second consumer")
+    val named = lowering.enum_variant_payload_type_at(enum_def.runtime_name + "::Named", 0)
+    require(named != nil, "named payload demand failed")
+    require(lowering.enum_variant_payload_kind[enum_def.runtime_name + "::Named"] == "struct", "named payload category lost")
+    require(lowering.enum_variant_payload_arity(enum_def.runtime_name + "::Named") == 2, "named payload arity lost")
+    require(lowering.enum_runtime_id(enum_def.runtime_name) >= 2, "deferred runtime identity lost")
+    require(lowering.enum_runtime_id("Choice") == local_runtime_before, "foreign qualified demand replaced the local bare runtime identity")
+    require(lowering.enum_variant_index["Choice"] == ["Shadow"], "foreign payload demand replaced local enum shadow")
+    require(not lowering.enum_variant_payload_types.has("Choice::Pair"), "foreign qualified payload overwrote local bare payload owner")
+    # Simulate an archive function fragment: rich declarations remain in the
+    # repository, while this body carries no owning enum/struct definitions.
+    # The only constructor demand in make is inside its lifted lambda.
+    var lambda_fragment = provider
+    lambda_fragment.enums = {}
+    lambda_fragment.structs = {}
+    val lambda_mir = lowering.lower_module(lambda_fragment, [], false)
+    require(lowering.errors.len() == 0, "lambda-first provider payload demand failed")
+    var lifted_bodies = 0
+    for function in lambda_mir.functions.values():
+        if function.name.starts_with("__lambda_lift_"):
+            require(function.blocks.len() > 0, "lifted lambda body is empty")
+            lifted_bodies = lifted_bodies + 1
+    require(lifted_bodies > 0, "lambda-first oracle did not emit an actual lifted body")
+    # Mirror the existing structural capture contract; diagnostics for a
+    # redundant catch-all are independent of selecting the wrong enum owner.
+    val capture = fixture_module("enum Op:\n    Eq\n    Ne\n    Lt\n\nenum Kind:\n    Return\n\nfn capture(op: Op) -> i64:\n    match op:\n        case Return:\n            if Return == Op.Eq: 1 else: 0\n        case _:\n            2\n", "capture")
+    val capture_mir = lowering.lower_module(capture, [], false)
+    var found_capture = false
+    var capture_variant_tests = 0
+    for function in capture_mir.functions.values():
+        if function.name == "capture" or function.name.ends_with(".capture"):
+            found_capture = true
+            for block in function.blocks:
+                if (block.label ?? "").contains("ematch_arm"):
+                    capture_variant_tests = capture_variant_tests + 1
+    require(found_capture and capture_variant_tests == 0, "typed capture borrowed an unrelated enum variant test")
+    var bad_enum = choice_declaration
+    var variants = bad_enum.variants
+    var explicit_variant = variants[0]
+    require(explicit_variant.has_discriminant, "missing-artifact oracle needs a real explicit discriminant")
+    explicit_variant.discriminant_artifact = nil
+    variants[0] = explicit_variant
+    bad_enum.variants = variants
+    val before_errors = lowering.errors.len()
+    val rejected = lowering.declaration_enum_definition_v1(declaration, bad_enum)
+    require(rejected == nil and lowering.errors.len() > before_errors, "missing discriminant artifact was silently omitted")
+    print "PASS: archive enum prescan and per-consumer nominal payload relocation"
