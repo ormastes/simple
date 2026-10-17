@@ -1832,6 +1832,72 @@ impl MirLowering:
                     prescan_param_tys.push(prescan_param.type_)
                 bootstrap_fn_param_hir_types_register(prescan_fn.name, prescan_param_tys)
 
+    me register_builtin_enum_seeds():
+        """Register the built-in Result/Option variant and runtime-identity
+        seeds. Extracted from lower_module's tail (2026-10-17) so lanes that
+        bypass the non-bootstrap tail -- the stage3 bootstrap-fixed entry
+        lane above all -- can apply the same seeds. Seeds only what is
+        missing, so a user declaration of the same name still wins."""
+        if not self.enum_variant_index.has("Result"):
+            self.enum_variant_index["Result"] = ["Ok", "Err"]
+            self.reindex_enum_variant_owners("Result", [], ["Ok", "Err"])
+            self.enum_variant_discriminants["Result"] = [0, 1]
+        if not self.enum_runtime_id_index.has("Result"):
+            self.enum_runtime_id_index["Result"] = 0
+        self.register_builtin_enum_dual("Result", ["Ok", "Err"], [0, 1], 0)
+
+        # Register the built-in Option enum so bare-variant construction
+        # (`Some(v)` / `None`) and `match o: case Some(v)/None` resolve the same
+        # discriminants (Some=0, None=1, matching the stdlib `enum Option`
+        # declaration order). Option is not carried in module.enums. Skip if
+        # user code shadows the name.
+        if not self.enum_variant_index.has("Option"):
+            self.enum_variant_index["Option"] = ["Some", "None"]
+            self.reindex_enum_variant_owners("Option", [], ["Some", "None"])
+            self.enum_variant_discriminants["Option"] = [0, 1]
+        if not self.enum_runtime_id_index.has("Option"):
+            self.enum_runtime_id_index["Option"] = 1
+        self.register_builtin_enum_dual("Option", ["Some", "None"], [0, 1], 1)
+
+    me register_module_enum_bootstrap_inventory_v1(modules: [HirModule]):
+        """Register every given module's own enums (variants AND runtime
+        ids) plus the built-in Result/Option seeds, up front, before a
+        bootstrap-lane lowering runs.
+
+        Measured gap (stage3 frontier, 2026-10-17, site-19): the
+        bootstrap-fixed stage3 lane lowers app.cli.bootstrap_main through
+        lower_module's bootstrap-flat branch on a fresh MirLowering. That
+        branch returns before the non-bootstrap tail, so NONE of the tail's
+        registration runs on this instance: not the module's own
+        module.enums loop, not the built-in Option/Result seeds, and (with
+        the empty provider list this lane passes) no dependency enums
+        either. The stage3 build therefore died with "enum construction:
+        missing runtime identity for 'Option'" and "enum construction:
+        unregistered declaration 'compiler.common.driver_core_modes.
+        CompileMode'" at the entry's construction sites, while stage2 --
+        built by the Rust seed, which seeds a GLOBAL enum sidecar across
+        the whole closure (reserved Result/Option lane 0/1) before lowering
+        -- compiled the same entry fine. The other Simple lanes never hit
+        this because their registration arrives from a different pass
+        (bootstrap_globals' per-module flat type defs, or lower_module's
+        provider loops); only this lane bypasses all of them.
+
+        register_enum_variants / register_enum_runtime_id read only the
+        HirEnum (no symbol table), the seeds guard on has() so re-runs are
+        quiet, and the module's own tail registration overwrites
+        unconditionally if it ever runs."""
+        var inventory_module_i = 0
+        while inventory_module_i < modules.len():
+            val inventory_enums = modules[inventory_module_i].enums.values()
+            var inventory_enum_i = 0
+            while inventory_enum_i < inventory_enums.len():
+                val inventory_enum_def: HirEnum = inventory_enums[inventory_enum_i]
+                self.register_enum_variants(inventory_enum_def)
+                self.register_enum_runtime_id(inventory_enum_def)
+                inventory_enum_i = inventory_enum_i + 1
+            inventory_module_i = inventory_module_i + 1
+        self.register_builtin_enum_seeds()
+
     me lower_bootstrap_entry_module(module: HirModule) -> MirModule:
         """Lower the stage3 fixed-entry module (`app.cli.bootstrap_main`).
 
@@ -2318,26 +2384,7 @@ impl MirLowering:
         # discriminants (Ok=0, Err=1) as user enums. Result is not carried in
         # module.enums, so without this the variants lowered as indirect calls
         # to an undefined callee. Skip if user code shadows the name.
-        if not self.enum_variant_index.has("Result"):
-            self.enum_variant_index["Result"] = ["Ok", "Err"]
-            self.reindex_enum_variant_owners("Result", [], ["Ok", "Err"])
-            self.enum_variant_discriminants["Result"] = [0, 1]
-        if not self.enum_runtime_id_index.has("Result"):
-            self.enum_runtime_id_index["Result"] = 0
-        self.register_builtin_enum_dual("Result", ["Ok", "Err"], [0, 1], 0)
-
-        # Register the built-in Option enum so bare-variant construction
-        # (`Some(v)` / `None`) and `match o: case Some(v)/None` resolve the same
-        # discriminants (Some=0, None=1, matching the stdlib `enum Option`
-        # declaration order). Option is not carried in module.enums. Skip if
-        # user code shadows the name.
-        if not self.enum_variant_index.has("Option"):
-            self.enum_variant_index["Option"] = ["Some", "None"]
-            self.reindex_enum_variant_owners("Option", [], ["Some", "None"])
-            self.enum_variant_discriminants["Option"] = [0, 1]
-        if not self.enum_runtime_id_index.has("Option"):
-            self.enum_runtime_id_index["Option"] = 1
-        self.register_builtin_enum_dual("Option", ["Some", "None"], [0, 1], 1)
+        self.register_builtin_enum_seeds()
 
         # Build (struct NAME, method name) -> method SymbolId lookup from
         # module.impls. Bug #138/#156: a receiver with no HIR type inference
