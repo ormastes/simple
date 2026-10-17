@@ -252,6 +252,31 @@ fn mono_archive_registration_receipt_seal_v1(receipt: MonoArchiveRegistrationRec
     if not w.ok: return ""
     sha256_text((if receipt.logical_name != "": "mono-logical-registration-receipt-v3\n" else: "mono-registration-receipt-v3\n") + w.finish())
 
+fn mono_archive_registration_receipt_difference_v1(
+        expected: MonoArchiveRegistrationReceiptV1,
+        actual: MonoArchiveRegistrationReceiptV1) -> text:
+    if expected.logical_name != actual.logical_name: return "logical name"
+    if expected.archive.archive_key != actual.archive.archive_key or
+            expected.archive.body_digest != actual.archive.body_digest or
+            expected.archive.lowering_warnings_digest != actual.archive.lowering_warnings_digest:
+        return "archive identity"
+    if expected.base_digest != actual.base_digest or expected.base_epoch != actual.base_epoch:
+        return "predecessor identity"
+    if expected.next_symbol != actual.next_symbol: return "next symbol"
+    if expected.generic_functions != actual.generic_functions or
+            expected.generic_structs != actual.generic_structs or
+            expected.generic_classes != actual.generic_classes:
+        return "generic counts"
+    if expected.roots != actual.roots: return "root order"
+    if expected.rows.len() != actual.rows.len(): return "row count"
+    var index = 0
+    while index < expected.rows.len():
+        if mono_archive_registration_row_digest_v1(expected.rows[index]) !=
+                mono_archive_registration_row_digest_v1(actual.rows[index]):
+            return "row order or payload"
+        index = index + 1
+    "unknown seal component"
+
 fn mono_archive_registration_scratch_collector_v1(owner: MonoArchiveRegistrationOwnerV1) -> MonomorphizationPass:
     var worker = MonomorphizationPass.create()
     worker.template_body_mode = MonoTemplateBodyModeV1.ArchiveRequests
@@ -576,24 +601,35 @@ fn mono_archive_publish_registration_v1(owner: MonoArchiveRegistrationOwnerV1,
         return Err("registration publication cache owner unavailable")
     if not transient_scope_begin(): return Err("registration publication scope unavailable")
     var valid = false
+    var refusal = "registration predecessor or archive authority refused"
     if not owner.sealed and receipt.base_epoch == owner.epoch and receipt.base_digest != "" and
             receipt.base_digest == mono_archive_registration_owner_digest_v1(owner) and
             receipt.seal != "" and receipt.seal == mono_archive_registration_receipt_seal_v1(receipt) and
             not owner.archives.has(receipt.archive.input.module_name) and
             hir_body_archive_matches_v1(receipt.archive, receipt.archive.input):
         if val decoded = hir_cache_load_in_owned_scope(receipt.archive.archive_key):
+            refusal = "registration archived warning identity refused"
             if hir_body_archive_warnings_digest_v1(hir_cache_last_warnings()) == receipt.archive.lowering_warnings_digest:
                 # Re-run the same actual collector on the admitted complete
                 # body. This proves updates/collisions/order, not just a seal of
                 # caller-created dictionary snapshots.
                 val exact = mono_archive_collect_registration_in_owned_scope_v1(owner,
                     decoded, receipt.archive.input.module_name, receipt.archive)
-                valid = exact.is_ok() and exact.unwrap().seal == receipt.seal
+                if exact.is_err():
+                    refusal = "registration exact recollection refused: " + exact.unwrap_err()
+                else:
+                    valid = exact.unwrap().seal == receipt.seal
+                    if not valid:
+                        refusal = "registration exact recollection differs: " +
+                            mono_archive_registration_receipt_difference_v1(receipt, exact.unwrap())
+        else:
+            refusal = "registration archived body decode refused"
     val schedule = if valid: mono_archive_registration_schedule_digest_v1(owner.roots +
         [MonoArchiveRootOrderV1(module_name: receipt.archive.input.module_name, symbols: receipt.roots)]) else: ""
+    if valid and schedule == "": refusal = "registration ordered schedule refused"
     valid = valid and schedule != ""
     mono_archive_registration_close_v1(schedule, valid)
-    if not valid: return Err("registration predecessor, body, rows, or order refused")
+    if not valid: return Err(refusal)
     mono_archive_registration_install_v1(owner, receipt, schedule)
 
 fn mono_archive_registration_install_v1(owner: MonoArchiveRegistrationOwnerV1,

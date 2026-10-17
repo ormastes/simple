@@ -99,6 +99,19 @@ compile the self-hosted compiler with an eprint inside
 (`find_local_hir_type` hit/miss + both rendered types) — native vs
 interpreted — on this exact repro.
 
+## Linux release_phase3 follow-up (2026-10-16)
+
+The canonical Stage 2 test-runner build reproduced the `SdnValue.Array`
+payload mismatch at `src/lib/common/sdn/value.spl:54` with producer
+`5571bd354b42baf112cef648b6fee15fbe0997c3c9a0e1f409a6dd7e6067be6a`.
+Qualifying the `SdnValue` match patterns removed the independent B5b duplicate
+wildcard diagnostic, but allowing a negative remembered-HIR comparison to fall
+through to canonical MIR evidence did not admit the array payload: the MIR
+carrier lacks sufficient enum identity. A second call-site recovery attempt
+crashed the staged compiler during MIR after 64/265 modules and was reverted in
+`fd88fb91edf`. No semantic fix is admitted; the original fail-closed behavior
+remains the required baseline.
+
 ## Scope note
 
 Both matrix families from 2026-10-12 (48 rt_hal fn-field + 12 SdnValue) are
