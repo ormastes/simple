@@ -795,7 +795,20 @@ impl CompilerDriver:
                 stored = parser_record != "" and hir_cache_store_in_owned_scope(
                     transaction_cache_key, module, warnings, parser_record)
                 if not stored:
-                    infrastructure_error = "HIR shard cache publication failed for {source.path}"
+                    if hir_cache_last_refusal_is_io_v1():
+                        infrastructure_error = "HIR shard cache publication failed for {source.path}"
+                    else:
+                        # Codec refusal (encode reject / selfcheck / unstable
+                        # roundtrip): fail-closed evidence gate, not an I/O
+                        # failure. The module is correct in memory; the main
+                        # build lowers it on the cache miss. Fail the shard
+                        # only for genuine I/O store failures -- otherwise an
+                        # encoder draw that refuses blobs (e.g. the upstream
+                        # missing_required_hir_module_function_entry gate fed
+                        # by an erased dict read) fails EVERY module and the
+                        # whole row. The ledger records UNCACHED via
+                        # hir_cache_stored=false.
+                        eprint("[hir-shard] cache store refused (codec, not I/O); module will be lowered by the main build: {source.path}")
 
         if errors.len() == 0 and infrastructure_error == "":
             if val Some(input) = archive_input:
