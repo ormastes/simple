@@ -1,0 +1,107 @@
+"""
+Pure incremental copy-mode input. Ordered actions are decoded by production
+helpers; terminal timing, clipboard and history effects are separate evidence.
+# @manual: primary
+Execution and docgen pending TEST_BLOCKED.
+"""
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.client_copy_input.{client_copy_new, client_copy_feed}
+
+describe "smux incremental copy input":
+    it "should decode batched ordinary copy keys in their original order":
+        # @req REQ-SMUX-INTERACTIVE-005
+        step("Feed several navigation keys in one ordinary input action")
+        val decoded = client_copy_feed(client_copy_new(), "kkq")
+        expect(decoded.actions).to_equal(["up", "up", "exit"])
+        expect(decoded.state.pending).to_equal("")
+
+    it "should decode multiple arrows and page keys from one chunk":
+        # @req REQ-SMUX-INTERACTIVE-005
+        step("Feed coalesced CSI sequences through the production copy decoder")
+        val decoded = client_copy_feed(client_copy_new(), "\x1b[A\x1b[B\x1b[5~\x1b[6~")
+        expect(decoded.actions).to_equal(["up", "down", "page-up", "page-down"])
+        expect(decoded.state.pending).to_equal("")
+
+    it "should retain a fragmented arrow without exiting copy mode":
+        # @req REQ-SMUX-INTERACTIVE-005
+        step("Read Escape before the rest of an arrow sequence")
+        val first = client_copy_feed(client_copy_new(), "\x1b")
+        expect(first.actions.len()).to_equal(0)
+        expect(first.state.pending).to_equal("\x1b")
+        val second = client_copy_feed(first.state, "[")
+        expect(second.actions.len()).to_equal(0)
+        expect(second.state.pending).to_equal("\x1b[")
+        val third = client_copy_feed(second.state, "A")
+        expect(third.actions).to_equal(["up"])
+        expect(third.state.pending).to_equal("")
+
+    it "should retain a fragmented page key and continue with later keys":
+        # @req REQ-SMUX-INTERACTIVE-005
+        step("Read an unfinished page-up key followed by its final byte and down")
+        val first = client_copy_feed(client_copy_new(), "j\x1b[5")
+        expect(first.actions).to_equal(["down"])
+        expect(first.state.pending).to_equal("\x1b[5")
+        val second = client_copy_feed(first.state, "~j")
+        expect(second.actions).to_equal(["page-up", "down"])
+        expect(second.state.pending).to_equal("")
+
+    it "should exit on standalone Escape only after an explicit flush":
+        # @req REQ-SMUX-INTERACTIVE-005
+        val first = client_copy_feed(client_copy_new(), "\x1b")
+        step("An empty read before the deadline retains the pending Escape")
+        val waiting = client_copy_feed(first.state, "")
+        expect(waiting.actions.len()).to_equal(0)
+        expect(waiting.state.pending).to_equal("\x1b")
+        step("An explicit controller deadline flush resolves the standalone Escape")
+        val flushed = client_copy_feed(waiting.state, "", true)
+        expect(flushed.actions).to_equal(["exit"])
+        expect(flushed.state.pending).to_equal("")
+        expect(client_copy_feed(flushed.state, "", true).actions.len()).to_equal(0)
+
+    it "should not flush a partial CSI sequence as a standalone Escape":
+        # @req REQ-SMUX-INTERACTIVE-005
+        val first = client_copy_feed(client_copy_new(), "\x1b[")
+        step("Only a pending bare Escape is eligible for the deadline flush")
+        val waiting = client_copy_feed(first.state, "", true)
+        expect(waiting.actions.len()).to_equal(0)
+        expect(waiting.state.pending).to_equal("\x1b[")
+        expect(client_copy_feed(waiting.state, "B").actions).to_equal(["down"])
+
+    it "should emit mark and copy actions for Space Enter and y":
+        # @req REQ-SMUX-INTERACTIVE-005
+        step("Decode the selection and copy bindings without clipboard effects")
+        val decoded = client_copy_feed(client_copy_new(), " \ry\n")
+        expect(decoded.actions).to_equal(["mark", "copy", "copy", "copy"])
+
+    it "should ignore an unknown complete CSI and resume ordinary navigation":
+        # @req REQ-SMUX-INTERACTIVE-005
+        step("Consume unknown CSI as a sequence without forwarding any child input")
+        val decoded = client_copy_feed(client_copy_new(), "\x1b[99~k\x1b[1;2Aj")
+        expect(decoded.actions).to_equal(["up", "down"])
+        expect(decoded.state.pending).to_equal("")
+
+    it "should clear overlong and malformed pending sequences":
+        # @req REQ-SMUX-INTERACTIVE-005
+        step("Bound the pending CSI state to sixteen bytes")
+        val long = client_copy_feed(client_copy_new(), "\x1b[123456789012345")
+        expect(long.actions.len()).to_equal(0)
+        expect(long.state.pending).to_equal("")
+        val malformed = client_copy_feed(client_copy_new(), "\x1b[\x03")
+        expect(malformed.actions.len()).to_equal(0)
+        expect(malformed.state.pending).to_equal("")
+
+    it "should ignore unrelated Unicode and unknown Escape bindings":
+        # @req REQ-SMUX-INTERACTIVE-005
+        step("Ignore unbound copy input without creating an input-to-child action")
+        val decoded = client_copy_feed(client_copy_new(), "界😀\x1bzk")
+        expect(decoded.actions).to_equal(["up"])
+        expect(decoded.state.pending).to_equal("")
+
+    it "should leave the original pending state unchanged":
+        # @req REQ-SMUX-INTERACTIVE-005
+        val first = client_copy_feed(client_copy_new(), "\x1b[")
+        step("Complete an arrow using a new state value")
+        val completed = client_copy_feed(first.state, "A")
+        expect(first.state.pending).to_equal("\x1b[")
+        expect(completed.state.pending).to_equal("")
+        expect(completed.actions).to_equal(["up"])

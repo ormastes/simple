@@ -52,6 +52,7 @@ use std.string_builder.{StringBuilder}
 use compiler.backend.linker.managed_native_args_v1.{managed_native_extra_args_error_v1, managed_native_input_args_error_v1}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_resolve_v1, native_tool_strict_revalidate_v1}
 use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_strict_archives_v1, native_runtime_strict_revalidate_v1, native_runtime_strict_generated_inputs_v1}
+use compiler.backend.linker._LinkerWrapper.native_all_support.{native_all_msvc_llvm_link_inputs, native_all_input_present}
 
 use compiler.backend.linker.lld_sffi.{LldResult, lld_elf_link}
 use compiler.backend.linker.mold.{MoldBackend, MoldConfig, find_linker_path, linker_type_for_path, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
@@ -1886,7 +1887,11 @@ fn native_runtime_provider_selection_error_for_config_platform(
             return "runtime path differs from managed authority"
         if config.runtime_bundle == "" or config.runtime_bundle == "auto":
             return "managed runtime requires an explicit provider bundle"
-        val inputs = native_runtime_archive_inputs_for_platform(admitted_dir, config.runtime_bundle, msvc)
+        var inputs = native_runtime_archive_inputs_for_platform(admitted_dir, config.runtime_bundle, msvc)
+        if msvc:
+            val selected = native_msvc_llvm_runtime_inputs(inputs, admitted_dir, config)
+            if selected.is_err(): return selected.unwrap_err()
+            inputs = selected.unwrap()
         match native_runtime_strict_archives_v1(admitted_dir, inputs):
             case Ok(_): return ""
             case Err(reason): return reason
@@ -1902,6 +1907,22 @@ fn native_runtime_provider_selection_error_for_config_platform(
         file_exists(runtime_dir + "/" + backfill_name),
         file_exists(runtime_dir + "/" + native_all_name)
     )
+
+fn native_msvc_llvm_runtime_inputs(inputs: [text], runtime_dir: text,
+        config: NativeLinkConfig) -> Result<[text], text>:
+    native_msvc_llvm_all_inputs([], inputs, [], runtime_dir, config)
+
+fn native_msvc_llvm_all_inputs(configured: [text], objects: [text], runtime: [text],
+        runtime_dir: text, config: NativeLinkConfig) -> Result<[text], text>:
+    val inputs = objects + configured + runtime
+    if not native_all_input_present(inputs): return Ok(inputs)
+    val root = runtime_dir.replace("\\", "/")
+    val target = if config.target_triple != "": config.target_triple else: _windows_link_arch(config) + "-pc-windows-msvc"
+    val selected = native_all_msvc_llvm_link_inputs(configured, objects, runtime,
+        target, root, file_exists(root + "/LLVM-C.lib"))?
+    if native_tool_strict_requested_v1():
+        val _admitted = native_runtime_strict_archives_v1(root, [selected[selected.len() - 1]])?
+    return Ok(selected)
 
 fn native_runtime_archive_inputs(runtime_dir: text) -> [text]:
     if runtime_dir == "" or runtime_dir == "none":
@@ -2486,12 +2507,19 @@ fn link_native_windows_with_engine(object_files: [text], output: text, config: N
         val runtime_msvc = internal_coff_runtime_is_msvc(
             native_effective_link_os(host_os(), config.target_triple, config.linker_abi),
             _is_mingw_link(config))
-        val runtime_archives = native_runtime_archive_inputs_for_platform(
+        var runtime_archives = native_runtime_archive_inputs_for_platform(
             runtime_dir, config.runtime_bundle, runtime_msvc)
+        if runtime_msvc:
+            runtime_archives = native_msvc_llvm_runtime_inputs(runtime_archives, runtime_dir, config)?
         for path in runtime_archives:
             if not library_files.contains(path): library_files = library_files.push(path)
         var support_inputs = object_files
         for path in runtime_archives: support_inputs.push(path)
+        if runtime_msvc:
+            val with_llvm = native_msvc_llvm_all_inputs(library_files, object_files, runtime_archives, runtime_dir, config)?
+            if native_all_input_present(with_llvm):
+                val llvm = with_llvm[with_llvm.len() - 1]
+                if not library_files.contains(llvm): library_files.push(llvm)
         var support_libraries = ["kernel32.lib", "ws2_32.lib", "bcrypt.lib",
             "userenv.lib", "ntdll.lib", "advapi32.lib", "d3d11.lib", "dxgi.lib"]
         for library in native_all_msvc_support_libraries(support_inputs):
@@ -2627,14 +2655,20 @@ fn _link_native_msvc_with_engine(object_files: [text], output: text, config: Nat
     for wlib in native_all_msvc_support_libraries(object_files):
         if not msvc_config.libs.contains(wlib):
             msvc_config.libs.push(wlib)
-
     # Auto-detect runtime library
     var runtime_dir = config.runtime_path
     if runtime_dir == "":
         runtime_dir = find_runtime_lib_dir()
+    val explicit_inputs = native_msvc_llvm_all_inputs(msvc_config.libs, object_files, [], runtime_dir, config)?
+    if native_all_input_present(explicit_inputs):
+        val dependency = explicit_inputs[explicit_inputs.len() - 1]
+        if not msvc_config.libs.contains(dependency): msvc_config.libs.push(dependency)
     if runtime_dir != "" and runtime_dir != "none":
-        val runtime_archives = native_runtime_archive_inputs_for_platform(
+        var runtime_archives = native_runtime_archive_inputs_for_platform(
             runtime_dir, config.runtime_bundle, true)
+        runtime_archives = native_msvc_llvm_runtime_inputs(runtime_archives, runtime_dir, config)?
+        val _complete_inputs = native_msvc_llvm_all_inputs(msvc_config.libs,
+            object_files, runtime_archives, runtime_dir, config)?
         msvc_config.lib_paths.push(runtime_dir)
         val selected_runtime_libs = native_msvc_runtime_selection(
             config.runtime_bundle, runtime_archives)
