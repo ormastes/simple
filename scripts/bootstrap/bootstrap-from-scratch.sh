@@ -4992,11 +4992,30 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       cd "${repo_root}" || exit 125
       BOOTSTRAP_VERIFY_TEST_WORKERS="${stage2_tests_workers}"
       BOOTSTRAP_VERIFY_BUILD_THREADS="${stage2_tests_build_threads}"
+      # Serialize the two full-closure tool builds (verifier default is 2
+      # concurrent, half threads each). Measured 2026-10-16 (cycles 44-48):
+      # each build's group-scoped tree peaks at 10.5-12.6 GiB (watchdog
+      # receipts, cold cache), so two concurrent builds sum past any campaign
+      # cap the policy admits -- the hard ceiling is 24 GiB, priced for "one
+      # build at a time" -- and the campaign watchdog kills the whole matrix
+      # tree at the cap (~10 min into the first heavy task, at ANY cap).
+      # Serial rows keep a single build tree under the cap; each build then
+      # also gets the full build-thread count instead of half.
+      BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY="${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-1}"
       # Canonical source-derived tests consume their admitted producer, as in
       # run-release-stage2-qualified.shs. Explicit delegation remains opt-in and
       # subject to the phase verifier's existing real MC/DC waiver requirements.
       BOOTSTRAP_STAGE2_TEST_DELEGATE="${BOOTSTRAP_STAGE2_TEST_DELEGATE:-0}"
       export BOOTSTRAP_VERIFY_TEST_WORKERS BOOTSTRAP_VERIFY_BUILD_THREADS BOOTSTRAP_STAGE2_TEST_DELEGATE
+      # This phase wraps whole tool builds; the compile-worker budget floors
+      # at 5.59 GiB and killed it (exit 88) on large hosts. An explicit cap
+      # still wins. See bootstrap_tree_rss_phase_cap_kib.
+      if [ -z "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-}" ]; then
+        bootstrap_tree_rss_resolve "${stage2_tests_build_threads}" "${repo_root}" || exit 125
+        SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$(bootstrap_tree_rss_phase_cap_kib "${repo_root}") || exit 125
+        export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+        echo "stage2-compiler-tests tree RSS cap: ${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB} KiB (whole-build phase)"
+      fi
       sh "${repo_root}/scripts/bootstrap/bootstrap-phase-verification.shs" \
         --phase=stage2 \
         --backend="${backend}" \

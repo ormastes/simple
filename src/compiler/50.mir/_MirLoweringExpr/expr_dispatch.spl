@@ -936,9 +936,22 @@ impl MirLowering:
             return element
         match element.kind:
             case HirTypeKind.Named(declared_symbol, args):
-                if owner_key == "" or args.len() != 0:
-                    self.error_fatal("record collection payload requires an exact non-generic provider owner", Some(element.span))
-                    return HirType(kind: HirTypeKind.Error, span: element.span)
+                if owner_key == "":
+                    # No provider-owner evidence reached the consumer (the
+                    # defining module could not resolve the element symbol, or
+                    # the prescan found no aggregate layout). The consumer's
+                    # own declared Named type is the only authoritative
+                    # element identity available; pass it through un-rebound
+                    # rather than fail the whole build for absent evidence.
+                    return element
+                if args.len() != 0:
+                    # Generic instantiation (e.g. `[ProviderBox[T]]`): the
+                    # provider-owner rebind is name-only evidence and cannot
+                    # capture the instantiation's layout; the consumer's own
+                    # Named(symbol, args) is the authoritative element type.
+                    # Pass it through un-rebound, exactly as the enum sentinel
+                    # above does for non-aggregates.
+                    return element
                 val rebound = self.rebind_named_type_owner(element, owner_key)
                 match rebound.kind:
                     case HirTypeKind.Error:
@@ -6740,6 +6753,16 @@ impl MirLowering:
                             span: arm0.span
                         ))
                     else:
+                        # SIMPLE_ENUM_REG_TRACE=1 (cycle-51/52 discriminator):
+                        # the bare-variant Binding arm stayed a default because
+                        # the registry could not prove `bname` a unit variant.
+                        # This receipt names WHICH link failed: an empty
+                        # subject owner, a missing discriminant, empty
+                        # unique-owner candidates, an unresolvable (remapped)
+                        # binding symbol, or an empty registry altogether.
+                        if (mir_expr_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+                            val trace_subject = if match_subject_type != nil: "present" else: "absent"
+                            eprint("[enum-reg] upgrade-miss module={self.current_module_id} arm={norm_i} bname='{bname}' subject_owner='{match_subject_owner}' subject_type={trace_subject} disc={self.enum_variant_discriminant(match_subject_owner, bname)} candidates={self.variant_owner_keys(bname).len()} bare_registry={self.enum_variant_index.len()} q_registry={self.enum_variant_index_q.len()}")
                         norm_arms = norm_arms.push(arm0)
                 case _:
                     norm_arms = norm_arms.push(arm0)
