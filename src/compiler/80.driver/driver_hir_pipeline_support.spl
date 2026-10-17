@@ -25,7 +25,7 @@ use compiler.semantics.value_struct_layout.{ValueStructLayoutModuleV1,
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use compiler.semantics.layer_eq_validation.{validate_layer_eq_types}
 use compiler.semantics.effect_validation.{validate_effect_contracts}
-use compiler.semantics.rt_criticality_validation.{validate_rt_criticality_diagnostics, validate_rt_criticality_diagnostics_array}
+use compiler.semantics.rt_criticality_validation.{validate_rt_criticality_diagnostics, validate_rt_criticality_diagnostics_array, validate_rt_criticality_diagnostics_blobs}
 use compiler.driver.cache.driver_hir_post_validation_gate_facts_v1.{
     driver_hir_gate_layout_report_v1, driver_hir_gate_publish_warnings_v1,
     driver_hir_gate_census_report_v1, driver_hir_gate_publish_census_v1,
@@ -254,7 +254,7 @@ fn driver_hir_module_dict_dropped_values(hir_modules: Dict<text, HirModule>) -> 
     dropped
 
 pub fn driver_rt_criticality_errors(modules: Dict<text, HirModule>,
-        hir_module_array: [HirModule] = []) -> [text]:
+        hir_module_array: [HirModule] = [], hir_module_blobs: [text] = []) -> [text]:
     """Route typed RT warnings to diagnostics and errors to the fatal driver result."""
     # Cycle-76/77: Dict<text, HirModule> value reads arrive erased in this
     # lane regardless of read pattern (.values rebind, keys()+[]). When the
@@ -269,7 +269,7 @@ pub fn driver_rt_criticality_errors(modules: Dict<text, HirModule>,
     # the next cycle's log without a shim.
     if (env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
         eprint("[enum-reg] rt-criticality lane: dict_keys={modules.keys().len()} array={module_list.len()}")
-    val report = driver_hir_gate_rt_report_v1(validate_rt_criticality_diagnostics_array(module_list))
+    val report = driver_hir_gate_rt_report_v1(validate_rt_criticality_diagnostics_blobs(hir_module_blobs, module_list))
     driver_hir_gate_publish_warnings_v1(report.warnings)
     report.errors
 
@@ -293,7 +293,8 @@ pub fn driver_validate_value_struct_layout_declarations_v1(
     module_keys: [text],
     module_values: [ValueStructLayoutModuleV1],
     hir_modules: Dict<text, HirModule>,
-    hir_module_array: [HirModule] = []
+    hir_module_array: [HirModule] = [],
+    hir_module_blobs: [text] = []
 ) -> [text]:
     var errors: [text] = []
     # One receipt per sub-pass: the Stage-3 worker died between the last
@@ -332,7 +333,7 @@ pub fn driver_validate_value_struct_layout_declarations_v1(
         errors = errors.push(effect_error)
     log_phase("phase3:hir:validate:effects:done errors={errors.len()}")
     log_phase("phase3:hir:validate:rt_criticality:start")
-    for rt_error in driver_rt_criticality_errors(hir_modules, hir_module_array):
+    for rt_error in driver_rt_criticality_errors(hir_modules, hir_module_array, hir_module_blobs):
         errors = errors.push(rt_error)
     log_phase("phase3:hir:validate:rt_criticality:done errors={errors.len()}")
     log_phase("phase3:hir:validate:aspects:start")
