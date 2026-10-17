@@ -1,6 +1,6 @@
 # RISC-V FreeBSD bootstrap execution plan
 
-Status: in progress; no guest or bootstrap PASS yet.
+Status: in progress; VM, Rust and admitted LLVM probes passed; Simple bootstrap pending.
 
 ## User-selected outcome
 
@@ -18,7 +18,42 @@ the work. These requirements come directly from the user's objective.
 | REQ-005 Repair RISC-V/BSD failures | Reproduced failures, scoped source changes and relevant regression evidence; no seed fallback presented as self-host proof |
 | REQ-006 Land fixes | Reviewed PR containing only owned changes merged into `release_phase3` |
 
-## Current evidence
+## Verified execution update — 2026-10-18
+
+- Removed seven obsolete snapshot worktrees after retaining changed/untracked
+  files and Git recovery references. Archives remain under
+  `build/worktree-cleanup-archive/20261017/`. Physical C: free space exceeded
+  100 GiB at the latest phase check. Removing unused LLVM 23.1.3 sources also
+  freed approximately 2.6 GiB inside WSL; this does not imply immediate physical
+  Windows VHD reclamation. Safe recurring retention remains incomplete.
+- FreeBSD 14.4 riscv64 boots under QEMU 10.2.1 with a persistent 64 GiB overlay,
+  four virtual CPUs, 6 GiB RAM and working SSH. The official base checksum and
+  image integrity passed. Reboot-and-reconnect verification remains pending.
+- Guest base Clang 19.1.7 and Rust/Cargo 1.98.1 compiled and executed probes.
+- LLVM 23.1.2 was built on Linux as native FreeBSD RISC-V executables against
+  the guest sysroot, installed in `/usr/local/llvm23`, and qualified by guest
+  Clang compiling a C probe whose executable produced `42`.
+  `llvm2312-qualification.log` records
+  `llvm2312_guest_compile_execute_status=pass`; the deployment process exited 0.
+  The toolchain archive SHA-256 is
+  `c6e34c522cbe9cd23ecb4a59663f266e61158e2ff68cc91cefee1de8bec8e64f`.
+- Cross-build recovery required setting CMake's module linker flags to LLD,
+  in addition to executable/shared linker flags. Extraction must use
+  `tar --no-same-owner` so FreeBSD's loader cache accepts root-owned libraries.
+- Native dependency jobs remain live: pkg, Python/CMake, Perl/libcurl/Git,
+  coreutils/pkgconf/libffi/zstd and rsync. GNU Make installation passed.
+  Do not describe the complete toolset as ready until every required tool passes.
+- PRs #3638 and #3640 merged host/target alignment fixes into `release_phase3`.
+  The staged guest source is pinned to
+  `070b8181df63f137b7cedd2dd2ab1099db25a375`; actual Git identity validation
+  waits for guest Git installation. The canonical native checker is queued
+  behind dependencies. No Simple Stage 2/3 bootstrap PASS is claimed.
+
+Live handles and run-specific logs are recorded locally in
+`build/riscv-freebsd/active-run-state.json`. Preserve completed checks and build
+caches; inspect terminal results before resuming a failed stage.
+
+## Initial evidence — 2026-10-17
 
 Inspection on 2026-10-17 found Windows C: below 2 GiB free. The Ubuntu WSL
 filesystem reports hundreds of GiB logically available, but its backing file
