@@ -345,7 +345,6 @@ impl MonomorphizationPass:
         # the specialization set and the symbol ids handed out are a pure
         # function of the input.
         var rewritten: Dict<text, Dict<SymbolId, HirFunction>> = {}
-        var rewritten_constants: Dict<text, Dict<SymbolId, HirConst>> = {}
         var rewritten_consts: Dict<text, Dict<SymbolId, HirConst>> = {}
         for name in mod_keys:
             val module: HirModule = modules[name]
@@ -390,10 +389,6 @@ impl MonomorphizationPass:
                     fixed_address: const.fixed_address)
             rewritten_consts[name] = consts
             rewritten[name] = funcs
-            # Module-level `val`/`var` initializers are roots too: a generic
-            # call there (`var lock: Mutex = mutex_new(0)`) was never rewritten
-            # and reached MIR as the bare dotted template name (undefined at link).
-            rewritten_constants[name] = self.rewrite_module_constants(module)
         self.drain_worklist()
 
         # Steps 3/4: place every specialization and prune its owner after the
@@ -443,7 +438,6 @@ impl MonomorphizationPass:
             if (owns_specialization or out.symbols.next_symbol_id >= MONO_SYMBOL_BASE) and out.symbols.next_symbol_id < self.next_symbol:
                 out.symbols.next_symbol_id = self.next_symbol
             out.functions = funcs
-            out.constants = rewritten_constants[name]
             result[name] = self.prune_consumed_templates(out)
             # Its function table is now owned by the result. Module iteration
             # uses the frozen mod_keys list, never the shrinking table keys.
@@ -792,21 +786,6 @@ impl MonomorphizationPass:
         var out = func
         out.body = self.rewrite_block(func.body, func.return_type)
         self.current_return_type = previous_return_type
-        out
-
-    me rewrite_module_constants(module: HirModule) -> Dict<SymbolId, HirConst>:
-        """Rewrite generic call sites in every module constant/static initializer."""
-        var out: Dict<SymbolId, HirConst> = {}
-        for key in module.constants.keys():
-            var declaration: HirConst = module.constants[key]
-            self.env = {}
-            val previous_return_type = self.current_return_type
-            self.current_return_type = nil
-            val initializer: HirExpr = declaration.value
-            self.collect_lets_expr_opt(initializer)
-            declaration.value = self.rewrite_expr_with_context(initializer, declaration.type_)
-            self.current_return_type = previous_return_type
-            out[key] = declaration
         out
 
     me drain_worklist():
