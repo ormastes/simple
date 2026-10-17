@@ -538,12 +538,24 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         out = out + indent + "while i{k} < n{k}:\n"
         out = out + _emit_dec(u, s.a, "dk{k}", indent + "    ", c, required_node)
         out = out + _emit_dec(u, s.b, "dv{k}", indent + "    ", c, required_node)
+        # Store through a presence bind of the decoded optional value, never
+        # the optional itself: dict[key] = T? stores land erased (nil) on
+        # the stage2 LLVM draw -- the decoded module.functions dict holds
+        # nil HirFunction values while the cache blob is complete, and the
+        # first values()/for-in consumer passes a nil declaration into
+        # record_exact_extern_declaration_v1 (SIGSEGV, EXC_BAD_ACCESS at
+        # 0x70, stage2 p2_add sanity smoke). The presence-guarded concrete
+        # bind is the proven-clean shape; absent values are skipped rather
+        # than stored as nil (the cache re-encode selfcheck already rejects
+        # lossy entries). Kept inside the tip's required_node/r.ok rejection
+        # guard so a rejected decode never reaches the dictionary either.
         if required_node:
-            # A rejected key/value must not reach any dictionary operation.
             out = out + indent + "    if r.ok:\n"
-            out = out + indent + "        " + target + "[dk{k}] = dv{k}\n"
+            out = out + indent + "        if val present_v{k} = dv{k}:\n"
+            out = out + indent + "            " + target + "[dk{k}] = present_v{k}\n"
         else:
-            out = out + indent + "    " + target + "[dk{k}] = dv{k}\n"
+            out = out + indent + "    if val present_v{k} = dv{k}:\n"
+            out = out + indent + "        " + target + "[dk{k}] = present_v{k}\n"
         out = out + indent + "    i{k} = i{k} + 1\n"
         return out
     _codec_fail("hir codec generator: unhandled shape {s.cat}")
