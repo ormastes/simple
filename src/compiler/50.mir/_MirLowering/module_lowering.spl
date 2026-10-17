@@ -1593,7 +1593,9 @@ impl MirLowering:
         val prescan_struct_values = module.structs.values()
         var psi = 0
         while psi < prescan_struct_values.len():
-            val struct_def = prescan_struct_values[psi]
+            # Annotated rebind: .values() element through ANY (stage2
+            # composite-transport hazard; 2026-10-16).
+            val struct_def: HirStruct = prescan_struct_values[psi]
             # register_composite_field_metadata (above) now also captures
             # each field's declared array ELEMENT HirType into
             # struct_field_array_elem_type, so this call alone covers both
@@ -1620,7 +1622,7 @@ impl MirLowering:
         val prescan_class_values = module.classes.values()
         psi = 0
         while psi < prescan_class_values.len():
-            val class_def = prescan_class_values[psi]
+            val class_def: HirClass = prescan_class_values[psi]
             val class_symbol = module.symbols.get_symbol_raw(class_def.symbol.id)
             if class_symbol != nil:
                 # Types/defaults are relocated after each consumer installs
@@ -1959,13 +1961,15 @@ impl MirLowering:
         for thunk in archive_trait_thunks: retained_thunks.push(thunk)
         self.native_trait_thunks = retained_thunks
         self.register_native_trait_declarations(module)
-        for trait_provider in providers:
+        for raw_trait_provider in providers:
+            val trait_provider: HirModule = raw_trait_provider
             if trait_provider.name != module.name:
                 self.register_native_trait_declarations(trait_provider)
         if self.declaration_repository != nil:
             self.register_declaration_provider_traits_v1(module, false)
         self.register_native_trait_implementations(module)
-        for trait_provider in providers:
+        for raw_trait_provider in providers:
+            val trait_provider: HirModule = raw_trait_provider
             if trait_provider.name != module.name:
                 self.register_native_trait_implementations(trait_provider)
         if self.declaration_repository != nil:
@@ -1988,7 +1992,13 @@ impl MirLowering:
         val local_struct_values = module.structs.values()
         var local_meta_i = 0
         while local_meta_i < local_struct_values.len():
-            val struct_def = local_struct_values[local_meta_i]
+            # Annotated rebind: .values() elements travel through ANY; the
+            # stage2-compiled compiler faults reading fields off an
+            # unannotated extraction (same hazard class as the
+            # runtime_module_initializers_in_declaration_order index-sort
+            # fix, 2026-10-16 -- first fired on test_runner_main's
+            # struct/class/enum tables, which main.spl leaves empty).
+            val struct_def: HirStruct = local_struct_values[local_meta_i]
             self.register_composite_field_metadata(struct_def.name, struct_def.fields, module.symbols, true)
             self.register_struct_type_param_names(struct_def.name, struct_def.type_params)
             val struct_symbol = module.symbols.get_symbol_raw(struct_def.symbol.id)
@@ -2003,7 +2013,7 @@ impl MirLowering:
         val local_class_values = module.classes.values()
         local_meta_i = 0
         while local_meta_i < local_class_values.len():
-            val class_def = local_class_values[local_meta_i]
+            val class_def: HirClass = local_class_values[local_meta_i]
             self.register_composite_field_metadata(class_def.name, class_def.fields, module.symbols, true)
             val class_symbol = module.symbols.get_symbol_raw(class_def.symbol.id)
             if class_symbol != nil:
@@ -2028,14 +2038,17 @@ impl MirLowering:
         # Provider arrays belong to the driver and are borrowed for this pass;
         # retain only relocated field/default metadata in the MIR owner roots.
         var consumer_composite_names: Dict<text, bool> = {}
-        for local_struct_value in local_struct_values:
+        for raw_local_struct_value in local_struct_values:
+            val local_struct_value: HirStruct = raw_local_struct_value
             consumer_composite_names[local_struct_value.name] = true
-        for local_class_value in local_class_values:
+        for raw_local_class_value in local_class_values:
+            val local_class_value: HirClass = raw_local_class_value
             consumer_composite_names[local_class_value.name] = true
-        for provider_module in providers:
+        for raw_provider_module in providers:
+            val provider_module: HirModule = raw_provider_module
             if provider_module.name != module.name:
-                for provider_struct in provider_module.structs.values():
-                    val provider_struct_def: HirStruct = provider_struct
+                for raw_provider_struct in provider_module.structs.values():
+                    val provider_struct_def: HirStruct = raw_provider_struct
                     self.register_provider_struct(provider_struct_def, provider_module.symbols,
                         consumer_composite_names.has(provider_struct_def.name))
             # Struct-only providers also own receiver methods (for example
@@ -2044,11 +2057,14 @@ impl MirLowering:
             # (app.test_daemon.qemu_broker_snapshot) declare no type at all.
             if provider_module.name != module.name and (provider_module.classes.len() > 0 or provider_module.enums.len() > 0 or provider_module.structs.len() > 0 or provider_module.impls.len() > 0):
                 var provider_links: Dict<i64, text> = {}
-                for provider_func in provider_module.functions.values():
+                for raw_provider_func in provider_module.functions.values():
+                    val provider_func: HirFunction = raw_provider_func
                     provider_links[provider_func.symbol.id] = mir_provider_function_name(provider_module.name, provider_module.symbols, provider_func)
-                for provider_class in provider_module.classes.values():
+                for raw_provider_class in provider_module.classes.values():
+                    val provider_class: HirClass = raw_provider_class
                     self.register_provider_class(provider_class, provider_module.symbols, provider_links, false)
-                for provider_func in provider_module.functions.values():
+                for raw_provider_func in provider_module.functions.values():
+                    val provider_func: HirFunction = raw_provider_func
                     self.register_provider_method(provider_func, provider_module.symbols, provider_links)
         # Before the ambient-bootstrap early return below: the stage3
         # bootstrap-fixed lane lowers through that branch too.
@@ -2222,7 +2238,7 @@ impl MirLowering:
         val struct_values = module.structs.values()
         var si = 0
         while si < struct_values.len():
-            val struct_def = struct_values[si]
+            val struct_def: HirStruct = struct_values[si]
             val sym_id = struct_def.symbol
             var field_names: [text] = []
             var field_has_default: [bool] = []
@@ -2247,7 +2263,7 @@ impl MirLowering:
         val enum_values = module.enums.values()
         var ei = 0
         while ei < enum_values.len():
-            val enum_def = enum_values[ei]
+            val enum_def: HirEnum = enum_values[ei]
             self.register_enum_variants(enum_def)
             self.register_enum_runtime_id(enum_def)
             ei = ei + 1
@@ -2307,7 +2323,7 @@ impl MirLowering:
 
         var impl_mi = 0
         while impl_mi < module.impls.len():
-            val impl_def = module.impls[impl_mi]
+            val impl_def: HirImpl = module.impls[impl_mi]
             var impl_type_name = ""
             var impl_type_key = ""
             var canonical_impl_type_key = ""
@@ -2372,7 +2388,7 @@ impl MirLowering:
         val class_values = module.classes.values()
         var ci = 0
         while ci < class_values.len():
-            val class_def = class_values[ci]
+            val class_def: HirClass = class_values[ci]
             val sym_id = class_def.symbol
             var field_names: [text] = []
             var field_has_default: [bool] = []
@@ -2418,15 +2434,17 @@ impl MirLowering:
             ci = ci + 1
 
         var local_callable_links: Dict<i64, text> = {}
-        for local_func in module.functions.values():
+        for raw_local_func in module.functions.values():
+            val local_func: HirFunction = raw_local_func
             local_callable_links[local_func.symbol.id] = self.provider_callable_symbol_name(local_func.symbol, local_func.name)
-        for local_func in module.functions.values():
+        for raw_local_func in module.functions.values():
+            val local_func: HirFunction = raw_local_func
             self.register_provider_method(local_func, module.symbols, local_callable_links)
 
         val bitfield_values = module.bitfields.values()
         var bi = 0
         while bi < bitfield_values.len():
-            val bitfield_def = bitfield_values[bi]
+            val bitfield_def: HirBitfield = bitfield_values[bi]
             val sym_id = bitfield_def.symbol
             # Key by direct .id access: symbol_id_value's match-destructure
             # of SymbolId returns nil in the interpreter, silently keying
@@ -2506,12 +2524,14 @@ impl MirLowering:
         else:
             var coni = 0
             while coni < const_vals.len():
-                self.lower_const(const_vals[coni])
+                val const_pass: HirConst = const_vals[coni]
+                self.lower_const(const_pass)
                 coni = coni + 1
             # Second pass for statics; see the bootstrap-path loop above.
             coni = 0
             while coni < const_vals.len():
-                self.lower_static(const_vals[coni])
+                val const_pass: HirConst = const_vals[coni]
+                self.lower_static(const_pass)
                 coni = coni + 1
 
             self.lower_runtime_module_initializers(module, const_vals)
@@ -2793,10 +2813,14 @@ impl MirLowering:
         # rather than merged in declaration order: a function-pointer
         # initializer names a function, never another global, so it has no
         # ordering dependency on the entries already collected.
-        for slot_const in consts:
+        for raw_slot_const in consts:
+            # Annotated rebind: composite element through ANY (same hazard
+            # class as the runtime-initializer index-sort fix, 2026-10-16).
+            val slot_const: HirConst = raw_slot_const
             if self.hir_const_is_function_slot(slot_const):
                 var slot_already = false
-                for existing in dynamic:
+                for raw_existing in dynamic:
+                    val existing: HirConst = raw_existing
                     if existing.symbol.id == slot_const.symbol.id:
                         slot_already = true
                 if not slot_already:
@@ -2805,9 +2829,11 @@ impl MirLowering:
             return
         var init_index = 1
         while init_index < dynamic.len():
+            val prev_init: HirConst = dynamic[init_index - 1]
+            val next_init: HirConst = dynamic[init_index]
             module_lowering_publish_initializer_dependency_v1(
-                "{module_name_raw}::{dynamic[init_index - 1].name}",
-                "{module_name_raw}::{dynamic[init_index].name}",
+                "{module_name_raw}::{prev_init.name}",
+                "{module_name_raw}::{next_init.name}",
                 "declaration-order:{init_index - 1}:{init_index}")
             init_index = init_index + 1
 
@@ -2829,7 +2855,8 @@ impl MirLowering:
         var finalized_statics: [MirStatic] = []
         val initializer_guard = self.begin_global_initializer_guard(init_name)
 
-        for const_ in dynamic:
+        for raw_const in dynamic:
+            val const_: HirConst = raw_const
             val value = self.lower_expr(const_.value)
             var value_type = self.lookup_local_type(value)
             # A dict initializer's SSA local is an i64 handle, but its MIR type

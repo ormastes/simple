@@ -423,15 +423,21 @@ impl MirLowering:
             case IntLit(_, _) | FloatLit(_, _) | FloatLexeme(_, _) | BoolLit(_) | CharLit(_) | UnitLit | NilLit:
                 expr_kind
             case StringLit(value, interpolations):
-                if interpolations == nil:
+                # Presence does not unwrap [HirInterpolation]?: iterating the
+                # Some wrapper reads its enum header as an array header
+                # (same ABI defect class as the ArrayLit/DictLit fix).
+                val optional_interpolations: [HirInterpolation]? = interpolations
+                if optional_interpolations == nil:
                     expr_kind
                 else:
                     var relocated_interpolations: [HirInterpolation] = []
-                    for interpolation in interpolations:
-                        val cur: HirInterpolation = interpolation
-                        var relocated: HirInterpolation = cur
-                        relocated.expr = self.relocate_provider_default(cur.expr, provider, links)
-                        relocated_interpolations = relocated_interpolations.push(relocated)
+                    if val present_interpolations = optional_interpolations:
+                        val concrete_interpolations: [HirInterpolation] = present_interpolations
+                        for interpolation in concrete_interpolations:
+                            val cur: HirInterpolation = interpolation
+                            var relocated: HirInterpolation = cur
+                            relocated.expr = self.relocate_provider_default(cur.expr, provider, links)
+                            relocated_interpolations = relocated_interpolations.push(relocated)
                     HirExprKind.StringLit(value, Some(relocated_interpolations))
             case Var(id) | NamedVar(id, _):
                 # Nil-payload guard: when the id is absent from the provider
@@ -666,10 +672,13 @@ impl MirLowering:
             # (trait_impl_lowering.spl HirImpl(...)) passes the optional
             # `trait_` but never sets the flag. Presence of `trait_` naming a
             # Trait symbol is the authority (an inherent impl has nil).
-            val impl_trait: HirType? = impl_def.trait_
+            # Never round-trip the concrete `trait_` slot through HirType?:
+            # wrap/unwrap transport is a proven ABI defect class. Test the
+            # concrete slot and bind a concrete local (4710b22a991 pattern).
             var trait_key = ""
-            if impl_trait != nil:
-                val trait_kind: HirTypeKind = (impl_trait ?? impl_def.type_).kind
+            if impl_def.trait_ != nil:
+                val impl_trait: HirType = impl_def.trait_
+                val trait_kind: HirTypeKind = impl_trait.kind
                 match trait_kind:
                     case Named(trait_sym, _):
                         if symbols.symbols.has(trait_sym.id):
