@@ -17,6 +17,7 @@
 #   from decoded modules is byte-identical to one made in process.
 
 use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_types.{SymbolId}  # explicit: glob is not an import-origin for surface projection
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader,
     FLAT_POOL_CODEC_VERSION}
 use compiler.hir.hir_codec_support.{HirCodecWriter,
@@ -98,6 +99,23 @@ fn hir_module_encode_reason(module: HirModule) -> text:
     if w.ok:
         return ""
     w.unsupported
+
+# Cycle-82: scalar HAL fact for the rt-criticality early-exit predicate.
+# Every non-codec lane's Dict value reads of HirFunction arrive erased (the
+# cycle-82 shim faulted inside driver_dict_has_rt_hal at the +120 field load
+# on rt_index_get's result); only this unit's context -- the generated
+# codec's -- demonstrably walks module.functions values on every encode
+# (hc_enc_hir_module reads node.functions[dk3] directly). Same read pattern,
+# same unit family, so this is the one lane that can extract the fact.
+fn hir_module_has_rt_hal(module: HirModule) -> bool:
+    val ks: [SymbolId] = module.functions.keys()
+    for dk in ks:
+        # Nullable-value guard, same shape as hc_enc_hir_module's dict walk.
+        if module.functions[dk] == nil:
+            continue
+        if module.functions[dk].func_attr.is_rt_hal:
+            return true
+    false
 
 fn hir_module_decode(blob: text) -> HirModule?:
     # Preserve the trusted legacy contract and its constructor exactly. The
@@ -259,6 +277,7 @@ export hir_canonical_codec_identity_v1
 export hir_canonical_codec_generated_available_v1
 export HirDecodeLimits, HirDecodeAuditUsage, HirDecodeAuditObserver, HirDecodeError
 export hir_module_encode, hir_module_encode_canonical, hir_module_encode_reason
+export hir_module_has_rt_hal
 export hir_module_decode, hir_module_decode_bounded, hir_module_decode_bounded_audited
 export hir_module_decode_stable
 export HirCodecRoundTrip, hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line
