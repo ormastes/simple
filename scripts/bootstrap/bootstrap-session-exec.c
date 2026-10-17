@@ -474,7 +474,7 @@ static int parse_supervise(int argc, wchar_t **argv, options *o) {
             }
         }
         else if (!wcscmp(a, L"--interval-ms")) { if (!parse_u32(v, 100ULL, &o->interval_ms) || !o->interval_ms) return 0; }
-        else if (!wcscmp(a, L"--observation-budget-ms")) { if (!parse_u32(v, 5000ULL, &o->budget_ms) || o->budget_ms < 1000) return 0; }
+        else if (!wcscmp(a, L"--observation-budget-ms")) { if (!parse_u32(v, 60000ULL, &o->budget_ms) || o->budget_ms < 1000) return 0; }
         else if (!wcscmp(a, L"--timeout-seconds")) { if (!parse_u32(v, 0x7fffffffULL, &o->timeout_s)) return 0; }
         else if (!wcscmp(a, L"--parent-winpid")) { if (!parse_u32(v, 0xffffffffULL, &o->parent_pid)) return 0; }
         else return 0;
