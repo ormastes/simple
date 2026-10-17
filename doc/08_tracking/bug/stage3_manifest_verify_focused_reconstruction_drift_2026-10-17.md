@@ -69,3 +69,35 @@ remains).
   (argv line) on any admitted release_phase3 Windows lane.
 - Harness base-state failure: stage3-focused-provenance-test.py fails
   6/6 scenarios on pristine 1986eb71e4a (verified via git archive).
+
+## Focused harness repair, 2026-10-17
+
+Following production reconstruction repair `52b57c0beca`, the harness still
+constructed invalid bare optional-environment placeholders. It also retained
+the old absolute K1 spelling, omitted explicit CUDA/plugin source fixtures,
+and did not initialize the CUDA mode used by the reconstructed command.
+The fixture now uses a real compiler-ceiling assignment, explicit empty
+optional Stage2 diagnostics/preflight context, relative K1 and absolute
+canonical CUDA/plugin sources. Production admission checks are unchanged.
+
+Concurrent harness processes were observed while both used the same fixed
+`/tmp/focused-<stage>-<platform>.transcript` names. Each test invocation now
+owns a temporary directory, resolved through the same shell used by the
+helpers, and removes it on cleanup. This prevents cross-worktree transcript
+overwrites; it does not weaken transcript comparison.
+
+Validation on the isolated `work/bootstrap-focused-provenance-repair-20261017`
+lane: the six-case run passed Linux Stage2/3, Darwin Stage2/3 and Windows
+Stage2; Windows Stage3 failed its transcript comparison while another harness
+process was present. After transcript isolation, only that failed case was
+rerun using `FOCUSED_PROVENANCE_CASES=x86_64-pc-windows-msvc:stage3` and passed
+in 9.574 seconds. All six cases therefore have passing evidence, with the
+five unchanged successful cases retained rather than repeated. Each passing
+case checks both exact hash-vector equality and production transcript
+verification. The initial all-case fixture failure and intermediate source
+path mismatch were retained in session output; no compiler build was run.
+
+This repairs test execution, not full bootstrap admission. Actual Phase3 link,
+producer behavior, source/lineage admission and broader runtime gates remain
+the shared bootstrap owner's responsibility. Bug DB reconciliation remains
+pending a qualified tool; this appendix is the dated evidence record.
