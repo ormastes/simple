@@ -17,8 +17,10 @@ fn _hc_i64_is_nil_v1(value: i64) -> bool:
 
 fn _hc_i64_index_before_v1(values: [i64], left_index: i64,
                             right_index: i64) -> bool:
-    val left = values[left_index]
-    val right = values[right_index]
+    # ANY-transport: values is [i64] -- the SymbolId annotation this carried
+    # was a silently-mistyped rebind (wrong layout on every read).
+    val left: i64 = values[left_index]
+    val right: i64 = values[right_index]
     val left_nil = _hc_i64_is_nil_v1(left)
     val right_nil = _hc_i64_is_nil_v1(right)
     if left_nil:
@@ -29,8 +31,8 @@ fn _hc_i64_index_before_v1(values: [i64], left_index: i64,
 
 fn _hc_symbol_id_index_before_v1(values: [SymbolId], left_index: i64,
                                   right_index: i64) -> bool:
-    val left = values[left_index]
-    val right = values[right_index]
+    val left: SymbolId = values[left_index]
+    val right: SymbolId = values[right_index]
     if left == nil:
         return right != nil
     if right == nil:
@@ -43,8 +45,8 @@ fn _hc_utf8_bytes_before_v1(bytes: [[u8]], present: [bool],
         return present[right_index]
     if not present[right_index]:
         return false
-    val left = bytes[left_index]
-    val right = bytes[right_index]
+    val left: [u8] = bytes[left_index]
+    val right: [u8] = bytes[right_index]
     var offset: i64 = 0
     while offset < left.len() and offset < right.len():
         if left[offset] != right[offset]:
@@ -104,19 +106,36 @@ fn _hc_order_i64_indices_v1(values: [i64]) -> [i64]:
             var right = middle
             var output = run_start
             while output < run_end:
-                if (right < run_end and (left >= middle or
-                        _hc_i64_index_before_v1(values, current[right], current[left]))):
-                    scratch[output] = current[right]
+                # ANY-transport: annotated element extractions BEFORE the
+                # comparator call and the array-slot writes (cycle-69
+                # cache-encode SIGSEGV). Same merge semantics: right wins only
+                # on a strict before(); exact ties keep left (source order).
+                var take_right = false
+                var take_value: i64 = 0
+                if right < run_end and left < middle:
+                    val right_value: i64 = current[right]
+                    val left_value: i64 = current[left]
+                    if _hc_i64_index_before_v1(values, right_value, left_value):
+                        take_value = right_value
+                        take_right = true
+                if take_right:
+                    scratch[output] = take_value
                     right = right + 1
                 else:
-                    # Left wins exact ties, preserving source order.
-                    scratch[output] = current[left]
-                    left = left + 1
+                    if left < middle:
+                        val left_value: i64 = current[left]
+                        scratch[output] = left_value
+                        left = left + 1
+                    else:
+                        val right_value: i64 = current[right]
+                        scratch[output] = right_value
+                        right = right + 1
                 output = output + 1
             run_start = run_end
         var copy_index: i64 = 0
         while copy_index < current.len():
-            current[copy_index] = scratch[copy_index]
+            val copied: i64 = scratch[copy_index]
+            current[copy_index] = copied
             copy_index = copy_index + 1
         if width > current.len() / 2: width = current.len()
         else: width = width * 2
@@ -139,18 +158,36 @@ fn _hc_order_symbol_id_indices_v1(values: [SymbolId]) -> [i64]:
             var right = middle
             var output = run_start
             while output < run_end:
-                if (right < run_end and (left >= middle or
-                        _hc_symbol_id_index_before_v1(values, current[right], current[left]))):
-                    scratch[output] = current[right]
+                # ANY-transport: annotated element extractions BEFORE the
+                # comparator call and the array-slot writes (cycle-69
+                # cache-encode SIGSEGV). Same merge semantics: right wins only
+                # on a strict before(); exact ties keep left (source order).
+                var take_right = false
+                var take_value: i64 = 0
+                if right < run_end and left < middle:
+                    val right_value: i64 = current[right]
+                    val left_value: i64 = current[left]
+                    if _hc_symbol_id_index_before_v1(values, right_value, left_value):
+                        take_value = right_value
+                        take_right = true
+                if take_right:
+                    scratch[output] = take_value
                     right = right + 1
                 else:
-                    scratch[output] = current[left]
-                    left = left + 1
+                    if left < middle:
+                        val left_value: i64 = current[left]
+                        scratch[output] = left_value
+                        left = left + 1
+                    else:
+                        val right_value: i64 = current[right]
+                        scratch[output] = right_value
+                        right = right + 1
                 output = output + 1
             run_start = run_end
         var copy_index: i64 = 0
         while copy_index < current.len():
-            current[copy_index] = scratch[copy_index]
+            val copied: i64 = scratch[copy_index]
+            current[copy_index] = copied
             copy_index = copy_index + 1
         if width > current.len() / 2: width = current.len()
         else: width = width * 2
@@ -184,19 +221,36 @@ fn _hc_order_text_indices_v1(values: [text]) -> [i64]:
             var right = middle
             var output = run_start
             while output < run_end:
-                if (right < run_end and (left >= middle or
-                        _hc_utf8_bytes_before_v1(bytes, present,
-                            current[right], current[left]))):
-                    scratch[output] = current[right]
+                # ANY-transport: annotated element extractions BEFORE the
+                # comparator call and the array-slot writes (cycle-69
+                # cache-encode SIGSEGV). Same merge semantics: right wins only
+                # on a strict before(); exact ties keep left (source order).
+                var take_right = false
+                var take_value: i64 = 0
+                if right < run_end and left < middle:
+                    val right_value: i64 = current[right]
+                    val left_value: i64 = current[left]
+                    if _hc_utf8_bytes_before_v1(bytes, present, right_value, left_value):
+                        take_value = right_value
+                        take_right = true
+                if take_right:
+                    scratch[output] = take_value
                     right = right + 1
                 else:
-                    scratch[output] = current[left]
-                    left = left + 1
+                    if left < middle:
+                        val left_value: i64 = current[left]
+                        scratch[output] = left_value
+                        left = left + 1
+                    else:
+                        val right_value: i64 = current[right]
+                        scratch[output] = right_value
+                        right = right + 1
                 output = output + 1
             run_start = run_end
         var copy_index: i64 = 0
         while copy_index < current.len():
-            current[copy_index] = scratch[copy_index]
+            val copied: i64 = scratch[copy_index]
+            current[copy_index] = copied
             copy_index = copy_index + 1
         if width > current.len() / 2: width = current.len()
         else: width = width * 2
@@ -204,20 +258,28 @@ fn _hc_order_text_indices_v1(values: [text]) -> [i64]:
 
 pub fn hc_order_i64_keys_v1(values: [i64]) -> [i64]:
     var ordered: [i64] = []
-    for index in _hc_order_i64_indices_v1(values):
-        ordered.push(values[index])
+    for raw_index in _hc_order_i64_indices_v1(values):
+        # ANY-transport: annotated rebind of both the index element and the
+        # keyed element before use (cycle-69: unbox of an erased i64 word).
+        val index: i64 = raw_index
+        val key: i64 = values[index]
+        ordered.push(key)
     ordered
 
 pub fn hc_order_text_keys_v1(values: [text]) -> [text]:
     var ordered: [text] = []
-    for index in _hc_order_text_indices_v1(values):
-        ordered.push(values[index])
+    for raw_index in _hc_order_text_indices_v1(values):
+        val index: i64 = raw_index
+        val key: text = values[index]
+        ordered.push(key)
     ordered
 
 pub fn hc_order_symbol_id_keys_v1(values: [SymbolId]) -> [SymbolId]:
     var ordered: [SymbolId] = []
-    for index in _hc_order_symbol_id_indices_v1(values):
-        ordered.push(values[index])
+    for raw_index in _hc_order_symbol_id_indices_v1(values):
+        val index: i64 = raw_index
+        val key: SymbolId = values[index]
+        ordered.push(key)
     ordered
 
 export hc_order_i64_keys_v1, hc_order_text_keys_v1

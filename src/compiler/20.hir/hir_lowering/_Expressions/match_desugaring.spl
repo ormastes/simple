@@ -55,7 +55,8 @@ impl HirLowering:
             case Struct(_, fields):
                 var stmts2: [HirStmt] = []
                 for fpair in fields:
-                    val fname: text = fpair.0
+                    val fpair_typed: (text, HirPattern) = fpair
+                    val fname: text = fpair_typed.0
                     val fpat: HirPattern = fpair.1
                     val felem_expr = HirExpr(kind: HirExprKind.Field(value_expr, fname, nil), has_type_: false, type_: nil, span: span)
                     val sub_stmts2 = self.destructure_pattern_prelude(felem_expr, fpat, span)
@@ -133,7 +134,8 @@ impl HirLowering:
         payload accessor the test condition uses. Without this they were
         left silently UNBOUND."""
         var stmts: [HirStmt] = []
-        if val pl = payload:
+        val payload_opt: HirPatternPayload? = payload
+        if val pl = payload_opt:
             match pl:
                 case Tuple(ps):
                     var pi = 0
@@ -159,7 +161,8 @@ impl HirLowering:
         """The sub-tests for an enum payload's sub-patterns (empty when every
         slot is irrefutable, or when the variant carries no payload)."""
         var conds: [HirExpr] = []
-        if val pl = payload:
+        val payload_opt: HirPatternPayload? = payload
+        if val pl = payload_opt:
             match pl:
                 case Tuple(ps):
                     var pi = 0
@@ -280,8 +283,10 @@ impl HirLowering:
             case Literal(lit_expr):
                 Some(self.literal_test_condition(value_expr, lit_expr, span))
             case Range(start, end, inclusive):
-                if val rs = start:
-                    if val re = end:
+                val start_opt: Expr? = start
+                if val rs = start_opt:
+                    val end_opt: Expr? = end
+                    if val re = end_opt:
                         val ge = HirExpr(kind: HirExprKind.Binary(HirBinOp.GtEq, value_expr, rs), has_type_: false, type_: nil, span: span)
                         val hi_op = if inclusive: HirBinOp.LtEq else: HirBinOp.Lt
                         val le = HirExpr(kind: HirExprKind.Binary(hi_op, value_expr, re), has_type_: false, type_: nil, span: span)
@@ -289,7 +294,8 @@ impl HirLowering:
                     else:
                         Some(HirExpr(kind: HirExprKind.Binary(HirBinOp.GtEq, value_expr, rs), has_type_: false, type_: nil, span: span))
                 else:
-                    if val re2 = end:
+                    val end_opt: Expr? = end
+                    if val re2 = end_opt:
                         Some(HirExpr(kind: HirExprKind.Binary(HirBinOp.Lt, value_expr, re2), has_type_: false, type_: nil, span: span))
                     else:
                         # Both bounds absent: `start..end` with neither side is
@@ -335,7 +341,8 @@ impl HirLowering:
             case Struct(_, fields):
                 var conditions: [HirExpr] = []
                 for fpair in fields:
-                    val fname: text = fpair.0
+                    val fpair_typed: (text, HirPattern) = fpair
+                    val fname: text = fpair_typed.0
                     val fpat: HirPattern = fpair.1
                     val felem_expr = HirExpr(kind: HirExprKind.Field(value_expr, fname, nil), has_type_: false, type_: nil, span: span)
                     val sub_cond3 = self.pattern_test_condition(felem_expr, fpat, span)
@@ -389,7 +396,7 @@ impl HirLowering:
                 Some(HirExpr(kind: HirExprKind.BoolLit(false), has_type_: false, type_: nil, span: span))
 
     me build_if_chain(scrut_var: HirExpr, hir_arms: [HirMatchArm], idx: i64, span: Span) -> HirExpr:
-        val arm = hir_arms[idx]
+        val arm: HirMatchArm = hir_arms[idx]
         val cond = self.pattern_test_condition(scrut_var, arm.pattern, span)
         val prelude = self.destructure_pattern_prelude(scrut_var, arm.pattern, span)
         var arm_stmts: [HirStmt] = []
@@ -464,7 +471,8 @@ impl HirLowering:
         var out: [HirPattern] = []
         match pat.kind:
             case Enum(_, _, payload):
-                if val pl = payload:
+                val payload_opt: HirPatternPayload? = payload
+                if val pl = payload_opt:
                     match pl:
                         case Tuple(ps):
                             out = ps
@@ -525,7 +533,8 @@ impl HirLowering:
         Enum, Binding, Wildcard) -- no new MIR support is needed. Only the
         first Or slot of an arm is expanded per round; the caller loops."""
         var out: [HirMatchArm] = []
-        for arm in arms:
+        for raw_arm in arms:
+            val arm: HirMatchArm = raw_arm
             val pats = self.enum_payload_pats(arm.pattern)
             var or_slot = -1
             var si = 0
@@ -595,7 +604,7 @@ impl HirLowering:
             out = out.push(arms[c2])
             c2 = c2 + 1
         val rest = self.lower_range_payload_arms(scrut_var, arms, found + 1, span)
-        val arm = arms[found]
+        val arm: HirMatchArm = arms[found]
         val pats = self.enum_payload_pats(arm.pattern)
         var new_pats: [HirPattern] = []
         var conds: [HirExpr] = []
@@ -670,11 +679,13 @@ impl HirLowering:
         match arm.pattern.kind:
             case Enum(etype, variant, payload):
                 var out_arm = arm
-                if val pl = payload:
+                val payload_opt: HirPatternPayload? = payload
+                if val pl = payload_opt:
                     match pl:
                         case Tuple(patterns):
                             var any_complex = false
-                            for pat in patterns:
+                            for raw_pat in patterns:
+                                val pat: HirPattern = raw_pat
                                 match pat.kind:
                                     case HirPatternKind.Wildcard:
                                         ()
@@ -709,7 +720,8 @@ impl HirLowering:
                             if any_complex:
                                 var new_patterns: [HirPattern] = []
                                 var prelude: [HirStmt] = []
-                                for pat in patterns:
+                                for raw_pat in patterns:
+                                    val pat: HirPattern = raw_pat
                                     match pat.kind:
                                         case HirPatternKind.Wildcard:
                                             new_patterns = new_patterns.push(pat)
@@ -791,7 +803,8 @@ impl HirLowering:
 
     fn flatten_or_alternatives(alts: [HirPattern]) -> [HirPattern]:
         var out: [HirPattern] = []
-        for alt in alts:
+        for raw_alt in alts:
+            val alt: HirPattern = raw_alt
             match alt.kind:
                 case Or(inner):
                     for x in self.flatten_or_alternatives(inner):
@@ -804,13 +817,15 @@ impl HirLowering:
         """Split each top-level Or arm that has at least one Enum alternative
         into sibling arms, one per alternative, keeping guard/body/span."""
         var out: [HirMatchArm] = []
-        for arm in arms:
+        for raw_arm in arms:
+            val arm: HirMatchArm = raw_arm
             var split = false
             match arm.pattern.kind:
                 case Or(nested_alts):
                     # `A | B | C` may arrive as Or([Or([A, B]), C]); flatten.
                     val alts = self.flatten_or_alternatives(nested_alts)
-                    for alt in alts:
+                    for raw_alt in alts:
+                        val alt: HirPattern = raw_alt
                         match alt.kind:
                             case Enum(_, _, _):
                                 split = true
@@ -838,7 +853,8 @@ impl HirLowering:
         if self.match_guard_level == "off":
             return self.build_match_expr_unchecked(hir_scrutinee, hir_arms, span)
         var parsed_guards = 0
-        for parsed_arm in hir_arms:
+        for raw_parsed_arm in hir_arms:
+            val parsed_arm: HirMatchArm = raw_parsed_arm
             if parsed_arm.has_guard:
                 parsed_guards = parsed_guards + 1
         if parsed_guards == 0:
@@ -891,7 +907,8 @@ impl HirLowering:
         val hir_arms = self.expand_enum_or_arms(narrowed_arms)
         var has_enum = false
         var needs_general_fallback = false
-        for a in hir_arms:
+        for raw_a in hir_arms:
+            val a: HirMatchArm = raw_a
             match a.pattern.kind:
                 case Enum(_, _, _):
                     has_enum = true

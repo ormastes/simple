@@ -196,7 +196,9 @@ impl HirLowering:
             case HirTypeKind.Error | HirTypeKind.Infer(_, _) | HirTypeKind.Any | HirTypeKind.Never:
                 return HirType(kind: HirTypeKind.Error, span: span)
             case _: ()
-        for element in elements:
+        for raw_element in elements:
+            # ANY-transport hazard sweep round 3: annotated rebind.
+            val element: HirExpr = raw_element
             if not element.has_type_: return HirType(kind: HirTypeKind.Error, span: span)
             if not hir_types_equal(first.type_, element.type_): return HirType(kind: HirTypeKind.Error, span: span)
         first.type_
@@ -592,7 +594,10 @@ impl HirLowering:
                             span: arm.span
                         ))
                         arm_idx = arm_idx + 1
-                    if val else_block_src = else_:
+                    # ANY-transport: else_ is Block? (composite option); rebind
+                    # before the if-val destructure (p2_add cycle-65/66 class).
+                    val else_opt: Block? = else_
+                    if val else_block_src = else_opt:
                         return HirExpr(
                             kind: HirExprKind.IfChain(hir_arms, self.lower_hir_block(else_block_src)),
                             has_type_: false,
@@ -607,7 +612,8 @@ impl HirLowering:
                 case ExprKind.If(cond, then_, else_):
                     val hir_cond = self.lower_hir_expr(cond)
                     val hir_then = self.lower_hir_block(then_)
-                    if val else_block_src = else_:
+                    val else_opt: Block? = else_
+                    if val else_block_src = else_opt:
                         return HirExpr(
                             kind: HirExprKind.If(hir_cond, hir_then, self.lower_hir_block(else_block_src)),
                             has_type_: false,
@@ -1075,7 +1081,8 @@ impl HirLowering:
             case ExprKind.Lambda(params, body):
                 self.symbols.push_scope(ScopeKind.Function)
                 var hir_params: [HirParam] = []
-                for p in params:
+                for raw_p in params:
+                    val p: Param = raw_p
                     val type_ = if p.type_.?: self.lower_type(p.type_) else: HirType(kind: HirTypeKind.Infer(0, 0), span: p.span)
                     val symbol = self.symbols.define(p.name, SymbolKind.Parameter, Some(type_), p.span, Visibility.Private, false, nil)
                     hir_params = hir_params.push(HirParam(
@@ -1120,7 +1127,8 @@ impl HirLowering:
             case ExprKind.TryCatch(body, clauses, finally_):
                 val hir_body = self.lower_hir_block(body)
                 var hir_clauses: [HirCatchClause] = []
-                for clause in clauses:
+                for raw_clause in clauses:
+                    val clause: CatchClause = raw_clause
                     self.symbols.push_scope(ScopeKind.Block)
                     val hir_pattern = self.lower_pattern(clause.pattern)
                     val hir_type = if clause.has_type_:
@@ -1161,7 +1169,8 @@ impl HirLowering:
 
             case ExprKind.ListComprehension(expr, clauses):
                 var hir_clauses: [HirCompClause] = []
-                for clause in clauses:
+                for raw_clause in clauses:
+                    val clause: ComprehensionClause = raw_clause
                     val hir_kind = match clause.kind:
                         case For(var_, iter):
                             val symbol = self.symbols.define(var_, SymbolKind.Variable, nil, clause.span, Visibility.Private, false, nil)
