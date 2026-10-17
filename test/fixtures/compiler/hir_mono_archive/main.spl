@@ -277,9 +277,66 @@ fn capture_registration(owner: MonoArchiveRegistrationOwnerV1, archive: HirBodyA
     if not paused or not owned or not cache_owned or not ended: panic("registration fixture ownership")
     captured
 
+fn named_collision_order_control(first: HirModule, second: HirModule,
+        first_unique: text, second_unique: text) -> text:
+    val created = mono_archive_registration_create_v1()
+    if created.is_err(): return "collision owner creation refused"
+    val owner = created.unwrap()
+    val first_archive = archive_fixture(first)
+    val second_archive = archive_fixture(second)
+    if first_archive.is_err() or second_archive.is_err(): return "collision archive refused"
+    val first_rows = capture_registration(owner, first_archive.unwrap())
+    if first_rows.is_err(): return "first collision capture refused"
+    if mono_archive_publish_registration_v1(owner, first_rows.unwrap()).is_err():
+        return "first collision publication refused"
+    if owner.epoch != 1 or not owner.state.facts.named_types.has("Shared") or
+            not owner.state.facts.named_types.has(first_unique):
+        return "first declaration or unrelated type missing"
+    if owner.state.facts.named_ambiguous.has("Shared") and owner.state.facts.named_ambiguous["Shared"]:
+        return "single declaration classified ambiguous"
+    val second_rows = capture_registration(owner, second_archive.unwrap())
+    if second_rows.is_err(): return "second collision capture refused"
+    if mono_archive_publish_registration_v1(owner, second_rows.unwrap()).is_err():
+        return "second collision publication refused"
+    if owner.epoch != 2 or not owner.state.facts.named_ambiguous.has("Shared") or
+            not owner.state.facts.named_ambiguous["Shared"] or
+            owner.state.facts.named_types.has("Shared"):
+        return "ambiguous display name retained a resident winner"
+    if not owner.state.facts.named_types.has(first_unique) or
+            not owner.state.facts.named_types.has(second_unique):
+        return "collision removal dropped an unrelated type"
+    if owner.archives.len() != 2 or owner.roots.len() != 2 or
+            owner.roots[0].module_name != first.name or owner.roots[1].module_name != second.name:
+        return "collision publication order changed"
+    var inventory: Dict<text, text> = {}
+    inventory[first.name] = first.path
+    inventory[second.name] = second.path
+    val sealed = mono_archive_registration_seal_v1(owner, inventory, [first.name, second.name])
+    if sealed.is_err() or not owner.sealed: return "collision admission seal refused"
+    if sealed.unwrap().state.facts.named_types.has("Shared") or
+            not sealed.unwrap().state.facts.named_types.has(first_unique) or
+            not sealed.unwrap().state.facts.named_types.has(second_unique):
+        return "sealed collision facts differ from published owner"
+    ""
+
 fn main() -> i64:
     if env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_DIGEST").len() != 64 or env_get("SIMPLE_HIR_LEASE_CLOSURE_DIGEST").len() != 64: return 1
     var checks = 1
+    # Actual parsed/archived declarations have different Shared field types.
+    # Both publication orders must retire the old winner and preserve the
+    # unrelated declarations through the real admission seal.
+    val named_a = lower_fixture("named_collision_a.spl", "lease.named_a")
+    val named_b = lower_fixture("named_collision_b.spl", "lease.named_b")
+    val named_ab = named_collision_order_control(named_a, named_b, "OnlyA", "OnlyB")
+    if named_ab != "":
+        print "FAIL named collision A/B: {named_ab}"
+        return 201
+    checks = checks + 1
+    val named_ba = named_collision_order_control(named_b, named_a, "OnlyB", "OnlyA")
+    if named_ba != "":
+        print "FAIL named collision B/A: {named_ba}"
+        return 202
+    checks = checks + 1
     if outer<i64>(7) != 43 or outer<text>("complete native provider") != 43: return 2
     checks = checks + 1
     val provider = lower_fixture("provider.spl", "lease.provider")
@@ -765,6 +822,6 @@ fn main() -> i64:
             not mono_archive_admit_v1(path_mismatch_modules, collector(modules)).is_err() or
             selected_owner.epoch != 1 or selected_owner.archives.len() != 1: return 156
     checks = checks + 1
-    if checks != 80: return 52
+    if checks != 82: return 52
     print "HIR mono archive consumer: {checks} checks passed"
     0
