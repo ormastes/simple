@@ -56,7 +56,8 @@ impl HirLowering:
                 span: parameter.span)
         var field_types: Dict<text, HirType> = {}
         var field_order: [text] = []
-        for field in fields:
+        for raw_field in fields:
+            val field: HirField = raw_field
             field_types[field.name] = self.lower_type(field.type_)
             field_order = field_order.push(field.name)
         self.symbols.pop_scope()
@@ -102,7 +103,9 @@ impl HirLowering:
     # array field indexed on the native path).
     me register_struct_field_types(hir_struct: HirStruct):
         var field_types: Dict<text, HirType> = {}
-        for f in hir_struct.fields:
+        for raw_f in hir_struct.fields:
+            # ANY-transport hazard sweep round 3: annotated rebind.
+            val f: HirField = raw_f
             field_types[f.name] = f.type_
         self.struct_field_types_by_name[hir_struct.name] = field_types
         # Module-qualified key -- see the rationale on the twin write in
@@ -540,7 +543,7 @@ impl HirLowering:
         while param_idx < callable.params.len():
             if not callable.params[param_idx].has_type_:
                 return nil
-            val param = callable.params[param_idx]
+            val param: HirParam = callable.params[param_idx]
             param_types = param_types.push(self.imported_surface_type_projected(
                 param.type_, param.type_name, param.array_element_name, imported_module_name))
             param_idx = param_idx + 1
@@ -605,7 +608,8 @@ impl HirLowering:
         # returns with a tail-only decision.
         if self.ambient_bootstrap_enabled() or fn_decl.body.stmts.len() != 1:
             return nil
-        for param in fn_decl.params:
+        for raw_param in fn_decl.params:
+            val param: HirParam = raw_param
             if not param.has_type_ and param.has_default:
                 return nil
         if fn_decl.has_return_type:
@@ -623,10 +627,12 @@ impl HirLowering:
             case ExprKind.Call(callee, args):
                 match callee.kind:
                     case ExprKind.Ident(name):
-                        for param in fn_decl.params:
+                        for raw_param in fn_decl.params:
+                            val param: HirParam = raw_param
                             if param.name == name and not param.has_type_ and not param.has_default:
                                 var argument_types: [HirType] = []
-                                for arg in args:
+                                for raw_arg in args:
+                                    val arg: HirCallArg = raw_arg
                                     if arg.has_name: return nil
                                     argument_types = argument_types.push(HirType(kind: HirTypeKind.Any, span: arg.span))
                                 return HirType(kind: HirTypeKind.Function(argument_types, HirType(kind: HirTypeKind.Any, span: tail.span), []), span: tail.span)
@@ -773,7 +779,8 @@ impl HirLowering:
                 acc
             case ExprKind.IfChain(arms, else_):
                 var acc = return_scan_empty()
-                for arm in arms:
+                for raw_arm in arms:
+                    val arm: IfArm = raw_arm
                     acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(arm.cond, params))
                     acc = merge_return_scan(acc, self.scan_ast_block_for_returns(arm.then_, params))
                 if val else_b = else_:
@@ -781,14 +788,16 @@ impl HirLowering:
                 acc
             case ExprKind.MatchCase(scrutinee, arms):
                 var acc = self.scan_ast_expr_for_returns(scrutinee, params)
-                for arm in arms:
+                for raw_arm in arms:
+                    val arm: MatchArm = raw_arm
                     acc = merge_return_scan(acc, self.scan_ast_block_for_returns(arm.body, params))
                     if arm.has_guard:
                         acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(arm.guard, params))
                 acc
             case ExprKind.TryCatch(body, clauses, finally_):
                 var acc = self.scan_ast_block_for_returns(body, params)
-                for clause in clauses:
+                for raw_clause in clauses:
+                    val clause: CatchClause = raw_clause
                     acc = merge_return_scan(acc, self.scan_ast_block_for_returns(clause.body, params))
                 if val fin_b = finally_:
                     acc = merge_return_scan(acc, self.scan_ast_block_for_returns(fin_b, params))
@@ -809,12 +818,14 @@ impl HirLowering:
                 self.scan_ast_expr_for_returns(operand, params)
             case ExprKind.Call(callee, args):
                 var acc = self.scan_ast_expr_for_returns(callee, params)
-                for a in args:
+                for raw_a in args:
+                    val a: HirCallArg = raw_a
                     acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(a.value, params))
                 acc
             case ExprKind.MethodCall(receiver, _, args):
                 var acc = self.scan_ast_expr_for_returns(receiver, params)
-                for a in args:
+                for raw_a in args:
+                    val a: HirCallArg = raw_a
                     acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(a.value, params))
                 acc
             case ExprKind.Cast(expr, _):
