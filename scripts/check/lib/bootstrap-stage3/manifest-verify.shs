@@ -17,6 +17,14 @@ bootstrap_stage3_focused_compositions_verify() {
         false:static|false:dynamic) bsfc_template="$bootstrap_stage3_root/src/compositions/cuda_disabled/plugins/backend_registry/selected_cuda_backend.spl" ;;
         *) return 1 ;;
     esac
+    # The builder compiles from the repo composition dir (cuda_<mode>);
+    # the generated overlay below only pins the backend-selection content.
+    case "$bsfc_cuda_enabled:$bsfc_cuda_placement" in
+        true:static) bsfc_cuda_mode=static ;;
+        true:dynamic) bsfc_cuda_mode=dynamic ;;
+        false:static|false:dynamic) bsfc_cuda_mode=disabled ;;
+        *) return 1 ;;
+    esac
     bsfc_manifest_sha=$(bootstrap_stage3_verify_value focused_cuda_manifest_sha256 "$bootstrap_stage3_manifest") || return 1
     bsfc_template_sha=$(bootstrap_stage3_verify_value focused_cuda_template_sha256 "$bootstrap_stage3_manifest") || return 1
     bsfc_cuda="$bootstrap_stage3_manifest_output_root/compositions/cuda-$bsfc_manifest_sha-$bsfc_template_sha"
@@ -73,6 +81,18 @@ bootstrap_stage3_focused_command() (
     bsfc_low=$(bootstrap_stage3_verify_value focused_low_memory "$bootstrap_stage3_manifest") || return 1
     case "$bsfc_low" in 0|1) ;; *) return 1 ;; esac
     set --
+    # Frontend shard rows are prepended by run_transcribed AFTER the builder's
+    # env-name check and ARE part of the recorded command. Replay them first,
+    # in recorded order, from the transcript (recorded authority, cold-init
+    # precedent). Non-Windows transcripts lack them; skip quietly.
+    for bsfc_frontend_name in SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB \
+            SIMPLE_HIR_SHARD_WORKER_KB SIMPLE_PARSE_SHARD_WORKER_KB \
+            SIMPLE_PARSE_SHARD_MAX SIMPLE_SHARD_MEM_CLAMP; do
+        if bsfc_frontend_value=$(bootstrap_stage3_transcript_explicit_env_value \
+                "$bsfc_transcript" "$bsfc_frontend_name" 2>/dev/null); then
+            set -- "$@" "$bsfc_frontend_name=$bsfc_frontend_value"
+        fi
+    done
     if [ "$bsfc_phase" = stage2 ]; then
         for bsfc_name in SIMPLE_LLVM_BIN SIMPLE_LLVM_PATH MIMALLOC_EAGER_COMMIT; do
             bsfc_value=$(bootstrap_stage3_transcript_explicit_env_value "$bsfc_transcript" "$bsfc_name") || return 1
@@ -162,9 +182,15 @@ bootstrap_stage3_focused_command() (
         set -- "$@" "SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1=$(bootstrap_stage3_transcript_explicit_env_value "$bsfc_transcript" SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1)"
     fi
     case "$bsfc_action" in hash) ;; transcript) set -- "$@" -- "$bsfc_compiler" ;; *) return 1 ;; esac
+    # Source argv must byte-match the builder (bootstrap-from-scratch.sh):
+    # k1 is repo-relative (k1_composition_source_root strips the repo prefix),
+    # cuda is the repo composition dir, and the plugins root is always passed.
+    bsfc_k1_argv=${bsfc_k1#"$bootstrap_stage3_root/"}
+    bsfc_cuda_argv="$bootstrap_stage3_root/src/compositions/cuda_$bsfc_cuda_mode"
     set -- "$@" native-build --target "$bootstrap_stage3_platform" --backend "$bootstrap_stage3_backend" \
-        --runtime-bundle core-c-bootstrap --source "$bsfc_k1" --source "$bsfc_cuda" \
-        --source src/compiler --source src/app --source src/lib --entry-closure --threads "$bsfc_jobs"
+        --runtime-bundle core-c-bootstrap --source "$bsfc_k1_argv" --source "$bsfc_cuda_argv" \
+        --source src/compiler --source src/app --source src/lib \
+        --source "$bootstrap_stage3_root/src/plugins" --entry-closure --threads "$bsfc_jobs"
     if [ "$bsfc_phase" = stage2 ]; then
         bsfc_verbose=$(bootstrap_stage3_verify_value focused_stage2_verbose "$bootstrap_stage3_manifest") || return 1
         case "$bsfc_verbose" in 0) ;; 1) set -- "$@" --verbose ;; *) return 1 ;; esac
