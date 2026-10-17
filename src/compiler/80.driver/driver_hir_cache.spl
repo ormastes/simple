@@ -219,28 +219,18 @@ fn hir_cache_load(key: text, parser_binding: text = "") -> HirModule?:
     # The owned loader only replaces the persistent warning root on a hit.
     var promoted = true
     if paused and decoded != nil:
+        # Cycle-137 REVERT of the cycle-136 deep-promotion block: the
+        # runtime's rt_transient_heap_promote is a RECURSIVE plan walker
+        # (runtime_native.c:2776) -- RAW structs scan every word for children,
+        # DICT nodes walk every occupied entry's key AND value, ARRAY nodes
+        # walk elements. The module promote above is therefore already deep;
+        # re-promoting the now-persistent nested dicts classifies them as
+        # non-transient (class 0, not an immortal string) and FAILS, which
+        # tripped the ownership panic. The cycle-134/135 shallow-promotion
+        # diagnosis was wrong; the fvals element fault has another cause
+        # (next: probe with the dict-index read pattern that mono uses, in
+        # place of the .values() chain).
         promoted = transient_promote(decoded) and transient_promote(_hir_cache_last_warnings)
-        # Cycle-136: the module promotion is SHALLOW. RtCoreDict's entry array
-        # is a separate allocation that stays in this arena and is reclaimed
-        # by transient_scope_end below -- header-live/entries-dead (the
-        # cycle-134/135 hir-final receipt pair: fvals_len=5 from the promoted
-        # header, function value words faulting). Deep-promote every dict the
-        # decoded module carries, the same list as the lowering lane's
-        # cycle-135 block. (If the boxed values themselves still fault, the
-        # next escalation promotes each function object -- see the cycle-135
-        # caveat.)
-        if promoted:
-            val promoted_module: HirModule = decoded
-            promoted = transient_promote(promoted_module.functions) and
-                transient_promote(promoted_module.classes) and
-                transient_promote(promoted_module.structs) and
-                transient_promote(promoted_module.enums) and
-                transient_promote(promoted_module.bitfields) and
-                transient_promote(promoted_module.traits) and
-                transient_promote(promoted_module.constants) and
-                transient_promote(promoted_module.gpu_function_targets) and
-                transient_promote(promoted_module.symbols.symbols) and
-                transient_promote(promoted_module.symbols.scopes)
     val ended = transient_scope_end()
     if not paused or not promoted or not ended:
         panic("HIR cache decode scope ownership failed")

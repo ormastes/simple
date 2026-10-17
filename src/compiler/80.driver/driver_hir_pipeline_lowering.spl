@@ -486,28 +486,16 @@ impl CompilerDriver:
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("HIR ownership promotion failed for {source_path}")
-        # Cycle-135: the module struct's promotion is SHALLOW. RtCoreDict
-        # stores its entry array as a SEPARATE allocation that stays in the
-        # transient arena, so the nested dicts' entries are reclaimed when
-        # this scope ends -- header-live/entries-dead (the hir-final
-        # fvals_len=5 + deep-fault receipt pair confirmed exactly this:
-        # len reads 5 from the promoted header, value words fault). Deep-
-        # promote every dict the module carries, the same precedent as
-        # promote_symbol_table_transient_owners below (which covers the
-        # symbol table but not these declaration dicts).
-        if not (rt_transient_heap_promote(hir_module.functions) and
-                rt_transient_heap_promote(hir_module.classes) and
-                rt_transient_heap_promote(hir_module.structs) and
-                rt_transient_heap_promote(hir_module.enums) and
-                rt_transient_heap_promote(hir_module.bitfields) and
-                rt_transient_heap_promote(hir_module.traits) and
-                rt_transient_heap_promote(hir_module.constants) and
-                rt_transient_heap_promote(hir_module.gpu_function_targets) and
-                rt_transient_heap_promote(hir_module.symbols.symbols) and
-                rt_transient_heap_promote(hir_module.symbols.scopes)):
-            driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
-            return Err("HIR module dict ownership promotion failed for {source_path}")
+        # Cycle-137 REVERT of the cycle-135 deep-promotion block: the
+        # runtime promote is a recursive plan walker (runtime_native.c:2776 --
+        # RAW structs scan words for children, DICT nodes walk every occupied
+        # entry's key and value, ARRAY nodes walk elements). The module
+        # promote above is already deep; re-promoting the now-persistent
+        # nested dicts fails their non-transient classify (root_class 0, not
+        # an immortal string) and would trip the ownership panic -- exactly
+        # what the cycle-137 cache-lane SIGABRT showed. The cycle-134/135
+        # shallow-promotion diagnosis was wrong; the fvals element fault has
+        # another cause.
         if not lowering.promote_diagnostics_transient_owner():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
