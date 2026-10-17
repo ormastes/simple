@@ -259,3 +259,148 @@ The mono-archive capture context that degrades the arms therefore
 activates at whole-entry scale, not at consumer-module scale — debugging
 needs the full closure or an archive-body dump, both owned by the mono
 lane's infrastructure.
+
+## Fifth layer (2026-10-16): the registry itself is absent in replay
+
+PR #3493 (unique-owner fallback also when the subject route misses) was
+campaign-verified: B5b PERSISTS. The fallback is never reached because
+`variant_owner_keys("Null")` does not yield exactly one owner in the
+archive-replay lowering instance — the MIR enum variant registry
+(enum_variant_index_q) is never populated for modules whose bodies are
+lowered from the mono archive in ArchiveRequests mode; the registry is
+built only when a MirLowerer instance processes the enum's HirEnum
+declaration, which body-only replay does not do. Fix direction (mono
+archive owner): at the replay/lowering boundary, register the replayed
+module's enum variants into the MIR registry from the archive nominal
+rows (mono_archive_nominal_*), or re-lower the enum declarations
+alongside the bodies. The scalar-gate message "multiple wildcard arms"
+for is_null was emitted from the WILDCARD branch: arm 0 (`case Null:`)
+is an unresolved Binding that consumed the default slot, arm 1 (`case _:`)
+then collided — the text names the wrong arm kind (diagnostic polish,
+separate).
+
+## Stage3 frontier (2026-10-17): mono passes; MIR enum-construction registration divergence
+
+With the mono fix (#3588) and the 20 GiB ceiling (#3589), stage3 on macOS
+builds past the mono phase (peak 13.9 GiB, status=complete) and fails in MIR
+lowering:
+
+```
+MIR lowering error: enum construction: missing runtime identity for 'Option'
+MIR lowering error: enum construction: unregistered declaration
+  'compiler.common.driver_core_modes.CompileMode'
+  at src/app/cli/bootstrap_main.spl:380:20 and :550:20
+```
+
+SEED-WORKS / STAGE2-FAILS DIVERGENCE: stage2's own build compiled the same
+entry (bootstrap_main.spl) with the same construction sites successfully —
+stage2 was built by the Rust seed; stage3 is built by the stage2 (pure-Simple)
+compiler. The self-hosted compiler does not register what the seed registers
+for enum constructions reached through mono-specialized/generic contexts
+(Option's runtime identity; a qualified enum key from an imported module at
+the entry's construction sites).
+
+Checked and ruled out: register_module_enum_inventory_v1 (#3527) and the
+provider-enum paths DO call register_enum_variants, which registers runtime
+ids — so the gap is in which modules/instantiations those passes cover in the
+stage3 schedule, or in mono's minted instantiations needing their own runtime
+registration (#3521/#3526 family). Owner: self-host divergence lane.
+Repro: the stage3 resume command in /tmp/resume34-cap12.sh (final-push
+worktree); HIR is cached so the mono/MIR phases re-run in ~15 min.
+
+## Module-emission divergence (2026-10-17): whole modules absent from stage3 objects
+
+After #3595 (stage3 bootstrap enum inventory), stage3's mono and MIR phases
+PASS and the final link fails: `app.cli.bootstrap_focused_native_build.
+run_exact_stage3_focused_capsule` / `run_exact_stage4_focused_capsule` and all
+of `bootstrap_focused_native_build_args` are referenced (U) from
+bootstrap_main.o but DEFINED NOWHERE in the stage3 object set (nm across all
+native-objects-*/0-*.o: zero focused_* definitions, no mono renames). The seed
+emits these modules (stage2's own build, same entry, linked fine); the
+self-hosted stage2 compiler's module scheduler skips BOTH modules entirely
+despite phase1 closure scans, imports, and direct uses in the entry's normal
+paths (cache_dir at bootstrap_main.spl:413 etc.).
+
+WORKAROUND (uncommitted, final-push verification tree only): the three
+flag-readers bootstrap_main needs are inlined into bootstrap_main.spl (entry
+module, which the scheduler always emits), and the two focused-capsule
+dispatch routes return a clear error. This unblocks the stage3 link; the
+focused-capsule sub-build routes are disabled in the self-hosted binary.
+
+Owner: self-host divergence lane. The scheduler skips exactly these two
+modules — the trigger (naming? import shape? demand propagation through
+`use ...{a, b, c}` explicit lists?) needs the seed-vs-stage2 scheduler
+comparison; the repro is the stage3 resume in /tmp/resume34-cap12.sh
+(HIR cached, mono/MIR/link re-run in ~20 min).
+
+## Emission divergence is systemic (2026-10-17, second stage3 link)
+
+The focused_native_build workaround cleared its two symbols; the next stage3
+link fails on 25 undefined symbols across ~17 modules, including function-
+level gaps in core modules (`lib.nogc_sync_mut.io_runtime.env_get`,
+`dir_create` — not whole-module) and driver modules (`compiler_driver_create`,
+`run_native_build_entry_v1`, K1 backend table, compile-options/result helpers).
+Counting evidence: the stage3 link inputs carry ~44 defined symbols across 40
+fresh objects; the remaining module objects must come from the content-keyed
+native cache, and the missing 25 are functions whose emitting modules produced
+no object in this scope. Stage2's build (by the seed) emitted all of them.
+
+This is NOT module-pair-specific: the stage2-built compiler's emission/cache
+diverges from the seed's across the closure. Inlining is not viable at this
+scope. Owner: self-host divergence lane — the seed's emitter/caching is the
+reference; compare emission+native-cache admission for the 25 named symbols
+(repro: /tmp/fullchain-monofix.sh on the final-push tree; HIR cached, link
+verdict in ~20 min).
+
+## ROOT CAUSE FOUND (2026-10-17): symbol-mangling scheme mismatch at the stage3 link
+
+Measured (nm over all 40 fresh stage3 objects: 3,059 defs, ALL dotted; all
+1,344 seed-built cache objects: 32,810 defs, ALL double-underscore; zero
+spelling overlap; every undefined symbol's underscore twin exists in the
+cache):
+- Seed rule (mangle.rs module_prefix_from_path): `{prefix}__{fn}`, numbered
+  layers stripped, `_dot_` escaping, suffix disambiguation.
+- Pure-Simple rule (provider_metadata.spl:46 mir_provider_callable_identity;
+  _MirToLlvm/core_codegen.spl:396): `{module.name}.{fn}` — DOTTED.
+Both schemes are internally consistent; stage3 is the FIRST link that mixes
+both emitters by design (phase-compatibility reuse of seed-built cache
+objects), so the fresh entry's dotted references miss the cache's underscore
+definitions. Stage2 "emitted all of these" because stage2 was emitted
+entirely by the seed — one scheme.
+SECOND divergence riding on top: K1 modules are defined in the cache under a
+composed owner prefix (`_compositions__kernel_llvm_cranelift__compiler__...`)
+— scheduler/owner-attribution divergence; scheme alignment alone would not
+fix those.
+
+Ranked fix designs (agent-2, evidence-backed):
+- H1 (long-term): align pure-Simple mangling to the seed's __ scheme —
+  requires changing name-BUILDER and name-PARSER together (mir_provider_callable_key,
+  extension_owner_is_known rfind("."), _hir_symbol_owner_module all split on
+  dots) plus _dot_ escaping and suffix disambiguation. Partial alignment
+  silently mis-links — not a one-cycle change.
+- H2 (next experiment, de-risked): link-lane emitter gate — tag cache
+  capsules with the producing emitter's scheme; the pure-Simple compiler
+  re-emits (never links) seed-scheme cache objects, so stage3 is dotted
+  throughout and links. Correct by construction; costs the cross-stage cache
+  reuse (~1300 modules of MIR/codegen the caches exist to avoid). Verify with
+  /tmp/fullchain-monofix.sh (HIR cached; ~20 min to the link verdict).
+
+## Emission-coverage root cause (2026-10-17, H2 chain cycle falsified the cache hypothesis)
+
+PR #3608 (emitter-scheme gate, landed) made the stage3 link scheme-homogeneous
+via full re-emission — and the SAME 36 symbols stayed undefined. Decisive
+evidence: the link contains NO cache objects at all (stage3-native-cache has
+no objects dir; the runtime archives are Rust-only per nm); the link is the
+entry object + ~40 fresh module objects + Rust runtime. So the bootstrap-fixed
+entry lane (lower_bootstrap_entry_module → entry-only lowering) emits only
+~40 module objects; io_runtime.env_get, driver_compile_options_default, the
+K1 table rows, and the other 30 symbols live in modules THIS LANE NEVER
+LOWERS. The seed's stage3-equivalent lane lowers the whole callable closure
+(~1299 modules) — that is the coverage gap, pure and simple.
+
+Next experiment (one cycle): extend the bootstrap-fixed lane to lower its
+callable closure (walk the entry's demanded callables' owning modules like
+the direct lane's provider loops, or seed the lane with the closure's module
+list before entry lowering). Cheap pre-check without a chain cycle: sweep-
+style per-module compiles of bootstrap_main's closure modules and compare
+the emitted-object count (~40) against the seed's lane's count.
