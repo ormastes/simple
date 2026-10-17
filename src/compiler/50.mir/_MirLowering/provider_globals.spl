@@ -61,6 +61,36 @@ fn mir_global_reference_ids(functions: [HirFunction], constants: [HirConst]) -> 
     for raw_constant in constants:
         val constant: HirConst = raw_constant
         pending = pending.push(HirNode.Expr(constant.value))
+    mir_global_reference_ids_drain_v1(pending)
+
+# Cycle-92: the array-based entry above corrupts twice over on stage2 draws
+# -- .values() materialization at the call sites and the for-in rebind over
+# [HirFunction] elements (shim: fault at the function.body field read on the
+# rebind). This module-keyed twin walks the dicts in the guard-first
+# double-access shape (the generated-codec extraction draw, 10/10 clean);
+# the module crosses by value (proven transport). Both entries share the
+# same drain.
+fn mir_global_reference_ids_of_module_v1(module: HirModule) -> [i64]:
+    var pending: [HirNode] = []
+    val function_keys: [SymbolId] = module.functions.keys()
+    for key in function_keys:
+        if module.functions[key] == nil:
+            continue
+        val function: HirFunction = module.functions[key]
+        for node in hir_children_of_block(function.body):
+            pending = pending.push(node)
+        for param in function.params:
+            if param.has_default:
+                pending = pending.push(HirNode.Expr(param.default))
+    val constant_keys: [SymbolId] = module.constants.keys()
+    for key in constant_keys:
+        if module.constants[key] == nil:
+            continue
+        val constant: HirConst = module.constants[key]
+        pending = pending.push(HirNode.Expr(constant.value))
+    mir_global_reference_ids_drain_v1(pending)
+
+fn mir_global_reference_ids_drain_v1(pending: [HirNode]) -> [i64]:
     var seen: Dict<i64, bool> = {}
     var result: [i64] = []
     var index = 0
@@ -86,7 +116,7 @@ fn mir_global_reference_ids(functions: [HirFunction], constants: [HirConst]) -> 
 
 impl MirLowering:
     me register_imported_global_bindings(module: HirModule, providers: [HirModule]):
-        val referenced = mir_global_reference_ids(module.functions.values(), module.constants.values())
+        val referenced = mir_global_reference_ids_of_module_v1(module)
         val demanded = self.imported_global_demands(module.name, referenced)
         val callables = self.imported_callable_initializer_demands(module.name, referenced)
         var owners = mir_global_demanded_owners(demanded)
