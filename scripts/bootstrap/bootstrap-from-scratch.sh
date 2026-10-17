@@ -5031,6 +5031,16 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # the same flag here so the verification lane matches its producer.
       SIMPLE_NATIVE_ARENA_DECLS="${SIMPLE_NATIVE_ARENA_DECLS:-1}"
       export SIMPLE_NATIVE_ARENA_DECLS
+      # Row time budget: a cold full-CLI tool build on this host needs roughly
+      # 10-15 minutes through parse, transient-heap promote, claim, and lower
+      # (measured 2026-10-18: the streaming-surface promote alone --
+      # rt_transient_heap_promote's per-surface full-heap retain scan -- runs
+      # minutes past the 600 s default). The default kills the HIR shard worker
+      # mid-promote with the same BLOCKED exit=-2 claimed=0 signature as the
+      # mirror stall. Size the per-row internal native-build timeout for the
+      # host; callers may override.
+      BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT="${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:-1800}"
+      export BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT
       # Canonical source-derived tests consume their admitted producer, as in
       # run-release-stage2-qualified.shs. Explicit delegation remains opt-in and
       # subject to the phase verifier's existing real MC/DC waiver requirements.
