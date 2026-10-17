@@ -34,3 +34,24 @@ prove a Stage 3 bootstrap. Continue using the native FreeBSD checker after
 its actual toolchain prerequisites have been satisfied. RISC-V provisioning
 and toolchain evidence is recorded in
 `doc/08_tracking/bug/freebsd_riscv64_binary_toolchain_repository_20261018.md`.
+
+## Cross-built LLVM qualification
+
+An admitted LLVM 23.1.2 toolchain has now passed native compilation and execution
+inside the FreeBSD 14.4 RISC-V guest. This qualifies the toolchain, not Simple's
+bootstrap. The execution plan records its archive identity and remaining gates:
+`doc/03_plan/riscv_freebsd_bootstrap_20261017.md`.
+
+When reproducing the Linux-to-FreeBSD LLVM build, configure LLD for all three
+CMake link categories: `CMAKE_EXE_LINKER_FLAGS`,
+`CMAKE_SHARED_LINKER_FLAGS` and `CMAKE_MODULE_LINKER_FLAGS`. Each needs
+`-fuse-ld=lld`. Omitting module flags leaves Clang plugin links using the host
+x86 linker, which rejects the RISC-V `elf64lriscv` emulation. Resume the cached
+build after correcting that flag; rebuilding compiler objects is unnecessary.
+
+Extract the verified archive as the guest installer with
+`tar --no-same-owner -xzf <archive> -C /`, then add
+`/usr/local/llvm23/lib` through `ldconfig -m`. Preserving Linux user ownership
+causes FreeBSD's loader cache to ignore the library directory. Require both
+`llvm-config --version` admission and an executed guest Clang output before
+proceeding to the canonical native bootstrap checker.
