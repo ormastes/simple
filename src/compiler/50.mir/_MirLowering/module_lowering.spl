@@ -397,7 +397,12 @@ fn runtime_module_initializers_in_declaration_order(consts: [HirConst]) -> [HirC
         val const_: HirConst = consts[di]
         if runtime_module_initializer_supported(const_):
             order.push(di)
-            key_span.push(const_.span.start)
+            # Retained-HIR decode can nil-fill trailing fields of an
+            # old-schema receipt (span included); a nil span must not reach
+            # the (span, symbol) ordering compare (0xC0000005 NULL deref,
+            # Windows stage3 mir boundary). Default it to the front.
+            val span_start = if const_.span == nil: 0 else: const_.span.start
+            key_span.push(span_start)
             key_symbol.push(const_.symbol.id)
         di = di + 1
     # Stable insertion sort is O(n^2) in this module's dynamic globals only.
@@ -1224,8 +1229,12 @@ impl MirLowering:
                 span: Span.empty(),
                 verification_contract: nil
             )
-        for raw_fn in module.functions.values():
-            val fn_: HirFunction = raw_fn
+        # Cycle-91 playbook form: materialized keys + guard-first double access.
+        val function_keys_39: [SymbolId] = module.functions.keys()
+        for dk_39 in function_keys_39:
+            if module.functions[dk_39] == nil:
+                continue
+            val fn_: HirFunction = module.functions[dk_39]
             val fn_id = self.symbol_id_value(fn_.symbol)
             if fn_id == target_id:
                 return fn_
@@ -1659,8 +1668,11 @@ impl MirLowering:
         # NVMe rv32 fw mask-361, 2026-07-24). Register every free fn's
         # declared HIR return type name-keyed (ambiguous duplicates are
         # never answered — see mir_data.spl).
-        for raw_prescan_fn in module.functions.values():
-            val prescan_fn: HirFunction = raw_prescan_fn
+        val prescan_function_keys: [SymbolId] = module.functions.keys()
+        for dk_38 in prescan_function_keys:
+            if module.functions[dk_38] == nil:
+                continue
+            val prescan_fn: HirFunction = module.functions[dk_38]
             self.register_provider_callable_link(module.name, module.symbols, prescan_fn)
             val prescan_call_name = mir_provider_function_name(module.name, module.symbols, prescan_fn)
             var prescan_return_shape = ""
@@ -1826,6 +1838,72 @@ impl MirLowering:
                 for prescan_param in prescan_fn.params:
                     prescan_param_tys.push(prescan_param.type_)
                 bootstrap_fn_param_hir_types_register(prescan_fn.name, prescan_param_tys)
+
+    me register_builtin_enum_seeds():
+        """Register the built-in Result/Option variant and runtime-identity
+        seeds. Extracted from lower_module's tail (2026-10-17) so lanes that
+        bypass the non-bootstrap tail -- the stage3 bootstrap-fixed entry
+        lane above all -- can apply the same seeds. Seeds only what is
+        missing, so a user declaration of the same name still wins."""
+        if not self.enum_variant_index.has("Result"):
+            self.enum_variant_index["Result"] = ["Ok", "Err"]
+            self.reindex_enum_variant_owners("Result", [], ["Ok", "Err"])
+            self.enum_variant_discriminants["Result"] = [0, 1]
+        if not self.enum_runtime_id_index.has("Result"):
+            self.enum_runtime_id_index["Result"] = 0
+        self.register_builtin_enum_dual("Result", ["Ok", "Err"], [0, 1], 0)
+
+        # Register the built-in Option enum so bare-variant construction
+        # (`Some(v)` / `None`) and `match o: case Some(v)/None` resolve the same
+        # discriminants (Some=0, None=1, matching the stdlib `enum Option`
+        # declaration order). Option is not carried in module.enums. Skip if
+        # user code shadows the name.
+        if not self.enum_variant_index.has("Option"):
+            self.enum_variant_index["Option"] = ["Some", "None"]
+            self.reindex_enum_variant_owners("Option", [], ["Some", "None"])
+            self.enum_variant_discriminants["Option"] = [0, 1]
+        if not self.enum_runtime_id_index.has("Option"):
+            self.enum_runtime_id_index["Option"] = 1
+        self.register_builtin_enum_dual("Option", ["Some", "None"], [0, 1], 1)
+
+    me register_module_enum_bootstrap_inventory_v1(modules: [HirModule]):
+        """Register every given module's own enums (variants AND runtime
+        ids) plus the built-in Result/Option seeds, up front, before a
+        bootstrap-lane lowering runs.
+
+        Measured gap (stage3 frontier, 2026-10-17, site-19): the
+        bootstrap-fixed stage3 lane lowers app.cli.bootstrap_main through
+        lower_module's bootstrap-flat branch on a fresh MirLowering. That
+        branch returns before the non-bootstrap tail, so NONE of the tail's
+        registration runs on this instance: not the module's own
+        module.enums loop, not the built-in Option/Result seeds, and (with
+        the empty provider list this lane passes) no dependency enums
+        either. The stage3 build therefore died with "enum construction:
+        missing runtime identity for 'Option'" and "enum construction:
+        unregistered declaration 'compiler.common.driver_core_modes.
+        CompileMode'" at the entry's construction sites, while stage2 --
+        built by the Rust seed, which seeds a GLOBAL enum sidecar across
+        the whole closure (reserved Result/Option lane 0/1) before lowering
+        -- compiled the same entry fine. The other Simple lanes never hit
+        this because their registration arrives from a different pass
+        (bootstrap_globals' per-module flat type defs, or lower_module's
+        provider loops); only this lane bypasses all of them.
+
+        register_enum_variants / register_enum_runtime_id read only the
+        HirEnum (no symbol table), the seeds guard on has() so re-runs are
+        quiet, and the module's own tail registration overwrites
+        unconditionally if it ever runs."""
+        var inventory_module_i = 0
+        while inventory_module_i < modules.len():
+            val inventory_enums = modules[inventory_module_i].enums.values()
+            var inventory_enum_i = 0
+            while inventory_enum_i < inventory_enums.len():
+                val inventory_enum_def: HirEnum = inventory_enums[inventory_enum_i]
+                self.register_enum_variants(inventory_enum_def)
+                self.register_enum_runtime_id(inventory_enum_def)
+                inventory_enum_i = inventory_enum_i + 1
+            inventory_module_i = inventory_module_i + 1
+        self.register_builtin_enum_seeds()
 
     me lower_bootstrap_entry_module(module: HirModule) -> MirModule:
         """Lower the stage3 fixed-entry module (`app.cli.bootstrap_main`).
@@ -2005,13 +2083,19 @@ impl MirLowering:
         self.exact_extern_signatures = {}
         # E-MIR-TYPE-Error rate limit is per module (see lower_type).
         self.mir_type_error_reports = {}
-        for raw_declaration in module.functions.values():
-            val declaration: HirFunction = raw_declaration
+        val function_keys_37: [SymbolId] = module.functions.keys()
+        for dk_37 in function_keys_37:
+            if module.functions[dk_37] == nil:
+                continue
+            val declaration: HirFunction = module.functions[dk_37]
             self.record_exact_extern_declaration_v1(declaration)
         self.lowering_entry_module = is_entry_module
         var function_names: [text] = []
-        for raw_func in module.functions.values():
-            val func: HirFunction = raw_func
+        val function_keys_36: [SymbolId] = module.functions.keys()
+        for dk_36 in function_keys_36:
+            if module.functions[dk_36] == nil:
+                continue
+            val func: HirFunction = module.functions[dk_36]
             self.register_provider_callable_link(module.name, module.symbols, func, is_entry_module)
             function_names.push(mir_provider_function_name(module.name, module.symbols, func, is_entry_module))
         self.current_function_names = function_names
@@ -2079,8 +2163,11 @@ impl MirLowering:
         for raw_provider_module in providers:
             val provider_module: HirModule = raw_provider_module
             if provider_module.name != module.name:
-                for raw_provider_struct in provider_module.structs.values():
-                    val provider_struct_def: HirStruct = raw_provider_struct
+                val provider_struct_keys: [SymbolId] = provider_module.structs.keys()
+                for dk_35 in provider_struct_keys:
+                    if provider_module.structs[dk_35] == nil:
+                        continue
+                    val provider_struct_def: HirStruct = provider_module.structs[dk_35]
                     self.register_provider_struct(provider_struct_def, provider_module.symbols,
                         consumer_composite_names.has(provider_struct_def.name))
             # Struct-only providers also own receiver methods (for example
@@ -2089,14 +2176,23 @@ impl MirLowering:
             # (app.test_daemon.qemu_broker_snapshot) declare no type at all.
             if provider_module.name != module.name and (provider_module.classes.len() > 0 or provider_module.enums.len() > 0 or provider_module.structs.len() > 0 or provider_module.impls.len() > 0):
                 var provider_links: Dict<i64, text> = {}
-                for raw_provider_func in provider_module.functions.values():
-                    val provider_func: HirFunction = raw_provider_func
+                val provider_function_keys_34: [SymbolId] = provider_module.functions.keys()
+                for dk_34 in provider_function_keys_34:
+                    if provider_module.functions[dk_34] == nil:
+                        continue
+                    val provider_func: HirFunction = provider_module.functions[dk_34]
                     provider_links[provider_func.symbol.id] = mir_provider_function_name(provider_module.name, provider_module.symbols, provider_func)
-                for raw_provider_class in provider_module.classes.values():
-                    val provider_class: HirClass = raw_provider_class
+                val provider_class_keys: [SymbolId] = provider_module.classes.keys()
+                for dk_33 in provider_class_keys:
+                    if provider_module.classes[dk_33] == nil:
+                        continue
+                    val provider_class: HirClass = provider_module.classes[dk_33]
                     self.register_provider_class(provider_class, provider_module.symbols, provider_links, false)
-                for raw_provider_func in provider_module.functions.values():
-                    val provider_func: HirFunction = raw_provider_func
+                val provider_function_keys_32: [SymbolId] = provider_module.functions.keys()
+                for dk_32 in provider_function_keys_32:
+                    if provider_module.functions[dk_32] == nil:
+                        continue
+                    val provider_func: HirFunction = provider_module.functions[dk_32]
                     self.register_provider_method(provider_func, provider_module.symbols, provider_links)
         # Before the ambient-bootstrap early return below: the stage3
         # bootstrap-fixed lane lowers through that branch too.
@@ -2313,26 +2409,7 @@ impl MirLowering:
         # discriminants (Ok=0, Err=1) as user enums. Result is not carried in
         # module.enums, so without this the variants lowered as indirect calls
         # to an undefined callee. Skip if user code shadows the name.
-        if not self.enum_variant_index.has("Result"):
-            self.enum_variant_index["Result"] = ["Ok", "Err"]
-            self.reindex_enum_variant_owners("Result", [], ["Ok", "Err"])
-            self.enum_variant_discriminants["Result"] = [0, 1]
-        if not self.enum_runtime_id_index.has("Result"):
-            self.enum_runtime_id_index["Result"] = 0
-        self.register_builtin_enum_dual("Result", ["Ok", "Err"], [0, 1], 0)
-
-        # Register the built-in Option enum so bare-variant construction
-        # (`Some(v)` / `None`) and `match o: case Some(v)/None` resolve the same
-        # discriminants (Some=0, None=1, matching the stdlib `enum Option`
-        # declaration order). Option is not carried in module.enums. Skip if
-        # user code shadows the name.
-        if not self.enum_variant_index.has("Option"):
-            self.enum_variant_index["Option"] = ["Some", "None"]
-            self.reindex_enum_variant_owners("Option", [], ["Some", "None"])
-            self.enum_variant_discriminants["Option"] = [0, 1]
-        if not self.enum_runtime_id_index.has("Option"):
-            self.enum_runtime_id_index["Option"] = 1
-        self.register_builtin_enum_dual("Option", ["Some", "None"], [0, 1], 1)
+        self.register_builtin_enum_seeds()
 
         # Build (struct NAME, method name) -> method SymbolId lookup from
         # module.impls. Bug #138/#156: a receiver with no HIR type inference
@@ -2470,11 +2547,17 @@ impl MirLowering:
             ci = ci + 1
 
         var local_callable_links: Dict<i64, text> = {}
-        for raw_local_func in module.functions.values():
-            val local_func: HirFunction = raw_local_func
+        val function_keys_31: [SymbolId] = module.functions.keys()
+        for dk_31 in function_keys_31:
+            if module.functions[dk_31] == nil:
+                continue
+            val local_func: HirFunction = module.functions[dk_31]
             local_callable_links[local_func.symbol.id] = self.provider_callable_symbol_name(local_func.symbol, local_func.name)
-        for raw_local_func in module.functions.values():
-            val local_func: HirFunction = raw_local_func
+        val function_keys_30: [SymbolId] = module.functions.keys()
+        for dk_30 in function_keys_30:
+            if module.functions[dk_30] == nil:
+                continue
+            val local_func: HirFunction = module.functions[dk_30]
             self.register_provider_method(local_func, module.symbols, local_callable_links)
 
         val bitfield_values = module.bitfields.values()
