@@ -207,7 +207,7 @@ test is reported `NOT_RUN`, never a complete qualification PASS.
 Sampling failure, malformed output, or a sample exceeding its observation
 budget causes exit 89. The default is five seconds on FreeBSD and one second
 elsewhere. `SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS` explicitly selects a
-budget from 1000 through 30000 milliseconds on every platform; invalid values
+budget from 1000 through 60000 milliseconds on every platform; invalid values
 fail closed. This changes the allowed observation duration, not the RSS cap
 or 100 ms target cadence. Scheduling uses the remaining
 interval budget, rather than adding a full sleep after measurement. Scheduler
