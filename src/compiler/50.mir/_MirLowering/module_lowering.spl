@@ -1,4 +1,4 @@
-use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.mir._MirLowering.declaration_enum_metadata_v1.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use compiler.mir._MirLoweringExpr.function_signature_owner.*
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
@@ -633,6 +633,9 @@ impl MirLowering:
             callable_text_value_abi: {},
             lowering_entry_module: false,
             declaration_repository: nil,
+            declaration_enum_provider_keys: {},
+            declaration_enum_positions: {},
+            declaration_enum_payload_owner: {},
             declaration_parameter_defaults: {},
             declaration_parameter_defaults_ambiguous: {},
             declaration_field_defaults: {},
@@ -897,6 +900,7 @@ impl MirLowering:
         Index-based counterpart to the arity-1-only
         `enum_single_payload_types` lookup: a caller that needs slot N asks
         this first and then `enum_variant_payload_type_at`."""
+        self.ensure_declaration_enum_payloads_v1(payload_key)
         if val types = self.enum_variant_payload_types.get(payload_key):
             return types.len()
         return 0
@@ -907,6 +911,7 @@ impl MirLowering:
         Slot 0 of an arity-1 Tuple is the same HirType the pre-existing
         `enum_single_payload_types[payload_key]` returns; that map is still
         consulted FIRST by its callers, so its behaviour is unchanged."""
+        self.ensure_declaration_enum_payloads_v1(payload_key)
         if val types = self.enum_variant_payload_types.get(payload_key):
             if index >= 0 and index < types.len():
                 return Some(types[index])
@@ -934,8 +939,10 @@ impl MirLowering:
                 ni = ni + 1
         return -1
 
-    me register_enum_variants(enum_def: HirEnum):
+    me register_enum_variants(enum_def: HirEnum, store_payload_types: bool = true):
         """Register names and resolved portable runtime discriminants."""
+        if store_payload_types and self.declaration_repository != nil:
+            self.declaration_enum_payload_owner[enum_def.name] = enum_def.runtime_name
         # SIMPLE_ENUM_REG_TRACE=1 (cycle-53 discriminator): capture the exact
         # name/runtime_name spellings at write time for the failing enum. A
         # mismatch between this runtime_name and the subject owner key built
@@ -980,7 +987,6 @@ impl MirLowering:
             # keep their exact previous behaviour -- and the three full-arity
             # maps are written alongside it for every variant, so match
             # lowering / payload extraction / layout can index slot N.
-            val payload_key = "{enum_def.name}::{variant.name}"
             var full_types: [HirType] = []
             var full_names: [text] = []
             var payload_kind = "unit"
@@ -992,8 +998,6 @@ impl MirLowering:
                         full_types.push(payload_types[pti])
                         full_names.push("")
                         pti = pti + 1
-                    if payload_types.len() == 1:
-                        self.enum_single_payload_types[payload_key] = payload_types[0]
                 case HirVariantKind.Struct(payload_fields):
                     payload_kind = "struct"
                     var pfi = 0
@@ -1002,18 +1006,8 @@ impl MirLowering:
                         full_names.push(payload_fields[pfi].name)
                         pfi = pfi + 1
                 case _: ()
-            self.enum_variant_payload_types[payload_key] = full_types
-            self.enum_variant_payload_names[payload_key] = full_names
-            self.enum_variant_payload_kind[payload_key] = payload_kind
-            # Constructor validation must use the same declaration identity as
-            # the qualified variant/discriminant maps. Bare names can collide.
-            if enum_def.runtime_name != "":
-                val qualified_payload_key = "{enum_def.runtime_name}::{variant.name}"
-                self.enum_variant_payload_types[qualified_payload_key] = full_types
-                self.enum_variant_payload_names[qualified_payload_key] = full_names
-                self.enum_variant_payload_kind[qualified_payload_key] = payload_kind
-                if full_types.len() == 1:
-                    self.enum_single_payload_types[qualified_payload_key] = full_types[0]
+            self.register_enum_payload_metadata_v1(enum_def.name, enum_def.runtime_name,
+                variant.name, full_types, full_names, payload_kind, store_payload_types, true)
             next_value = value + 1
             vi = vi + 1
         # Bare-name collision registry (2026-08-01). enum_variant_index is keyed
@@ -1053,6 +1047,28 @@ impl MirLowering:
         self.enum_variant_index[enum_def.name] = names
         self.reindex_enum_variant_owners(enum_def.name, prior_variant_names, names)
         self.enum_variant_discriminants[enum_def.name] = discriminants
+
+    me register_enum_payload_metadata_v1(enum_name: text, runtime_name: text, variant: text,
+            types: [HirType], names: [text], kind: text, store_types: bool = true, write_bare: bool = true):
+        # Kind/names are ID-free and needed by unit-arm inference even before
+        # a consumer demands nominal payload types. Keep the legacy tuple-only
+        # bare single-slot rule and the qualified any-single-slot rule exact.
+        if write_bare:
+            val key = "{enum_name}::{variant}"
+            self.enum_variant_payload_names[key] = names
+            self.enum_variant_payload_kind[key] = kind
+            if store_types:
+                self.enum_variant_payload_types[key] = types
+                if kind == "tuple" and types.len() == 1:
+                    self.enum_single_payload_types[key] = types[0]
+        if runtime_name != "":
+            val key = "{runtime_name}::{variant}"
+            self.enum_variant_payload_names[key] = names
+            self.enum_variant_payload_kind[key] = kind
+            if store_types:
+                self.enum_variant_payload_types[key] = types
+                if types.len() == 1:
+                    self.enum_single_payload_types[key] = types[0]
 
     me register_module_enum_inventory_v1(modules: [HirModule]):
         """Register every given module's own enums, up front, before any
@@ -1182,6 +1198,7 @@ impl MirLowering:
                     class_key_i = class_key_i + 1
                 composite_class_i = composite_class_i + 1
             composite_module_i = composite_module_i + 1
+
 
     # O(1) inverse of `enum_variant_index`, maintained at every bare-key write.
     # `prior_names` is the variant set this owner previously had registered
@@ -1522,6 +1539,7 @@ impl MirLowering:
                                         if field_element_symbol.kind == SymbolKind.Class:
                                             field_array_element_type_name = mir_class_identity(field_element_symbol)
                                         field_type_ownership_key = field_array_element_type_name
+
                             case _: ()
                     case Slice(field_slice_element_type):
                         field_elem_type = field_slice_element_type
@@ -1539,6 +1557,7 @@ impl MirLowering:
                                         if field_slice_element_symbol.kind == SymbolKind.Class:
                                             field_array_element_type_name = mir_class_identity(field_slice_element_symbol)
                                         field_type_ownership_key = field_array_element_type_name
+
                             case _: ()
                     case _: ()
             field_type_names.push(field_type_name)
@@ -2146,7 +2165,7 @@ impl MirLowering:
             val _aborted = reverse_reference_module_abort_v1(reverse_token)
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 9))
             return Err("reverse-reference publication failed for {module.name}")
-        scope_decisions = scope_decisions | 256
+        scope_decisions = scope_decisions | %d
         if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 10))
         Ok(lowered)
 
@@ -2185,6 +2204,13 @@ impl MirLowering:
         self.collection_literal_operands = {}
         self.collection_literal_ordinals = {}
         self.symbols = module.symbols
+        if self.declaration_repository != nil:
+            # These HirTypes contain consumer-local numeric IDs. Scalar enum
+            # identities/kinds and deferred declaration indexes survive; type
+            # arrays are rebound lazily only when this consumer reads them.
+            self.enum_variant_payload_types = {}
+            self.enum_single_payload_types = {}
+            self.declaration_enum_payload_owner = {}
         # Provider SymbolIds are module-local: rebuild and relocate trait
         # metadata whenever the active consumer symbol table changes.
         self.native_trait_layouts = []
@@ -2316,6 +2342,14 @@ impl MirLowering:
                     if provider_class == nil:
                         continue
                     self.register_provider_class(provider_class, provider_module.symbols, provider_links, false)
+                # Provider enums were gated-in by the condition above but
+                # never registered: a consumer module's match arms on a
+                # provider enum's variants found an empty registry
+                # (measured B5b, lib.common.sdn.value.SdnValue.is_null,
+                # site-19 fifth layer). register_enum_variants is the same
+                # registration the enum's own module pass runs.
+                for provider_enum in provider_module.enums.values():
+                    self.register_enum_variants(provider_enum)
                 val provider_function_keys_32: [SymbolId] = provider_module.functions.keys()
                 for dk_32 in provider_function_keys_32:
                     # workaround(p2_add cycles 91-105): per-read draw corruption — bind once, guard the local.
@@ -2568,9 +2602,12 @@ impl MirLowering:
         while module_fn_i < module_fn_values.len():
             # module.functions also contains impl methods; retain their static
             # marker for the separate static receiver lookup below.
-            val module_fn: HirFunction = module_fn_values[module_fn_i]
-            if module_fn.is_static:
-                static_method_symbol_ids[self.symbol_id_value(module_fn.symbol)] = true
+            # workaround(p2_add): values() draws corrupt per read; bind once
+            # via if val, guard and use the same binding.
+            val static_element: HirFunction? = module_fn_values[module_fn_i]
+            if val module_fn = static_element:
+                if module_fn.is_static:
+                    static_method_symbol_ids[self.symbol_id_value(module_fn.symbol)] = true
             module_fn_i = module_fn_i + 1
 
         var impl_mi = 0
@@ -2822,25 +2859,24 @@ impl MirLowering:
         if prescan_trace:
             eprint("[mir-prescan-module] start module={module.name} functions={self.lower_emit_fn_values.len()}")
         while psi < self.lower_emit_fn_values.len():
-            # workaround(p2_add): values() materialization can carry nil-3
-            # elements (ABI draw corruption, cycles 91-149); a nil record has
-            # no body/symbol to prescan. Guard-first idiom, no-op on health.
-            if self.lower_emit_fn_values[psi] == nil:
-                psi = psi + 1
-                continue
-            if prescan_trace:
-                eprint("[mir-prescan-function] start module={module.name} index={psi} name={self.lower_emit_fn_values[psi].name}")
-            if not self.lower_emit_fn_values[psi].is_extern:
-                self.prescan_block_for_struct_types(self.lower_emit_fn_values[psi].body)
-            else:
-                # Mark every extern BEFORE any body is lowered. The lowering
-                # loop below also records it, but only when it reaches the
-                # declaration, so a caller lowered earlier saw the extern's
-                # `-> i64` result as a declared scalar: `ext() == nil` folded
-                # to false and `take(ext())` boxed a nil word as Some.
-                self.extern_fn_symbols[self.lower_emit_fn_values[psi].symbol.id] = true
-            if prescan_trace:
-                eprint("[mir-prescan-function] done module={module.name} index={psi} name={self.lower_emit_fn_values[psi].name}")
+            # workaround(p2_add): values() elements draw nil-3 PER READ in this
+            # lane's codegen (smoke8: check-draw non-nil, use-draw nil-3).
+            # Bind ONE draw, unwrap via if val, use that binding throughout.
+            val prescan_element: HirFunction? = self.lower_emit_fn_values[psi]
+            if val prescan_fn = prescan_element:
+                if prescan_trace:
+                    eprint("[mir-prescan-function] start module={module.name} index={psi} name={prescan_fn.name}")
+                if not prescan_fn.is_extern:
+                    self.prescan_block_for_struct_types(prescan_fn.body)
+                else:
+                    # Mark every extern BEFORE any body is lowered. The lowering
+                    # loop below also records it, but only when it reaches the
+                    # declaration, so a caller lowered earlier saw the extern's
+                    # `-> i64` result as a declared scalar: `ext() == nil` folded
+                    # to false and `take(ext())` boxed a nil word as Some.
+                    self.extern_fn_symbols[prescan_fn.symbol.id] = true
+                if prescan_trace:
+                    eprint("[mir-prescan-function] done module={module.name} index={psi} name={prescan_fn.name}")
             psi = psi + 1
         if prescan_trace:
             eprint("[mir-prescan-module] done module={module.name}")
@@ -2898,13 +2934,14 @@ impl MirLowering:
             eprint("[enum-reg] fn-keys: module={module.name} values_len={fn_values_count} dict_len={module.functions.len()}")
         var fni = 0
         while fni < fn_values_count:
-            # workaround(p2_add): values() elements can draw nil-3; a nil
-            # record is not emittable (guard-first idiom).
-            if self.lower_emit_fn_values[fni] == nil:
-                fni = fni + 1
-                continue
-            self.lower_module_emit_fn_v1(module, self.lower_emit_fn_values[fni],
-                    archive_function_symbols, bootstrap_trace, trace_enabled, fni)
+            # workaround(p2_add): values() draws corrupt PER READ (smoke8: the
+            # nil record passed the check-draw and faulted the use-draw at
+            # lower_module_emit_fn_v1's first field read). Bind ONE draw into
+            # an optional, unwrap via if val, pass that binding.
+            val emit_element: HirFunction? = self.lower_emit_fn_values[fni]
+            if val emit_fn = emit_element:
+                self.lower_module_emit_fn_v1(module, emit_fn,
+                        archive_function_symbols, bootstrap_trace, trace_enabled, fni)
             fni = fni + 1
 
     # Cycle-103: per-function emission step for lower_module_emit_all_v1.

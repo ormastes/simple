@@ -13,11 +13,15 @@ extern fn rt_pty_is_running(handle: i64) -> bool
 # extern with a differing (nullable) signature. See
 # doc/08_tracking/bug/win_host_os_detector_disagreement_2026-09-14.md.
 use std.sffi.platform.{platform_name_raw}
+use std.sys.pty_input_codec.{pty_input_prefix}
 
 pub fn open(rows: i32, cols: i32) -> i32:
     if rows <= 0 or cols <= 0:
         return -1
     rt_pty_open(rows, cols)
+
+pub fn exit_code(handle: i32) -> Result<i64, text>:
+    Err("PTY exit status unavailable in this runtime composition")
 
 pub fn spawn(handle: i32, program: text) -> i64:
     if handle < 0 or program == "":
@@ -28,6 +32,28 @@ pub fn write(handle: i32, data: text) -> bool:
     if handle < 0:
         return false
     rt_pty_write(handle as i64, data)
+
+# Legacy portable provider writes synchronously. Native Windows configured
+# providers override this surface with byte-preserving nonblocking writes.
+# This fallback cannot qualify owner-loop fairness. It accepts only complete
+# UTF-8 scalars, retaining an incomplete final scalar for the caller to retry.
+pub fn write_some(handle: i32, data: [u8]) -> i64:
+    if handle < 0:
+        return -1
+    val prefix = pty_input_prefix(data)
+    if prefix.is_err():
+        return -1
+    val accepted = prefix.unwrap()
+    if accepted.accepted == 0:
+        return 0
+    if not write(handle, accepted.content):
+        return -1
+    return accepted.accepted
+
+pub fn input_pending(handle: i32) -> Result<bool, text>:
+    if handle < 0:
+        return Err("invalid pty handle")
+    return Ok(false)
 
 pub fn read(handle: i32, timeout_ms: i32) -> text:
     if handle < 0 or timeout_ms < 0:
@@ -43,6 +69,21 @@ pub fn is_running(handle: i32) -> bool:
     if handle < 0:
         return false
     rt_pty_is_running(handle as i64)
+
+# This legacy runtime ABI has no resize operation. Native Windows composition
+# supplies the real ConPTY operation; callers distinguish absence from failure.
+pub fn can_resize() -> bool:
+    false
+
+pub fn resize(handle: i32, rows: i32, cols: i32) -> bool:
+    if handle < 0 or rows <= 0 or cols <= 0:
+        return false
+    return false
+
+# The legacy close ABI reclaims synchronously; it owns no deferred buffers.
+# The native provider overrides this with its cancellation/JobObject sweep.
+pub fn cleanup_pending() -> i64:
+    0
 
 pub fn platform_default_shell() -> text:
     val platform = platform_name_raw()

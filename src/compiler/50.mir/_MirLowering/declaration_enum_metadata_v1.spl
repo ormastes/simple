@@ -1,0 +1,181 @@
+# Archive enum metadata: ID-free phase barrier and lazy consumer-local types.
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.hir_declaration_types_v1.{MirHirEnumDeclarationV1, MirHirVariantDeclarationV1,
+    MirHirFieldDeclarationV1, MirHirModuleDeclarationsV1, MirHirDeclarationRepositoryV1}
+use compiler.mir.hir_declaration_summary_v1.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir._MirLowering.declaration_providers_v1.*
+
+impl MirLowering:
+    me declaration_enum_definition_v1(provider: MirHirModuleDeclarationsV1,
+            declaration: MirHirEnumDeclarationV1) -> HirEnum?:
+        val owner = mir_hir_declaration_logical_key_v1(provider)
+        var variants: [HirVariant] = []
+        for raw_variant in declaration.variants:
+            val variant: MirHirVariantDeclarationV1 = raw_variant
+            var discriminant = HirExpr(kind: HirExprKind.UnitLit, type_: nil, span: variant.span)
+            if variant.has_discriminant:
+                if val artifact = variant.discriminant_artifact:
+                    if val expression = self.load_declaration_raw_expression_v1(owner, artifact):
+                        discriminant = expression
+                    else: return nil
+                else:
+                    self.error_fatal("archive enum discriminant artifact is missing", Some(variant.span))
+                    return nil
+            elif variant.discriminant_artifact != nil:
+                self.error_fatal("archive enum has an unexpected discriminant artifact", Some(variant.span))
+                return nil
+            var kind = HirVariantKind.Unit
+            if variant.kind == "unit":
+                if variant.tuple_types.len() != 0 or variant.fields.len() != 0:
+                    self.error_fatal("archive enum unit variant has payload metadata", Some(variant.span))
+                    return nil
+            elif variant.kind == "tuple":
+                if variant.fields.len() != 0:
+                    self.error_fatal("archive enum tuple variant has named fields", Some(variant.span))
+                    return nil
+                val types = variant.tuple_types
+                kind = HirVariantKind.Tuple(types)
+            elif variant.kind == "struct":
+                if variant.tuple_types.len() != 0:
+                    self.error_fatal("archive enum named variant has tuple metadata", Some(variant.span))
+                    return nil
+                var fields: [HirField] = []
+                for raw_field in variant.fields:
+                    val field: MirHirFieldDeclarationV1 = raw_field
+                    var field_default = HirExpr(kind: HirExprKind.UnitLit, type_: nil, span: field.span)
+                    if field.has_default:
+                        if val artifact = field.default_artifact:
+                            if val expression = self.load_declaration_raw_expression_v1(owner, artifact):
+                                field_default = expression
+                            else: return nil
+                        else:
+                            self.error_fatal("archive enum field default artifact is missing", Some(field.span))
+                            return nil
+                    elif field.default_artifact != nil:
+                        self.error_fatal("archive enum field has an unexpected default artifact", Some(field.span))
+                        return nil
+                    # Registration consumes names/types, not field symbols or
+                    # default bodies. Keep exact default artifacts owned by the
+                    # declaration repository for the actual default consumer.
+                    val type_ = field.type_
+                    fields.push(HirField(symbol: field.symbol, name: field.name, type_: type_,
+                        has_default: field.has_default, default: field_default, visibility: field.visibility,
+                        is_public: field.is_public, is_volatile: field.is_volatile,
+                        has_bits_attr: field.has_bits_attr, bits_width: field.bits_width,
+                        has_fixed_address: field.has_fixed_address, fixed_address: field.fixed_address, span: field.span))
+                kind = HirVariantKind.Struct(fields)
+            else:
+                self.error_fatal("archive enum payload kind is invalid: {variant.kind}", Some(variant.span))
+                return nil
+            variants.push(HirVariant(symbol: variant.symbol, name: variant.name, kind: kind,
+                has_discriminant: variant.has_discriminant, discriminant: discriminant, span: variant.span))
+        Some(HirEnum(symbol: declaration.symbol, name: declaration.name,
+            runtime_name: declaration.runtime_name, type_params: declaration.type_params,
+            variants: variants, visibility: declaration.visibility, is_public: declaration.is_public,
+            has_doc_comment: false, doc_comment: "", span: declaration.span,
+            is_generic_template: declaration.is_generic_template, has_specialization_of: false,
+            specialization_of: "", type_bindings: {}, attributes: declaration.attributes,
+            complete_open: declaration.complete_open, dyn_open: declaration.dyn_open))
+
+    me register_declaration_enums_v1(provider: MirHirModuleDeclarationsV1):
+        if provider.enums.len() == 0: return
+        if not mir_hir_module_declarations_valid_v1(provider):
+            self.error_fatal("archive enum declaration owner is invalid", nil)
+            return
+        val owner = mir_hir_declaration_logical_key_v1(provider)
+        var position = 0
+        for raw_declaration in provider.enums:
+            val declaration: MirHirEnumDeclarationV1 = raw_declaration
+            if not provider.symbols.symbols.has(declaration.symbol.id):
+                self.error_fatal("archive enum declaration symbol is missing", Some(declaration.span))
+                return
+            val symbol = provider.symbols.symbols[declaration.symbol.id]
+            if symbol.kind != SymbolKind.Enum or symbol.name != declaration.name:
+                self.error_fatal("archive enum declaration symbol differs", Some(declaration.span))
+                return
+            val prepared = self.declaration_enum_definition_v1(provider, declaration)
+            if prepared == nil: return
+            val enum_def: HirEnum = prepared.unwrap()
+            val consumer_symbols = self.symbols
+            self.symbols = provider.symbols
+            # Exact provider artifacts fold under their own symbol context.
+            # Payload kind/names survive, but no provider-local HirTypes do.
+            self.register_enum_variants(enum_def, false)
+            self.register_enum_runtime_id(enum_def)
+            self.symbols = consumer_symbols
+            self.declaration_enum_provider_keys[enum_def.name] = owner
+            self.declaration_enum_positions[enum_def.name] = position
+            if enum_def.runtime_name != "":
+                self.declaration_enum_provider_keys[enum_def.runtime_name] = owner
+                self.declaration_enum_positions[enum_def.runtime_name] = position
+            position = position + 1
+
+    me ensure_declaration_enum_runtime_v1(enum_key: text):
+        if self.declaration_repository == nil or not self.declaration_enum_provider_keys.has(enum_key): return
+        val repository: MirHirDeclarationRepositoryV1 = self.declaration_repository.unwrap()
+        val owner = self.declaration_enum_provider_keys[enum_key]
+        if not repository.modules.has(owner) or not self.declaration_enum_positions.has(enum_key):
+            self.error_fatal("archive enum deferred owner is missing", nil)
+            return
+        val provider: MirHirModuleDeclarationsV1 = repository.modules[owner]
+        val position = self.declaration_enum_positions[enum_key]
+        if position < 0 or position >= provider.enums.len():
+            self.error_fatal("archive enum deferred position is invalid", nil)
+            return
+        val declaration: MirHirEnumDeclarationV1 = provider.enums[position]
+        val had_bare = self.enum_runtime_id_index.has(declaration.name)
+        # Match enum_runtime_id's indexed-read policy for native Dict fields
+        # (doc/07_guide/language/dict_native_pitfalls.md).
+        val previous = if had_bare: self.enum_runtime_id_index[declaration.name] else: -1
+        self.register_enum_runtime_name(declaration.runtime_name, declaration.name, Some(declaration.span))
+        # A foreign qualified demand must not replace an already installed
+        # local/bare runtime identity in this consumer.
+        if had_bare and enum_key != declaration.name:
+            self.enum_runtime_id_index[declaration.name] = previous
+
+    me ensure_declaration_enum_payloads_v1(payload_key: text):
+        if self.declaration_repository == nil or self.enum_variant_payload_types.has(payload_key): return
+        val separator = payload_key.last_index_of("::")
+        if separator < 0: return
+        val enum_key = payload_key.substring(0, separator)
+        if not self.declaration_enum_provider_keys.has(enum_key): return
+        val repository: MirHirDeclarationRepositoryV1 = self.declaration_repository.unwrap()
+        val owner = self.declaration_enum_provider_keys[enum_key]
+        if not repository.modules.has(owner) or not self.declaration_enum_positions.has(enum_key):
+            self.error_fatal("archive enum deferred owner is missing", nil)
+            return
+        val provider: MirHirModuleDeclarationsV1 = repository.modules[owner]
+        val position = self.declaration_enum_positions[enum_key]
+        if position < 0 or position >= provider.enums.len():
+            self.error_fatal("archive enum deferred position is invalid", nil)
+            return
+        val declaration: MirHirEnumDeclarationV1 = provider.enums[position]
+        var write_bare = false
+        if self.declaration_enum_payload_owner.has(declaration.name):
+            write_bare = self.declaration_enum_payload_owner[declaration.name] == declaration.runtime_name
+        elif self.declaration_enum_provider_keys.has(declaration.name) and self.declaration_enum_positions.has(declaration.name):
+            write_bare = self.declaration_enum_provider_keys[declaration.name] == owner and self.declaration_enum_positions[declaration.name] == position
+        for raw_variant in declaration.variants:
+            val variant: MirHirVariantDeclarationV1 = raw_variant
+            var types: [HirType] = []
+            var names: [text] = []
+            if variant.kind == "tuple":
+                types = self.relocate_provider_types(variant.tuple_types, provider.symbols)
+                for type_ in types: names.push("")
+            elif variant.kind == "struct":
+                for raw_field in variant.fields:
+                    val field: MirHirFieldDeclarationV1 = raw_field
+                    types.push(self.relocate_provider_type(field.type_, provider.symbols))
+                    names.push(field.name)
+            elif variant.kind != "unit":
+                self.error_fatal("archive enum payload kind is invalid: {variant.kind}", Some(variant.span))
+                return
+            self.register_enum_payload_metadata_v1(declaration.name, declaration.runtime_name,
+                variant.name, types, names, variant.kind, true, write_bare)
+        if write_bare:
+            self.declaration_enum_payload_owner[declaration.name] = declaration.runtime_name
+        self.ensure_declaration_enum_runtime_v1(enum_key)

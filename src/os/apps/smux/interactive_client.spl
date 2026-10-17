@@ -1,0 +1,304 @@
+# One hosted client, one local view. Transport requests remain disposable;
+# leaving this terminal never sends stop-server or closes the owner's children.
+use std.sys.terminal_console.{open as console_open, read as console_read,
+    size as console_size, write as console_write, close as console_close,
+    cleanup as console_cleanup, clipboard_write as console_clipboard_write}
+use std.nogc_sync_mut.concurrent.thread.{thread_sleep as thread_sleep_ms}
+use std.io_runtime.{time_now_monotonic_ms}
+use os.apps.smux.server.{smux_server_request}
+use os.apps.smux.smux_remote.{smux_remote_reply_ok}
+use os.apps.smux.client_input.{ClientInputState, ClientInputAction,
+    client_input_new, client_input_feed}
+use os.apps.smux.client_copy_input.{ClientCopyInput, client_copy_new, client_copy_feed}
+use os.apps.smux.client_view.{client_input_hex, client_reply_ids,
+    client_frame_body, client_next_id, client_copy_frame}
+
+class TerminalClient:
+    address: text
+    token: text
+    session: text
+    client_id: text
+    window: text
+    pane: text
+    cols: i64
+    rows: i64
+    layout: i64
+    copy: bool
+    history: [text]
+    offset: i64
+    mark: i64
+    copy_input: ClientCopyInput
+    copy_deadline: i64
+
+fn request(client: TerminalClient, command: text) -> Result<text, text>:
+    val response = smux_server_request(client.address, client.token, command)
+    if response.is_err():
+        return Err(response.unwrap_err())
+    if not smux_remote_reply_ok(response.unwrap()):
+        return Err(response.unwrap())
+    return response
+
+fn windows(client: TerminalClient) -> Result<[text], text>:
+    val reply = request(client, "windows " + client.session)
+    if reply.is_err(): return Err(reply.unwrap_err())
+    return client_reply_ids(reply.unwrap(), "smux: windows[")
+
+fn panes(client: TerminalClient) -> Result<[text], text>:
+    val reply = request(client, "client-panes " + client.session + " " + client.window)
+    if reply.is_err(): return Err(reply.unwrap_err())
+    return client_reply_ids(reply.unwrap(), "smux: panes[")
+
+fn select_pane(client: TerminalClient) -> Result<TerminalClient, text>:
+    val ids = panes(client)
+    if ids.is_err(): return Err(ids.unwrap_err())
+    if ids.unwrap().len() == 0: return Err("window has no panes")
+    var next = client
+    next.pane = ids.unwrap()[0]
+    return Ok(next)
+
+fn arrange(client: TerminalClient) -> Result<bool, text>:
+    val layouts = ["even-horizontal", "even-vertical", "main-horizontal", "main-vertical", "tiled"]
+    val selected = if client.layout < 0: "current" else: layouts[client.layout]
+    val reply = request(client, "client-layout " + client.session + " " + client.window + " " +
+        selected + " " + client.cols.to_text() + " " + client.rows.to_text())
+    if reply.is_err(): return Err(reply.unwrap_err())
+    return Ok(true)
+
+fn copy_move(client: TerminalClient, delta: i64) -> TerminalClient:
+    var next = client
+    next.offset = next.offset + delta
+    var maximum = next.history.len() - next.rows
+    if maximum < 0: maximum = 0
+    if next.offset < 0: next.offset = 0
+    if next.offset > maximum: next.offset = maximum
+    return next
+
+fn copy_actions(client: TerminalClient, actions: [text], terminal: i64) -> Result<TerminalClient, text>:
+    var next = client
+    for action in actions:
+        if not next.copy: break
+        if action == "exit": next.copy = false
+        elif action == "up": next = copy_move(next, 1)
+        elif action == "down": next = copy_move(next, -1)
+        elif action == "page-up": next = copy_move(next, next.rows)
+        elif action == "page-down": next = copy_move(next, -next.rows)
+        elif action == "mark": next.mark = next.history.len() - 1 - next.offset
+        elif action == "copy":
+            var first = next.history.len() - 1 - next.offset
+            var last = first
+            if next.mark >= 0:
+                if next.mark < first: first = next.mark
+                else: last = next.mark
+            if first >= 0 and last < next.history.len():
+                val copied = console_clipboard_write(terminal, next.history[first:last + 1].join("\r\n"))
+                if copied.is_err(): return Err(copied.unwrap_err())
+                if not copied.unwrap(): return Err("clipboard copy failed")
+            next.copy = false
+    return Ok(next)
+
+fn copy_feed(client: TerminalClient, data: text, terminal: i64, flush_escape: bool) -> Result<TerminalClient, text>:
+    val decoded = client_copy_feed(client.copy_input, data, flush_escape)
+    var next = client
+    next.copy_input = decoded.state
+    next.copy_deadline = if decoded.state.pending == "\x1b": time_now_monotonic_ms() + 100 else: 0
+    return copy_actions(next, decoded.actions, terminal)
+
+fn apply_action(client: TerminalClient, action: ClientInputAction, terminal: i64) -> Result<TerminalClient, text>:
+    var next = client
+    if action.kind == "input":
+        if client.copy:
+            return copy_feed(client, action.data, terminal, false)
+        val sent = request(client, "input " + client.session + " " + client.window + " " +
+            client.pane + " " + client_input_hex(action.data))
+        if sent.is_err(): return Err(sent.unwrap_err())
+    elif action.kind == "next-window":
+        val ids = windows(client)
+        if ids.is_err(): return Err(ids.unwrap_err())
+        next.window = client_next_id(ids.unwrap(), client.window)
+        val selected = select_pane(next)
+        if selected.is_err(): return Err(selected.unwrap_err())
+        next = selected.unwrap()
+        next.copy = false
+        next.layout = -1
+        val arranged = arrange(next)
+        if arranged.is_err(): return Err(arranged.unwrap_err())
+    elif action.kind == "next-pane":
+        val ids = panes(client)
+        if ids.is_err(): return Err(ids.unwrap_err())
+        next.pane = client_next_id(ids.unwrap(), client.pane)
+        next.copy = false
+    elif action.kind == "new-window":
+        val created = request(client, "new-window " + client.session + " window")
+        if created.is_err(): return Err(created.unwrap_err())
+        next.window = created.unwrap()[21:]
+        val selected = select_pane(next)
+        if selected.is_err(): return Err(selected.unwrap_err())
+        next = selected.unwrap()
+        next.copy = false
+        next.layout = -1
+        val arranged = arrange(next)
+        if arranged.is_err(): return Err(arranged.unwrap_err())
+    elif action.kind == "split-horizontal" or action.kind == "split-vertical":
+        val direction = if action.kind == "split-vertical": "vertical" else: "horizontal"
+        val reply = request(client, "client-split " + client.session + " " + client.window + " " +
+            client.pane + " " + direction)
+        if reply.is_err(): return Err(reply.unwrap_err())
+        next.pane = reply.unwrap()[17:]
+        next.copy = false
+        val arranged = arrange(next)
+        if arranged.is_err(): return Err(arranged.unwrap_err())
+    elif action.kind == "cycle-layout":
+        next.layout = (next.layout + 1) % 5
+        val arranged = arrange(next)
+        if arranged.is_err(): return Err(arranged.unwrap_err())
+    elif action.kind == "copy-mode":
+        val reply = request(client, "client-history " + client.session + " " + client.window + " " + client.pane + " 2000")
+        if reply.is_err(): return Err(reply.unwrap_err())
+        val lines = reply.unwrap().split("\n")
+        next.history = lines[1:]
+        next.offset = 0
+        next.mark = -1
+        next.copy_input = client_copy_new()
+        next.copy_deadline = 0
+        next.copy = true
+    elif action.kind == "copy-up" and client.copy:
+        next = copy_move(next, 1)
+    elif action.kind == "copy-down" and client.copy:
+        next = copy_move(next, -1)
+    elif action.kind == "copy-exit":
+        next.copy = false
+    return Ok(next)
+
+fn console_error(result: Result<bool, text>) -> text:
+    if result.is_err(): return result.unwrap_err()
+    if not result.unwrap(): return "terminal write failed"
+    return ""
+
+pub fn smux_interactive_attach(address: text, token: text, session: text, client_id: text) -> i64:
+    # All identifiers travel in one-line commands. Refuse delimiter injection
+    # before acquiring a terminal lease or registering an attachment.
+    for value in [session, client_id]:
+        if value == "" or value.contains(" ") or value.contains("\t") or value.contains("\r") or value.contains("\n"):
+            return 1
+    val opened = console_open()
+    if opened.is_err():
+        # Open may have partially changed modes before a native failure. The
+        # provider retains that private lease until restoration can complete.
+        var cleaned = console_cleanup()
+        val deadline = time_now_monotonic_ms() + 2000
+        while not cleaned and time_now_monotonic_ms() < deadline:
+            thread_sleep_ms(10)
+            cleaned = console_cleanup()
+        print("smux: " + opened.unwrap_err())
+        return 1
+    val terminal = opened.unwrap()
+    var client = TerminalClient(address: address, token: token, session: session,
+        client_id: client_id, window: "", pane: "", cols: 80, rows: 24,
+        layout: -1, copy: false, history: [], offset: 0, mark: -1,
+        copy_input: client_copy_new(), copy_deadline: 0)
+    var error = ""
+    var attached = false
+    val admission = request(client, "attach " + session + " " + client_id)
+    if admission.is_err(): error = admission.unwrap_err()
+    else: attached = true
+    if error == "":
+        val ids = windows(client)
+        if ids.is_err(): error = ids.unwrap_err()
+        elif ids.unwrap().len() == 0: error = "session has no windows"
+        else: client.window = ids.unwrap()[0]
+    if error == "":
+        val selected = select_pane(client)
+        if selected.is_err(): error = selected.unwrap_err()
+        else: client = selected.unwrap()
+    var input_state = client_input_new()
+    var done = false
+    var refresh: i64 = 0
+    var last_frame = ""
+    var last_header = ""
+    var last_copy = false
+    var sized = false
+    if error == "": error = console_error(console_write(terminal, "\x1b[?1049h\x1b[?25l"))
+    while error == "" and not done:
+        val dimensions = console_size(terminal)
+        if dimensions.is_err():
+            error = dimensions.unwrap_err()
+        elif dimensions.unwrap().len() != 2:
+            error = "invalid terminal size"
+        else:
+            val size = dimensions.unwrap()
+            # Refuse unsupported dimensions instead of pretending that a
+            # clipped or wrapped render is the requested screen.
+            if size[0] <= 0 or size[1] <= 0 or size[0] > 512 or size[1] > 256 or size[0] * size[1] > 60000:
+                error = "terminal size exceeds supported canvas"
+            elif not sized or client.cols != size[0] or client.rows != size[1]:
+                client.cols = size[0]
+                client.rows = size[1]
+                val registered = request(client, "client-size " + client.session + " " + client.client_id + " " +
+                    client.cols.to_text() + " " + client.rows.to_text())
+                if registered.is_err(): error = registered.unwrap_err()
+                else:
+                    val arranged = arrange(client)
+                    if arranged.is_err(): error = arranged.unwrap_err()
+                sized = true
+        if error == "" and client.copy and client.copy_deadline > 0 and time_now_monotonic_ms() >= client.copy_deadline:
+            val flushed = copy_feed(client, "", terminal, true)
+            if flushed.is_err(): error = flushed.unwrap_err()
+            else: client = flushed.unwrap()
+            refresh = 0
+        if error == "":
+            val read = console_read(terminal, 512)
+            if read.is_err(): error = read.unwrap_err()
+            elif read.unwrap() != "":
+                val step = client_input_feed(input_state, read.unwrap())
+                input_state = step.state
+                for action in step.actions:
+                    if not done and error == "":
+                        if action.kind == "detach": done = true
+                        else:
+                            val changed = apply_action(client, action, terminal)
+                            if changed.is_err(): error = changed.unwrap_err()
+                            else: client = changed.unwrap()
+                refresh = 0
+        val now = time_now_monotonic_ms()
+        if error == "" and not done and now >= refresh:
+            var frame = ""
+            if client.copy:
+                frame = client_copy_frame(client.history, client.offset, client.rows, client.cols, client.mark)
+            else:
+                val reply = request(client, "frame " + client.session + " " + client.window + " " + client.pane)
+                if reply.is_err(): error = reply.unwrap_err()
+                else:
+                    val body = client_frame_body(reply.unwrap(), client.cols, client.rows)
+                    if body.is_err(): error = body.unwrap_err()
+                    else:
+                        val header = reply.unwrap().split("\n")[0]
+                        if header != last_header: last_frame = ""
+                        last_header = header
+                        frame = body.unwrap()
+            if client.copy != last_copy:
+                last_frame = ""
+                last_copy = client.copy
+            if error == "" and frame != last_frame:
+                # Clear padding after a shared canvas shrinks or copy mode
+                # ends; ordinary full-frame updates need no extra clear.
+                val clear = if last_frame == "": "\x1b[H\x1b[2J" else: ""
+                error = console_error(console_write(terminal, clear + frame))
+                last_frame = frame
+            refresh = now + 50
+        if error == "" and not done:
+            thread_sleep_ms(10)
+    if attached:
+        val detached = request(client, "detach " + client.session + " " + client.client_id)
+        if detached.is_err() and error == "": error = detached.unwrap_err()
+    # The console owner retains failed restoration/release resources against
+    # the same close token. Retry only this lease, with a finite polling budget.
+    var restored = console_close(terminal)
+    val restore_deadline = time_now_monotonic_ms() + 2000
+    while not restored and time_now_monotonic_ms() < restore_deadline:
+        thread_sleep_ms(10)
+        restored = console_close(terminal)
+    if not restored and error == "": error = "terminal restore failed"
+    if error != "":
+        print("smux: " + error)
+        return 1
+    return 0

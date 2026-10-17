@@ -1,0 +1,37 @@
+# ConPTY emits UTF8 bytes. Never decode an incomplete OS read in isolation.
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+
+pub struct WindowsPtyDecodedV1:
+    value: text
+    tail: [u8]
+
+pub fn windows_pty_size_valid_v1(rows: i32, cols: i32) -> bool:
+    # COORD fields are positive signed SHORTs; bound screen work as well.
+    rows > 0 and rows <= 1000 and cols > 0 and cols <= 1000 and (rows as i64) * (cols as i64) <= 262144
+
+pub fn windows_pty_coord_v1(rows: i32, cols: i32) -> u32:
+    ((rows as i64) * 65536 + (cols as i64)) as u32
+
+pub fn windows_pty_decode_v1(tail: [u8], chunk: [u8], eof: bool) -> WindowsPtyDecodedV1:
+    var bytes: [u8] = [0u8; tail.len() + chunk.len()]
+    for index in 0..tail.len(): bytes[index] = tail[index]
+    for index in 0..chunk.len(): bytes[tail.len() + index] = chunk[index]
+    var end = bytes.len()
+    if not eof and end > 0:
+        var lead = end - 1
+        var trailing = 0
+        while lead >= 0 and bytes[lead] >= 128u8 and bytes[lead] <= 191u8 and trailing < 3:
+            lead = lead - 1
+            trailing = trailing + 1
+        if lead >= 0:
+            val first = bytes[lead] as i64
+            val width = if first >= 194 and first <= 223: 2 elif first >= 224 and first <= 239: 3 elif first >= 240 and first <= 244: 4 else: 1
+            if width > end - lead: end = lead
+    var complete: [u8] = [0u8; end]
+    var pending: [u8] = [0u8; bytes.len() - end]
+    for index in 0..end: complete[index] = bytes[index]
+    for index in end..bytes.len(): pending[index - end] = bytes[index]
+    val value = match validated_utf8_bytes_to_text_linear(complete):
+        case Ok(decoded): decoded
+        case Err(_reason): "�"
+    WindowsPtyDecodedV1(value: value, tail: pending)

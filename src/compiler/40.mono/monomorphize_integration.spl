@@ -83,6 +83,16 @@ struct NominalBindingContext:
 # Monomorphization Pass
 # ============================================================================
 
+# WORKAROUND(mir_provider_optional_type_wrapper_segv_2026-10-14): the old
+# A174 producer passes ArrayLit optional metadata to a concrete HirType ABI
+# while relocating imported class defaults. Keep fresh allocation in ordinary
+# function bodies until producers include recovery 4710b22a9913b294d8c1c8edd44c9e22bceddede.
+fn mono_default_warnings_v1() -> [text]:
+    []
+
+fn mono_default_archive_requests_v1() -> [MonoSpecializationRequestV1]:
+    []
+
 class MonomorphizationPass:
     """Runs monomorphization on HIR modules."""
     # Compatibility field for callers constructing the pass. The integration
@@ -180,7 +190,8 @@ class MonomorphizationPass:
     # Diagnostics whose level resolved to `warning` (`mono_diag_level`): the
     # build goes on and the site keeps the lowering it had before this pass
     # learned to recognise it.
-    warnings: [text] = []
+    # @workaround bug=mir_provider_optional_type_wrapper_segv_2026-10-14 recover=4710b22a9913b294d8c1c8edd44c9e22bceddede reason=old-A174-provider-ArrayLit-optional-ABI
+    warnings: [text] = mono_default_warnings_v1()
     # "<code>|<subject>" already reported, for once-per-subject diagnostics.
     reported_once: Dict<text, bool> = {}
     # Templates with >= 1 call site left unrewritten; never pruned, so the
@@ -220,7 +231,8 @@ class MonomorphizationPass:
     archive_specialized_signatures: Dict<text, MonoTemplateSignatureV1> = {}
     archive_symbol_identities: Dict<text, text> = {}
     template_recipes: Dict<text, MonoTemplateRecipeV1> = {}
-    archive_requests: [MonoSpecializationRequestV1] = []
+    # @workaround bug=mir_provider_optional_type_wrapper_segv_2026-10-14 recover=4710b22a9913b294d8c1c8edd44c9e22bceddede reason=old-A174-provider-ArrayLit-optional-ABI
+    archive_requests: [MonoSpecializationRequestV1] = mono_default_archive_requests_v1()
     # Filled only from completed FIFO emission records during archive assembly.
     archive_emitted_templates: Dict<text, text> = {}
 
@@ -333,6 +345,7 @@ impl MonomorphizationPass:
         # the specialization set and the symbol ids handed out are a pure
         # function of the input.
         var rewritten: Dict<text, Dict<SymbolId, HirFunction>> = {}
+        var rewritten_constants: Dict<text, Dict<SymbolId, HirConst>> = {}
         var rewritten_consts: Dict<text, Dict<SymbolId, HirConst>> = {}
         for name in mod_keys:
             val module: HirModule = modules[name]
@@ -382,6 +395,16 @@ impl MonomorphizationPass:
         # Steps 3/4: place every specialization and prune its owner after the
         # fixed point. Pruning consults pass-wide specialization facts only;
         # it does not need a second complete inventory of unpruned modules.
+        # Several logical keys can alias ONE physical module (the same source
+        # reached as `compiler.frontend.core.types` and through a tier-free
+        # spelling). Each alias owns its own function table, and MIR emits only
+        # the first alias in inventory order, which need not be the alias
+        # `template_module` last recorded. Place a specialization into every
+        # alias of its owner so the emitted alias always carries it.
+        var physical_owner: Dict<text, text> = {}
+        for name in mod_keys:
+            val keyed: HirModule = modules[name]
+            physical_owner[name] = hir_symbol_owner_module(keyed.name)
         var result: Dict<text, HirModule> = {}
         for name in mod_keys:
             val module: HirModule = modules[name]
@@ -395,8 +418,11 @@ impl MonomorphizationPass:
             val specialized_keys: [text] = self.specialized_functions.keys()
             for mangled in specialized_keys:
                 val m: text = mangled
-                if self.spec_module[m] != name:
-                    continue
+                val spec_owner: text = self.spec_module[m]
+                if spec_owner != name:
+                    val alias_owner: text = physical_owner[name]
+                    if alias_owner == "" or (physical_owner[spec_owner] ?? "") != alias_owner:
+                        continue
                 val spec: HirFunction = self.specialized_functions[m]
                 funcs[spec.symbol] = spec
                 # MIR uses the owning table to resolve callable identity. A
