@@ -2025,6 +2025,21 @@ impl MirLowering:
             val method_variant_owners = self.enum_variant_owners[method]
             if method_variant_owners.len() == 1:
                 recv_enum_name = method_variant_owners[0]
+        # Cycle-53 fix: static_receiver_name can be a QUALIFIED declaration
+        # identity ("lib.common.sdn.value.SdnValue", produced by
+        # mir_class_identity in the static-owner recovery above), while
+        # enum_variant_index is keyed by BARE names -- so the containment
+        # test below rejected a receiver whose enum WAS registered (cycle-52
+        # symptom: SdnValue.Bool(...) "unresolved method call" with a healthy
+        # registry). Normalize through the runtime_name -> bare index before
+        # the test; the inverse-index fallback only knew bare owners.
+        if recv_enum_name != "" and not self.enum_variant_index.contains(recv_enum_name) and
+                self.enum_variant_index_q.has(recv_enum_name):
+            val bare_recv_enum_name = self.enum_bare_of(recv_enum_name)
+            if self.enum_variant_index.contains(bare_recv_enum_name):
+                recv_enum_name = bare_recv_enum_name
+        if (mir_expr_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1" and method == "Bool":
+            eprint("[enum-reg] ctor-reclass module={self.current_module_id} method={method} static_receiver_name='{static_receiver_name}' recv_enum_name='{recv_enum_name}' owners_has={self.enum_variant_owners.has(method)} contains={self.enum_variant_index.contains(recv_enum_name)} q_has={self.enum_variant_index_q.has(recv_enum_name)} bare_registry={self.enum_variant_index.len()}")
         if recv_enum_name != "" and self.enum_variant_index.contains(recv_enum_name):
             var is_variant = false
             for vn in self.enum_variant_index[recv_enum_name]:
