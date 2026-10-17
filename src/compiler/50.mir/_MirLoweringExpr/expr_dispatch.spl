@@ -4217,68 +4217,7 @@ impl MirLowering:
                     case _:
                         ()
                 if bin_is_array_concat:
-                    # Result element/array MIR type: prefer whichever
-                    # operand carries a concrete Array/Slice MIR type
-                    # (both operands are expected to share one element
-                    # type for a well-typed `arr1 + arr2`); fall back
-                    # to a generic i64-element Array type (matches
-                    # decode_runtime_value's own Array/Slice fallback
-                    # convention) when neither operand's MIR type is
-                    # known -- e.g. `[] + [1]` where the empty-literal
-                    # operand's element type defaults to i64 anyway
-                    # (lower_array_lit's own default).
-                    var array_result_type = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))
-                    var array_result_type_known = false
-                    if val left_arr_ty = self.local_mir_type_of(left_local):
-                        match left_arr_ty.kind:
-                            case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
-                                array_result_type = left_arr_ty
-                                array_result_type_known = true
-                            case _: ()
-                    if not array_result_type_known:
-                        if val right_arr_ty = self.local_mir_type_of(right_local):
-                            match right_arr_ty.kind:
-                                case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
-                                    array_result_type = right_arr_ty
-                                case _: ()
-                    # Bug #149 (same class): the FuncPtr's declared
-                    # `return_type` is what registers rt_array_concat's
-                    # KNOWN return type at codegen time -- it MUST
-                    # match `array_result_type` (Array/Slice kind ->
-                    # "ptr"), the type the call's DESTINATION local is
-                    # declared with just below. A mismatched i64
-                    # declared-return (while the destination itself is
-                    # Array/Slice-typed) emits the call as `call i64
-                    # @rt_array_concat(...)` while later consumers
-                    # (a second chained `+`, `.len()`, indexing) still
-                    # see the Array/Slice-typed dest and treat it as a
-                    # pointer -- invalid IR ('%lNN defined with type
-                    # i64 but expected ptr'), verified empirically on
-                    # chained `a + [3,4] + [5]`. rt_array_concat
-                    # genuinely returns SplArray* in C (matches the
-                    # static `declare ptr @rt_array_concat(ptr, ptr)`
-                    # in llvm_lib_translate.spl), so array_result_type
-                    # (-> ptr) is correct for params too.
-                    val array_cat_func = MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("rt_array_concat"),
-                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
-                            params: [array_result_type, array_result_type],
-                            return_type: array_result_type,
-                            is_variadic: false
-                        )))
-                    ))
-                    var b_array_cat = self.builder
-                    val array_cat_res = b_array_cat.emit_call(array_cat_func, [mir_operand_copy(left_local), mir_operand_copy(right_local)], array_result_type)
-                    self.builder = b_array_cat
-                    if val array_cat_local = array_cat_res:
-                        self.runtime_array_locals[array_cat_local.id] = true
-                        self.mark_runtime_value_local(array_cat_local.id)
-                        val left_elem_syms = self.array_element_struct_syms.get(left_local.id)
-                        if left_elem_syms != nil:
-                            val les = left_elem_syms ?? ""
-                            if les != "":
-                                self.array_element_struct_syms[array_cat_local.id] = les
-                        return array_cat_local
+                    return self.lower_unresolved_array_concat_v1(left_local, right_local)
 
                 # Only authoritative Any + tagged provenance admits dynamic
                 # arithmetic. Array/text handles alone are not Any evidence.
