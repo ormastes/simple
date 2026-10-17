@@ -591,7 +591,10 @@ impl MirLowering:
             var mir_params: [MirType] = []
             var mir_ret = MirType.i64()
             var is_concrete_function_type = false
-            match sym.type_.kind:
+            # Guard above returns in the nil arm; bind concrete via if val
+            # (never unwrap — Poll.unwrap mis-dispatch is documented above).
+            val fn_type: HirType = if val t = sym.type_: t else: HirType(kind: HirTypeKind.Error, span: span)
+            match fn_type.kind:
                 case HirTypeKind.Function(params, ret, _):
                     if hir_type_has_unresolved_type_param(ret):
                         is_concrete_function_type = false
@@ -1842,10 +1845,12 @@ impl MirLowering:
     me note_container_elem_type(container: LocalId, value_local: LocalId):
         self.infer_empty_array_elem_hir_type(container, value_local)
         val vt = self.local_mir_type_of(value_local)
-        if vt != nil:
-            val vt_disc = _sffi_enum_discriminant<MirTypeKind>(vt.kind)
+        # Presence test does not unwrap; .kind and the concrete
+        # runtime_elem_value_type slot need the payload (4710b22a991 class).
+        if val present_vt = vt:
+            val vt_disc = _sffi_enum_discriminant<MirTypeKind>(present_vt.kind)
             if vt_disc == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.F64) or vt_disc == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.F32):
-                self.runtime_elem_value_type[container.id] = vt
+                self.runtime_elem_value_type[container.id] = present_vt
         # Bug (layoutglyph_struct_array_i64_field_tag_shift_readback):
         # lower_array_lit captures a struct-typed element's name into
         # array_element_struct_syms (keyed by the ARRAY's own local id) so
