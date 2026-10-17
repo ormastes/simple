@@ -2774,26 +2774,26 @@ impl MirLowering:
         # heap refs whose rebind draws clean here (bootstrap branch evidence);
         # the first-element receipt converts any residual rebind corruption
         # from silent-skip to loud.
-        val fn_values: [HirFunction] = module.functions.values()
-        # Cycle-104 promotion pin (cycle-78 unpromoted-capture class): the
-        # gated receipt below and the loop condition do NOT force promotion
-        # of fn_values for the call-argument use fn_values[fni] (the outlined
-        # arg load references an undeclared symbol without it). This
-        # unconditional scalar reference is the promotion-forcing use, per
-        # the cycle-78 log_phase-line precedent.
-        val fn_values_count: i64 = fn_values.len()
+        # Cycle-105: struct-field transport (cycle-78's final working fix).
+        # The local-var form -- rebind, promotion pin, unconditional scalar --
+        # all failed with 'llvm global load referenced undeclared symbol
+        # fn_values' (cycle-104); only the owner-field form promotes. The
+        # assignment is the per-module reset (sequential lowering, one module
+        # at a time; the next module's assignment replaces these entries).
+        self.lower_emit_fn_values = module.functions.values()
         # Cycle-103: per-iteration body moved to lower_module_emit_fn_v1
         # (param-feed split, cycle-102 pattern). The loop-head named
         # bind `val fn_: HirFunction = fn_values[fni]` is the same
         # corruptor class fixed in prescan; the element now crosses
         # as a by-value argument with no caller-side bind.
+        val fn_values_count: i64 = self.lower_emit_fn_values.len()
         if bootstrap_trace:
             print "[mir-lower] function-keys"
         if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
             eprint("[enum-reg] fn-keys: module={module.name} values_len={fn_values_count} dict_len={module.functions.len()}")
         var fni = 0
         while fni < fn_values_count:
-            self.lower_module_emit_fn_v1(module, fn_values[fni],
+            self.lower_module_emit_fn_v1(module, self.lower_emit_fn_values[fni],
                     archive_function_symbols, bootstrap_trace, trace_enabled, fni)
             fni = fni + 1
 
@@ -2833,7 +2833,7 @@ impl MirLowering:
             # function whose lowering follows. On a livelock the LAST
             # fn-start line in the log is the spinning function.
             if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
-                eprint("[enum-reg] fn-start module={module.name} fn={fn_.name} idx={index}/{fn_values.len()}")
+                eprint("[enum-reg] fn-start module={module.name} fn={fn_.name} idx={index}/{self.lower_emit_fn_values.len()}")
             var mir_fn = self.lower_function(fn_)
             if fn_.has_vhdl_metadata:
                 mir_fn.has_vhdl_metadata = true
