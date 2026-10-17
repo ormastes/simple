@@ -658,7 +658,7 @@ impl CompilerDriver:
         if val final_repository = production.unwrap():
             return self.lower_archived_to_mir_v1(final_repository, target_context,
                 force_all_sources, allow_bootstrap_shortcuts)
-        var mir_provider_modules = self.ctx.hir_modules.values()
+        self.ctx.mir_feed_modules = self.ctx.hir_modules.values()
         # Cycle-123 discrimination receipt (SIMPLE_SDN_RACE_TRACE=1): if this
         # expression read faults, the corruption is AT the ctx field read /
         # .values() materialization right here; if it prints, the array is
@@ -666,7 +666,7 @@ impl CompilerDriver:
         # local across this big function (the cycle-78/105 unpromoted-capture
         # class).
         if (env_get("SIMPLE_SDN_RACE_TRACE") ?? "") == "1":
-            eprint("[race-trace] mir-feed len={mir_provider_modules.len()} first_fn={mir_provider_modules[0].name}")
+            eprint("[race-trace] mir-feed len={self.ctx.mir_feed_modules.len()} first_fn={self.ctx.mir_feed_modules[0].name}")
         var mir_physical_ownership_active = false
         var mir_source_indices: [i64] = []
         var source_index = 0
@@ -701,7 +701,15 @@ impl CompilerDriver:
                 if not self.ctx.hir_modules.contains_key(logical_name):
                     self.ctx.add_error("MIR physical ownership missing HIR for {logical_name}")
                     return false
-                physical_owners = physical_owners.push(self.ctx.hir_modules[logical_name].name)
+                # Cycle-125: the plain dict-value read arrives erased (the
+                # cycle-76/77 class) and this lane PUSHES it into the feed
+                # array, poisoning every MIR reader. Guard-first double
+                # access, immediately adjacent (the campaign's 10/10 form).
+                if not self.ctx.hir_modules.has(logical_name):
+                    self.ctx.add_error("MIR physical ownership missing HIR for {logical_name}")
+                    return false
+                val owner_hir_module: HirModule = self.ctx.hir_modules[logical_name]
+                physical_owners = physical_owners.push(owner_hir_module.name)
             val admitted_indices = driver_mir_physical_source_indices_v1(
                 admitted_physical_paths, self.ctx.source_identities_owner,
                 physical_owners)
@@ -709,10 +717,33 @@ impl CompilerDriver:
                 self.ctx.add_error(admitted_indices.unwrap_err())
                 return false
             val physical_indices = admitted_indices.unwrap()
-            mir_provider_modules = []
-            for physical_index in physical_indices:
-                val logical_name = self.ctx.source_module_names_owner[physical_index]
-                mir_provider_modules = mir_provider_modules.push(self.ctx.hir_modules[logical_name])
+            # Cycle-126: skip the rebuild when the admission is the identity
+            # (same length, index i admitted at position i). The birth array
+            # (self.ctx.hir_modules.values() above) is the proven-sound
+            # transport -- the cycle-124 mir-feed receipt verified its
+            # element -- while every dict-value re-read this lane has tried
+            # (plain, guard-first) arrives erased in this draw and poisons
+            # the rebuilt array. For identity admissions the rebuild is a
+            # no-op semantically, so the sound birth array is kept. Non-
+            # identity admissions still rebuild (flagged: the erased-read
+            # rebuild remains latent for filtered/ordered builds).
+            var feed_needs_rebuild = physical_indices.len() != self.ctx.mir_feed_modules.len()
+            var feed_identity_i = 0
+            while not feed_needs_rebuild and feed_identity_i < physical_indices.len():
+                if physical_indices[feed_identity_i] != feed_identity_i:
+                    feed_needs_rebuild = true
+                feed_identity_i = feed_identity_i + 1
+            if feed_needs_rebuild:
+                self.ctx.mir_feed_modules = []
+                for physical_index in physical_indices:
+                    val logical_name = self.ctx.source_module_names_owner[physical_index]
+                    # Cycle-125: guard-first double access (the erased-read
+                    # class).
+                    if not self.ctx.hir_modules.has(logical_name):
+                        self.ctx.add_error("MIR physical ownership missing HIR for {logical_name}")
+                        return false
+                    val feed_hir_module: HirModule = self.ctx.hir_modules[logical_name]
+                    self.ctx.mir_feed_modules = self.ctx.mir_feed_modules.push(feed_hir_module)
             if self.ctx.sources.len() > 0:
                 if self.ctx.sources.len() != self.ctx.source_paths_owner.len():
                     self.ctx.add_error("MIR source scheduling differs from admitted inventory")
@@ -726,9 +757,9 @@ impl CompilerDriver:
                     inventory_source_index = inventory_source_index + 1
                 mir_source_indices = physical_indices
             mir_physical_ownership_active = true
-            log_phase("aot:mir_physical_owners logical={physical_owners.len()} physical={mir_provider_modules.len()}")
+            log_phase("aot:mir_physical_owners logical={physical_owners.len()} physical={self.ctx.mir_feed_modules.len()}")
         val mir_scheduled_count = if mir_physical_ownership_active:
-            mir_provider_modules.len()
+            self.ctx.mir_feed_modules.len()
         else:
             self.ctx.sources.len()
         compiler_work_mir_schedule_v1(mir_scheduled_count)
@@ -856,7 +887,7 @@ impl CompilerDriver:
             # to trait-implementor registration only, so trait-object calls
             # devirtualize exactly as on the direct path; lower_module's own
             # provider registration stays empty as before.
-            bootstrap_lowering.trait_impl_provider_modules = mir_provider_modules
+            bootstrap_lowering.trait_impl_provider_modules = self.ctx.mir_feed_modules
             bootstrap_lowering.trait_impl_closure_complete = driver_trait_devirtualization_allowed_v1(
                 driver_source_entry_closure_enabled(self.ctx),
                 self.ctx.runtime_std_full_inventory_selection != nil,
@@ -968,13 +999,13 @@ impl CompilerDriver:
                 # with array-index EXPRESSION reads (the hir_module_has_rt_hal
                 # class) feeding the handle/scalar args directly.
                 var prescan_owner_i = 0
-                while prescan_owner_i < mir_provider_modules.len():
+                while prescan_owner_i < self.ctx.mir_feed_modules.len():
                     direct_lowering.prescan_module_struct_names(
-                        mir_provider_modules[prescan_owner_i].structs,
-                        mir_provider_modules[prescan_owner_i].classes,
-                        mir_provider_modules[prescan_owner_i].functions,
-                        mir_provider_modules[prescan_owner_i].name,
-                        mir_provider_modules[prescan_owner_i].symbols)
+                        self.ctx.mir_feed_modules[prescan_owner_i].structs,
+                        self.ctx.mir_feed_modules[prescan_owner_i].classes,
+                        self.ctx.mir_feed_modules[prescan_owner_i].functions,
+                        self.ctx.mir_feed_modules[prescan_owner_i].name,
+                        self.ctx.mir_feed_modules[prescan_owner_i].symbols)
                     prescan_owner_i = prescan_owner_i + 1
             else:
                 # Cycle-118: the flagged unwrap-bind branch -- same corruptor
@@ -1059,7 +1090,7 @@ impl CompilerDriver:
                         # Bind concrete for the concrete HirModule param; the ICE
                         # gate guarantees presence (dead Err arm mirrors it).
                         val scoped_entry = if val scoped_hir = direct_hir:
-                            direct_lowering.lower_module_transient_scoped(scoped_hir, mir_provider_modules, direct_pos == 0)
+                            direct_lowering.lower_module_transient_scoped(scoped_hir, self.ctx.mir_feed_modules, direct_pos == 0)
                         else:
                             Err("MIR lowering missing HIR module for {name_direct}")
                         driver_trace_module_mir_errors(name_direct, src_direct.path,
@@ -1151,17 +1182,17 @@ impl CompilerDriver:
             # any module on the shared MirLowering instance.
             # Cycle-117: same expression-read index loop (no for-in rebind).
             var prescan_provider_i = 0
-            while prescan_provider_i < mir_provider_modules.len():
+            while prescan_provider_i < self.ctx.mir_feed_modules.len():
                 lowering.prescan_module_struct_names(
-                    mir_provider_modules[prescan_provider_i].structs,
-                    mir_provider_modules[prescan_provider_i].classes,
-                    mir_provider_modules[prescan_provider_i].functions,
-                    mir_provider_modules[prescan_provider_i].name,
-                    mir_provider_modules[prescan_provider_i].symbols)
+                    self.ctx.mir_feed_modules[prescan_provider_i].structs,
+                    self.ctx.mir_feed_modules[prescan_provider_i].classes,
+                    self.ctx.mir_feed_modules[prescan_provider_i].functions,
+                    self.ctx.mir_feed_modules[prescan_provider_i].name,
+                    self.ctx.mir_feed_modules[prescan_provider_i].symbols)
                 prescan_provider_i = prescan_provider_i + 1
             var fallback_done = 0
             var fallback_failed = 0
-            for hir_module in mir_provider_modules:
+            for hir_module in self.ctx.mir_feed_modules:
                 val typed_hir_module: HirModule = hir_module
                 val module_context_errors_before = self.ctx.error_count_value
                 val name = if mir_physical_ownership_active:
@@ -1183,14 +1214,14 @@ impl CompilerDriver:
                     val may_continue = _driver_mir_ice_continue(self.ctx, name, typed_hir_module.path, ice_gate, ice_message_arena_aborted(ice_gate))
                     fallback_done = fallback_done + 1
                     fallback_failed = build_phase_record_failed_module_v1(fallback_failed, true)
-                    if not may_continue or fallback_done % 64 == 0 or fallback_done == mir_provider_modules.len():
+                    if not may_continue or fallback_done % 64 == 0 or fallback_done == self.ctx.mir_feed_modules.len():
                         log_build_progress("mir", "modules", fallback_done,
-                            mir_provider_modules.len(), name, 4, 6, fallback_failed, 0, "running")
+                            self.ctx.mir_feed_modules.len(), name, 4, 6, fallback_failed, 0, "running")
                     if not may_continue: return false
                     continue
                 val fallback_devirt_before: i64 = lowering.devirtualized_calls
                 val module_errors_before = lowering.errors.len()
-                val scoped_fallback = lowering.lower_module_transient_scoped(hir_module, mir_provider_modules)
+                val scoped_fallback = lowering.lower_module_transient_scoped(hir_module, self.ctx.mir_feed_modules)
                 driver_trace_module_mir_errors(name, typed_hir_module.path,
                     lowering.errors, module_errors_before)
                 if scoped_fallback.is_err():
@@ -1201,7 +1232,7 @@ impl CompilerDriver:
                     fallback_done = fallback_done + 1
                     fallback_failed = build_phase_record_failed_module_v1(fallback_failed, true)
                     log_build_progress("mir", "modules", fallback_done,
-                        mir_provider_modules.len(), name, 4, 6, fallback_failed, 0, "running")
+                        self.ctx.mir_feed_modules.len(), name, 4, 6, fallback_failed, 0, "running")
                     return false
                 # Closed BEFORE the E-MONO-038 check below, so that orderly
                 # `return false` leaves no open `start` breadcrumb.
@@ -1221,7 +1252,7 @@ impl CompilerDriver:
                     fallback_done = fallback_done + 1
                     fallback_failed = build_phase_record_failed_module_v1(fallback_failed, true)
                     log_build_progress("mir", "modules", fallback_done,
-                        mir_provider_modules.len(), name, 4, 6, fallback_failed, 0, "running")
+                        self.ctx.mir_feed_modules.len(), name, 4, 6, fallback_failed, 0, "running")
                     return false
                 self.ctx.mir_modules[name] = mir_module
                 if name == "app.cli.bootstrap_main":
@@ -1230,9 +1261,9 @@ impl CompilerDriver:
                 fallback_failed = build_phase_record_failed_module_v1(fallback_failed,
                     driver_mir_has_new_fatal_errors_v1(lowering.errors, module_errors_before) or
                     self.ctx.error_count_value > module_context_errors_before)
-                if fallback_done % 64 == 0 or fallback_done == mir_provider_modules.len():
+                if fallback_done % 64 == 0 or fallback_done == self.ctx.mir_feed_modules.len():
                     log_build_progress("mir", "modules", fallback_done,
-                        mir_provider_modules.len(), name, 4, 6, fallback_failed, 0, "running")
+                        self.ctx.mir_feed_modules.len(), name, 4, 6, fallback_failed, 0, "running")
             _driver_collect_mir_errors(self.ctx, lowering.errors)
             driver_collect_mir_advisories(self.ctx, lowering.mir_advisories)
             log_debug("[lower_to_mir] MIR done")
