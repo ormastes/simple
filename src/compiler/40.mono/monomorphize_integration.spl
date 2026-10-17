@@ -235,7 +235,14 @@ struct MonoStats:
     # has a matching entry in `MonomorphizationPass.diagnostics`.
     unresolved_generic_calls: i64
 
+# Cycle-86: collect_generics' inlined dict-index extraction draw is defective
+# (fault at the rebind copy at the identical PC even after the cycle-85
+# loop-header rewrite -- the body draw is stable per function). This fresh
+# minimal helper mirrors the generated codec's node.functions[dk3] read, the
+# campaign's most-walked clean pattern; the by-value return + annotated
+# rebind at the call site is the proven transport (decode -> unwrap -> bind).
 impl MonomorphizationPass:
+
     static fn create() -> MonomorphizationPass:
         MonomorphizationPass(
             monomorphizer: monomorphizer_create(),
@@ -349,7 +356,8 @@ impl MonomorphizationPass:
             # specialization request like any other. (module is a value copy;
             # carry the rewritten table into step 3 via rewritten_consts.)
             var consts: Dict<SymbolId, HirConst> = module.constants
-            for const_key in consts.keys():
+            val const_keys: [SymbolId] = consts.keys()
+            for const_key in const_keys:
                 val const: HirConst = consts[const_key]
                 if const.value == nil:
                     continue
@@ -384,7 +392,8 @@ impl MonomorphizationPass:
                 out.constants = rewritten_consts[name]
             var funcs: Dict<SymbolId, HirFunction> = rewritten[name]
             var owns_specialization = false
-            for mangled in self.specialized_functions.keys():
+            val specialized_keys: [text] = self.specialized_functions.keys()
+            for mangled in specialized_keys:
                 val m: text = mangled
                 if self.spec_module[m] != name:
                     continue
@@ -447,36 +456,9 @@ impl MonomorphizationPass:
         if module.symbols != nil:
             if module.symbols.next_symbol_id > self.next_symbol:
                 self.next_symbol = module.symbols.next_symbol_id
-        for sym_id in functions.keys():
-            val func: HirFunction = functions[sym_id]
-            # Record the symbol -> name edge for call-site resolution, and keep
-            # the fresh-symbol counter past every id already in use.
-            val fsym: SymbolId = func.symbol
-            self.sym_names[mono_sym_key(module_name, fsym.id)] = func.name
-            if fsym.id >= self.next_symbol:
-                self.next_symbol = fsym.id + 1
-            if is_generic_function(func):
-                # Canonicalize `Named(sym_of_T, [])` -> `TypeParam("T")` once,
-                # so inference and substitution see one spelling.
-                val recipe = MonoTemplateRecipeV1(module_name: module_name,
-                    original_symbol: func.symbol, template_name: func.name,
-                    canonical_type_params: func.type_params,
-                    bound_type_params: func.type_params, inherent_method: false)
-                self.archive_template_signatures[func.name] = mono_template_recipe_signature_v1(func, recipe)
-                if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
-                    self.generic_functions[func.name] = func
-                self.template_recipes[func.name] = recipe
-                self.template_module[func.name] = module_name
-                self.stats.generic_functions_found = self.stats.generic_functions_found + 1
-            else:
-                self.fn_returns[mono_sym_key(module_name, fsym.id)] = func.return_type
-                self.plain_fn_symbols[mono_sym_key(module_name, fsym.id)] = true
-                if not func.is_method:
-                    var ptys: [HirType] = []
-                    for p in func.params:
-                        val pp: HirParam = p
-                        ptys = ptys.push(pp.type_)
-                    self.fn_sigs[mono_sym_key(module_name, fsym.id)] = HirType(kind: HirTypeKind.Function(ptys, func.return_type, []), span: func.span)
+        val function_keys: [SymbolId] = functions.keys()
+        for sym_id in function_keys:
+            self.collect_function_entry_v1(module_name, module, sym_id)
 
         # Imported callables are declarations in this module's symbol table,
         # not bodies in module.functions. Their signatures were lowered in the
@@ -486,7 +468,8 @@ impl MonomorphizationPass:
         # declared_imported_surface_callable_type leaves generic imports untyped,
         # including unused type parameters; never invent a signature for them.
         if module.symbols != nil:
-            for imported_id in module.symbols.symbols.keys():
+            val imported_symbol_ids = module.symbols.symbols.keys()
+            for imported_id in imported_symbol_ids:
                 val imported: HirSymbol = module.symbols.symbols[imported_id]
                 if imported.kind != SymbolKind.Function or imported.type_ == nil:
                     continue
@@ -506,7 +489,8 @@ impl MonomorphizationPass:
 
         # Collect generic structs
         val structs = module.structs
-        for sym_id in structs.keys():
+        val struct_keys: [SymbolId] = structs.keys()
+        for sym_id in struct_keys:
             val s: HirStruct = structs[sym_id]
             self.record_named_type(module_name, s.symbol, s.name, s.type_params.len() == 0)
             if s.type_params.len() == 0:
@@ -524,7 +508,8 @@ impl MonomorphizationPass:
         # `hir_type_is_concrete` rejects downstream, so recording them cannot
         # manufacture a wrong binding, only a correctly-refused one.
         val enums = module.enums
-        for sym_id in enums.keys():
+        val enum_keys: [SymbolId] = enums.keys()
+        for sym_id in enum_keys:
             val en: HirEnum = enums[sym_id]
             self.record_named_type(module_name, en.symbol, en.name, en.type_params.len() == 0)
             for v in en.variants:
@@ -547,7 +532,8 @@ impl MonomorphizationPass:
 
         # Collect generic classes
         val classes = module.classes
-        for sym_id in classes.keys():
+        val class_keys: [SymbolId] = classes.keys()
+        for sym_id in class_keys:
             val c: HirClass = classes[sym_id]
             self.record_named_type(module_name, c.symbol, c.name, c.type_params.len() == 0)
             if c.type_params.len() == 0:
@@ -562,13 +548,63 @@ impl MonomorphizationPass:
             val nominal = mono_archive_nominal_project_v2(module_name, module.symbols)
             for key in nominal.keys(): self.archive_nominal_rows[key] = nominal[key]
             self.archive_nominal_keys[module_name] = nominal.keys().sort()
-            for raw_id in module.symbols.symbols.keys():
+            val archive_symbol_ids = module.symbols.symbols.keys()
+            for raw_id in archive_symbol_ids:
                 val symbol: HirSymbol = module.symbols.symbols[raw_id]
                 self.archive_symbol_identities[mono_sym_key(module_name, symbol.id.id)] =
                     mono_type_identity(module.symbols, symbol.id, module_name)
         else:
             self.module_symbols[module_name] = module.symbols
         self.collect_generic_impl_methods(module, module_name)
+
+    # Cycles 85-89: this body was inlined in collect_generics, whose draw
+    # corrupts the dict-index rebind (85/86: inline index), the by-value
+    # return bind of an extraction helper (87), the bare-dict-param index in
+    # this fresh method (88), and the plain field-expression index (89).
+    # Final discriminator across all nine draws: EXTRACTIONS DRAW CLEAN ONLY
+    # IN THE GENERATED CODEC'S GUARD-FIRST DOUBLE-ACCESS SHAPE -- every clean
+    # walk (hir_module_has_rt_hal, the seven codec_abi helpers) does
+    # `if dict[k] == nil: skip` BEFORE binding `dict[k]`; every crashing walk
+    # single-accesses. The guard below changes no semantics (values are never
+    # nil); it changes the codegen draw.
+    me collect_function_entry_v1(module_name: text, module: HirModule, sym_id: SymbolId):
+        # Guard-first double access, byte-for-byte the generated codec's
+        # shape (hc_enc_hir_module: `if node.functions[dk3] == nil ... else
+        # use node.functions[dk3]`). Cycles 81-88 retrospective: EVERY clean
+        # extraction double-accesses behind a nil guard; EVERY crashing one
+        # single-accesses. Values are never nil in practice, so the guard
+        # changes no semantics -- it changes the codegen draw.
+        if module.functions[sym_id] == nil:
+            return
+        val func: HirFunction = module.functions[sym_id]
+        # Record the symbol -> name edge for call-site resolution, and keep
+        # the fresh-symbol counter past every id already in use.
+        val fsym: SymbolId = func.symbol
+        self.sym_names[mono_sym_key(module_name, fsym.id)] = func.name
+        if fsym.id >= self.next_symbol:
+            self.next_symbol = fsym.id + 1
+        if is_generic_function(func):
+            # Canonicalize `Named(sym_of_T, [])` -> `TypeParam("T")` once,
+            # so inference and substitution see one spelling.
+            val recipe = MonoTemplateRecipeV1(module_name: module_name,
+                original_symbol: func.symbol, template_name: func.name,
+                canonical_type_params: func.type_params,
+                bound_type_params: func.type_params, inherent_method: false)
+            self.archive_template_signatures[func.name] = mono_template_recipe_signature_v1(func, recipe)
+            if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
+                self.generic_functions[func.name] = func
+            self.template_recipes[func.name] = recipe
+            self.template_module[func.name] = module_name
+            self.stats.generic_functions_found = self.stats.generic_functions_found + 1
+        else:
+            self.fn_returns[mono_sym_key(module_name, fsym.id)] = func.return_type
+            self.plain_fn_symbols[mono_sym_key(module_name, fsym.id)] = true
+            if not func.is_method:
+                var ptys: [HirType] = []
+                for p in func.params:
+                    val pp: HirParam = p
+                    ptys = ptys.push(pp.type_)
+                self.fn_sigs[mono_sym_key(module_name, fsym.id)] = HirType(kind: HirTypeKind.Function(ptys, func.return_type, []), span: func.span)
 
     me collect_generic_impl_methods(module: HirModule, module_name: text):
         """Register each instance method of a generic inherent impl
@@ -592,8 +628,11 @@ impl MonomorphizationPass:
             # Build the body index once, only when a generic impl needs it.
             # Keep one impl traversal even when the first generic impl is last.
             if not body_index_ready:
-                for raw_fn in module.functions.values():
-                    val f: HirFunction = raw_fn
+                val body_index_keys: [SymbolId] = module.functions.keys()
+                for dk_29 in body_index_keys:
+                    if module.functions[dk_29] == nil:
+                        continue
+                    val f: HirFunction = module.functions[dk_29]
                     val fs: SymbolId = f.symbol
                     by_id[fs.id] = f
                 body_index_ready = true
@@ -672,7 +711,8 @@ impl MonomorphizationPass:
         # HirConst also represents mutable module-level pools. Its symbol is
         # the declaration identity; bootstrap constants' dictionary keys can
         # instead be declaration indices, so never substitute the map key.
-        for key in module.constants.keys():
+        val constant_keys: [SymbolId] = module.constants.keys()
+        for key in constant_keys:
             val declaration: HirConst = module.constants[key]
             if declaration.symbol.is_valid() and hir_type_is_concrete(declaration.type_):
                 self.declared_global_types[mono_sym_key(module_name, declaration.symbol.id)] = declaration.type_
@@ -3102,7 +3142,10 @@ impl MonomorphizationPass:
                 return module
         var out = module
         var kept: Dict<SymbolId, HirFunction> = {}
-        for sym_id in module.functions.keys():
+        val prune_function_keys: [SymbolId] = module.functions.keys()
+        for sym_id in prune_function_keys:
+            if module.functions[sym_id] == nil:
+                continue
             val f: HirFunction = module.functions[sym_id]
             var is_template = false
             val tps: [HirTypeParam] = f.type_params
