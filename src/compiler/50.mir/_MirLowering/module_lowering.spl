@@ -1592,7 +1592,16 @@ impl MirLowering:
         if overwrite or not self.struct_field_array_elem_type.has(name):
             self.struct_field_array_elem_type[name] = field_elem_types
 
-    me prescan_module_struct_names(module: HirModule):
+    # Cycle-110: dict-handle/scalar transport. The HirModule by-value
+    # param's prologue copy in this host drew corrupted (the .functions
+    # field handle was garbage, faulting three calls downstream on the
+    # values-array element deref -- cycles 91 through 109 fixed symptoms).
+    # Dicts are reference-typed handles; structs/classes are empty for
+    # p2_add-class modules so their inner walks never execute here.
+    me prescan_module_struct_names(structs: Dict<SymbolId, HirStruct>,
+            classes: Dict<SymbolId, HirClass>,
+            functions: Dict<SymbolId, HirFunction>,
+            module_name: text, module_symbols: SymbolTable):
         """Cross-module struct/class-name prepass (field-index SEGV).
 
         Entry-closure lowering iterates modules on ONE shared MirLowering,
@@ -1621,7 +1630,7 @@ impl MirLowering:
         nested struct (`state.driver.width`, bug #166 mechanism) resolves
         too — the construct-site prescan that normally fills that map runs
         per-module and hits the same ordering gap."""
-        val prescan_struct_values = module.structs.values()
+        val prescan_struct_values = structs.values()
         var psi = 0
         while psi < prescan_struct_values.len():
             # Annotated rebind: .values() element through ANY (stage2
@@ -1635,35 +1644,35 @@ impl MirLowering:
             # / native_bool_array_element_interpolation_special_garbage,
             # 2026-07-17) -- no separate inline loop needed here.
             val bare_layout_was_free = not self.struct_field_order.has(struct_def.name)
-            self.register_composite_field_metadata(struct_def.name, struct_def.fields, module.symbols, false)
+            self.register_composite_field_metadata(struct_def.name, struct_def.fields, module_symbols, false)
             self.register_struct_type_param_names(struct_def.name, struct_def.type_params)
             # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
-            val optional_struct_symbol: HirSymbol? = module.symbols.get_symbol_raw(struct_def.symbol.id)
+            val optional_struct_symbol: HirSymbol? = module_symbols.get_symbol_raw(struct_def.symbol.id)
             if val present_struct_symbol = optional_struct_symbol:
                 val struct_symbol: HirSymbol = present_struct_symbol
                 val struct_key = self.composite_layout_key(struct_symbol)
-                self.register_result_err_layout_types(struct_key, struct_def.fields, module.symbols)
+                self.register_result_err_layout_types(struct_key, struct_def.fields, module_symbols)
                 if bare_layout_was_free:
                     self.struct_bare_layout_owner[struct_def.name] = struct_key
                 if struct_key != struct_def.name:
-                    self.register_composite_field_metadata(struct_key, struct_def.fields, module.symbols, false)
+                    self.register_composite_field_metadata(struct_key, struct_def.fields, module_symbols, false)
                     self.register_struct_identity_layout_key(struct_symbol, struct_key)
                     self.register_struct_type_param_names(struct_key, struct_def.type_params)
                 val struct_attr = if struct_def.has_layout_attr: struct_def.layout_attr else: layoutattr_default_()
                 self.register_composite_layout_identity(struct_symbol, struct_def.fields, struct_attr)
             psi = psi + 1
-        val prescan_class_values = module.classes.values()
+        val prescan_class_values = classes.values()
         psi = 0
         while psi < prescan_class_values.len():
             val class_def: HirClass = prescan_class_values[psi]
             # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
-            val optional_class_symbol: HirSymbol? = module.symbols.get_symbol_raw(class_def.symbol.id)
+            val optional_class_symbol: HirSymbol? = module_symbols.get_symbol_raw(class_def.symbol.id)
             if val present_class_symbol = optional_class_symbol:
                 val class_symbol: HirSymbol = present_class_symbol
                 # Types/defaults are relocated after each consumer installs
                 # its own SymbolTable. This prepass only records ID-free layout.
                 val class_attr = if class_def.has_layout_attr: class_def.layout_attr else: layoutattr_default_()
-                self.register_result_err_layout_types(mir_class_identity(class_symbol), class_def.fields, module.symbols)
+                self.register_result_err_layout_types(mir_class_identity(class_symbol), class_def.fields, module_symbols)
                 self.register_composite_layout_identity(class_symbol, class_def.fields, class_attr)
             psi = psi + 1
         # Same ordering gap for CALL RETURN TYPES: the entry module lowers
@@ -1677,7 +1686,12 @@ impl MirLowering:
         # Cycle-100: moved to prescan_module_functions_v1 (fresh-method
         # draw; both keys+index (cycle-91 crash) and values for-in
         # (cycle-100 crash) draw corrupted in this function's body).
-        self.prescan_module_functions_v1(module)
+        # Cycle-109: pass the functions DICT, not the module -- a dict is a
+        # reference-typed handle, so the call-site copy is a single pointer
+        # (the HirModule by-value arg copy at this big call site is the
+        # cycle-109 corruptor: the callee's .values() then produced a garbage
+        # array, faulting on the first element deref).
+        self.prescan_module_functions_v1(functions, module_name, module_symbols)
 
     # Cycle-100: the per-function prescan body of prescan_module_struct_names,
     # hosted in a fresh method. Both prior extraction shapes drew corrupted
@@ -1686,17 +1700,18 @@ impl MirLowering:
     # then read through its by-value param (cycle-100 shim, same callee as
     # cycle-91). The module crosses by value (proven transport); no large
     # composite crosses back.
-    me prescan_module_functions_v1(module: HirModule):
-        val prescan_function_keys_values: [HirFunction] = module.functions.values()
-        # Cycle-102: the loop-head NAMED BIND of the for-in element is the
-        # corruptor (the cycle-102 shim faulted reading the bind's spill
-        # during arg marshalling). Pass the raw element straight into a
-        # small fresh method; its by-value param copy draws in the
-        # callee prologue (the proven has_rt_hal class).
-        for raw_prescan_fn in prescan_function_keys_values:
-            # Cycle-106: expression reads off the for-in element (no named
-            # bind); scalars/small composites cross by value.
-            self.prescan_one_function_v1(module, raw_prescan_fn.symbol, raw_prescan_fn.name,
+    me prescan_module_functions_v1(functions: Dict<SymbolId, HirFunction>,
+            module_name: text, module_symbols: SymbolTable):
+        # Cycle-108/109: dict-param transport. The caller passes the functions
+        # dict HANDLE (reference copy, no struct copy at the big call site);
+        # rt_dict_values on the handle is C-level. The owner-field form for
+        # the materialized array stays (cycle-105); the lower_module prescan
+        # loop re-assigns before its own iteration (per-module reset).
+        self.lower_emit_fn_values = functions.values()
+        # Cycle-102/106: no named bind; expression reads off the field
+        # element feed the scalar-call directly.
+        for raw_prescan_fn in self.lower_emit_fn_values:
+            self.prescan_one_function_v1(module_name, module_symbols, raw_prescan_fn.symbol, raw_prescan_fn.name,
                 raw_prescan_fn.is_extern, raw_prescan_fn.is_method, raw_prescan_fn.is_static,
                 raw_prescan_fn.has_export_attr, raw_prescan_fn.func_attr,
                 raw_prescan_fn.return_type, raw_prescan_fn.params)
@@ -1709,7 +1724,7 @@ impl MirLowering:
     # param spill); the tiny caller now reads every needed field off the
     # for-in element as EXPRESSIONS (the has_rt_hal class) and only
     # scalars/small composites cross.
-    me prescan_one_function_v1(module: HirModule, fn_symbol: SymbolId,
+    me prescan_one_function_v1(module_name: text, module_symbols: SymbolTable, fn_symbol: SymbolId,
             fn_name: text, fn_is_extern: bool, fn_is_method: bool,
             fn_is_static: bool, fn_has_export_attr: bool,
             fn_attr: FunctionAttr, fn_return_type: HirType,
@@ -1719,16 +1734,17 @@ impl MirLowering:
         # host's own HirFunction prologue copy corrupts too (the fields_v1
         # marshalling faulted on the param spill). The caller now feeds
         # scalars/small composites extracted as element expressions.
-        self.register_provider_callable_link_fields_v1(module.name, module.symbols,
+        self.register_provider_callable_link_fields_v1(module_name, module_symbols,
             fn_symbol, fn_name, fn_is_extern,
             fn_is_method, fn_is_static, fn_has_export_attr,
             fn_attr, false)
-        val prescan_call_name = mir_provider_function_name(module.name, module.symbols, prescan_fn)
+        val prescan_call_name = mir_provider_function_name_fields_v1(module_name, module_symbols,
+            fn_symbol, fn_name, fn_is_extern, fn_has_export_attr, fn_attr, false)
         var prescan_return_shape = ""
         match fn_return_type.kind:
             case Named(prescan_return_symbol_id, _):
                 # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
-                val optional_prescan_return_symbol: HirSymbol? = module.symbols.get_symbol_raw(prescan_return_symbol_id.id)
+                val optional_prescan_return_symbol: HirSymbol? = module_symbols.get_symbol_raw(prescan_return_symbol_id.id)
                 if val present_prescan_return_symbol = optional_prescan_return_symbol:
                     val prescan_return_symbol: HirSymbol = present_prescan_return_symbol
                     prescan_return_shape = self.composite_layout_key(prescan_return_symbol)
@@ -1743,7 +1759,7 @@ impl MirLowering:
                 match prescan_element_type.kind:
                     case Named(prescan_element_id, _):
                         # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
-                        val optional_prescan_element: HirSymbol? = module.symbols.get_symbol_raw(prescan_element_id.id)
+                        val optional_prescan_element: HirSymbol? = module_symbols.get_symbol_raw(prescan_element_id.id)
                         if val present_prescan_element = optional_prescan_element:
                             val prescan_element: HirSymbol = present_prescan_element
                             match prescan_element.kind:
@@ -1768,7 +1784,7 @@ impl MirLowering:
             case Result(prescan_ok_type, prescan_err_type):
                 match prescan_err_type.kind:
                     case Named(err_symbol_id, _):
-                        if val err_symbol = module.symbols.get_symbol_raw(err_symbol_id.id):
+                        if val err_symbol = module_symbols.get_symbol_raw(err_symbol_id.id):
                             match err_symbol.kind:
                                 case Class:
                                     bootstrap_fn_ret_err_shape_register(prescan_call_name, mir_class_identity(err_symbol))
@@ -1777,14 +1793,14 @@ impl MirLowering:
                                 case _: ()
                     case _: ()
                 # Ok-payload struct/class layout key, resolved HERE while
-                # `module.symbols` is still the DEFINING module's own
+                # `module_symbols` is still the DEFINING module's own
                 # self-consistent table (see bootstrap_fn_ret_ok_shape_
                 # register's doc comment in mir_data.spl for why this
                 # can't be deferred to the consumer).
                 match prescan_ok_type.kind:
                     case Named(prescan_ok_symbol_id, _):
                         # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
-                        val optional_prescan_ok_symbol: HirSymbol? = module.symbols.get_symbol_raw(prescan_ok_symbol_id.id)
+                        val optional_prescan_ok_symbol: HirSymbol? = module_symbols.get_symbol_raw(prescan_ok_symbol_id.id)
                         if val present_prescan_ok_symbol = optional_prescan_ok_symbol:
                             val prescan_ok_symbol: HirSymbol = present_prescan_ok_symbol
                             match prescan_ok_symbol.kind:
@@ -1814,7 +1830,7 @@ impl MirLowering:
                 # collides across modules in an entry-closure build) and
                 # finally to a silent index 0 -- reading `path`, a text
                 # POINTER, as the i64 `size`. Resolved HERE, while
-                # `module.symbols` is still the DEFINING module's own
+                # `module_symbols` is still the DEFINING module's own
                 # self-consistent table, so no consumer has to dereference a
                 # foreign per-module SymbolId. Record the defining owner
                 # for structs as well as classes; a stored Optional must
@@ -1822,7 +1838,7 @@ impl MirLowering:
                 match prescan_optional_inner.kind:
                     case Named(prescan_optional_symbol_id, _):
                         # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
-                        val optional_prescan_optional_symbol: HirSymbol? = module.symbols.get_symbol_raw(prescan_optional_symbol_id.id)
+                        val optional_prescan_optional_symbol: HirSymbol? = module_symbols.get_symbol_raw(prescan_optional_symbol_id.id)
                         if val present_prescan_optional_symbol = optional_prescan_optional_symbol:
                             val prescan_optional_symbol: HirSymbol = present_prescan_optional_symbol
                             match prescan_optional_symbol.kind:
@@ -2729,27 +2745,30 @@ impl MirLowering:
         # keys+index form's corrupt aggregate-key re-lookup crashed inside
         # the dict probe at this site (cycle-99 shim: fault in lower_module
         # at the prescan region's dict access).
-        val prescan_fn_values: [HirFunction] = module.functions.values()
+        # Cycle-107: same field as the emission loop (one materialization per
+        # module). Local-array-var + named-bind + body-pass all draw corrupted
+        # in this host (cycles 102/105/106 ledger); expression reads on the
+        # field are the proven class.
+        self.lower_emit_fn_values = module.functions.values()
         var psi = 0
         # Level-gated (default OFF), retained per the log-retention policy.
         val prescan_trace = mir_lower_trace_enabled()
         if prescan_trace:
-            eprint("[mir-prescan-module] start module={module.name} functions={prescan_fn_values.len()}")
-        while psi < prescan_fn_values.len():
-            val prescan_fn: HirFunction = prescan_fn_values[psi]
+            eprint("[mir-prescan-module] start module={module.name} functions={self.lower_emit_fn_values.len()}")
+        while psi < self.lower_emit_fn_values.len():
             if prescan_trace:
-                eprint("[mir-prescan-function] start module={module.name} index={psi} name={prescan_fn.name}")
-            if not prescan_fn.is_extern:
-                self.prescan_block_for_struct_types(prescan_fn.body)
+                eprint("[mir-prescan-function] start module={module.name} index={psi} name={self.lower_emit_fn_values[psi].name}")
+            if not self.lower_emit_fn_values[psi].is_extern:
+                self.prescan_block_for_struct_types(self.lower_emit_fn_values[psi].body)
             else:
                 # Mark every extern BEFORE any body is lowered. The lowering
                 # loop below also records it, but only when it reaches the
                 # declaration, so a caller lowered earlier saw the extern's
                 # `-> i64` result as a declared scalar: `ext() == nil` folded
                 # to false and `take(ext())` boxed a nil word as Some.
-                self.extern_fn_symbols[prescan_fn.symbol.id] = true
+                self.extern_fn_symbols[self.lower_emit_fn_values[psi].symbol.id] = true
             if prescan_trace:
-                eprint("[mir-prescan-function] done module={module.name} index={psi} name={prescan_fn.name}")
+                eprint("[mir-prescan-function] done module={module.name} index={psi} name={self.lower_emit_fn_values[psi].name}")
             psi = psi + 1
         if prescan_trace:
             eprint("[mir-prescan-module] done module={module.name}")
