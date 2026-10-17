@@ -760,7 +760,7 @@ impl CompilerDriver:
                     "MIR demand admission failed: {demand_admission.unwrap_err()}")
                 return false
             self.ctx.demand_mir_admission = Some(
-                demand_admission.unwrap().admission)
+                demand_admission.?.admission)
             if not demand_compile_bind_mir_admission_v1(
                     &mut measured_execution_input, self.ctx.demand_mir_admission!):
                 self.ctx.add_error(
@@ -954,16 +954,35 @@ impl CompilerDriver:
             # (SEGV on `state.driver.width` across modules). Register every
             # module's name-keyed struct layout before lowering any module.
             if mir_physical_ownership_active:
-                for prescan_hir in mir_provider_modules:
-                    direct_lowering.prescan_module_struct_names(prescan_hir)
+                # Cycle-117: NO for-in element rebind -- the rebind copy of
+                # the HirModule element corrupted the .functions handle
+                # (garbage element words three calls downstream). Index loop
+                # with array-index EXPRESSION reads (the hir_module_has_rt_hal
+                # class) feeding the handle/scalar args directly.
+                var prescan_owner_i = 0
+                while prescan_owner_i < mir_provider_modules.len():
+                    direct_lowering.prescan_module_struct_names(
+                        mir_provider_modules[prescan_owner_i].structs,
+                        mir_provider_modules[prescan_owner_i].classes,
+                        mir_provider_modules[prescan_owner_i].functions,
+                        mir_provider_modules[prescan_owner_i].name,
+                        mir_provider_modules[prescan_owner_i].symbols)
+                    prescan_owner_i = prescan_owner_i + 1
             else:
+                # Cycle-118: the flagged unwrap-bind branch -- same corruptor
+                # as cycle-117 (named binds of HirModule elements/values).
+                # Scalar key bind only; the module value is never bound:
+                # expression reads with .unwrap() feed the handle/scalar args.
                 var direct_prescan_idx = 0
                 while direct_prescan_idx < self.ctx.sources.len():
-                    val src_prescan = self.ctx.sources[direct_prescan_idx]
-                    val prescan_hir = self.ctx.hir_modules[src_prescan.module_name]
-                    # Presence does not unwrap: bind concrete before the concrete param.
-                    if val present_prescan_hir = prescan_hir:
-                        direct_lowering.prescan_module_struct_names(present_prescan_hir)
+                    val prescan_key: text = self.ctx.sources[direct_prescan_idx].module_name
+                    if self.ctx.hir_modules.has(prescan_key):
+                        direct_lowering.prescan_module_struct_names(
+                            self.ctx.hir_modules[prescan_key].?.structs,
+                            self.ctx.hir_modules[prescan_key].?.classes,
+                            self.ctx.hir_modules[prescan_key].?.functions,
+                            self.ctx.hir_modules[prescan_key].?.name,
+                            self.ctx.hir_modules[prescan_key].?.symbols)
                     direct_prescan_idx = direct_prescan_idx + 1
             # Enum registry completeness, next to the struct-name prescan:
             # the per-module provider pass in lower_module registers only
@@ -1122,8 +1141,16 @@ impl CompilerDriver:
             # Same crossmodule struct prepass as the --entry-closure loop
             # above: register all modules' struct layouts before lowering
             # any module on the shared MirLowering instance.
-            for prescan_module in mir_provider_modules:
-                lowering.prescan_module_struct_names(prescan_module)
+            # Cycle-117: same expression-read index loop (no for-in rebind).
+            var prescan_provider_i = 0
+            while prescan_provider_i < mir_provider_modules.len():
+                lowering.prescan_module_struct_names(
+                    mir_provider_modules[prescan_provider_i].structs,
+                    mir_provider_modules[prescan_provider_i].classes,
+                    mir_provider_modules[prescan_provider_i].functions,
+                    mir_provider_modules[prescan_provider_i].name,
+                    mir_provider_modules[prescan_provider_i].symbols)
+                prescan_provider_i = prescan_provider_i + 1
             var fallback_done = 0
             var fallback_failed = 0
             for hir_module in mir_provider_modules:
