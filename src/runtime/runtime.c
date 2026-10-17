@@ -1657,6 +1657,9 @@ int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t ex
     return expected_enum_id == 0 || enum_value->enum_id == 0 || enum_value->enum_id == (int32_t)expected_enum_id;
 }
 
+/* Standalone core-C requires the native BDD state and actual assertions.
+ * The legacy hosted compatibility callbacks intentionally do nothing. */
+#if !defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)
 void rt_bdd_describe_start_rv(int64_t name_rv) {
     (void)name_rv;
 }
@@ -1676,6 +1679,7 @@ void rt_bdd_expect_eq_rv(int64_t actual, int64_t expected) {
     (void)actual;
     (void)expected;
 }
+#endif
 
 /* ================================================================
  * Panic
@@ -2593,7 +2597,9 @@ int64_t rt_readdir_count(int64_t h) { (void)h; return 0; }
 int64_t rt_readdir_entry(int64_t h, int64_t i) { (void)h; (void)i; return rt_string_new(NULL, 0); }
 void rt_readdir_free(int64_t h) { (void)h; }
 int64_t rt_mkdir(int64_t p, int64_t m) { (void)p; (void)m; return -(int64_t)EINVAL; }
+#if !defined(SIMPLE_CORE_C_STANDALONE)
 int64_t rt_remove(const char* p) { (void)p; return -1; }
+#endif
 #endif
 
 /* Tagged-text ABI (see runtime.h): decode the command, delegate to
@@ -2634,7 +2640,7 @@ int64_t rt_shell_output(int64_t cmd_value) {
  * link), but conflicting weak-external defaults are a separate, unforceable
  * rule.
  *
- * Making THIS file the strong owner on Windows fixes it while leaving exactly
+ * Making THIS file the strong owner on hosted Windows fixes it while leaving exactly
  * one weak external (runtime_native.c's), which resolves against a strong
  * definition normally. The reverse -- compiling runtime_native.c's copies out
  * under SIMPLE_CORE_C_STANDALONE -- was tried first and is WRONG: it leaves
@@ -2644,6 +2650,8 @@ int64_t rt_shell_output(int64_t cmd_value) {
  * failed with `simple_runtime.lib(runtime_native.obj) : error LNK2019:
  * unresolved external symbol rt_cli_get_args`.
  *
+ * Standalone core-C instead needs runtime_native.c's registered tagged argv;
+ * its three definitions below are excluded from that composition.
  * CROSS-PLATFORM: off Windows this macro expands to exactly the
  * `__attribute__((weak))` that was here before, so Linux, macOS and FreeBSD
  * are byte-identical. The mingw lane is COFF too and benefits identically. */
@@ -2653,6 +2661,10 @@ int64_t rt_shell_output(int64_t cmd_value) {
 #  define SPL_CLI_ARGS_WEAK __attribute__((weak))
 #endif
 
+/* Standalone core-C uses tagged, registered arrays and scalar words, whereas
+ * these hosted helpers return legacy SplArray/SplValue layouts. Keep the
+ * native core provider as the sole Windows standalone owner. */
+#if !defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)
 SPL_CLI_ARGS_WEAK SplArray* rt_cli_get_args(void) {
     SplArray* arr = spl_array_new();
     for (int i = 0; i < g_argc; i++) {
@@ -2672,6 +2684,7 @@ SPL_CLI_ARGS_WEAK SplValue rt_cli_arg_at(int64_t index) {
     const char* arg = spl_get_arg(index);
     return spl_str(arg ? arg : "");
 }
+#endif
 
 /* rt_ FFI wrappers for prefetch */
 void rt_prefetch_start(const char* path) { spl_prefetch_start(path); }
@@ -4095,6 +4108,9 @@ const char* rt_hex_to_wire(const char* hex_str) {
     return (const char*)result;
 }
 
+#if !defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)
+/* Standalone core-C instead selects runtime_native.c's tagged text/array ABI.
+ * Keep these legacy hosted byte-buffer helpers out of that composition. */
 /* ---- Byte array handle for [u8] FFI ----
  * The [u8] type in Simple FFI maps to an opaque int64_t handle.
  * Internally: pointer to { uint8_t* data; int64_t len; int64_t cap; } */
@@ -4140,3 +4156,4 @@ int64_t rt_bytes_to_text(int64_t bytes_value) {
     if (!data) return rt_string_new(NULL, 0);
     return rt_string_new(data, (uint64_t)len);
 }
+#endif
