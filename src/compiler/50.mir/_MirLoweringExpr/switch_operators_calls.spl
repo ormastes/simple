@@ -1,3 +1,4 @@
+use compiler.mir._MirLowering.declaration_enum_metadata_v1.*
 use compiler.mir._MirLoweringExpr.optional_record_owner.*
 use compiler.mir._MirLowering.declaration_providers_v1.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
@@ -640,6 +641,9 @@ impl MirLowering:
         val found = self.enum_runtime_id_index.get(enum_name)
         if found != nil:
             return found
+        self.ensure_declaration_enum_runtime_v1(enum_name)
+        if self.enum_runtime_id_index_q.has(enum_name): return self.enum_runtime_id_index_q[enum_name]
+        if self.enum_runtime_id_index.has(enum_name): return self.enum_runtime_id_index[enum_name]
         self.error_fatal("enum construction: missing runtime identity for '{enum_name}'", nil)
         -1
 
@@ -2961,11 +2965,18 @@ impl MirLowering:
             case _: ()
         ""
 
+    me enum_payload_metadata_is_unit(payload_key: text) -> bool:
+        val kind = self.enum_variant_payload_kind[payload_key]
+        if kind == "unit": return true
+        # The flat-AST bridge also represents source unit variants as Tuple([]).
+        # Require an actual empty declared slot-name list; absence is no proof.
+        kind == "tuple" and self.enum_variant_payload_names.has(payload_key) and self.enum_variant_payload_names[payload_key].len() == 0
+
     me enum_variant_is_unit(owner_key: text, variant: text) -> bool:
         """True only when the declaration registry proves this is a unit arm."""
         val qualified_payload = "{owner_key}::{variant}"
         if self.enum_variant_payload_kind.has(qualified_payload):
-            return self.enum_variant_payload_kind[qualified_payload] == "unit"
+            return self.enum_payload_metadata_is_unit(qualified_payload)
         # Bare-key fallback through the runtime_name -> bare index. The
         # previous `owner_key == bare` guard refused this fallback for
         # QUALIFIED owner keys, which is inconsistent with the sibling
@@ -2979,7 +2990,7 @@ impl MirLowering:
         val bare = self.enum_bare_of(owner_key)
         val bare_payload = "{bare}::{variant}"
         if self.enum_variant_payload_kind.has(bare_payload):
-            return self.enum_variant_payload_kind[bare_payload] == "unit"
+            return self.enum_payload_metadata_is_unit(bare_payload)
         # The compiler-seeded generic enums are not ordinary HirEnum
         # declarations, so their payload-kind table is intentionally absent.
         # Keep the one payloadless built-in spelling recognizable; Result
@@ -3477,6 +3488,7 @@ impl MirLowering:
                     val tc_syms = enum_pat_binding_syms(epayload)
                     val tc_pos = enum_pat_binding_positions(epayload)
                     var tc_slot_types: [HirType] = []
+                    self.ensure_declaration_enum_payloads_v1("{lookup_key}::{variant}")
                     if val tc_found_types = self.enum_variant_payload_types.get("{lookup_key}::{variant}"):
                         tc_slot_types = tc_found_types
                     var tc_enum_generic = self.generic_enum_constructor_owners.get(lookup_key) ?? false
@@ -6403,6 +6415,9 @@ impl MirLowering:
                     # Share only admitted declaration metadata and expression
                     # descriptors. Lifted bodies have their own lambda scratch.
                     lw.declaration_repository = self.declaration_repository
+                    lw.declaration_enum_provider_keys = self.declaration_enum_provider_keys
+                    lw.declaration_enum_positions = self.declaration_enum_positions
+                    lw.declaration_enum_payload_owner = self.declaration_enum_payload_owner
                     lw.declaration_parameter_defaults = self.declaration_parameter_defaults
                     lw.declaration_parameter_defaults_ambiguous = self.declaration_parameter_defaults_ambiguous
                     lw.declaration_field_defaults = self.declaration_field_defaults
@@ -7307,8 +7322,8 @@ impl MirLowering:
         self.emit_typed_function_value_call(callee_local, arg_operands, function_type, callee.span, indirect_return, call_param_types, arg_operands.len())
 
     me emit_typed_function_value_call(callee_local: LocalId, arg_operands: [MirOperand], function_type: HirType?, call_span: Span, indirect_return: HirType?, call_param_types: [HirType], args_len: i64) -> LocalId:
-        # Keep the existing word-parameter/closure ABI. Only the declared
-        # return type and its provenance are different from the old path.
+        # The helper proves the signature from the declared function type;
+        # the caller's parameter/return bindings are outside this method's scope.
         var param_types: [MirType] = []
         var ret_type = MirType.i64()
         var indirect_hir_return: HirType? = nil
@@ -7344,7 +7359,7 @@ impl MirLowering:
                     case _: ()
         if not indirect_signature_proven:
             self.error_fatal("indirect callable lacks a proven function signature", Some(call_span))
-            return self.lower_expr(HirExpr(kind: HirExprKind.IntLit(0, nil), has_type_: true, type_: HirType(kind: HirTypeKind.Int(64, true), span: call_span), span: call_span))
+            return self.builder.emit_const_int(0)
         val sig = MirSignature(params: param_types, return_type: ret_type, is_variadic: false)
         val indirect_result = self.emit_function_value_call(callee_local, arg_operands, sig, ret_type)
         if val result_hir = indirect_hir_return:
