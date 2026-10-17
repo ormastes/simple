@@ -53,6 +53,43 @@ H3. The dict read paths (`rt_dict_get`/`rt_dict_keys`/`rt_dict_values`)
    `functions=5`.
 3. Compare against the mono lane's successful reads of the same dict.
 
+## Cycle-148 final matrix (all patterns exhausted)
+
+Every Simple-level read pattern fails on these dicts from every modern draw;
+`hir_module_encode` (compiled in an early draw) succeeds:
+
+| Pattern | Result |
+|---------|--------|
+| `.values()` element deref | fault / garbage words |
+| `keys()` + annotated key bind + bracket | nil (identity loss) |
+| `keys()` + for-in element straight into bracket | empty |
+| in-pool dict+key, all reads in `hir_codec.spl` | empty |
+| `hc_order_symbol_id_keys_v1` ordered walk | empty |
+| fresh OUT-OF-SCOPE decode of the re-encoded blob | empty |
+| while+index, `ks[i]` expression into bracket (`ks_len=5` prints) | empty |
+| blob -> decode -> in-pool unwrap-bind -> while+index (all in one small fn) | empty |
+| `hir_module_encode(modules[key])` | SUCCESS (3808 bytes, deterministic digest) |
+
+## Disassembly fingerprint (cycle-148)
+
+Both the working generated walk (`hc_enc_hir_module`, first functions-dict
+`rt_index_get` at 0xf5b0a0) and a failing hand-written walk
+(`hir_module_first_fn_name_wi_v1`, `rt_index_get` at 0xf70a08) prepare the
+call IDENTICALLY: dict handle from `[reg, #48]`, key, `bl rt_index_get`.
+The calls are the same; the DICT HANDLE VALUE differs. In the failing
+function the handle derives from the function's 176-byte CONDITIONAL
+PROLOGUE COPY LOOP (f708a8-f709c4: 24 words of
+`ldr/csel tag-adjust/str`) — the prime suspect is that this copy loop
+mangles word #48 (the functions-handle word) of the by-value module
+parameter. The compiler owner should verify: does word 6 of the copied
+struct equal the incoming parameter's word 6 at f709c8?
+
+Bisect hint: encode's draw predates the campaign's stage2 rebuilds; a
+compiler change between the two compilations altered the prologue-copy
+codegen for large by-value struct params. The campaign can bisect which
+stage2 commit introduced the corrupting copy loop by rebuilding
+`hir_module_first_fn_name_wi_v1`-shaped probes against older compilers.
+
 ## Campaign-side state
 
 - Compiler-side workarounds landed through cycle-140 (keys+index feeds,
