@@ -871,17 +871,33 @@ impl ResolveError:
 # Public API
 # ============================================================================
 
+# Cycle-130: the resolved module's AUTHORITATIVE copy travels through this
+# owner, not the returned tuple. The (HirModule, [ResolveError]) tuple return
+# corrupts the module slot at the Stage-3 native value ABI (the cycle-121
+# lesson, second instance: the driver's reinsertion of the tuple-extracted
+# module poisoned ctx.hir_modules' function values for every later phase).
+# The tuple is kept for call-site compatibility; callers that PERSIST the
+# module must read `resolve_methods_module_owner.?` instead of the tuple
+# slot. Assigned on every entry before return; single-threaded per lane.
+var resolve_methods_module_owner: HirModule? = nil
+
+export resolve_methods_module_owner
+
 fn resolve_methods(module: HirModule) -> (HirModule, [ResolveError]):
     """Resolve all method calls in a module.
 
     This is the main entry point for the resolution pass.
-    Returns the resolved module and any errors encountered.
+    Returns the resolved module and any errors encountered. The resolved
+    module's authoritative copy is also published through
+    `resolve_methods_module_owner` (cycle-130: the tuple slot corrupts at
+    the native value ABI; callers that persist the module read the owner).
     """
     # Receiver-owned methods live in the HIR module's symbol table.  Replacing
     # it with an empty table discarded both type identity and import ownership,
     # making same-named methods fall through to unrelated global candidates.
     val resolver = create_method_resolver(module.symbols)
     val resolved = resolver.resolve_module(module)
+    resolve_methods_module_owner = resolved
     (resolved, resolver.errors)
 
 fn resolve_methods_quiet(module: HirModule) -> (HirModule, [ResolveError]):
@@ -897,6 +913,7 @@ fn resolve_methods_quiet(module: HirModule) -> (HirModule, [ResolveError]):
     var resolver = create_method_resolver(module.symbols)
     resolver.quiet = true
     val resolved = resolver.resolve_module(module)
+    resolve_methods_module_owner = resolved
     (resolved, resolver.errors)
 
 fn resolve_methods_with_solver(module: HirModule, solver: TraitSolver) -> (HirModule, [ResolveError]):
