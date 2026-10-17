@@ -1,0 +1,74 @@
+# Reproduce the versioned block Unicode predicates from pinned official UCD text.
+# Input paths, release commit, byte hashes and license are recorded in the bug report.
+
+fn block_unicode_hex_v17(value: text) -> Result<i64, text>:
+    if value.len() == 0: return Err("empty Unicode scalar")
+    var result: i64 = 0
+    var i: i64 = 0
+    while i < value.len():
+        val byte = value.byte_at(i)
+        var digit: i64 = -1
+        if byte >= 48 and byte <= 57: digit = byte - 48
+        if byte >= 65 and byte <= 70: digit = byte - 55
+        if byte >= 97 and byte <= 102: digit = byte - 87
+        if digit < 0: return Err("invalid Unicode scalar hex")
+        result = result * 16 + digit
+        if result > 1114111: return Err("Unicode scalar out of range")
+        i = i + 1
+    Ok(result)
+
+fn block_unicode_range_line_v17(first: i64, last: i64) -> text:
+    "    if cp >= {first} and cp <= {last}: return true\n"
+
+fn block_unicode_generate_v17(unicode_data: text, prop_list: text) -> Result<text, text>:
+    if not prop_list.starts_with("# PropList-17.0.0.txt"):
+        return Err("expected official Unicode 17.0.0 PropList")
+    var output = "fn block_unicode_numeric_v17(cp: i64) -> bool:\n"
+    var start: i64 = -1
+    var last: i64 = -1
+    var previous: i64 = -1
+    var count: i64 = 0
+    for line in unicode_data.split("\n"):
+        if line.trim() == "": continue
+        val fields = line.split(";")
+        if fields.len() != 15: return Err("malformed UnicodeData row")
+        val cp = block_unicode_hex_v17(fields[0])?
+        if cp <= previous: return Err("unordered UnicodeData row")
+        previous = cp
+        val category = fields[2]
+        if category == "Nd" or category == "Nl" or category == "No":
+            count = count + 1
+            if start < 0:
+                start = cp
+                last = cp
+            elif cp == last + 1:
+                last = cp
+            else:
+                output = output + block_unicode_range_line_v17(start, last)
+                start = cp
+                last = cp
+    if count != 1924 or start < 0: return Err("unexpected Unicode17 numeric population")
+    output = output + block_unicode_range_line_v17(start, last)
+    output = output + "    false\n\nfn block_unicode_whitespace_v17(cp: i64) -> bool:\n"
+    var whitespace_count: i64 = 0
+    var previous_space: i64 = -1
+    for raw_line in prop_list.split("\n"):
+        val line = raw_line.split("#")[0].trim()
+        if line == "": continue
+        val fields = line.split(";")
+        if fields.len() != 2: return Err("malformed PropList row")
+        if fields[1].trim() != "White_Space": continue
+        val bounds = fields[0].trim().split("..")
+        if bounds.len() < 1 or bounds.len() > 2: return Err("malformed property range")
+        var cp = block_unicode_hex_v17(bounds[0])?
+        val last_cp = block_unicode_hex_v17(bounds[bounds.len() - 1])?
+        if cp <= previous_space or last_cp < cp: return Err("unordered whitespace range")
+        while cp <= last_cp:
+            output = output + "    if cp == {cp}: return true\n"
+            whitespace_count = whitespace_count + 1
+            previous_space = cp
+            cp = cp + 1
+    if whitespace_count != 25: return Err("unexpected Unicode17 whitespace population")
+    Ok(output + "    false\n\n")
+
+export block_unicode_generate_v17
