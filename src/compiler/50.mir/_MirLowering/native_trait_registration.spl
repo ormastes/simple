@@ -38,16 +38,20 @@ impl MirLowering:
                 val owner = self.native_trait_owner_for_type(type_)
                 if owner == "": "" else: "named:" + owner
             case HirTypeKind.Named(id, args):
-                val symbol = self.symbols.get_symbol_raw(id.id)
-                if symbol == nil: return ""
-                val owner = native_trait_qualified_owner(symbol)
-                if owner == "": return ""
-                var key = "named:" + owner
-                for arg in args:
-                    val child = self.native_trait_signature_type_key(arg)
-                    if child == "": return ""
-                    key = key + "[" + child + "]"
-                key
+                val optional_symbol: HirSymbol? = self.symbols.get_symbol_raw(id.id)
+                if optional_symbol == nil: return ""
+                if val present_symbol = optional_symbol:
+                    val symbol: HirSymbol = present_symbol
+                    val owner = native_trait_qualified_owner(symbol)
+                    if owner == "": return ""
+                    var key = "named:" + owner
+                    for arg in args:
+                        val child = self.native_trait_signature_type_key(arg)
+                        if child == "": return ""
+                        key = key + "[" + child + "]"
+                    key
+                else:
+                    ""
             case HirTypeKind.Optional(inner):
                 val child = self.native_trait_signature_type_key(inner)
                 if child == "": "" else: "optional[" + child + "]"
@@ -141,9 +145,14 @@ impl MirLowering:
         val symbol_id = match type_.kind:
             case HirTypeKind.Named(id, _) | HirTypeKind.DynTrait(id): id
             case _: return ""
-        val symbol = self.symbols.get_symbol_raw(symbol_id.id)
-        if symbol == nil or symbol.kind != SymbolKind.Trait: return ""
-        native_trait_qualified_owner(symbol)
+        val optional_symbol: HirSymbol? = self.symbols.get_symbol_raw(symbol_id.id)
+        if optional_symbol == nil: return ""
+        if val present_symbol = optional_symbol:
+            val symbol: HirSymbol = present_symbol
+            if symbol.kind != SymbolKind.Trait: return ""
+            native_trait_qualified_owner(symbol)
+        else:
+            ""
 
     fn native_trait_value_type(type_: HirType) -> bool:
         if self.native_trait_owner_for_type(type_) != "": return true
@@ -153,9 +162,14 @@ impl MirLowering:
 
     me register_native_trait_declarations(module: HirModule):
         for declaration in module.traits.values():
-            val symbol = module.symbols.get_symbol_raw(declaration.symbol.id)
-            if symbol == nil: continue
-            val owner = native_trait_qualified_owner(symbol)
+            # Presence alone does not unwrap HirSymbol?: derive the owner from
+            # the concrete payload; an absent symbol keeps owner "" and skips
+            # exactly like the old `symbol == nil: continue` arm.
+            val optional_symbol: HirSymbol? = module.symbols.get_symbol_raw(declaration.symbol.id)
+            var owner = ""
+            if val present_symbol = optional_symbol:
+                val symbol: HirSymbol = present_symbol
+                owner = native_trait_qualified_owner(symbol)
             # A missing declaration identity is not a usable object layout.
             # Diagnose at conversion, not for an unused generic declaration.
             if owner == "": continue
@@ -222,36 +236,38 @@ impl MirLowering:
             val concrete_id = match implementation.type_.kind:
                 case HirTypeKind.Named(id, _): id
                 case _: continue
-            val concrete = module.symbols.get_symbol_raw(concrete_id.id)
-            if concrete == nil: continue
-            val concrete_owner = native_trait_qualified_owner(concrete)
-            if concrete_owner == "": continue
-            var methods: [text] = []
-            var signatures: [NativeTraitMethodSlot] = []
-            for slot in self.native_trait_layouts[index].methods:
-                val method_id = implementation.methods.get(slot.name)
-                if val target = method_id:
-                    if function_index.has(target.id):
-                        val declaration: HirFunction = function_values[function_index[target.id]]
-                        methods.push(mir_provider_function_name(module.name, module.symbols, declaration))
-                        var params: [HirType] = []
-                        var parameter_names: [text] = []
-                        var parameter_mutability: [bool] = []
-                        for param in declaration.params:
-                            params.push(self.relocate_provider_type(param.type_, module.symbols))
-                            parameter_names.push(param.name)
-                            parameter_mutability.push(param.is_mutable)
-                        signatures.push(NativeTraitMethodSlot(name: slot.name, params: params,
-                            parameter_names: parameter_names,
-                            parameter_mutability: parameter_mutability,
-                            result: self.relocate_provider_type(declaration.return_type, module.symbols),
-                            mutable_receiver: declaration.is_mutable))
+            val optional_concrete: HirSymbol? = module.symbols.get_symbol_raw(concrete_id.id)
+            if optional_concrete == nil: continue
+            if val present_concrete = optional_concrete:
+                val concrete: HirSymbol = present_concrete
+                val concrete_owner = native_trait_qualified_owner(concrete)
+                if concrete_owner == "": continue
+                var methods: [text] = []
+                var signatures: [NativeTraitMethodSlot] = []
+                for slot in self.native_trait_layouts[index].methods:
+                    val method_id = implementation.methods.get(slot.name)
+                    if val target = method_id:
+                        if function_index.has(target.id):
+                            val declaration: HirFunction = function_values[function_index[target.id]]
+                            methods.push(mir_provider_function_name(module.name, module.symbols, declaration))
+                            var params: [HirType] = []
+                            var parameter_names: [text] = []
+                            var parameter_mutability: [bool] = []
+                            for param in declaration.params:
+                                params.push(self.relocate_provider_type(param.type_, module.symbols))
+                                parameter_names.push(param.name)
+                                parameter_mutability.push(param.is_mutable)
+                            signatures.push(NativeTraitMethodSlot(name: slot.name, params: params,
+                                parameter_names: parameter_names,
+                                parameter_mutability: parameter_mutability,
+                                result: self.relocate_provider_type(declaration.return_type, module.symbols),
+                                mutable_receiver: declaration.is_mutable))
+                        else:
+                            methods.push("")
                     else:
                         methods.push("")
-                else:
-                    methods.push("")
-            self.native_trait_implementations.push(NativeTraitImplementation(
-                trait_owner: owner, concrete_owner: concrete_owner, methods: methods,
-                concrete_type: self.relocate_provider_type(implementation.type_, module.symbols),
-                concrete_name: concrete.name, reference_semantics: concrete.kind == SymbolKind.Class,
-                signatures: signatures))
+                self.native_trait_implementations.push(NativeTraitImplementation(
+                    trait_owner: owner, concrete_owner: concrete_owner, methods: methods,
+                    concrete_type: self.relocate_provider_type(implementation.type_, module.symbols),
+                    concrete_name: concrete.name, reference_semantics: concrete.kind == SymbolKind.Class,
+                    signatures: signatures))
