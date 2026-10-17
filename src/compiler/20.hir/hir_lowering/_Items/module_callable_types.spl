@@ -496,7 +496,9 @@ impl HirLowering:
         var owner_symbols: [SymbolId] = []
         # Reserve EVERY binder before projecting any constraint/default. Self
         # and forward references must be TypeParam, never importer Named rows.
-        for tp in owner_type_params:
+        for raw_tp in owner_type_params:
+            # ANY-transport hazard sweep round 3: annotated rebind.
+            val tp: ParserTypeParam = raw_tp
             val symbol = self.symbols.define(tp.name, SymbolKind.TypeParam, nil,
                 tp.span, Visibility.Private, false, nil)
             owner_symbols = owner_symbols.push(symbol)
@@ -504,7 +506,8 @@ impl HirLowering:
                 kind: HirTypeKind.TypeParam(tp.name, []), span: tp.span)
         var parameters: [HirTypeParam] = []
         var parameter_index = 0
-        for tp in owner_type_params:
+        for raw_tp in owner_type_params:
+            val tp: ParserTypeParam = raw_tp
             var bounds: [HirType] = []
             for bound in tp.bounds:
                 bounds = bounds.push(self.imported_surface_type(bound, imported_module_name))
@@ -518,7 +521,9 @@ impl HirLowering:
             parameter_index = parameter_index + 1
         # Publish together: constraint references remain finite binder leaves,
         # independent of declaration order, including mutually recursive bounds.
-        for parameter in parameters:
+        for raw_parameter in parameters:
+            # ANY-transport hazard sweep round 3: annotated rebind.
+            val parameter: HirTypeParam = raw_parameter
             self.prescan_type_parameters[parameter.symbol.id] = HirType(
                 kind: HirTypeKind.TypeParam(parameter.name, parameter.bounds),
                 span: parameter.span)
@@ -543,7 +548,7 @@ impl HirLowering:
         while param_idx < callable.params.len():
             if not callable.params[param_idx].has_type_:
                 return nil
-            val param: HirParam = callable.params[param_idx]
+            val param: ModuleSurfaceParam = callable.params[param_idx]
             param_types = param_types.push(self.imported_surface_type_projected(
                 param.type_, param.type_name, param.array_element_name, imported_module_name))
             param_idx = param_idx + 1
@@ -609,7 +614,7 @@ impl HirLowering:
         if self.ambient_bootstrap_enabled() or fn_decl.body.stmts.len() != 1:
             return nil
         for raw_param in fn_decl.params:
-            val param: HirParam = raw_param
+            val param: Param = raw_param
             if not param.has_type_ and param.has_default:
                 return nil
         if fn_decl.has_return_type:
@@ -628,7 +633,7 @@ impl HirLowering:
                 match callee.kind:
                     case ExprKind.Ident(name):
                         for raw_param in fn_decl.params:
-                            val param: HirParam = raw_param
+                            val param: Param = raw_param
                             if param.name == name and not param.has_type_ and not param.has_default:
                                 var argument_types: [HirType] = []
                                 for raw_arg in args:
@@ -701,7 +706,12 @@ impl HirLowering:
 
     me scan_ast_block_for_returns(b: Block, params: [Param]) -> ReturnScan:
         var acc = return_scan_empty()
-        for stmt in b.stmts:
+        for raw_stmt in b.stmts:
+            # ANY-transport hazard sweep round 3: annotated rebind. Unannotated,
+            # the stage2-compiled compiler read erased Stmt words here and the
+            # p2_add smoke SEGV'd inside scan_ast_expr_for_returns (cycle-60
+            # stage2 sanity, minimal repro).
+            val stmt: Stmt = raw_stmt
             acc = merge_return_scan(acc, self.scan_ast_stmt_for_returns(stmt, params))
         acc
 
