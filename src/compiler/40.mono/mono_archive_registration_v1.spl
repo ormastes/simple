@@ -252,6 +252,57 @@ fn mono_archive_registration_receipt_seal_v1(receipt: MonoArchiveRegistrationRec
     if not w.ok: return ""
     sha256_text((if receipt.logical_name != "": "mono-logical-registration-receipt-v3\n" else: "mono-registration-receipt-v3\n") + w.finish())
 
+fn mono_archive_registration_row_difference_v1(row: MonoArchiveRegistrationRowV1) -> text:
+    match row:
+        case MonoArchiveRegistrationRowV1.SymbolName(_, _): "registration recollection row differs: symbol name"
+        case MonoArchiveRegistrationRowV1.FunctionReturn(_, _): "registration recollection row differs: function return"
+        case MonoArchiveRegistrationRowV1.FunctionSignature(_, _): "registration recollection row differs: function signature"
+        case MonoArchiveRegistrationRowV1.NamedType(_, _): "registration recollection row differs: named type"
+        case MonoArchiveRegistrationRowV1.NamedAmbiguous(_, _): "registration recollection row differs: named ambiguity"
+        case MonoArchiveRegistrationRowV1.NamedSymbolName(_, _): "registration recollection row differs: named symbol"
+        case MonoArchiveRegistrationRowV1.FieldType(_, _): "registration recollection row differs: field type"
+        case MonoArchiveRegistrationRowV1.FieldOwner(_, _): "registration recollection row differs: field owner"
+        case MonoArchiveRegistrationRowV1.EnumPayloadType(_, _): "registration recollection row differs: enum payload"
+        case MonoArchiveRegistrationRowV1.ModulePath(_, _): "registration recollection row differs: module path"
+        case MonoArchiveRegistrationRowV1.TemplateModule(_, _): "registration recollection row differs: template module"
+        case MonoArchiveRegistrationRowV1.GenericMethod(_, _): "registration recollection row differs: generic method"
+        case MonoArchiveRegistrationRowV1.RejectedMethod(_, _): "registration recollection row differs: rejected method"
+        case MonoArchiveRegistrationRowV1.GenericTypeParams(_, _): "registration recollection row differs: generic type params"
+        case MonoArchiveRegistrationRowV1.GenericTypeModule(_, _): "registration recollection row differs: generic type module"
+        case MonoArchiveRegistrationRowV1.GenericFieldNames(_, _): "registration recollection row differs: generic field names"
+        case MonoArchiveRegistrationRowV1.GenericFieldType(_, _): "registration recollection row differs: generic field type"
+        case MonoArchiveRegistrationRowV1.DeclaredGlobalType(_, _): "registration recollection row differs: declared global type"
+        case MonoArchiveRegistrationRowV1.TemplateSignature(_, _): "registration recollection row differs: template signature"
+        case MonoArchiveRegistrationRowV1.TemplateRecipe(_, _): "registration recollection row differs: template recipe"
+        case MonoArchiveRegistrationRowV1.SymbolIdentity(_, _): "registration recollection row differs: symbol identity"
+        case MonoArchiveRegistrationRowV1.NominalDeclarationV2(_, _): "registration recollection row differs: nominal declaration"
+        case MonoArchiveRegistrationRowV1.SymbolProjection(_, _): "registration recollection row differs: symbol projection"
+
+fn mono_archive_registration_receipt_difference_v1(
+        expected: MonoArchiveRegistrationReceiptV1,
+        actual: MonoArchiveRegistrationReceiptV1) -> text:
+    if expected.logical_name != actual.logical_name: return "registration exact recollection differs: logical name"
+    if expected.archive.archive_key != actual.archive.archive_key or
+            expected.archive.body_digest != actual.archive.body_digest or
+            expected.archive.lowering_warnings_digest != actual.archive.lowering_warnings_digest:
+        return "registration exact recollection differs: archive identity"
+    if expected.base_digest != actual.base_digest or expected.base_epoch != actual.base_epoch:
+        return "registration exact recollection differs: predecessor identity"
+    if expected.next_symbol != actual.next_symbol: return "registration exact recollection differs: next symbol"
+    if expected.generic_functions != actual.generic_functions or
+            expected.generic_structs != actual.generic_structs or
+            expected.generic_classes != actual.generic_classes:
+        return "registration exact recollection differs: generic counts"
+    if expected.roots != actual.roots: return "registration exact recollection differs: root order"
+    if expected.rows.len() != actual.rows.len(): return "registration exact recollection differs: row count"
+    var index = 0
+    while index < expected.rows.len():
+        if mono_archive_registration_row_digest_v1(expected.rows[index]) !=
+                mono_archive_registration_row_digest_v1(actual.rows[index]):
+            return mono_archive_registration_row_difference_v1(expected.rows[index])
+        index = index + 1
+    "registration exact recollection differs: unknown seal component"
+
 fn mono_archive_registration_scratch_collector_v1(owner: MonoArchiveRegistrationOwnerV1) -> MonomorphizationPass:
     var worker = MonomorphizationPass.create()
     worker.template_body_mode = MonoTemplateBodyModeV1.ArchiveRequests
@@ -415,8 +466,11 @@ fn mono_archive_collect_complete_registration_v1(owner: MonoArchiveRegistrationO
             roots = roots.push(function.symbol.id)
     val facts = owner.state.facts
     var rows: [MonoArchiveRegistrationRowV1] = []
+    # The archive owner already encoded this exact module and sealed its digest;
+    # do not serialize the complete HIR body again merely to name a body-free
+    # symbol projection. The archive key binds the input, body, and warnings.
     val projection = hir_mono_symbol_projection_encode_v1(module.symbols,
-        sha256_text(archive.archive_key + "\n" + hir_module_encode(module)))
+        sha256_text(archive.archive_key + "\n" + archive.body_digest))
     if projection == "": return Err("registration actual nominal symbol projection refused")
     rows.push(MonoArchiveRegistrationRowV1.SymbolProjection(module_name, projection))
     for key in worker.sym_names.keys().sort():
@@ -593,7 +647,8 @@ fn mono_archive_publish_registration_v1(owner: MonoArchiveRegistrationOwnerV1,
                     refusal = "registration exact recollection refused: " + exact.unwrap_err()
                 else:
                     valid = exact.unwrap().seal == receipt.seal
-                    refusal = "registration exact recollection seal differs"
+                    if not valid:
+                        refusal = mono_archive_registration_receipt_difference_v1(receipt, exact.unwrap())
         else:
             refusal = "registration archived body decode refused"
     val schedule = if valid: mono_archive_registration_schedule_digest_v1(owner.roots +

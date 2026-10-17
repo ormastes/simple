@@ -5022,8 +5022,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # subject to the phase verifier's existing real MC/DC waiver requirements.
       BOOTSTRAP_STAGE2_TEST_DELEGATE="${BOOTSTRAP_STAGE2_TEST_DELEGATE:-0}"
       export BOOTSTRAP_VERIFY_TEST_WORKERS BOOTSTRAP_VERIFY_BUILD_THREADS \
-        BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY BOOTSTRAP_STAGE2_TEST_DELEGATE \
-        SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS
+        BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY BOOTSTRAP_STAGE2_TEST_DELEGATE
+      export SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS
       # This phase wraps whole tool builds; the compile-worker budget floors
       # at 5.59 GiB and killed it (exit 88) on large hosts. An explicit cap
       # still wins. See bootstrap_tree_rss_phase_cap_kib.
