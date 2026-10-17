@@ -57,7 +57,10 @@ fn module_surface_callable_from_header(
 ) -> ModuleSurfaceCallable:
     var params: [ModuleSurfaceParam] = []
     for raw_param in header.params:
-        val param: Param = raw_param
+        # ParserFunctionHeader.params is [ParserParamHeader], NOT [Param] --
+        # mis-annotating it here deterministically SIGSEGV'd the self-compile
+        # worker inside this function (cycle-61 r4 shim backtrace).
+        val param: ParserParamHeader = raw_param
         params = params.push(ModuleSurfaceParam(
             name: param.name,
             has_type_: param.has_type_,
@@ -91,7 +94,10 @@ fn module_surface_callable_from_header(
 fn module_surface_trait_from_trait(trait_: ParserTrait) -> ModuleSurfaceTrait:
     var methods: [ModuleSurfaceCallable] = []
     var default_methods: [ParserFunction] = []
-    for method in trait_.methods:
+    for raw_method in trait_.methods:
+        # ANY-transport hazard sweep: annotated rebind (worker SIGSEGV in
+        # module_surface_from_owner while self-compiling, cycle-61 r4).
+        val method: ParserFunction = raw_method
         methods = methods.push(module_surface_callable_from_function(method))
         if not method.body.stmts.is_empty():
             default_methods = default_methods.push(method)
@@ -206,7 +212,8 @@ pub fn module_surface_from_owner(
     var callable_names: [text] = []
     for name in owner.value.functions.keys():
         val callable = if owner.value.function_headers.contains_key(name):
-            module_surface_callable_from_header(owner.value.function_headers[name])
+            val fn_header: ParserFunctionHeader = owner.value.function_headers[name]
+            module_surface_callable_from_header(fn_header)
         else:
             # Compatibility for parser producers without the compact header
             # index.
