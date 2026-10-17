@@ -725,6 +725,15 @@ impl CompilerDriver:
         var module: HirModule = nil
         var cached = false
         var stored = false
+        # Set when the verified-cache store was REFUSED for a non-I/O reason
+        # (codec encode-reject / selfcheck / unstable roundtrip). The blob is
+        # then unwritable by construction (the encoder rejected it), so no
+        # shard-scope handoff file can exist; the sound fallback is the
+        # caller's PASS+UNCACHED finish (the module stays in the aggregate and
+        # the main build lowers it on the cache miss -- the streaming lane's
+        # long-standing semantics). Tracked in a local because the cache's
+        # last-refusal reason is global state and goes stale across modules.
+        var store_refused_codec = false
         var infrastructure_error = ""
         var abi_receipt: (text, Result<text, text>) = ("", Err(""))
         var errors: [text] = []
@@ -800,14 +809,18 @@ impl CompilerDriver:
                     else:
                         # Codec refusal (encode reject / selfcheck / unstable
                         # roundtrip): fail-closed evidence gate, not an I/O
-                        # failure. The module is correct in memory; the main
-                        # build lowers it on the cache miss. Fail the shard
-                        # only for genuine I/O store failures -- otherwise an
-                        # encoder draw that refuses blobs (e.g. the upstream
-                        # missing_required_hir_module_function_entry gate fed
-                        # by an erased dict read) fails EVERY module and the
-                        # whole row. The ledger records UNCACHED via
-                        # hir_cache_stored=false.
+                        # failure. The blob is unwritable by construction (the
+                        # encoder rejected it), so no shard-scope handoff file
+                        # can exist; the sound fallback is the caller's
+                        # PASS+UNCACHED finish -- the module stays in the
+                        # aggregate and the main build lowers it on the cache
+                        # miss (the streaming lane's long-standing semantics).
+                        # Without this, an encoder draw that refuses blobs
+                        # (e.g. the upstream missing_required_hir_module_function_entry
+                        # gate fed by an erased dict read) fails EVERY module
+                        # and the whole row. hir_cache_stored stays false, so
+                        # the ledger records UNCACHED.
+                        store_refused_codec = true
                         eprint("[hir-shard] cache store refused (codec, not I/O); module will be lowered by the main build: {source.path}")
 
         if errors.len() == 0 and infrastructure_error == "":
@@ -899,7 +912,7 @@ impl CompilerDriver:
             self.ctx.add_error(infrastructure_error)
             return driver_hir_failed_shard_receipt_v1(-1)
         if errors.len() > 0: return driver_hir_failed_shard_receipt_v1(2)
-        if not stored:
+        if not stored and not store_refused_codec:
             self.ctx.add_error("HIR shard completed without a durable module")
             return driver_hir_failed_shard_receipt_v1(-1)
         if val Some(custody) = source_body_custody:
