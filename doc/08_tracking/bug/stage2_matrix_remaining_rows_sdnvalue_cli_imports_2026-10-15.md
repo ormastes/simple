@@ -351,3 +351,56 @@ scope. Owner: self-host divergence lane — the seed's emitter/caching is the
 reference; compare emission+native-cache admission for the 25 named symbols
 (repro: /tmp/fullchain-monofix.sh on the final-push tree; HIR cached, link
 verdict in ~20 min).
+
+## ROOT CAUSE FOUND (2026-10-17): symbol-mangling scheme mismatch at the stage3 link
+
+Measured (nm over all 40 fresh stage3 objects: 3,059 defs, ALL dotted; all
+1,344 seed-built cache objects: 32,810 defs, ALL double-underscore; zero
+spelling overlap; every undefined symbol's underscore twin exists in the
+cache):
+- Seed rule (mangle.rs module_prefix_from_path): `{prefix}__{fn}`, numbered
+  layers stripped, `_dot_` escaping, suffix disambiguation.
+- Pure-Simple rule (provider_metadata.spl:46 mir_provider_callable_identity;
+  _MirToLlvm/core_codegen.spl:396): `{module.name}.{fn}` — DOTTED.
+Both schemes are internally consistent; stage3 is the FIRST link that mixes
+both emitters by design (phase-compatibility reuse of seed-built cache
+objects), so the fresh entry's dotted references miss the cache's underscore
+definitions. Stage2 "emitted all of these" because stage2 was emitted
+entirely by the seed — one scheme.
+SECOND divergence riding on top: K1 modules are defined in the cache under a
+composed owner prefix (`_compositions__kernel_llvm_cranelift__compiler__...`)
+— scheduler/owner-attribution divergence; scheme alignment alone would not
+fix those.
+
+Ranked fix designs (agent-2, evidence-backed):
+- H1 (long-term): align pure-Simple mangling to the seed's __ scheme —
+  requires changing name-BUILDER and name-PARSER together (mir_provider_callable_key,
+  extension_owner_is_known rfind("."), _hir_symbol_owner_module all split on
+  dots) plus _dot_ escaping and suffix disambiguation. Partial alignment
+  silently mis-links — not a one-cycle change.
+- H2 (next experiment, de-risked): link-lane emitter gate — tag cache
+  capsules with the producing emitter's scheme; the pure-Simple compiler
+  re-emits (never links) seed-scheme cache objects, so stage3 is dotted
+  throughout and links. Correct by construction; costs the cross-stage cache
+  reuse (~1300 modules of MIR/codegen the caches exist to avoid). Verify with
+  /tmp/fullchain-monofix.sh (HIR cached; ~20 min to the link verdict).
+
+## Emission-coverage root cause (2026-10-17, H2 chain cycle falsified the cache hypothesis)
+
+PR #3608 (emitter-scheme gate, landed) made the stage3 link scheme-homogeneous
+via full re-emission — and the SAME 36 symbols stayed undefined. Decisive
+evidence: the link contains NO cache objects at all (stage3-native-cache has
+no objects dir; the runtime archives are Rust-only per nm); the link is the
+entry object + ~40 fresh module objects + Rust runtime. So the bootstrap-fixed
+entry lane (lower_bootstrap_entry_module → entry-only lowering) emits only
+~40 module objects; io_runtime.env_get, driver_compile_options_default, the
+K1 table rows, and the other 30 symbols live in modules THIS LANE NEVER
+LOWERS. The seed's stage3-equivalent lane lowers the whole callable closure
+(~1299 modules) — that is the coverage gap, pure and simple.
+
+Next experiment (one cycle): extend the bootstrap-fixed lane to lower its
+callable closure (walk the entry's demanded callables' owning modules like
+the direct lane's provider loops, or seed the lane with the closure's module
+list before entry lowering). Cheap pre-check without a chain cycle: sweep-
+style per-module compiles of bootstrap_main's closure modules and compare
+the emitted-object count (~40) against the seed's lane's count.
