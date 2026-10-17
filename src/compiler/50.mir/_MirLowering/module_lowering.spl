@@ -181,16 +181,24 @@ fn mir_exact_extern_pointee_v1(type_: HirType) -> bool:
 
 impl MirLowering:
     me static_scalar_type_from_hir(type_: HirType?) -> MirType?:
-        if type_ == nil:
+        # Presence does not unwrap HirType?: a Some box crossing the concrete
+        # HirType ABI (match .kind / lower_type) reads its enum header as a
+        # struct header. Bind the concrete payload first (4710b22a991 pattern).
+        val optional_type: HirType? = type_
+        if optional_type == nil:
             return nil
-        match type_.kind:
-            # Raw bootstrap text uses the Opaque representation. `lower_type`
-            # describes the general fat-pointer text ABI instead, so it is not
-            # the static slot representation used by literal lowering.
-            case HirTypeKind.Str: Some(self.bootstrap_text_type())
-            case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool:
-                Some(self.lower_type(type_))
-            case _: nil
+        if val present_type = optional_type:
+            val concrete_type: HirType = present_type
+            match concrete_type.kind:
+                # Raw bootstrap text uses the Opaque representation. `lower_type`
+                # describes the general fat-pointer text ABI instead, so it is not
+                # the static slot representation used by literal lowering.
+                case HirTypeKind.Str: Some(self.bootstrap_text_type())
+                case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool:
+                    Some(self.lower_type(concrete_type))
+                case _: nil
+        else:
+            nil
 
     me infer_unfolded_static_expr_type(expr: HirExpr) -> MirType?:
         # Shared across both binary branches so a repeated dependency cannot
@@ -370,27 +378,52 @@ fn runtime_module_initializer_type_fallback(const_: HirConst) -> bool:
         case _: false
 
 fn runtime_module_initializers_in_declaration_order(consts: [HirConst]) -> [HirConst]:
-    var dynamic: [HirConst] = []
-    for const_ in consts:
+    # Sort INDICES over parallel scalar key arrays, never moving composite
+    # HirConst elements between array slots. The previous insertion sort
+    # read AND rewrote `dynamic[j + 1]` element-wise; Stage-2 stores array
+    # elements through ANY (the documented transport hazard behind
+    # expr_dispatch.spl's "Rebind the extracted composite" pattern), and the
+    # stage2-compiled compiler faulted inside THIS function chasing a tagged
+    # word read back from a moved element (reproduced under gdb:
+    # `ldr x10, [x10]` on an untagged element field, SIGSEGV in
+    # register_provider_global_bindings -> lower_module of the entry module,
+    # 2026-10-16). i64 keys and indices are primitive transports; each
+    # composite element is read exactly twice under an explicit annotation.
+    var order: [i64] = []
+    var key_span: [i64] = []
+    var key_symbol: [i64] = []
+    var di = 0
+    while di < consts.len():
+        val const_: HirConst = consts[di]
         if runtime_module_initializer_supported(const_):
-            dynamic.push(const_)
-    # Keep this compiler authority path concrete: the generic comparator
-    # currently fails native inference (and its historical closure ABI).
+            order.push(di)
+            key_span.push(const_.span.start)
+            key_symbol.push(const_.symbol.id)
+        di = di + 1
     # Stable insertion sort is O(n^2) in this module's dynamic globals only.
     var i = 1
-    while i < dynamic.len():
-        val current = dynamic[i]
+    while i < order.len():
+        val cur_order = order[i]
+        val cur_span = key_span[i]
+        val cur_symbol = key_symbol[i]
         var j = i - 1
         while j >= 0:
-            val previous = dynamic[j]
-            val before = current.span.start < previous.span.start or
-                (current.span.start == previous.span.start and current.symbol.id < previous.symbol.id)
+            val before = cur_span < key_span[j] or
+                (cur_span == key_span[j] and cur_symbol < key_symbol[j])
             if not before: break
-            dynamic[j + 1] = previous
+            order[j + 1] = order[j]
+            key_span[j + 1] = key_span[j]
+            key_symbol[j + 1] = key_symbol[j]
             j = j - 1
-        dynamic[j + 1] = current
+        order[j + 1] = cur_order
+        key_span[j + 1] = cur_span
+        key_symbol[j + 1] = cur_symbol
         i = i + 1
-    dynamic
+    var out: [HirConst] = []
+    for ordered_index in order:
+        val selected: HirConst = consts[ordered_index]
+        out.push(selected)
+    out
 
 fn mir_layout_canonical_module_name(name: text) -> text:
     """Fold every spelling of ONE physical module onto a single dotted name.
@@ -1102,8 +1135,10 @@ impl MirLowering:
                     class_default_expr.push(composite_class.fields[class_field_i].default)
                     class_field_i = class_field_i + 1
                 var class_keys: [text] = [composite_class.name]
-                val composite_class_symbol = composite_module.symbols.get_symbol_raw(composite_class.symbol.id)
-                if composite_class_symbol != nil:
+                # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                val optional_composite_class_symbol: HirSymbol? = composite_module.symbols.get_symbol_raw(composite_class.symbol.id)
+                if val present_composite_class_symbol = optional_composite_class_symbol:
+                    val composite_class_symbol: HirSymbol = present_composite_class_symbol
                     class_keys.push(self.composite_layout_key(composite_class_symbol))
                     class_keys.push(mir_class_identity(composite_class_symbol))
                 var class_key_i = 0
@@ -1385,8 +1420,10 @@ impl MirLowering:
                     case Function(_, _, _):
                         field_type_ownership_key = "function-signature-v1\n" + self.function_signature_ownership_proof(field_type, symbols)
                     case Named(field_type_sym, _):
-                        val field_type_symbol = symbols.get_symbol_raw(field_type_sym.id)
-                        if field_type_symbol.?:
+                        # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                        val optional_field_type_symbol: HirSymbol? = symbols.get_symbol_raw(field_type_sym.id)
+                        if val present_field_type_symbol = optional_field_type_symbol:
+                            val field_type_symbol: HirSymbol = present_field_type_symbol
                             if field_type_symbol.kind == SymbolKind.TypeParam:
                                 # `a: A` of `struct Pair<A, B>`: not a struct
                                 # named A -- the instance decides (BUG-IT-6).
@@ -1438,8 +1475,10 @@ impl MirLowering:
                             case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
                                 field_array_element_type_name = "__runtime_array__"
                             case Named(field_element_sym, _):
-                                val field_element_symbol = symbols.get_symbol_raw(field_element_sym.id)
-                                if field_element_symbol.?:
+                                # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                                val optional_field_element_symbol: HirSymbol? = symbols.get_symbol_raw(field_element_sym.id)
+                                if val present_field_element_symbol = optional_field_element_symbol:
+                                    val field_element_symbol: HirSymbol = present_field_element_symbol
                                     # Only aggregates carry a provider layout. An
                                     # enum element (e.g. modifiers:
                                     # [SdoctestModifier]) has no struct provider
@@ -1460,8 +1499,10 @@ impl MirLowering:
                             case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
                                 field_array_element_type_name = "__runtime_array__"
                             case Named(field_slice_element_sym, _):
-                                val field_slice_element_symbol = symbols.get_symbol_raw(field_slice_element_sym.id)
-                                if field_slice_element_symbol.?:
+                                # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                                val optional_field_slice_element_symbol: HirSymbol? = symbols.get_symbol_raw(field_slice_element_sym.id)
+                                if val present_field_slice_element_symbol = optional_field_slice_element_symbol:
+                                    val field_slice_element_symbol: HirSymbol = present_field_slice_element_symbol
                                     if field_slice_element_symbol.kind == SymbolKind.Class or
                                             field_slice_element_symbol.kind == SymbolKind.Struct:
                                         field_array_element_type_name = self.composite_layout_key(field_slice_element_symbol)
@@ -1568,7 +1609,9 @@ impl MirLowering:
         val prescan_struct_values = module.structs.values()
         var psi = 0
         while psi < prescan_struct_values.len():
-            val struct_def = prescan_struct_values[psi]
+            # Annotated rebind: .values() element through ANY (stage2
+            # composite-transport hazard; 2026-10-16).
+            val struct_def: HirStruct = prescan_struct_values[psi]
             # register_composite_field_metadata (above) now also captures
             # each field's declared array ELEMENT HirType into
             # struct_field_array_elem_type, so this call alone covers both
@@ -1579,8 +1622,10 @@ impl MirLowering:
             val bare_layout_was_free = not self.struct_field_order.has(struct_def.name)
             self.register_composite_field_metadata(struct_def.name, struct_def.fields, module.symbols, false)
             self.register_struct_type_param_names(struct_def.name, struct_def.type_params)
-            val struct_symbol = module.symbols.get_symbol_raw(struct_def.symbol.id)
-            if struct_symbol != nil:
+            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+            val optional_struct_symbol: HirSymbol? = module.symbols.get_symbol_raw(struct_def.symbol.id)
+            if val present_struct_symbol = optional_struct_symbol:
+                val struct_symbol: HirSymbol = present_struct_symbol
                 val struct_key = self.composite_layout_key(struct_symbol)
                 self.register_result_err_layout_types(struct_key, struct_def.fields, module.symbols)
                 if bare_layout_was_free:
@@ -1595,9 +1640,11 @@ impl MirLowering:
         val prescan_class_values = module.classes.values()
         psi = 0
         while psi < prescan_class_values.len():
-            val class_def = prescan_class_values[psi]
-            val class_symbol = module.symbols.get_symbol_raw(class_def.symbol.id)
-            if class_symbol != nil:
+            val class_def: HirClass = prescan_class_values[psi]
+            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+            val optional_class_symbol: HirSymbol? = module.symbols.get_symbol_raw(class_def.symbol.id)
+            if val present_class_symbol = optional_class_symbol:
+                val class_symbol: HirSymbol = present_class_symbol
                 # Types/defaults are relocated after each consumer installs
                 # its own SymbolTable. This prepass only records ID-free layout.
                 val class_attr = if class_def.has_layout_attr: class_def.layout_attr else: layoutattr_default_()
@@ -1619,8 +1666,10 @@ impl MirLowering:
             var prescan_return_shape = ""
             match prescan_fn.return_type.kind:
                 case Named(prescan_return_symbol_id, _):
-                    val prescan_return_symbol = module.symbols.get_symbol_raw(prescan_return_symbol_id.id)
-                    if prescan_return_symbol != nil:
+                    # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                    val optional_prescan_return_symbol: HirSymbol? = module.symbols.get_symbol_raw(prescan_return_symbol_id.id)
+                    if val present_prescan_return_symbol = optional_prescan_return_symbol:
+                        val prescan_return_symbol: HirSymbol = present_prescan_return_symbol
                         prescan_return_shape = self.composite_layout_key(prescan_return_symbol)
                         if prescan_return_symbol.kind == SymbolKind.Class:
                             prescan_return_shape = mir_class_identity(prescan_return_symbol)
@@ -1632,8 +1681,10 @@ impl MirLowering:
                     # A caller cannot safely look up an imported element id.
                     match prescan_element_type.kind:
                         case Named(prescan_element_id, _):
-                            val prescan_element = module.symbols.get_symbol_raw(prescan_element_id.id)
-                            if prescan_element != nil:
+                            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                            val optional_prescan_element: HirSymbol? = module.symbols.get_symbol_raw(prescan_element_id.id)
+                            if val present_prescan_element = optional_prescan_element:
+                                val prescan_element: HirSymbol = present_prescan_element
                                 match prescan_element.kind:
                                     case SymbolKind.Class:
                                         prescan_element_shape = mir_class_identity(prescan_element)
@@ -1671,8 +1722,10 @@ impl MirLowering:
                     # can't be deferred to the consumer).
                     match prescan_ok_type.kind:
                         case Named(prescan_ok_symbol_id, _):
-                            val prescan_ok_symbol = module.symbols.get_symbol_raw(prescan_ok_symbol_id.id)
-                            if prescan_ok_symbol != nil:
+                            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                            val optional_prescan_ok_symbol: HirSymbol? = module.symbols.get_symbol_raw(prescan_ok_symbol_id.id)
+                            if val present_prescan_ok_symbol = optional_prescan_ok_symbol:
+                                val prescan_ok_symbol: HirSymbol = present_prescan_ok_symbol
                                 match prescan_ok_symbol.kind:
                                     case Class:
                                         bootstrap_fn_ret_ok_shape_register(prescan_call_name, mir_class_identity(prescan_ok_symbol))
@@ -1707,8 +1760,10 @@ impl MirLowering:
                     # not capture an importer declaration with the same leaf.
                     match prescan_optional_inner.kind:
                         case Named(prescan_optional_symbol_id, _):
-                            val prescan_optional_symbol = module.symbols.get_symbol_raw(prescan_optional_symbol_id.id)
-                            if prescan_optional_symbol != nil:
+                            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                            val optional_prescan_optional_symbol: HirSymbol? = module.symbols.get_symbol_raw(prescan_optional_symbol_id.id)
+                            if val present_prescan_optional_symbol = optional_prescan_optional_symbol:
+                                val prescan_optional_symbol: HirSymbol = present_prescan_optional_symbol
                                 match prescan_optional_symbol.kind:
                                     case Class:
                                         bootstrap_fn_ret_opt_shape_register(prescan_call_name, mir_class_identity(prescan_optional_symbol))
@@ -1934,13 +1989,15 @@ impl MirLowering:
         for thunk in archive_trait_thunks: retained_thunks.push(thunk)
         self.native_trait_thunks = retained_thunks
         self.register_native_trait_declarations(module)
-        for trait_provider in providers:
+        for raw_trait_provider in providers:
+            val trait_provider: HirModule = raw_trait_provider
             if trait_provider.name != module.name:
                 self.register_native_trait_declarations(trait_provider)
         if self.declaration_repository != nil:
             self.register_declaration_provider_traits_v1(module, false)
         self.register_native_trait_implementations(module)
-        for trait_provider in providers:
+        for raw_trait_provider in providers:
+            val trait_provider: HirModule = raw_trait_provider
             if trait_provider.name != module.name:
                 self.register_native_trait_implementations(trait_provider)
         if self.declaration_repository != nil:
@@ -1963,11 +2020,19 @@ impl MirLowering:
         val local_struct_values = module.structs.values()
         var local_meta_i = 0
         while local_meta_i < local_struct_values.len():
-            val struct_def = local_struct_values[local_meta_i]
+            # Annotated rebind: .values() elements travel through ANY; the
+            # stage2-compiled compiler faults reading fields off an
+            # unannotated extraction (same hazard class as the
+            # runtime_module_initializers_in_declaration_order index-sort
+            # fix, 2026-10-16 -- first fired on test_runner_main's
+            # struct/class/enum tables, which main.spl leaves empty).
+            val struct_def: HirStruct = local_struct_values[local_meta_i]
             self.register_composite_field_metadata(struct_def.name, struct_def.fields, module.symbols, true)
             self.register_struct_type_param_names(struct_def.name, struct_def.type_params)
-            val struct_symbol = module.symbols.get_symbol_raw(struct_def.symbol.id)
-            if struct_symbol != nil:
+            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+            val optional_struct_symbol: HirSymbol? = module.symbols.get_symbol_raw(struct_def.symbol.id)
+            if val present_struct_symbol = optional_struct_symbol:
+                val struct_symbol: HirSymbol = present_struct_symbol
                 val struct_key = self.composite_layout_key(struct_symbol)
                 self.struct_bare_layout_owner[struct_def.name] = struct_key
                 if struct_key != struct_def.name:
@@ -1978,10 +2043,12 @@ impl MirLowering:
         val local_class_values = module.classes.values()
         local_meta_i = 0
         while local_meta_i < local_class_values.len():
-            val class_def = local_class_values[local_meta_i]
+            val class_def: HirClass = local_class_values[local_meta_i]
             self.register_composite_field_metadata(class_def.name, class_def.fields, module.symbols, true)
-            val class_symbol = module.symbols.get_symbol_raw(class_def.symbol.id)
-            if class_symbol != nil:
+            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+            val optional_class_symbol: HirSymbol? = module.symbols.get_symbol_raw(class_def.symbol.id)
+            if val present_class_symbol = optional_class_symbol:
+                val class_symbol: HirSymbol = present_class_symbol
                 val class_key = self.composite_layout_key(class_symbol)
                 self.struct_bare_layout_owner[class_def.name] = class_key
                 if class_key != class_def.name:
@@ -2003,14 +2070,17 @@ impl MirLowering:
         # Provider arrays belong to the driver and are borrowed for this pass;
         # retain only relocated field/default metadata in the MIR owner roots.
         var consumer_composite_names: Dict<text, bool> = {}
-        for local_struct_value in local_struct_values:
+        for raw_local_struct_value in local_struct_values:
+            val local_struct_value: HirStruct = raw_local_struct_value
             consumer_composite_names[local_struct_value.name] = true
-        for local_class_value in local_class_values:
+        for raw_local_class_value in local_class_values:
+            val local_class_value: HirClass = raw_local_class_value
             consumer_composite_names[local_class_value.name] = true
-        for provider_module in providers:
+        for raw_provider_module in providers:
+            val provider_module: HirModule = raw_provider_module
             if provider_module.name != module.name:
-                for provider_struct in provider_module.structs.values():
-                    val provider_struct_def: HirStruct = provider_struct
+                for raw_provider_struct in provider_module.structs.values():
+                    val provider_struct_def: HirStruct = raw_provider_struct
                     self.register_provider_struct(provider_struct_def, provider_module.symbols,
                         consumer_composite_names.has(provider_struct_def.name))
             # Struct-only providers also own receiver methods (for example
@@ -2019,19 +2089,14 @@ impl MirLowering:
             # (app.test_daemon.qemu_broker_snapshot) declare no type at all.
             if provider_module.name != module.name and (provider_module.classes.len() > 0 or provider_module.enums.len() > 0 or provider_module.structs.len() > 0 or provider_module.impls.len() > 0):
                 var provider_links: Dict<i64, text> = {}
-                for provider_func in provider_module.functions.values():
+                for raw_provider_func in provider_module.functions.values():
+                    val provider_func: HirFunction = raw_provider_func
                     provider_links[provider_func.symbol.id] = mir_provider_function_name(provider_module.name, provider_module.symbols, provider_func)
-                for provider_class in provider_module.classes.values():
+                for raw_provider_class in provider_module.classes.values():
+                    val provider_class: HirClass = raw_provider_class
                     self.register_provider_class(provider_class, provider_module.symbols, provider_links, false)
-                # Provider enums were gated-in by the condition above but
-                # never registered: a consumer module's match arms on a
-                # provider enum's variants found an empty registry
-                # (measured B5b, lib.common.sdn.value.SdnValue.is_null,
-                # site-19 fifth layer). register_enum_variants is the same
-                # registration the enum's own module pass runs.
-                for provider_enum in provider_module.enums.values():
-                    self.register_enum_variants(provider_enum)
-                for provider_func in provider_module.functions.values():
+                for raw_provider_func in provider_module.functions.values():
+                    val provider_func: HirFunction = raw_provider_func
                     self.register_provider_method(provider_func, provider_module.symbols, provider_links)
         # Before the ambient-bootstrap early return below: the stage3
         # bootstrap-fixed lane lowers through that branch too.
@@ -2205,7 +2270,7 @@ impl MirLowering:
         val struct_values = module.structs.values()
         var si = 0
         while si < struct_values.len():
-            val struct_def = struct_values[si]
+            val struct_def: HirStruct = struct_values[si]
             val sym_id = struct_def.symbol
             var field_names: [text] = []
             var field_has_default: [bool] = []
@@ -2230,7 +2295,7 @@ impl MirLowering:
         val enum_values = module.enums.values()
         var ei = 0
         while ei < enum_values.len():
-            val enum_def = enum_values[ei]
+            val enum_def: HirEnum = enum_values[ei]
             self.register_enum_variants(enum_def)
             self.register_enum_runtime_id(enum_def)
             ei = ei + 1
@@ -2290,14 +2355,16 @@ impl MirLowering:
 
         var impl_mi = 0
         while impl_mi < module.impls.len():
-            val impl_def = module.impls[impl_mi]
+            val impl_def: HirImpl = module.impls[impl_mi]
             var impl_type_name = ""
             var impl_type_key = ""
             var canonical_impl_type_key = ""
             match impl_def.type_.kind:
                 case Named(impl_type_sym, _):
-                    val impl_type_symbol = self.symbols.get_symbol_raw(impl_type_sym.id)
-                    if impl_type_symbol.?:
+                    # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                    val optional_impl_type_symbol: HirSymbol? = self.symbols.get_symbol_raw(impl_type_sym.id)
+                    if val present_impl_type_symbol = optional_impl_type_symbol:
+                        val impl_type_symbol: HirSymbol = present_impl_type_symbol
                         impl_type_name = impl_type_symbol.name
                         impl_type_key = self.composite_layout_key(impl_type_symbol)
                         canonical_impl_type_key = mir_class_identity(impl_type_symbol)
@@ -2355,7 +2422,7 @@ impl MirLowering:
         val class_values = module.classes.values()
         var ci = 0
         while ci < class_values.len():
-            val class_def = class_values[ci]
+            val class_def: HirClass = class_values[ci]
             val sym_id = class_def.symbol
             var field_names: [text] = []
             var field_has_default: [bool] = []
@@ -2386,8 +2453,10 @@ impl MirLowering:
             # field whose declared type resolves to THIS class is recognised
             # as a class even when another module declares a value struct of
             # the same bare name.
-            val class_owner_symbol = module.symbols.get_symbol_raw(sym_id.id)
-            if class_owner_symbol != nil:
+            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+            val optional_class_owner_symbol: HirSymbol? = module.symbols.get_symbol_raw(sym_id.id)
+            if val present_class_owner_symbol = optional_class_owner_symbol:
+                val class_owner_symbol: HirSymbol = present_class_owner_symbol
                 self.class_type_names[self.composite_layout_key(class_owner_symbol)] = true
                 self.struct_field_has_default[self.composite_layout_key(class_owner_symbol)] = field_has_default
                 self.struct_field_default_expr[self.composite_layout_key(class_owner_symbol)] = field_default_expr
@@ -2401,15 +2470,17 @@ impl MirLowering:
             ci = ci + 1
 
         var local_callable_links: Dict<i64, text> = {}
-        for local_func in module.functions.values():
+        for raw_local_func in module.functions.values():
+            val local_func: HirFunction = raw_local_func
             local_callable_links[local_func.symbol.id] = self.provider_callable_symbol_name(local_func.symbol, local_func.name)
-        for local_func in module.functions.values():
+        for raw_local_func in module.functions.values():
+            val local_func: HirFunction = raw_local_func
             self.register_provider_method(local_func, module.symbols, local_callable_links)
 
         val bitfield_values = module.bitfields.values()
         var bi = 0
         while bi < bitfield_values.len():
-            val bitfield_def = bitfield_values[bi]
+            val bitfield_def: HirBitfield = bitfield_values[bi]
             val sym_id = bitfield_def.symbol
             # Key by direct .id access: symbol_id_value's match-destructure
             # of SymbolId returns nil in the interpreter, silently keying
@@ -2489,12 +2560,14 @@ impl MirLowering:
         else:
             var coni = 0
             while coni < const_vals.len():
-                self.lower_const(const_vals[coni])
+                val const_pass: HirConst = const_vals[coni]
+                self.lower_const(const_pass)
                 coni = coni + 1
             # Second pass for statics; see the bootstrap-path loop above.
             coni = 0
             while coni < const_vals.len():
-                self.lower_static(const_vals[coni])
+                val const_pass: HirConst = const_vals[coni]
+                self.lower_static(const_pass)
                 coni = coni + 1
 
             self.lower_runtime_module_initializers(module, const_vals)
@@ -2776,10 +2849,14 @@ impl MirLowering:
         # rather than merged in declaration order: a function-pointer
         # initializer names a function, never another global, so it has no
         # ordering dependency on the entries already collected.
-        for slot_const in consts:
+        for raw_slot_const in consts:
+            # Annotated rebind: composite element through ANY (same hazard
+            # class as the runtime-initializer index-sort fix, 2026-10-16).
+            val slot_const: HirConst = raw_slot_const
             if self.hir_const_is_function_slot(slot_const):
                 var slot_already = false
-                for existing in dynamic:
+                for raw_existing in dynamic:
+                    val existing: HirConst = raw_existing
                     if existing.symbol.id == slot_const.symbol.id:
                         slot_already = true
                 if not slot_already:
@@ -2788,9 +2865,11 @@ impl MirLowering:
             return
         var init_index = 1
         while init_index < dynamic.len():
+            val prev_init: HirConst = dynamic[init_index - 1]
+            val next_init: HirConst = dynamic[init_index]
             module_lowering_publish_initializer_dependency_v1(
-                "{module_name_raw}::{dynamic[init_index - 1].name}",
-                "{module_name_raw}::{dynamic[init_index].name}",
+                "{module_name_raw}::{prev_init.name}",
+                "{module_name_raw}::{next_init.name}",
                 "declaration-order:{init_index - 1}:{init_index}")
             init_index = init_index + 1
 
@@ -2812,7 +2891,8 @@ impl MirLowering:
         var finalized_statics: [MirStatic] = []
         val initializer_guard = self.begin_global_initializer_guard(init_name)
 
-        for const_ in dynamic:
+        for raw_const in dynamic:
+            val const_: HirConst = raw_const
             val value = self.lower_expr(const_.value)
             var value_type = self.lookup_local_type(value)
             # A dict initializer's SSA local is an i64 handle, but its MIR type
@@ -3077,8 +3157,11 @@ impl MirLowering:
                 var name = ""
                 match callee.kind:
                     case Var(sym):
-                        val s = self.symbols.get_symbol_raw(sym.id)
-                        if s.?: name = s.name
+                        # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                        val optional_s: HirSymbol? = self.symbols.get_symbol_raw(sym.id)
+                        if val present_s = optional_s:
+                            val s: HirSymbol = present_s
+                            name = s.name
                     case NamedVar(_, n):
                         name = n
                     case _:
@@ -3148,15 +3231,19 @@ impl MirLowering:
                     case NamedVar(sym2, _): Some(sym2)
                     case _: nil
                 if val cs = callee_symbol:
-                    val fn_sym = self.symbols.get_symbol_raw(cs.id)
-                    if fn_sym.?:
+                    # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                    val optional_fn_sym: HirSymbol? = self.symbols.get_symbol_raw(cs.id)
+                    if val present_fn_sym = optional_fn_sym:
+                        val fn_sym: HirSymbol = present_fn_sym
                         if val fn_type = fn_sym.type_:
                             match fn_type.kind:
                                 case HirTypeKind.Function(_, ret, _):
                                     match ret.kind:
                                         case Named(ret_sym, _):
-                                            val ret_symbol = self.symbols.get_symbol_raw(ret_sym.id)
-                                            if ret_symbol.?:
+                                            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                                            val optional_ret_symbol: HirSymbol? = self.symbols.get_symbol_raw(ret_sym.id)
+                                            if val present_ret_symbol = optional_ret_symbol:
+                                                val ret_symbol: HirSymbol = present_ret_symbol
                                                 return ret_symbol.name
                                         case _:
                                             ()
