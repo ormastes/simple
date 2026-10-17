@@ -277,16 +277,18 @@ my %unexpected_sid;
 my $sample_started_at;
 # The cadence is a scheduling target, not a deadline for a host-wide process
 # observation. Keep slow but valid samples bounded separately from that target.
-# Up to 30s for emulated hosts: a riscv64 TCG guest with 20 compile threads
-# stalled one /proc sample past 5s after 3729 good ones (peak 894 MiB).
+# Up to 60s for bootstrap owners: a CPU-bound Linux Stage 2 producer completed
+# 4494 valid observations at 1.25 GiB RSS, then one /proc walk was descheduled
+# for 30.78s. The caller remains responsible for explicitly selecting this
+# wider bound; ordinary watchdog users retain the one-second default.
 # FreeBSD's host-wide ps observer can exceed one second under bootstrap load.
 # Match the existing product-builder budget without changing sample cadence,
 # RSS ceilings, or an explicit caller-selected observation budget.
 sub resolve_observation_budget_ms {
     my ($platform, $override) = @_;
     my $budget = $override // ($platform eq 'freebsd' ? 5000 : 1000);
-    $budget =~ /^\d+$/ && $budget >= 1000 && $budget <= 30000
-        or die "rss-guard: observation budget must be between 1000 and 30000 ms\n";
+    $budget =~ /^\d+$/ && $budget >= 1000 && $budget <= 60000
+        or die "rss-guard: observation budget must be between 1000 and 60000 ms\n";
     return $budget;
 }
 my $observation_budget_ms = resolve_observation_budget_ms(

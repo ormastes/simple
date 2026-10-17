@@ -150,6 +150,12 @@ case "${1:-}" in
 esac
 . "${bootstrap_entry_dir}/lib/host-shared-cache.shs"
 simple_host_cache_configure
+# Full bootstrap can transiently deschedule a valid host-wide /proc walk while
+# the native producer is CPU-bound. Keep that observation bounded, but give the
+# owner enough headroom to distinguish scheduler delay from failed measurement.
+# This does not change the 100 ms target cadence or the enforced RSS ceiling.
+SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS="${SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS:-60000}"
+export SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS
 . "${bootstrap_early_repo_root}/scripts/check/lib/bootstrap-planner-admission-bound.shs"
 kernel_policy_manifest="${bootstrap_early_repo_root}/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn"
 kernel_policy_value() {
@@ -4055,6 +4061,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
       ${stage2_cold_init_env:+"${stage2_cold_init_env}"} \
       ${compiler_ceiling_env:+"${compiler_ceiling_env}"} \
+      ${stage2_preflight_context_env:+"${stage2_preflight_context_env}"} \
       ${stage2_diagnostic_env} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
@@ -4222,6 +4229,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
       ${stage2_cold_init_env:+"${stage2_cold_init_env}"} \
       ${compiler_ceiling_env:+"${compiler_ceiling_env}"} \
+      ${stage2_preflight_context_env:+"${stage2_preflight_context_env}"} \
       ${stage2_diagnostic_env}
     # These three guards are the ONLY pre-exec refusal on this path, and they
     # used to be bare `|| return 1`. A mismatch therefore produced no build log
@@ -4239,7 +4247,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       cat "${stage2_refusal_log}" >&2
       return 1
     }
-    stage2_expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "${PLATFORM}" "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-}" "${stage2_diagnostic_names}") || {
+    stage2_expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "${PLATFORM}" "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-}" "${stage2_diagnostic_names}" "${stage2_preflight_context_recorded:+SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1}") || {
       echo "error: stage2 pre-exec refusal: no canonical stage2 env name list for ${PLATFORM}" \
         > "${stage2_refusal_log}"
       cat "${stage2_refusal_log}" >&2
@@ -5016,8 +5024,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # subject to the phase verifier's existing real MC/DC waiver requirements.
       BOOTSTRAP_STAGE2_TEST_DELEGATE="${BOOTSTRAP_STAGE2_TEST_DELEGATE:-0}"
       export BOOTSTRAP_VERIFY_TEST_WORKERS BOOTSTRAP_VERIFY_BUILD_THREADS \
-        BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY BOOTSTRAP_STAGE2_TEST_DELEGATE \
-        SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS
+        BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY BOOTSTRAP_STAGE2_TEST_DELEGATE
+      export SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS
       # This phase wraps whole tool builds; the compile-worker budget floors
       # at 5.59 GiB and killed it (exit 88) on large hosts. An explicit cap
       # still wins. See bootstrap_tree_rss_phase_cap_kib.
