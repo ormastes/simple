@@ -996,6 +996,40 @@ impl MirLowering:
         self.reindex_enum_variant_owners(enum_def.name, prior_variant_names, names)
         self.enum_variant_discriminants[enum_def.name] = discriminants
 
+    me register_module_enum_inventory_v1(modules: [HirModule]):
+        """Register every given module's own enums, up front, before any
+        per-module lowering runs.
+
+        Measured gap (2026-10-16, manual stage3 per-module object sweep):
+        compiling `src/compiler/di.spl` with the admitted stage2 binary failed
+        in `compiler.common.config.CompilerProfile.to_text` with B5b "match
+        has multiple wildcard/binding default arms (binding `Test`)". A
+        two-module fixture (entry declaring a struct with an enum-typed
+        static-fn parameter + a dependency whose own fn matches on its own
+        enum's bare variants) reproduces it in ~4s: the dependency's `case X:`
+        arms degrade to bindings whenever the entry's demand set does not
+        cover the dependency's callables, because the only registration that
+        would reach its enums is the per-module provider pass in lower_module,
+        which skips `provider_module.name == module.name`. When that pass is
+        demand-incomplete (or the module's HirModule no longer carries
+        `module.enums` by the time its turn comes), the module's own match
+        arms find an empty variant registry and the scalar gate rejects them.
+
+        register_enum_variants reads only the HirEnum (no symbol table), and
+        identical re-registration inside lower_module is quiet by the
+        existing dedup rules, so calling this once over all scheduled source
+        modules closes the gap without changing any per-module behaviour.
+        Enum metadata is small (names + discriminants + payload shapes)
+        relative to the struct-name prescan the driver already pays."""
+        var inventory_module_i = 0
+        while inventory_module_i < modules.len():
+            val inventory_enum_values = modules[inventory_module_i].enums.values()
+            var inventory_enum_i = 0
+            while inventory_enum_i < inventory_enum_values.len():
+                self.register_enum_variants(inventory_enum_values[inventory_enum_i])
+                inventory_enum_i = inventory_enum_i + 1
+            inventory_module_i = inventory_module_i + 1
+
     # O(1) inverse of `enum_variant_index`, maintained at every bare-key write.
     # `prior_names` is the variant set this owner previously had registered
     # under the same bare key (empty on a first registration); those entries are
@@ -1316,18 +1350,19 @@ impl MirLowering:
                             case Named(field_element_sym, _):
                                 val field_element_symbol = symbols.get_symbol_raw(field_element_sym.id)
                                 if field_element_symbol.?:
-                                    # mcp_record_array_owner_loss_2026_10_11 (#3079): provider-owned element identity.
-                                    # Only a RECORD element carries the qualified key: it
-                                    # routes for-in/index reads into the record-layout check,
-                                    # which an enum `[E]` element cannot satisfy. Non-records
-                                    # keep the bare name; HIR rebinding keeps the full key.
-                                    field_type_ownership_key = self.composite_layout_key(field_element_symbol)
-                                    field_array_element_type_name = field_element_symbol.name
-                                    if field_element_symbol.kind == SymbolKind.Class:
-                                        field_type_ownership_key = mir_class_identity(field_element_symbol)
-                                        field_array_element_type_name = field_type_ownership_key
-                                    elif field_element_symbol.kind == SymbolKind.Struct:
-                                        field_array_element_type_name = field_type_ownership_key
+                                    # Only aggregates carry a provider layout. An
+                                    # enum element (e.g. modifiers:
+                                    # [SdoctestModifier]) has no struct provider
+                                    # layout; recording composite_layout_key for
+                                    # it made the record-array check demand one
+                                    # and fail the build. Enums stay word-tagged
+                                    # values, not runtime arrays.
+                                    if field_element_symbol.kind == SymbolKind.Class or
+                                            field_element_symbol.kind == SymbolKind.Struct:
+                                        field_array_element_type_name = self.composite_layout_key(field_element_symbol)
+                                        if field_element_symbol.kind == SymbolKind.Class:
+                                            field_array_element_type_name = mir_class_identity(field_element_symbol)
+                                        field_type_ownership_key = field_array_element_type_name
                             case _: ()
                     case Slice(field_slice_element_type):
                         field_elem_type = field_slice_element_type
@@ -1337,13 +1372,12 @@ impl MirLowering:
                             case Named(field_slice_element_sym, _):
                                 val field_slice_element_symbol = symbols.get_symbol_raw(field_slice_element_sym.id)
                                 if field_slice_element_symbol.?:
-                                    field_type_ownership_key = self.composite_layout_key(field_slice_element_symbol)
-                                    field_array_element_type_name = field_slice_element_symbol.name
-                                    if field_slice_element_symbol.kind == SymbolKind.Class:
-                                        field_type_ownership_key = mir_class_identity(field_slice_element_symbol)
-                                        field_array_element_type_name = field_type_ownership_key
-                                    elif field_slice_element_symbol.kind == SymbolKind.Struct:
-                                        field_array_element_type_name = field_type_ownership_key
+                                    if field_slice_element_symbol.kind == SymbolKind.Class or
+                                            field_slice_element_symbol.kind == SymbolKind.Struct:
+                                        field_array_element_type_name = self.composite_layout_key(field_slice_element_symbol)
+                                        if field_slice_element_symbol.kind == SymbolKind.Class:
+                                            field_array_element_type_name = mir_class_identity(field_slice_element_symbol)
+                                        field_type_ownership_key = field_array_element_type_name
                             case _: ()
                     case _: ()
             field_type_names.push(field_type_name)

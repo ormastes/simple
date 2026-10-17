@@ -361,6 +361,16 @@ impl MonomorphizationPass:
         # Steps 3/4: place every specialization and prune its owner after the
         # fixed point. Pruning consults pass-wide specialization facts only;
         # it does not need a second complete inventory of unpruned modules.
+        # Several logical keys can alias ONE physical module (the same source
+        # reached as `compiler.frontend.core.types` and through a tier-free
+        # spelling). Each alias owns its own function table, and MIR emits only
+        # the first alias in inventory order, which need not be the alias
+        # `template_module` last recorded. Place a specialization into every
+        # alias of its owner so the emitted alias always carries it.
+        var physical_owner: Dict<text, text> = {}
+        for name in mod_keys:
+            val keyed: HirModule = modules[name]
+            physical_owner[name] = hir_symbol_owner_module(keyed.name)
         var result: Dict<text, HirModule> = {}
         for name in mod_keys:
             val module: HirModule = modules[name]
@@ -371,8 +381,11 @@ impl MonomorphizationPass:
             var owns_specialization = false
             for mangled in self.specialized_functions.keys():
                 val m: text = mangled
-                if self.spec_module[m] != name:
-                    continue
+                val spec_owner: text = self.spec_module[m]
+                if spec_owner != name:
+                    val alias_owner: text = physical_owner[name]
+                    if alias_owner == "" or (physical_owner[spec_owner] ?? "") != alias_owner:
+                        continue
                 val spec: HirFunction = self.specialized_functions[m]
                 funcs[spec.symbol] = spec
                 # MIR uses the owning table to resolve callable identity. A

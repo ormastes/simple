@@ -18,11 +18,30 @@ pub fn native_relocatable_link_plan(
 ) -> Result<NativeRelocatableLink, text>:
     val windows = target.contains("windows") or target.contains("mingw") or
         (target == "" and host_os == "windows")
+    val darwin = target.contains("apple-darwin") or
+        (target == "" and host_os == "darwin")
     var program = "ld.lld"
     var args: [text] = ["-r"]
     var candidates: [text] = ["ld.lld"]
     var requires_bfd = false
-    if windows:
+    if darwin:
+        # ld.lld is the ELF driver and rejects Mach-O objects ("unknown file
+        # type"); ld64.lld does not implement -r. Apple ld supports -r.
+        # Measured 2026-10-16: every --emit-object on macOS with a Homebrew
+        # LLVM provider failed in the final merge until routed through
+        # `xcrun ld -r -arch <arch>`.
+        val arch = if target == "": host_arch else: target.split("-")[0]
+        var apple_arch = arch
+        if arch == "aarch64" or arch == "arm64":
+            apple_arch = "arm64"
+        elif arch == "x86_64":
+            apple_arch = "x86_64"
+        else:
+            return Err("emit-object Darwin relocatable linking is unsupported for architecture {arch}; use --emit-archive for a multi-object artifact")
+        program = "xcrun"
+        args = ["ld", "-r", "-arch", apple_arch]
+        candidates = ["xcrun"]
+    elif windows:
         val arch = if target == "": host_arch else: target.split("-")[0]
         var prefix = ""
         if arch == "x86_64":
