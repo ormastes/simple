@@ -384,3 +384,23 @@ Ranked fix designs (agent-2, evidence-backed):
   throughout and links. Correct by construction; costs the cross-stage cache
   reuse (~1300 modules of MIR/codegen the caches exist to avoid). Verify with
   /tmp/fullchain-monofix.sh (HIR cached; ~20 min to the link verdict).
+
+## Emission-coverage root cause (2026-10-17, H2 chain cycle falsified the cache hypothesis)
+
+PR #3608 (emitter-scheme gate, landed) made the stage3 link scheme-homogeneous
+via full re-emission — and the SAME 36 symbols stayed undefined. Decisive
+evidence: the link contains NO cache objects at all (stage3-native-cache has
+no objects dir; the runtime archives are Rust-only per nm); the link is the
+entry object + ~40 fresh module objects + Rust runtime. So the bootstrap-fixed
+entry lane (lower_bootstrap_entry_module → entry-only lowering) emits only
+~40 module objects; io_runtime.env_get, driver_compile_options_default, the
+K1 table rows, and the other 30 symbols live in modules THIS LANE NEVER
+LOWERS. The seed's stage3-equivalent lane lowers the whole callable closure
+(~1299 modules) — that is the coverage gap, pure and simple.
+
+Next experiment (one cycle): extend the bootstrap-fixed lane to lower its
+callable closure (walk the entry's demanded callables' owning modules like
+the direct lane's provider loops, or seed the lane with the closure's module
+list before entry lowering). Cheap pre-check without a chain cycle: sweep-
+style per-module compiles of bootstrap_main's closure modules and compare
+the emitted-object count (~40) against the seed's lane's count.
