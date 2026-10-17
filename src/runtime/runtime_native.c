@@ -6601,6 +6601,18 @@ void rt_println_value(int64_t value) {
     fflush(stdout);
 }
 
+/* Keep word-order tagged-value imports owned by this provider too. Rust's
+ * equivalent forwarding aliases can share a COFF section with rt_print/ln;
+ * selecting the raw-string C functions then discards that Rust section.
+ * Forward to the same tagged owners already selected above, not rt_print. */
+void rt_value_print(int64_t value) {
+    rt_print_value(value);
+}
+
+void rt_value_println(int64_t value) {
+    rt_println_value(value);
+}
+
 void serial_println(int64_t value) {
     rt_println_value(value);
 }
