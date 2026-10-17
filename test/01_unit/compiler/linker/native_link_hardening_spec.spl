@@ -24,6 +24,8 @@ use compiler.backend.linker.linker_wrapper.{
 }
 use compiler.backend.build_native_types.{BuildLinkConfig, BuildOutputFormat, native_link_config_from_build}
 use compiler.backend.llvm_native_link.{NativeLinkOptions}
+use compiler.backend.llvm_native_link_orchestrator.{llvm_hosted_allow_duplicate_definitions}
+use compiler.backend.runtime_compiler.{hosted_c_compiler_plan}
 use compiler.backend.linker.mold.{find_requested_linker, find_size_linker_path, requested_linker_override}
 use compiler.backend.linker.msvc.{MsvcConfig, msvc_strip_unix_rpath_args}
 use testing.{describe, it, expect}
@@ -581,6 +583,17 @@ describe "Native linker hardening":
     it "keeps unresolved Windows symbols fatal":
         expect(msvc_duplicate_symbol_flag()).to_equal("/FORCE:MULTIPLE")
         expect(msvc_duplicate_symbol_flag().contains("UNRESOLVED")).to_equal(false)
+
+    it "selects strict Windows duplicate policy from the link target rather than the host":
+        expect(llvm_hosted_allow_duplicate_definitions("windows", "", false)).to_equal(false)
+        expect(llvm_hosted_allow_duplicate_definitions("windows-mingw", "native", false)).to_equal(false)
+        expect(llvm_hosted_allow_duplicate_definitions("linux", "", false)).to_equal(true)
+        val cross = hosted_c_compiler_plan("x86_64-pc-windows-gnu", "linux", "x86_64")
+        expect(cross.supported).to_equal(true)
+        expect(cross.requires_cross).to_equal(true)
+        expect(llvm_hosted_allow_duplicate_definitions("linux", "x86_64-pc-windows-gnu", false)).to_equal(false)
+        expect(llvm_hosted_allow_duplicate_definitions("windows", "x86_64-pc-windows-msvc", false)).to_equal(false)
+        expect(llvm_hosted_allow_duplicate_definitions("linux", "", true)).to_equal(false)
 
     it "rejects explicit Windows FORCE variants under strict duplicate policy":
         for flag in ["/FORCE:MULTIPLE", " /FoRcE:MuLtIpLe ", "-force:multiple", "/FORCE", "-force", "/force:unresolved", "/force:multiple,unresolved", "\"/FORCE:MULTIPLE\""]:
