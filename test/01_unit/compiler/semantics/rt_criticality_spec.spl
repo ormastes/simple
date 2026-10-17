@@ -1,3 +1,5 @@
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
+use compiler.semantics.rt_criticality_validation.{validate_rt_criticality_diagnostics_blobs}
 use std.test.*
 use compiler.semantics.rt_criticality.*
 use compiler.frontend.rt_criticality_registry.{rt_criticality_parse_args}
@@ -263,3 +265,105 @@ describe "mission-critical transitive admission":
         rt_criticality_reset()
         expect(diagnostics.len()).to_equal(1)
         expect(diagnostics[0]).to_contain("RT-E-UNBOUNDED-ALLOCATION")
+
+describe "RT encoded inventory admission":
+    it "rejects malformed input even with false parallel scalar hints":
+        rt_criticality_reset()
+        val diagnostics = validate_rt_criticality_diagnostics_blobs(["invalid HIR"], [], [false], [0])
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0].severity).to_equal(RtCriticalDiagnosticSeverity.Error)
+        expect(diagnostics[0].message).to_contain("RT-E-HIR-BLOB-DECODE")
+
+    it "rejects malformed input with missing, extra, or negative scalar hints":
+        rt_criticality_reset()
+        val missing = validate_rt_criticality_diagnostics_blobs(["invalid HIR"], [])
+        val extra = validate_rt_criticality_diagnostics_blobs(["invalid HIR"], [], [false, false], [0, 0])
+        val negative = validate_rt_criticality_diagnostics_blobs(["invalid HIR"], [], [false], [-1])
+        expect(missing.len()).to_equal(1)
+        expect(extra.len()).to_equal(1)
+        expect(negative.len()).to_equal(1)
+        expect(missing[0].message).to_contain("RT-E-HIR-BLOB-DECODE")
+        expect(extra[0].message).to_contain("RT-E-HIR-BLOB-DECODE")
+        expect(negative[0].message).to_contain("RT-E-HIR-BLOB-DECODE")
+
+    it "rejects a corrupt late module instead of validating a partial inventory":
+        rt_criticality_reset()
+        val module = rt_validation_module("synthetic/rt_blob_valid.spl",
+            rt_validation_fn(820, "plain_tick", FunctionAttr.default()))
+        val blob = hir_module_encode(module)
+        expect(blob == "").to_equal(false)
+        val diagnostics = validate_rt_criticality_diagnostics_blobs([blob, "invalid HIR"], [], [false, false], [0, 0])
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0].severity).to_equal(RtCriticalDiagnosticSeverity.Error)
+        expect(diagnostics[0].message).to_contain("module blob 1")
+        expect(diagnostics[0].message).to_contain("RT-E-HIR-BLOB-DECODE")
+
+    it "rejects a truncated real encoding and clears previously published capabilities":
+        rt_criticality_reset()
+        val module = rt_validation_module("synthetic/rt_blob_truncated.spl",
+            rt_validation_fn(821, "plain_tick", FunctionAttr.default()))
+        val blob = hir_module_encode(module)
+        expect(blob.len() > 1).to_equal(true)
+        rt_bound_manifest_replace([RtBoundCapability(subject_id: "stale",
+            closure_digest: "stale", effect: RT_EFFECT_ALLOC, max_units: 1, review_id: "STALE")])
+        val diagnostics = validate_rt_criticality_diagnostics_blobs([blob.substring(0, blob.len() - 1)], [])
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0].message).to_contain("RT-E-HIR-BLOB-DECODE")
+        expect(rt_bound_manifest_capabilities().len()).to_equal(0)
+
+    it "validates a complete real no-claims inventory":
+        rt_criticality_reset()
+        val module = rt_validation_module("synthetic/rt_blob_complete.spl",
+            rt_validation_fn(822, "plain_tick", FunctionAttr.default()))
+        val blob = hir_module_encode(module)
+        expect(blob == "").to_equal(false)
+        val diagnostics = validate_rt_criticality_diagnostics_blobs([blob], [], [false], [0])
+        expect(diagnostics.len()).to_equal(0)
+
+    it "keeps real critical claims authoritative over false scalar hints":
+        val path = "synthetic/rt_blob_claim.spl"
+        rt_criticality_reset()
+        rt_criticality_declare(path, "malloc_tick", "critical")
+        val module = rt_validation_module(path,
+            rt_validation_fn(823, "malloc_tick", FunctionAttr.default()))
+        val blob = hir_module_encode(module)
+        expect(blob == "").to_equal(false)
+        val diagnostics = validate_rt_criticality_diagnostics_blobs([blob], [], [false], [0])
+        rt_criticality_reset()
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0].severity).to_equal(RtCriticalDiagnosticSeverity.Error)
+        expect(diagnostics[0].message).to_contain("RT-E-UNBOUNDED-ALLOCATION")
+
+    it "retains the real-module fallback when no encoded inventory was supplied":
+        val path = "synthetic/rt_blob_fallback.spl"
+        rt_criticality_reset()
+        rt_criticality_declare(path, "malloc_tick", "critical")
+        val module = rt_validation_module(path,
+            rt_validation_fn(824, "malloc_tick", FunctionAttr.default()))
+        val diagnostics = validate_rt_criticality_diagnostics_blobs([], [module])
+        rt_criticality_reset()
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0].message).to_contain("RT-E-UNBOUNDED-ALLOCATION")
+    it "rejects a decodable noncanonical module and clears published capabilities":
+        rt_criticality_reset()
+        val module = rt_validation_module("synthetic/rt_blob_noncanonical.spl",
+            rt_validation_fn(825, "plain_tick", FunctionAttr.default()))
+        val canonical = hir_module_encode(module)
+        expect(canonical == "").to_equal(false)
+        # Actual codec order: header, module name, path, then import count.
+        # The legacy decoder accepts 00 as zero; the encoder emits only 0.
+        var lines = canonical.split("\n")
+        expect(lines[3]).to_equal("0")
+        lines[3] = "00"
+        val noncanonical = lines.join("\n")
+        val decoded = hir_module_decode(noncanonical)
+        expect(decoded == nil).to_equal(false)
+        expect(hir_module_encode(decoded.unwrap())).to_equal(canonical)
+        rt_bound_manifest_replace([RtBoundCapability(subject_id: "stale",
+            closure_digest: "stale", effect: RT_EFFECT_ALLOC, max_units: 1, review_id: "STALE")])
+        val diagnostics = validate_rt_criticality_diagnostics_blobs([noncanonical], [], [false], [0])
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0].severity).to_equal(RtCriticalDiagnosticSeverity.Error)
+        expect(diagnostics[0].message).to_contain("RT-E-HIR-BLOB-NONCANONICAL")
+        expect(diagnostics[0].message).to_contain("module blob 0")
+        expect(rt_bound_manifest_capabilities().len()).to_equal(0)

@@ -727,55 +727,36 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
 
 fn validate_rt_criticality_diagnostics_blobs(blobs: [text], fallback: [HirModule],
         has_rt_hal_flags: [bool] = [], claim_counts: [i64] = []) -> [RtCriticalDiagnostic]:
-    """Decode-and-validate entry (cycle-78r3). Encoded module bytes are the
-    only transport that preserves a HirModule-sized struct; decode rebuilds
-    genuine structs via the allocator, bypassing every erased element path.
-    Falls back to the array entry when no blobs were threaded.
-    Cycle-81 CLEAN escalation: cycle-80's inline scalar scan on the decoded
-    struct FAULTED -- a HirFunction extracted from a genuine decoded module
-    is still a large-composite element copy, and those corrupt in EVERY
-    element copy in this compiled code. The early-exit facts therefore arrive
-    as PRODUCER-SIDE PARALLEL SCALAR arrays (computed at the blobs push site,
-    where reads demonstrably work); on the no-claims path not a single field
-    is read off a decoded HirModule and the decode is skipped entirely. When
-    the scalar arrays were not threaded (compat callers), the predicate
-    conservatively falls through to the claims path."""
+    """Validate the complete encoded module inventory before RT policy.
+
+    Parallel scalar hints remain accepted for caller compatibility, but are
+    not bound to the encoded owners and cannot authorize a success shortcut.
+    A corrupt or noncanonical module invalidates the entire admission input.
+    Empty input retains the existing genuine-module fallback contract.
+    """
     if blobs.len() == 0:
         return validate_rt_criticality_diagnostics_array(fallback)
-    var facts_threaded = has_rt_hal_flags.len() >= blobs.len() and
-        claim_counts.len() >= blobs.len()
-    var any_rt_hal = false
-    var any_claims = false
-    if facts_threaded:
-        for raw_flag in has_rt_hal_flags:
-            # [bool] element: small composite, scalar-safe rebind.
-            val flag: bool = raw_flag
-            if flag: any_rt_hal = true
-        for raw_count in claim_counts:
-            # [i64] element: scalar transport.
-            val count: i64 = raw_count
-            if count > 0: any_claims = true
-    if facts_threaded and not any_rt_hal and not any_claims:
-        if (env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
-            eprint("[enum-reg] rt-criticality blobs: scalar-exit blobs={blobs.len()} any_rt_hal={any_rt_hal} any_claims={any_claims}")
-        rt_bound_manifest_clear()
-        return []
-    # Claims path (rare) or unthreaded scalars (compat): the full policy still
-    # moves HirModules through element transports; flagged for a
-    # per-scalar-facts rework. Best effort: digest-verified decode into the
-    # array entry.
     var verified = 0
     var modules_list: [HirModule] = []
+    var blob_index: i64 = 0
     for raw_blob in blobs:
         # [text] element: scalar transport; decode allocates a fresh module.
         val blob: text = raw_blob
         if val decoded = hir_module_decode(blob):
             val restored: HirModule = decoded
-            if hir_module_encode(restored) == blob:
-                verified = verified + 1
-                modules_list.push(restored)
+            if hir_module_encode(restored) != blob:
+                rt_bound_manifest_clear()
+                return [RtCriticalDiagnostic(severity: RtCriticalDiagnosticSeverity.Error,
+                    message: "RT-E-HIR-BLOB-NONCANONICAL: module blob {blob_index} failed roundtrip verification")]
+            verified = verified + 1
+            modules_list.push(restored)
+        else:
+            rt_bound_manifest_clear()
+            return [RtCriticalDiagnostic(severity: RtCriticalDiagnosticSeverity.Error,
+                message: "RT-E-HIR-BLOB-DECODE: module blob {blob_index} could not be decoded")]
+        blob_index = blob_index + 1
     if (env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
-        eprint("[enum-reg] rt-criticality blobs: decoded={blobs.len()} verified={verified} threaded={facts_threaded}")
+        eprint("[enum-reg] rt-criticality blobs: decoded={blobs.len()} verified={verified}")
     validate_rt_criticality_diagnostics_array(modules_list)
 
 fn validate_rt_criticality_diagnostics_array(modules_list: [HirModule]) -> [RtCriticalDiagnostic]:
