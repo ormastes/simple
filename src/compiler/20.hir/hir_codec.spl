@@ -17,6 +17,12 @@
 #   from decoded modules is byte-identical to one made in process.
 
 use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_types.{SymbolId}  # explicit: glob is not an import-origin for surface projection
+use compiler.hir.hir_definitions.{HirFunction, HirStruct, HirClass, HirEnum,
+    HirBitfield, HirTrait, HirConst}
+use compiler.hir.abi_interface.{HirAbiInterfaceEncoderV1, HIR_ABI_INTERFACE_DOMAIN_V1}
+use compiler.common.cache.canonical_identity.{canon_str, canon_nat, canon_field,
+    canon_seq, canonical_identity_sort_texts}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader,
     FLAT_POOL_CODEC_VERSION}
 use compiler.hir.hir_codec_support.{HirCodecWriter,
@@ -98,6 +104,191 @@ fn hir_module_encode_reason(module: HirModule) -> text:
     if w.ok:
         return ""
     w.unsupported
+
+# Cycle-82: scalar HAL fact for the rt-criticality early-exit predicate.
+# Every non-codec lane's Dict value reads of HirFunction arrive erased (the
+# cycle-82 shim faulted inside driver_dict_has_rt_hal at the +120 field load
+# on rt_index_get's result); only this unit's context -- the generated
+# codec's -- demonstrably walks module.functions values on every encode
+# (hc_enc_hir_module reads node.functions[dk3] directly). Same read pattern,
+# same unit family, so this is the one lane that can extract the fact.
+fn hir_module_has_rt_hal(module: HirModule) -> bool:
+    val ks: [SymbolId] = module.functions.keys()
+    for dk in ks:
+        # Nullable-value guard, same shape as hc_enc_hir_module's dict walk.
+        if module.functions[dk] == nil:
+            continue
+        if module.functions[dk].func_attr.is_rt_hal:
+            return true
+    false
+
+# Cycle-83: cold-HIR receipt lane host. The shard-stage2 codegen for
+# hir_abi_interface_parts_v1's declaration-dict walks is defective (shim
+# fault at the +80 type-tag load right after the functions-dict element
+# copy). Cycle-84 disproved unit-hosting for the MONOLITHIC body (the
+# relocated copy compiled to a byte-identical defective draw), so the walk
+# is split into per-dict helpers below, each in the hir_module_has_rt_hal
+# shape (materialized keys array, nil guard, single annotated rebind) -- the
+# only extraction shape with a proven-clean draw. Output stays byte-identical
+# to the abi_interface original; keep the two in sync.
+fn hir_codec_abi_interface_parts_v1(module: HirModule) -> Result<[text], text>:
+    var encoder = HirAbiInterfaceEncoderV1.new(module)
+    var parts: [text] = [canon_field("module", canon_str(module.name))]
+    var exports: [text] = []
+    for name in module.exports:
+        exports.push(canon_str(name))
+    parts.push(canon_field("exports", canon_seq(canonical_identity_sort_texts(exports))))
+    match codec_abi_function_parts_v1(encoder, module):
+        case Err(reason): return Err(reason)
+        case Ok(rows):
+            for row in rows:
+                parts.push(row)
+    match codec_abi_struct_parts_v1(encoder, module):
+        case Err(reason): return Err(reason)
+        case Ok(rows):
+            for row in rows:
+                parts.push(row)
+    match codec_abi_class_parts_v1(encoder, module):
+        case Err(reason): return Err(reason)
+        case Ok(rows):
+            for row in rows:
+                parts.push(row)
+    match codec_abi_enum_parts_v1(encoder, module):
+        case Err(reason): return Err(reason)
+        case Ok(rows):
+            for row in rows:
+                parts.push(row)
+    match codec_abi_bitfield_parts_v1(encoder, module):
+        case Err(reason): return Err(reason)
+        case Ok(rows):
+            for row in rows:
+                parts.push(row)
+    match codec_abi_trait_parts_v1(encoder, module):
+        case Err(reason): return Err(reason)
+        case Ok(rows):
+            for row in rows:
+                parts.push(row)
+    match codec_abi_constant_parts_v1(encoder, module):
+        case Err(reason): return Err(reason)
+        case Ok(rows):
+            for row in rows:
+                parts.push(row)
+    if encoder.error != "":
+        return Err(encoder.error)
+    Ok(parts)
+
+# Per-dict walkers in the proven extraction shape. Each reads only
+# small-composite fields off the rebind; large composites pass to the
+# encoder methods by value only for PUBLIC items.
+fn codec_abi_function_parts_v1(encoder: HirAbiInterfaceEncoderV1, module: HirModule) -> Result<[text], text>:
+    var parts: [text] = []
+    val ks: [SymbolId] = module.functions.keys()
+    for dk in ks:
+        if module.functions[dk] == nil:
+            continue
+        val function: HirFunction = module.functions[dk]
+        if function.is_public:
+            parts.push(encoder.function_identity(function))
+            if encoder.error != "":
+                return Err(encoder.error + ":declaration=function:" + function.name)
+    Ok(parts)
+
+fn codec_abi_struct_parts_v1(encoder: HirAbiInterfaceEncoderV1, module: HirModule) -> Result<[text], text>:
+    var parts: [text] = []
+    val ks: [SymbolId] = module.structs.keys()
+    for dk in ks:
+        if module.structs[dk] == nil:
+            continue
+        val struct_: HirStruct = module.structs[dk]
+        if struct_.is_public:
+            parts.push(encoder.record_identity("struct", struct_.name,
+                struct_.type_params, struct_.fields, struct_.has_layout_attr,
+                struct_.layout_attr))
+            if encoder.error != "":
+                return Err(encoder.error + ":declaration=struct:" + struct_.name)
+    Ok(parts)
+
+fn codec_abi_class_parts_v1(encoder: HirAbiInterfaceEncoderV1, module: HirModule) -> Result<[text], text>:
+    var parts: [text] = []
+    val ks: [SymbolId] = module.classes.keys()
+    for dk in ks:
+        if module.classes[dk] == nil:
+            continue
+        val class_: HirClass = module.classes[dk]
+        if class_.is_public:
+            parts.push(encoder.record_identity("class", class_.name,
+                class_.type_params, class_.fields, class_.has_layout_attr,
+                class_.layout_attr))
+            if encoder.error != "":
+                return Err(encoder.error + ":declaration=class:" + class_.name)
+    Ok(parts)
+
+fn codec_abi_enum_parts_v1(encoder: HirAbiInterfaceEncoderV1, module: HirModule) -> Result<[text], text>:
+    var parts: [text] = []
+    val ks: [SymbolId] = module.enums.keys()
+    for dk in ks:
+        if module.enums[dk] == nil:
+            continue
+        val enum_: HirEnum = module.enums[dk]
+        if enum_.is_public:
+            parts.push(encoder.enum_identity(enum_))
+            if encoder.error != "":
+                return Err(encoder.error + ":declaration=enum:" + enum_.name)
+    Ok(parts)
+
+fn codec_abi_bitfield_parts_v1(encoder: HirAbiInterfaceEncoderV1, module: HirModule) -> Result<[text], text>:
+    var parts: [text] = []
+    val ks: [SymbolId] = module.bitfields.keys()
+    for dk in ks:
+        if module.bitfields[dk] == nil:
+            continue
+        val bitfield: HirBitfield = module.bitfields[dk]
+        if bitfield.is_public:
+            parts.push(encoder.bitfield_identity(bitfield))
+            if encoder.error != "":
+                return Err(encoder.error + ":declaration=bitfield:" + bitfield.name)
+    Ok(parts)
+
+fn codec_abi_trait_parts_v1(encoder: HirAbiInterfaceEncoderV1, module: HirModule) -> Result<[text], text>:
+    var parts: [text] = []
+    val ks: [SymbolId] = module.traits.keys()
+    for dk in ks:
+        if module.traits[dk] == nil:
+            continue
+        val trait_: HirTrait = module.traits[dk]
+        if trait_.is_public:
+            parts.push(encoder.trait_identity(trait_))
+            if encoder.error != "":
+                return Err(encoder.error + ":declaration=trait:" + trait_.name)
+    Ok(parts)
+
+fn codec_abi_constant_parts_v1(encoder: HirAbiInterfaceEncoderV1, module: HirModule) -> Result<[text], text>:
+    var parts: [text] = []
+    val ks: [SymbolId] = module.constants.keys()
+    for dk in ks:
+        if module.constants[dk] == nil:
+            continue
+        val constant: HirConst = module.constants[dk]
+        if constant.is_public:
+            parts.push(canon_field("constant", canon_seq([
+                canon_field("name", canon_str(constant.name)),
+                canon_field("type", encoder.type_identity(constant.type_)),
+                canon_field("mutable", canon_nat(if constant.is_mutable: 1 else: 0)),
+                canon_field("volatile", canon_nat(if constant.is_volatile: 1 else: 0)),
+                canon_field("fixed-address", canon_str(if constant.has_fixed_address: constant.fixed_address.to_text() else: "none"))
+            ])))
+            if encoder.error != "":
+                return Err(encoder.error + ":declaration=constant:" + constant.name)
+    Ok(parts)
+
+fn hir_codec_abi_interface_encoded_v1(module: HirModule) -> Result<text, text>:
+    match hir_codec_abi_interface_parts_v1(module):
+        case Err(reason): Err(reason)
+        case Ok(parts):
+            var encoded: [text] = []
+            for part in canonical_identity_sort_texts(parts):
+                encoded.push(canon_str(part))
+            Ok(canon_field(HIR_ABI_INTERFACE_DOMAIN_V1, canon_seq(encoded)))
 
 fn hir_module_decode(blob: text) -> HirModule?:
     # Preserve the trusted legacy contract and its constructor exactly. The
@@ -259,6 +450,8 @@ export hir_canonical_codec_identity_v1
 export hir_canonical_codec_generated_available_v1
 export HirDecodeLimits, HirDecodeAuditUsage, HirDecodeAuditObserver, HirDecodeError
 export hir_module_encode, hir_module_encode_canonical, hir_module_encode_reason
+export hir_module_has_rt_hal
+export hir_codec_abi_interface_parts_v1, hir_codec_abi_interface_encoded_v1
 export hir_module_decode, hir_module_decode_bounded, hir_module_decode_bounded_audited
 export hir_module_decode_stable
 export HirCodecRoundTrip, hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line
