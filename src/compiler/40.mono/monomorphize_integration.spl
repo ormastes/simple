@@ -253,10 +253,6 @@ struct MonoStats:
 # minimal helper mirrors the generated codec's node.functions[dk3] read, the
 # campaign's most-walked clean pattern; the by-value return + annotated
 # rebind at the call site is the proven transport (decode -> unwrap -> bind).
-fn mono_genuine_function_v1(functions: Dict<SymbolId, HirFunction>, sym_id: SymbolId) -> HirFunction:
-    val func: HirFunction = functions[sym_id]
-    func
-
 impl MonomorphizationPass:
 
     static fn create() -> MonomorphizationPass:
@@ -573,20 +569,25 @@ impl MonomorphizationPass:
             self.module_symbols[module_name] = module.symbols
         self.collect_generic_impl_methods(module, module_name)
 
-    # Cycles 85-88: this body was inlined in collect_generics, whose draw
-    # corrupts the dict-index rebind (85/86), the by-value return bind of
-    # mono_genuine_function_v1 (87: fault at the field-0 load on the helper's
-    # return value), AND the bare-dict-param index inside this fresh method
-    # itself (88: same fault at the extraction rebind -- functions[sym_id]
-    # through a dict PARAM/LOCAL is the corrupting shape; module.functions[dk]
-    # through a field expression is the proven-clean draw, see the codec
-    # helpers). The signature therefore takes the MODULE and indexes the
-    # field expression directly.
+    # Cycles 85-89: this body was inlined in collect_generics, whose draw
+    # corrupts the dict-index rebind (85/86: inline index), the by-value
+    # return bind of an extraction helper (87), the bare-dict-param index in
+    # this fresh method (88), and the plain field-expression index (89).
+    # Final discriminator across all nine draws: EXTRACTIONS DRAW CLEAN ONLY
+    # IN THE GENERATED CODEC'S GUARD-FIRST DOUBLE-ACCESS SHAPE -- every clean
+    # walk (hir_module_has_rt_hal, the seven codec_abi helpers) does
+    # `if dict[k] == nil: skip` BEFORE binding `dict[k]`; every crashing walk
+    # single-accesses. The guard below changes no semantics (values are never
+    # nil); it changes the codegen draw.
     me collect_function_entry_v1(module_name: text, module: HirModule, sym_id: SymbolId):
-        # Index through the module field, not a dict param/local: the
-        # bare-dict-variable index draw is defective (cycles 82/85-88),
-        # the module.functions[dk] field-expression draw is the proven
-        # clean one (codec helpers, hir_module_has_rt_hal).
+        # Guard-first double access, byte-for-byte the generated codec's
+        # shape (hc_enc_hir_module: `if node.functions[dk3] == nil ... else
+        # use node.functions[dk3]`). Cycles 81-88 retrospective: EVERY clean
+        # extraction double-accesses behind a nil guard; EVERY crashing one
+        # single-accesses. Values are never nil in practice, so the guard
+        # changes no semantics -- it changes the codegen draw.
+        if module.functions[sym_id] == nil:
+            return
         val func: HirFunction = module.functions[sym_id]
         # Record the symbol -> name edge for call-site resolution, and keep
         # the fresh-symbol counter past every id already in use.
@@ -641,7 +642,9 @@ impl MonomorphizationPass:
             if not body_index_ready:
                 val body_index_keys: [SymbolId] = module.functions.keys()
                 for dk_29 in body_index_keys:
-                    val f: HirFunction = mono_genuine_function_v1(module.functions, dk_29)
+                    if module.functions[dk_29] == nil:
+                        continue
+                    val f: HirFunction = module.functions[dk_29]
                     val fs: SymbolId = f.symbol
                     by_id[fs.id] = f
                 body_index_ready = true
@@ -3153,7 +3156,9 @@ impl MonomorphizationPass:
         var kept: Dict<SymbolId, HirFunction> = {}
         val prune_function_keys: [SymbolId] = module.functions.keys()
         for sym_id in prune_function_keys:
-            val f: HirFunction = mono_genuine_function_v1(module.functions, sym_id)
+            if module.functions[sym_id] == nil:
+                continue
+            val f: HirFunction = module.functions[sym_id]
             var is_template = false
             val tps: [HirTypeParam] = f.type_params
             if tps != nil:
