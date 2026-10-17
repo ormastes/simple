@@ -138,9 +138,10 @@ impl HirLowering:
     # module sees the promoted return type too, not just the callee's own
     # generated `ret` instruction.
     me infer_untyped_return_type(fn_decl: ParserFunction) -> HirType:
-        val fn_body: Block = fn_decl.body
+        # Cycle-150: no Block bind -- pass fn_decl.body as an expression (the
+        # cycle-116 bind-free rule; the copy then draws in the callee).
         val fn_params: [Param] = fn_decl.params
-        val scan: ReturnScan = self.scan_ast_block_for_returns(fn_body, fn_params)
+        val scan: ReturnScan = self.scan_ast_block_for_returns(fn_decl.body, fn_params)
         if not scan.found_value_return:
             if val dynamic_tail = self.dynamic_callback_tail_type(fn_decl):
                 return dynamic_tail
@@ -632,17 +633,25 @@ impl HirLowering:
         if fn_decl.has_return_type:
             if self.lower_type(fn_decl.return_type).kind == HirTypeKind.Unit:
                 return nil
-        val fn_body: Block = fn_decl.body
         val fn_params: [Param] = fn_decl.params
-        val scan: ReturnScan = self.scan_ast_block_for_returns(fn_body, fn_params)
+        val scan: ReturnScan = self.scan_ast_block_for_returns(fn_decl.body, fn_params)
         if scan.found_value_return:
             return nil
+        # Cycle-150: bind-free tail reads. The `val tail: Stmt = stmts[len-1]`
+        # array-index bind of a large composite drew corrupted (the
+        # cycle-116/148 class), and rt_enum_discriminant on the corrupt
+        # copy's kind was the one-function-file / single-stmt crash
+        # (scan_ast_expr_for_returns family). Every read below is an
+        # expression read off the array (the hir_module_has_rt_hal class);
+        # the Stmt is never named.
         val fn_body_stmts: [Stmt] = fn_decl.body.stmts
-        val tail: Stmt = fn_body_stmts[fn_body_stmts.len() - 1]
-        val probe = Expr(kind: ExprKind.NilLit, span: tail.span)
-        if rt_enum_discriminant(tail.kind) != rt_enum_discriminant(StmtKind.Expr(probe)):
+        if fn_body_stmts.len() == 0:
             return nil
-        val tail_expr: Expr = _sffi_tuple_get<Expr>(rt_enum_payload(tail.kind), 0)
+        val tail_index: i64 = fn_body_stmts.len() - 1
+        val probe = Expr(kind: ExprKind.NilLit, span: fn_body_stmts[tail_index].span)
+        if rt_enum_discriminant(fn_body_stmts[tail_index].kind) != rt_enum_discriminant(StmtKind.Expr(probe)):
+            return nil
+        val tail_expr: Expr = _sffi_tuple_get<Expr>(rt_enum_payload(fn_body_stmts[tail_index].kind), 0)
         match tail_expr.kind:
             case ExprKind.Call(callee, args):
                 val callee_expr: Expr = callee
@@ -656,7 +665,7 @@ impl HirLowering:
                                     val arg: HirCallArg = raw_arg
                                     if arg.has_name: return nil
                                     argument_types = argument_types.push(HirType(kind: HirTypeKind.Any, span: arg.span))
-                                return HirType(kind: HirTypeKind.Function(argument_types, HirType(kind: HirTypeKind.Any, span: tail.span), []), span: tail.span)
+                                return HirType(kind: HirTypeKind.Function(argument_types, HirType(kind: HirTypeKind.Any, span: fn_body_stmts[tail_index].span), []), span: fn_body_stmts[tail_index].span)
                     case _: ()
             case _: ()
         nil
