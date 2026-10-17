@@ -2725,6 +2725,29 @@ impl MirLowering:
         # Lower functions (skip extern declarations - they have no body)
         # Cycle-94: same draw fix as the prescan loop above; skip branches
         # become continue + one increment.
+        # Cycle-97: the emission loop moved to lower_module_emit_all_v1
+        # (fresh-method draw; see the method header). All key-carried
+        # dict walks draw corrupted inside lower_module itself.
+        self.lower_module_emit_all_v1(module, archive_function_symbols, bootstrap_trace, trace_enabled)
+
+        if bootstrap_trace:
+            print "[mir-lower] lower_module:done"
+        self.publish_native_trait_thunks(false)
+        self.attach_external_layout_traces()
+        self.builder.module
+
+    # Cycle-97: lower_module's per-function emission loop, hosted in a fresh
+    # method. Receipts from the cycle-97 binary proved the loop's dict walks
+    # draw corrupted inside lower_module itself: fn-keys materialized len=5
+    # but module.functions.has(first key) was FALSE at loop entry, so the
+    # nil guard skipped every function and the lane emitted nothing
+    # (E-LANE-VACUOUS). Every clean key-carried extraction draw in this
+    # campaign (10/10) is in a fresh method in the has_rt_hal shape; every
+    # draw inside lower_module corrupts (values+index: cycle-94 crash;
+    # keys+index: cycle-97 silent mismatch). The module crosses by value
+    # (proven transport); no large composite crosses back.
+    me lower_module_emit_all_v1(module: HirModule, archive_function_symbols: [i64]?,
+            bootstrap_trace: bool, trace_enabled: bool):
         val fn_keys: [SymbolId] = module.functions.keys()
         if bootstrap_trace:
             print "[mir-lower] function-keys"
@@ -2734,13 +2757,13 @@ impl MirLowering:
         if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
             eprint("[enum-reg] fn-keys: module={module.name} len={fn_keys.len()} dict_len={module.functions.len()}")
         var fni = 0
-        # Cycle-95 regression fix: while+index over the materialized keys,
-        # NOT for-in -- the for-in draw in this function silently zero-iterates
+        # Cycle-95 regression fix (context: lower_module, from which this
+        # loop moved in cycle-97): while+index over the materialized keys,
+        # NOT for-in -- the for-in draw silently zero-iterates there
         # (BUG-001 class: 'tuple destructuring silently produces zero
-        # iterations in compiled mode'), which skipped every function and
-        # emitted nothing. The original elif chain is restored verbatim
-        # inside the guard-first loop (the guard changes no semantics; the
-        # dict-walk extraction shape stays the proven-clean draw).
+        # iterations in compiled mode'). The original elif chain is restored
+        # verbatim inside the guard-first loop (the guard changes no
+        # semantics; the dict-walk extraction shape stays the proven draw).
         while fni < fn_keys.len():
             val fn_key: SymbolId = fn_keys[fni]
             if fni == 0 and (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
@@ -2800,12 +2823,6 @@ impl MirLowering:
                 if bootstrap_trace:
                     print "[mir-lower] function:added"
                 fni = fni + 1
-
-        if bootstrap_trace:
-            print "[mir-lower] lower_module:done"
-        self.publish_native_trait_thunks(false)
-        self.attach_external_layout_traces()
-        self.builder.module
 
     # mutglobal lane (module-level `var` mutation, see
     # scratchpad/mutglobal_plan.md): `lower_const` (function_lowering.spl,
