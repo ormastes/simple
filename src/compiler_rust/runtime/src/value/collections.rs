@@ -162,6 +162,12 @@ struct CollectionProviderCache {
     providers: Option<CollectionProviders>,
     provider_simd_tier: Option<SimdTier>,
     resolutions: usize,
+        // Cached SIMPLE_SIMD_TIER override for the current tier epoch: loaded
+    // once from the environment per epoch (see read_simd_tier_override_env)
+    // so the hot text-search path never re-scans the environment. Reset with
+    // the rest of the epoch by clear_collection_provider_cache().
+    override_loaded: bool,
+    override_tier: Option<SimdTier>,
 }
 
 fn collection_provider_cache() -> &'static Mutex<CollectionProviderCache> {
@@ -169,6 +175,8 @@ fn collection_provider_cache() -> &'static Mutex<CollectionProviderCache> {
     CACHE.get_or_init(|| {
         Mutex::new(CollectionProviderCache {
             host_simd_tier: None,
+            override_loaded: false,
+            override_tier: None,
             providers: None,
             provider_simd_tier: None,
             resolutions: 0,
@@ -211,7 +219,17 @@ fn providers_for_tier(tier: SimdTier) -> CollectionProviders {
     }
 }
 
-fn configured_simd_tier_override() -> Option<SimdTier> {
+// Raw env read for the SIMPLE_SIMD_TIER launch-time knob. Callers must cache
+// the result -- a std::env::var per call is an O(environ) __findenv_locked
+// scan, and this knob feeds EVERY text search (byte_find/byte_split back
+// Simple's index_of/str_split/contains). Measured on the stage2-compiler-tests
+// row as 338/409 sample frames inside __findenv_locked over the phase's
+// 165-entry env, crawling the HIR shard worker to ~1 s of work per 10 min wall
+// while the parent sat in rt_process_wait (v15 test_runner hang, v16
+// compiler_cli_build hang, 2026-10-18). The value is cached per provider-cache
+// epoch by collection_providers() and re-read on clear_collection_provider_cache
+// (the existing tier-epoch reset the tests already use).
+fn read_simd_tier_override_env() -> Option<SimdTier> {
     std::env::var("SIMPLE_SIMD_TIER").ok()?.parse().ok()
 }
 
@@ -225,10 +243,15 @@ fn resolve_host_simd_tier() -> (SimdTier, bool) {
 }
 
 fn collection_providers() -> CollectionProviders {
-    let override_tier = configured_simd_tier_override();
     let mut cache = collection_provider_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    if !cache.override_loaded {
+        cache.override_loaded = true;
+        cache.override_tier = read_simd_tier_override_env();
+    }
+    let override_tier = cache.override_tier;
 
     let (simd_tier, cacheable) = if let Some(override_tier) = override_tier {
         (override_tier, true)
@@ -266,6 +289,8 @@ pub(crate) fn clear_collection_provider_cache() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     cache.host_simd_tier = None;
+    cache.override_loaded = false;
+    cache.override_tier = None;
     cache.providers = None;
     cache.provider_simd_tier = None;
     cache.resolutions = 0;
