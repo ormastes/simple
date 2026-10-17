@@ -125,6 +125,11 @@ impl MirLowering:
         var consumer_names: Dict<text, bool> = {}
         for local_struct in module.structs.values(): consumer_names[local_struct.name] = true
         for local_class in module.classes.values(): consumer_names[local_class.name] = true
+        # SIMPLE_ENUM_REG_TRACE=1 (cycle-51/52 discriminator) counters: the
+        # receipt after the loop proves whether the archived declaration rows
+        # carried any enum records at all for this consumer's pass.
+        var enum_trace_providers: i64 = 0
+        var enum_trace_rows: i64 = 0
         for name in repository.ordered_modules:
             val provider: MirHirModuleDeclarationsV1 = repository.modules[name]
             # Enums register for EVERY provider including the module's own
@@ -137,6 +142,9 @@ impl MirLowering:
             for raw_enum in provider.enums:
                 val enum_declaration: MirHirEnumDeclarationV1 = raw_enum
                 self.register_provider_enum_from_declarations_v1(enum_declaration, provider.symbols)
+                enum_trace_rows = enum_trace_rows + 1
+            if provider.enums.len() > 0:
+                enum_trace_providers = enum_trace_providers + 1
             if provider.name == module.name: continue
             for raw_struct in provider.structs:
                 val declaration: MirHirNominalDeclarationV1 = raw_struct
@@ -150,6 +158,18 @@ impl MirLowering:
                 for raw_function in provider.functions:
                     val function: MirHirFunctionDeclarationV1 = raw_function
                     self.register_declaration_method_v1(function, provider.symbols, links)
+        if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+            # One line per consumer module: how many provider rows carried
+            # enums and whether the consumer's own archived rows did. An
+            # empty enum_rows here with a failing SdnValue lookup proves the
+            # loss is upstream of MIR (archive/projection); non-zero rows
+            # with a failing lookup prove the loss is in registration or the
+            # lookup keys (cycle-51/52 discriminator).
+            if repository.modules.has(module.name):
+                val own_rows: MirHirModuleDeclarationsV1 = repository.modules[module.name]
+                eprint("[enum-reg] provider-pass consumer={module.name} providers_with_enums={enum_trace_providers} enum_rows={enum_trace_rows} own_rows={own_rows.enums.len()}")
+            else:
+                eprint("[enum-reg] provider-pass consumer={module.name} providers_with_enums={enum_trace_providers} enum_rows={enum_trace_rows} own_rows=<consumer absent from repository>")
 
     me register_declaration_provider_traits_v1(module: HirModule, implementations: bool):
         val repository: MirHirDeclarationRepositoryV1 = self.declaration_repository.unwrap()
@@ -804,6 +824,16 @@ impl MirLowering:
         self.enum_runtime_to_bare[enum_def.runtime_name] = enum_def.name
         self.enum_variant_index[enum_def.name] = names
         self.enum_variant_discriminants[enum_def.name] = discriminants
+        # Maintain the variant->owners inverse index too. Without this, an
+        # enum that registered ONLY through declaration rows (never via the
+        # local module.enums path) was invisible to the enum-constructor
+        # fallback in method_calls_literals (unique bare owner for the
+        # variant leaf), so `SdnValue.Bool(...)`-style construction fell
+        # through to "unresolved method call" even with a healthy registry
+        # (cycle-52 symptom). Withdraw-and-add with an empty prior set: a
+        # divergent same-bare replacement keeps the pre-existing last-wins
+        # semantics of the bare maps themselves.
+        self.reindex_enum_variant_owners(enum_def.name, [], names)
 
     me register_provider_struct_from_declarations_v1(struct_def: MirHirNominalDeclarationV1, provider: SymbolTable, consumer_owns_name: bool):
         # prescan_module_struct_names registers every module's struct field
