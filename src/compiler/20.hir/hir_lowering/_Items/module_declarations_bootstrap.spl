@@ -135,6 +135,11 @@ impl HirLowering:
         while idx < cls_keys.len():
             val name = cls_keys[idx]
             val class_symbol = self.define_own_module_type(name, SymbolKind.Class, decl_span, decl_visibility, mod_name)
+            # Cycle-153: guard-first double access (the 10/10 extraction form);
+            # the bare annotated dict-value bind drew the corrupting copy.
+            if not module_classes.has(name):
+                idx = idx + 1
+                continue
             val class_decl: ParserClass = module_classes[name]
             if class_decl.type_params.len() == 0:
                 self.nongeneric_record_owners[class_symbol.id] = true
@@ -147,6 +152,10 @@ impl HirLowering:
         while idx < str_keys.len():
             val name = str_keys[idx]
             val struct_symbol = self.define_own_module_type(name, SymbolKind.Struct, decl_span, decl_visibility, mod_name)
+            # Cycle-153: guard-first double access.
+            if not module_structs.has(name):
+                idx = idx + 1
+                continue
             val struct_decl: ParserStruct = module_structs[name]
             if struct_decl.type_params.len() == 0:
                 self.nongeneric_record_owners[struct_symbol.id] = true
@@ -222,6 +231,14 @@ impl HirLowering:
         idx = 0
         while idx < fn_keys.len():
             val name = fn_keys[idx]
+            # Cycle-153: guard-first double access. The bare annotated bind
+            # `val fn_decl: ParserFunction = module_functions[name]` compiled
+            # to the mangled-word per-word copy (the cycle-148/150 fingerprint)
+            # and declared_callable_type then faulted on the corrupt copy's
+            # .body.stmts chain (variant H/F SIGSEGV at 0xfd569c).
+            if not module_functions.has(name):
+                idx = idx + 1
+                continue
             val fn_decl: ParserFunction = module_functions[name]
             val fn_return_type: Type = fn_decl.return_type
             if (hir_module_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") ?? "") == "1":
