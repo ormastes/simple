@@ -194,9 +194,16 @@ else
 fi
 [ "${SIMPLE_MEM_SNAPSHOT_FILE+x}${SIMPLE_EVIDENCE_RUN_ID+x}" = '' ] ||
     resume_fail "cache replay cannot acquire ambient snapshot diagnostics"
-expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "$platform" "$stage2_recorded_cold_init" "$stage2_recorded_compiler_ceiling" "$stage2_diagnostic_names") ||
+stage2_recorded_env_names=$(transcript_explicit_env_names "$transcript") ||
+    resume_fail "transcript environment set is unavailable"
+stage2_recorded_preflight_names=
+case " $stage2_recorded_env_names " in
+    *' SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1 '*)
+        stage2_recorded_preflight_names=SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1 ;;
+esac
+expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "$platform" "$stage2_recorded_cold_init" "$stage2_recorded_compiler_ceiling" "$stage2_diagnostic_names" "$stage2_recorded_preflight_names") ||
     resume_fail "canonical environment set is unavailable"
-[ "$(transcript_explicit_env_names "$transcript")" = "$expected_env_names" ] ||
+[ "$stage2_recorded_env_names" = "$expected_env_names" ] ||
     resume_fail "transcript environment set is not canonical"
 # Replay exactly the recorded policy; an ambient export cannot change it.
 if [ "$stage2_recorded_cold_init" = 1 ]; then
