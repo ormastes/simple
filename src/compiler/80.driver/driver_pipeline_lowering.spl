@@ -853,6 +853,25 @@ impl CompilerDriver:
                 driver_source_entry_closure_enabled(self.ctx),
                 self.ctx.runtime_std_full_inventory_selection != nil,
                 self.ctx.demand_mir_admission != nil or self.ctx.demand_dirty_modules.len() > 0)
+            # lower_module's bootstrap-flat branch returns before the
+            # non-bootstrap tail, so on this fresh lowering instance NO enum
+            # registration exists: not the entry's own module.enums, not the
+            # built-in Option/Result seeds, and (empty provider list) no
+            # dependency enums. Stage3 measured the failure as "enum
+            # construction: missing runtime identity for 'Option'" and
+            # "unregistered declaration 'compiler.common.driver_core_modes.
+            # CompileMode'" at the entry's construction sites (site-19,
+            # stage3 frontier 2026-10-17); the seed seeds a global enum
+            # sidecar across the whole closure before lowering. Register
+            # the closure's enums + runtime ids + builtin seeds up front.
+            var bootstrap_enum_modules: [HirModule] = []
+            var bootstrap_enum_idx = 0
+            while bootstrap_enum_idx < self.ctx.sources.len():
+                val bootstrap_enum_hir = self.ctx.hir_modules[self.ctx.sources[bootstrap_enum_idx].module_name]
+                if bootstrap_enum_hir != nil:
+                    bootstrap_enum_modules = bootstrap_enum_modules.push(bootstrap_enum_hir)
+                bootstrap_enum_idx = bootstrap_enum_idx + 1
+            bootstrap_lowering.register_module_enum_bootstrap_inventory_v1(bootstrap_enum_modules)
             var bootstrap_mir = bootstrap_lowering.lower_bootstrap_entry_module(bootstrap_hir)
             driver_trace_module_mir_errors("app.cli.bootstrap_main", bootstrap_hir.path,
                 bootstrap_lowering.errors, 0)
@@ -942,8 +961,9 @@ impl CompilerDriver:
                 while direct_prescan_idx < self.ctx.sources.len():
                     val src_prescan = self.ctx.sources[direct_prescan_idx]
                     val prescan_hir = self.ctx.hir_modules[src_prescan.module_name]
-                    if prescan_hir != nil:
-                        direct_lowering.prescan_module_struct_names(prescan_hir)
+                    # Presence does not unwrap: bind concrete before the concrete param.
+                    if val present_prescan_hir = prescan_hir:
+                        direct_lowering.prescan_module_struct_names(present_prescan_hir)
                     direct_prescan_idx = direct_prescan_idx + 1
             # Enum registry completeness, next to the struct-name prescan:
             # the per-module provider pass in lower_module registers only
@@ -960,8 +980,10 @@ impl CompilerDriver:
             while enum_inventory_idx < self.ctx.sources.len():
                 val src_enum_inventory = self.ctx.sources[enum_inventory_idx]
                 val enum_inventory_hir = self.ctx.hir_modules[src_enum_inventory.module_name]
-                if enum_inventory_hir != nil:
-                    enum_inventory_modules = enum_inventory_modules.push(enum_inventory_hir)
+                # Pushing the Some box into a concrete [HirModule] transports the
+                # wrapper; inventory registration then reads headers as structs.
+                if val present_enum_hir = enum_inventory_hir:
+                    enum_inventory_modules = enum_inventory_modules.push(present_enum_hir)
                 enum_inventory_idx = enum_inventory_idx + 1
             direct_lowering.register_module_enum_inventory_v1(enum_inventory_modules)
             # Struct/class NAME-keyed layout rows, same shape: the prescan
@@ -994,7 +1016,11 @@ impl CompilerDriver:
                         log_phase("aot:lower_to_mir:missing_hir idx={direct_idx} module={name_direct} path={src_direct.path}")
                     var lowered_entry: MirModule = MirModule(name: name_direct, functions: {}, statics: {}, constants: {}, types: {})
                     if ice_message == "":
-                        direct_lowering.symbols = direct_hir.symbols
+                        # ICE gate above already guarantees direct_hir is present;
+                        # still bind concrete — field access on the Some box reads
+                        # its enum header as the symbols pointer.
+                        if val present_direct_hir = direct_hir:
+                            direct_lowering.symbols = present_direct_hir.symbols
                         val devirt_before: i64 = direct_lowering.devirtualized_calls
                         val module_errors_before = direct_lowering.errors.len()
                         # Per-module transient scope. The lowering arena for one
@@ -1003,7 +1029,12 @@ impl CompilerDriver:
                         # process (the compiler's own immortal heap). See
                         # lower_module_transient_scoped for the enumerated escape
                         # set and why ambient bootstrap is excluded.
-                        val scoped_entry = direct_lowering.lower_module_transient_scoped(direct_hir, mir_provider_modules, direct_pos == 0)
+                        # Bind concrete for the concrete HirModule param; the ICE
+                        # gate guarantees presence (dead Err arm mirrors it).
+                        val scoped_entry = if val scoped_hir = direct_hir:
+                            direct_lowering.lower_module_transient_scoped(scoped_hir, mir_provider_modules, direct_pos == 0)
+                        else:
+                            Err("MIR lowering missing HIR module for {name_direct}")
                         driver_trace_module_mir_errors(name_direct, src_direct.path,
                             direct_lowering.errors, module_errors_before)
                         if scoped_entry.is_err():
