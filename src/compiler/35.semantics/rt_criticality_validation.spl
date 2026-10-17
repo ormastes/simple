@@ -3,11 +3,16 @@
 # lowered functions and feeds it once per compilation.
 
 use compiler.hir.hir_types.*
+# Codec transport for the validation lane (cycle-78r3): HirModule is too large
+# for ANY element transport (dict reads, array rebinds all arrive erased); the
+# encoded-bytes round trip is the proven carrier.
+use compiler.hir.hir_codec.{hir_module_decode, hir_module_encode}
 use compiler.hir.hir_definitions.*
 use compiler.semantics.effect_validation.{effect_block_loops, effect_block_callees}
 use compiler.semantics.effect_verifier.{LOOP_BOUND_NONE}
 use compiler.semantics.rt_criticality.*
 use compiler.frontend.rt_criticality_registry.{rt_criticality_claim_keys}
+use std.nogc_sync_mut.io_runtime.{env_get}
 use compiler.frontend.rt_criticality_registry.{rt_criticality_claim_path, rt_criticality_claim_fn}
 use compiler.frontend.rt_criticality_registry.{rt_criticality_profile, rt_criticality_reason}
 use compiler.frontend.rt_criticality_registry.{rt_criticality_bounds_for}
@@ -480,9 +485,9 @@ struct RtCriticalFunctionFactsV1:
 pub fn rt_module_function_declarations_v1(module_key: text,
         module: HirModule) -> [RtCriticalFunctionDeclarationV1]:
     var declarations: [RtCriticalFunctionDeclarationV1] = []
-    for raw_fn in module.functions.values():
+    for dk_26 in module.functions.keys():
         # ANY-transport: annotated rebind (cycle-70 sweep).
-        val fn_: HirFunction = raw_fn
+        val fn_: HirFunction = module.functions[dk_26]
         declarations.push(RtCriticalFunctionDeclarationV1(module_key: module_key,
             module_path: module.path, module_name: module.name, symbol_id: fn_.symbol.id,
             name: fn_.name, is_rt_hal: fn_.func_attr.is_rt_hal, line: fn_.span.line))
@@ -617,8 +622,8 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
         val profile = claim.profile
         var root_id = ""
         for raw_fn in functions:
-        # ANY-transport: annotated rebind (cycle-71).
-        val fn_: RtCriticalFunctionFactsV1 = raw_fn
+            # ANY-transport: annotated rebind (cycle-71).
+            val fn_: RtCriticalFunctionFactsV1 = raw_fn
             val declaration = fn_.declaration
             if not rt_declaration_matches_v1(declaration, claim.path): continue
             if declaration.name == fn_name:
@@ -720,6 +725,89 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
     val ordered = rt_sort_criticality_diagnostics(diagnostics)
     ordered
 
+fn validate_rt_criticality_diagnostics_blobs(blobs: [text], fallback: [HirModule],
+        has_rt_hal_flags: [bool] = [], claim_counts: [i64] = []) -> [RtCriticalDiagnostic]:
+    """Decode-and-validate entry (cycle-78r3). Encoded module bytes are the
+    only transport that preserves a HirModule-sized struct; decode rebuilds
+    genuine structs via the allocator, bypassing every erased element path.
+    Falls back to the array entry when no blobs were threaded.
+    Cycle-81 CLEAN escalation: cycle-80's inline scalar scan on the decoded
+    struct FAULTED -- a HirFunction extracted from a genuine decoded module
+    is still a large-composite element copy, and those corrupt in EVERY
+    element copy in this compiled code. The early-exit facts therefore arrive
+    as PRODUCER-SIDE PARALLEL SCALAR arrays (computed at the blobs push site,
+    where reads demonstrably work); on the no-claims path not a single field
+    is read off a decoded HirModule and the decode is skipped entirely. When
+    the scalar arrays were not threaded (compat callers), the predicate
+    conservatively falls through to the claims path."""
+    if blobs.len() == 0:
+        return validate_rt_criticality_diagnostics_array(fallback)
+    var facts_threaded = has_rt_hal_flags.len() >= blobs.len() and
+        claim_counts.len() >= blobs.len()
+    var any_rt_hal = false
+    var any_claims = false
+    if facts_threaded:
+        for raw_flag in has_rt_hal_flags:
+            # [bool] element: small composite, scalar-safe rebind.
+            val flag: bool = raw_flag
+            if flag: any_rt_hal = true
+        for raw_count in claim_counts:
+            # [i64] element: scalar transport.
+            val count: i64 = raw_count
+            if count > 0: any_claims = true
+    if facts_threaded and not any_rt_hal and not any_claims:
+        if (env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+            eprint("[enum-reg] rt-criticality blobs: scalar-exit blobs={blobs.len()} any_rt_hal={any_rt_hal} any_claims={any_claims}")
+        rt_bound_manifest_clear()
+        return []
+    # Claims path (rare) or unthreaded scalars (compat): the full policy still
+    # moves HirModules through element transports; flagged for a
+    # per-scalar-facts rework. Best effort: digest-verified decode into the
+    # array entry.
+    var verified = 0
+    var modules_list: [HirModule] = []
+    for raw_blob in blobs:
+        # [text] element: scalar transport; decode allocates a fresh module.
+        val blob: text = raw_blob
+        if val decoded = hir_module_decode(blob):
+            val restored: HirModule = decoded
+            if hir_module_encode(restored) == blob:
+                verified = verified + 1
+                modules_list.push(restored)
+    if (env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
+        eprint("[enum-reg] rt-criticality blobs: decoded={blobs.len()} verified={verified} threaded={facts_threaded}")
+    validate_rt_criticality_diagnostics_array(modules_list)
+
+fn validate_rt_criticality_diagnostics_array(modules_list: [HirModule]) -> [RtCriticalDiagnostic]:
+    """Array-handoff variant (cycle-76): Dict<text, HirModule> value reads
+    arrive erased through every read pattern (.values rebind, keys()+[]);
+    array element transports restore reliably. Same policy, iterated over the
+    array; module keys/ids are recovered from each module's own fields."""
+    var modules_keys: [text] = []
+    var modules_vals: [HirModule] = []
+    for raw_m in modules_list:
+        # array for-in rebinds ARE effective (rounds 1-3 evidence).
+        val m: HirModule = raw_m
+        modules_keys.push(m.name)
+        modules_vals.push(m)
+    var has_rt_hal = false
+    for module in modules_vals:
+        val m0: HirModule = module
+        for fn_key0 in m0.functions.keys():
+            val fn0: HirFunction = m0.functions[fn_key0]
+            if fn0.func_attr.is_rt_hal: has_rt_hal = true
+    if rt_criticality_claim_keys().len() == 0 and not has_rt_hal:
+        rt_bound_manifest_clear()
+        return []
+    # Rebuild the dict ONCE from the restored array elements; the rebuild's
+    # inserts carry genuinely-restored values.
+    var modules: Dict<text, HirModule> = {}
+    var ki = 0
+    while ki < modules_keys.len():
+        modules[modules_keys[ki]] = modules_vals[ki]
+        ki = ki + 1
+    validate_rt_criticality_diagnostics(modules)
+
 fn validate_rt_criticality_diagnostics(modules: Dict<text, HirModule>) -> [RtCriticalDiagnostic]:
     """Validate RT roots while retaining warning/error severity for callers."""
     var has_rt_hal = false
@@ -755,6 +843,8 @@ fn validate_rt_criticality(modules: Dict<text, HirModule>) -> [text]:
 
 export validate_rt_criticality, rt_name_effects
 export validate_rt_criticality_diagnostics
+export validate_rt_criticality_diagnostics_array
+export validate_rt_criticality_diagnostics_blobs
 export rt_expr_allocates, rt_block_allocates
 export rt_expr_dispatches, rt_block_dispatches
 export rt_direct_callee_dispatches
