@@ -917,6 +917,38 @@ impl CompilerDriver:
                     bootstrap_enum_modules = bootstrap_enum_modules.push(bootstrap_enum_hir)
                 bootstrap_enum_idx = bootstrap_enum_idx + 1
             bootstrap_lowering.register_module_enum_bootstrap_inventory_v1(bootstrap_enum_modules)
+            # Emission coverage (site-19, emission divergence 2026-10-17): this
+            # lane previously lowered ONLY the entry, so the per-module
+            # collection emission iterated just the replayed modules (~40
+            # objects) and the link missed every callable owned by the other
+            # ~1259 closure modules (measured: io_runtime.env_get,
+            # driver_compile_options_default, the K1 table rows, ... undefined
+            # under a scheme-homogeneous link -- not a cache or mangling
+            # problem; the #3608 emitter gate proved that by eliminating every
+            # foreign-scheme object and changing nothing). Lower EVERY
+            # scheduled closure module through this same instance and publish
+            # each MirModule into ctx.mir_modules, the exact shape the direct
+            # lane's per-module loop produces for the collection emission.
+            # Non-entry modules go FIRST: lower_module's bootstrap-flat branch
+            # resets the flat function registry per call, and the flat entry
+            # emission (bootstrap_mir_function_count > 0) reads that registry,
+            # the entry must be the LAST module lowered on this instance.
+            # Modules already in ctx.mir_modules (archive/mono replay) keep
+            # their MIR and are skipped.
+            var bootstrap_closure_idx = 0
+            while bootstrap_closure_idx < self.ctx.sources.len():
+                val bootstrap_closure_source = self.ctx.sources[bootstrap_closure_idx]
+                val bootstrap_closure_name = bootstrap_closure_source.module_name
+                if bootstrap_closure_name != "app.cli.bootstrap_main" and
+                        not self.ctx.mir_modules.contains_key(bootstrap_closure_name):
+                    val bootstrap_closure_hir = self.ctx.hir_modules[bootstrap_closure_name]
+                    if bootstrap_closure_hir != nil:
+                        val bootstrap_closure_mir = bootstrap_lowering.lower_module(
+                            bootstrap_closure_hir, [], false)
+                        bootstrap_closure_mir.name = bootstrap_closure_name
+                        self.ctx.mir_modules[bootstrap_closure_name] = bootstrap_closure_mir
+                        log_phase("aot:bootstrap_fixed:closure_module module={bootstrap_closure_name} functions={bootstrap_closure_mir.functions.len()}")
+                bootstrap_closure_idx = bootstrap_closure_idx + 1
             var bootstrap_mir = bootstrap_lowering.lower_bootstrap_entry_module(bootstrap_hir)
             driver_trace_module_mir_errors("app.cli.bootstrap_main", bootstrap_hir.path,
                 bootstrap_lowering.errors, 0)
@@ -927,7 +959,7 @@ impl CompilerDriver:
                     "app.cli.bootstrap_main", bootstrap_lowering.devirtualized_calls,
                     self.ctx.runtime_std_full_inventory_selection != nil):
                 self.ctx.add_error(archived_devirt)
-            log_phase("aot:bootstrap_fixed:done module=app.cli.bootstrap_main functions={bootstrap_mir.functions.len()}")
+            log_phase("aot:bootstrap_fixed:done module=app.cli.bootstrap_main functions={bootstrap_mir.functions.len()} closure_modules={self.ctx.mir_modules.keys().len()}")
             return self.ctx.error_count_value == 0
 
         if self.ctx.sources.len() > 0:
