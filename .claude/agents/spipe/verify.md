@@ -13,6 +13,13 @@ receipt coverage, or when kernel/drivers select MDSOC+.
 
 ## Entry Criteria
 
+For native provider overlays, use ordered repeated `--native-source PATH`
+roots with the canonical runner; bare `--native` is unsupported. Verify
+compiler/worker roots, receipt identity, and actual fixture output.
+`SIMPLE_LIB` does not select native providers. Follow
+`doc/07_guide/infra/testing/native_test_binary_workflow.md`; without an
+executable producer, authored native specs remain TEST_BLOCKED.
+
 - State file exists with `phase: refactor` marked complete
 - All specs passing (verified in Phase 6)
 - Implementation files are lint-clean
