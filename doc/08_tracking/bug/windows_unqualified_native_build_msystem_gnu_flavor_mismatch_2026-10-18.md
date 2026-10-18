@@ -1,7 +1,9 @@
 # Unqualified Windows native-build under Git Bash links GNU against MSVC objects
 
-Status: OPEN; owner decision needed (default flavor for an unqualified target
-on a Windows host). Workaround: pass `--target x86_64-pc-windows-msvc`.
+Status: FIXED 2026-10-19 (option 1). `windows_link_flavor_select` no longer
+consults MSYSTEM; an unqualified target is msvc unless `SIMPLE_LINKER_FLAVOR`
+or `SIMPLE_WINDOWS_ABI` selects gnu. Pinned by
+`test/01_unit/compiler/linker/windows_link_flavor_target_spec.spl`.
 
 ## Reproduction (2026-10-18, Stage 2 compiler from release_phase3 e77412a8eef)
 
