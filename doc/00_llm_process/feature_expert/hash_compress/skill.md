@@ -93,3 +93,12 @@ seen both ways. Tail expressions and continuation lines are never recorded.
   blocks. `lz4_compress_frame` emits independent <=64 KiB blocks (each compressed or
   stored raw, with a per-block checksum when enabled).
 - Specs: `zstd_frame_variants_spec.spl` and `lz4_spec.spl` (mirrored under `test/unit/`).
+
+## RSAES-PKCS1-v1_5 padding randomness (2026-10-19)
+`std.common.crypto.rsa_pkcs1` type-2 PS is random nonzero bytes from
+`csprng_bytes` (`std.common.aes.utilities`, `rt_random_i64`), rejection-sampled;
+entropy failure returns `[]`. Do not use `entropy_platform_bytes` there yet:
+`rt_entropy_fill` is unbacked in the seed. The padding helper is private; the
+spec observes it via `rsa_pkcs1_public_encrypt` with e=1 and an all-0xFF
+modulus (ciphertext == padded block, no RSA-2048 modexp). Spec:
+`test/01_unit/lib/crypto/rsa_pkcs1_padding_spec.spl`.
