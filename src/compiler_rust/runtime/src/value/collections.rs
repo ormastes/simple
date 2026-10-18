@@ -29,7 +29,16 @@ thread_local! {
 
 struct TransientHeapScope {
     paused: bool,
-    objects: Vec<RuntimeValue>,
+    // MIR phase crawl fix (cycle-163, 2026-10-19): promote used to
+    // `objects.retain(!reachable.contains)` -- a full scan of every object
+    // tracked since scope start on EVERY promote call. The MIR phase calls
+    // promote once per module (4084x) while the scope grows monotonically,
+    // making the phase quadratic (~1 module/min at done=64/4084, with single
+    // modules drawing 43-minute dts). A set lets promote delete exactly the
+    // reachable pointers (O(reachable) per call) instead of scanning
+    // O(scope) with a hash lookup per element. Free order at scope end is
+    // irrelevant (each object unregisters and deallocs its own pointer).
+    objects: super::heap::HeapPtrSet<RuntimeValue>,
 }
 
 /// True when the calling thread holds a transient heap scope that is paused,
@@ -42,7 +51,7 @@ pub(crate) fn track_transient_heap(value: RuntimeValue) -> RuntimeValue {
     TRANSIENT_HEAP_SCOPE.with(|slot| {
         if let Some(scope) = slot.borrow_mut().as_mut() {
             if !scope.paused {
-                scope.objects.push(value);
+                scope.objects.insert(value);
             }
         }
     });
@@ -2159,7 +2168,7 @@ pub extern "C" fn rt_transient_array_scope_begin() -> bool {
         }
         *slot = Some(TransientHeapScope {
             paused: false,
-            objects: Vec::new(),
+            objects: super::heap::HeapPtrSet::default(),
         });
         true
     })
@@ -2371,7 +2380,9 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
                 return false;
             }
         }
-        scope.objects.retain(|object| !reachable_heap.contains(&object.0));
+        for ptr in reachable_heap.iter() {
+            scope.objects.remove(&RuntimeValue(*ptr));
+        }
         true
     })
 }
