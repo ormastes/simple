@@ -37,7 +37,11 @@ accepted for the per-scope private directory only.
 Not moved, on purpose: `cas_put`/`cas_get` and HIR cache body/keys (64 hex is
 pinned across the archive/lease modules; XXH3-128 needs a schema bump there),
 and the receipt digests in the target-receipted parse path (`source_digest`,
-`parser_input_digest`), which are SHA-256 identities other code verifies.
+`preprocessed_digest`), which are SHA-256 identities other code verifies.
+`parse_full_frontend_preprocessed_with_scope` returns the parser-input TEXT,
+and only the target-receipted caller hashes it into `preprocessed_digest`, so
+an ordinary parse pays no whole-file SHA-256 at all. Pinned by
+`target_cfg_receipt_v1_spec` ("binds the preprocessed digest ...").
 
 Measured (seed `bin/local/seed_simple`, sha256 prefix 9c45d2bf601ab93e):
 | Case | Before | After |
