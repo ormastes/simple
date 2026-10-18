@@ -1,0 +1,84 @@
+"""Real fingerprint I/O and fail-closed cache admission regressions.
+
+The raw-hash failure case exercises the native FFI's actual failure result;
+it does not manufacture nil as a text literal. Native execution is required
+before claiming that contract is qualified.
+"""
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_write_exact, file_write_bytes, file_delete}
+use compiler.driver.driver_build.incremental.{
+    FileFingerprint, DependencyEntry, BuildCache, ChangeKind,
+    incremental_fingerprint_digest_valid_v1
+}
+
+extern fn rt_getpid() -> i64
+extern fn rt_time_monotonic_ns() -> i64
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_hash_sha256(path: text) -> text
+
+fn fingerprint_fixture_prefix() -> text:
+    expect(rt_dir_create_all("build")).to_equal(true)
+    "build/fingerprint-sha-{rt_getpid()}-{rt_time_monotonic_ns()}"
+
+describe "fingerprint SHA256 admission":
+    it "accepts only complete lowercase hexadecimal digests":
+        val valid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        expect(incremental_fingerprint_digest_valid_v1(valid)).to_equal(true)
+        expect(incremental_fingerprint_digest_valid_v1("")).to_equal(false)
+        expect(incremental_fingerprint_digest_valid_v1(valid[:63])).to_equal(false)
+        expect(incremental_fingerprint_digest_valid_v1(valid + "0")).to_equal(false)
+        expect(incremental_fingerprint_digest_valid_v1("A" + valid[1:])).to_equal(false)
+        expect(incremental_fingerprint_digest_valid_v1(valid[:63] + "g")).to_equal(false)
+
+    it "rejects the actual native hash failure and a missing fingerprint":
+        val missing = fingerprint_fixture_prefix() + ".missing"
+        val failed_hash = rt_file_hash_sha256(missing)
+        expect(incremental_fingerprint_digest_valid_v1(failed_hash)).to_equal(false)
+        expect(FileFingerprint.from_file(missing)).to_be_nil()
+
+    it "fingerprints empty and binary files with exact known digests":
+        val prefix = fingerprint_fixture_prefix()
+        val empty_path = prefix + ".empty"
+        val binary_path = prefix + ".binary"
+        expect(file_write_exact(empty_path, "")).to_equal(true)
+        expect(file_write_bytes(binary_path, [0u8, 255u8, 128u8, 10u8])).to_equal(true)
+        val empty_fp = FileFingerprint.from_file(empty_path)
+        val binary_fp = FileFingerprint.from_file(binary_path)
+        expect(file_delete(empty_path)).to_equal(true)
+        expect(file_delete(binary_path)).to_equal(true)
+        expect(empty_fp != nil).to_equal(true)
+        expect(binary_fp != nil).to_equal(true)
+        expect(empty_fp!.content_hash).to_equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        expect(binary_fp!.content_hash).to_equal("6d6f7836f1e146dc0204afb5133dae52fdc05603d8ac2dc793b481b0e0829fd1")
+
+    it "keeps unchanged sources clean and reports a removed listed source as deleted":
+        val source = fingerprint_fixture_prefix() + ".spl"
+        expect(file_write_exact(source, "val answer = 42\n")).to_equal(true)
+        val current = FileFingerprint.from_file(source)
+        expect(current != nil).to_equal(true)
+        var cache = BuildCache.empty("")
+        cache.fingerprints[source] = current!
+        val unchanged = cache.detect_changes([source])
+        expect(unchanged.changes.len()).to_equal(0)
+        expect(file_delete(source)).to_equal(true)
+        val removed = cache.detect_changes([source])
+        expect(removed.changes.len()).to_equal(1)
+        expect(removed.changes[0].path).to_equal(source)
+        expect(removed.changes[0].kind).to_equal(ChangeKind.Deleted)
+        val new_cache = BuildCache.empty("")
+        val unavailable = new_cache.detect_changes([source])
+        expect(unavailable.changes.len()).to_equal(1)
+        expect(unavailable.changes[0].kind).to_equal(ChangeKind.Added)
+
+    it "requires recompilation when a real dependency disappears":
+        val source = fingerprint_fixture_prefix() + ".spl"
+        expect(file_write_exact(source, "val dependency = 7\n")).to_equal(true)
+        val current = FileFingerprint.from_file(source)
+        expect(current != nil).to_equal(true)
+        val entry = DependencyEntry(source: source, fingerprint: current!,
+            dependencies: [source], outputs: [], deps_iface: "",
+            interface_digest: "", module_witness: "")
+        val dependencies: {text: FileFingerprint} = {source: current!}
+        expect(entry.needs_recompile(current!, dependencies)).to_equal(false)
+        expect(file_delete(source)).to_equal(true)
+        expect(entry.needs_recompile(current!, dependencies)).to_equal(true)
