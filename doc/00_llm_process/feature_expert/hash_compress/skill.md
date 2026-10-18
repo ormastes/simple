@@ -83,3 +83,13 @@ seen both ways. Tail expressions and continuation lines are never recorded.
 - Check the ENCODER against an independent decoder (host `gzip -dc`), not only our own
   inflate: a same-path round trip hid the >65535-byte stored-block LEN truncation.
 - Do not fabricate KATs (`fabricated_blake2s_65_byte_kat_2026-08-04.md`).
+
+## Block-size limits (frame encoders)
+
+- Zstd: Block_Maximum_Size is 128 KiB and the block header size field is 21 bits.
+  `zstd_compress_frame` splits input into <=128 KiB raw/RLE blocks (RLE per block when
+  its bytes are identical); Last_Block=1 only on the final block.
+- LZ4: the frame BD byte declares a 64 KiB max block, and the decoder rejects larger
+  blocks. `lz4_compress_frame` emits independent <=64 KiB blocks (each compressed or
+  stored raw, with a per-block checksum when enabled).
+- Specs: `zstd_frame_variants_spec.spl` and `lz4_spec.spl` (mirrored under `test/unit/`).
