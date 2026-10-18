@@ -2,7 +2,7 @@
 
 Owner: Astra feature acceptance. Scope: two missing runtime files consumed by
 the existing grouped runner/qualification fixture. Base `648420d`; maximum three
-repair/check cycles; this is cycle one. Highest-model review is required.
+repair/check cycles; this is cycle two. Highest-model review is required.
 No compiler/process launch is authorized in this lane.
 
 `managed_parse_group_install_v1` admits the canonical snapshot, exact target,
@@ -15,15 +15,16 @@ around a valid independent module without losing their diagnostic receipts.
 The action arms/takes the existing flat capture bridge and publishes raw flat
 payloads matching the ordinary compiler frontend cache payload. Durable cache
 hits require canonical module receipt, source identity, blob digest and decoder
-acceptance. A separate authority digest binds snapshot, producer, target,
-codec, parse kind and the existing frontend feature fingerprint. Missing or
+acceptance. A separate authority sidecar binds the per-module key, codec,
+prepared source, cfg decisions and actual frontend feature/capture policy. Missing or
 invalid authority/receipt/blob means a miss; unreadable cache I/O and reported
 parser policy errors are explicit errors. No error parse is cached.
 
 Authority sidecars use the per-module CACHE-2 key plus `.authority`, binding
 worker/cache/target/module/source identity without batch snapshot, slot or
 generation. Canonical sidecar fields additionally bind parse kind, flat codec
-and actual frontend feature identity. The existing reaped-generation parent
+and a digest of actual frontend feature/capture policy, prepared bytes and cfg
+decisions. The existing reaped-generation parent
 copier now validates and carries this sidecar together with the verified module
 receipt/blob. Missing, malformed or wrong-key sidecars remain cold. Parent
 validation uses only existing lightweight wire/digest contracts; it does not
@@ -51,3 +52,25 @@ canonical diagnostic/SDN round trip, durable reuse, cache corruption negatives,
 source changes, target/policy rejection and entry marker/shutdown/mailbox checks.
 Runtime, docgen and live process qualification remain UNRUN. No nine-feature
 completion, Phase3 admission or release PASS is claimed.
+
+Cycle-two parity correction shares the ordinary frontend's domain extraction
+and checked advisory preparation. The worker first uses the existing explicit
+snapshot OS/architecture cfg evaluator (whose `cpu` predicate aliases arch),
+then parses/restores the exact prepared bytes. It reattaches extracted domains
+and applies the same desugaring on both paths. Flat artifacts remain reference
+parser pool payloads, not serialized final desugared modules: an ordinary
+frontend consumer repeats preparation, domain attachment and desugaring. The
+original source digest stays request-bound; transformed bytes and decisions
+add cache authority rather than replacing original input identity.
+
+OPEN SUPPORT GAP: `SIMPLE_CAPTURE_WRITE_CHECK=warning` deliberately suppresses
+capture for a successful warning parse. V1 results require a flat artifact and
+cannot honestly represent this successful noncacheable outcome. Installation
+therefore explicitly refuses warning mode; a post-install change fails policy
+validation before parsing. This temporary limitation does not close full worker
+acceptance. Future support must add a versioned noncacheable-success result with
+canonical warning diagnostics and parent consumption semantics, or extend the
+canonical capture/restore policy to retain and replay warning evidence without
+silencing warnings. It must preserve ordinary warning-success semantics and
+prove cold/warm parity before warning mode can be admitted. No fake artifact,
+policy bypass or conversion of warning-success into source ERROR is acceptable.

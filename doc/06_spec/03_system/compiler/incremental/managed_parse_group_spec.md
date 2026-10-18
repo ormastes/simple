@@ -31,6 +31,14 @@ not predetermined success/failure DTOs.
 6. Invoke the worker entry with matching shutdown and verify every installed
    marker field through the real wire reader, including aggregate source bytes.
    Reject a foreign shutdown identity and an unsafe mailbox filename.
+7. Feed the full target frontend an excluded syntactically invalid function,
+   an included `selected` function and a `schema` domain with payload `Person`.
+   Assert those independent AST expectations, then require worker cold and
+   replacement-owner warm artifacts to match the actual frontend capture.
+8. Select warning capture policy and require explicit installation refusal;
+   changing an admitted owner to warning policy yields a policy rejection.
+   Restore the previous process policy before assertions. Warning-success
+   transport remains an open support gap, not a completed acceptance criterion.
 
 Live compiled-worker parity and durable replacement-process reuse remain owned
 by `parser_qualification_evidence.spl` and require an admitted pinned producer,

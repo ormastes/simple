@@ -10,8 +10,10 @@ use compiler.driver.driver_build.managed_parse_group_result.*
 use compiler.frontend.flat_ast_bridge.{flat_pool_capture_arm, flat_pool_capture_take, parse_and_build_module_scoped, build_module_from_flat_pool_blob}
 use compiler.core.parser.{parser_has_errors}
 use compiler.frontend.core.cfg_platform.{cfg_detect_os, cfg_detect_arch, cfg_detect_cpu}
+use compiler.frontend.frontend.{parse_full_frontend_target_receipted_v1}
+use compiler.common.config.{Logger}
 use std.common.crypto.sha256.{sha256_text}
-use std.nogc_sync_mut.io.env_ops.{cwd}
+use std.nogc_sync_mut.io.env_ops.{cwd, env_get, env_set}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_regular_no_follow_bounded, file_exists}
@@ -59,6 +61,51 @@ fn managed_spec_check(owner: ManagedParseGroupOwnerV1, result: ManagedParseActio
         expect(file_exists(owner.root + "/cache/" + key + ".sdn")).to_be(false)
 
 describe "REQ-IM-007 REQ-IM-008: real managed parser and durable flat artifacts":
+    it "should match the full target frontend for excluded invalid declarations and retained domain blocks":
+        val original = managed_spec_owner("conditional-domain")
+        val excluded_os = if original.snapshot.target_os == "windows": "linux" else: "windows"
+        val source = "@cfg(os = \"" + excluded_os + "\")\nfn excluded() -> i64:\n    val = 1\n" +
+            "@cfg(os = \"" + original.snapshot.target_os + "\")\nfn selected() -> i64:\n    42\n" +
+            "schema" + "{" + " Person " + "}" + "\n"
+        var snapshot = original.snapshot
+        snapshot.modules = [ManagedParseModuleV1("selected", "package", "qualification-parent/selected.spl", sha256_text(source))]
+        snapshot.snapshot_digest = managed_parse_snapshot_digest_v1(snapshot)
+        expect(file_atomic_write(original.root + "/sources/qualification-parent/selected.spl", source)).to_be(true)
+        step("Run the ordinary target frontend and assert independently known selection and domain semantics")
+        flat_pool_capture_arm()
+        val ordinary = parse_full_frontend_target_receipted_v1(source,
+            "qualification-parent/selected.spl", "selected", Logger(0), "selected", sha256_text(source),
+            snapshot.target_arch + "-" + snapshot.target_os).unwrap()
+        expect(parser_has_errors()).to_be(false)
+        expect(ordinary[0].functions.contains_key("selected")).to_be(true)
+        expect(ordinary[0].functions.contains_key("excluded")).to_be(false)
+        expect(ordinary[0].domain_blocks.len()).to_equal(1)
+        expect(ordinary[0].domain_blocks[0].kind).to_equal("schema")
+        expect(ordinary[0].domain_blocks[0].payload).to_equal("Person")
+        val ordinary_blob = flat_pool_capture_take()
+        expect(ordinary_blob == "").to_be(false)
+        step("Require worker cold capture and replacement-owner warm capture to match that full frontend artifact")
+        val owner = managed_parse_group_install_v1(original.root, snapshot).unwrap()
+        val first = managed_parse_group_action_owned_v1(owner, managed_spec_action(owner, "conditional-first"))
+        expect(first.result.modules[0].status).to_equal("OK")
+        expect(first.result.modules[0].blob_digest).to_equal(sha256_text(ordinary_blob))
+        val replacement = managed_parse_group_install_v1(original.root, snapshot).unwrap()
+        val second = managed_parse_group_action_owned_v1(replacement, managed_spec_action(replacement, "conditional-second"))
+        expect(second.result.modules[0].status).to_equal("OK")
+        expect(second.result.modules[0].reused).to_be(true)
+        expect(second.result.modules[0].blob_digest).to_equal(first.result.modules[0].blob_digest)
+
+    it "should refuse warning mode at install without turning a warning into a source error":
+        val owner = managed_spec_owner("warning-admission")
+        val previous = env_get("SIMPLE_CAPTURE_WRITE_CHECK")
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", "warning")).to_be(true)
+        val refused = managed_parse_group_install_v1(owner.root, owner.snapshot)
+        val changed_policy = managed_parse_group_action_owned_v1(owner, managed_spec_action(owner, "warning-policy"))
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", previous)).to_be(true)
+        expect(refused.is_err()).to_be(true)
+        expect(changed_policy.result.modules[1].diagnostics[0]).to_contain("E-PARSE-POLICY")
+        expect(changed_policy.result.modules[1].blob_path).to_equal("")
+
     it "should emit the real installed wire marker and honor only an exact shutdown identity":
         step("Install the worker entry with an already requested matching shutdown")
         val owner = managed_spec_owner("entry-stop")
