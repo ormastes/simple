@@ -13,8 +13,7 @@ use std.nogc_sync_mut.compression.gzip.types.{
 }
 use std.nogc_sync_mut.compression.gzip.huffman.{
     deflate_fixed_huffman, deflate_fixed_distances, huffman_lookup,
-    bitstream_new, bitstream_write_bits_lsb, bitstream_write_huffman,
-    bitstream_finish, deflate_length_extra, deflate_distance_extra
+    deflate_length_extra, deflate_distance_extra
 }
 
 # =============================================================================
@@ -26,117 +25,146 @@ fn deflate_block_stored(data, is_final) -> [u8]:
     if data == nil:
         return []
 
+    # LEN is a 16-bit field (RFC 1951 3.2.4): longer input becomes a run of
+    # stored blocks, and only the last one may carry BFINAL.
     var block: [u8] = []
-
-    # Block header (3 bits)
-    var header = BLOCK_STORED << 1
-    if is_final:
-        header = header | 1
-
-    block.push(header.to_u8())
-
-    # Length (2 bytes)
-    val len = data.len()
-    block.push((len & 0xff).to_u8())
-    block.push(((len >> 8) & 0xff).to_u8())
-
-    # One's complement of length
-    val nlen = (~len) & 0xffff
-    block.push((nlen & 0xff).to_u8())
-    block.push(((nlen >> 8) & 0xff).to_u8())
-
-    # Data bytes
-    var i = 0
+    val total = data.len()
+    var start = 0
     loop:
-        if i >= data.len():
+        val len = if total - start > 65535: 65535 else: total - start
+        val last = start + len >= total
+        var header = BLOCK_STORED << 1
+        if is_final and last:
+            header = header | 1
+        block.push(header.to_u8())
+        block.push((len & 0xff).to_u8())
+        block.push(((len >> 8) & 0xff).to_u8())
+        val nlen = (~len) & 0xffff
+        block.push((nlen & 0xff).to_u8())
+        block.push(((nlen >> 8) & 0xff).to_u8())
+        var i = start
+        while i < start + len:
+            block.push(data[i])
+            i = i + 1
+        start = start + len
+        if last:
             break
-        block.push(data[i])
-        i = i + 1
 
     return block
 
-# Create DEFLATE fixed Huffman block (RFC 1951 §3.2.6)
-# Produces a proper bitstream: BFINAL+BTYPE LSB-first, Huffman codes MSB-first packed LSB into bytes.
-# Core fixed-Huffman block writer.
+# Reverse the low `n` bits of `code` (Huffman codes are sent MSB-first, RFC 1951 3.1.1).
+fn _reverse_bits(code: i64, n: i64) -> i64:
+    var r = 0
+    var i = 0
+    while i < n:
+        r = (r << 1) | ((code >> i) & 1)
+        i = i + 1
+    r
+
+# Pack (value, bit-count) pairs LSB-first into bytes, zero-padding the last byte
+# (RFC 1951 3.1.1). One pass with a single owned output array: the previous
+# bit-writer returned its whole byte array from every call, which copied it per
+# symbol (O(n^2); 7.7 GB RSS under JIT for a 30 KB input).
+fn deflate_pack_bits(vals: [i64], counts: [i64]) -> [u8]:
+    var out: [u8] = []
+    var buf = 0
+    var cnt = 0
+    var i = 0
+    while i < vals.len():
+        buf = buf | (vals[i] << cnt)
+        cnt = cnt + counts[i]
+        while cnt >= 8:
+            out.push((buf & 255).to_u8())
+            buf = buf >> 8
+            cnt = cnt - 8
+        i = i + 1
+    if cnt > 0:
+        out.push((buf & 255).to_u8())
+    out
+
+# Core fixed-Huffman block writer (RFC 1951 3.2.6).
 #
-# `sync_flush` appends an empty stored block (RFC 1951 §3.2.4) so the stream
-# ends in 00 00 FF FF — required by RFC 7692 permessage-deflate.  The stored
-# block's 3 header bits are written INTO the bitstream *before* padding, so they
-# share the end-of-block symbol's trailing byte whenever there is room.  That
-# bit-level packing is what makes the output byte-exact with zlib Z_SYNC_FLUSH;
-# simply appending 4 bytes to a padded block produces a stream whose second
-# block header is misaligned and fails to inflate.
+# `sync_flush` appends an empty stored block (RFC 1951 3.2.4) so the stream
+# ends in 00 00 FF FF -- required by RFC 7692 permessage-deflate. The stored
+# block's 3 header bits are packed INTO the bitstream *before* padding, so they
+# share the end-of-block symbol's trailing byte whenever there is room; that is
+# what makes the output byte-exact with zlib Z_SYNC_FLUSH.
 fn _deflate_block_fixed_ex(tokens, is_final, sync_flush) -> [u8]:
     if tokens == nil:
         return []
 
-    val lit_codes  = deflate_fixed_huffman()
-    val dist_codes = deflate_fixed_distances()
+    # Fixed codes pre-reversed to send order (codes go out MSB-first, 3.1.1) once per
+    # block, indexed by symbol: the per-token path is then two array reads.
+    # Values read out of untyped `[Any]` rows are bound to typed locals before any
+    # arithmetic: the seed JIT otherwise passes them on still tagged
+    # (build/probe/gzip_jit3.spl).
+    var lit_vals: [i64] = []
+    var lit_bits: [i64] = []
+    for row in deflate_fixed_huffman():
+        val code: i64 = row[1]
+        val nbits: i64 = row[2]
+        lit_vals.push(_reverse_bits(code, nbits))
+        lit_bits.push(nbits)
+    var dist_vals: [i64] = []
+    for row in deflate_fixed_distances():
+        val code: i64 = row[1]
+        dist_vals.push(_reverse_bits(code, 5))
 
-    # Start bit stream — write BFINAL (1 bit) and BTYPE (2 bits) LSB-first
-    var bfinal = 0
-    if is_final:
-        bfinal = 1
-    var bs = bitstream_new()
-    bs = bitstream_write_bits_lsb(bs, bfinal, 1)
-    bs = bitstream_write_bits_lsb(bs, BLOCK_FIXED, 2)
+    # Bit fields in send order: BFINAL (1 bit) then BTYPE (2 bits), LSB-first.
+    var vals: [i64] = []
+    var counts: [i64] = []
+    vals.push(if is_final: 1 else: 0)
+    counts.push(1)
+    vals.push(BLOCK_FIXED)
+    counts.push(2)
 
-    # Encode tokens
     var i = 0
-    loop:
-        if i >= tokens.len():
-            break
-
+    while i < tokens.len():
         val token = tokens[i]
-        val token_type = token[0]
-        val value = token[1]
+        val token_type: i64 = token[0]
+        val value: i64 = token[1]
 
         if token_type == 0:
-            # Literal byte
-            if val code_info = huffman_lookup(lit_codes, value):
-                bs = bitstream_write_huffman(bs, code_info[0], code_info[1])
+            vals.push(lit_vals[value])
+            counts.push(lit_bits[value])
         else:
             # Match: token = [1, distance, length]
-            val distance = value
-            val length   = token[2]
-
-            # Length code
+            val length: i64 = token[2]
             val len_code = deflate_length_code(length)
-            if val len_info = huffman_lookup(lit_codes, len_code):
-                bs = bitstream_write_huffman(bs, len_info[0], len_info[1])
+            vals.push(lit_vals[len_code])
+            counts.push(lit_bits[len_code])
 
-            # Length extra bits (LSB-first)
             val len_extra = deflate_length_extra(length)
-            val len_ex_val = len_extra[0]
-            val len_ex_cnt = len_extra[1]
+            val len_ex_val: i64 = len_extra[0]
+            val len_ex_cnt: i64 = len_extra[1]
             if len_ex_cnt > 0:
-                bs = bitstream_write_bits_lsb(bs, len_ex_val, len_ex_cnt)
+                vals.push(len_ex_val)
+                counts.push(len_ex_cnt)
 
-            # Distance code (5-bit, MSB-first)
-            val dist_code = deflate_distance_code(distance)
-            if val dist_info = huffman_lookup(dist_codes, dist_code):
-                bs = bitstream_write_huffman(bs, dist_info[0], dist_info[1])
+            vals.push(dist_vals[deflate_distance_code(value)])
+            counts.push(5)
 
-            # Distance extra bits (LSB-first)
-            val dist_extra = deflate_distance_extra(distance)
-            val dist_ex_val = dist_extra[0]
-            val dist_ex_cnt = dist_extra[1]
+            val dist_extra = deflate_distance_extra(value)
+            val dist_ex_val: i64 = dist_extra[0]
+            val dist_ex_cnt: i64 = dist_extra[1]
             if dist_ex_cnt > 0:
-                bs = bitstream_write_bits_lsb(bs, dist_ex_val, dist_ex_cnt)
+                vals.push(dist_ex_val)
+                counts.push(dist_ex_cnt)
 
         i = i + 1
 
     # End-of-block symbol (256)
-    if val eob_info = huffman_lookup(lit_codes, 256):
-        bs = bitstream_write_huffman(bs, eob_info[0], eob_info[1])
+    vals.push(lit_vals[256])
+    counts.push(lit_bits[256])
 
     if not sync_flush:
-        return bitstream_finish(bs)
+        return deflate_pack_bits(vals, counts)
 
     # Empty stored block header: BFINAL=0 (1 bit) + BTYPE=00 stored (2 bits).
-    bs = bitstream_write_bits_lsb(bs, 0, 3)
-    var out = bitstream_finish(bs)
-    # LEN = 0x0000, NLEN = 0xFFFF — byte-aligned after the padding above.
+    vals.push(0)
+    counts.push(3)
+    var out = deflate_pack_bits(vals, counts)
+    # LEN = 0x0000, NLEN = 0xFFFF -- byte-aligned after the padding above.
     out.push(0x00u8)
     out.push(0x00u8)
     out.push(0xFFu8)
@@ -153,8 +181,6 @@ fn deflate_block_fixed_sync_flush(tokens) -> [u8]:
 
 # Get length code for match length
 fn deflate_length_code(length) -> i64:
-    if length < 3:
-        return 257
     if length <= 10:
         return 257 + (length - 3)
     if length <= 18:

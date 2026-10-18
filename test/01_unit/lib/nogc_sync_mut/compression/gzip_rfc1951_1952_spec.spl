@@ -10,23 +10,31 @@ Adverse streams are hand-assembled bit by bit from RFC 1951 section 3.2; the pos
 known-answer streams were produced by the host `gzip -9n` (independent oracle).
 `inflate` tolerates a final-less stream that ends exactly on a block boundary (RFC 7692
 sync-flush); the gzip container (`gzip_decompress`) does not. Multi-member gzip files (RFC
-1952 section 2.2) are REJECTED, not concatenated. Failure is reported as nil, not a typed error.
+1952 section 2.2) decode to the concatenation of their members; any bad member fails the
+whole file. Failure is reported as nil, not a typed error.
 ## Verification guidance and troubleshooting
 Run one spec at a time. A red adverse case means the decoder accepted a stream the RFC
 forbids; the case name cites the RFC section that is violated.
 """
-# Lifecycle: doc/03_plan/lib/crypto/hash_gzip_hardening_2026-10-18.md ;
-# doc/04_architecture/lib/common_compression_framework.md
+# Lifecycle: doc/01_research/lib/compress/compression_codec_catalog_2026-06-15.md ;
+# doc/03_plan/lib/crypto/hash_gzip_hardening_2026-10-18.md ;
+# doc/04_architecture/lib/common_compression_framework.md ;
+# doc/05_design/lib/crypto/hash_gzip_design.md
 # @manual_section: gzip_rfc1951
 use std.spec.step
 use std.spipe.*
-use std.nogc_sync_mut.compression.gzip.inflate.{inflate, inflate_bounded, inflate_block_stored, inflate_block_fixed, inflate_block_dynamic, deflate_block_parse}
-use std.nogc_sync_mut.compression.gzip.huffman.{bitstream_reader_new, bitstream_new, bitstream_write_bits_lsb, bitstream_write_huffman, bitstream_finish, huffman_lookup, deflate_fixed_huffman, deflate_fixed_distances, deflate_length_decode_info, deflate_distance_decode_info, deflate_length_extra, deflate_distance_extra}
-use std.nogc_sync_mut.compression.gzip.deflate.{deflate_length_code, deflate_distance_code}
+use std.nogc_sync_mut.compression.gzip.inflate.{inflate, inflate_bounded, inflate_member, deflate_block_parse}
+use std.nogc_sync_mut.compression.gzip.huffman.{huffman_lookup, deflate_fixed_huffman, deflate_fixed_distances, deflate_length_decode_info, deflate_distance_decode_info, deflate_length_extra, deflate_distance_extra}
+use std.nogc_sync_mut.compression.gzip.deflate.{deflate_length_code, deflate_distance_code, deflate_pack_bits}
 use std.nogc_sync_mut.compression.gzip.crc.{crc32_calculate, crc32_update, crc32_finalize, crc32_chunked, crc32_verify, crc32_text}
 use std.nogc_sync_mut.compression.gzip.{gzip_compress, gzip_decompress, gzip_validate, gzip_is_compressed, gzip_get_metadata, gzip_extract_payload}
 use std.nogc_sync_mut.compression.gzip.header.{gzip_header_create, gzip_header_parse, gzip_header_size, gzip_footer_parse, gzip_footer_validate}
-use std.common.compress.gzip.{gzip_decompress as facade_decompress, gzip_crc32}
+use std.common.compress.gzip.{gzip_decompress as facade_decompress, gzip_crc32, gzip_compress as facade_compress}
+use std.common.compress.deflate.{deflate_compress_sync_flush, deflate_decompress_eof, deflate_decompress}
+use std.nogc_sync_mut.compression.gzip.{gzip_compress_default, gzip_compress_best, gzip_compress_fast, gzip_compress_none, gzip_compression_ratio, gzip_space_savings, gzip_efficiency, gzip_header_overhead, gzip_footer_overhead, gzip_total_overhead, gzip_analyze_data, gzip_suggest_level, gzip_estimate_size}
+use std.nogc_sync_mut.compression.gzip.lz77.{lz77_compress}
+use std.nogc_sync_mut.compression.gzip.deflate.{deflate_block_stored, deflate_block_fixed}
+use std.nogc_sync_mut.compression.gzip.stream.{gzip_stream_text_to_bytes, gzip_stream_bytes_to_text}
 
 # ---- bit-level stream builder (RFC 1951 section 3.1.1: LSB-first packing) ----
 fn _lsb(v: i64, n: i64) -> [i64]:
@@ -675,20 +683,8 @@ describe "RFC 1951 inflate - invalid dynamic-Huffman headers":
         val bits = _cat(_cat(_dyn_header(ll, [1]), _msb(0, 1)), _msb(2, 2))
         expect(_is_nil(inflate(_pack(bits)))).to_equal(true)
 
-describe "RFC 1951 inflate - single-block entry points and legacy shim":
+describe "RFC 1951 inflate - legacy block shim":
     # @manual scenario evidence
-    it "the single-block entry points decode one block each (RFC 1951 3.2.4 to 3.2.7)":
-        # @req REQ-GZIP-053
-        # @capture(vector): stored abc, fixed hello body, dynamic seq body
-        step("Decode one block with each single-block entry point")
-        val st = inflate_block_stored(bitstream_reader_new([3, 0, 252, 255, 97, 98, 99]))
-        expect((st[0] ?? []) == _text_bytes("abc")).to_equal(true)
-        val fx = inflate_block_fixed(bitstream_reader_new(_pack(_cat(_fl(97), _fl(256)))))
-        expect(fx[0] == nil).to_equal(false)
-        val ll = _litlens([[97, 1], [256, 1]], 257)
-        val dy = inflate_block_dynamic(bitstream_reader_new(_pack(_skip(_dyn_custom(_uniform4(), ll, [0], [97, 256]), 3))))
-        expect(dy[0] == nil).to_equal(false)
-
     it "the legacy block parser reads stored blocks and rejects malformed offsets (boundary)":
         # @req REQ-GZIP-054
         # @capture(vector): offsets -1, past end, stored, fixed marker
@@ -940,12 +936,36 @@ describe "RFC 1952 gzip - invalid body and trailer":
         val m = _bcat(_member(BASE_HDR, ABC_BODY, ABC_FOOTER), [122, 122])
         expect(_is_nil(gzip_decompress(m))).to_equal(true)
 
-    it "concatenated members are rejected: only a single member is supported (RFC 1952 2.2)":
+    it "concatenated members decode to the concatenation of their data (RFC 1952 2.2)":
         # @req REQ-GZIP-134
-        # @capture(vector): two valid abc members back to back
-        step("Decode two concatenated members")
+        # @capture(vector): host (printf a | gzip -n; printf b | gzip -n) = 42 bytes, gunzip prints ab
+        step("Decode two members produced separately by the host gzip")
+        val two: [u8] = [31, 139, 8, 0, 0, 0, 0, 0, 0, 3, 75, 4, 0, 67, 190, 183, 232, 1, 0, 0, 0, 31, 139, 8, 0, 0, 0, 0, 0, 0, 3, 75, 2, 0, 249, 239, 190, 113, 1, 0, 0, 0]
+        expect((gzip_decompress(two) ?? []) == "ab".bytes()).to_equal(true)
+        expect(gzip_validate(two)).to_equal(true)
+        expect(facade_decompress(two) == "ab".bytes()).to_equal(true)
         val one = _member(BASE_HDR, ABC_BODY, ABC_FOOTER)
-        expect(_is_nil(gzip_decompress(_bcat(one, one)))).to_equal(true)
+        expect((gzip_decompress(_bcat(_bcat(one, one), one)) ?? []) == "abcabcabc".bytes()).to_equal(true)  # oracle: three abc members
+
+    it "a malformed second member fails the whole file (RFC 1952 2.2)":
+        # @req REQ-GZIP-141
+        # @capture(vector): valid member followed by a member with a corrupt CRC, ISIZE, magic, or deflate body
+        step("Decode files whose second member is damaged")
+        val one = _member(BASE_HDR, ABC_BODY, ABC_FOOTER)
+        expect(_is_nil(gzip_decompress(_bcat(one, _member(BASE_HDR, ABC_BODY, _with(ABC_FOOTER, 0, 195)))))).to_equal(true)
+        expect(_is_nil(gzip_decompress(_bcat(one, _member(BASE_HDR, ABC_BODY, _with(ABC_FOOTER, 4, 4)))))).to_equal(true)
+        expect(_is_nil(gzip_decompress(_bcat(one, _member(_with(BASE_HDR, 1, 140), ABC_BODY, ABC_FOOTER))))).to_equal(true)
+        expect(_is_nil(gzip_decompress(_bcat(one, _member(BASE_HDR, [7, 0, 0], ABC_FOOTER))))).to_equal(true)
+        expect(gzip_validate(_bcat(one, _member(BASE_HDR, ABC_BODY, _with(ABC_FOOTER, 0, 195))))).to_equal(false)
+        expect(facade_decompress(_bcat(one, _member(BASE_HDR, ABC_BODY, _with(ABC_FOOTER, 0, 195)))).len()).to_equal(0)  # oracle: failure is an empty array
+
+    it "bytes after the last member that are not a member fail the file (RFC 1952 2.2)":
+        # @req REQ-GZIP-142
+        # @capture(vector): two valid members + 3 junk bytes; one member + a truncated second header
+        step("Decode files with trailing junk or a truncated trailing member")
+        val one = _member(BASE_HDR, ABC_BODY, ABC_FOOTER)
+        expect(_is_nil(gzip_decompress(_bcat(_bcat(one, one), [0, 0, 0])))).to_equal(true)
+        expect(_is_nil(gzip_decompress(_bcat(one, _prefix(one, 12))))).to_equal(true)
 
     it "a body that never sets BFINAL is rejected inside a gzip member (RFC 1951 3.2.3)":
         # @req REQ-GZIP-135
@@ -1003,18 +1023,6 @@ describe "RFC 1952 gzip - byte-flip mutation sweep":
             i = i + 1
         expect(wrong).to_equal(0)  # oracle: CRC-32 protects the payload
         expect(failed > 15).to_equal(true)
-
-describe "RFC 1952 gzip - metadata helpers":
-    # @manual scenario evidence
-    it "metadata and payload extraction read a valid member and reject garbage (RFC 1952 2.3)":
-        # @req REQ-GZIP-150
-        # @capture(vector): the stored abc member and 4 junk bytes
-        step("Read metadata and payload from valid and invalid members")
-        val m = _member(BASE_HDR, ABC_BODY, ABC_FOOTER)
-        expect(gzip_get_metadata(m) == nil).to_equal(false)
-        expect(gzip_get_metadata([1, 2, 3, 4]) == nil).to_equal(true)
-        expect(gzip_extract_payload(m) == nil).to_equal(false)
-        expect(gzip_is_compressed([1, 2, 3, 4])).to_equal(false)
 
 describe "RFC 1951 inflate - length and distance extra bits":
     # @manual scenario evidence
@@ -1159,14 +1167,15 @@ describe "RFC 1951 symbol tables and bit streams":
         expect(huffman_lookup(lit, -1) == nil).to_equal(true)
         expect(huffman_lookup(lit, 288) == nil).to_equal(true)
 
-    it "the bit writer packs LSB-first, pads the last byte and emits nothing for an empty stream (RFC 1951 3.1.1)":
+    it "the bit packer packs LSB-first, pads the last byte and emits nothing for an empty stream (RFC 1951 3.1.1)":
         # @req REQ-GZIP-074
-        # @capture(vector): 8 bits 0xA5; 3 bits 0b101 then Huffman code 0b10 of 2 bits (bits 1,0,1,1,0 = 13); empty
-        step("Write bits and finish the stream")
-        expect(bitstream_finish(bitstream_write_bits_lsb(bitstream_new(), 165, 8)) == [165u8]).to_equal(true)
-        val mixed = bitstream_write_huffman(bitstream_write_bits_lsb(bitstream_new(), 5, 3), 2, 2)
-        expect(bitstream_finish(mixed) == [13u8]).to_equal(true)
-        expect(bitstream_finish(bitstream_new()).len()).to_equal(0)  # oracle: no bits written, no bytes
+        # @capture(vector): 8 bits 0xA5; 3 bits 0b101 then 2 bits 0b01 (= 13); empty
+        step("Pack bit fields into bytes")
+        expect(deflate_pack_bits([165], [8]) == [165u8]).to_equal(true)
+        expect(deflate_pack_bits([5, 1], [3, 2]) == [13u8]).to_equal(true)
+        expect(deflate_pack_bits([4095, 1], [12, 5]) == [255u8, 31u8, 0u8]).to_equal(true)
+        var none: [i64] = []
+        expect(deflate_pack_bits(none, none).len()).to_equal(0)  # oracle: no bits written, no bytes
 
 describe "RFC 1952 CRC-32":
     # @manual scenario evidence
@@ -1193,3 +1202,229 @@ describe "RFC 1952 CRC-32":
         expect(crc32_chunked(nil)).to_equal(0)  # oracle: no chunks means CRC of empty input
         expect(crc32_update(4294967295, nil)).to_equal(4294967295)  # oracle: nil data leaves the register unchanged
         expect(crc32_calculate(nil)).to_equal(0)  # oracle: nil data is treated as empty
+
+describe "gzip writer, metadata and statistics":
+    # @manual scenario evidence
+    it "every compression level writes a member that the host-verified decoder reads back (RFC 1952 2.3)":
+        # @req REQ-GZIP-160
+        # @capture(vector): abc and 300 repeated bytes at default, best, fast and stored levels
+        step("Round-trip data through each level wrapper")
+        var run: [u8] = []
+        var i = 0
+        while i < 300:
+            run.push(66u8)
+            i = i + 1
+        expect(_is_abc(gzip_decompress(gzip_compress_default(_abc())))).to_equal(true)
+        expect(_is_abc(gzip_decompress(gzip_compress_best(_abc())))).to_equal(true)
+        expect(_is_abc(gzip_decompress(gzip_compress_fast(_abc())))).to_equal(true)
+        expect(_is_abc(gzip_decompress(gzip_compress_none(_abc())))).to_equal(true)
+        expect((gzip_decompress(gzip_compress_best(run)) ?? []) == run).to_equal(true)
+        expect((gzip_decompress(facade_compress(run)) ?? []) == run).to_equal(true)
+
+    it "stored output above 65535 bytes is split into blocks of at most 65535 bytes (boundary, RFC 1951 3.2.4)":
+        # @req REQ-GZIP-183
+        # @capture(vector): 70000 and 65535 bytes at the stored level; LEN is a 16-bit field
+        step("Write 70000 bytes with the stored level and read the block headers")
+        var big: [u8] = []
+        var i = 0
+        while i < 70000:
+            big.push(((i * 7) % 251).to_u8())
+            i = i + 1
+        val z = gzip_compress_none(big)
+        val second = 10 + 5 + 65535
+        expect(z[10].to_i64() & 1).to_equal(0)  # oracle: first block is not BFINAL
+        expect(z[11].to_i64() | (z[12].to_i64() << 8)).to_equal(65535)  # oracle: RFC 1951 3.2.4 LEN max
+        expect(z[second].to_i64() & 1).to_equal(1)  # oracle: second block is BFINAL
+        expect(z[second + 1].to_i64() | (z[second + 2].to_i64() << 8)).to_equal(4465)  # oracle: 70000 - 65535
+        expect((gzip_decompress(z) ?? []) == big).to_equal(true)
+        step("Write exactly 65535 bytes and confirm one final block holds them")
+        var edge: [u8] = []
+        i = 0
+        while i < 65535:
+            edge.push(big[i])
+            i = i + 1
+        val ze = gzip_compress_none(edge)
+        expect(ze[10].to_i64() & 1).to_equal(1)  # oracle: single final block
+        expect(ze.len()).to_equal(10 + 5 + 65535 + 8)  # oracle: header + block header + data + trailer
+        expect((gzip_decompress(ze) ?? []) == edge).to_equal(true)
+
+    it "the XFL byte records best (2) and fastest (4) compression (RFC 1952 2.3.1)":
+        # @req REQ-GZIP-161
+        # @capture(vector): header byte 8 at level 9, 1, 6
+        step("Read the extra-flags byte of members written at different levels")
+        expect(gzip_compress_best(_abc())[8]).to_equal(2)  # oracle: RFC 1952 2.3.1 XFL=2 maximum compression
+        expect(gzip_compress_fast(_abc())[8]).to_equal(4)  # oracle: RFC 1952 2.3.1 XFL=4 fastest algorithm
+        expect(gzip_compress_default(_abc())[8]).to_equal(0)  # oracle: no hint for the default level
+
+    it "metadata and payload extraction describe the first member and reject garbage (RFC 1952 2.3)":
+        # @req REQ-GZIP-150
+        # @capture(vector): stored abc member (MTIME 0, OS 3, CRC 0x352441C2, ISIZE 3) and junk
+        step("Read metadata and payload from valid and invalid members")
+        val m = _member(BASE_HDR, ABC_BODY, ABC_FOOTER)
+        val meta = gzip_get_metadata(m)
+        expect(meta[3]).to_equal(891568578)  # oracle: python zlib.crc32(b"abc")
+        expect(meta[4]).to_equal(3)  # oracle: ISIZE of abc
+        expect(meta[1]).to_equal(3)  # oracle: OS byte of BASE_HDR is Unix (3)
+        expect(gzip_extract_payload(m) == ABC_BODY).to_equal(true)
+        val two = _bcat(m, _member(BASE_HDR, ABC_BODY, ABC_FOOTER))
+        expect(gzip_extract_payload(two) == ABC_BODY).to_equal(true)
+        expect(gzip_get_metadata([1, 2, 3, 4]) == nil).to_equal(true)
+        expect(gzip_get_metadata(nil) == nil).to_equal(true)
+        expect(gzip_get_metadata(_member(BASE_HDR, [7, 0, 0], ABC_FOOTER)) == nil).to_equal(true)
+        expect(gzip_get_metadata(_prefix(m, 20)) == nil).to_equal(true)
+        expect(gzip_extract_payload([1, 2, 3, 4]) == nil).to_equal(true)
+        expect(gzip_extract_payload(nil) == nil).to_equal(true)
+        expect(gzip_extract_payload(_member(BASE_HDR, [7, 0, 0], ABC_FOOTER)) == nil).to_equal(true)
+        expect(gzip_is_compressed([1, 2, 3, 4])).to_equal(false)
+        expect(gzip_is_compressed([31])).to_equal(false)
+        expect(gzip_is_compressed(nil)).to_equal(false)
+        expect(gzip_validate(nil)).to_equal(false)
+
+    it "ratio, savings and efficiency follow their definitions and are zero for empty input (boundary)":
+        # @req REQ-GZIP-162
+        # @capture(vector): 100 -> 25 bytes; empty original; nil data
+        step("Compute compression metrics")
+        expect(gzip_compression_ratio(100, 25) == 0.25).to_equal(true)  # oracle: 25 / 100
+        expect(gzip_space_savings(100, 25) == 75.0).to_equal(true)  # oracle: (100 - 25) / 100 * 100
+        expect(gzip_compression_ratio(0, 5) == 0.0).to_equal(true)  # oracle: empty original defined as 0
+        expect(gzip_space_savings(0, 5) == 0.0).to_equal(true)  # oracle: empty original defined as 0
+        val orig = _repeat_byte(1, 100)
+        val comp = _repeat_byte(1, 40)
+        var none: [u8] = []
+        expect(gzip_efficiency(orig, comp) == 60.0).to_equal(true)  # oracle: (100 - 40) / 100 * 100
+        expect(gzip_efficiency(nil, comp) == 0.0).to_equal(true)  # oracle: nil original defined as 0
+        expect(gzip_efficiency(orig, nil) == 0.0).to_equal(true)  # oracle: nil compressed defined as 0
+        expect(gzip_efficiency(none, comp) == 0.0).to_equal(true)  # oracle: empty original defined as 0
+
+    it "overheads equal the RFC 1952 fixed header and trailer sizes (RFC 1952 2.3)":
+        # @req REQ-GZIP-163
+        # @capture(vector): 10-byte header, 8-byte trailer
+        step("Read the overhead constants")
+        expect(gzip_header_overhead()).to_equal(10)  # oracle: RFC 1952 fixed header is 10 bytes
+        expect(gzip_footer_overhead()).to_equal(8)  # oracle: CRC32 + ISIZE
+        expect(gzip_total_overhead(false)).to_equal(18)  # oracle: 10 + 8
+        expect(gzip_total_overhead(true)).to_equal(28)  # oracle: 10 + 8 + 10 estimated name bytes
+
+    it "data analysis reports size, distinct bytes and entropy (boundary)":
+        # @req REQ-GZIP-164
+        # @capture(vector): AAAA (entropy 0), ABAB (entropy 1 bit), nil
+        step("Analyze small inputs")
+        val a = gzip_analyze_data([65, 65, 65, 65])
+        expect(a[0]).to_equal(4)  # oracle: four input bytes
+        expect(a[1]).to_equal(1)  # oracle: one distinct byte value
+        expect(a[2] == 0.0).to_equal(true)  # oracle: a constant source has zero entropy
+        val b = gzip_analyze_data([65, 66, 65, 66])
+        expect(b[1]).to_equal(2)  # oracle: two distinct byte values
+        expect(b[2] == 1.0).to_equal(true)  # oracle: two equiprobable symbols carry 1 bit
+        expect(gzip_analyze_data(nil) == nil).to_equal(true)
+
+    it "level suggestion and size estimate follow the documented size bands (boundary)":
+        # @req REQ-GZIP-165
+        # @capture(vector): 10 B, 5000 B, 2 MiB; all four levels; nil
+        step("Suggest levels and estimate sizes")
+        expect(gzip_suggest_level(_repeat_byte(1, 10))).to_equal(9)  # oracle: small data uses best (LEVEL_BEST = 9)
+        expect(gzip_suggest_level(_repeat_byte(1, 5000))).to_equal(6)  # oracle: medium data uses default (6)
+        expect(gzip_suggest_level(_repeat_byte(1, 2097152))).to_equal(1)  # oracle: large data uses fast (1)
+        expect(gzip_suggest_level(nil)).to_equal(6)  # oracle: absent data defaults to 6
+        val hundred = _repeat_byte(1, 100)
+        expect(gzip_estimate_size(hundred, 0)).to_equal(100)  # oracle: stored ratio 1.0
+        expect(gzip_estimate_size(hundred, 1)).to_equal(70)  # oracle: fast ratio 0.7
+        expect(gzip_estimate_size(hundred, 6)).to_equal(50)  # oracle: default ratio 0.5
+        expect(gzip_estimate_size(hundred, 9)).to_equal(40)  # oracle: best ratio 0.4
+        expect(gzip_estimate_size(nil, 6)).to_equal(0)  # oracle: absent data estimates 0
+
+describe "DEFLATE writer, LZ77 and text helpers":
+    # @manual scenario evidence
+    it "the sync-flush facade output matches zlib Z_SYNC_FLUSH for hello and round-trips (RFC 7692 7.2.1)":
+        # @req REQ-GZIP-170
+        # @capture(vector): python zlib compressobj(-15) compress(b"hello") + flush(Z_SYNC_FLUSH)
+        step("Compress hello through the sync-flush facade")
+        val r = deflate_compress_sync_flush("hello".bytes())
+        val z = r.unwrap_or([])
+        expect(z == [202u8, 72u8, 205u8, 201u8, 201u8, 7u8, 0u8, 0u8, 0u8, 255u8, 255u8]).to_equal(true)
+        expect(deflate_decompress(z) == "hello".bytes()).to_equal(true)
+        expect(deflate_decompress_eof([7u8, 0u8]).is_err()).to_equal(true)
+        var empty: [u8] = []
+        expect(deflate_decompress(deflate_compress_sync_flush(empty).unwrap_or([])).len()).to_equal(0)  # oracle: empty in, empty out
+
+    it "stored and fixed block writers handle nil, final and non-final blocks (RFC 1951 3.2.4, 3.2.6)":
+        # @req REQ-GZIP-171
+        # @capture(vector): stored abc final/non-final, nil inputs, fixed block of one literal
+        step("Write blocks directly")
+        expect(deflate_block_stored(_abc(), true) == ABC_BODY).to_equal(true)
+        expect(deflate_block_stored(_abc(), false)[0]).to_equal(0)  # oracle: BFINAL=0 BTYPE=00 header byte
+        expect(deflate_block_stored(nil, true).len()).to_equal(0)  # oracle: nil data writes nothing
+        expect(deflate_block_fixed(nil, true).len()).to_equal(0)  # oracle: nil tokens write nothing
+        expect(deflate_block_fixed([[0, 97, 0]], true) == [75u8, 4u8, 0u8]).to_equal(true)  # oracle: host gzip -n of "a" body
+
+    it "lz77 yields literals for short or empty input and matches for repeats at every level (boundary)":
+        # @req REQ-GZIP-172
+        # @capture(vector): nil, empty, abcabcabc at levels 1, 6, 9
+        step("Tokenize small inputs at several levels")
+        var empty: [u8] = []
+        expect(lz77_compress(nil, 6).len()).to_equal(0)  # oracle: nil input has no tokens
+        expect(lz77_compress(empty, 6).len()).to_equal(0)  # oracle: empty input has no tokens
+        val data = "abcabcabc".bytes()
+        for level in [1, 6, 9]:
+            val t = lz77_compress(data, level)
+            expect(t.len()).to_equal(4)  # oracle: 3 literals + one overlapping match (distance 3, length 6)
+            expect(t[3][0]).to_equal(1)  # oracle: token type 1 = match
+            expect(t[3][1]).to_equal(3)  # oracle: distance 3
+            expect(t[3][2]).to_equal(6)  # oracle: length 6
+
+    it "text conversion keeps non-ASCII bytes and rejects bytes that are not UTF-8 (boundary)":
+        # @req REQ-GZIP-173
+        # @capture(vector): e-acute (C3 A9), euro sign (E2 82 AC), lone 0xFF, truncated 0xC3
+        step("Convert between text and bytes")
+        val accented = gzip_stream_text_to_bytes("caf\u00e9")
+        expect(accented == [99u8, 97u8, 102u8, 195u8, 169u8]).to_equal(true)
+        expect(gzip_stream_bytes_to_text(accented) == "caf\u00e9").to_equal(true)
+        expect(gzip_stream_bytes_to_text([226u8, 130u8, 172u8]) == "\u20ac").to_equal(true)
+        expect(gzip_stream_bytes_to_text([255u8]) == nil).to_equal(true)
+        expect(gzip_stream_bytes_to_text([195u8]) == nil).to_equal(true)
+        expect(gzip_stream_bytes_to_text(_abc()) == "abc").to_equal(true)
+
+describe "long codes, window limits and member boundaries":
+    # @manual scenario evidence
+    it "a dynamic code longer than the lookup-table width still decodes (RFC 1951 3.2.2)":
+        # @req REQ-GZIP-180
+        # @capture(vector): lengths 1..9 for a..i, 10 for j and end-of-block; data j a EOB
+        step("Inflate a block that uses a 10-bit code")
+        val ll = _litlens([[97, 1], [98, 2], [99, 3], [100, 4], [101, 5], [102, 6], [103, 7], [104, 8], [105, 9], [106, 10], [256, 10]], 257)
+        val bits = _dyn_custom(_uniform4(), ll, [0], [106, 97, 256])
+        expect((inflate(_pack(bits)) ?? []) == [106u8, 97u8]).to_equal(true)
+
+    it "a gzip member whose only block is not final and ends the input is rejected (RFC 1951 3.2.3)":
+        # @req REQ-GZIP-181
+        # @capture(vector): header + non-final stored block, no trailer
+        step("Decode a member that stops after a non-final block")
+        val body: [u8] = [0, 3, 0, 252, 255, 97, 98, 99]
+        expect(_is_nil(gzip_decompress(_bcat(BASE_HDR, body)))).to_equal(true)
+        expect(inflate_member(body, 0) == nil).to_equal(true)
+        expect(inflate_member(ABC_BODY, 8) == nil).to_equal(true)  # start at the end leaves no block header
+
+    it "round trips cover distances above 4, the chain-length bound and the 32 KiB window limit (RFC 1951 3.2.5)":
+        # @req REQ-GZIP-182
+        # @capture(vector): period-5 text; 200 abc+i groups at level 1; abc, 33000 fillers, abc again
+        step("Round-trip data that exercises each match-finder limit")
+        val period5 = "abcdeabcdeabcdeabcde".bytes()
+        expect((gzip_decompress(gzip_compress(period5, 6)) ?? []) == period5).to_equal(true)
+        var groups: [u8] = []
+        var g = 0
+        while g < 200:
+            groups.push(97u8)
+            groups.push(98u8)
+            groups.push(99u8)
+            groups.push(g.to_u8())
+            g = g + 1
+        expect((gzip_decompress(gzip_compress(groups, 1)) ?? []) == groups).to_equal(true)
+        var far: [u8] = [97u8, 98u8, 99u8]
+        var f = 0
+        while f < 33000:
+            far.push(100u8)
+            f = f + 1
+        far.push(97u8)
+        far.push(98u8)
+        far.push(99u8)
+        far.push(5u8)
+        expect((gzip_decompress(gzip_compress(far, 6)) ?? []) == far).to_equal(true)

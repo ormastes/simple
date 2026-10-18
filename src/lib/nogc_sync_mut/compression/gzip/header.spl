@@ -58,33 +58,39 @@ fn gzip_header_create(filename, timestamp: i64, extra_flags: i64, os_type: i64) 
 
     return header
 
-# Parse GZIP header
+# Parse GZIP header at the start of `data`
 # Returns: (flags, timestamp, extra_flags, os, header_size) or nil
 fn gzip_header_parse(data):
+    gzip_header_parse_at(data, 0)
+
+# Parse the GZIP member header that starts at byte offset `base` (RFC 1952 2.2: a
+# file is a series of members). The last element is the ABSOLUTE offset of the
+# first byte after the header.
+fn gzip_header_parse_at(data, base: i64):
     if data == nil:
         return nil
 
-    if data.len() < 10:
+    if base < 0 or data.len() < base + 10:
         return nil
 
     # Check magic bytes
-    if data[0].to_i64() != GZIP_MAGIC1:
+    if data[base].to_i64() != GZIP_MAGIC1:
         return nil
-    if data[1].to_i64() != GZIP_MAGIC2:
+    if data[base + 1].to_i64() != GZIP_MAGIC2:
         return nil
 
     # Check compression method
-    if data[2].to_i64() != CM_DEFLATE:
+    if data[base + 2].to_i64() != CM_DEFLATE:
         return nil
 
-    val flags = data[3].to_i64()
+    val flags = data[base + 3].to_i64()
     if (flags & 0xE0) != 0:
         return nil
-    val timestamp = data[4].to_i64() | (data[5].to_i64() << 8) | (data[6].to_i64() << 16) | (data[7].to_i64() << 24)
-    val extra_flags = data[8].to_i64()
-    val os = data[9].to_i64()
+    val timestamp = data[base + 4].to_i64() | (data[base + 5].to_i64() << 8) | (data[base + 6].to_i64() << 16) | (data[base + 7].to_i64() << 24)
+    val extra_flags = data[base + 8].to_i64()
+    val os = data[base + 9].to_i64()
 
-    var offset = 10
+    var offset = base + 10
 
     # Skip extra field
     if (flags & FLAG_EXTRA) != 0:
@@ -115,12 +121,12 @@ fn gzip_header_parse(data):
                 break
             offset = offset + 1
 
-    # Skip header CRC
+    # Header CRC16: the low 16 bits of the CRC-32 of every header byte before it
     if (flags & FLAG_HCRC) != 0:
         if offset + 2 > data.len():
             return nil
-        var header_bytes = []
-        var i = 0
+        var header_bytes: [u8] = []
+        var i = base
         while i < offset:
             header_bytes.push(data[i])
             i = i + 1

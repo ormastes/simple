@@ -27,8 +27,9 @@ Plan: `doc/03_plan/lib/crypto/hash_gzip_hardening_2026-10-18.md`.
   big-endian (high then low). A secret < 136 bytes fails closed.
 
 ## gzip / DEFLATE (`src/lib/nogc_sync_mut/compression/gzip/`)
-- `inflate_complete` = `_inflate_core(require_final = true)`; gzip members
-  must end in a BFINAL block. Raw `inflate` keeps sync-flush leniency for
+- `inflate_member(input, start)` = `_inflate_core(member = true)`; gzip members
+  must end in a BFINAL block and are decoded back to back (RFC 1952 2.2
+  multi-member; output is the concatenation). Raw `inflate` keeps sync-flush leniency for
   RFC 7692 permessage-deflate.
 - Huffman validation (RFC 1951 3.2.2/3.2.7): over-subscribed codes always
   rejected; incomplete codes rejected except zlib's single one-bit code for
