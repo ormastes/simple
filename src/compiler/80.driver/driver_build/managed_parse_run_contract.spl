@@ -78,6 +78,9 @@ fn managed_parse_run_validate_v1(run: ManagedParseRunV1) -> text:
     if run.max_attempts < 1 or run.max_attempts > 3 or run.poll_ms < 1 or run.poll_ms > 60000: return "invalid retry/poll bound"
     if run.startup_timeout_ms < run.poll_ms or run.shutdown_timeout_ms < run.poll_ms or run.lifetime_ms < run.startup_timeout_ms or run.lifetime_ms < run.shutdown_timeout_ms or run.lifetime_ms > 604800000: return "invalid process deadlines"
     if artifact_service_profile_validate_v1(run.profile) != "ok" or not run.profile.pools.contains("parse") or run.profile.max_workers > 64 or run.profile.memory_budget_bytes > 1099511627776 or run.profile.foreground_priority > 2147483647: return "invalid parser profile"
+    if run.profile.pools.len() > 4096: return "profile wire bound exceeded"
+    for field in [run.profile.profile_name, run.profile.compatibility_id, run.profile.cas_namespace] + run.profile.pools:
+        if not builder_text_valid_v1(field): return "invalid profile wire scalar"
     if not managed_parse_unique_ids_v1(run.worker_slots) or run.worker_slots.len() > 64 or run.worker_slots.len() > run.profile.max_workers or run.profile.memory_budget_bytes < run.worker_slots.len(): return "invalid worker slots"
     if run.snapshots.len() != run.worker_slots.len(): return "snapshot slot count mismatch"
     val schedule_error = managed_parse_schedule_validate_v1(run.schedule)
@@ -103,9 +106,12 @@ fn managed_parse_run_validate_v1(run: ManagedParseRunV1) -> text:
         if bound_actions.contains(binding.action_id) or bound_groups.contains(binding.group_id): return "duplicate parse binding"
         var found_group = false
         var dependencies: [text] = []
+        var source_digests: [text] = []
         for group in run.schedule.groups:
             if group.identity == binding.group_id:
                 found_group = true
+                for module in run.snapshots[0].modules:
+                    if group.members.contains(module.package_id): source_digests = source_digests.push(module.source_digest)
                 for dependency in group.dependencies:
                     var found_dependency = false
                     for peer in run.bindings:
@@ -118,6 +124,10 @@ fn managed_parse_run_validate_v1(run: ManagedParseRunV1) -> text:
         for action in run.graph.actions:
             if action.action_id == binding.action_id:
                 if action.pool != BuildActionPoolV1.parse or action.snapshot_revision != digest or action.restat_identity != binding.cache_identity or action.dynamic_edges.sorted() != dependencies.sorted() or action.memory_budget_bytes > run.profile.memory_budget_bytes: return "action authority mismatch"
+                if action.command_identity != "managed-reference-parse-v1:" + run.worker_digest: return "action parser producer mismatch"
+                # Input multiplicity is significant: two equal source blobs
+                # still represent two selected modules. Graph wire sorts rows.
+                if action.inputs.sorted() != source_digests.sorted(): return "action source membership mismatch"
                 found_action = true
         if not found_action: return "binding action absent"
         bound_actions = bound_actions.push(binding.action_id)

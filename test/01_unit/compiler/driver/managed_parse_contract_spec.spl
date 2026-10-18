@@ -134,3 +134,40 @@ describe "managed parser wire contracts":
         run = parse_contract_run()
         run.bindings = []
         expect(managed_parse_run_validate_v1(run)).to_equal("invalid parse graph")
+
+    it "rejects independently rehashed graphs with unrelated commands or inputs":
+        var run = parse_contract_run()
+        var action = run.graph.actions[0]
+        action.command_identity = "different-parser"
+        var graph = PersistedBuildGraphV1("pending", "", run.graph.snapshot_revision, [action])
+        graph.generation = persisted_graph_digest_v1(graph)
+        run.graph = graph
+        expect(managed_parse_run_validate_v1(run)).to_equal("action parser producer mismatch")
+        run = parse_contract_run()
+        action = run.graph.actions[0]
+        action.inputs = [sha256_text("unrelated source")]
+        graph = PersistedBuildGraphV1("pending", "", run.graph.snapshot_revision, [action])
+        graph.generation = persisted_graph_digest_v1(graph)
+        run.graph = graph
+        expect(managed_parse_run_validate_v1(run)).to_equal("action source membership mismatch")
+
+    it "round trips a maximal profile scalar and rejects overflow and NUL":
+        var boundary = "x"
+        for i in 0..16: boundary = boundary + boundary
+        expect(boundary.len()).to_equal(65536)
+        var run = parse_contract_run()
+        run.profile.profile_name = boundary
+        val wire = managed_parse_run_encode_v1(run)
+        expect(wire.len()).to_be_greater_than(65536)
+        val decoded = managed_parse_run_decode_v1(wire)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().profile.profile_name).to_equal(boundary)
+        run.profile.profile_name = boundary + "x"
+        expect(managed_parse_run_validate_v1(run)).to_equal("invalid profile wire scalar")
+        expect(managed_parse_run_encode_v1(run)).to_equal("")
+        run = parse_contract_run()
+        run.profile.cas_namespace = "bad\0namespace"
+        expect(managed_parse_run_encode_v1(run)).to_equal("")
+        run = parse_contract_run()
+        run.profile.pools = ["parse", "bad\0pool"]
+        expect(managed_parse_run_encode_v1(run)).to_equal("")
