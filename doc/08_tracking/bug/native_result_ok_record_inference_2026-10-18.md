@@ -32,12 +32,36 @@ decodes the declared Ok type only when `enum_match_expr_type(base)` recovers
 a Result type. Otherwise it retains the raw integer local. This is a concrete
 inspection lead, not a demonstrated complete root cause. Remove the
 workarounds only after a compiler fix passes the same unannotated native
-cases. Explicit source annotations themselves still require native proof.
+cases. The focused native comparison below proves this annotation pattern.
 
 Regression specs call real module-role selection and runtime decoding,
 iterate their typed Result-record arrays and preserve exact negative error
-messages. Native execution and the corrected three production MIR sites are
-currently UNRUN; source review must not be presented as their qualification.
+messages. These BDD specs and the corrected three production MIR sites are
+currently UNRUN; the focused comparison does not qualify all three sites.
+
+Focused native comparison with runtime variant `b441c88d477950d2118edf04ddaae1eefb9b5e91942dc821836d108ba776f1ab`:
+the unannotated fixture failed with the expected for-in collection `I64`;
+the otherwise identical typed fixture passed all 12 selected HIR, MIR and
+object-codegen modules. Both call the actual module-role selection owner.
+Canonical typed linking failed on an unmaterialized tracked SDK header;
+that failed command remains recorded. After restoring the exact tracked
+header, C-only strict completion reused the original 12 sealed COFF objects
+and compiled the genuine 38 runtime C units plus canonical `/MD` entry.
+Strict link passed without FORCE or ignored unresolved symbols.
+
+The resulting executable ran exactly once: exit zero, exact 29-byte
+`RESULT_RECORD_ARRAY_TRY_PASS` plus LF, empty stderr, stable pre/post SHA256
+`eec6af85bf3440d7d708643bbb5c5272bc65e3ec2e8aae25fb54a3737411f7dc`.
+This proves actual selected-path iteration and exact invalid-policy error
+propagation for this owner. It does not qualify the other two production
+sites, whole CLI, core checks or full tests.
+
+The completion discloses missing source-witness metadata for nine standard
+library capsules and post-build removal of one module-role source snapshot;
+its precompile source pin matches the tracked owner. Formal SMF admission
+is not claimed. Raw evidence, preserved canonical failures and strict map:
+`C:/dev/simple-bootstrap-storage/scope-producer-3d9d-20261018/result-record-native-proof-setup-corrected`.
+The strict completion contains `focused-execution-terminal.json`.
 
 Retained native evidence:
 `C:/dev/p4i3b/authority-images/logs/provisional-authority.attempt1.stderr.log`
