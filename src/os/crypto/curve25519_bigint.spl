@@ -166,7 +166,7 @@ fn _bi_mul_i64(a: list, n: i64) -> list:
         result.push(carry)
     _bi_normalize(result)
 
-fn _bi_divmod_i64(a: list, n: i64) -> list:
+fn _bi_divmod_i64(a: list, n: i64) -> [list]:
     if n == 0:
         return [_bi_zero(), _bi_zero()]
     if n == 1:
@@ -207,6 +207,7 @@ fn _bigint_bit_length(a: list) -> i64:
         temp = temp / 2
     base_bits + bits
 
+# @workaround bug=array_get_contract_drift_crypto_2026-10-18 recover=4bbbbd1217e reason=use-proven-indexing-until-get-contract-is-resolved
 fn _bigint_get_bit(a: list, n: i64) -> i64:
     val limb_idx = n / BIGINT_BITS_PER_LIMB
     val bit_idx = n % BIGINT_BITS_PER_LIMB
@@ -214,10 +215,12 @@ fn _bigint_get_bit(a: list, n: i64) -> i64:
     if limb_idx >= len:
         return 0
 
-    val limb = a.get(limb_idx)
+    # Caller supplies n >= 0; the upper limb bound is checked above.
+    val limb = a[limb_idx]
     val mask = 1 << bit_idx
     (limb / mask) % 2
 
+# @workaround bug=array_get_contract_drift_crypto_2026-10-18 recover=4bbbbd1217e reason=use-proven-indexing-until-get-contract-is-resolved
 fn _bigint_shift_left_one(a: list) -> list:
     if _bi_is_zero(a):
         return a
@@ -228,7 +231,7 @@ fn _bigint_shift_left_one(a: list) -> list:
     var i: i64 = 0
 
     while i < len:
-        val limb = a.get(i)
+        val limb = a[i]
         val shifted = limb * 2 + carry
         result.push(shifted % BIGINT_BASE)
         carry = shifted / BIGINT_BASE
@@ -319,18 +322,20 @@ fn _bigint_bytes_to_bigint_le(b: [u8]) -> list:
         result = _bi_add(result, _bi_from_i64(b[i].to_i64()))
     result
 
+# @workaround bug=array_get_contract_drift_crypto_2026-10-18 recover=4bbbbd1217e reason=use-proven-indexing-until-get-contract-is-resolved
 fn _bigint_to_bytes_le(n: list, byte_count: i64) -> [u8]:
     var result: [u8] = []
     var temp = _bigint_field_reduce(n)
     var i: i64 = 0
     while i < byte_count:
         val divmod = _bi_divmod_i64(temp, 256)
-        val remainder = divmod.get(1)
+        # divmod always returns [quotient, remainder]; both are limb arrays.
+        val remainder = divmod[1]
         if remainder.len() > 0:
-            result.push(remainder.get(0).to_u8())
+            result.push(remainder[0].to_u8())
         else:
             result.push(0)
-        temp = divmod.get(0)
+        temp = divmod[0]
         i = i + 1
 
     result
@@ -431,17 +436,17 @@ fn bigint_fe_invert(z: list) -> list:
 
     bigint_fe_mul(t, z11)
 
-fn bigint_fe_cswap(a: list, b: list, swap: i64) -> list:
+fn bigint_fe_cswap(a: list, b: list, swap: i64) -> [list]:
     if swap == 0:
         return [a, b]
     [b, a]
 
-fn _bigint_cswap_pair(x1: list, x2: list, z1: list, z2: list, swap: i64) -> list:
+fn _bigint_cswap_pair(x1: list, x2: list, z1: list, z2: list, swap: i64) -> [list]:
     if swap == 0:
         return [x1, x2, z1, z2]
     [x2, x1, z2, z1]
 
-fn _bigint_ladder_step(x2: list, z2: list, x3: list, z3: list, x1: list) -> list:
+fn _bigint_ladder_step(x2: list, z2: list, x3: list, z3: list, x1: list) -> [list]:
     val a = bigint_fe_add(x2, z2)
     val aa = bigint_fe_sq(a)
     val b = bigint_fe_sub(x2, z2)
@@ -487,6 +492,7 @@ fn _bigint_mask_u_coord(u_coord: [u8]) -> [u8]:
     masked[31] = masked[31] & 0x7F
     masked
 
+# @workaround bug=array_get_contract_drift_crypto_2026-10-18 recover=4bbbbd1217e reason=use-proven-indexing-until-get-contract-is-resolved
 fn x25519_safe(scalar: [u8], u_coord: [u8]) -> [u8]:
     val k = _bigint_clamp_scalar(scalar)
     val u = bigint_fe_from_bytes(_bigint_mask_u_coord(u_coord))
@@ -505,24 +511,25 @@ fn x25519_safe(scalar: [u8], u_coord: [u8]) -> [u8]:
         val swap_bit = k_bit ^ prev_bit
         prev_bit = k_bit
 
+        # These helpers return exactly four coordinate arrays, never Option.
         val swapped = _bigint_cswap_pair(x_2, x_3, z_2, z_3, swap_bit)
-        x_2 = swapped.get(0)
-        x_3 = swapped.get(1)
-        z_2 = swapped.get(2)
-        z_3 = swapped.get(3)
+        x_2 = swapped[0]
+        x_3 = swapped[1]
+        z_2 = swapped[2]
+        z_3 = swapped[3]
 
         val step = _bigint_ladder_step(x_2, z_2, x_3, z_3, u)
-        x_2 = step.get(0)
-        z_2 = step.get(1)
-        x_3 = step.get(2)
-        z_3 = step.get(3)
+        x_2 = step[0]
+        z_2 = step[1]
+        x_3 = step[2]
+        z_3 = step[3]
 
         if bit_pos == 0:
             val final_swapped = _bigint_cswap_pair(x_2, x_3, z_2, z_3, prev_bit)
-            x_2 = final_swapped.get(0)
-            x_3 = final_swapped.get(1)
-            z_2 = final_swapped.get(2)
-            z_3 = final_swapped.get(3)
+            x_2 = final_swapped[0]
+            x_3 = final_swapped[1]
+            z_2 = final_swapped[2]
+            z_3 = final_swapped[3]
 
             val z_inv = bigint_fe_invert(z_2)
             val result = bigint_fe_mul(x_2, z_inv)
@@ -550,15 +557,17 @@ fn bigint_roundtrip_probe(u_coord: [u8]) -> [u8]:
 fn bigint_mask_probe(u_coord: [u8]) -> [u8]:
     _bigint_mask_u_coord(u_coord)
 
+# @workaround bug=array_get_contract_drift_crypto_2026-10-18 recover=4bbbbd1217e reason=use-proven-indexing-until-get-contract-is-resolved
 fn bigint_cswap_probe() -> i64:
     val swapped = _bigint_cswap_pair(bigint_fe_one(), bigint_fe_zero(), bigint_fe_one(), bigint_fe_zero(), 1)
-    val first = swapped.get(0)
+    val first = swapped[0]
     first.len()
 
+# @workaround bug=array_get_contract_drift_crypto_2026-10-18 recover=4bbbbd1217e reason=use-proven-indexing-until-get-contract-is-resolved
 fn bigint_ladder_probe() -> i64:
     val u = bigint_fe_from_bytes(_bigint_mask_u_coord([
         9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
     ]))
     val step = _bigint_ladder_step(bigint_fe_one(), bigint_fe_zero(), u, bigint_fe_one(), u)
-    val first = step.get(0)
+    val first = step[0]
     first.len()

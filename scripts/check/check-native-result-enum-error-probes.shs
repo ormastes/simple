@@ -1,0 +1,124 @@
+#!/bin/sh
+# Windows bootstrap diagnostic: three sequential entries, one bounded job.
+# Call only after the coordinator reserves an 8 GiB slot. No automatic retry.
+set -eu
+
+usage() {
+    echo 'usage: sh scripts/check/check-native-result-enum-error-probes.shs --run SOURCE_HEAD RESERVED_GIB OUTPUT_DIR' >&2
+    echo 'RESERVED_GIB includes all other live jobs and the OS; minimum 53.' >&2
+    exit 89
+}
+
+case "${1:-}" in --run|--worker) ;; *) usage ;; esac
+[ "$#" -eq 4 ] || usage
+mode=$1
+expected_head=$2
+reserved_gib=$3
+out=$4
+case "$expected_head" in *[!0-9a-f]*|'') usage ;; esac
+[ "${#expected_head}" -eq 40 ] || usage
+case "$reserved_gib" in *[!0-9]*|'') usage ;; esac
+[ "$reserved_gib" -ge 53 ] && [ "$reserved_gib" -le 256 ] || usage
+case "$out" in /c/dev/*) ;; *) usage ;; esac
+
+src=$(git rev-parse --show-toplevel)
+script="$src/scripts/check/check-native-result-enum-error-probes.shs"
+producer=/c/dev/simple-bootstrap-storage/scope-producer-3d9d-20261018/windows-async-stdio-PENDING/simple-async-stdio-variant.exe
+producer_sha=b441c88d477950d2118edf04ddaae1eefb9b5e91942dc821836d108ba776f1ab
+fixture_root=test/fixtures/compiler/result_enum_unwrap
+hash() { sha256sum < "$1" | cut -d ' ' -f 1; }
+verify_inputs() {
+    [ "$(hash "$producer")" = "$producer_sha" ]
+    [ "$(git -C "$src" rev-parse HEAD)" = "$expected_head" ]
+    [ -z "$(git -C "$src" status --porcelain --untracked-files=normal -- src scripts "$fixture_root")" ]
+}
+verify_inputs
+
+if [ "$mode" = --run ]; then
+    [ ! -e "$out" ] || { echo 'Output already exists; preserve prior evidence.' >&2; exit 125; }
+    facts=$(powershell.exe -NoProfile -Command '$o=Get-CimInstance Win32_OperatingSystem; "{0} {1}" -f ([int64]$o.FreePhysicalMemory*1024),([int64]$o.FreeVirtualMemory*1024)' | tr -d '\r')
+    physical=${facts%% *}
+    commit=${facts##* }
+    for number in "$physical" "$commit"; do
+        case "$number" in ''|0*|*[!0-9]*) exit 125 ;; esac
+    done
+    reserve=$((reserved_gib * 1073741824))
+    cap=8589934592
+    required=$((reserve + cap))
+    mkdir -p "$out"
+    printf 'physical_bytes=%s\ncommit_bytes=%s\nreserve_bytes=%s\ncap_bytes=%s\nrequired_bytes=%s\nsource_head=%s\n' "$physical" "$commit" "$reserve" "$cap" "$required" "$expected_head" >"$out/admission.env"
+    [ "$physical" -ge "$required" ] && [ "$commit" -ge "$required" ] || exit 125
+    export SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE="$out/helper-cache"
+    export SIMPLE_LLVM_WIN_ROOT_23='C:/Program Files/LLVM' LLVM_SYS_231_PREFIX='C:/Program Files/LLVM'
+    . "$src/scripts/setup/windows-msvc-bootstrap-env.shs"
+    exec perl "$src/scripts/resource/process-tree-rss-watchdog.pl" \
+        --max-rss-kib=8388608 --compiler-jobs=1 --timeout-seconds=660 \
+        --budget-scope=compiler --rss-cap-mode=enforce --session-mode=new \
+        --cap-source=explicit-env --cap-bound=joint-budget \
+        --receipt="$out/guard.env" -- /usr/bin/bash "$script" --worker "$expected_head" "$reserved_gib" "$out"
+fi
+
+export SIMPLE_LLVM_WIN_ROOT_23='C:/Program Files/LLVM' LLVM_SYS_231_PREFIX='C:/Program Files/LLVM'
+. "$src/scripts/setup/windows-msvc-bootstrap-env.shs"
+export CC='C:/Program Files/LLVM/bin/clang-cl.exe' SIMPLE_CC='C:/Program Files/LLVM/bin/clang-cl.exe' CL=/TC
+export SIMPLE_LLVM_BIN='C:/Users/user/.simple/toolchains/llvm-msvc-23.1.1/clang+llvm-23.1.1-x86_64-pc-windows-msvc/bin'
+export LLVM_BIN="$SIMPLE_LLVM_BIN"
+export PATH="/c/Users/user/.simple/toolchains/llvm-msvc-23.1.1/clang+llvm-23.1.1-x86_64-pc-windows-msvc/bin:$PATH"
+export SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_COMPILER_PHASE_PROFILE=1
+export SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=8388608 SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=8388608
+export SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce SIMPLE_HOST_MAX_THREADS=1 SIMPLE_PARSE_SHARD_MAX=1
+export SIMPLE_PROJECT_ROOT="$src" SIMPLE_FRONTEND_CACHE=1 SIMPLE_HIR_CACHE=1
+if [ -e "$src/build/scv/source-inventory/CURRENT" ]; then
+    export SIMPLE_SCV_INVENTORY_COLD_INIT=0
+else
+    export SIMPLE_SCV_INVENTORY_COLD_INIT=1
+fi
+cd "$src"
+printf 'producer_sha256=%s\nsource_head=%s\nlauncher_sha256=%s\nllc_sha256=%s\n' "$producer_sha" "$expected_head" "$(hash "$script")" "$(hash "$SIMPLE_LLVM_BIN/llc.exe")" >"$out/input-pins.env"
+aggregate=0
+for name in baseline pattern_binding generic_error; do
+    probe="$out/$name"
+    entry="$fixture_root/$name.spl"
+    mkdir -p "$probe/cache" "$probe/tmp" "$probe/frontend" "$probe/hir"
+    export TMPDIR="$probe/tmp"
+    export SIMPLE_FRONTEND_CACHE_DIR="$probe/frontend" SIMPLE_HIR_CACHE_DIR="$probe/hir"
+    export SIMPLE_NATIVE_BUILD_CACHE_DIR="$probe/cache"
+    printf 'entry=%s\nentry_sha256=%s\n' "$entry" "$(hash "$entry")" >"$probe/input-pins.env"
+    set +e
+    "$producer" native-build --target x86_64-pc-windows-msvc --backend llvm \
+        --source "$fixture_root" --entry-closure --entry "$entry" \
+        --threads 1 --timeout 180 --keep-going --keep-intermediates \
+        --cache-dir "$probe/cache" --mode one-binary --runtime-bundle core-c-bootstrap \
+        --runtime-path "$src/src/runtime" --output "$probe/program.exe" \
+        >"$probe/compile.stdout.log" 2>"$probe/compile.stderr.log"
+    compile_rc=$?
+    set -e
+    verify_inputs
+    find "$probe/cache" -type f \( -name '*.o' -o -name '*.obj' \) >"$probe/object-paths.txt"
+    object_count=$(wc -l < "$probe/object-paths.txt" | tr -d ' ')
+    printf 'compile_exit=%s\nobject_files=%s\nrun_exit=UNRUN\n' "$compile_rc" "$object_count" >"$probe/result.env"
+    if [ "$name" = baseline ]; then
+        if [ "$compile_rc" -ne 0 ] && grep -Fq 'unsupported Result unwrap_err payload type' "$probe/compile.stderr.log"; then
+            printf 'expected_failure_observed=1\n' >>"$probe/result.env"
+        else
+            printf 'expected_failure_observed=0\n' >>"$probe/result.env"
+            aggregate=1
+        fi
+        continue
+    fi
+    if [ "$compile_rc" -ne 0 ] || [ ! -f "$probe/program.exe" ]; then
+        aggregate=1
+        continue
+    fi
+    set +e
+    "$probe/program.exe" >"$probe/run.stdout.log" 2>"$probe/run.stderr.log"
+    run_rc=$?
+    set -e
+    printf 'compile_exit=%s\nobject_files=%s\nrun_exit=%s\nexe_sha256=%s\n' "$compile_rc" "$object_count" "$run_rc" "$(hash "$probe/program.exe")" >"$probe/result.env"
+    expected=result-enum-error-pass
+    if [ "$name" = generic_error ]; then expected=generic-result-error-pass; fi
+    tr -d '\r' <"$probe/run.stdout.log" >"$probe/run.normalized.txt"
+    if [ "$run_rc" -ne 0 ] || ! grep -Fxq "$expected" "$probe/run.normalized.txt"; then aggregate=1; fi
+done
+printf 'aggregate_exit=%s\nproduction_owner_probes=UNRUN\n' "$aggregate" >"$out/result.env"
+exit "$aggregate"
