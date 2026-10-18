@@ -368,7 +368,8 @@ pub fn lz4_decompress_frame(data: [u8]) -> Result<[u8], CompressionError>:
                 out = out.push(data[i])
                 i = i + 1
         else:
-            val block_result = _lz4_decode_block(data, block_bytes_start, block_len)
+            # A block never decodes past the descriptor's Block Maximum Size.
+            val block_result = _lz4_decode_block(data, block_bytes_start, block_len, max_block_size)
             match block_result:
                 Ok(decoded):
                     out = _lz4_append_bytes(out, decoded)
@@ -395,6 +396,10 @@ pub fn lz4_decompress_block(data: [u8]) -> Result<[u8], CompressionError>:
     The entire `data` slice is treated as one LZ4 block.
     """
     _lz4_decode_block(data, 0, data.len())
+
+pub fn lz4_decompress_block_bounded(data: [u8], max_out: i64) -> Result<[u8], CompressionError>:
+    """Decompress a raw LZ4 block, rejecting it before it expands past `max_out` bytes."""
+    _lz4_decode_block(data, 0, data.len(), max_out)
 
 pub fn lz4_compress_block(data: [u8]) -> [u8]:
     """Compress `data` as a raw LZ4 block (no frame header).
@@ -556,8 +561,12 @@ fn _lz4_encode_block_compress(src: [u8]) -> [u8]:
     out = _lz4_emit_last_literals(out, lit_start, final_lit_len, src)
     out
 
-fn _lz4_decode_block(data: [u8], start: i64, length: i64) -> Result<[u8], CompressionError>:
-    """Decode one LZ4 block starting at `start` for `length` bytes."""
+fn _lz4_decode_block(data: [u8], start: i64, length: i64, max_out: i64 = -1) -> Result<[u8], CompressionError>:
+    """Decode one LZ4 block starting at `start` for `length` bytes.
+
+    `max_out` >= 0 bounds the decoded size: an over-long block is rejected
+    before it is expanded (LZ4 can expand ~255x), not after.
+    """
     if start < 0 or length < 0 or start + length > data.len():
         return Err(CompressionError.CorruptStream("lz4 block bounds"))
     var out: [u8] = []
@@ -581,6 +590,8 @@ fn _lz4_decode_block(data: [u8], start: i64, length: i64) -> Result<[u8], Compre
         # Copy literals
         if pos + lit_len > end:
             return Err(CompressionError.TruncatedInput("lz4 literal overrun"))
+        if max_out >= 0 and out.len() + lit_len > max_out:
+            return Err(CompressionError.CorruptStream("lz4 block exceeds output bound"))
         var i = 0
         while i < lit_len:
             out = out.push(data[pos + i])
@@ -608,6 +619,8 @@ fn _lz4_decode_block(data: [u8], start: i64, length: i64) -> Result<[u8], Compre
             match_len = match_len + extra
         if offset == 0:
             return Err(CompressionError.CorruptStream("lz4 invalid match offset"))
+        if max_out >= 0 and out.len() + match_len > max_out:
+            return Err(CompressionError.CorruptStream("lz4 block exceeds output bound"))
         var j = 0
         while j < match_len:
             val src_pos = out.len() - offset
