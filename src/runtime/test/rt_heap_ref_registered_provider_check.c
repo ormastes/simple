@@ -5,7 +5,7 @@
 
 typedef int8_t (*heap_registry_probe_v1)(int64_t);
 
-int8_t rt_heap_ref_registered_provider_header_check(int64_t value) {
+int8_t heap_ref_registered_provider_header_check(int64_t value) {
 #if defined(SIMPLE_CORE_C_STANDALONE) && SIMPLE_CORE_C_STANDALONE
     heap_registry_probe_v1 probe = rt_heap_ref_registered;
 #else
