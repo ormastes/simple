@@ -242,3 +242,34 @@ Plan of record:
 - None for the core cipher/compression gate as of 2026-05-13. The broader optimization plan remains open until every measured row beats both C and Rust baselines.
 - Performance blocker: CRC32 lazy module-level table caching currently crashes native code; see `doc/08_tracking/bug/crc32_native_global_table_cache_segfault_2026-05-13.md`.
 - Performance blocker: CRC32 direct `[u8]` literal table materialization currently corrupts native checksum parity; see `doc/08_tracking/bug/native_u8_array_literal_not_packed_2026-05-13.md`.
+
+## 2026-10-19 Consumer-Gap Wave (Simple / SimpleOS / browser)
+
+Core gate was RED on `release_phase3` (`passed=3 failed=1`: 24 spec files
+had truncated `step("\")` literals and did not parse). Repaired; Tier 1 is
+`passed=13 skipped=0 failed=0` again (seed `5bdd376460541de9`).
+
+Landed in this wave (one PR each): zstd/LZ4 store encoders split frames
+into <=128 KiB / <=64 KiB blocks (were invalid above the limit); AES-GCM
+S-box built once per operation (was rebuilt per byte lookup) plus a NIST
+GCM KAT; RSAES-PKCS1-v1_5 type-2 PS is random nonzero (was fixed 0xFF);
+nvfs LZ4 extents use the real LZ4 block codec with incompressible fallback;
+browser HTTP/1.1 client requests and decodes gzip/deflate (zstd held back: predefined-table frames rejected, ~29 MB import RSS).
+
+Remaining, recorded rather than done:
+
+- No pure-Simple zstd entropy encoder (lib emits raw/RLE blocks only); nvfs
+  Zstd3/Zstd19 stay tagged-copy (TODO FR-NVFS-N7a-003).
+- Brotli: no known-answer decode spec against real encoder output (no
+  `brotli` tool on the measuring host), so the browser does not advertise
+  `br`; the brotli encoder only compresses inputs with <=4 distinct bytes.
+- TLS on the browser (rustls via `rt_tls_*`) and SimpleOS (`rt_tls13_*`,
+  `rt_ssh_*`) is not on the pure-Simple crypto modules; browser
+  `default_cipher` reports a fixed label, not the negotiated suite.
+- `src/os/crypto/*` duplicates 14 `src/lib/common/crypto/*` modules as
+  divergent copies; OS CSPRNG (`src/os/crypto/random.spl`) has its own
+  ChaCha quarter-round and no seed-read success check.
+- Missing: P-256 ECDH, RSA-PSS/OAEP/decrypt/sign, AES-192; no RFC 7748
+  X25519 vectors.
+- Importing the `std.common.compress` facade makes JIT demote to the
+  interpreter on `ZstdFrameHeader.dict_id` (nvfs imports `lz4` directly).
