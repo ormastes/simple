@@ -1197,6 +1197,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_xxhash_finish",
     "rt_xxhash_reset",
     "rt_xxhash_free",
+    "rt_xxh3_128_text",
     // File I/O operations - directory
     "rt_dir_create",
     "rt_dir_list",

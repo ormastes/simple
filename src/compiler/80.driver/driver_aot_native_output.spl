@@ -148,7 +148,7 @@ use compiler.common.cache.phase_compatibility_manifest.{
     phase_compatibility_admit_v1
 }
 use compiler.frontend.frontend_parse_cache.{
-    FRONTEND_CACHE_ENTRY_VERSION, frontend_parse_cache_dir
+    FRONTEND_CACHE_ENTRY_VERSION, frontend_parse_cache_dir, frontend_parse_cache_key
 }
 use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
 use compiler.common.cache.phase_compatibility_path_io.{
@@ -558,6 +558,18 @@ fn driver_emit_phase2_compatibility_manifest_v1(
             artifact_digest, producer_identity, provider_identity,
             target_identity, source))
     val frontend_dir = frontend_parse_cache_dir()
+    # .fpc names are the XXH3 frontend key of the source bytes, not the build
+    # cache's SHA-256 content_hash, so index each source by that key once.
+    # Two sources with one key map to "" (ambiguous).
+    var source_by_frontend_key: Dict<text, text> = {}
+    for source in build_cache.entries.keys():
+        val source_key = frontend_parse_cache_key(source)
+        if source_key == "":
+            continue
+        if source_by_frontend_key.contains_key(source_key):
+            source_by_frontend_key[source_key] = ""
+        else:
+            source_by_frontend_key[source_key] = source
     for name in dir_list(frontend_dir) ?? []:
         if not name.ends_with(".fpc"):
             continue
@@ -574,14 +586,11 @@ fn driver_emit_phase2_compatibility_manifest_v1(
         if artifact_digest.len() != 64:
             return "unreadable-frontend-artifact:" + name
         val subject = name.substring(0, name.len() - 4)
-        var source_identity = ""
-        for source in build_cache.entries.keys():
-            if build_cache.entries[source].fingerprint.content_hash == subject:
-                if source_identity != "":
-                    return "m2-frontend-source-ambiguous:" + subject
-                source_identity = source
-        if source_identity == "":
+        if not source_by_frontend_key.contains_key(subject):
             return "m2-frontend-source-missing:" + subject
+        val source_identity = source_by_frontend_key[subject]
+        if source_identity == "":
+            return "m2-frontend-source-ambiguous:" + subject
         val projection = reverse_reference_exact_projection_v1(
             m2_read, source_identity, source_identity,
             "direct-import-export")

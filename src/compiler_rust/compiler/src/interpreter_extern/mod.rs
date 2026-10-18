@@ -773,6 +773,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_base64_encode", crypto::rt_base64_encode);
     insert_simple!("rt_base64url_decode", crypto::rt_base64url_decode);
     insert_simple!("rt_base64url_encode", crypto::rt_base64url_encode);
+    insert_simple!("rt_xxh3_128_text", crypto::rt_xxh3_128_text);
     insert_simple!("rt_black_box", file_io::rt_black_box);
     insert_simple!("__rt_btreemap_clear", collections::__rt_btreemap_clear);
     insert_simple!("__rt_btreemap_contains_key", collections::__rt_btreemap_contains_key);

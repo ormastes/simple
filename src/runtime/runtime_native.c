@@ -15522,6 +15522,200 @@ int64_t rt_file_hash(int64_t path_value) {
     return hex;
 }
 
+/* XXH3-128 (seed 0, default secret): a scalar port of xxHash's xxhash.h,
+ * twin of the Rust lane's xxhash_rust::xxh3::xxh3_128 and the pure-Simple
+ * std.common.crypto.xxh3. Not collision-resistant: used for local cache
+ * indexing only (the frontend parse-cache key). The 64x64->128 multiply is
+ * built from 32-bit limbs because MSVC has no unsigned __int128. */
+static const uint8_t xxh3c_secret[192] = {
+    0xb8, 0xfe, 0x6c, 0x39, 0x23, 0xa4, 0x4b, 0xbe, 0x7c, 0x01, 0x81, 0x2c, 0xf7, 0x21, 0xad, 0x1c,
+    0xde, 0xd4, 0x6d, 0xe9, 0x83, 0x90, 0x97, 0xdb, 0x72, 0x40, 0xa4, 0xa4, 0xb7, 0xb3, 0x67, 0x1f,
+    0xcb, 0x79, 0xe6, 0x4e, 0xcc, 0xc0, 0xe5, 0x78, 0x82, 0x5a, 0xd0, 0x7d, 0xcc, 0xff, 0x72, 0x21,
+    0xb8, 0x08, 0x46, 0x74, 0xf7, 0x43, 0x24, 0x8e, 0xe0, 0x35, 0x90, 0xe6, 0x81, 0x3a, 0x26, 0x4c,
+    0x3c, 0x28, 0x52, 0xbb, 0x91, 0xc3, 0x00, 0xcb, 0x88, 0xd0, 0x65, 0x8b, 0x1b, 0x53, 0x2e, 0xa3,
+    0x71, 0x64, 0x48, 0x97, 0xa2, 0x0d, 0xf9, 0x4e, 0x38, 0x19, 0xef, 0x46, 0xa9, 0xde, 0xac, 0xd8,
+    0xa8, 0xfa, 0x76, 0x3f, 0xe3, 0x9c, 0x34, 0x3f, 0xf9, 0xdc, 0xbb, 0xc7, 0xc7, 0x0b, 0x4f, 0x1d,
+    0x8a, 0x51, 0xe0, 0x4b, 0xcd, 0xb4, 0x59, 0x31, 0xc8, 0x9f, 0x7e, 0xc9, 0xd9, 0x78, 0x73, 0x64,
+    0xea, 0xc5, 0xac, 0x83, 0x34, 0xd3, 0xeb, 0xc3, 0xc5, 0x81, 0xa0, 0xff, 0xfa, 0x13, 0x63, 0xeb,
+    0x17, 0x0d, 0xdd, 0x51, 0xb7, 0xf0, 0xda, 0x49, 0xd3, 0x16, 0x55, 0x26, 0x29, 0xd4, 0x68, 0x9e,
+    0x2b, 0x16, 0xbe, 0x58, 0x7d, 0x47, 0xa1, 0xfc, 0x8f, 0xf8, 0xb8, 0xd1, 0x7a, 0xd0, 0x31, 0xce,
+    0x45, 0xcb, 0x3a, 0x8f, 0x95, 0x16, 0x04, 0x28, 0xaf, 0xd7, 0xfb, 0xca, 0xbb, 0x4b, 0x40, 0x7e,
+};
+#define RT_XXH_P32_1 0x9E3779B1u
+#define RT_XXH_P32_2 0x85EBCA77u
+#define RT_XXH_P32_3 0xC2B2AE3Du
+#define RT_XXH_P64_1 0x9E3779B185EBCA87ull
+#define RT_XXH_P64_2 0xC2B2AE3D27D4EB4Full
+#define RT_XXH_P64_3 0x165667B19E3779F9ull
+#define RT_XXH_P64_4 0x85EBCA77C2B2AE63ull
+#define RT_XXH_P64_5 0x27D4EB2F165667C5ull
+#define RT_XXH_MX1 0x165667919E3779F9ull
+#define RT_XXH_MX2 0x9FB21C651E98DF25ull
+
+static uint32_t xxh3c_r32(const uint8_t* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+static uint64_t xxh3c_r64(const uint8_t* p) {
+    return (uint64_t)xxh3c_r32(p) | ((uint64_t)xxh3c_r32(p + 4) << 32);
+}
+static uint32_t xxh3c_swap32(uint32_t x) {
+    return (x << 24) | ((x << 8) & 0x00ff0000u) | ((x >> 8) & 0x0000ff00u) | (x >> 24);
+}
+static uint64_t xxh3c_swap64(uint64_t x) {
+    return ((uint64_t)xxh3c_swap32((uint32_t)x) << 32) | xxh3c_swap32((uint32_t)(x >> 32));
+}
+static void xxh3c_mul128(uint64_t a, uint64_t b, uint64_t* lo, uint64_t* hi) {
+    uint64_t lo_lo = (a & 0xffffffffu) * (b & 0xffffffffu);
+    uint64_t hi_lo = (a >> 32) * (b & 0xffffffffu);
+    uint64_t lo_hi = (a & 0xffffffffu) * (b >> 32);
+    uint64_t hi_hi = (a >> 32) * (b >> 32);
+    uint64_t cross = (lo_lo >> 32) + (hi_lo & 0xffffffffu) + lo_hi;
+    *hi = (hi_lo >> 32) + (cross >> 32) + hi_hi;
+    *lo = (cross << 32) | (lo_lo & 0xffffffffu);
+}
+static uint64_t xxh3c_fold64(uint64_t a, uint64_t b) {
+    uint64_t lo, hi;
+    xxh3c_mul128(a, b, &lo, &hi);
+    return lo ^ hi;
+}
+static uint64_t xxh3c_xxh64_avalanche(uint64_t h) {
+    h ^= h >> 33; h *= RT_XXH_P64_2; h ^= h >> 29; h *= RT_XXH_P64_3; return h ^ (h >> 32);
+}
+static uint64_t xxh3c_avalanche(uint64_t h) {
+    h ^= h >> 37; h *= RT_XXH_MX1; return h ^ (h >> 32);
+}
+static uint64_t xxh3c_mix16(const uint8_t* in, const uint8_t* sec, uint64_t seed) {
+    return xxh3c_fold64(xxh3c_r64(in) ^ (xxh3c_r64(sec) + seed),
+                         xxh3c_r64(in + 8) ^ (xxh3c_r64(sec + 8) - seed));
+}
+static void xxh3c_mix32(uint64_t acc[2], const uint8_t* a, const uint8_t* b,
+                          const uint8_t* sec, uint64_t seed) {
+    acc[0] += xxh3c_mix16(a, sec, seed);
+    acc[0] ^= xxh3c_r64(b) + xxh3c_r64(b + 8);
+    acc[1] += xxh3c_mix16(b, sec + 16, seed);
+    acc[1] ^= xxh3c_r64(a) + xxh3c_r64(a + 8);
+}
+static void xxh3c_acc512(uint64_t acc[8], const uint8_t* in, const uint8_t* sec) {
+    for (int i = 0; i < 8; i++) {
+        uint64_t v = xxh3c_r64(in + 8 * i);
+        uint64_t k = v ^ xxh3c_r64(sec + 8 * i);
+        acc[i ^ 1] += v;
+        acc[i] += (k & 0xffffffffu) * (k >> 32);
+    }
+}
+static uint64_t xxh3c_merge(const uint64_t acc[8], const uint8_t* sec, uint64_t start) {
+    uint64_t r = start;
+    for (int i = 0; i < 4; i++)
+        r += xxh3c_fold64(acc[2 * i] ^ xxh3c_r64(sec + 16 * i),
+                           acc[2 * i + 1] ^ xxh3c_r64(sec + 16 * i + 8));
+    return xxh3c_avalanche(r);
+}
+
+/* lo/hi are the XXH128_hash_t low64/high64 halves. */
+static void xxh3c_128_raw_v1(const uint8_t* in, uint64_t len, uint64_t* lo, uint64_t* hi) {
+    const uint8_t* s = xxh3c_secret;
+    if (len == 0) {
+        *lo = xxh3c_xxh64_avalanche(xxh3c_r64(s + 64) ^ xxh3c_r64(s + 72));
+        *hi = xxh3c_xxh64_avalanche(xxh3c_r64(s + 80) ^ xxh3c_r64(s + 88));
+    } else if (len <= 3) {
+        uint32_t cl = ((uint32_t)in[0] << 16) | ((uint32_t)in[len >> 1] << 24) |
+                      (uint32_t)in[len - 1] | ((uint32_t)len << 8);
+        uint32_t sw = xxh3c_swap32(cl);
+        uint32_t ch = (sw << 13) | (sw >> 19);
+        *lo = xxh3c_xxh64_avalanche((uint64_t)cl ^ (uint64_t)(xxh3c_r32(s) ^ xxh3c_r32(s + 4)));
+        *hi = xxh3c_xxh64_avalanche((uint64_t)ch ^ (uint64_t)(xxh3c_r32(s + 8) ^ xxh3c_r32(s + 12)));
+    } else if (len <= 8) {
+        uint64_t in64 = (uint64_t)xxh3c_r32(in) + ((uint64_t)xxh3c_r32(in + len - 4) << 32);
+        uint64_t keyed = in64 ^ (xxh3c_r64(s + 16) ^ xxh3c_r64(s + 24));
+        uint64_t ml, mh;
+        xxh3c_mul128(keyed, RT_XXH_P64_1 + (len << 2), &ml, &mh);
+        mh += ml << 1;
+        ml ^= mh >> 3;
+        ml ^= ml >> 35;
+        ml *= RT_XXH_MX2;
+        ml ^= ml >> 28;
+        *lo = ml;
+        *hi = xxh3c_avalanche(mh);
+    } else if (len <= 16) {
+        uint64_t bl = xxh3c_r64(s + 32) ^ xxh3c_r64(s + 40);
+        uint64_t bh = xxh3c_r64(s + 48) ^ xxh3c_r64(s + 56);
+        uint64_t il = xxh3c_r64(in), ih = xxh3c_r64(in + len - 8);
+        uint64_t ml, mh, hl, hh;
+        xxh3c_mul128(il ^ ih ^ bl, RT_XXH_P64_1, &ml, &mh);
+        ml += (uint64_t)(len - 1) << 54;
+        ih ^= bh;
+        mh += ih + (uint64_t)(uint32_t)ih * (uint64_t)(RT_XXH_P32_2 - 1u);
+        ml ^= xxh3c_swap64(mh);
+        xxh3c_mul128(ml, RT_XXH_P64_2, &hl, &hh);
+        hh += mh * RT_XXH_P64_2;
+        *lo = xxh3c_avalanche(hl);
+        *hi = xxh3c_avalanche(hh);
+    } else if (len <= 240) {
+        uint64_t acc[2] = { len * RT_XXH_P64_1, 0 };
+        if (len <= 128) {
+            if (len > 32) {
+                if (len > 64) {
+                    if (len > 96) xxh3c_mix32(acc, in + 48, in + len - 64, s + 96, 0);
+                    xxh3c_mix32(acc, in + 32, in + len - 48, s + 64, 0);
+                }
+                xxh3c_mix32(acc, in + 16, in + len - 32, s + 32, 0);
+            }
+            xxh3c_mix32(acc, in, in + len - 16, s, 0);
+        } else {
+            uint64_t rounds = len / 32;
+            for (uint64_t i = 0; i < 4; i++)
+                xxh3c_mix32(acc, in + 32 * i, in + 32 * i + 16, s + 32 * i, 0);
+            acc[0] = xxh3c_avalanche(acc[0]);
+            acc[1] = xxh3c_avalanche(acc[1]);
+            for (uint64_t i = 4; i < rounds; i++)
+                xxh3c_mix32(acc, in + 32 * i, in + 32 * i + 16, s + 3 + 32 * (i - 4), 0);
+            xxh3c_mix32(acc, in + len - 16, in + len - 32, s + 136 - 17 - 16, 0);
+        }
+        *lo = xxh3c_avalanche(acc[0] + acc[1]);
+        *hi = 0 - xxh3c_avalanche(acc[0] * RT_XXH_P64_1 + acc[1] * RT_XXH_P64_4 + len * RT_XXH_P64_2);
+    } else {
+        uint64_t acc[8] = { RT_XXH_P32_3, RT_XXH_P64_1, RT_XXH_P64_2, RT_XXH_P64_3,
+                            RT_XXH_P64_4, RT_XXH_P32_2, RT_XXH_P64_5, RT_XXH_P32_1 };
+        const uint64_t stripes = (192 - 64) / 8, block = 64 * stripes;
+        uint64_t blocks = (len - 1) / block;
+        for (uint64_t n = 0; n < blocks; n++) {
+            for (uint64_t i = 0; i < stripes; i++)
+                xxh3c_acc512(acc, in + n * block + 64 * i, s + 8 * i);
+            for (int i = 0; i < 8; i++) {
+                uint64_t a = acc[i];
+                a ^= a >> 47;
+                a ^= xxh3c_r64(s + 192 - 64 + 8 * i);
+                acc[i] = a * RT_XXH_P32_1;
+            }
+        }
+        uint64_t tail = ((len - 1) - block * blocks) / 64;
+        for (uint64_t i = 0; i < tail; i++)
+            xxh3c_acc512(acc, in + blocks * block + 64 * i, s + 8 * i);
+        xxh3c_acc512(acc, in + len - 64, s + 192 - 64 - 7);
+        *lo = xxh3c_merge(acc, s + 11, len * RT_XXH_P64_1);
+        *hi = xxh3c_merge(acc, s + 192 - 64 - 11, ~(len * RT_XXH_P64_2));
+    }
+}
+
+/* `extern fn rt_xxh3_128_text(data: text) -> text`: XXH3-128 of the text's
+ * UTF-8 bytes as 32 lower-case hex, canonical big-endian (high then low),
+ * matching the Rust lane's `format!("{:032x}", xxh3_128(..))`. A non-text
+ * argument yields "" -- the caller's fallback sentinel. */
+int64_t rt_xxh3_128_text(int64_t data_value) {
+    static const char alphabet[] = "0123456789abcdef";
+    uint64_t len = 0, lo = 0, hi = 0;
+    const uint8_t* bytes = rt_core_string_bytes(data_value, &len);
+    char hex[33];
+    if (!bytes) return rt_string_new(NULL, 0);
+    xxh3c_128_raw_v1(bytes, len, &lo, &hi);
+    for (int i = 0; i < 16; i++) {
+        hex[i] = alphabet[(hi >> (60 - 4 * i)) & 15u];
+        hex[16 + i] = alphabet[(lo >> (60 - 4 * i)) & 15u];
+    }
+    hex[32] = '\0';
+    return rt_string_new((const uint8_t*)hex, 32u);
+}
+
 /* Run `cmd` through the shell and return captured stdout as a runtime string
  * (stderr passes through, exit status is discarded -- interpreter contract).
  * `cmd` arrives as a tagged runtime value: rt_shell_exec is in no codegen

@@ -2493,6 +2493,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_terminal_stdout_is_tty", &[], &[I64]), // () -> RuntimeValue (bool)
     RuntimeFuncSpec::new("rt_tls13_sha256", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_unbox_int", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_xxh3_128_text", &[I64], &[I64]), // text -> 32-hex XXH3-128
 ];
 
 #[cfg(test)]
