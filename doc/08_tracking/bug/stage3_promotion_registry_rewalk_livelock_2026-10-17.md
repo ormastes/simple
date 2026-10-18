@@ -162,3 +162,34 @@ tests pinning that valid containers (grown boxed arrays, byte/u64-packed
 arrays, tuples, grow-boundary dicts) are never dropped and that a
 corrupt child is refused without hanging the promote. If the guard ever
 fires in a lane, its log line settles attribution immediately.
+
+## Addendum 2026-10-17 (evening): smoke AV persists through upstream p2_add cycles 91-126
+
+Seven lane attempts on the moving tip; the stage2 sanity frontend-smoke AV
+(0xC0000005) persisted at cycles 105/112/126 with EVOLVING signatures
+(cdb-smoke5/6/7.log):
+- cycle-105/112: `mov r9,[rbp]` rbp=0 in prescan_one_function_v1
+  (nil prescan_fn via values()/thunk transport; .simple/logs/cdb-smoke5.log)
+- cycle-126: `mov rax,[rax]` rax=0 at simple_exe+0x24f83f (NULL dispatch
+  pointer; .simple/logs/cdb-smoke7.log) — corruption moved downstream.
+
+Workaround layer landed: PR #3611 (bind-once guards on the six remaining
+double-read dict draws in module_lowering.spl, astra GO). The residual
+defect is upstream's dict-value/ABI transport in the p2_add domain
+(cycles 121-126 are actively chasing it: tuple-return ABI, erased dict
+reads, feed-array poisoning). This doc + the three cdb captures are the
+handoff evidence for their next cycles.
+
+## Addendum 2026-10-17 (late): smoke9 — guards reach the box, the box is empty inside
+
+Lane attempt 10 (with #3629 bind-once if-val guards on all three values()-drawn
+loops) still AVs, now at RVA 0x58202d — same function lower_module_emit_fn_v1,
+shifted by the guard code. Registers: r13=untag(fn-field)=0, r8=0x8000000000000000
+(boxed header). The record PASSES if val (the draw is a Some box) but its PAYLOAD
+word is nil-0: the owner-field array-element read emits a boxed optional with a
+nil payload where a concrete HirFunction belongs. This is the compiler CODEGEN's
+element-read transport (double-wrap), not a consumption-side nil — no source
+guard can compensate. Producer fix belongs to upstream's p2_add cycles (their
+escalation docs at cycles 144-154 are chasing the same class: "verbatim stores
+in Tuple/Array/set_field arms; revert generic-path experiment", cycle-154).
+Capture: .simple/logs/cdb-smoke9.log.
