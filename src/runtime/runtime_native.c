@@ -15419,7 +15419,14 @@ int rt_file_link_create_excl_no_follow(
 /* Raw owner-facing form used by authenticated native artifact loaders. */
 int rt_sha256_file_raw_v1(const char *path, uint8_t out[32]) {
     if (!path || !path[0] || !out) return 0;
+#if defined(_WIN32)
+    wchar_t* wide = rt_win_long_path_widen(path);
+    if (!wide) return 0;
+    FILE* in = _wfopen(wide, L"rb");
+    free(wide);
+#else
     FILE* in = fopen(path, "rb");
+#endif
     if (!in) return 0;
     uint32_t state[8] = {
         0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
