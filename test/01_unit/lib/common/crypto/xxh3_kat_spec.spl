@@ -11,7 +11,8 @@ bin/simple test test/01_unit/lib/common/crypto/xxh3_kat_spec.spl
 XXH3 is NOT cryptographic and is not collision resistant against adversaries.
 Output equals the scalar reference path of xxHash 0.8.x; it is endianness
 independent. A custom secret shorter than 136 bytes is rejected fail-closed:
-xxh3_128_with_secret returns an empty array and xxh3_64_with_secret returns 0.
+xxh3_128_with_secret returns an empty array and xxh3_64_with_secret returns nil
+(0 is a valid digest, so it cannot signal rejection).
 ## Verification guidance and troubleshooting
 A red row prints the failing input length. Vectors are copied verbatim from
 xxHash tests/sanity_test_vectors.h; the input is the xxHash sanity buffer
@@ -263,7 +264,7 @@ describe "XXH3-64 official sanity vectors":
         var failed = ""
         for r in rows:
             val buf = _sanity(r[0])
-            val h = xxh3_64_with_secret(buf, secret)
+            val h: u64 = xxh3_64_with_secret(buf, secret) ?? 0u64
             if _hi(h) != r[3] or _lo(h) != r[4]:
                 failed = failed + "len=" + r[0].to_text() + " "
         expect(failed).to_equal("")
@@ -521,7 +522,7 @@ describe "XXH3 canonical text form and invalid input":
         step("Render the 128-bit hash of one byte as hex")
         expect(xxh3_128_hex(_sanity(1))).to_equal("a6cd5e9392000f6ac44bdff4074eecdb")
 
-    it "a secret shorter than 136 bytes is rejected fail-closed with an empty 128-bit result and a zero 64-bit result (XXH3_SECRET_SIZE_MIN)":
+    it "a secret shorter than 136 bytes is rejected fail-closed with an empty 128-bit result and a nil 64-bit result (XXH3_SECRET_SIZE_MIN)":
         # @req REQ-XXH3-010
         # @capture(vector): boundary - 135 bytes is invalid, 136 bytes is the minimum valid size
         step("Hash with a 135-byte secret and a 136-byte secret")
@@ -534,9 +535,8 @@ describe "XXH3 canonical text form and invalid input":
         val ok64 = xxh3_64_with_secret(data, minimal)
         expect(bad128.len()).to_equal(0)  # oracle: rejected secret yields no hash words
         expect(ok128.len()).to_equal(2)  # oracle: low64 and high64
-        expect(_lo(bad64)).to_equal(0)  # oracle: rejected secret yields zero
-        expect(_hi(bad64)).to_equal(0)  # oracle: rejected secret yields zero
-        expect(ok64 != 0u64).to_equal(true)
+        expect(bad64).to_be_nil()
+        expect(ok64 == nil).to_be(false)
 
     it "an empty secret is invalid and rejected (error path for XXH3_SECRET_SIZE_MIN)":
         # @req REQ-XXH3-010
@@ -544,4 +544,4 @@ describe "XXH3 canonical text form and invalid input":
         step("Hash with an empty secret")
         val empty: [u8] = []
         expect(xxh3_128_with_secret(_sanity(10), empty).len()).to_equal(0)  # oracle: rejected secret yields no hash words
-        expect(xxh3_64_with_secret(_sanity(10), empty) == 0u64).to_equal(true)
+        expect(xxh3_64_with_secret(_sanity(10), empty)).to_be_nil()

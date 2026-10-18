@@ -37,8 +37,8 @@ Binary: Rust seed bin/local/seed_simple (9c45d2bf601ab93e), interpreter + JIT.
 - **Fixed in round 2 -- O(n^2) memory/time**: the bit writer returned its whole byte array from every
   call (copy per symbol) and the bit reader returned a tuple holding the input array per bit.
   deflate now collects (value, nbits) pairs and packs once; inflate uses an integer bit offset and a
-  9-bit lookup table. 30 KB compress+decompress: JIT 30.2 s / 7.75 GB -> 0.48 s / 124 MB;
+  9-bit lookup table. 30 KB compress+decompress (input: 30000 LCG bytes, g = (g*1103515245+12345) & 0x7fffffff, byte = (g>>16)&255, seed 12345, then its first 64 bytes repeated; level 6): JIT 30.2 s / 7.75 GB -> 0.48 s / 124 MB;
   interpreter 10.6 s -> 2.9 s. The old encoder also mis-coded distances > 24576 (fixed above), so
   its output for such inputs was corrupt; for all other inputs output is byte-identical.
 - JIT hazard: `push` through an `[Any]` tuple slot mutates the caller's array, and untyped `[Any]`
-  values passed to typed params stay tagged (build/probe/gzip_jit3.spl); typed locals avoid it.
+  values passed to typed params stay tagged (test/fixtures/compiler/seed_jit_untyped_any_tag_repro/main.spl, `rev=` line); typed locals avoid it.

@@ -11,7 +11,7 @@ Found while implementing XXH3 (src/lib/common/crypto/xxh3.spl): every input >= 2
 in spec runs until the u64 locals were annotated.
 
 ## Repro
-build/probe/u64_infer_bug.spl (10 lines):
+test/fixtures/compiler/seed_interp_u64_inference_repro/main.spl:
 
     val x = rd(b, 0) ^ rd(b, 8)          # inferred
     val y: u64 = rd(b, 0) ^ rd(b, 8)     # annotated

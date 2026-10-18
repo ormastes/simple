@@ -4,12 +4,12 @@ Date: 2026-10-18. Found by: gzip hardening lane. Binary: Rust seed `bin/local/se
 (sha256 prefix 9c45d2bf601ab93e), default JIT mode. Interpreter mode is correct.
 
 ## Symptom
-`build/probe/perf_baseline.spl` (gzip_compress_default + gzip_decompress, any size, even 0 bytes)
+A gzip_compress_default + gzip_decompress round trip (any size, even 0 bytes)
 printed `ok=0 same=false` under JIT and `ok=65536 same=true` under
 `SIMPLE_EXECUTION_MODE=interpreter`.
 
 ## Minimal repro
-`build/probe/gzip_jit_repro.spl`: pushing `v.to_u8()` into `var bytes = bs[0]` (untyped array
+`test/fixtures/compiler/seed_jit_untyped_any_tag_repro/main.spl`: pushing `v.to_u8()` into `var bytes = bs[0]` (untyped array
 taken from an `[Any]` tuple) stores `99` as `12` (99 >> 3) under JIT; annotating
 `var bytes: [u8] = bs[0]` gives 99. Same for `x.to_u8()` where `x` is an UNTYPED fn
 parameter (`gzip_footer_create(crc32, size)`: footer bytes came out as value << 3).
