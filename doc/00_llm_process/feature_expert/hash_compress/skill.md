@@ -8,7 +8,7 @@ official specifications' own vectors. Plan:
 | Need | Use | Never |
 |---|---|---|
 | immutable artifact id, distributed cache object, content verification | `std.common.crypto.blake3` (`blake3_hash`, `blake3_hex`, `blake3_keyed_hash`, `blake3_derive_key`, `blake3_hash_xof`) | XXH3 (not collision-resistant) |
-| fast local fingerprint, AST/TLDR cache index key | `std.common.crypto.xxh3` (`xxh3_128`, `xxh3_128_hex`, `xxh3_64`, `_seeded`, `_with_secret`) | anything adversary-controlled |
+| fast local fingerprint, AST/TLDR cache index key | `std.common.crypto.xxh3` (`xxh3_128`, `xxh3_128_hex`, `xxh3_64`, `_seeded`, `_with_secret` — 64-bit returns `[u64]`, `[]` on a short secret) | anything adversary-controlled |
 | gzip file / HTTP gzip | `std.nogc_sync_mut.compression.gzip` (`gzip_decompress` decodes every member with `inflate_member`) | raw `inflate` for a gzip member (it tolerates a missing BFINAL for sync-flush) |
 
 ## Specs (all vectors copied verbatim from the official sources)
@@ -32,6 +32,8 @@ seen both ways. Tail expressions and continuation lines are never recorded.
 ## Landmines (all found in this lane)
 - Seed JIT: `.to_u8()`/`push` on an untyped value is mis-encoded (value >> 3);
   type the params/arrays. `doc/08_tracking/bug/seed_jit_untyped_to_u8_push_double_untag_2026-10-18.md`.
+- Seed JIT: unwrapping a `u64?` (`.unwrap()` or untyped `?? d`) yields a pointer-like value;
+  return `[u64]` instead. `doc/08_tracking/bug/seed_jit_optional_u64_unwrap_2026-10-18.md`.
 - Seed interpreter: an unannotated `val x = f() ^ g()` of extern-backed u64
   calls becomes signed; annotate `: u64`.
   `doc/08_tracking/bug/seed_interp_u64_inference_signed_2026-10-18.md`.

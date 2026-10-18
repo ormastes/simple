@@ -24,7 +24,9 @@ Plan: `doc/03_plan/lib/crypto/hash_gzip_hardening_2026-10-18.md`.
 - Seeded long inputs derive a 192-byte custom secret; short inputs mix the
   seed directly. `_mul128` uses 32-bit limbs (no native 128-bit type).
 - Result of `xxh3_128` is `[low64, high64]`; `xxh3_128_hex` is canonical
-  big-endian (high then low). A secret < 136 bytes fails closed.
+  big-endian (high then low). A secret < 136 bytes fails closed: both
+  `_with_secret` variants return `[]` (64-bit: `[hash]` otherwise; not `u64?`,
+  see seed_jit_optional_u64_unwrap_2026-10-18.md).
 
 ## gzip / DEFLATE (`src/lib/nogc_sync_mut/compression/gzip/`)
 - `inflate_member(input, start)` = `_inflate_core(member = true)`; gzip members
