@@ -56,3 +56,24 @@ always returns four computed coordinates; step positions 0..3 all exist. Both
 public diagnostic probes select position zero from those same four-item results.
 The regression checks both swap branches, all ladder values, division special
 branches, and multi-limb byte roundtrip; no empty-shape assumption was added.
+
+## Scalar access follow-up (UNRUN)
+
+The same Optional-as-value mismatch affected `_bigint_get_bit` and
+`_bigint_shift_left_one`: both used get results in integer arithmetic. Their
+accesses now use indexing. Source/test call-site search found only
+`_bigint_mod_safe` calling these helpers before the new regression.
+
+For get_bit, that caller initializes i to bit_length(a)-1 and invokes the
+helper only inside `while i >= 0`, decrementing i afterward. Thus n >= 0 at
+all existing calls; divisor 30 gives limb_idx >= 0, and the helper returns
+before access when limb_idx >= a.len(). A negative n is outside this proven
+caller domain; its public contract remains unspecified/open. No negative-n
+behavior or guard was invented in this repair.
+
+For shift_left_one, zero/empty inputs return early. The loop starts i at zero,
+checks i < a.len(), and increments by one without mutating a. Thus every read
+is in bounds. New assertions cover empty/zero inputs, low and limb-boundary
+bits, the upper-bound return, one-limb carry, propagation into a second limb,
+and actual modulo use of both helpers. Expected modulo: (2^30+5) % 7 = 6.
+All new executable assertions remain UNRUN; this is a source-only repair.

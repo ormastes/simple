@@ -38,3 +38,7 @@ nested declarations. See
 conflicting API contracts, exact trace, and workaround retirement gate.
 Updated tests remain UNRUN. Earlier diagnosis above is historical and is
 insufficient to explain or resolve the native failure by itself.
+
+The scalar access follow-up also covers bit indices 0/1/29/30/60, empty input,
+shift carries, and modulo integration. Existing get_bit callers prove n >= 0;
+negative-n behavior remains unspecified. These additional cases are UNRUN.
