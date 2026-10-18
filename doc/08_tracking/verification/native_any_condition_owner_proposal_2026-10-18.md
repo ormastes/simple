@@ -18,13 +18,15 @@ The change is isolated to `MirLowering.lower_cond_operand` in `mir_lowering_stmt
 
 1. Evaluate the expression once through the existing dispatcher.
 2. Retain the existing Optional/Nil presence path and its precedence.
-3. Identify Any from the registered local HIR owner. Only when that owner is absent may an Any expression annotation recover the classification, and then only for an actual MIR I64 slot. A normalized MIR Bool is never decoded as tagged Any through this fallback.
+3. Identify Any from the registered local HIR owner and require its actual MIR slot to be I64. Only when that HIR owner is absent may an Any expression annotation recover the classification, again requiring an actual MIR I64 slot. A normalized MIR Bool is never decoded as tagged Any through either path.
 4. Emit the existing `rt_value_truthy(i64) -> bool` call for the proven Any condition.
 5. Keep concrete bool/int/float, unresolved Infer and other conditions on their existing paths. Preserve all assurance diagnostics and runtime-value metadata.
 
 The runtime provider already exists in the actual C cohort (`runtime.h` int8_t return and `runtime_native.c` implementation); root also confirmed the corresponding owned Rust runtime ABI. No provider, handwritten tag decoder or public assertion API is added. The returned normalized Bool flows through the existing branch/not/and/or lowering. MC/DC wrapping remains in `lower_cond_expr`, so decoding does not introduce a duplicate condition probe.
 
-The new path adds one bounded runtime predicate call per evaluated Any condition and no allocation or specialization loop. Existing local HIR lookup is reused; only the annotation fallback adds a MIR local-type lookup. Performance measurements are UNRUN. Global masking of I64 branch operands would misread raw integer19 as tagged false and is explicitly avoided.
+The new path adds one existing runtime predicate call per evaluated Any condition and no allocation or specialization loop. Existing local HIR lookup is reused; either candidate Any path additionally checks the actual MIR local type. Performance measurements are UNRUN. Global masking of I64 branch operands would misread raw integer19 as tagged false and is explicitly avoided.
+
+Third and final bounded source-review revision: independent review found that `lower_assign_var` copies into an existing local, updates the runtime-value flag and remembers the RHS HIR type without changing the destination MIR storage. Thus registered Any metadata alone does not prove I64 storage; both detection paths now require it. The actual failed assertion parameter remains covered because its parameter ABI is proven I64. This prevents an added decode of an already normalized Bool; it does not claim to repair or execute that separate assignment scenario. All executable checks remain UNRUN.
 
 ## Established semantics and unresolved distinctions
 
