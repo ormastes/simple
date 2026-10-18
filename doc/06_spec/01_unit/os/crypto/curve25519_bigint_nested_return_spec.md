@@ -27,3 +27,14 @@ Pending validation, coordinated by the parent: execute this spec with the
 admitted self-hosted runtime and retry only failed campaign row 9 and its
 affected closure. Existing green objects must be preserved. No full rebuild
 or Rust seed fallback is authorized. Native success is not claimed here.
+
+## Retry3 correction
+
+The annotation-only patch failed actual native retry3 with the same len/get
+diagnostics. Native get constructs Optional<T>; crypto used it as T. The
+subsequent compatibility repair uses fixed-position indexing and keeps the
+nested declarations. See
+`doc/08_tracking/bug/array_get_contract_drift_crypto_2026-10-18.md` for the
+conflicting API contracts, exact trace, and workaround retirement gate.
+Updated tests remain UNRUN. Earlier diagnosis above is historical and is
+insufficient to explain or resolve the native failure by itself.
