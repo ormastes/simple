@@ -2,11 +2,13 @@
 use std.common.crypto.sha256.{sha256_text}
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
-use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.parser_types.{ParserModule, ParserFunction}
 use compiler.core.parser.{par_had_error_get}
 use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering._Items.module_callable_types.*
+use compiler.hir.hir_lowering._Items.lowering_helpers.{ReturnScan}
 use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_definitions.{HirFunction, HirBlock}
 use compiler.mono.monomorphize_integration.{run_monomorphization}
@@ -128,6 +130,29 @@ fn case_7():
     val specialized = enum_template_specialized_mir()
     objectless_require((driver_native_parsed_objectless_proof_valid_v1(proof, "template", "template.spl", identity, specialized)) == (false), "assert-133")
 
+fn enum_template_check_if_return_scan(source: text, ambiguous: bool, label: text):
+    val parsed = enum_template_parse(source)
+    objectless_require(parsed.functions.len() == 1, label + " function count")
+    val names: [text] = parsed.functions.keys()
+    val function: ParserFunction = parsed.functions[names[0]]
+    var lowering = HirLowering.with_filename("template.spl")
+    val scan: ReturnScan = lowering.scan_ast_block_for_returns(function.body, function.params)
+    objectless_require(scan.found_value_return, label + " value return")
+    objectless_require(scan.resolved_name == "i64", label + " payload type")
+    objectless_require(scan.ambiguous == ambiguous, label + " branch agreement")
+    objectless_require(lowering.errors.len() == 0, label + " scanner errors")
+
+fn case_8():
+    enum_template_check_if_return_scan(
+        "fn scan_present_else():\n    if true:\n        return 1\n    else:\n        return 2\n",
+        false, "typed tuple present else")
+    enum_template_check_if_return_scan(
+        "fn scan_absent_else():\n    if true:\n        return 3\n",
+        false, "typed tuple absent else")
+    enum_template_check_if_return_scan(
+        "fn scan_conflicting_else():\n    if true:\n        return 4\n    else:\n        return false\n",
+        true, "typed tuple conflicting else")
+
 fn objectless_require(condition: bool, label: text):
     if not condition: panic("enum-template-proof: " + label)
 
@@ -139,5 +164,6 @@ fn main() -> i64:
     case_5()
     case_6()
     case_7()
+    case_8()
     print "generic-enum-objectless-pass"
     0
