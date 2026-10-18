@@ -113,3 +113,16 @@ modulus (ciphertext == padded block, no RSA-2048 modexp). Spec:
   (4 KiB AES-256-GCM): interp 14.0 -> 10.3 s, jit 0.28 -> 0.21 s, jit RSS
   174 -> 103 MB. `crc32.update_byte/update_u32` are compiler-intrinsic pattern
   wrappers with no library callers; left as is.
+
+## zstd decoder: Predefined_Mode and Repeat_Mode sequence tables (2026-10-19)
+- `zstd_seq.spl::_zstd_parse_sequence_tables` no longer blanket-rejects Repeat (3) or
+  all-Predefined (0,0,0); those were placeholders pinned by `zstd_sequence_header_spec`
+  and `zstd_single_sequence_compress_spec`, not guards against a real defect. Default
+  LL/ML/OF distributions (36/53/29 symbols, AL 6/6/5) match RFC 8878 3.1.1.3.2.2.
+- Table history is threaded per frame in `zstd_dict.spl` (`sequence_table_history`);
+  an RLE-mode table is stored in history as a 1-entry table_log 0 table so a later
+  Repeat reuses it. `sequence_history_established` (dictionary or an earlier sequence
+  block) makes Repeat on a first block a CorruptStream error, since the default history
+  is the predefined tables and would otherwise decode silently wrong.
+- Real fixtures: `test/01_unit/lib/common/zstd_predefined_repeat_modes_spec.spl`
+  (host `zstd` 1.5.5; repeat frame needs `--zstd=wlog=10` for small blocks, `-19`).

@@ -1,6 +1,6 @@
 use std.common.compress.types.{CompressionError}
 use std.common.compress.zstd_bits.{ZstdMsbBackwardBits, zstd_msb_bits_init, zstd_msb_bits_read, zstd_msb_bits_remaining}
-use std.common.compress.zstd_fse.{ZstdFseDecodeTable, ZstdFseState, zstd_fse_parse_normalized_counts, zstd_fse_build_decode_table, zstd_fse_init_state, zstd_fse_get_entry}
+use std.common.compress.zstd_fse.{ZstdFseDecodeEntry, ZstdFseDecodeTable, ZstdFseState, zstd_fse_parse_normalized_counts, zstd_fse_build_decode_table, zstd_fse_init_state, zstd_fse_get_entry}
 use std.common.compress.zstd_types.{append_bytes, append_self_overlap_copy}
 use std.common.compress.zstd_types.{ZstdSequenceCount, ZstdSequenceModes, ZstdSequence, ZstdRepeatOffsets, ZstdRleSequenceTables, ZstdSequenceTables, ZstdSequenceTableHistory, ZSTD_LL_MAX_TABLE_LOG, ZSTD_ML_MAX_TABLE_LOG, ZSTD_OF_MAX_TABLE_LOG, ZSTD_LL_DEFAULT_DISTRIBUTION, ZSTD_ML_DEFAULT_DISTRIBUTION, ZSTD_OF_DEFAULT_DISTRIBUTION}
 
@@ -211,7 +211,10 @@ fn _zstd_parse_single_sequence_table(input: [u8], pos: i64, block_end: i64, mode
     if mode == 1:
         if _zstd_sequence_bounds_invalid(pos, block_end, input.len()):
             return Err(CompressionError.TruncatedInput("zstd rle sequence table"))
-        return Ok((Some(input[pos].to_i64()), nil, previous_table, 1))
+        # RFC 8878: an RLE table is the table a later Repeat_Mode block reuses.
+        val rle_code = input[pos].to_i64()
+        val rle_table = ZstdFseDecodeTable(table_log: 0, entries: [ZstdFseDecodeEntry(symbol: rle_code, bits: 0, baseline: 0)])
+        return Ok((Some(rle_code), nil, rle_table, 1))
     if mode == 3:
         return Ok((nil, Some(previous_table), previous_table, 0))
     if mode == 0:
@@ -231,15 +234,6 @@ fn _zstd_parse_single_sequence_table(input: [u8], pos: i64, block_end: i64, mode
     Ok((nil, Some(table), table, counts.bytes_used))
 
 fn _zstd_parse_sequence_tables(input: [u8], pos: i64, block_end: i64, modes: ZstdSequenceModes, previous_tables: ZstdSequenceTableHistory) -> Result<(ZstdSequenceTables, ZstdSequenceTableHistory), CompressionError>:
-    # Gate unsupported modes with specific errors before attempting decode
-    if (modes.literals_length_mode == 3 or
-            modes.offsets_mode == 3 or
-            modes.match_length_mode == 3):
-        return Err(CompressionError.UnsupportedFeature("zstd repeated fse tables are not supported"))
-    if (modes.literals_length_mode == 0 and
-            modes.offsets_mode == 0 and
-            modes.match_length_mode == 0):
-        return Err(CompressionError.UnsupportedFeature("zstd sequence decoding tables via all-predefined modes not supported"))
     var cursor = pos
     val ll_res = _zstd_parse_single_sequence_table(input, cursor, block_end, modes.literals_length_mode, ZSTD_LL_MAX_TABLE_LOG, ZSTD_LL_DEFAULT_DISTRIBUTION, previous_tables.literal_lengths)
     val (ll_rle, ll_table, next_ll_table, ll_used) = match ll_res:
