@@ -33,3 +33,39 @@ the new SCV source guard; Phase3 must incorporate and qualify that SPL change.
 Evidence: phase3-validation-20261016/core-checked-reader-repair-cycle1.
 Bug database reconciliation remains pending; this dated record preserves the
 concrete evidence while its qualified database tool is unavailable.
+
+## Fresh native counterfactual, 2026-10-18
+
+The actual `0405` producer (source cohort `b790`) reproduced the same defect:
+its Git owner emitted event 36967 for `protocol café.spl` with byte_count=-1
+while all five digest facets were valid. This evidence identifies a stale
+producer lacking existing fix `c1f630e7a05`, rather than a new SCV validator bug.
+
+The existing `test/04_smoke/core_checked_reader_native.c` was linked twice
+against the same retained original `0405` core-C runtime archive. Baseline
+exited 5 at the actual 297-byte Unicode fixture. The counterfactual compiled
+the original `b790` `runtime_native.c` with only the exact existing checked-reader
+hunk from `c1f630e7a05`, then supplied that object before the unchanged archive.
+It exited 0 with empty stderr and:
+
+```text
+CORE_CHECKED_READER_PASS checks=17 unicode_fixture_bytes=297
+```
+
+The fresh executed assertion count is **17**. The original evidence paragraph
+above remains historical; this run independently confirms the same count.
+The fixed link map binds `rt_file_read_text_at_checked`, `rt_open_fd`, and
+`rt_string_new` to `runtime_native_fixed.obj`. Normal strict linking used
+`/OPT:REF`, without undefined-symbol substitutes or permissive link flags.
+Compilation used LLVM `clang-cl`, the MSVC ABI and `/MT`, MSVC headers
+14.44.35207, and Windows SDK 10.0.26100.0.
+
+Retained local evidence: `C:/dev/p4-reader/receipt.json`, with native stdout,
+baseline/fixed exit status, exact source diff, compile/link response files,
+maps, source/tool/archive/executable hashes, and a conservative 17-header local
+include closure. Fixed executable SHA-256:
+`476d8fcfc5fc1027618b12c6a9820c7e5a7e4c7c0e9df4514b3a248426a528fc`.
+The original archive was reused without mutation. No green native check was
+rerun. This native-only result does not qualify the separate SPL failed-read
+guard, complete SCV refresh, bootstrap phase, or full CLI; those remain owned
+by the subsequent producer build and its admission checks.
