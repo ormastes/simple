@@ -1,3 +1,6 @@
+/* Focused manual native probe. Before running, create the dedicated parent
+ * C:/dev/p3-retained-seal-probe; each run owns a unique root-PID child.
+ * This harness is not claimed to be a generic portable test runner. */
 #include "../runtime_cache_host_authority_v1.c"
 #include <stdio.h>
 static int checks;
