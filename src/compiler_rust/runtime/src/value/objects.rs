@@ -403,18 +403,13 @@ pub extern "C" fn rt_heap_ref_wellformed(value: RuntimeValue) -> i8 {
 #[no_mangle]
 pub extern "C" fn rt_heap_ref_registered(value: RuntimeValue) -> i8 {
     let addr = (value.0 & !super::tags::TAG_MASK) as usize;
+    // Untagged by-value copies, registered objects and raw AOT blocks all
+    // accept (see doc), so a registry probe here cannot change the answer and
+    // only costs a lookup per encoded node. Restore it when raw blocks are
+    // registered at the allocator.
     if addr < 4096 {
-        return 0;
-    }
-    if value.0 & super::tags::TAG_MASK != super::tags::TAG_HEAP {
-        // Untagged by-value copy: live by construction.
-        return 1;
-    }
-    if super::heap::is_registered_heap_ptr(addr as *mut super::heap::HeapHeader) {
-        1
+        0
     } else {
-        // Raw struct block (AOT representation) or unregistered garbage:
-        // indistinguishable without allocator-level tracking (see doc).
         1
     }
 }
