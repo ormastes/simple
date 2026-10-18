@@ -18,8 +18,11 @@ fn demand_artifact_recover_owner_v1(
     binding: GroupedActionLeaseV1, successor_owner_id: text,
     successor_generation: i64
 ) -> Result<DemandArtifactRouteV1, text>:
-    if not route.valid or route.execution.coordinator == nil:
+    if not route.valid:
         return Err("recovery-route-invalid")
+    var coordinator = match route.execution.coordinator:
+        Some(value): value
+        _: return Err("recovery-route-invalid")
     if not builder_digest_valid_v1(successor_owner_id) or
             successor_owner_id == owner.identity_digest or
             successor_generation <= route.lease_generation or
@@ -41,10 +44,12 @@ fn demand_artifact_recover_owner_v1(
     if service_index < 0:
         return Err("recovery-action-missing")
     val entry = route.service.entries[service_index]
-    if entry.state != ArtifactRequestStateV1.leased or entry.lease == nil or
+    if entry.state != ArtifactRequestStateV1.leased or
             entry.cas_artifact_digest != "":
         return Err("recovery-action-not-leased")
-    val lease = entry.lease.unwrap()
+    val lease = match entry.lease:
+        Some(value): value
+        _: return Err("recovery-action-not-leased")
     if lease.cancelled or lease.action_id != binding.action_id or
             lease.lease_id != binding.lease_id or
             lease.owner_id != owner.identity_digest or
@@ -53,7 +58,6 @@ fn demand_artifact_recover_owner_v1(
             entry.request.snapshot_revision != binding.snapshot_digest or
             entry.request.compatibility_id != binding.cache_identity:
         return Err("recovery-lease-mismatch")
-    var coordinator = route.execution.coordinator.unwrap()
     if coordinator.graph.snapshot_revision != binding.snapshot_digest:
         return Err("recovery-coordinator-snapshot-mismatch")
     if coordinator.cancelled:
@@ -65,8 +69,11 @@ fn demand_artifact_recover_owner_v1(
     if runtime_index < 0:
         return Err("recovery-coordinator-action-missing")
     val current = coordinator.runtime[runtime_index]
+    val result_present = match current.result:
+        Some(_): true
+        _: false
     if current.state != BuildActionStateV1.running or
-            current.owner_token != lease.lease_id or current.result != nil:
+            current.owner_token != lease.lease_id or result_present:
         return Err("recovery-coordinator-owner-mismatch")
 
     # The provider verifies exact launch identity, terminal leader reap and an
@@ -89,7 +96,7 @@ fn demand_artifact_recover_owner_v1(
     service.entries[service_index] = ArtifactQueueEntryV1(
         entry.request, ArtifactRequestStateV1.queued, entry.lease, "", "")
     coordinator.runtime[runtime_index] = BuildActionRuntimeV1(
-        binding.action_id, BuildActionStateV1.pending, "", 0, nil)
+        binding.action_id, BuildActionStateV1.pending, "", 0, None)
     var execution = staged.execution
     execution.coordinator = Some(coordinator)
     staged.execution = execution
