@@ -141,3 +141,14 @@ fixture with its matching runtime; require exit 0 and exactly
 producer/source/runtime identities and output. Before admission, collect the
 original failing gate's richer diagnostic without weakening its refusal.
 General runtime/core verification and production readiness remain pending.
+
+## Static audit evidence, 2026-10-18
+
+Working/staged direct-environment guards and whitespace checks passed for the
+repair. The executable-spec layout count under doc/06_spec is zero. The wider
+SFFI audit remains FAIL: source variants 398/399; migration symbols 3593/3546.
+Astra reviewed the exact added declarations against normalized signatures:
+they reuse existing symbols and add zero migration or signature-variant
+symbols. The aggregate 47-symbol excess predates this branch. No ratchet
+ceiling was raised. Fixture annotations now state the actual borrowing,
+sentinel and identity contracts; annotations do not constitute execution proof.
