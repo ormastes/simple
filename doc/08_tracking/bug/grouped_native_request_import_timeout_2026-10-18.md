@@ -1,0 +1,13 @@
+# Grouped parent imports worker implementation for a wire request
+
+Status: source repair prepared; targeted runtime/performance verification pending.
+
+The retained retry5 compile of `src/app/bootstrap_builder/grouped_native_run.spl` used admitted pure-Simple compiler70194 and target4a649fd. It timed out at300seconds with116/1182 HIR modules complete, no ERROR markers and5144 re-export warnings. Source closure completed at1800ms; load_sources at4098ms; parse/surface setup ended at194242ms; HIR last progressed at299126ms. Thus190144ms preceded HIR and104873ms covered HIR; this was not evidence of a single stuck HIR module. Outer peak RSS was1357704KiB, worker peak1298636KiB.
+
+The parent imported only `NativeGroupWorkerRequestV1` and its encoder from `grouped_native_worker`, which also imports the module loader/JIT/compiler implementation. Entry-closure compilation therefore parsed and lowered that implementation merely to construct a request. Move the unchanged record, path helpers, validator and codec into `std.common.build_manager.grouped_native_worker_request`. Parent imports the defining owner; worker imports and re-exports the same definitions. Worker execution, request bytes, validation, route admission and process ownership are unchanged.
+
+The warm-route metadata path was inspected separately. Its interface-action archive module contains receipt/value codecs; its directory name does not establish a full HIR implementation dependency. No speculative archive split or validation omission is included.
+
+Static named-import reachability over the1182 retained surface paths falls from316 to154 nodes in the diagnostic model, with163 removed and one new contract. The model has unresolved aliases (44 before,11 after), so these are neither actual compiler closure counts nor performance measurements. The remaining modeled compiler files are16 cache/driver owners,3 common owners and one archive value codec; loader/JIT/backend/frontend implementation nodes disappear. Exact target verification must establish the real closure and elapsed/RSS change.
+
+This target-side dependency fix can be compiled by unchanged70194; editing target compiler sources is not being mistaken for replacing that admitted producer. Preserve its source/runtime binding and compatible cache; do not increase the deadline as the fix. The baseline needs no replay. One exact failed-target verification is planned; any further repair stays within the newly authorized three-cycle budget. The codec SSpec/native companion and required core/MCP smokes are UNRUN. No Phase3/release-readiness claim is made.
