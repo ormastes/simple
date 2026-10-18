@@ -1024,29 +1024,13 @@ impl NativeProjectBuilder {
 
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     fn quote_linker_response_path(path: &Path) -> String {
-        let raw = path.to_string_lossy();
-        debug_assert!(
-            !raw.contains(['\n', '\r']),
-            "response file paths must not contain newlines: {}",
-            path.display()
-        );
-        let escaped = raw.replace('\\', "\\\\").replace('"', "\\\"");
-        format!("\"{escaped}\"")
+        super::archive::quote_posix_response_path(path)
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     fn write_linker_object_response_file(temp_dir: &Path, object_paths: &[PathBuf]) -> Result<PathBuf, String> {
         let rsp_path = temp_dir.join("spl_objects.rsp");
-        let mut quoted_paths = Vec::with_capacity(object_paths.len());
-        for obj in object_paths {
-            let raw = obj.to_string_lossy();
-            if raw.contains(['\n', '\r']) {
-                return Err(format!("object path contains unsupported newline: {}", obj.display()));
-            }
-            quoted_paths.push(Self::quote_linker_response_path(obj));
-        }
-        let contents = quoted_paths.join("\n");
-        std::fs::write(&rsp_path, format!("{contents}\n")).map_err(|e| format!("write object response file: {e}"))?;
+        super::archive::write_object_response_file(&rsp_path, object_paths, false)?;
         Ok(rsp_path)
     }
 
