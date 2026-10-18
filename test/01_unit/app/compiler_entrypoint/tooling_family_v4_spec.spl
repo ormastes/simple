@@ -1,0 +1,73 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use app.compiler_entrypoint.inventory_families.{compiler_inventory_family_v1, compiler_inventory_path_selected_v1}
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_inventory_roots_v1}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_membership_encode_v1, compiler_inventory_membership_decode_v1, compiler_inventory_membership_merge_v1, compiler_inventory_cursor_decode_v1}
+use tooling_family_v4_fixture.{tooling_v4_roundtrip_io, tooling_v4_legacy_io, tooling_v4_pointer_bound_io}
+
+fn tooling_v4_cursor_text(tooling: bool) -> text:
+    val digest = sha256_text("")
+    var rows = [if tooling: "simple-compile-event-cursor-v4" else: "simple-compile-event-cursor-v3", "git_head={digest}", "filesystem_rows=0", "filesystem_digest={digest}", "inventory_digest={digest}", "inventory_generation=1", "untracked_src_digest={digest}", "untracked_test_digest={digest}", "untracked_membership_digest={digest}"]
+    if tooling: rows = rows.push("untracked_examples_tooling_digest={digest}")
+    rows.join("\n")
+
+describe "finite tooling inventory v4":
+    it "normalizes canonical exact and descendant selectors into three finite families":
+        val families = compiler_source_authority_inventory_roots_v1("C:/workspace", ["src/app", "test/unit", "examples/10_tooling/ide", "C:/workspace/examples/10_tooling"])
+        expect(families.len()).to_equal(3)
+        expect(families[0]).to_equal("src")
+        expect(families[1]).to_equal("test")
+        expect(families[2]).to_equal("examples/10_tooling")
+        val windows = compiler_source_authority_inventory_roots_v1("C:/workspace", ["C:\\workspace\\examples\\10_tooling"])
+        expect(windows.len()).to_equal(1)
+        expect(windows[0]).to_equal("examples/10_tooling")
+
+    it "rejects broad examples siblings traversal outside roots and control bytes":
+        for selector in ["examples", "examples/11_other", "examples/10_tooling-other", "examples/10_tooling/../escape", "D:/foreign/examples/10_tooling", "examples/10_tooling\nextra"]:
+            val refused = compiler_source_authority_inventory_roots_v1("C:/workspace", [selector])
+            expect(refused.len()).to_equal(0)
+        for relative in ["examples/10_tooling//x.spl", "examples/10_tooling/./x.spl", "examples/10_tooling/../x.spl", "examples/10_tooling\\x.spl", "/examples/10_tooling/x.spl"]:
+            expect(compiler_inventory_family_v1(relative)).to_equal("")
+        expect(compiler_inventory_path_selected_v1("examples/10_tooling/x.spl", ["src"])).to_equal(false)
+        expect(compiler_inventory_path_selected_v1("examples/10_tooling/x.spl", ["examples/10_tooling"])).to_equal(true)
+
+    it "roundtrips actual mixed membership and preserves unselected families":
+        val paths = ["src/a.spl", "test/a.spl", "examples/10_tooling/a.spl"]
+        val encoded = compiler_inventory_membership_encode_v1(paths)
+        expect(encoded.len()).to_be_greater_than(0)
+        val decoded = compiler_inventory_membership_decode_v1(encoded)
+        expect(decoded != nil).to_equal(true)
+        if val members = decoded:
+            expect(members.len()).to_equal(3)
+            expect(members[0]).to_equal(paths[0])
+            expect(members[1]).to_equal(paths[1])
+            expect(members[2]).to_equal(paths[2])
+        val merged = compiler_inventory_membership_merge_v1(paths, ["examples/10_tooling/b.spl"], ["examples/10_tooling"])
+        expect(merged.len()).to_equal(3)
+        expect(merged[0]).to_equal("src/a.spl")
+        expect(merged[1]).to_equal("test/a.spl")
+        expect(merged[2]).to_equal("examples/10_tooling/b.spl")
+        expect(compiler_inventory_membership_encode_v1(["examples/other/a.spl"])).to_equal("")
+        expect(compiler_inventory_membership_encode_v1(["examples/10_tooling/a.spl", "examples/10_tooling/a.spl"])).to_equal("")
+
+    it "decodes exact v3 and v4 contracts and rejects missing malformed or mismatched digest rows":
+        val legacy = compiler_inventory_cursor_decode_v1(tooling_v4_cursor_text(false))
+        expect(legacy.valid).to_equal(true)
+        expect(legacy.untracked_examples_tooling_digest).to_equal("")
+        val v4 = tooling_v4_cursor_text(true)
+        val current = compiler_inventory_cursor_decode_v1(v4)
+        expect(current.valid).to_equal(true)
+        expect(current.untracked_examples_tooling_digest).to_equal(sha256_text(""))
+        expect(compiler_inventory_cursor_decode_v1(v4.replace("simple-compile-event-cursor-v4", "simple-compile-event-cursor-v3")).valid).to_equal(false)
+        expect(compiler_inventory_cursor_decode_v1(tooling_v4_cursor_text(false).replace("simple-compile-event-cursor-v3", "simple-compile-event-cursor-v4")).valid).to_equal(false)
+        expect(compiler_inventory_cursor_decode_v1(v4.replace("untracked_examples_tooling_digest=", "wrong_digest=")).valid).to_equal(false)
+        expect(compiler_inventory_cursor_decode_v1(v4 + "x").valid).to_equal(false)
+
+    it "publishes real eight-scope snapshots and reconciles tooling changes and deletion":
+        expect(tooling_v4_roundtrip_io()).to_equal("")
+
+    it "refuses legacy tooling authority then migrates only through the real cold-scan owner":
+        expect(tooling_v4_legacy_io()).to_equal("")
+
+    it "reads maximum valid v4 pointers within 1024 bytes and rejects oversized records":
+        expect(tooling_v4_pointer_bound_io()).to_equal("")
