@@ -75,6 +75,25 @@ pub fn hir_ast_expr_statement_payload_v1(kind: StmtKind) -> Expr?:
         case _: nil
 
 impl HirLowering:
+    # Cycle-159 (v18, 2026-10-18): per-field type extraction in a fresh small
+    # method. The fields ARRAY HANDLE and a scalar index cross the boundary
+    # (reference copy); the element bind, the field.type_ read, the nil guard,
+    # and the lower_type call all happen ONLY here. Prior shapes in the caller
+    # (guard-first double read; single annotated bind) still marshalled an
+    # erased Type into lower_type (+480, x26==0) on the stage2 candidate --
+    # the by-value composite crossing itself is the corruptor in this draw.
+    # The HirType result crosses back by value, the proven-clean direction
+    # (the codec-pool precedent). A nil declared type (streaming-surface /
+    # unstub code-less parse) yields the explicit Error placeholder:
+    # composite layout registration needs field NAME and ORDER only.
+    me prescan_one_field_type_v1(fields: [ParserField], index: i64) -> HirType:
+        val field: ParserField = fields[index]
+        val field_type: Type = field.type_
+        if field_type == nil:
+            HirType(kind: HirTypeKind.Error, span: field.span)
+        else:
+            self.lower_type(field_type)
+
     me prescan_composite_field_types(name: text, fields: [ParserField], type_params: [ParserTypeParam]):
         """Register parser struct/class fields before function lowering."""
         # Field annotations use the declaration's generic scope even during
@@ -89,23 +108,22 @@ impl HirLowering:
                 span: parameter.span)
         var field_types: Dict<text, HirType> = {}
         var field_order: [text] = []
-        for raw_field in fields:
-            val field: HirField = raw_field
-            # Streaming-surface / unstub modules can present a field whose
-            # declared type annotation did not survive the code-less parse
-            # (prescan_composite_field_types runs on the retained lane too;
-            # measured nil draw on the stage2 candidate at
-            # lower_type +424, address 0x0, 2026-10-17). Composite layout
-            # registration needs the field NAME and ORDER (aggregates are
-            # word-boxed); register an explicit Error placeholder instead of
-            # nil-derefing so the prescan completes. Code-ful lanes retain
-            # real types.
-            if field.type_ == nil:
-                field_types[field.name] = HirType(
-                    kind: HirTypeKind.Error, span: field.span)
-            else:
-                field_types[field.name] = self.lower_type(field.type_)
-            field_order = field_order.push(field.name)
+        var prescan_field_i = 0
+        while prescan_field_i < fields.len():
+            # Cycle-117: no for-in element rebind (the rebind copy corrupts the
+            # handle); index loop with an owner-field bind.
+            # Cycle-158/159 (v17-v18, 2026-10-18): the field TYPE never crosses
+            # a boundary by value -- the whole extraction runs inside the fresh
+            # small method below (handle+index in; the HirType result back, the
+            # proven-clean large-composite-return direction). Both the earlier
+            # guard-first double read AND the single annotated bind still fed
+            # lower_type an erased word on app.cli._CliMain.args_and_os_commands
+            # (four typed-flag structs; lldb x26==0 at lower_type +480).
+            val prescan_field_name: text = fields[prescan_field_i].name
+            field_types[prescan_field_name] = self.prescan_one_field_type_v1(
+                fields, prescan_field_i)
+            field_order = field_order.push(prescan_field_name)
+            prescan_field_i = prescan_field_i + 1
         self.symbols.pop_scope()
         self.prescan_type_parameters = saved_parameters
         self.struct_field_types_by_name[name] = field_types
