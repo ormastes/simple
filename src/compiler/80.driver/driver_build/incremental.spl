@@ -710,6 +710,16 @@ fn incremental_reverse_reference_generation_identity_v1(
     val root_generation = sha256_text(generation_facts.join(""))
     (sha256_text("build-cache-state:{root_generation}"), root_generation)
 
+# Native hash failures may return a flat nil despite the extern's text type.
+# Check length before byte access: nil has runtime text length -1, not 0.
+pub fn incremental_fingerprint_digest_valid_v1(digest: text) -> bool:
+    if digest.len() != 64: return false
+    for index in 0..64:
+        val byte = digest.byte_at(index) as i64
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)):
+            return false
+    true
+
 struct FileFingerprint:
     """Content hash + metadata for a source file."""
     path: text
@@ -728,7 +738,7 @@ impl FileFingerprint:
         # a runtime admits those bytes as text. rt_hash_text is a decimal
         # machine-word hash and cannot authenticate a native capsule receipt.
         val hash = rt_file_hash_sha256(path)
-        if hash == "":
+        if not incremental_fingerprint_digest_valid_v1(hash):
             return nil
         val size = incremental_file_size(path)
         val mtime = 0
@@ -806,6 +816,8 @@ impl DependencyEntry:
                 if val fresh_fingerprint = fresh:
                     if cached.is_stale(fresh_fingerprint):
                         return true
+                else:
+                    return true
         false
 
 # ============================================================================
@@ -1200,6 +1212,12 @@ impl BuildCache:
             if val fingerprint = fresh:
                 fresh_fingerprint = fingerprint
             else:
+                # An unavailable hash cannot certify an unchanged source.
+                if self.fingerprints.has(path):
+                    val kind = if incremental_file_exists(path): ChangeKind.Modified else: ChangeKind.Deleted
+                    changes = changes.add(path, kind)
+                else:
+                    changes = changes.add(path, ChangeKind.Added)
                 continue
             if not self.fingerprints.has(path):
                 changes = changes.add(path, ChangeKind.Added)
