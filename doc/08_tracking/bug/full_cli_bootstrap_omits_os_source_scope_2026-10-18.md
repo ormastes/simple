@@ -5,8 +5,9 @@ but omitted `src/os`. The explicit full CLI and test-runner recipes in
 `bootstrap-phase-verification.shs` had the same omission. Their entrypoint
 closures import OS modules through startup, loader and application surfaces.
 
-A real native continuation selected 2229 modules and exposed eleven unresolved
-`os.*` imports before HIR inventory publication. All eleven source files exist
+The original CLI attempt retained a 2229-module selection. A later real native
+continuation exposed eleven unresolved `os.*` imports before HIR inventory
+publication; its exact selected inventory is not established here. All eleven source files exist
 in the clean source tree, but all are absent from the owner-created SCV snapshot.
 They include `os.cli`, compositor, QEMU, SMF lifecycle/session/trust/loader and
 IPC modules. This was a scope omission, not a missing physical file or ledger
