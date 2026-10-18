@@ -24,3 +24,20 @@ and negative controls) and `test/fixtures/compiler_entrypoint/smux_sosix_host`
 fixtures retain their real I/O, resize and cleanup assertions. No native
 compiler was invoked for this source-only lane. Root must bind execution to an
 admitted producer and source identity before marking the bug verified.
+
+## Source verification, 2026-10-18
+
+Focused controls passed for eleven boundary sources, seven rejecting controls,
+two admitting controls, and all thirty-three alias declarations. Normalized
+comparison found no unrelated behavior changes in the ten migrated consumers.
+All twenty-seven smux product files contain no raw extern declarations or
+forbidden async-SOSIX imports. Working/staged environment guards, whitespace,
+and executable-spec layout (zero misplaced specs) passed.
+
+The canonical capsule guard remains FAIL only for unchanged R4 line limits:
+common contracts vfs_contract_v1.spl has 385 lines and async sosix/fs.spl has
+335, versus 300. Their blobs equal baseline HEAD (e420c119a7d7412829a0de435e71fc6880faa28a
+and f146445de2532946d2fe08fa669d1d4023eb9984). Selftest and R1/R2/R3 passed;
+R5 reports 5778 direct calls against ceiling 6294. No ceiling was raised.
+Raw scoped and canonical evidence is retained in build/smux-sosix-source-check.
+These source findings do not close native qualification or release gates.
