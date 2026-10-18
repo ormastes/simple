@@ -66,6 +66,10 @@ fn codec_use_lines() -> text:
     out = out + "use compiler.hir.hir_types.{{HirModule}}  # explicit: a glob is not an import-origin for surface projection\n"
     out = out + "use compiler.hir.hir_operators.{{HirBinOp, HirUnaryOp, HirAssignOp}}\n"
     out = out + "use compiler.common.diagnostics.span.{{Span}}\n"
+    # Formation probe for the fail-closed encoder node guards (the erased-read
+    # campaign: a corrupt NON-NIL node must refuse the cache entry, never
+    # deref). Generic extern, the established declaration shape.
+    out = out + "extern fn rt_heap_ref_wellformed<T>(value: T) -> bool\n"
     out = out + "use compiler.common.dependency.visibility.{{Visibility}}\n"
     out = out + "use compiler.common.dynamic_identity.closure.{{Closure}}\n"
     out = out + "use compiler.blocks.value.{{BlockValue}}\n"
@@ -574,6 +578,19 @@ fn _codec_binders(fields: [FieldDecl]) -> text:
 
 fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
     var parts: [text] = ["fn " + enc_fn_name(decl.name) + "(w: HirCodecWriter, node: " + decl.name + "):\n"]
+    # Fail closed on a nil node: live compiler state can present a nil/corrupt
+    # composite (erased-read draw; measured hc_enc_span SIGSEGV at address 0x8
+    # encoding app.cli.check_dbs on the stage2 candidate, 2026-10-18). A nil
+    # node cannot be encoded faithfully, so refuse this cache entry; the
+    # owning build continues from its in-memory HIR (the shard lane finishes
+    # PASS+UNCACHED via the driver_hir_pipeline_lowering codec-refusal
+    # fallback). Never write fields off a nil node.
+    parts.push("    if node == nil:\n")
+    parts.push("        w.reject(\"nil " + decl.name + " node\")\n")
+    parts.push("        return\n")
+    parts.push("    if not rt_heap_ref_wellformed(node):\n")
+    parts.push("        w.reject(\"illformed " + decl.name + " node\")\n")
+    parts.push("        return\n")
     var c = EmitCounter(n: 0)
     if decl.is_enum:
         parts.push("    match node:\n")

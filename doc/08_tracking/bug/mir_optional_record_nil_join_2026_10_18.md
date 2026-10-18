@@ -1,0 +1,24 @@
+# Optional record provider is lost when an if branch is nil
+
+Canonical ID: `mir_optional_record_nil_join_2026_10_18`.
+Status: OPEN; authoritative bug DB reconciliation PENDING because no qualified DB tool is available in this bootstrap lane. The source workaround passed the focused real-owner native probe below. The intended-syntax compiler regression and whole authority remain unqualified.
+
+The genuine 2026-10-18 Phase4 authority build used producer SHA `3c6eafef89dcae8f22db2ff5b4ea831cda494fe19b0dd847f186792f019a2951`, producer source `f04888bdb33f71acc0cd97c38b412b065edc1fe4`, target source `4f00255ec1ee6908b81e4db1333d95f1a8d5d7c0`. It failed at `src/lib/scv/compile_source_inventory.spl:60:15` with `Optional record has no unique provider layout snapshot`. Authority MIR processed232 modules,223 succeeded and9 failed; no authority objects were emitted.
+
+`compile_source_inventory_initial_events_v1` returns `CompileSourceInventoryV1?`. A value-position if joins its call result with nil before `match initial`. The compiler's `join_optional_record_owners` marks the untracked nil arm unknown, then clears the otherwise unique provider. `remember_merged_arm_identity` calls that join before its nil-arm early return. `checked_optional_record_type` subsequently rejects the empty owner. Producer and target optional owner source are identical SHA `e4ba41da39db0fae3eeac9500d7a030cc58af86acebb8d2af1ad66d117c65242`.
+
+The source workaround binds the call directly with `if val`, assigns the initial inventory only when present, and runs the existing warm or sequential reducer when no seed was applied. It retains every validation, failure return, generation rule, publication argument and readback gate. The tested source snapshot is `335eeab85aa` (workaround introduced in `befb0a47291`); landing commit/link is pending review. This is a caller workaround, not a compiler fix.
+
+## Focused native evidence, 2026-10-18
+
+`test/fixtures/compiler/source_inventory_seed_owner/main.spl` imports the real public event publication/readback owner. Six writes require exact physical-file readback before events are constructed. Runtime assertions cover cold two-entry seeding and sorted content digests, warm two-event generation advancement, serial advancement, invalid-event rejection without changing CURRENT, and duplicate-create fallback on a separate fresh fixture root. Only the real owner publishes CURRENT; the fixture does not inject receipts or private authority.
+
+The immutable pure compiler was `b441c88d477950d2118edf04ddaae1eefb9b5e91942dc821836d108ba776f1ab`, target snapshot `335eeab85aa`, LLVM 23.1.1, stub fallback disabled. Compilation/link and actual execution both exited 0; runtime stdout/stderr were empty as expected. Executable SHA-256: `603b0849d8970ce3082389d9a6b63ca9c66c209dcb1554fe0b9aeaf6942f2ae2`. The 8 GiB/8-job guard completed exit 0, quiescent, helper verified, peak RSS 3,882,476 KiB. HIR reported 56/56 success, zero cache hits. Independent observation checked 46 COFF AMD64 objects against capsule-recorded sizes and SHA-256 values; zero mismatches. Capsule provenance includes missing witness facts, so this is not formal SMF admission.
+
+Evidence: `C:/dev/p4scvfocus/{input-pins.env,result.env,guard.env,root-object-verification.json,compile.stdout.log,compile.stderr.log,run.stdout.log,run.stderr.log}`. The source owner is unchanged from the tested snapshot when projected for landing. Whole-checkout SCV admission, all Phase4 tools, whole tests and the compiler-owner regression remain pending; no fourth producer bootstrap or unchanged green rerun was performed.
+
+Link-policy limitation: the canonical response file includes `/FORCE:MULTIPLE` (duplicate-definition policy), but no `/FORCE:UNRESOLVED` or `/IGNORE` flag. This is a successful canonical link/run, not a duplicate-free strict-link qualification. Four compiler-side invalid-array-handle diagnostics also persist despite exit 0; runtime stderr is empty. Neither limitation is hidden by the focused functional PASS.
+
+Intended compiler fix: a proven nil arm is neutral when joining one unique Optional-record provider. Unknown non-nil arms, incompatible providers and ambiguous layouts must remain rejected. Recovery reference: `4f00255ec1ee6908b81e4db1333d95f1a8d5d7c0`; restore the concise source form only after the compiler fix and native regression pass.
+
+Regression: `test/fixtures/compiler/optional_record_nil_branch_join/main.spl` checks present, absent and disabled branches and must compile natively and exit0. Add compiler-owner unit coverage for unique+nil success, unknown non-nil rejection and conflicting-owner rejection when implementing the compiler fix. Background compiler-fix owner: root compiler investigation lane. Evidence retained at `C:/dev/p4i3b/failure-matrix.json` and the full worker stderr identified there. No fourth producer bootstrap was launched.

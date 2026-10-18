@@ -1,6 +1,5 @@
 /* Native-C parity provider for common.cache_host_authority_v1.
- * Unix is descriptor anchored. Windows is deliberately release-blocking until
- * the CreateFileW/GetFinalPathNameByHandleW provider is admitted. */
+ * Unix and Windows file operations are descriptor/handle anchored. */
 #ifndef _WIN32
 #define _GNU_SOURCE
 #endif
@@ -54,9 +53,321 @@ int64_t rt_cache_host_namespace_abort_v3(int64_t scope){(void)scope;return -3;}
 int64_t rt_cache_host_namespace_close_v3(int64_t ns){(void)ns;return -3;}
 
 #ifdef _WIN32
+/* Windows file-authority subset, implemented in its canonical C owner.
+ * Every capability retains its directory ancestry without DELETE sharing.
+ * Reads additionally exclude WRITE sharing: receipt bytes cannot be replaced
+ * or modified through ordinary filesystem handles while their authority lives.
+ * UNC/device roots and reparse points deliberately fail closed. */
+#include <windows.h>
+#include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
+#include <stdio.h>
+
+#define CW_PATH 32760
+#define CW_DEPTH 256
+#define CW_LIMIT 67108864
+enum cw_kind { CW_ROOT, CW_READ, CW_TEMP, CW_SEALED };
+struct cw_cap {
+    int64_t token;
+    enum cw_kind kind;
+    HANDLE handles[CW_DEPTH];
+    unsigned count;
+    int sealed;
+    struct cw_cap *next;
+};
+static SRWLOCK cw_lock = SRWLOCK_INIT;
+static struct cw_cap *cw_caps;
+static int cw_random(void *,ULONG);
+
+static struct cw_cap *cw_find(int64_t token) {
+    struct cw_cap *c;
+    for (c = cw_caps; c; c = c->next) if (c->token == token) return c;
+    return NULL;
+}
+static HANDLE cw_file(struct cw_cap *c) { return c->handles[c->count - 1]; }
+static void cw_free(struct cw_cap *c) {
+    if (!c) return;
+    while (c->count) CloseHandle(c->handles[--c->count]);
+    free(c);
+}
+static int64_t cw_admit(struct cw_cap *c, enum cw_kind kind) {
+    if (!c) return -1;
+    for (int i=0; i<128; ++i) {
+        uint64_t token;
+        if (!cw_random(&token,sizeof token)) break;
+        token &= INT64_MAX;
+        if (!token || cw_find((int64_t)token)) continue;
+        c->token=(int64_t)token; c->kind=kind; c->next=cw_caps; cw_caps=c;
+        return c->token;
+    }
+    cw_free(c); return -1;
+}
+static struct cw_cap *cw_clone(struct cw_cap *src) {
+    struct cw_cap *c = (struct cw_cap *)calloc(1, sizeof *c);
+    if (!c) return NULL;
+    for (unsigned i = 0; i < src->count; ++i) {
+        if (!DuplicateHandle(GetCurrentProcess(), src->handles[i], GetCurrentProcess(),
+                &c->handles[c->count], 0, FALSE, DUPLICATE_SAME_ACCESS)) { cw_free(c); return NULL; }
+        ++c->count;
+    }
+    return c;
+}
+static wchar_t *cw_widen(const uint8_t *p, int64_t n) {
+    if (!p || n <= 0 || n > CW_PATH || memchr(p, 0, (size_t)n)) return NULL;
+    int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (const char *)p, (int)n, NULL, 0);
+    if (len <= 0 || len >= CW_PATH) return NULL;
+    wchar_t *w = (wchar_t *)calloc((size_t)len + 1, sizeof *w);
+    if (!w) return NULL;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (const char *)p, (int)n, w, len)) { free(w); return NULL; }
+    return w;
+}
+static int cw_component(const wchar_t *p, size_t n) {
+    if (!n || n > 255 || p[n-1] == L'.' || p[n-1] == L' ') return 0;
+    for (size_t i = 0; i < n; ++i)
+        if (p[i] < 32 || wcschr(L"\\/:*?\"<>|", p[i])) return 0;
+    size_t base = 0; while (base < n && p[base] != L'.') ++base;
+    if ((base == 3 && (!_wcsnicmp(p,L"CON",3) || !_wcsnicmp(p,L"PRN",3) ||
+            !_wcsnicmp(p,L"AUX",3) || !_wcsnicmp(p,L"NUL",3))) ||
+        (base == 4 && (!_wcsnicmp(p,L"COM",3) || !_wcsnicmp(p,L"LPT",3)) &&
+            ((p[3] >= L'1' && p[3] <= L'9') || p[3] == 0xb9 || p[3] == 0xb2 || p[3] == 0xb3))) return 0;
+    return 1;
+}
+static int cw_relative(const wchar_t *p, int leaf) {
+    const wchar_t *start = p;
+    for (;;) {
+        if (*p == L'/' || !*p) {
+            if (!cw_component(start, (size_t)(p-start))) return 0;
+            if (!*p) return 1;
+            if (leaf) return 0;
+            start = p + 1;
+        }
+        ++p;
+    }
+}
+static int cw_final(HANDLE h, wchar_t *out) {
+    DWORD n = GetFinalPathNameByHandleW(h, out, CW_PATH, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    return n > 0 && n < CW_PATH;
+}
+static int cw_append_path(HANDLE parent, const wchar_t *name, wchar_t *path) {
+    if (!cw_final(parent, path)) return 0;
+    size_t n = wcslen(path), m = wcslen(name);
+    if (n + m + 2 >= CW_PATH) return 0;
+    if (path[n-1] != L'\\') path[n++] = L'\\';
+    memcpy(path+n, name, (m+1)*sizeof *name);
+    return 1;
+}
+static int cw_checked_append(struct cw_cap *c, const wchar_t *path, DWORD access,
+        DWORD sharing, DWORD disposition, int directory) {
+    if (c->count == CW_DEPTH) return 0;
+    HANDLE h = CreateFileW(path, access, sharing, NULL, disposition,
+        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS |
+        (disposition == CREATE_NEW ? FILE_FLAG_WRITE_THROUGH : 0), NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    BY_HANDLE_FILE_INFORMATION info;
+    wchar_t *actual = (wchar_t *)malloc(CW_PATH * sizeof *actual);
+    int good = actual && GetFileInformationByHandle(h, &info) &&
+        !(info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+        !!(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == directory &&
+        GetFileType(h) == FILE_TYPE_DISK && cw_final(h, actual) && !_wcsicmp(path, actual);
+    free(actual);
+    if (!good) { CloseHandle(h); return 0; }
+    c->handles[c->count++] = h;
+    return 1;
+}
+int64_t rt_cache_host_open_root_v1(const uint8_t *p, int64_t n) {
+    wchar_t *w = cw_widen(p,n), *path = NULL;
+    struct cw_cap *c = NULL;
+    int64_t result = -1;
+    if (!w) return -1;
+    for (wchar_t *t=w; *t; ++t) if (*t == L'/') *t=L'\\';
+    wchar_t *root = w;
+    if (!wcsncmp(root,L"\\\\?\\",4)) root += 4;
+    if (wcslen(root) < 3 || !((root[0]>=L'A'&&root[0]<=L'Z')||(root[0]>=L'a'&&root[0]<=L'z')) ||
+            root[1]!=L':' || root[2]!=L'\\') goto done;
+    if (wcslen(root)>3 && root[wcslen(root)-1]==L'\\') goto done;
+    path=(wchar_t *)calloc(CW_PATH,sizeof *path); c=(struct cw_cap *)calloc(1,sizeof *c);
+    if (!path || !c) goto done;
+    swprintf(path,CW_PATH,L"\\\\?\\%c:\\",root[0]);
+    if (!cw_checked_append(c,path,FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,OPEN_EXISTING,1)) goto done;
+    wchar_t *start=root+3;
+    while (*start) {
+        wchar_t *end=wcschr(start,L'\\'); if (!end) end=start+wcslen(start);
+        if (!cw_component(start,(size_t)(end-start))) goto done;
+        wchar_t saved=*end; *end=0;
+        int good=cw_append_path(cw_file(c),start,path) &&
+            cw_checked_append(c,path,FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,OPEN_EXISTING,1);
+        *end=saved; if (!good) goto done;
+        start=saved?end+1:end;
+    }
+    /* Directory flush needs write access. Its already-retained ancestry and
+     * directory deny DELETE sharing, so this final-path reopen cannot swap
+     * objects. ReOpenFile itself does not support directory handles. Denial
+     * leaves a usable read root whose sync operation honestly fails. */
+    if (cw_final(cw_file(c),path))
+        (void)cw_checked_append(c,path,GENERIC_READ|GENERIC_WRITE,
+            FILE_SHARE_READ|FILE_SHARE_WRITE,OPEN_EXISTING,1);
+    AcquireSRWLockExclusive(&cw_lock); result=cw_admit(c,CW_ROOT); c=NULL; ReleaseSRWLockExclusive(&cw_lock);
+done:
+    cw_free(c); free(path); free(w); return result;
+}
+int64_t rt_cache_host_open_read_v1(int64_t token,const uint8_t *p,int64_t n) {
+    wchar_t *w=cw_widen(p,n), *path=NULL;
+    struct cw_cap *c=NULL; int64_t result=-1;
+    if (!w || !cw_relative(w,0)) { free(w); return -1; }
+    path=(wchar_t *)malloc(CW_PATH*sizeof *path); if (!path) { free(w); return -1; }
+    AcquireSRWLockExclusive(&cw_lock);
+    struct cw_cap *parent=cw_find(token);
+    if (!parent || parent->kind!=CW_ROOT || !(c=cw_clone(parent))) goto done;
+    wchar_t *start=w;
+    for (;;) {
+        wchar_t *end=wcschr(start,L'/'); int directory=end!=NULL;
+        if (end) *end=0;
+        if (!cw_append_path(cw_file(c),start,path) || !cw_checked_append(c,path,
+                directory?FILE_READ_ATTRIBUTES:GENERIC_READ,
+                directory?(FILE_SHARE_READ|FILE_SHARE_WRITE):FILE_SHARE_READ,OPEN_EXISTING,directory)) goto done;
+        if (!directory) break;
+        start=end+1;
+    }
+    result=cw_admit(c,CW_READ); c=NULL;
+done:
+    cw_free(c); ReleaseSRWLockExclusive(&cw_lock); free(path); free(w); return result;
+}
+int64_t rt_cache_host_size_v1(int64_t token,int64_t maximum) {
+    if (maximum<0 || maximum>CW_LIMIT) return -1;
+    AcquireSRWLockExclusive(&cw_lock); struct cw_cap *c=cw_find(token); LARGE_INTEGER size;
+    int64_t result=c && (c->kind==CW_READ || c->kind==CW_SEALED) && GetFileSizeEx(cw_file(c),&size) &&
+        size.QuadPart>=0 && size.QuadPart<=maximum ? size.QuadPart : -1;
+    ReleaseSRWLockExclusive(&cw_lock); return result;
+}
+static int cw_read_at(HANDLE h,int64_t off,uint8_t *p,DWORD n) {
+    LARGE_INTEGER pos; pos.QuadPart=off; DWORD got=0;
+    return SetFilePointerEx(h,pos,NULL,FILE_BEGIN) && ReadFile(h,p,n,&got,NULL) && got==n;
+}
+int64_t rt_cache_host_pread_receipt_v1(int64_t token,int64_t off,uint8_t *out,int64_t cap) {
+    if (!out || off || cap<0 || cap>CW_LIMIT) return -1;
+    AcquireSRWLockExclusive(&cw_lock); struct cw_cap *c=cw_find(token);
+    int64_t result=-1; BY_HANDLE_FILE_INFORMATION a,b; LARGE_INTEGER size;
+    if (!c || (c->kind!=CW_READ && c->kind!=CW_SEALED) || !GetFileInformationByHandle(cw_file(c),&a) ||
+            !GetFileSizeEx(cw_file(c),&size) || size.QuadPart<0 || size.QuadPart>cap) goto done;
+    DWORD want=(DWORD)size.QuadPart;
+    if (!cw_read_at(cw_file(c),0,out,want)) goto done;
+    uint8_t verify[4096];
+    for (DWORD checked=0; checked<want;) {
+        DWORD n=want-checked; if (n>sizeof verify) n=sizeof verify;
+        if (!cw_read_at(cw_file(c),checked,verify,n) || memcmp(out+checked,verify,n)) { result=-2; goto done; }
+        checked+=n;
+    }
+    if (!GetFileInformationByHandle(cw_file(c),&b) ||
+            a.dwVolumeSerialNumber!=b.dwVolumeSerialNumber || a.nFileIndexHigh!=b.nFileIndexHigh ||
+            a.nFileIndexLow!=b.nFileIndexLow || a.nFileSizeHigh!=b.nFileSizeHigh ||
+            a.nFileSizeLow!=b.nFileSizeLow || CompareFileTime(&a.ftLastWriteTime,&b.ftLastWriteTime)) result=-2;
+    else result=want;
+done:
+    ReleaseSRWLockExclusive(&cw_lock); return result;
+}
+static int cw_random(void *out,ULONG n) {
+    HMODULE lib=LoadLibraryW(L"advapi32.dll"); if (!lib) return 0;
+    typedef BOOLEAN (WINAPI *random_fn)(PVOID,ULONG);
+    random_fn random=(random_fn)(void *)GetProcAddress(lib,"SystemFunction036");
+    int good=random && random(out,n); FreeLibrary(lib); return good;
+}
+int64_t rt_cache_host_secure_temp_v1(int64_t token) {
+    wchar_t *path=(wchar_t *)malloc(CW_PATH*sizeof *path); if (!path) return -1;
+    int64_t result=-1; struct cw_cap *c=NULL;
+    AcquireSRWLockExclusive(&cw_lock); struct cw_cap *parent=cw_find(token);
+    if (!parent || parent->kind!=CW_ROOT || !(c=cw_clone(parent))) goto done;
+    for (int attempt=0; attempt<128; ++attempt) {
+        uint64_t random[2]; wchar_t name[80]; if (!cw_random(random,sizeof random)) break;
+        swprintf(name,80,L".simple-cache-tmp-%016llx%016llx",(unsigned long long)random[0],(unsigned long long)random[1]);
+        if (!cw_append_path(cw_file(c),name,path)) break;
+        if (cw_checked_append(c,path,GENERIC_READ|GENERIC_WRITE|DELETE,FILE_SHARE_READ,CREATE_NEW,0)) {
+            result=cw_admit(c,CW_TEMP); c=NULL; break;
+        }
+        if (GetLastError()!=ERROR_FILE_EXISTS && GetLastError()!=ERROR_ALREADY_EXISTS) break;
+    }
+done:
+    cw_free(c); ReleaseSRWLockExclusive(&cw_lock); free(path); return result;
+}
+int64_t rt_cache_host_write_temp_v1(int64_t token,int64_t off,const uint8_t *p,int64_t n) {
+    if (!p || off<0 || n<0 || off>CW_LIMIT || n>CW_LIMIT-off) return -1;
+    AcquireSRWLockExclusive(&cw_lock); struct cw_cap *c=cw_find(token); LARGE_INTEGER pos; pos.QuadPart=off; DWORD written;
+    int64_t result=c && c->kind==CW_TEMP && !c->sealed && SetFilePointerEx(cw_file(c),pos,NULL,FILE_BEGIN) &&
+        WriteFile(cw_file(c),p,(DWORD)n,&written,NULL) ? (int64_t)written : -1;
+    ReleaseSRWLockExclusive(&cw_lock); return result;
+}
+static void cw_unlink_cap(struct cw_cap *c) {
+    struct cw_cap **slot=&cw_caps; while (*slot && *slot!=c) slot=&(*slot)->next;
+    if (*slot) *slot=c->next;
+}
+static int64_t cw_publish(int64_t token,const uint8_t *p,int64_t n,int retained) {
+    wchar_t *name=cw_widen(p,n), *path=NULL; int64_t result=-1;
+    if (!name || !cw_relative(name,1)) { free(name); return -1; }
+    path=(wchar_t *)malloc(CW_PATH*sizeof *path); if (!path) { free(name); return -1; }
+    AcquireSRWLockExclusive(&cw_lock); struct cw_cap *c=cw_find(token);
+    if (!c || c->kind!=CW_TEMP || c->count<2 || !FlushFileBuffers(cw_file(c)) ||
+            !cw_append_path(c->handles[c->count-2],name,path)) goto done;
+    /* Reserve a distinct capability while the old TEMP token is still live.
+     * Failure here leaves the TEMP available for its ordinary cleanup owner. */
+    int64_t sealed_token=0;
+    if (retained) {
+        for (int i=0; i<128; ++i) {
+            uint64_t candidate;
+            if (!cw_random(&candidate,sizeof candidate)) break;
+            candidate &= INT64_MAX;
+            if (candidate && !cw_find((int64_t)candidate)) { sealed_token=(int64_t)candidate; break; }
+        }
+        if (!sealed_token) goto done;
+    }
+    FILE_BASIC_INFO basic; memset(&basic,0,sizeof basic); basic.FileAttributes=FILE_ATTRIBUTE_READONLY;
+    if (!SetFileInformationByHandle(cw_file(c),FileBasicInfo,&basic,sizeof basic)) goto done;
+    c->sealed=1;
+    size_t bytes=wcslen(path)*sizeof *path;
+    FILE_RENAME_INFO *rename=(FILE_RENAME_INFO *)calloc(1,sizeof *rename+bytes);
+    if (!rename) goto done;
+    rename->ReplaceIfExists=FALSE; rename->RootDirectory=NULL; rename->FileNameLength=(DWORD)bytes;
+    memcpy(rename->FileName,path,bytes);
+    int good=SetFileInformationByHandle(cw_file(c),FileRenameInfo,rename,(DWORD)(sizeof *rename+bytes));
+    DWORD error=GetLastError(); free(rename);
+    if (!good) { result=(error==ERROR_ALREADY_EXISTS || error==ERROR_FILE_EXISTS)?0:-1; goto done; }
+    /* Flush the renamed file before reporting success. Publication is atomic
+     * and no-replace; errors after rename remain errors, never fake success. */
+    good=FlushFileBuffers(cw_file(c));
+    if (good && retained) {
+        /* Same original writer, acquired before sealing: no path reopen and
+         * no write surface for the resulting capability. Old TEMP is invalid. */
+        c->token=sealed_token; c->kind=CW_SEALED; result=sealed_token;
+    } else { cw_unlink_cap(c); cw_free(c); result=good?1:-1; }
+done:
+    ReleaseSRWLockExclusive(&cw_lock); free(path); free(name); return result;
+}
+int64_t rt_cache_host_publish_noreplace_v1(int64_t token,const uint8_t *p,int64_t n) {
+    return cw_publish(token,p,n,0);
+}
+int64_t rt_cache_host_publish_retained_noreplace_v2(int64_t token,const uint8_t *p,int64_t n) {
+    return cw_publish(token,p,n,1);
+}
+int64_t rt_cache_host_fsync_v1(int64_t token) {
+    AcquireSRWLockExclusive(&cw_lock); struct cw_cap *c=cw_find(token);
+    /* Read capabilities intentionally cannot grant write/append access.
+     * Windows therefore cannot flush them: preserve Unsupported rather than
+     * claiming that a read-only FlushFileBuffers failure is durable success. */
+    int64_t result=c && c->kind!=CW_READ && FlushFileBuffers(cw_file(c))?1:-1;
+    ReleaseSRWLockExclusive(&cw_lock); return result;
+}
+int64_t rt_cache_host_close_v1(int64_t token) {
+    AcquireSRWLockExclusive(&cw_lock); struct cw_cap *c=cw_find(token);
+    if (!c) { ReleaseSRWLockExclusive(&cw_lock); return -1; }
+    int64_t result=0;
+    if (c->kind==CW_TEMP) {
+        FILE_BASIC_INFO basic; memset(&basic,0,sizeof basic); basic.FileAttributes=FILE_ATTRIBUTE_NORMAL;
+        FILE_DISPOSITION_INFO disposition; disposition.DeleteFile=TRUE;
+        if (!SetFileInformationByHandle(cw_file(c),FileBasicInfo,&basic,sizeof basic) ||
+                !SetFileInformationByHandle(cw_file(c),FileDispositionInfo,&disposition,sizeof disposition)) result=-1;
+    }
+    cw_unlink_cap(c); cw_free(c); ReleaseSRWLockExclusive(&cw_lock); return result;
+}
 #define UNSUPPORTED(name, args) int64_t name args { return -1; }
-UNSUPPORTED(rt_cache_host_open_root_v1, (const uint8_t *p, int64_t n))
-UNSUPPORTED(rt_cache_host_open_read_v1, (int64_t h, const uint8_t *p, int64_t n))
 UNSUPPORTED(rt_cache_host_open_child_v1, (int64_t h, const uint8_t *p, int64_t n, int64_t c))
 UNSUPPORTED(rt_cache_host_open_cas_kind_v1, (int64_t h, const uint8_t *p, int64_t n, int64_t c))
 UNSUPPORTED(rt_cache_host_open_cas_shard_v1, (int64_t h, const uint8_t *p, int64_t n, int64_t l, int64_t c))
@@ -68,14 +379,7 @@ UNSUPPORTED(rt_cache_host_release_reader_pin_v1, (int64_t h,int64_t e,int64_t g,
 UNSUPPORTED(rt_cache_host_open_pinned_cas_v1, (int64_t h,const uint8_t*k,int64_t kl,const uint8_t*d,int64_t dl,int64_t now))
 UNSUPPORTED(rt_cache_host_reader_gc_begin_v1, (int64_t r,int64_t e))
 UNSUPPORTED(rt_cache_host_reader_gc_end_v1, (int64_t r,int64_t e,int64_t g))
-UNSUPPORTED(rt_cache_host_size_v1, (int64_t h, int64_t m))
-UNSUPPORTED(rt_cache_host_pread_receipt_v1, (int64_t h, int64_t o, uint8_t *p, int64_t n))
-UNSUPPORTED(rt_cache_host_secure_temp_v1, (int64_t h))
-UNSUPPORTED(rt_cache_host_write_temp_v1, (int64_t h, int64_t o, const uint8_t *p, int64_t n))
-UNSUPPORTED(rt_cache_host_publish_noreplace_v1, (int64_t h, const uint8_t *p, int64_t n))
 UNSUPPORTED(rt_cache_host_quarantine_v1, (int64_t r, int64_t o, const uint8_t *p, int64_t n))
-UNSUPPORTED(rt_cache_host_fsync_v1, (int64_t h))
-UNSUPPORTED(rt_cache_host_close_v1, (int64_t h))
 #else
 #include <errno.h>
 #include <fcntl.h>
@@ -96,8 +400,8 @@ UNSUPPORTED(rt_cache_host_close_v1, (int64_t h))
 #define SPL_STAT_CTIM_NSEC(s) ((s).st_ctim.tv_nsec)
 #endif
 
-enum cache_cap_kind { CAP_ROOT=1, CAP_DIR=2, CAP_READ=3, CAP_TEMP=4, CAP_CAS_ROOT=5, CAP_CAS_KIND=6, CAP_CAS_SHARD1=7, CAP_CAS_SHARD2=8, CAP_TEMP_CAS=9 };
-struct cache_cap { int64_t token; int fd; int parent_fd; enum cache_cap_kind kind; char temp_name[96]; struct cache_cap *next; };
+enum cache_cap_kind { CAP_ROOT=1, CAP_DIR=2, CAP_READ=3, CAP_TEMP=4, CAP_CAS_ROOT=5, CAP_CAS_KIND=6, CAP_CAS_SHARD1=7, CAP_CAS_SHARD2=8, CAP_TEMP_CAS=9, CAP_SEALED=10 };
+struct cache_cap { int64_t token; int fd; int parent_fd; enum cache_cap_kind kind; int sealed; char temp_name[96]; struct cache_cap *next; };
 static struct cache_cap *caps;
 static pthread_mutex_t caps_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -161,10 +465,10 @@ int64_t rt_cache_host_release_reader_pin_v1(int64_t h,int64_t e,int64_t g,const 
 int64_t rt_cache_host_open_pinned_cas_v1(int64_t h,const uint8_t*k,int64_t kl,const uint8_t*d,int64_t dl,int64_t now){(void)h;(void)k;(void)kl;(void)d;(void)dl;(void)now;return-1;}
 int64_t rt_cache_host_reader_gc_begin_v1(int64_t r,int64_t e){(void)r;(void)e;return-1;}
 int64_t rt_cache_host_reader_gc_end_v1(int64_t r,int64_t e,int64_t g){(void)r;(void)e;(void)g;return-1;}
-int64_t rt_cache_host_size_v1(int64_t h,int64_t maximum){if(maximum<0||maximum>67108864)return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);struct stat s;int64_t result=(!c||c->kind!=CAP_READ||fstat(c->fd,&s)||(s.st_mode&S_IFMT)!=S_IFREG||s.st_size<0||s.st_size>maximum)?-1:(int64_t)s.st_size;pthread_mutex_unlock(&caps_lock);return result;}
-int64_t rt_cache_host_pread_receipt_v1(int64_t h,int64_t off,uint8_t*out,int64_t cap){if(!out||off||cap<0||cap>67108864)return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);if(!c||c->kind!=CAP_READ){pthread_mutex_unlock(&caps_lock);return-1;}struct stat a,b;if(fstat(c->fd,&a)||(a.st_mode&S_IFMT)!=S_IFREG||a.st_size<0||a.st_size>cap){pthread_mutex_unlock(&caps_lock);return-1;}size_t got=0,want=(size_t)a.st_size;while(got<want){ssize_t n=pread(c->fd,out+got,want-got,(off_t)got);if(n<=0){pthread_mutex_unlock(&caps_lock);return-1;}got+=(size_t)n;}uint8_t verify[4096];size_t checked=0;while(checked<want){size_t n=want-checked<sizeof verify?want-checked:sizeof verify;if(pread(c->fd,verify,n,(off_t)checked)!=(ssize_t)n||memcmp(out+checked,verify,n)){pthread_mutex_unlock(&caps_lock);return-2;}checked+=n;}int bad=fstat(c->fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size||SPL_STAT_MTIM_NSEC(a)!=SPL_STAT_MTIM_NSEC(b)||SPL_STAT_CTIM_NSEC(a)!=SPL_STAT_CTIM_NSEC(b)||a.st_mtime!=b.st_mtime||a.st_ctime!=b.st_ctime;pthread_mutex_unlock(&caps_lock);return bad?-2:(int64_t)want;}
+int64_t rt_cache_host_size_v1(int64_t h,int64_t maximum){if(maximum<0||maximum>67108864)return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);struct stat s;int64_t result=(!c||(c->kind!=CAP_READ&&c->kind!=CAP_SEALED)||fstat(c->fd,&s)||(s.st_mode&S_IFMT)!=S_IFREG||s.st_size<0||s.st_size>maximum)?-1:(int64_t)s.st_size;pthread_mutex_unlock(&caps_lock);return result;}
+int64_t rt_cache_host_pread_receipt_v1(int64_t h,int64_t off,uint8_t*out,int64_t cap){if(!out||off||cap<0||cap>67108864)return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);if(!c||(c->kind!=CAP_READ&&c->kind!=CAP_SEALED)){pthread_mutex_unlock(&caps_lock);return-1;}struct stat a,b;if(fstat(c->fd,&a)||(a.st_mode&S_IFMT)!=S_IFREG||a.st_size<0||a.st_size>cap){pthread_mutex_unlock(&caps_lock);return-1;}size_t got=0,want=(size_t)a.st_size;while(got<want){ssize_t n=pread(c->fd,out+got,want-got,(off_t)got);if(n<=0){pthread_mutex_unlock(&caps_lock);return-1;}got+=(size_t)n;}uint8_t verify[4096];size_t checked=0;while(checked<want){size_t n=want-checked<sizeof verify?want-checked:sizeof verify;if(pread(c->fd,verify,n,(off_t)checked)!=(ssize_t)n||memcmp(out+checked,verify,n)){pthread_mutex_unlock(&caps_lock);return-2;}checked+=n;}int bad=fstat(c->fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size||SPL_STAT_MTIM_NSEC(a)!=SPL_STAT_MTIM_NSEC(b)||SPL_STAT_CTIM_NSEC(a)!=SPL_STAT_CTIM_NSEC(b)||a.st_mtime!=b.st_mtime||a.st_ctime!=b.st_ctime;pthread_mutex_unlock(&caps_lock);return bad?-2:(int64_t)want;}
 int64_t rt_cache_host_secure_temp_v1(int64_t h){pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);if(!c||(c->kind!=CAP_ROOT&&c->kind!=CAP_DIR&&c->kind!=CAP_CAS_SHARD2)){pthread_mutex_unlock(&caps_lock);return-1;}int temp_kind=c->kind==CAP_CAS_SHARD2?CAP_TEMP_CAS:CAP_TEMP;int parent=fcntl(c->fd,F_DUPFD_CLOEXEC,3);pthread_mutex_unlock(&caps_lock);if(parent<0)return-1;for(int i=0;i<128;i++){char name[96];snprintf(name,sizeof name,".simple-cache-tmp-%ld-%lld",(long)getpid(),(long long)random_token());int fd=openat(parent,name,O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd>=0)return add_cap((enum cache_cap_kind)temp_kind,fd,parent,name);if(errno!=EEXIST)break;}close(parent);return-1;}
-int64_t rt_cache_host_write_temp_v1(int64_t h,int64_t off,const uint8_t*p,int64_t n){if(!p||off<0||n<0||n>67108864)return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);ssize_t rc=(!c||(c->kind!=CAP_TEMP&&c->kind!=CAP_TEMP_CAS))?-1:pwrite(c->fd,p,(size_t)n,(off_t)off);pthread_mutex_unlock(&caps_lock);return rc;}
+int64_t rt_cache_host_write_temp_v1(int64_t h,int64_t off,const uint8_t*p,int64_t n){if(!p||off<0||n<0||n>67108864)return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);ssize_t rc=(!c||c->sealed||(c->kind!=CAP_TEMP&&c->kind!=CAP_TEMP_CAS))?-1:pwrite(c->fd,p,(size_t)n,(off_t)off);pthread_mutex_unlock(&caps_lock);return rc;}
 int64_t rt_cache_host_publish_noreplace_v1(int64_t h,const uint8_t*p,int64_t n){char dest[32769];if(!copy_name(p,n,dest)||!valid_relative(dest)||strchr(dest,'/'))return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);if(!c||(c->kind!=CAP_TEMP&&c->kind!=CAP_TEMP_CAS)||(c->kind==CAP_TEMP_CAS&&!lower_hex_n(dest,60))||fsync(c->fd)||fchmod(c->fd,0444)){pthread_mutex_unlock(&caps_lock);return-1;}
 #ifdef __linux__
 int rc=(int)syscall(SYS_renameat2,c->parent_fd,c->temp_name,c->parent_fd,dest,RENAME_NOREPLACE);
@@ -172,6 +476,42 @@ int rc=(int)syscall(SYS_renameat2,c->parent_fd,c->temp_name,c->parent_fd,dest,RE
 int rc=linkat(c->parent_fd,c->temp_name,c->parent_fd,dest,0);if(!rc)unlinkat(c->parent_fd,c->temp_name,0);
 #endif
 if(rc){int e=errno;pthread_mutex_unlock(&caps_lock);return e==EEXIST?0:-1;}fsync(c->parent_fd);struct cache_cap**slot=&caps;while(*slot&&*slot!=c)slot=&(*slot)->next;if(*slot)*slot=c->next;close(c->fd);close(c->parent_fd);free(c);pthread_mutex_unlock(&caps_lock);return 1;}
+/* Retained original descriptor; destination-name observation is fail-closed,
+ * not an atomic conditional rename or a cross-process directory lock. */
+int64_t rt_cache_host_publish_retained_noreplace_v2(int64_t h,const uint8_t *p,int64_t n) {
+    char dest[32769]; int64_t result=-1, token=-1; struct stat original,published;
+    if (!copy_name(p,n,dest)||!valid_relative(dest)||strchr(dest,'/')) return -1;
+    pthread_mutex_lock(&caps_lock); struct cache_cap *c=find_cap(h);
+    if (!c||(c->kind!=CAP_TEMP&&c->kind!=CAP_TEMP_CAS)||
+            (c->kind==CAP_TEMP_CAS&&!lower_hex_n(dest,60))||
+            fstat(c->fd,&original)||(original.st_mode&S_IFMT)!=S_IFREG) goto done;
+    for (int i=0;i<128;++i) { int64_t candidate=random_token();
+        if (candidate>0&&!find_cap(candidate)) { token=candidate; break; } }
+    if (token<0||fsync(c->fd)||fchmod(c->fd,0444)) goto done;
+    c->sealed=1;
+#ifdef __linux__
+    int rc=(int)syscall(SYS_renameat2,c->parent_fd,c->temp_name,c->parent_fd,dest,RENAME_NOREPLACE);
+#else
+    int rc=linkat(c->parent_fd,c->temp_name,c->parent_fd,dest,0);
+#endif
+    if (rc) { result=errno==EEXIST?0:-1; goto done; }
+#ifdef __linux__
+    int removed_temp=1;
+#else
+    int removed_temp=unlinkat(c->parent_fd,c->temp_name,0)==0;
+#endif
+    int good=removed_temp&&!fstatat(c->parent_fd,dest,&published,AT_SYMLINK_NOFOLLOW)&&
+        (published.st_mode&S_IFMT)==S_IFREG&&original.st_dev==published.st_dev&&
+        original.st_ino==published.st_ino&&!fsync(c->fd)&&!fsync(c->parent_fd);
+    if (good) { c->token=token; c->kind=CAP_SEALED; c->temp_name[0]=0; result=token; }
+    else {
+        struct cache_cap **slot=&caps; while (*slot&&*slot!=c) slot=&(*slot)->next;
+        if (*slot) *slot=c->next;
+        close(c->fd); close(c->parent_fd); free(c);
+    }
+ done:
+    pthread_mutex_unlock(&caps_lock); return result;
+}
 int64_t rt_cache_host_quarantine_v1(int64_t r,int64_t o,const uint8_t*p,int64_t n){
 #ifndef __linux__
 (void)r;(void)o;(void)p;(void)n;return-1;
@@ -180,7 +520,7 @@ char dest[32769];if(!copy_name(p,n,dest)||!valid_relative(dest)||strchr(dest,'/'
 #endif
 }
 int64_t rt_cache_host_fsync_v1(int64_t h){pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);int rc=c?fsync(c->fd):-1;pthread_mutex_unlock(&caps_lock);return rc?-1:1;}
-int64_t rt_cache_host_close_v1(int64_t h){pthread_mutex_lock(&caps_lock);struct cache_cap**p=&caps,*c=NULL;while(*p){if((*p)->token==h){c=*p;*p=c->next;break;}p=&(*p)->next;}pthread_mutex_unlock(&caps_lock);if(!c)return-1;if(c->kind==CAP_TEMP||c->kind==CAP_TEMP_CAS){unlinkat(c->parent_fd,c->temp_name,0);close(c->parent_fd);}int rc=close(c->fd);free(c);return rc;}
+int64_t rt_cache_host_close_v1(int64_t h){pthread_mutex_lock(&caps_lock);struct cache_cap**p=&caps,*c=NULL;while(*p){if((*p)->token==h){c=*p;*p=c->next;break;}p=&(*p)->next;}pthread_mutex_unlock(&caps_lock);if(!c)return-1;if(c->kind==CAP_TEMP||c->kind==CAP_TEMP_CAS){unlinkat(c->parent_fd,c->temp_name,0);close(c->parent_fd);}else if(c->kind==CAP_SEALED){close(c->parent_fd);}int rc=close(c->fd);free(c);return rc;}
 #endif
 
 /* ===========================================================================

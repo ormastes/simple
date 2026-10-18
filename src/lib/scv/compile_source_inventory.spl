@@ -54,25 +54,25 @@ fn compile_source_inventory_apply_and_publish_v1(
             COMPILE_SOURCE_INVENTORY_SCHEMA_V1,
             next_generation, rebuilt.inventory!.entries)
     else:
-        val initial = if inventory.generation == 0 and inventory.entries.len() == 0:
-            compile_source_inventory_initial_events_v1(events)
-        else:
-            nil
-        match initial:
-            case Some(seed): inventory = seed
-            case _:
-                if events.len() > 1:
-                    val changed = compile_source_inventory_apply_warm_batch_v1(
-                        inventory, events)
+        # @workaround bug=mir_optional_record_nil_join_2026_10_18 recover=4f00255ec1ee6908b81e4db1333d95f1a8d5d7c0 reason=retain-optional-provider-owner-without-a-call-plus-nil-merge
+        var seeded = false
+        if inventory.generation == 0 and inventory.entries.len() == 0:
+            if val seed = compile_source_inventory_initial_events_v1(events):
+                inventory = seed
+                seeded = true
+        if not seeded:
+            if events.len() > 1:
+                val changed = compile_source_inventory_apply_warm_batch_v1(
+                    inventory, events)
+                if not changed.valid:
+                    return CompileSourceInventoryReadV1(false, changed.reason, "", nil)
+                inventory = changed.inventory!
+            else:
+                for event in events:
+                    val changed = compile_source_inventory_apply_event_v1(inventory, event)
                     if not changed.valid:
                         return CompileSourceInventoryReadV1(false, changed.reason, "", nil)
                     inventory = changed.inventory!
-                else:
-                    for event in events:
-                        val changed = compile_source_inventory_apply_event_v1(inventory, event)
-                        if not changed.valid:
-                            return CompileSourceInventoryReadV1(false, changed.reason, "", nil)
-                        inventory = changed.inventory!
     val (digest, publish_reason) = compile_source_inventory_publish_reasoned_v1(
         cache_root, inventory, cursor_head, cursor_rows,
         cursor_filesystem_digest, expected_pointer_digest,
