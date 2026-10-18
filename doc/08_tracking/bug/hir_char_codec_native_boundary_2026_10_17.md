@@ -75,3 +75,9 @@ Generator parity and BDD regressions are prepared and UNRUN. No complete
 compiler link, deployment, reader consumer qualification, or broader
 compiler/lib/MCP/LSP verification is claimed. Database reconciliation remains
 pending a qualified database tool.
+
+Review tightened the direct scalar helper: `char` lowers to LLVM i32, so it
+does not return an unproven nil carrier. A nil marker passed directly to that
+helper poisons the reader with `char_nil_requires_enum_slot`. The generated
+enum decoder handles the marker before calling the helper and preserves nil
+using the existing schema-owned restoration boundary. Tests cover both paths.
