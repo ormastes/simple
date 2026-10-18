@@ -9,6 +9,13 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
 
 ## Prerequisites Check
 
+For native linking, read `doc/07_guide/compiler/linker_selection.md`.
+External mold/LLD remain separate from the mold-like internal Simple engine.
+Use the admitted target/platform route until real internal correctness,
+compiler/application and performance evidence supports a reviewed cutover.
+Record the actual engine and fallback; external execution is not internal proof.
+Managed native admission currently requires its admitted external hosted linker.
+
 | Artifact | Path | If exists, skip to |
 |----------|------|--------------------|
 | Research | `doc/01_research/local/<feature>.md` | Phase 4 |

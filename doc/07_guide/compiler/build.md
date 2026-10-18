@@ -2,6 +2,11 @@
 
 This guide covers the Simple build system, project configuration, build commands, and the bootstrap process for building Simple from source.
 
+For native output, Simple uses external mold/LLD or the admitted platform
+linker route while its mold-like internal Simple linker is being stabilized.
+See [linker selection and cutover](linker_selection.md) for target boundaries,
+`SIMPLE_LINKER` overrides and the evidence required before changing defaults.
+
 ---
 
 ## Overview
