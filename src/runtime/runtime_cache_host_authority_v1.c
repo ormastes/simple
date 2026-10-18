@@ -7,6 +7,12 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#ifndef _WIN32
+int64_t rt_cache_host_publish_retained_noreplace_v2(int64_t token,const uint8_t *p,int64_t n) {
+    (void)token; (void)p; (void)n; return -1;
+}
+#endif
+
 /* Native-C daemon authority remains fail-closed until its canonical byte
  * records and cryptographic corruption checks exactly match the Rust provider. */
 int64_t rt_cache_host_authenticate_peer_v1(int64_t root, int64_t peer) {(void)root;(void)peer;return -1;}
@@ -67,7 +73,7 @@ int64_t rt_cache_host_namespace_close_v3(int64_t ns){(void)ns;return -3;}
 #define CW_PATH 32760
 #define CW_DEPTH 256
 #define CW_LIMIT 67108864
-enum cw_kind { CW_ROOT, CW_READ, CW_TEMP };
+enum cw_kind { CW_ROOT, CW_READ, CW_TEMP, CW_SEALED };
 struct cw_cap {
     int64_t token;
     enum cw_kind kind;
@@ -236,7 +242,7 @@ done:
 int64_t rt_cache_host_size_v1(int64_t token,int64_t maximum) {
     if (maximum<0 || maximum>CW_LIMIT) return -1;
     AcquireSRWLockExclusive(&cw_lock); struct cw_cap *c=cw_find(token); LARGE_INTEGER size;
-    int64_t result=c && c->kind==CW_READ && GetFileSizeEx(cw_file(c),&size) &&
+    int64_t result=c && (c->kind==CW_READ || c->kind==CW_SEALED) && GetFileSizeEx(cw_file(c),&size) &&
         size.QuadPart>=0 && size.QuadPart<=maximum ? size.QuadPart : -1;
     ReleaseSRWLockExclusive(&cw_lock); return result;
 }
@@ -248,7 +254,7 @@ int64_t rt_cache_host_pread_receipt_v1(int64_t token,int64_t off,uint8_t *out,in
     if (!out || off || cap<0 || cap>CW_LIMIT) return -1;
     AcquireSRWLockExclusive(&cw_lock); struct cw_cap *c=cw_find(token);
     int64_t result=-1; BY_HANDLE_FILE_INFORMATION a,b; LARGE_INTEGER size;
-    if (!c || c->kind!=CW_READ || !GetFileInformationByHandle(cw_file(c),&a) ||
+    if (!c || (c->kind!=CW_READ && c->kind!=CW_SEALED) || !GetFileInformationByHandle(cw_file(c),&a) ||
             !GetFileSizeEx(cw_file(c),&size) || size.QuadPart<0 || size.QuadPart>cap) goto done;
     DWORD want=(DWORD)size.QuadPart;
     if (!cw_read_at(cw_file(c),0,out,want)) goto done;
@@ -300,13 +306,25 @@ static void cw_unlink_cap(struct cw_cap *c) {
     struct cw_cap **slot=&cw_caps; while (*slot && *slot!=c) slot=&(*slot)->next;
     if (*slot) *slot=c->next;
 }
-int64_t rt_cache_host_publish_noreplace_v1(int64_t token,const uint8_t *p,int64_t n) {
+static int64_t cw_publish(int64_t token,const uint8_t *p,int64_t n,int retained) {
     wchar_t *name=cw_widen(p,n), *path=NULL; int64_t result=-1;
     if (!name || !cw_relative(name,1)) { free(name); return -1; }
     path=(wchar_t *)malloc(CW_PATH*sizeof *path); if (!path) { free(name); return -1; }
     AcquireSRWLockExclusive(&cw_lock); struct cw_cap *c=cw_find(token);
     if (!c || c->kind!=CW_TEMP || c->count<2 || !FlushFileBuffers(cw_file(c)) ||
             !cw_append_path(c->handles[c->count-2],name,path)) goto done;
+    /* Reserve a distinct capability while the old TEMP token is still live.
+     * Failure here leaves the TEMP available for its ordinary cleanup owner. */
+    int64_t sealed_token=0;
+    if (retained) {
+        for (int i=0; i<128; ++i) {
+            uint64_t candidate;
+            if (!cw_random(&candidate,sizeof candidate)) break;
+            candidate &= INT64_MAX;
+            if (candidate && !cw_find((int64_t)candidate)) { sealed_token=(int64_t)candidate; break; }
+        }
+        if (!sealed_token) goto done;
+    }
     FILE_BASIC_INFO basic; memset(&basic,0,sizeof basic); basic.FileAttributes=FILE_ATTRIBUTE_READONLY;
     if (!SetFileInformationByHandle(cw_file(c),FileBasicInfo,&basic,sizeof basic)) goto done;
     c->sealed=1;
@@ -321,9 +339,19 @@ int64_t rt_cache_host_publish_noreplace_v1(int64_t token,const uint8_t *p,int64_
     /* Flush the renamed file before reporting success. Publication is atomic
      * and no-replace; errors after rename remain errors, never fake success. */
     good=FlushFileBuffers(cw_file(c));
-    cw_unlink_cap(c); cw_free(c); result=good?1:-1;
+    if (good && retained) {
+        /* Same original writer, acquired before sealing: no path reopen and
+         * no write surface for the resulting capability. Old TEMP is invalid. */
+        c->token=sealed_token; c->kind=CW_SEALED; result=sealed_token;
+    } else { cw_unlink_cap(c); cw_free(c); result=good?1:-1; }
 done:
     ReleaseSRWLockExclusive(&cw_lock); free(path); free(name); return result;
+}
+int64_t rt_cache_host_publish_noreplace_v1(int64_t token,const uint8_t *p,int64_t n) {
+    return cw_publish(token,p,n,0);
+}
+int64_t rt_cache_host_publish_retained_noreplace_v2(int64_t token,const uint8_t *p,int64_t n) {
+    return cw_publish(token,p,n,1);
 }
 int64_t rt_cache_host_fsync_v1(int64_t token) {
     AcquireSRWLockExclusive(&cw_lock); struct cw_cap *c=cw_find(token);
