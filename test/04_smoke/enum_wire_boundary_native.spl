@@ -1,6 +1,11 @@
 use std.nogc_sync_mut.io_runtime.{exit}
 use std.nogc_sync_mut.sffi.enum_wire.{enum_wire_nil_slot, enum_wire_restore_nil}
 
+@unsafe(reason: "test observes the selected runtime identity of a typed enum constructor", capabilities: [ffi])
+extern fn rt_enum_id<T>(value: T) -> i64
+@unsafe(reason: "test observes the selected runtime discriminant without assuming ordinal tags", capabilities: [ffi])
+extern fn rt_enum_discriminant<T>(value: T) -> i64
+
 fn require(condition: bool):
     if not condition:
         print "ENUM_WIRE_BOUNDARY_FAIL"
@@ -11,6 +16,7 @@ enum WireCase:
     Flag(value: bool)
     Row(label: text, enabled: bool, count: i64)
     TupleOnly(value: (i64, i64))
+    Pair(label: text, enabled: bool)
 
 @unsafe(reason: "fixture supplies the declared WireCase variant schema", capabilities: [ffi])
 fn require_slot(value: WireCase, arity: i64, index: i64, expected: bool):
@@ -21,6 +27,33 @@ fn require_slot(value: WireCase, arity: i64, index: i64, expected: bool):
 @unsafe(reason: "fixture supplies exact declared variant payload positions", capabilities: [ffi])
 fn main():
     val original = WireCase.Row("keep", false, 37)
+    # Observe this typed Row's real identity; variant tags need not be ordinal.
+    val original_owner = rt_enum_id(original)
+    val original_variant = rt_enum_discriminant(original)
+    require(original_owner >= 0)
+    require(original_variant >= 0)
+    # A wrong declared arity must retain the refusal and identify the actual
+    # three-field payload, without assuming a particular runtime enum ABI.
+    match enum_wire_nil_slot(original, 2, 1):
+        case Ok(_): require(false)
+        case Err(detail):
+            require(detail == "enum wire tuple arity mismatch owner={original_owner} variant={original_variant} expected_arity=2 index=1 actual_arity=3")
+    val pair_false = WireCase.Pair("keep false", false)
+    require_slot(pair_false, 2, 0, false)
+    require_slot(pair_false, 2, 1, false)
+    val pair_true = WireCase.Pair("keep true", true)
+    require_slot(pair_true, 2, 0, false)
+    require_slot(pair_true, 2, 1, false)
+    match pair_false:
+        case WireCase.Pair(label, enabled):
+            require(label == "keep false")
+            require(enabled == false)
+        case _: require(false)
+    match pair_true:
+        case WireCase.Pair(label, enabled):
+            require(label == "keep true")
+            require(enabled == true)
+        case _: require(false)
     match enum_wire_restore_nil(original, 3, [1]):
         case Ok(restored):
             require_slot(restored, 3, 1, true)
