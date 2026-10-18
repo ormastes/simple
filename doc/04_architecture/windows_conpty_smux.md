@@ -2,9 +2,12 @@
 # Windows ConPTY for SMUX Architecture
 
 `std.sys.pty` is the public pure-Simple capability and owns platform policy.
-SMUX depends only on this module. Raw `rt_pty_*` symbols are private platform
+SMUX reaches it through `std.nogc_sync_mut.sosix.pty` exact aliases.
+Raw `rt_pty_*` symbols are private platform
 providers: POSIX on Unix and ConPTY on Windows. Interpreter and native runtime
-providers implement the same five-symbol lifecycle contract and keep an
+providers expose the selected public lifecycle contract, including partial
+input, pending-input observation, resize capability, cleanup and exit status,
+with unsupported operations reported by that provider. They keep an
 internal logical-handle registry so Windows handles never masquerade as file
 descriptors.
 
