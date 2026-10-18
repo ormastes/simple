@@ -8,6 +8,15 @@ evidence found in the body. This is bookkeeping, not verification.
 
 Open compiler defect; the SimpleOS Draw IR call site uses a source workaround.
 
+2026-10-18: does not reproduce on hosted x86_64 Windows. The Stage 2
+self-hosted compiler (release_phase3 e77412a8eef, LLVM backend, core-C
+runtime) builds the reproducer shape (method returning `Evidence?`, `!= nil`
+guard, `val value = evidence.?`, `value.field`). It prints the field (42), and
+the absent case takes the nil branch. The MIR `.?` value-position arm now
+yields the payload (`_MirLoweringExpr/expr_dispatch.spl` `case ExistsCheck`).
+The freestanding QEMU lane where the original failure occurred has not been
+re-run.
+
 ## Reproducer
 
 In a freestanding x86 native build, a nullable struct returned from a method is
