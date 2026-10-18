@@ -1,0 +1,303 @@
+# New owner integration controls; the nine passing byte-only controls are not rerun.
+use compiler.hir.hir_lowering.concat_copy_v1.{async_text_concat_copy_v1, async_error_concat_copy_v1, hir_stmt_concat_copy_v1}
+use compiler.hir.hir_lowering.async_errors.{AsyncError, AsyncErrorCode}
+use compiler.hir.hir_definitions.{HirStmt, HirStmtKind, HirExpr, HirExprKind, HirBlock}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.cache.reverse_reference_key.{ReverseReferenceKeyV1, ReverseReferenceKeyDecodeV1, reverse_reference_key_decode_v1, reverse_reference_key_encode_v1}
+use compiler.driver.cache.reverse_reference_receipt.{REVERSE_REFERENCE_FAMILIES_V1, ReverseReferenceProjectionV1, ReverseReferenceGenerationReceiptV1, ReverseReferenceReceiptReadV1, reverse_reference_receipt_encode_v1, reverse_reference_receipt_decode_v1, reverse_reference_receipt_digest_v1}
+use app.startup.launch_metadata.{LaunchMetadata, launch_metadata_for_native_build, render_launch_metadata_sidecar, render_native_launch_metadata_trailer, has_native_launch_metadata_trailer}
+
+fn owner_span_v1(base: i64, file: text) -> Span:
+    Span(start: base, end: base + 7, line: base + 2, col: base + 3, file: file, length: 7)
+
+fn owner_span_matches_v1(actual: Span, base: i64, file: text) -> bool:
+    actual.start == base and actual.end == base + 7 and actual.line == base + 2 and actual.col == base + 3 and actual.file == file and actual.length == 7
+
+fn owner_async_error_v1(first: bool) -> AsyncError:
+    if first:
+        return AsyncError(code: AsyncErrorCode.E0801, message: "left-message", span: owner_span_v1(10, "left.spl"), has_help: true, help: "left-help", has_note: false, note: "left-note", has_suggestion: true, suggestion: "left-suggestion")
+    AsyncError(code: AsyncErrorCode.E0802, message: "right-message", span: owner_span_v1(20, "right.spl"), has_help: false, help: "right-help", has_note: true, note: "right-note", has_suggestion: false, suggestion: "right-suggestion")
+
+fn owner_async_matches_v1(actual: AsyncError, first: bool) -> bool:
+    if first:
+        return actual.code == AsyncErrorCode.E0801 and actual.message == "left-message" and owner_span_matches_v1(actual.span, 10, "left.spl") and actual.has_help and actual.help == "left-help" and not actual.has_note and actual.note == "left-note" and actual.has_suggestion and actual.suggestion == "left-suggestion"
+    actual.code == AsyncErrorCode.E0802 and actual.message == "right-message" and owner_span_matches_v1(actual.span, 20, "right.spl") and not actual.has_help and actual.help == "right-help" and actual.has_note and actual.note == "right-note" and not actual.has_suggestion and actual.suggestion == "right-suggestion"
+
+fn owner_text_controls_v1() -> text:
+    val left: [text] = ["left-A", "left-B"]
+    val right: [text] = ["right-C"]
+    var result: [text] = async_text_concat_copy_v1(left, right)
+    if result.len() != 3:
+        return "text-length"
+    if result[0] != "left-A" or result[1] != "left-B" or result[2] != "right-C":
+        return "text-order"
+    result[0] = "changed-left"
+    result[2] = "changed-right"
+    val empty: [text] = []
+    var fresh: [text] = async_text_concat_copy_v1(left, empty)
+    fresh[0] = "changed-empty-right"
+    if left.len() != 2 or right.len() != 1 or left[0] != "left-A" or right[0] != "right-C":
+        return "text-input-mutated"
+    ""
+
+fn owner_async_controls_v1() -> text:
+    val left: [AsyncError] = [owner_async_error_v1(true)]
+    val right: [AsyncError] = [owner_async_error_v1(false)]
+    var result: [AsyncError] = async_error_concat_copy_v1(left, right)
+    if result.len() != 2:
+        return "async-length"
+    if not owner_async_matches_v1(result[0], true) or not owner_async_matches_v1(result[1], false):
+        return "async-record-fields"
+    result[0] = owner_async_error_v1(false)
+    result[1] = owner_async_error_v1(true)
+    val empty: [AsyncError] = []
+    var fresh: [AsyncError] = async_error_concat_copy_v1(left, empty)
+    fresh[0] = owner_async_error_v1(false)
+    val alias: [AsyncError] = async_error_concat_copy_v1(left, left)
+    if alias.len() != 2 or not owner_async_matches_v1(alias[0], true) or not owner_async_matches_v1(alias[1], true):
+        return "async-self-alias"
+    if left.len() != 1 or right.len() != 1 or not owner_async_matches_v1(left[0], true) or not owner_async_matches_v1(right[0], false):
+        return "async-input-mutated"
+    ""
+
+fn owner_hir_expr_v1(value: i64) -> HirExpr:
+    val span: Span = owner_span_v1(value, "expr.spl")
+    val type_: HirType = HirType(kind: HirTypeKind.Int(64, true), span: owner_span_v1(value + 1, "type.spl"))
+    HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: true, type_: type_, span: span)
+
+fn owner_hir_stmt_v1(value: i64) -> HirStmt:
+    HirStmt(kind: HirStmtKind.Expr(owner_hir_expr_v1(value)), span: owner_span_v1(value + 2, "stmt.spl"))
+
+fn owner_hir_expr_matches_v1(actual: HirExpr, value: i64) -> bool:
+    if not actual.has_type_ or not owner_span_matches_v1(actual.span, value, "expr.spl"):
+        return false
+    val actual_type: HirType = actual.type_
+    if not owner_span_matches_v1(actual_type.span, value + 1, "type.spl"):
+        return false
+    match actual_type.kind:
+        case HirTypeKind.Int(bits, signed):
+            if bits != 64 or not signed:
+                return false
+        case _:
+            return false
+    match actual.kind:
+        case HirExprKind.IntLit(found, suffix):
+            found == value and suffix == nil
+        case _:
+            false
+
+fn owner_hir_stmt_matches_v1(actual: HirStmt, value: i64) -> bool:
+    if not owner_span_matches_v1(actual.span, value + 2, "stmt.spl"):
+        return false
+    match actual.kind:
+        case HirStmtKind.Expr(expr):
+            owner_hir_expr_matches_v1(expr, value)
+        case _:
+            false
+
+fn owner_hir_controls_v1() -> text:
+    val left: [HirStmt] = [owner_hir_stmt_v1(31)]
+    val right: [HirStmt] = [owner_hir_stmt_v1(47)]
+    var result: [HirStmt] = hir_stmt_concat_copy_v1(left, right)
+    if result.len() != 2 or not owner_hir_stmt_matches_v1(result[0], 31) or not owner_hir_stmt_matches_v1(result[1], 47):
+        return "hir-whole-elements"
+    val block: HirBlock = HirBlock(stmts: result, has: true, value: owner_hir_expr_v1(63), span: owner_span_v1(71, "block.spl"), unsafe_caps: ["ffi", "memory"])
+    if not block.has or not owner_hir_expr_matches_v1(block.value, 63) or not owner_span_matches_v1(block.span, 71, "block.spl"):
+        return "hir-block-metadata"
+    if block.unsafe_caps.len() != 2 or block.unsafe_caps[0] != "ffi" or block.unsafe_caps[1] != "memory":
+        return "hir-block-capabilities"
+    result[0] = owner_hir_stmt_v1(47)
+    val empty: [HirStmt] = []
+    var fresh: [HirStmt] = hir_stmt_concat_copy_v1(left, empty)
+    fresh[0] = owner_hir_stmt_v1(47)
+    val alias: [HirStmt] = hir_stmt_concat_copy_v1(left, left)
+    if alias.len() != 2 or not owner_hir_stmt_matches_v1(alias[0], 31) or not owner_hir_stmt_matches_v1(alias[1], 31):
+        return "hir-self-alias"
+    if left.len() != 1 or right.len() != 1 or not owner_hir_stmt_matches_v1(left[0], 31) or not owner_hir_stmt_matches_v1(right[0], 47):
+        return "hir-input-mutated"
+    ""
+
+fn owner_receipt_key_v1(subject: text, digest: text) -> ReverseReferenceKeyV1:
+    ReverseReferenceKeyV1(registry_kind: "semantic", owner_generation: "owner-1", root_generation: "root-2", subject_identity: subject, projection_kind: "direct-import-export", projection_digest: digest, schema_version: 1)
+
+fn owner_receipt_key_matches_v1(actual: ReverseReferenceKeyV1, subject: text, digest: text) -> bool:
+    actual.registry_kind == "semantic" and actual.owner_generation == "owner-1" and actual.root_generation == "root-2" and actual.subject_identity == subject and actual.projection_kind == "direct-import-export" and actual.projection_digest == digest and actual.schema_version == 1
+
+# Shared with the receipt-only final-cycle entry; the other four groups stay unexecuted.
+export owner_receipt_controls_v1
+
+fn owner_receipt_controls_v1() -> text:
+    val digest_a: text = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    val digest_b: text = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    val families: [text] = ["direct-import-export", "trait-type-implementation", "unresolved-method-candidate", "annotation-consumer", "generic-specialization", "aop-consumer", "runtime-provider", "initializer-dependent", "module-scc-artifact", "emitted-symbol-relocation"]
+    if REVERSE_REFERENCE_FAMILIES_V1.len() != 10:
+        return "receipt-family-contract-size"
+    var family_index: i64 = 0
+    while family_index < 10:
+        if REVERSE_REFERENCE_FAMILIES_V1[family_index] != families[family_index]:
+            return "receipt-family-contract-name"
+        family_index = family_index + 1
+    val key_a: ReverseReferenceKeyV1 = owner_receipt_key_v1("subject-a", digest_a)
+    val key_b: ReverseReferenceKeyV1 = owner_receipt_key_v1("subject-b", digest_b)
+    val incomplete_projections: [ReverseReferenceProjectionV1] = [ReverseReferenceProjectionV1(key: key_b, consumer_identity: "consumer-b"), ReverseReferenceProjectionV1(key: key_a, consumer_identity: "consumer-a")]
+    var projections: [ReverseReferenceProjectionV1] = []
+    projections.push(incomplete_projections[0])
+    projections.push(incomplete_projections[1])
+    family_index = 1
+    while family_index < 10:
+        val key: ReverseReferenceKeyV1 = ReverseReferenceKeyV1(registry_kind: "semantic", owner_generation: "owner-1", root_generation: "root-2", subject_identity: "subject-family-{family_index}", projection_kind: families[family_index], projection_digest: digest_a, schema_version: 1)
+        projections.push(ReverseReferenceProjectionV1(key: key, consumer_identity: "consumer-family-{family_index}"))
+        family_index = family_index + 1
+    var expected_lines: [text] = []
+    for projection in projections:
+        val frame: text = reverse_reference_key_encode_v1(projection.key)
+        val key_decoded: ReverseReferenceKeyDecodeV1 = reverse_reference_key_decode_v1(frame)
+        if not key_decoded.valid or key_decoded.key == nil:
+            return "receipt-key-decode:" + key_decoded.reason
+        val key_roundtrip: ReverseReferenceKeyV1 = key_decoded.key.unwrap()
+        if reverse_reference_key_encode_v1(key_roundtrip) != frame:
+            return "receipt-key-canonical-roundtrip"
+        val consumer: text = projection.consumer_identity
+        expected_lines.push("{frame.len()}:{frame}{consumer.len()}:{consumer}")
+    expected_lines.sort()
+    val receipt: ReverseReferenceGenerationReceiptV1 = ReverseReferenceGenerationReceiptV1(schema_version: 1, owner_generation: "owner-1", root_generation: "root-2", projections: projections)
+    val encoded: text = reverse_reference_receipt_encode_v1(receipt)
+    val lines: [text] = encoded.split("\n")
+    if lines.len() != 16 or lines[0] != "simple-reverse-reference-generation-receipt-v1" or lines[1] != "schema=1" or lines[2] != "owner=owner-1" or lines[3] != "root=root-2" or lines[4] != "count=11":
+        return "receipt-header"
+    var index: i64 = 0
+    while index < 11:
+        if lines[index + 5] != expected_lines[index]:
+            return "receipt-projection-order"
+        index = index + 1
+    val decoded: ReverseReferenceReceiptReadV1 = reverse_reference_receipt_decode_v1(encoded)
+    if not decoded.valid or decoded.receipt == nil:
+        return "receipt-decode:" + decoded.reason
+    val roundtrip: ReverseReferenceGenerationReceiptV1 = decoded.receipt.unwrap()
+    if roundtrip.schema_version != 1 or roundtrip.owner_generation != "owner-1" or roundtrip.root_generation != "root-2" or roundtrip.projections.len() != 11:
+        return "receipt-fields"
+    for projection in roundtrip.projections:
+        val key: ReverseReferenceKeyV1 = projection.key
+        if key.registry_kind != "semantic" or key.owner_generation != "owner-1" or key.root_generation != "root-2" or key.schema_version != 1:
+            return "receipt-key-common-fields"
+        val consumer: text = projection.consumer_identity
+        if consumer == "consumer-a":
+            if not owner_receipt_key_matches_v1(key, "subject-a", digest_a):
+                return "receipt-first-direct-fields"
+        elif consumer == "consumer-b":
+            if not owner_receipt_key_matches_v1(key, "subject-b", digest_b):
+                return "receipt-second-direct-fields"
+        else:
+            var matched: bool = false
+            family_index = 1
+            while family_index < 10:
+                if consumer == "consumer-family-{family_index}":
+                    matched = true
+                    if key.subject_identity != "subject-family-{family_index}" or key.projection_kind != families[family_index] or key.projection_digest != digest_a:
+                        return "receipt-family-key-fields"
+                family_index = family_index + 1
+            if not matched:
+                return "receipt-unknown-consumer"
+    val digest: text = reverse_reference_receipt_digest_v1(receipt)
+    if digest.len() != 64 or reverse_reference_receipt_encode_v1(roundtrip) != encoded or digest != reverse_reference_receipt_digest_v1(roundtrip):
+        return "receipt-roundtrip-digest"
+    val incomplete: ReverseReferenceGenerationReceiptV1 = ReverseReferenceGenerationReceiptV1(schema_version: 1, owner_generation: "owner-1", root_generation: "root-2", projections: incomplete_projections)
+    val missing_family: ReverseReferenceReceiptReadV1 = reverse_reference_receipt_decode_v1(reverse_reference_receipt_encode_v1(incomplete))
+    if missing_family.valid or missing_family.reason != "missing-family:trait-type-implementation":
+        return "receipt-missing-family-unexpected:" + missing_family.reason
+    val wrong_header: ReverseReferenceReceiptReadV1 = reverse_reference_receipt_decode_v1(encoded.replace("simple-reverse-reference-generation-receipt-v1", "wrong-header"))
+    val wrong_schema: ReverseReferenceReceiptReadV1 = reverse_reference_receipt_decode_v1(encoded.replace("schema=1", "schema=2"))
+    val wrong_count: ReverseReferenceReceiptReadV1 = reverse_reference_receipt_decode_v1(encoded.replace("count=11", "count=12"))
+    val mixed_generation: ReverseReferenceReceiptReadV1 = reverse_reference_receipt_decode_v1(encoded.replace("owner=owner-1", "owner=other-owner"))
+    if wrong_header.valid or wrong_header.reason != "corrupt-header":
+        return "receipt-header-denial:" + wrong_header.reason
+    if wrong_schema.valid or wrong_schema.reason != "unsupported-schema":
+        return "receipt-schema-denial:" + wrong_schema.reason
+    if wrong_count.valid or wrong_count.reason != "corrupt-count":
+        return "receipt-count-denial:" + wrong_count.reason
+    if mixed_generation.valid or mixed_generation.reason != "mixed-generation":
+        return "receipt-generation-denial:" + mixed_generation.reason
+    var reordered: [text] = []
+    for line in lines:
+        reordered.push(line)
+    val saved: text = reordered[5]
+    reordered[5] = reordered[6]
+    reordered[6] = saved
+    val wrong_order: ReverseReferenceReceiptReadV1 = reverse_reference_receipt_decode_v1(reordered.join("\n"))
+    if wrong_order.valid or wrong_order.reason != "noncanonical-order-or-duplicate":
+        return "receipt-order-denial:" + wrong_order.reason
+    val frame_a: text = reverse_reference_key_encode_v1(key_a)
+    val bad_domain: ReverseReferenceKeyDecodeV1 = reverse_reference_key_decode_v1(frame_a.replace("F31:simple/reverse-reference-key/v1", "F30:simple/reverse-reference-key/v1"))
+    val bad_length: ReverseReferenceKeyDecodeV1 = reverse_reference_key_decode_v1(frame_a.replace("S8:semantic", "S08:semantic"))
+    val trailing_key: ReverseReferenceKeyDecodeV1 = reverse_reference_key_decode_v1(frame_a + "x")
+    if bad_domain.valid or bad_domain.reason != "invalid-domain-or-field-count":
+        return "receipt-key-domain-denial:" + bad_domain.reason
+    if bad_length.valid or bad_length.reason != "invalid-text-length":
+        return "receipt-key-length-denial:" + bad_length.reason
+    if trailing_key.valid or trailing_key.reason != "trailing-data":
+        return "receipt-key-trailing-denial:" + trailing_key.reason
+    ""
+fn owner_byte_consumer_controls_v1() -> text:
+    val metadata: LaunchMetadata = launch_metadata_for_native_build("windows", "x86_64", "native")
+    val payload: [u8] = render_launch_metadata_sidecar(metadata).bytes()
+    var trailer: [u8] = render_native_launch_metadata_trailer(metadata)
+    if trailer.len() != payload.len() + 24 or not has_native_launch_metadata_trailer(trailer):
+        return "production-trailer-shape"
+    var index: i64 = 0
+    while index < payload.len():
+        if trailer[index] != payload[index]:
+            return "production-trailer-payload"
+        index = index + 1
+    index = 0
+    while index < 8:
+        val expected: u8 = ((payload.len() >> (index * 8)) & 255).to_u8()
+        if trailer[payload.len() + index] != expected:
+            return "production-trailer-size"
+        index = index + 1
+    val magic: [u8] = [83.to_u8(), 73.to_u8(), 77.to_u8(), 80.to_u8(), 76.to_u8(), 69.to_u8(), 95.to_u8(), 76.to_u8(), 65.to_u8(), 85.to_u8(), 78.to_u8(), 67.to_u8(), 72.to_u8(), 95.to_u8(), 86.to_u8(), 49.to_u8()]
+    index = 0
+    while index < magic.len():
+        if trailer[payload.len() + 8 + index] != magic[index]:
+            return "production-trailer-magic"
+        index = index + 1
+    trailer[trailer.len() - 1] = 0.to_u8()
+    if has_native_launch_metadata_trailer(trailer) or has_native_launch_metadata_trailer(magic):
+        return "production-trailer-denial"
+    if metadata.target_os != "windows" or metadata.target_arch != "x86_64" or metadata.target_abi != "native":
+        return "production-metadata-mutated"
+    ""
+
+fn main() -> i32:
+    var failures: i32 = 0
+    val text_reason: text = owner_text_controls_v1()
+    if text_reason != "":
+        print "FAIL owner-text: {text_reason}"
+        failures = failures + 1
+    else:
+        print "PASS owner-text"
+    val async_reason: text = owner_async_controls_v1()
+    if async_reason != "":
+        print "FAIL owner-async: {async_reason}"
+        failures = failures + 1
+    else:
+        print "PASS owner-async"
+    val hir_reason: text = owner_hir_controls_v1()
+    if hir_reason != "":
+        print "FAIL owner-hir: {hir_reason}"
+        failures = failures + 1
+    else:
+        print "PASS owner-hir"
+    val receipt_reason: text = owner_receipt_controls_v1()
+    if receipt_reason != "":
+        print "FAIL owner-receipt: {receipt_reason}"
+        failures = failures + 1
+    else:
+        print "PASS owner-receipt"
+    val byte_reason: text = owner_byte_consumer_controls_v1()
+    if byte_reason != "":
+        print "FAIL production-byte-consumer: {byte_reason}"
+        failures = failures + 1
+    else:
+        print "PASS production-byte-consumer"
+    failures

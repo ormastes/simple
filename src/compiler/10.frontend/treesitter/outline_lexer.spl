@@ -50,15 +50,18 @@ fn treesitter_new(source: text) -> TreeSitter:
             previous: lex_token_eof(1),
             errors: [],
             source: source,
-            doc_comment: nil,
+            has_doc_comment: false,
+            doc_comment: "",
             inline_blocks: [],
             asm_blocks: [],
-            current_context: nil,
+            has_current_context: false,
+            current_context: "",
             fast_mode: false,
             heuristic_mode: false,
-            registry: nil
+            has_registry: false,
+            registry: BlockRegistry.new()
         )
-        ts_advance(ts)  # Prime the parser
+        ts.advance()  # Prime this actual mutable parser, not a by-value helper copy
         ts
 
 
@@ -75,13 +78,15 @@ fn treesitter_with_fast_mode(fast_mode: bool) -> TreeSitter:
             previous: lex_token_eof(1),
             errors: [],
             source: "",
-            #  # DESUGARED: doc_comment: nil
+            has_doc_comment: false,
+            doc_comment: "",
             inline_blocks: [],
             asm_blocks: [],
-            #  # DESUGARED: current_context: nil
+            has_current_context: false,
+            current_context: "",
             fast_mode: fast_mode,
             heuristic_mode: false,
-            # # DESUGARED: registry: Some(block_registry())
+            has_registry: true,
             registry: block_registry()
         )
 
@@ -100,17 +105,81 @@ fn treesitter_with_heuristic_mode(enabled: bool) -> TreeSitter:
             previous: lex_token_eof(1),
             errors: [],
             source: "",
-            #  # DESUGARED: doc_comment: nil
+            has_doc_comment: false,
+            doc_comment: "",
             inline_blocks: [],
             asm_blocks: [],
-            #  # DESUGARED: current_context: nil
+            has_current_context: false,
+            current_context: "",
             fast_mode: false,
             heuristic_mode: enabled,
-            registry: nil
+            has_registry: false,
+            registry: BlockRegistry.new()
         )
 
 
 fn treesitter_with_source(self: TreeSitter, source: text) -> TreeSitter:
+        self.with_source(source)
+
+me treesitter_advance(self: TreeSitter) -> Token:
+        self.advance()
+
+fn ts_advance(ts: TreeSitter) -> Token:
+        treesitter_advance(ts)
+
+
+fn treesitter_peek(self: TreeSitter) -> TokenKind:
+        self.peek()
+
+fn treesitter_check(self: TreeSitter, kind: TokenKind) -> bool:
+        self.check(kind)
+
+me treesitter_match_token(self: TreeSitter, kind: TokenKind) -> bool:
+        self.match_token(kind)
+
+me treesitter_expect(self: TreeSitter, kind: TokenKind, message: text) -> bool:
+        self.expect(kind, message)
+
+fn treesitter_is_at_end(self: TreeSitter) -> bool:
+        self.is_at_end()
+
+me treesitter_error(self: TreeSitter, message: text):
+        self.error(message)
+
+me treesitter_warning(self: TreeSitter, message: text):
+        self.warning(message)
+
+me treesitter_skip_newlines(self: TreeSitter):
+        self.skip_newlines()
+
+me treesitter_take_doc_comment(self: TreeSitter) -> text?:
+        self.take_doc_comment()
+
+me treesitter_try_parse_body_docstring(self: TreeSitter) -> text?:
+        self.try_parse_body_docstring()
+
+me treesitter_skip_expression(self: TreeSitter):
+        self.skip_expression()
+
+me treesitter_synchronize(self: TreeSitter):
+        self.synchronize()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+# Canonical receiver bodies; free entry points above preserve compatibility.
+impl TreeSitter:
+    static fn new(source: text) -> TreeSitter:
+        treesitter_new(source)
+
+    static fn with_fast_mode(fast_mode: bool) -> TreeSitter:
+        treesitter_with_fast_mode(fast_mode)
+
+    static fn with_heuristic_mode(enabled: bool) -> TreeSitter:
+        treesitter_with_heuristic_mode(enabled)
+
+    fn with_source(source: text) -> TreeSitter:
         var next = self
         next.lexer = lexer_new(source)
         next.source = source
@@ -118,7 +187,7 @@ fn treesitter_with_source(self: TreeSitter, source: text) -> TreeSitter:
         next
 
 
-me treesitter_advance(self: TreeSitter) -> Token:
+    me advance() -> Token:
         """Advance to next token."""
         self.previous = self.current
 
@@ -142,21 +211,18 @@ me treesitter_advance(self: TreeSitter) -> Token:
         self.lexer = lexer
         self.previous
 
-fn ts_advance(ts: TreeSitter) -> Token:
-        treesitter_advance(ts)
 
-
-fn treesitter_peek(self: TreeSitter) -> TokenKind:
+    fn peek() -> TokenKind:
         """Peek at current token kind."""
         self.current.kind
 
 
-fn treesitter_check(self: TreeSitter, kind: TokenKind) -> bool:
+    fn check(kind: TokenKind) -> bool:
         """Check if current token matches kind."""
         self.current.kind == kind
 
 
-me treesitter_match_token(self: TreeSitter, kind: TokenKind) -> bool:
+    me match_token(kind: TokenKind) -> bool:
         """Match and consume token if it matches."""
         if self.check(kind):
             self.advance()
@@ -165,7 +231,7 @@ me treesitter_match_token(self: TreeSitter, kind: TokenKind) -> bool:
             false
 
 
-me treesitter_expect(self: TreeSitter, kind: TokenKind, message: text) -> bool:
+    me expect(kind: TokenKind, message: text) -> bool:
         """Expect a token, report error if not found."""
         if self.current.kind == kind:
             self.advance()
@@ -175,13 +241,13 @@ me treesitter_expect(self: TreeSitter, kind: TokenKind, message: text) -> bool:
             false
 
 
-fn treesitter_is_at_end(self: TreeSitter) -> bool:
+    fn is_at_end() -> bool:
         """Check if at end of input (Eof or nil token)."""
         val kind = self.current.kind
         kind == TokenKind.Eof
 
 
-me treesitter_error(self: TreeSitter, message: text):
+    me error(message: text):
         self.errors = self.errors.push(ParseError(
             message: message,
             span: self.current.span,
@@ -189,7 +255,7 @@ me treesitter_error(self: TreeSitter, message: text):
         ))
 
 
-me treesitter_warning(self: TreeSitter, message: text):
+    me warning(message: text):
         self.errors = self.errors.push(ParseError(
             message: message,
             span: self.current.span,
@@ -197,18 +263,21 @@ me treesitter_warning(self: TreeSitter, message: text):
         ))
 
 
-me treesitter_skip_newlines(self: TreeSitter):
+    me skip_newlines():
         while self.check(TokenKind.Newline):
             self.advance()
 
 
-me treesitter_take_doc_comment(self: TreeSitter) -> text?:
+    me take_doc_comment() -> text?:
+        if not self.has_doc_comment:
+            return nil
         val doc = self.doc_comment
-        self.doc_comment = nil
-        doc
+        self.has_doc_comment = false
+        self.doc_comment = ""
+        Some(doc)
 
 
-me treesitter_try_parse_body_docstring(self: TreeSitter) -> text?:
+    me try_parse_body_docstring() -> text?:
         if self.check(TokenKind.StringLit):
             val doc = self.current.text
             self.advance()
@@ -217,7 +286,7 @@ me treesitter_try_parse_body_docstring(self: TreeSitter) -> text?:
         nil
 
 
-me treesitter_skip_expression(self: TreeSitter):
+    me skip_expression():
         var paren_depth = 0
         var bracket_depth = 0
         var brace_depth = 0
@@ -251,7 +320,7 @@ me treesitter_skip_expression(self: TreeSitter):
             self.advance()
 
 
-me treesitter_synchronize(self: TreeSitter):
+    me synchronize():
         while not self.is_at_end():
             if self.check(TokenKind.Newline):
                 self.advance()
@@ -259,8 +328,3 @@ me treesitter_synchronize(self: TreeSitter):
             if self.check(TokenKind.Dedent):
                 return
             self.advance()
-
-
-# ============================================================================
-# Exports
-# ============================================================================

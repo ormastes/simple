@@ -30,6 +30,7 @@ mod unix {
         CasShard1(RawFd),
         CasShard2(RawFd),
         Read(RawFd),
+        Sealed { fd: RawFd, root_fd: RawFd },
         ReaderPin {
             root_fd: RawFd,
             namespace_lock_fd: RawFd,
@@ -47,6 +48,7 @@ mod unix {
             root_fd: RawFd,
             name: CString,
             cas_leaf: bool,
+            sealed: bool,
         },
     }
 
@@ -783,7 +785,7 @@ mod unix {
         }
         let guard = handles().lock().expect("cache authority handle lock");
         let fd = match guard.get(&handle) {
-            Some(Entry::Read(fd)) => *fd,
+            Some(Entry::Read(fd)) | Some(Entry::Sealed { fd, .. }) => *fd,
             _ => return INVALID,
         };
         let mut stat: libc::stat = std::mem::zeroed();
@@ -805,7 +807,7 @@ mod unix {
         }
         let guard = handles().lock().expect("cache authority handle lock");
         let fd = match guard.get(&handle) {
-            Some(Entry::Read(fd)) => *fd,
+            Some(Entry::Read(fd)) | Some(Entry::Sealed { fd, .. }) => *fd,
             _ => return INVALID,
         };
         let mut before: libc::stat = std::mem::zeroed();
@@ -892,6 +894,7 @@ mod unix {
                     root_fd: owned_root,
                     name,
                     cas_leaf,
+                    sealed: false,
                 });
             }
             if errno() != libc::EEXIST {
@@ -908,7 +911,7 @@ mod unix {
             return INVALID;
         }
         let guard = handles().lock().expect("cache authority handle lock");
-        let Some(Entry::Temp { fd, .. }) = guard.get(&handle) else {
+        let Some(Entry::Temp { fd, sealed: false, .. }) = guard.get(&handle) else {
             return INVALID;
         };
         libc::pwrite(*fd, data.cast(), len as usize, offset as libc::off_t) as i64
@@ -926,6 +929,7 @@ mod unix {
             root_fd,
             name,
             cas_leaf,
+            ..
         }) = guard.get(&handle)
         else {
             return INVALID;
@@ -958,6 +962,72 @@ mod unix {
             libc::close(root_fd);
         }
         1
+    }
+
+    #[cfg(test)]
+    std::thread_local! { static FAIL_SEALED_POST_FLUSH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+    unsafe fn sealed_post_flush(fd: RawFd) -> bool {
+        #[cfg(test)]
+        if FAIL_SEALED_POST_FLUSH.with(|fail| fail.replace(false)) { return false; }
+        libc::fsync(fd) == 0
+    }
+
+    /// Additive sealed writer authority. Success consumes TEMP and retains the
+    /// exact original fd under a distinct token; no pathname reopen occurs.
+    #[no_mangle]
+    pub unsafe extern "C" fn rt_cache_host_publish_retained_noreplace_v2(
+        handle: i64, dest: *const u8, len: i64,
+    ) -> i64 {
+        let Some(dest) = input(dest, len) else { return INVALID };
+        if !relative_name(&dest) || dest.as_bytes().contains(&b'/') { return INVALID; }
+        let mut guard = handles().lock().expect("cache authority handle lock");
+        let (fd, root_fd, name, cas_leaf) = match guard.get(&handle) {
+            Some(Entry::Temp { fd, root_fd, name, cas_leaf, .. }) => (*fd, *root_fd, name.clone(), *cas_leaf),
+            _ => return INVALID,
+        };
+        if cas_leaf && !lower_hex_component(&dest, 60) { return INVALID; }
+        let mut original: libc::stat = std::mem::zeroed();
+        if libc::fstat(fd, &mut original) != 0 || (original.st_mode & libc::S_IFMT) != libc::S_IFREG { return INVALID; }
+        // Reserve while TEMP is live, so the replacement cannot equal it.
+        let mut sealed_token = INVALID;
+        for _ in 0..128 {
+            let mut bytes = [0u8; 8];
+            if std::fs::File::open("/dev/urandom")
+                .and_then(|mut file| file.read_exact(&mut bytes)).is_err() { return INVALID; }
+            let candidate = i64::from_ne_bytes(bytes) & i64::MAX;
+            if candidate > 0 && !guard.contains_key(&candidate) { sealed_token = candidate; break; }
+        }
+        if sealed_token <= 0 || libc::fsync(fd) != 0 || libc::fchmod(fd, 0o444) != 0 {
+            return INVALID;
+        }
+        if let Some(Entry::Temp { sealed, .. }) = guard.get_mut(&handle) { *sealed = true; }
+        #[cfg(target_os = "linux")]
+        let rc = libc::syscall(libc::SYS_renameat2, root_fd, name.as_ptr(),
+            root_fd, dest.as_ptr(), libc::RENAME_NOREPLACE) as i32;
+        #[cfg(not(target_os = "linux"))]
+        let rc = libc::linkat(root_fd, name.as_ptr(), root_fd, dest.as_ptr(), 0);
+        if rc != 0 { return if errno() == libc::EEXIST { 0 } else { INVALID }; }
+        #[cfg(target_os = "linux")]
+        let removed_temp = true;
+        #[cfg(not(target_os = "linux"))]
+        let removed_temp = libc::unlinkat(root_fd, name.as_ptr(), 0) == 0;
+        // Errors after publication consume TEMP without granting authority.
+        // A source-leaf swap must never grant the original fd authority for
+        // different published bytes. This is not an atomic conditional rename
+        // or a directory-lock/race-immunity claim; receipt admission still runs.
+        let mut published: libc::stat = std::mem::zeroed();
+        let durable = removed_temp && libc::fstatat(root_fd, dest.as_ptr(), &mut published, libc::AT_SYMLINK_NOFOLLOW) == 0
+            && (published.st_mode & libc::S_IFMT) == libc::S_IFREG
+            && original.st_dev == published.st_dev && original.st_ino == published.st_ino
+            && sealed_post_flush(fd) && libc::fsync(root_fd) == 0;
+        let Some(Entry::Temp { fd, root_fd, .. }) = guard.remove(&handle) else {
+            unreachable!("TEMP held under registry lock")
+        };
+        if !durable {
+            libc::close(fd); libc::close(root_fd); return INVALID;
+        }
+        guard.insert(sealed_token, Entry::Sealed { fd, root_fd });
+        sealed_token
     }
 
     /// Descriptor-bound quarantine: create a no-replace hard link from the
@@ -1012,7 +1082,8 @@ mod unix {
             | Some(Entry::CasShard2(fd))
             | Some(Entry::Read(fd))
             | Some(Entry::ReaderPin { root_fd: fd, .. })
-            | Some(Entry::Temp { fd, .. }) => *fd,
+            | Some(Entry::Temp { fd, .. })
+            | Some(Entry::Sealed { fd, .. }) => *fd,
             None => return INVALID,
         };
         if libc::fsync(fd) == 0 {
@@ -1044,6 +1115,10 @@ mod unix {
                 libc::close(namespace_lock_fd);
                 libc::close(root_fd) as i64
             }
+            Entry::Sealed { fd, root_fd } => {
+                libc::close(root_fd);
+                libc::close(fd) as i64
+            }
             Entry::Temp { fd, root_fd, name, .. } => {
                 libc::unlinkat(root_fd, name.as_ptr(), 0);
                 libc::close(root_fd);
@@ -1063,6 +1138,70 @@ mod unix {
         fn root(path: &std::path::Path) -> i64 {
             let bytes = path.as_os_str().as_encoded_bytes();
             unsafe { rt_cache_host_open_root_v1(bytes.as_ptr(), bytes.len() as i64) }
+        }
+
+        #[test]
+        fn retained_seal_keeps_original_fd_and_rejects_mutation() {
+            use std::os::unix::fs::MetadataExt;
+            let dir = tempfile::tempdir().unwrap();
+            let r = root(dir.path());
+            unsafe {
+                let t = rt_cache_host_secure_temp_v1(r);
+                assert!(t > 0);
+                assert_eq!(rt_cache_host_write_temp_v1(t, 0, b"original".as_ptr(), 8), 8);
+                let fd = match handles().lock().unwrap().get(&t) { Some(Entry::Temp { fd, .. }) => *fd, _ => panic!() };
+                let mut before: libc::stat = std::mem::zeroed();
+                assert_eq!(libc::fstat(fd, &mut before), 0);
+                let sealed = rt_cache_host_publish_retained_noreplace_v2(t, b"object".as_ptr(), 6);
+                assert!(sealed > 0 && sealed != t);
+                let retained = match handles().lock().unwrap().get(&sealed) { Some(Entry::Sealed { fd, .. }) => *fd, _ => panic!() };
+                assert_eq!(retained, fd);
+                assert_eq!(fs::metadata(dir.path().join("object")).unwrap().ino(), before.st_ino);
+                assert_eq!(rt_cache_host_write_temp_v1(t, 0, b"x".as_ptr(), 1), INVALID);
+                assert_eq!(rt_cache_host_write_temp_v1(sealed, 0, b"x".as_ptr(), 1), INVALID);
+                assert_eq!(rt_cache_host_close_v1(t), INVALID);
+                assert_eq!(rt_cache_host_fsync_v1(sealed), 1);
+                assert_eq!(rt_cache_host_fsync_v1(r), 1);
+                assert_eq!(rt_cache_host_size_v1(sealed, 8), 8);
+                assert_eq!(rt_cache_host_size_v1(sealed, 7), INVALID);
+                let mut bytes = [0u8; 8];
+                assert_eq!(rt_cache_host_pread_receipt_v1(sealed, 0, bytes.as_mut_ptr(), 8), 8);
+                assert_eq!(&bytes, b"original");
+                let other = rt_cache_host_secure_temp_v1(r);
+                assert_eq!(rt_cache_host_write_temp_v1(other, 0, b"replacement".as_ptr(), 11), 11);
+                assert_eq!(rt_cache_host_publish_retained_noreplace_v2(other, b"object".as_ptr(), 6), 0);
+                assert_eq!(rt_cache_host_write_temp_v1(other, 0, b"x".as_ptr(), 1), INVALID);
+                assert_eq!(fs::read(dir.path().join("object")).unwrap(), b"original");
+                assert_eq!(rt_cache_host_close_v1(other), 0);
+                assert_eq!(rt_cache_host_publish_retained_noreplace_v2(sealed, b"wrong".as_ptr(), 5), INVALID);
+                assert_eq!(rt_cache_host_close_v1(sealed), 0);
+                assert_eq!(rt_cache_host_close_v1(sealed), INVALID);
+                assert_eq!(rt_cache_host_fsync_v1(sealed), INVALID);
+                assert_eq!(rt_cache_host_close_v1(r), 0);
+            }
+        }
+
+        #[test]
+        fn retained_seal_source_swap_and_postflush_failure_grant_no_capability() {
+            let dir = tempfile::tempdir().unwrap();
+            let r = root(dir.path());
+            unsafe {
+                let t = rt_cache_host_secure_temp_v1(r);
+                assert_eq!(rt_cache_host_write_temp_v1(t, 0, b"original".as_ptr(), 8), 8);
+                let name = match handles().lock().unwrap().get(&t) { Some(Entry::Temp { name, .. }) => name.to_str().unwrap().to_owned(), _ => panic!() };
+                fs::remove_file(dir.path().join(&name)).unwrap();
+                fs::write(dir.path().join(&name), b"swapped").unwrap();
+                assert_eq!(rt_cache_host_publish_retained_noreplace_v2(t, b"swapped-dest".as_ptr(), 12), INVALID);
+                assert_eq!(rt_cache_host_close_v1(t), INVALID);
+                assert_eq!(fs::read(dir.path().join("swapped-dest")).unwrap(), b"swapped");
+                let t = rt_cache_host_secure_temp_v1(r);
+                assert_eq!(rt_cache_host_write_temp_v1(t, 0, b"valid".as_ptr(), 5), 5);
+                FAIL_SEALED_POST_FLUSH.with(|fail| fail.set(true));
+                assert_eq!(rt_cache_host_publish_retained_noreplace_v2(t, b"flush-failed".as_ptr(), 12), INVALID);
+                assert_eq!(rt_cache_host_close_v1(t), INVALID);
+                assert_eq!(fs::read(dir.path().join("flush-failed")).unwrap(), b"valid");
+                assert_eq!(rt_cache_host_close_v1(r), 0);
+            }
         }
 
         #[test]
@@ -1478,6 +1617,7 @@ mod windows_unsupported {
     unsupported!(rt_cache_host_secure_temp_v1(root: i64));
     unsupported!(rt_cache_host_write_temp_v1(handle: i64, offset: i64, data: *const u8, len: i64));
     unsupported!(rt_cache_host_publish_noreplace_v1(handle: i64, dest: *const u8, len: i64));
+    unsupported!(rt_cache_host_publish_retained_noreplace_v2(handle: i64, dest: *const u8, len: i64));
     unsupported!(rt_cache_host_quarantine_v1(root: i64, object: i64, dest: *const u8, len: i64));
     unsupported!(rt_cache_host_fsync_v1(handle: i64));
     unsupported!(rt_cache_host_close_v1(handle: i64));

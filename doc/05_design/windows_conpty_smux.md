@@ -126,3 +126,39 @@ Windows API references:
 - [ClosePseudoConsole](https://learn.microsoft.com/en-us/windows/console/closepseudoconsole)
 - [Synchronous and overlapped pipe IO](https://learn.microsoft.com/en-us/windows/win32/ipc/synchronous-and-overlapped-input-and-output)
 - [CancelIoEx](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex)
+
+## Synchronous SOSIX routing, 2026-10-18
+
+REQ-006 adds exact aliases under `std.nogc_sync_mut.sosix` for the existing
+host owners: `process`, `time`, `host`, `stdio`, `pty` and `terminal_console`.
+These are synchronous compatibility operations and may block exactly as their
+owners do. They introduce no ring, scheduler, descriptor registry or async
+completion guarantee. `src/os` never imports the async SOSIX capsule.
+
+The PTY/console aliases target the stable `std.sys` capabilities. The ordered
+Windows provider overlay still selects the actual ConPTY/console owner. TCP
+retains its existing `io.tcp -> sosix.network -> Windows TCP owner` route.
+Native Win32 ABI declarations and resource management stay in provider owners.
+Clipboard actions remain explicit client actions through the existing console
+capability; this repair performs no clipboard access during development.
+
+The stdin alias preserves `text` plus empty-text EOF via the annotated
+`sffi.host.read_stdin_line` owner. Output uses an inline-requested SOSIX wrapper
+around the original language `print` intrinsic, preserving its text conversion
+and newline lowering. It does not assume that a raw `rt_println` foreign call
+has the same text marshaling. Startup aliases retain the normalized CLI helper and existing
+file/PID contracts. The platform-name alias returns the existing OS name;
+fixtures only compare it with `windows`, equivalent to their prior host-family
+predicate for this qualification gate.
+
+Clock units remain Unix microseconds and monotonic milliseconds. The sleep
+alias targets `concurrent.thread.thread_sleep`; this fixes fixtures that
+previously imported a shell-based helper and incorrectly formatted subsecond
+delays. No polling algorithm or deadline is changed.
+
+Alias overhead, native symbol ownership and stdout bytes require runtime/link
+evidence. Source checks establish routing only. The source spec/manual and
+`smux_sosix_host` native control are listed in the test plan; all native results
+remain pending an admitted producer. No generic registry, runtime platform
+dispatch, new environment read, extra filesystem scan or hot-path shell spawn
+is introduced by these aliases.

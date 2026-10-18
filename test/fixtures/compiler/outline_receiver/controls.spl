@@ -1,0 +1,221 @@
+use block_controls.{outline_block_prerequisite_controls_v1}
+use compiler.frontend.core.lexer_types.{TokenKind}
+use compiler.frontend.treesitter_types.{ErrorSeverity, TypeOutlineKind, VariantPayload}
+use compiler.frontend.treesitter.outline_lexer.*
+use compiler.frontend.treesitter.outline.*
+use compiler.frontend.treesitter.outline_decls.*
+use compiler.frontend.treesitter.outline_members.*
+use compiler.frontend.treesitter.outline_types.*
+use compiler.frontend.treesitter.heuristic.*
+use compiler.common.dependency.visibility.{Visibility}
+
+fn outline_presence_controls_v1() -> text:
+    var present = TreeSitter.new("fn present(value: i64 = 7) -> i64:\n    value\n")
+    val described = present.parse_function_outline(Visibility.Private, false, Some("function doc"))
+    if not described.has_return_type or not described.has_doc_comment or described.doc_comment != "function doc":
+        return "present function return/doc metadata lost"
+    if described.params.len() != 1: return "present parameter missing"
+    val parameter = described.params[0]
+    if not parameter.has_type_ or not parameter.has_default_span:
+        return "present parameter type/default flags lost"
+    if parameter.default_span.end_pos <= parameter.default_span.start:
+        return "present default span lost"
+    match parameter.type_.kind:
+        case TypeOutlineKind.Named(name, arguments):
+            if name != "i64" or arguments.len() != 0: return "present parameter type differs"
+        case _: return "present parameter type is not named"
+
+    var absent = TreeSitter.new("fn absent(value):\n    value\n")
+    val inferred = absent.parse_function_outline(Visibility.Private, false, nil)
+    if inferred.has_return_type or inferred.has_doc_comment or inferred.doc_comment != "":
+        return "absent function metadata fabricated"
+    match inferred.return_type.kind:
+        case TypeOutlineKind.Infer: ()
+        case _: return "absent return placeholder is not Infer"
+    if inferred.params.len() != 1: return "absent parameter missing"
+    val untyped = inferred.params[0]
+    if untyped.has_type_ or untyped.has_default_span: return "absent parameter metadata fabricated"
+    if untyped.default_span.start != 0 or untyped.default_span.end_pos != 0:
+        return "absent default placeholder differs"
+    match untyped.type_.kind:
+        case TypeOutlineKind.Infer: ()
+        case _: return "absent parameter placeholder is not Infer"
+
+    var external = TreeSitter.new("fn external(value: i64) -> i64\n")
+    val external_function = external.parse_extern_function_outline(Visibility.Private, Some(""))
+    if not external_function.is_extern or not external_function.has_return_type or not external_function.has_doc_comment or external_function.doc_comment != "":
+        return "extern present return or empty-but-present doc differs"
+    var external_absent = TreeSitter.new("fn external_absent(value)\n")
+    val external_inferred = external_absent.parse_extern_function_outline(Visibility.Private, nil)
+    if external_inferred.has_return_type or external_inferred.has_doc_comment or external_inferred.doc_comment != "":
+        return "extern absent metadata fabricated"
+    if present.has_current_context or present.current_context != "":
+        return "function parsing did not restore absent parent context"
+    var context_parser = TreeSitter.new("fn context() -> i64:\n    1\n")
+    context_parser.has_current_context = true
+    context_parser.current_context = "outer"
+    context_parser.parse_function_outline(Visibility.Private, false, nil)
+    if not context_parser.has_current_context or context_parser.current_context != "outer":
+        return "function parsing did not restore present parent context"
+    ""
+
+fn outline_remaining_presence_controls_v1() -> text:
+    var attribute_parser = TreeSitter.new("@flag(1)")
+    val attribute = attribute_parser.parse_attribute()
+    if not attribute.has_args_span or attribute.args_span.end_pos <= attribute.args_span.start:
+        return "present attribute arguments lost"
+    var bare_attribute_parser = TreeSitter.new("@flag")
+    val bare_attribute = bare_attribute_parser.parse_attribute()
+    if bare_attribute.has_args_span or bare_attribute.args_span.start != 0 or bare_attribute.args_span.end_pos != 0:
+        return "absent attribute arguments fabricated"
+
+    var alias_parser = TreeSitter.new("import std.io as alias\n")
+    val aliased = alias_parser.parse_import()
+    if not aliased.has_alias or aliased.alias != "alias": return "present import alias lost"
+    var bare_import_parser = TreeSitter.new("import std.io\n")
+    val bare_import = bare_import_parser.parse_import()
+    if bare_import.has_alias or bare_import.alias != "": return "absent import alias fabricated"
+
+    var generic_parser = TreeSitter.new("T = i64")
+    val generic = generic_parser.parse_type_param()
+    if not generic.has_default: return "present generic default lost"
+    match generic.default.kind:
+        case TypeOutlineKind.Named(name, arguments):
+            if name != "i64" or arguments.len() != 0: return "generic default type differs"
+        case _: return "present generic default is not named"
+    var bare_generic_parser = TreeSitter.new("T")
+    val bare_generic = bare_generic_parser.parse_type_param()
+    if bare_generic.has_default: return "absent generic default fabricated"
+    match bare_generic.default.kind:
+        case TypeOutlineKind.Infer: ()
+        case _: return "absent generic default placeholder differs"
+
+    var variant_parser = TreeSitter.new("EmptyTuple()")
+    val variant = variant_parser.parse_variant_outline()
+    if not variant.has_payload: return "present empty tuple payload lost"
+    match variant.payload:
+        case VariantPayload.Tuple(types):
+            if types.len() != 0: return "empty tuple payload not empty"
+        case _: return "tuple payload changed kind"
+    var bare_variant_parser = TreeSitter.new("Bare")
+    val bare_variant = bare_variant_parser.parse_variant_outline()
+    if bare_variant.has_payload: return "absent variant payload fabricated"
+
+    var bit_parser = TreeSitter.new("_reserved: 0")
+    val zero_bits = bit_parser.parse_bitfield_field_outline()
+    if not zero_bits.has_bits or zero_bits.bits != 0 or zero_bits.has_type_:
+        return "present zero bit width confused with absence"
+    var typed_bit_parser = TreeSitter.new("field: u8")
+    val typed_bit = typed_bit_parser.parse_bitfield_field_outline()
+    if not typed_bit.has_type_ or typed_bit.has_bits: return "inferred bit width confused with explicit width"
+    var field_parser = TreeSitter.new("field: u8 @bits(0)\n")
+    val zero_field = field_parser.parse_field_outline(Visibility.Private)
+    if not zero_field.has_bits or zero_field.bits != 0 or zero_field.has_address_span or zero_field.has_default_span:
+        return "field zero width or absent spans differ"
+
+    var message_parser = TreeSitter.new("assert 1, \"\"\n")
+    val messaged = message_parser.parse_static_assert_outline()
+    if not messaged.has_message: return "present empty assertion message lost"
+    var bare_message_parser = TreeSitter.new("assert 1\n")
+    val bare_message = bare_message_parser.parse_static_assert_outline()
+    if bare_message.has_message or bare_message.message != "": return "absent assertion message fabricated"
+
+    var optional_doc_parser = TreeSitter.new("struct Packet:\n    count: i64\n")
+    val no_doc = optional_doc_parser.parse_struct_outline(Visibility.Private, nil, [])
+    if no_doc.has_doc_comment or no_doc.doc_comment != "": return "absent method doc fabricated"
+    var legacy_doc_parser = TreeSitter.new("struct Packet:\n    count: i64\n")
+    val empty_doc = treesitter_parse_struct_outline(legacy_doc_parser, Visibility.Private, "", [])
+    if not empty_doc.has_doc_comment or empty_doc.doc_comment != "": return "legacy concrete empty doc promotion lost"
+    ""
+
+fn outline_receiver_controls_v1() -> text:
+    val prerequisite_failure = outline_block_prerequisite_controls_v1()
+    if prerequisite_failure != "": return prerequisite_failure
+    # Never resume a token stream after constructing the next parser: the
+    # core lexer owns one global cursor, not independent parser cursors.
+    var parser = TreeSitter.new("alpha beta")
+    if parser.current.text != "alpha" or parser.previous.kind != TokenKind.Eof:
+        return "constructor did not prime caller parser"
+    if parser.has_doc_comment or parser.doc_comment != "" or parser.has_current_context or parser.current_context != "" or parser.has_registry:
+        return "ordinary constructor presence flags differ"
+    val first = parser.advance()
+    if first.text != "alpha" or parser.previous.text != "alpha" or parser.current.text != "beta":
+        return "receiver advance lost state"
+    val second = treesitter_advance(parser)
+    if second.text != "beta" or parser.previous.text != "beta" or not parser.is_at_end():
+        return "free me compatibility lost writeback"
+    if parser.expect(TokenKind.Ident, "expected identifier control"):
+        return "expect accepted end of input"
+    if parser.errors.len() != 1 or parser.errors[0].message != "expected identifier control":
+        return "real expect diagnostic missing"
+    treesitter_warning(parser, "warning control")
+    if parser.errors.len() != 2 or parser.errors[1].severity != ErrorSeverity.Warning:
+        return "free warning lost error state"
+    parser.has_doc_comment = true
+    parser.doc_comment = "retained doc"
+    val doc = parser.take_doc_comment()
+    if not doc.? or (doc ?? "") != "retained doc" or parser.has_doc_comment or parser.doc_comment != "":
+        return "doc take did not clear presence and payload"
+    if treesitter_take_doc_comment(parser).?: return "absent doc take returned a value"
+
+    var recovery = treesitter_new("discard tokens\nrecovered")
+    recovery.error("recover control")
+    recovery.synchronize()
+    if recovery.current.text != "recovered" or recovery.errors.len() != 1:
+        return "error recovery failed to reach next line"
+    if not recovery.match_token(TokenKind.Ident) or not recovery.is_at_end():
+        return "match did not consume recovered token"
+
+    var snapshot = treesitter_new("original")
+    snapshot.advance()
+    val old_source = snapshot.source
+    val old_current = snapshot.current.kind
+    var replacement = treesitter_with_source(snapshot, "replacement")
+    if snapshot.source != old_source or snapshot.current.kind != old_current:
+        return "with_source mutated its value receiver"
+    if replacement.current.text != "replacement" or replacement.source != "replacement":
+        return "with_source failed to prime returned parser"
+    replacement.advance()
+
+    var nested = TreeSitter.new("import std.io\nfn sample(values: [i64]) -> i64:\n    1\nstruct Packet:\n    count: i64\n")
+    val outline = nested.parse_outline()
+    if outline.errors.len() != 0: return "valid nested outline produced errors"
+    if outline.imports.len() != 1 or outline.functions.len() != 1 or outline.structs.len() != 1:
+        return "nested outline lost declarations"
+    if outline.functions[0].name != "sample" or outline.functions[0].params.len() != 1 or outline.functions[0].params[0].name != "values":
+        return "function or nested parameter outline differs"
+    val parameter = outline.functions[0].params[0]
+    if not parameter.has_type_: return "typed parameter presence flag missing"
+    match parameter.type_.kind:
+        case TypeOutlineKind.Array(element):
+            match element.kind:
+                case TypeOutlineKind.Named(name, arguments):
+                    if name != "i64" or arguments.len() != 0: return "array parameter element differs"
+                case _: return "array parameter element is not named i64"
+        case _: return "parameter is not an array outline"
+    val function = outline.functions[0]
+    if not function.has_return_type: return "function return presence flag missing"
+    match function.return_type.kind:
+        case TypeOutlineKind.Named(name, arguments):
+            if name != "i64" or arguments.len() != 0: return "return type differs"
+        case _: return "return is not named i64"
+    if outline.structs[0].name != "Packet" or outline.structs[0].fields.len() != 1 or outline.structs[0].fields[0].name != "count":
+        return "struct field outline differs"
+
+    val presence_failure = outline_presence_controls_v1()
+    if presence_failure != "": return presence_failure
+    val remaining_failure = outline_remaining_presence_controls_v1()
+    if remaining_failure != "": return remaining_failure
+
+    val fast = TreeSitter.with_fast_mode(true)
+    if not fast.fast_mode or not fast.has_registry or fast.has_doc_comment or fast.has_current_context:
+        return "fast constructor presence flags differ"
+    var heuristic = TreeSitter.with_heuristic_mode(true).with_source("fn heuristic_sample() -> i64:\n    1\n")
+    if not heuristic.heuristic_mode or heuristic.has_registry or heuristic.has_doc_comment or heuristic.has_current_context:
+        return "heuristic constructor presence flags differ"
+    val heuristic_outline = heuristic.parse_outline()
+    if heuristic_outline.functions.len() != 1 or heuristic_outline.functions[0].name != "heuristic_sample":
+        return "real heuristic dispatch changed"
+    ""
+
+export outline_receiver_controls_v1

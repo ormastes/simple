@@ -198,26 +198,13 @@ fn native_effective_link_os(host: text, target: text, linker_abi: text) -> text:
 # ============================================================================
 
 pub fn link_status_text(site: text, payload: text) -> text:
-    """Normalize an "" == ok / message == failure status returned by a helper.
+    """Preserve explicit empty success and nonempty failure; reject unavailable status.
 
-    Two jobs, both forced by a real incident
-    (doc/08_tracking/bug/stage2_sanity_link_fails_with_nil_error_payload_2026-09-13.md):
-    the stage-2 NATIVE binary produced a status value that rendered as `nil`,
-    which is neither "" nor a message, so `status != ""` fired and the caller
-    returned `Err(nil)` — a link failure with no statement of what failed and
-    no print anywhere on the path.
-
-    Interpolation is the only reliable normalizer here: a nil renders as the
-    literal text "nil", which no legitimate status of these helpers ever is
-    (every failure message on this path starts with a word plus a quoted
-    subject). A `nil` therefore means "the return channel lost the value", and
-    the only value these helpers can lose on a success path is "" — so it is
-    reported LOUDLY, unconditionally, and then treated as the success it was.
-    A genuine failure still renders as its own message and still fails."""
+    A native return value rendering as nil carries no independent success
+    authority. Its lost payload could have been an admission failure."""
     val rendered = "{payload}"
     if rendered == "nil":
-        print "[linker-wrapper] {site}: status lost in the native return channel (rendered nil); treating as ok"
-        return ""
+        return site + ": unavailable link status (native return channel rendered nil)"
     rendered
 
 pub fn link_error_detail(site: text, payload: text) -> text:
@@ -2468,7 +2455,24 @@ fn internal_coff_runtime_is_msvc(os: text, mingw_env: bool) -> bool:
 fn link_native_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     native_link_output_v1(link_native_windows_with_engine(object_files, output, config))
 
+fn native_windows_strict_extra_args_error(extra_flags: [text], allow_duplicate_definitions: bool) -> text:
+    """Reject duplicate-policy overrides before either Windows linker engine runs."""
+    if allow_duplicate_definitions: return ""
+    for flag in extra_flags:
+        # Quotes are command-line syntax, not an escape from policy validation.
+        val normalized = flag.replace("\"", "").trim().lower()
+        if normalized == "/force" or normalized == "-force" or normalized.starts_with("/force:") or normalized.starts_with("-force:"):
+            return "strict Windows link rejects FORCE option: {flag}"
+        if normalized == "--allow-multiple-definition" or normalized == "muldefs":
+            return "strict Windows link rejects duplicate-definition option: {flag}"
+        # Nested argv cannot be checked as ordinary direct-linker flags.
+        if normalized.starts_with("@") or normalized.starts_with("-wl,") or normalized == "-xlinker" or normalized == "/link":
+            return "strict Windows link rejects nested linker arguments: {flag}"
+    ""
+
 fn link_native_windows_with_engine(object_files: [text], output: text, config: NativeLinkConfig) -> Result<NativeLinkSuccessV1, text>:
+    val argument_error = native_windows_strict_extra_args_error(config.extra_flags, config.allow_duplicate_definitions)
+    if argument_error != "": return Err(argument_error)
     if requested_linker_override().trim().lower() == "internal":
         val target_arch = _windows_link_arch(config)
         val arm64_target = target_arch == "aarch64" or target_arch == "arm64"

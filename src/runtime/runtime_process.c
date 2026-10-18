@@ -3035,17 +3035,59 @@ static struct RtMcpChild* rt_mcp_children = NULL;
 
 /* Core-C async spawn and wait share PID-keyed ownership. _spawnvp returns a
  * HANDLE, which cannot be consumed by rt_process_wait's registry contract. */
+static bool rt_mcp_duplicate_std(DWORD which, HANDLE* duplicate);
+
+/* GUI parents may have no standard handles. Give those streams NUL rather
+ * than rejecting an otherwise valid asynchronous launch. */
+static bool rt_mcp_async_std(DWORD which, HANDLE* duplicate) {
+    HANDLE source = GetStdHandle(which);
+    if (source && source != INVALID_HANDLE_VALUE)
+        return rt_mcp_duplicate_std(which, duplicate);
+    SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
+    *duplicate = CreateFileW(L"NUL", which == STD_INPUT_HANDLE ? GENERIC_READ : GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, NULL);
+    if (*duplicate == INVALID_HANDLE_VALUE) { *duplicate = NULL; return false; }
+    return true;
+}
+
 int64_t rt_process_spawn_async_owned_windows(const char* cmd, const char** args, int64_t arg_count) {
     if (!cmd || !*cmd || arg_count < 0 || (arg_count > 0 && !args)) return -1;
     char* line = win_cmd_build_line(cmd, args, arg_count);
     if (!line) return -1;
     struct RtMcpChild* owner = (struct RtMcpChild*)calloc(1, sizeof(*owner));
     if (!owner) { free(line); return -1; }
-    STARTUPINFOA startup = {0};
+    HANDLE streams[3] = {NULL, NULL, NULL};
+    SIZE_T attributes_size = 0;
+    LPPROC_THREAD_ATTRIBUTE_LIST attributes = NULL;
+    bool attributes_initialized = false;
+    bool ready = rt_mcp_async_std(STD_INPUT_HANDLE, &streams[0]) &&
+                 rt_mcp_async_std(STD_OUTPUT_HANDLE, &streams[1]) &&
+                 rt_mcp_async_std(STD_ERROR_HANDLE, &streams[2]);
+    if (ready) {
+        (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attributes_size);
+        attributes = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(attributes_size);
+        attributes_initialized = attributes &&
+            InitializeProcThreadAttributeList(attributes, 1, 0, &attributes_size);
+        ready = attributes_initialized;
+    }
+    if (ready) ready = UpdateProcThreadAttribute(attributes, 0,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, streams, sizeof(streams), NULL, NULL) != 0;
+    STARTUPINFOEXA startup = {0};
     PROCESS_INFORMATION process = {0};
-    startup.cb = sizeof(startup);
-    BOOL started = CreateProcessA(NULL, line, NULL, NULL, TRUE, CREATE_NO_WINDOW,
-                                 NULL, NULL, &startup, &process);
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = streams[0];
+    startup.StartupInfo.hStdOutput = streams[1];
+    startup.StartupInfo.hStdError = streams[2];
+    startup.lpAttributeList = attributes;
+    BOOL started = ready && CreateProcessA(NULL, line, NULL, NULL, TRUE,
+        CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+        NULL, NULL, &startup.StartupInfo, &process);
+    if (attributes) {
+        if (attributes_initialized) DeleteProcThreadAttributeList(attributes);
+        free(attributes);
+    }
+    for (size_t i = 0; i < 3; i++) if (streams[i]) CloseHandle(streams[i]);
     free(line);
     if (!started) { free(owner); return -1; }
     CloseHandle(process.hThread);

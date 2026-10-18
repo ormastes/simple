@@ -177,3 +177,44 @@ Unverified: the Stage 2 exe's exact runtime lane (capsule C runtime with
 `SIMPLE_RUNTIME_MEMORY_OWNER` assumed); the share of the real 1294 s parse /
 HIR curve attributable to promote (needs a profiled rebuild with a promote
 timer, not possible from the read-only admitted exe).
+
+## Follow-up 2026-10-18: MEASURED — promote is not the term; registry probe + lost decl-owner chains are
+
+cdb `-pv` stack sampling (no symbols; functions mapped by `.pdata`, identified
+from referenced strings/panic `Location` records and call shape) of the
+run-12 stage2 exe (`bf03aa8e…`) doing the full-CLI `native-build`
+directly (same flags/policy env as the matrix row, no watchdog), 40 samples
+per window:
+
+| window | in `rt_transient_heap_promote` | registry lock+probe (`is_registered_heap_ptr`) | of which via `rt_native_eq` |
+|---|---|---|---|
+| parse | 0 | ~50% | most |
+| HIR 343-1086 | 0 | ~53% | ~35% |
+| HIR ~1300 | 0 | 37/40 | 28/40 |
+
+Correction to the "Inferred" section above: the C promote walker
+(`runtime_native.c`) has **zero call sites** in this exe — the Rust runtime's
+`rt_transient_heap_promote` is the linked one — and neither walker appeared
+in any sample. The position-dependent HIR curve is instead:
+
+1. `surface_decl_owner_indices` (`_Items/module_lowering.spl`) backed every
+   `surface_decl_owners` Dict miss with a full registry sweep — one 6-list
+   linear scan (`module_surface_declares_item`) of every module surface per
+   unbound name, reached from `imported_surface_type`. 27/40 samples at
+   module ~1300. The BOOT-20 scalar pair/hash-chain read path (b488a271c48)
+   that made the sweep unnecessary had been lost on this line while its
+   fields and phase-memo promotion roots survived.
+2. Every text `==` (`rt_native_eq` -> `value_eq_inner`) took the global heap
+   registry mutex and probed its process-lifetime HashSet 8 times; every
+   other validated value access probes it once.
+
+Fixes (work/promote-rewalk-prune-20261018): restore the pair chains as the
+read authority; probe once per operand in value eq/hash; answer repeat
+validations from a per-thread `(addr, free-epoch)` cache invalidated by
+every registry erase. A/B against this baseline is pending a rebuilt
+stage2 exe. The promote re-walk analysis above stays valid as a
+complexity fact but was not the measured cost at <=1300 modules.
+
+Memory follow-up (open): the heap registry keeps one entry per live object
+for the process lifetime (~16+ B/entry plus rehash doubling) and is part
+of the 12.8 GB job commit observed at the end of full-CLI parse.

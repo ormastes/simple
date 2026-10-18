@@ -182,6 +182,16 @@ fn mir_exact_extern_pointee_v1(type_: HirType) -> bool:
         case HirTypeKind.Ptr(inner, _): mir_exact_extern_pointee_v1(inner)
         case _: false
 
+# Local diagnostic decisions only; cleanup/abort return values are not counted.
+# Bits1/2/4/8/16/32/64/128/256: normal begin/pause/module/owner/MIRregistry/
+# functionregistry/seal/end/publish succeeded. Outcome0 precedes fallback work.
+fn mir_scope_trace_selected_v1(selected: text, module_name: text) -> bool:
+    selected != "" and selected == module_name
+
+# eprint adds the sole newline; do not retain arbitrary module/graph text.
+fn mir_scope_decision_trace_line_v1(decisions: i64, outcome: i64) -> text:
+    "[mir-scope-decisions] decisions={decisions} outcome={outcome}"
+
 impl MirLowering:
     me static_scalar_type_from_hir(type_: HirType?) -> MirType?:
         # Presence does not unwrap HirType?: a Some box crossing the concrete
@@ -709,7 +719,8 @@ impl MirLowering:
     fn canonical_layout_digest(fields: [HirField], layout_attr: LayoutAttr) -> text:
         val layout = compute_struct_layout(fields, layout_attr)
         var rows: [text] = ["size={layout.size};align={layout.align};stride={layout.stride}"]
-        for field in layout.fields:
+        for raw_field in layout.fields:
+            val field: FieldLayout = raw_field
             rows.push("field={field.name};offset={field.offset};size={field.size};align={field.align};bits={field.has_bits};width={field.bits_width};bit_offset={field.bit_offset}")
         sha256_text(rows.join("\n"))
 
@@ -768,7 +779,8 @@ impl MirLowering:
             owner_count = self.composite_layout_owner_counts[key]
         if owner == "" or owner == self.current_module_id or owner_count == 0:
             return
-        for trace in self.external_layout_traces:
+        for raw_trace in self.external_layout_traces:
+            val trace: MirExternalLayoutTraceV1 = raw_trace
             if trace.owner_module_id == owner and trace.type_id == info_name:
                 return
         self.external_layout_traces.push(MirExternalLayoutTraceV1(
@@ -949,7 +961,7 @@ impl MirLowering:
         var next_value: i64 = 0
         var vi = 0
         while vi < enum_def.variants.len():
-            val variant = enum_def.variants[vi]
+            val variant: HirVariant = enum_def.variants[vi]
             var value = next_value
             if variant.has_discriminant:
                 val folded = self.lower_const_expr(variant.discriminant)
@@ -2096,11 +2108,16 @@ impl MirLowering:
         # when one is already live. Reclamation is an optimisation and must
         # never be the reason a module fails to lower, so a refused scope
         # falls back to exactly today's unscoped behaviour.
+        val scope_trace = mir_scope_trace_selected_v1(mir_lower_env_get("SIMPLE_MIR_SCOPE_TRACE_MODULE") ?? "", module.name)
+        var scope_decisions: i64 = 0
         if not transient_array_scope_begin_v1():
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 0))
             return Ok(self.lower_module(module, providers, is_entry_module))
+        scope_decisions = scope_decisions | 1
         val reverse_token = reverse_reference_module_begin_v1()
         if reverse_token < 0:
             val _ended = transient_array_scope_end_v1()
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 1))
             return Err("transient MIR scope reverse-reference owner unavailable for {module.name}")
         val lowered: MirModule = self.lower_module(module, providers, is_entry_module)
         # Function-local lookup tables are scratch. The completed MIR owns its
@@ -2108,33 +2125,73 @@ impl MirLowering:
         # have separate retained roots. Clear these before promotion so the
         # last function's transient indexes can be reclaimed with this scope.
         self.reset_function_local_tracking()
+        # These consumer-local trait lookup tables are rebuilt at the start of
+        # every lower_module. Promoting them here makes obsolete versions
+        # immortal after the next module replaces their roots. All synchronous
+        # lambda lowering has returned; emitted signatures/vtables and thunks
+        # remain reachable through lowered and the retained builder/thunk roots.
+        # Detach only the lookup roots while the scope still owns allocations;
+        # do not free their children, which may alias completed MIR or HIR.
+        self.native_trait_layouts = []
+        self.native_trait_implementations = []
+        # Provider method dispatch rows contain consumer-local SymbolIds and
+        # return-shape hints, rebuilt by lower_module for every consumer.
+        # All synchronous method/lambda lowering has completed. Keep the MIR
+        # call operands/signatures and shared declaration facts; retire only
+        # these obsolete lookup roots before their allocations are promoted.
+        self.struct_method_syms = {}
+        self.struct_method_ambiguous = {}
+        self.struct_method_return_names = {}
+        self.struct_method_return_is_array = {}
+        self.struct_method_return_is_optional = {}
+        # Only lower_module's completed prescan/emission loops read this
+        # .values() scratch array. Do not promote a second owner of HIR bodies.
+        # The input HIR and returned MIR keep their own retained roots.
+        self.lower_emit_fn_values = []
         # From here every exit path must close the scope. `end` frees the
         # arena, so any path that ends WITHOUT a successful promotion must
         # also refuse to hand `lowered` back.
         if not transient_array_scope_pause_v1():
             val _ended_pause = mir_abort_reverse_reference_scope_v1(reverse_token)
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 2))
             return Err("transient MIR scope pause failed for {module.name}")
+        scope_decisions = scope_decisions | 2
         if not transient_heap_promote_v1(lowered):
             val _ended_module = mir_abort_reverse_reference_scope_v1(reverse_token)
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 3))
             return Err("MIR module ownership promotion failed for {module.name}")
+        scope_decisions = scope_decisions | 4
         if not self.promote_transient_owner():
             val _ended_owner = mir_abort_reverse_reference_scope_v1(reverse_token)
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 4))
             return Err("MIR lowering owner promotion failed for {module.name}")
+        scope_decisions = scope_decisions | 8
         if not bootstrap_mir_registries_promote():
             val _ended_mir_registries = mir_abort_reverse_reference_scope_v1(reverse_token)
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 5))
             return Err("bootstrap MIR registry promotion failed for {module.name}")
+        scope_decisions = scope_decisions | 16
         if not bootstrap_fn_registries_promote():
             val _ended_fn_registries = mir_abort_reverse_reference_scope_v1(reverse_token)
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 6))
             return Err("bootstrap fn registry promotion failed for {module.name}")
+        scope_decisions = scope_decisions | 32
         if not reverse_reference_module_seal_v1(reverse_token):
             val _ended_reverse = mir_abort_reverse_reference_scope_v1(reverse_token)
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 7))
             return Err("reverse-reference ownership promotion failed for {module.name}")
+        scope_decisions = scope_decisions | 64
         if not transient_array_scope_end_v1():
             val _aborted = reverse_reference_module_abort_v1(reverse_token)
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 8))
             return Err("transient MIR scope end failed for {module.name}")
+        scope_decisions = scope_decisions | 128
         if not reverse_reference_module_publish_v1(reverse_token):
             val _aborted = reverse_reference_module_abort_v1(reverse_token)
+            if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 9))
             return Err("reverse-reference publication failed for {module.name}")
+        scope_decisions = scope_decisions | 256
+        if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 10))
         Ok(lowered)
 
     me record_exact_extern_declaration_v1(declaration: HirFunction):
@@ -2145,7 +2202,8 @@ impl MirLowering:
         if not mir_exact_extern_type_v1(declaration.return_type, true):
             return
         var parameters: [MirType] = []
-        for parameter in declaration.params:
+        for raw_parameter in declaration.params:
+            val parameter: HirParam = raw_parameter
             if parameter.has_default or not mir_exact_extern_type_v1(parameter.type_, false):
                 return
             parameters.push(self.lower_type(parameter.type_))
@@ -3279,7 +3337,7 @@ impl MirLowering:
         var fields: [MirFieldDef] = []
         var fi = 0
         while fi < struct_def.fields.len():
-            val hir_field = struct_def.fields[fi]
+            val hir_field: HirField = struct_def.fields[fi]
             val field_layout: FieldLayout = layout.fields[fi]
             val field_offset: i64 = field_layout.offset
             val errors_before = self.errors.len()
@@ -3328,7 +3386,7 @@ impl MirLowering:
         var fields: [MirFieldDef] = []
         var fi = 0
         while fi < class_def.fields.len():
-            val hir_field = class_def.fields[fi]
+            val hir_field: HirField = class_def.fields[fi]
             val field_layout: FieldLayout = layout.fields[fi]
             val field_offset: i64 = field_layout.offset
             fields.push(MirFieldDef(

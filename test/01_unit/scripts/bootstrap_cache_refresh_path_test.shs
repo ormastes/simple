@@ -1,0 +1,67 @@
+#!/bin/sh
+# Real path conversion/validation only; no compiler or production-cache access.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs"
+parent=${BOOTSTRAP_CACHE_TEST_ROOT:?absolute private fixture root required}
+bootstrap_cache_new_path_validate "$parent" || exit 64
+mkdir -p "$parent"
+parent=$(CDPATH= cd -- "$parent" && pwd -P)
+work=$(mktemp -d "$parent/refresh-path.XXXXXX")
+trap 'status=$?; printf "Retained refresh-path fixture: %s\n" "$work"; exit "$status"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Extract and call the actual production functions, not a test implementation.
+sed -n '/^absolute_path()/,/^}/p' "$repo/scripts/bootstrap/bootstrap-from-scratch.sh" > "$work/paths.sh"
+sed -n '/^bootstrap_refresh_stage2_source_path()/,/^}/p' "$repo/scripts/bootstrap/bootstrap-from-scratch.sh" >> "$work/paths.sh"
+. "$work/paths.sh"
+repo_root=$repo
+mkdir "$work/valid predecessor"
+accept_path() {
+  actual=$(bootstrap_refresh_stage2_source_path "$1")
+  [ "$actual" = "$2" ] || { echo 'FAIL normalized path differs' >&2; exit 1; }
+  bootstrap_cache_new_path_validate "$actual" || { echo 'FAIL canonical path refused' >&2; exit 1; }
+}
+reject_path() {
+  if actual=$(bootstrap_refresh_stage2_source_path "$1") && bootstrap_cache_new_path_validate "$actual"; then
+    echo 'FAIL noncanonical path admitted' >&2
+    exit 1
+  fi
+}
+
+accept_path "$work/valid predecessor" "$work/valid predecessor"
+accept_path "$work/valid predecessor/future" "$work/valid predecessor/future"
+reject_path ''
+reject_path 'relative/predecessor'
+reject_path 'D:relative'
+reject_path "$work/valid predecessor/"
+reject_path "$work//valid predecessor"
+reject_path "$work/./valid predecessor"
+reject_path "$work/valid predecessor/../valid predecessor"
+
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    native=$(cygpath -m -- "$work/valid predecessor")
+    backslashes=$(cygpath -w -- "$work/valid predecessor")
+    accept_path "$native" "$work/valid predecessor"
+    accept_path "$backslashes" "$work/valid predecessor"
+    reject_path "$native/"
+    reject_path "$native/../valid predecessor"
+    reject_path "$native//future"
+    # Require a real link. Native-strict refuses MSYS copy emulation.
+    MSYS=winsymlinks:nativestrict ln -s "$work/valid predecessor" "$work/link"
+    ;;
+  *)
+    echo 'Windows native-drive conversion not exercised on this host'
+    ln -s "$work/valid predecessor" "$work/link"
+    ;;
+esac
+[ -L "$work/link" ] || { echo 'FAIL real symlink fixture unavailable' >&2; exit 1; }
+reject_path "$work/link"
+reject_path "$work/link/future"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) reject_path "$(cygpath -m -- "$work/link")" ;;
+esac
+printf 'PASS refresh path: real canonical conversion, lexical refusal and symlink refusal; no compiler/cache execution\n'

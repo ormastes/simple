@@ -13,6 +13,33 @@ use compiler.hir.hir_lowering.items.{bootstrap_hir_module_count}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_key}
 
 describe "Driver HIR shard transaction ownership":
+    it "maps only actual cache hits and stores to the ledger cache flag":
+        expect(driver_hir_shard_cache_stored_v1(0)).to_equal(true)
+        expect(driver_hir_shard_cache_stored_v1(1)).to_equal(true)
+        expect(driver_hir_shard_cache_stored_v1(2)).to_equal(false)
+        expect(driver_hir_shard_cache_stored_v1(3)).to_equal(false)
+        expect(driver_hir_shard_cache_stored_v1(-1)).to_equal(false)
+        expect(driver_hir_shard_cache_stored_v1(4)).to_equal(false)
+
+    it "rejects a real parsed module with no parser binding before classifying a store refusal":
+        val root = secure_temp_dir(".", "hir-driver-no-binding-").unwrap()
+        val path = "{root}/answer.spl"
+        val content = "fn answer() -> i64:\n    37\n"
+        expect(file_create_exclusive(path, content)).to_equal(true)
+        val source = SourceFile(path: path, content: content, module_name: "hir_driver.no_binding")
+        var driver = CompilerDriver.create(CompileOptions.default())
+        var lowering = hirlowering_for_module(path, ModuleSurfacesByName.empty())
+        val rows_before = bootstrap_hir_module_count()
+        val receipt = driver.lower_streaming_hir_shard_receipt_transaction_v1(
+            lowering, source, false, "", nil, nil, -1)
+        expect(receipt.status).to_equal(-1)
+        expect(receipt.archive.is_none()).to_equal(true)
+        expect(receipt.declaration_registration.is_none()).to_equal(true)
+        expect(driver.ctx.errors.join("\n")).to_contain("HIR shard parser binding unavailable")
+        expect(driver.ctx.hir_modules.len()).to_equal(0)
+        expect(bootstrap_hir_module_count()).to_equal(rows_before)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+
     it "rolls back actual failed parser rows and retains diagnostics after reclamation":
         val root = secure_temp_dir(".", "hir-driver-failure-").unwrap()
         val path = "{root}/broken.spl"

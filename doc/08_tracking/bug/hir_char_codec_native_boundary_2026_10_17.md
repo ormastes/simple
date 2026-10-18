@@ -55,3 +55,42 @@ Required controls before declaring repair complete:
 6. Broader compiler/lib/MCP/LSP and BDD gates remain UNRUN until executed against an admitted implementation. No claim is made that this single repair resolves every broader reader diagnostic.
 
 No production code, compiler runtime, generated output or executable tests are changed by this report. No Rust seed execution, new reader attempt or exhausted-feature budget reset was used to establish these findings.
+
+## 2026-10-18: paired generator and generated-code repair prepared
+
+Work starts from `6e8d05eee4817157e34b64ce6a091f3a4bf665c4`, retaining
+the C1-style typed prototype and schema-owned enum nil restoration protocol.
+The generator now classifies `char` separately from `text`. Encoding uses the
+existing `char_from_codepoint` UTF-8 owner and text escaping; decoding validates
+one scalar by exact decode/encode byte equality before constructing a `char`.
+The nil marker remains `\\N`; a literal backslash followed by N is two scalars
+and fails character decoding. Invalid text poisons the actual FlatPoolReader.
+Nil, U+0000 and U+0003 remain separate cases in the native regression fixture.
+
+The pure scalar validation workaround has its own canonical report:
+`native_text_scalar_validation_failure_2026_10_18.md`. Its second native probe
+passed; the complete generated codec fixture is prepared and UNRUN. The
+fixture imports actual generated functions rather than reproducing the codec.
+Generator parity and BDD regressions are prepared and UNRUN. No complete
+compiler link, deployment, reader consumer qualification, or broader
+compiler/lib/MCP/LSP verification is claimed. Database reconciliation remains
+pending a qualified database tool.
+
+Review tightened the direct scalar helper: `char` lowers to LLVM i32, so it
+does not return an unproven nil carrier. A nil marker passed directly to that
+helper poisons the reader with `char_nil_requires_enum_slot`. The generated
+enum decoder handles the marker before calling the helper and preserves nil
+using the existing schema-owned restoration boundary. Tests cover both paths.
+
+## 2026-10-18: final bounded full-codec attempt is BLOCKED
+
+The third attempt froze source `ebd27e64134103786f3f7f0c27866f73ed4d0260`
+and the same immutable b441 compiler. HIR lowering passed for all 100 modules,
+including the generated codec. The outer 600-second guard then timed out while
+the genuine native-build worker was active; peak RSS was 2,974,508 KiB and the
+process tree was verified quiescent. No MIR result, object output, linked
+fixture, or runtime PASS was obtained. The source repair is reviewed but full
+generated-codec qualification is **BLOCKED**, not complete. The original
+CharLit MIR diagnostic has not yet been proven eliminated by this attempt.
+Evidence and the worker performance blocker are recorded in
+`native_char_codec_worker_timeout_2026_10_18.md`. No fourth attempt was made.

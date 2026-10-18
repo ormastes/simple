@@ -31,8 +31,8 @@ use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_ge
 
 extern fn rt_enum_discriminant<T>(value: T) -> i64
 # Generic payload accessor: the payload is the raw boxed tuple word; extract
-# fields with annotated _sffi_tuple_get<T> (the StmtKind.Expr arm and the
-# cycle-66 If pre-dispatch below both use this shape).
+# fields with annotated _sffi_tuple_get<T> for multi-field variants such as
+# If. StmtKind.Expr has one direct Expr payload, not a tuple wrapper.
 @unsafe(reason: "raw tagged-enum borrowed payload projection ABI", capabilities: [ffi])
 extern fn rt_enum_payload<T>(value: T) -> i64
 @unsafe(reason: "raw tagged-tuple indexed borrowed value projection ABI", capabilities: [ffi])
@@ -56,6 +56,23 @@ use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_
 use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.sffi_identity.{sffi_raw_callable_effects}
+
+pub fn hir_ast_expr_statement_payload_v1(kind: StmtKind) -> Expr?:
+    """Project the declared single Expr payload without guessing its ABI."""
+    if kind == nil:
+        return nil
+    # Keep the variant guard: older producers confused the Expr variant with
+    # the Expr struct in a broad match. Payload projection stays typed.
+    val probe = Expr(kind: ExprKind.NilLit, span: Span.empty())
+    val disc = rt_enum_discriminant(kind)
+    if disc < 0 or disc != rt_enum_discriminant(StmtKind.Expr(probe)):
+        return nil
+    match kind:
+        case StmtKind.Expr(expr):
+            if expr == nil:
+                return nil
+            Some(expr)
+        case _: nil
 
 impl HirLowering:
     # Cycle-159 (v18, 2026-10-18): per-field type extraction in a fresh small
@@ -641,14 +658,14 @@ impl HirLowering:
         if param.has_type_ or param.has_default:
             return nil
         if val callback_type = self.dynamic_callback_function_type(fn_decl):
-            val tail_expr: Expr = _sffi_tuple_get<Expr>(rt_enum_payload(fn_decl.body.stmts[0].kind), 0)
-            match tail_expr.kind:
-                case ExprKind.Call(callee, _):
-                    match callee.kind:
-                        case ExprKind.Ident(name):
-                            if name == param.name: return callback_type
-                        case _: ()
-                case _: ()
+            if val tail_expr = hir_ast_expr_statement_payload_v1(fn_decl.body.stmts[0].kind):
+                match tail_expr.kind:
+                    case ExprKind.Call(callee, _):
+                        match callee.kind:
+                            case ExprKind.Ident(name):
+                                if name == param.name: return callback_type
+                            case _: ()
+                    case _: ()
         nil
 
     me dynamic_callback_function_type(fn_decl: ParserFunction) -> HirType?:
@@ -679,26 +696,23 @@ impl HirLowering:
         if fn_body_stmts.len() == 0:
             return nil
         val tail_index: i64 = fn_body_stmts.len() - 1
-        val probe = Expr(kind: ExprKind.NilLit, span: fn_body_stmts[tail_index].span)
-        if rt_enum_discriminant(fn_body_stmts[tail_index].kind) != rt_enum_discriminant(StmtKind.Expr(probe)):
-            return nil
-        val tail_expr: Expr = _sffi_tuple_get<Expr>(rt_enum_payload(fn_body_stmts[tail_index].kind), 0)
-        match tail_expr.kind:
-            case ExprKind.Call(callee, args):
-                val callee_expr: Expr = callee
-                match callee_expr.kind:
-                    case ExprKind.Ident(name):
-                        for raw_param in fn_decl.params:
-                            val param: Param = raw_param
-                            if param.name == name and not param.has_type_ and not param.has_default:
-                                var argument_types: [HirType] = []
-                                for raw_arg in args:
-                                    val arg: HirCallArg = raw_arg
-                                    if arg.has_name: return nil
-                                    argument_types = argument_types.push(HirType(kind: HirTypeKind.Any, span: arg.span))
-                                return HirType(kind: HirTypeKind.Function(argument_types, HirType(kind: HirTypeKind.Any, span: fn_body_stmts[tail_index].span), []), span: fn_body_stmts[tail_index].span)
-                    case _: ()
-            case _: ()
+        if val tail_expr = hir_ast_expr_statement_payload_v1(fn_body_stmts[tail_index].kind):
+            match tail_expr.kind:
+                case ExprKind.Call(callee, args):
+                    val callee_expr: Expr = callee
+                    match callee_expr.kind:
+                        case ExprKind.Ident(name):
+                            for raw_param in fn_decl.params:
+                                val param: Param = raw_param
+                                if param.name == name and not param.has_type_ and not param.has_default:
+                                    var argument_types: [HirType] = []
+                                    for raw_arg in args:
+                                        val arg: CallArg = raw_arg
+                                        if arg.has_name: return nil
+                                        argument_types = argument_types.push(HirType(kind: HirTypeKind.Any, span: arg.span))
+                                    return HirType(kind: HirTypeKind.Function(argument_types, HirType(kind: HirTypeKind.Any, span: fn_body_stmts[tail_index].span), []), span: fn_body_stmts[tail_index].span)
+                        case _: ()
+                case _: ()
         nil
 
     me infer_simple_type_name_ast(e: Expr, params: [Param]) -> text?:
@@ -776,15 +790,7 @@ impl HirLowering:
         acc
 
     me scan_ast_stmt_for_returns(s: Stmt, params: [Param]) -> ReturnScan:
-        # `Expr` is also a struct name. On the pure-Simple stage4 path a broad
-        # match can treat this arm as irrefutable and pass the enum's raw tuple
-        # payload to scan_ast_expr_for_returns. Dispatch by discriminant first.
-        val nil_expr = Expr(kind: ExprKind.NilLit, span: s.span)
-        val expr_stmt_disc = rt_enum_discriminant(StmtKind.Expr(nil_expr))
-        val stmt_kind = s.kind
-        val stmt_disc = rt_enum_discriminant(stmt_kind)
-        if stmt_disc >= 0 and stmt_disc == expr_stmt_disc:
-            val expr: Expr = _sffi_tuple_get<Expr>(rt_enum_payload(stmt_kind), 0)
+        if val expr = hir_ast_expr_statement_payload_v1(s.kind):
             return self.scan_ast_expr_for_returns(expr, params)
         match s.kind:
             case StmtKind.Val(_, _, init):
@@ -868,9 +874,9 @@ impl HirLowering:
         # ANY-transport hazard (cycle-66): `case ExprKind.If(cond, then_, else_)`
         # payload sub-bindings arrive ERASED from the enum payload destructure,
         # and annotated rebinds of the option do not restore them (the raw
-        # tuple payload landmine this file already works around for
-        # StmtKind.Expr below). Dispatch If by discriminant and extract the
-        # payload with annotated tuple gets, exactly like that arm.
+        # payload transport hazard). Dispatch If by discriminant and extract
+        # its three fields with annotated tuple gets. The single-payload
+        # StmtKind.Expr variant uses hir_ast_expr_statement_payload_v1.
         val e_kind_for_if = e.kind
         val if_exemplar = ExprKind.If(Expr(kind: ExprKind.NilLit, span: e.span),
             Block(stmts: [], span: e.span), nil)
@@ -990,7 +996,7 @@ impl HirLowering:
                 val callee_expr: Expr = callee
                 var acc = self.scan_ast_expr_for_returns(callee_expr, params)
                 for raw_a in args:
-                    val a: HirCallArg = raw_a
+                    val a: CallArg = raw_a
                     # ANY-transport: rebind scan results before the by-value merge (cycle-62).
                     val merge_arg_1: ReturnScan = self.scan_ast_expr_for_returns(a.value, params)
                     val merge_result: ReturnScan = merge_return_scan(acc, merge_arg_1)
@@ -1000,7 +1006,7 @@ impl HirLowering:
                 val receiver_expr: Expr = receiver
                 var acc = self.scan_ast_expr_for_returns(receiver_expr, params)
                 for raw_a in args:
-                    val a: HirCallArg = raw_a
+                    val a: CallArg = raw_a
                     # ANY-transport: rebind scan results before the by-value merge (cycle-62).
                     val merge_arg_1: ReturnScan = self.scan_ast_expr_for_returns(a.value, params)
                     val merge_result: ReturnScan = merge_return_scan(acc, merge_arg_1)

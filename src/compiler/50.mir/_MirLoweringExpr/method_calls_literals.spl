@@ -11,6 +11,7 @@ use compiler.mir._MirLowering.native_trait_conversion.*
 use compiler.mir._MirLowering.native_trait_calls.*
 use compiler.mir._MirLoweringExpr.builtin_method_extras.*
 use compiler.mir._MirLoweringExpr.collection_literal_membership.*
+use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{enum_payload_types_alias_equal}
 # MIR Lowering - Expression Lowering
 #
 # Expression lowering from HIR to MIR:
@@ -1242,6 +1243,119 @@ impl MirLowering:
         self.builder = b_push
         self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, push_recv)
         push_recv
+
+    me array_concat_element_authority_v1(expression: HirExpr, local: LocalId) -> HirType?:
+        # A direct empty literal has no element authority. A typed variable
+        # or cast keeps its declared element type even when its value is empty.
+        match expression.kind:
+            case HirExprKind.ArrayLit(elements, _):
+                if elements.len() == 0: return nil
+            case _: ()
+        val declared = self.receiver_declared_or_result_type(expression, local)
+        val source = if declared.?: declared else: self.enum_match_expr_type(expression)
+        if val container = source:
+            match container.kind:
+                case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
+                    match element.kind:
+                        case HirTypeKind.Infer(_, _) | HirTypeKind.Error: return nil
+                        case _: return Some(element)
+                case _: ()
+        nil
+
+    fn array_concat_is_empty_literal_v1(expression: HirExpr) -> bool:
+        match expression.kind:
+            case HirExprKind.ArrayLit(elements, _): elements.len() == 0
+            case _: false
+
+    me lower_unresolved_array_concat_v1(concat_left: LocalId, concat_right: LocalId, authority: LocalId? = nil) -> LocalId:
+        """Allocate a fresh concatenation; never write back either input handle."""
+        # Result element/array MIR type: prefer whichever
+        # operand carries a concrete Array/Slice MIR type
+        # (both operands are expected to share one element
+        # type for a well-typed `arr1 + arr2`); fall back
+        # to a generic i64-element Array type (matches
+        # decode_runtime_value's own Array/Slice fallback
+        # convention) when neither operand's MIR type is
+        # known -- e.g. `[] + [1]` where the empty-literal
+        # operand's element type defaults to i64 anyway
+        # (lower_array_lit's own default).
+        val metadata_source = authority ?? concat_left
+        var array_result_type = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))
+        var array_result_type_known = false
+        if val left_arr_ty = self.local_mir_type_of(metadata_source):
+            match left_arr_ty.kind:
+                case MirTypeKind.Array(element, _) | MirTypeKind.Slice(element):
+                    array_result_type = MirType(kind: MirTypeKind.Array(element, 0))
+                    array_result_type_known = true
+                case _: ()
+        if not array_result_type_known:
+            if val right_arr_ty = self.local_mir_type_of(concat_right):
+                match right_arr_ty.kind:
+                    case MirTypeKind.Array(element, _) | MirTypeKind.Slice(element):
+                        array_result_type = MirType(kind: MirTypeKind.Array(element, 0))
+                    case _: ()
+        # Bug #149 (same class): the FuncPtr's declared
+        # `return_type` is what registers rt_array_concat's
+        # KNOWN return type at codegen time -- it MUST
+        # match `array_result_type` (Array/Slice kind ->
+        # "ptr"), the type the call's DESTINATION local is
+        # declared with just below. A mismatched i64
+        # declared-return (while the destination itself is
+        # Array/Slice-typed) emits the call as `call i64
+        # @rt_array_concat(...)` while later consumers
+        # (a second chained `+`, `.len()`, indexing) still
+        # see the Array/Slice-typed dest and treat it as a
+        # pointer -- invalid IR ('%lNN defined with type
+        # i64 but expected ptr'), verified empirically on
+        # chained `a + [3,4] + [5]`. rt_array_concat
+        # genuinely returns SplArray* in C (matches the
+        # static `declare ptr @rt_array_concat(ptr, ptr)`
+        # in llvm_lib_translate.spl), so array_result_type
+        # (-> ptr) is correct for params too.
+        val array_cat_func = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_array_concat"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [array_result_type, array_result_type],
+                return_type: array_result_type,
+                is_variadic: false
+            )))
+        ))
+        var b_array_cat = self.builder
+        val array_cat_res = b_array_cat.emit_call(array_cat_func, [mir_operand_copy(concat_left), mir_operand_copy(concat_right)], array_result_type)
+        self.builder = b_array_cat
+        if val array_cat_local = array_cat_res:
+            self.runtime_array_locals[array_cat_local.id] = true
+            self.mark_runtime_value_local(array_cat_local.id)
+            self.copy_local_hir_type_metadata(metadata_source.id, array_cat_local.id)
+            # Concatenation has a new extent; retain element authority only.
+            var metadata_index = 0
+            while metadata_index < self.local_hir_type_ids.len():
+                if self.local_hir_type_ids[metadata_index] == array_cat_local.id:
+                    val source_type = self.local_hir_type_values[metadata_index]
+                    match source_type.kind:
+                        case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
+                            self.local_hir_type_values[metadata_index] = HirType(
+                                kind: HirTypeKind.Array(element, nil), span: source_type.span)
+                        case _: ()
+                    break
+                metadata_index = metadata_index + 1
+            if val concat_element = self.noted_runtime_elem_type(metadata_source):
+                self.runtime_elem_value_type[array_cat_local.id] = concat_element
+            elif val concat_element = self.noted_runtime_elem_type(concat_right):
+                self.runtime_elem_value_type[array_cat_local.id] = concat_element
+            else:
+                match array_result_type.kind:
+                    case MirTypeKind.Array(element, _):
+                        self.runtime_elem_value_type[array_cat_local.id] = element
+                    case _: ()
+            val left_elem_syms = self.array_element_struct_syms.get(metadata_source.id)
+            if left_elem_syms != nil:
+                val les = left_elem_syms ?? ""
+                if les != "":
+                    self.array_element_struct_syms[array_cat_local.id] = les
+            return array_cat_local
+        self.error_fatal("unable to emit array concat", nil)
+        concat_left
 
     me lower_unresolved_array_merge(mg_recv: LocalId, mg_src: HirExpr, wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64) -> LocalId:
         """Builtin Array.merge(other) -- the COMPILER-GENERATED form.
@@ -4417,6 +4531,41 @@ impl MirLowering:
                     return self.lower_unresolved_array_push(
                         unresolved_receiver_local, args[0].value,
                         wb_kind, wb_base, wb_index, wb_field_idx)
+                if method == "concat" and args.len() == 1 and self.local_is_runtime_array(unresolved_receiver_local):
+                    val left_element = self.array_concat_element_authority_v1(receiver, unresolved_receiver_local)
+                    # Contextual literals use the existing element adaptation
+                    # boundary; already typed arrays must agree without casts.
+                    val concat_other = if val expected = left_element:
+                        match args[0].value.kind:
+                            case HirExprKind.ArrayLit(elements, _): self.lower_array_lit(elements, Some(expected))
+                            case _: self.lower_expr(args[0].value)
+                    else:
+                        self.lower_expr(args[0].value)
+                    if not self.local_is_runtime_array(concat_other):
+                        self.error_fatal("array concat requires an array argument", Some(args[0].value.span))
+                        return unresolved_receiver_local
+                    val right_element = match args[0].value.kind:
+                        case HirExprKind.ArrayLit(_, _):
+                            if left_element.?: left_element else: self.array_concat_element_authority_v1(args[0].value, concat_other)
+                        case _: self.array_concat_element_authority_v1(args[0].value, concat_other)
+                    var metadata_source = unresolved_receiver_local
+                    if val expected = left_element:
+                        if val actual = right_element:
+                            if not enum_payload_types_alias_equal(expected, actual, self.symbols):
+                                self.error_fatal("array concat element type mismatch", Some(args[0].value.span))
+                                return unresolved_receiver_local
+                        elif not self.array_concat_is_empty_literal_v1(args[0].value):
+                            self.error_fatal("array concat argument element authority missing", Some(args[0].value.span))
+                            return unresolved_receiver_local
+                    elif val expected = right_element:
+                        if not self.array_concat_is_empty_literal_v1(receiver):
+                            self.error_fatal("array concat receiver element authority missing", Some(receiver.span))
+                            return unresolved_receiver_local
+                        metadata_source = concat_other
+                    elif not self.array_concat_is_empty_literal_v1(receiver) or not self.array_concat_is_empty_literal_v1(args[0].value):
+                        self.error_fatal("array concat element authority missing", Some(receiver.span))
+                        return unresolved_receiver_local
+                    return self.lower_unresolved_array_concat_v1(unresolved_receiver_local, concat_other, Some(metadata_source))
                 if (method == "merge" or method == "extend") and args.len() == 1:
                     return self.lower_unresolved_array_merge(
                         unresolved_receiver_local, args[0].value,
