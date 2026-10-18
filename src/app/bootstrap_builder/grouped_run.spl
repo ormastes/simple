@@ -14,7 +14,7 @@ use std.common.build_manager.grouped_execution_contract.{GroupedActionLeaseV1, G
 use app.bootstrap_builder.grouped_journal.{GroupedRunRecordV1, GroupedRunJournalV1, grouped_journal_encode_v1, grouped_journal_decode_v1}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
-use std.common.build_manager.contracts.{builder_identifier_valid_v1}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
 use std.nogc_sync_mut.io.group_process_owner.{GroupProcessOwnerV1, GroupProcessRequestV1, GroupProcessInputV1, group_process_start_v1, group_process_recover_v1, group_process_poll_v1, group_process_cancel_v1, group_process_collect_reap_v1, group_process_peak_memory_v1, group_process_reap_path_v1}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_atomic_write, file_exists, file_lock, file_unlock}
 use std.nogc_sync_mut.io.dir_ops.{dir_create}
@@ -139,8 +139,26 @@ fn grouped_run_retain_cache_v1(run: ManagedParseRunV1, slot: GroupedRunSlotV1) -
             case Ok(value): value
             case Err(_): continue
         if sha256_text(blob) != retained.blob_digest: continue
+        val authority = match file_read_regular_no_follow_bounded(previous + "/cache/" + key + ".authority", 1024):
+            case Ok(value): value
+            case Err(_): continue
+        val authority_reader = BuilderWireReaderV1.create(authority)
+        if authority_reader.scalar() != "SIMPLE-MANAGED-REFERENCE-PARSE-CACHE-AUTHORITY-1" or
+                authority_reader.scalar() != key:
+            continue
+        val codec_identity = authority_reader.scalar()
+        val feature_identity = authority_reader.scalar()
+        # Parent checks wire/key authority only. Codec/feature compatibility is
+        # checked by the consuming worker; importing its frontend here would
+        # pull the parser closure into the parent scheduler.
+        if codec_identity == "" or codec_identity.len() > 128 or
+                not builder_digest_valid_v1(feature_identity) or authority_reader.complete_error() != "" or
+                authority != "SIMPLE-MANAGED-REFERENCE-PARSE-CACHE-AUTHORITY-1\n" +
+                    builder_wire_line_v1(key) + builder_wire_line_v1(codec_identity) + builder_wire_line_v1(feature_identity):
+            continue
         if not grouped_run_write_v1(slot.root + "/" + retained.blob_path, blob, 134217728) or
-                not grouped_run_write_v1(slot.root + "/cache/" + key + ".sdn", payload):
+                not grouped_run_write_v1(slot.root + "/cache/" + key + ".sdn", payload) or
+                not grouped_run_write_v1(slot.root + "/cache/" + key + ".authority", authority):
             return false
     true
 
