@@ -46,6 +46,49 @@ fn parse_contract_run() -> ManagedParseRunV1:
     parse_contract_run_for(parse_contract_snapshot())
 
 describe "managed parser wire contracts":
+    it "reuses an unchanged module key after another file changes without replaying the old action":
+        var before = parse_contract_snapshot()
+        before.modules = before.modules + [ManagedParseModuleV1("peer", "package", "peer.spl", sha256_text("old peer"))]
+        before.snapshot_digest = managed_parse_snapshot_digest_v1(before)
+        var after = parse_contract_snapshot()
+        after.modules = after.modules + [ManagedParseModuleV1("peer", "package", "peer.spl", sha256_text("new peer"))]
+        after.worker_id = "replacement"
+        after.generation = 2
+        after.snapshot_digest = managed_parse_snapshot_digest_v1(after)
+        expect(after.snapshot_digest == before.snapshot_digest).to_equal(false)
+        val unchanged = managed_parse_module_cache_key_v1(before, before.modules[0])
+        expect(unchanged.len()).to_equal(64)
+        expect(managed_parse_module_cache_key_v1(after, after.modules[0])).to_equal(unchanged)
+        expect(managed_parse_module_cache_key_v1(after, after.modules[1]) == managed_parse_module_cache_key_v1(before, before.modules[1])).to_equal(false)
+        expect(managed_parse_module_cache_key_v1(after, before.modules[1])).to_equal("")
+        expect(managed_parse_action_validate_v1(after, parse_contract_action(before))).to_equal("action snapshot mismatch")
+        val old_key = sha256_text("SIMPLE-MANAGED-PARSE-MODULE-CACHE-1\n" + managed_parse_fields_v1([
+            before.snapshot_digest, before.modules[0].module_id, before.modules[0].package_id,
+            before.modules[0].source_path, before.modules[0].source_digest]))
+        expect(unchanged == old_key).to_equal(false)
+
+    it "invalidates module keys for each semantic identity dependency":
+        val before = parse_contract_snapshot()
+        val key = managed_parse_module_cache_key_v1(before, before.modules[0])
+        for field in ["source", "cache", "os", "arch", "cpu", "producer", "module", "package", "path"]:
+            var changed = parse_contract_snapshot()
+            if field == "source": changed.modules = [ManagedParseModuleV1("module", "package", "input.spl", sha256_text("new source"))]
+            elif field == "cache": changed.cache_identity = sha256_text("new feature configuration")
+            elif field == "os": changed.target_os = "freebsd"
+            elif field == "arch": changed.target_arch = "x86_64"
+            elif field == "cpu": changed.target_cpu = "other"
+            elif field == "producer": changed.worker_digest = sha256_text("new parser")
+            elif field == "module": changed.modules = [ManagedParseModuleV1("renamed", "package", "input.spl", before.modules[0].source_digest)]
+            elif field == "package": changed.modules = [ManagedParseModuleV1("module", "other", "input.spl", before.modules[0].source_digest)]
+            else: changed.modules = [ManagedParseModuleV1("module", "package", "moved.spl", before.modules[0].source_digest)]
+            changed.snapshot_digest = managed_parse_snapshot_digest_v1(changed)
+            val changed_key = managed_parse_module_cache_key_v1(changed, changed.modules[0])
+            expect(changed_key.len()).to_equal(64)
+            expect(changed_key == key).to_equal(false)
+        var malformed = parse_contract_snapshot()
+        malformed.snapshot_digest = sha256_text("unsealed")
+        expect(managed_parse_module_cache_key_v1(malformed, malformed.modules[0])).to_equal("")
+
     it "round trips the actual nested run codec":
         step("Encode a graph, schedule, profile, binding and snapshot")
         val run = parse_contract_run()
