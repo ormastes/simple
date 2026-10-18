@@ -1115,10 +1115,10 @@ rebased_push_published_base() {
 }
 
 # New feature refs normally use published main as their range base. A branch
-# explicitly tracking a versioned release branch instead needs that published
+# explicitly tracking a versioned release or the registered release_phase3 line needs that published
 # release as its base; otherwise a five-file PR scans every change between
 # main and release. Trust only the configured upstream on the SAME push remote,
-# and only after querying that exact versioned release ref at Git's actual
+# and only after querying that exact release ref at Git's actual
 # pre-push destination ($2), which may differ from the named remote's fetch URL.
 # A release branch may have advanced since the feature branched, so use the
 # unique common ancestor. Every excluded commit is then reachable from the
@@ -1132,14 +1132,18 @@ new_ref_published_base() {
     # release/main value drop into the ordinary-main fallback by accident.
     [ "$(printf '%s\n' "$_nr_merge" | wc -l | tr -d ' ')" -eq 1 ] || return 1
     case "$_nr_merge" in
-        refs/heads/release/*)
-            _nr_version=${_nr_merge#refs/heads/release/}
-            case "$_nr_version" in
-                *.*) ;;
-                *) return 1 ;;
-            esac
-            case "$_nr_version" in
-                ''|.*|*.|*..*|*[!0-9.]*) return 1 ;;
+        refs/heads/release/*|refs/heads/release_phase3)
+            case "$_nr_merge" in
+                refs/heads/release/*)
+                    _nr_version=${_nr_merge#refs/heads/release/}
+                    case "$_nr_version" in
+                        *.*) ;;
+                        *) return 1 ;;
+                    esac
+                    case "$_nr_version" in
+                        ''|.*|*.|*..*|*[!0-9.]*) return 1 ;;
+                    esac
+                    ;;
             esac
             _nr_config_remote=$(git -C "$ROOT" config --get-all "branch.$_nr_branch.remote" 2>/dev/null) || return 1
             _nr_push_remote=${MUST_CHECK_PUSH_REMOTE:-}
@@ -1366,6 +1370,95 @@ if [ "${1:-}" = --self-test-release-base ]; then
     git -C "$ROOT" update-ref refs/remotes/origin/release/1.0 "$_st_release_one" || exit 2
     new_ref_published_base refs/heads/fix/release "$_st_tip" >/dev/null 2>&1 && exit 2
     echo 'push-must-check: absent remote release refuses despite stale local ref: PASS'
+
+    # The registered legacy line can have independent history from main.
+    # Use real objects and publication in this disposable bare remote only.
+    _st_tree=$(git -C "$ROOT" mktree </dev/null) || exit 2
+    _st_legacy=$(printf 'legacy root\n' | git -C "$ROOT" commit-tree "$_st_tree") || exit 2
+    _st_own=$(printf 'legacy own\n' | git -C "$ROOT" commit-tree "$_st_tree" -p "$_st_legacy") || exit 2
+    git -C "$ROOT" update-ref refs/heads/release_phase3 "$_st_legacy" || exit 2
+    git -C "$ROOT" update-ref refs/heads/work/legacy "$_st_own" || exit 2
+    git -C "$ROOT" push -q origin refs/heads/release_phase3 || exit 2
+    git -C "$ROOT" branch -q --set-upstream-to=origin/release_phase3 work/legacy || exit 2
+    _st_base=$(new_ref_published_base refs/heads/work/legacy "$_st_own") || exit 2
+    [ "$_st_base" = "$_st_legacy" ] || exit 2
+    [ "$(git -C "$ROOT" rev-list "$_st_base..$_st_own")" = "$_st_own" ] || exit 2
+    git -C "$ROOT" merge-base "$_st_own" origin/main >/dev/null 2>&1 && exit 2
+    echo 'push-must-check: exact legacy upstream retains its own commit on independent history: PASS'
+
+    _st_advanced=$(printf 'legacy advanced\n' | git -C "$ROOT" commit-tree "$_st_tree" -p "$_st_legacy") || exit 2
+    git -C "$ROOT" update-ref refs/heads/release_phase3 "$_st_advanced" || exit 2
+    git -C "$ROOT" push -q origin refs/heads/release_phase3 || exit 2
+    [ "$(new_ref_published_base refs/heads/work/legacy "$_st_own")" = "$_st_legacy" ] || exit 2
+    echo 'push-must-check: advanced legacy publication keeps the unique common base: PASS'
+
+    git -C "$ROOT" config --add branch.work/legacy.merge refs/heads/main || exit 2
+    new_ref_published_base refs/heads/work/legacy "$_st_own" >/dev/null 2>&1 && exit 2
+    git -C "$ROOT" config --unset-all branch.work/legacy.merge || exit 2
+    git -C "$ROOT" config --add branch.work/legacy.merge refs/heads/release_phase3 || exit 2
+    git -C "$ROOT" config --add branch.work/legacy.merge refs/heads/release_phase3 || exit 2
+    new_ref_published_base refs/heads/work/legacy "$_st_own" >/dev/null 2>&1 && exit 2
+    git -C "$ROOT" config --unset-all branch.work/legacy.merge || exit 2
+    git -C "$ROOT" config branch.work/legacy.merge refs/heads/release_phase3 || exit 2
+    echo 'push-must-check: mixed and duplicate legacy upstreams refuse: PASS'
+
+    git -C "$ROOT" config branch.work/legacy.remote forged || exit 2
+    new_ref_published_base refs/heads/work/legacy "$_st_own" >/dev/null 2>&1 && exit 2
+    git -C "$ROOT" config branch.work/legacy.remote origin || exit 2
+    git -C "$ROOT" config --add branch.work/legacy.remote origin || exit 2
+    new_ref_published_base refs/heads/work/legacy "$_st_own" >/dev/null 2>&1 && exit 2
+    git -C "$ROOT" config --unset-all branch.work/legacy.remote || exit 2
+    git -C "$ROOT" config branch.work/legacy.remote origin || exit 2
+    echo 'push-must-check: wrong and duplicate configured legacy remotes refuse: PASS'
+
+    git -C "$ROOT" config remote.origin.pushurl "$_st_dir/push.git" || exit 2
+    MUST_CHECK_PUSH_DESTINATION=$(git -C "$ROOT" remote get-url --push origin) || exit 2
+    new_ref_published_base refs/heads/work/legacy "$_st_own" >/dev/null 2>&1 && exit 2
+    git -C "$ROOT" push -q origin refs/heads/release_phase3 || exit 2
+    [ "$(new_ref_published_base refs/heads/work/legacy "$_st_own")" = "$_st_legacy" ] || exit 2
+    echo 'push-must-check: legacy publication must exist on the actual push endpoint: PASS'
+    MUST_CHECK_PUSH_DESTINATION=""
+    new_ref_published_base refs/heads/work/legacy "$_st_own" >/dev/null 2>&1 && exit 2
+    MUST_CHECK_PUSH_DESTINATION=--invalid-destination
+    new_ref_published_base refs/heads/work/legacy "$_st_own" >/dev/null 2>&1 && exit 2
+    git -C "$ROOT" config --unset remote.origin.pushurl || exit 2
+    MUST_CHECK_PUSH_DESTINATION=$_st_dir/remote.git
+    echo 'push-must-check: missing and option-shaped legacy destinations refuse: PASS'
+
+    # A published near-match must not gain legacy release authority.
+    git -C "$ROOT" update-ref refs/heads/release_phase30 "$_st_legacy" || exit 2
+    git -C "$ROOT" push -q origin refs/heads/release_phase30 || exit 2
+    git -C "$ROOT" config branch.work/legacy.merge refs/heads/release_phase30 || exit 2
+    new_ref_published_base refs/heads/work/legacy "$_st_own" >/dev/null 2>&1 && exit 2
+    git -C "$ROOT" config branch.work/legacy.merge refs/heads/release_phase3 || exit 2
+    echo 'push-must-check: published legacy near-match does not authorize independent history: PASS'
+
+    new_ref_published_base refs/heads/work/legacy "$_st_main_tip" >/dev/null 2>&1 && exit 2
+    echo 'push-must-check: unrelated published legacy history refuses: PASS'
+
+    # Two criss-cross merges have exactly two best common ancestors.
+    _st_left=$(printf 'legacy left\n' | git -C "$ROOT" commit-tree "$_st_tree" -p "$_st_advanced") || exit 2
+    _st_right=$(printf 'legacy right\n' | git -C "$ROOT" commit-tree "$_st_tree" -p "$_st_advanced") || exit 2
+    _st_published_merge=$(printf 'published merge\n' | git -C "$ROOT" commit-tree "$_st_tree" -p "$_st_left" -p "$_st_right") || exit 2
+    _st_private_merge=$(printf 'private merge\n' | git -C "$ROOT" commit-tree "$_st_tree" -p "$_st_right" -p "$_st_left") || exit 2
+    git -C "$ROOT" update-ref refs/heads/release_phase3 "$_st_published_merge" || exit 2
+    git -C "$ROOT" push -q origin refs/heads/release_phase3 || exit 2
+    _st_bases=$(git -C "$ROOT" merge-base --all "$_st_published_merge" "$_st_private_merge") || exit 2
+    [ "$(printf '%s\n' "$_st_bases" | wc -l | tr -d ' ')" -eq 2 ] || exit 2
+    new_ref_published_base refs/heads/work/legacy "$_st_private_merge" >/dev/null 2>&1 && exit 2
+    echo 'push-must-check: multiple published legacy common ancestors refuse: PASS'
+
+    # Construct a remote-only commit without fetching it into the local store.
+    _st_unfetched=$(printf 'remote-only legacy\n' | git -C "$_st_dir/remote.git" -c user.name=test -c user.email=test@example.com commit-tree "$_st_tree" -p "$_st_published_merge") || exit 2
+    git -C "$_st_dir/remote.git" update-ref refs/heads/release_phase3 "$_st_unfetched" || exit 2
+    git -C "$ROOT" rev-parse --verify --quiet "$_st_unfetched^{commit}" >/dev/null && exit 2
+    new_ref_published_base refs/heads/work/legacy "$_st_own" >/dev/null 2>&1 && exit 2
+    echo 'push-must-check: unavailable published legacy commit refuses: PASS'
+
+    git -C "$ROOT" push -q origin :refs/heads/release_phase3 || exit 2
+    git -C "$ROOT" update-ref refs/remotes/origin/release_phase3 "$_st_legacy" || exit 2
+    new_ref_published_base refs/heads/work/legacy "$_st_own" >/dev/null 2>&1 && exit 2
+    echo 'push-must-check: unpublished legacy refuses despite forged local tracking ref: PASS'
     echo "push-must-check: retained fixture $_st_dir"
     exit 0
 fi
