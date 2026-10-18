@@ -67,3 +67,32 @@ Retained native evidence:
 `C:/dev/p4i3b/authority-images/logs/provisional-authority.attempt1.stderr.log`
 and the complete raw
 `C:/dev/p4i3b/authority-images/tmp/native-build-stderr-37292-1.log`.
+
+## Explicit temporary grouped-parent workaround (2026-10-18)
+
+User-authorized target-source compatibility for original grouped-parent MIR
+errors3/4 states `NativeGroupResultV1` on the `native_group_recover_result_v1` Ok
+binding and `NativeGroupWarmRouteV1` on the `native_group_warm_route_read_v1` Ok
+binding. The latter type is imported from its defining route owner. Both
+annotations match the existing callable return declarations exactly. No cast,
+loop rewrite, nil/default fallback, duplicate invocation, error conversion,
+validation bypass or change to result persistence/dependency checks is added.
+
+The sites carry `@workaround` markers identifying this bug and root-fix commit
+71b46ad19d27b08fba3758b58ccb00e631aef303. That compiler repair remains present
+and separate. Qualifying a temporary annotation with an older producer does
+not qualify the repaired compiler. Existing documented typed/untyped evidence
+motivates this control but is not a PASS for these newly edited sites.
+
+The new typed native control and two actual parsed/MIR scenarios are UNRUN.
+The unannotated four-case root-fix fixture remains in the separate compiler-fix candidate; it is not introduced by this release package. Before
+removing this workaround, execute it with an admitted producer containing the
+repair, then verify the actual grouped target no longer reports either site.
+
+Workaround follow-up: bug DB reconciliation remains pending because no qualified
+full-CLI bug DB command is available in this lane. Background fix owner is the
+MIR Result-try provenance lane (`astra_compiler_verification`), with root-fix
+commit71b46ad above retained independently. The workaround commit is recorded
+in the integration handoff; these source-only controls are not runtime proof.
+
+Release package note: original workaround commit540674d6d935027f0195f5a137da50386da35c34 is narrowed here to the two production bindings and typed-only tests/provider/manual. Compiler repair71b46ad is retained in its separate candidate, not a dependency silently cherry-picked into release. See `doc/06_spec/01_unit/compiler/mir/result_try_record_array_workaround_spec.md`. All newly packaged tests remain UNRUN.
