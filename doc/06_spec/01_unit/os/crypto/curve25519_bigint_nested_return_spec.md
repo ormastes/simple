@@ -42,3 +42,13 @@ insufficient to explain or resolve the native failure by itself.
 The scalar access follow-up also covers bit indices 0/1/29/30/60, empty input,
 shift carries, and modulo integration. Existing get_bit callers prove n >= 0;
 negative-n behavior remains unspecified. These additional cases are UNRUN.
+
+## Native evidence boundary (2026-10-18)
+
+The corrected source now has a real AArch64 relocatable-object PASS and a linked
+Ed25519 example PASS against an independent five-line affine oracle. These do
+not mark this SSpec file executed: its division, bit, carry and ladder scenarios
+remain UNRUN because a qualified SSpec runner is unavailable. The preserved
+get-contract probes also remain unresolved. Exact source/object/binary hashes
+and local evidence locations are recorded in
+`doc/08_tracking/bug/array_get_contract_drift_crypto_2026-10-18.md`.
