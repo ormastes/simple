@@ -20,7 +20,9 @@ use compiler.backend.linker.linker_wrapper.{
     native_msvc_extra_args,
     native_windows_strict_extra_args_error,
     link_native_windows_with_engine,
-    _link_native_mingw
+    _link_native_mingw,
+    link_status_text,
+    native_runtime_provider_selection_error_for_config_platform
 }
 use compiler.backend.build_native_types.{BuildLinkConfig, BuildOutputFormat, native_link_config_from_build}
 use compiler.backend.llvm_native_link.{NativeLinkOptions}
@@ -33,6 +35,25 @@ use testing.{describe, it, expect}
 extern fn rt_file_read_text(path: text) -> text
 
 describe "Native linker hardening":
+    it "preserves only explicit empty link status as success":
+        expect(link_status_text("runtime-admission", "")).to_equal("")
+        expect(link_status_text("runtime-admission", "provider rejected")).to_equal("provider rejected")
+
+    it "keeps an unavailable rendered status as a site-named failure":
+        val error = link_status_text("runtime-admission", "nil")
+        expect(error != "").to_equal(true)
+        expect(error).to_contain("runtime-admission:")
+        expect(error).to_contain("unavailable link status")
+
+    it "preserves a genuine configured runtime provider rejection through status normalization":
+        var config = NativeLinkConfig.default()
+        config.runtime_path = "/missing/admitted/runtime"
+        config.runtime_bundle = "core-c-bootstrap"
+        val rejected = native_runtime_provider_selection_error_for_config_platform(config, false)
+        expect(rejected != "").to_equal(true)
+        expect(rejected != "nil").to_equal(true)
+        expect(link_status_text("native-runtime-provider-selection", rejected)).to_equal(rejected)
+
     it "selects an installed LLD for Linux size builds without an override":
         val config = NativeLinkConfig.default()
         expect(config.prefer_size_linker).to_equal(false)
