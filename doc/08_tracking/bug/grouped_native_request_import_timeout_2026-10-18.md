@@ -22,4 +22,4 @@ The standalone shared-check fixture compiled successfully with the same producer
 
 Manual link setup packets v1/v2/v3 are preserved under that fixture evidence root. All stopped before any C support compilation, linking or probe execution: v1 rejected the existing peer count; v2/v3 rejected a changed peer worker command. No guard was bypassed. Final v3 guard exited one with quiescent=1, verified helper and no escaped session PIDs. Retry scope is exhausted; native four-case runtime verification remains UNRUN. No object recompilation is authorized by these setup failures.
 
-The SSpec runner, core/lib/MCP/LSP checks, full test suite, Phase 3 and all nine incremental-build feature groups remain unqualified. This local repair has not been pushed or landed. Existing valid cached objects and producer admissions are preserved.
+The SSpec runner, core/lib/MCP/LSP checks, full test suite, Phase 3 and all nine incremental-build feature groups remain unqualified. Landing scope is the reviewed request-owner extraction only; this evidence does not qualify the complete parent object or Phase 3. Existing valid cached objects and producer admissions are preserved.
