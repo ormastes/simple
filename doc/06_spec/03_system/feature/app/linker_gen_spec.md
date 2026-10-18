@@ -1,5 +1,11 @@
 # Linker Script Generator
 
+> 2026-10-18 repair candidate: regeneration and execution PENDING. The generated
+> content below predates the current nonzero-address and NOBITS regressions and
+> must not be used as acceptance evidence. The executable spec is
+> `test/03_system/feature/app/linker_gen_spec.spl`; regenerate this manual with
+> an admitted SPipe runtime before merging the repair.
+
 > Tests the linker script generation tool for bare-metal targets. Verifies that memory layout definitions, section placement, and symbol exports are correctly translated into platform-specific linker scripts for various architectures.
 
 <!-- sdn-diagram:id=linker_gen_spec.arch -->
