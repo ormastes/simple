@@ -1428,3 +1428,37 @@ describe "long codes, window limits and member boundaries":
         far.push(99u8)
         far.push(5u8)
         expect((gzip_decompress(gzip_compress(far, 6)) ?? []) == far).to_equal(true)
+
+describe "many blocks keep per-block cost independent of earlier output":
+    # @manual scenario evidence
+    it "2000 empty fixed blocks between a stored block and a back-reference into it decode correctly (RFC 1951 3.2)":
+        # @req REQ-GZIP-190
+        # @capture(vector): stored 'abc' (non-final), 2000 empty fixed blocks, final fixed block with length 6 distance 3
+        step("Inflate a stream whose back-reference crosses 2000 empty blocks")
+        var bits: [i64] = []
+        var n = 0
+        while n < 2000:
+            bits = _cat(bits, _cat(_blk(0, 1), _fl(256)))
+            n = n + 1
+        bits = _cat(bits, _cat(_cat(_cat(_blk(1, 1), _fl(260)), _fd(2)), _fl(256)))
+        var raw: [u8] = [0, 3, 0, 252, 255, 97, 98, 99]
+        for b in _pack(bits):
+            raw.push(b)
+        expect((inflate(raw) ?? []) == "abcabcabc".bytes()).to_equal(true)
+
+    it "the output budget is honoured exactly across many blocks: 9 bytes fit, 8 do not (boundary)":
+        # @req REQ-GZIP-191
+        # @capture(vector): the same stream under max_output 9 and 8
+        step("Inflate the many-block stream under tight output budgets")
+        var bits: [i64] = []
+        var n = 0
+        while n < 300:
+            bits = _cat(bits, _cat(_blk(0, 1), _fl(256)))
+            n = n + 1
+        bits = _cat(bits, _cat(_cat(_cat(_blk(1, 1), _fl(260)), _fd(2)), _fl(256)))
+        var raw: [u8] = [0, 3, 0, 252, 255, 97, 98, 99]
+        for b in _pack(bits):
+            raw.push(b)
+        expect((inflate_bounded(raw, 9) ?? []) == "abcabcabc".bytes()).to_equal(true)
+        expect(_is_nil(inflate_bounded(raw, 8))).to_equal(true)
+        expect(_is_nil(inflate_bounded(raw, 3))).to_equal(true)

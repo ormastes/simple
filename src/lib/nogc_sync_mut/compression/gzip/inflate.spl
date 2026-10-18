@@ -179,10 +179,13 @@ fn _fixed_litlen_lengths() -> [i64]:
 # BLOCK BODIES
 # =============================================================================
 
-# Decode literal/length + distance symbols until end-of-block, appending to a copy
-# of `history` (RFC 1951 back-references reach up to 32 KiB into earlier blocks,
-# section 3.2). `max_output` bounds the TOTAL length (negative = unbounded).
-# Returns [output, new_bp] or nil on any malformed or truncated input.
+# Decode literal/length + distance symbols until end-of-block. `history` is the
+# output of the earlier blocks: it is only READ (RFC 1951 back-references may reach
+# into earlier blocks, section 3.2) and never copied, so a block costs O(its own
+# output) however much was produced before. `max_output` bounds the TOTAL length
+# (history + block; negative = unbounded).
+# Returns [block_output, new_bp] -- the NEW bytes only -- or nil on malformed or
+# truncated input.
 fn _inflate_codes(data: [u8], bp0: i64, total: i64, history: [u8], max_output: i64, lit: [Any], dist: [Any]) -> [Any]?:
     val lc: [i64] = lit[0]
     val ls: [i64] = lit[1]
@@ -191,7 +194,8 @@ fn _inflate_codes(data: [u8], bp0: i64, total: i64, history: [u8], max_output: i
     val ds: [i64] = dist[1]
     val df: [i64] = dist[2]
     var bp = bp0
-    var out: [u8] = history
+    val hlen = history.len()
+    var out: [u8] = []
     loop:
         val sr = huffman_decode_symbol(data, bp, total, lc, ls, lf)
         val symbol: i64 = sr[0]
@@ -201,7 +205,7 @@ fn _inflate_codes(data: [u8], bp0: i64, total: i64, history: [u8], max_output: i
         if symbol == 256:
             break
         if symbol < 256:
-            if max_output >= 0 and out.len() >= max_output:
+            if max_output >= 0 and hlen + out.len() >= max_output:
                 return nil
             out.push(symbol.to_u8())
         else:
@@ -230,26 +234,33 @@ fn _inflate_codes(data: [u8], bp0: i64, total: i64, history: [u8], max_output: i
                     return nil
                 distance = base_dist + _bits(data, bp, dex_cnt)
                 bp = bp + dex_cnt
-            if distance > out.len():
+            if distance > hlen + out.len():
                 return nil
-            if max_output >= 0 and out.len() + length > max_output:
+            if max_output >= 0 and hlen + out.len() + length > max_output:
                 return nil
-            val start_pos = out.len() - distance
+            var src = hlen + out.len() - distance
             var j = 0
-            while j < length:
-                out.push(out[start_pos + j])
-                j = j + 1
+            if src >= hlen:
+                # Source lies wholly in this block (the common case).
+                src = src - hlen
+                while j < length:
+                    out.push(out[src + j])
+                    j = j + 1
+            else:
+                while j < length:
+                    out.push(if src < hlen: history[src] else: out[src - hlen])
+                    src = src + 1
+                    j = j + 1
     return [out, bp]
 
-fn _inflate_fixed(data: [u8], bp: i64, total: i64, history: [u8], max_output: i64) -> [Any]?:
-    val lit = huffman_build(_fixed_litlen_lengths())
+# Fixed-Huffman tables (RFC 1951 3.2.6) as [literal/length, distance]; built once per stream.
+fn _fixed_tables() -> [Any]:
     var dist_lengths: [i64] = []
     var i = 0
     while i < 32:
         dist_lengths.push(5)
         i = i + 1
-    val dist = huffman_build(dist_lengths)
-    return _inflate_codes(data, bp, total, history, max_output, lit, dist)
+    return [huffman_build(_fixed_litlen_lengths()), huffman_build(dist_lengths)]
 
 # Dynamic-Huffman block (RFC 1951 3.2.7): read the code-length tables, then the body.
 fn _inflate_dynamic(data: [u8], bp0: i64, total: i64, history: [u8], max_output: i64) -> [Any]?:
@@ -349,6 +360,7 @@ fn _inflate_core(input: [u8], start: i64, max_output: i64, member: bool) -> [Any
     val total = input.len() * 8
     var bp = start * 8
     var out: [u8] = []
+    var fixed_tables: [Any] = []
 
     loop:
         # BFINAL (1 bit) and BTYPE (2 bits), LSB-first
@@ -380,10 +392,17 @@ fn _inflate_core(input: [u8], start: i64, max_output: i64, member: bool) -> [Any
                 k = k + 1
             bp = (byte_pos + blen) * 8
         else:
-            val br = if btype == BLOCK_FIXED: _inflate_fixed(input, bp, total, out, max_output) else: _inflate_dynamic(input, bp, total, out, max_output)
+            if btype == BLOCK_FIXED and fixed_tables.len() == 0:
+                fixed_tables = _fixed_tables()
+            val br = if btype == BLOCK_FIXED: _inflate_codes(input, bp, total, out, max_output, fixed_tables[0], fixed_tables[1]) else: _inflate_dynamic(input, bp, total, out, max_output)
             if br == nil:
                 return nil
-            out = br[0]
+            val block_out: [u8] = br[0]
+            if out.len() == 0:
+                out = block_out
+            else:
+                for b in block_out:
+                    out.push(b)
             bp = br[1]
 
         val consumed_bytes = (bp + 7) >> 3

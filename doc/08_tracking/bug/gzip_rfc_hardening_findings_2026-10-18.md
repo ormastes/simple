@@ -42,3 +42,11 @@ Binary: Rust seed bin/local/seed_simple (9c45d2bf601ab93e), interpreter + JIT.
   its output for such inputs was corrupt; for all other inputs output is byte-identical.
 - JIT hazard: `push` through an `[Any]` tuple slot mutates the caller's array, and untyped `[Any]`
   values passed to typed params stay tagged (test/fixtures/compiler/seed_jit_untyped_any_tag_repro/main.spl, `rev=` line); typed locals avoid it.
+- **Fixed in round 3 -- memory DoS via many blocks** (independent reviewer, also on base): every block
+  did `var out = history` and the core did `out = br[0]`, copying all output so far per block. Probe
+  build/probe/review_blocks_{0,500,2000}.spl (1,032,001 bytes of history, N empty fixed blocks, 9 KB input):
+  JIT RSS 76 MB / 606 MB / 2.19 GB; interpreter 2.3 s / 8.0 s / 25.4 s. Block decoders now only READ
+  `history` and return the block's NEW bytes, appended once by the core (first block is moved, not copied);
+  fixed tables are built once per stream. After: JIT RSS 76 / 93 / 103 MB, interpreter 2.1 s / - / 3.2 s at
+  a flat 195 MB. Specs REQ-GZIP-190/191 (2000 empty blocks + budget) guard correctness; the RSS evidence is
+  the probe. (These probe streams are raw DEFLATE, not gzip-wrapped, so host `gzip -dc` does not apply.)
