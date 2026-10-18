@@ -29,7 +29,7 @@ use compiler.core.ast_coverage_inventory.{
     compiler_coverage_inventory_promote_transient_owner,
     compiler_coverage_inventory_release_parse_scratch}
 use compiler.frontend.desugar.placeholder_lambda.{placeholder_release_parse_scratch}
-use std.string_core.{char_code}
+use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
 use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
 use compiler.core.parser.{par_had_error_get}
 use compiler.core.parser.{parser_promote_transient_owners, parser_initialization_generation_v1}
@@ -156,21 +156,8 @@ fn _sffi_transient_array_scope_end() -> bool:
 # third parse none. A path hash cannot drift that way, and needs no sorted
 # index (which would be O(n^2) over 662 interpreted-Simple modules).
 #
-# The hash is spelled out here rather than reusing rt_hash_text because the
-# split must agree ACROSS PROCESSES; a runtime hash that is seeded or
-# implementation-defined would silently give two shards different answers.
-fn _driver_parse_shard_hash(path: text) -> i64:
-    var h: i64 = 5381
-    var i: i64 = 0
-    while i < path.len():
-        h = ((h * 33) + char_code(path[i:i + 1])) % 1000000007
-        i = i + 1
-    h
-
-# Shared with the HIR shards (driver_hir_cache.spl): one hash, one marker
-# name, across every shard kind and process.
-pub fn driver_parse_shard_hash(path: text) -> i64:
-    _driver_parse_shard_hash(path)
+# The path hash lives in driver_parse_shard_hash.spl (XXH3-64), shared with
+# the HIR shards.
 
 var _driver_parse_shard_memo: text = "@@unset@@"
 
@@ -197,7 +184,7 @@ fn _driver_parse_shard_owns_static(path: text) -> bool:
     val count = spec.substring(slash + 1, spec.len()).to_i64() ?? 0
     if count <= 0 or index < 0 or index >= count:
         return true
-    (_driver_parse_shard_hash(path) % count) == index
+    (driver_parse_shard_hash(path) % count) == index
 
 # ----- Shared work queue (replaces the static split when the orchestrator
 # publishes SIMPLE_PARSE_SHARD_QUEUE) ------------------------------------------
@@ -242,7 +229,7 @@ fn _driver_parse_shard_claim(queue_dir: text, path: text) -> bool:
     # Path hash + length: the marker name must agree across processes (same
     # reason the hash is spelled out above) and a collision only costs one
     # module its shard slot -- the real build still parses it.
-    val marker = "{queue_dir}/{_driver_parse_shard_hash(path)}-{path.len()}.claim"
+    val marker = "{queue_dir}/{driver_parse_shard_hash(path)}-{path.len()}.claim"
     if file_exists(marker):
         return false
     val fd = file_lock("{queue_dir}/.lock", 30)

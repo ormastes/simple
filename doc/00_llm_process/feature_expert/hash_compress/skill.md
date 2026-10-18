@@ -7,9 +7,28 @@ official specifications' own vectors. Plan:
 
 | Need | Use | Never |
 |---|---|---|
-| immutable artifact id, distributed cache object, content verification | `std.common.crypto.blake3` (`blake3_hash`, `blake3_hex`, `blake3_keyed_hash`, `blake3_derive_key`, `blake3_hash_xof`) | XXH3 (not collision-resistant) |
+| immutable artifact id, distributed cache object, content verification | `std.common.crypto.blake3` (`blake3_text` -> 64-hex digest of text, `blake3_hash`, `blake3_keyed_hash`, `blake3_derive_key`, `blake3_hash_xof`; `blake3_hex` only hex-encodes bytes, it does not hash) | XXH3 (not collision-resistant) |
 | fast local fingerprint, AST/TLDR cache index key | `std.common.crypto.xxh3` (`xxh3_128`, `xxh3_128_hex`, `xxh3_64`, `_seeded`, `_with_secret` — 64-bit returns `[u64]`, `[]` on a short secret) | anything adversary-controlled |
 | gzip file / HTTP gzip | `std.nogc_sync_mut.compression.gzip` (`gzip_decompress` decodes every member with `inflate_member`) | raw `inflate` for a gzip member (it tolerates a missing BFINAL for sync-flush) |
+
+## Consumers (wired 2026-10-18)
+| Site | Hash | Spec |
+|---|---|---|
+| `src/compiler/80.driver/cache/package_tldr_metadata.spl` `package_tldr_interface_key_v1` / `package_tldr_action_key_v1` (TLDR archive identity, `/v2` tags) | BLAKE3-256 (`blake3_text`) | `test/01_unit/compiler/cache/package_tldr_metadata_spec.spl` |
+| `src/compiler/80.driver/driver_parse_shard_hash.spl` `driver_parse_shard_hash` (parse/HIR shard owner index and claim-marker name) | XXH3-64 of the path, `>> 1` | `test/01_unit/compiler/driver/parse_shard_hash_xxh3_spec.spl` |
+
+Not moved, on purpose: content-body digests (`cas_put`/`cas_get`, the frontend
+parse (AST) cache key `frontend_parse_cache_key`, HIR cache body/keys). They use
+the C-accelerated SHA-256; pure-Simple hashing of whole files would regress the
+cache hit path (interpreter: BLAKE3 ~0.9 s, XXH3 ~0.15 s per 64 KiB, SHA-256 ~0).
+HIR cache keys are also pinned to 64 hex across the archive/lease modules, so
+XXH3-128 (32 hex) cannot go there without a schema change.
+
+Measured (seed `bin/local/seed_simple`, sha256 prefix 9c45d2bf601ab93e):
+| Case | Before | After |
+|---|---|---|
+| shard hash, 2000 calls on a 58-byte path, interpreter / JIT | djb2 1.49 s / 0.14 s | XXH3-64 1.11 s / 0.12 s |
+| 200 short (~300 B) keys, interpreter / JIT | SHA-256 0.11 s / 0.33 s | BLAKE3 1.14 s / 0.28 s |
 
 ## Specs (all vectors copied verbatim from the official sources)
 | Spec | Source | Scenarios |
