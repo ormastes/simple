@@ -1,7 +1,7 @@
 # Windows enum-wire encode refusal lacks payload context
 
-Status: diagnostic and native controls authored; execution pending a rebuilt
-Pure-Simple producer. The underlying representation failure is unresolved.
+Status: rebuilt-producer diagnostic observed; native controls and full core
+verification pending. The underlying representation failure is unresolved.
 
 ## Observed failure
 
@@ -24,14 +24,37 @@ successful cache store.
 
 ## Attribution and diagnostic change
 
+The diagnostic source was frozen as `58c2a34b106af1ab0abbf5e2c353845805f9e951`.
+Its producer `b09cd33730f1fca82bc6440cd59883a11bbaa3dd6a0f79a2347d6a0bb89ece88`
+linked after 3 compiled / 1359 cached modules, then failed normal `p2_add`
+admission. One new-producer ROUNDTRIP1 Hello diagnostic returned exit 1,
+quiescent 1 and peak RSS 2937828 KiB. Its encode refusal reports:
+`owner=1050503435 variant=2375492728 expected_arity=2 index=1 actual_arity=-1`.
+Logs, receipt and an immutable rejected executable are retained under
+`build/smux-astra-enum7-hello-trace` in the NEXT worktree.
+
+Astra and root independently reproduced the declared emitter hashes: the
+qualified name `compiler.20.hir.hir_types.HirTypeKind` yields owner 1050503435,
+and the Rust string hash of `Int` yields discriminator 2375492728. Provenance:
+`native_project/imports.rs` and `mangle.rs` preserve the numbered declaring
+namespace; `codegen/shared.rs:21` derives the owner; `llvm/functions.rs` derives
+the low-32-bit variant hash. This identifies `HirTypeKind.Int`, whose generated
+scalar-boolean encoder expects arity 2 / slot 1. Runtime tuple inspection returns
+-1, meaning its payload is not recognized as a tuple by that linked owner.
+This does not establish whether construction, transport or mixed runtime
+ownership caused the incompatible representation. The next probe must compare
+the actual linked enum/tuple owners and emitted constructor payload. Removing
+the arity check is not a repair. No normal Hello or product executable passed.
+
 `hir_codec_roundtrip_selfcheck` returns before decode when encoding yields an
 empty blob; it obtains the reason from a second encode pass. The observed
 reason therefore comes from `enum_wire_nil_slot`, not nil restoration.
 Generated `HirTypeKind.Int` uses arity 2 / boolean slot 1, while
 `HirExprKind.StringLit` uses arity 2 / text slot 0. Hello contains both an
 explicit `i64` return type and a string literal; types can be visited before
-the body. The actual failing enum and linked runtime representation remain
-unproven. The `Call` variant itself does not use this scalar boundary.
+the body. These were the initial candidates before the richer diagnostic
+identified `HirTypeKind.Int`. The linked payload construction and transport
+cause remain unproven. The `Call` variant itself does not use this boundary.
 
 The encode-side mismatch now retains its prefix and appends the validated
 enum owner/discriminant, caller-declared arity/index, and observed runtime
@@ -39,8 +62,8 @@ tuple length. Each metadata value is read once. Formatting occurs only on
 the refusal path. Existing identity, range, tuple-shape, and restoration
 checks remain in force; there are no raw casts or permissive fallback paths.
 Enum IDs are runtime identities, not a promise of human-readable schema
-names. The next retained diagnostic must map them before attributing an ABI
-defect to a particular enum.
+names. The observed identifiers above were mapped through the declared
+emitter algorithms before attributing the failure to `HirTypeKind.Int`.
 
 ## Focused control and pending verification
 
@@ -54,7 +77,8 @@ A new real two-field
 the original text and boolean values. Existing restoration, invalid-index,
 single-payload, and tuple-as-one-payload controls remain.
 
-No compiler or test execution was performed for this change. After a rebuilt
+The diagnostic compiler rebuilt and its refusal was observed as recorded
+above. The native control and general tests remain unexecuted. After a rebuilt
 producer passes normal Hello, compile and execute this existing native smoke
 fixture with its matching runtime; require exit 0 and exactly
 `ENUM_WIRE_BOUNDARY_PASS` plus newline, with empty stderr. Preserve the
