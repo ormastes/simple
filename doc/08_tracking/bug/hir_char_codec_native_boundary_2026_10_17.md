@@ -55,3 +55,23 @@ Required controls before declaring repair complete:
 6. Broader compiler/lib/MCP/LSP and BDD gates remain UNRUN until executed against an admitted implementation. No claim is made that this single repair resolves every broader reader diagnostic.
 
 No production code, compiler runtime, generated output or executable tests are changed by this report. No Rust seed execution, new reader attempt or exhausted-feature budget reset was used to establish these findings.
+
+## 2026-10-18: paired generator and generated-code repair prepared
+
+Work starts from `6e8d05eee4817157e34b64ce6a091f3a4bf665c4`, retaining
+the C1-style typed prototype and schema-owned enum nil restoration protocol.
+The generator now classifies `char` separately from `text`. Encoding uses the
+existing `char_from_codepoint` UTF-8 owner and text escaping; decoding validates
+one scalar by exact decode/encode byte equality before constructing a `char`.
+The nil marker remains `\\N`; a literal backslash followed by N is two scalars
+and fails character decoding. Invalid text poisons the actual FlatPoolReader.
+Nil, U+0000 and U+0003 remain separate cases in the native regression fixture.
+
+The pure scalar validation workaround has its own canonical report:
+`native_text_scalar_validation_failure_2026_10_18.md`. Its second native probe
+passed; the complete generated codec fixture is prepared and UNRUN. The
+fixture imports actual generated functions rather than reproducing the codec.
+Generator parity and BDD regressions are prepared and UNRUN. No complete
+compiler link, deployment, reader consumer qualification, or broader
+compiler/lib/MCP/LSP verification is claimed. Database reconciliation remains
+pending a qualified database tool.

@@ -13,7 +13,7 @@
 #   - hc_decode_reject: decoder failures poison the caller-owned reader without
 #     terminating the process. Public decode then treats the entry as a miss.
 
-use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_escape}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_escape, flat_pool_unescape}
 use compiler.frontend.parser_types_expr.{Expr}
 use compiler.blocks.value.{BlockValue}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -21,7 +21,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 # also declared in io/signal_handlers, so the direct module path is required.
 use std.nogc_sync_mut.io_runtime.{exit}
 use std.common.binary_io.{f64_to_bits, f64_from_bits}
-use std.common.encoding.utf8.{text_byte_len}
+use std.common.encoding.utf8.{text_byte_len, utf8_decode_one, utf8_encode_one, char_from_codepoint}
 use std.nogc_sync_mut.sffi.enum_wire.{enum_wire_nil_slot, enum_wire_restore_nil}
 
 # CHUNKED: `parts` is the CURRENT chunk and is bounded by HIR_CODEC_CHUNK_LINES;
@@ -500,6 +500,37 @@ fn hc_read_f64(r: FlatPoolReader) -> f64:
         return 0.0
     f64_from_bits(((hi as u64) << 32) | (lo as u64))
 
+# @workaround bug=native_text_scalar_validation_failure_2026_10_18 recover=b4ac2495d01a25dbc564c6dff12621fe61c87897 reason=use-existing-pure-utf8-owners-for-scalar-validation
+fn hc_char_bytes_valid(bytes: [i64]) -> bool:
+    if bytes.len() == 0 or bytes.len() > 4: return false
+    val decoded = utf8_decode_one(bytes, 0)
+    if decoded[1] != bytes.len(): return false
+    # Invalid input decodes as U+FFFD. Byte equality distinguishes replacement
+    # from an actual U+FFFD scalar, and rejects overlong/surrogate encodings.
+    val encoded = utf8_encode_one(decoded[0])
+    if encoded.len() != bytes.len(): return false
+    var index = 0
+    while index < bytes.len():
+        if encoded[index] != bytes[index]: return false
+        index = index + 1
+    true
+
+fn hc_put_char(w: HirCodecWriter, value: char):
+    val cp = value as i64
+    if cp < 0 or cp > 0x10FFFF or (cp >= 0xD800 and cp <= 0xDFFF):
+        w.reject("invalid_char_scalar")
+        return
+    w.put_text(char_from_codepoint(cp))
+
+fn hc_read_char(r: FlatPoolReader, raw: text) -> char:
+    if raw == "\\N": return nil
+    val value = flat_pool_unescape(raw)
+    if not hc_char_bytes_valid(value.bytes()):
+        r.reject_malformed("invalid_char_scalar")
+        return 0 as char
+    # The native text-to-char cast requires the explicit scalar intermediate.
+    (value as i64) as char
+
 # Only the generated enum schema calls these boundaries. It supplies the
 # actual variant arity/index, never an inferred runtime tuple shape.
 fn hc_enc_enum_bool<T>(w: HirCodecWriter, node: T, arity: i64, index: i64, value: bool):
@@ -518,6 +549,15 @@ fn hc_enc_enum_text<T>(w: HirCodecWriter, node: T, arity: i64, index: i64, value
             case Ok(is_nil):
                 if is_nil: w.put_nil_text_wire()
                 else: w.put_text(value)
+            case Err(detail): w.reject(detail)
+
+fn hc_enc_enum_char<T>(w: HirCodecWriter, node: T, arity: i64, index: i64, value: char):
+    if not w._can_append(0, 128, 16): return
+    unsafe(capabilities: [ffi]):
+        match enum_wire_nil_slot(node, arity, index):
+            case Ok(is_nil):
+                if is_nil: w.put_nil_text_wire()
+                else: hc_put_char(w, value)
             case Err(detail): w.reject(detail)
 
 # @workaround bug=a174_enum_scalar_codec_wire_boundary_2026_10_16 recover=5c3e501759ae833a828b14b4e23c9238c73b76a6 reason=preserve-wire-nil-without-untyped-enum-payload-joins

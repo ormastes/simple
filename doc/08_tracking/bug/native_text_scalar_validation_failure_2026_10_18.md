@@ -31,3 +31,16 @@ convention, then require ASCII, BMP, astral, empty, multiple-scalar and invalid
 UTF-8 controls through the public helpers. Restore the original probe helper
 from the recovery commit only after that regression passes. Compiler/runtime
 UTF-8 ownership lane is the background fix owner, currently unassigned.
+
+## 2026-10-18: second focused native attempt
+
+Workaround commit `6e8d05eee4817157e34b64ce6a091f3a4bf665c4` passed the
+genuine native probe with the same immutable compiler. Evidence at
+`C:/dev/p4char2/result.env` records compile exit 0 and run exit 0; stdout is
+`CHAR_WIRE_ASCII_VALID=true` followed by `CHAR_WIRE_SCALAR_CAST_PASS`.
+Executable SHA-256:
+`89c5d579e40e5b43b40dac6fbd9597a911a3301fd1e51017e9813fa7121c0973`.
+The guard records peak RSS 2,540,840 KiB and a complete, quiescent process tree.
+This qualifies the pure validator plus typed scalar conversion and enum
+extraction for the fixture cases. It does not resolve the original public
+validation API failure, or qualify the production CharLit codec.
