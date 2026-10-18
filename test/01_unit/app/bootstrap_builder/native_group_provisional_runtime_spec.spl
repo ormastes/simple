@@ -1,6 +1,7 @@
 use std.spec.{describe, it, expect, fail}
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use app.bootstrap_builder.native_group_provisional_runtime.{
+    NativeGroupProvisionalRuntimeV1,
     native_group_provisional_runtime_from_authority_v1,
     native_group_provisional_runtime_decode_v1,
     native_group_provisional_runtime_match_authority_v1
@@ -16,7 +17,25 @@ fn _runtime_spec_authority_v1() -> text:
         "b".repeat(64)
     canonical_identity_sort_texts([regular, link, other]).join("\n") + "\n"
 
+fn _runtime_paths_through_try_v1(payload: text) -> Result<text, text>:
+    val decoded: NativeGroupProvisionalRuntimeV1 = native_group_provisional_runtime_decode_v1(payload)?
+    var paths: [text] = []
+    for record in decoded.records:
+        paths = paths.push(record.relative_path)
+    Ok(paths.join("|"))
+
 describe "provisional runtime source snapshot":
+    it "iterates the declared decoded record payload and propagates rejection":
+        match native_group_provisional_runtime_from_authority_v1(_runtime_spec_authority_v1()):
+            Ok(snapshot):
+                match _runtime_paths_through_try_v1(snapshot.payload):
+                    Ok(paths): expect(paths).to_equal("src/runtime/a.spl|src/runtime/link.spl")
+                    Err(reason): fail(reason)
+            Err(reason): fail(reason)
+        match _runtime_paths_through_try_v1(""):
+            Ok(_): fail("invalid runtime payload accepted through try")
+            Err(reason): expect(reason).to_equal("provisional runtime source snapshot framing invalid")
+
     it "keeps exact runtime file and symlink rows but excludes other source":
         val authority = _runtime_spec_authority_v1()
         match native_group_provisional_runtime_from_authority_v1(authority):
