@@ -852,7 +852,8 @@ impl HirLowering:
                     # same-module calls) round-trips to `ident_name_t`
                     # unchanged, so this is a no-op there.
                     val display_name = self.symbols.symbol_display_name(found_symbol, ident_name_t)
-                    HirExprKind.NamedVar(found_symbol, display_name)
+                    val named_var_kind = HirExprKind.NamedVar(found_symbol, display_name)
+                    named_var_kind
 
             # NOTE: ExprKind.Field and ExprKind.Block arms are handled by the
             # discriminant pre-dispatch above (seed always-true struct-pattern
@@ -1078,18 +1079,29 @@ impl HirLowering:
             case ExprKind.Lambda(params, body):
                 self.symbols.push_scope(ScopeKind.Function)
                 var hir_params: [HirParam] = []
-                for raw_p in params:
-                    val p: Param = raw_p
-                    val type_ = if p.type_.?: self.lower_type(p.type_) else: HirType(kind: HirTypeKind.Infer(0, 0), span: p.span)
-                    val symbol = self.symbols.define(p.name, SymbolKind.Parameter, Some(type_), p.span, Visibility.Private, false, nil)
+                # Cycle-161 (v22, 2026-10-18): NO for-in element rebind --
+                # the `val p: Param = raw_p` bind drew erased and the
+                # p.type_/p.span reads faulted at base+0x4577128 inside
+                # lower_hir_expr (bracketed trace run: T1-T4 of the child
+                # Ident printed, crash followed in THIS loop). Index loop
+                # with per-field single annotated binds (the cycle-117/
+                # codec-pool class); outcomes unchanged.
+                var lam_param_i = 0
+                while lam_param_i < params.len():
+                    val lam_p_name: text = params[lam_param_i].name
+                    val lam_p_type_raw: Type = params[lam_param_i].type_
+                    val lam_p_span: Span = params[lam_param_i].span
+                    val type_ = if lam_p_type_raw.?: self.lower_type(lam_p_type_raw) else: HirType(kind: HirTypeKind.Infer(0, 0), span: lam_p_span)
+                    val symbol = self.symbols.define(lam_p_name, SymbolKind.Parameter, Some(type_), lam_p_span, Visibility.Private, false, nil)
                     hir_params = hir_params.push(HirParam(
                         symbol: symbol,
-                        name: p.name,
+                        name: lam_p_name,
                         type_: type_,
                         default: nil,
-                        span: p.span,
+                        span: lam_p_span,
                         is_mutable: false
                     ))
+                    lam_param_i = lam_param_i + 1
                 val hir_body = self.lower_hir_expr(body)
                 self.symbols.pop_scope()
                 HirExprKind.Lambda(hir_params, hir_body, [])
@@ -1257,5 +1269,5 @@ impl HirLowering:
             case _:
                 self.error("unsupported expression kind", e.span)
                 HirExprKind.Error
-
-        HirExpr(kind: kind, has_type_: false, type_: nil, span: e.span)
+        val wrapped_expr = HirExpr(kind: kind, has_type_: false, type_: nil, span: e.span)
+        wrapped_expr
