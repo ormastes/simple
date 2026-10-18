@@ -169,7 +169,22 @@ pub fn module_relative_name_from_path(path: text, relative_name: text) -> text:
     target_parts.push(tail.replace(".", "/") + ".spl")
     module_logical_name_from_path(target_parts.join("/"))
 
+# Cycle-166 (2026-10-19): MIR profiling of the pathological first-batch
+# modules put module_logical_name_from_path at ~14% of wall time -- it builds
+# its result with PER-CHAR string concat (O(len^2) allocations per call) and
+# MIR lowering re-derives the same module's name thousands of times per
+# module. Pure function of its input, so memoize per process (the compiler
+# phase is single-threaded; shard workers are separate processes).
+var _module_logical_name_cache: {text: text} = {}
+
 pub fn module_logical_name_from_path(path: text) -> text:
+    if _module_logical_name_cache.has(path):
+        return _module_logical_name_cache[path]
+    val computed = _module_logical_name_from_path_uncached(path)
+    _module_logical_name_cache[path] = computed
+    computed
+
+fn _module_logical_name_from_path_uncached(path: text) -> text:
     """Derive the dotted logical module name (e.g. `_wallB_mod_a`) from a
     source path (e.g. `src/_wallB_mod_a.spl`). Under `SIMPLE_BOOTSTRAP=1`,
     `HirModule.name`/`ParserModule.name` is the raw parsed PATH, not the
