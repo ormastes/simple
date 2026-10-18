@@ -52,3 +52,7 @@ remain UNRUN because a qualified SSpec runner is unavailable. The preserved
 get-contract probes also remain unresolved. Exact source/object/binary hashes
 and local evidence locations are recorded in
 `doc/08_tracking/bug/array_get_contract_drift_crypto_2026-10-18.md`.
+
+Landing adds comment-only workaround tags; no executable tokens changed.
+The retained native evidence binds the pre-comment source hash, not the new
+raw file hash. Comment-stripped equality is recorded in the landing session.

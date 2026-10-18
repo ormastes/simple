@@ -94,9 +94,12 @@ The AArch64 ELF relocatable object is 603,096 bytes, SHA-256
 Five modules were rebuilt with no reuse; compile and post-authority exits were
 zero. The exact source SHA-256
 `72dd3d80f0b75c9f3c8a58707a5810afce216c7d901d696e23d8e5e7041754ab`
-occurs in the admitted target snapshot and matches this narrow landing branch.
+occurs in the admitted target snapshot. Subsequent landing annotations add only
+workaround comments; the raw hash above describes the executed source, while
+comment-stripped source remains byte-identical. Those comments were not recompiled.
 
-Manual link attempt 4 reused that object and 42 retained runtime/entry objects;
+Manual link attempt 4 reused that object and 41 retained runtime/entry support objects
+(42 object inputs total);
 it did not rebuild the Simple object. Link and executable exits were zero.
 The five stdout lines exactly matched an independent affine oracle for the
 Ed25519 base point, identity, identity-plus-base, doubling, and base-plus-base.
@@ -117,3 +120,21 @@ Manual-link manifest SHA-256:
 `ec25ff063cb75ce81c20bc5fe14fc47c3efac98086f3d4669d58cb787cfd9e14`.
 Guard receipt `manual-link-packet/guard4.env` SHA-256:
 `8a36908ac27012ece4f35c9b4ac116c126a6ee8e58faf68537b59a8b61775d85`.
+
+## Workaround traceability
+
+Bug ID: `array_get_contract_drift_crypto_2026-10-18`.
+DB reconciliation: **pending**; the qualified general CLI/DB command is
+unavailable. This dated report retains the required bug fields; no DB update
+or derived-index refresh is claimed. Background fix owner: array-access
+language contract and compiler/interpreter owners; user contract selection
+remains pending.
+
+Intended-code recovery reference: `4bbbbd1217e` (nested return declarations with
+the original direct-get expressions). Recovery does not authorize reset or
+checkout. Applied source workarounds: `ce4c8377fd9` and `0aaf66032e8`, reproduced
+on the narrow branch as `0364eec0a0a` and `3797013c3c2`. The original failure,
+producer/source identities, preserved reproducer fixtures and new regression
+spec are recorded above. Preceding source/test `@workaround` comments identify
+the affected blocks. Remove them only after the chosen get contract and
+cross-mode regressions are qualified; native example PASS alone is insufficient.
