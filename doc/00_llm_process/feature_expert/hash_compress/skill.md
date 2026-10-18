@@ -102,3 +102,12 @@ entropy failure returns `[]`. Do not use `entropy_platform_bytes` there yet:
 spec observes it via `rsa_pkcs1_public_encrypt` with e=1 and an all-0xFF
 modulus (ciphertext == padded block, no RSA-2048 modexp). Spec:
 `test/01_unit/lib/crypto/rsa_pkcs1_padding_spec.spl`.
+- Lookup tables (AES S-box / inverse S-box): build ONCE per top-level operation
+  (key expansion, `_gctr`, public block encrypt/decrypt) with the existing push
+  builder and pass it down as a parameter. No module-level globals (native
+  codegen segfault) and no `[u8]` literal tables (native corruption), see
+  `doc/03_plan/lib/crypto/all_cipher_compress_algorithm_gate.md`. The old
+  per-byte `_aes_sbox()` rebuilt 256 entries on every lookup. Measured
+  (4 KiB AES-256-GCM): interp 14.0 -> 10.3 s, jit 0.28 -> 0.21 s, jit RSS
+  174 -> 103 MB. `crc32.update_byte/update_u32` are compiler-intrinsic pattern
+  wrappers with no library callers; left as is.
