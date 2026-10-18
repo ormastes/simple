@@ -1,0 +1,458 @@
+# XXH3 (64-bit and 128-bit) — Pure Simple Implementation
+#
+# Fast NON-cryptographic hash by Yann Collet (xxHash 0.8.x, BSD-2-Clause algorithm).
+# Reference: https://github.com/Cyan4973/xxHash (xxhash.h, scalar code path).
+# Output is endianness independent and byte-for-byte equal to the reference.
+#
+# Public API:
+#   xxh3_64 / xxh3_64_seeded / xxh3_64_with_secret   -> u64
+#   xxh3_128 / xxh3_128_seeded / xxh3_128_with_secret -> [low64, high64]
+#   xxh3_128_hex                                      -> 32 lowercase hex chars
+#                                                        (canonical: high64 then low64)
+#
+# Fail-closed contract: a custom secret shorter than 136 bytes
+# (XXH3_SECRET_SIZE_MIN) is invalid. xxh3_128_with_secret returns [] and
+# xxh3_64_with_secret returns 0 in that case.
+#
+# All u64 arithmetic wraps naturally.
+
+extern fn rt_typed_bytes_u32_le_at(buf: [u8], off: u64) -> u64
+extern fn rt_typed_bytes_u64_le_at(buf: [u8], off: u64) -> u64
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+fn _p32_1() -> u64:
+    0x9E3779B1
+
+fn _p32_2() -> u64:
+    0x85EBCA77
+
+fn _p32_3() -> u64:
+    0xC2B2AE3D
+
+fn _p64_1() -> u64:
+    0x9E3779B185EBCA87
+
+fn _p64_2() -> u64:
+    0xC2B2AE3D27D4EB4F
+
+fn _p64_3() -> u64:
+    0x165667B19E3779F9
+
+fn _p64_4() -> u64:
+    0x85EBCA77C2B2AE63
+
+fn _p64_5() -> u64:
+    0x27D4EB2F165667C5
+
+fn _pmx1() -> u64:
+    0x165667919E3779F9
+
+fn _pmx2() -> u64:
+    0x9FB21C651E98DF25
+
+fn _secret_min() -> i64:
+    136
+
+# XXH3_kSecret (192 bytes)
+fn _ksecret() -> [u8]:
+    [
+        0xb8u8, 0xfeu8, 0x6cu8, 0x39u8, 0x23u8, 0xa4u8, 0x4bu8, 0xbeu8, 0x7cu8, 0x01u8, 0x81u8, 0x2cu8,
+        0xf7u8, 0x21u8, 0xadu8, 0x1cu8, 0xdeu8, 0xd4u8, 0x6du8, 0xe9u8, 0x83u8, 0x90u8, 0x97u8, 0xdbu8,
+        0x72u8, 0x40u8, 0xa4u8, 0xa4u8, 0xb7u8, 0xb3u8, 0x67u8, 0x1fu8, 0xcbu8, 0x79u8, 0xe6u8, 0x4eu8,
+        0xccu8, 0xc0u8, 0xe5u8, 0x78u8, 0x82u8, 0x5au8, 0xd0u8, 0x7du8, 0xccu8, 0xffu8, 0x72u8, 0x21u8,
+        0xb8u8, 0x08u8, 0x46u8, 0x74u8, 0xf7u8, 0x43u8, 0x24u8, 0x8eu8, 0xe0u8, 0x35u8, 0x90u8, 0xe6u8,
+        0x81u8, 0x3au8, 0x26u8, 0x4cu8, 0x3cu8, 0x28u8, 0x52u8, 0xbbu8, 0x91u8, 0xc3u8, 0x00u8, 0xcbu8,
+        0x88u8, 0xd0u8, 0x65u8, 0x8bu8, 0x1bu8, 0x53u8, 0x2eu8, 0xa3u8, 0x71u8, 0x64u8, 0x48u8, 0x97u8,
+        0xa2u8, 0x0du8, 0xf9u8, 0x4eu8, 0x38u8, 0x19u8, 0xefu8, 0x46u8, 0xa9u8, 0xdeu8, 0xacu8, 0xd8u8,
+        0xa8u8, 0xfau8, 0x76u8, 0x3fu8, 0xe3u8, 0x9cu8, 0x34u8, 0x3fu8, 0xf9u8, 0xdcu8, 0xbbu8, 0xc7u8,
+        0xc7u8, 0x0bu8, 0x4fu8, 0x1du8, 0x8au8, 0x51u8, 0xe0u8, 0x4bu8, 0xcdu8, 0xb4u8, 0x59u8, 0x31u8,
+        0xc8u8, 0x9fu8, 0x7eu8, 0xc9u8, 0xd9u8, 0x78u8, 0x73u8, 0x64u8, 0xeau8, 0xc5u8, 0xacu8, 0x83u8,
+        0x34u8, 0xd3u8, 0xebu8, 0xc3u8, 0xc5u8, 0x81u8, 0xa0u8, 0xffu8, 0xfau8, 0x13u8, 0x63u8, 0xebu8,
+        0x17u8, 0x0du8, 0xddu8, 0x51u8, 0xb7u8, 0xf0u8, 0xdau8, 0x49u8, 0xd3u8, 0x16u8, 0x55u8, 0x26u8,
+        0x29u8, 0xd4u8, 0x68u8, 0x9eu8, 0x2bu8, 0x16u8, 0xbeu8, 0x58u8, 0x7du8, 0x47u8, 0xa1u8, 0xfcu8,
+        0x8fu8, 0xf8u8, 0xb8u8, 0xd1u8, 0x7au8, 0xd0u8, 0x31u8, 0xceu8, 0x45u8, 0xcbu8, 0x3au8, 0x8fu8,
+        0x95u8, 0x16u8, 0x04u8, 0x28u8, 0xafu8, 0xd7u8, 0xfbu8, 0xcau8, 0xbbu8, 0x4bu8, 0x40u8, 0x7eu8
+    ]
+
+# ============================================================================
+# Primitives
+# ============================================================================
+
+fn _rd64(buf: [u8], off: i64) -> u64:
+    rt_typed_bytes_u64_le_at(buf, off.to_u64())
+
+fn _rd32(buf: [u8], off: i64) -> u64:
+    rt_typed_bytes_u32_le_at(buf, off.to_u64())
+
+fn _rotl64(x: u64, n: u64) -> u64:
+    (x << n) | (x >> (64u64 - n))
+
+fn _bswap32(x: u64) -> u64:
+    ((x & 0xFFu64) << 24u64) | ((x & 0xFF00u64) << 8u64) | ((x >> 8u64) & 0xFF00u64) | ((x >> 24u64) & 0xFFu64)
+
+fn _bswap64(x: u64) -> u64:
+    (_bswap32(x & 0xFFFFFFFFu64) << 32u64) | _bswap32(x >> 32u64)
+
+# Full 64x64 -> 128 multiply via 32-bit limbs. Returns [low64, high64].
+fn _mul128(a: u64, b: u64) -> [u64]:
+    val m: u64 = 0xFFFFFFFFu64
+    val a0: u64 = a & m
+    val a1: u64 = a >> 32u64
+    val b0: u64 = b & m
+    val b1: u64 = b >> 32u64
+    val p00: u64 = a0 * b0
+    val p01: u64 = a0 * b1
+    val p10: u64 = a1 * b0
+    val p11: u64 = a1 * b1
+    val mid: u64 = (p00 >> 32u64) + (p01 & m) + (p10 & m)
+    val lo: u64 = (p00 & m) | (mid << 32u64)
+    val hi: u64 = p11 + (p01 >> 32u64) + (p10 >> 32u64) + (mid >> 32u64)
+    [lo, hi]
+
+fn _fold64(a: u64, b: u64) -> u64:
+    val p = _mul128(a, b)
+    p[0] ^ p[1]
+
+fn _xorshift(v: u64, s: u64) -> u64:
+    v ^ (v >> s)
+
+fn _avalanche64(h: u64) -> u64:
+    var v: u64 = _xorshift(h, 33u64)
+    v = v * _p64_2()
+    v = _xorshift(v, 29u64)
+    v = v * _p64_3()
+    _xorshift(v, 32u64)
+
+fn _avalanche3(h: u64) -> u64:
+    var v: u64 = _xorshift(h, 37u64)
+    v = v * _pmx1()
+    _xorshift(v, 32u64)
+
+fn _rrmxmx(h: u64, len: u64) -> u64:
+    var v: u64 = h ^ (_rotl64(h, 49u64) ^ _rotl64(h, 24u64))
+    v = v * _pmx2()
+    v = v ^ ((v >> 35u64) + len)
+    v = v * _pmx2()
+    _xorshift(v, 28u64)
+
+fn _mix16(data: [u8], doff: i64, sec: [u8], soff: i64, seed: u64) -> u64:
+    val lo: u64 = _rd64(data, doff)
+    val hi: u64 = _rd64(data, doff + 8)
+    _fold64(lo ^ (_rd64(sec, soff) + seed), hi ^ (_rd64(sec, soff + 8) - seed))
+
+# 128-bit mix32: acc is [low, high]; returns the updated pair.
+fn _mix32(acc: [u64], data: [u8], o1: i64, o2: i64, sec: [u8], soff: i64, seed: u64) -> [u64]:
+    var lo: u64 = acc[0] + _mix16(data, o1, sec, soff, seed)
+    lo = lo ^ (_rd64(data, o2) + _rd64(data, o2 + 8))
+    var hi: u64 = acc[1] + _mix16(data, o2, sec, soff + 16, seed)
+    hi = hi ^ (_rd64(data, o1) + _rd64(data, o1 + 8))
+    [lo, hi]
+
+# ============================================================================
+# 64-bit short paths
+# ============================================================================
+
+fn _len0_64(sec: [u8], seed: u64) -> u64:
+    _avalanche64(seed ^ (_rd64(sec, 56) ^ _rd64(sec, 64)))
+
+fn _len1to3_64(data: [u8], sec: [u8], seed: u64) -> u64:
+    val n = data.len()
+    val c1: u64 = data[0].to_u64()
+    val c2: u64 = data[n >> 1].to_u64()
+    val c3: u64 = data[n - 1].to_u64()
+    val combined: u64 = (c1 << 16u64) | (c2 << 24u64) | c3 | (n.to_u64() << 8u64)
+    val bitflip: u64 = (_rd32(sec, 0) ^ _rd32(sec, 4)) + seed
+    _avalanche64(combined ^ bitflip)
+
+fn _len4to8_64(data: [u8], sec: [u8], seed0: u64) -> u64:
+    val n = data.len()
+    val seed: u64 = seed0 ^ (_bswap32(seed0 & 0xFFFFFFFFu64) << 32u64)
+    val in1: u64 = _rd32(data, 0)
+    val in2: u64 = _rd32(data, n - 4)
+    val bitflip: u64 = (_rd64(sec, 8) ^ _rd64(sec, 16)) - seed
+    val input64: u64 = in2 + (in1 << 32u64)
+    _rrmxmx(input64 ^ bitflip, n.to_u64())
+
+fn _len9to16_64(data: [u8], sec: [u8], seed: u64) -> u64:
+    val n = data.len()
+    val bitflip1: u64 = (_rd64(sec, 24) ^ _rd64(sec, 32)) + seed
+    val bitflip2: u64 = (_rd64(sec, 40) ^ _rd64(sec, 48)) - seed
+    val input_lo: u64 = _rd64(data, 0) ^ bitflip1
+    val input_hi: u64 = _rd64(data, n - 8) ^ bitflip2
+    val acc: u64 = n.to_u64() + _bswap64(input_lo) + input_hi + _fold64(input_lo, input_hi)
+    _avalanche3(acc)
+
+fn _len17to128_64(data: [u8], sec: [u8], seed: u64) -> u64:
+    val n = data.len()
+    var acc: u64 = n.to_u64() * _p64_1()
+    if n > 32:
+        if n > 64:
+            if n > 96:
+                acc = acc + _mix16(data, 48, sec, 96, seed)
+                acc = acc + _mix16(data, n - 64, sec, 112, seed)
+            acc = acc + _mix16(data, 32, sec, 64, seed)
+            acc = acc + _mix16(data, n - 48, sec, 80, seed)
+        acc = acc + _mix16(data, 16, sec, 32, seed)
+        acc = acc + _mix16(data, n - 32, sec, 48, seed)
+    acc = acc + _mix16(data, 0, sec, 0, seed)
+    acc = acc + _mix16(data, n - 16, sec, 16, seed)
+    _avalanche3(acc)
+
+fn _len129to240_64(data: [u8], sec: [u8], seed: u64) -> u64:
+    val n = data.len()
+    var acc: u64 = n.to_u64() * _p64_1()
+    val rounds = n / 16
+    var i = 0
+    while i < 8:
+        acc = acc + _mix16(data, 16 * i, sec, 16 * i, seed)
+        i = i + 1
+    acc = _avalanche3(acc)
+    while i < rounds:
+        acc = acc + _mix16(data, 16 * i, sec, 16 * (i - 8) + 3, seed)
+        i = i + 1
+    acc = acc + _mix16(data, n - 16, sec, 136 - 17, seed)
+    _avalanche3(acc)
+
+# ============================================================================
+# Long inputs (> 240 bytes): stripes, accumulate, scramble
+# ============================================================================
+
+fn _acc512(acc: [u64], data: [u8], doff: i64, sec: [u8], soff: i64) -> [u64]:
+    var a = acc
+    val m: u64 = 0xFFFFFFFFu64
+    var i = 0
+    while i < 8:
+        val dv: u64 = _rd64(data, doff + 8 * i)
+        val dk: u64 = dv ^ _rd64(sec, soff + 8 * i)
+        a[i ^ 1] = a[i ^ 1] + dv
+        a[i] = a[i] + (dk & m) * (dk >> 32u64)
+        i = i + 1
+    a
+
+fn _scramble(acc: [u64], sec: [u8], soff: i64) -> [u64]:
+    var a = acc
+    var i = 0
+    while i < 8:
+        var v: u64 = _xorshift(a[i], 47u64)
+        v = v ^ _rd64(sec, soff + 8 * i)
+        a[i] = v * _p32_1()
+        i = i + 1
+    a
+
+fn _hash_long_acc(data: [u8], sec: [u8]) -> [u64]:
+    var acc: [u64] = [_p32_3(), _p64_1(), _p64_2(), _p64_3(), _p64_4(), _p32_2(), _p64_5(), _p32_1()]
+    val n = data.len()
+    val ssz = sec.len()
+    val per_block = (ssz - 64) / 8
+    val block_len = 64 * per_block
+    val nb_blocks = (n - 1) / block_len
+    var b = 0
+    while b < nb_blocks:
+        var s = 0
+        while s < per_block:
+            acc = _acc512(acc, data, b * block_len + s * 64, sec, s * 8)
+            s = s + 1
+        acc = _scramble(acc, sec, ssz - 64)
+        b = b + 1
+    val nb_last = ((n - 1) - block_len * nb_blocks) / 64
+    var s2 = 0
+    while s2 < nb_last:
+        acc = _acc512(acc, data, nb_blocks * block_len + s2 * 64, sec, s2 * 8)
+        s2 = s2 + 1
+    _acc512(acc, data, n - 64, sec, ssz - 64 - 7)
+
+fn _merge_accs(acc: [u64], sec: [u8], soff: i64, start: u64) -> u64:
+    var r: u64 = start
+    var i = 0
+    while i < 4:
+        r = r + _fold64(acc[2 * i] ^ _rd64(sec, soff + 16 * i), acc[2 * i + 1] ^ _rd64(sec, soff + 16 * i + 8))
+        i = i + 1
+    _avalanche3(r)
+
+# Secret derived from the default secret for seeded long inputs.
+fn _custom_secret(seed: u64) -> [u8]:
+    val ks = _ksecret()
+    var out: [u8] = []
+    var i = 0
+    while i < 12:
+        val lo: u64 = _rd64(ks, 16 * i) + seed
+        val hi: u64 = _rd64(ks, 16 * i + 8) - seed
+        var j = 0
+        while j < 8:
+            out.push(((lo >> (8u64 * j.to_u64())) & 0xFFu64).to_u8())
+            j = j + 1
+        j = 0
+        while j < 8:
+            out.push(((hi >> (8u64 * j.to_u64())) & 0xFFu64).to_u8())
+            j = j + 1
+        i = i + 1
+    out
+
+# ============================================================================
+# 64-bit dispatch
+# ============================================================================
+
+# sec is used for short paths with the given seed; for n > 240 it is the long secret.
+fn _core64(data: [u8], seed: u64, sec: [u8]) -> u64:
+    val n = data.len()
+    if n > 240:
+        val acc = _hash_long_acc(data, sec)
+        return _merge_accs(acc, sec, 11, n.to_u64() * _p64_1())
+    if n > 128:
+        return _len129to240_64(data, sec, seed)
+    if n > 16:
+        return _len17to128_64(data, sec, seed)
+    if n > 8:
+        return _len9to16_64(data, sec, seed)
+    if n >= 4:
+        return _len4to8_64(data, sec, seed)
+    if n > 0:
+        return _len1to3_64(data, sec, seed)
+    _len0_64(sec, seed)
+
+fn xxh3_64(data: [u8]) -> u64:
+    _core64(data, 0u64, _ksecret())
+
+fn xxh3_64_seeded(data: [u8], seed: u64) -> u64:
+    if data.len() > 240 and seed != 0u64:
+        return _core64(data, seed, _custom_secret(seed))
+    _core64(data, seed, _ksecret())
+
+fn xxh3_64_with_secret(data: [u8], secret: [u8]) -> u64:
+    if secret.len() < _secret_min():
+        return 0u64
+    _core64(data, 0u64, secret)
+
+# ============================================================================
+# 128-bit short paths
+# ============================================================================
+
+fn _len0_128(sec: [u8], seed: u64) -> [u64]:
+    val lo: u64 = _avalanche64(seed ^ (_rd64(sec, 64) ^ _rd64(sec, 72)))
+    val hi: u64 = _avalanche64(seed ^ (_rd64(sec, 80) ^ _rd64(sec, 88)))
+    [lo, hi]
+
+fn _len1to3_128(data: [u8], sec: [u8], seed: u64) -> [u64]:
+    val n = data.len()
+    val c1: u64 = data[0].to_u64()
+    val c2: u64 = data[n >> 1].to_u64()
+    val c3: u64 = data[n - 1].to_u64()
+    val cl: u64 = (c1 << 16u64) | (c2 << 24u64) | c3 | (n.to_u64() << 8u64)
+    val sw: u64 = _bswap32(cl)
+    val ch: u64 = ((sw << 13u64) | (sw >> 19u64)) & 0xFFFFFFFFu64
+    val bfl: u64 = (_rd32(sec, 0) ^ _rd32(sec, 4)) + seed
+    val bfh: u64 = (_rd32(sec, 8) ^ _rd32(sec, 12)) - seed
+    [_avalanche64(cl ^ bfl), _avalanche64(ch ^ bfh)]
+
+fn _len4to8_128(data: [u8], sec: [u8], seed0: u64) -> [u64]:
+    val n = data.len()
+    val seed: u64 = seed0 ^ (_bswap32(seed0 & 0xFFFFFFFFu64) << 32u64)
+    val in_lo: u64 = _rd32(data, 0)
+    val in_hi: u64 = _rd32(data, n - 4)
+    val input64: u64 = in_lo + (in_hi << 32u64)
+    val bitflip: u64 = (_rd64(sec, 16) ^ _rd64(sec, 24)) + seed
+    val keyed: u64 = input64 ^ bitflip
+    val m = _mul128(keyed, _p64_1() + (n.to_u64() << 2u64))
+    var hi: u64 = m[1] + (m[0] << 1u64)
+    var lo: u64 = m[0] ^ (hi >> 3u64)
+    lo = _xorshift(lo, 35u64)
+    lo = lo * _pmx2()
+    lo = _xorshift(lo, 28u64)
+    hi = _avalanche3(hi)
+    [lo, hi]
+
+fn _len9to16_128(data: [u8], sec: [u8], seed: u64) -> [u64]:
+    val n = data.len()
+    val bfl: u64 = (_rd64(sec, 32) ^ _rd64(sec, 40)) - seed
+    val bfh: u64 = (_rd64(sec, 48) ^ _rd64(sec, 56)) + seed
+    val in_lo: u64 = _rd64(data, 0)
+    var in_hi: u64 = _rd64(data, n - 8)
+    val m = _mul128(in_lo ^ in_hi ^ bfl, _p64_1())
+    var mlo: u64 = m[0] + ((n - 1).to_u64() << 54u64)
+    in_hi = in_hi ^ bfh
+    val mhi: u64 = m[1] + in_hi + (in_hi & 0xFFFFFFFFu64) * (_p32_2() - 1u64)
+    mlo = mlo ^ _bswap64(mhi)
+    val h = _mul128(mlo, _p64_2())
+    val hh: u64 = h[1] + mhi * _p64_2()
+    [_avalanche3(h[0]), _avalanche3(hh)]
+
+fn _finish128(acc: [u64], n: i64, seed: u64) -> [u64]:
+    val lo: u64 = acc[0] + acc[1]
+    val hi: u64 = acc[0] * _p64_1() + acc[1] * _p64_4() + (n.to_u64() - seed) * _p64_2()
+    [_avalanche3(lo), 0u64 - _avalanche3(hi)]
+
+fn _len17to128_128(data: [u8], sec: [u8], seed: u64) -> [u64]:
+    val n = data.len()
+    var acc: [u64] = [n.to_u64() * _p64_1(), 0u64]
+    if n > 32:
+        if n > 64:
+            if n > 96:
+                acc = _mix32(acc, data, 48, n - 64, sec, 96, seed)
+            acc = _mix32(acc, data, 32, n - 48, sec, 64, seed)
+        acc = _mix32(acc, data, 16, n - 32, sec, 32, seed)
+    acc = _mix32(acc, data, 0, n - 16, sec, 0, seed)
+    _finish128(acc, n, seed)
+
+fn _len129to240_128(data: [u8], sec: [u8], seed: u64) -> [u64]:
+    val n = data.len()
+    var acc: [u64] = [n.to_u64() * _p64_1(), 0u64]
+    val rounds = n / 32
+    var i = 0
+    while i < 4:
+        acc = _mix32(acc, data, 32 * i, 32 * i + 16, sec, 32 * i, seed)
+        i = i + 1
+    acc = [_avalanche3(acc[0]), _avalanche3(acc[1])]
+    while i < rounds:
+        acc = _mix32(acc, data, 32 * i, 32 * i + 16, sec, 3 + 32 * (i - 4), seed)
+        i = i + 1
+    acc = _mix32(acc, data, n - 16, n - 32, sec, 136 - 17 - 16, 0u64 - seed)
+    _finish128(acc, n, seed)
+
+fn _core128(data: [u8], seed: u64, sec: [u8]) -> [u64]:
+    val n = data.len()
+    if n > 240:
+        val acc = _hash_long_acc(data, sec)
+        val lo: u64 = _merge_accs(acc, sec, 11, n.to_u64() * _p64_1())
+        val hi: u64 = _merge_accs(acc, sec, sec.len() - 64 - 11, 0xFFFFFFFFFFFFFFFFu64 ^ (n.to_u64() * _p64_2()))
+        return [lo, hi]
+    if n > 128:
+        return _len129to240_128(data, sec, seed)
+    if n > 16:
+        return _len17to128_128(data, sec, seed)
+    if n > 8:
+        return _len9to16_128(data, sec, seed)
+    if n >= 4:
+        return _len4to8_128(data, sec, seed)
+    if n > 0:
+        return _len1to3_128(data, sec, seed)
+    _len0_128(sec, seed)
+
+fn xxh3_128(data: [u8]) -> [u64]:
+    _core128(data, 0u64, _ksecret())
+
+fn xxh3_128_seeded(data: [u8], seed: u64) -> [u64]:
+    if data.len() > 240 and seed != 0u64:
+        return _core128(data, seed, _custom_secret(seed))
+    _core128(data, seed, _ksecret())
+
+fn xxh3_128_with_secret(data: [u8], secret: [u8]) -> [u64]:
+    if secret.len() < _secret_min():
+        return []
+    _core128(data, 0u64, secret)
+
+fn _hex64(v: u64) -> text:
+    val digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
+    var out = ""
+    var i = 15
+    while i >= 0:
+        val nib = ((v >> (4u64 * i.to_u64())) & 0xFu64).to_i64()
+        out = out + digits[nib]
+        i = i - 1
+    out
+
+fn xxh3_128_hex(data: [u8]) -> text:
+    val h = xxh3_128(data)
+    _hex64(h[1]) + _hex64(h[0])
