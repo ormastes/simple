@@ -16,23 +16,39 @@ extern fn rt_value_nil() -> i64
 extern fn rt_tuple_new(length: i64) -> i64
 @unsafe(reason: "runtime tuple length; invalid handle returns minus one", capabilities: [ffi])
 extern fn rt_tuple_len(tuple: i64) -> i64
-@unsafe(reason: "read an in-range field of a validated runtime tuple", capabilities: [ffi])
+@unsafe(reason: "selected runtime validates array ownership and kind; invalid lengths cannot satisfy a declared multi-field arity", capabilities: [ffi])
+extern fn rt_array_len(array: i64) -> i64
+@unsafe(reason: "read an in-range field of a runtime-validated tuple or enum payload array", capabilities: [ffi])
 extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
 @unsafe(reason: "write only the private newly allocated tuple; check success", capabilities: [ffi])
 extern fn rt_tuple_set(tuple: i64, index: i64, value: i64) -> i8
+
+@unsafe(reason: "caller checks exact declared arity greater than one; seed enum payloads are Arrays while native tuples are Tuples", capabilities: [ffi])
+fn enum_wire_multi_payload_len(payload: i64) -> i64:
+    val tuple_length = rt_tuple_len(payload)
+    if tuple_length >= 0:
+        return tuple_length
+    # Both runtime owners validate array ownership/kind. Their invalid-array
+    # results (-1 or 0) cannot match a declared multi-field arity >= 2.
+    rt_array_len(payload)
 
 @unsafe(reason: "serializer proves T is an enum and arity/index match its actual variant schema; runtime words cannot prove single tuple versus multiple fields", capabilities: [ffi])
 fn enum_wire_nil_slot<T>(value: T, arity: i64, index: i64) -> Result<bool, text>:
     if arity < 1 or index < 0 or index >= arity:
         return Err("enum wire slot out of range")
     unsafe(capabilities: [ffi]):
-        if rt_enum_id(value) < 0 or rt_enum_discriminant(value) < 0:
+        val owner = rt_enum_id(value)
+        if owner < 0:
+            return Err("enum wire invalid enum")
+        val variant = rt_enum_discriminant(value)
+        if variant < 0:
             return Err("enum wire invalid enum")
         val payload = rt_enum_payload(value)
         if arity == 1:
             return Ok(payload == rt_value_nil())
-        if rt_tuple_len(payload) != arity:
-            return Err("enum wire tuple arity mismatch")
+        val actual_arity = enum_wire_multi_payload_len(payload)
+        if actual_arity != arity:
+            return Err("enum wire tuple arity mismatch owner={owner} variant={variant} expected_arity={arity} index={index} actual_arity={actual_arity}")
         Ok(rt_tuple_get(payload, index) == rt_value_nil())
 
 @unsafe(reason: "trusted serializer proves actual variant schema and that every replacement slot admits wire nil; prototype and payloads belong to the active runtime scope", capabilities: [ffi])
@@ -49,7 +65,7 @@ fn enum_wire_restore_nil<T>(prototype: T, arity: i64, nil_slots: [i64]) -> Resul
         if owner < 0 or owner > 4294967295 or variant < 0 or variant > 4294967295:
             return Err("enum wire invalid enum identity")
         val original = rt_enum_payload(prototype)
-        if arity > 1 and rt_tuple_len(original) != arity:
+        if arity > 1 and enum_wire_multi_payload_len(original) != arity:
             return Err("enum wire tuple arity mismatch")
         if nil_slots.len() == 0:
             return Ok(prototype)
