@@ -16,6 +16,7 @@ official specifications' own vectors. Plan:
 |---|---|---|
 | `src/compiler/80.driver/cache/package_tldr_metadata.spl` `package_tldr_interface_key_v1` / `package_tldr_action_key_v1` (TLDR archive identity, `/v2` tags) | BLAKE3-256 (`blake3_text`) | `test/01_unit/compiler/cache/package_tldr_metadata_spec.spl` |
 | `src/compiler/80.driver/driver_parse_shard_hash.spl` `driver_parse_shard_hash` (parse/HIR shard owner index and claim-marker name) | XXH3-64 of the path, `>> 1` | `test/01_unit/compiler/driver/parse_shard_hash_xxh3_spec.spl` |
+| `src/lib/gc_async_mut/gpu/browser_engine/net/h1_client.spl` `h1_decode_content_encoding` (HTTP `Content-Encoding` gzip/x-gzip, zlib-or-raw deflate; zstd/br rejected; post-decode 50 MiB cap) | gzip/deflate decoders | `test/01_unit/lib/gc_async_mut/gpu/browser_engine/h1_content_encoding_spec.spl` |
 | `src/compiler/10.frontend/frontend.spl` private parse (AST) cache key, `frontend_parse_cache_key`, and the M2->M3 `.fpc` binding in `driver_aot_native_output.spl` / `cache/phase_compatibility_admission.spl` | XXH3-128 via the runtime accelerator `xxh3_128_text` (`std.nogc_sync_mut.sffi.crypto`, extern `rt_xxh3_128_text`) | `test/01_unit/compiler/frontend/supplied_source_cache_key_spec.spl` |
 | `src/os/services/nvfs/core/compression.spl` LZ4 algo=1 extents (`lz4_compress_block`/`lz4_decompress_block`, `[u32 len \| block]`, raw fallback to algo=0 when not smaller; legacy len+4 tagged-copy still decodes) | LZ4 block (not a hash) | `test/01_unit/lib/fs_driver/nvfs_compression_spec.spl` |
 
