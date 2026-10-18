@@ -1,5 +1,21 @@
 # LLM Repository Wiki
 
+## Simple linker: external mold/LLD and internal Simple engine
+
+The self-hosted Simple compiler can use external mold or LLVM LLD; that does
+not make the linker itself pure Simple. The mold-like MDSOC++ Simple linker
+is a separate internal engine, selected through supported internal routes.
+Keep the admitted external/platform route until internal correctness,
+compiler/application execution, resource and host evidence justify a reviewed
+target-specific cutover. ELF success does not certify Windows PE or macOS
+Mach-O. Record the actual engine; external fallback is not internal proof.
+
+Read [linker selection and cutover](../07_guide/compiler/linker_selection.md)
+before choosing defaults or claiming completion. Managed native admission
+currently requires its admitted external hosted linker. The overall
+`mold_is_pure_simple_linker_complete()` receipt gate does not automatically
+change defaults or replace real execution evidence.
+
 ## Bootstrap failure collection
 
 For one-thread crash diagnosis, host CUDA policy, RAM cache-parent staging and
