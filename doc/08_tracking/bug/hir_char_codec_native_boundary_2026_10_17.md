@@ -81,3 +81,16 @@ does not return an unproven nil carrier. A nil marker passed directly to that
 helper poisons the reader with `char_nil_requires_enum_slot`. The generated
 enum decoder handles the marker before calling the helper and preserves nil
 using the existing schema-owned restoration boundary. Tests cover both paths.
+
+## 2026-10-18: final bounded full-codec attempt is BLOCKED
+
+The third attempt froze source `ebd27e64134103786f3f7f0c27866f73ed4d0260`
+and the same immutable b441 compiler. HIR lowering passed for all 100 modules,
+including the generated codec. The outer 600-second guard then timed out while
+the genuine native-build worker was active; peak RSS was 2,974,508 KiB and the
+process tree was verified quiescent. No MIR result, object output, linked
+fixture, or runtime PASS was obtained. The source repair is reviewed but full
+generated-codec qualification is **BLOCKED**, not complete. The original
+CharLit MIR diagnostic has not yet been proven eliminated by this attempt.
+Evidence and the worker performance blocker are recorded in
+`native_char_codec_worker_timeout_2026_10_18.md`. No fourth attempt was made.
