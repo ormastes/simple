@@ -1,6 +1,6 @@
 # Grouped parent imports worker implementation for a wire request
 
-Status: source repair prepared; targeted runtime/performance verification pending.
+Status: HIR deadline criterion PASS; fixture object PASS; native codec execution and full target object remain unqualified.
 
 The retained retry5 compile of `src/app/bootstrap_builder/grouped_native_run.spl` used admitted pure-Simple compiler70194 and target4a649fd. It timed out at300seconds with116/1182 HIR modules complete, no ERROR markers and5144 re-export warnings. Source closure completed at1800ms; load_sources at4098ms; parse/surface setup ended at194242ms; HIR last progressed at299126ms. Thus190144ms preceded HIR and104873ms covered HIR; this was not evidence of a single stuck HIR module. Outer peak RSS was1357704KiB, worker peak1298636KiB.
 
@@ -11,3 +11,15 @@ The warm-route metadata path was inspected separately. Its interface-action arch
 Static named-import reachability over the1182 retained surface paths falls from316 to154 nodes in the diagnostic model, with163 removed and one new contract. The model has unresolved aliases (44 before,11 after), so these are neither actual compiler closure counts nor performance measurements. The remaining modeled compiler files are16 cache/driver owners,3 common owners and one archive value codec; loader/JIT/backend/frontend implementation nodes disappear. Exact target verification must establish the real closure and elapsed/RSS change.
 
 This target-side dependency fix can be compiled by unchanged70194; editing target compiler sources is not being mistaken for replacing that admitted producer. Preserve its source/runtime binding and compatible cache; do not increase the deadline as the fix. The baseline needs no replay. One exact failed-target verification is planned; any further repair stays within the newly authorized three-cycle budget. The codec SSpec/native companion and required core/MCP smokes are UNRUN. No Phase3/release-readiness claim is made.
+
+## Targeted verification, 2026-10-18
+
+Executed source repair commit `68e74662c5f37d2aee0e619daa59acd5a5f872cb` with unchanged admitted producer `70194dd3e815ed6ec1da0ed7f286d14914d7946b827541beaa53080512e7f650`. The parent target in `/home/yoon/dev/simple-phase3-hir-fanout-attempt2-20261018` completed all 168 HIR modules by 60943 ms, within the unchanged 300-second deadline. Monomorphization completed at 63376 ms. The earlier baseline reached only 116 of 1182 HIR modules before its deadline. This establishes the observed HIR timeout criterion; it is not a paired percentile or memory benchmark.
+
+The parent subsequently failed MIR: 162 modules passed, six failed, with 20 error markers across six diagnostic families. Final compiler elapsed time was 204170 ms; no parent object was produced. The errors include Result tuple payload typing, non-array iteration, unresolved `remove`, and unsubstituted generic types. The censored baseline never reached these stages, so their preexistence or attribution is not established. Terminal assessment SHA256: `95826c430d6b0fde28e82f2fbcd2026ec27d91b207533316ac17601403f9e0a7`. Outer peak RSS was 2072540 KiB; baseline and candidate peaks cover different completed phases and do not establish an RSS regression or improvement.
+
+The standalone shared-check fixture compiled successfully with the same producer and Cranelift in 7430 ms (10 modules). Its object is a 426064-byte AArch64 relocatable ELF, SHA256 `29644e6a3ebef2df3bb56a9cc03878b1b187b8f1881fc61c7d4b95983a88dc48`. Compile and post-authority checks exited zero; resource guards were quiescent and verified. Independent assessment: `/home/yoon/dev/simple-phase3-hir-request-fixture-object-20261018/run-v1/terminal-assessment.json`, SHA256 `3e0fdfd3dee3a87f19510dcef98330feb30c66f5496550e751a77a11b01929b9`. The diagnostic source epoch `0f25a4616e1005411b9d6383bc33d5b48976ed9e` adds only reviewed exact-fixture admission/custody infrastructure to the feature epoch; it is not a new producer.
+
+Manual link setup packets v1/v2/v3 are preserved under that fixture evidence root. All stopped before any C support compilation, linking or probe execution: v1 rejected the existing peer count; v2/v3 rejected a changed peer worker command. No guard was bypassed. Final v3 guard exited one with quiescent=1, verified helper and no escaped session PIDs. Retry scope is exhausted; native four-case runtime verification remains UNRUN. No object recompilation is authorized by these setup failures.
+
+The SSpec runner, core/lib/MCP/LSP checks, full test suite, Phase 3 and all nine incremental-build feature groups remain unqualified. This local repair has not been pushed or landed. Existing valid cached objects and producer admissions are preserved.
