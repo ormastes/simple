@@ -4,6 +4,9 @@ use compiler.common.config.Logger
 use compiler.frontend.frontend.{parse_full_frontend, parse_full_frontend_target_receipted_v1}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_load, frontend_parse_cache_hits, frontend_parse_cache_misses}
 use std.common.crypto.sha256.sha256_text
+use std.common.crypto.xxh3.{xxh3_128_hex}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.nogc_sync_mut.sffi.crypto.{xxh3_128_text, xxh3_128_text_fallback_used}
 use std.io_runtime.file_exists
 use std.io_runtime.file_write_exact
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope, frontend_parse_cache_dir, frontend_parse_cache_entry_encode}
@@ -17,7 +20,7 @@ describe "supplied source owns private parse cache identity":
         val source = "fn migration_member() -> i64:\n    77\n"
         val parsed = parse_full_frontend(source, supplied_key_path, "migration", Logger(level: 0))
         expect(parsed.functions.contains_key("migration_member")).to_equal(true)
-        val key = sha256_text(source)
+        val key = xxh3_128_hex(text_to_utf8_bytes(source))
         val blob = frontend_parse_cache_load(key)
         expect(blob.len() > 0).to_equal(true)
         val path = frontend_parse_cache_dir() + "/" + key + ".fpc"
@@ -42,11 +45,11 @@ describe "supplied source owns private parse cache identity":
         val second = "fn supplied_second() -> i64:\n    22\n"
         val a = parse_full_frontend(first, supplied_key_path, "supplied", Logger(level: 0))
         expect(a.functions.contains_key("supplied_first")).to_equal(true)
-        expect(frontend_parse_cache_load(sha256_text(first)).len() > 0).to_equal(true)
+        expect(frontend_parse_cache_load(xxh3_128_hex(text_to_utf8_bytes(first))).len() > 0).to_equal(true)
         val b = parse_full_frontend(second, supplied_key_path, "supplied", Logger(level: 0))
         expect(b.functions.contains_key("supplied_second")).to_equal(true)
         expect(b.functions.contains_key("supplied_first")).to_equal(false)
-        expect(frontend_parse_cache_load(sha256_text(second)).len() > 0).to_equal(true)
+        expect(frontend_parse_cache_load(xxh3_128_hex(text_to_utf8_bytes(second))).len() > 0).to_equal(true)
 
     it "restores equal source through the existing bridge for an alias":
         val source = "fn alias_member() -> i64:\n    33\n"
@@ -89,3 +92,13 @@ describe "supplied source owns private parse cache identity":
             "x86_64-unknown-linux-gnu")
         expect(linux.is_ok()).to_equal(true)
         expect(linux.unwrap()[0].functions.contains_key("windows_only")).to_equal(false)
+
+describe "private parse cache key uses the runtime XXH3-128 accelerator":
+    it "hashes through the runtime and agrees with the pure-Simple reference":
+        # Pure-Simple xxh3_128_hex is the oracle (official-vector KAT spec);
+        # the fallback flag proves the runtime path, not the fallback, answered.
+        val samples = ["", "abc", "fn a() -> i64:\n    1\n", "x".repeat(5000)]
+        for s in samples:
+            expect(xxh3_128_text(s)).to_equal(xxh3_128_hex(text_to_utf8_bytes(s)))
+        expect(xxh3_128_text("abc")).to_equal("06b05ab6733a618578af5f94892f3950")
+        expect(xxh3_128_text_fallback_used()).to_equal(false)

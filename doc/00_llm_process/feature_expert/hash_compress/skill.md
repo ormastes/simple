@@ -11,24 +11,40 @@ official specifications' own vectors. Plan:
 | fast local fingerprint, AST/TLDR cache index key | `std.common.crypto.xxh3` (`xxh3_128`, `xxh3_128_hex`, `xxh3_64`, `_seeded`, `_with_secret` — 64-bit returns `[u64]`, `[]` on a short secret) | anything adversary-controlled |
 | gzip file / HTTP gzip | `std.nogc_sync_mut.compression.gzip` (`gzip_decompress` decodes every member with `inflate_member`) | raw `inflate` for a gzip member (it tolerates a missing BFINAL for sync-flush) |
 
-## Consumers (wired 2026-10-18)
+## Consumers (wired 2026-10-18; AST key 2026-10-19)
 | Site | Hash | Spec |
 |---|---|---|
 | `src/compiler/80.driver/cache/package_tldr_metadata.spl` `package_tldr_interface_key_v1` / `package_tldr_action_key_v1` (TLDR archive identity, `/v2` tags) | BLAKE3-256 (`blake3_text`) | `test/01_unit/compiler/cache/package_tldr_metadata_spec.spl` |
 | `src/compiler/80.driver/driver_parse_shard_hash.spl` `driver_parse_shard_hash` (parse/HIR shard owner index and claim-marker name) | XXH3-64 of the path, `>> 1` | `test/01_unit/compiler/driver/parse_shard_hash_xxh3_spec.spl` |
+| `src/compiler/10.frontend/frontend.spl` private parse (AST) cache key, `frontend_parse_cache_key`, and the M2->M3 `.fpc` binding in `driver_aot_native_output.spl` / `cache/phase_compatibility_admission.spl` | XXH3-128 via the runtime accelerator `xxh3_128_text` (`std.nogc_sync_mut.sffi.crypto`, extern `rt_xxh3_128_text`) | `test/01_unit/compiler/frontend/supplied_source_cache_key_spec.spl` |
 
-Not moved, on purpose: content-body digests (`cas_put`/`cas_get`, the frontend
-parse (AST) cache key `frontend_parse_cache_key`, HIR cache body/keys). They use
-the C-accelerated SHA-256; pure-Simple hashing of whole files would regress the
-cache hit path (interpreter: BLAKE3 ~0.9 s, XXH3 ~0.15 s per 64 KiB, SHA-256 ~0).
-HIR cache keys are also pinned to 64 hex across the archive/lease modules, so
-XXH3-128 (32 hex) cannot go there without a schema change.
+`rt_xxh3_128_text(data: text) -> text` is the XXH3-128 accelerator: C twin in
+`src/runtime/runtime_native.c` (scalar port, 32-bit-limb multiply for MSVC;
+checked against all 45 seed-0 XXH128 sanity rows), Rust lane
+`xxhash_rust::xxh3::xxh3_128` in `runtime/src/value/sffi/hash/xxhash.rs`,
+interpreter wrapper in `interpreter_extern/crypto.rs`. It is VALUE-ABI (boxed
+text in, text out), not a text-ABI `(ptr,len)` extern and not `[u8]`-returning
+(the shape behind doc/08_tracking/bug/jit_rt_tls13_sha256_returns_empty_2026-08-05.md). `xxh3_128_text` falls back to pure-Simple `xxh3_128_hex` on
+any non-32-hex answer and records it (`xxh3_128_text_fallback_used`).
+
+The private parse key changed from 64-hex SHA-256 to 32-hex XXH3-128; old
+`.fpc` files are never named again and age out through the LRU cap. The shared
+parse CAS (`SIMPLE_SHARED_PARSE_CAS_ROOT`) keeps its SHA-256 source identity
+(cross-host, target-receipted), and `frontend.spl` now computes that SHA only
+when a shared root is configured. XXH3 is not collision-resistant: that is
+accepted for the per-scope private directory only.
+
+Not moved, on purpose: `cas_put`/`cas_get` and HIR cache body/keys (64 hex is
+pinned across the archive/lease modules; XXH3-128 needs a schema bump there),
+and the receipt digests in the target-receipted parse path (`source_digest`,
+`parser_input_digest`), which are SHA-256 identities other code verifies.
 
 Measured (seed `bin/local/seed_simple`, sha256 prefix 9c45d2bf601ab93e):
 | Case | Before | After |
 |---|---|---|
 | shard hash, 2000 calls on a 58-byte path, interpreter / JIT | djb2 1.49 s / 0.14 s | XXH3-64 1.11 s / 0.12 s |
 | 200 short (~300 B) keys, interpreter / JIT | SHA-256 0.11 s / 0.33 s | BLAKE3 1.14 s / 0.28 s |
+| AST key over 400 compiler files x5 (27 MB), JIT / interpreter (seed `5bdd376460541de9`) | SHA-256 76 ms / 206 ms | XXH3-128 1.35 ms / 9.5 ms |
 
 ## Specs (all vectors copied verbatim from the official sources)
 | Spec | Source | Scenarios |

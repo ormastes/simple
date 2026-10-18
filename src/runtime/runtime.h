@@ -1564,6 +1564,7 @@ bool        rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
                            const uint8_t* new_ptr, uint64_t new_len);
 /* Lower-case hex SHA-256 of the file as a runtime string; nil if unreadable. */
 int64_t     rt_file_hash_sha256(const uint8_t* path_ptr, uint64_t path_len);
+int64_t     rt_xxh3_128_text(int64_t data_value);
 /* Tagged text cmd -> captured stdout as a runtime string; nil on spawn failure. */
 int64_t     rt_shell_exec(int64_t cmd_value);
 int         rt_file_move(const uint8_t* src_ptr, uint64_t src_len,

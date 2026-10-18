@@ -44,9 +44,11 @@ Feature wikis: [cache_identity](../../feature_expert/cache_identity/skill.md),
    proven. A rename, reorder, or removal is a `schema_version` bump, not a patch.
    The digest function is part of the key: `package_tldr_interface_key_v1` and
    `package_tldr_action_key_v1` hash with BLAKE3-256 under the `/v2` domain tags
-   (2026-10-18). `cas_put`/`cas_get` and every body digest stay on the
-   runtime-accelerated SHA-256: pure-Simple BLAKE3 measured ~0.9 s per 64 KiB in
-   the interpreter vs ~0 for SHA-256, so moving body hashes needs an accelerator.
+   (2026-10-18). The frontend private parse (`.fpc`) key is XXH3-128 through the
+   `rt_xxh3_128_text` accelerator (2026-10-19), and the M2->M3 `.fpc` binding
+   re-derives it with `frontend_parse_cache_key`, never the build cache's SHA-256
+   `content_hash`. `cas_put`/`cas_get` and HIR body digests stay on SHA-256 (64
+   hex is pinned there; switching needs a schema bump, not just the accelerator).
 2. **Exact-key lookup only.** No prefix, restore-key, nearest-branch, or
    timestamp fallback may return a compiler artifact.
 3. **Git identity is admission, never identity.** Branch, commit, PR number, and
