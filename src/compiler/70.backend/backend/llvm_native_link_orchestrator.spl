@@ -59,6 +59,17 @@ pub fn llvm_hosted_allow_duplicate_definitions(hosted_os: text, hosted_target: t
     val link_os = native_effective_link_os(hosted_os, hosted_target, native_linker_abi_for_target(hosted_target))
     link_os != "windows" and link_os != "windows-mingw" and link_os != "windows-msvc"
 
+pub fn llvm_hosted_runtime_compile_bundle(runtime_bundle: text, native_all: text, hosted_os: text, hosted_target: text, stage4_requested: bool) -> text:
+    """A strict (no duplicate forgiveness) hosted link cannot take the ordinary
+    composition: runtime.c re-defines ~50 symbols that runtime_native.c and the
+    provider objects also export (Windows native-build of a 20-line program:
+    lld-link "duplicate symbol: rt_time_now_seconds" and more, 2026-10-18).
+    Core-C excludes runtime.c and is duplicate-free; native-all keeps its own
+    composition because it needs the hosted fallbacks core-C suppresses."""
+    if native_all != "" or stage4_requested: return runtime_bundle
+    if llvm_hosted_allow_duplicate_definitions(hosted_os, hosted_target, stage4_requested): return runtime_bundle
+    "core-c"
+
 fn _llvm_bootstrap_native_all_path(stage4_requested: bool, runtime_path: text,
         runtime_bundle: text, requires_cross: bool, hosted_os: text,
         mingw: bool) -> text:
@@ -230,7 +241,8 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         print "[LLVM-LINK] step 1: compile_runtime_objects..."
     # native_all already owns spl_dl* in Rust; otherwise the pure hosted
     # runtime supplies the C owner for both LLVM and Cranelift.
-    val rt_result = compile_runtime_objects(verbose, options.opt_level, bootstrap_native_all == "", hosted_cc, stage4_requested, runtime_bundle)
+    val runtime_compile_bundle = llvm_hosted_runtime_compile_bundle(runtime_bundle, bootstrap_native_all, hosted_os, hosted_target, stage4_requested)
+    val rt_result = compile_runtime_objects(verbose, options.opt_level, bootstrap_native_all == "", hosted_cc, stage4_requested, runtime_compile_bundle)
     if trace:
         print "[LLVM-LINK] compile_runtime_objects returned"
     val runtime_objects: [text] = match rt_result:
