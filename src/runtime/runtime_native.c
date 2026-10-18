@@ -9643,7 +9643,7 @@ int8_t rt_heap_ref_wellformed(int64_t value) {
 
 /* Registry-membership probe for the C immortal object registry, exported
    under its OWN name so the Rust runtime's union probe can consult both
-   registries (rt_heap_ref_registered -- defined once, in the Rust runtime --
+   registries (rt_heap_ref_registered -- owned by Rust in mixed builds --
    accepts a node live in EITHER registry; a same-named C definition would
    collide at link time and whichever the linker dropped would silently
    decide which registry the encoder sees). True only when the (tag-stripped)
@@ -9657,6 +9657,14 @@ int8_t rt_heap_ref_registered_c(int64_t value) {
     if (raw < 4096) return 0;
     return rt_core_is_registered_immortal_ptr((void*)raw) ? 1 : 0;
 }
+
+#if defined(SIMPLE_CORE_C_STANDALONE) && SIMPLE_CORE_C_STANDALONE
+/* Standalone Core-C has only the C registry and no Rust union provider.
+ * Keep the public ABI strong here and absent from mixed-runtime builds. */
+int8_t rt_heap_ref_registered(int64_t value) {
+    return rt_heap_ref_registered_c(value);
+}
+#endif
 
 /* Array `at`: bounds-checked element access with an Option (`T?`) result.
  *
