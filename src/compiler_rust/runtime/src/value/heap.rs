@@ -252,6 +252,22 @@ fn heap_allocation_registry() -> &'static Mutex<HeapPtrSet<usize>> {
     HEAP_ALLOCATION_REGISTRY.get_or_init(|| Mutex::new(HeapPtrSet::default()))
 }
 
+/// True when the (tag-masked) address is a LIVE heap allocation. Unlike the
+/// formation probe (rt_heap_ref_wellformed), this is a registry-membership
+/// test: any large garbage integer passes the former, which is why the HIR
+/// codec's illformed-node guard built on it still dereferenced a wild
+/// HirSymbol span (0xb4b1cdae6eec3880, compiler.driver.driver_types, v19).
+/// False rejects are safe -- callers only decline to act on the object.
+pub fn heap_ptr_is_registered(ptr: usize) -> bool {
+    if ptr < 4096 {
+        return false;
+    }
+    heap_allocation_registry()
+        .lock()
+        .map(|registry| registry.contains(&ptr))
+        .unwrap_or(false)
+}
+
 #[inline]
 pub fn register_heap_ptr(ptr: *mut HeapHeader) {
     if !ptr.is_null() {

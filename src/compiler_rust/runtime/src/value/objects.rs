@@ -384,6 +384,25 @@ pub extern "C" fn rt_heap_ref_wellformed(value: RuntimeValue) -> i8 {
     }
 }
 
+/// Liveness probe for the fail-closed HIR codec encoder guards: true only
+/// when the (tag-masked) address is a LIVE entry of the heap allocation
+/// registry. rt_heap_ref_wellformed above is FORMATION ONLY -- any large
+/// garbage integer passes it -- which let a wild HirSymbol span
+/// (0xb4b1cdae6eec3880, compiler.driver.driver_types, v19) reach a field
+/// deref. Cache-eligible HIR is fully promoted, so an unregistered node is
+/// corrupt by definition; the encoder refuses the entry and the owning build
+/// continues from its in-memory HIR. Mirrors rt_heap_ref_registered in
+/// src/runtime/runtime_native.c.
+#[no_mangle]
+pub extern "C" fn rt_heap_ref_registered(value: RuntimeValue) -> i8 {
+    let addr = (value.0 & !super::tags::TAG_MASK) as usize;
+    if super::heap::heap_ptr_is_registered(addr) {
+        1
+    } else {
+        0
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
     let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
