@@ -9,6 +9,7 @@
 //! and auto-detected linker selection via `LinkerBuilder`.
 
 mod aggregate_layout;
+mod archive;
 mod config;
 mod compiler;
 mod discovery;
@@ -1555,9 +1556,8 @@ impl NativeProjectBuilder {
                 .map_err(|e| format!("remove existing archive {}: {e}", self.output.display()))?;
         }
         let ar = find_archive_tool()?;
-        let output = archive_create_command(&ar, &self.output, object_paths, false, false)
-            .output()
-            .map_err(|e| format!("run archive tool {ar}: {e}"))?;
+        let response_dir = tempfile::tempdir().map_err(|e| format!("create archive response dir: {e}"))?;
+        let output = archive::create_archive(&ar, &self.output, object_paths, response_dir.path())?;
         if output.status.success() {
             Ok(())
         } else {
