@@ -82,7 +82,48 @@ then qualified inside FreeBSD by configuring a C/C++ project with Clang
 test passes. The installed `cmake`, `ctest` and `cpack` version checks passed.
 Cross-build success or `--version` alone is insufficient qualification.
 
-## Guest temporary-file retention
+## Installed prerequisite qualification (2026-10-18)
+
+The persistent FreeBSD 14.4 riscv64 guest admitted LLVM/Clang 23.1.2,
+Rust/Cargo 1.98.1, GNU Make 4.4.1, Python 3.13.16, CMake 3.31.12,
+Perl 5.42.3, Git 2.56.0, libcurl 8.22.0, coreutils 9.9,
+pkgconf 3.0.7, libffi 3.8.0, zstd 1.5.7 and rsync 3.5.1.
+The final receipt is `/root/simple-bootstrap-evidence/` followed by
+`bootstrap-dependencies-pkgconf-repair.log` and `.exit`: the log records
+`bootstrap_dependencies_status=pass`, and the exit receipt is `0`.
+Functional qualification includes native C/C++ and Rust execution, Git HTTPS
+with certificate verification, encoding conversion, rsync transfer comparison,
+timeout behavior, libffi calls and executable closures returning `42`, and
+zstd compression/decompression comparison.
+
+The remaining installation repairs were:
+
+- Build Git with `NEEDS_LIBICONV=` on this FreeBSD provider. Base libc supplies
+  iconv; a native conversion probe and an installed Git non-ASCII encoding
+  conversion passed. Do not disable encoding support to bypass `-liconv`.
+- Configure libcurl with `CURL_CA_BUNDLE=none` and
+  `CURL_CA_PATH=/etc/ssl/certs`. This guest has the native managed certificate
+  directory but no `/etc/ssl/cert.pem`. Installed Git HTTPS passed with
+  `http.sslVerify=true`; certificate verification was not disabled.
+- Configure pkgconf with `--with-system-includedir=/usr/include` and
+  `--with-system-libdir=/usr/lib:/lib`. Default metadata must retain
+  `-I/usr/local/include -L/usr/local/lib`, because the qualified Clang does not
+  implicitly search those directories. Default `pkg-config --cflags --libs
+  libffi` then compiled and executed both native call and closure probes.
+  A cached reconfiguration requires rebuilding the three directory-macro
+  consumers: `libpkgconf/personality.c`, `cli/main.c` and
+  `cli/pccritic/critic.c`; configure alone left stale objects in this run.
+- Import source with `tar --no-same-owner`. An earlier Linux-UID-preserving
+  import made root's Git reject the repository ownership. The existing guest
+  source was repaired only after verifying its absolute root, without
+  following symlinks or adding a broad Git `safe.directory` exception.
+
+These receipts prove prerequisite qualification. They do not prove the Simple
+bootstrap or persistence after reboot. The canonical checker still must pass
+its Stage 2, Stage 3, provenance and executed-program gates on the pinned
+source revision; reboot verification follows completed builds.
+
+## Guest temporary-file retention policy
 
 The persistent guest uses native daily `periodic` maintenance. Configure
 `/etc/periodic.conf` with `daily_clean_tmps_enable="YES"`,
