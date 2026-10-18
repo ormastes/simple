@@ -2,6 +2,7 @@
 # Real coordinator/bridge transitions with parent-verified receipt DTO fixtures.
 # No claim of OS death proof or executed runner integration.
 use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
 use compiler.driver.action_graph.grouped_execution_adapter.{GroupedExecutionV1, grouped_execution_new_v1, grouped_execution_ready_v1, grouped_execution_claim_v1, grouped_execution_commit_v1, grouped_execution_recover_v1}
 use std.common.build_manager.grouped_execution_contract.{GroupedActionBindingV1, GroupedActionLeaseV1, GroupedReapReceiptV1}
 use compiler.driver.cache.package_scc_scheduler.{PackageSccGroupV1, PackageSccWaveV1, PackageCompileScheduleV1, PackageCompileResultV1, package_scc_identity_v1}
@@ -18,10 +19,11 @@ use lib.compiler_artifact_service.service.{ArtifactRequestStateV1}
 fn grouped_spec_state() -> GroupedExecutionV1:
     val snapshot = "a".repeat(64)
     val cache = "b".repeat(64)
-    val first = PackageSccGroupV1(package_scc_identity_v1(["a"], cache), ["a"], [])
-    val peer = PackageSccGroupV1(package_scc_identity_v1(["b"], cache), ["b"], [])
-    val child = PackageSccGroupV1(package_scc_identity_v1(["c"], cache), ["c"], [first.identity])
-    val schedule = PackageCompileScheduleV1(true, "ok", cache, ["a", "b", "c"], [first, peer, child],
+    val variant = sha256_text("variant")
+    val first = PackageSccGroupV1(package_scc_identity_v1(["a"], variant), ["a"], [])
+    val peer = PackageSccGroupV1(package_scc_identity_v1(["b"], variant), ["b"], [])
+    val child = PackageSccGroupV1(package_scc_identity_v1(["c"], variant), ["c"], [first.identity])
+    val schedule = PackageCompileScheduleV1(true, "ok", variant, ["a", "b", "c"], [first, peer, child],
         [PackageSccWaveV1(0, [first, peer]), PackageSccWaveV1(1, [child])])
     val actions = [BuildActionV1("a", "parse", [snapshot], [], ["a.pool"], BuildActionPoolV1.parse, 1, snapshot, 16, ""),
         BuildActionV1("b", "parse", [snapshot], [], ["b.pool"], BuildActionPoolV1.parse, 1, snapshot, 16, ""),
@@ -44,6 +46,23 @@ fn grouped_spec_reap(lease: GroupedActionLeaseV1) -> GroupedReapReceiptV1:
         lease.generation, lease.lease_id, lease.snapshot_digest, lease.cache_identity, "d".repeat(64))
 
 describe "REQ-IM-007: grouped runner uses the canonical build authorities":
+    it "should keep schedule variant and execution cache identities independent":
+        step("Admit SCC identities derived from a variant distinct from the execution cache")
+        val initial = grouped_spec_state()
+        expect(initial.schedule.variant_digest == initial.route.service.profile.compatibility_id).to_be(false)
+        expect(initial.reason).to_equal("ok")
+        val claimed = grouped_execution_claim_v1(initial, "a", "worker-a", 1, 64)
+        expect(claimed.accepted).to_be(true)
+        expect(claimed.lease.unwrap().cache_identity).to_equal(initial.route.service.profile.compatibility_id)
+        step("Reject a binding that substitutes the variant digest for the cache identity")
+        var bindings = initial.bindings
+        bindings[0].cache_identity = initial.schedule.variant_digest
+        expect(grouped_execution_new_v1(initial.schedule, initial.route, bindings, initial.worker_slots, 2).reason).to_equal("group-binding-invalid")
+        step("Keep SCC group identity bound to the variant rather than the cache")
+        var schedule = initial.schedule
+        schedule.variant_digest = initial.route.service.profile.compatibility_id
+        expect(grouped_execution_new_v1(schedule, initial.route, initial.bindings, initial.worker_slots, 2).reason).to_equal("group-schedule-invalid")
+
     it "should admit declared slots once and retain empty typed dispatches until claim":
         step("Create two ready groups and a dependent group with no dispatch leases")
         val initial = grouped_spec_state()

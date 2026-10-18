@@ -48,3 +48,10 @@ dispatches, worker bounds, exact retry, peer preservation, stale completion,
 eight receipt mismatches, attempt exhaustion, final failure and forbidden
 intermediate package publication. Runtime and docgen remain UNRUN. No Phase3,
 live process retirement, or nine-feature completion claim is made.
+
+Review cycle two corrects an identity-domain conflation: SCC identity is bound
+to `schedule.variant_digest`; execution binding cache identity is bound to
+`route.service.profile.compatibility_id`. Both are independently validated
+digests and need not be equal. The shared spec fixture now uses distinct
+identities, with positive claim and both-direction substitution negatives.
+No digest domain is aliased and runtime qualification remains UNRUN.

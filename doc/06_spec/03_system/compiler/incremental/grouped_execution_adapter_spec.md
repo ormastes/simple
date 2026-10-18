@@ -7,6 +7,11 @@ consumer and is not claimed as executed.
 
 ## Admission and ownership
 
+Use a schedule variant digest distinct from the execution cache digest. Admit
+and claim with SCC identities bound to the variant and leases bound to the
+profile cache. Reject substitution in either direction: a binding using the
+variant as cache, or a schedule using the cache as variant with unchanged SCCs.
+
 Create two independent SCC actions and one dependent action using the actual
 coordinator, service and bridge. Verify two ready bindings and typed absent
 dispatch slots. Reject an undeclared worker, duplicate action claim, occupied
