@@ -1,0 +1,159 @@
+# @req REQ-SSPEC-COMPILER
+# Real source -> parser bridge -> HIR -> mono. Native qualification is separate.
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.SourceFile
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.monomorphize_integration.{run_monomorphization, mono_type_identity, MonomorphizationPass}
+use compiler.mono.mono_archive_types_v1.{MonoTemplateBodyModeV1}
+
+# The class owns T; neither static method declares a method type parameter.
+# The result types make lost owner binding observable without native execution.
+val CLASS_FACTORY = "class Future<T>:\n    static fn from_value(value: T) -> T:\n        value\n    static fn pending() -> T?:\n        nil\n"
+
+fn class_static_lower_one(source: text) -> HirModule:
+    val parsed = parse_full_frontend(source, "testdata/class_static.spl", "factory", Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/class_static.spl")
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    module
+
+fn class_static_direct_target(module: HirModule, caller: text, expected_args: i64) -> i64:
+    var called: i64 = -1
+    var found = false
+    for key in module.functions.keys():
+        val function: HirFunction = module.functions[key]
+        if function.name != caller: continue
+        found = true
+        val body: HirBlock = function.body
+        val tail: HirExpr = body.value
+        match tail.kind:
+            case HirExprKind.Call(callee, args, type_args):
+                expect(args.len()).to_equal(expected_args)
+                expect(type_args.len()).to_equal(0)
+                val concrete_callee: HirExpr = callee
+                expect(concrete_callee.has_type_).to_equal(true)
+                match concrete_callee.kind:
+                    case HirExprKind.NamedVar(symbol, _): called = symbol.id
+                    case _: fail("class static call lacks a concrete callable symbol")
+            case _: fail("class static call was not rewritten")
+    expect(found).to_equal(true)
+    expect(called).to_be_greater_than(-1)
+    called
+
+describe "class-owned static generic specialization":
+    it "infers from_value and preserves explicit owner arguments for pending":
+        val source = CLASS_FACTORY + "\nfn ready() -> bool:\n    Future.from_value(true)\n\nfn waiting() -> bool?:\n    Future<bool>.pending()\n"
+        val hir = class_static_lower_one(source)
+        var modules: Dict<text, HirModule> = {}
+        modules["factory"] = hir
+        val (output, stats) = run_monomorphization(modules)
+        expect(stats.specializations_created).to_equal(2)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        val module: HirModule = output["factory"]
+        val ready_target = class_static_direct_target(module, "ready", 1)
+        val pending_target = class_static_direct_target(module, "waiting", 0)
+        var concrete = 0
+        for key in module.functions.keys():
+            val function: HirFunction = module.functions[key]
+            if function.symbol.id == ready_target:
+                concrete = concrete + 1
+                expect(function.type_params.len()).to_equal(0)
+                expect(function.is_generic_template).to_equal(false)
+                expect(function.params.len()).to_equal(1)
+                match function.params[0].type_.kind:
+                    case HirTypeKind.Bool: ()
+                    case _: fail("from_value parameter retained owner T")
+                match function.return_type.kind:
+                    case HirTypeKind.Bool: ()
+                    case _: fail("from_value result retained owner T")
+            if function.symbol.id == pending_target:
+                concrete = concrete + 1
+                expect(function.type_params.len()).to_equal(0)
+                expect(function.is_generic_template).to_equal(false)
+                expect(function.params.len()).to_equal(0)
+                match function.return_type.kind:
+                    case HirTypeKind.Optional(inner):
+                        match inner.kind:
+                            case HirTypeKind.Bool: ()
+                            case _: fail("pending payload retained owner T")
+                    case _: fail("pending lost its optional return")
+        expect(concrete).to_equal(2)
+
+    it "rejects an explicit owner type conflicting with the value":
+        val hir = class_static_lower_one(CLASS_FACTORY + "\nfn main():\n    Future<i64>.from_value(true)\n")
+        var modules: Dict<text, HirModule> = {}
+        modules["factory"] = hir
+        val (output, stats) = run_monomorphization(modules)
+        expect(stats.specializations_created).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(1)
+
+    it "does not guess a missing class argument for pending":
+        val hir = class_static_lower_one(CLASS_FACTORY + "\nfn main():\n    Future.pending()\n")
+        var modules: Dict<text, HirModule> = {}
+        modules["factory"] = hir
+        val (output, stats) = run_monomorphization(modules)
+        expect(stats.specializations_created).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(1)
+
+    it "registers the same owner recipe in retained and archive request modes":
+        val hir = class_static_lower_one(CLASS_FACTORY)
+        for mode in [MonoTemplateBodyModeV1.Retained, MonoTemplateBodyModeV1.ArchiveRequests]:
+            var mono = MonomorphizationPass.create()
+            mono.template_body_mode = mode
+            mono.current_module = "factory"
+            mono.collect_generics(hir, "factory")
+            var registered = 0
+            for key in hir.classes.keys():
+                val owner: HirClass = hir.classes[key]
+                if owner.name != "Future": continue
+                for method in ["from_value", "pending"]:
+                    val name = mono.class_static_template_v1(owner.symbol, method)
+                    expect(name != "").to_equal(true)
+                    val signature = mono.template_signature_v1(name)
+                    expect(signature.type_params.len()).to_equal(1)
+                    expect(signature.param_types.len()).to_equal(if method == "pending": 0 else: 1)
+                    registered = registered + 1
+            expect(registered).to_equal(2)
+
+    it "relocates an imported nominal argument and calls the exact owner specialization":
+        val consumer = "use factory.{Future}\nuse payload.{Payload}\n\nfn roundtrip(value: Payload) -> Payload:\n    Future<Payload>.from_value(value)\n"
+        val sources = [
+            SourceFile(path: "testdata/factory.spl", content: CLASS_FACTORY, module_name: "factory"),
+            SourceFile(path: "testdata/payload.spl", content: "struct Payload:\n    value: i64\n", module_name: "payload"),
+            SourceFile(path: "testdata/consumer.spl", content: consumer, module_name: "consumer")]
+        var parsed: Dict<text, Module> = {}
+        for source in sources:
+            parsed[source.module_name] = parse_full_frontend(source.content, source.path, source.module_name, Logger(level: 0))
+        val surface_result = module_surfaces_from_modules(parsed, sources)
+        expect(surface_result.is_ok()).to_equal(true)
+        val surfaces = surface_result.unwrap()
+        var modules: Dict<text, HirModule> = {}
+        for source in sources:
+            var lowering = hirlowering_for_module(source.module_name, surfaces)
+            modules[source.module_name] = lowering.lower_module(parsed[source.module_name])
+            expect(lowering.errors.len()).to_equal(0)
+        val (output, stats) = run_monomorphization(modules)
+        expect(stats.specializations_created).to_equal(1)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        val caller: HirModule = output["consumer"]
+        val target = class_static_direct_target(caller, "roundtrip", 1)
+        val provider: HirModule = output["factory"]
+        var matched = false
+        for key in provider.functions.keys():
+            val function: HirFunction = provider.functions[key]
+            if function.symbol.id != target: continue
+            matched = true
+            expect(function.params.len()).to_equal(1)
+            expect(function.type_params.len()).to_equal(0)
+            match function.return_type.kind:
+                case HirTypeKind.Named(symbol, _):
+                    expect(mono_type_identity(provider.symbols, symbol, "factory")).to_equal("payload.Payload")
+                case _: fail("imported payload result lost its nominal owner")
+        expect(matched).to_equal(true)
