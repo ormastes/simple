@@ -204,50 +204,7 @@ pub(crate) fn find_archive_tool() -> Result<String, String> {
     }
 }
 
-fn is_msvc_archive_tool(tool: &str) -> bool {
-    Path::new(tool)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .is_some_and(|stem| {
-            stem.eq_ignore_ascii_case("lib") || stem.eq_ignore_ascii_case("llvm-lib")
-        })
-}
-
-pub(super) fn archive_create_command(
-    tool: &str,
-    archive: &Path,
-    objects: &[PathBuf],
-    append: bool,
-    deterministic: bool,
-) -> std::process::Command {
-    let mut command = std::process::Command::new(tool);
-    if is_msvc_archive_tool(tool) {
-        command.arg("/NOLOGO").arg(format!("/OUT:{}", archive.display()));
-        if append {
-            command.arg(archive);
-        }
-    } else {
-        let mode = match (append, deterministic) {
-            (false, false) => "rcs",
-            (true, false) => "rs",
-            (false, true) => "rcsD",
-            (true, true) => "rsD",
-        };
-        command.arg(mode).arg(archive);
-    }
-    command.args(objects);
-    command
-}
-
-pub(super) fn archive_list_command(tool: &str, archive: &Path) -> std::process::Command {
-    let mut command = std::process::Command::new(tool);
-    if is_msvc_archive_tool(tool) {
-        command.arg("/NOLOGO").arg("/LIST").arg(archive);
-    } else {
-        command.arg("t").arg(archive);
-    }
-    command
-}
+pub(super) use super::archive::{archive_create_command, archive_list_command};
 
 pub(crate) fn find_cxx_compiler() -> String {
     simple_common::platform::cc_detect::find_cxx_compiler()
