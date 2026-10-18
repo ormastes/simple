@@ -1,0 +1,185 @@
+# New managed-parser protocol; not a native-object manifest compatibility alias.
+use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1, builder_relative_path_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+struct ManagedParseModuleV1:
+    module_id: text
+    package_id: text
+    source_path: text
+    source_digest: text
+
+struct ManagedParseSnapshotV1:
+    worker_id: text
+    generation: i64
+    worker_digest: text
+    snapshot_digest: text
+    cache_identity: text
+    target_os: text
+    target_arch: text
+    target_cpu: text
+    max_source_bytes: i64
+    modules: [ManagedParseModuleV1]
+
+struct ManagedParseActionV1:
+    action_id: text
+    group_id: text
+    worker_id: text
+    generation: i64
+    lease_id: text
+    snapshot_digest: text
+    cache_identity: text
+    package_members: [text]
+    keep_going: bool
+
+fn managed_parse_fields_v1(fields: [text]) -> text:
+    var out = ""
+    for field in fields: out = out + builder_wire_line_v1(field)
+    out
+
+fn managed_parse_list_read_v1(reader: BuilderWireReaderV1) -> [text]:
+    val count = reader.number(4096, false)
+    var out: [text] = []
+    for i in 0..count: out = out.push(reader.scalar())
+    out
+
+fn managed_parse_list_wire_v1(values: [text]) -> text:
+    managed_parse_fields_v1(["{values.len()}"] + values)
+
+fn managed_parse_unique_ids_v1(values: [text]) -> bool:
+    if values.len() == 0 or values.len() > 4096: return false
+    var seen: [text] = []
+    for value in values:
+        if not builder_identifier_valid_v1(value) or seen.contains(value): return false
+        seen = seen.push(value)
+    true
+
+fn managed_parse_snapshot_body_v1(value: ManagedParseSnapshotV1) -> text:
+    var out = managed_parse_fields_v1([value.worker_digest, value.cache_identity,
+        value.target_os, value.target_arch, value.target_cpu, "{value.max_source_bytes}", "{value.modules.len()}"])
+    for module in value.modules:
+        out = out + managed_parse_fields_v1([module.module_id, module.package_id, module.source_path, module.source_digest])
+    out
+
+fn managed_parse_snapshot_shape_v1(value: ManagedParseSnapshotV1) -> text:
+    if not builder_identifier_valid_v1(value.worker_id) or value.generation < 1 or value.generation > 2147483647:
+        return "invalid snapshot worker generation"
+    if not builder_digest_valid_v1(value.worker_digest) or not builder_digest_valid_v1(value.cache_identity): return "invalid snapshot producer/cache"
+    for target in [value.target_os, value.target_arch, value.target_cpu]:
+        if not builder_identifier_valid_v1(target): return "invalid snapshot target"
+    if value.max_source_bytes < 1 or value.max_source_bytes > 134217728: return "invalid source byte bound"
+    if value.modules.len() == 0 or value.modules.len() > 4096: return "invalid module count"
+    var ids: [text] = []
+    var paths: [text] = []
+    for module in value.modules:
+        if not builder_identifier_valid_v1(module.module_id) or not builder_identifier_valid_v1(module.package_id): return "invalid module identity"
+        if ids.contains(module.module_id) or paths.contains(module.source_path): return "duplicate module or source"
+        if not builder_relative_path_valid_v1(module.source_path) or not builder_digest_valid_v1(module.source_digest): return "invalid module source"
+        ids = ids.push(module.module_id)
+        paths = paths.push(module.source_path)
+    ""
+
+fn managed_parse_snapshot_digest_v1(value: ManagedParseSnapshotV1) -> text:
+    if managed_parse_snapshot_shape_v1(value) != "": return ""
+    # Stable across worker replacement; the action separately binds slot/lease.
+    sha256_text("SIMPLE-MANAGED-PARSE-CONTENT-1\n" + managed_parse_snapshot_body_v1(value))
+
+fn managed_parse_snapshot_validate_v1(value: ManagedParseSnapshotV1) -> text:
+    val reason = managed_parse_snapshot_shape_v1(value)
+    if reason != "": return reason
+    if value.snapshot_digest != managed_parse_snapshot_digest_v1(value): return "snapshot digest mismatch"
+    ""
+
+fn managed_parse_snapshot_encode_v1(value: ManagedParseSnapshotV1) -> text:
+    if managed_parse_snapshot_validate_v1(value) != "": return ""
+    val out = "SIMPLE-MANAGED-PARSE-SNAPSHOT-1\n" + managed_parse_fields_v1([value.worker_id, "{value.generation}", value.snapshot_digest]) + managed_parse_snapshot_body_v1(value)
+    if out.len() > 65536: return ""
+    out
+
+fn managed_parse_snapshot_decode_v1(payload: text) -> Result<ManagedParseSnapshotV1, text>:
+    val reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "SIMPLE-MANAGED-PARSE-SNAPSHOT-1": return Err("invalid snapshot header")
+    val worker = reader.scalar()
+    val generation = reader.number(2147483647, false)
+    val digest = reader.scalar()
+    val producer = reader.scalar()
+    val cache = reader.scalar()
+    val os = reader.scalar()
+    val arch = reader.scalar()
+    val cpu = reader.scalar()
+    val bound = reader.number(134217728, false)
+    val count = reader.number(4096, false)
+    var modules: [ManagedParseModuleV1] = []
+    for i in 0..count:
+        modules = modules.push(ManagedParseModuleV1(reader.scalar(), reader.scalar(), reader.scalar(), reader.scalar()))
+    if reader.complete_error() != "": return Err(reader.complete_error())
+    val value = ManagedParseSnapshotV1(worker, generation, producer, digest, cache, os, arch, cpu, bound, modules)
+    val reason = managed_parse_snapshot_validate_v1(value)
+    if reason != "": return Err(reason)
+    if managed_parse_snapshot_encode_v1(value) != payload: return Err("noncanonical snapshot")
+    Ok(value)
+
+fn managed_parse_action_shape_v1(value: ManagedParseActionV1) -> text:
+    for id in [value.action_id, value.group_id, value.worker_id, value.lease_id]:
+        if not builder_identifier_valid_v1(id): return "invalid action identity"
+    if value.generation < 1 or value.generation > 2147483647: return "invalid action generation"
+    if not builder_digest_valid_v1(value.snapshot_digest) or not builder_digest_valid_v1(value.cache_identity): return "invalid action digest"
+    if not managed_parse_unique_ids_v1(value.package_members): return "invalid action membership"
+    ""
+
+fn managed_parse_action_validate_v1(snapshot: ManagedParseSnapshotV1, action: ManagedParseActionV1) -> text:
+    val snapshot_error = managed_parse_snapshot_validate_v1(snapshot)
+    if snapshot_error != "": return snapshot_error
+    val reason = managed_parse_action_shape_v1(action)
+    if reason != "": return reason
+    if action.worker_id != snapshot.worker_id or action.generation != snapshot.generation or action.snapshot_digest != snapshot.snapshot_digest or action.cache_identity != snapshot.cache_identity: return "action snapshot mismatch"
+    for package in action.package_members:
+        var found = false
+        for module in snapshot.modules:
+            if module.package_id == package: found = true
+        if not found: return "action package absent"
+    ""
+
+fn managed_parse_action_encode_v1(value: ManagedParseActionV1) -> text:
+    if managed_parse_action_shape_v1(value) != "": return ""
+    val out = "SIMPLE-MANAGED-PARSE-ACTION-1\n" + managed_parse_fields_v1([value.action_id, value.group_id, value.worker_id,
+        "{value.generation}", value.lease_id, value.snapshot_digest, value.cache_identity,
+        if value.keep_going: "1" else: "0"]) + managed_parse_list_wire_v1(value.package_members)
+    if out.len() > 65536: return ""
+    out
+
+fn managed_parse_action_decode_v1(payload: text) -> Result<ManagedParseActionV1, text>:
+    val reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "SIMPLE-MANAGED-PARSE-ACTION-1": return Err("invalid action header")
+    val id = reader.scalar()
+    val group = reader.scalar()
+    val worker = reader.scalar()
+    val generation = reader.number(2147483647, false)
+    val lease = reader.scalar()
+    val snapshot = reader.scalar()
+    val cache = reader.scalar()
+    val keep = reader.number(1, false) == 1
+    val members = managed_parse_list_read_v1(reader)
+    if reader.complete_error() != "": return Err(reader.complete_error())
+    val value = ManagedParseActionV1(id, group, worker, generation, lease, snapshot, cache, members, keep)
+    if managed_parse_action_shape_v1(value) != "" or managed_parse_action_encode_v1(value) != payload: return Err("invalid or noncanonical action")
+    Ok(value)
+
+fn managed_parse_action_basename_v1(value: ManagedParseActionV1) -> text:
+    val wire = managed_parse_action_encode_v1(value)
+    if wire == "": return ""
+    sha256_text(wire) + ".sdn"
+
+fn managed_parse_module_cache_key_v1(snapshot: ManagedParseSnapshotV1, module: ManagedParseModuleV1) -> text:
+    if managed_parse_snapshot_validate_v1(snapshot) != "": return ""
+    var found = false
+    for candidate in snapshot.modules:
+        if candidate.module_id == module.module_id and candidate.package_id == module.package_id and candidate.source_path == module.source_path and candidate.source_digest == module.source_digest: found = true
+    if not found: return ""
+    sha256_text("SIMPLE-MANAGED-PARSE-MODULE-CACHE-1\n" + managed_parse_fields_v1([
+        snapshot.snapshot_digest, module.module_id, module.package_id, module.source_path, module.source_digest]))
+
+export ManagedParseModuleV1, ManagedParseSnapshotV1, ManagedParseActionV1
+export managed_parse_snapshot_digest_v1, managed_parse_snapshot_validate_v1, managed_parse_snapshot_encode_v1, managed_parse_snapshot_decode_v1
+export managed_parse_action_shape_v1, managed_parse_action_validate_v1, managed_parse_action_encode_v1, managed_parse_action_decode_v1, managed_parse_action_basename_v1, managed_parse_module_cache_key_v1
+export managed_parse_fields_v1, managed_parse_list_read_v1, managed_parse_list_wire_v1, managed_parse_unique_ids_v1

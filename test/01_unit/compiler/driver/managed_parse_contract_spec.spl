@@ -1,0 +1,136 @@
+# @req REQ-MANAGED-PARSE-WIRE-001 REQ-MANAGED-PARSE-AUTHORITY-002
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.driver_build.managed_parse_group_contract.*
+use compiler.driver.driver_build.managed_parse_group_result.*
+use compiler.driver.driver_build.managed_parse_run_contract.*
+use compiler.driver.cache.package_scc_scheduler.{PackageCompileScheduleV1, PackageSccGroupV1, PackageSccWaveV1, package_scc_identity_v1}
+use compiler.driver.action_graph.persisted_graph.{PersistedBuildGraphV1, persisted_graph_digest_v1}
+use compiler.driver.action_graph.build_action_v1.{BuildActionV1, BuildActionPoolV1}
+use lib.compiler_artifact_service.profile.{ArtifactServiceProfileV1}
+use std.common.build_manager.grouped_execution_contract.{GroupedActionBindingV1}
+
+fn parse_contract_snapshot() -> ManagedParseSnapshotV1:
+    var snapshot = ManagedParseSnapshotV1("worker", 1, sha256_text("producer"), "", sha256_text("cache"),
+        "linux", "aarch64", "generic", 1048576,
+        [ManagedParseModuleV1("module", "package", "input.spl", sha256_text("source"))])
+    snapshot.snapshot_digest = managed_parse_snapshot_digest_v1(snapshot)
+    snapshot
+
+fn parse_contract_action(snapshot: ManagedParseSnapshotV1) -> ManagedParseActionV1:
+    ManagedParseActionV1("parse", "group", snapshot.worker_id, snapshot.generation,
+        "lease", snapshot.snapshot_digest, snapshot.cache_identity, ["package"], true)
+
+fn parse_contract_result(snapshot: ManagedParseSnapshotV1) -> ManagedParseActionResultV1:
+    val blob = sha256_text("real parser output belongs to worker tests")
+    ManagedParseActionResultV1(parse_contract_action(snapshot),
+        [ManagedParseModuleResultV1("module", snapshot.modules[0].source_digest,
+            "OK", "artifacts/" + blob + ".flat", blob, [], false)], "")
+
+fn parse_contract_run() -> ManagedParseRunV1:
+    val snapshot = parse_contract_snapshot()
+    val variant = sha256_text("variant")
+    val group = PackageSccGroupV1(package_scc_identity_v1(["package"], variant), ["package"], [])
+    val schedule = PackageCompileScheduleV1(true, "ok", variant, ["package"], [group], [PackageSccWaveV1(0, [group])])
+    val action = BuildActionV1("parse", "managed-reference-parse-v1:" + snapshot.worker_digest,
+        [snapshot.modules[0].source_digest], [], ["parse.flat-receipt"], BuildActionPoolV1.parse,
+        100, snapshot.snapshot_digest, 1024, snapshot.cache_identity)
+    var graph = PersistedBuildGraphV1("pending", "", snapshot.snapshot_digest, [action])
+    graph.generation = persisted_graph_digest_v1(graph)
+    val profile = ArtifactServiceProfileV1("parser", snapshot.cache_identity, ["parse"], 0, false, "cas", 1, 4096, 4096)
+    ManagedParseRunV1("run", schedule, graph, profile,
+        [GroupedActionBindingV1(group.identity, "parse", "parse", snapshot.snapshot_digest, snapshot.cache_identity, false)],
+        ["worker"], [snapshot], "/work/source", "/work/state", "/tools/parser", snapshot.worker_digest,
+        ["SIMPLE_NO_STUB_FALLBACK=1"], 1, true, 20, 30000, 10000, "/tools/broker", sha256_text("broker"), 120000)
+
+describe "managed parser wire contracts":
+    it "round trips the actual nested run codec":
+        step("Encode a graph, schedule, profile, binding and snapshot")
+        val run = parse_contract_run()
+        expect(managed_parse_run_validate_v1(run)).to_equal("")
+        val wire = managed_parse_run_encode_v1(run)
+        expect(wire).to_start_with("SIMPLE-MANAGED-PARSE-RUN-1\n")
+        val decoded = managed_parse_run_decode_v1(wire)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(managed_parse_run_encode_v1(decoded.unwrap())).to_equal(wire)
+        expect(decoded.unwrap().snapshots[0].modules[0].source_path).to_equal("input.spl")
+
+    it "keeps cache identity across worker replacement but invalidates changed source and target":
+        val first = parse_contract_snapshot()
+        var peer = parse_contract_snapshot()
+        peer.worker_id = "replacement"
+        peer.generation = 2
+        expect(managed_parse_snapshot_digest_v1(peer)).to_equal(first.snapshot_digest)
+        expect(managed_parse_module_cache_key_v1(peer, peer.modules[0])).to_equal(managed_parse_module_cache_key_v1(first, first.modules[0]))
+        peer.target_cpu = "other"
+        expect(managed_parse_snapshot_digest_v1(peer) == first.snapshot_digest).to_equal(false)
+        var changed = parse_contract_snapshot()
+        changed.modules = [ManagedParseModuleV1("module", "package", "input.spl", sha256_text("changed"))]
+        expect(managed_parse_snapshot_digest_v1(changed) == first.snapshot_digest).to_equal(false)
+        expect(managed_parse_snapshot_validate_v1(changed)).to_equal("snapshot digest mismatch")
+
+    it "rejects duplicate modules and traversal paths before encoding":
+        var duplicate = parse_contract_snapshot()
+        duplicate.modules = duplicate.modules + duplicate.modules
+        expect(managed_parse_snapshot_encode_v1(duplicate)).to_equal("")
+        var traversal = parse_contract_snapshot()
+        traversal.modules = [ManagedParseModuleV1("module", "package", "../escape.spl", sha256_text("source"))]
+        expect(managed_parse_snapshot_encode_v1(traversal)).to_equal("")
+
+    it "round trips results and refuses stale lease, membership and source":
+        val snapshot = parse_contract_snapshot()
+        val action = parse_contract_action(snapshot)
+        val result = parse_contract_result(snapshot)
+        val wire = managed_parse_action_result_encode_v1(result)
+        val decoded = managed_parse_action_result_decode_v1(wire)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(managed_parse_action_result_validate_v1(snapshot, action, decoded.unwrap())).to_equal("")
+        var stale = parse_contract_action(snapshot)
+        stale.lease_id = "different"
+        expect(managed_parse_action_result_validate_v1(snapshot, stale, result)).to_equal("result lease/action mismatch")
+        var replaced = parse_contract_result(snapshot)
+        val blob = replaced.modules[0].blob_digest
+        replaced.modules = [ManagedParseModuleResultV1("other", snapshot.modules[0].source_digest, "OK", "artifacts/" + blob + ".flat", blob, [], false)]
+        expect(managed_parse_action_result_validate_v1(snapshot, action, replaced)).to_equal("result inventory mismatch")
+        replaced.modules = [ManagedParseModuleResultV1("module", sha256_text("changed"), "OK", "artifacts/" + blob + ".flat", blob, [], false)]
+        expect(managed_parse_action_result_validate_v1(snapshot, action, replaced)).to_equal("result inventory mismatch")
+
+    it "retains real failure text and rejects unknown or contradictory status":
+        val snapshot = parse_contract_snapshot()
+        val error = ManagedParseModuleResultV1("module", snapshot.modules[0].source_digest, "ERROR", "", "", ["syntax error at input.spl:1"], false)
+        val failed = ManagedParseActionResultV1(parse_contract_action(snapshot), [error], "parse failed")
+        expect(managed_parse_action_result_validate_v1(snapshot, failed.action, failed)).to_equal("")
+        val wire = managed_parse_action_result_encode_v1(failed)
+        expect(managed_parse_action_result_decode_v1(wire).unwrap().modules[0].diagnostics).to_equal(["syntax error at input.spl:1"])
+        val missing_error = ManagedParseActionResultV1(failed.action, [error], "")
+        expect(managed_parse_action_result_encode_v1(missing_error)).to_equal("")
+        var unknown = error
+        unknown.status = "CACHED"
+        expect(managed_parse_module_result_encode_v1(unknown)).to_equal("")
+        var reused_failure = error
+        reused_failure.reused = true
+        expect(managed_parse_module_result_encode_v1(reused_failure)).to_equal("")
+
+    it "rejects truncated trailing and invalid wire data":
+        val wire = managed_parse_snapshot_encode_v1(parse_contract_snapshot())
+        expect(managed_parse_snapshot_decode_v1(wire + "extra\n").is_err()).to_equal(true)
+        expect(managed_parse_snapshot_decode_v1(wire.substring(0, wire.len() - 1)).is_err()).to_equal(true)
+        expect(managed_parse_snapshot_decode_v1(wire.replace("worker\n", "%XX\n")).is_err()).to_equal(true)
+        expect(managed_parse_run_decode_v1("SIMPLE-MANAGED-PARSE-RUN-9\n").is_err()).to_equal(true)
+
+    it "refuses run authority and process-bound changes":
+        var run = parse_contract_run()
+        run.worker_digest = sha256_text("replacement")
+        expect(managed_parse_run_validate_v1(run)).to_equal("snapshot worker/cache mismatch")
+        run = parse_contract_run()
+        run.worker_slots = ["worker", "worker"]
+        expect(managed_parse_run_validate_v1(run)).to_equal("invalid worker slots")
+        run = parse_contract_run()
+        run.environment = ["A=1", "a=2"]
+        expect(managed_parse_run_validate_v1(run)).to_equal("duplicate or invalid environment name")
+        run = parse_contract_run()
+        run.lifetime_ms = 1
+        expect(managed_parse_run_validate_v1(run)).to_equal("invalid process deadlines")
+        run = parse_contract_run()
+        run.bindings = []
+        expect(managed_parse_run_validate_v1(run)).to_equal("invalid parse graph")
