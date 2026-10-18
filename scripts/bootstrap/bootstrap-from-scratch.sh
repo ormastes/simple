@@ -1527,9 +1527,31 @@ run_timeout_kill() {
 absolute_path() {
   case "$1" in
     /*) printf '%s\n' "$1" ;;
+    [A-Za-z]:[\\/]*) cygpath -u -- "$1" ;;
     *) printf '%s/%s\n' "${repo_root}" "$1" ;;
   esac
 }
+
+bootstrap_refresh_stage2_source_path() {
+  [ "$#" -eq 1 ] || return 1
+  case "$1" in
+    [A-Za-z]:[\\/]*)
+      # MSYS can rewrite a nested bash.exe option to D:/... before parsing.
+      # Preserve the strict lexical checks before cygpath can normalize them.
+      refresh_native_path=$(printf '%s\n' "$1" | tr '\\' '/') || return 1
+      case "/${refresh_native_path}/" in *//*|*/./*|*/../*) return 1 ;; esac
+      absolute_path "$refresh_native_path"
+      ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+if [ -n "${refresh_stage2_source_cache}" ]; then
+  refresh_stage2_source_cache=$(bootstrap_refresh_stage2_source_path "${refresh_stage2_source_cache}") || {
+    echo 'error: source refresh predecessor path normalization failed' >&2
+    exit 64
+  }
+fi
 
 if [ -n "${LLVM_PREFIX:-}" ] && [ -d "${LLVM_PREFIX}/bin" ]; then
   # llvm-config --prefix reports a native spelling (on Windows a C:/... path);
@@ -1881,7 +1903,10 @@ bootstrap_prepare_phase_cache() {
       [ "$(hash_file "$4")" = "$(hash_file "${seed_bin}")" ] || {
       echo 'error: source refresh rejected: unsupported Rust dependency-key owner/producer' >&2; exit 64;
     }
-    bootstrap_cache_new_path_validate "${refresh_stage2_source_cache}" || exit 64
+    bootstrap_cache_new_path_validate "${refresh_stage2_source_cache}" || {
+      echo 'error: source refresh predecessor path must be canonical and must not be a symlink' >&2
+      exit 64
+    }
     cache_refresh_records="${log_dir}/cache-source-transitions"
     bootstrap_cache_new_path_validate "$(absolute_path "${cache_refresh_records}")" || exit 64
     mkdir -p "${cache_refresh_records}" || exit 1
