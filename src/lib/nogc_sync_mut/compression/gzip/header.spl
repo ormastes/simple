@@ -21,76 +21,76 @@ use std.nogc_sync_mut.compression.gzip.crc.{crc32_calculate}
 
 # Create GZIP header
 # Returns: array of header bytes
-fn gzip_header_create(filename, timestamp, extra_flags, os_type):
-    var header = []
+fn gzip_header_create(filename, timestamp: i64, extra_flags: i64, os_type: i64) -> [u8]:
+    var header: [u8] = []
 
     # Magic bytes
-    header.push(GZIP_MAGIC1)
-    header.push(GZIP_MAGIC2)
+    header.push((GZIP_MAGIC1).to_u8())
+    header.push((GZIP_MAGIC2).to_u8())
 
     # Compression method (8 = DEFLATE)
-    header.push(CM_DEFLATE)
+    header.push((CM_DEFLATE).to_u8())
 
     # Flags
     var flags = 0
     if filename != nil:
         flags = flags | FLAG_NAME
-    header.push(flags)
+    header.push((flags).to_u8())
 
     # Timestamp (4 bytes, little-endian)
     val ts = timestamp
-    header.push(ts & 0xff)
-    header.push((ts >> 8) & 0xff)
-    header.push((ts >> 16) & 0xff)
-    header.push((ts >> 24) & 0xff)
+    header.push((ts & 0xff).to_u8())
+    header.push(((ts >> 8) & 0xff).to_u8())
+    header.push(((ts >> 16) & 0xff).to_u8())
+    header.push(((ts >> 24) & 0xff).to_u8())
 
     # Extra flags
-    header.push(extra_flags)
+    header.push((extra_flags).to_u8())
 
     # OS type
-    header.push(os_type)
+    header.push((os_type).to_u8())
 
-    # Optional filename
+    # Optional filename: raw bytes, zero-terminated (RFC 1952 2.3.1 FNAME)
     if filename != nil:
-        var i = 0
-        loop:
-            if i >= filename.len():
-                break
-            val ch = filename[i]
-            header.push(char_to_byte(ch))
-            i = i + 1
-        # Null terminator
-        header.push(0)
+        for b in filename.bytes():
+            header.push(b)
+        header.push(0u8)
 
     return header
 
-# Parse GZIP header
+# Parse GZIP header at the start of `data`
 # Returns: (flags, timestamp, extra_flags, os, header_size) or nil
 fn gzip_header_parse(data):
+    gzip_header_parse_at(data, 0)
+
+# Parse the GZIP member header that starts at byte offset `base` (RFC 1952 2.2: a
+# file is a series of members). The last element is the ABSOLUTE offset of the
+# first byte after the header.
+fn gzip_header_parse_at(data, base: i64):
     if data == nil:
         return nil
 
-    if data.len() < 10:
+    if base < 0 or data.len() < base + 10:
         return nil
 
     # Check magic bytes
-    if data[0].to_i64() != GZIP_MAGIC1:
+    if data[base].to_i64() != GZIP_MAGIC1:
         return nil
-    if data[1].to_i64() != GZIP_MAGIC2:
+    if data[base + 1].to_i64() != GZIP_MAGIC2:
         return nil
 
     # Check compression method
-    if data[2].to_i64() != CM_DEFLATE:
+    if data[base + 2].to_i64() != CM_DEFLATE:
         return nil
 
-    val flags = data[3].to_i64()
+    val flags = data[base + 3].to_i64()
     if (flags & 0xE0) != 0:
         return nil
-    val timestamp = data[4].to_i64() | (data[5].to_i64() << 8) | (data[6].to_i64() << 16) | (data[7].to_i64() << 24)
-    val extra_flags = data[8].to_i64()
-    val os = data[9].to_i64()
+    val timestamp = data[base + 4].to_i64() | (data[base + 5].to_i64() << 8) | (data[base + 6].to_i64() << 16) | (data[base + 7].to_i64() << 24)
+    val extra_flags = data[base + 8].to_i64()
+    val os = data[base + 9].to_i64()
 
-    var offset = 10
+    var offset = base + 10
 
     # Skip extra field
     if (flags & FLAG_EXTRA) != 0:
@@ -121,12 +121,12 @@ fn gzip_header_parse(data):
                 break
             offset = offset + 1
 
-    # Skip header CRC
+    # Header CRC16: the low 16 bits of the CRC-32 of every header byte before it
     if (flags & FLAG_HCRC) != 0:
         if offset + 2 > data.len():
             return nil
-        var header_bytes = []
-        var i = 0
+        var header_bytes: [u8] = []
+        var i = base
         while i < offset:
             header_bytes.push(data[i])
             i = i + 1
@@ -151,21 +151,21 @@ fn gzip_header_size(header_info) -> i64:
 # =============================================================================
 
 # Create GZIP footer (CRC32 + uncompressed size)
-fn gzip_footer_create(crc32, size):
-    var footer = []
+fn gzip_footer_create(crc32: i64, size: i64) -> [u8]:
+    var footer: [u8] = []
 
     # CRC32 (4 bytes, little-endian)
-    footer.push(crc32 & 0xff)
-    footer.push((crc32 >> 8) & 0xff)
-    footer.push((crc32 >> 16) & 0xff)
-    footer.push((crc32 >> 24) & 0xff)
+    footer.push((crc32 & 0xff).to_u8())
+    footer.push(((crc32 >> 8) & 0xff).to_u8())
+    footer.push(((crc32 >> 16) & 0xff).to_u8())
+    footer.push(((crc32 >> 24) & 0xff).to_u8())
 
     # Uncompressed size modulo 2^32 (4 bytes, little-endian)
     val size_mod = size & 0xffffffff
-    footer.push(size_mod & 0xff)
-    footer.push((size_mod >> 8) & 0xff)
-    footer.push((size_mod >> 16) & 0xff)
-    footer.push((size_mod >> 24) & 0xff)
+    footer.push((size_mod & 0xff).to_u8())
+    footer.push(((size_mod >> 8) & 0xff).to_u8())
+    footer.push(((size_mod >> 16) & 0xff).to_u8())
+    footer.push(((size_mod >> 24) & 0xff).to_u8())
 
     return footer
 
@@ -209,29 +209,3 @@ fn gzip_footer_validate(footer_info, data, expected_size):
         return false
 
     return true
-
-# =============================================================================
-# UTILITY FUNCTIONS
-# =============================================================================
-
-# Convert character to byte value
-fn char_to_byte(ch):
-    if ch == "a":
-        return 97
-    if ch == "b":
-        return 98
-    if ch == "z":
-        return 122
-    if ch == "A":
-        return 65
-    if ch == "Z":
-        return 90
-    if ch == "0":
-        return 48
-    if ch == "9":
-        return 57
-    if ch == ".":
-        return 46
-    if ch == "/":
-        return 47
-    return 0
