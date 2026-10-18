@@ -807,55 +807,52 @@ impl HirLowering:
                 # when consumed directly (bug doc iteration 18).
                 val ident_name_t: text = name
                 val symbol = self.symbols.lookup(ident_name_t)
-                if val found_symbol = symbol:
-                    # NOTE: `if val found_symbol = symbol:` is not sufficient
-                    # here -- same class of bug fixed in 413d121a011 for MIR
-                    # `if val ... .type_:` sites: the seed interpreter's
-                    # `if val` presence check can still enter this true
-                    # branch with `found_symbol` bound to nil when the
-                    # lookup actually failed. Downstream consumers of
-                    # HirExprKind.NamedVar (e.g. MIR lowering's `symbol.id`
-                    # access) assume `symbol` is never nil, so a redundant
-                    # explicit nil re-check here avoids constructing a
-                    # NamedVar with a nil symbol and crashing later with
-                    # "undefined field 'id': cannot access field on value
-                    # of type 'nil'".
-                    if found_symbol == nil:
-                        self.lower_unresolved_ident(ident_name_t, e.span)
-                    else:
-                        # Under a --entry-closure bootstrap build, a
-                        # cross-module imported (or same-module,
-                        # non-entry-module) function's stored symbol name may
-                        # have been rewritten to a qualified `module.function`
-                        # form (qualify_imported_function_symbol /
-                        # bootstrap_decl_idx's rename_symbol call, both in
-                        # this file's `impl HirLowering` block) so it stays
-                        # distinct from a same-named function in a DIFFERENT
-                        # module -- the flat MIR accumulator
-                        # (bootstrap_lower_extra_hir_module_to_mir,
-                        # bootstrap_globals.spl) keys/emits every closure
-                        # helper module's functions the same qualified way.
-                        # Bake the CURRENT stored name into this NamedVar's
-                        # payload text HERE (same HIR-lowering pass as the
-                        # rename, so the mutation is still visible) rather
-                        # than deferring to a fresh `self.symbols` lookup at
-                        # MIR-lowering time: a symbol-table rename applied
-                        # during HIR lowering does not survive the trip
-                        # through the bootstrap entry-HIR-module global into
-                        # that later, separate pass (the interpreter's known
-                        # "mutating a class held inside a value-type struct
-                        # across a pass boundary" landmine) even though it IS
-                        # visible to a same-pass lookup like this one (bug
-                        # bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe
-                        # B). A name that was never rewritten (the common
-                        # case: normal compiles, single-entry bootstrap
-                        # builds, and the entry closure module's own
-                        # same-module calls) round-trips to `ident_name_t`
-                        # unchanged, so this is a no-op there.
-                        val display_name = self.symbols.symbol_display_name(found_symbol, ident_name_t)
-                        HirExprKind.NamedVar(found_symbol, display_name)
-                else:
+                # Cycle-160 (v21, 2026-10-18): the `if val` presence bind of
+                # this lookup optional copied the Some payload from an
+                # erased-draw optional and SIGSEGV'd inside lower_hir_expr
+                # (instrumented run: last [unbox] site before the crash; wild
+                # word 0x...577128 on the payload copy). Guard on nil BEFORE
+                # any unbox, then bind the payload ONCE into an annotated
+                # concrete local (the codec-pool single-read class) and use
+                # that word for both consumers. Outcomes are unchanged:
+                # absent (either level of nil) -> lower_unresolved_ident;
+                # present -> NamedVar. (The older NOTE's nil-recheck is
+                # subsumed by the pre-guard.)
+                if symbol == nil or symbol.? == nil:
                     self.lower_unresolved_ident(ident_name_t, e.span)
+                else:
+                    val found_symbol: HirSymbol = symbol.?
+                    # Under a --entry-closure bootstrap build, a
+                    # cross-module imported (or same-module,
+                    # non-entry-module) function's stored symbol name may
+                    # have been rewritten to a qualified `module.function`
+                    # form (qualify_imported_function_symbol /
+                    # bootstrap_decl_idx's rename_symbol call, both in
+                    # this file's `impl HirLowering` block) so it stays
+                    # distinct from a same-named function in a DIFFERENT
+                    # module -- the flat MIR accumulator
+                    # (bootstrap_lower_extra_hir_module_to_mir,
+                    # bootstrap_globals.spl) keys/emits every closure
+                    # helper module's functions the same qualified way.
+                    # Bake the CURRENT stored name into this NamedVar's
+                    # payload text HERE (same HIR-lowering pass as the
+                    # rename, so the mutation is still visible) rather
+                    # than deferring to a fresh `self.symbols` lookup at
+                    # MIR-lowering time: a symbol-table rename applied
+                    # during HIR lowering does not survive the trip
+                    # through the bootstrap entry-HIR-module global into
+                    # that later, separate pass (the interpreter's known
+                    # "mutating a class held inside a value-type struct
+                    # across a pass boundary" landmine) even though it IS
+                    # visible to a same-pass lookup like this one (bug
+                    # bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe
+                    # B). A name that was never rewritten (the common
+                    # case: normal compiles, single-entry bootstrap
+                    # builds, and the entry closure module's own
+                    # same-module calls) round-trips to `ident_name_t`
+                    # unchanged, so this is a no-op there.
+                    val display_name = self.symbols.symbol_display_name(found_symbol, ident_name_t)
+                    HirExprKind.NamedVar(found_symbol, display_name)
 
             # NOTE: ExprKind.Field and ExprKind.Block arms are handled by the
             # discriminant pre-dispatch above (seed always-true struct-pattern
