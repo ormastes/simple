@@ -27,8 +27,7 @@ fn parse_contract_result(snapshot: ManagedParseSnapshotV1) -> ManagedParseAction
         [ManagedParseModuleResultV1("module", snapshot.modules[0].source_digest,
             "OK", "artifacts/" + blob + ".flat", blob, [], false)], "")
 
-fn parse_contract_run() -> ManagedParseRunV1:
-    val snapshot = parse_contract_snapshot()
+fn parse_contract_run_for(snapshot: ManagedParseSnapshotV1) -> ManagedParseRunV1:
     val variant = sha256_text("variant")
     val group = PackageSccGroupV1(package_scc_identity_v1(["package"], variant), ["package"], [])
     val schedule = PackageCompileScheduleV1(true, "ok", variant, ["package"], [group], [PackageSccWaveV1(0, [group])])
@@ -42,6 +41,9 @@ fn parse_contract_run() -> ManagedParseRunV1:
         [GroupedActionBindingV1(group.identity, "parse", "parse", snapshot.snapshot_digest, snapshot.cache_identity, false)],
         ["worker"], [snapshot], "/work/source", "/work/state", "/tools/parser", snapshot.worker_digest,
         ["SIMPLE_NO_STUB_FALLBACK=1"], 1, true, 20, 30000, 10000, "/tools/broker", sha256_text("broker"), 120000)
+
+fn parse_contract_run() -> ManagedParseRunV1:
+    parse_contract_run_for(parse_contract_snapshot())
 
 describe "managed parser wire contracts":
     it "round trips the actual nested run codec":
@@ -171,3 +173,28 @@ describe "managed parser wire contracts":
         run = parse_contract_run()
         run.profile.pools = ["parse", "bad\0pool"]
         expect(managed_parse_run_encode_v1(run)).to_equal("")
+
+    it "binds two identical source blobs as distinct modules with one graph dependency":
+        var snapshot = parse_contract_snapshot()
+        snapshot.modules = snapshot.modules + [ManagedParseModuleV1("peer", "package", "peer.spl", snapshot.modules[0].source_digest)]
+        snapshot.snapshot_digest = managed_parse_snapshot_digest_v1(snapshot)
+        var run = parse_contract_run_for(snapshot)
+        expect(run.graph.actions[0].inputs.len()).to_equal(1)
+        expect(managed_parse_run_validate_v1(run)).to_equal("")
+        val decoded = managed_parse_run_decode_v1(managed_parse_run_encode_v1(run))
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().snapshots[0].modules.len()).to_equal(2)
+        expect(decoded.unwrap().snapshots[0].modules[1].source_path).to_equal("peer.spl")
+        var action = run.graph.actions[0]
+        action.inputs = []
+        var graph = PersistedBuildGraphV1("pending", "", run.graph.snapshot_revision, [action])
+        graph.generation = persisted_graph_digest_v1(graph)
+        run.graph = graph
+        expect(managed_parse_run_validate_v1(run)).to_equal("action source membership mismatch")
+        run = parse_contract_run_for(snapshot)
+        action = run.graph.actions[0]
+        action.inputs = action.inputs + [sha256_text("extra input")]
+        graph = PersistedBuildGraphV1("pending", "", run.graph.snapshot_revision, [action])
+        graph.generation = persisted_graph_digest_v1(graph)
+        run.graph = graph
+        expect(managed_parse_run_validate_v1(run)).to_equal("action source membership mismatch")
