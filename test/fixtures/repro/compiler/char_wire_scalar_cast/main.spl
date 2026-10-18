@@ -1,0 +1,47 @@
+# Native prerequisite probe for the generated CharLit wire decoder.
+# This proves scalar conversion only, not a complete codec repair.
+use std.common.encoding.utf8.{utf8_decode_one, utf8_encode_one}
+
+enum WireScalar:
+    Character(value: char)
+
+# @workaround bug=native_text_scalar_validation_failure_2026_10_18 recover=b4ac2495d01a25dbc564c6dff12621fe61c87897 reason=use-existing-pure-utf8-owners-for-scalar-validation
+fn scalar_text_valid(value: text) -> bool:
+    val bytes = value.bytes()
+    if bytes.len() == 0: return false
+    val decoded = utf8_decode_one(bytes, 0)
+    if decoded[1] != bytes.len(): return false
+    # The decoder substitutes U+FFFD for invalid input. Re-encoding must match
+    # every byte, so malformed sequences cannot masquerade as that valid scalar.
+    val encoded = utf8_encode_one(decoded[0])
+    if encoded.len() != bytes.len(): return false
+    var index = 0
+    while index < bytes.len():
+        if encoded[index] != bytes[index]: return false
+        index = index + 1
+    true
+
+fn scalar_from_text(value: text) -> char:
+    (value as i64) as char
+
+fn scalar_roundtrip(value: text) -> i64:
+    val scalar = scalar_from_text(value)
+    val packet = WireScalar.Character(scalar)
+    match packet:
+        case Character(decoded): decoded as i64
+
+fn main() -> i64:
+    if scalar_text_valid(""): return 11
+    if scalar_text_valid("ab"): return 12
+    val ascii_valid = scalar_text_valid("a")
+    print "CHAR_WIRE_ASCII_VALID={ascii_valid}"
+    if not ascii_valid: return 13
+    if not scalar_text_valid("é"): return 14
+    if not scalar_text_valid("😀"): return 15
+    if scalar_roundtrip("a") != 97: return 21
+    if scalar_roundtrip("é") != 233: return 22
+    if scalar_roundtrip("😀") != 128512: return 23
+    if scalar_roundtrip("\n") != 10: return 24
+    if scalar_roundtrip("\\") != 92: return 25
+    print "CHAR_WIRE_SCALAR_CAST_PASS"
+    0

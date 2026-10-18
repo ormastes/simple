@@ -66,6 +66,10 @@ fn codec_use_lines() -> text:
     out = out + "use compiler.hir.hir_types.{{HirModule}}  # explicit: a glob is not an import-origin for surface projection\n"
     out = out + "use compiler.hir.hir_operators.{{HirBinOp, HirUnaryOp, HirAssignOp}}\n"
     out = out + "use compiler.common.diagnostics.span.{{Span}}\n"
+    # Formation probe for the fail-closed encoder node guards (the erased-read
+    # campaign: a corrupt NON-NIL node must refuse the cache entry, never
+    # deref). Generic extern, the established declaration shape.
+    out = out + "extern fn rt_heap_ref_wellformed<T>(value: T) -> bool\n"
     out = out + "use compiler.common.dependency.visibility.{{Visibility}}\n"
     out = out + "use compiler.common.dynamic_identity.closure.{{Closure}}\n"
     out = out + "use compiler.blocks.value.{{BlockValue}}\n"
@@ -73,7 +77,7 @@ fn codec_use_lines() -> text:
     out = out + "use compiler.common.attributes.{{FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata, VhdlClockedMetadata, VhdlGenericMetadata, VhdlReturnFieldMetadata, VhdlResetPolarity, VhdlResetSynchrony, OptimizationReq, OptimizationReqLevel, OptimizationBackend}}\n"
     out = out + "use compiler.frontend.parser_types_expr.{{AsmTargetSpec, AsmConstraintKind, AsmLocation, Type, TypeKind, Expr}}\n"
     out = out + "use compiler.frontend.core.flat_pool_codec.{{FlatPoolReader, flat_pool_parse_i64, flat_pool_unescape}}\n"
-    out = out + "use compiler.hir.hir_codec_support.{{HirCodecWriter, hc_enc_opaque_expr, hc_dec_opaque_expr, hc_enc_opaque_block_value, hc_dec_opaque_block_value, hc_bad_tag, hc_read_f64, hc_enc_enum_bool, hc_enc_enum_text, hc_restore_enum_nil}}\n"
+    out = out + "use compiler.hir.hir_codec_support.{{HirCodecWriter, hc_enc_opaque_expr, hc_dec_opaque_expr, hc_enc_opaque_block_value, hc_dec_opaque_block_value, hc_bad_tag, hc_read_f64, hc_enc_enum_bool, hc_enc_enum_text, hc_enc_enum_char, hc_put_char, hc_read_char, hc_restore_enum_nil}}\n"
     out = out + "use compiler.hir.hir_codec_key_order.{{hc_order_i64_keys_v1, hc_order_text_keys_v1, hc_order_symbol_id_keys_v1}}\n"
     out
 
@@ -239,7 +243,9 @@ class CodecUniverse:
             return TypeShape(cat: "prim_i64", a: "", b: "", name: "")
         if t == "bool":
             return TypeShape(cat: "prim_bool", a: "", b: "", name: "")
-        if t == "text" or t == "char":
+        if t == "char":
+            return TypeShape(cat: "prim_char", a: "", b: "", name: "")
+        if t == "text":
             return TypeShape(cat: "prim_text", a: "", b: "", name: "")
         if t == "f64":
             return TypeShape(cat: "prim_f64", a: "", b: "", name: "")
@@ -405,6 +411,8 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
         return indent + "w.put_bool(" + v + ")\n"
     if s.cat == "prim_text":
         return indent + "w.put_text(" + v + ")\n"
+    if s.cat == "prim_char":
+        return indent + "hc_put_char(w, " + v + ")\n"
     if s.cat == "prim_f64":
         return indent + "w.put_f64(" + v + ")\n"
     # A declared non-optional node field can still hold nil in a real
@@ -469,6 +477,8 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
     """Statements that read one value of `type_text` into a new local `target`."""
     val s = u.classify(type_text)
     val decl_type = _strip_default(type_text).trim()
+    if s.cat == "prim_char":
+        return indent + "val " + target + " = hc_read_char(r, r.next())\n"
     # Scalars are decoded INLINE through an if-expression rather than a
     # helper returning `T?`: a helper's Some(false) is a truthy box to the
     # encoder's `if v:` and re-encoded as 1 (seen on the first round-trip run).
@@ -574,6 +584,19 @@ fn _codec_binders(fields: [FieldDecl]) -> text:
 
 fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
     var parts: [text] = ["fn " + enc_fn_name(decl.name) + "(w: HirCodecWriter, node: " + decl.name + "):\n"]
+    # Fail closed on a nil node: live compiler state can present a nil/corrupt
+    # composite (erased-read draw; measured hc_enc_span SIGSEGV at address 0x8
+    # encoding app.cli.check_dbs on the stage2 candidate, 2026-10-18). A nil
+    # node cannot be encoded faithfully, so refuse this cache entry; the
+    # owning build continues from its in-memory HIR (the shard lane finishes
+    # PASS+UNCACHED via the driver_hir_pipeline_lowering codec-refusal
+    # fallback). Never write fields off a nil node.
+    parts.push("    if node == nil:\n")
+    parts.push("        w.reject(\"nil " + decl.name + " node\")\n")
+    parts.push("        return\n")
+    parts.push("    if not rt_heap_ref_wellformed(node):\n")
+    parts.push("        w.reject(\"illformed " + decl.name + " node\")\n")
+    parts.push("        return\n")
     var c = EmitCounter(n: 0)
     if decl.is_enum:
         parts.push("    match node:\n")
@@ -589,8 +612,8 @@ fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
             var field_index = 0
             for f in fields:
                 val shape = u.classify(f.type_text)
-                if shape.cat == "prim_bool" or shape.cat == "prim_text":
-                    val helper = if shape.cat == "prim_bool": "hc_enc_enum_bool" else: "hc_enc_enum_text"
+                if shape.cat == "prim_bool" or shape.cat == "prim_text" or shape.cat == "prim_char":
+                    val helper = if shape.cat == "prim_bool": "hc_enc_enum_bool" elif shape.cat == "prim_char": "hc_enc_enum_char" else: "hc_enc_enum_text"
                     parts.push("            " + helper + "(w, node, " + "{fields.len()}" + ", " + "{field_index}" + ", b_" + f.binder + ")\n")
                 else:
                     parts.push(_emit_enc(u, f.type_text, "b_" + f.binder, "            ", c))
@@ -628,7 +651,7 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
             var field_index = 0
             for f in fields:
                 val shape = u.classify(f.type_text)
-                if shape.cat == "prim_bool" or shape.cat == "prim_text":
+                if shape.cat == "prim_bool" or shape.cat == "prim_text" or shape.cat == "prim_char":
                     val k = c.next()
                     val target = "f_" + f.binder
                     val flag = "wire_nil_" + f.binder
@@ -636,6 +659,10 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
                     if shape.cat == "prim_bool":
                         parts.push("        val " + flag + " = raw{k} == \"N\"\n")
                         parts.push("        val " + target + " = raw{k} == \"1\"\n")
+                    elif shape.cat == "prim_char":
+                        parts.push("        val " + flag + " = raw{k} == \"\\\\N\"\n")
+                        parts.push("        val " + target + ": char = if " + flag + ": 0 as char else: hc_read_char(r, raw{k})\n")
+                        parts.push("        if not r.ok: return nil\n")
                     else:
                         parts.push("        val " + flag + " = raw{k} == \"\\\\N\"\n")
                         parts.push("        val " + target + " = if " + flag + ": \"\" else: flat_pool_unescape(raw{k})\n")

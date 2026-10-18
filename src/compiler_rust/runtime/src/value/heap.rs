@@ -187,6 +187,7 @@ impl HeapHeader {
 
 use super::core::RuntimeValue;
 use std::collections::HashSet;
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -252,14 +253,52 @@ fn heap_allocation_registry() -> &'static Mutex<HeapPtrSet<usize>> {
     HEAP_ALLOCATION_REGISTRY.get_or_init(|| Mutex::new(HeapPtrSet::default()))
 }
 
+/// Bumped (under the registry lock) by every erase. A pointer that a locked
+/// probe found registered at epoch E is still registered while the epoch is
+/// E, so a per-thread `(addr, epoch)` cache answers repeat validations
+/// without the mutex or a probe into the ever-growing set. That probe was
+/// ~half of the Windows stage2 full-CLI parse and HIR profiles (cdb samples,
+/// 2026-10-18). Starts at 1 so the zeroed cache never matches.
+static HEAP_FREE_EPOCH: AtomicU64 = AtomicU64::new(1);
+const VALIDATED_SLOTS: usize = 1 << 12;
+
+thread_local! {
+    static VALIDATED: [Cell<(usize, u64)>; VALIDATED_SLOTS] =
+        const { [const { Cell::new((0, 0)) }; VALIDATED_SLOTS] };
+}
+
+#[inline]
+fn validated_slot(addr: usize) -> usize {
+    ((addr >> 4) ^ (addr >> 16)) & (VALIDATED_SLOTS - 1)
+}
+
+#[inline]
+fn validated_cached(addr: usize, epoch: u64) -> bool {
+    VALIDATED
+        .try_with(|cache| cache[validated_slot(addr)].get() == (addr, epoch))
+        .unwrap_or(false)
+}
+
+#[inline]
+fn validated_remember(addr: usize, epoch: u64) {
+    let _ = VALIDATED.try_with(|cache| cache[validated_slot(addr)].set((addr, epoch)));
+}
+
+#[inline]
+fn heap_free_epoch_bump() {
+    HEAP_FREE_EPOCH.fetch_add(1, Ordering::AcqRel);
+}
+
 #[inline]
 pub fn register_heap_ptr(ptr: *mut HeapHeader) {
     if !ptr.is_null() {
+        let epoch = HEAP_FREE_EPOCH.load(Ordering::Acquire);
         let inserted = heap_allocation_registry()
             .lock()
             .map(|mut registry| registry.insert(ptr as usize))
             .unwrap_or(false);
         if inserted {
+            validated_remember(ptr as usize, epoch);
             // Caller just allocated the object; header is valid by contract.
             let (kind, bytes) = unsafe { ((*ptr).object_type as u8, (*ptr).size as u64) };
             note_heap_alloc(kind, bytes);
@@ -273,7 +312,13 @@ pub fn unregister_heap_ptr(ptr: *mut HeapHeader) {
     if !ptr.is_null() {
         let removed = heap_allocation_registry()
             .lock()
-            .map(|mut registry| registry.remove(&(ptr as usize)))
+            .map(|mut registry| {
+            let removed = registry.remove(&(ptr as usize));
+            if removed {
+                heap_free_epoch_bump();
+            }
+            removed
+        })
             .unwrap_or(false);
         if removed {
             // Presence in the registry means not yet freed (the erasing call
@@ -299,7 +344,13 @@ pub fn unregister_heap_ptr_checked(ptr: *mut HeapHeader) -> bool {
     }
     let removed = heap_allocation_registry()
         .lock()
-        .map(|mut registry| registry.remove(&(ptr as usize)))
+        .map(|mut registry| {
+            let removed = registry.remove(&(ptr as usize));
+            if removed {
+                heap_free_epoch_bump();
+            }
+            removed
+        })
         .unwrap_or(false);
     if removed {
         let (kind, bytes) = unsafe { ((*ptr).object_type as u8, (*ptr).size as u64) };
@@ -311,10 +362,19 @@ pub fn unregister_heap_ptr_checked(ptr: *mut HeapHeader) -> bool {
 
 #[inline]
 pub fn is_registered_heap_ptr(ptr: *mut HeapHeader) -> bool {
-    heap_allocation_registry()
+    let addr = ptr as usize;
+    let epoch = HEAP_FREE_EPOCH.load(Ordering::Acquire);
+    if addr != 0 && validated_cached(addr, epoch) {
+        return true;
+    }
+    let present = heap_allocation_registry()
         .lock()
-        .map(|registry| registry.contains(&(ptr as usize)))
-        .unwrap_or(false)
+        .map(|registry| registry.contains(&addr))
+        .unwrap_or(false);
+    if present {
+        validated_remember(addr, epoch);
+    }
+    present
 }
 
 /// Number of RuntimeValue heap objects known to the hosted runtime.
@@ -331,7 +391,10 @@ pub extern "C" fn rt_heap_registry_count() -> i64 {
 
 pub fn clear_heap_allocation_registry() {
     if let Some(registry) = HEAP_ALLOCATION_REGISTRY.get() {
-        let _ = registry.lock().map(|mut registry| registry.clear());
+        let _ = registry.lock().map(|mut registry| {
+            registry.clear();
+            heap_free_epoch_bump();
+        });
     }
     HEAP_LIVE_BYTES.store(0, Ordering::Relaxed);
     HEAP_TOTAL_ALLOCS.store(0, Ordering::Relaxed);
@@ -454,10 +517,20 @@ pub(crate) fn registered_heap_type(val: RuntimeValue) -> Option<HeapObjectType> 
     if ptr.is_null() || addr < MIN_VALID_HEAP_ADDR || addr & 0x7 != 0 {
         return None;
     }
+    let epoch = HEAP_FREE_EPOCH.load(Ordering::Acquire);
+    if validated_cached(addr, epoch) {
+        // Seqlock re-check: no erase (so no free) happened around the read.
+        let object_type = unsafe { std::ptr::read_volatile(&(*ptr).object_type) };
+        std::sync::atomic::fence(Ordering::Acquire);
+        if HEAP_FREE_EPOCH.load(Ordering::Relaxed) == epoch {
+            return Some(object_type);
+        }
+    }
     let registry = heap_allocation_registry().lock().ok()?;
     if !registry.contains(&addr) {
         return None;
     }
+    validated_remember(addr, epoch);
     Some(unsafe { (*ptr).object_type })
 }
 
@@ -784,5 +857,32 @@ mod attr_tests {
         let id = s.ids["attr_test_mod_a"] as usize;
         assert_eq!(s.live[id], 0, "live returns to zero after free");
         assert_eq!(s.peak[id], 10_000_000, "peak survives the free");
+    }
+}
+
+#[cfg(test)]
+mod validated_cache_tests {
+    use super::*;
+
+    #[test]
+    fn erased_pointer_is_not_answered_from_the_validated_cache() {
+        let layout = std::alloc::Layout::from_size_align(64, 8).unwrap();
+        let ptr = unsafe { std::alloc::alloc_zeroed(layout) } as *mut HeapHeader;
+        unsafe {
+            (*ptr).object_type = HeapObjectType::String;
+            (*ptr).size = 64;
+        }
+        register_heap_ptr(ptr);
+        assert!(is_registered_heap_ptr(ptr));
+        assert!(is_registered_heap_ptr(ptr), "cached hit");
+        let value = unsafe { RuntimeValue::from_heap_ptr(ptr) };
+        assert_eq!(registered_heap_type(value), Some(HeapObjectType::String));
+        assert!(unregister_heap_ptr_checked(ptr));
+        assert!(!is_registered_heap_ptr(ptr), "erase must invalidate the cache");
+        assert_eq!(registered_heap_type(value), None);
+        register_heap_ptr(ptr);
+        assert!(is_registered_heap_ptr(ptr), "re-registered address validates again");
+        assert!(unregister_heap_ptr_checked(ptr));
+        unsafe { std::alloc::dealloc(ptr as *mut u8, layout) };
     }
 }

@@ -10,10 +10,10 @@ use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
+use std.io_runtime.{hash_text}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
-use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_declares_item}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}  # explicit: a glob is not an import-origin for surface projection
 # Same reason as the line above, for the four surface types used in DECLARATION
 # position in this module's own signatures: hir_surface_param_to_param(param:
@@ -427,6 +427,51 @@ impl HirLowering:
                 kind_index = kind_index + 1
             surface_index = surface_index + 1
         self.surface_decl_owners = owners
+        # BOOT-20 read authority (restores b488a271c48, lost in a later
+        # restore while its fields stayed): one (name, surface) pair per
+        # frozen decl name -- the same six arrays module_surface_declares_item
+        # reads -- with scalar hash chains over the pairs. No class-field Dict
+        # membership is trusted, so the miss path needs no registry sweep.
+        var pair_names: [text] = []
+        var pair_surfaces: [i64] = []
+        var pair_surface = 0
+        while pair_surface < self.module_surfaces.surfaces.len():
+            val decl_surface = self.module_surfaces.surfaces[pair_surface]
+            var decl_kind = 0
+            while decl_kind < 6:
+                val decl_names: [text] = match decl_kind:
+                    case 0: decl_surface.callable_names
+                    case 1: decl_surface.composite_names
+                    case 2: decl_surface.enum_names
+                    case 3: decl_surface.trait_names
+                    case 4: decl_surface.type_alias_names
+                    case _: decl_surface.constant_names
+                var decl_index = 0
+                while decl_index < decl_names.len():
+                    pair_names = pair_names.push(decl_names[decl_index])
+                    pair_surfaces = pair_surfaces.push(pair_surface)
+                    decl_index = decl_index + 1
+                decl_kind = decl_kind + 1
+            pair_surface = pair_surface + 1
+        var bucket_count: i64 = 64
+        while bucket_count < pair_names.len() * 2:
+            bucket_count = bucket_count * 2
+        var hash_buckets: [i64] = []
+        while hash_buckets.len() < bucket_count:
+            hash_buckets = hash_buckets.push(-1)
+        val hash_mask = bucket_count - 1
+        var hash_next: [i64] = []
+        var hash_pair = 0
+        while hash_pair < pair_names.len():
+            val bucket = hash_text(pair_names[hash_pair]) & hash_mask
+            hash_next = hash_next.push(hash_buckets[bucket])
+            hash_buckets[bucket] = hash_pair
+            hash_pair = hash_pair + 1
+        self.surface_decl_pair_names = pair_names
+        self.surface_decl_pair_surfaces = pair_surfaces
+        self.surface_decl_pair_hash_buckets = hash_buckets
+        self.surface_decl_pair_hash_next = hash_next
+        self.surface_decl_pair_hash_mask = hash_mask
         self.surface_decl_index_built = true
 
     me surface_decl_owner_indices(name: text) -> [i64]:
@@ -435,21 +480,26 @@ impl HirLowering:
         question once per consumer."""
         if not self.surface_decl_index_built:
             self.build_surface_decl_index()
-        if self.surface_decl_owners.contains_key(name):
-            return self.surface_decl_owners[name]
-        # CHAINTABLE-HARDEN (cycle-36 sweep): surface_decl_owners is a
-        # {text: [i64]} Dict -- the exact BOOT-20 corruptible shape -- and a
-        # false-negative contains_key here silently drops the unique-owner
-        # answer ('unresolved name' in body lowering, missed field-package
-        # dependency). The negative path pays the authoritative full-registry
-        # sweep this index replaced.
-        var sweep_indices: [i64] = []
-        var sweep_surface = 0
-        while sweep_surface < self.module_surfaces.surfaces.len():
-            if module_surface_declares_item(self.module_surfaces.surfaces[sweep_surface], name):
-                sweep_indices = sweep_indices.push(sweep_surface)
-            sweep_surface = sweep_surface + 1
-        sweep_indices
+        # The full-registry sweep that used to back a Dict miss cost one
+        # 6-list scan of every surface per unbound name: ~70% of the Windows
+        # stage2 full-CLI HIR samples at module 1300 (2026-10-18). Chains are
+        # newest-first; a name repeated across one surface's decl kinds yields
+        # adjacent equal surfaces, so dedupe on the last one and reverse to
+        # the ascending order the sweep returned.
+        var newest_first: [i64] = []
+        var pair_index = self.surface_decl_pair_hash_buckets[hash_text(name) & self.surface_decl_pair_hash_mask]
+        while pair_index >= 0:
+            if self.surface_decl_pair_names[pair_index] == name:
+                val owner = self.surface_decl_pair_surfaces[pair_index]
+                if newest_first.len() == 0 or newest_first[newest_first.len() - 1] != owner:
+                    newest_first = newest_first.push(owner)
+            pair_index = self.surface_decl_pair_hash_next[pair_index]
+        var owners: [i64] = []
+        var back = newest_first.len() - 1
+        while back >= 0:
+            owners = owners.push(newest_first[back])
+            back = back - 1
+        owners
 
     me build_package_sibling_index():
         """One pass over the registry KEYS: canonical package name -> the
