@@ -240,6 +240,57 @@ impl MirLowering:
         self.builder = b_push
         self.builtin_mark_array_result(result_arr, Some(tuple_type), nil, result_arr)
 
+    me builtin_dict_entries_array(dict_local: LocalId, field_types: [MirType]) -> LocalId:
+        """Snapshot paired slots, then use the same native tuple layout as a dict loop."""
+        var b_entries = self.builder
+        val entries = b_entries.emit_call_value(
+            builtin_extra_rt_operand("rt_dict_entries", [MirType.i64()], MirType.i64()),
+            [mir_operand_copy(dict_local)], MirType.i64())
+        self.builder = b_entries
+        self.runtime_array_locals[entries.id] = true
+        self.mark_runtime_value_local(entries.id)
+        self.builtin_runtime_tuples_to_native(entries, field_types)
+
+    me builtin_dict_items(receiver: HirExpr, dict_local: LocalId) -> LocalId:
+        # A handle alone does not establish either field's representation.
+        # Never decode an unknown record/text slot using a guessed i64 type.
+        var key_mir = MirType(kind: MirTypeKind.Never)
+        var value_mir = MirType(kind: MirTypeKind.Never)
+        if val local_mir = self.local_mir_type_of(dict_local):
+            var dict_mir = local_mir
+            match dict_mir.kind:
+                case MirTypeKind.Ref(inner_mir, _): dict_mir = inner_mir
+                case _: ()
+            match dict_mir.kind:
+                case MirTypeKind.Dict(k, v):
+                    key_mir = if self.mir_type_is_str(k): self.bootstrap_text_type() else: k
+                    value_mir = if self.mir_type_is_str(v): self.bootstrap_text_type() else: v
+                case _: ()
+        var declared: HirType? = self.find_local_hir_type(dict_local.id)
+        if declared == nil:
+            declared = self.receiver_declared_type(receiver)
+        if declared == nil:
+            declared = receiver.type_
+        if val declared_type = declared:
+            var dict_hir = declared_type
+            match dict_hir.kind:
+                case HirTypeKind.Ref(inner_hir, _): dict_hir = inner_hir
+                case _: ()
+            match dict_hir.kind:
+                case HirTypeKind.Dict(k, v):
+                    key_mir = self.builtin_dict_entry_field_type(Some(k), key_mir)
+                    value_mir = self.builtin_dict_entry_field_type(Some(v), value_mir)
+                case _: ()
+        match key_mir.kind:
+            case MirTypeKind.Never:
+                return self.builtin_extra_fail_closed("Dict.items requires a known key type", Some(receiver.span))
+            case _: ()
+        match value_mir.kind:
+            case MirTypeKind.Never:
+                return self.builtin_extra_fail_closed("Dict.items requires a known value type", Some(receiver.span))
+            case _: ()
+        self.builtin_dict_entries_array(dict_local, [key_mir, value_mir])
+
     me builtin_dict_entry_field_type(declared: HirType?, mir_fallback: MirType) -> MirType:
         """Field type of one side of a dict entry: the declared key/value type
         (text in its `bootstrap_text_type` form, the one loop variables use),
