@@ -1,0 +1,143 @@
+# Actual parser/HIR/MIR objectless-proof harness. UNRUN.
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.core.parser.{par_had_error_get}
+use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirFunction, HirBlock}
+use compiler.mono.monomorphize_integration.{run_monomorphization}
+use compiler.driver.driver_native_objectless_proof.{driver_native_parser_can_persist_objectless}
+use compiler.driver.driver_types.{driver_native_parsed_module_has_no_runtime_body_v1,
+    driver_native_parsed_objectless_proof_v1, driver_native_parsed_objectless_proof_valid_v1}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+val TEMPLATE_ENUM = "enum Poll<T>:\n    Ready(T)\n    Pending\n\nimpl Poll<T>:\n    fn is_ready() -> bool:\n        match self:\n            case Poll.Ready(_): true\n            case Poll.Pending: false\n"
+
+fn enum_template_parse(source: text) -> ParserModule:
+    val parsed = parse_full_frontend(source, "template.spl", "template", Logger(level: 0))
+    objectless_require((par_had_error_get()) == (false), "assert-25")
+    parsed
+
+fn enum_template_candidate(source: text) -> bool:
+    val parsed = enum_template_parse(source)
+    val persistent = driver_native_parser_can_persist_objectless(ModuleSurfaceParserOwner.new(parsed))
+    # Cold proof capture and retained-parser scheduling share the same rule.
+    objectless_require((driver_native_parsed_module_has_no_runtime_body_v1(parsed)) == (persistent), "assert-32")
+    persistent
+
+fn enum_template_mir(source: text) -> MirModule:
+    val parsed = enum_template_parse(source)
+    var lowering = HirLowering.with_filename("template.spl")
+    val hir = lowering.lower_module(parsed)
+    objectless_require((lowering.errors.len()) == (0), "assert-39")
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    objectless_require((mir_lowering.errors.len()) == (0), "assert-42")
+    mir
+
+fn enum_template_specialized_mir() -> MirModule:
+    val source = TEMPLATE_ENUM + "\nfn selected() -> bool:\n    val value: Poll<bool> = Poll.Ready(true)\n    value.is_ready()\n"
+    val parsed = enum_template_parse(source)
+    var lowering = HirLowering.with_filename("template.spl")
+    val hir = lowering.lower_module(parsed)
+    objectless_require((lowering.errors.len()) == (0), "assert-50")
+    var modules: Dict<text, HirModule> = {}
+    modules["template"] = hir
+    val (specialized, stats) = run_monomorphization(modules)
+    objectless_require((stats.specializations_created) > (0), "assert-54")
+    objectless_require((stats.unresolved_generic_calls) == (0), "assert-55")
+    val concrete: HirModule = specialized["template"]
+    var mir_lowering = MirLowering.new(concrete.symbols)
+    val mir = mir_lowering.lower_module(concrete)
+    objectless_require((mir_lowering.errors.len()) == (0), "assert-59")
+    objectless_require((mir.functions.len()) > (1), "assert-60")
+    mir
+
+fn case_1():
+    val parsed = enum_template_parse(TEMPLATE_ENUM)
+    objectless_require((parsed.impls.len()) == (1), "assert-66")
+    objectless_require((parsed.impls[0].type_params.len()) == (1), "assert-67")
+    objectless_require((parsed.impls[0].methods.len()) == (1), "assert-68")
+    var lowering = HirLowering.with_filename("template.spl")
+    val hir = lowering.lower_module(parsed)
+    objectless_require((lowering.errors.len()) == (0), "assert-71")
+    var templates = 0
+    for key in hir.functions.keys():
+        val function: HirFunction = hir.functions[key]
+        val body: HirBlock = function.body
+        objectless_require((function.is_generic_template) == (true), "assert-76")
+        objectless_require((body.stmts.len() > 0 or body.value != nil) == (true), "assert-77")
+        templates = templates + 1
+    objectless_require((templates) == (1), "assert-79")
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    objectless_require((mir_lowering.errors.len()) == (0), "assert-82")
+    objectless_require((mir.functions.len()) == (0), "assert-83")
+    objectless_require((mir.statics.len()) == (0), "assert-84")
+    objectless_require((mir.constants.len()) == (0), "assert-85")
+    objectless_require((enum_template_candidate(TEMPLATE_ENUM)) == (true), "assert-87")
+
+fn case_2():
+    val source = "enum Choice<T>:\n    Item(T)\nimpl Choice<U>:\n    fn present() -> bool: true\n"
+    objectless_require((enum_template_candidate(source)) == (true), "assert-91")
+
+fn case_3():
+    for source in [
+        "enum Choice<T>:\n    Item(T)\nimpl Choice<i64>:\n    fn present() -> bool: true\n",
+        "enum Choice<T>:\n    Item(T)\nimpl<T> Choice<[T]>:\n    fn present() -> bool: true\n",
+        "enum Pair<A, B>:\n    Item(A, B)\nimpl<A, B> Pair<B, A>:\n    fn present() -> bool: true\n",
+        "enum Flag:\n    On\nimpl Flag:\n    fn present() -> bool: true\n"]:
+        objectless_require((enum_template_candidate(source)) == (false), "assert-99")
+
+fn case_4():
+    for source in [
+        "impl External<T>:\n    fn present() -> bool: true\n",
+        "enum Choice<T>:\n    Item(T)\nimpl Choice<T>:\n    static fn present() -> bool: true\n",
+        TEMPLATE_ENUM + "\nfn answer() -> i64: 42\n",
+        TEMPLATE_ENUM + "\nval answer = 42\n"]:
+        objectless_require((enum_template_candidate(source)) == (false), "assert-107")
+
+fn case_5():
+    for source in [
+        "trait Present:\n    fn present() -> bool\nenum Choice<T>:\n    Item(T)\nimpl<T> Present for Choice<T>:\n    fn present() -> bool: true\n",
+        "enum Pair<A, B>:\n    Item(A, B)\nimpl Pair<T>:\n    fn present() -> bool: true\n"]:
+        objectless_require((enum_template_candidate(source)) == (false), "assert-113")
+
+fn case_6():
+    val parsed = enum_template_parse(TEMPLATE_ENUM + "\ntrait Named:\n    fn name() -> text:\n        \"value\"\n")
+    objectless_require((driver_native_parser_can_persist_objectless(ModuleSurfaceParserOwner.new(parsed))) == (false), "assert-117")
+
+fn case_7():
+    val identity = sha256_text(TEMPLATE_ENUM)
+    val proof = driver_native_parsed_objectless_proof_v1("template", "template.spl", identity)
+    val empty_mir = enum_template_mir(TEMPLATE_ENUM)
+    objectless_require((driver_native_parsed_objectless_proof_valid_v1(proof, "template", "template.spl", identity, empty_mir)) == (true), "assert-123")
+    objectless_require((driver_native_parsed_objectless_proof_valid_v1(proof, "template", "other.spl", identity, empty_mir)) == (false), "assert-124")
+    objectless_require((driver_native_parsed_objectless_proof_valid_v1(proof, "template", "template.spl", sha256_text("changed"), empty_mir)) == (false), "assert-125")
+    objectless_require((driver_native_parsed_objectless_proof_valid_v1("", "template", "template.spl", identity, empty_mir)) == (false), "assert-126")
+    # Actual lowered code must not disappear merely because an earlier
+    # declaration proof was true (e.g. a concrete specialization arrived).
+    val concrete = enum_template_mir("fn answer() -> i64: 42\n")
+    objectless_require((concrete.functions.len()) > (0), "assert-130")
+    objectless_require((driver_native_parsed_objectless_proof_valid_v1(proof, "template", "template.spl", identity, concrete)) == (false), "assert-131")
+    val specialized = enum_template_specialized_mir()
+    objectless_require((driver_native_parsed_objectless_proof_valid_v1(proof, "template", "template.spl", identity, specialized)) == (false), "assert-133")
+
+fn objectless_require(condition: bool, label: text):
+    if not condition: panic("enum-template-proof: " + label)
+
+fn main() -> i64:
+    case_1()
+    case_2()
+    case_3()
+    case_4()
+    case_5()
+    case_6()
+    case_7()
+    print "generic-enum-objectless-pass"
+    0
