@@ -1,0 +1,83 @@
+# Native execution is required to qualify ownership; no RSS claim is made.
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.Module
+use compiler.hir.hir_lowering.types.hirlowering_for_module
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.module_surfaces_from_modules
+use compiler.mir.mir.*
+
+describe "provider method lookup scope retirement":
+    it "preserves imported method calls and return shapes across consumer scopes":
+        val provider_source = "pub struct MethodRecord:\n    value: i64\n\npub class MethodFactory:\n    base: i64\n\nimpl MethodFactory:\n    fn record() -> MethodRecord:\n        MethodRecord(value: self.base)\n\n    fn records() -> [MethodRecord]:\n        [MethodRecord(value: self.base)]\n\n    fn optional_record() -> MethodRecord?:\n        Some(MethodRecord(value: self.base))\n"
+        val consumer_source = "use lib.method_provider.\{MethodRecord, MethodFactory\}\n\nfn exercise(factory: MethodFactory) -> i64:\n    val record = factory.record()\n    val records = factory.records()\n    val maybe = factory.optional_record()\n    if val value = maybe:\n        return record.value + records[0].value + value.value\n    0\n"
+        val logger = Logger(level: 0)
+        val provider_ast = parse_full_frontend(provider_source, "lib/method_provider.spl", "lib.method_provider", logger)
+        var modules: Dict<text, Module> = {}
+        modules["lib.method_provider"] = provider_ast
+        val sources = [SourceFile(path: "lib/method_provider.spl", content: provider_source, module_name: "lib.method_provider")]
+        val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+        var provider_lowering = hirlowering_for_module("lib/method_provider.spl", surfaces)
+        val provider = provider_lowering.lower_module(provider_ast)
+        expect(provider_lowering.errors.len()).to_equal(0)
+        var first_hir_lowering = hirlowering_for_module("app/first.spl", surfaces)
+        val first_hir = first_hir_lowering.lower_module(parse_full_frontend(consumer_source, "app/first.spl", "app.first", logger))
+        expect(first_hir_lowering.errors.len()).to_equal(0)
+        var second_hir_lowering = hirlowering_for_module("app/second.spl", surfaces)
+        val second_hir = second_hir_lowering.lower_module(parse_full_frontend(consumer_source, "app/second.spl", "app.second", logger))
+        expect(second_hir_lowering.errors.len()).to_equal(0)
+        val provider_functions = provider.functions.len()
+        expect(provider_functions).to_be_greater_than(0)
+        val target = driver_mir_target_context(driver_core_compile_options_default())
+
+        # Establish that real imported method registration populates the lookup
+        # family; the scoped assertions below must not pass on an empty fixture.
+        var reference = MirLowering.new_for_target(first_hir.symbols, target)
+        val reference_mir = reference.lower_module(first_hir, [provider], true)
+        expect(reference.errors.len()).to_equal(0)
+        expect(reference_mir.functions.len()).to_be_greater_than(0)
+        expect(reference.struct_method_syms.len()).to_be_greater_than(0)
+        expect(reference.struct_method_return_names.len()).to_be_greater_than(0)
+        expect(reference.struct_method_return_is_array.len()).to_be_greater_than(0)
+        expect(reference.struct_method_return_is_optional.len()).to_be_greater_than(0)
+
+        var lowering = MirLowering.new_for_target(first_hir.symbols, target)
+        val first_result = lowering.lower_module_transient_scoped(first_hir, [provider], true)
+        expect(first_result.is_ok()).to_equal(true)
+        val first = first_result.unwrap()
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.struct_method_syms.len()).to_equal(0)
+        expect(lowering.struct_method_ambiguous.len()).to_equal(0)
+        expect(lowering.struct_method_return_names.len()).to_equal(0)
+        expect(lowering.struct_method_return_is_array.len()).to_equal(0)
+        expect(lowering.struct_method_return_is_optional.len()).to_equal(0)
+        val first_graph = serialize_mir_module(first)
+        expect(first_graph).to_contain("Call")
+        expect(first_graph).to_contain("MethodFactory.record")
+        expect(first_graph).to_contain("MethodFactory.records")
+        expect(first_graph).to_contain("MethodFactory.optional_record")
+        for raw_function in first.functions.values():
+            val function: MirFunction = raw_function
+            expect(function.signature.params_known).to_equal(true)
+            expect(function.blocks.len()).to_be_greater_than(0)
+
+        val second_result = lowering.lower_module_transient_scoped(second_hir, [provider], false)
+        expect(second_result.is_ok()).to_equal(true)
+        val second = second_result.unwrap()
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.struct_method_syms.len()).to_equal(0)
+        expect(lowering.struct_method_ambiguous.len()).to_equal(0)
+        expect(lowering.struct_method_return_names.len()).to_equal(0)
+        expect(lowering.struct_method_return_is_array.len()).to_equal(0)
+        expect(lowering.struct_method_return_is_optional.len()).to_equal(0)
+        val second_graph = serialize_mir_module(second)
+        expect(second_graph).to_contain("MethodFactory.record")
+        expect(second_graph).to_contain("MethodFactory.records")
+        expect(second_graph).to_contain("MethodFactory.optional_record")
+        expect(serialize_mir_module(first)).to_equal(first_graph)
+        expect(provider.functions.len()).to_equal(provider_functions)
+        expect(first_hir.functions.len()).to_be_greater_than(0)
+        expect(second_hir.functions.len()).to_be_greater_than(0)
