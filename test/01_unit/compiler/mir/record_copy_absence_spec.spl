@@ -1,0 +1,181 @@
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{SymbolId, SymbolTable}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_stmts.*
+
+fn record_copy_probe() -> MirFunction:
+    var lowering = MirLowering.new(SymbolTable.new())
+    val symbol = SymbolId(id: 41)
+    val record_type = MirType(kind: MirTypeKind.Struct(symbol))
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 90), "copy_probe", MirSignature(params: [record_type], return_type: record_type, is_variadic: false), Span.empty())
+    var input = LocalId(id: -1)
+    for local in builder.locals:
+        match local.kind:
+            case LocalKind.Arg(0): input = local.id
+            case _: ()
+    expect(input.id).to_be_greater_than(-1)
+    lowering.builder = builder
+    lowering.struct_field_order["CopyRecord"] = ["value"]
+    lowering.result_err_record_owners[input.id] = "copy_probe::CopyRecord"
+    lowering.generic_instance_field_types[input.id] = [MirType.i64()]
+    lowering.generic_instance_field_struct_names[input.id] = ["OwnedField"]
+    val output = lowering.copy_struct_value_recursive(input, "CopyRecord", symbol, ["CopyRecord"])
+    expect(lowering.struct_value_syms[output.id]).to_equal("CopyRecord")
+    expect(lowering.result_err_record_owners[output.id]).to_equal("copy_probe::CopyRecord")
+    expect(lowering.generic_instance_field_types[output.id].len()).to_equal(1)
+    expect(lowering.generic_instance_field_struct_names[output.id][0]).to_equal("OwnedField")
+    var finished = lowering.builder
+    finished.set_terminator(MirTerminator.Ret(Some(mir_operand_copy(output))))
+    finished.end_function()
+
+fn copy_probe_word(operand: MirOperand, words: Dict<i64, i64>) -> i64:
+    match operand.kind:
+        case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+            if words.contains(local.id): return words[local.id]
+            panic("copy guard reads an undefined scalar")
+        case MirOperandKind.Const(MirConstValue.Int(value), _): return value
+        case MirOperandKind.Const(MirConstValue.Zero, _): return 0
+        case _: panic("unexpected copy guard operand")
+
+# Execute the generated scalar guard, rather than duplicating its predicate.
+# No host pointer is dereferenced. Any record load in this block is a failure.
+fn copy_probe_target(function: MirFunction, input_word: i64) -> MirBlock:
+    var words: Dict<i64, i64> = {}
+    for local in function.locals:
+        match local.kind:
+            case LocalKind.Arg(0): words[local.id.id] = input_word
+            case _: ()
+    var selected = -1
+    for block in function.blocks:
+        if block.id.id != function.entry_block.id: continue
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Const(dest, MirConstValue.Int(value), _): words[dest.id] = value
+                case MirInstKind.Const(dest, MirConstValue.Zero, _): words[dest.id] = 0
+                case MirInstKind.Bitcast(dest, source, _): words[dest.id] = copy_probe_word(source, words)
+                case MirInstKind.BinOp(dest, op, left, right):
+                    val a = copy_probe_word(left, words)
+                    val b = copy_probe_word(right, words)
+                    match op:
+                        case MirBinOp.Ne: words[dest.id] = if a != b: 1 else: 0
+                        case MirBinOp.BitAnd: words[dest.id] = a & b
+                        case _: panic("unexpected copy guard operation")
+                case MirInstKind.GetField(_, _, _): panic("record read before absence guard")
+                case MirInstKind.Aggregate(_, _, _): panic("record allocation before absence guard")
+                case MirInstKind.Alloc(_, _) | MirInstKind.Store(_, _): ()
+                case _: panic("unexpected copy guard instruction")
+        match block.terminator:
+            case MirTerminator.If(condition, present, absent):
+                selected = if copy_probe_word(condition, words) != 0: present.id else: absent.id
+            case _: panic("record copy entry does not branch")
+    for block in function.blocks:
+        if block.id.id == selected: return block
+    panic("record guard destination missing")
+
+fn copy_probe_nil_word(function: MirFunction) -> i64:
+    # The only integer constant in the guard comes from the real NilLit owner.
+    for block in function.blocks:
+        if block.id.id != function.entry_block.id: continue
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Const(_, MirConstValue.Int(value), _): return value
+                case _: ()
+    panic("canonical nil materialization missing")
+
+fn copy_probe_absent_word(function: MirFunction, input_word: i64) -> i64:
+    val merge = copy_probe_target(function, input_word)
+    expect(merge.label ?? "").to_equal("structcopy_merge")
+    var input_id = -1
+    for local in function.locals:
+        match local.kind:
+            case LocalKind.Arg(0): input_id = local.id.id
+            case _: ()
+    var saved_slot = -1
+    for block in function.blocks:
+        if block.id.id != function.entry_block.id: continue
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Store(pointer, value):
+                    match value.kind:
+                        case MirOperandKind.Copy(source):
+                            expect(source.id).to_equal(input_id)
+                        case _: panic("merge slot is not initialized from original record")
+                    match pointer.kind:
+                        case MirOperandKind.Copy(slot): saved_slot = slot.id
+                        case _: panic("merge slot is not a local")
+                case _: ()
+    expect(saved_slot).to_be_greater_than(-1)
+    for instruction in merge.instructions:
+        match instruction.kind:
+            case MirInstKind.Load(_, pointer):
+                match pointer.kind:
+                    case MirOperandKind.Copy(slot):
+                        expect(slot.id).to_equal(saved_slot)
+                        return input_word
+                    case _: panic("merge load is not from the preserved slot")
+            case MirInstKind.GetField(_, _, _) | MirInstKind.Aggregate(_, _, _): panic("absent record copied")
+            case _: ()
+    panic("absent record merge has no preserved result")
+
+describe "native record copy absence", tag: ["only-compiled"]:
+    it "routes native null directly to the merge without record reads or allocation":
+        val function = record_copy_probe()
+        val block = copy_probe_target(function, 0)
+        expect(block.label ?? "").to_equal("structcopy_merge")
+        expect(copy_probe_absent_word(function, 0)).to_equal(0)
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.GetField(_, _, _) | MirInstKind.Aggregate(_, _, _): panic("absent record copied")
+                case _: ()
+
+    it "routes the canonical runtime nil word directly to the same merge":
+        val function = record_copy_probe()
+        val nil_word = copy_probe_nil_word(function)
+        val block = copy_probe_target(function, nil_word)
+        expect(block.label ?? "").to_equal("structcopy_merge")
+        expect(copy_probe_absent_word(function, nil_word)).to_equal(nil_word)
+
+    it "retains record field reads and fresh allocation for a present address":
+        val function = record_copy_probe()
+        val block = copy_probe_target(function, 4096)
+        expect(block.label ?? "").to_equal("structcopy_present")
+        var reads = 0
+        var allocations = 0
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.GetField(_, _, _): reads = reads + 1
+                case MirInstKind.Aggregate(_, _, _): allocations = allocations + 1
+                case _: ()
+        expect(reads).to_equal(1)
+        expect(allocations).to_equal(1)
+
+    it "uses the shared guard for by-value parameters and nested records":
+        val source = "struct Child:\n    value: i64\n\nstruct Parent:\n    child: Child\n\nfn copy_parent(value: Parent) -> Parent:\n    value\n"
+        val parsed = parse_full_frontend(source, "nested_copy.spl", "nested_copy", Logger(level: 0))
+        var frontend = HirLowering.with_filename("nested_copy.spl")
+        val hir = frontend.lower_module(parsed)
+        expect(frontend.errors.len()).to_equal(0)
+        var lowering = MirLowering.new(hir.symbols)
+        val mir = lowering.lower_module(hir)
+        expect(lowering.errors.len()).to_equal(0)
+        var found = false
+        for function in mir.functions.values():
+            if function.name == "copy_parent" or function.name.ends_with(".copy_parent"):
+                found = true
+                var present_blocks = 0
+                var old_nested_blocks = 0
+                for block in function.blocks:
+                    val label = block.label ?? ""
+                    if label == "structcopy_present":
+                        present_blocks = present_blocks + 1
+                    if label == "structcopy_nested":
+                        old_nested_blocks = old_nested_blocks + 1
+                expect(present_blocks).to_be_greater_than(1)
+                expect(old_nested_blocks).to_equal(0)
+        expect(found).to_equal(true)
