@@ -82,8 +82,8 @@ fn _inflate_block_fixed_bounded(br, history: [u8], max_output: i64):
         val symbol  = sym_ret[0]
         cur_br = sym_ret[1]
 
-        if symbol < 0 or _inflate_reader_failed(cur_br):
-            # Decode error
+        if _inflate_reader_failed(cur_br):
+            # Truncated stream
             return [nil, cur_br]
 
         if symbol == 256:
@@ -142,10 +142,7 @@ fn _inflate_block_fixed_bounded(br, history: [u8], max_output: i64):
             loop:
                 if j >= length:
                     break
-                val cp = start_pos + j
-                if cp < 0 or cp >= out.len():
-                    return [nil, cur_br]
-                out.push(out[cp])
+                out.push(out[start_pos + j])
                 j = j + 1
 
     return [out, cur_br]
@@ -208,7 +205,10 @@ fn huffman_build(lengths):
         i = i + 1
     return [counts, symbols]
 
-fn _huffman_lengths_valid(lengths: [i64], allow_empty: bool) -> bool:
+# RFC 1951 3.2.2: a code must not be over-subscribed. An incomplete code is
+# only tolerated as the single one-bit code that zlib also accepts
+# (`allow_single`); an empty code only where `allow_empty` (no distances).
+fn _huffman_lengths_valid(lengths: [i64], allow_empty: bool, allow_single: bool) -> bool:
     var counts: [i64] = []
     var i: i64 = 0
     while i <= 15:
@@ -216,8 +216,6 @@ fn _huffman_lengths_valid(lengths: [i64], allow_empty: bool) -> bool:
         i = i + 1
     var used: i64 = 0
     for length in lengths:
-        if length < 0 or length > 15:
-            return false
         if length > 0:
             counts[length] = counts[length] + 1
             used = used + 1
@@ -230,6 +228,8 @@ fn _huffman_lengths_valid(lengths: [i64], allow_empty: bool) -> bool:
         if remaining < 0:
             return false
         i = i + 1
+    if remaining > 0:
+        return allow_single and used == 1 and counts[1] == 1
     true
 
 # Decode one symbol with a canonical decoder. Returns [symbol, new_br]; -1 on error.
@@ -245,7 +245,7 @@ fn huffman_decode_symbol(br, counts, symbols):
         val bit_ret = bitstream_read_one_bit(cur_br)
         val bit = bit_ret[0]
         cur_br = bit_ret[1]
-        if bit < 0:
+        if _inflate_reader_failed(cur_br):
             return [-1, cur_br]
         code = code | bit
         val count = counts[len_i]
@@ -272,7 +272,7 @@ fn _inflate_block_dynamic_bounded(br, history: [u8], max_output: i64):
     val hclen_ret = bitstream_read_bits_lsb(cur_br, 4)
     val hclen = hclen_ret[0] + 4
     cur_br = hclen_ret[1]
-    if _inflate_reader_failed(cur_br) or hlit > 286 or hdist > 32:
+    if _inflate_reader_failed(cur_br) or hlit > 286 or hdist > 30:
         return [nil, cur_br]
 
     # Code-length alphabet lengths, in the RFC's permuted order
@@ -294,7 +294,7 @@ fn _inflate_block_dynamic_bounded(br, history: [u8], max_output: i64):
         if _inflate_reader_failed(cur_br):
             return [nil, cur_br]
         i = i + 1
-    if not _huffman_lengths_valid(clen_lengths, false):
+    if not _huffman_lengths_valid(clen_lengths, false, false):
         return [nil, cur_br]
     val clen_huff = huffman_build(clen_lengths)
     val clen_counts = clen_huff[0]
@@ -363,9 +363,9 @@ fn _inflate_block_dynamic_bounded(br, history: [u8], max_output: i64):
             break
         dist_lengths.push(lengths[i])
         i = i + 1
-    if (not _huffman_lengths_valid(litlen_lengths, false) or
+    if (not _huffman_lengths_valid(litlen_lengths, false, true) or
         litlen_lengths.len() <= 256 or litlen_lengths[256] == 0 or
-        not _huffman_lengths_valid(dist_lengths, true)):
+        not _huffman_lengths_valid(dist_lengths, true, true)):
         return [nil, cur_br]
     val litlen_huff = huffman_build(litlen_lengths)
     val litlen_counts = litlen_huff[0]
@@ -389,8 +389,7 @@ fn _inflate_block_dynamic_bounded(br, history: [u8], max_output: i64):
                 return [nil, cur_br]
             out.push(symbol.to_u8())
         else:
-            if symbol > 285:
-                return [nil, cur_br]
+            # hlit <= 286 bounds the alphabet, so symbol <= 285 here.
             val len_info = deflate_length_decode_info(symbol)
             val base_len = len_info[0]
             val ex_cnt = len_info[1]
@@ -404,7 +403,7 @@ fn _inflate_block_dynamic_bounded(br, history: [u8], max_output: i64):
             val dc_ret = huffman_decode_symbol(cur_br, dist_counts, dist_symbols)
             val dist_code = dc_ret[0]
             cur_br = dc_ret[1]
-            if dist_code < 0 or dist_code > 29 or _inflate_reader_failed(cur_br):
+            if dist_code < 0 or _inflate_reader_failed(cur_br):
                 return [nil, cur_br]
             val di_info = deflate_distance_decode_info(dist_code)
             val base_dist = di_info[0]
@@ -425,20 +424,19 @@ fn _inflate_block_dynamic_bounded(br, history: [u8], max_output: i64):
             loop:
                 if j >= length:
                     break
-                val cp = start_pos + j
-                if cp < 0 or cp >= out.len():
-                    return [nil, cur_br]
-                out.push(out[cp])
+                out.push(out[start_pos + j])
                 j = j + 1
     return [out, cur_br]
 
 fn inflate_block_dynamic(br):
     _inflate_block_dynamic_bounded(br, [], -1)
 
-# Decompress a complete DEFLATE stream without allowing output beyond max_output.
-# A negative max_output preserves the legacy unbounded API.
-fn inflate_bounded(input: [u8], max_output: i64) -> [u8]?:
+# Shared DEFLATE loop. `max_output` < 0 means unbounded; `require_final` rejects a
+# stream whose input ends without a BFINAL block (an empty input included).
+fn _inflate_core(input: [u8], max_output: i64, require_final: bool) -> [u8]?:
     if input.len() == 0 or max_output == 0:
+        if require_final:
+            return nil
         var empty: [u8] = []
         return empty
 
@@ -457,12 +455,8 @@ fn inflate_bounded(input: [u8], max_output: i64) -> [u8]?:
         if _inflate_reader_failed(br) or btype < BLOCK_STORED or btype > BLOCK_DYNAMIC:
             return nil
 
-        # A negative `remaining` is the sentinel for "unbounded", not an error.
-        # Only the bounded path can genuinely overflow its budget.
+        # A negative `remaining` is the sentinel for "unbounded".
         val remaining = if max_output < 0: -1 else: max_output - out.len()
-        if max_output >= 0 and remaining < 0:
-            return nil
-
         if btype == BLOCK_STORED:
             val sr = _inflate_block_stored_bounded(br, remaining)
             val block_out = sr[0]
@@ -505,9 +499,22 @@ fn inflate_bounded(input: [u8], max_output: i64) -> [u8]?:
         # stream (RFC 7692 permessage-deflate), which legitimately carries no
         # BFINAL=1 block. Stop cleanly rather than reading past the end.
         if consumed_bytes >= input.len():
+            if require_final:
+                return nil
             break
 
     return out
+
+# Decompress a complete DEFLATE stream without allowing output beyond max_output.
+# A negative max_output preserves the legacy unbounded API.
+fn inflate_bounded(input: [u8], max_output: i64) -> [u8]?:
+    _inflate_core(input, max_output, false)
+
+# Decompress a DEFLATE stream that must end with a BFINAL block (RFC 1951
+# section 3.2.3), as a gzip member requires; unlike `inflate` it does not accept a
+# sync-flush prefix.
+fn inflate_complete(input: [u8]) -> [u8]?:
+    _inflate_core(input, -1, true)
 
 # Decompress a complete DEFLATE stream (one or more blocks).
 # Returns decompressed [u8] or nil on error.
