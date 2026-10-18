@@ -30,6 +30,8 @@ use compiler.backend.llvm_native_link_orchestrator.{llvm_hosted_allow_duplicate_
 use compiler.backend.runtime_compiler.{hosted_c_compiler_plan}
 use compiler.backend.linker.mold.{find_requested_linker, find_size_linker_path, requested_linker_override}
 use compiler.backend.linker.msvc.{MsvcConfig, msvc_strip_unix_rpath_args}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
+use std.io_runtime.{env_get}
 use testing.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -47,11 +49,15 @@ describe "Native linker hardening":
 
     it "preserves a genuine configured runtime provider rejection through status normalization":
         var config = NativeLinkConfig.default()
-        config.runtime_path = "/missing/admitted/runtime"
+        config.runtime_path = "none"
         config.runtime_bundle = "core-c-bootstrap"
+        var expected = "runtime bundle 'core-c-bootstrap' cannot use runtime path 'none'"
+        if native_tool_strict_requested_v1():
+            val admitted = env_get("SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH") ?? ""
+            config.runtime_path = admitted + "/link-status-negative"
+            expected = "runtime path differs from managed authority"
         val rejected = native_runtime_provider_selection_error_for_config_platform(config, false)
-        expect(rejected != "").to_equal(true)
-        expect(rejected != "nil").to_equal(true)
+        expect(rejected).to_equal(expected)
         expect(link_status_text("native-runtime-provider-selection", rejected)).to_equal(rejected)
 
     it "selects an installed LLD for Linux size builds without an override":
