@@ -31,22 +31,10 @@ val _B3_DERIVE_KEY_MATERIAL: u32 = 64u32
 val _B3_BLOCK_LEN: i64 = 64
 val _B3_CHUNK_LEN: i64 = 1024
 
-# IV = SHA-256 IV (spec 2.2).
+# IV = SHA-256 IV (spec 2.2); the compression function inlines the same words.
 fn _b3_iv() -> [u32]:
     [1779033703u32, 3144134277u32, 1013904242u32, 2773480762u32,
      1359893119u32, 2600822924u32, 528734635u32, 1541459225u32]
-
-# Column then diagonal G-function operand indices into the 16-word state.
-fn _b3_gidx() -> [i64]:
-    [0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15,
-     0, 5, 10, 15, 1, 6, 11, 12, 2, 7, 8, 13, 3, 4, 9, 14]
-
-# Message word permutation applied between rounds (spec 2.2).
-fn _b3_perm() -> [i64]:
-    [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8]
-
-fn _b3_rotr(x: u32, n: i64) -> u32:
-    (x >> n.to_u32()) | (x << (32 - n).to_u32())
 
 # Little-endian u32 at byte offset `off` of `data`; bytes at or past `end` are 0.
 fn _b3_word_le(data: [u8], off: i64, end: i64) -> u32:
@@ -62,6 +50,13 @@ fn _b3_word_le(data: [u8], off: i64, end: i64) -> u32:
 fn _b3_block_words(data: [u8], off: i64, len: i64) -> [u32]:
     var m: [u32] = []
     var i = 0
+    if len == 64:
+        while i < 16:
+            val o = off + 4 * i
+            m.push(data[o].to_u32() | (data[o + 1].to_u32() << 8u32) |
+                   (data[o + 2].to_u32() << 16u32) | (data[o + 3].to_u32() << 24u32))
+            i = i + 1
+        return m
     while i < 16:
         m.push(_b3_word_le(data, off + 4 * i, off + len))
         i = i + 1
@@ -69,55 +64,146 @@ fn _b3_block_words(data: [u8], off: i64, len: i64) -> [u32]:
 
 # ---------------------------------------------------------------------------
 # The compression function (spec 2.2). Returns all 16 output words; the first
-# 8 are the new chaining value when not at the root.
+# 8 are the new chaining value when not at the root. State and message words
+# are scalar locals (no per-call or per-round allocation); the message
+# permutation between rounds is a scalar re-binding.
 # ---------------------------------------------------------------------------
 
 fn _b3_compress(cv: [u32], block: [u32], counter: u64, block_len: u32, flags: u32) -> [u32]:
-    val iv = _b3_iv()
-    val gi = _b3_gidx()
-    val perm = _b3_perm()
-    var v: [u32] = [cv[0], cv[1], cv[2], cv[3], cv[4], cv[5], cv[6], cv[7],
-                    iv[0], iv[1], iv[2], iv[3],
-                    (counter & 0xFFFFFFFFu64).to_u32(), (counter >> 32u64).to_u32(),
-                    block_len, flags]
-    var m = block
+    var v0 = cv[0]
+    var v1 = cv[1]
+    var v2 = cv[2]
+    var v3 = cv[3]
+    var v4 = cv[4]
+    var v5 = cv[5]
+    var v6 = cv[6]
+    var v7 = cv[7]
+    var v8 = 1779033703u32
+    var v9 = 3144134277u32
+    var v10 = 1013904242u32
+    var v11 = 2773480762u32
+    var v12 = (counter & 0xFFFFFFFFu64).to_u32()
+    var v13 = (counter >> 32u64).to_u32()
+    var v14 = block_len
+    var v15 = flags
+    var m0 = block[0]
+    var m1 = block[1]
+    var m2 = block[2]
+    var m3 = block[3]
+    var m4 = block[4]
+    var m5 = block[5]
+    var m6 = block[6]
+    var m7 = block[7]
+    var m8 = block[8]
+    var m9 = block[9]
+    var m10 = block[10]
+    var m11 = block[11]
+    var m12 = block[12]
+    var m13 = block[13]
+    var m14 = block[14]
+    var m15 = block[15]
     var r = 0
     while r < 7:
-        var g = 0
-        while g < 8:
-            val a = gi[4 * g]
-            val b = gi[4 * g + 1]
-            val c = gi[4 * g + 2]
-            val d = gi[4 * g + 3]
-            val mx = m[2 * g]
-            val my = m[2 * g + 1]
-            v[a] = v[a] + v[b] + mx
-            v[d] = _b3_rotr(v[d] ^ v[a], 16)
-            v[c] = v[c] + v[d]
-            v[b] = _b3_rotr(v[b] ^ v[c], 12)
-            v[a] = v[a] + v[b] + my
-            v[d] = _b3_rotr(v[d] ^ v[a], 8)
-            v[c] = v[c] + v[d]
-            v[b] = _b3_rotr(v[b] ^ v[c], 7)
-            g = g + 1
+        v0 = v0 + v4 + m0
+        v12 = ((v12 ^ v0) >> 16u32) | ((v12 ^ v0) << 16u32)
+        v8 = v8 + v12
+        v4 = ((v4 ^ v8) >> 12u32) | ((v4 ^ v8) << 20u32)
+        v0 = v0 + v4 + m1
+        v12 = ((v12 ^ v0) >> 8u32) | ((v12 ^ v0) << 24u32)
+        v8 = v8 + v12
+        v4 = ((v4 ^ v8) >> 7u32) | ((v4 ^ v8) << 25u32)
+        v1 = v1 + v5 + m2
+        v13 = ((v13 ^ v1) >> 16u32) | ((v13 ^ v1) << 16u32)
+        v9 = v9 + v13
+        v5 = ((v5 ^ v9) >> 12u32) | ((v5 ^ v9) << 20u32)
+        v1 = v1 + v5 + m3
+        v13 = ((v13 ^ v1) >> 8u32) | ((v13 ^ v1) << 24u32)
+        v9 = v9 + v13
+        v5 = ((v5 ^ v9) >> 7u32) | ((v5 ^ v9) << 25u32)
+        v2 = v2 + v6 + m4
+        v14 = ((v14 ^ v2) >> 16u32) | ((v14 ^ v2) << 16u32)
+        v10 = v10 + v14
+        v6 = ((v6 ^ v10) >> 12u32) | ((v6 ^ v10) << 20u32)
+        v2 = v2 + v6 + m5
+        v14 = ((v14 ^ v2) >> 8u32) | ((v14 ^ v2) << 24u32)
+        v10 = v10 + v14
+        v6 = ((v6 ^ v10) >> 7u32) | ((v6 ^ v10) << 25u32)
+        v3 = v3 + v7 + m6
+        v15 = ((v15 ^ v3) >> 16u32) | ((v15 ^ v3) << 16u32)
+        v11 = v11 + v15
+        v7 = ((v7 ^ v11) >> 12u32) | ((v7 ^ v11) << 20u32)
+        v3 = v3 + v7 + m7
+        v15 = ((v15 ^ v3) >> 8u32) | ((v15 ^ v3) << 24u32)
+        v11 = v11 + v15
+        v7 = ((v7 ^ v11) >> 7u32) | ((v7 ^ v11) << 25u32)
+        v0 = v0 + v5 + m8
+        v15 = ((v15 ^ v0) >> 16u32) | ((v15 ^ v0) << 16u32)
+        v10 = v10 + v15
+        v5 = ((v5 ^ v10) >> 12u32) | ((v5 ^ v10) << 20u32)
+        v0 = v0 + v5 + m9
+        v15 = ((v15 ^ v0) >> 8u32) | ((v15 ^ v0) << 24u32)
+        v10 = v10 + v15
+        v5 = ((v5 ^ v10) >> 7u32) | ((v5 ^ v10) << 25u32)
+        v1 = v1 + v6 + m10
+        v12 = ((v12 ^ v1) >> 16u32) | ((v12 ^ v1) << 16u32)
+        v11 = v11 + v12
+        v6 = ((v6 ^ v11) >> 12u32) | ((v6 ^ v11) << 20u32)
+        v1 = v1 + v6 + m11
+        v12 = ((v12 ^ v1) >> 8u32) | ((v12 ^ v1) << 24u32)
+        v11 = v11 + v12
+        v6 = ((v6 ^ v11) >> 7u32) | ((v6 ^ v11) << 25u32)
+        v2 = v2 + v7 + m12
+        v13 = ((v13 ^ v2) >> 16u32) | ((v13 ^ v2) << 16u32)
+        v8 = v8 + v13
+        v7 = ((v7 ^ v8) >> 12u32) | ((v7 ^ v8) << 20u32)
+        v2 = v2 + v7 + m13
+        v13 = ((v13 ^ v2) >> 8u32) | ((v13 ^ v2) << 24u32)
+        v8 = v8 + v13
+        v7 = ((v7 ^ v8) >> 7u32) | ((v7 ^ v8) << 25u32)
+        v3 = v3 + v4 + m14
+        v14 = ((v14 ^ v3) >> 16u32) | ((v14 ^ v3) << 16u32)
+        v9 = v9 + v14
+        v4 = ((v4 ^ v9) >> 12u32) | ((v4 ^ v9) << 20u32)
+        v3 = v3 + v4 + m15
+        v14 = ((v14 ^ v3) >> 8u32) | ((v14 ^ v3) << 24u32)
+        v9 = v9 + v14
+        v4 = ((v4 ^ v9) >> 7u32) | ((v4 ^ v9) << 25u32)
         if r < 6:
-            var pm: [u32] = []
-            var p = 0
-            while p < 16:
-                pm.push(m[perm[p]])
-                p = p + 1
-            m = pm
+            val t0 = m2
+            val t1 = m6
+            val t2 = m3
+            val t3 = m10
+            val t4 = m7
+            val t5 = m0
+            val t6 = m4
+            val t7 = m13
+            val t8 = m1
+            val t9 = m11
+            val t10 = m12
+            val t11 = m5
+            val t12 = m9
+            val t13 = m14
+            val t14 = m15
+            val t15 = m8
+            m0 = t0
+            m1 = t1
+            m2 = t2
+            m3 = t3
+            m4 = t4
+            m5 = t5
+            m6 = t6
+            m7 = t7
+            m8 = t8
+            m9 = t9
+            m10 = t10
+            m11 = t11
+            m12 = t12
+            m13 = t13
+            m14 = t14
+            m15 = t15
         r = r + 1
-    var out: [u32] = []
-    var i = 0
-    while i < 8:
-        out.push(v[i] ^ v[i + 8])
-        i = i + 1
-    i = 0
-    while i < 8:
-        out.push(v[i + 8] ^ cv[i])
-        i = i + 1
-    out
+    [v0 ^ v8, v1 ^ v9, v2 ^ v10, v3 ^ v11, v4 ^ v12, v5 ^ v13, v6 ^ v14, v7 ^ v15,
+     v8 ^ cv[0], v9 ^ cv[1], v10 ^ cv[2], v11 ^ cv[3], v12 ^ cv[4], v13 ^ cv[5], v14 ^ cv[6], v15 ^ cv[7]]
 
 # ---------------------------------------------------------------------------
 # Output nodes (spec 2.4/2.5): the inputs of a not-yet-run compression, packed
@@ -206,14 +292,15 @@ fn _b3_core(key: [u32], flags: u32, data: [u8], out_len: i64) -> [u8]:
     while out.len() < out_len:
         val words = _b3_node_run(node, blk.to_u64(), _B3_ROOT)
         var w = 0
-        while w < 16 and out.len() < out_len:
-            var k = 0
-            while k < 4 and out.len() < out_len:
-                out.push(((words[w] >> (8 * k).to_u32()) & 255u32).to_u8())
-                k = k + 1
+        while w < 16:
+            val x = words[w]
+            out.push((x & 255u32).to_u8())
+            out.push(((x >> 8u32) & 255u32).to_u8())
+            out.push(((x >> 16u32) & 255u32).to_u8())
+            out.push((x >> 24u32).to_u8())
             w = w + 1
         blk = blk + 1
-    out
+    out[0:out_len]
 
 fn _b3_key_words(key: [u8]) -> [u32]:
     var w: [u32] = []
