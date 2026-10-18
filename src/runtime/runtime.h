@@ -806,6 +806,10 @@ int64_t  rt_enum_payload(int64_t value);
  * page. This is a FORMATION check, not liveness -- see runtime_native.c. */
 int8_t   rt_heap_ref_wellformed(int64_t value);
 int8_t   rt_heap_ref_registered_c(int64_t value);
+#if defined(SIMPLE_CORE_C_STANDALONE) && SIMPLE_CORE_C_STANDALONE
+/* Standalone Core-C has no Rust union owner for this public ABI. */
+int8_t   rt_heap_ref_registered(int64_t value);
+#endif
 int64_t  rt_closure_new(int64_t func_ptr, int64_t capture_count);
 int64_t  rt_closure_set_capture(int64_t closure, int64_t index, int64_t value);
 int64_t  rt_closure_get_capture(int64_t closure, int64_t index);
