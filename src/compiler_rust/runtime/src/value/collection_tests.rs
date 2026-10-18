@@ -2866,3 +2866,23 @@ fn rt_clear_empties_arrays_in_place_and_copies_text() {
     assert_text_eq(rt_clear(t), "", "clear on text yields the empty text");
     assert_text_eq(t, "abc", "text receiver must NOT be mutated");
 }
+
+#[test]
+fn test_rt_heap_ref_registered_accepts_live_collection_objects() {
+    use crate::value::objects::rt_heap_ref_registered;
+    let arr = rt_array_new(4);
+    assert_eq!(rt_heap_ref_registered(arr), 1, "live array must pass the liveness probe");
+    let s = collections::rt_string_new(b"hello".as_ptr(), 5);
+    assert_eq!(rt_heap_ref_registered(s), 1, "live string must pass");
+    let d = rt_dict_new(4);
+    assert_eq!(rt_heap_ref_registered(d), 1, "live dict must pass");
+    // The v19 wild span word is NOT heap-tagged: as a by-value copy it
+    // passes by construction. A TAGGED value is accepted when registered;
+    // unregistered tagged values (raw AOT struct blocks) also pass -- they
+    // are indistinguishable from garbage without allocator tracking (v21).
+    // What must NEVER pass is nil / zero-page.
+    assert_eq!(rt_heap_ref_registered(RuntimeValue(0x4fb177cf04577128u64)), 1,
+        "untagged by-value copy passes the node probe");
+    assert_eq!(rt_heap_ref_registered(RuntimeValue(0x999u64)), 0,
+        "zero-page tagged value is refused");
+}
