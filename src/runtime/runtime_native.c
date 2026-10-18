@@ -9641,16 +9641,18 @@ int8_t rt_heap_ref_wellformed(int64_t value) {
     return (((uint64_t)value) & ~RT_VALUE_TAG_MASK) >= 4096 ? 1 : 0;
 }
 
-/* Registry-membership probe: true only when the (tag-stripped) pointer is a
-   LIVE entry of the immortal object registry. rt_heap_ref_wellformed above is
-   a pure shape probe -- any large garbage integer passes it -- which is why
-   the encoder's illformed-node guard built on it still dereferenced a wild
-   HirSymbol span (0xb4b1cdae6eec3880, compiler.driver.driver_types, v19).
-   HIR reaching the cache encoder is fully transient-heap-promoted, so a node
-   that is not registered is corrupt by definition: refuse the entry (the
-   owning build continues from its in-memory HIR). False rejects are safe --
-   they only decline to cache. */
-int8_t rt_heap_ref_registered(int64_t value) {
+/* Registry-membership probe for the C immortal object registry, exported
+   under its OWN name so the Rust runtime's union probe can consult both
+   registries (rt_heap_ref_registered -- defined once, in the Rust runtime --
+   accepts a node live in EITHER registry; a same-named C definition would
+   collide at link time and whichever the linker dropped would silently
+   decide which registry the encoder sees). True only when the (tag-stripped)
+   pointer is a LIVE entry here. rt_heap_ref_wellformed above is a pure shape
+   probe -- any large garbage integer passes it -- which is why the encoder's
+   illformed-node guard built on it still dereferenced a wild HirSymbol span
+   (0xb4b1cdae6eec3880, compiler.driver.driver_types, v19). False rejects
+   are safe -- they only decline to cache. */
+int8_t rt_heap_ref_registered_c(int64_t value) {
     uintptr_t raw = ((uintptr_t)value) & ~(uintptr_t)RT_VALUE_TAG_MASK;
     if (raw < 4096) return 0;
     return rt_core_is_registered_immortal_ptr((void*)raw) ? 1 : 0;

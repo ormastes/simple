@@ -805,7 +805,7 @@ int64_t  rt_enum_payload(int64_t value);
  * handoffs: 1 for a tagged or raw/untagged class reference outside the zero
  * page. This is a FORMATION check, not liveness -- see runtime_native.c. */
 int8_t   rt_heap_ref_wellformed(int64_t value);
-int8_t   rt_heap_ref_registered(int64_t value);
+int8_t   rt_heap_ref_registered_c(int64_t value);
 int64_t  rt_closure_new(int64_t func_ptr, int64_t capture_count);
 int64_t  rt_closure_set_capture(int64_t closure, int64_t index, int64_t value);
 int64_t  rt_closure_get_capture(int64_t closure, int64_t index);

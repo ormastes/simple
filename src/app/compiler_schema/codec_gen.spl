@@ -429,14 +429,22 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
         val callee = if s.cat == "node": enc_fn_name(s.name) else: "hc_enc_opaque_" + _codec_snake(s.name)
         # @workaround bug=a174_struct_nil_comparison_dispatch_2026_10_16 recover=e458621e87670403385147dd4380acb0b925153d reason=old-producer-record-presence-dispatch
         val record_presence = s.cat == "opaque" or u.is_struct(s.name)
-        var out = if record_presence: indent + "if not " + v + ".?:\n" else: indent + "if " + v + " == nil:\n"
+        # v21 (2026-10-18): bind the node ONCE and use that word for both the
+        # presence check and the encode call. The guard-first double read
+        # (check, then argument) drew non-nil then ERASED-NIL on
+        # module.functions, so the required-entry gate refused EVERY module
+        # (p2_add: stores=0 refused=everything) even though every entry was
+        # present. The single annotated bind is the codec-pool proven class.
+        val bind_k = c.next()
+        var out = indent + "val enc_node_v" + "{bind_k}" + ": " + _strip_default(s.name).trim() + " = " + v + "\n"
+        out = out + (if record_presence: indent + "if not enc_node_v{bind_k}.?:\n" else: indent + "if enc_node_v{bind_k} == nil:\n")
         if required_node:
             out = out + indent + "    w.reject(\"missing_required_hir_module_function_entry\")\n"
         else:
             out = out + indent + "    w.put_i64(0)\n"
         out = out + indent + "else:\n"
         out = out + indent + "    w.put_i64(1)\n"
-        out = out + indent + "    " + callee + "(w, " + v + ")\n"
+        out = out + indent + "    " + callee + "(w, enc_node_v{bind_k})\n"
         return out
     val k = c.next()
     if s.cat == "opt":

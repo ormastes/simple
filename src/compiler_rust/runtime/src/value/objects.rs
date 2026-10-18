@@ -384,22 +384,38 @@ pub extern "C" fn rt_heap_ref_wellformed(value: RuntimeValue) -> i8 {
     }
 }
 
-/// Liveness probe for the fail-closed HIR codec encoder guards: true only
-/// when the (tag-masked) address is a LIVE entry of the heap allocation
-/// registry. rt_heap_ref_wellformed above is FORMATION ONLY -- any large
-/// garbage integer passes it -- which let a wild HirSymbol span
-/// (0xb4b1cdae6eec3880, compiler.driver.driver_types, v19) reach a field
-/// deref. Cache-eligible HIR is fully promoted, so an unregistered node is
-/// corrupt by definition; the encoder refuses the entry and the owning build
-/// continues from its in-memory HIR. Mirrors rt_heap_ref_registered in
-/// src/runtime/runtime_native.c.
+/// Encoder node guard, tag-aware (v21, 2026-10-18). The generated encoders
+/// receive nodes in TWO shapes:
+///   * Runtime-allocated nodes (arrays/strings/dicts/objects) -- registered
+///     in the heap allocation registry at birth.
+///   * RAW struct blocks -- the AOT lowering allocates Simple structs and
+///     tuples as plain rt_alloc(field_count*8) blocks, tags the value
+///     TAG_HEAP, and never registers them (expr_dispatch.spl: the "no rt_array
+///     header / no runtime tuple type tag under AOT" representation). A pure
+///     registry probe therefore false-rejected EVERYTHING (v20: stores=0
+///     refused=2694) and an unregistered garbage word is INDISTINGUISHABLE
+///     from a live raw block -- no registry can separate them (v21).
+/// So: nil rejects; a registered heap object accepts; an unregistered tagged
+/// value ACCEPTS on the formation check (the erased-read campaign's corrupt
+/// FIELD inside a live block remains guarded writer-side and by the draw
+/// fixes landed upstream). A follow-up should register raw struct blocks at
+/// the allocator so this probe can reject the v19 class again.
 #[no_mangle]
 pub extern "C" fn rt_heap_ref_registered(value: RuntimeValue) -> i8 {
     let addr = (value.0 & !super::tags::TAG_MASK) as usize;
-    if super::heap::heap_ptr_is_registered(addr) {
+    if addr < 4096 {
+        return 0;
+    }
+    if value.0 & super::tags::TAG_MASK != super::tags::TAG_HEAP {
+        // Untagged by-value copy: live by construction.
+        return 1;
+    }
+    if super::heap::is_registered_heap_ptr(addr as *mut super::heap::HeapHeader) {
         1
     } else {
-        0
+        // Raw struct block (AOT representation) or unregistered garbage:
+        // indistinguishable without allocator-level tracking (see doc).
+        1
     }
 }
 
