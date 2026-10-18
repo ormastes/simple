@@ -1,0 +1,128 @@
+# @req REQ-IM-007
+# Real coordinator/bridge transitions with parent-verified receipt DTO fixtures.
+# No claim of OS death proof or executed runner integration.
+use std.spec.*
+use compiler.driver.action_graph.grouped_execution_adapter.{GroupedExecutionV1, grouped_execution_new_v1, grouped_execution_ready_v1, grouped_execution_claim_v1, grouped_execution_commit_v1, grouped_execution_recover_v1}
+use std.common.build_manager.grouped_execution_contract.{GroupedActionBindingV1, GroupedActionLeaseV1, GroupedReapReceiptV1}
+use compiler.driver.cache.package_scc_scheduler.{PackageSccGroupV1, PackageSccWaveV1, PackageCompileScheduleV1, PackageCompileResultV1, package_scc_identity_v1}
+use compiler.driver.action_graph.build_action_v1.{BuildActionV1, BuildActionResultV1, BuildActionPoolV1, BuildActionStateV1}
+use compiler.driver.action_graph.persisted_graph.{PersistedBuildGraphV1}
+use compiler.driver.action_graph.coordinator.{BuildPoolBudgetV1, coordinator_new_v1}
+use compiler.driver.action_graph.demand_compile_integration.{DemandCompileExecutionV1}
+use compiler.driver.action_graph.artifact_service_bridge.{demand_artifact_route_v1}
+use compiler.driver.backend.native_promotion_queue.{NativePromotionQueueV1}
+use compiler.driver.perf.demand_compile_counters.{demand_compile_counters_empty_v1}
+use lib.compiler_artifact_service.profile.{artifact_service_profile_v1}
+use lib.compiler_artifact_service.service.{ArtifactRequestStateV1}
+
+fn grouped_spec_state() -> GroupedExecutionV1:
+    val snapshot = "a".repeat(64)
+    val cache = "b".repeat(64)
+    val first = PackageSccGroupV1(package_scc_identity_v1(["a"], cache), ["a"], [])
+    val peer = PackageSccGroupV1(package_scc_identity_v1(["b"], cache), ["b"], [])
+    val child = PackageSccGroupV1(package_scc_identity_v1(["c"], cache), ["c"], [first.identity])
+    val schedule = PackageCompileScheduleV1(true, "ok", cache, ["a", "b", "c"], [first, peer, child],
+        [PackageSccWaveV1(0, [first, peer]), PackageSccWaveV1(1, [child])])
+    val actions = [BuildActionV1("a", "parse", [snapshot], [], ["a.pool"], BuildActionPoolV1.parse, 1, snapshot, 16, ""),
+        BuildActionV1("b", "parse", [snapshot], [], ["b.pool"], BuildActionPoolV1.parse, 1, snapshot, 16, ""),
+        BuildActionV1("c", "parse", [snapshot], ["a"], ["c.pool"], BuildActionPoolV1.parse, 1, snapshot, 16, "")]
+    val coordinator = coordinator_new_v1(PersistedBuildGraphV1("graph", "", snapshot, actions), [BuildPoolBudgetV1(BuildActionPoolV1.parse, 2, 64)])
+    val execution = DemandCompileExecutionV1(true, "ok", Some(coordinator), None,
+        NativePromotionQueueV1([]), "", demand_compile_counters_empty_v1(), None, None, 0, "", 0, 0)
+    val route = demand_artifact_route_v1(execution, artifact_service_profile_v1("grouped", cache, ["parse"], 0, true), false, "parent", 1)
+    val bindings = [GroupedActionBindingV1(first.identity, "a", "parse", snapshot, cache, false),
+        GroupedActionBindingV1(peer.identity, "b", "parse", snapshot, cache, false),
+        GroupedActionBindingV1(child.identity, "c", "parse", snapshot, cache, false)]
+    grouped_execution_new_v1(schedule, route, bindings, ["worker-a", "worker-b"], 2)
+
+fn grouped_spec_result(action: text, success: bool) -> BuildActionResultV1:
+    BuildActionResultV1(action, "a".repeat(64), success, false,
+        if success: "c".repeat(64) else: "", "", if success: [] else: ["compile failed"], 8)
+
+fn grouped_spec_reap(lease: GroupedActionLeaseV1) -> GroupedReapReceiptV1:
+    GroupedReapReceiptV1(lease.group_id, lease.action_id, lease.worker_id,
+        lease.generation, lease.lease_id, lease.snapshot_digest, lease.cache_identity, "d".repeat(64))
+
+describe "REQ-IM-007: grouped runner uses the canonical build authorities":
+    it "should admit declared slots once and retain empty typed dispatches until claim":
+        step("Create two ready groups and a dependent group with no dispatch leases")
+        val initial = grouped_spec_state()
+        expect(initial.reason).to_equal("ok")
+        expect(grouped_execution_ready_v1(initial).len()).to_equal(2)
+        expect(initial.dispatches[0]).to_be_nil()
+        expect(grouped_execution_claim_v1(initial, "a", "unknown", 1, 64).accepted).to_be(false)
+        val claimed = grouped_execution_claim_v1(initial, "a", "worker-a", 1, 64)
+        expect(claimed.accepted).to_be(true)
+        expect(claimed.lease.unwrap().generation).to_equal(1)
+        expect(initial.dispatches[0]).to_be_nil()
+        step("Reject duplicate action ownership, busy worker reuse and blocked dependencies")
+        expect(grouped_execution_claim_v1(claimed.execution, "a", "worker-b", 1, 64).accepted).to_be(false)
+        expect(grouped_execution_claim_v1(claimed.execution, "b", "worker-a", 1, 64).reason).to_equal("group-worker-busy")
+        expect(grouped_execution_claim_v1(claimed.execution, "c", "worker-b", 1, 64).accepted).to_be(false)
+        expect(claimed.execution.route.service.entries[2].state).to_equal(ArtifactRequestStateV1.queued)
+
+    it "should preserve an independent success while recovering only a reaped dispatch":
+        step("Claim two independent actions and complete B")
+        val first = grouped_execution_claim_v1(grouped_spec_state(), "a", "worker-a", 1, 64)
+        expect(first.accepted).to_be(true)
+        val peer = grouped_execution_claim_v1(first.execution, "b", "worker-b", 1, 64)
+        expect(peer.accepted).to_be(true)
+        val peer_done = grouped_execution_commit_v1(peer.execution, peer.lease.unwrap(), grouped_spec_result("b", true), "c".repeat(64), [])
+        expect(peer_done.accepted).to_be(true)
+        step("Recover A using its exact retained binding and advance one generation")
+        val recovered = grouped_execution_recover_v1(peer_done.execution, grouped_spec_reap(first.lease.unwrap()), 2)
+        expect(recovered.accepted).to_be(true)
+        expect(recovered.lease.unwrap().generation).to_equal(2)
+        expect(recovered.execution.route.service.entries[1].state).to_equal(ArtifactRequestStateV1.completed)
+        expect(recovered.execution.route.execution.coordinator.unwrap().runtime[1].state).to_equal(BuildActionStateV1.succeeded)
+        expect(peer_done.execution.dispatches[0].unwrap().lease.generation).to_equal(1)
+        step("Reject an original result and enforce the two-attempt budget")
+        val stale = grouped_execution_commit_v1(recovered.execution, first.lease.unwrap(), grouped_spec_result("a", true), "c".repeat(64), [])
+        expect(stale.accepted).to_be(false)
+        expect(stale.execution.route.service.entries[0].cas_artifact_digest).to_equal("")
+        expect(grouped_execution_recover_v1(recovered.execution, grouped_spec_reap(recovered.lease.unwrap()), 3).reason).to_equal("group-retry-budget-exhausted")
+        step("Admit the final failed attempt without a CAS artifact and keep its child blocked")
+        val failed = grouped_execution_commit_v1(recovered.execution, recovered.lease.unwrap(), grouped_spec_result("a", false), "", [])
+        expect(failed.accepted).to_be(true)
+        expect(failed.execution.route.service.entries[0].state).to_equal(ArtifactRequestStateV1.failed)
+        expect(failed.execution.route.execution.coordinator.unwrap().runtime[0].memory_reserved_bytes).to_equal(0)
+        expect(grouped_execution_ready_v1(failed.execution).len()).to_equal(0)
+        expect(grouped_execution_commit_v1(failed.execution, recovered.lease.unwrap(), grouped_spec_result("a", false), "", []).accepted).to_be(false)
+
+    it "should reject each mismatched receipt before either owner changes":
+        val claimed = grouped_execution_claim_v1(grouped_spec_state(), "a", "worker-a", 1, 64)
+        expect(claimed.accepted).to_be(true)
+        for kind in 0..8:
+            step("Change one group, action, worker, epoch, token, snapshot, cache or proof field")
+            var proof = grouped_spec_reap(claimed.lease.unwrap())
+            if kind == 0: proof.group_id = "wrong"
+            elif kind == 1: proof.action_id = "wrong"
+            elif kind == 2: proof.worker_id = "worker-b"
+            elif kind == 3: proof.generation = 2
+            elif kind == 4: proof.lease_id = "e".repeat(64)
+            elif kind == 5: proof.snapshot_digest = "e".repeat(64)
+            elif kind == 6: proof.cache_identity = "e".repeat(64)
+            else: proof.tree_receipt_digest = ""
+            val denied = grouped_execution_recover_v1(claimed.execution, proof, 2)
+            expect(denied.accepted).to_be(false)
+            expect(denied.execution.route.service.entries[0].lease.unwrap().generation).to_equal(1)
+            expect(denied.execution.route.execution.coordinator.unwrap().runtime[0].memory_reserved_bytes).to_equal(16)
+        expect(grouped_execution_recover_v1(claimed.execution, grouped_spec_reap(claimed.lease.unwrap()), 1).accepted).to_be(false)
+
+    it "should reject package publication from intermediate parse actions":
+        step("Submit a package archive under an admitted parse dispatch")
+        val claimed = grouped_execution_claim_v1(grouped_spec_state(), "a", "worker-a", 1, 64)
+        expect(claimed.accepted).to_be(true)
+        val lease = claimed.lease.unwrap()
+        val publication = PackageCompileResultV1(lease.group_id, "a", "c".repeat(64), "c".repeat(64), "c".repeat(64), true)
+        val rejected = grouped_execution_commit_v1(claimed.execution, lease, grouped_spec_result("a", true), "c".repeat(64), [publication])
+        expect(rejected.reason).to_equal("intermediate-action-cannot-publish-packages")
+        expect(rejected.execution.published_packages.len()).to_equal(0)
+        expect(rejected.execution.route.service.entries[0].state).to_equal(ArtifactRequestStateV1.leased)
+
+    it "should reject incomplete or duplicate binding and slot admission":
+        step("Validate immutable runner topology before allowing claims")
+        val initial = grouped_spec_state()
+        expect(grouped_execution_new_v1(initial.schedule, initial.route, [initial.bindings[0]], initial.worker_slots, 2).reason).to_equal("group-binding-count-mismatch")
+        expect(grouped_execution_new_v1(initial.schedule, initial.route, initial.bindings, ["worker-a", "worker-a"], 2).reason).to_equal("group-worker-invalid")
+        expect(grouped_execution_new_v1(initial.schedule, initial.route, initial.bindings, initial.worker_slots, 0).reason).to_equal("group-budget-invalid")
