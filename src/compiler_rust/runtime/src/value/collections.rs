@@ -32,13 +32,21 @@ struct TransientHeapScope {
     // MIR phase crawl fix (cycle-163, 2026-10-19): promote used to
     // `objects.retain(!reachable.contains)` -- a full scan of every object
     // tracked since scope start on EVERY promote call. The MIR phase calls
-    // promote once per module (4084x) while the scope grows monotonically,
-    // making the phase quadratic (~1 module/min at done=64/4084, with single
-    // modules drawing 43-minute dts). A set lets promote delete exactly the
-    // reachable pointers (O(reachable) per call) instead of scanning
-    // O(scope) with a hash lookup per element. Free order at scope end is
-    // irrelevant (each object unregisters and deallocs its own pointer).
-    objects: super::heap::HeapPtrSet<RuntimeValue>,
+    // promote once per module (4084x), making the phase quadratic. A set
+    // lets promote delete exactly the reachable pointers (O(reachable) per
+    // call) instead of scanning O(scope) with a hash lookup per element.
+    //
+    // CRITICAL (cycle-164): the set is keyed by the TAGGED VALUE WORD (u64),
+    // NOT by RuntimeValue's value-based Eq/Hash -- for strings those compare
+    // and hash by CONTENT, so two distinct live strings with equal text
+    // collapse to one set entry: promote removed (or teardown freed) the
+    // WRONG object, and the survivor's promoted owner kept using a block the
+    // scope had already handed to free() -> UAF, surfacing as
+    // EXC_BAD_ACCESS at 0x8 in HirLowering.declare_module_symbols (crash
+    // receipts candidate-c163/c164 2026-10-19). The tagged word is unique
+    // per object, matching the pointer-equality semantics of the old
+    // Vec::retain it replaced.
+    objects: super::heap::HeapPtrSet<u64>,
 }
 
 /// True when the calling thread holds a transient heap scope that is paused,
@@ -51,7 +59,7 @@ pub(crate) fn track_transient_heap(value: RuntimeValue) -> RuntimeValue {
     TRANSIENT_HEAP_SCOPE.with(|slot| {
         if let Some(scope) = slot.borrow_mut().as_mut() {
             if !scope.paused {
-                scope.objects.insert(value);
+                scope.objects.insert(value.0);
             }
         }
     });
@@ -2381,7 +2389,7 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
             }
         }
         for ptr in reachable_heap.iter() {
-            scope.objects.remove(&RuntimeValue(*ptr));
+            scope.objects.remove(ptr);
         }
         true
     })
@@ -2393,8 +2401,14 @@ pub extern "C" fn rt_transient_array_scope_end() -> bool {
     let Some(scope) = scope else {
         return false;
     };
-    for object in scope.objects {
-        free_transient_heap(object);
+    // Per-object teardown (as before cycle-164): the bulk-unregister variant
+    // grew a pathological memory balloon in full-tree rows (jetsam kill at
+    // 145 GB vs the admitted binary's steady ~6 GB at the same HIR offset),
+    // so it was reverted; the per-object unregister cost stands until the
+    // leak in the bulk path is root-caused. The set keyed by tagged word
+    // (identity, not string content) is retained -- that fix is load-bearing.
+    for word in scope.objects {
+        free_transient_heap(RuntimeValue(word));
     }
     unsafe { rt_transient_raw_scope_end() != 0 }
 }
