@@ -5,6 +5,10 @@ use std.nogc_sync_mut.sffi.enum_wire.{enum_wire_nil_slot, enum_wire_restore_nil}
 extern fn rt_enum_id<T>(value: T) -> i64
 @unsafe(reason: "test observes the selected runtime discriminant without assuming ordinal tags", capabilities: [ffi])
 extern fn rt_enum_discriminant<T>(value: T) -> i64
+@unsafe(reason: "test reads the payload of a validated typed enum", capabilities: [ffi])
+extern fn rt_enum_payload<T>(value: T) -> i64
+@unsafe(reason: "test verifies that restoration allocated a runtime tuple", capabilities: [ffi])
+extern fn rt_tuple_len(tuple: i64) -> i64
 
 fn require(condition: bool):
     if not condition:
@@ -17,6 +21,7 @@ enum WireCase:
     Row(label: text, enabled: bool, count: i64)
     TupleOnly(value: (i64, i64))
     Pair(label: text, enabled: bool)
+    IntFields(bits: i64, signed: bool)
 
 @unsafe(reason: "fixture supplies the declared WireCase variant schema", capabilities: [ffi])
 fn require_slot(value: WireCase, arity: i64, index: i64, expected: bool):
@@ -24,7 +29,7 @@ fn require_slot(value: WireCase, arity: i64, index: i64, expected: bool):
         case Ok(actual): require(actual == expected)
         case Err(_): require(false)
 
-@unsafe(reason: "fixture supplies exact declared variant payload positions", capabilities: [ffi])
+@unsafe(reason: "fixture checks declared payload positions and intentional invalid-schema refusals using real typed constructors", capabilities: [ffi])
 fn main():
     val original = WireCase.Row("keep", false, 37)
     # Observe this typed Row's real identity; variant tags need not be ordinal.
@@ -54,8 +59,27 @@ fn main():
             require(label == "keep true")
             require(enabled == true)
         case _: require(false)
+    val int_fields = WireCase.IntFields(64, true)
+    require_slot(int_fields, 2, 1, false)
+    match enum_wire_restore_nil(int_fields, 2, [1]):
+        case Ok(restored):
+            require(rt_tuple_len(rt_enum_payload(restored)) == 2)
+            require_slot(restored, 2, 1, true)
+            require_slot(int_fields, 2, 1, false)
+            require(rt_enum_id(restored) == rt_enum_id(int_fields))
+            require(rt_enum_discriminant(restored) == rt_enum_discriminant(int_fields))
+            match restored:
+                case WireCase.IntFields(bits, _): require(bits == 64)
+                case _: require(false)
+            match int_fields:
+                case WireCase.IntFields(bits, signed):
+                    require(bits == 64)
+                    require(signed == true)
+                case _: require(false)
+        case Err(_): require(false)
     match enum_wire_restore_nil(original, 3, [1]):
         case Ok(restored):
+            require(rt_tuple_len(rt_enum_payload(restored)) == 3)
             require_slot(restored, 3, 1, true)
             require_slot(original, 3, 1, false)
             match restored:
@@ -69,6 +93,21 @@ fn main():
         case Err(_): require(false)
     require_slot(WireCase.Flag(false), 1, 0, false)
     require_slot(WireCase.Flag(true), 1, 0, false)
+    # A scalar payload is not a multi-field collection. Neither runtime's
+    # rejected array-length sentinel may satisfy the supplied arity of two.
+    match enum_wire_nil_slot(WireCase.Flag(true), 2, 1):
+        case Ok(_): require(false)
+        case Err(detail):
+            require(detail.starts_with("enum wire tuple arity mismatch"))
+    match enum_wire_restore_nil(WireCase.Flag(true), 2, []):
+        case Ok(_): require(false)
+        case Err(detail): require(detail == "enum wire tuple arity mismatch")
+    match enum_wire_nil_slot(int_fields, 2, 2):
+        case Ok(_): require(false)
+        case Err(detail): require(detail == "enum wire slot out of range")
+    match enum_wire_nil_slot(int_fields, 2, -1):
+        case Ok(_): require(false)
+        case Err(detail): require(detail == "enum wire slot out of range")
     match enum_wire_restore_nil(WireCase.Empty, 0, []):
         case Ok(restored):
             match restored:
@@ -83,6 +122,7 @@ fn main():
         case Err(_): ()
     # @workaround bug=a174_enum_tuple_literal_provenance_2026_10_16 recover=2b0fe4e6db0 reason=retain-tuple-payload-type-at-constructor
     val tuple_payload: (i64, i64) = (7, 9)
+    require_slot(WireCase.TupleOnly(tuple_payload), 1, 0, false)
     match enum_wire_restore_nil(WireCase.TupleOnly(tuple_payload), 1, []):
         case Ok(restored):
             match restored:
