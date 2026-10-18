@@ -2001,19 +2001,7 @@ int8_t rt_transient_raw_owner_thread_allows(void) {
 }
 
 static void rt_core_transient_raw_clear(void) {
-    /* Cycle-163 (2026-10-19): the MIR phase runs one transient raw scope per
-     * module (4084x). Keeping the table at its largest module's high-water
-     * capacity made every later scope end scan AND memset the full capacity
-     * (sampled: ~half of MIR wall time inside scope end after the promote
-     * fix). Scopes are short-lived; release oversized tables so a scope end
-     * costs its own live set, not the phase's historical maximum. Small
-     * tables stay allocated to keep the common cheap-module case allocation-
-     * free. */
-    if (rt_core_transient_raw_alloc_cap > 65536) {
-        free(rt_core_transient_raw_allocs);
-        rt_core_transient_raw_allocs = NULL;
-        rt_core_transient_raw_alloc_cap = 0;
-    } else if (rt_core_transient_raw_alloc_cap != 0) {
+    if (rt_core_transient_raw_alloc_cap != 0) {
         memset(rt_core_transient_raw_allocs, 0,
             rt_core_transient_raw_alloc_cap * sizeof(RtCoreTransientRawAlloc));
     }
