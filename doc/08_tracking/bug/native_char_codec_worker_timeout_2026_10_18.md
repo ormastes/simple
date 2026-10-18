@@ -38,6 +38,11 @@ record is unknown; no MIR completion or module-specific MIR failure was
 observed. This does not prove a new source regression or identify the worker's
 internal bottleneck.
 
+The `run native_build_worker.spl` command line does not establish interpreted
+execution. The producer's compiled bootstrap dispatch has a native entry for
+this target (`run_native_build_worker_entry`); argument spelling alone cannot
+distinguish that route from interpretation. No interpreter slowdown is claimed.
+
 The authoritative guard receipt is terminal: `status=timeout`,
 `exit_status=124`, `root_pid=33180`, `peak_rss_kib=2974508`,
 `quiescent=1`, `session_helper_integrity=verified`, and
