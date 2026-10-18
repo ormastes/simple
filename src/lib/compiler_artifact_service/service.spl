@@ -72,7 +72,13 @@ fn artifact_service_claim_v1(
     var best_priority: i64 = -1
     for index in 0..service.entries.len():
         val entry = service.entries[index]
+        # Recovery retains the retired lease as a fence on a queued entry.
+        # A delayed claimer may not recreate its old publication authority.
+        val generation_admitted = match entry.lease:
+            Some(previous): generation > previous.generation
+            _: true
         if entry.state == ArtifactRequestStateV1.queued and
+                generation_admitted and
                 entry.request.priority > foreground_priority and
                 entry.request.memory_budget_bytes <= available_memory_bytes and
                 entry.request.priority > best_priority:
@@ -86,7 +92,8 @@ fn artifact_service_claim_v1(
         if index == best_index:
             val lease = ArtifactLeaseV1(lease_id, entry.request.action_id, owner_id, generation, false)
             entries = entries.push(ArtifactQueueEntryV1(
-                entry.request, ArtifactRequestStateV1.leased, Some(lease), "", ""))
+                entry.request, ArtifactRequestStateV1.leased, Some(lease), "",
+                if entry.lease != nil: "owner-recovered" else: ""))
         else:
             entries = entries.push(entry)
     ArtifactServiceV1(service.profile, entries)
