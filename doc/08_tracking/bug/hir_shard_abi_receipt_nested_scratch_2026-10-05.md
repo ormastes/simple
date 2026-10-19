@@ -49,7 +49,10 @@ owner closure, subsequent independent ownership, and retained-allocation growth.
 
 For the next authenticated source freeze, run the native scratch spec and the
 existing cold/warm HIR-shard fixture using a producer rebuilt with this repair.
-Require an actual `[abi-interface]` receipt for each valid shard module and no
+Run with `SIMPLE_HIR_ABI_INTERFACE_TRACE=1` (since 2026-10-19 the trace is
+opt-in; without it no `[abi-interface]` line is printed and this check would
+report a false "missing receipt"). Require an actual `[abi-interface]` receipt
+for each valid shard module and no
 scratch-unavailable diagnostic. Retain compiler/fixture identities, cache hit
 counts, module results, elapsed p50/p95 and peak/steady RSS for equal baseline
 and candidate workloads. A repaired receipt does more real work than the old

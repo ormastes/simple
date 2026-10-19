@@ -204,8 +204,18 @@ pub fn driver_hir_shard_cache_stored_v1(status: i64) -> bool:
 # every module is not free (canon text + SHA-256 per module), so skip it when
 # log_phase would drop the line anyway. ABI failures still surface as hard
 # `cold-hir-abi-unresolved` errors in capture_cold_hir_typed_receipts_v1.
+#
+# Phase profiling alone no longer pays for it: measured on the r8 Stage-3
+# build (memory-snapshot-v1.3971529.events, 576 modules), the step after
+# hir-post-diagnostics -- this digest -- added 14.9 GB RSS (26.5 MB/module,
+# max 444 MB) and 189 s with zero tracked-heap change, while bootstrap runs
+# set SIMPLE_COMPILER_PHASE_PROFILE=1 by default. The [abi-interface] lines
+# are opt-in via SIMPLE_HIR_ABI_INTERFACE_TRACE=1 (on top of phase tracing).
+fn driver_hir_abi_interface_trace_enabled() -> bool:
+    driver_phase_trace_enabled() and (env_get("SIMPLE_HIR_ABI_INTERFACE_TRACE")) == "1"
+
 fn driver_log_typed_hir_abi_interface_v1(module: HirModule, path: text):
-    if not driver_phase_trace_enabled(): return
+    if not driver_hir_abi_interface_trace_enabled(): return
     driver_log_typed_hir_abi_result_v1(module.name,
         driver_hir_abi_interface_digest_v1(module), path)
 
@@ -792,8 +802,8 @@ impl CompilerDriver:
                 module = round_trip.module
             # This transaction already owns the scope. Retain only the receipt;
             # reacquiring a scope here rejects every shard's ABI digest.
-            # Log-only receipt: skipped unless phase tracing is on.
-            if driver_phase_trace_enabled():
+            # Log-only receipt: skipped unless the ABI interface trace is on.
+            if driver_hir_abi_interface_trace_enabled():
                 abi_receipt = (module.name, driver_hir_abi_interface_digest_in_owned_scope_v1(module))
             if cached:
                 stored = true
