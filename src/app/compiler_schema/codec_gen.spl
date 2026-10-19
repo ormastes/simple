@@ -561,7 +561,14 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         out = out + indent + "var i{k} = 0\n"
         out = out + indent + "while i{k} < n{k}:\n"
         out = out + _emit_dec(u, s.a, "dk{k}", indent + "    ", c, required_node)
-        out = out + _emit_dec(u, s.b, "dv{k}", indent + "    ", c, required_node)
+        val value_shape = u.classify(s.b)
+        if value_shape.cat == "prim_i64":
+            # Keep later emitted local names aligned with scalar _emit_dec.
+            val _wire_slot = c.next()
+            out = out + indent + "    val value_pos{k} = r.pos\n"
+            out = out + indent + "    val dv{k}: i64 = r.next_i64()\n"
+        else:
+            out = out + _emit_dec(u, s.b, "dv{k}", indent + "    ", c, required_node)
         # Store through a presence bind of the decoded optional value, never
         # the optional itself: dict[key] = T? stores land erased (nil) on
         # the stage2 LLVM draw -- the decoded module.functions dict holds
@@ -577,6 +584,14 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
             out = out + indent + "    if r.ok:\n"
             out = out + indent + "        if val present_v{k} = dv{k}:\n"
             out = out + indent + "            " + target + "[dk{k}] = present_v{k}\n"
+        elif value_shape.cat == "prim_i64":
+            # Raw integers are not optional node handles. Preserve 3 and reject
+            # nil/malformed tokens even under the legacy unbounded reader.
+            out = out + indent + "    if r.ok:\n"
+            out = out + indent + "        if r.lines[value_pos{k}] != \"{{dv{k}}}\":\n"
+            out = out + indent + "            r.reject_malformed(\"integer_dictionary_value\")\n"
+            out = out + indent + "        else:\n"
+            out = out + indent + "            " + target + "[dk{k}] = dv{k}\n"
         else:
             out = out + indent + "    if val present_v{k} = dv{k}:\n"
             out = out + indent + "        " + target + "[dk{k}] = present_v{k}\n"

@@ -1,0 +1,122 @@
+# Native standalone probe: actual generated codec, no SSpec/seed dependency.
+use compiler.hir.hir_types.{Scope, ScopeId, ScopeKind, SymbolTable}
+use compiler.hir.generated.hir_codec.{hc_enc_scope, hc_dec_scope, hc_enc_symbol_table, hc_dec_symbol_table}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_parse_i64}
+
+fn scalar_map() -> Dict<text, i64>:
+    {"negative": -1, "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4,
+        "minimum": -9223372036854775807 - 1, "maximum": 9223372036854775807}
+
+fn check_scalar_map(values: Dict<text, i64>):
+    val keys: [text] = ["negative", "zero", "one", "two", "three", "four", "minimum", "maximum"]
+    val expected: [i64] = [-1, 0, 1, 2, 3, 4, -9223372036854775807 - 1, 9223372036854775807]
+    assert(values.len() == 8)
+    var index = 0
+    while index < keys.len():
+        assert(values.contains_key(keys[index]))
+        val actual: i64 = values[keys[index]]
+        assert(actual == expected[index])
+        index = index + 1
+
+fn scope_with(values: Dict<text, i64>) -> Scope:
+    # Absence here is the public optional-parent field, at an explicit boundary.
+    val parent: ScopeId? =
+        unsafe:
+            nil
+    Scope(id: ScopeId(id: 0), parent: parent, kind: ScopeKind.Module, symbols: values)
+
+fn encode_scope(scope: Scope) -> text:
+    var writer = HirCodecWriter.create()
+    hc_enc_scope(writer, scope)
+    assert(writer.ok)
+    writer.finish()
+
+fn check_scope_roundtrip():
+    val original = scope_with(scalar_map())
+    val blob = encode_scope(original)
+    var reader = FlatPoolReader.new_canonical(blob)
+    val restored: Scope = hc_dec_scope(reader)
+    assert(reader.ok)
+    assert(reader.finish_canonical_frame())
+    assert(restored.id.id == 0)
+    assert(restored.kind == ScopeKind.Module)
+    check_scalar_map(restored.symbols)
+    assert(encode_scope(restored) == blob)
+
+fn check_table_roundtrip():
+    var original = SymbolTable.new()
+    original.qualified_functions = scalar_map()
+    original.qualified_types = scalar_map()
+    original.exact_symbols = scalar_map()
+    original.module_callables = scalar_map()
+    original.root_scope_symbols = scalar_map()
+    original.structural_union_symbols = scalar_map()
+    original.scopes[0] = scope_with(scalar_map())
+    var writer = HirCodecWriter.create()
+    hc_enc_symbol_table(writer, original)
+    assert(writer.ok)
+    val blob = writer.finish()
+    var reader = FlatPoolReader.new_canonical(blob)
+    val restored: SymbolTable = hc_dec_symbol_table(reader)
+    assert(reader.ok)
+    assert(reader.finish_canonical_frame())
+    check_scalar_map(restored.qualified_functions)
+    check_scalar_map(restored.qualified_types)
+    check_scalar_map(restored.exact_symbols)
+    check_scalar_map(restored.module_callables)
+    check_scalar_map(restored.root_scope_symbols)
+    check_scalar_map(restored.structural_union_symbols)
+    assert(restored.scopes.contains_key(0))
+    val scope: Scope = restored.scopes[0]
+    assert(scope.id.id == 0)
+    assert(scope.kind == ScopeKind.Module)
+    assert(restored.scopes.len() == original.scopes.len())
+    assert(restored.current_scope.id == original.current_scope.id)
+    check_scalar_map(scope.symbols)
+    var again = HirCodecWriter.create()
+    hc_enc_symbol_table(again, restored)
+    assert(again.ok)
+    assert(again.finish() == blob)
+
+fn reject_scope_value(blob: text):
+    var canonical = FlatPoolReader.new_canonical(blob)
+    val canonical_result: Scope = hc_dec_scope(canonical)
+    assert(not canonical.ok)
+    assert(not canonical_result.symbols.contains_key("probe_value"))
+    var legacy = FlatPoolReader.new(blob)
+    val legacy_result: Scope = hc_dec_scope(legacy)
+    assert(not legacy.ok)
+    assert(not legacy_result.symbols.contains_key("probe_value"))
+
+fn check_absent_and_malformed_wire():
+    val one: Dict<text, i64> = {"probe_value": 3}
+    val blob = encode_scope(scope_with(one))
+    val marker = "probe_value\n3\n"
+    assert(blob.ends_with(marker))
+    reject_scope_value(blob.replace(marker, "probe_value\nN\n"))
+    reject_scope_value(blob.replace(marker, "probe_value\n03\n"))
+    reject_scope_value(blob.replace(marker, "probe_value\n+3\n"))
+    reject_scope_value(blob.replace(marker, "probe_value\n"))
+    reject_scope_value(blob.replace(marker, "probe_value"))
+
+fn check_typed_control():
+    val words: [text] = ["-1", "0", "1", "2", "3", "4", "-9223372036854775808", "9223372036854775807"]
+    val keys: [text] = ["negative", "zero", "one", "two", "three", "four", "minimum", "maximum"]
+    var values: Dict<text, i64> = {}
+    var index = 0
+    while index < words.len():
+        val decoded: i64 = flat_pool_parse_i64(words[index])
+        values[keys[index]] = decoded
+        index = index + 1
+    check_scalar_map(values)
+
+fn main():
+    check_typed_control()
+    print "codec scalar map typed control passed"
+    check_scope_roundtrip()
+    print "codec scalar map Scope roundtrip passed"
+    check_table_roundtrip()
+    print "codec scalar map SymbolTable roundtrip passed"
+    check_absent_and_malformed_wire()
+    print "codec scalar map absent and malformed wire checks passed"
