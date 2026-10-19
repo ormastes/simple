@@ -135,3 +135,17 @@ modulus (ciphertext == padded block, no RSA-2048 modexp). Spec:
 - `zstd_compressed_block_spec.spl` 14/14: the 7 former failures were stale expectations ("UnsupportedFeature:
   fresh-table compressed literals"); the decoder now decodes fresh-table Huffman literals and these malformed
   frames fail with CorruptStream/TruncatedInput. Host `zstd -d` 1.5.5 rejects all 7 frames too.
+
+## P-256 ECDH, AES-192(-GCM), RSA-PSS verify (2026-10-19)
+- `std.common.crypto.ecdh_p256`: `p256_public_key(d)`, `p256_ecdh_shared_secret(d, peer)`
+  return `Result`. Peer must be 65-byte `04||X||Y`, X,Y < p, on-curve; scalar in [1,n-1].
+  Scalar-mult is PURE Simple (always-add-and-select double-and-add in
+  `os.crypto.ecdh_p256`); `ecdsa_p256.spl` itself is an SFFI facade with no point math.
+  Vector: NIST CAVP KAS ECC CDH P-256 COUNT=0. RFC 5903 vectors not pinned (offline).
+- `aes_gcm.spl`: `aes192_key_expansion` (Nk=6, 208 bytes), `aes192_{en,de}crypt_block`,
+  `aes192_gcm_{en,de}crypt`. Vectors: FIPS-197 C.2, GCM spec test cases 8 and 10.
+- `std.common.crypto.rsa_pss`: `rsa_pss_verify_sha256` (sLen 32),
+  `_with_salt_len`, `rsa_pss_emsa_verify_sha256` (encoding check only, fast).
+  Vectors are OpenSSL-produced (not published NIST/Wycheproof); RSA-2048 spec
+  takes ~130 s in the interpreter, so test EM separately for fast checks.
+- Specs run JIT->interpreter demoted (`jit-bail:no-main-fn`) on the seed.

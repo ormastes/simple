@@ -334,6 +334,53 @@ fn aes256_key_expansion(key: [u8]) -> [u8]:
     expanded
 
 # ============================================================================
+# AES-192 Key Expansion (FIPS 197, Section 5.2)
+# Nk=6, Nr=12, total_words=52
+#   word_idx % 6 == 0: RotWord + SubWord + Rcon; otherwise normal XOR
+# ============================================================================
+
+fn aes192_key_expansion(key: [u8]) -> [u8]:
+    """Expand 24-byte AES-192 key into 208 round-key bytes (13 round keys)."""
+    val sb = _aes_gcm_aes_sbox_table()
+    val nk: u64 = 6
+    val total_words: u64 = 52
+
+    var expanded: [u8] = []
+
+    var i: u64 = 0
+    while i < 24:
+        expanded.push(_u8_at(key, i))
+        i = i + 1
+
+    var word_idx: u64 = nk
+    while word_idx < total_words:
+        val prev_base = (word_idx - 1) * 4
+        var t0 = _u8_at(expanded, prev_base)
+        var t1 = _u8_at(expanded, prev_base + 1)
+        var t2 = _u8_at(expanded, prev_base + 2)
+        var t3 = _u8_at(expanded, prev_base + 3)
+
+        if word_idx % nk == 0:
+            val r0 = _aes_sbox(sb, t1.to_i64())
+            val r1 = _aes_sbox(sb, t2.to_i64())
+            val r2 = _aes_sbox(sb, t3.to_i64())
+            val r3 = _aes_sbox(sb, t0.to_i64())
+            val rcon_b: i64 = _aes_rcon_byte(((word_idx / nk) - 1).to_i64())
+            t0 = (r0.to_i64() ^ rcon_b).to_u8()
+            t1 = r1
+            t2 = r2
+            t3 = r3
+
+        val prev_word_base = (word_idx - nk) * 4
+        expanded.push(_u8_at(expanded, prev_word_base) ^ t0)
+        expanded.push(_u8_at(expanded, prev_word_base + 1) ^ t1)
+        expanded.push(_u8_at(expanded, prev_word_base + 2) ^ t2)
+        expanded.push(_u8_at(expanded, prev_word_base + 3) ^ t3)
+        word_idx = word_idx + 1
+
+    expanded
+
+# ============================================================================
 # AES Block Encryption (scalar, round-count parametric)
 #
 # AES-128: pass round_keys from aes128_key_expansion (176 bytes), num_rounds=10
@@ -359,6 +406,10 @@ fn _aes_encrypt_block(sb: [u8], plaintext: [u8], round_keys: [u8], num_rounds: u
 fn aes128_encrypt_block(plaintext: [u8], round_keys: [u8]) -> [u8]:
     """Encrypt one 16-byte block with AES-128 (pre-expanded 176-byte schedule)."""
     _aes_encrypt_block(_aes_gcm_aes_sbox_table(), plaintext, round_keys, 10)
+
+fn aes192_encrypt_block(plaintext: [u8], round_keys: [u8]) -> [u8]:
+    """Encrypt one 16-byte block with AES-192 (pre-expanded 208-byte schedule)."""
+    _aes_encrypt_block(_aes_gcm_aes_sbox_table(), plaintext, round_keys, 12)
 
 fn aes256_encrypt_block(plaintext: [u8], round_keys: [u8]) -> [u8]:
     """Encrypt one 16-byte block with AES-256 (pre-expanded 240-byte schedule)."""
@@ -541,6 +592,10 @@ fn _aes_decrypt_block(isb: [u8], ciphertext: [u8], round_keys: [u8], num_rounds:
 fn aes128_decrypt_block(ciphertext: [u8], round_keys: [u8]) -> [u8]:
     """Decrypt one 16-byte block with AES-128 (pre-expanded 176-byte schedule)."""
     _aes_decrypt_block(_aes_gcm_aes_inv_sbox_table(), ciphertext, round_keys, 10)
+
+fn aes192_decrypt_block(ciphertext: [u8], round_keys: [u8]) -> [u8]:
+    """Decrypt one 16-byte block with AES-192 (pre-expanded 208-byte schedule)."""
+    _aes_decrypt_block(_aes_gcm_aes_inv_sbox_table(), ciphertext, round_keys, 12)
 
 fn aes256_decrypt_block(ciphertext: [u8], round_keys: [u8]) -> [u8]:
     """Decrypt one 16-byte block with AES-256 (pre-expanded 240-byte schedule)."""
@@ -887,6 +942,65 @@ fn aes256_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
     AesGcmResult.Ok(data: _gctr(round_keys, icb, ciphertext, 14))
 
 # ============================================================================
+# AES-192-GCM Encryption / Decryption
+# ============================================================================
+
+fn aes192_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8]:
+    """AES-192-GCM authenticated encryption.
+
+    Returns ciphertext || 16-byte authentication tag.
+    AES-192 block encryption uses pure scalar 12-round loop (no SIMD).
+    """
+    val round_keys = aes192_key_expansion(key)
+
+    var zero_block: [u8] = []
+    var i: u64 = 0
+    while i < 16:
+        zero_block.push(0x00u8)
+        i = i + 1
+    val h = aes192_encrypt_block(zero_block, round_keys)
+
+    val j0 = _aes_gcm_make_j0(nonce)
+    val icb = _aes_gcm_inc32(j0)
+    val ciphertext = _gctr(round_keys, icb, plaintext, 12)
+    val s = _aes_gcm_ghash(h, aad, ciphertext)
+    val tag = _gctr(round_keys, j0, s, 12)
+
+    _aesgcm_append_bytes(ciphertext, tag)
+
+fn aes192_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: [u8]) -> AesGcmResult:
+    """AES-192-GCM authenticated decryption with constant-time tag comparison.
+
+    Returns AesGcmResult.Ok(plaintext) or AesGcmResult.Err on tag mismatch.
+    AES-192 block encryption uses pure scalar 12-round loop (no SIMD).
+    """
+    val round_keys = aes192_key_expansion(key)
+
+    var zero_block: [u8] = []
+    var i: u64 = 0
+    while i < 16:
+        zero_block.push(0x00u8)
+        i = i + 1
+    val h = aes192_encrypt_block(zero_block, round_keys)
+
+    val j0 = _aes_gcm_make_j0(nonce)
+    val s = _aes_gcm_ghash(h, aad, ciphertext)
+    val expected_tag = _gctr(round_keys, j0, s, 12)
+
+    # Constant-time tag comparison
+    var diff: u8 = 0x00
+    var i2: u64 = 0
+    while i2 < 16:
+        diff = diff | (_u8_at(expected_tag, i2) ^ _u8_at(tag, i2))
+        i2 = i2 + 1
+
+    if diff != 0:
+        return AesGcmResult.Err("authentication tag mismatch")
+
+    val icb = _aes_gcm_inc32(j0)
+    AesGcmResult.Ok(data: _gctr(round_keys, icb, ciphertext, 12))
+
+# ============================================================================
 # Exports
 # ============================================================================
 
@@ -903,3 +1017,8 @@ export aes128_decrypt_block
 export aes256_decrypt_block
 export aes256_gcm_encrypt
 export aes256_gcm_decrypt
+export aes192_key_expansion
+export aes192_encrypt_block
+export aes192_decrypt_block
+export aes192_gcm_encrypt
+export aes192_gcm_decrypt
