@@ -15198,6 +15198,8 @@ static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
  * operation: make always consumes the slot, success or failure. */
 static _Thread_local char rt_secure_temp_dir_parent_slot[RT_TEXT_PATH_MAX];
 static _Thread_local int rt_secure_temp_dir_parent_ready = 0;
+static _Thread_local char rt_secure_temp_dir_prefix_slot[128];
+static _Thread_local int rt_secure_temp_dir_prefix_ready = 0;
 
 static int64_t rt_secure_temp_dir_core(const char* parent, const uint8_t* prefix_ptr, uint64_t prefix_len) {
     char prefix[128], path[RT_TEXT_PATH_MAX];
@@ -15232,8 +15234,31 @@ static int64_t rt_secure_temp_dir_core(const char* parent, const uint8_t* prefix
     LocalFree(descriptor); FreeLibrary(advapi);
     if (!created) { rt_secure_temp_dir_diag("CreateDirectoryA", path); return rt_string_new(NULL, 0); }
 #else
-    int n = snprintf(path, sizeof(path), "%s/%s-XXXXXX", parent, prefix);
-    if (n < 0 || (size_t)n >= sizeof(path) || !mkdtemp(path)) return rt_string_new(NULL, 0);
+    /* Exclusive-create staging: mkdtemp cannot be used on the hosted
+     * bootstrap link -- the stub fabricator weak-stubs libc symbols the
+     * system scan misses (measured: _mkdtemp resolved to an 8-byte
+     * `return 3` body, so mkdtemp "succeeded" without creating the
+     * directory and the follow-up chmod failed with ENOENT). mkdir with a
+     * random leaf is the same contract: the name need not be secret (the
+     * directory is private by mode, 0700), only freshly exclusive, which
+     * the EEXIST retry loop provides. */
+    static uint64_t rt_secure_temp_dir_rng_state = 0;
+    if (rt_secure_temp_dir_rng_state == 0) {
+        rt_secure_temp_dir_rng_state = ((uint64_t)getpid() << 32) ^
+            (uint64_t)time(NULL) ^ 0x9e3779b97f4a7c15ULL;
+    }
+    int created = 0;
+    for (int attempt = 0; attempt < 64; attempt++) {
+        rt_secure_temp_dir_rng_state ^= rt_secure_temp_dir_rng_state << 13;
+        rt_secure_temp_dir_rng_state ^= rt_secure_temp_dir_rng_state >> 7;
+        rt_secure_temp_dir_rng_state ^= rt_secure_temp_dir_rng_state << 17;
+        int n = snprintf(path, sizeof(path), "%s/%s-%012llx", parent, prefix,
+            (unsigned long long)(rt_secure_temp_dir_rng_state & 0xffffffffffffULL));
+        if (n < 0 || (size_t)n >= sizeof(path)) return rt_string_new(NULL, 0);
+        if (mkdir(path, 0700) == 0) { created = 1; break; }
+        if (errno != EEXIST) return rt_string_new(NULL, 0);
+    }
+    if (!created) return rt_string_new(NULL, 0);
     if (chmod(path, 0700) != 0) { rmdir(path); return rt_string_new(NULL, 0); }
 #endif
     return rt_string_new((const uint8_t*)path, (uint64_t)strlen(path));
@@ -15254,12 +15279,30 @@ int64_t rt_secure_temp_dir_set_parent(const uint8_t* parent_ptr, uint64_t parent
     return 1;
 }
 
-int64_t rt_secure_temp_dir_make(const uint8_t* prefix_ptr, uint64_t prefix_len) {
-    if (!rt_secure_temp_dir_parent_ready) return rt_string_new(NULL, 0);
+int64_t rt_secure_temp_dir_set_prefix(const uint8_t* prefix_ptr, uint64_t prefix_len) {
+    if (!rt_text_arg_to_path(prefix_ptr, prefix_len,
+                             rt_secure_temp_dir_prefix_slot,
+                             sizeof(rt_secure_temp_dir_prefix_slot))) return 0;
+    if (rt_secure_temp_dir_prefix_slot[0] == '\0' ||
+        strchr(rt_secure_temp_dir_prefix_slot, '/') ||
+        strchr(rt_secure_temp_dir_prefix_slot, '\\')) return 0;
+    rt_secure_temp_dir_prefix_ready = 1;
+    return 1;
+}
+
+int64_t rt_secure_temp_dir_make(void) {
+    if (!rt_secure_temp_dir_parent_ready || !rt_secure_temp_dir_prefix_ready) {
+        rt_secure_temp_dir_parent_ready = 0;
+        rt_secure_temp_dir_prefix_ready = 0;
+        return rt_string_new(NULL, 0);
+    }
     char parent[RT_TEXT_PATH_MAX];
     snprintf(parent, sizeof(parent), "%s", rt_secure_temp_dir_parent_slot);
     rt_secure_temp_dir_parent_ready = 0;
-    return rt_secure_temp_dir_core(parent, prefix_ptr, prefix_len);
+    rt_secure_temp_dir_prefix_ready = 0;
+    return rt_secure_temp_dir_core(parent,
+        (const uint8_t*)rt_secure_temp_dir_prefix_slot,
+        (uint64_t)strlen(rt_secure_temp_dir_prefix_slot));
 }
 
 #if defined(_WIN32)

@@ -2228,7 +2228,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // staging parent and prefix as two single-argument calls (thread-local
     // slot in the C runtime). Same (ptr, len) expansion for each text arg.
     RuntimeFuncSpec::new("rt_secure_temp_dir_set_parent", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_secure_temp_dir_make", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_secure_temp_dir_set_prefix", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_secure_temp_dir_make", &[], &[I64]),
     RuntimeFuncSpec::new("rt_file_read_lines", &[I64, I64], &[I64]), // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_file_append_text", &[I64, I64, I64, I64], &[I8]), // path_ptr, path_len, content_ptr, content_len -> bool
     RuntimeFuncSpec::new("rt_file_read_bytes", &[I64, I64], &[I64]),           // path -> RuntimeValue (array)
