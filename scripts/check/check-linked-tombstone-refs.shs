@@ -1,0 +1,252 @@
+#!/bin/sh
+# check-linked-tombstone-refs.shs -- fail when a LINKED binary's code refers to
+# address -1 (the linker tombstone for a reference into a discarded section).
+#
+# Incident 2026-10-19
+# (doc/08_tracking/bug/stage2_core_c_literal_relocations_resolve_to_minus_one_2026_10_19.md):
+# the seed's bootstrap core-C capsule is a `cc -Wl,-r -Wl,--gc-sections`
+# closure. With mold as the effective linker that partial link keeps every
+# .text.* section but drops the .rodata.str1.1 literal sections, rewriting each
+# reference as symbol 0 / addend -1. The final link materialised every literal
+# of the capsule's functions at -1: 16 sites in runtime_native.c (rt_sdr_*,
+# rt_secure_temp_dir_*), and the Stage 2 compiler SEGV'd in snprintf(-1) the
+# first time it staged a source snapshot. The seed now refuses such a closure
+# itself (tools.rs partial_link_tombstone_relocations); this guard checks the
+# finished artifact, so the class cannot ship from any other producer either.
+#
+# Mechanism: llvm-objdump -d over the executable sections, then match the
+# disassembly shapes a reference into a discarded section takes. mold's -r
+# leaves symbol 0 with addend -1 on aarch64 and addend 0 on x86_64:
+#   aarch64: adrp xN, 0xfffffffffffff000                   (page of -1)
+#   x86_64 : <insn> ...(%rip)  # 0xffffffffffffffff or a null-page target
+#            (< 0x1000; mold's x86_64 shape resolves to 0x4)
+#
+# Scope:
+#   enforced (fail closed): Linux on x86_64 / aarch64. A missing
+#     llvm-objdump there is ERROR, never a pass.
+#   best effort: FreeBSD on amd64/arm64 scans when llvm-objdump is present and
+#     otherwise prints SKIP.
+#   SKIP (exit 0, warning on stderr): any other OS or architecture -- no
+#     recognised pattern / not ELF -- never reported as a pass.
+# Tool: $SIMPLE_OBJDUMP if set (must exist), else llvm-objdump, else the
+# highest-versioned llvm-objdump-NN on PATH. GNU objdump is never used.
+#
+# Usage:
+#   sh scripts/check/check-linked-tombstone-refs.shs <binary>...
+#   sh scripts/check/check-linked-tombstone-refs.shs --selftest
+# Verdict (last stdout line):
+#   PASS -- <n> binary(ies) checked, 0 tombstone reference(s)          exit 0
+#   SKIP -- <reason> (nothing was checked)                              exit 0
+#   FAIL -- <k> tombstone reference(s) in <bins>: <func(count)>...      exit 1
+#   ERROR -- nothing was checked (<reason>)                             exit 2
+# --selftest runs before every scan and is fatal.
+
+set -u
+
+die_error() {
+    echo "ERROR — nothing was checked ($1)"
+    exit 2
+}
+
+skip() {
+    echo "warning: check-linked-tombstone-refs: $1; tombstone scan skipped" >&2
+    echo "SKIP — $1 (nothing was checked)"
+    exit 0
+}
+
+host_os=$(uname -s)
+host_arch=$(uname -m)
+enforced=0
+case "$host_os" in
+    Linux)
+        case "$host_arch" in
+            x86_64|aarch64) enforced=1 ;;
+            *) skip "no tombstone pattern for $host_os/$host_arch" ;;
+        esac ;;
+    FreeBSD)
+        case "$host_arch" in
+            amd64|x86_64|arm64|aarch64) ;;
+            *) skip "no tombstone pattern for $host_os/$host_arch" ;;
+        esac ;;
+    *) skip "$host_os is not an ELF host this guard covers" ;;
+esac
+
+find_objdump() {
+    if [ -n "${SIMPLE_OBJDUMP:-}" ]; then
+        command -v "$SIMPLE_OBJDUMP" 2>/dev/null
+        return $?
+    fi
+    if command -v llvm-objdump >/dev/null 2>&1; then
+        command -v llvm-objdump
+        return 0
+    fi
+    # Versioned names (llvm-objdump-23, ...): pick the highest on PATH.
+    best="" best_ver=-1
+    old_ifs=$IFS
+    IFS=:
+    for dir in $PATH; do
+        IFS=$old_ifs
+        for cand in "$dir"/llvm-objdump-[0-9]*; do
+            [ -x "$cand" ] || continue
+            ver=${cand##*-}
+            case "$ver" in *[!0-9]*|'') continue ;; esac
+            if [ "$ver" -gt "$best_ver" ]; then best=$cand best_ver=$ver; fi
+        done
+        IFS=:
+    done
+    IFS=$old_ifs
+    [ -n "$best" ] || return 1
+    printf '%s\n' "$best"
+}
+
+if ! OBJDUMP=$(find_objdump); then
+    if [ -n "${SIMPLE_OBJDUMP:-}" ]; then
+        die_error "SIMPLE_OBJDUMP=$SIMPLE_OBJDUMP is not an executable"
+    fi
+    if [ "$enforced" -eq 1 ]; then
+        die_error "llvm-objdump not found on $host_os/$host_arch; GNU objdump is not used as a fallback"
+    fi
+    skip "llvm-objdump not found on $host_os/$host_arch"
+fi
+CC_BIN=${CC:-clang}
+
+# scan_binary <path> <report-file>: writes "<function> <count>" lines for every
+# tombstone reference; returns 0 when the disassembly ran, 2 otherwise.
+scan_binary() {
+    scan_dis="$scan_tmp/dis.txt"
+    "$OBJDUMP" -d --no-show-raw-insn "$1" > "$scan_dis" 2>"$scan_tmp/dis.err"
+    scan_rc=$?
+    if [ "$scan_rc" -ne 0 ]; then
+        return 2
+    fi
+    if [ ! -s "$scan_dis" ]; then
+        return 2
+    fi
+    awk '
+        /^[0-9a-f]+ <.*>:$/ { fn = $2; sub(/^</, "", fn); sub(/>:$/, "", fn); next }
+        /[[:space:]]adrp[[:space:]]+[xw][0-9]+, (0x)?fffffffffffff000/ { hits[fn]++; next }
+        /\(%rip\)/ && /#[[:space:]]*(0x)?(ffffffffffffffff|[0-9a-f]|[0-9a-f][0-9a-f]|[0-9a-f][0-9a-f][0-9a-f])([[:space:]]|$)/ { hits[fn]++; next }
+        END { for (f in hits) print f, hits[f] }
+    ' "$scan_dis" > "$2"
+    return 0
+}
+
+run_scan() {
+    # run_scan <report-out> <binary>...: sets SCAN_TOTAL, SCAN_BAD_BINS, SCAN_CHECKED
+    run_report=$1
+    shift
+    : > "$run_report"
+    SCAN_TOTAL=0
+    SCAN_BAD_BINS=""
+    SCAN_CHECKED=0
+    for bin in "$@"; do
+        [ -f "$bin" ] || die_error "binary not found: $bin"
+        one="$scan_tmp/one.txt"
+        scan_binary "$bin" "$one"
+        one_rc=$?
+        if [ "$one_rc" -ne 0 ]; then
+            die_error "$OBJDUMP could not disassemble $bin: $(head -c 300 "$scan_tmp/dis.err")"
+        fi
+        SCAN_CHECKED=$((SCAN_CHECKED + 1))
+        count=$(awk '{ s += $2 } END { print s + 0 }' "$one")
+        if [ "$count" -gt 0 ]; then
+            SCAN_TOTAL=$((SCAN_TOTAL + count))
+            SCAN_BAD_BINS="$SCAN_BAD_BINS $bin"
+            sort "$one" | awk '{ printf "%s(%s) ", $1, $2 }' >> "$run_report"
+        fi
+    done
+}
+
+scan_tmp=$(mktemp -d "${TMPDIR:-/tmp}/tombstone-refs.XXXXXX") || die_error "mktemp failed"
+trap 'rm -rf "$scan_tmp"' EXIT INT TERM
+
+# Fixtures are cross-linked for BOTH supported arches (clang --target, lld,
+# -nostdlib, entry = the probed function), so each pattern is proven on every
+# host. The host arch's fixtures are mandatory; the other arch's are skipped
+# with a note only if this clang cannot target it.
+selftest_arch() {
+    sa_arch=$1
+    sa_dir="$st/$sa_arch"
+    mkdir -p "$sa_dir"
+    sa_t="--target=$sa_arch-unknown-linux-gnu"
+    sa_link="-nostdlib -no-pie -fuse-ld=lld"
+    # shellcheck disable=SC2086
+    "$CC_BIN" $sa_t -O2 -fPIC $sa_link -Wl,-e,pick "$st/good.c" -o "$sa_dir/good" 2>"$sa_dir/err" || return 3
+    # shellcheck disable=SC2086
+    "$CC_BIN" $sa_t -O2 -fPIC $sa_link -Wl,-e,pick -Wl,--defsym=tombstone_literal=0xffffffffffffffff \
+        "$st/bad.c" -o "$sa_dir/bad" 2>"$sa_dir/err" || return 3
+    run_scan "$sa_dir/r1" "$sa_dir/good"
+    if [ "$SCAN_CHECKED" -ne 1 ] || [ "$SCAN_TOTAL" -ne 0 ]; then
+        die_error "selftest failed ($sa_arch clean fixture reported $SCAN_TOTAL reference(s))"
+    fi
+    run_scan "$sa_dir/r2" "$sa_dir/bad"
+    if [ "$SCAN_TOTAL" -lt 1 ] || ! grep -q 'pick(' "$sa_dir/r2"; then
+        die_error "selftest failed ($sa_arch defsym -1 fixture not detected in pick)"
+    fi
+    SELFTEST_DONE="$SELFTEST_DONE $sa_arch:defsym-1"
+    # The incident's real shape: a mold `-r --gc-sections` closure of a
+    # function-sectioned member with a string literal, then a final link.
+    if command -v mold >/dev/null 2>&1; then
+        # shellcheck disable=SC2086
+        "$CC_BIN" $sa_t -O2 -fPIC -c -ffunction-sections -fdata-sections "$st/lit.c" -o "$sa_dir/lit.o" 2>"$sa_dir/err" \
+            || die_error "selftest: $sa_arch mold fixture compile failed"
+        # shellcheck disable=SC2086
+        "$CC_BIN" $sa_t -fuse-ld=mold -nostdlib -Wl,-r -no-pie -Wl,--gc-sections -Wl,--undefined=lit_root \
+            "$sa_dir/lit.o" -o "$sa_dir/closure.o" 2>"$sa_dir/err" \
+            || die_error "selftest: $sa_arch mold -r closure failed: $(head -c 300 "$sa_dir/err")"
+        # shellcheck disable=SC2086
+        "$CC_BIN" $sa_t $sa_link -Wl,-e,lit_root -Wl,--defsym=snprintf=0x401000 \
+            "$sa_dir/closure.o" -o "$sa_dir/mold_bin" 2>"$sa_dir/err" \
+            || die_error "selftest: $sa_arch mold fixture final link failed: $(head -c 300 "$sa_dir/err")"
+        run_scan "$sa_dir/r3" "$sa_dir/mold_bin"
+        if [ "$SCAN_TOTAL" -lt 1 ] || ! grep -q 'lit_root(' "$sa_dir/r3"; then
+            die_error "selftest failed ($sa_arch mold -r --gc-sections closure not detected; did mold change its tombstone?)"
+        fi
+        SELFTEST_DONE="$SELFTEST_DONE $sa_arch:mold-r"
+    fi
+    return 0
+}
+
+selftest() {
+    st="$scan_tmp/selftest"
+    mkdir -p "$st"
+    SELFTEST_DONE=""
+    command -v "$CC_BIN" >/dev/null 2>&1 || die_error "selftest: C compiler $CC_BIN not found"
+    printf '%s\n' \
+        '__attribute__((visibility("hidden"))) const char real_literal[] = "ok";' \
+        'const char *pick(void) { return real_literal; }' > "$st/good.c"
+    # -fPIC + hidden visibility: a PC-relative reference on both arches
+    # (aarch64 adrp/add, x86_64 lea sym(%rip)), the shape the incident had.
+    printf '%s\n' \
+        'extern __attribute__((visibility("hidden"))) const char tombstone_literal[];' \
+        'const char *pick(void) { return tombstone_literal; }' > "$st/bad.c"
+    printf '%s\n' \
+        'int snprintf(char *, unsigned long, const char *, ...);' \
+        'int lit_root(char *b, const char *s) { return snprintf(b, 64, "%s-root", s); }' > "$st/lit.c"
+    case "$host_arch" in
+        x86_64|amd64) native_arch=x86_64 other_arch=aarch64 ;;
+        *) native_arch=aarch64 other_arch=x86_64 ;;
+    esac
+    selftest_arch "$native_arch" ||
+        die_error "selftest: cannot build $native_arch fixtures with $CC_BIN and lld: $(head -c 300 "$st/$native_arch/err")"
+    if ! selftest_arch "$other_arch"; then
+        echo "note: check-linked-tombstone-refs: $CC_BIN cannot build $other_arch fixtures; only $native_arch patterns proven" >&2
+    fi
+}
+
+selftest
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS — selftest fixtures checked on $host_os/$host_arch with $OBJDUMP (clean +$SELFTEST_DONE)"
+    exit 0
+fi
+[ "$#" -gt 0 ] || die_error "no binary given"
+
+run_scan "$scan_tmp/report" "$@"
+[ "$SCAN_CHECKED" -gt 0 ] || die_error "0 binaries disassembled"
+if [ "$SCAN_TOTAL" -gt 0 ]; then
+    echo "FAIL — $SCAN_TOTAL tombstone reference(s) in$SCAN_BAD_BINS: $(cat "$scan_tmp/report")"
+    exit 1
+fi
+echo "PASS — $SCAN_CHECKED binary(ies) checked, 0 tombstone reference(s)"
+exit 0

@@ -4390,7 +4390,19 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     "${stage2_status}" "${stage2_native_log}" "${stage2_cache_absolute}"
   if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then
     echo "  Stage 2: running bootstrap compiler sanity"
-    if ! SIMPLE_RT_OBJ_CACHE_DIR="${stage2_cache_absolute}/rt-obj" \
+    # Code that refers to address -1 is a reference into a section the link
+    # discarded (2026-10-19: mold -r dropped the capsule's string literals and
+    # Stage 2 SEGV'd in snprintf). Refuse it before executing anything. ELF
+    # hosts only; the guard itself SKIPs (exit 0) where it has no pattern or
+    # tool and fails closed on Linux x86_64/aarch64.
+    stage2_tombstone_status=0
+    case "$(uname -s)" in
+      Linux|FreeBSD)
+        sh "${repo_root}/scripts/check/check-linked-tombstone-refs.shs" "${stage2_bin}" >&2 ||
+          stage2_tombstone_status=$? ;;
+    esac
+    if [ "${stage2_tombstone_status}" -ne 0 ] ||
+      ! SIMPLE_RT_OBJ_CACHE_DIR="${stage2_cache_absolute}/rt-obj" \
       bootstrap_stage_sanity "${stage2_bin}" \
       "$(absolute_path "${stage2_sanity_evidence}")" \
       "${stage2_home_absolute}" "${stage2_tmp_absolute}" \
