@@ -1,0 +1,81 @@
+use std.spec.{describe, it, expect, fail}
+use std.common.encoding.host_text_boundary_v1.{HostTextByteSpanV1, host_validate_text_span_v1, host_text_to_utf8_v1}
+use std.common.text_bytes.{utf8_bytes_valid}
+
+# The bulk runtime validator (rt_utf8_validate behind utf8_bytes_valid) and the
+# whole-span fast path of host_validate_text_span_v1 must agree with the
+# pure-Simple scalar decoder, which stays the reference. host_text_to_utf8_v1
+# runs that scalar loop unconditionally (legacy [i64] lane, no fast path), so
+# it is the slow oracle here: same accept set, and on rejection the fast entry
+# point must report the oracle's error code and byte offset.
+
+fn widen(bytes: [u8]) -> [i64]:
+    var wide: [i64] = []
+    for byte in bytes: wide.push(byte as i64)
+    wide
+
+fn whole(bytes: [u8]) -> HostTextByteSpanV1:
+    HostTextByteSpanV1(prefix: [], bytes: bytes, start: 0, end: bytes.len())
+
+fn expect_parity(bytes: [u8], valid: bool, code: text, offset: i64):
+    val slow = host_text_to_utf8_v1(widen(bytes), "utf-8")
+    val fast = host_validate_text_span_v1(whole(bytes), "utf-8")
+    expect(utf8_bytes_valid(bytes)).to_equal(valid)
+    expect(slow.is_ok()).to_equal(valid)
+    expect(fast.is_ok()).to_equal(valid)
+    if valid:
+        expect(slow.unwrap()).to_equal(widen(bytes))
+    else:
+        match slow:
+            case Ok(_): fail("slow decoder accepted invalid input")
+            case Err(reference):
+                expect(reference.code).to_equal(code)
+                expect(reference.byte_offset).to_equal(offset)
+                match fast:
+                    case Ok(_): fail("fast path accepted invalid input")
+                    case Err(error):
+                        expect(error.code).to_equal(reference.code)
+                        expect(error.byte_offset).to_equal(reference.byte_offset)
+                        expect(error.reason).to_equal(reference.reason)
+
+describe "UTF-8 fast path vs scalar decoder parity":
+    it "agrees on ASCII and empty input":
+        expect_parity([], true, "", -1)
+        expect_parity([0x68u8, 0x69u8, 0x0Au8, 0u8, 0x7Fu8], true, "", -1)
+
+    it "agrees on valid multibyte scalars":
+        expect_parity([0xC3u8, 0xA9u8], true, "", -1)
+        expect_parity([0xE2u8, 0x82u8, 0xACu8], true, "", -1)
+        expect_parity([0xF0u8, 0x9Fu8, 0x98u8, 0x80u8], true, "", -1)
+        expect_parity([0xEDu8, 0x9Fu8, 0xBFu8], true, "", -1)
+        expect_parity([0xEEu8, 0x80u8, 0x80u8], true, "", -1)
+        expect_parity([0xF4u8, 0x8Fu8, 0xBFu8, 0xBFu8], true, "", -1)
+
+    it "keeps a UTF-8 BOM as content on both paths":
+        expect_parity([0xEFu8, 0xBBu8, 0xBFu8, 65u8], true, "", -1)
+        expect_parity([0xEFu8, 0xBBu8, 0xBFu8], true, "", -1)
+
+    it "agrees on truncated sequences":
+        expect_parity([0xC3u8], false, "truncated_input", 1)
+        expect_parity([65u8, 0xE2u8, 0x82u8], false, "truncated_input", 3)
+        expect_parity([0xF0u8, 0x9Fu8, 0x98u8], false, "truncated_input", 3)
+        expect_parity([0xEFu8, 0xBBu8], false, "truncated_input", 2)
+
+    it "agrees on overlong encodings":
+        expect_parity([0xC0u8, 0x80u8], false, "invalid_utf8", 0)
+        expect_parity([0xC1u8, 0xBFu8], false, "invalid_utf8", 0)
+        expect_parity([0xE0u8, 0x80u8, 0x80u8], false, "invalid_utf8", 1)
+        expect_parity([0xE0u8, 0x9Fu8, 0xBFu8], false, "invalid_utf8", 1)
+        expect_parity([0xF0u8, 0x8Fu8, 0xBFu8, 0xBFu8], false, "invalid_utf8", 1)
+
+    it "agrees on surrogates and out-of-range scalars":
+        expect_parity([0xEDu8, 0xA0u8, 0x80u8], false, "invalid_utf8", 1)
+        expect_parity([0xEDu8, 0xBFu8, 0xBFu8], false, "invalid_utf8", 1)
+        expect_parity([0xF4u8, 0x90u8, 0x80u8, 0x80u8], false, "invalid_utf8", 1)
+        expect_parity([0xF5u8, 0x80u8, 0x80u8, 0x80u8], false, "invalid_utf8", 0)
+        expect_parity([0xFFu8], false, "invalid_utf8", 0)
+
+    it "agrees on stray and broken continuation bytes":
+        expect_parity([0x80u8], false, "invalid_utf8", 0)
+        expect_parity([65u8, 0xC3u8, 0x28u8], false, "invalid_utf8", 2)
+        expect_parity([0xE2u8, 0x82u8, 0x41u8], false, "invalid_utf8", 2)
