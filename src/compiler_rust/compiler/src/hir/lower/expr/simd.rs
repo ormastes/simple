@@ -329,13 +329,10 @@ impl Lowerer {
 
         let mut args_hir = self.lower_call_args(args, ctx)?;
         if args.iter().all(|arg| arg.name.is_none()) {
-            if let Some(params) = self.fn_param_defaults.get(&qualified_name).cloned() {
-                for default in params.iter().skip(args_hir.len()) {
-                    match default {
-                        Some(expr) if Self::is_constant_default(expr) => args_hir.push(self.lower_expr(expr, ctx)?),
-                        _ => break,
-                    }
-                }
+            if let Some(params) = self.fn_param_defaults.get(&qualified_name)
+                .or_else(|| self.global_method_param_defaults.as_ref().and_then(|defs| defs.get(&qualified_name)))
+                .cloned() {
+                self.fill_omitted_default_args(&qualified_name, &params, &mut args_hir, ctx)?;
             }
         }
 
