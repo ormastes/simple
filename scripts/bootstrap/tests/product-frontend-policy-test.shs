@@ -12,6 +12,10 @@ unset SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB SIMPLE_SHARD_MEM_CLAMP \
 if bootstrap_product_frontend_policy diagnostic 5859375 monitor >"$scratch/absent" 2>/dev/null; then exit 1; fi
 [ ! -s "$scratch/absent" ]
 count=1
+# Fanout hosts leave the parse warm-up to the compiler's clamp (tree budget /
+# 1650000 KiB per parse shard, bounded by --threads); only the Windows owner
+# pins one frontend (bug parse_shard_warmup_pinned_to_one_worker_2026-10-19).
+if bootstrap_product_frontend_fanout_host; then parse_pin=unset; else parse_pin=1; fi
 for mode in enforce monitor; do
   SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB=3000000
   rows=$(bootstrap_product_frontend_policy diagnostic 5859375 "$mode")
@@ -20,9 +24,9 @@ for mode in enforce monitor; do
 $rows
 EOF
     export SIMPLE_NATIVE_BUILD_THREADS=80
-    sh -c 'printf "%s\n" "$SIMPLE_NATIVE_BUILD_THREADS" "$SIMPLE_SHARD_MEM_CLAMP" "$SIMPLE_PARSE_SHARD_MAX" "$SIMPLE_PARSE_SHARD_WORKER_KB" "$SIMPLE_HIR_SHARD_WORKER_KB" "$SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB"'
+    sh -c 'printf "%s\n" "$SIMPLE_NATIVE_BUILD_THREADS" "$SIMPLE_SHARD_MEM_CLAMP" "${SIMPLE_PARSE_SHARD_MAX-unset}" "$SIMPLE_PARSE_SHARD_WORKER_KB" "$SIMPLE_HIR_SHARD_WORKER_KB" "$SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB"'
   ) >"$scratch/child"
-  printf '%s\n' 80 1 1 1650000 3000000 3000000 >"$scratch/expected"
+  printf '%s\n' 80 1 "$parse_pin" 1650000 3000000 3000000 >"$scratch/expected"
   cmp "$scratch/expected" "$scratch/child"
   count=$((count + 1))
 done
@@ -84,4 +88,12 @@ else
   done
 fi
 count=$((count + 6))
+rows=$(bootstrap_product_frontend_policy qualified 45088768 enforce 50331648)
+if bootstrap_product_frontend_fanout_host; then
+  [ "$(printf '%s\n' "$rows" | grep -c '^SIMPLE_PARSE_SHARD_MAX=')" -eq 0 ]
+else
+  printf '%s\n' "$rows" | grep -qx SIMPLE_PARSE_SHARD_MAX=1
+fi
+bootstrap_stage3_windows_frontend_policy | grep -qx SIMPLE_PARSE_SHARD_MAX=1
+count=$((count + 2))
 printf 'PASS product frontend policy: %s cases, real child transport; no native build\n' "$count"

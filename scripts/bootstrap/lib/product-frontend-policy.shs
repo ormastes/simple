@@ -48,6 +48,18 @@ bootstrap_product_frontend_policy() {
     product_policy_rows=$(bootstrap_stage3_windows_frontend_environment \
         "$product_policy_cap" "$product_policy_rss_mode" "$product_policy_share" \
         "$product_policy_ceiling" "$product_policy_max") || return 1
+    # The Windows owner pins SIMPLE_PARSE_SHARD_MAX=1 by design (one frontend).
+    # On a fanout host that pin serialized the parse cache warm-up to one cold
+    # parse of the whole closure (~104 ms/file: 137 s at 1315 modules, ~4.7 min
+    # at the 2702-module Stage 2 closure) while the HIR shards fanned out. The
+    # compiler's clamp already sizes parse shards from the exported tree budget
+    # (60% / 1650000 KiB per shard, bounded by --threads), so the row is dropped
+    # here; the contradiction check below still refuses an inherited explicit
+    # fanout request. Bug parse_shard_warmup_pinned_to_one_worker_2026-10-19.
+    if bootstrap_product_frontend_fanout_host; then
+        product_policy_rows=$(printf '%s\n' "$product_policy_rows" |
+            sed '/^SIMPLE_PARSE_SHARD_MAX=1$/d') || return 1
+    fi
     # Reject inherited contradictory scheduling requests rather than quietly
     # masking them. No eval, host-memory query, or unchecked fanout override.
     [ "${SIMPLE_SHARD_MEM_CLAMP:-1}" = 1 ] &&
