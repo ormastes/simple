@@ -3115,33 +3115,43 @@ impl Lowerer {
         // in the interpreter (`interpreter/expr.rs` Expr::Try). Without this an
         // `Option<T>`-typed None, or a nil reaching an `ANY` subject, matched
         // no Err discriminant and execution continued with a nil payload.
-        let is_none = HirExpr {
+        //
+        // `rt_try_is_absent(s, id, Err)` is exactly `rt_is_none(s) ||
+        // rt_enum_check_variant(s, id, Err)` in one enum lookup, so the Err
+        // test is kept (a Result.Err flowing through `ANY` into an Option-typed
+        // slot has enum id 0, which the check treats as a wildcard, and must
+        // still propagate) while the present path makes one call before the
+        // payload read -- the same count as the pre-fix Err-only lowering.
+        let is_absent = HirExpr {
             kind: HirExprKind::BuiltinCall {
-                name: "rt_is_none".to_string(),
-                args: vec![subject_ref],
+                name: "rt_try_is_absent".to_string(),
+                args: vec![
+                    subject_ref,
+                    HirExpr {
+                        kind: HirExprKind::Integer(self.enum_runtime_id_for_type(subject_ty)),
+                        ty: TypeId::I64,
+                    },
+                    HirExpr {
+                        kind: HirExprKind::Integer(err_disc),
+                        ty: TypeId::I64,
+                    },
+                ],
             },
             ty: TypeId::BOOL,
         };
 
         // A plain `Result` subject cannot be None, so it keeps the original
-        // Err-only lowering (no extra runtime call per `?`).
+        // Err-only lowering (byte-identical to the pre-fix code).
         let is_plain_result = matches!(
             self.module.types.get(subject_ty),
             Some(HirType::Enum { name, .. }) if name == "Result"
         );
-        // A plain `Option` subject can never be Err, so its absence test
-        // replaces (rather than precedes) the Err test: two runtime calls on
-        // the present path, the same count as the pre-fix Err-only lowering.
-        let is_plain_option = matches!(
-            self.module.types.get(subject_ty),
-            Some(HirType::Enum { name, .. }) if name == "Option"
-        );
         let body = if propagate_absence && !is_plain_result {
             HirExpr {
                 kind: HirExprKind::If {
-                    condition: Box::new(is_none),
+                    condition: Box::new(is_absent),
                     then_branch: Box::new(early_return),
-                    else_branch: Some(Box::new(if is_plain_option { unwrap_ok } else { err_or_payload })),
+                    else_branch: Some(Box::new(unwrap_ok)),
                 },
                 ty: payload_ty,
             }

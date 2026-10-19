@@ -9631,6 +9631,19 @@ int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t ex
     return expected_enum_id == 0 || e->enum_id == 0 || (int64_t)e->enum_id == expected_enum_id;
 }
 
+/* `?` absence test in ONE enum lookup: exactly
+ * rt_is_none(value) || rt_enum_check_variant(value, expected_enum_id, err_discriminant).
+ * Twin of rt_try_is_absent in the Rust runtime (value/objects.rs). */
+int8_t rt_try_is_absent(int64_t value, int64_t expected_enum_id, int64_t err_discriminant) {
+    if (value == rt_core_nil()) return 1;
+    RtCoreEnum* e = rt_core_as_enum(value);
+    if (!e) return 0;
+    int64_t discriminant = (int64_t)e->discriminant;
+    if ((int64_t)e->enum_id == RT_OPTION_ENUM_ID && (discriminant == 1 || discriminant == RT_DISC_NONE)) return 1;
+    if (discriminant != err_discriminant) return 0;
+    return expected_enum_id == 0 || e->enum_id == 0 || (int64_t)e->enum_id == expected_enum_id;
+}
+
 int64_t rt_enum_payload(int64_t value) {
     RtCoreEnum* e = rt_core_as_enum(value);
     return e ? e->payload : rt_core_nil();

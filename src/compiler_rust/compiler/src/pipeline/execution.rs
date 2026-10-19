@@ -1488,6 +1488,27 @@ fn loop_try(n: i64) -> Result<i64, text>:
         i = i + 1
     Ok(acc)
 
+fn err_any(flag: bool):
+    if flag:
+        return Err("boom")
+    Some(5)
+
+fn opt_from_any(flag: bool) -> Option<i64>:
+    val o: Option<i64> = err_any(flag)
+    val v = o?
+    print "opt_from_any continued"
+    Some(v + 1)
+
+fn falsy(k: i64) -> Option<i64>:
+    if k == 0:
+        return Some(0)
+    None
+
+fn falsy_try(k: i64) -> Option<i64>:
+    val v = falsy(k)?
+    print "falsy_try continued v={v}"
+    Some(v + 10)
+
 fn show_arr(a: [u8]?) -> text:
     if val x = a:
         return "arr[{x[0]},{x[1]}]"
@@ -1525,9 +1546,23 @@ fn main():
     match loop_try(5):
         case Ok(v): print "L2 {v}"
         case Err(e): print "L2 err {e}"
+    # Only the absence of "opt_from_any continued" is observed here: a native
+    # `match` on an Option slot holding a Result.Err is a separate question.
+    val r1 = opt_from_any(true)
+    print "X1 returned"
+    match opt_from_any(false):
+        case Some(v): print "X2 {v}"
+        case None: print "X2 none"
+        case _: print "X2 propagated"
+    match falsy_try(0):
+        case Some(v): print "F1 {v}"
+        case None: print "F1 none"
+    match falsy_try(1):
+        case Some(v): print "F2 {v}"
+        case None: print "F2 none"
 "#;
 
-    const TRY_FORMS_EXPECTED: &str = "arr_try continued len=3\nA1 arr[7,9]\nA2 nil\ndict_try continued\nD1 6\nD2 nil\ntup_try continued\nT1 34\nT2 nil\nenum_try continued\nE1 42\nE2 none\nany_try continued\nN1 3\nN2 nil\nres_try continued\nR1 11\nR2 err neg\nL1 2\nL2 err neg\n";
+    const TRY_FORMS_EXPECTED: &str = "arr_try continued len=3\nA1 arr[7,9]\nA2 nil\ndict_try continued\nD1 6\nD2 nil\ntup_try continued\nT1 34\nT2 nil\nenum_try continued\nE1 42\nE2 none\nany_try continued\nN1 3\nN2 nil\nres_try continued\nR1 11\nR2 err neg\nL1 2\nL2 err neg\nX1 returned\nopt_from_any continued\nX2 6\nfalsy_try continued v=0\nF1 10\nF2 none\n";
 
     #[test]
     fn native_try_operator_matches_interpreter_on_every_subject_shape() {
