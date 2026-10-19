@@ -33,7 +33,7 @@ verbatim. The JIT runs the same MIR against the Rust runtime and is correct.
 ## Fix
 
 Every C accessor that hands a packed element to Simple code now goes
-through `rt_core_array_value_at`. That helper returns `rt_value_int(byte)` for
+through `spl_core_array_value_at`. That helper returns `rt_value_int(byte)` for
 BYTES and `rt_value_int(word)` for U64_PACKED, the exact twin of Rust's
 `RuntimeValue::from_int`. A word of 2^60 or more becomes a lossless signed
 wide box, which `UnboxInt` (`rt_value_unbox_int`) and `rt_value_as_u64` both
