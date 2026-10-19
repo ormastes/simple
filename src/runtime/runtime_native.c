@@ -9974,10 +9974,17 @@ int8_t rt_heap_ref_registered_c(int64_t value) {
 }
 
 #if defined(SIMPLE_CORE_C_STANDALONE) && SIMPLE_CORE_C_STANDALONE
-/* Standalone Core-C has only the C registry and no Rust union provider.
- * Keep the public ABI strong here and absent from mixed-runtime builds. */
+/* Standalone Core-C public encoder node guard. Twin of the Rust provider
+ * (compiler_rust/runtime/src/value/objects.rs rt_heap_ref_registered, v21):
+ * AOT lowering allocates Simple structs (HirModule and every HIR node struct)
+ * as raw rt_alloc blocks tagged TAG_HEAP that are never registered, so a
+ * registry-only probe here rejected EVERY HIR module ("unregistered HirModule
+ * node": Phase 3 2026-10-19, stores=0 refused=1351 on the core-c-bootstrap
+ * lane). Only nil / zero-page values reject; rt_heap_ref_registered_c stays
+ * the strict registry-membership probe. Restore a registry check here once
+ * raw struct blocks are registered at the allocator. */
 int8_t rt_heap_ref_registered(int64_t value) {
-    return rt_heap_ref_registered_c(value);
+    return rt_heap_ref_wellformed(value);
 }
 #endif
 
