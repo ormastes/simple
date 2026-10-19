@@ -101,3 +101,16 @@ describe "bare variant arms over a subject typed only by its lowered local":
         val (mir, all) = lower_consumer_mir("fn g(node: Node) -> i64:\n    match node.kind:\n        case Function(n): n\n        case Other(m): m\n")
         expect(all).to_equal("")
         expect(variant_tests_in(mir, "g")).to_equal(2)
+
+    it "a mutable binding named like a unit variant stays a binding (never re-owned)":
+        # HIR keeps `case mut Leaf:` a binding even when the name is a
+        # variant; MIR must not turn it into a variant test either, so it is
+        # the catch-all and no variant test is emitted.
+        val (mir, all) = lower_consumer_mir("fn mb(nodes: [Node]) -> i64:\n    val first = nodes[0]\n    match first.kind:\n        case mut Leaf: 1\n")
+        expect(all).to_equal("")
+        expect(variant_tests_in(mir, "mb")).to_equal(0)
+
+    it "a re-owned unit-variant arm whose body names the binding reads the subject, not an unbound local":
+        val (mir, all) = lower_consumer_mir("fn rb(nodes: [Node]) -> i64:\n    val first = nodes[0]\n    match first.kind:\n        case Leaf:\n            if Leaf == KindA.Leaf: 1 else: 2\n        case Function(n): n\n        case Other(m): m\n")
+        expect(all).to_equal("")
+        expect(variant_tests_in(mir, "rb")).to_equal(3)
