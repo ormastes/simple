@@ -374,9 +374,9 @@ fn hir_cache_clear_last_warnings():
     # Caller pauses its transient scope before replacing this retained root.
     _hir_cache_last_warnings = []
 
-# Store failures can construct a dynamic io-* reason in the caller's scratch
-# scope. Scalar counters and fixed-size reject counters do not allocate; this
-# text is the sole retained cache diagnostic owner besides last_warnings.
+# Retain cache diagnostics for callers that own an enclosing scratch scope.
+# Store refusal reasons are process-lived literals; this owner remains part
+# of the archive/shard lifetime protocol alongside last_warnings.
 fn hir_cache_promote_diagnostic_owner_v1() -> bool:
     transient_promote(_hir_cache_last_reason)
 
@@ -431,13 +431,13 @@ fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]
         # A failed write can leave a partial temp (disk full is the measured
         # case, P-INFRA-3); it was never unlinked and never reported.
         val _partial = rt_file_delete(tmp)
-        _hir_cache_note_store_failure("write", tmp)
+        _hir_cache_note_store_failure("write", "io-write", tmp)
         return false
     if rt_file_move(tmp, final_path):
         _hir_cache_stores = _hir_cache_stores + 1
         return true
     val _cleaned = rt_file_delete(tmp)
-    _hir_cache_note_store_failure("rename", final_path)
+    _hir_cache_note_store_failure("rename", "io-rename", final_path)
     false
 
 # A cache that cannot store is a slow build, not a wrong one, so a failed store
@@ -447,9 +447,12 @@ fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]
 # a failed self-check is not an I/O failure and is counted as `refused=`.
 var _hir_cache_store_failures: i64 = 0
 
-fn _hir_cache_note_store_failure(step: text, path: text):
+fn _hir_cache_note_store_failure(step: text, reason: text, path: text):
     _hir_cache_store_failures = _hir_cache_store_failures + 1
-    _hir_cache_last_reason = "io-" + step
+    # Both private callers pass a literal: the native literal owner persists
+    # it beyond hir_cache_store's scratch scope. Concatenating here published
+    # a transient string that scope_end freed before summary/classification.
+    _hir_cache_last_reason = reason
     if _hir_cache_store_failures == 1:
         eprint("[hir-cache] store failed at {step}: {path}; this module will be re-lowered next run (further failures are only counted)\n")
 
