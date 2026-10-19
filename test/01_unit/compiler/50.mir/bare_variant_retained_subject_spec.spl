@@ -1,0 +1,74 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Bare variant arms over a subject typed only by its lowered local
+
+Phase-3 MIR residue (enum_match cluster, 2026-10-20): `match nodes[0].kind:`
+or `match self.resolve(x).kind:` carries no expression type on the native
+--entry path (no type inference), so `enum_match_expr_type` answers nil while
+field/element lowering has already recorded the declared enum type on the
+lowered subject local. `enum_match_subject_type` retained only Result/Optional
+from that local, so every bare payload variant declared by two enums reported
+"bare variant 'X' is ambiguous ... has type unresolved". A retained Named
+type now owns the bare arms when the expression has no type.
+"""
+
+# @tag: unit, compiler, mir, hir, enum, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val data_source = "pub enum KindA:\n    Function(n: i64)\n    Other(m: i64)\n\npub enum KindB:\n    Function(s: text)\n    Other(t: text)\n\npub struct Node:\n    kind: KindA\n    tag: i64\n"
+
+fn lower_consumer(body: text) -> text:
+    val consumer_source = "use lib.data.*\n\n" + body
+    val log = Logger(level: 0)
+    val data_ast = parse_full_frontend(data_source, "lib/data.spl", "lib.data", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.data"] = data_ast
+    val sources = [SourceFile(path: "lib/data.spl", content: data_source, module_name: "lib.data")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var data_lowering = hirlowering_for_module("lib.data", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val data_hir = data_lowering.lower_module(data_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["data_hir"] = data_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "data_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+    val mir = mir_lowering.lower_module(consumer_hir, [data_hir, consumer_hir])
+    var out = ""
+    for e in consumer_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    print "errors: [{out}]"
+    out
+
+fn expect_owned_arms(all: text):
+    expect(all.contains("ambiguous")).to_equal(false)
+    expect(all.contains("no variant")).to_equal(false)
+    expect(all.contains("unknown variant")).to_equal(false)
+    expect(all.contains("does not match subject owner")).to_equal(false)
+
+describe "bare payload variant shared by two enums, subject typed only by its lowered local":
+    it "element field subject: val first = nodes[0]; match first.kind":
+        expect_owned_arms(lower_consumer("fn d(nodes: [Node]) -> i64:\n    val first = nodes[0]\n    match first.kind:\n        case Function(n): n\n        case Other(m): m\n"))
+
+    it "direct index field subject: match nodes[0].kind":
+        expect_owned_arms(lower_consumer("fn e(nodes: [Node]) -> i64:\n    match nodes[0].kind:\n        case Function(n): n + 1\n        case Other(m): m + 1\n"))
+
+    it "an explicitly typed parameter subject still resolves":
+        expect_owned_arms(lower_consumer("fn g(node: Node) -> i64:\n    match node.kind:\n        case Function(n): n\n        case Other(m): m\n"))
