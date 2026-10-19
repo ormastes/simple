@@ -2981,6 +2981,27 @@ impl Lowerer {
                         Ok(present)
                     };
                 }
+
+                // Every other nullable pointee (`[T]?`, `{K: V}?`, tuple?, ...)
+                // is likewise not a Result/Option enum: its runtime value is the
+                // collection handle itself, nil when absent. Falling through to
+                // the Err-only path below never early-returned on nil and
+                // answered `rt_enum_payload(<array>) == nil` when present, so
+                // `val a = f()?` with `f() -> [u8]?` continued past a nil and
+                // lost a present array under JIT/native while the interpreter
+                // propagated / unwrapped. Same nil-test + normalizer as above;
+                // heap handles keep their concrete type, anything else is `ANY`
+                // (a tagged word, as in the scalar case).
+                if propagate_absence {
+                    let payload_ty = match self.module.types.get(pointee) {
+                        Some(HirType::Array { .. })
+                        | Some(HirType::Dict { .. })
+                        | Some(HirType::Tuple(_))
+                        | Some(HirType::LabeledTuple(_)) => pointee,
+                        _ => TypeId::ANY,
+                    };
+                    return Ok(self.lower_option_try_branch(inner_hir, subject_ty, payload_ty, ctx));
+                }
             }
         }
 
@@ -3062,26 +3083,56 @@ impl Lowerer {
             ty: payload_ty,
         };
 
+        // Present Ok/Some payload. An `ANY` subject that is a bare non-enum
+        // value also lands here and reads as nil; the interpreter rejects `?`
+        // on such a value outright, so there is no defined result to match.
         let unwrap_ok = HirExpr {
             kind: HirExprKind::BuiltinCall {
                 name: "rt_enum_payload".to_string(),
-                args: vec![subject_ref],
+                args: vec![subject_ref.clone()],
             },
             ty: payload_ty,
+        };
+
+        let err_or_payload = HirExpr {
+            kind: HirExprKind::If {
+                condition: Box::new(is_err),
+                then_branch: Box::new(early_return.clone()),
+                else_branch: Some(Box::new(unwrap_ok)),
+            },
+            ty: payload_ty,
+        };
+
+        // `?` also propagates absence: nil and `Option.None` return early, as
+        // in the interpreter (`interpreter/expr.rs` Expr::Try). Without this an
+        // `Option<T>`-typed None, or a nil reaching an `ANY` subject, matched
+        // no Err discriminant and execution continued with a nil payload.
+        let is_none = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_is_none".to_string(),
+                args: vec![subject_ref],
+            },
+            ty: TypeId::BOOL,
+        };
+
+        let body = if propagate_absence {
+            HirExpr {
+                kind: HirExprKind::If {
+                    condition: Box::new(is_none),
+                    then_branch: Box::new(early_return),
+                    else_branch: Some(Box::new(err_or_payload)),
+                },
+                ty: payload_ty,
+            }
+        } else {
+            err_or_payload
         };
 
         Ok(HirExpr {
             kind: HirExprKind::LetIn {
                 local_idx: subject_idx,
                 value: Box::new(inner_hir),
-                body: Box::new(HirExpr {
-                    kind: HirExprKind::If {
-                        condition: Box::new(is_err),
-                        then_branch: Box::new(early_return),
-                        else_branch: Some(Box::new(unwrap_ok)),
-                    },
-                    ty: payload_ty,
-                }),
+                body: Box::new(body),
             },
             ty: payload_ty,
         })
