@@ -498,3 +498,26 @@ finding: the bug-DB 'CRC mismatch' warning is reader-side (tracked DB body
 matches zlib crc32 exactly; self-hosted crc32_text disagrees) -- warning-only,
 but the workaround table never loads, leaving erased-read workarounds
 unapplied in these builds.
+
+## 2026-10-19 (cycle-171, partial) -- bootstrap-lane registration draws: 64,960 -> 56,801 MIR errors; per-build draw lottery blocks per-site chasing
+
+Cycle-171 opened with 64,960 MIR errors (classes: 'undefined variable
+BLOCK_*' module vals, 'enum construction: unregistered declaration' with
+clean lookup keys, 'missing runtime identity', corrupt qualified keys).
+Commit 7c1899d73a8 applied the bind-once family to the registration reads
+(enum-bootstrap inventory Dict index -> keys()+annotated extraction;
+bootstrap-flat constants element reads -> annotated HirConst rebinds) and
+measured 64,960 -> 56,801 on seednew18. A follow-up treatment (annotated
+rebind of register_enum_variants' by-value HirEnum param plus the second
+inventory loop) REBUILT the lottery and produced 113,653 errors on
+seednew19 -- the rebind hurt and was reverted; the branch sits at the
+verified-best 7c1899d73a8 (wt-f836519 in sync). LESSON FOR THE NEXT ROW:
+error-count deltas across candidate rebuilds are not purely treatment
+effects -- every rebuild reshuffles which compiled read sites draw, so
+single-site bind-once chasing is stochastic at this wall's scale. The
+remaining classes (enum runtime ids, qualified-key construction in
+symbol_name_scalar_raw/enum_qualified_key, method resolution) likely need
+the systemic lever: either the workaround-table load repaired (the
+reader-side crc32_text mismatch means erased-read workaround annotations
+never apply to these builds -- see the cycle-170 conclusion) or a
+seed-side codegen fix for the erased-read defect itself.
