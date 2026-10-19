@@ -26,6 +26,7 @@ use std.nogc_sync_mut.sffi.system.{env_get}
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
+use compiler.mir.array_move.mir_array_move.{array_move_sites_for, array_move_sites_empty, am_block_has_place_let}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
@@ -254,6 +255,14 @@ impl MirLowering:
         # bootstrap_stage2_empty_mir_bodies_2026-07-05). Real HIR->MIR lowering
         # now runs for all bootstrap functions.
         self.reset_function_local_tracking()
+        # Inlined lambdas re-enter this method on the same instance: keep the
+        # caller's array-move approvals and restore them on exit.
+        val caller_array_move_lets: Dict<i64, bool> = self.array_move_let_symbols
+        val array_move_sites = if am_block_has_place_let(fn_.body):
+            array_move_sites_for(fn_.body, self.symbols, self.array_move_ctor_tables(fn_.body))
+        else:
+            array_move_sites_empty()
+        self.array_move_let_symbols = array_move_sites.let_symbols
         if bootstrap_trace:
             print "[mir-lower] real-lower:start {fn_.name}"
 
@@ -888,6 +897,7 @@ impl MirLowering:
         self.mir_tag_probe_active_function = ""
         self.lambda_bindings = caller_lambda_bindings
         self.lambda_capture_snapshot = caller_lambda_snapshots
+        self.array_move_let_symbols = caller_array_move_lets
         fn_result
 
     me lower_vulkan_kernel_param_type(param: HirParam) -> MirType:
