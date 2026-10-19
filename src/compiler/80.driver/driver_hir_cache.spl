@@ -50,7 +50,7 @@
 
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
 use compiler.hir.hir_types.{HirModule}
-use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, hir_module_decode_stable, hir_codec_header}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_encode_reason, hir_module_decode, hir_module_decode_stable, hir_codec_header}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_escape}
 use compiler.common.cache_contract.hir_cache_envelope_reader_v1.{hir_cache_envelope_parse, hir_cache_parser_record_valid_v1}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
@@ -401,7 +401,10 @@ fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]
     val blob = hir_module_encode(module)
     if blob == "":
         _hir_cache_refuse("codec")
-        _hir_cache_note_first_refusal("codec", module.path)
+        # Name the refused payload once: a bare `codec` count hid that every
+        # module was refused for one runtime-probe reason (2026-10-19).
+        if not _hir_cache_codec_refusal_noted:
+            _hir_cache_note_first_refusal("codec", module.path, hir_module_encode_reason(module))
         return false
     # Publication is an evidence gate, independent of the diagnostic env flag:
     # refuse loss or unstable ordering before creating even a temporary file.
@@ -502,14 +505,15 @@ fn _hir_cache_note_store_attempt():
         eprint("[hir-cache-store] rate attempts={attempts} stored={stored} refused={refused} io_failed={failures}")
     _hir_cache_store_attempts = _hir_cache_store_attempts + 1
 
-fn _hir_cache_note_first_refusal(reason: text, path: text):
+fn _hir_cache_note_first_refusal(reason: text, path: text, detail: text = ""):
     if reason == "codec":
         if _hir_cache_codec_refusal_noted: return
         _hir_cache_codec_refusal_noted = true
     elif reason == "unstable":
         if _hir_cache_unstable_refusal_noted: return
         _hir_cache_unstable_refusal_noted = true
-    eprint("[hir-cache-store] refused reason={reason} module={path}; entry not stored (further {reason} refusals are only counted)")
+    val detail_part = if detail != "": " detail={detail}" else: ""
+    eprint("[hir-cache-store] refused reason={reason}{detail_part} module={path}; entry not stored (further {reason} refusals are only counted)")
 
 # Write-time round-trip self-check knob -> mode "all" | "sampled" | "off".
 # SIMPLE_HIR_CACHE_SELFCHECK=1 checks every store, =0 never; the host-config
