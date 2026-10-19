@@ -1,0 +1,7 @@
+# Default collection policy omitted native target from SMF options identity
+
+Confirmed source defect at release ea83abd9595bd3c77fedd7a8cac6eb28c604efcb: driver `compute_options_hash` passes `CompileOptions.native_target`, but the hash owner previously appended target only when collection policy was nondefault or budget was specified. A target-only change under moderate/-1 thus produced the same options identity. Broader outer caches may independently distinguish targets; no end-to-end stale publication was demonstrated.
+
+Fix: enter the existing length-framed collection configuration block whenever target is nonempty as well. No new field, ABI, grammar, constructor arity, backend dispatch or default-policy change. Existing nondefault keys retain their encoding; completely unspecified defaults remain unchanged. Explicit-target/default-policy keys change intentionally, causing a normal miss/rebuild.
+
+Tests: eight real driver/hash/codec/validator SSpec scenarios in `compile_options_target_identity_spec.spl`, authored before the source correction. Native/interpreter/docgen and required broader checks UNRUN. Constant number of extra framed fields on the affected path; O(target length) additional hashing/storage and no new retained state, loops, filesystem reads or hot container-operation work. No measured performance claim. Full profile bytes/workload/tag/layout identity and dynload integration remain separate obligations.
