@@ -17,6 +17,7 @@ use compiler.mir._MirLowering.native_trait_registration.*
 use compiler.mir._MirLowering.native_trait_thunks.*
 use compiler.mir._MirLowering.asm_and_targets.*
 use compiler.mir._MirLowering.transient_owner.*
+use compiler.mir._MirLowering.section_profile_sffi.{mir_section_profile_enabled, mir_section_profile_mark}
 use compiler.mir._MirLowering.transient_owner_sffi.{
     transient_array_scope_begin_v1,
     transient_array_scope_pause_v1,
@@ -82,37 +83,6 @@ use std.io_runtime.{env_get_opt}
 @always_inline
 fn mir_lower_env_get(key: text) -> text?:
     env_get_opt(key)
-
-# SIMPLE_MIR_SECTION_PROFILE_FILE=<path>: one durable mem-snapshot row
-# (monotonic_ms + rss_kib) per lower_module section boundary, so the fixed
-# per-module provider-registration cost and the promotion walk can be
-# measured separately from body lowering. Unset = one env read per module.
-extern fn rt_mem_snapshot_open(path: text) -> i64
-extern fn rt_mem_snapshot_record(
-    fd: i64, seq: i64, event: text, phase: text, source_index: i64,
-    source_path: text,
-    retained_modules: i64, validation_keys: i64,
-    validation_values: i64, shared_traits: i64, hir_names: i64,
-    hir_symbols: i64, hir_functions: i64, hir_constants: i64,
-    hir_enums: i64, hir_structs: i64, hir_classes: i64
-) -> bool
-var _mir_section_profile_fd: i64 = -2
-var _mir_section_profile_seq: i64 = 0
-
-fn mir_section_profile_enabled() -> bool:
-    if _mir_section_profile_fd == -2:
-        val sink = mir_lower_env_get("SIMPLE_MIR_SECTION_PROFILE_FILE") ?? ""
-        _mir_section_profile_fd = if sink != "": rt_mem_snapshot_open(sink) else: -1
-    _mir_section_profile_fd >= 0
-
-fn mir_section_profile_mark(section: text, module_name: text):
-    if not mir_section_profile_enabled():
-        return
-    if rt_mem_snapshot_record(_mir_section_profile_fd, _mir_section_profile_seq,
-            "mir_section", section, -1, module_name, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0):
-        _mir_section_profile_seq = _mir_section_profile_seq + 1
-    else:
-        _mir_section_profile_fd = -1
 
 fn _text_list_eq(a: [text], b: [text]) -> bool:
     """Order-sensitive equality for two variant-name lists.
@@ -2540,8 +2510,10 @@ impl MirLowering:
         # split (provider_layout_demand_v1): registered when this consumer can
         # name the declaration, not for the whole closure up front. The
         # ambient bootstrap and declaration-repository lanes keep the eager
-        # pass, as does SIMPLE_MIR_EAGER_PROVIDER_LAYOUTS=1 (A/B checks).
-        val layout_demand = lazy_provider_methods and not self.ambient_bootstrap_enabled() and
+        # pass, as do provider_layouts_eager and
+        # SIMPLE_MIR_EAGER_PROVIDER_LAYOUTS=1 (A/B checks).
+        val layout_demand = lazy_provider_methods and not self.provider_layouts_eager and
+            not self.ambient_bootstrap_enabled() and
             self.declaration_repository == nil and
             (mir_lower_env_get("SIMPLE_MIR_EAGER_PROVIDER_LAYOUTS") ?? "") != "1"
         # Index-aligned with `providers` and reused by
@@ -2593,15 +2565,14 @@ impl MirLowering:
                             provider_links[provider_func.symbol.id] = mir_provider_function_name(provider_module.name, provider_module.symbols, provider_func)
                         provider_funcs.push(provider_func)
                     provider_links_built = true
-                val provider_class_keys: [SymbolId] = provider_module.classes.keys()
-                for dk_33 in provider_class_keys:
-                    if layout_demand:
-                        break
-                    # workaround(p2_add cycles 91-105): per-read draw corruption — bind once, guard the local.
-                    val provider_class: HirClass = provider_module.classes[dk_33]
-                    if provider_class == nil:
-                        continue
-                    self.register_provider_class(provider_class, provider_module.symbols, provider_links, false, not lazy_provider_methods)
+                if not layout_demand:
+                    val provider_class_keys: [SymbolId] = provider_module.classes.keys()
+                    for dk_33 in provider_class_keys:
+                        # workaround(p2_add cycles 91-105): per-read draw corruption — bind once, guard the local.
+                        val provider_class: HirClass = provider_module.classes[dk_33]
+                        if provider_class == nil:
+                            continue
+                        self.register_provider_class(provider_class, provider_module.symbols, provider_links, false, not lazy_provider_methods)
                 # Provider enums were gated-in by the condition above but
                 # never registered: a consumer module's match arms on a
                 # provider enum's variants found an empty registry

@@ -32,15 +32,20 @@ fn mir_nominal_owner_matches(name: text, defining_module: text, ownership_key: t
     expected != "" and actual == expected
 
 fn mir_provider_layout_leaf_v1(name: text) -> text:
-    """Unqualified declaration leaf of a type spelling (`a.b::C` -> `C`)."""
+    """Unqualified declaration leaf of a type spelling: `a.b::C` -> `C`,
+    `Map<a.B, c.D>` -> `Map` (generic arguments are not the declaration)."""
+    var base = name
+    val generic_at = base.index_of("<")
+    if generic_at >= 0:
+        base = base.substring(0, generic_at)
     var start = 0
-    val colon_at = name.rfind("::")
+    val colon_at = base.rfind("::")
     if colon_at >= 0:
         start = colon_at + 2
-    val dot_at = name.rfind(".")
+    val dot_at = base.rfind(".")
     if dot_at + 1 > start:
         start = dot_at + 1
-    if start <= 0: name else: name.substring(start)
+    if start <= 0: base else: base.substring(start)
 
 fn mir_provider_callable_key(owner: text, name: text) -> text:
     val module_name = _hir_symbol_owner_module(owner)
@@ -1257,6 +1262,14 @@ impl MirLowering:
             self.provider_layout_register_leaf_v1(pending_leaf)
         self.provider_layout_pending = []
         self.provider_layout_draining = false
+
+    fn provider_layout_missed_v1(name: text) -> bool:
+        """True when layout demand is active, provider rows exist for the
+        leaf of `name`, and this consumer never registered them."""
+        if not self.provider_layout_demand_active:
+            return false
+        val leaf = mir_provider_layout_leaf_v1(name)
+        self.provider_layout_rows_by_name.has(leaf) and not self.provider_layout_materialized.has(leaf)
 
     me provider_layout_demand_symbols_since_v1(first_symbol_id: i64):
         """Demand the leaves of every symbol defined in the active table at or
