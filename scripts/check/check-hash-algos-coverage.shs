@@ -26,7 +26,7 @@
 #   HASH_COV_SPECS=<paths>  replace the driving spec list
 #
 # Verdict is always the LAST line of stdout:
-#   PASS — <n> files checked, 100% decision and condition (<d> decisions, <c> conditions)
+#   PASS — <n> files checked, 100% decision and condition (<d> decisions, <c> conditions, <x> justified exclusion(s))
 #   FAIL — <n> files checked, <m> below 100%: <names>
 #   ERROR — nothing was checked
 # Exit codes: 0 PASS, 1 FAIL, 2 ERROR. Not wired into the push tier.
@@ -78,7 +78,39 @@ src/lib/common/hash/djb2.spl
 # separated paths) replaces the list, e.g. to measure a baseline.
 SPECS="${HASH_COV_SPECS:-
 test/01_unit/lib/common/crypto/sha256_core_vectors_spec.spl
+test/01_unit/lib/common/crypto/sha256_boundary_vectors_spec.spl
+test/01_unit/lib/common/crypto/sha1_sha512_boundary_vectors_spec.spl
+test/01_unit/lib/common/crypto/xxh3_kat_spec.spl
+test/01_unit/lib/common/crypto/xxh3_reference_vectors_spec.spl
+test/01_unit/lib/common/crypto/blake3_kat_spec.spl
+test/01_unit/lib/common/crypto/ed25519_strict_verify_spec.spl
+test/01_unit/lib/common/crypto/ed25519_rfc8032_vectors_negatives_spec.spl
+test/01_unit/lib/common/hash/djb2_spec.spl
 }"
+
+# Justified exclusions: sites that cannot take both outcomes under the
+# interpreter on this host. Key: <file>:<line>:D (decision) or
+# <file>:<line>:C<n> (condition n of the decision on that line). An excluded
+# row must still exist and still be uncovered; otherwise the exclusion is
+# stale and the gate FAILs. Never add a row to raise a number -- each needs a
+# reason that holds for every input the public API accepts.
+EXCLUDE="
+src/lib/common/crypto/sha256.spl:236:D accelerator: rt_tls13_sha256 always returns 32 bytes on a hosted runtime; the pure fallback is only taken where the extern is absent
+src/lib/common/crypto/sha256.spl:404:C1 volatile wipe: the interpreter cannot address boxed arrays (rt_array_data_ptr == 0) so the wipe never verifies; native codegen always verifies
+src/lib/common/crypto/sha256.spl:404:C2 volatile wipe: short-circuited behind C1 (always true under the interpreter)
+src/lib/common/crypto/sha256.spl:415:D volatile wipe: zeroizing digest is nil under the interpreter (wipe unverifiable), a 64-char digest natively
+src/lib/common/crypto/sha256.spl:570:D volatile wipe: Sha256StreamV1.zeroize() reports unverified under the interpreter, verified natively
+src/lib/common/crypto/sha256.spl:570:C0 volatile wipe: as 570:D, state_report.verified() is false under the interpreter
+src/lib/common/crypto/sha256.spl:570:C1 volatile wipe: short-circuited behind C0
+src/lib/common/crypto/sha256.spl:570:C2 volatile wipe: short-circuited behind C0
+src/lib/common/crypto/ed25519.spl:700:D self-test failure arm: true only if keypair derivation disagrees with RFC 8032 TEST 1
+src/lib/common/crypto/ed25519.spl:704:D self-test failure arm: true only if signing disagrees with RFC 8032 TEST 1
+src/lib/common/crypto/ed25519.spl:707:D self-test failure arm: true only if verify rejects the RFC 8032 TEST 1 signature
+src/lib/common/crypto/ed25519.spl:716:D self-test failure arm: true only if verify accepts a corrupted signature
+src/lib/common/crypto/ed25519.spl:746:D self-test failure arm: true only if keypair derivation disagrees with RFC 8032 TEST 2
+src/lib/common/crypto/ed25519.spl:750:D self-test failure arm: true only if signing disagrees with RFC 8032 TEST 2
+src/lib/common/crypto/ed25519.spl:753:D self-test failure arm: true only if verify rejects the RFC 8032 TEST 2 signature
+"
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/$SELF.XXXXXX") || err "mktemp failed"
 trap 'rm -rf "$WORK"' EXIT INT TERM
@@ -258,10 +290,18 @@ done
 # shellcheck disable=SC2086
 merge_artifacts $artifacts >"$WORK/merged.txt"
 
+# Uncovered rows as exclusion keys: "<rel>:<line>:D" / "<rel>:<line>:C<n>".
+sed -n -e "s#^UD $toplevel/\([^ ]*\) .*#\1:D#p" \
+       -e "s#^UC $toplevel/\([^ ]*\) decision=[0-9]* condition=\([0-9]*\) .*#\1:C\2#p" \
+       "$WORK/merged.txt" | sort -u >"$WORK/uncovered.txt"
+echo "$EXCLUDE" | awk 'NF { print $1 }' | sort -u >"$WORK/excluded.txt"
+stale=$(comm -13 "$WORK/uncovered.txt" "$WORK/excluded.txt" | tr '\n' ' ')
+
 checked=0
 below=""
 total_d=0
 total_c=0
+total_x=0
 printf '%-48s %14s %14s\n' "file" "decisions" "conditions"
 for rel in $SCOPE; do
     [ -f "$rel" ] || err "scope file missing: $rel"
@@ -277,11 +317,16 @@ for rel in $SCOPE; do
     printf '%-48s %8s/%-5s %8s/%-5s\n' "$rel" "$2" "$1" "$4" "$3"
     total_d=$((total_d + $1))
     total_c=$((total_c + $3))
-    if [ "$1" -eq 0 ] || [ "$2" -ne "$1" ] || [ "$4" -ne "$3" ]; then
+    # Uncovered rows of this file that are not justified exclusions.
+    open_rows=$(grep "^$rel:" "$WORK/uncovered.txt" | comm -23 - "$WORK/excluded.txt" | wc -l)
+    x_rows=$(grep "^$rel:" "$WORK/uncovered.txt" | comm -12 - "$WORK/excluded.txt" | wc -l)
+    total_x=$((total_x + x_rows))
+    if [ "$1" -eq 0 ] || [ "$open_rows" -ne 0 ]; then
         below="$below $rel"
     fi
     if [ "$REPORT" -eq 1 ]; then
         grep -E "^U[DC] $abs:" "$WORK/merged.txt" | sed "s#$toplevel/##" | sort -t: -k2 -n
+        [ "$x_rows" -gt 0 ] && echo "   ($x_rows uncovered row(s) above are justified exclusions)"
     fi
 done
 
@@ -290,10 +335,14 @@ if [ -n "$spec_fail" ]; then
     echo "FAIL — $checked files checked, driving spec(s) failed:$spec_fail"
     exit 1
 fi
+if [ -n "$stale" ]; then
+    echo "FAIL — $checked files checked, stale exclusion(s) (covered or no longer present): $stale"
+    exit 1
+fi
 if [ -n "$below" ]; then
     count=$(echo "$below" | wc -w)
     echo "FAIL — $checked files checked, $count below 100%:$below"
     exit 1
 fi
-echo "PASS — $checked files checked, 100% decision and condition ($total_d decisions, $total_c conditions)"
+echo "PASS — $checked files checked, 100% decision and condition ($total_d decisions, $total_c conditions, $total_x justified exclusion(s))"
 exit 0
