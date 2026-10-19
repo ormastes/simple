@@ -22,6 +22,28 @@ type BddSharedCell = RefCell<HashMap<String, Value>>;
 
 // BDD testing state (thread-local for test isolation)
 // Made pub(crate) so interpreter_control.rs can access for context statement handling
+/// Record a failed standalone assertion builtin (`assert_*`, `fail*`).
+///
+/// Inside an `it` the failure is parked in `BDD_EXPECT_FAILED` and reaped when
+/// the example ends (`hard_failed` below). Outside any `it` nothing ever reads
+/// that flag, so a wrong `assert_equal(y, 5)` at script top level — e.g. a
+/// `///` comment doctest run as a composite file — used to exit 0 and report
+/// "1 passed". These builtins win at dispatch Priority 3, before user
+/// functions, so `use std.spec.*` cannot restore a checking `assert_equal`
+/// either. With no harness to collect it, the failure is fatal, matching the
+/// `assert` keyword. See doc/08_tracking/bug/bug_db.sdn
+/// `bdd_assert_outside_it_silent_false_green_2026_10_19`.
+fn record_assertion_failure(msg: String) -> Result<(), CompileError> {
+    if !BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
+        return Err(CompileError::semantic(format!(
+            "{msg} (assertion outside an `it` block has no spec harness to record it)"
+        )));
+    }
+    BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+    BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = Some(msg));
+    Ok(())
+}
+
 thread_local! {
     // Current indentation level for nested describe/context blocks
     pub(crate) static BDD_INDENT: RefCell<usize> = const { RefCell::new(0) };
@@ -1844,20 +1866,14 @@ pub(super) fn eval_bdd_builtin(
                 impl_methods,
             )?;
             if !is_condition_present(args.first().map(|a| &a.value), &val) {
-                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-                BDD_FAILURE_MSG.with(|cell| {
-                    *cell.borrow_mut() = Some(format!("assert_true failed: got {}", val.to_display_string()));
-                });
+                record_assertion_failure(format!("assert_true failed: got {}", val.to_display_string()))?;
             }
             Ok(Some(Value::Nil))
         }
         "assert_false" => {
             let val = eval_arg(args, 0, Value::Bool(true), env, functions, classes, enums, impl_methods)?;
             if is_condition_present(args.first().map(|a| &a.value), &val) {
-                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-                BDD_FAILURE_MSG.with(|cell| {
-                    *cell.borrow_mut() = Some(format!("assert_false failed: got {}", val.to_display_string()));
-                });
+                record_assertion_failure(format!("assert_false failed: got {}", val.to_display_string()))?;
             }
             Ok(Some(Value::Nil))
         }
@@ -1870,10 +1886,7 @@ pub(super) fn eval_bdd_builtin(
             // `Option::None` result fails the matcher. Still strict: `Some(_)`,
             // `Result::Err`, `false`, `0`, and `""` are all NOT nil.
             if !val.is_nil_like() {
-                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-                BDD_FAILURE_MSG.with(|cell| {
-                    *cell.borrow_mut() = Some(format!("assert_nil failed: got {}", val.to_display_string()));
-                });
+                record_assertion_failure(format!("assert_nil failed: got {}", val.to_display_string()))?;
             }
             Ok(Some(Value::Nil))
         }
@@ -1882,10 +1895,7 @@ pub(super) fn eval_bdd_builtin(
             // Mirror of `assert_nil`: `Option::None` is nil, so it must FAIL here.
             // The old `val == Value::Nil` test let a typed `None` pass as "not nil".
             if val.is_nil_like() {
-                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-                BDD_FAILURE_MSG.with(|cell| {
-                    *cell.borrow_mut() = Some(format!("assert_not_nil failed: got {}", val.to_display_string()));
-                });
+                record_assertion_failure(format!("assert_not_nil failed: got {}", val.to_display_string()))?;
             }
             Ok(Some(Value::Nil))
         }
@@ -1893,14 +1903,11 @@ pub(super) fn eval_bdd_builtin(
             let actual = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let expected = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
             if actual != expected {
-                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-                BDD_FAILURE_MSG.with(|cell| {
-                    *cell.borrow_mut() = Some(format!(
-                        "assert_equal failed: expected {}, got {}",
-                        expected.to_display_string(),
-                        actual.to_display_string(),
-                    ));
-                });
+                record_assertion_failure(format!(
+                    "assert_equal failed: expected {}, got {}",
+                    expected.to_display_string(),
+                    actual.to_display_string(),
+                ))?;
             }
             Ok(Some(Value::Nil))
         }
@@ -1908,13 +1915,10 @@ pub(super) fn eval_bdd_builtin(
             let actual = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let expected = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
             if actual == expected {
-                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-                BDD_FAILURE_MSG.with(|cell| {
-                    *cell.borrow_mut() = Some(format!(
-                        "assert_not_equal failed: both sides equal {}",
-                        expected.to_display_string(),
-                    ));
-                });
+                record_assertion_failure(format!(
+                    "assert_not_equal failed: both sides equal {}",
+                    expected.to_display_string(),
+                ))?;
             }
             Ok(Some(Value::Nil))
         }
@@ -1942,13 +1946,10 @@ pub(super) fn eval_bdd_builtin(
             let haystack_s = haystack.to_display_string();
             let needle_s = needle.to_display_string();
             if !haystack_s.contains(&needle_s) {
-                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-                BDD_FAILURE_MSG.with(|cell| {
-                    *cell.borrow_mut() = Some(format!(
-                        "assert_contains failed: '{}' does not contain '{}'",
-                        haystack_s, needle_s,
-                    ));
-                });
+                record_assertion_failure(format!(
+                    "assert_contains failed: '{}' does not contain '{}'",
+                    haystack_s, needle_s,
+                ))?;
             }
             Ok(Some(Value::Nil))
         }
@@ -1971,10 +1972,7 @@ pub(super) fn eval_bdd_builtin(
                 enums,
                 impl_methods,
             )?;
-            BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-            BDD_FAILURE_MSG.with(|cell| {
-                *cell.borrow_mut() = Some(msg.to_display_string());
-            });
+            record_assertion_failure(msg.to_display_string())?;
             Ok(Some(Value::Nil))
         }
         // BDD Registry SFFI functions - shared across all modules
