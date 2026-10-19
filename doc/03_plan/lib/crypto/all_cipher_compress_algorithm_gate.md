@@ -269,7 +269,14 @@ Remaining, recorded rather than done:
 - `src/os/crypto/*` duplicates 14 `src/lib/common/crypto/*` modules as
   divergent copies; OS CSPRNG (`src/os/crypto/random.spl`) has its own
   ChaCha quarter-round and no seed-read success check.
-- Missing: P-256 ECDH, RSA-PSS/OAEP/decrypt/sign, AES-192; no RFC 7748
+- Added 2026-10-19 (common layer, pure Simple): P-256 ECDH
+  (`ecdh_p256.spl`, validates peer point; delegates scalar-mult to
+  `os.crypto.ecdh_p256`), AES-192 + AES-192-GCM (`aes_gcm.spl`), RSA-PSS
+  SHA-256 verify (`rsa_pss.spl`). Specs: `aes192_gcm_kat_spec`,
+  `p256_ecdh_nist_cdh_kat_spec`, `rsa_pss_verify_openssl_kat_spec`.
+- Missing: RSA-OAEP/decrypt/sign in the common layer; RFC 5903 section 8.1 ECDH
+  vectors (only NIST CDH COUNT=0 pinned); published NIST SigVerPSS / Wycheproof
+  PSS vectors (spec uses OpenSSL-produced signatures); no RFC 7748
   X25519 vectors.
 - Importing the `std.common.compress` facade makes JIT demote to the
   interpreter on `ZstdFrameHeader.dict_id` (nvfs imports `lz4` directly).
