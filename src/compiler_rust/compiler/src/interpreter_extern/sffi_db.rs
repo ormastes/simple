@@ -103,6 +103,9 @@ struct SqlTable {
 #[derive(Clone, Debug, Default)]
 struct SqlDatabase {
     tables: HashMap<String, SqlTable>,
+    /// Index name (lowercased) -> owning table. Indexes are metadata only:
+    /// this emulation scans linearly, so they exist for name/DDL semantics.
+    indexes: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -973,6 +976,85 @@ fn sqlite_parse_create(sql: &str) -> Option<(String, Vec<String>, Vec<String>)> 
     Some((table, columns, unique_cols))
 }
 
+/// Parsed `CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON table (col [ASC|DESC], ...)`.
+struct SqlCreateIndex {
+    unique: bool,
+    if_not_exists: bool,
+    name: String,
+    table: String,
+    columns: Vec<String>,
+}
+
+fn sqlite_parse_create_index(sql: &str) -> Option<SqlCreateIndex> {
+    let body = sql.trim().trim_end_matches(';').trim();
+    let mut words = body.split_whitespace().peekable();
+    if !words.next()?.eq_ignore_ascii_case("create") {
+        return None;
+    }
+    let mut unique = false;
+    let mut next = words.next()?;
+    if next.eq_ignore_ascii_case("unique") {
+        unique = true;
+        next = words.next()?;
+    }
+    if !next.eq_ignore_ascii_case("index") {
+        return None;
+    }
+    let mut name = words.next()?;
+    let mut if_not_exists = false;
+    if name.eq_ignore_ascii_case("if") {
+        if !words.next()?.eq_ignore_ascii_case("not") || !words.next()?.eq_ignore_ascii_case("exists") {
+            return None;
+        }
+        if_not_exists = true;
+        name = words.next()?;
+    }
+    if !words.next()?.eq_ignore_ascii_case("on") {
+        return None;
+    }
+    let open = body.find('(')?;
+    let close = body.rfind(')')?;
+    if close < open {
+        return None;
+    }
+    let table_start = body[..open].split_whitespace().last()?;
+    let table = table_start.trim_matches('"').to_string();
+    let mut columns = Vec::new();
+    for part in body[open + 1..close].split(',') {
+        let col = part.split_whitespace().next()?.trim_matches('"').to_string();
+        columns.push(col);
+    }
+    if table.is_empty() || columns.is_empty() {
+        return None;
+    }
+    Some(SqlCreateIndex {
+        unique,
+        if_not_exists,
+        name: name.trim_matches('"').to_string(),
+        table,
+        columns,
+    })
+}
+
+/// Parsed `DROP INDEX [IF EXISTS] name`: (if_exists, name).
+fn sqlite_parse_drop_index(sql: &str) -> Option<(bool, String)> {
+    let body = sql.trim().trim_end_matches(';').trim();
+    let words: Vec<&str> = body.split_whitespace().collect();
+    if words.len() < 3 || !words[0].eq_ignore_ascii_case("drop") || !words[1].eq_ignore_ascii_case("index") {
+        return None;
+    }
+    if words[2].eq_ignore_ascii_case("if") {
+        if words.len() != 5 || !words[3].eq_ignore_ascii_case("exists") {
+            return None;
+        }
+        return Some((true, words[4].trim_matches('"').to_string()));
+    }
+    if words.len() != 3 {
+        return None;
+    }
+    Some((false, words[2].trim_matches('"').to_string()))
+}
+
 fn sqlite_parse_insert(sql: &str) -> Option<(String, Vec<String>)> {
     let lower = sql.to_ascii_lowercase();
     if !lower.starts_with("insert into ") {
@@ -1089,6 +1171,36 @@ fn sqlite_execute_statement(conn: &mut SqlConn, sql: &str) -> i64 {
             next_id: 1,
             unique_cols,
         });
+        conn.changes = 0;
+        return 1;
+    }
+    if let Some(ci) = sqlite_parse_create_index(sql) {
+        if ci.unique {
+            // Fail closed: UNIQUE index enforcement is not emulated here.
+            return sqlite_set_error(conn, format!("unsupported UNIQUE INDEX (emulation): {sql}"));
+        }
+        let key = ci.name.to_ascii_lowercase();
+        if conn.db.indexes.contains_key(&key) {
+            if ci.if_not_exists {
+                conn.changes = 0;
+                return 1;
+            }
+            return sqlite_set_error(conn, format!("index {} already exists", ci.name));
+        }
+        let Some(table) = conn.db.tables.get(&ci.table) else {
+            return sqlite_set_error(conn, format!("no such table: {}", ci.table));
+        };
+        if let Some(bad) = ci.columns.iter().find(|c| !table.columns.contains(c)) {
+            return sqlite_set_error(conn, format!("no such column: {bad}"));
+        }
+        conn.db.indexes.insert(key, ci.table);
+        conn.changes = 0;
+        return 1;
+    }
+    if let Some((if_exists, name)) = sqlite_parse_drop_index(sql) {
+        if conn.db.indexes.remove(&name.to_ascii_lowercase()).is_none() && !if_exists {
+            return sqlite_set_error(conn, format!("no such index: {name}"));
+        }
         conn.changes = 0;
         return 1;
     }
