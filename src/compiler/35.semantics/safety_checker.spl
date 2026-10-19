@@ -413,42 +413,13 @@ fn safetychecker_check_module(self: SafetyChecker, module: HirModule) -> [Safety
         val func: HirFunction = _for_item_0[1]
         safetychecker_check_function(self, func)
 
-    # Check all methods in classes.
-    #
-    # `HirClass.methods` is `Dict<text, SymbolId>` (method name -> symbol),
-    # NOT a body list -- iterating a Dict in this language yields (key,
-    # value) tuples (same shape as the `module.functions` iteration just
-    # above), so the old `for method in class_.methods:
-    # safetychecker_check_function(self, method)` passed a raw tuple where a
-    # `HirFunction` was expected and crashed the first time any spec defined
-    # a class with a method body (E1047 lane G2, 2026-07-29): "semantic:
-    # undefined field: unknown property or method 'params' on Tuple". Route
-    # through the symbol instead and look the real body up in
-    # `module.functions` (`Dict<SymbolId, HirFunction>`). NOTE: a class's
-    # inline-method bodies are lowered in `declaration_lowering.spl:
-    # lower_class` but only `hir_fn.symbol` is kept in `methods` -- the
-    # `HirFunction` itself is never merged into `module.functions` for
-    # class-embedded methods (unlike impl methods below, via
-    # `lowered_impl_functions`), so `contains_key` is expected to miss and
-    # skip here until that gap is closed upstream; this fix's job is only to
-    # stop the crash and check what IS reachable.
-    for _for_item_1 in module.classes:
-        val class_: HirClass = _for_item_1[1]
-        for _for_item_cm in class_.methods:
-            val method_symbol: SymbolId = _for_item_cm[1]
-            if module.functions.contains_key(method_symbol):
-                safetychecker_check_function(self, module.functions[method_symbol])
-
-    # Check all methods in impls. Same Dict<text, SymbolId> shape as classes
-    # above, but impl method bodies ARE merged into `module.functions` (via
-    # `self.lowered_impl_functions` in module_lowering.spl), so this path
-    # now actually walks real bodies instead of being permanently dead.
-    for impl_ in module.impls:
-        for _for_item_im in impl_.methods:
-            val method_symbol: SymbolId = _for_item_im[1]
-            if module.functions.contains_key(method_symbol):
-                safetychecker_check_function(self, module.functions[method_symbol])
-
+    # No second walk over impl_/class_ .methods: their symbols can only reach
+    # bodies in module.functions, which the loop above already checked, so a
+    # re-walk re-reported every impl-method error (and, natively, a typed
+    # SymbolId local is a copied, identity-hashed key, so it silently missed
+    # instead). Class-embedded method bodies never reach module.functions
+    # (declaration_lowering.spl lower_class keeps only the symbol); that gap
+    # is unchanged here.
     self.context.errors
 
 
