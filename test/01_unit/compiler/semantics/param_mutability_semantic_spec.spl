@@ -105,3 +105,24 @@ describe "E1047 param-mutability-semantic":
         val checker = SafetyChecker.create()
         val errors = safetychecker_check_module(checker, hir)
         expect(count_e1047(errors)).to_equal(0)
+
+    it "reports a violation inside an impl method exactly once":
+        # `impl` method bodies are merged into module.functions, which
+        # safetychecker_check_module already walks in full. A second walk
+        # over impl_.methods re-checked the same bodies, so the interpreter
+        # reported this one violation twice, while native codegen missed the
+        # re-check's lookup (a typed SymbolId local is a copied struct key)
+        # and reported it once -- the answer depended on the lane.
+        val src = "struct Counter:\n" +
+            "    n: i64\n" +
+            "\n" +
+            "impl Counter:\n" +
+            "    fn bumped(x: i64) -> i64:\n" +
+            "        x = 42\n" +
+            "        x\n"
+        val parsed = parse_full_frontend(src, "testdata/e1047_impl_once.spl", "e1047_impl_once", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/e1047_impl_once.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(count_e1047(errors)).to_equal(1)
