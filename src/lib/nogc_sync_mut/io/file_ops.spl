@@ -12,6 +12,11 @@ use std.common.encoding.external_text.{utf8_format}
 use std.io_runtime.{read_file_text, read_file_text_result, file_delete, file_copy}
 use std.nogc_sync_mut.fs.host_path.{host_path_native}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+# Cycle-170 split crossing (parent slot, prefix slot, make) is a SOSIX
+# operation; see std.nogc_sync_mut.sosix.secure_temp_dir.
+use std.nogc_sync_mut.sosix.secure_temp_dir.{
+    sosix_secure_temp_dir_set_parent, sosix_secure_temp_dir_set_prefix,
+    sosix_secure_temp_dir_make}
 @unsafe(reason: "raw file byte-write ABI; the provider borrows the caller-owned byte array", capabilities: [ffi])
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 @unsafe(reason: "legacy UTF-8 replacement provider owns create mode and empty-write semantics", capabilities: [ffi])
@@ -47,15 +52,6 @@ extern fn rt_file_fsync(path: text) -> bool
 # extern fn rt_file_write(path: text, content: text) -> bool  # Disabled - not in runtime extern registry
 @unsafe(reason: "creates an OS-owned private staging directory", capabilities: [ffi])
 extern fn rt_secure_temp_dir(parent: text, prefix: text) -> text
-# Cycle-170 split crossing: the two-argument rt_secure_temp_dir text-ABI call
-# draws erased in candidate-seednew's compiled marshalling, so the staging
-# parent travels through a thread-local slot in its own single-argument call.
-@unsafe(reason: "stores the staging parent in a thread-local slot for the paired make call", capabilities: [ffi])
-extern fn rt_secure_temp_dir_set_parent(parent: text) -> i64
-@unsafe(reason: "stores the staging leaf prefix in a thread-local slot for the paired make call", capabilities: [ffi])
-extern fn rt_secure_temp_dir_set_prefix(prefix: text) -> i64
-@unsafe(reason: "creates the OS-owned private staging directory from the slotted parent and prefix", capabilities: [ffi])
-extern fn rt_secure_temp_dir_make() -> text
 @unsafe(reason: "atomically transfers ownership of a staged file path", capabilities: [ffi])
 extern fn rt_file_publish_noreplace(staged_path: text, destination: text) -> i64
 @unsafe(reason: "raw file-size ABI; negative status is the provider failure sentinel", capabilities: [ffi])
@@ -219,13 +215,13 @@ fn secure_temp_dir_raw(parent: text, prefix: text) -> text:
         # check-text-literal-extern-abi.shs) -- measured here as
         # prefix_set=0 for driver_aot's literal "simple-aot-diagnostic" while
         # the heap-built parent crossed clean.
-        val parent_set: i64 = rt_secure_temp_dir_set_parent(host_path_native(parent + ""))
+        val parent_set: i64 = sosix_secure_temp_dir_set_parent(host_path_native(parent + ""))
         if parent_set != 1:
             return ""
-        val prefix_set: i64 = rt_secure_temp_dir_set_prefix(host_path_native(prefix + ""))
+        val prefix_set: i64 = sosix_secure_temp_dir_set_prefix(host_path_native(prefix + ""))
         if prefix_set != 1:
             return ""
-        rt_secure_temp_dir_make()
+        sosix_secure_temp_dir_make()
 
 fn file_publish_noreplace_raw(staged_path: text, destination: text) -> i64:
     unsafe(capabilities: [ffi]):
