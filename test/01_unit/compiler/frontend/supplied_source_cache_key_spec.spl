@@ -1,4 +1,7 @@
-# Requires a fresh private frontend cache scope/root; see matching manual.
+# Publishes its own fresh private frontend cache scope/root. Under `test`
+# (interpret mode) the driver never publishes SIMPLE_FRONTEND_CACHE_SCOPE
+# (driver_source_pipeline_parsing.spl), so relying on an inherited scope left
+# the cache OFF and every cache-dependent example failing when none was set.
 use std.spec
 use compiler.common.config.Logger
 use compiler.frontend.frontend.{parse_full_frontend, parse_full_frontend_target_receipted_v1}
@@ -9,13 +12,23 @@ use std.common.text_bytes.{text_to_utf8_bytes}
 use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text, xxh3_128_text_fallback_used}
 use std.io_runtime.file_exists
 use std.io_runtime.file_write_exact
+use std.io_runtime.{env_set, getpid}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope, frontend_parse_cache_dir, frontend_parse_cache_entry_encode}
 use compiler.frontend.core.flat_pool_codec.FLAT_POOL_CODEC_VERSION
 
 val supplied_key_path = "test/fixtures/compiler/frontend/supplied_source_key.spl"
 
+# Idempotent; must run before the first frontend_parse_cache_scope() call.
+# Only a non-empty scope is memoized, so publishing it first is sufficient.
+fn use_fresh_private_parse_cache():
+    val run = "supplied-source-cache-key-{getpid()}"
+    val _on = env_set("SIMPLE_FRONTEND_CACHE", "1")
+    val _scope = env_set("SIMPLE_FRONTEND_CACHE_SCOPE", run)
+    val _dir = env_set("SIMPLE_FRONTEND_CACHE_DIR", "build/test_supplied_source_cache_key/" + run)
+
 describe "supplied source owns private parse cache identity":
     it "rejects a real legacy entry and accepts the same pool under the corrected version":
+        use_fresh_private_parse_cache()
         expect(frontend_parse_cache_enabled()).to_equal(true)
         val source = "fn migration_member() -> i64:\n    77\n"
         val parsed = parse_full_frontend(source, supplied_key_path, "migration", Logger(level: 0))
@@ -39,6 +52,7 @@ describe "supplied source owns private parse cache identity":
         expect(frontend_parse_cache_load(key)).to_equal(blob)
 
     it "stores changed supplied bytes under their own keys while disk and mtime stay unchanged":
+        use_fresh_private_parse_cache()
         expect(file_exists(supplied_key_path)).to_equal(true)
         expect(frontend_parse_cache_enabled()).to_equal(true)
         val first = "fn supplied_first() -> i64:\n    11\n"
@@ -52,6 +66,7 @@ describe "supplied source owns private parse cache identity":
         expect(frontend_parse_cache_load(xxh3_128_hex(text_to_utf8_bytes(second))).len() > 0).to_equal(true)
 
     it "restores equal source through the existing bridge for an alias":
+        use_fresh_private_parse_cache()
         val source = "fn alias_member() -> i64:\n    33\n"
         val first = parse_full_frontend(source, supplied_key_path, "original", Logger(level: 0))
         expect(first.functions.contains_key("alias_member")).to_equal(true)
@@ -61,6 +76,7 @@ describe "supplied source owns private parse cache identity":
         expect(frontend_parse_cache_hits()).to_equal(hits + 1)
 
     it "does not admit a missing source path into the private cache":
+        use_fresh_private_parse_cache()
         val path = "test/fixtures/compiler/frontend/absent_supplied_key_control.spl"
         expect(file_exists(path)).to_equal(false)
         val hits = frontend_parse_cache_hits()
@@ -72,6 +88,7 @@ describe "supplied source owns private parse cache identity":
         expect(frontend_parse_cache_misses()).to_equal(misses)
 
     it "rejects a caller-supplied stale digest before cache access":
+        use_fresh_private_parse_cache()
         val source = "fn current_control() -> i64:\n    55\n"
         val hits = frontend_parse_cache_hits()
         val result = parse_full_frontend_target_receipted_v1(source, supplied_key_path,
@@ -81,6 +98,7 @@ describe "supplied source owns private parse cache identity":
         expect(frontend_parse_cache_hits()).to_equal(hits)
 
     it "keeps different target projections separate for equal raw source":
+        use_fresh_private_parse_cache()
         val source = "@cfg(windows)\nfn windows_only() -> i64:\n    66\n"
         val win = parse_full_frontend_target_receipted_v1(source, supplied_key_path,
             "target", Logger(level: 0), "source:target", sha256_text(source),
