@@ -30,6 +30,15 @@ use compiler.common.native_output_intent.{NativeOutputIntentV1, native_output_in
 use compiler.driver.driver_build.native_group_request.{native_group_request_path_v1}
 use compiler.driver.driver_build.native_staged_codegen.{NativeStagedCodegenStateV1,
     NATIVE_STAGED_CODEGEN_BATCH_ENV_V1, native_staged_codegen_batch_size_v1}
+use compiler.driver.driver_build.native_mir_shard.{NATIVE_MIR_SHARD_QUEUE_ENV_V1,
+    native_mir_shard_spec_v1, native_mir_shard_queue_v1, native_mir_shard_owner_v1,
+    native_mir_shard_link_ledger_v1, native_mir_shard_publish_pass_v1,
+    native_mir_shard_link_inputs_v1}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_seal,
+    hir_shard_recovery_complete, hir_shard_recovery_block}
+use compiler.driver.driver_build.build_outcome.{BuildUnitOutcome}
+use std.io_runtime.{exit}
+extern fn rt_stdout_flush()
 
 fn native_build_cache_dir() -> text:
     val dir = env_get_opt("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
@@ -76,6 +85,11 @@ fn _driver_entry_source_input(input_files: [text]) -> text:
 impl CompilerDriver:
     me aot_compile() -> CompileResult:
         val log = self.ctx.logger
+        # Process-level MIR sharding (driver_build/native_mir_shard.spl).
+        if native_mir_shard_spec_v1() != "":
+            return self.aot_compile_mir_shard_v1()
+        if native_mir_shard_link_ledger_v1() != "":
+            return self.aot_link_mir_shards_v1()
 
         # Step 4->5 receipts. `log_phase` is env-gated and off by default, so
         # the whole post-MIR pass chain (borrow_check / process_async /
@@ -401,4 +415,130 @@ impl CompilerDriver:
             self.native_staged_codegen.cache_hit_count, "running")
         log_phase("aot:staged_codegen:batch:done index={batch_index} released={batch_names.len()}")
         true
+
+    fn native_mir_shard_eligible_v1() -> bool:
+        """Shards publish per-module objects only; lanes whose final step needs
+        more than object paths (cold-HIR object persistence, collection
+        receipts) or that wipe the shared cache scope stay unsharded."""
+        self.native_staged_codegen_eligible_v1() and
+            self.ctx.cold_hir_typed_receipts.len() == 0 and
+            self.ctx.options.collection_memory_budget_bytes < 0 and
+            (env_get_opt("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") != "1"
+
+    me aot_compile_mir_shard_v1() -> CompileResult:
+        """MIR shard worker: lower only the modules this worker claims, run
+        the per-module post-lowering chain, emit their objects into the shared
+        native cache, and record one terminal per claimed module. Any claimed
+        module without a PASS is sealed FAILED, so the coordinator blocks the
+        link; this process then exits and returns all of its memory."""
+        val queue = native_mir_shard_queue_v1()
+        val owner = native_mir_shard_owner_v1()
+        if queue == "":
+            return CompileResult.CodegenError("MIR shard worker has no ledger ({NATIVE_MIR_SHARD_QUEUE_ENV_V1} unset)")
+        if not self.native_mir_shard_eligible_v1():
+            val _blocked = hir_shard_recovery_block(queue, "MIR sharding is unsupported for this build lane")
+            return CompileResult.CodegenError("MIR sharding is unsupported for this build lane")
+        var shard_state = NativeStagedCodegenStateV1.begin(0)
+        shard_state.active = true
+        shard_state.shard_queue = queue
+        self.native_staged_codegen = shard_state
+        log_phase("aot:mir_shard:start owner={owner}")
+        var codegen_ok = false
+        var module_functions: {text: i64} = {}
+        var module_statics: {text: i64} = {}
+        var shard_borrow_failed = false
+        val shard_lowered = self.lower_to_mir()
+        if shard_lowered and not self.borrow_check():
+            shard_borrow_failed = true
+        if shard_lowered and not shard_borrow_failed:
+            val _async_state_machines = self.process_async()
+            if (env_get_opt("SIMPLE_BOOTSTRAP_SKIP_MIR_OPT") ?? "") != "1":
+                self.optimize_mir_level(self.ctx.options.opt_level ?? 0)
+            self.weave_aop()
+            self.apply_debug_trace()
+            if self.ctx.error_count_value == 0:
+                for held_name in self.ctx.mir_modules.keys():
+                    module_functions[held_name] = self.ctx.mir_modules[held_name].functions.keys().len()
+                    module_statics[held_name] = self.ctx.mir_modules[held_name].statics.keys().len()
+                if self.ctx.freeze_storage_registry_for_schedule(
+                        self.native_staged_codegen.scheduled_names) == "invalid":
+                    self.ctx.add_error("MIR shard: typed storage registry is malformed")
+                else:
+                    val output = self.ctx.options.output_file ?? _driver_default_output(self.ctx.options.input_files)
+                    self.native_staged_codegen.flushing = true
+                    val shard_result = self.compile_to_native(output)
+                    self.native_staged_codegen.flushing = false
+                    if shard_result.is_success():
+                        codegen_ok = true
+                    else:
+                        val shard_error = match shard_result:
+                            case CompileResult.CodegenError(message): message
+                            case _: "MIR shard codegen failed"
+                        self.ctx.add_error(shard_error)
+        var passed = 0
+        val claimed = self.native_staged_codegen.shard_claimed_names
+        if codegen_ok:
+            for name in claimed:
+                var outcome_label = ""
+                for outcome in self.native_staged_codegen.module_outcomes.records:
+                    if outcome.source_path == name:
+                        outcome_label = outcome.label()
+                val has_object = self.native_staged_codegen.module_objects.contains_key(name)
+                # No outcome at all is compile_to_native's objectless facade
+                # route; an OK outcome must carry its object.
+                val object_path = if outcome_label == "OK" and has_object:
+                    self.native_staged_codegen.module_objects[name]
+                else:
+                    ""
+                val module_passed = (outcome_label == "OK" and has_object) or (outcome_label == "" and not has_object)
+                val functions = if module_functions.contains_key(name): module_functions[name] else: 0
+                val statics = if module_statics.contains_key(name): module_statics[name] else: 0
+                if module_passed and native_mir_shard_publish_pass_v1(queue, name, object_path,
+                        functions, statics):
+                    passed = passed + 1
+        val sealed = hir_shard_recovery_seal(queue, owner, "FAILED")
+        val completed = hir_shard_recovery_complete(queue, owner)
+        for err in self.ctx.errors:
+            log_error("MIR shard error: {err}")
+        print "[mir-shard] done owner={owner} claimed={claimed.len()} passed={passed} sealed_failed={sealed} borrow_failed={shard_borrow_failed}"
+        val shard_failed = passed != claimed.len() or sealed != 0 or not completed or
+            self.ctx.error_count_value != 0
+        if shard_failed:
+            val ice_summary = ice_boundary_finalize()
+            if ice_summary != "":
+                log_error(ice_summary)
+        # Like the HIR shard child: everything after this point (verdict,
+        # link, output publication) is the final worker's job, and exiting
+        # here is what returns this worker's MIR to the OS.
+        rt_stdout_flush()
+        exit(if shard_failed: 1 else: 0)
+        CompileResult.Success(nil)
+
+    me aot_link_mir_shards_v1() -> CompileResult:
+        """Final MIR-shard step: lower nothing, admit the sealed ledger's PASS
+        objects (all-or-nothing, bound to this build's source fingerprint),
+        and run the ordinary compile_to_native verdict + link over them."""
+        if not self.native_mir_shard_eligible_v1():
+            return CompileResult.CodegenError("MIR shard link is unsupported for this build lane")
+        val admitted = native_mir_shard_link_inputs_v1(native_mir_shard_link_ledger_v1(),
+            self.ctx.native_sources_fingerprint)
+        if admitted.is_err():
+            return CompileResult.CodegenError(admitted.unwrap_err())
+        val inputs = admitted.unwrap()
+        var link_state = NativeStagedCodegenStateV1.begin(0)
+        link_state.active = true
+        link_state.object_files = inputs.object_files
+        link_state.modules_flushed = inputs.modules.len()
+        link_state.lane_functions = inputs.functions
+        link_state.lane_statics = inputs.statics
+        link_state.lane_objectless = inputs.objectless
+        var outcome_unit = 0
+        for object_module in inputs.object_modules:
+            outcome_unit = outcome_unit + 1
+            link_state.module_outcomes.record(BuildUnitOutcome.ok(outcome_unit, object_module, 0, 0))
+        link_state.module_unit_id = outcome_unit
+        self.native_staged_codegen = link_state
+        print "[mir-shard] link modules={inputs.modules.len()} objects={inputs.object_files.len()} objectless={inputs.objectless}"
+        val output = self.ctx.options.output_file ?? _driver_default_output(self.ctx.options.input_files)
+        self.compile_to_native(output)
 use compiler.common.diagnostics.span.{Span}

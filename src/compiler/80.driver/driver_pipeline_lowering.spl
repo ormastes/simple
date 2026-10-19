@@ -21,6 +21,9 @@ use compiler.mono.verify.post_mono_verify.{post_mono_archive_admission_v1}
 use driver_types.{CompileContext}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_build.native_staged_codegen.{native_staged_codegen_flush_due_v1}
+use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_spec_v1,
+    native_mir_shard_claim_cap_v1, native_mir_shard_claim_v1}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory}
 use compiler.driver.driver_ice_boundary.{
     ice_boundary_module_start, ice_message_arena_aborted,
     ice_boundary_module_done, ice_boundary_fail, ice_boundary_keep_going
@@ -1108,6 +1111,7 @@ impl CompilerDriver:
             # every full batch through codegen and release its MIR instead of
             # retaining the entire closure's MIR until compile_to_native.
             var staged_pending = 0
+            var staged_source_names: [text] = []
             if self.native_staged_codegen.active:
                 var staged_schedule: [text] = []
                 for held_name in self.ctx.mir_modules.keys():
@@ -1118,9 +1122,21 @@ impl CompilerDriver:
                     if mir_physical_ownership_active and self.ctx.hir_modules.has(staged_lookup):
                         staged_name = mir_layout_canonical_module_name(self.ctx.hir_modules[staged_lookup].name)
                     staged_schedule = staged_schedule.push(staged_name)
+                    staged_source_names = staged_source_names.push(staged_name)
                 self.native_staged_codegen.scheduled_names = staged_schedule
                 staged_pending = self.ctx.mir_modules.keys().len()
                 log_phase("aot:staged_codegen:schedule modules={staged_schedule.len()} batch={self.native_staged_codegen.batch_size}")
+            # MIR shard worker (driver_build/native_mir_shard.spl): publish the
+            # schedule as the ledger inventory, then lower only claimed modules.
+            val mir_shard_queue = self.native_staged_codegen.shard_queue
+            val mir_shard_key = self.ctx.native_sources_fingerprint
+            val mir_shard_cap = native_mir_shard_claim_cap_v1(
+                native_mir_shard_spec_v1(), staged_source_names.len())
+            if mir_shard_queue != "":
+                if mir_shard_key == "" or not hir_shard_recovery_inventory(
+                        mir_shard_queue, mir_shard_key, staged_source_names):
+                    self.ctx.add_error("MIR shard ledger inventory refused for this worker")
+                    return false
             while direct_pos < mir_source_indices.len():
                 val direct_idx = mir_source_indices[direct_pos]
                 val src_direct = self.ctx.sources[direct_idx]
@@ -1131,6 +1147,23 @@ impl CompilerDriver:
                     mir_layout_canonical_module_name(self.ctx.hir_modules[source_lookup_name].name)
                 else:
                     source_lookup_name
+                if mir_shard_queue != "":
+                    # Another worker owns it, or this worker's share is full:
+                    # not lowered here. direct_pos still advances, so the entry
+                    # flag (direct_pos == 0) keeps its schedule meaning.
+                    var mir_shard_owned = false
+                    if self.native_staged_codegen.shard_claimed_names.len() < mir_shard_cap:
+                        val mir_shard_claim = native_mir_shard_claim_v1(
+                            mir_shard_queue, name_direct, mir_shard_key)
+                        if mir_shard_claim < 0:
+                            self.ctx.add_error("MIR shard ledger refused claim for {name_direct}")
+                            return false
+                        mir_shard_owned = mir_shard_claim == 1
+                    if not mir_shard_owned:
+                        direct_pos = direct_pos + 1
+                        continue
+                    self.native_staged_codegen.shard_claimed_names =
+                        self.native_staged_codegen.shard_claimed_names.push(name_direct)
                 var mir_direct = if native_entry_closure_mir or driver_source_matches_entry(self.ctx, src_direct.path, name_direct) or (sosix_env_get_nullable("SIMPLE_UNSTUB_HIR") ?? "") == "1":
                     log_phase("aot:lower_to_mir:module:start idx={direct_idx} module={name_direct} path={src_direct.path}")
                     val direct_hir = self.ctx.hir_modules[source_lookup_name]

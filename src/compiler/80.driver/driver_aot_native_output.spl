@@ -2212,7 +2212,10 @@ impl CompilerDriver:
         # Guard (bug #119): refuse empty mir_modules. A requested --entry that
         # produces no modules is likely a misconfiguration (isolated entry with
         # zero imports). Hard-error instead of silently falling back to bootstrap_main.
-        if total_modules <= 0:
+        # A MIR-shard link call legitimately holds no MIR: every module was
+        # emitted by a shard worker and arrives through the staged summary.
+        if total_modules <= 0 and not (self.native_staged_codegen.active and
+                self.native_staged_codegen.modules_flushed > 0):
             val entry_hint = if ctx.options.input_files.len() > 0:
                 " (input: {ctx.options.input_files[0]})"
             else:
@@ -2426,6 +2429,8 @@ impl CompilerDriver:
                             BuildUnitOutcome.ok(module_unit_id, name, 0, 0))
                         for obj in scoped_outputs:
                             object_files = object_files.push(obj)
+                        if staged_active:
+                            self.native_staged_codegen.module_objects[name] = scoped_outputs[0]
                         if collection_receipt_requested:
                             collection_bindings = collection_bindings.push(cached_collection_binding)
                         if native_group.? and scoped_outputs.len() == 1:
@@ -2728,6 +2733,8 @@ impl CompilerDriver:
                         entry_object_ready_size = admitted_size
                     reconstructed_outputs = reconstructed_outputs.push(obj_path)
                     object_files = object_files.push(obj_path)
+                    if staged_active:
+                        self.native_staged_codegen.module_objects[name] = obj_path
                     if collection_receipt_requested:
                         val binding = match collection_native_bind_capsule_v1(capsule):
                             case Ok(value): value
