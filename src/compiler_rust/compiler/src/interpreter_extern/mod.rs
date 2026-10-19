@@ -425,6 +425,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_transient_array_scope_begin", memory::rt_transient_array_scope_begin);
     insert_simple!("rt_transient_array_scope_pause", memory::rt_transient_array_scope_pause);
     insert_simple!("rt_transient_array_scope_end", memory::rt_transient_array_scope_end);
+    insert_simple!("rt_transient_array_scope_state_v1", memory::rt_transient_array_scope_state_v1);
     insert_simple!("rt_transient_heap_promote", memory::rt_transient_heap_promote);
     insert_simple!("rt_transient_heap_promote_share_begin", memory::rt_transient_heap_promote_share_begin);
     insert_simple!("rt_transient_heap_promote_share_end", memory::rt_transient_heap_promote_share_end);
@@ -3758,6 +3759,7 @@ mod tests {
             "rt_transient_array_scope_begin",
             "rt_transient_array_scope_pause",
             "rt_transient_array_scope_end",
+            "rt_transient_array_scope_state_v1",
             "rt_transient_heap_promote",
             "rt_transient_heap_promote_share_begin",
             "rt_transient_heap_promote_share_end",
