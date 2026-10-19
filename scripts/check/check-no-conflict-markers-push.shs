@@ -174,11 +174,51 @@ if [ "${1:-}" = --selftest ]; then
         st_fail=1
     fi
 
+    # Fixture 3: an unrebased clean branch must PASS even though main advanced
+    # with a sibling PR that carries conflict-marker text (merge-base diff).
+    st_repo3="$st_tmp/unrebased-repo"
+    mkdir -p "$st_repo3/scripts/check"
+    cp "$st_self" "$st_repo3/scripts/check/check-no-conflict-markers-push.shs"
+    (
+        cd "$st_repo3" || exit 2
+        git init -q -b main
+        git config user.email test@example.com
+        git config user.name test
+        printf 'hello
+' > f.txt
+        git add f.txt
+        git commit -q -m "initial"
+        git checkout -q -b side
+        printf 'clean
+' > own.txt
+        git add own.txt
+        git commit -q -m "own clean change"
+        git checkout -q main
+        printf '<<<<<<< a
+x
+=======
+y
+>>>>>>> b
+' > sibling.txt
+        git add sibling.txt
+        git commit -q -m "sibling lands with stale content"
+        sh scripts/check/check-no-conflict-markers-push.shs "main..side" > out.txt 2>&1
+        echo $? > rc.txt
+    )
+    st_rc3=$(cat "$st_repo3/rc.txt" 2>/dev/null)
+    st_out3=$(cat "$st_repo3/out.txt" 2>/dev/null)
+    if [ "$st_rc3" = "0" ] && printf '%s' "$st_out3" | "$GREP" -q "PASS — 1 file(s) scanned"; then
+        echo "$SELF: selftest fixture 3 (unrebased branch judged from merge-base, not base tip) -> PASS: ok"
+    else
+        echo "$SELF: selftest FIXTURE 3 FAILED (unrebased clean branch must PASS against an advanced base): rc=$st_rc3 out=$st_out3" >&2
+        st_fail=1
+    fi
+
     if [ "$st_fail" -ne 0 ]; then
         echo "$SELF: ERROR — nothing was checked (selftest failed)"
         exit 2
     fi
-    echo "$SELF: selftest: 2 fixture(s) passed"
+    echo "$SELF: selftest: 3 fixture(s) passed"
     exit 0
 fi
 
@@ -327,7 +367,14 @@ is_allowlisted() {
 #   ":<oldmode> <newmode> <oldsha> <newsha> <status>\0<path>\0"
 # Converting every NUL to a newline is safe: git paths can never contain a NUL
 # or a literal newline, so this never fabricates a false line boundary.
-git -c core.quotePath=false diff --raw -z --no-renames "$range" -- \
+# Judge the branch's OWN changes: diff from the merge-base, never tip-vs-tip.
+# `git diff A..B` is tip-vs-tip while the rev-list above is merge-base
+# relative, so on an unrebased branch a tip-vs-tip diff would re-check files
+# sibling PRs changed since the fork point. Unrelated histories have no
+# merge-base; tip-vs-tip is then the only meaningful comparison.
+_mb=$(git merge-base "$left" "$right" 2>/dev/null) || _mb=""
+[ -n "$_mb" ] || _mb=$left
+git -c core.quotePath=false diff --raw -z --no-renames "$_mb" "$right" -- \
     > "$TMPD/rawdiff" 2>"$TMPD/rawdifferr"
 dl=$?
 [ "$dl" -eq 0 ] || die 2 "git diff --raw '$range' failed with status $dl: $(head -1 "$TMPD/rawdifferr" 2>/dev/null)"
