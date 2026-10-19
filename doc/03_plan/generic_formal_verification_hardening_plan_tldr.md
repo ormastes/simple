@@ -19,3 +19,5 @@ Bound specialization/proof caches, recursion and workers. Preserve live leases a
 Implementation order: baseline/bug closure → generic semantics → admitted formal subset → trusted proof replay → dynamic/profile invalidation → resource/engine qualification → guarded landing. Real negative controls and a calibrated existing runner are mandatory. Reject placeholder proofs, undeclared axioms, solver unknown/timeout and missing evidence.
 
 Next inspect: `src/compiler/40.mono/monomorphize_integration.spl`, `mono_archive_types_v1.spl`, common `formal_interfaces.spl`, MIR `verification_ir.spl`, Lean backend, and verify `replay_runner.spl`. Root owns composition/landing; an independent reviewer checks each phase. No overall formal-verification PASS is established.
+
+2026-10-19 status (§12): new manual `MonoBoundaryModel` Lean target states variant-shadowing owner preservation (PR #3807), E-MONO-041 owner proof and E-MONO-033 mono→MIR boundary soundness under a diagnostic-coverage premise. Source-coded only — not kernel-built (no Lean toolchain on the authoring host). Class-static template inference is a TODO pending its branch landing.
