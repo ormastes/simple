@@ -1,0 +1,215 @@
+# @tag: system, encoding, abstract-text, utf8
+# @manual: show
+use std.spec
+use std.common.encoding.external_text.*
+use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
+
+fn abstract_text_value<T>(value: T) -> Result<Text, CodecError> where T: AbstractText:
+    value.to_internal_text()
+
+fn abstract_char_value<T>(value: T) -> Result<Char, CodecError> where T: AbstractChar:
+    value.to_internal_char()
+
+fn expect_codec_error<T>(result: Result<T, CodecError>, kind: CodecErrorKind, offset: i64):
+    match result:
+        case Err(error):
+            expect(error.kind).to_equal(kind)
+            expect(error.byte_offset).to_equal(offset)
+        case Ok(value):
+            assert(false)
+
+fn utf16_format(order: ByteOrder, bom: BomPolicy) -> ExternalFormat:
+    ExternalFormat(encoding: Encoding.Utf16, byte_order: order, bom: bom)
+
+fn expect_external_format(actual: ExternalFormat, expected: ExternalFormat):
+    expect(actual.encoding).to_equal(expected.encoding)
+    expect(actual.byte_order).to_equal(expected.byte_order)
+    expect(actual.bom).to_equal(expected.bom)
+
+fn decode_chunks(chunks: [[u8]], format: ExternalFormat) -> Result<Text, CodecError>:
+    var decoder = external_text_decoder(format)?
+    var output: text = ""
+    for chunk in chunks:
+        output = output + decoder.push(chunk)?
+        expect(decoder.pending_byte_count()).to_be_less_than(4)
+    output = output + decoder.finish()?
+    Ok(output)
+
+fn check_owned_external_bytes():
+    var original: [u8] = [65]
+    val encoded = external_text(original, utf8_format()).unwrap()
+    original[0] = 66
+    var exposed = encoded.encoded_bytes().unwrap()
+    exposed[0] = 67
+    expect(encoded.to_internal_text().unwrap()).to_equal("A")
+    expect(encoded.encoded_bytes().unwrap()).to_equal([65])
+
+fn check_decoder_failure_is_sticky():
+    var decoder = external_text_decoder(utf8_format()).unwrap()
+    expect(decoder.push([65]).unwrap()).to_equal("A")
+    expect_codec_error(decoder.push([0xFF]), CodecErrorKind.InvalidUtf8, 1)
+    expect_codec_error(decoder.push([66]), CodecErrorKind.InvalidUtf8, 1)
+    expect_codec_error(decoder.finish(), CodecErrorKind.InvalidUtf8, 1)
+
+fn check_decoder_closes():
+    var decoder = external_text_decoder(utf8_format()).unwrap()
+    expect(decoder.finish().unwrap()).to_equal("")
+    expect_codec_error(decoder.push([65]), CodecErrorKind.StreamFinished, 0)
+    expect_codec_error(decoder.finish(), CodecErrorKind.StreamFinished, 0)
+
+fn check_independent_decoders():
+    var first = external_text_decoder(utf8_format()).unwrap()
+    var second = external_text_decoder(utf16_format(ByteOrder.BigEndian, BomPolicy.Require)).unwrap()
+    expect(first.push([0xF0, 0x9F]).unwrap()).to_equal("")
+    expect(second.push([0xFE]).unwrap()).to_equal("")
+    expect(first.pending_byte_count()).to_equal(2)
+    expect(second.pending_byte_count()).to_equal(1)
+    expect(second.push([0xFF, 0, 65]).unwrap()).to_equal("A")
+    expect_codec_error(first.finish(), CodecErrorKind.TruncatedInput, 2)
+    expect(second.push([0, 66]).unwrap()).to_equal("B")
+    expect(second.finish().unwrap()).to_equal("")
+
+describe "explicit external text and UTF-8 abstractions":
+    it "REQ-001: uses one generic text contract for internal and external values":
+        # @step: Read UTF-16 text through the shared text abstraction
+        val encoded = external_text([0x41, 0x00, 0x00, 0x00, 0x3D, 0xD8, 0x42, 0xDE], utf16_format(ByteOrder.LittleEndian, BomPolicy.Preserve)).unwrap()
+        expect(text_to_utf8_bytes(abstract_text_value(encoded).unwrap())).to_equal([65, 0, 0xF0, 0x9F, 0x99, 0x82])
+        expect(abstract_text_value("hello").unwrap()).to_equal("hello")
+        # Both concrete implementations must preserve the same typed Result
+        # through a generic consumer, including empty input and embedded NUL.
+        val internal = bytes_to_text([65, 0, 0xF0, 0x9F, 0x99, 0x82])
+        val primitive_result: Result<Text, CodecError> = abstract_text_value(internal)
+        expect(text_to_utf8_bytes(primitive_result.unwrap())).to_equal([65, 0, 0xF0, 0x9F, 0x99, 0x82])
+        expect(abstract_text_value("").unwrap()).to_equal("")
+        expect(abstract_text_value(external_text([], utf8_format()).unwrap()).unwrap()).to_equal("")
+
+    it "REQ-001: rejects invalid primitive text introduced through a raw provider":
+        # @step: Validate the internal text abstraction at an unchecked provider boundary
+        val invalid = bytes_to_text([0xC0, 0x80])
+        expect_codec_error(abstract_text_value(invalid), CodecErrorKind.InvalidUtf8, 0)
+
+    it "REQ-002: rejects unknown or incoherent metadata before payload decoding":
+        # @step: Admit explicit encoding and byte order metadata
+        val unknown = ExternalFormat(encoding: Encoding.Unknown("mystery"), byte_order: ByteOrder.NotApplicable, bom: BomPolicy.Preserve)
+        expect_codec_error(external_text([0xFF], unknown), CodecErrorKind.UnknownEncoding, -1)
+        expect_codec_error(external_text_decoder(unknown), CodecErrorKind.UnknownEncoding, -1)
+        expect_codec_error(external_format_from_label("utf-16", BomPolicy.Preserve), CodecErrorKind.UnknownEncoding, -1)
+        val ambiguous = utf16_format(ByteOrder.NotApplicable, BomPolicy.Preserve)
+        expect_codec_error(external_text([], ambiguous), CodecErrorKind.InvalidFormat, -1)
+        val swapped = ExternalFormat(encoding: Encoding.Utf8, byte_order: ByteOrder.BigEndian, bom: BomPolicy.Preserve)
+        expect_codec_error(external_text([], swapped), CodecErrorKind.InvalidFormat, -1)
+
+    it "REQ-002: resolves exact supported protocol labels":
+        val utf8 = external_format_from_label("utf-8", BomPolicy.Preserve).unwrap()
+        expect_external_format(utf8, utf8_format())
+        val little = external_format_from_label("utf-16le", BomPolicy.Require).unwrap()
+        expect_external_format(little, utf16_format(ByteOrder.LittleEndian, BomPolicy.Require))
+        val big = external_format_from_label("utf-16be", BomPolicy.Forbid).unwrap()
+        expect_external_format(big, utf16_format(ByteOrder.BigEndian, BomPolicy.Forbid))
+
+    it "REQ-002: retains every metadata field on external text and character boundaries":
+        # @step: Retain encoding, byte order and BOM policy through ingress and output
+        val format = utf16_format(ByteOrder.BigEndian, BomPolicy.Require)
+        val incoming_text = external_text([0xFE, 0xFF, 0, 65], format).unwrap()
+        expect_external_format(incoming_text.external_format(), format)
+        expect(incoming_text.encoded_byte_length()).to_equal(4)
+        expect(incoming_text.encoded_bytes().unwrap()).to_equal([0xFE, 0xFF, 0, 65])
+        val incoming_char = external_char([0xFE, 0xFF, 0, 65], format).unwrap()
+        expect_external_format(incoming_char.external_format(), format)
+        expect(incoming_char.encoded_byte_length()).to_equal(4)
+        val text_value = incoming_text.to_internal_text().unwrap()
+        val char_value = incoming_char.to_internal_char().unwrap()
+        val outgoing_text = external_text_from_internal(text_value, format).unwrap()
+        val outgoing_char = external_char_from_internal(char_value, format).unwrap()
+        expect_external_format(outgoing_text.external_format(), format)
+        expect_external_format(outgoing_char.external_format(), format)
+        expect(outgoing_text.encoded_byte_length()).to_equal(4)
+        expect(outgoing_char.encoded_byte_length()).to_equal(4)
+        expect(outgoing_text.encoded_bytes().unwrap()).to_equal([0xFE, 0xFF, 0, 65])
+        expect(outgoing_char.encoded_bytes().unwrap()).to_equal([0xFE, 0xFF, 0, 65])
+
+    it "REQ-003: external character denotes exactly one scalar":
+        # @step: Decode one supplementary character without treating a surrogate as a character
+        val encoded = external_char([0xD8, 0x3D, 0xDE, 0x42], utf16_format(ByteOrder.BigEndian, BomPolicy.Preserve)).unwrap()
+        expect(abstract_char_value(encoded).unwrap() as i64).to_equal(0x1F642)
+        val internal: Char = 0x1F642 as char
+        expect(abstract_char_value(internal).unwrap() as i64).to_equal(0x1F642)
+        expect_codec_error(external_char([], utf8_format()), CodecErrorKind.NotOneScalar, 0)
+        expect_codec_error(external_char([65, 66], utf8_format()), CodecErrorKind.NotOneScalar, 0)
+        expect_codec_error(external_char([65, 66, 67, 68, 69], utf8_format()), CodecErrorKind.NotOneScalar, 0)
+        expect_codec_error(external_char([0xED, 0xA0, 0x80], utf8_format()), CodecErrorKind.InvalidUtf8, 1)
+
+    it "REQ-003: a required BOM is metadata and a preserved BOM is a scalar":
+        val required = ExternalFormat(encoding: Encoding.Utf8, byte_order: ByteOrder.NotApplicable, bom: BomPolicy.Require)
+        val encoded = external_char([0xEF, 0xBB, 0xBF, 65], required).unwrap()
+        expect(encoded.to_internal_char().unwrap() as i64).to_equal(65)
+        expect_codec_error(external_char([0xEF, 0xBB, 0xBF, 65], utf8_format()), CodecErrorKind.NotOneScalar, 0)
+        expect(external_char([0xEF, 0xBB, 0xBF], utf8_format()).unwrap().to_internal_char().unwrap() as i64).to_equal(0xFEFF)
+
+    it "REQ-004: strict conversion reports original byte offsets":
+        # @step: Reject ill-formed bytes without replacement
+        val invalid = external_text([65, 0xE0, 0x80, 0x80], utf8_format()).unwrap()
+        expect_codec_error(invalid.to_internal_text(), CodecErrorKind.InvalidUtf8, 2)
+        expect_codec_error(abstract_text_value(invalid), CodecErrorKind.InvalidUtf8, 2)
+        val truncated = external_text([65, 0, 0x3D, 0xD8, 0x42], utf16_format(ByteOrder.LittleEndian, BomPolicy.Preserve)).unwrap()
+        expect_codec_error(truncated.to_internal_text(), CodecErrorKind.TruncatedInput, 5)
+        expect_codec_error(abstract_text_value(truncated), CodecErrorKind.TruncatedInput, 5)
+        val required = ExternalFormat(encoding: Encoding.Utf8, byte_order: ByteOrder.NotApplicable, bom: BomPolicy.Require)
+        val after_bom = external_text([0xEF, 0xBB, 0xBF, 0xFF], required).unwrap()
+        expect_codec_error(after_bom.to_internal_text(), CodecErrorKind.InvalidUtf8, 3)
+
+    it "REQ-005: output encoding is symmetric and preserves NUL":
+        # @step: Encode internal UTF-8 for an explicitly little-endian destination
+        val internal = bytes_to_text([65, 0, 0xF0, 0x9F, 0x99, 0x82])
+        val encoded = external_text_from_internal(internal, utf16_format(ByteOrder.LittleEndian, BomPolicy.Require)).unwrap()
+        expect(encoded.encoded_bytes().unwrap()).to_equal([0xFF, 0xFE, 65, 0, 0, 0, 0x3D, 0xD8, 0x42, 0xDE])
+        expect(encoded.to_internal_text().unwrap()).to_equal(internal)
+        val external_result: Result<Text, CodecError> = abstract_text_value(encoded)
+        expect(text_to_utf8_bytes(external_result.unwrap())).to_equal([65, 0, 0xF0, 0x9F, 0x99, 0x82])
+        val big = external_text([0xFE, 0xFF, 0, 65, 0, 0, 0xD8, 0x3D, 0xDE, 0x42], utf16_format(ByteOrder.BigEndian, BomPolicy.Require)).unwrap()
+        expect(text_to_utf8_bytes(abstract_text_value(big).unwrap())).to_equal([65, 0, 0xF0, 0x9F, 0x99, 0x82])
+        val character = external_char_from_internal(0x1F642 as char, utf16_format(ByteOrder.BigEndian, BomPolicy.Preserve)).unwrap()
+        expect(character.encoded_bytes().unwrap()).to_equal([0xD8, 0x3D, 0xDE, 0x42])
+
+    it "REQ-005: BOM requirements do not silently guess byte order":
+        val required = utf16_format(ByteOrder.BigEndian, BomPolicy.Require)
+        val wrong_order = external_text([0xFF, 0xFE, 65, 0], required).unwrap()
+        expect_codec_error(wrong_order.to_internal_text(), CodecErrorKind.MissingBom, 0)
+        expect_codec_error(abstract_text_value(wrong_order), CodecErrorKind.MissingBom, 0)
+        val forbidden = ExternalFormat(encoding: Encoding.Utf8, byte_order: ByteOrder.NotApplicable, bom: BomPolicy.Forbid)
+        val marked = external_text([0xEF, 0xBB, 0xBF, 65], forbidden).unwrap()
+        expect_codec_error(marked.to_internal_text(), CodecErrorKind.ForbiddenBom, 0)
+        expect_codec_error(abstract_text_value(marked), CodecErrorKind.ForbiddenBom, 0)
+        expect_codec_error(external_text_from_internal(bytes_to_text([0xEF, 0xBB, 0xBF]), forbidden), CodecErrorKind.ForbiddenBom, 0)
+
+    it "REQ-006: owns its byte payload and returns defensive copies":
+        # @step: Keep external text stable when caller buffers change
+        check_owned_external_bytes()
+
+    it "REQ-007: streams split UTF-8 and UTF-16 scalars with bounded carry":
+        # @step: Decode transport chunks without confusing a partial scalar with EOF
+        val utf8 = decode_chunks([[65, 0xF0], [0x9F], [0x99], [0x82, 0]], utf8_format()).unwrap()
+        expect(text_to_utf8_bytes(utf8)).to_equal([65, 0xF0, 0x9F, 0x99, 0x82, 0])
+        val utf16 = decode_chunks([[0xFF], [0xFE, 0x3D], [0xD8], [0x42], [0xDE]], utf16_format(ByteOrder.LittleEndian, BomPolicy.Require)).unwrap()
+        expect(text_to_utf8_bytes(utf16)).to_equal([0xF0, 0x9F, 0x99, 0x82])
+        val big = decode_chunks([[0xFE], [0xFF, 0xD8], [0x3D], [0xDE], [0x42]], utf16_format(ByteOrder.BigEndian, BomPolicy.Require)).unwrap()
+        expect(text_to_utf8_bytes(big)).to_equal([0xF0, 0x9F, 0x99, 0x82])
+
+    it "REQ-007: decoder carry, format and failure state belong to each stream":
+        # @step: Interleave independent UTF-8 and UTF-16 streams
+        check_independent_decoders()
+
+    it "REQ-007: finish rejects incomplete input at the absolute missing-byte offset":
+        expect_codec_error(decode_chunks([[65], [0xF0, 0x9F]], utf8_format()), CodecErrorKind.TruncatedInput, 3)
+        expect_codec_error(decode_chunks([[65, 0], [0x3D, 0xD8], [0x42]], utf16_format(ByteOrder.LittleEndian, BomPolicy.Preserve)), CodecErrorKind.TruncatedInput, 5)
+
+    it "REQ-007: closes decoding and retains the first failure":
+        check_decoder_failure_is_sticky()
+        check_decoder_closes()
+
+    it "REQ-007: handles split forbidden and required UTF-8 signatures":
+        val required = ExternalFormat(encoding: Encoding.Utf8, byte_order: ByteOrder.NotApplicable, bom: BomPolicy.Require)
+        expect(decode_chunks([[0xEF], [0xBB], [0xBF, 65]], required).unwrap()).to_equal("A")
+        val forbidden = ExternalFormat(encoding: Encoding.Utf8, byte_order: ByteOrder.NotApplicable, bom: BomPolicy.Forbid)
+        expect_codec_error(decode_chunks([[0xEF], [0xBB], [0xBF, 65]], forbidden), CodecErrorKind.ForbiddenBom, 0)
+        expect_codec_error(decode_chunks([[0xEF]], required), CodecErrorKind.MissingBom, 0)
