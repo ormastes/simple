@@ -698,13 +698,17 @@ fn hosted_bytes_le_load(builder: &mut FunctionBuilder, ptr_bits: Value, index: V
 
     builder.switch_to_block(packed_block);
     let byte_ptr = builder.ins().iadd(data_ptr, index);
+    // The `_le_` contract is little-endian bytes, independent of the host:
+    // the multi-byte packed loads say so explicitly (a no-op on LE hosts, a
+    // byte swap on BE). The slot arm below composes bytes with shifts.
+    let le = MemFlags::new().with_endianness(cranelift_codegen::ir::Endianness::Little);
     let packed = if width == 8 {
-        builder.ins().load(types::I64, MemFlags::new(), byte_ptr, 0)
+        builder.ins().load(types::I64, le, byte_ptr, 0)
     } else if width == 1 {
         let value = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
         builder.ins().uextend(types::I64, value)
     } else {
-        let value = builder.ins().load(types::I32, MemFlags::new(), byte_ptr, 0);
+        let value = builder.ins().load(types::I32, le, byte_ptr, 0);
         builder.ins().uextend(types::I64, value)
     };
     builder.ins().jump(join_block, &[packed]);
