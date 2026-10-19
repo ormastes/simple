@@ -564,7 +564,8 @@ fn open_regular_no_follow(path: &Path) -> Option<std::fs::File> {
     #[cfg(unix)]
     {
         let path = CString::new(path.as_os_str().as_bytes()).ok()?;
-        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        // Reach same-handle admission even for a FIFO with no writer.
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK) };
         if fd < 0 {
             return None;
         }
