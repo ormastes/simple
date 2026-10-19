@@ -47,6 +47,15 @@ extern fn rt_file_fsync(path: text) -> bool
 # extern fn rt_file_write(path: text, content: text) -> bool  # Disabled - not in runtime extern registry
 @unsafe(reason: "creates an OS-owned private staging directory", capabilities: [ffi])
 extern fn rt_secure_temp_dir(parent: text, prefix: text) -> text
+# Cycle-170 split crossing: the two-argument rt_secure_temp_dir text-ABI call
+# draws erased in candidate-seednew's compiled marshalling, so the staging
+# parent travels through a thread-local slot in its own single-argument call.
+@unsafe(reason: "stores the staging parent in a thread-local slot for the paired make call", capabilities: [ffi])
+extern fn rt_secure_temp_dir_set_parent(parent: text) -> i64
+@unsafe(reason: "stores the staging leaf prefix in a thread-local slot for the paired make call", capabilities: [ffi])
+extern fn rt_secure_temp_dir_set_prefix(prefix: text) -> i64
+@unsafe(reason: "creates the OS-owned private staging directory from the slotted parent and prefix", capabilities: [ffi])
+extern fn rt_secure_temp_dir_make() -> text
 @unsafe(reason: "atomically transfers ownership of a staged file path", capabilities: [ffi])
 extern fn rt_file_publish_noreplace(staged_path: text, destination: text) -> i64
 @unsafe(reason: "raw file-size ABI; negative status is the provider failure sentinel", capabilities: [ffi])
@@ -191,8 +200,32 @@ fn file_atomic_write(path: text, content: text) -> bool:
         case Err(_): false
 
 fn secure_temp_dir_raw(parent: text, prefix: text) -> text:
+    # Cycle-170 (candidate-seednew 2026-10-19): the two-argument
+    # rt_secure_temp_dir text-ABI crossing reached the C admission with a
+    # corrupted pointer word, and each single-argument split site drew or
+    # not by its own compiled lottery (measured: set_parent(host(parent))
+    # clean, make(host(prefix)) refused). The remaining arg-crossing-free
+    # shape: slot BOTH strings in their own single-argument crossings (call
+    # results only -- bare parameter reads at these marshallings draw
+    # erased) and call a ZERO-argument make. host_path_native is the
+    # identity on this host for both the directory and the leaf prefix.
+    # The 0700 mkdtemp privacy property and the fail-closed '' refusal are
+    # unchanged; the slot pair is one logical operation (make always
+    # consumes both slots).
     unsafe(capabilities: [ffi]):
-        rt_secure_temp_dir(host_path_native(parent), prefix)
+        # `+ ""` forces a fresh heap string: string-LITERAL text arguments
+        # cross the text-ABI extern boundary as (NULL, len) by design
+        # (runtime_native.c rt_string_data rejects non-heap handles; pinned by
+        # check-text-literal-extern-abi.shs) -- measured here as
+        # prefix_set=0 for driver_aot's literal "simple-aot-diagnostic" while
+        # the heap-built parent crossed clean.
+        val parent_set: i64 = rt_secure_temp_dir_set_parent(host_path_native(parent + ""))
+        if parent_set != 1:
+            return ""
+        val prefix_set: i64 = rt_secure_temp_dir_set_prefix(host_path_native(prefix + ""))
+        if prefix_set != 1:
+            return ""
+        rt_secure_temp_dir_make()
 
 fn file_publish_noreplace_raw(staged_path: text, destination: text) -> i64:
     unsafe(capabilities: [ffi]):

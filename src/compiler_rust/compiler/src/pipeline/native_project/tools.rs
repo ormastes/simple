@@ -2407,6 +2407,13 @@ pub(super) fn bootstrap_mutex_runtime_requested_symbols() -> Vec<String> {
         "rt_simple_abi_version",
         "rt_simple_abi_version_deferred",
         "rt_sosix_directory_pair_check_v1",
+        // Cycle-170: the secure_temp_dir split-crossing pair (runtime_native.c)
+        // must survive capsule retention -- otherwise the stub generator
+        // fabricates weak return-3 stubs for them and SCV snapshot staging
+        // refuses every snapshot CREATE under candidate-seednew.
+        "rt_secure_temp_dir_set_parent",
+        "rt_secure_temp_dir_set_prefix",
+        "rt_secure_temp_dir_make",
     ]
     .into_iter()
     .map(str::to_string)
@@ -4047,6 +4054,15 @@ fn is_known_system_name(name: &str) -> bool {
             // only in is_macos_system_symbol, so on a Linux host they were
             // weak-stub candidates (test_cxx_abi_symbols_are_not_stub_candidates).
             | "clock_getres"
+            // Cycle-170: the hosted candidate link's system scan missed these
+            // libc entry points, so the stub fabricator gave them 8-byte
+            // `return 3` bodies (measured: _mkdtemp = mov x0,#3; ret, which
+            // made rt_secure_temp_dir's mkdtemp "succeed" without creating
+            // the directory -- chmod then failed with ENOENT). Real libc
+            // definitions must win on every hosted link.
+            | "mkdtemp"
+            | "mkstemp"
+            | "wmemchr"
             | "flock"
             | "recvmsg"
             | "sendfile"

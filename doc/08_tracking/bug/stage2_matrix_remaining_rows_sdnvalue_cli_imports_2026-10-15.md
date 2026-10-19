@@ -448,3 +448,53 @@ candidate today (c167/c168/oldtree) crashed in HIR
 `module_declarations_bootstrap`, this one gets through HIR and dies one
 phase later. That MIR-lower_module fault is the next row; it is downstream
 of and unrelated to the RT-blob gate fix.
+
+## 2026-10-19 (later) — cycle-170: SCV snapshot-staging refusal is a compiled-marshalling draw, not a source-level read
+
+Follow-up to the seednew10 wall (commit c6a4eba8539, PARTIAL). Full evidence
+chain: (1) both linked `rt_secure_temp_dir` implementations (fresh C
+`runtime_native.o`, authority-archive `runtime_secure_staging.o`) are
+byte-logical twins (text_arg_to_path 4096 → snprintf → mkdtemp → chmod 0700);
+(2) mkdtemp succeeds from the shell against the same parent/template; (3)
+string-literal text args cross the text-ABI extern boundary as (NULL, len)
+BY DESIGN (runtime_native.c `rt_string_data`, values < 0x10000; pinned by
+check-text-literal-extern-abi.shs) — literal probes always refuse, a trap;
+(4) a heap-string micro-probe still refused inside the candidate only; (5)
+annotated binds AND single-element array transport of the crossing words
+both failed to cure it, while single-argument crossings (dir_create) draw
+clean in the same binary. Conclusion: candidate-seednew's COMPILED
+marshalling of this two-argument text-ABI extern call draws erased — below
+source-level reach. Latent footprint: the candidate's own AOT "diagnostic
+staging unavailable" on every candidate native-build (invisible unless
+diagnostics stage). Next levers: two single-arg-shaped crossings via a shim,
+candidate-side codegen fix for multi-arg text-ABI externs (root cause), or
+SCV staging via file_create_excl only with explicit review of the 0700→0755
+privacy delta. Cycle-169's lower_module fix remains parked behind this wall.
+
+## 2026-10-19 (cycle-170 conclusion) -- SCV admission unblocked: four stacked causes; MIR reached; cycle-171 is the entry-module MIR erased-value errors
+
+The day-long `snapshot-staging-create-failed` wall had four stacked causes,
+each probe-measured (commit 669c50c11be): (1) weak return-3 stubs preempted
+the new C-runtime exports (stub scan ignored the fresh core-C capsule, and
+the capsule retention list dropped the symbols); (2) the seed's text->(ptr,len)
+expansion is keyed by an explicit NAME MAP in codegen/instr/calls.rs -- the
+runtime_sffi.rs arity rows alone do not expand (disassembly showed the raw
+handle in x0); (3) the compiled two-arg rt_secure_temp_dir crossing drew
+corrupted words, so staging now crosses as two single-arg slot-setters plus a
+zero-arg make(); (4) `_mkdtemp` was ITSELF a weak stub (`mov x0,#3; ret`) --
+mkdtemp "succeeded" without creating the directory and chmod failed ENOENT;
+the core now uses an exclusive mkdir+EEXIST-retry loop and mkdtemp/mkstemp/
+wmemchr are added to is_known_system_name. VERIFIED (build-seednew17.log):
+SCV admission passes, snapshot 3cdae91c is created, all 1311 modules clear
+HIR + mono, and the MIR bootstrap-fixed lane prints closure_module for every
+module + done (closure_modules=1310) -- the cycle-169 SIGSEGV is dead.
+NEXT WALL (cycle-171): entry-module MIR lowering fails with erased-value
+errors -- 'undefined variable BLOCK_FIXED/BLOCK_DYNAMIC/BLOCK_STORED' and a
+corrupted enum declaration name 'HostGpuLaneBegin\n.HwConstant::bits.
+CompileMode' in lib.nogc_sync_mut.compression.* -- the crash-class draw now
+manifests as wrong values; same treatment family (single annotated bind /
+bind-once at the drawing read in the entry module's MIR lowering). Side
+finding: the bug-DB 'CRC mismatch' warning is reader-side (tracked DB body
+matches zlib crc32 exactly; self-hosted crc32_text disagrees) -- warning-only,
+but the workaround table never loads, leaving erased-read workarounds
+unapplied in these builds.
