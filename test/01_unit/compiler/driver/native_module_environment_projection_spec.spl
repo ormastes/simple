@@ -38,3 +38,40 @@ describe "native module delivery-intent projection":
             [("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", ""), ("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", "entry")])
         expect(duplicate.valid).to_equal(false)
         expect(duplicate.reason).to_contain("environment-field-duplicate")
+
+    it "ignores per-run observability sinks and the external RSS ceiling":
+        # Stage 3 relaunches differ only in these (pid-stamped paths, run id,
+        # watchdog ceiling); none is read by a compiler decision, so they must
+        # not give every relaunch a private object-cache scope.
+        val run_a: [(text, text)] = [("PATH", "/usr/bin"),
+            ("SIMPLE_COMPILER_PHASE_PROFILE", "1"),
+            ("SIMPLE_COMPILER_PHASE_PROFILE_FILE", "/out/phase-profile.101.events"),
+            ("SIMPLE_MEM_SNAPSHOT_FILE", "/out/memory-snapshot-v1.101.events"),
+            ("SIMPLE_EVIDENCE_RUN_ID", "stage3-101"),
+            ("SIMPLE_BUILD_PROGRESS_EVENTS", "/out/a.events"),
+            ("SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB", "52428800")]
+        val run_b: [(text, text)] = [("PATH", "/usr/bin"),
+            ("SIMPLE_COMPILER_PHASE_PROFILE_FILE", "/out/phase-profile.202.events"),
+            ("SIMPLE_MEM_SNAPSHOT_FILE", "/out/memory-snapshot-v1.202.events"),
+            ("SIMPLE_EVIDENCE_RUN_ID", "stage3-202"),
+            ("SIMPLE_BUILD_PROGRESS_EVENTS", "/out/b.events"),
+            ("SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB", "77594624")]
+        val bare: [(text, text)] = [("PATH", "/usr/bin")]
+        val a = native_build_module_environment_snapshot_fingerprint_v1(run_a)
+        val b = native_build_module_environment_snapshot_fingerprint_v1(run_b)
+        val plain = native_build_module_environment_snapshot_fingerprint_v1(bare)
+        expect(a.valid).to_equal(true)
+        expect(a.digest).to_equal(b.digest)
+        expect(a.digest).to_equal(plain.digest)
+        # The complete capture (admission/no-op evidence) still records them.
+        expect(native_build_environment_snapshot_fingerprint_v1(run_a).digest ==
+            native_build_environment_snapshot_fingerprint_v1(run_b).digest).to_equal(false)
+        # A semantic switch and the shard tree budget (it sizes worker fanout)
+        # still move the module scope.
+        val semantic = native_build_module_environment_snapshot_fingerprint_v1(
+            [("PATH", "/usr/bin"), ("SIMPLE_EVIDENCE_RUN_ID", "stage3-101"),
+                ("SIMPLE_NATIVE_ARENA_DECLS", "1")])
+        val budget = native_build_module_environment_snapshot_fingerprint_v1(
+            [("PATH", "/usr/bin"), ("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "46137344")])
+        expect(semantic.digest == plain.digest).to_equal(false)
+        expect(budget.digest == plain.digest).to_equal(false)

@@ -2905,6 +2905,12 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // (ptr, len) pair instead of passing boxed RuntimeValue payloads.
         "rt_secure_temp_dir" | "rt_file_publish_noreplace" => Some(&[0, 1]),
 
+        // Cycle-170 split crossing (runtime_native.c): the two-argument
+        // rt_secure_temp_dir call draws corrupted words on candidate-seednew,
+        // so SCV/AOT staging crosses the parent and prefix as single-argument
+        // calls through thread-local slots, then a zero-argument make.
+        "rt_secure_temp_dir_set_parent" | "rt_secure_temp_dir_set_prefix" => Some(&[0]),
+
         // Package SFFI (runtime/src/value/sffi/package.rs). Every text param is
         // a (ptr, len) pair — the family was converted off `*const c_char`
         // because Simple heap strings carry no trailing NUL, so no sound

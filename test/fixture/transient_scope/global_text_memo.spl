@@ -1,0 +1,105 @@
+# Minimal reproduction of the Stage-2 `schema=.TestExecutionMode` MIR defect.
+#
+# `module_logical_name_from_path` (00.common/module_path_naming.spl) keeps a
+# module-level `{text: text}` memo. An entry inserted while a transient array
+# scope is ACTIVE stores a value allocated inside that scope. No promote root
+# reaches a module-level global, so ending the scope frees the VALUE while the
+# dict still maps the persistent key to it; every later hit returns the freed
+# handle. Stage 2 read build-progress text (`schema=...`) back as the owner
+# module of imported enums (gdb on the r4 Stage 2: entries inserted under
+# HirLowering.register_imported_type_methods_inner inside the per-file HIR
+# scope were garbage by the next module's hit).
+#
+# Case A is the pre-fix memo (every miss inserts). Case B is the fix: a lookup
+# never inserts; only an explicit warm call, made at a scope-free point,
+# retains an entry, so a miss inside the scope is computed but not retained.
+#
+# The memo mirrors the compiler's shape locally: Stage 2 links a cross-module
+# `compiler.*` callee by its bare name (undefined symbol) unless
+# SIMPLE_BOOTSTRAP=1, so the fixture cannot import the real function. Code that
+# Stage 2 emits re-boxes text arguments per dict call, so here the KEY is born
+# in the scope too; the compiler's own code passes its persistent key through,
+# which is why there a dead-scope entry was HIT and returned garbage.
+#
+# Exit 0 = case A retains a dead-scope entry and case B does not.
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+var _memo_unguarded: {text: text} = {}
+var _memo_guarded: {text: text} = {}
+var _memo_guarded_retaining: bool = false
+
+fn derive(path: text) -> text:
+    # Per-char concat, like _module_logical_name_from_path_uncached.
+    var portable = ""
+    var index = 0
+    while index < path.len():
+        val ch = path.char_at(index)
+        portable = portable + (if ch == "/": "." else: ch)
+        index = index + 1
+    portable
+
+fn name_unguarded(path: text) -> text:
+    if _memo_unguarded.has(path):
+        return _memo_unguarded[path]
+    val computed = derive(path)
+    _memo_unguarded[path] = computed
+    computed
+
+fn name_guarded(path: text) -> text:
+    if _memo_guarded.has(path):
+        return _memo_guarded[path]
+    val computed = derive(path)
+    if _memo_guarded_retaining:
+        _memo_guarded[path] = computed
+    computed
+
+fn warm_guarded(path: text):
+    _memo_guarded_retaining = true
+    val _retained = name_guarded(path)
+    _memo_guarded_retaining = false
+
+fn main() -> i64:
+    # Persistent key and persistent dicts, exactly as in the compiler: the
+    # memo is first touched, and `defining_module` is allocated, before any
+    # per-module scope.
+    val path = "lib/nogc_sync_mut/test_runner/test_runner_types"
+    val expected = "lib.nogc_sync_mut.test_runner.test_runner_types"
+    val warm_a = name_unguarded("warm/a")
+    warm_guarded("warm/b")
+    val warm_b = name_guarded("warm/b")
+    if not rt_transient_array_scope_begin():
+        print "FAIL: scope begin"
+        return 2
+    val inside_ok_a = name_unguarded(path) == expected
+    val inside_ok_b = name_guarded(path) == expected
+    if not rt_transient_array_scope_pause():
+        print "FAIL: scope pause"
+        return 2
+    if not rt_transient_array_scope_end():
+        print "FAIL: scope end"
+        return 2
+    # Every entry inserted inside the ended scope now names a freed key and a
+    # freed value (gdb: both chunks pass through free() in
+    # rt_transient_array_scope_end). Count them instead of reading them: which
+    # garbage a stale hit returns depends on allocator reuse, a dangling entry
+    # does not. The real compiler read `schema=...` back through exactly such
+    # an entry.
+    val retained_a = _memo_unguarded.len()
+    val retained_b = _memo_guarded.len()
+    val after_b = name_guarded(path)
+    print "  warm={warm_a}/{warm_b} inside_ok={inside_ok_a}/{inside_ok_b}"
+    print "  case A (unguarded) entries={retained_a} (1 persistent + {retained_a - 1} from the dead scope)"
+    print "  case B (guarded)   entries={retained_b} observed={after_b}"
+    val reproduced = retained_a == 2
+    val fixed = retained_b == 1 and after_b == expected and inside_ok_b
+    if reproduced and fixed:
+        print "RESULT: REPRODUCED and FIXED"
+        return 0
+    if not reproduced:
+        print "RESULT: NOT REPRODUCED"
+        return 1
+    print "RESULT: FIX INEFFECTIVE"
+    1

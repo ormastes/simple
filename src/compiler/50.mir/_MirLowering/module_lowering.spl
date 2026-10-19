@@ -944,25 +944,31 @@ impl MirLowering:
 
     me register_enum_variants(enum_def: HirEnum, store_payload_types: bool = true):
         """Register names and resolved portable runtime discriminants."""
+        # Cycle-171: annotated rebind of the by-value HirEnum param --
+        # field reads (name/runtime_name/variants) of the bare parameter
+        # drew erased on candidate-seednew (corrupt qualified keys such
+        # as 'DiagramGraphKind.CompileMode' and missing runtime ids in
+        # the 56k-error MIR dump). Same bind-once family as cycle-169.
+        val enum_def_r: HirEnum = enum_def
         if store_payload_types and self.declaration_repository != nil:
-            self.declaration_enum_payload_owner[enum_def.name] = enum_def.runtime_name
+            self.declaration_enum_payload_owner[enum_def_r.name] = enum_def_r.runtime_name
         # SIMPLE_ENUM_REG_TRACE=1 (cycle-53 discriminator): capture the exact
         # name/runtime_name spellings at write time for the failing enum. A
         # mismatch between this runtime_name and the subject owner key built
         # by enum_qualified_key is the remaining suspect for the disc=0 /
         # is_unit=false asymmetry.
-        if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1" and enum_def.name == "SdnValue":
-            eprint("[enum-reg] register-enum module={self.current_module_id} name='{enum_def.name}' runtime_name='{enum_def.runtime_name}' variants={enum_def.variants.len()}")
-        val generic_constructor = enum_def.type_params.len() > 0 or enum_def.is_generic_template
-        self.generic_enum_constructor_owners[enum_def.name] = generic_constructor
-        if enum_def.runtime_name != "":
-            self.generic_enum_constructor_owners[enum_def.runtime_name] = generic_constructor
+        if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1" and enum_def_r.name == "SdnValue":
+            eprint("[enum-reg] register-enum module={self.current_module_id} name='{enum_def_r.name}' runtime_name='{enum_def_r.runtime_name}' variants={enum_def_r.variants.len()}")
+        val generic_constructor = enum_def_r.type_params.len() > 0 or enum_def_r.is_generic_template
+        self.generic_enum_constructor_owners[enum_def_r.name] = generic_constructor
+        if enum_def_r.runtime_name != "":
+            self.generic_enum_constructor_owners[enum_def_r.runtime_name] = generic_constructor
         var names: [text] = []
         var discriminants: [i64] = []
         var next_value: i64 = 0
         var vi = 0
-        while vi < enum_def.variants.len():
-            val variant: HirVariant = enum_def.variants[vi]
+        while vi < enum_def_r.variants.len():
+            val variant: HirVariant = enum_def_r.variants[vi]
             var value = next_value
             if variant.has_discriminant:
                 val folded = self.lower_const_expr(variant.discriminant)
@@ -970,11 +976,11 @@ impl MirLowering:
                     match const_value:
                         case Int(int_value): value = int_value
                         case _:
-                            self.error_fatal("enum variant '{enum_def.name}.{variant.name}' discriminant must be an integer constant", Some(variant.span))
+                            self.error_fatal("enum variant '{enum_def_r.name}.{variant.name}' discriminant must be an integer constant", Some(variant.span))
                 else:
-                    self.error_fatal("enum variant '{enum_def.name}.{variant.name}' discriminant must be a constant integer expression", Some(variant.span))
+                    self.error_fatal("enum variant '{enum_def_r.name}.{variant.name}' discriminant must be a constant integer expression", Some(variant.span))
             if value < 0 or value > 2147483647:
-                self.error_fatal("enum variant '{enum_def.name}.{variant.name}' discriminant {value} is outside portable runtime range 0..2147483647", Some(variant.span))
+                self.error_fatal("enum variant '{enum_def_r.name}.{variant.name}' discriminant {value} is outside portable runtime range 0..2147483647", Some(variant.span))
             var duplicate = false
             var di = 0
             while di < discriminants.len():
@@ -982,7 +988,7 @@ impl MirLowering:
                     duplicate = true
                 di = di + 1
             if duplicate:
-                self.error_fatal("enum '{enum_def.name}' has duplicate discriminant {value}", Some(variant.span))
+                self.error_fatal("enum '{enum_def_r.name}' has duplicate discriminant {value}", Some(variant.span))
             names.push(variant.name)
             discriminants.push(value)
             # Full payload registration (2026-08-21). The arity-1 Tuple write
@@ -1009,7 +1015,7 @@ impl MirLowering:
                         full_names.push(payload_fields[pfi].name)
                         pfi = pfi + 1
                 case _: ()
-            self.register_enum_payload_metadata_v1(enum_def.name, enum_def.runtime_name,
+            self.register_enum_payload_metadata_v1(enum_def_r.name, enum_def_r.runtime_name,
                 variant.name, full_types, full_names, payload_kind, store_payload_types, true)
             next_value = value + 1
             vi = vi + 1
@@ -1019,37 +1025,37 @@ impl MirLowering:
         # eviction when the variant sets DIVERGE, so that a later lookup miss can
         # NAME the colliding owner instead of returning a silent -1. Divergence
         # only -- an identical re-registration is benign and stays quiet.
-        if self.enum_variant_index.has(enum_def.name):
-            val prior_names = self.enum_variant_index[enum_def.name]
+        if self.enum_variant_index.has(enum_def_r.name):
+            val prior_names = self.enum_variant_index[enum_def_r.name]
             if not _text_list_eq(prior_names, names):
                 val prior_text = prior_names.join(", ")
                 val new_text = names.join(", ")
-                self.enum_bare_name_collisions[enum_def.name] = "previously registered as [{prior_text}], now overwritten by [{new_text}] (runtime_name '{enum_def.runtime_name}')"
+                self.enum_bare_name_collisions[enum_def_r.name] = "previously registered as [{prior_text}], now overwritten by [{new_text}] (runtime_name '{enum_def_r.runtime_name}')"
                 # Step (c) ambiguity flag. Readers that could not derive a
                 # runtime_name and fell back to the bare key consult this to
                 # tell "one enum owns this name" from "the survivor of a
                 # contest". Set only on DIVERGENCE, so the 192 benign identical
                 # re-registrations never raise it.
-                self.enum_bare_ambiguous[enum_def.name] = true
+                self.enum_bare_ambiguous[enum_def_r.name] = true
         # Dual key (step c): the qualified maps are keyed by runtime_name, which
         # is unique per declaration, so BOTH sides of a bare-name contest are
         # retained here in full. Written before the bare maps below purely so a
         # reader observing a half-updated state sees the complete set, never a
         # partial one.
-        self.enum_variant_index_q[enum_def.runtime_name] = names
-        self.enum_variant_discriminants_q[enum_def.runtime_name] = discriminants
-        self.enum_runtime_to_bare[enum_def.runtime_name] = enum_def.name
+        self.enum_variant_index_q[enum_def_r.runtime_name] = names
+        self.enum_variant_discriminants_q[enum_def_r.runtime_name] = discriminants
+        self.enum_runtime_to_bare[enum_def_r.runtime_name] = enum_def_r.name
         # Captured BEFORE the bare-key write below, which is last-wins: these
         # are the variant leaves this owner currently contributes to
         # `enum_variant_owners` and must be withdrawn before the new set is
         # added, or an evicted leaf would keep naming this owner forever.
-        val prior_variant_names: [text] = if self.enum_variant_index.has(enum_def.name):
-            self.enum_variant_index[enum_def.name]
+        val prior_variant_names: [text] = if self.enum_variant_index.has(enum_def_r.name):
+            self.enum_variant_index[enum_def_r.name]
         else:
             []
-        self.enum_variant_index[enum_def.name] = names
-        self.reindex_enum_variant_owners(enum_def.name, prior_variant_names, names)
-        self.enum_variant_discriminants[enum_def.name] = discriminants
+        self.enum_variant_index[enum_def_r.name] = names
+        self.reindex_enum_variant_owners(enum_def_r.name, prior_variant_names, names)
+        self.enum_variant_discriminants[enum_def_r.name] = discriminants
 
     me register_enum_payload_metadata_v1(enum_name: text, runtime_name: text, variant: text,
             types: [HirType], names: [text], kind: text, store_types: bool = true, write_bare: bool = true):
@@ -1098,14 +1104,19 @@ impl MirLowering:
         modules closes the gap without changing any per-module behaviour.
         Enum metadata is small (names + discriminants + payload shapes)
         relative to the struct-name prescan the driver already pays."""
-        var inventory_module_i = 0
-        while inventory_module_i < modules.len():
-            val inventory_enum_values = modules[inventory_module_i].enums.values()
+        # Cycle-171: `modules` is an array whose bare index read drew on
+        # candidate-seednew; the annotated rebind restores it (same
+        # bind-once family as cycle-169), and the enum element read is
+        # annotated on its way into register_enum_variants.
+        var inv_module_i = 0
+        while inv_module_i < modules.len():
+            val inv_module: HirModule = modules[inv_module_i]
+            val inventory_enum_values = inv_module.enums.values()
             var inventory_enum_i = 0
             while inventory_enum_i < inventory_enum_values.len():
-                self.register_enum_variants(inventory_enum_values[inventory_enum_i])
+                val inv_enum: HirEnum = inventory_enum_values[inventory_enum_i]
+                self.register_enum_variants(inv_enum)
                 inventory_enum_i = inventory_enum_i + 1
-            inventory_module_i = inventory_module_i + 1
 
     me register_module_composite_inventory_v1(modules: [HirModule]):
         """Register every given module's own struct/class NAME-keyed layout
@@ -2022,16 +2033,22 @@ impl MirLowering:
         HirEnum (no symbol table), the seeds guard on has() so re-runs are
         quiet, and the module's own tail registration overwrites
         unconditionally if it ever runs."""
-        var inventory_module_i = 0
-        while inventory_module_i < modules.len():
-            val inventory_enums = modules[inventory_module_i].enums.values()
+        # Cycle-171: `modules[i]` (Dict<text, HirModule> index read) draws
+        # erased on candidate-seednew -- measured as 65k 'enum construction:
+        # unregistered declaration' MIR errors whose lookup keys were clean
+        # but the registry missed whole modules. Iterate keys() and extract
+        # with an annotated rebind (the proven cycle-76 transport), the same
+        # pattern driver_rt_criticality uses for Dict<text, HirModule>.
+        for raw_inventory_module in modules.keys():
+            val inventory_module_key: text = raw_inventory_module
+            val inventory_module: HirModule = modules[inventory_module_key]
+            val inventory_enums = inventory_module.enums.values()
             var inventory_enum_i = 0
             while inventory_enum_i < inventory_enums.len():
                 val inventory_enum_def: HirEnum = inventory_enums[inventory_enum_i]
                 self.register_enum_variants(inventory_enum_def)
                 self.register_enum_runtime_id(inventory_enum_def)
                 inventory_enum_i = inventory_enum_i + 1
-            inventory_module_i = inventory_module_i + 1
         self.register_builtin_enum_seeds()
 
     me lower_bootstrap_entry_module(module: HirModule) -> MirModule:
@@ -2490,7 +2507,12 @@ impl MirLowering:
                 print "[mir-lower] constants:count {bs_const_vals.len()}"
             var bs_ci = 0
             while bs_ci < bs_const_vals.len():
-                self.lower_const(bs_const_vals[bs_ci])
+                # Cycle-171: annotated rebind -- the bare element read feeds
+                # lower_const/lower_static and drew on candidate-seednew
+                # (module `val`s such as gzip BLOCK_FIXED then failed every
+                # reference as 'undefined variable').
+                val bs_const: HirConst = bs_const_vals[bs_ci]
+                self.lower_const(bs_const)
                 bs_ci = bs_ci + 1
             # Statics are typed in a second pass: an unfolded initializer such as
             # `val passed = executed - failed` recovers its scalar type from the
@@ -2500,7 +2522,8 @@ impl MirLowering:
             # depend on whether its operands happened to be visited first.
             bs_ci = 0
             while bs_ci < bs_const_vals.len():
-                self.lower_static(bs_const_vals[bs_ci])
+                val bs_static_const: HirConst = bs_const_vals[bs_ci]
+                self.lower_static(bs_static_const)
                 bs_ci = bs_ci + 1
             bootstrap_mir_functions_reset()
             val bootstrap_function_values: [HirFunction] = module.functions.values()

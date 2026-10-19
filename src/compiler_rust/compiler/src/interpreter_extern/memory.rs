@@ -1859,12 +1859,15 @@ pub fn rt_ptr_write_bytes(args: &[Value]) -> Result<Value, CompileError> {
 /// Only `ByteArray`/`FrozenByteArray` have contiguous byte storage; a boxed
 /// `Array` has no byte data pointer, so this returns 0 and callers MUST fall
 /// back to a per-byte path rather than treating 0 as an address.
+/// An EMPTY packed byte array still answers non-zero, like the C and Rust
+/// runtimes (whose data block always exists): `text_byte_buffer` reads 0 as
+/// allocation failure. `Vec::as_ptr` is non-null even with no elements.
 pub fn rt_array_data_ptr(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_array_data_ptr requires 1 argument (array)"));
     }
     Ok(Value::Int(match &args[0] {
-        Value::ByteArray(v) | Value::FrozenByteArray(v) if !v.is_empty() => v.as_ptr() as i64,
+        Value::ByteArray(v) | Value::FrozenByteArray(v) => v.as_ptr() as i64,
         _ => 0,
     }))
 }

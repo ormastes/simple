@@ -175,14 +175,38 @@ pub fn module_relative_name_from_path(path: text, relative_name: text) -> text:
 # MIR lowering re-derives the same module's name thousands of times per
 # module. Pure function of its input, so memoize per process (the compiler
 # phase is single-threaded; shard workers are separate processes).
+#
+# Entries are retained ONLY by `module_logical_name_cache_warm`, never by a
+# plain lookup. HIR lowers every file and MIR every module inside an unpaused
+# transient array scope; a value (and, in code Stage 2 emits, the re-boxed key)
+# computed there is freed when the scope ends, and no promote root reaches this
+# module-level dict. Retaining it left a dangling entry whose later hits
+# returned whatever reused the storage: Stage 2 read build-progress text back
+# as imported-enum owners (`schema=.TestExecutionMode`, ~138 MIR errors; bug
+# stage2_test_runner_imported_enum_owner_text_corrupt_2026_10_19). A plain
+# lookup cannot tell whether a scope is running (the scope-state extern is not
+# backed by the interpreter), so retention is opt-in at a known scope-free
+# point instead: lower_to_mir_with_target_context
+# (80.driver/driver_pipeline_lowering.spl) warms every module name and symbol
+# owner at state 0, before its per-module scopes begin.
 var _module_logical_name_cache: {text: text} = {}
+var _module_logical_name_cache_retaining: bool = false
 
 pub fn module_logical_name_from_path(path: text) -> text:
     if _module_logical_name_cache.has(path):
         return _module_logical_name_cache[path]
     val computed = _module_logical_name_from_path_uncached(path)
-    _module_logical_name_cache[path] = computed
+    if _module_logical_name_cache_retaining:
+        _module_logical_name_cache[path] = computed
     computed
+
+pub fn module_logical_name_cache_warm(path: text):
+    """Derive and RETAIN `path`'s logical name. Caller contract: no transient
+    array scope is running (state 0, or paused), and `path` is persistent;
+    otherwise the retained entry dangles once that scope ends."""
+    _module_logical_name_cache_retaining = true
+    val _retained = module_logical_name_from_path(path)
+    _module_logical_name_cache_retaining = false
 
 fn _module_logical_name_from_path_uncached(path: text) -> text:
     """Derive the dotted logical module name (e.g. `_wallB_mod_a`) from a
