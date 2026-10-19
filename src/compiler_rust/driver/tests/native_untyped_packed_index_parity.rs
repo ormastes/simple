@@ -29,6 +29,16 @@ fn run_interpreter(source: &Path) -> String {
     String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout")
 }
 
+fn run_jit(source: &Path) -> String {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("simple"))
+        .current_dir(project_root())
+        .env("SIMPLE_EXECUTION_MODE", "jit")
+        .arg(source)
+        .assert()
+        .success();
+    String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout")
+}
+
 fn run_native(source: &Path, dir: &Path) -> String {
     let output = dir.join("native_probe");
     Command::new(assert_cmd::cargo::cargo_bin!("simple"))
@@ -123,10 +133,12 @@ fn main():
 /// like the Rust runtime's `from_int`. Values 0, 7, 8, 56, 64 and 255 cover
 /// the multiple-of-8 bytes that used to decode as `v >> 3`.
 ///
-/// Left out on purpose because the interpreter or the generic-array native
-/// dispatch disagrees for reasons unrelated to packed slots (see the bug note):
-/// `max`/`sorted` on `[u8]`, `for` sums over `[u8]`, `any`/`all`, untyped
-/// `index_of`, and float elements.
+/// `max`/`sorted`, `any`/`all`, untyped `index_of` and typed `[u64]` `for`
+/// loops are covered by `packed_array_hardening_fixture_agrees_across_engines`
+/// below. Still left out (recorded in
+/// doc/08_tracking/bug/runtime_array_hardening_2026-10-19.md): the
+/// interpreter's mixed i64 + u8 sum wraps at 256, and a mixed int/float
+/// literal is typed `[i64]`.
 #[test]
 fn packed_array_element_accessors_match_interpreter() {
     let program = "\
@@ -185,4 +197,32 @@ fn main():
         program,
         "wide untyped idx0=1152921504606846981 first=1152921504606846981 last=18446744073709551615",
     );
+}
+
+/// Interpreter, JIT and native must agree on the packed-array / wide-int
+/// hardening fixture (join, packed writes, typed `[u64]` for-loops, values
+/// >= 2^60, any/all/index_of results, `[u8]` max/sorted, reverse of a copy).
+/// Each line diverged in at least one engine before the fix.
+#[test]
+fn packed_array_hardening_fixture_agrees_across_engines() {
+    let source = project_root()
+        .parent()
+        .expect("repo root")
+        .join("test/fixtures/engine_differential/packed_array_hardening.spl");
+    let dir = tempdir().expect("tempdir");
+    let interp = run_interpreter(&source);
+    for expected in [
+        "join u8=65,66,67 u64=65,1152921504606846981 i64=1,10000",
+        "write u64=56,9 len=3 u8=56,200",
+        "for typed-u64=319 untyped-u64=319",
+        "wide max=2305843009213693952 sorted0=5 sorted3=2305843009213693952 dict=true",
+        "any i64=true true 1 u8=true true 1",
+        "any direct=true false 1",
+        "u8 max=255 sorted=[0, 7, 8, 56, 64, 255]",
+        "reverse src=[1, 2, 3, 200] r=[200, 3, 2, 1] p=[1, 2, 3] popped=200 alias=[200, 3, 2, 1]",
+    ] {
+        assert!(interp.contains(expected), "interpreter output {interp:?} lacks {expected:?}");
+    }
+    assert_eq!(run_jit(&source), interp, "JIT output must match the interpreter");
+    assert_eq!(run_native(&source, dir.path()), interp, "native output must match the interpreter");
 }

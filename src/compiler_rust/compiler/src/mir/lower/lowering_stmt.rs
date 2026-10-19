@@ -2053,6 +2053,12 @@ impl<'a> MirLowerer<'a> {
                         | crate::hir::TypeId::BOOL
                 );
                 let needs_float_unbox = matches!(element_ty, crate::hir::TypeId::F32 | crate::hir::TypeId::F64);
+                // A typed `[u64]` reads its element with the same layout-aware
+                // raw accessor `a[i]` uses (lower_index_expr). `rt_array_get`
+                // + UnboxInt was wrong for a U64_PACKED array: the JIT's inline
+                // `rt_array_get` and the C `rt_array_get` both hand back the RAW
+                // word, so UnboxInt's `>> 3` turned 56 into 7.
+                let typed_u64_read = iterable_is_array && element_ty == crate::hir::TypeId::U64;
                 // FR-DRIVER-0002b: narrow after UnboxInt for [u8]/[u16]/[u32]/[i8]/[i16]/[i32]
                 // element types so the loop variable's value gets the correct narrow TypeId.
                 let narrow_to_signed: Option<(u8, bool)> = match element_ty {
@@ -2072,7 +2078,7 @@ impl<'a> MirLowerer<'a> {
                     let current_idx = func.new_vreg();
                     let boxed_idx = func.new_vreg();
                     let raw_element = func.new_vreg();
-                    let element = if needs_int_unbox || needs_float_unbox {
+                    let element = if (needs_int_unbox || needs_float_unbox) && !typed_u64_read {
                         func.new_vreg()
                     } else {
                         raw_element
@@ -2106,7 +2112,11 @@ impl<'a> MirLowerer<'a> {
                         let _ = boxed_idx;
                         block.instructions.push(MirInst::Call {
                             dest: Some(raw_element),
-                            target: crate::mir::CallTarget::from_name("rt_array_get"),
+                            target: crate::mir::CallTarget::from_name(if typed_u64_read {
+                                "rt_typed_words_u64_at"
+                            } else {
+                                "rt_array_get"
+                            }),
                             args: vec![collection_reg, current_idx],
                         });
                     } else {
@@ -2125,7 +2135,7 @@ impl<'a> MirLowerer<'a> {
                     }
 
                     // Unbox element if it's a native type (rt_index_get returns RuntimeValue)
-                    if needs_int_unbox {
+                    if needs_int_unbox && !typed_u64_read {
                         block.instructions.push(MirInst::UnboxInt {
                             dest: unboxed_intermediate,
                             value: raw_element,
