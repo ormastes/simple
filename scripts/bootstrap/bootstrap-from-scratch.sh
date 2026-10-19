@@ -5834,6 +5834,24 @@ run_logged stage4b-ui-backend env RUST_LOG="${RUST_LOG:-error}" \
 [ -x "${ui_backend_bin}" ] || { echo "error: failed to compile cached UI backend" >&2; exit 1; }
 echo "Full CLI binary: ${full_bin}"
 
+# Stage 4c: crypto/compress default to dynload, so the full CLI emits their
+# dynSMF bundles. SMF emit needs no linker; Windows inherits ${exe_suffix}
+# through ${full_bin}. No trust-registry hash generator exists yet, so the
+# artifact digests are printed as dynsmf_artifact_sha256=<id>:<sha> lines.
+echo "Stage 4c: compiling crypto/compress dynSMF bundles..."
+bootstrap_progress_mark stage4c "$(absolute_path "${log_dir}/stage4c-dynsmf-crypto.log")"
+mkdir -p build/dynsmf
+for dynsmf_id in crypto compress; do
+  dynsmf_entry="src/lib/common/${dynsmf_id}/dynsmf_entry.spl"
+  dynsmf_out="build/dynsmf/${dynsmf_id}.smf"
+  [ -f "${dynsmf_entry}" ] || { echo "error: Stage 4c dynSMF entry missing: ${dynsmf_entry}" >&2; exit 1; }
+  rm -f "${dynsmf_out}"
+  run_logged "stage4c-dynsmf-${dynsmf_id}" run_timeout 120 "${full_bin}" compile \
+    "${dynsmf_entry}" -o "${dynsmf_out}"
+  [ -s "${dynsmf_out}" ] || { echo "error: Stage 4c failed to emit ${dynsmf_out}" >&2; exit 1; }
+  echo "dynsmf_artifact_sha256=${dynsmf_id}:$(hash_file "${dynsmf_out}")"
+done
+
 # ===========================================================================
 # Stage 5: Compile MCP servers (optional, skip with --no-mcp)
 # ===========================================================================
