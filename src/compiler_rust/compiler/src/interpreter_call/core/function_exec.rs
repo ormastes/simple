@@ -894,6 +894,9 @@ pub(crate) fn execute_function_body(
 
     // Validate the full return contract (total, not unit-only).
     let result = validate_sffi_return_contract(&func.name, func.return_type.as_ref(), return_origin, Some(result))?;
+    // A declared unsigned scalar return (`-> u64`) must not hand the caller a
+    // plain Int: `0xFFFF_8000_0000_0000` would compare as negative there.
+    let result = crate::interpreter::coerce_to_declared_unsigned(result, func.return_type.as_ref());
 
     // Wrap in Promise if async and requested
     let result = if wrap_async && is_async_function(func) {

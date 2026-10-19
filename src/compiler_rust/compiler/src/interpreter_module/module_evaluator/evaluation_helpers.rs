@@ -483,6 +483,15 @@ pub(super) fn process_imports_and_assignments(
                     if let Ok(value) =
                         evaluate_expr(init, env, local_functions, local_classes, local_enums, impl_methods)
                     {
+                        // Apply the declared type exactly as a local `val` does:
+                        // an imported `val K: u64 = 0xFFFF_8000_0000_0000` must
+                        // stay unsigned, not a negative Int that compares SIGNED.
+                        let declared = match (&stmt.ty, &stmt.pattern) {
+                            (Some(ty), _) => Some(ty),
+                            (None, Pattern::Typed { ty, .. }) => Some(ty),
+                            _ => None,
+                        };
+                        let value = crate::interpreter::coerce_to_declared_type(value, declared);
                         // Handle all pattern types (Identifier, MutIdentifier, Typed)
                         if let Some(name) = get_pattern_name(&stmt.pattern) {
                             env.insert(name.clone(), value.clone());
@@ -505,6 +514,7 @@ pub(super) fn process_imports_and_assignments(
                     local_enums,
                     impl_methods,
                 )?;
+                let value = crate::interpreter::coerce_to_declared_type(value, stmt.ty.as_ref());
                 env.insert(stmt.name.clone(), value.clone());
                 exports.insert(stmt.name.clone(), value.clone());
                 record_owned_global(module_path, &stmt.name, &value);
@@ -518,6 +528,7 @@ pub(super) fn process_imports_and_assignments(
                     local_enums,
                     impl_methods,
                 )?;
+                let value = crate::interpreter::coerce_to_declared_type(value, stmt.ty.as_ref());
                 env.insert(stmt.name.clone(), value.clone());
                 exports.insert(stmt.name.clone(), value.clone());
                 record_owned_global(module_path, &stmt.name, &value);

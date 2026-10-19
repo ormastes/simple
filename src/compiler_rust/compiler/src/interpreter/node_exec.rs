@@ -28,6 +28,74 @@ use crate::interpreter_unit::{
 };
 use simple_runtime::debug;
 
+/// Apply a binding's declared type to its value so later operations see the
+/// static type rather than the evaluated literal's default `i64`.
+///
+/// - `u8`/`u16`/`u32`/`u64`: a plain `Value::Int` becomes `Value::UInt` at the
+///   declared width (masked), so comparisons, division, remainder, and right
+///   shifts on it are unsigned. A `u64` value >= 2^63 otherwise stays a
+///   negative `Int` and compares SIGNED.
+/// - `[u8]`: an empty boxed array, or one whose elements are all `u8` values,
+///   becomes packed `Value::ByteArray` storage. Element reads are unchanged
+///   (they already yield `u8`), and the binding gets the contiguous byte
+///   storage `rt_array_data_ptr` needs.
+///
+/// Every interpreter binding site with a declared type uses this: local and
+/// module-level `val`/`var`, `const`, `static`, and declared function returns
+/// (scalars only there; see `function_exec.rs`).
+/// Bug: doc/08_tracking/bug/seed_u64_signed_compare_and_u8_data_ptr_2026-10-19.md
+pub(crate) fn coerce_to_declared_type(value: Value, ty: Option<&Type>) -> Value {
+    match ty {
+        Some(Type::Simple(_)) => coerce_to_declared_unsigned(value, ty),
+        Some(Type::Array { element, size: None }) if matches!(element.as_ref(), Type::Simple(name) if name == "u8") => {
+            pack_u8_array(value)
+        }
+        _ => value,
+    }
+}
+
+/// Scalar half of [`coerce_to_declared_type`]: only the unsigned widths.
+pub(crate) fn coerce_to_declared_unsigned(value: Value, ty: Option<&Type>) -> Value {
+    let Some(Type::Simple(type_name)) = ty else {
+        return value;
+    };
+    let width: u8 = match type_name.as_str() {
+        "u8" => 8,
+        "u16" => 16,
+        "u32" => 32,
+        "u64" => 64,
+        _ => return value,
+    };
+    match value {
+        Value::Int(i) => {
+            let masked: u64 = match width {
+                8 => (i as u8) as u64,
+                16 => (i as u16) as u64,
+                32 => (i as u32) as u64,
+                _ => i as u64,
+            };
+            Value::UInt { value: masked, width }
+        }
+        // Already-typed UInt (literal-suffix path) and non-integers (e.g.
+        // object newtypes around u32) pass through.
+        other => other,
+    }
+}
+
+fn pack_u8_array(value: Value) -> Value {
+    let Value::Array(data) = &value else {
+        return value;
+    };
+    let mut bytes = Vec::with_capacity(data.len());
+    for element in data.iter() {
+        match element {
+            Value::UInt { value: byte, width: 8 } => bytes.push(*byte as u8),
+            _ => return value,
+        }
+    }
+    Value::ByteArray(Arc::new(bytes))
+}
+
 /// Check if the watchdog timeout has been exceeded (single atomic load, negligible overhead).
 macro_rules! check_timeout {
     () => {
@@ -137,32 +205,14 @@ pub(crate) fn exec_node(
                     // Coerce to Value::UInt when the annotation is an unsigned integer type
                     // so subsequent arithmetic on the bound variable applies modulo-2^width
                     // wrap. See doc/08_tracking/bug/interpreter_u32_wrap_subtraction_2026-05-01.md.
-                    Some(Type::Simple(type_name)) if matches!(type_name.as_str(), "u8" | "u16" | "u32" | "u64") => {
-                        let width: u8 = match type_name.as_str() {
-                            "u8" => 8,
-                            "u16" => 16,
-                            "u32" => 32,
-                            "u64" => 64,
-                            _ => unreachable!(),
-                        };
-                        match value {
-                            // Already-typed UInt: keep as-is (literal-suffix path).
-                            Value::UInt { .. } => value,
-                            // Plain Int: wrap into UInt at the annotated width.
-                            Value::Int(i) => {
-                                let masked: u64 = match width {
-                                    8 => (i as u8) as u64,
-                                    16 => (i as u16) as u64,
-                                    32 => (i as u32) as u64,
-                                    64 => i as u64,
-                                    _ => i as u64,
-                                };
-                                Value::UInt { value: masked, width }
-                            }
-                            // Other types pass through (e.g. Object newtypes around u32).
-                            other => other,
-                        }
+                    Some(ty @ Type::Simple(type_name))
+                        if matches!(type_name.as_str(), "u8" | "u16" | "u32" | "u64") =>
+                    {
+                        coerce_to_declared_unsigned(value, Some(ty))
                     }
+                    // `[u8]` bindings get packed byte storage (see
+                    // `coerce_to_declared_type`).
+                    Some(ty @ Type::Array { size: None, .. }) => coerce_to_declared_type(value, Some(ty)),
                     Some(Type::Simple(type_name)) if is_unit_type(type_name) => {
                         if let Err(e) = validate_unit_type(&value, type_name) {
                             let var_name = get_var_name(&let_stmt.pattern);
@@ -264,6 +314,7 @@ pub(crate) fn exec_node(
                         ctx,
                     )
                 })?;
+            let value = coerce_to_declared_type(value, const_stmt.ty.as_ref());
             env.insert(const_stmt.name.clone(), value);
             crate::interpreter::const_trace("node_exec:const-insert", &const_stmt.name);
             CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
@@ -271,6 +322,7 @@ pub(crate) fn exec_node(
         }
         Node::Static(static_stmt) => {
             let value = evaluate_expr(&static_stmt.value, env, functions, classes, enums, impl_methods)?;
+            let value = coerce_to_declared_type(value, static_stmt.ty.as_ref());
             env.insert(static_stmt.name.clone(), value);
             if !static_stmt.mutability.is_mutable() {
                 crate::interpreter::const_trace("node_exec:static-insert", &static_stmt.name);

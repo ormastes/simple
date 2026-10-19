@@ -1882,21 +1882,42 @@ pub fn rt_ptr_write_bytes(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-/// Data pointer of a packed byte array, or 0 when there is none.
+/// Data pointer of a packed byte array.
 ///
 /// Callable from Simple as: `rt_array_data_ptr(arr: [u8]) -> i64`
-/// Only `ByteArray`/`FrozenByteArray` have contiguous byte storage; a boxed
-/// `Array` has no byte data pointer, so this returns 0 and callers MUST fall
-/// back to a per-byte path rather than treating 0 as an address.
-/// An EMPTY packed byte array still answers non-zero, like the C and Rust
-/// runtimes (whose data block always exists): `text_byte_buffer` reads 0 as
-/// allocation failure. `Vec::as_ptr` is non-null even with no elements.
+///
+/// Return contract:
+/// - `ByteArray`/`FrozenByteArray` (packed `[u8]`, which every `[u8]`-typed
+///   binding now uses — see `coerce_to_declared_type`): the real data pointer,
+///   valid while the caller retains the array and does not grow it. An EMPTY
+///   packed array still answers non-zero, like the C and Rust runtimes (whose
+///   data block always exists): `text_byte_buffer` reads 0 as allocation
+///   failure. `Vec::as_ptr` is non-null even with no elements.
+/// - A NON-EMPTY boxed `Array` whose elements are all `u8` values: an ERROR.
+///   It is a live byte array with no contiguous storage in this engine;
+///   answering 0 made callers treat a real payload as absent (the theme
+///   notification transport rejected it as a null address).
+/// - Anything else (an empty boxed array, or one holding non-`u8` values such
+///   as an `[i64]`/`[text]` passed through a generic declaration): 0, meaning
+///   "no packed byte storage". Callers MUST treat 0 as invalid, never as an
+///   address.
+/// Bug: doc/08_tracking/bug/seed_u64_signed_compare_and_u8_data_ptr_2026-10-19.md
 pub fn rt_array_data_ptr(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_array_data_ptr requires 1 argument (array)"));
     }
     Ok(Value::Int(match &args[0] {
         Value::ByteArray(v) | Value::FrozenByteArray(v) => v.as_ptr() as i64,
+        Value::Array(items)
+            if !items.is_empty() && items.iter().all(|item| matches!(item, Value::UInt { width: 8, .. })) =>
+        {
+            return Err(CompileError::runtime(format!(
+                "rt_array_data_ptr: a {}-element [u8] array has boxed (non-contiguous) storage in the \
+                 interpreter, so it has no data pointer; bind it to a `[u8]`-typed val/var before taking \
+                 its address",
+                items.len()
+            )));
+        }
         _ => 0,
     }))
 }
