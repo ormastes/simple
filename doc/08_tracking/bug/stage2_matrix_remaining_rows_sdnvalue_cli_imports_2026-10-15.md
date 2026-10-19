@@ -521,3 +521,24 @@ the systemic lever: either the workaround-table load repaired (the
 reader-side crc32_text mismatch means erased-read workaround annotations
 never apply to these builds -- see the cycle-170 conclusion) or a
 seed-side codegen fix for the erased-read defect itself.
+
+## 2026-10-19 (cycle-172) -- CRC gate fixed (byte-path, fail-closed verified); workaround load now blocked one layer deeper at bug-ID validation
+
+Diagnosis: the 'CRC mismatch' was NEVER an algorithm defect -- pure-Simple
+crc32_text passes the 0xCBF43926 KAT and matches zlib on a 320KB input; the
+tracked bug_db.sdn body matches zlib crc32 exactly (278564174, Python-
+verified, clean UTF-8, identity round trip). The defect is the erased-read
+family in the text crossing chain. Fix (5c94e8d92a8): workaround_bug_snapshot
+reads raw bytes (workaround_host_read_bytes alias) and CRCs the exact body
+bytes of the same read via crc32_update -- gate stays fail-closed (verified:
+tracked DB ACCEPTs at 278564174, flipped-byte copy REFUSEs at
+computed=2213474243). Next layer (8e78e147a6c): the refresh then failed
+'unknown canonical bug ID' for an id PRESENT in the DB with a correctly-
+printed key -- get_bug's lookup read drew; bind-once applied there but the
+seed build STILL fails at the same validation: the draw sits deeper
+(available_bug_tables / get_table / get_row / the sdn parse). Workarounds
+therefore still do not load; the MIR count with workarounds applied remains
+UNMEASURED. Control numbers this cycle: same wt tree measured 56,801
+(seednew18) and 113,663 (seednew20) on different builder binaries --
+final confirmation that the count is builder-binary-dependent (draw lottery),
+not tree-determined.
