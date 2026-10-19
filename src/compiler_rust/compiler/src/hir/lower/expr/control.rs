@@ -3106,7 +3106,7 @@ impl Lowerer {
             kind: HirExprKind::If {
                 condition: Box::new(is_err),
                 then_branch: Box::new(early_return.clone()),
-                else_branch: Some(Box::new(unwrap_ok)),
+                else_branch: Some(Box::new(unwrap_ok.clone())),
             },
             ty: payload_ty,
         };
@@ -3129,12 +3129,19 @@ impl Lowerer {
             self.module.types.get(subject_ty),
             Some(HirType::Enum { name, .. }) if name == "Result"
         );
+        // A plain `Option` subject can never be Err, so its absence test
+        // replaces (rather than precedes) the Err test: two runtime calls on
+        // the present path, the same count as the pre-fix Err-only lowering.
+        let is_plain_option = matches!(
+            self.module.types.get(subject_ty),
+            Some(HirType::Enum { name, .. }) if name == "Option"
+        );
         let body = if propagate_absence && !is_plain_result {
             HirExpr {
                 kind: HirExprKind::If {
                     condition: Box::new(is_none),
                     then_branch: Box::new(early_return),
-                    else_branch: Some(Box::new(err_or_payload)),
+                    else_branch: Some(Box::new(if is_plain_option { unwrap_ok } else { err_or_payload })),
                 },
                 ty: payload_ty,
             }

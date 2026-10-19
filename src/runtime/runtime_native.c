@@ -5292,8 +5292,11 @@ int8_t rt_is_none(int64_t value) {
      * Options use enum id 1 with ordinal Some=0 / None=1, so raw zero remains
      * a valid present payload and other enum types are never classified nil. */
     if (value == rt_core_nil()) return 1;
-    if (rt_enum_id(value) != RT_OPTION_ENUM_ID) return 0;
-    int64_t discriminant = rt_enum_discriminant(value);
+    /* One registry lookup, not two (rt_enum_id + rt_enum_discriminant each
+     * resolved the enum again): `?` on an Option calls this per evaluation. */
+    RtCoreEnum* e = rt_core_as_enum(value);
+    if (!e || (int64_t)e->enum_id != RT_OPTION_ENUM_ID) return 0;
+    int64_t discriminant = (int64_t)e->discriminant;
     return discriminant == 1 || discriminant == RT_DISC_NONE;
 }
 int8_t rt_is_some(int64_t value) {
