@@ -89,8 +89,9 @@ seen both ways. Tail expressions and continuation lines are never recorded.
 ## Block-size limits (frame encoders)
 
 - Zstd: Block_Maximum_Size is 128 KiB and the block header size field is 21 bits.
-  `zstd_compress_frame` splits input into <=128 KiB raw/RLE blocks (RLE per block when
-  its bytes are identical); Last_Block=1 only on the final block.
+  `zstd_compress_frame` splits input into <=128 KiB blocks, each RLE (identical bytes),
+  a real Compressed_Block (type 2, `zstd_enc.spl`) when strictly smaller, else Raw;
+  Last_Block=1 only on the final block.
 - LZ4: the frame BD byte declares a 64 KiB max block, and the decoder rejects larger
   blocks. `lz4_compress_frame` emits independent <=64 KiB blocks (each compressed or
   stored raw, with a per-block checksum when enabled).
@@ -180,3 +181,41 @@ rewrite and are deleted. A stream that references the static dictionary fails wi
 `UnsupportedFeature` (monkey vector), never wrong output.
 Context modes (LSB6/MSB6/UTF8/Signed) have no passing official vector yet.
 
+
+## zstd encoder: Block_Type=2 with predefined FSE sequences (2026-10-19)
+- `src/lib/common/compress/zstd_enc.spl`: hash-chain LZ77 (4-byte min match; chain depth
+  by level: 1->1, 2->4, 3-5->8, 6-9->16, 10-18->32, 19+->64; greedy, no lazy), matches
+  never cross a 128 KiB block end, history spans blocks, offset <= position (single-segment
+  Window_Size == content size). Sequences use Predefined_Mode for LL/ML/OF (modes byte 0),
+  FSE encode tables built per call from `ZSTD_*_DEFAULT_DISTRIBUTION` (logs 6/6/5, same
+  spread as the decoder), LL/ML base+extra-bit tables derived from the decoder's own
+  `_zstd_decode_*`/`_zstd_*_extra_bits`, offsets coded as `offset + 3` (never a repeat
+  code), backward bitstream with the 1-bit end marker. Per block: RLE if identical, else
+  compressed if strictly smaller, else Raw.
+- Limits (v1): literals are Raw or RLE only (no Huffman literal coding); no repeat
+  offsets; no custom/RLE/Repeat sequence tables; no lazy matching; no dictionary use.
+  Ratio vs `zstd -3` is ~1.2x worse on source text, throughput ~0.1 MB/s under the seed.
+- Oracle: every generated frame must pass `zstd -d -c | cmp` (host zstd 1.5.5); our own
+  decoder round trip is secondary. Sabotage (`offset + 2`, spread step `+2`) is rejected by
+  `zstd -d` ("Data corruption detected" / checksum).
+- nvfs `compression.spl`: algo 2/3 = `[u32 len | zstd frame]` (levels 3/19), raw fallback
+  when not strictly smaller, legacy tagged-copy (len+4) still decodes.
+  Forward-incompatible: an OLD (tagged-copy) reader given a new real-frame extent checks
+  only the length prefix and returns the frame bytes with ok=true (silent corruption).
+  No on-disk field tells the two apart (pmap has only the algo tag; superblock
+  version/feature_bits are never checked). NVFS is in-memory only today; gate with a
+  superblock feature bit before it persists volumes.
+- Specs: `zstd_compress_sequences_spec.spl`, `nvfs_compression_spec.spl`. The old
+  "raw-block path" pins in `zstd_single_sequence_compress_spec.spl` / `zstd_frame_variants_spec.spl`
+  were updated to the compressed-block frames (the 12-byte `abc` x4 frame is host-verified).
+
+## zstd under the seed JIT, and the legacy decoder (2026-10-19)
+- A len-bounded `while i < len: data[i]` loop over `[u8]` is lowered by the seed JIT to a
+  hoisted raw-byte load that misreads slot-layout arrays (`[]` in a struct field builds one;
+  `var x: [u8] = []` builds the packed one). It broke XXH64 tails, so zstd frames with
+  len % 4 != 0 failed with ChecksumMismatch under JIT only. Fixed in the seed JIT (branch
+  work/jit-u8-hoisted-read-layout), not in the library: do not add direct `rt_*` reads to
+  `xxhash.spl` to dodge it (no-direct-rt ratchet). Bug: doc/08_tracking/bug/jit_hoisted_u8_data_ptr_ignores_slot_layout_2026-10-19.md.
+  Specs run in the interpreter, so check JIT with `bin/simple run <probe>`.
+- `std.nogc_sync_mut.compression.zstd` (`zstd_decode`): Raw/RLE literal Size_Format 01/11
+  are 12/20-bit, and FCS flag 2 is 4 bytes; both were wrong before 2026-10-19.
