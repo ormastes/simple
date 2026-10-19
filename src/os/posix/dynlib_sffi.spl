@@ -23,6 +23,7 @@
 # rule: a successful result must not outlive the DynLibKind generation.
 
 use os.posix.dynlib.{DynLibKind, dynlib_symbol, dynlib_symbol_is_process_callable}
+use std.nogc_sync_mut.sffi.dyn_bytes_abi.{dyn_bytes_abi_pack_lens, DYN_BYTES_ABI_MAX_LEN}
 use os.smf.provider_query_wire.{
     encode_provider_query_request_v1, decode_provider_query_result_v1
 }
@@ -67,6 +68,8 @@ extern fn rt_provider_query_v1_call(fn_ptr: i64, request_ptr: i64, result_ptr: i
 extern fn rt_cli_command_v1_call(fn_ptr: i64, interface_handle: i64,
     provider_context: i64, request_ptr: i64, request_len: i64,
     result_ptr: i64, result_capacity: i64) -> i32
+@unsafe(reason: "byte-slice ABI call through an unverified loaded-component address", capabilities: [ffi, raw_ptr])
+extern fn rt_call_ptr_3(addr: i64, arg1: i64, arg2: i64, arg3: i64) -> i64
 @unsafe(reason: "foreign allocation returns a nullable raw pointer", capabilities: [ffi, raw_ptr])
 extern fn rt_alloc(size: i64) -> i64
 @unsafe(reason: "foreign deallocation consumes an owned raw pointer", capabilities: [ffi, raw_ptr])
@@ -242,6 +245,54 @@ fn call_cli_command_v1(fn_ptr: i64, interface_handle: u64, provider_context: u64
         return _cli_command_call_error(status, "cli-command-status-mismatch")
     CliCommandCallV1(true, status, decoded, "")
 
+class BytesCallV1:
+    ok: bool
+    status: i64
+    bytes: [u8]
+    diagnostic: text
+
+fn _bytes_call_once_v1(fn_ptr: i64, input: [u8], out_cap: i64) -> BytesCallV1:
+    val in_ptr = rt_alloc(input.len() + 1)
+    if in_ptr <= 0:
+        return BytesCallV1(false, -1, [], "bytes-call-input-allocation-failed")
+    val out_ptr = rt_alloc(out_cap + 1)
+    if out_ptr <= 0:
+        rt_free(in_ptr)
+        return BytesCallV1(false, -1, [], "bytes-call-output-allocation-failed")
+    var i = 0
+    while i < input.len():
+        rt_ptr_write_u8(in_ptr, i, input[i] as i64)
+        i = i + 1
+    rt_memset(out_ptr, 0, out_cap + 1)
+    val status = rt_call_ptr_3(fn_ptr, in_ptr, out_ptr,
+        dyn_bytes_abi_pack_lens(input.len(), out_cap))
+    val bytes: [u8] = if status > 0 and status <= out_cap: rt_bytes_from_raw(out_ptr, status) else: []
+    rt_free(out_ptr)
+    rt_free(in_ptr)
+    if status < 0:
+        return BytesCallV1(false, status, [], "bytes-call-callee-error")
+    if status > out_cap:
+        return BytesCallV1(false, status, [], "bytes-call-capacity-short")
+    BytesCallV1(true, status, bytes, "")
+
+@unsafe(reason: "invokes an unverified loaded-component address over owned raw buffers", capabilities: [ffi, raw_ptr])
+fn call_bytes_fn_v1(fn_ptr: i64, input: [u8], out_cap: i64) -> BytesCallV1:
+    """Call a loaded component through the byte-slice ABI (`std.nogc_sync_mut.sffi.dyn_bytes_abi`).
+
+    Callee: `fn(in_ptr, out_ptr, lens) -> i64` with `lens = (out_cap << 32) | in_len`.
+    A return in `0..=out_cap` is the output length; a return above `out_cap`
+    is the size the callee needs, and this wrapper retries once with it;
+    a negative return is a callee error.
+    """
+    if fn_ptr <= 0:
+        return BytesCallV1(false, -1, [], "bytes-call-pointer-invalid")
+    if input.len() > DYN_BYTES_ABI_MAX_LEN or out_cap < 0 or out_cap > DYN_BYTES_ABI_MAX_LEN:
+        return BytesCallV1(false, -1, [], "bytes-call-length-invalid")
+    val first = _bytes_call_once_v1(fn_ptr: fn_ptr, input: input, out_cap: out_cap)
+    if first.ok or first.status <= out_cap or first.status > DYN_BYTES_ABI_MAX_LEN:
+        return first
+    _bytes_call_once_v1(fn_ptr: fn_ptr, input: input, out_cap: first.status)
+
 # --- Safe wrappers: resolve symbol by name, then call ---
 
 @unsafe(reason: "per-call symbol lookup feeds an untyped integer-only dynamic ABI", capabilities: [ffi, raw_ptr])
@@ -302,4 +353,5 @@ fn dynlib_call_6(lib: DynLibKind, name: text, arg0: i64, arg1: i64, arg2: i64, a
 
 export ProviderQueryCallV1, call_provider_query_v1
 export CliCommandCallV1, call_cli_command_v1
+export BytesCallV1, call_bytes_fn_v1
 export VectorKernelCallV1, call_vector_kernel_v1
