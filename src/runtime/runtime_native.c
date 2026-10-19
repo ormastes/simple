@@ -2809,9 +2809,14 @@ static int rt_core_transient_add(RtCoreTransientPlan* plan, int64_t value) {
  *  - the ROOT of each call is always walked, never skipped;
  *  - only nodes of a call that fully committed enter the set (a failed or
  *    partially-committed call adds nothing, so later calls re-walk as today);
- *  - any registered heap object or raw allocation freed inside the window is
- *    erased from the set, so a recycled address is never mistaken for a
- *    committed node;
+ *  - a registered heap object unregistered, or a transient-raw-table entry
+ *    erased, ON THIS THREAD inside the window is erased from the set, so the
+ *    MIR caller's freed temporary carriers can never be mistaken for a
+ *    committed node at a recycled address. Not covered (and not needed by the
+ *    contract, which frees only those carriers): raw blocks with no raw-table
+ *    entry (e.g. persistent rt_struct_alloc blocks) and frees performed by
+ *    another thread, which touch only that thread's window. The Rust twin
+ *    erases heap objects only; its raw blocks are freed by the C allocator;
  *  - scope end closes the window; begin requires this thread's paused scope.
  * -------------------------------------------------------------------------- */
 static _Thread_local int core_transient_share_active = 0;

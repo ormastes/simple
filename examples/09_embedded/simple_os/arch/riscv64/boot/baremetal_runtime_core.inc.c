@@ -2141,15 +2141,11 @@ int8_t rt_transient_array_scope_pause(void) { return 1; }
 int8_t rt_transient_array_scope_end(void)   { return 1; }
 int8_t rt_transient_heap_promote(int64_t value) { (void)value; return 1; }
 /* Promotion share window: a pure walk-avoidance optimisation in the hosted
- * runtimes. With nothing ever reclaimed there is no walk to avoid, so only
- * the open/closed answer is kept. */
-static int rt_transient_promote_share_open = 0;
-int8_t rt_transient_heap_promote_share_begin(void) { rt_transient_promote_share_open = 1; return 1; }
-int8_t rt_transient_heap_promote_share_end(void) {
-    int8_t was_open = rt_transient_promote_share_open ? 1 : 0;
-    rt_transient_promote_share_open = 0;
-    return was_open;
-}
+ * runtimes. With nothing ever reclaimed there is no walk to avoid, so no
+ * window ever opens (begin 0 = "no window", promotion unchanged; end 0 =
+ * "none was open"), per the runtime.h contract. */
+int8_t rt_transient_heap_promote_share_begin(void) { return 0; }
+int8_t rt_transient_heap_promote_share_end(void) { return 0; }
 
 /* --- dictionaries ---------------------------------------------------------
  * No dict existed in this arch tree at all.
