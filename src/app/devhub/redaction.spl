@@ -43,6 +43,56 @@ fn _assignment_name(prefix: text) -> text:
     last_word
 
 
+fn _line_end(value: text, start: i64) -> i64:
+    val newline = value[start:].find("\n")
+    if newline >= 0:
+        return start + newline
+    value.len()
+
+
+fn _quoted_end(value: text, open_idx: i64, line_end: i64) -> i64:
+    """Index just past the closing quote of the value opened at open_idx.
+
+    Fails closed: an unterminated quote masks through the end of the line."""
+    val quote = value[open_idx:open_idx + 1]
+    var i = open_idx + 1
+    while i < line_end:
+        val ch = value[i:i + 1]
+        if ch == "\\":
+            i = i + 2
+        elif ch == quote:
+            return i + 1
+        else:
+            i = i + 1
+    line_end
+
+
+fn _value_end(value: text, start: i64, line_end: i64, name_raw: text) -> i64:
+    """End (exclusive) of the secret value that begins after the delimiter."""
+    var i = start
+    while i < line_end and (value[i:i + 1] == " " or value[i:i + 1] == "\t" or value[i:i + 1] == "\r"):
+        i = i + 1
+    if i < line_end:
+        val first = value[i:i + 1]
+        if first == "\"" or first == "'":
+            return _quoted_end(value, i, line_end)
+    val name = name_raw.trim().lower().replace("\"", "").replace("'", "")
+    if name == "authorization" or name == "cookie" or name == "set-cookie":
+        return line_end
+    # Unquoted value: a comma ends it only when it separates diagnostic
+    # fields (followed by whitespace, a quote, or end of line).
+    var j = i
+    while j < line_end:
+        if value[j:j + 1] == ",":
+            if j + 1 >= line_end:
+                return j
+            val nxt = value[j + 1:j + 2]
+            if nxt == " " or nxt == "\t" or nxt == "\"" or nxt == "'" or nxt == "\r":
+                return j
+        j = j + 1
+    line_end
+
+
 fn _redact_sensitive_assignment(value: text) -> text:
     var delimiter = value.find(":")
     val equals = value.find("=")
@@ -69,12 +119,13 @@ fn _redact_sensitive_assignment(value: text) -> text:
         val space = value[delimiter + 1:].find(" ")
         if space >= 0 and delimiter + 1 + space < end:
             end = delimiter + 1 + space
-    val comma = value[delimiter + 1:].find(",")
-    if comma >= 0 and delimiter + 1 + comma < end:
-        end = delimiter + 1 + comma
-    val newline = value[delimiter + 1:].find("\n")
-    if newline >= 0 and delimiter + 1 + newline < end:
-        end = delimiter + 1 + newline
+    val rest_start = delimiter + 1
+    val line_end = _line_end(value, rest_start)
+    if not query_assignment:
+        end = _value_end(value, rest_start, line_end, assignment_name)
+    else:
+        if line_end < end:
+            end = line_end
     val suffix = if end < value.len(): _redact_sensitive_assignment(value[end:]) else: ""
     val mask = if query_assignment: "***" else: " ***"
     value[:delimiter + 1] + mask + suffix
