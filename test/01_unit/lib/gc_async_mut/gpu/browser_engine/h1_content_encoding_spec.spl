@@ -1,0 +1,129 @@
+"""
+## Purpose and audience
+Purpose: Prove the browser HTTP/1 client advertises and decodes Content-Encoding.
+Audience: browser networking maintainers.
+## Compatibility and limitations
+Fixtures are real gzip -9 / zstd -3 / zlib / raw-deflate output of one 134-byte HTML page.
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+"""
+use std.spec.*
+use std.spec.step
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{parse_http_response_bytes, build_request_bytes}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchRequest, RequestMode}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.Url
+
+fn get_req(headers: text) -> FetchRequest:
+    FetchRequest(method: "GET", url: Url.parse_or_opaque("http://example.test/"), headers: headers, body: [], mode: RequestMode.SameOrigin, credentials: "same-origin")
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+val PAGE = "<html><head><title>Hi</title></head><body><p>Hello compressed world, hello compressed world, hello compressed world.</p></body></html>"
+val GZ: [u8] = [31u8, 139u8, 8u8, 0u8, 0u8, 0u8, 0u8, 0u8, 2u8, 3u8, 179u8, 201u8, 40u8, 201u8, 205u8, 177u8, 179u8, 201u8, 72u8, 77u8, 76u8, 177u8, 179u8, 41u8, 201u8, 44u8, 201u8, 73u8, 181u8, 243u8, 200u8, 180u8, 209u8, 135u8, 176u8, 108u8, 244u8, 33u8, 226u8, 73u8, 249u8, 41u8, 149u8, 118u8, 54u8, 5u8, 118u8, 30u8, 169u8, 57u8, 57u8, 249u8, 10u8, 201u8, 249u8, 185u8, 5u8, 69u8, 169u8, 197u8, 197u8, 169u8, 41u8, 10u8, 229u8, 249u8, 69u8, 57u8, 41u8, 58u8, 10u8, 25u8, 36u8, 137u8, 235u8, 217u8, 232u8, 23u8, 0u8, 141u8, 134u8, 24u8, 170u8, 15u8, 182u8, 31u8, 0u8, 239u8, 74u8, 147u8, 240u8, 134u8, 0u8, 0u8, 0u8]
+val ZST_TINY: [u8] = [40u8, 181u8, 47u8, 253u8, 36u8, 134u8, 93u8, 2u8, 0u8, 114u8, 196u8, 14u8, 20u8, 160u8, 165u8, 109u8, 241u8, 164u8, 93u8, 92u8, 130u8, 132u8, 45u8, 45u8, 255u8, 29u8, 167u8, 62u8, 213u8, 242u8, 214u8, 15u8, 97u8, 79u8, 179u8, 88u8, 229u8, 159u8, 178u8, 128u8, 35u8, 176u8, 68u8, 10u8, 24u8, 118u8, 41u8, 29u8, 58u8, 70u8, 139u8, 161u8, 153u8, 71u8, 126u8, 252u8, 128u8, 41u8, 81u8, 46u8, 23u8, 242u8, 203u8, 45u8, 235u8, 219u8, 112u8, 232u8, 167u8, 89u8, 116u8, 4u8, 0u8, 88u8, 24u8, 76u8, 4u8, 230u8, 237u8, 196u8, 120u8, 135u8, 210u8, 4u8, 19u8, 174u8, 121u8, 159u8]
+val ZLIB: [u8] = [120u8, 156u8, 179u8, 201u8, 40u8, 201u8, 205u8, 177u8, 179u8, 201u8, 72u8, 77u8, 76u8, 177u8, 179u8, 41u8, 201u8, 44u8, 201u8, 73u8, 181u8, 243u8, 200u8, 180u8, 209u8, 135u8, 176u8, 108u8, 244u8, 33u8, 226u8, 73u8, 249u8, 41u8, 149u8, 118u8, 54u8, 5u8, 118u8, 30u8, 169u8, 57u8, 57u8, 249u8, 10u8, 201u8, 249u8, 185u8, 5u8, 69u8, 169u8, 197u8, 197u8, 169u8, 41u8, 10u8, 229u8, 249u8, 69u8, 57u8, 41u8, 58u8, 10u8, 25u8, 36u8, 137u8, 235u8, 217u8, 232u8, 23u8, 0u8, 141u8, 134u8, 24u8, 170u8, 15u8, 182u8, 31u8, 0u8, 180u8, 136u8, 48u8, 40u8]
+val RAWDEFLATE: [u8] = [179u8, 201u8, 40u8, 201u8, 205u8, 177u8, 179u8, 201u8, 72u8, 77u8, 76u8, 177u8, 179u8, 41u8, 201u8, 44u8, 201u8, 73u8, 181u8, 243u8, 200u8, 180u8, 209u8, 135u8, 176u8, 108u8, 244u8, 33u8, 226u8, 73u8, 249u8, 41u8, 149u8, 118u8, 54u8, 5u8, 118u8, 30u8, 169u8, 57u8, 57u8, 249u8, 10u8, 201u8, 249u8, 185u8, 5u8, 69u8, 169u8, 197u8, 197u8, 169u8, 41u8, 10u8, 229u8, 249u8, 69u8, 57u8, 41u8, 58u8, 10u8, 25u8, 36u8, 137u8, 235u8, 217u8, 232u8, 23u8, 0u8, 141u8, 134u8, 24u8, 170u8, 15u8, 182u8, 31u8, 0u8]
+
+fn wire(head: text, body: [u8]) -> [u8]:
+    var out = rt_text_to_bytes(head + "\r\n")
+    var i = 0
+    while i < body.len():
+        out.push(body[i])
+        i = i + 1
+    out
+
+fn chunked(body: [u8]) -> [u8]:
+    var out = rt_text_to_bytes("5f\r\n")  # GZ is 95 bytes = 0x5f
+    var i = 0
+    while i < body.len():
+        out.push(body[i])
+        i = i + 1
+    val tail = rt_text_to_bytes("\r\n0\r\n\r\n")
+    i = 0
+    while i < tail.len():
+        out.push(tail[i])
+        i = i + 1
+    out
+
+fn expect_page(raw: [u8]):
+    expect_body(raw, PAGE)
+
+fn expect_body(raw: [u8], page: text):
+    match parse_http_response_bytes(raw):
+        Ok(response):
+            expect(response.status).to_equal(200)
+            expect(response.body).to_equal(rt_text_to_bytes(page))
+            expect(response.headers.to_lower().contains("content-encoding")).to_equal(false)
+        Err(error):
+            fail("decode unexpectedly rejected: {error}")
+
+fn expect_rejected(raw: [u8]):
+    match parse_http_response_bytes(raw):
+        Ok(response):
+            fail("compressed body passed through ({response.body.len()} bytes)")
+        Err(error):
+            expect("{error}").to_contain("Content-Encoding")
+
+describe "Browser HTTP/1 Content-Encoding":
+    it "advertises gzip and deflate in the request":
+        step("Verify: request carries Accept-Encoding")
+        val req = get_req("")
+        expect(build_request_bytes(req)).to_contain("Accept-Encoding: gzip, deflate\r\n")
+
+    it "does not duplicate a caller Accept-Encoding":
+        step("Verify: caller Accept-Encoding wins")
+        val req = get_req("Accept-Encoding: identity\r\n")
+        val text_out = build_request_bytes(req)
+        expect(text_out).to_contain("Accept-Encoding: identity\r\n")
+        expect(text_out.contains("gzip, deflate")).to_equal(false)
+
+    it "decodes a gzip body":
+        step("Verify: gzip decoded")
+        expect_page(wire("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {GZ.len()}\r\n", GZ))
+
+    it "decodes x-gzip with mixed-case token":
+        step("Verify: X-GZip decoded")
+        expect_page(wire("HTTP/1.1 200 OK\r\nContent-Encoding: X-GZip\r\nContent-Length: {GZ.len()}\r\n", GZ))
+
+    it "decodes a zlib-wrapped deflate body":
+        step("Verify: zlib deflate decoded")
+        expect_page(wire("HTTP/1.1 200 OK\r\nContent-Encoding: deflate\r\nContent-Length: {ZLIB.len()}\r\n", ZLIB))
+
+    it "decodes a raw deflate body":
+        step("Verify: raw deflate fallback decoded")
+        expect_page(wire("HTTP/1.1 200 OK\r\nContent-Encoding: deflate\r\nContent-Length: {RAWDEFLATE.len()}\r\n", RAWDEFLATE))
+
+    it "rejects an unadvertised zstd body instead of passing it through":
+        step("Verify: zstd is an explicit unsupported-encoding error")
+        expect_rejected(wire("HTTP/1.1 200 OK\r\nContent-Encoding: zstd\r\nContent-Length: {ZST_TINY.len()}\r\n", ZST_TINY))
+
+    it "decodes chunked transfer plus gzip":
+        step("Verify: chunked then gzip")
+        expect_page(wire("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Encoding: gzip\r\n", chunked(GZ)))
+
+    it "accepts a gzip, identity list":
+        step("Verify: list with identity")
+        expect_page(wire("HTTP/1.1 200 OK\r\nContent-Encoding: gzip, identity\r\nContent-Length: {GZ.len()}\r\n", GZ))
+
+    it "rejects an unsupported br encoding":
+        step("Verify: br is an error")
+        expect_rejected(wire("HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: 3\r\n", [1u8, 2u8, 3u8]))
+
+    it "rejects a corrupt gzip body":
+        step("Verify: corrupt gzip is an error")
+        var bad: [u8] = []
+        var i = 0
+        while i < GZ.len():
+            bad.push(GZ[i])
+            i = i + 1
+        bad[30] = 255u8
+        bad[31] = 0u8
+        expect_rejected(wire("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {bad.len()}\r\n", bad))
+
+    it "leaves an identity response untouched":
+        step("Verify: no Content-Encoding keeps body and headers")
+        match parse_http_response_bytes(rt_text_to_bytes("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nHI")):
+            Ok(response):
+                expect(response.body).to_equal([72u8, 73u8])
+                expect(response.headers).to_contain("Content-Length: 2")
+            Err(error):
+                fail("identity rejected: {error}")
