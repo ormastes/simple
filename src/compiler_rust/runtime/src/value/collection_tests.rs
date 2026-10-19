@@ -2922,3 +2922,108 @@ fn packed_byte_data_pointers_are_8_aligned() {
         rt_array_free(array);
     }
 }
+
+/// Packed `[u8]` / `[u64]` arrays hold RAW 1-byte / 8-byte elements. These
+/// generic operations used to view them through `as_slice()` (8-byte tagged
+/// slots): reading a `[u8]` ran past its buffer, `reverse` wrote past it (the
+/// JIT then crashed or printed foreign bytes), and words were misread as
+/// tagged values. Every expected value is pinned numerically against the raw
+/// buffer, so a byte-order dependent read or write would also fail here.
+/// Bug: doc/08_tracking/bug/runtime_array_hardening_2026-10-19.md
+mod packed_array_hardening {
+    use super::super::*;
+    use crate::value::sffi::rt_value_eq;
+    use crate::value::{rt_dict_contains, rt_dict_new, rt_dict_set};
+
+    const BIG: i64 = (1i64 << 60) + 5;
+    const BIGGER: i64 = 1i64 << 61;
+
+    fn bytes(values: &[u8]) -> RuntimeValue {
+        let arr = rt_byte_array_new(values.len().max(1) as u64);
+        for &v in values {
+            assert!(rt_typed_bytes_u8_push(arr, v as i64));
+        }
+        arr
+    }
+
+    fn words(values: &[u64]) -> RuntimeValue {
+        let arr = rt_array_new_with_cap_u64(values.len().max(1) as i64);
+        for &v in values {
+            assert!(rt_typed_words_u64_push(arr, v as i64));
+        }
+        arr
+    }
+
+    fn byte_values(arr: RuntimeValue) -> Vec<i64> {
+        (0..rt_array_len(arr)).map(|i| rt_array_get(arr, i).as_int()).collect()
+    }
+
+    fn text(v: RuntimeValue) -> String {
+        let len = rt_string_len(v) as usize;
+        let data = rt_string_data(v);
+        unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(data, len)).into_owned() }
+    }
+
+    #[test]
+    fn reverse_reversed_sorted_keep_packed_elements() {
+        let a = bytes(&[1, 2, 3, 200]);
+        let r = rt_array_reversed(a);
+        assert_eq!(byte_values(r), vec![200, 3, 2, 1]);
+        assert_eq!(byte_values(a), vec![1, 2, 3, 200]);
+        assert!(rt_array_reverse(a));
+        assert_eq!(byte_values(a), vec![200, 3, 2, 1]);
+        let s = rt_array_sorted(bytes(&[56, 7, 8, 0, 255, 64]));
+        assert_eq!(byte_values(s), vec![0, 7, 8, 56, 64, 255]);
+        let w = words(&[5, u64::MAX, 40]);
+        assert!(rt_array_reverse(w));
+        assert_eq!(rt_typed_words_u64_at(w, 0), 40);
+        assert_eq!(rt_typed_words_u64_at(w, 1), -1);
+        assert_eq!(rt_typed_words_u64_at(w, 2), 5);
+        let ws = rt_array_sorted(w);
+        assert_eq!(rt_typed_words_u64_at(ws, 2), -1);
+        assert_eq!(rt_typed_words_u64_at(ws, 0), 5);
+    }
+
+    #[test]
+    fn packed_max_min_sum_index_join() {
+        let a = bytes(&[56, 7, 8, 0, 255, 64]);
+        assert_eq!(rt_array_max(a).as_int(), 255);
+        assert_eq!(rt_array_min(a).as_int(), 0);
+        assert_eq!(rt_array_sum(bytes(&[56, 8, 255])).as_int(), 319);
+        assert_eq!(rt_array_index_of(a, RuntimeValue::from_int(8)), 2);
+        assert_eq!(rt_array_last_index_of(a, RuntimeValue::from_int(255)), 4);
+        assert_eq!(rt_array_count(a, RuntimeValue::from_int(64)), 1);
+        assert_eq!(text(rt_array_join(bytes(&[65, 66, 67]), rt_string_new(",".as_ptr(), 1))), "65,66,67");
+        let w = words(&[BIG as u64, BIGGER as u64, 5]);
+        assert_eq!(rt_array_max(w).as_int(), BIGGER);
+        assert_eq!(rt_array_min(w).as_int(), 5);
+        assert_eq!(u64_bits(rt_array_max(words(&[5, u64::MAX]))), u64::MAX);
+        // generic arrays holding wide (heap-boxed) ints order by value too
+        let g = rt_array_new(3);
+        for v in [BIGGER, 5, BIG] {
+            assert!(rt_array_push(g, RuntimeValue::from_int(v)));
+        }
+        assert_eq!(rt_array_max(g).as_int(), BIGGER);
+        assert_eq!(rt_array_min(g).as_int(), 5);
+    }
+
+    fn u64_bits(v: RuntimeValue) -> u64 {
+        v.as_int() as u64
+    }
+
+    #[test]
+    fn wide_ints_compare_and_hash_by_value() {
+        let a = RuntimeValue::from_int(BIG);
+        let b = RuntimeValue::from_int(BIG);
+        assert_ne!(a.to_raw(), b.to_raw());
+        assert_eq!(rt_value_eq(a, b), 1);
+        assert_eq!(rt_value_eq(a, RuntimeValue::from_u64(BIG as u64)), 1);
+        assert_eq!(rt_value_eq(RuntimeValue::from_u64(BIG as u64), a), 1);
+        assert_eq!(rt_value_eq(RuntimeValue::from_int(-BIG), RuntimeValue::from_u64((-BIG) as u64)), 0);
+        let d = rt_dict_new(4);
+        assert!(rt_dict_set(d, a, RuntimeValue::from_int(1)));
+        assert!(rt_dict_contains(d, b));
+        assert!(rt_dict_contains(d, RuntimeValue::from_u64(BIG as u64)));
+        assert!(!rt_dict_contains(d, RuntimeValue::from_int(BIGGER)));
+    }
+}
