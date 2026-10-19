@@ -786,6 +786,10 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        // Same-named flattened struct/class: bind `Type.member` to the
+        // declaration the current owner sees (flatten_struct_owner.rs).
+        let scoped_type_name = self.module.types.scoped_name(type_name).to_string();
+        let type_name = scoped_type_name.as_str();
         if let Some(type_id) = self.static_enum_variant_type(type_name, member) {
             return self.lower_static_enum_variant_call(type_name, member, type_id, args, ctx);
         }

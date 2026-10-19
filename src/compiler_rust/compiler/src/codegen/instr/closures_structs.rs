@@ -26,9 +26,15 @@ fn resolve_unique_module_qualified_func<M: Module>(ctx: &InstrContext<'_, M>, na
         // dynamic dispatch (SIGSEGV: test_config `.index_of` bound to
         // devhub__cmd_storage___index_of). Require the candidate's own tail
         // (after its LAST `__`) to equal the probed tail exactly.
+        //
+        // A flatten-owner identity (`__spl_flat_<owner>__Type.method`, one of
+        // two same-named structs of a flattened unit) is not a module
+        // qualifier: the bare `Type.method` is the OTHER owner's body, so it
+        // must never win by suffix over that exact name.
         if candidate
             .strip_suffix(&suffix)
             .is_some_and(|prefix| !prefix.is_empty() && !prefix.ends_with('_'))
+            && !candidate.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX)
             && !ids.contains(id)
         {
             ids.push(*id);

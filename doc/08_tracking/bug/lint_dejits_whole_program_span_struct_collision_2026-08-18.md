@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-18
-- Status: **OPEN — root cause located and reproduced; fix not landed**
+- Status: **OPEN (Cause 1) — Cause 2 (same-named struct de-JIT) FIXED 2026-10-19, see end**
 - Supersedes the "superlinearity not located" section of
   `doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md`.
 - Binary identity for every number below:
@@ -260,3 +260,49 @@ Module-qualified struct resolution across all three engines. Until then the
 sanctioned remedy for a specific collision remains renaming one struct
 (fix option 1), which buys the measured **1.23x** on lint and nothing more.
 
+
+## 2026-10-19 — Cause 2 FIXED: module-qualified struct identity in HIR lowering
+
+Result 2 above ("not expressible on this lane") was stale by the time of this
+fix: the flattener already tagged structs, impls and every method with a
+`__simple_flatten_module_owner__=<path>` attribute and emitted per-importer
+import-binding markers (the same data the global and function collision fixes
+use). Re-seen live in a Phase 4 full-CLI native-build as
+`Cannot infer field type: struct 'TextSpan' field 'end' (declared fields:
+value, start, len) [in src/app/cli/native_build_main.spl]`
+(`10.frontend/block_types.TextSpan` vs `db/accel.TextSpan`).
+
+Fix (`src/compiler_rust/compiler/src/hir/lower/module_lowering/flatten_struct_owner.rs`):
+- the flattener now tags classes too (`module_loader.rs::tag_node_function_owners`);
+- a struct/class name declared by two or more owners with differing field
+  layouts is a collision; on a lowering-only clone each colliding declaration
+  is renamed to its owner-mangled symbol (entry module, else last declaration,
+  keeps the bare name), and declaration signatures (fn params/returns, field
+  types, impl targets, typed globals) are rewritten through the declaring
+  owner's scope;
+- function bodies resolve bare type names through a per-owner overlay on
+  `TypeRegistry::lookup` (own declaration, else the selective import's source,
+  following aliases and re-export facades);
+- codegen's unique-suffix method resolution no longer binds a bare
+  `Type.method` to a `__spl_flat_<owner>__Type.method` identity.
+
+The interpreter is untouched (it never sees the clone; the extra class
+attribute is ignored by it). `SIMPLE_JIT_DUP_STRUCT_FEED` stays default-OFF —
+the consensus fallback is still unsound — but these collisions no longer reach
+it.
+
+Evidence (seed `f177131df057…`, aarch64, `--profile bootstrap --features llvm`):
+- `compiler/tests/jit_same_name_struct_module_qualified.rs`: 6 core cases RED
+  before (`Cannot infer field type: struct 'TextSpan' field 'end'`, the
+  production message), 8/8 GREEN after (adds re-export facade and generic).
+- `scripts/check/check-dup-struct-name-jit-soundness.shs` (rewritten to require
+  JIT code emission, no `[jit-fallback]`, and interpreter-equal output on both
+  the default and forced-feed arms): deployed seed `FAIL` on 7/10 arms, fixed
+  seed `PASS — 10 arm(s)`; `--selftest` negative control `PASS`.
+- `SIMPLE_EXECUTION_MODE=jit` run of `src/app/cli/native_build_main.spl`:
+  0 `[jit-fallback]` lines (was the TextSpan whole-module fallback).
+
+Still open: Cause 1 (lint pinned to the interpreter by text-grep); glob imports
+(`use m.*`) carry no per-name marker and keep the bare-name meaning; enum
+payload types naming a colliding struct are not owner-rewritten; the
+function-side `join_path` co-compiled signature warning is a separate class.
