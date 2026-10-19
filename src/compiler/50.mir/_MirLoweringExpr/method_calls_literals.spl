@@ -1980,7 +1980,7 @@ impl MirLowering:
         val predicate_owner_recovery_allowed = resolution_is_unresolved or resolution_is_instance_method
         if predicate_method_shape and predicate_owner_recovery_allowed:
             val static_predicate_key = "static::{static_receiver_name}::{method}"
-            if resolution_is_unresolved and static_receiver_name != "" and self.struct_method_syms.contains(static_predicate_key):
+            if resolution_is_unresolved and static_receiver_name != "" and self.struct_method_key_present_v1(static_predicate_key):
                 predicate_has_custom_owner = true
             else:
                 if not has_prelowered_method_receiver:
@@ -2001,7 +2001,7 @@ impl MirLowering:
                 if not predicate_receiver_is_text and resolution_is_unresolved:
                     val predicate_owner = self.struct_value_syms.get(prelowered_method_receiver.id)
                     if predicate_owner != nil and predicate_owner != "":
-                        predicate_has_custom_owner = self.struct_method_syms.contains(self.struct_owner_method_key(predicate_owner ?? "", method))
+                        predicate_has_custom_owner = self.struct_method_key_present_v1(self.struct_owner_method_key(predicate_owner ?? "", method))
         if mir_mc_trace_state == 1:
             eprint("[mir-method-call] predicate-owner method={method}\n")
 
@@ -2098,7 +2098,7 @@ impl MirLowering:
         val chr_primitive_resolution_allowed = resolution_is_unresolved or resolution_is_free_function
         if chr_method_shape and chr_primitive_resolution_allowed:
             val static_chr_key = "static::{static_receiver_name}::{method}"
-            if static_receiver_name != "" and self.struct_method_syms.contains(static_chr_key):
+            if static_receiver_name != "" and self.struct_method_key_present_v1(static_chr_key):
                 chr_has_custom_owner = true
             else:
                 var declared_chr_owner = ""
@@ -2116,7 +2116,7 @@ impl MirLowering:
                                         case Class: declared_chr_owner = mir_class_identity(chr_owner_definition)
                                         case _: ()
                             case _: ()
-                if declared_chr_owner != "" and self.struct_method_syms.contains("{declared_chr_owner}::{method}"):
+                if declared_chr_owner != "" and self.struct_method_key_present_v1("{declared_chr_owner}::{method}"):
                     if not has_prelowered_method_receiver:
                         prelowered_method_receiver = self.lower_expr(receiver)
                         has_prelowered_method_receiver = true
@@ -2128,7 +2128,7 @@ impl MirLowering:
                         has_prelowered_method_receiver = true
                     val chr_owner = self.struct_value_syms.get(prelowered_method_receiver.id)
                     if chr_owner != nil and chr_owner != "":
-                        chr_has_custom_owner = self.struct_method_syms.contains(self.struct_owner_method_key(chr_owner ?? "", method))
+                        chr_has_custom_owner = self.struct_method_key_present_v1(self.struct_owner_method_key(chr_owner ?? "", method))
         if chr_method_shape and chr_primitive_resolution_allowed and not chr_has_custom_owner and not has_prelowered_method_receiver:
             prelowered_method_receiver = self.lower_expr(receiver)
             has_prelowered_method_receiver = true
@@ -3799,7 +3799,7 @@ impl MirLowering:
                 val free_owner = self.struct_value_syms.get(free_receiver.id)
                 if chr_method_shape and chr_has_custom_owner and free_owner != nil and free_owner != "":
                     val owner_method_key = self.struct_owner_method_key(free_owner ?? "", method)
-                    if self.struct_method_syms.contains(owner_method_key):
+                    if self.struct_method_key_present_v1(owner_method_key):
                         selected_func_id = self.struct_method_syms[owner_method_key]
                 val func_operand = self.symbol_to_operand(selected_func_id)
                 val return_type = self.resolved_call_return_type(selected_func_id)
@@ -3879,7 +3879,7 @@ impl MirLowering:
                 else:
                     nil
                 var static_method_id: SymbolId? = nil
-                if static_receiver_name != "" and self.struct_method_syms.contains(static_method_key):
+                if static_receiver_name != "" and self.struct_method_key_present_v1(static_method_key):
                     static_method_id = Some(self.struct_method_syms[static_method_key])
                 elif static_receiver_name != "":
                     match static_receiver_symbol:
@@ -3956,6 +3956,7 @@ impl MirLowering:
                         static_args.push(mir_operand_copy(static_arg))
                         name_static_arg_index = name_static_arg_index + 1
                     var static_return_type = self.resolved_call_return_type(resolved_static_method_id)
+                    self.provider_method_materialize_v1("{static_receiver_name}::{method}")
                     val static_result_name = self.struct_method_return_names.get("{static_receiver_name}::{method}")
                     if static_result_name != nil and static_result_name != "":
                         for static_result_symbol in self.symbols.symbols.values():
@@ -4041,6 +4042,7 @@ impl MirLowering:
                     # register_owner_method recorded two declaring modules for
                     # this owner/method row; dispatching to either would be a
                     # silent guess. Same fatal prefix as the miss below.
+                    self.provider_method_materialize_v1(unresolved_method_key)
                     if self.struct_method_ambiguous.has(unresolved_method_key):
                         val ambiguous_owner = unresolved_struct_name ?? ""
                         self.error("unresolved method call: {method} is ambiguous on {ambiguous_owner}: impl blocks in more than one module declare it", Some(receiver.span))
@@ -4049,7 +4051,7 @@ impl MirLowering:
                     val unresolved_method_id: SymbolId? = if declared_record_owner >= 0:
                         val candidate: i64 = self.symbols.record_instance_method_scalar_raw(declared_record_owner, method)
                         if candidate >= 0: Some(SymbolId(id: candidate)) else: nil
-                    elif self.struct_method_syms.contains(unresolved_method_key):
+                    elif self.struct_method_key_present_v1(unresolved_method_key):
                         Some(self.struct_method_syms[unresolved_method_key])
                     else:
                         match self.receiver_declared_or_result_type(receiver, unresolved_receiver_local):
@@ -4762,6 +4764,7 @@ impl MirLowering:
 
     me remember_method_return_provenance(result_local: LocalId, method_key: text):
         """Preserve owner-qualified aggregate/array identity on method results."""
+        self.provider_method_materialize_v1(method_key)
         if not self.struct_value_syms.contains(result_local.id) and self.struct_method_return_names.contains(method_key):
             val result_name = self.struct_method_return_names[method_key]
             if result_name != "":

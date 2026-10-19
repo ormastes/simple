@@ -645,6 +645,48 @@ struct MirLowering:
     # transport. Assigned once per module before the loop; NOT cleared after
     # (the next module's assignment is the reset -- sequential lowering only).
     lower_emit_fn_values: [HirFunction] = []
+    # Provider session index (provider_metadata.spl). A pure function of
+    # the provider HIR list, built ONCE per lowering session (the first
+    # lower_module call with that list) and then read-only until the list
+    # changes, so every consumer module reuses it instead of rebuilding it.
+    # Born inside one module's transient scope and retained by
+    # promote_transient_owner like every other cross-module registry; never
+    # mutated in a later scope (a different provider list REPLACES the whole
+    # set with carriers born in the then-current scope). Holds no consumer
+    # SymbolIds: rows name provider-table ids only.
+    provider_session_names: [text] = []
+    # Index-aligned with provider_session_names: `mir_provider_function_name`
+    # link table per provider, valid only where provider_session_links_ready.
+    provider_session_links: [Dict<i64, text>] = []
+    provider_session_links_ready: [bool] = []
+    # Demand index of provider method dispatch rows: "{owner}::{method}" (and
+    # "static::..." ) -> row ids in the exact order the eager provider loop
+    # used to register them. Rows are materialized into struct_method_* only
+    # when the consumer looks the key up (provider_method_materialize_v1).
+    provider_method_row_keys: Dict<text, [i64]> = {}
+    provider_method_row_provider: [i64] = []
+    # 0 = class-method row (register_provider_class), 1 = owner row
+    # (register_provider_method_fields_v1).
+    provider_method_row_kind: [i64] = []
+    provider_method_row_symbol: [i64] = []
+    provider_method_row_class_symbol: [i64] = []
+    provider_method_row_return_type: Dict<i64, HirType> = {}
+    # Per-module demand state: the borrowed driver HIR list, the consumer
+    # module name, and the keys already materialized. All three are reset by
+    # lower_module and emptied by lower_module_transient_scoped before the
+    # scope pauses, so promotion never walks the borrowed HIR through them.
+    provider_method_modules: [HirModule] = []
+    provider_method_consumer: text = ""
+    provider_method_materialized: Dict<text, bool> = {}
+    # true restores the eager whole-program method relocation (A/B and
+    # determinism checks); SIMPLE_MIR_EAGER_PROVIDER_METHODS=1 does the same.
+    provider_methods_eager: bool = false
+    # A lambda sub-lowering that did not inherit struct_method_ambiguous must
+    # not start recording it while materializing (eager lambdas never saw it).
+    provider_method_record_ambiguity: bool = true
+    # Bare enum name -> runtime_name whose registration is currently installed
+    # in the bare/qualified enum registries (register_enum_variants skip).
+    enum_registration_current: Dict<text, text> = {}
 
 impl MirLowering:
     fn local_symbol_slot(symbol_id: i64) -> i64:

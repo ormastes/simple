@@ -227,6 +227,10 @@ impl MirLowering:
         ambiguous: it is recorded in struct_method_ambiguous, which the
         unresolved-receiver dispatch reports, instead of silently letting the
         last-registered module win."""
+        # Provider rows for this key precede every later registration in the
+        # eager order; install them first so the ambiguity check below sees
+        # the same prior row it always saw.
+        self.provider_method_materialize_v1(key)
         if self.struct_method_syms.has(key):
             val prior = self.struct_method_syms[key]
             if prior.id != method.id:
@@ -250,10 +254,34 @@ impl MirLowering:
             return
         if not links.has(function_symbol.id):
             return
+        val key = self.provider_method_dispatch_key_v1(function_symbol, provider)
+        if key == "":
+            return
+        val owner_module = provider.symbol_defining_module_scalar_raw(function_symbol.id)
+        val method = self.relocate_provider_callable(function_symbol, provider, links)
+        if method.id < 0:
+            return
+        self.register_owner_method(key, method, owner_module)
+        if is_static:
+            self.register_owner_method("static::{key}", method, owner_module)
+        val ret = self.relocate_provider_type(return_type, provider)
+        val ret_name = self.provider_method_return_name_v1(ret)
+        if ret_name != "":
+            self.struct_method_return_names[key] = ret_name
+        val ret_kind: HirTypeKind = ret.kind
+        match ret_kind:
+            case Array(_, _) | Slice(_): self.struct_method_return_is_array[key] = true
+            case Optional(_): self.struct_method_return_is_optional[key] = true
+            case _: ()
+
+    fn provider_method_dispatch_key_v1(function_symbol: SymbolId, provider: SymbolTable) -> text:
+        """`{owner}::{method}` dispatch key for a provider method/static
+        function, or "" when it names no known owner. The single decision
+        shared by eager registration and demand materialization."""
         # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
         val optional_source: HirSymbol? = provider.get_symbol_raw(function_symbol.id)
         if optional_source == nil:
-            return
+            return ""
         if val present_source = optional_source:
             val source: HirSymbol = present_source
             # Method dispatch owns the declaring type even when its link spelling
@@ -261,33 +289,31 @@ impl MirLowering:
             val identity = mir_provider_callable_identity(source.defining_module ?? "", source.name)
             val parts = identity.split(".")
             if parts.len() < 2:
-                return
+                return ""
             val method_name = parts[parts.len() - 1]
             var class_key = identity.substring(0, identity.len() - method_name.len() - 1)
             if not self.class_type_names.has(class_key):
                 if not mir_provider_declares_value_method_owner(provider, source.defining_module ?? "", parts[parts.len() - 2], class_key):
                     val extension_owner = mir_provider_extension_owner_key(source.defining_module ?? "", source.name)
                     if extension_owner == "" or not self.extension_owner_is_known(extension_owner):
-                        return
+                        return ""
                     class_key = extension_owner
-            val method = self.relocate_provider_callable(function_symbol, provider, links)
-            if method.id < 0:
-                return
-            val key = "{class_key}::{method_name}"
-            self.register_owner_method(key, method, source.defining_module ?? "")
-            if is_static:
-                self.register_owner_method("static::{key}", method, source.defining_module ?? "")
-            val ret = self.relocate_provider_type(return_type, provider)
-            match ret.kind:
-                case Named(id, _):
-                    # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
-                    val optional_symbol: HirSymbol? = self.symbols.get_symbol_raw(id.id)
-                    if val present_symbol = optional_symbol:
-                        val symbol: HirSymbol = present_symbol
-                        self.struct_method_return_names[key] = if symbol.kind == SymbolKind.Class or symbol.kind == SymbolKind.Enum: mir_class_identity(symbol) else: symbol.name
-                case Array(_, _) | Slice(_): self.struct_method_return_is_array[key] = true
-                case Optional(_): self.struct_method_return_is_optional[key] = true
-                case _: ()
+            return "{class_key}::{method_name}"
+        ""
+
+    fn provider_method_return_name_v1(ret: HirType) -> text:
+        """struct_method_return_names value for a relocated return type, ""
+        when it names no symbol of the active table."""
+        val ret_kind: HirTypeKind = ret.kind
+        match ret_kind:
+            case Named(id, _):
+                # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                val optional_symbol: HirSymbol? = self.symbols.get_symbol_raw(id.id)
+                if val present_symbol = optional_symbol:
+                    val symbol: HirSymbol = present_symbol
+                    return if symbol.kind == SymbolKind.Class or symbol.kind == SymbolKind.Enum: mir_class_identity(symbol) else: symbol.name
+            case _: ()
+        ""
 
     me relocate_provider_type_symbol(id: SymbolId, provider: SymbolTable) -> SymbolId:
         # Absent-id guard: a SymbolId from a provider-closure expression may
@@ -582,7 +608,11 @@ impl MirLowering:
             result.kind = HirExprKind.Error
         result
 
-    me register_provider_class(class_def: HirClass, provider: SymbolTable, links: Dict<i64, text>, local: bool):
+    me register_provider_class(class_def: HirClass, provider: SymbolTable, links: Dict<i64, text>, local: bool,
+            register_methods: bool = true):
+        """Relocate one class's layout rows into the active table. With
+        `register_methods` false its `{class}::{method}` dispatch rows are left
+        to the provider session index, which materializes them on lookup."""
         if not provider.symbols.has(class_def.symbol.id):
             self.error_fatal("class provider symbol is absent from the provider table: {class_def.name}", Some(class_def.span))
             return
@@ -627,6 +657,8 @@ impl MirLowering:
                 self.struct_field_has_default[key] = flags
                 self.struct_field_default_expr[key] = defaults
                 self.class_type_names[key] = true
+            if not register_methods:
+                return
             for method_name in class_def.methods.keys():
                 # Annotated dict extraction — the exact module_build.spl #2693
                 # pattern; unannotated it loses the declared value type on the
@@ -859,3 +891,240 @@ impl MirLowering:
                                 fi = fi + 1
             case _: ()
         nil
+
+# Provider session index + demand materialization of provider method rows.
+#
+# lower_module used to relocate EVERY provider method of the whole closure into
+# EVERY consumer module's SymbolTable (define + signature/return relocation per
+# method), O(modules x program) work, with the relocated symbols retained in
+# each consumer table for the life of the process. The rows those relocations
+# fed (struct_method_syms / _ambiguous / _return_*) are read only by exact key,
+# so the session index records each row once and a consumer relocates a row
+# only when it looks that key up -- in the same row order the eager pass used,
+# and before any later local/declaration write to the key, so the observable
+# key -> value, ambiguity and return-shape results are the eager ones.
+#
+# Lifetime: the session carriers are MirLowering fields in the promoted owner
+# inventory (transient_owner.spl), born in the scope of the first module that
+# used this provider list and never mutated afterwards; a different list
+# replaces them wholesale with carriers born in the then-current scope. They
+# hold provider-table ids, link texts and provider HirTypes only, never a
+# consumer SymbolId or a pointer into a consumer scope. Per-module demand
+# state (provider_method_modules / _consumer / _materialized) is reset by
+# lower_module and emptied before the scope pauses.
+impl MirLowering:
+    me ensure_provider_session_v1(providers: [HirModule]):
+        """Build the provider session index unless it already describes
+        exactly this provider list (same length, same names in order)."""
+        if self.provider_session_names.len() == providers.len() and self.provider_session_links_ready.len() == providers.len():
+            var same = true
+            var check_i = 0
+            while same and check_i < providers.len():
+                val check_module: HirModule = providers[check_i]
+                if check_module.name != self.provider_session_names[check_i]:
+                    same = false
+                check_i = check_i + 1
+            if same:
+                return
+        var names: [text] = []
+        var links_by_index: [Dict<i64, text>] = []
+        var links_ready: [bool] = []
+        var row_provider: [i64] = []
+        var row_kind: [i64] = []
+        var row_symbol: [i64] = []
+        var row_class_symbol: [i64] = []
+        self.provider_method_row_keys = {}
+        self.provider_method_row_return_type = {}
+        var provider_i = 0
+        while provider_i < providers.len():
+            val provider_module: HirModule = providers[provider_i]
+            names.push(provider_module.name)
+            var links: Dict<i64, text> = {}
+            var built = false
+            # Same gate as lower_module's provider class/method pass.
+            if provider_module.classes.len() > 0 or provider_module.enums.len() > 0 or provider_module.structs.len() > 0 or provider_module.impls.len() > 0:
+                built = true
+                var funcs: [HirFunction] = []
+                val function_keys: [SymbolId] = provider_module.functions.keys()
+                for function_key in function_keys:
+                    # workaround(p2_add cycles 91-105): per-read draw corruption -- bind once, guard the local.
+                    val provider_func: HirFunction = provider_module.functions[function_key]
+                    if provider_func == nil:
+                        continue
+                    links[provider_func.symbol.id] = mir_provider_function_name(provider_module.name, provider_module.symbols, provider_func)
+                    funcs.push(provider_func)
+                # Class-method rows first: the eager pass registered every
+                # class of a provider before that provider's method rows.
+                val class_keys: [SymbolId] = provider_module.classes.keys()
+                for class_key in class_keys:
+                    # workaround(p2_add cycles 91-105): per-read draw corruption -- bind once, guard the local.
+                    val provider_class: HirClass = provider_module.classes[class_key]
+                    if provider_class == nil:
+                        continue
+                    # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                    val optional_class_source: HirSymbol? = provider_module.symbols.get_symbol_raw(provider_class.symbol.id)
+                    if val present_class_source = optional_class_source:
+                        val class_source: HirSymbol = present_class_source
+                        val canonical = mir_class_identity(class_source)
+                        val class_method_names: [text] = provider_class.methods.keys()
+                        var class_method_i = 0
+                        while class_method_i < class_method_names.len():
+                            val class_method_name: text = class_method_names[class_method_i]
+                            class_method_i = class_method_i + 1
+                            # Annotated dict extraction (module_build.spl #2693 pattern).
+                            val class_method_id: SymbolId = provider_class.methods[class_method_name]
+                            val class_row = row_provider.len()
+                            row_provider.push(provider_i)
+                            row_kind.push(0)
+                            row_symbol.push(class_method_id.id)
+                            row_class_symbol.push(provider_class.symbol.id)
+                            self.provider_method_file_row_v1("{canonical}::{class_method_name}", class_row)
+                # Owner rows, in function order. The owner decision itself is
+                # re-made at materialization (provider_method_dispatch_key_v1);
+                # a row is filed under every key that decision can produce.
+                var func_i = 0
+                while func_i < funcs.len():
+                    val method_func: HirFunction = funcs[func_i]
+                    func_i = func_i + 1
+                    if not method_func.is_method and not method_func.is_static:
+                        continue
+                    # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+                    val optional_source: HirSymbol? = provider_module.symbols.get_symbol_raw(method_func.symbol.id)
+                    if val present_source = optional_source:
+                        val source: HirSymbol = present_source
+                        val identity = mir_provider_callable_identity(source.defining_module ?? "", source.name)
+                        val parts = identity.split(".")
+                        if parts.len() >= 2:
+                            val method_name = parts[parts.len() - 1]
+                            val class_key = identity.substring(0, identity.len() - method_name.len() - 1)
+                            val extension_owner = mir_provider_extension_owner_key(source.defining_module ?? "", source.name)
+                            val owner_row = row_provider.len()
+                            row_provider.push(provider_i)
+                            row_kind.push(1)
+                            row_symbol.push(method_func.symbol.id)
+                            row_class_symbol.push(-1)
+                            self.provider_method_row_return_type[owner_row] = method_func.return_type
+                            self.provider_method_file_row_v1("{class_key}::{method_name}", owner_row)
+                            if method_func.is_static:
+                                self.provider_method_file_row_v1("static::{class_key}::{method_name}", owner_row)
+                            if extension_owner != "" and extension_owner != class_key:
+                                self.provider_method_file_row_v1("{extension_owner}::{method_name}", owner_row)
+                                if method_func.is_static:
+                                    self.provider_method_file_row_v1("static::{extension_owner}::{method_name}", owner_row)
+            links_by_index.push(links)
+            links_ready.push(built)
+            provider_i = provider_i + 1
+        self.provider_session_names = names
+        self.provider_session_links = links_by_index
+        self.provider_session_links_ready = links_ready
+        self.provider_method_row_provider = row_provider
+        self.provider_method_row_kind = row_kind
+        self.provider_method_row_symbol = row_symbol
+        self.provider_method_row_class_symbol = row_class_symbol
+
+    me provider_method_file_row_v1(key: text, row: i64):
+        if self.provider_method_row_keys.has(key):
+            var rows: [i64] = self.provider_method_row_keys[key]
+            rows.push(row)
+            self.provider_method_row_keys[key] = rows
+        else:
+            self.provider_method_row_keys[key] = [row]
+
+    me struct_method_key_present_v1(key: text) -> bool:
+        """`struct_method_syms.has(key)` after its provider rows are installed."""
+        self.provider_method_materialize_v1(key)
+        self.struct_method_syms.has(key)
+
+    me provider_method_materialize_v1(key: text):
+        """Install the provider rows for `key` exactly as the eager provider
+        pass would have left them: replay the rows in their eager order
+        against scratch state (class rows overwrite; owner rows run
+        register_owner_method's ambiguity rule), then publish. A key already
+        written by a later (local or declaration) registration keeps that
+        value, as it did when it overwrote the eager row; the ambiguity flag
+        and the boolean return-shape rows only ever get set, as before."""
+        if self.provider_method_modules.len() == 0:
+            return
+        if self.provider_method_materialized.has(key):
+            return
+        self.provider_method_materialized[key] = true
+        if not self.provider_method_row_keys.has(key):
+            return
+        val rows: [i64] = self.provider_method_row_keys[key]
+        val static_key = key.starts_with("static::")
+        var have = false
+        var current = SymbolId(id: -1)
+        var ambiguous = false
+        var has_return_name = false
+        var return_name = ""
+        var returns_array = false
+        var returns_optional = false
+        var ri = 0
+        while ri < rows.len():
+            val row: i64 = rows[ri]
+            ri = ri + 1
+            if row < 0 or row >= self.provider_method_row_provider.len():
+                continue
+            val provider_index: i64 = self.provider_method_row_provider[row]
+            if provider_index < 0 or provider_index >= self.provider_method_modules.len() or provider_index >= self.provider_session_links.len():
+                continue
+            val provider_module: HirModule = self.provider_method_modules[provider_index]
+            # The eager pass never registered a module as its own provider.
+            if provider_module.name == self.provider_method_consumer:
+                continue
+            val links: Dict<i64, text> = self.provider_session_links[provider_index]
+            val method_symbol = SymbolId(id: self.provider_method_row_symbol[row])
+            if self.provider_method_row_kind[row] == 0:
+                if static_key:
+                    continue
+                # register_provider_class already relocated the class symbol
+                # for this consumer (or diagnosed it and wrote no rows).
+                val class_target = self.relocate_provider_type_symbol(SymbolId(id: self.provider_method_row_class_symbol[row]), provider_module.symbols)
+                if class_target.id < 0:
+                    continue
+                val class_method = self.relocate_provider_callable(method_symbol, provider_module.symbols, links)
+                if class_method.id >= 0:
+                    current = class_method
+                    have = true
+                continue
+            val dispatch_key = self.provider_method_dispatch_key_v1(method_symbol, provider_module.symbols)
+            if dispatch_key == "":
+                continue
+            val row_key = if static_key: "static::{dispatch_key}" else: dispatch_key
+            if row_key != key:
+                continue
+            val method = self.relocate_provider_callable(method_symbol, provider_module.symbols, links)
+            if method.id < 0:
+                continue
+            if have and current.id != method.id:
+                # register_owner_method's rule: an unknown owner on either
+                # side is never evidence of a second declaring module.
+                val prior_owner = self.symbols.symbol_defining_module_scalar_raw(current.id)
+                val owner_module = provider_module.symbols.symbol_defining_module_scalar_raw(method_symbol.id)
+                if prior_owner != "" and owner_module != "":
+                    if _hir_symbol_owner_module(prior_owner) != _hir_symbol_owner_module(owner_module):
+                        ambiguous = true
+            current = method
+            have = true
+            if not static_key and self.provider_method_row_return_type.has(row):
+                val return_type: HirType = self.provider_method_row_return_type[row]
+                val ret = self.relocate_provider_type(return_type, provider_module.symbols)
+                val ret_name = self.provider_method_return_name_v1(ret)
+                if ret_name != "":
+                    return_name = ret_name
+                    has_return_name = true
+                val ret_kind: HirTypeKind = ret.kind
+                match ret_kind:
+                    case Array(_, _) | Slice(_): returns_array = true
+                    case Optional(_): returns_optional = true
+                    case _: ()
+        if have and not self.struct_method_syms.has(key):
+            self.struct_method_syms[key] = current
+        if ambiguous and self.provider_method_record_ambiguity:
+            self.struct_method_ambiguous[key] = true
+        if has_return_name and not self.struct_method_return_names.has(key):
+            self.struct_method_return_names[key] = return_name
+        if returns_array:
+            self.struct_method_return_is_array[key] = true
+        if returns_optional:
+            self.struct_method_return_is_optional[key] = true
