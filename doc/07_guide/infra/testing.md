@@ -441,9 +441,9 @@ what this tag must never become.
 | Guarantee | Meaning | Verified today |
 |---|---|---|
 | Expected to FAIL | A red result is the *normal* state; it is not an incident | policy only |
-| SKIPPED in whole-suite runs | `bin/simple test` with no path does not execute it, so it cannot turn the suite red | pending sibling lane |
-| COUNTED in the summary | The runner summary reports the in-development count, so the debt is visible, never invisible | pending sibling lane |
-| Listable | `simple test --tag in-development` selects exactly these specs | `--tag <name>` filtering itself exists (`src/compiler_rust/driver/src/cli/test_runner/args.rs:24`, forwarded at `execution.rs:923-925`); the `in-development` value is pending |
+| SKIPPED in whole-suite runs | `bin/simple test` with no path does not execute it, so it cannot turn the suite red | enforced (2026-10-19): `classify_in_development` in `src/lib/nogc_sync_mut/spec/in_development.spl`, applied per file by `in_development_adjust` in `src/app/test_runner_new/test_runner_main.spl` |
+| COUNTED in the summary | The runner summary reports the in-development count, so the debt is visible, never invisible | enforced: `in_development_summary_line` printed by `test_runner_main.spl`; each `SPEC FILE VERDICT:` line carries `in_development=<n>` |
+| Listable | `simple test --tag in-development` selects exactly these specs | enforced: `content_has_tag` in `src/lib/nogc_sync_mut/test_runner/test_runner_files.spl` matches the `# @tag:in-development` header (pinned by `test/01_unit/app/test_runner_new/tag_filter_header_spec.spl`); on an explicit path a non-matching `--tag` is an empty selection (exit 4), not a run |
 
 Two things follow from "counted, not hidden": the count is a **debt figure that
 is supposed to go down**, and a suite whose in-development count is rising
