@@ -48,12 +48,13 @@ box (`rt_value_u64`, Rust `HeapUInt`).
   accessor `a[i]` already uses, and skips the unbox. Typed `[u8]` and untyped
   loops are unchanged.
 - Self-hosted compiler: `lower_for_array_indexed`
-  (`src/compiler/50.mir/mir_lowering_stmts.spl`) now reads a `[u8]` element
-  through `rt_bytes_u8_at` + cast, mirroring the index read
-  (`expr_dispatch.spl` `typed_u8_runtime_read`). This has NOT been
-  exercised: no self-hosted binary is deployed in this worktree. The
-  self-hosted index read has no `[u64]` arm either, so `[u64]` is still open
-  there.
+  (`src/compiler/50.mir/mir_lowering_stmts.spl`) has the same `[u8]` defect.
+  The fix (read through `rt_bytes_u8_at` + cast, mirroring `expr_dispatch.spl`
+  `typed_u8_runtime_read`) is split out to branch
+  `work/selfhost-forloop-packed-u8`. It will land with a Stage 2 proof,
+  because Stage 2 compiles that file natively and the fix has not been
+  exercised. `[u64]` has no self-hosted index-read precedent and is still
+  open.
 - Still open: seed array destructuring (`val [p, q] = data`,
   `lowering_stmt.rs:117`) fails codegen in JIT and native with
   `GlobalLoad: unresolved identifier 'p'`. That has to be fixed before its
