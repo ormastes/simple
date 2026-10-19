@@ -252,23 +252,36 @@ class SdnTable:
             return nil
 
         # Parse rows
+        # Cycle-173: bind-once family throughout -- measured on
+        # candidate-seednew as EMPTY parsed tables (0 rows) for a DB whose
+        # header parsed fine, because the bare lines[i] element read drew
+        # (every row then mismatched the column count and was silently
+        # skipped) and the bare columns[j]/parts[j] reads could do the same
+        # on the next draw. The row body must never be silently dropped:
+        # an empty bugs table surfaces downstream as 'unknown canonical bug
+        # ID' with the id printing correctly.
         val table = SdnTable(name: table_name, columns: columns, rows: [], index: {})
-        for i in (header_idx + 1)..lines.len():
-            val line = lines[i].trim()
+        val columns_parsed: [text] = columns
+        val row_bound: i64 = lines.len()
+        for raw_i in (header_idx + 1)..row_bound:
+            val i: i64 = raw_i
+            val raw_line: text = lines[i]
+            val line = raw_line.trim()
             if line == "" or line.starts_with("#"):
                 continue
 
             # Parse row with quote-aware CSV splitting
             # Handles quoted values that contain commas
             val parts = split_sdn_row(line)
-            if parts.len() != columns.len():
+            if parts.len() != columns_parsed.len():
                 continue
 
             val row = SdnRow(fields: {}, _version: 0)
             var j = 0
-            while j < columns.len():
-                val col = columns[j]
-                val value = parts[j].trim()
+            while j < columns_parsed.len():
+                val col: text = columns_parsed[j]
+                val raw_value: text = parts[j]
+                val value = raw_value.trim()
                 # Strip surrounding quotes if present
                 val unquoted = strip_quotes(value)
                 row.set(col, unquoted)
@@ -376,9 +389,17 @@ class SdnTable:
 
     # Get row by primary key
     fn get_row(key: text) -> SdnRow?:
+        # Cycle-173: bind-once family. The bare for-in over the SdnRow array
+        # arrived erased (cycle-71 ANY-transport) and the bare key reads at
+        # the Option compare drew on candidate-seednew -- the scan then never
+        # matched a row that IS present, surfacing as 'unknown canonical bug
+        # ID' in the workaround refresh with the id printed correctly.
+        val key_lookup: text = key
         val pk = self.primary_key_column()
-        for row in self.rows:
-            if row.get(pk) == Some(key):
+        val pk_lookup: text = pk
+        for raw_row in self.rows:
+            val row: SdnRow = raw_row
+            if row.get(pk_lookup) == Some(key_lookup):
                 return Some(row)
         nil
 
@@ -581,8 +602,12 @@ class SdnDatabase:
 
     # Get table by name
     fn get_table(name: text) -> SdnTable?:
-        if self.tables.contains_key(name):
-            Some(self.tables[name])
+        # Cycle-173: annotated binds for the name reads and the dict
+        # extraction (cycle-76/77 proven transport).
+        val name_lookup: text = name
+        if self.tables.contains_key(name_lookup):
+            val table: SdnTable = self.tables[name_lookup]
+            Some(table)
         else:
             nil
 
