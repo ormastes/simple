@@ -1,0 +1,49 @@
+# @req REQ-GENERIC-BOUND-TRANSPORT
+# Regression: doc/08_tracking/bug/eq_ord_where_bound_unresolved_hir_2026_10_19.md
+use std.spec.{describe, it, expect, step, fail}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.HirFunction
+
+fn builtin_bound_parse(source: text) -> ParserModule:
+    val parsed = parse_full_frontend(source, "builtin_bound.spl", "builtin_bound", Logger(level: 0))
+    expect(parser_has_errors()).to_be(false)
+    parsed
+
+fn builtin_bound_function(module: HirModule, name: text) -> HirFunction:
+    for function in module.functions.values():
+        if function.name == name: return function
+    fail("missing lowered function " + name)
+    nil
+
+describe "builtin trait where bounds in HIR lowering":
+    it "lowers `where K: Ord + Eq` on a generic fn without unresolved-type errors":
+        step("The ordered_key_cmp.spl shape that poisoned Phase 3")
+        val parsed = builtin_bound_parse("fn usable<K>(key: K) -> bool where K: Ord + Eq:\n    key == key\n")
+        expect(parsed.functions["usable"].type_params[0].bounds.len()).to_equal(2)
+        var lowering = HirLowering.with_filename("builtin_bound.spl")
+        val module = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        val function = builtin_bound_function(module, "usable")
+        expect(function.type_params.len()).to_equal(1)
+
+    it "keeps a declared trait bound next to builtin ones":
+        step("sprof_collection_profile.spl shape: Hash + Eq + Ord with Hash declared")
+        val parsed = builtin_bound_parse("trait Hash:\n    fn hash(self) -> i64:\n        0\nfn g<K>(key: K) -> K where K: Hash + Eq + Ord:\n    key\n")
+        var lowering = HirLowering.with_filename("builtin_bound.spl")
+        val module = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        val function = builtin_bound_function(module, "g")
+        expect(function.type_params[0].bounds.len()).to_equal(1)
+
+    it "still reports an unknown non-builtin trait bound":
+        step("Only the trait solver's builtin set is exempt")
+        val parsed = builtin_bound_parse("fn h<K>(key: K) -> K where K: Ord + MissingTrait:\n    key\n")
+        var lowering = HirLowering.with_filename("builtin_bound.spl")
+        val module = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_be_greater_than(0)
