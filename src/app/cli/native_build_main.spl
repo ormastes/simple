@@ -33,6 +33,7 @@ use std.io_runtime.{get_args}
 use std.io_runtime.{file_exists, file_delete}
 use std.io_runtime.{file_write}
 use std.io_runtime.{getpid}
+use std.io_runtime.{time_now_monotonic_ms}
 use std.io_runtime.{dir_create_all, dir_remove_all, dir_exists}
 use app.cli.parse_shard_queue.{parse_shard_release_claims, parse_shard_exit_label}
 use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal}
@@ -820,8 +821,13 @@ fn run_hir_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64) -
 
 # Shared worker-pool driver for the HIR and MIR shard ledgers
 # (driver_hir_recovery.spl). Spawns `count` owners at most `parallel` at a
-# time, reaps and seals each, replaces a crashed owner that made progress
-# (unless fail-fast), closes the inventory, and returns the aggregate exit.
+# time (a free slot is refilled at once), reaps and seals each, replaces a
+# crashed owner that made progress (unless fail-fast), closes the inventory,
+# and returns the aggregate exit. timeout_ms (0 = none) runs from each
+# worker's own spawn; the old sequential waits let the k-th worker of a wave
+# run up to k x timeout_ms. Reap (and log) order is exit order, not index.
+const SHARD_POOL_POLL_MS: i64 = 200
+
 fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         base: [text], queue_dir: text, args: [text], count: i64, parallel: i64,
         simple_bin: text, timeout_ms: i64) -> i64:
@@ -841,64 +847,102 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     var all_stopped = true
     while pending.len() > 0 and not hir_shard_recovery_blocked(queue_dir):
         var replacements: [i64] = []
-        var window_start: i64 = 0
-        while window_start < pending.len() and not hir_shard_recovery_blocked(queue_dir):
-            var window: [i64] = []
-            while window.len() < window_size and window_start + window.len() < pending.len():
-                window = window.push(pending[window_start + window.len()])
-            window_start = window_start + window.len()
-            var pids: [i64] = []
-            var owners: [text] = []
-            for index in window:
+        # Slot pool, not waves: a worker starts as soon as any of the
+        # `window_size` slots frees, so one slow worker no longer idles the
+        # rest of its wave (count > parallel is the per-worker memory knob).
+        # Replacements still wait for the next generation, as before.
+        var next_pending: i64 = 0
+        var pids: [i64] = []
+        var owners: [text] = []
+        var indices: [i64] = []
+        var started_ms: [i64] = []
+        while next_pending < pending.len() or pids.len() > 0:
+            while pids.len() < window_size and next_pending < pending.len() and
+                    not hir_shard_recovery_blocked(queue_dir):
+                val index = pending[next_pending]
+                next_pending = next_pending + 1
                 val owner = "{index}/{count}@{generation}"
                 env_set(owner_env, owner)
                 var shard_args = base
                 shard_args = shard_args.push("{flag}={index}/{count}")
                 pids = pids.push(process_spawn_async(simple_bin, shard_args))
                 owners = owners.push(owner)
+                indices = indices.push(index)
+                started_ms = started_ms.push(time_now_monotonic_ms())
+            if pids.len() == 0:
+                break
+            # Reap the first live worker that exited, failed to wait, or ran
+            # past timeout_ms (0 = no deadline); -2 from a short poll is
+            # "still running", exactly what the blocking wait returned on
+            # timeout, so the kill/seal handling below is unchanged.
+            var reap_at: i64 = -1
+            var code: i64 = -1
+            i = 0
+            while reap_at < 0 and i < pids.len():
+                if pids[i] <= 0:
+                    reap_at = i
+                else:
+                    val polled = native_build_normalize_exit_code(process_wait(pids[i], SHARD_POOL_POLL_MS))
+                    if polled != -2 or (timeout_ms > 0 and time_now_monotonic_ms() - started_ms[i] >= timeout_ms):
+                        reap_at = i
+                        code = polled
+                i = i + 1
+            if reap_at < 0:
+                continue
+            val pid = pids[reap_at]
+            val owner = owners[reap_at]
+            val reaped_index = indices[reap_at]
+            var kept_pids: [i64] = []
+            var kept_owners: [text] = []
+            var kept_indices: [i64] = []
+            var kept_started: [i64] = []
             i = 0
             while i < pids.len():
-                val pid = pids[i]
-                val owner = owners[i]
-                val code = if pid > 0: native_build_normalize_exit_code(process_wait(pid, timeout_ms)) else: -1
-                # -1 is a wait error, not proof of exit. Even a false liveness
-                # probe also means invalid handle; require a real reap result.
-                var owner_stopped = pid <= 0 or (code != -2 and code != -1 and not process_is_running(pid))
-                if not owner_stopped and pid > 0:
-                    val _killed = process_kill(pid)
-                    val reaped = native_build_normalize_exit_code(process_wait(pid, 5000))
-                    owner_stopped = reaped != -2 and reaped != -1 and not process_is_running(pid)
-                    if not owner_stopped:
-                        all_stopped = false
-                        val _blocked = hir_shard_recovery_block(queue_dir, "worker could not be reaped")
-                val progress = hir_shard_recovery_progress(queue_dir, owner)
-                val finished = hir_shard_recovery_finished(queue_dir, owner)
-                val state = if hir_shard_recovery_blocked(queue_dir): "BLOCKED" elif code < 0: "CRASH" elif finished: "FAILED" else: "BLOCKED"
-                val sealed = if owner_stopped: hir_shard_recovery_seal(queue_dir, owner, state) else: -1
-                if code != 0 or sealed != 0 or not finished:
-                    failed_workers = failed_workers + 1
-                    eprint "[{label}] owner={owner} status={state} exit={code} claimed={progress} sealed={sealed} finished={finished}"
-                    if sealed < 0 or progress < 0 or (not finished and progress == 0) or code == 0 or (code > 0 and sealed > 0):
-                        val _blocked = hir_shard_recovery_block(queue_dir, "incomplete worker or ledger publication")
-                    elif not finished and not hir_shard_recovery_blocked(queue_dir) and hir_shard_recovery_can_replace(fail_fast, code, progress):
-                        replacements = replacements.push(window[i])
-                else:
-                    done = done + 1
-                if fail_fast and failed_workers > 0:
-                    var remaining = i + 1
-                    while remaining < pids.len():
-                        if pids[remaining] > 0:
-                            val _killed = process_kill(pids[remaining])
-                            val reaped = native_build_normalize_exit_code(process_wait(pids[remaining], 5000))
-                            if reaped != -2 and reaped != -1 and not process_is_running(pids[remaining]):
-                                val _sealed = hir_shard_recovery_seal(queue_dir, owners[remaining], "BLOCKED")
-                            else:
-                                all_stopped = false
-                                val _blocked = hir_shard_recovery_block(queue_dir, "cancelled worker could not be reaped")
-                        remaining = remaining + 1
-                    break
+                if i != reap_at:
+                    kept_pids = kept_pids.push(pids[i])
+                    kept_owners = kept_owners.push(owners[i])
+                    kept_indices = kept_indices.push(indices[i])
+                    kept_started = kept_started.push(started_ms[i])
                 i = i + 1
+            pids = kept_pids
+            owners = kept_owners
+            indices = kept_indices
+            started_ms = kept_started
+            # -1 is a wait error, not proof of exit. Even a false liveness
+            # probe also means invalid handle; require a real reap result.
+            var owner_stopped = pid <= 0 or (code != -2 and code != -1 and not process_is_running(pid))
+            if not owner_stopped and pid > 0:
+                val _killed = process_kill(pid)
+                val reaped = native_build_normalize_exit_code(process_wait(pid, 5000))
+                owner_stopped = reaped != -2 and reaped != -1 and not process_is_running(pid)
+                if not owner_stopped:
+                    all_stopped = false
+                    val _blocked = hir_shard_recovery_block(queue_dir, "worker could not be reaped")
+            val progress = hir_shard_recovery_progress(queue_dir, owner)
+            val finished = hir_shard_recovery_finished(queue_dir, owner)
+            val state = if hir_shard_recovery_blocked(queue_dir): "BLOCKED" elif code < 0: "CRASH" elif finished: "FAILED" else: "BLOCKED"
+            val sealed = if owner_stopped: hir_shard_recovery_seal(queue_dir, owner, state) else: -1
+            if code != 0 or sealed != 0 or not finished:
+                failed_workers = failed_workers + 1
+                eprint "[{label}] owner={owner} status={state} exit={code} claimed={progress} sealed={sealed} finished={finished}"
+                if sealed < 0 or progress < 0 or (not finished and progress == 0) or code == 0 or (code > 0 and sealed > 0):
+                    val _blocked = hir_shard_recovery_block(queue_dir, "incomplete worker or ledger publication")
+                elif not finished and not hir_shard_recovery_blocked(queue_dir) and hir_shard_recovery_can_replace(fail_fast, code, progress):
+                    replacements = replacements.push(reaped_index)
+            else:
+                done = done + 1
             if fail_fast and failed_workers > 0:
+                var remaining = 0
+                while remaining < pids.len():
+                    if pids[remaining] > 0:
+                        val _killed = process_kill(pids[remaining])
+                        val reaped = native_build_normalize_exit_code(process_wait(pids[remaining], 5000))
+                        if reaped != -2 and reaped != -1 and not process_is_running(pids[remaining]):
+                            val _sealed = hir_shard_recovery_seal(queue_dir, owners[remaining], "BLOCKED")
+                        else:
+                            all_stopped = false
+                            val _blocked = hir_shard_recovery_block(queue_dir, "cancelled worker could not be reaped")
+                    remaining = remaining + 1
                 break
         if fail_fast and failed_workers > 0:
             break
@@ -928,7 +972,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
 # SIMPLE_MIR_SHARD_COUNT sets the number of shards (default: the concurrent
 # worker count). Concurrency is the memory-clamped --threads value under the
 # SIMPLE_MIR_SHARD_WORKER_KB per-worker budget; more shards than concurrent
-# workers run in waves, so each worker's MIR share shrinks with the count.
+# workers queue for a free slot, so each worker's MIR share shrinks with the count.
 fn native_build_mir_shard_parallel(args: [text]) -> i64:
     if (env_get("SIMPLE_MIR_SHARD") ?? "") != "" or (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or
             (env_get("SIMPLE_PARSE_SHARD") ?? "") != "":
