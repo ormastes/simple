@@ -1,0 +1,66 @@
+# @req REQ-IM-006 REQ-IM-007 REQ-IM-016 NFR-IM-004
+use std.spec.*
+use compiler.frontend.flat_ast_bridge.{flat_pool_capture_arm, flat_pool_capture_take,
+    flat_pool_transport_capture_arm_v1, flat_pool_transport_capture_take_v1,
+    parse_and_build_module_scoped, build_module_from_flat_pool_blob}
+use compiler.core.parser.{parser_has_errors}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+
+fn transport_warning_source() -> text:
+    "fn main() -> i64:\n    var total = 0\n    val x = 2\n    val hook = fn() -> i64:\n        total = total + x\n        total\n    hook()\n"
+
+describe "REQ-IM-006: parser-owned warning transport without ordinary cache publication":
+    it "should preserve warning-success AST while ordinary cache capture stays suppressed":
+        val previous = env_get("SIMPLE_CAPTURE_WRITE_CHECK")
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", "warning")).to_be(true)
+        step("Run the ordinary warning parse with its unchanged noncacheable policy")
+        flat_pool_capture_arm()
+        val ordinary = parse_and_build_module_scoped(transport_warning_source(), "src/capture.spl", false)
+        val ordinary_error = parser_has_errors()
+        val ordinary_blob = flat_pool_capture_take()
+        step("Capture the same successful AST and pre-desugar warning through the explicit transport owner")
+        flat_pool_transport_capture_arm_v1()
+        val transported = parse_and_build_module_scoped(transport_warning_source(), "src/capture.spl", false)
+        val transport_error = parser_has_errors()
+        val packet = flat_pool_transport_capture_take_v1()
+        val restored = build_module_from_flat_pool_blob(packet.blob, transport_warning_source(), "src/capture.spl")
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", previous)).to_be(true)
+        expect(ordinary_error).to_be(false)
+        expect(transport_error).to_be(false)
+        expect(ordinary.functions.contains_key("main")).to_be(true)
+        expect(transported.functions.contains_key("main")).to_be(true)
+        expect(restored.unwrap().functions.contains_key("main")).to_be(true)
+        expect(ordinary_blob).to_equal("")
+        expect(packet.blob == "").to_be(false)
+        expect(packet.warning == "").to_be(false)
+        expect(packet.warning_line).to_equal(6)
+        expect(packet.warning_col).to_be_greater_than(0)
+        expect(packet.reusable).to_be(false)
+        val taken_again = flat_pool_transport_capture_take_v1()
+        expect(taken_again.blob).to_equal("")
+        expect(taken_again.warning).to_equal("")
+
+    it "should isolate malformed-warning-clean captures and forbid ordinary take of transport bytes":
+        val previous = env_get("SIMPLE_CAPTURE_WRITE_CHECK")
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", "warning")).to_be(true)
+        flat_pool_transport_capture_arm_v1()
+        val _warning = parse_and_build_module_scoped(transport_warning_source(), "src/capture.spl", false)
+        val _bad = parse_and_build_module_scoped("fn broken():\n    val = 1\n", "src/bad.spl", false)
+        val failed = parser_has_errors()
+        val bad_packet = flat_pool_transport_capture_take_v1()
+        flat_pool_transport_capture_arm_v1()
+        val _clean = parse_and_build_module_scoped("fn answer() -> i64:\n    42\n", "src/good.spl", false)
+        val clean_packet = flat_pool_transport_capture_take_v1()
+        flat_pool_transport_capture_arm_v1()
+        val _other = parse_and_build_module_scoped(transport_warning_source(), "src/capture.spl", false)
+        val ordinary_take = flat_pool_capture_take()
+        val after_wrong_take = flat_pool_transport_capture_take_v1()
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", previous)).to_be(true)
+        expect(failed).to_be(true)
+        expect(bad_packet.blob).to_equal("")
+        expect(bad_packet.warning).to_equal("")
+        expect(clean_packet.blob == "").to_be(false)
+        expect(clean_packet.warning).to_equal("")
+        expect(clean_packet.reusable).to_be(true)
+        expect(ordinary_take).to_equal("")
+        expect(after_wrong_take.blob).to_equal("")
