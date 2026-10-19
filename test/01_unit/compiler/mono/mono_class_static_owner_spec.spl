@@ -122,6 +122,29 @@ describe "class-owned static generic specialization":
                     registered = registered + 1
             expect(registered).to_equal(2)
 
+    it "keeps the erased route for a static signature that never names the owner parameter":
+        # PureTensor.zeros / ScalableVec.min_lanes shape: owner-free signatures
+        # carry no binding evidence and must not become owner templates.
+        val source = "class Grid<T>:\n    static fn lanes() -> i64:\n        4\n    static fn sizes(count: i64) -> [f64]:\n        []\n    static fn count_of(items: [T]) -> i64:\n        0\n\nfn width() -> i64:\n    Grid.lanes()\n"
+        val hir = class_static_lower_one(source)
+        var mono = MonomorphizationPass.create()
+        mono.current_module = "factory"
+        mono.collect_generics(hir, "factory")
+        var checked = 0
+        for key in hir.classes.keys():
+            val owner: HirClass = hir.classes[key]
+            if owner.name != "Grid": continue
+            expect(mono.class_static_template_v1(owner.symbol, "lanes")).to_equal("")
+            expect(mono.class_static_template_v1(owner.symbol, "sizes")).to_equal("")
+            expect(mono.class_static_template_v1(owner.symbol, "count_of") != "").to_equal(true)
+            checked = checked + 1
+        expect(checked).to_equal(1)
+        var modules: Dict<text, HirModule> = {}
+        modules["factory"] = hir
+        val (output, stats) = run_monomorphization(modules)
+        expect(stats.specializations_created).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+
     it "relocates an imported nominal argument and calls the exact owner specialization":
         val consumer = "use factory.{Future}\nuse payload.{Payload}\n\nfn roundtrip(value: Payload) -> Payload:\n    Future<Payload>.from_value(value)\n"
         val sources = [
