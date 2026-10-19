@@ -24,6 +24,18 @@
 #   interpreter, so tier 2 is native-only and its absence is reported, never
 #   counted as a pass.
 #
+# Second subject (2026-10-19): a module-level text memo is the same defect with
+# no carrier at all. `module_logical_name_from_path`
+# (00.common/module_path_naming.spl) inserted into `_module_logical_name_cache`
+# on every miss; misses happen inside the per-file HIR and per-module MIR
+# scopes, no promote root reaches a module-level dict, so ending the scope freed
+# the retained value and later hits returned reused storage (Stage 2 read
+# `schema=...` build-progress text as imported-enum owners, ~138 MIR errors).
+# Tier 1 requires that the memo store sits directly under
+# `if _module_logical_name_cache_retaining:` (set only by
+# module_logical_name_cache_warm at a scope-free point). Tier 2 also runs
+# test/fixture/transient_scope/global_text_memo.spl.
+#
 # SCAN ROOT (--rev, added 2026-09-07). Bare, tier 1 reads the working checkout.
 # On this box ~20 agent sessions share one clone, so the checkout routinely holds
 # content that is NOT being pushed and lacks content that IS — a push gate that
@@ -48,6 +60,8 @@ types_rel="src/compiler/20.hir/hir_lowering/module_surface_types.spl"
 freeze_rel="src/compiler/20.hir/hir_lowering/module_surface_registry_index.spl"
 promote_rel="src/compiler/20.hir/hir_lowering/module_surface_registry.spl"
 fixture_rel="test/fixture/transient_scope/text_field_promotion.spl"
+memo_rel="src/compiler/00.common/module_path_naming.spl"
+memo_fixture_rel="test/fixture/transient_scope/global_text_memo.spl"
 
 rev=""
 selftest_only=0
@@ -85,9 +99,23 @@ trap cleanup EXIT
 # actual defect class here.
 
 write_fixture_tree() {
-    # $1 = root, $2 = "clean" | "unpromoted"
+    # $1 = root, $2 = "clean" | "unpromoted" | "unguarded"
     _r=$1; _shape=$2
-    mkdir -p "$_r/src/compiler/20.hir/hir_lowering" "$_r/scripts/check"
+    mkdir -p "$_r/src/compiler/20.hir/hir_lowering" "$_r/src/compiler/00.common" "$_r/scripts/check"
+
+    {
+        echo 'pub fn module_logical_name_from_path(path: text) -> text:'
+        echo '    if _module_logical_name_cache.has(path):'
+        echo '        return _module_logical_name_cache[path]'
+        echo '    val computed = derive(path)'
+        [ "$_shape" != unguarded ] && echo '    if _module_logical_name_cache_retaining:'
+        if [ "$_shape" = unguarded ]; then
+            echo '    _module_logical_name_cache[path] = computed'
+        else
+            echo '        _module_logical_name_cache[path] = computed'
+        fi
+        echo '    computed'
+    } > "$_r/$memo_rel"
 
     {
         echo 'class ModuleSurface:'
@@ -125,7 +153,9 @@ write_fixture_tree() {
 # verdict_of <root> [args...] -> echoes "rc|last stdout line"
 verdict_of() {
     _root=$1; shift
-    _out=$(cd "$_root" && SIMPLE_TRANSIENT_CHECK_NO_SELFTEST=1 \
+    # Fixtures exercise tier 1 only: an inherited tier-2 compiler would try to
+    # build fixture sources the temporary tree does not contain.
+    _out=$(cd "$_root" && SIMPLE_TRANSIENT_CHECK_NO_SELFTEST=1 SIMPLE_NATIVE_COMPILER= \
         sh "$_root/scripts/check/$(basename "$0")" "$@" 2>/dev/null)
     _rc=$?
     printf '%s|%s\n' "$_rc" "$(printf '%s\n' "$_out" | tail -n 1)"
@@ -197,6 +227,16 @@ run_selftest() {
         *) echo "selftest fixture 5 (bad rev) expected ERROR, got: $(verdict_of "$_t" --rev deadbeefdeadbeefdeadbeefdeadbeefdeadbeef)" >&2; _fail=$((_fail + 1)) ;;
     esac
 
+    # 7: an unguarded memo store (the 2026-10-19 Stage-2 shape) is FAIL even
+    # when every ModuleSurface field is promoted.
+    write_fixture_tree "$_t" unguarded
+    _n=$((_n + 1))
+    case $(verdict_of "$_t") in
+        1\|FAIL*) : ;;
+        *) echo "selftest fixture 7 (unguarded memo) expected FAIL, got: $(verdict_of "$_t")" >&2; _fail=$((_fail + 1)) ;;
+    esac
+    write_fixture_tree "$_t" clean
+
     # 6: a subject that has vanished is ERROR, not a vacuous PASS.
     _n=$((_n + 1))
     : > "$_t/$types_rel"
@@ -234,7 +274,7 @@ if [ -n "$rev" ]; then
         exit 2
     }
     scan_root=$SCAN_TMP
-    for rel in "$types_rel" "$freeze_rel" "$promote_rel"; do
+    for rel in "$types_rel" "$freeze_rel" "$promote_rel" "$memo_rel"; do
         mkdir -p "$scan_root/$(dirname "$rel")"
         if ! git -C "$repo_root" show "$rev:$rel" > "$scan_root/$rel" 2>/dev/null; then
             echo "ERROR — nothing was checked (cannot materialise $rel at $rev)"
@@ -246,8 +286,9 @@ fi
 types_file="$scan_root/$types_rel"
 freeze_file="$scan_root/$freeze_rel"
 promote_file="$scan_root/$promote_rel"
+memo_file="$scan_root/$memo_rel"
 
-for f in "$types_file" "$freeze_file" "$promote_file"; do
+for f in "$types_file" "$freeze_file" "$promote_file" "$memo_file"; do
     if [ ! -f "$f" ]; then
         echo "ERROR — nothing was checked (missing source file: $f)"
         exit 2
@@ -317,13 +358,41 @@ if [ -n "$missing" ]; then
     exit 1
 fi
 
+# The logical-name memo store must sit directly under the retention guard.
+memo_shape=$(awk '
+    /^pub fn module_logical_name_from_path\(/ { infn = 1; next }
+    infn && /^[^ \t#]/ { infn = 0 }
+    infn && index($0, "_module_logical_name_cache[path] =") > 0 {
+        stores++
+        if (prev ~ /^    if _module_logical_name_cache_retaining:[ \t]*$/ && $0 ~ /^        _module_logical_name_cache/) guarded++
+    }
+    infn && $0 !~ /^[ \t]*$/ { prev = $0 }
+    END {
+        if (stores == 0) print "absent"
+        else if (guarded == stores) print "guarded"
+        else print "unguarded"
+    }
+' "$memo_file")
+
+case $memo_shape in
+    absent)
+        echo "ERROR — nothing was checked (module_logical_name_from_path no longer stores into _module_logical_name_cache in $memo_file; re-derive this subject before deleting the check)"
+        exit 2
+        ;;
+    unguarded)
+        echo "  A miss inside a transient scope retains a value that scope frees; later hits read reused storage."
+        echo "FAIL — $checked freeze-scope text field(s) promoted, but module_logical_name_from_path retains a memo entry outside the module_logical_name_cache_warm guard in the $scope_note"
+        exit 1
+        ;;
+esac
+
 # --- Tier 2: native fixture (opt-in) --------------------------------------
 
 # Under --rev tier 1 read the revision; building the WORKING COPY's fixture here
 # would mix evidence from two trees, so tier 2 is reported as not run rather than
 # quietly answering about a different tree.
 if [ -n "$rev" ]; then
-    echo "PASS — $checked freeze-scope text field(s) checked in the $scope_note, all promoted (tier 2 not run under --rev: the native fixture is built from a checkout, not from a revision)"
+    echo "PASS — $checked freeze-scope text field(s) checked in the $scope_note, all promoted, logical-name memo store guarded (tier 2 not run under --rev: the native fixture is built from a checkout, not from a revision)"
     exit 0
 fi
 
@@ -331,7 +400,7 @@ compiler=${SIMPLE_NATIVE_COMPILER:-}
 runtime_path=${SIMPLE_NATIVE_RUNTIME_PATH:-}
 
 if [ -z "$compiler" ] || [ -z "$runtime_path" ]; then
-    echo "PASS — $checked freeze-scope text field(s) checked in the $scope_note, all promoted (tier 2 not run: set SIMPLE_NATIVE_COMPILER and SIMPLE_NATIVE_RUNTIME_PATH to also execute $fixture_rel natively)"
+    echo "PASS — $checked freeze-scope text field(s) checked in the $scope_note, all promoted, logical-name memo store guarded (tier 2 not run: set SIMPLE_NATIVE_COMPILER and SIMPLE_NATIVE_RUNTIME_PATH to also execute $fixture_rel and $memo_fixture_rel natively)"
     exit 0
 fi
 
@@ -360,6 +429,34 @@ cd "$repo_root" || {
     exit 2
 }
 
+if [ ! -f "$repo_root/$memo_fixture_rel" ]; then
+    echo "ERROR — nothing was checked (fixture missing: $memo_fixture_rel)"
+    exit 2
+fi
+memo_binary="$workdir/global_text_memo.bin"
+memo_build_log="$workdir/memo_build.log"
+memo_run_log="$workdir/memo_run.log"
+"$compiler" native-build "$memo_fixture_rel" \
+    --target "$target" \
+    --backend llvm \
+    --runtime-bundle core-c-bootstrap \
+    --threads 2 \
+    --cache-dir "$workdir/cache" \
+    --mode dynload \
+    --runtime-path "$runtime_path" \
+    -o "$memo_binary" > "$memo_build_log" 2>&1
+memo_build_status=$?
+if [ "$memo_build_status" -ne 0 ] || [ ! -x "$memo_binary" ]; then
+    echo "ERROR — nothing was checked (tier 1 passed, but native-build of $memo_fixture_rel failed with status $memo_build_status; see $memo_build_log)"
+    exit 2
+fi
+"$memo_binary" > "$memo_run_log" 2>&1
+memo_run_status=$?
+if ! grep -q 'RESULT: REPRODUCED and FIXED' "$memo_run_log"; then
+    echo "FAIL — $checked field(s) checked; the global text memo fixture did not show the dead-scope entry and its guarded fix (status $memo_run_status); see $memo_run_log"
+    exit 1
+fi
+
 "$compiler" native-build "$fixture_rel" \
     --target "$target" \
     --backend llvm \
@@ -385,7 +482,7 @@ if [ "$run_status" -ge 124 ]; then
 fi
 
 if grep -q 'RESULT: REPRODUCED and FIXED' "$run_log"; then
-    echo "PASS — $checked freeze-scope text field(s) checked, all promoted; 2 native case(s) executed, pre-fix shape corrupts and the fix survives"
+    echo "PASS — $checked freeze-scope text field(s) checked, all promoted, logical-name memo store guarded; 4 native case(s) executed, pre-fix shapes corrupt and the fixes survive"
     exit 0
 fi
 
