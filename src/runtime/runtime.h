@@ -619,6 +619,11 @@ int64_t  rt_tls13_sha256(int64_t data);
 int64_t  rt_array_len(SplArray* array);
 int64_t  rt_array_len_safe(int64_t value);
 int64_t  rt_array_get(SplArray* array, int64_t idx);
+/* Hosted twins of the arm64 freestanding byte helpers (byte_utils.spl):
+ * unsigned index, out-of-bounds answers 0. Both return i64 per codegen's
+ * RuntimeFuncSpec, never a bare u32 (upper x0 bits would be unspecified). */
+int64_t  rt_arm_array_len_u32(SplArray* array);
+int64_t  rt_arm_array_get_byte_u32(SplArray* array, int64_t idx);
 int64_t  rt_array_get_text(SplArray* array, int64_t idx);
 int64_t  rt_array_last(SplArray* array);
 int8_t   rt_array_set(SplArray* array, int64_t idx, int64_t value);

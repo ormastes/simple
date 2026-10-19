@@ -918,6 +918,8 @@ pub use value::{
     rt_array_get_i64_raw,
     rt_array_get_text,
     rt_array_len,
+    rt_arm_array_get_byte_u32,
+    rt_arm_array_len_u32,
     rt_array_new,
     rt_array_pop,
     rt_array_push,
