@@ -4344,6 +4344,45 @@ typedef struct RtCoreEqPair {
     RtCoreArray* right;
 } RtCoreEqPair;
 
+/* Integer kind of a registered heap box: RT_VALUE_HEAP_INT (signed wide),
+ * RT_VALUE_HEAP_UINT (u64), or 0. One registry probe per value, the same count
+ * the uint-only test it replaces made. */
+static uint32_t spl_core_heap_int_kind(int64_t value) {
+    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return 0;
+    void* p = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    if (!p || !rt_core_is_registered_immortal_ptr(p)) return 0;
+    uint32_t kind = *(uint32_t*)p;
+    return (kind == RT_VALUE_HEAP_INT || kind == RT_VALUE_HEAP_UINT) ? kind : 0;
+}
+
+/* Integer value of `value` (tagged immediate, wide box or u64 box), given its
+ * spl_core_heap_int_kind. Sets *is_u64 for a u64 box. Returns 0 when `value`
+ * is not an integer. */
+static int spl_core_int_operand(int64_t value, uint32_t kind, uint64_t* bits, int* is_u64) {
+    void* p = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    *is_u64 = 0;
+    if (kind == RT_VALUE_HEAP_UINT) { *bits = ((RtCoreUInt*)p)->value; *is_u64 = 1; return 1; }
+    if (kind == RT_VALUE_HEAP_INT) { *bits = (uint64_t)((RtCoreWideInt*)p)->value; return 1; }
+    if (rt_core_is_int(value)) { *bits = (uint64_t)rt_core_as_int(value); return 1; }
+    return 0;
+}
+
+/* Numeric equality when either side is a heap integer box: 1/0, or -1 when
+ * neither side is one (the caller continues). Two wide boxes holding the same
+ * value are equal (they used to compare by address), and a u64 box equals a
+ * signed integer -- immediate or wide -- only when that integer is
+ * non-negative and has the same value. Rust twin: equality.rs heap_value_eq. */
+static int spl_core_heap_int_eq(int64_t left, int64_t right) {
+    uint32_t lk = spl_core_heap_int_kind(left);
+    uint32_t rk = spl_core_heap_int_kind(right);
+    if (!lk && !rk) return -1;
+    uint64_t a, b;
+    int au, bu;
+    if (!spl_core_int_operand(left, lk, &a, &au) || !spl_core_int_operand(right, rk, &b, &bu)) return 0;
+    if (au != bu && (int64_t)(au ? b : a) < 0) return 0;
+    return a == b;
+}
+
 #define RT_CORE_EQ_MAX_ARRAY_PAIRS 256
 
 static int rt_core_value_eq_inner(
@@ -4447,19 +4486,9 @@ static int rt_core_value_eq_inner(
         return rt_core_is_float(left) && rt_core_is_float(right) &&
             rt_core_as_float(left) == rt_core_as_float(right);
     }
-    RtCoreUInt* left_uint = rt_core_as_heap_uint(left);
-    RtCoreUInt* right_uint = rt_core_as_heap_uint(right);
-    if (left_uint || right_uint) {
-        if (left_uint && right_uint) return left_uint->value == right_uint->value;
-        if (left_uint && rt_core_is_int(right)) {
-            int64_t signed_right = rt_core_as_int(right);
-            return signed_right >= 0 && left_uint->value == (uint64_t)signed_right;
-        }
-        if (right_uint && rt_core_is_int(left)) {
-            int64_t signed_left = rt_core_as_int(left);
-            return signed_left >= 0 && (uint64_t)signed_left == right_uint->value;
-        }
-        return 0;
+    {
+        int numeric = spl_core_heap_int_eq(left, right);
+        if (numeric >= 0) return numeric;
     }
     if (rt_core_is_special(left) || rt_core_is_special(right)) return 0;
     RtCoreString* a = rt_core_as_string(left);
@@ -4487,19 +4516,9 @@ int64_t rt_native_eq(int64_t left, int64_t right) {
         return rt_core_is_float(left) && rt_core_is_float(right) &&
             rt_core_as_float(left) == rt_core_as_float(right);
     }
-    RtCoreUInt* left_uint = rt_core_as_heap_uint(left);
-    RtCoreUInt* right_uint = rt_core_as_heap_uint(right);
-    if (left_uint || right_uint) {
-        if (left_uint && right_uint) return left_uint->value == right_uint->value;
-        if (left_uint && rt_core_is_int(right)) {
-            int64_t signed_right = rt_core_as_int(right);
-            return signed_right >= 0 && left_uint->value == (uint64_t)signed_right;
-        }
-        if (right_uint && rt_core_is_int(left)) {
-            int64_t signed_left = rt_core_as_int(left);
-            return signed_left >= 0 && (uint64_t)signed_left == right_uint->value;
-        }
-        return 0;
+    {
+        int numeric = spl_core_heap_int_eq(left, right);
+        if (numeric >= 0) return numeric;
     }
     if (rt_core_is_special(left) || rt_core_is_special(right)) return 0;
     RtCoreString* left_string = rt_core_as_string(left);
@@ -5099,24 +5118,57 @@ int64_t rt_string_split_limit(int64_t value, int64_t delimiter, int64_t limit) {
     return (int64_t)(uintptr_t)parts;
 }
 
+/* Element `i` of an already-validated array as a RuntimeValue. BYTES and
+ * U64_PACKED arrays hold RAW elements (one byte / one word each, read through a
+ * pointer of the element's own width, so the result is byte-order independent);
+ * they are tagged exactly like the Rust twin's RuntimeValue::from_int. A word of
+ * 2^60 or more becomes a lossless signed wide box. Other arrays hold tagged
+ * 8-byte slots, returned verbatim. */
+static int64_t spl_core_slot_value(const RtCoreArray* array, int64_t i) {
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        return rt_value_int((int64_t)((const uint8_t*)array->data)[i]);
+    }
+    if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
+        return rt_value_int(((const int64_t*)array->data)[i]);
+    }
+    return ((const int64_t*)array->data)[i];
+}
+
+/* Join an array's elements as text. Text elements are used as-is; every other
+ * element is rendered with rt_to_string, as the Rust twin renders it with
+ * rt_value_to_string (`[1, 2].join(",")` is "1,2", not ","). Elements are read
+ * through spl_core_slot_value: reading a BYTES array as 8-byte slots ran past
+ * its buffer. Rendered handles are kept in one scratch vector so each element
+ * is rendered once for the two passes. */
 int64_t rt_string_join(int64_t array_value, int64_t separator) {
     RtCoreArray* array = rt_core_as_array(array_value);
     RtCoreString* sep = rt_core_as_string(separator);
     if (!array || !sep) return rt_core_nil();
+    RtCoreString** items = NULL;
+    if (array->len > 0) {
+        items = (RtCoreString**)malloc((size_t)array->len * sizeof(RtCoreString*));
+        if (!items) return rt_core_nil();
+    }
     uint64_t total = 0;
     for (int64_t i = 0; i < array->len; i++) {
-        RtCoreString* item = rt_core_as_string(((int64_t*)array->data)[i]);
+        int64_t value = spl_core_slot_value(array, i);
+        RtCoreString* item = rt_core_as_string(value);
+        if (!item) item = rt_core_as_string(rt_to_string(value));
+        items[i] = item;
         if (item) total += item->len;
         if (i + 1 < array->len) total += sep->len;
     }
     RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)total + 1);
-    if (!out) return rt_core_nil();
+    if (!out) {
+        free(items);
+        return rt_core_nil();
+    }
     out->kind = RT_VALUE_HEAP_STRING;
     out->reserved = 0;
     out->len = total;
     uint64_t pos = 0;
     for (int64_t i = 0; i < array->len; i++) {
-        RtCoreString* item = rt_core_as_string(((int64_t*)array->data)[i]);
+        RtCoreString* item = items[i];
         if (item && item->len > 0) {
             memcpy(out->data + pos, item->data, (size_t)item->len);
             pos += item->len;
@@ -5126,6 +5178,7 @@ int64_t rt_string_join(int64_t array_value, int64_t separator) {
             pos += sep->len;
         }
     }
+    free(items);
     out->data[total] = '\0';
     if (!rt_core_register_string(out)) {
         free(out);
@@ -5162,21 +5215,32 @@ int64_t rt_array_join_any(int64_t array_value, int64_t separator) {
     const char* sep;
     size_t sep_len;
     if (!core_join_text_view(separator, &sep, &sep_len)) return rt_string_new(NULL, 0);
+    /* A BYTES / U64_PACKED array holds raw numbers, not 8-byte text slots:
+     * reading it as slots ran past a byte buffer. Render each element to text
+     * once, then join those handles. */
+    int64_t* rendered = NULL;
+    if ((array->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) && array->len > 0) {
+        rendered = (int64_t*)malloc((size_t)array->len * sizeof(int64_t));
+        if (!rendered) return rt_string_new(NULL, 0);
+        for (int64_t i = 0; i < array->len; i++) rendered[i] = rt_to_string(spl_core_slot_value(array, i));
+    }
+    const int64_t* slots = rendered ? rendered : (const int64_t*)array->data;
+    int64_t result = 0; /* 0 = failed: empty text, as before */
     const size_t limit = SIZE_MAX - sizeof(RtCoreString) - 1;
     size_t total = 0;
     for (int64_t i = 0; i < array->len; i++) {
         const char* item;
         size_t item_len;
-        if (!core_join_text_view(((int64_t*)array->data)[i], &item, &item_len)
-            || item_len > limit - total) return rt_string_new(NULL, 0);
+        if (!core_join_text_view(slots[i], &item, &item_len)
+            || item_len > limit - total) goto done;
         total += item_len;
         if (i + 1 < array->len) {
-            if (sep_len > limit - total) return rt_string_new(NULL, 0);
+            if (sep_len > limit - total) goto done;
             total += sep_len;
         }
     }
     RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + total + 1);
-    if (!out) return rt_string_new(NULL, 0);
+    if (!out) goto done;
     out->kind = RT_VALUE_HEAP_STRING;
     out->reserved = 0;
     out->len = (uint64_t)total;
@@ -5184,14 +5248,14 @@ int64_t rt_array_join_any(int64_t array_value, int64_t separator) {
     for (int64_t i = 0; i < array->len; i++) {
         const char* item;
         size_t item_len;
-        if (!core_join_text_view(((int64_t*)array->data)[i], &item, &item_len)
+        if (!core_join_text_view(slots[i], &item, &item_len)
             || item_len > total - pos) {
             free(out);
-            return rt_string_new(NULL, 0);
+            goto done;
         }
         if (item_len > 0) { memcpy(out->data + pos, item, item_len); pos += item_len; }
         if (i + 1 < array->len && sep_len > 0) {
-            if (sep_len > total - pos) { free(out); return rt_string_new(NULL, 0); }
+            if (sep_len > total - pos) { free(out); goto done; }
             memcpy(out->data + pos, sep, sep_len);
             pos += sep_len;
         }
@@ -5199,9 +5263,13 @@ int64_t rt_array_join_any(int64_t array_value, int64_t separator) {
     out->data[total] = '\0';
     if (!rt_core_register_string(out)) {
         free(out);
-        return rt_core_nil();
+        result = rt_core_nil();
+        goto done;
     }
-    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+    result = (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+done:
+    free(rendered);
+    return result ? result : rt_string_new(NULL, 0);
 }
 
 int64_t rt_array_index_of(SplArray* array, int64_t value);
@@ -5897,13 +5965,7 @@ static int64_t spl_core_array_value_at(SplArray* a, int64_t idx) {
     if (!array) return rt_core_nil();
     if (idx < 0) idx += array->len;
     if (idx < 0 || idx >= array->len) return rt_core_nil();
-    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
-        return rt_value_int((int64_t)((uint8_t*)array->data)[idx]);
-    }
-    if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
-        return rt_value_int(((int64_t*)array->data)[idx]);
-    }
-    return ((int64_t*)array->data)[idx];
+    return spl_core_slot_value(array, idx);
 }
 
 /* Reverse the CHARACTERS of a runtime string (helper, no receiver check). */
@@ -6063,6 +6125,18 @@ static int rt_sort_cmp(int64_t a, int64_t b) {
         if (c != 0) return c < 0 ? -1 : 1;
         if (sa->len == sb->len) return 0;
         return sa->len < sb->len ? -1 : 1;
+    }
+    /* Integers outside the tagged immediate (wide or u64 heap boxes) are still
+     * (Int, Int): order them by value. They used to fall through to Equal, so
+     * max/sort of values >= 2^60 kept the input order. */
+    uint32_t ka = spl_core_heap_int_kind(a), kb = spl_core_heap_int_kind(b);
+    uint64_t x, y;
+    int xu, yu;
+    if ((ka || kb) && spl_core_int_operand(a, ka, &x, &xu) && spl_core_int_operand(b, kb, &y, &yu)) {
+        int x_neg = !xu && (int64_t)x < 0, y_neg = !yu && (int64_t)y < 0;
+        if (x_neg != y_neg) return x_neg ? -1 : 1;
+        if (x_neg) return (int64_t)x < (int64_t)y ? -1 : ((int64_t)x > (int64_t)y ? 1 : 0);
+        return x < y ? -1 : (x > y ? 1 : 0);
     }
     return 0;
 }
@@ -6259,6 +6333,19 @@ int64_t rt_array_sorted(int64_t receiver) {
 int64_t rt_array_max(int64_t receiver) {
     SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
     if (!arr || rt_array_len(arr) <= 0) return rt_core_nil();
+    RtCoreArray* packed = rt_core_array_ptr(arr);
+    if (packed->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) {
+        /* Raw unsigned elements: compare them as such. A word of 2^63 or more
+         * is negative once tagged, so the tagged comparison ranked it low. */
+        int is_bytes = (packed->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+        uint64_t best = 0;
+        for (int64_t i = 0; i < packed->len; i++) {
+            uint64_t v = is_bytes ? (uint64_t)((const uint8_t*)packed->data)[i]
+                                  : ((const uint64_t*)packed->data)[i];
+            if (v > best) best = v;
+        }
+        return rt_value_int((int64_t)best);
+    }
     int64_t result = spl_core_array_value_at(arr, 0);
     int64_t count = rt_array_len(arr);
     for (int64_t index = 1; index < count; index++) {
@@ -8740,6 +8827,33 @@ int64_t rt_array_last(SplArray* a) {
  * `&[I64, I64, I64] -> &[I8]` and src/runtime/simple_core/core_array.spl:182
  * already returns i8; this copy returning void meant the caller decoded an
  * uninitialised return register as the store's success flag. */
+/* The raw element a RuntimeValue `val` stores as in a packed array: tagged int,
+ * signed wide box or heap u64 box decoded to its integer bits, like the Rust
+ * twin's `value.as_int()`. BYTES keep the low byte. A value-level conversion,
+ * so it is byte-order independent. */
+static int64_t spl_core_packed_element_arg(int64_t val) {
+    RtCoreUInt* u = rt_core_as_heap_uint(val);
+    if (u) return (int64_t)u->value;
+    return rt_core_numeric_arg(val);
+}
+
+/* RuntimeValue write side, the mirror of spl_core_slot_value, for the entry
+ * points compiled code hands a RuntimeValue (rt_index_set, rt_push): BYTES and
+ * U64_PACKED arrays store the RAW element, so the value is decoded first --
+ * storing tagged 56 verbatim into a [u64] read back as 448. Other arrays store
+ * the tagged slot itself. rt_array_set / rt_array_push keep the C lane's raw
+ * word contract for U64_PACKED (paired with rt_array_get's raw read and pinned
+ * by rt_array_packed_reverse_index_enumerate_selfcheck.c). */
+static void spl_core_store_element(RtCoreArray* array, int64_t idx, int64_t val) {
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        ((uint8_t*)array->data)[idx] = (uint8_t)(spl_core_packed_element_arg(val) & 0xff);
+    } else if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
+        ((int64_t*)array->data)[idx] = spl_core_packed_element_arg(val);
+    } else {
+        ((int64_t*)array->data)[idx] = val;
+    }
+}
+
 int8_t rt_array_set(SplArray* a, int64_t idx, int64_t val) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
@@ -8827,8 +8941,11 @@ int64_t rt_range(int64_t start, int64_t end) {
  * returns the concatenated value. Other receiver kinds fail closed to nil. */
 int64_t rt_push(int64_t receiver, int64_t value) {
     SplArray* array = (SplArray*)(uintptr_t)receiver;
-    if (rt_core_array_ptr(array)) {
-        if (!rt_array_push(array, value)) return rt_core_nil();
+    RtCoreArray* core = rt_core_array_ptr(array);
+    if (core) {
+        if (!rt_core_array_reserve(array, core->len + 1)) return rt_core_nil();
+        spl_core_store_element(core, core->len, value);
+        core->len++;
         return receiver;
     }
     if (rt_core_as_string(receiver)) return rt_string_concat(receiver, value);
@@ -10648,7 +10765,7 @@ int8_t rt_index_set(int64_t collection, int64_t idx, int64_t val) {
         int64_t raw_idx = idx >> 3;
         if (raw_idx < 0) raw_idx += a->len;
         if (raw_idx < 0 || raw_idx >= a->len) return 0;
-        rt_array_set((SplArray*)a, raw_idx, val);
+        spl_core_store_element(a, raw_idx, val);
         return 1;
     }
     RtCoreDict* d = rt_core_as_dict(collection);
@@ -10731,9 +10848,14 @@ static uint64_t rt_core_dict_hash(int64_t k) {
     }
     /* Float keys hash by VALUE, so two independent boxes of the same double --
      * and the legacy inline form of that same double -- share a bucket. */
-    RtCoreUInt* u = rt_core_as_heap_uint(k);
-    uint64_t x = u
-        ? (u->value ^ UINT64_C(0x55494e545f553634))
+    /* Integer boxes hash by VALUE too, and a wide box hashes like the u64 box
+     * of the same value, because rt_native_eq makes those keys equal. A wide
+     * box used to hash its address, so an equal key built separately missed. */
+    uint32_t int_kind = spl_core_heap_int_kind(k);
+    uint64_t bits = 0;
+    int is_u64 = 0;
+    uint64_t x = (int_kind && spl_core_int_operand(k, int_kind, &bits, &is_u64))
+        ? (bits ^ UINT64_C(0x55494e545f553634))
         : (rt_core_is_float(k) ? rt_core_dict_float_bits(k) : (uint64_t)k);
     x ^= x >> 33;
     x *= 0xff51afd7ed558ccdULL;
