@@ -731,14 +731,19 @@ fn validate_rt_criticality_diagnostics_blobs(blobs: [text], fallback: [HirModule
 
     Parallel scalar hints remain accepted for caller compatibility, but are
     not bound to the encoded owners and cannot authorize a success shortcut.
-    A corrupt or noncanonical module invalidates the entire admission input.
-    When both inventories are nonempty, fallback supplies the required count
-    under the driver's one-module/at-most-one-blob contract, not identity proof.
-    Empty input retains the existing genuine-module fallback contract.
+    A corrupt or noncanonical blob is refused by the codec selfcheck and is
+    never admitted, but the refusal is codec-class, not fatal: the module is
+    already lowered in memory, so the fallback array (the proven transport,
+    same as the empty-input contract) is validated instead and the build
+    proceeds UNCACHED. Only a codec refusal with no fallback modules left to
+    validate stays fatal. When both inventories are nonempty, fallback
+    supplies the required count under the driver's one-module/at-most-one-blob
+    contract, not identity proof.
     """
     if blobs.len() == 0:
         return validate_rt_criticality_diagnostics_array(fallback)
     var verified = 0
+    var codec_refusals: [text] = []
     var modules_list: [HirModule] = []
     var blob_index: i64 = 0
     for raw_blob in blobs:
@@ -747,16 +752,37 @@ fn validate_rt_criticality_diagnostics_blobs(blobs: [text], fallback: [HirModule
         if val decoded = hir_module_decode(blob):
             val restored: HirModule = decoded
             if hir_module_encode(restored) != blob:
-                rt_bound_manifest_clear()
-                return [RtCriticalDiagnostic(severity: RtCriticalDiagnosticSeverity.Error,
-                    message: "RT-E-HIR-BLOB-NONCANONICAL: module blob {blob_index} failed roundtrip verification")]
-            verified = verified + 1
-            modules_list.push(restored)
+                # Codec-class refusal (roundtrip-unstable encode read, e.g.
+                # the erased-read draw): the selfcheck still refuses the
+                # blob -- it is never admitted -- but the refusal is NOT a
+                # fatal build error. The module is already lowered in
+                # memory; the fallback array is the proven transport (the
+                # empty-blobs contract below). A codec refusal makes the
+                # build UNCACHED (slow), never wrong; only a refusal with
+                # no in-memory modules left to validate stays fatal.
+                codec_refusals.push("RT-E-HIR-BLOB-NONCANONICAL: module blob {blob_index} failed roundtrip verification")
+            else:
+                verified = verified + 1
+                modules_list.push(restored)
         else:
+            codec_refusals.push("RT-E-HIR-BLOB-DECODE: module blob {blob_index} could not be decoded")
+        blob_index = blob_index + 1
+    if codec_refusals.len() > 0:
+        for refusal in codec_refusals:
+            eprint("[hir-blob-refused] {refusal}; validating the in-memory module instead (codec-class refusal is non-fatal; the build proceeds UNCACHED)")
+        if fallback.len() == 0:
             rt_bound_manifest_clear()
             return [RtCriticalDiagnostic(severity: RtCriticalDiagnosticSeverity.Error,
-                message: "RT-E-HIR-BLOB-DECODE: module blob {blob_index} could not be decoded")]
-        blob_index = blob_index + 1
+                message: "RT-E-HIR-BLOB-INVENTORY: {codec_refusals.len()} codec-refused blob(s) with no fallback modules left to validate")]
+        # Refused blobs are never validated from their (untrusted) bytes;
+        # the driver's fallback array carries every module, so RT policy
+        # still sees the full module set -- nothing is hidden from policy,
+        # and the previously fatal draw now degrades to UNCACHED.
+        var policy = validate_rt_criticality_diagnostics_array(fallback)
+        for refusal in codec_refusals:
+            policy.push(RtCriticalDiagnostic(severity: RtCriticalDiagnosticSeverity.Warning,
+                message: "{refusal} (codec-class refusal: non-fatal, build proceeds UNCACHED)"))
+        return policy
     # The driver appends every module to fallback, and at most one blob for
     # each module whose encoding succeeds. A nonempty partial blob inventory
     # must not silently hide refused modules from RT policy. Check after codec
