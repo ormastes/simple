@@ -6,11 +6,24 @@ proof, compiler refinement, runner-death proof, or measured latency result.
 The finite source model checks 192 completion inputs and every four-event trace
 over two claimers, two completers and cancellation (625 traces). The cost model
 checks 512 positive bounded configurations. Phase 1 execution remains diagnostic.
+An additional 625 recovery traces compare an independent abstract model with
+the service/coordinator bridge after every prefix. Recovery assumes an already
+admitted reap proof; it does not model or manufacture process-death evidence.
 """
+# @req REQ-FORMAL-BOUNDED REQ-FORMAL-OWNER REQ-IM-007
+# codex-system-test: recovery extension AUTHORED_UNRUN, 2026-10-19.
 use std.spec.*
 use lib.compiler_artifact_service.profile.{artifact_service_profile_v1}
 use lib.compiler_artifact_service.protocol.{ArtifactResultV1}
 use lib.compiler_artifact_service.service.{ArtifactServiceV1, ArtifactRequestV1, ArtifactLeaseV1, ArtifactRequestStateV1, artifact_service_enqueue_v1, artifact_service_claim_v1, artifact_service_complete_v1, artifact_service_cancel_v1}
+use compiler.driver.action_graph.artifact_service_bridge.{DemandArtifactRouteV1, demand_artifact_route_v1, demand_artifact_claim_owned_v1, demand_artifact_commit_owned_v1, demand_artifact_cancel_v1}
+use compiler.driver.action_graph.artifact_owner_recovery.{demand_artifact_requeue_retired_v1}
+use compiler.driver.action_graph.build_action_v1.{BuildActionV1, BuildActionResultV1, BuildActionPoolV1, BuildActionStateV1}
+use compiler.driver.action_graph.persisted_graph.{PersistedBuildGraphV1}
+use compiler.driver.action_graph.coordinator.{BuildPoolBudgetV1, coordinator_new_v1}
+use compiler.driver.action_graph.demand_compile_integration.{DemandCompileExecutionV1}
+use compiler.driver.backend.native_promotion_queue.{NativePromotionQueueV1}
+use compiler.driver.perf.demand_compile_counters.{demand_compile_counters_empty_v1}
 
 fn bounded_queued_service() -> ArtifactServiceV1:
     val profile = artifact_service_profile_v1("bounded-build", "compiler-c48", ["parse"], 0, true)
@@ -95,6 +108,163 @@ fn bounded_dead_owner_claim_fixedpoint() -> i64:
         if service.entries[0].lease.unwrap().generation != 7: return -22
     16
 
+# Independent finite oracle: phase is running, queued, completed,
+# cancelled-running, or cancelled-queued. Generation distinguishes epochs.
+# No oracle field is obtained from the production transition's output.
+struct BoundedRecoveryModelV1:
+    phase: text
+    generation: i64
+    recovered: bool
+    cancelled: bool
+    accepted: bool
+
+fn bounded_recovery_model_step(model: BoundedRecoveryModelV1, event: i64) -> BoundedRecoveryModelV1:
+    var next = model
+    next.accepted = false
+    if event == 4:
+        next.cancelled = true
+        if model.phase == "running": next.phase = "cancelled-running"
+        elif model.phase == "queued": next.phase = "cancelled-queued"
+    elif not model.cancelled:
+        if event == 0 and model.phase == "running" and model.generation == 7:
+            next.phase = "queued"
+            next.recovered = true
+            next.accepted = true
+        elif event == 1 and model.phase == "queued":
+            next.phase = "running"
+            next.generation = 8
+            next.accepted = true
+        elif model.phase == "running" and ((event == 2 and model.generation == 7) or
+                (event == 3 and model.generation == 8)):
+            next.phase = "completed"
+            next.accepted = true
+    next
+
+fn bounded_recovery_lease(generation: i64) -> ArtifactLeaseV1:
+    ArtifactLeaseV1(if generation == 7: "lease-a" else: "lease-b", "action-a",
+        if generation == 7: "b".repeat(64) else: "c".repeat(64), generation, false)
+
+fn bounded_recovery_initial() -> DemandArtifactRouteV1:
+    val action = BuildActionV1("action-a", "compile", ["source-a"], [], ["object-a"],
+        BuildActionPoolV1.parse, 1, "snapshot-a", 1024, "")
+    val coordinator = coordinator_new_v1(PersistedBuildGraphV1("graph", "", "snapshot-a", [action]),
+        [BuildPoolBudgetV1(BuildActionPoolV1.parse, 1, 2048)])
+    val execution = DemandCompileExecutionV1(true, "ok", Some(coordinator), None,
+        NativePromotionQueueV1([]), "action-a", demand_compile_counters_empty_v1(), None, None, 0, "", 0, 0)
+    val route = demand_artifact_route_v1(execution,
+        artifact_service_profile_v1("bounded-recovery", "compiler-c48", ["parse"], 0, true),
+        true, "b".repeat(64), 7)
+    val claimed = demand_artifact_claim_owned_v1(route, "action-a", "lease-a", 2048)
+    expect(claimed.claim.valid).to_be(true)
+    claimed.route
+
+# Projection is deliberately separate from both the abstract transition table
+# and production mutations. Cancellation of a running task retains reservation
+# until actual cleanup; requesting cancellation is not a reap proof.
+fn bounded_recovery_projection(route: DemandArtifactRouteV1, model: BoundedRecoveryModelV1) -> text:
+    if not route.valid or route.service.entries.len() != 1: return "route inventory"
+    val coordinator = match route.execution.coordinator:
+        Some(value): value
+        _: return "coordinator absent"
+    if coordinator.runtime.len() != 1 or coordinator.cancelled != model.cancelled: return "coordinator inventory/latch"
+    val entry = route.service.entries[0]
+    val runtime = coordinator.runtime[0]
+    val lease = match entry.lease:
+        Some(value): value
+        _: return "lease absent"
+    val expected_lease = bounded_recovery_lease(model.generation)
+    if lease.action_id != expected_lease.action_id or lease.lease_id != expected_lease.lease_id or
+            lease.owner_id != expected_lease.owner_id or lease.generation != model.generation:
+        return "lease fence"
+    val cancelled_work = model.phase == "cancelled-running" or model.phase == "cancelled-queued"
+    if lease.cancelled != cancelled_work: return "lease cancellation"
+    if route.owner_id != (if model.recovered: "c".repeat(64) else: "b".repeat(64)) or
+            route.lease_generation != (if model.recovered: 8 else: 7): return "successor authority"
+    if entry.request.action_id != "action-a" or entry.request.compatibility_id != "compiler-c48" or
+            entry.request.snapshot_revision != "snapshot-a" or entry.request.memory_budget_bytes != 1024 or
+            runtime.action_id != "action-a" or coordinator.graph.snapshot_revision != "snapshot-a":
+        return "request authority"
+    val expected_service = if cancelled_work: ArtifactRequestStateV1.cancelled else:
+        if model.phase == "completed": ArtifactRequestStateV1.completed else:
+        if model.phase == "queued": ArtifactRequestStateV1.queued else: ArtifactRequestStateV1.leased
+    val running = model.phase == "running" or model.phase == "cancelled-running"
+    val expected_runtime = if running: BuildActionStateV1.running else:
+        if model.phase == "completed": BuildActionStateV1.succeeded else:
+        if model.phase == "queued": BuildActionStateV1.pending else: BuildActionStateV1.cancelled
+    if entry.state != expected_service or runtime.state != expected_runtime: return "service/coordinator state"
+    if runtime.owner_token != (if running: expected_lease.lease_id else: ""): return "coordinator token"
+    if runtime.memory_reserved_bytes != (if running: 1024 else: 0): return "reservation"
+    val digest = if model.phase == "completed": "object-a" else: ""
+    if entry.cas_artifact_digest != digest: return "publication"
+    match runtime.result:
+        Some(result):
+            if model.phase != "completed" or result.action_id != "action-a" or
+                    result.snapshot_revision != "snapshot-a" or not result.success or result.cancelled or
+                    result.output_identity != "object-a": return "coordinator result"
+        _: if model.phase == "completed": return "completed result absent"
+    ""
+
+fn bounded_recovery_traces() -> Result<i64, text>:
+    var checked: i64 = 0
+    for encoded in 0..625:
+        var route = bounded_recovery_initial()
+        val dispatched_old_lease = route.service.entries[0].lease.unwrap()
+        var model = BoundedRecoveryModelV1("running", 7, false, false, true)
+        val initial_error = bounded_recovery_projection(route, model)
+        if initial_error != "": return Err("initial: " + initial_error)
+        var remaining = encoded
+        var starts7: i64 = 1
+        var starts8: i64 = 0
+        var publications: i64 = 0
+        for ordinal in 0..4:
+            val event = remaining % 5
+            remaining = remaining / 5
+            val before = route
+            val old_state = route.service.entries[0].state
+            val old_runtime_state = route.execution.coordinator.unwrap().runtime[0].state
+            val previous_model = model
+            model = bounded_recovery_model_step(model, event)
+            var accepted = false
+            if event == 0:
+                # EXTERNAL PRECONDITION: the parent already admitted the exact
+                # generation-7 tree-reap proof. No receipt is fabricated here.
+                match demand_artifact_requeue_retired_v1(route, dispatched_old_lease, "c".repeat(64), 8):
+                    Ok(value):
+                        route = value
+                        accepted = true
+                    Err(_reason): ()
+            elif event == 1:
+                val transfer = demand_artifact_claim_owned_v1(route, "action-a", "lease-b", 2048)
+                route = transfer.route
+                accepted = transfer.claim.valid
+            elif event == 2 or event == 3:
+                val result = BuildActionResultV1("action-a", "snapshot-a", true, false, "object-a", "", [], 512)
+                val transfer = demand_artifact_commit_owned_v1(route, result,
+                    Some(if event == 2: dispatched_old_lease else: bounded_recovery_lease(8)))
+                route = transfer.route
+                accepted = transfer.accepted
+            else:
+                demand_artifact_cancel_v1(&mut route, "action-a")
+            if event != 4 and accepted != model.accepted:
+                return Err("trace {encoded}, prefix {ordinal}: acceptance")
+            if event != 4:
+                val prior_error = bounded_recovery_projection(before, previous_model)
+                if prior_error != "": return Err("trace {encoded}, prefix {ordinal}: input mutated: " + prior_error)
+            val projection_error = bounded_recovery_projection(route, model)
+            if projection_error != "": return Err("trace {encoded}, prefix {ordinal}: " + projection_error)
+            # Count actual state changes, never a successful/idempotent return.
+            val new_state = route.service.entries[0].state
+            val new_runtime_state = route.execution.coordinator.unwrap().runtime[0].state
+            if old_runtime_state == BuildActionStateV1.pending and new_runtime_state == BuildActionStateV1.running:
+                if route.service.entries[0].lease.unwrap().generation == 7: starts7 = starts7 + 1
+                else: starts8 = starts8 + 1
+            if old_state != ArtifactRequestStateV1.completed and new_state == ArtifactRequestStateV1.completed:
+                publications = publications + 1
+            if starts7 > 1 or starts8 > 1 or publications > 1:
+                return Err("trace {encoded}, prefix {ordinal}: duplicate start/publication")
+        checked = checked + 1
+    Ok(checked)
+
 # Counts in order: capture entries, enumeration entries, hash bytes, read bytes,
 # TLDR decode bytes, parse bytes, HIR nodes, MIR nodes, object work, link work,
 # startup work, scheduler steps, receipt entries. Weights are symbolic work
@@ -144,9 +314,35 @@ describe "REQ-FORMAL-BOUNDED: build-cache finite state and work model":
         step("Enumerate all 625 claim, completion and cancellation traces")
         expect(bounded_service_traces()).to_equal(625)
 
-    it "should expose the missing reclaim transition rather than promise unconditional progress":
-        step("Retry a leased action after the owner stops completing")
+    it "should retain the old lease when retries supply no admitted retirement":
+        step("Retry a leased action without calling the proof-gated recovery owner")
         expect(bounded_dead_owner_claim_fixedpoint()).to_equal(16)
+
+    it "should refine all 625 admitted-recovery traces against the independent state model":
+        step("Claim generation 7 and enumerate four events over recovery, successor claim, both completions and cancellation")
+        step("Compare acceptance and both owner states at every prefix while preserving the input value")
+        expect(bounded_recovery_traces().unwrap()).to_equal(625)
+
+    it "should detect a forged lease, publication or reservation in the projection":
+        step("Mutate one real initial route field without changing the independent expected state")
+        val original = bounded_recovery_initial()
+        val model = BoundedRecoveryModelV1("running", 7, false, false, true)
+        expect(bounded_recovery_projection(original, model)).to_equal("")
+        for kind in 0..3:
+            var changed = original
+            if kind == 0:
+                changed.service.entries[0].lease = Some(bounded_recovery_lease(8))
+            elif kind == 1:
+                changed.service.entries[0].cas_artifact_digest = "unearned-object"
+            else:
+                var execution = changed.execution
+                var coordinator = execution.coordinator.unwrap()
+                coordinator.runtime[0].memory_reserved_bytes = 0
+                execution.coordinator = Some(coordinator)
+                changed.execution = execution
+            val expected = if kind == 0: "lease fence" else: if kind == 1: "publication" else: "reservation"
+            expect(bounded_recovery_projection(changed, model)).to_equal(expected)
+            expect(bounded_recovery_projection(original, model)).to_equal("")
 
     it "should separate cold byte cost, duplicate parse cost and warm decode cost":
         step("Check 512 bounded weighted cold and warm configurations")
