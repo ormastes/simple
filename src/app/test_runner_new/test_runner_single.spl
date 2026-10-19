@@ -29,6 +29,8 @@ use app.io.cli_ops.{cli_current_exe_path}
 use std.spec.in_development.{source_is_in_development, in_development_explicit_line}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES, TestRunOutcome, test_run_outcome_exit_code}
 use app.test_runner_new.client_arg_shape.{client_tag_value, client_select_tagged}
+use std.test_runner.child_cwd.{spec_child_launch_plan, child_cwd_absolute}
+use std.sffi.env.{env_cwd_raw, env_set_cwd_raw}
 use std.nogc_sync_mut.test_runner.resource_policy.{test_max_procs_value_valid}
 # Single source of truth for the six-class outcome contract
 # (OK/ERROR/CRASHED/TERMINATED/TIMEOUT/NOT_RUN) frozen in
@@ -1321,8 +1323,18 @@ fn main() -> i64:
         if env_get("SIMPLE_PHASE7_TRACE") == "1":
             print "phase7-apk-runner: pid={getpid()}"
     val start = time_now_unix_micros()
-    val child_args = if assert_ran: ["run", exec_path, "--test-result-file={evidence_path}"] else: ["run", exec_path]
-    val (stdout, stderr, code) = process_run_bounded(binary, child_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
+    # The child runs from the spec's project root so `src/...` reads resolve
+    # the way its imports do, whatever directory the runner was started in.
+    val runner_cwd = env_cwd_raw()
+    val (child_dir, child_exec_path) = spec_child_launch_plan(exec_path, runner_cwd)
+    val child_moved = child_dir != "" and env_set_cwd_raw(child_dir)
+    val child_binary = if child_moved: child_cwd_absolute(binary, runner_cwd) else: binary
+    val child_spec = if child_moved: child_exec_path else: exec_path
+    val child_args = if assert_ran: ["run", child_spec, "--test-result-file={evidence_path}"] else: ["run", child_spec]
+    val (stdout, stderr, code) = process_run_bounded(child_binary, child_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
+    if child_moved and not env_set_cwd_raw(runner_cwd):
+        print "error: test-runner: cannot restore working directory {runner_cwd}"
+        return 1
     val duration_ms = (time_now_unix_micros() - start) / 1000
     var runtime_coverage_sdn = ""
     if runtime_coverage_path != "":

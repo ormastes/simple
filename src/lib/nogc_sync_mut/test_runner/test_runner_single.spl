@@ -7,6 +7,8 @@
 use std.sffi.cli_args.{cli_get_args}
 use app.io.process_ops.{process_run_bounded}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
+use std.test_runner.child_cwd.{spec_child_launch_plan, child_cwd_absolute}
+use std.sffi.env.{env_cwd_raw, env_set_cwd_raw}
 
 use std.io_runtime.{file_exists}
 use std.nogc_sync_mut.io.file_ops.{file_read_text}
@@ -190,7 +192,16 @@ fn main() -> i64:
     val binary = find_simple_binary()
     val timeout_ms = run.timeout_secs * 1000
     val start = time_now_unix_micros()
-    val (stdout, stderr, code) = process_run_bounded(binary, ["run", run.path], timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
+    # Run the child from the spec's project root (see std.test_runner.child_cwd).
+    val runner_cwd = env_cwd_raw()
+    val (child_dir, child_path) = spec_child_launch_plan(run.path, runner_cwd)
+    val child_moved = child_dir != "" and env_set_cwd_raw(child_dir)
+    val child_binary = if child_moved: child_cwd_absolute(binary, runner_cwd) else: binary
+    val child_spec = if child_moved: child_path else: run.path
+    val (stdout, stderr, code) = process_run_bounded(child_binary, ["run", child_spec], timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
+    if child_moved and not env_set_cwd_raw(runner_cwd):
+        print "error: test-runner: cannot restore working directory {runner_cwd}"
+        return 1
     val duration_ms = (time_now_unix_micros() - start) / 1000
     if stdout != "":
         print stdout
