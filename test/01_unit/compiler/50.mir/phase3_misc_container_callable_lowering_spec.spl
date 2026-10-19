@@ -125,6 +125,65 @@ val result_tuple_src = "class Table:\n" +
     "    val p = pair_text(5).unwrap()\n" +
     "    Ok(s.len() + n + s2.len() + t.n + p.1 + lo + hi)\n"
 
+val result_ok_struct_src = "struct Rec:\n" +
+    "    n: i64\n" +
+    "\n" +
+    "fn pair_struct(x: i64) -> Result<(text, Rec), text>:\n" +
+    "    if x < 0: return Err(\"neg\")\n" +
+    "    Ok((\"r\", Rec(n: x)))\n" +
+    "\n" +
+    "fn use_struct() -> Result<i64, text>:\n" +
+    "    val (s, r) = pair_struct(4)?\n" +
+    "    Ok(s.len() + r.n)\n"
+
+val result_ok_nested_src = "class Table:\n" +
+    "    n: i64\n" +
+    "\n" +
+    "struct Rec:\n" +
+    "    m: i64\n" +
+    "\n" +
+    "fn nested(x: i64) -> Result<(text, (i64, Table), Rec), text>:\n" +
+    "    if x < 0: return Err(\"neg\")\n" +
+    "    Ok((\"n\", (x, Table(n: x)), Rec(m: x)))\n" +
+    "\n" +
+    "fn use_nested() -> Result<i64, text>:\n" +
+    "    val (s, inner, r) = nested(4)?\n" +
+    "    val (k, t) = inner\n" +
+    "    Ok(s.len() + k + t.n + r.m)\n"
+
+val result_err_record_src = "class Fault:\n" +
+    "    code: i64\n" +
+    "\n" +
+    "struct Oops:\n" +
+    "    why: text\n" +
+    "\n" +
+    "fn may_fail(x: i64) -> Result<(text, i64), Fault>:\n" +
+    "    if x < 0: return Err(Fault(code: x))\n" +
+    "    Ok((\"ok\", x))\n" +
+    "\n" +
+    "fn may_oops(x: i64) -> Result<i64, Oops>:\n" +
+    "    if x < 0: return Err(Oops(why: \"neg\"))\n" +
+    "    Ok(x)\n" +
+    "\n" +
+    "fn relay(x: i64) -> Result<i64, Fault>:\n" +
+    "    val (s, n) = may_fail(x)?\n" +
+    "    Ok(s.len() + n)\n" +
+    "\n" +
+    "fn relay_oops(x: i64) -> Result<i64, Oops>:\n" +
+    "    val n = may_oops(x)?\n" +
+    "    Ok(n + 1)\n"
+
+val result_ok_generic_src = "struct Box<T>:\n" +
+    "    v: T\n" +
+    "\n" +
+    "fn boxed(x: i64) -> Result<(text, Box<i64>), text>:\n" +
+    "    if x < 0: return Err(\"neg\")\n" +
+    "    Ok((\"b\", Box(v: x)))\n" +
+    "\n" +
+    "fn use_boxed() -> Result<i64, text>:\n" +
+    "    val (s, b) = boxed(4)?\n" +
+    "    Ok(s.len())\n"
+
 val optional_callable_src = "struct Ops:\n" +
     "    read_op: Option<fn(text) -> i64>\n" +
     "\n" +
@@ -183,6 +242,30 @@ describe "MIR lowering: phase-3 residual shapes":
         expect(p3_misc_count(messages, "unsupported Result tuple payload element type")).to_equal(0)
         expect(p3_misc_count(messages, "unsupported Result unwrap payload type")).to_equal(0)
         expect(messages.len()).to_equal(0)
+
+    it "admits a struct record in a Result Ok tuple slot":
+        val messages = p3_misc_messages(result_ok_struct_src)
+        print "diagnostics: [{p3_misc_dump(messages)}]"
+        expect(p3_misc_count(messages, "unsupported Result tuple payload element type")).to_equal(0)
+        expect(messages.len()).to_equal(0)
+
+    it "admits nested tuple, class and struct slots in a Result Ok tuple":
+        val messages = p3_misc_messages(result_ok_nested_src)
+        print "diagnostics: [{p3_misc_dump(messages)}]"
+        expect(p3_misc_count(messages, "unsupported Result tuple payload element type")).to_equal(0)
+        expect(messages.len()).to_equal(0)
+
+    it "propagates class and struct records through the Result Err slot":
+        val messages = p3_misc_messages(result_err_record_src)
+        print "diagnostics: [{p3_misc_dump(messages)}]"
+        expect(p3_misc_count(messages, "unsupported Result tuple payload element type")).to_equal(0)
+        expect(p3_misc_count(messages, "Result Err record")).to_equal(0)
+        expect(messages.len()).to_equal(0)
+
+    it "still fails closed on a generic record slot with no proven layout":
+        val messages = p3_misc_messages(result_ok_generic_src)
+        print "diagnostics: [{p3_misc_dump(messages)}]"
+        expect(p3_misc_count(messages, "unsupported Result tuple payload element type: slot 1 is Named(args=1)")).to_equal(1)
 
     it "calls an Option<fn> field through if-val and unwrap with a proven signature":
         val messages = p3_misc_messages(optional_callable_src)
