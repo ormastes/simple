@@ -80,6 +80,10 @@ array formatting and is not fixed here.
 
 ## Still open (not packed-slot defects)
 
+Follow-up: `runtime_array_hardening_2026-10-19.md` fixes the `any`/`all`/`index_of`,
+`[u8]` `max`/`sorted` and JIT `reverse` items below and records the float
+and interpreter-sum items with their root causes.
+
 - `any`/`all` return a raw bool, and an untyped `index_of(8)` misses. This
   happens on generic `[i64]` too, in both native and JIT.
 - The interpreter gets `[u8].max()`/`sorted()` wrong (64 and 255 for
