@@ -24,6 +24,7 @@
 #   --report      also list every uncovered decision/condition row
 #   --selftest    run only the fixtures (they also run before every scan)
 #   HASH_COV_SPECS=<paths>  replace the driving spec list
+#   HASH_COV_SCOPE=<paths>  replace the scope file list (measurement only)
 #
 # Verdict is always the LAST line of stdout:
 #   PASS — <n> files checked, 100% decision and condition (<d> decisions, <c> conditions, <x> justified exclusion(s))
@@ -61,7 +62,7 @@ done
 # Scope: the algorithm files. std.crypto.sha256 (src/lib/crypto/sha256.spl) is
 # a pure `export use` re-export with no decision sites; it resolves to
 # src/lib/common/crypto/sha256.spl, which is listed.
-SCOPE="
+SCOPE="${HASH_COV_SCOPE:-
 src/lib/common/crypto/sha256.spl
 src/lib/common/crypto/sha256_core.spl
 src/lib/common/crypto/sha1.spl
@@ -72,7 +73,7 @@ src/lib/common/crypto/ed25519.spl
 src/lib/common/crypto/ed25519_field.spl
 src/lib/common/crypto/ed25519_scalar.spl
 src/lib/common/hash/djb2.spl
-"
+}"
 
 # Specs that drive the scope. Each must pass. HASH_COV_SPECS (whitespace-
 # separated paths) replaces the list, e.g. to measure a baseline.
@@ -294,7 +295,9 @@ merge_artifacts $artifacts >"$WORK/merged.txt"
 sed -n -e "s#^UD $toplevel/\([^ ]*\) .*#\1:D#p" \
        -e "s#^UC $toplevel/\([^ ]*\) decision=[0-9]* condition=\([0-9]*\) .*#\1:C\2#p" \
        "$WORK/merged.txt" | sort -u >"$WORK/uncovered.txt"
-echo "$EXCLUDE" | awk 'NF { print $1 }' | sort -u >"$WORK/excluded.txt"
+# Only exclusions of files in scope are live (and can be stale).
+echo "$SCOPE" | awk 'NF { print $1 ":" }' >"$WORK/scope_prefixes.txt"
+echo "$EXCLUDE" | awk 'NF { print $1 }' | grep -F -f "$WORK/scope_prefixes.txt" | sort -u >"$WORK/excluded.txt"
 stale=$(comm -13 "$WORK/uncovered.txt" "$WORK/excluded.txt" | tr '\n' ' ')
 
 checked=0
