@@ -1,11 +1,6 @@
 # Pure-Simple `simple-core` array query/sort/transform — Tiers 2-5.
 # Depends on core_array.spl and core_array_ops.spl (linked at archive level).
 
-@unsafe(reason: "raw pointer/offset i64 load ABI", capabilities: [ffi, raw_ptr])
-extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
-@unsafe(reason: "raw pointer/offset i64 store ABI", capabilities: [ffi, raw_ptr])
-extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
-
 # Helpers from core_array.spl (archive-level linking)
 @unsafe(reason: "raw archive array borrowed items-pointer projection ABI", capabilities: [ffi, raw_ptr])
 extern fn array_items(array: i64) -> i64
@@ -33,16 +28,6 @@ extern fn rt_value_int(value: i64) -> i64
 extern fn numeric_box_kind(value: i64) -> i64
 @unsafe(reason: "owned Simple UInt projection after membership validation", capabilities: [ffi])
 extern fn rt_value_as_u64(value: i64) -> i64
-
-@always_inline
-fn _sffi_core_array_query_load_i64(ptr: i64, offset: i64) -> i64:
-    unsafe(capabilities: [ffi, raw_ptr]):
-        spl_load_i64(ptr, offset)
-
-@always_inline
-fn _sffi_core_array_query_store_i64(ptr: i64, offset: i64, value: i64):
-    unsafe(capabilities: [ffi, raw_ptr]):
-        spl_store_i64(ptr, offset, value)
 
 @always_inline
 fn _sffi_core_array_query_array_items(array: i64) -> i64:
@@ -83,6 +68,20 @@ fn _sffi_core_array_query_rt_array_reverse(array: i64) -> i8:
 fn _sffi_core_array_query_rt_string_join(array: i64, separator: i64) -> i64:
     unsafe(capabilities: [ffi]):
         rt_string_join(array, separator)
+
+@unsafe(reason: "validated borrowed array storage owner ABI", capabilities: [ffi, raw_ptr])
+extern fn array_load_value(array: i64, items: i64, index: i64) -> i64
+@always_inline
+fn _sffi_core_array_query_array_load_value(array: i64, items: i64, index: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        array_load_value(array, items, index)
+
+@unsafe(reason: "validated borrowed array storage owner ABI", capabilities: [ffi, raw_ptr])
+extern fn array_store_value(array: i64, items: i64, index: i64, value: i64)
+@always_inline
+fn _sffi_core_array_query_array_store_value(array: i64, items: i64, index: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        array_store_value(array, items, index, value)
 
 # Value helpers use the actual numeric owner; INT1 is not an inline tag.
 fn array_query_val_is_int(v: i64) -> i64:
@@ -129,7 +128,7 @@ pub fn rt_array_index_of(array: i64, value: i64) -> i64:
     val items = _sffi_core_array_query_array_items(array)
     var i = 0
     while i < len:
-        val item = _sffi_core_array_query_load_i64(items, i * 8)
+        val item = _sffi_core_array_query_array_load_value(array, items, i)
         if array_query_val_equal(item, value):
             return i
         i = i + 1
@@ -142,7 +141,7 @@ pub fn rt_array_last_index_of(array: i64, value: i64) -> i64:
     val items = _sffi_core_array_query_array_items(array)
     var i = len - 1
     while i >= 0:
-        val item = _sffi_core_array_query_load_i64(items, i * 8)
+        val item = _sffi_core_array_query_array_load_value(array, items, i)
         if array_query_val_equal(item, value):
             return i
         i = i - 1
@@ -156,7 +155,7 @@ pub fn rt_array_count(array: i64, value: i64) -> i64:
     var c = 0
     var i = 0
     while i < len:
-        val item = _sffi_core_array_query_load_i64(items, i * 8)
+        val item = _sffi_core_array_query_array_load_value(array, items, i)
         if array_query_val_equal(item, value):
             c = c + 1
         i = i + 1
@@ -172,14 +171,14 @@ pub fn rt_array_unique(array: i64) -> i64:
     val src_items = _sffi_core_array_query_array_items(array)
     var i = 0
     while i < len:
-        val item = _sffi_core_array_query_load_i64(src_items, i * 8)
+        val item = _sffi_core_array_query_array_load_value(array, src_items, i)
         # Check if item already in result
         val rlen = _sffi_core_array_query_array_len_value(result)
         val ritems = _sffi_core_array_query_array_items(result)
         var found = 0
         var j = 0
         while j < rlen and found < 1:
-            val existing = _sffi_core_array_query_load_i64(ritems, j * 8)
+            val existing = _sffi_core_array_query_array_load_value(result, ritems, j)
             if array_query_val_equal(existing, item):
                 found = 1
             j = j + 1
@@ -199,7 +198,7 @@ pub fn rt_array_all_truthy(array: i64) -> i64:
     val items = _sffi_core_array_query_array_items(array)
     var i = 0
     while i < len:
-        val item = _sffi_core_array_query_load_i64(items, i * 8)
+        val item = _sffi_core_array_query_array_load_value(array, items, i)
         if array_query_val_is_falsy(item) > 0:
             return 0
         i = i + 1
@@ -212,7 +211,7 @@ pub fn rt_array_any_truthy(array: i64) -> i64:
     val items = _sffi_core_array_query_array_items(array)
     var i = 0
     while i < len:
-        val item = _sffi_core_array_query_load_i64(items, i * 8)
+        val item = _sffi_core_array_query_array_load_value(array, items, i)
         if array_query_val_is_falsy(item) < 1:
             return 1
         i = i + 1
@@ -228,7 +227,7 @@ pub fn rt_array_sum(array: i64) -> i64:
     var total = 0
     var i = 0
     while i < len:
-        val item = _sffi_core_array_query_load_i64(items, i * 8)
+        val item = _sffi_core_array_query_array_load_value(array, items, i)
         if array_query_val_is_int(item) > 0:
             total = total + array_query_val_as_int(item)
         i = i + 1
@@ -241,10 +240,10 @@ pub fn rt_array_min(array: i64) -> i64:
     if len <= 0:
         return 3
     val items = _sffi_core_array_query_array_items(array)
-    var min_val = _sffi_core_array_query_load_i64(items, 0)
+    var min_val = _sffi_core_array_query_array_load_value(array, items, 0)
     var i = 1
     while i < len:
-        val item = _sffi_core_array_query_load_i64(items, i * 8)
+        val item = _sffi_core_array_query_array_load_value(array, items, i)
         if array_query_val_is_int(item) > 0 and array_query_val_is_int(min_val) > 0:
             if array_query_val_as_int(item) < array_query_val_as_int(min_val):
                 min_val = item
@@ -258,10 +257,10 @@ pub fn rt_array_max(array: i64) -> i64:
     if len <= 0:
         return 3
     val items = _sffi_core_array_query_array_items(array)
-    var max_val = _sffi_core_array_query_load_i64(items, 0)
+    var max_val = _sffi_core_array_query_array_load_value(array, items, 0)
     var i = 1
     while i < len:
-        val item = _sffi_core_array_query_load_i64(items, i * 8)
+        val item = _sffi_core_array_query_array_load_value(array, items, i)
         if array_query_val_is_int(item) > 0 and array_query_val_is_int(max_val) > 0:
             if array_query_val_as_int(item) > array_query_val_as_int(max_val):
                 max_val = item
@@ -300,12 +299,12 @@ pub fn rt_array_sort(array: i64) -> i8:
     # Insertion sort: shift elements right until we find the insert position
     var i = 1
     while i < len:
-        val key = _sffi_core_array_query_load_i64(items, i * 8)
+        val key = _sffi_core_array_query_array_load_value(array, items, i)
         var j = i - 1
-        while j >= 0 and sort_compare(_sffi_core_array_query_load_i64(items, j * 8), key) > 0:
-            _sffi_core_array_query_store_i64(items, (j + 1) * 8, _sffi_core_array_query_load_i64(items, j * 8))
+        while j >= 0 and sort_compare(_sffi_core_array_query_array_load_value(array, items, j), key) > 0:
+            _sffi_core_array_query_array_store_value(array, items, j + 1, _sffi_core_array_query_array_load_value(array, items, j))
             j = j - 1
-        _sffi_core_array_query_store_i64(items, (j + 1) * 8, key)
+        _sffi_core_array_query_array_store_value(array, items, j + 1, key)
         i = i + 1
     return 1
 
@@ -350,8 +349,8 @@ pub fn rt_array_zip(a: i64, b: i64) -> i64:
         val pair = _sffi_core_array_query_rt_array_new(2)
         if pair < 1:
             return 0
-        _sffi_core_array_query_rt_array_push(pair, _sffi_core_array_query_load_i64(_sffi_core_array_query_array_items(a), i * 8))
-        _sffi_core_array_query_rt_array_push(pair, _sffi_core_array_query_load_i64(_sffi_core_array_query_array_items(b), i * 8))
+        _sffi_core_array_query_rt_array_push(pair, _sffi_core_array_query_array_load_value(a, _sffi_core_array_query_array_items(a), i))
+        _sffi_core_array_query_rt_array_push(pair, _sffi_core_array_query_array_load_value(b, _sffi_core_array_query_array_items(b), i))
         _sffi_core_array_query_rt_array_push(result, pair)
         i = i + 1
     return result
@@ -370,7 +369,7 @@ pub fn rt_array_enumerate(array: i64) -> i64:
         if pair < 1:
             return 0
         _sffi_core_array_query_rt_array_push(pair, array_query_val_from_int(i))
-        _sffi_core_array_query_rt_array_push(pair, _sffi_core_array_query_load_i64(items, i * 8))
+        _sffi_core_array_query_rt_array_push(pair, _sffi_core_array_query_array_load_value(array, items, i))
         _sffi_core_array_query_rt_array_push(result, pair)
         i = i + 1
     return result
@@ -384,7 +383,7 @@ pub fn rt_array_flatten(array: i64) -> i64:
     var total = 0
     var i = 0
     while i < len:
-        val item = _sffi_core_array_query_load_i64(items, i * 8)
+        val item = _sffi_core_array_query_array_load_value(array, items, i)
         if _sffi_core_array_query_array_is_valid(item) > 0:
             total = total + _sffi_core_array_query_array_len_value(item)
         if _sffi_core_array_query_array_is_valid(item) < 1:
@@ -396,13 +395,13 @@ pub fn rt_array_flatten(array: i64) -> i64:
     # Second pass: copy
     i = 0
     while i < len:
-        val item = _sffi_core_array_query_load_i64(items, i * 8)
+        val item = _sffi_core_array_query_array_load_value(array, items, i)
         if _sffi_core_array_query_array_is_valid(item) > 0:
             val inner_len = _sffi_core_array_query_array_len_value(item)
             val inner_items = _sffi_core_array_query_array_items(item)
             var k = 0
             while k < inner_len:
-                _sffi_core_array_query_rt_array_push(result, _sffi_core_array_query_load_i64(inner_items, k * 8))
+                _sffi_core_array_query_rt_array_push(result, _sffi_core_array_query_array_load_value(item, inner_items, k))
                 k = k + 1
         if _sffi_core_array_query_array_is_valid(item) < 1:
             _sffi_core_array_query_rt_array_push(result, item)

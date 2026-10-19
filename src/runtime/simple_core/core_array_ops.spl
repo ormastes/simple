@@ -49,6 +49,8 @@ extern fn register_array(array: i64)
 extern fn unregister_array(array: i64)
 @unsafe(reason: "allocates a runtime-owned array handle; zero is failure", capabilities: [ffi, raw_ptr])
 extern fn rt_array_new(cap: i64) -> i64
+@unsafe(reason: "allocates a runtime-owned packed byte array; zero is failure", capabilities: [ffi, raw_ptr])
+extern fn rt_byte_array_new(cap: i64) -> i64
 @unsafe(reason: "mutates a runtime-owned array handle; false is failure", capabilities: [ffi, raw_ptr])
 extern fn rt_array_push(array: i64, value: i64) -> i8
 @unsafe(reason: "raw transient-tracking runtime note ABI", capabilities: [ffi, raw_ptr])
@@ -172,9 +174,42 @@ fn _sffi_core_array_ops_rt_array_new(cap: i64) -> i64:
         rt_array_new(cap)
 
 @always_inline
+fn _sffi_core_array_ops_rt_byte_array_new(cap: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_byte_array_new(cap)
+
+@always_inline
 fn _sffi_core_array_ops_rt_array_push(array: i64, value: i64) -> i8:
     unsafe(capabilities: [ffi, raw_ptr]):
         rt_array_push(array, value)
+
+@unsafe(reason: "validated borrowed array storage owner ABI", capabilities: [ffi, raw_ptr])
+extern fn array_element_size(array: i64) -> i64
+@always_inline
+fn _sffi_core_array_ops_array_element_size(array: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        array_element_size(array)
+
+@unsafe(reason: "validated borrowed array storage owner ABI", capabilities: [ffi, raw_ptr])
+extern fn array_load_value(array: i64, items: i64, index: i64) -> i64
+@always_inline
+fn _sffi_core_array_ops_array_load_value(array: i64, items: i64, index: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        array_load_value(array, items, index)
+
+@unsafe(reason: "validated borrowed array storage owner ABI", capabilities: [ffi, raw_ptr])
+extern fn array_store_value(array: i64, items: i64, index: i64, value: i64)
+@always_inline
+fn _sffi_core_array_ops_array_store_value(array: i64, items: i64, index: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        array_store_value(array, items, index, value)
+
+@unsafe(reason: "validated borrowed array storage owner ABI", capabilities: [ffi, raw_ptr])
+extern fn array_reserve(array: i64, needed: i64) -> i8
+@always_inline
+fn _sffi_core_array_ops_array_reserve(array: i64, needed: i64) -> i8:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        array_reserve(array, needed)
 
 # ============================================================================
 # Value tag helpers
@@ -309,6 +344,8 @@ fn rt_array_get_local(array: i64, idx: i64) -> i64:
     val actual_idx = _sffi_core_array_ops_normalize_index(array, idx)
     if actual_idx < 0 or actual_idx >= _sffi_core_array_ops_array_len_value(array):
         return 3
+    if (_sffi_core_array_ops_array_flags(array) & 8) != 0:
+        return _sffi_core_array_ops_load_u8(_sffi_core_array_ops_array_items(array), actual_idx)
     return _sffi_core_array_ops_load_i64(_sffi_core_array_ops_array_items(array), actual_idx * 8)
 
 pub fn rt_array_last(array: i64) -> i64:
@@ -317,18 +354,33 @@ pub fn rt_array_last(array: i64) -> i64:
     val len = _sffi_core_array_ops_array_len_value(array)
     if len <= 0:
         return 3
+    if (_sffi_core_array_ops_array_flags(array) & 8) != 0:
+        return _sffi_core_array_ops_load_u8(_sffi_core_array_ops_array_items(array), len - 1)
     return _sffi_core_array_ops_load_i64(_sffi_core_array_ops_array_items(array), (len - 1) * 8)
 
 pub fn rt_array_copy(array: i64) -> i64:
     if _sffi_core_array_ops_array_is_valid(array) < 1:
         return 0
     val len = _sffi_core_array_ops_array_len_value(array)
-    val result = _sffi_core_array_ops_rt_array_new(len)
+    val flags = _sffi_core_array_ops_array_flags(array)
+    # Match the C provider's storage selection, including byte precedence.
+    # Non-storage bits (such as the tuple marker) do not change copy width.
+    val is_bytes = (flags & 8) != 0
+    val is_u64 = (flags & 16) != 0
+    val element_size = if is_bytes: 1 else: 8
+    if len > 9223372036854775807 / element_size:
+        return 0
+    val source_items = _sffi_core_array_ops_array_items(array)
+    if len > 0 and source_items <= 0:
+        return 0
+    # Constructors own registry publication, minimum capacity, transient
+    # tracking and failure rollback. Do not duplicate those lifecycle steps.
+    val result = if is_bytes: _sffi_core_array_ops_rt_byte_array_new(len) elif is_u64: rt_array_new_with_cap_u64(len) else: _sffi_core_array_ops_rt_array_new(len)
     if result < 1:
         return 0
     if len > 0:
-        _sffi_core_array_ops_memcpy(_sffi_core_array_ops_array_items(result), _sffi_core_array_ops_array_items(array), len * 8)
-        _sffi_core_array_ops_set_array_len(result, len)
+        _sffi_core_array_ops_memcpy(_sffi_core_array_ops_array_items(result), source_items, len * element_size)
+    _sffi_core_array_ops_set_array_len(result, len)
     return result
 
 pub fn rt_array_concat(a: i64, b: i64) -> i64:
@@ -336,18 +388,41 @@ pub fn rt_array_concat(a: i64, b: i64) -> i64:
         return 0
     val len_a = _sffi_core_array_ops_array_len_value(a)
     val len_b = _sffi_core_array_ops_array_len_value(b)
-    if len_a > 9223372036854775807 - len_b:
+    if len_a > 100000000 - len_b:
         return 0
     val total = len_a + len_b
-    val result = _sffi_core_array_ops_rt_array_new(total)
+    val flags_a = _sffi_core_array_ops_array_flags(a)
+    val flags_b = _sffi_core_array_ops_array_flags(b)
+    if (flags_a & 16) != (flags_b & 16):
+        return 0
+    val both_bytes = (flags_a & 8) != 0 and (flags_b & 8) != 0
+    val result = if both_bytes: _sffi_core_array_ops_rt_byte_array_new(total) elif (flags_a & 16) != 0: rt_array_new_with_cap_u64(total) else: _sffi_core_array_ops_rt_array_new(total)
     if result < 1:
         return 0
-    if len_a > 0:
-        _sffi_core_array_ops_memcpy(_sffi_core_array_ops_array_items(result), _sffi_core_array_ops_array_items(a), len_a * 8)
-    if len_b > 0:
-        _sffi_core_array_ops_memcpy(_sffi_core_array_ops_array_items(result) + len_a * 8, _sffi_core_array_ops_array_items(b), len_b * 8)
+    val dst = _sffi_core_array_ops_array_items(result)
+    val left = _sffi_core_array_ops_array_items(a)
+    val right = _sffi_core_array_ops_array_items(b)
+    if _sffi_core_array_ops_array_element_size(a) == _sffi_core_array_ops_array_element_size(b):
+        val width = _sffi_core_array_ops_array_element_size(a)
+        if len_a > 0: _sffi_core_array_ops_memcpy(dst, left, len_a * width)
+        if len_b > 0: _sffi_core_array_ops_memcpy(dst + len_a * width, right, len_b * width)
+    else:
+        var i = 0
+        while i < len_a:
+            _sffi_core_array_ops_store_i64(dst, i * 8, _sffi_core_array_ops_array_load_value(a, left, i))
+            i = i + 1
+        i = 0
+        while i < len_b:
+            _sffi_core_array_ops_store_i64(dst, (len_a + i) * 8, _sffi_core_array_ops_array_load_value(b, right, i))
+            i = i + 1
     _sffi_core_array_ops_set_array_len(result, total)
     return result
+
+fn array_ops_new_like(array: i64, capacity: i64) -> i64:
+    val flags = _sffi_core_array_ops_array_flags(array)
+    if (flags & 8) != 0: return _sffi_core_array_ops_rt_byte_array_new(capacity)
+    if (flags & 16) != 0: return rt_array_new_with_cap_u64(capacity)
+    _sffi_core_array_ops_rt_array_new(capacity)
 
 pub fn rt_array_reverse(array: i64) -> i8:
     if _sffi_core_array_ops_array_is_valid(array) < 1:
@@ -357,9 +432,9 @@ pub fn rt_array_reverse(array: i64) -> i8:
     var lo = 0
     var hi = len - 1
     while lo < hi:
-        val tmp = _sffi_core_array_ops_load_i64(items, lo * 8)
-        _sffi_core_array_ops_store_i64(items, lo * 8, _sffi_core_array_ops_load_i64(items, hi * 8))
-        _sffi_core_array_ops_store_i64(items, hi * 8, tmp)
+        val tmp = _sffi_core_array_ops_array_load_value(array, items, lo)
+        _sffi_core_array_ops_array_store_value(array, items, lo, _sffi_core_array_ops_array_load_value(array, items, hi))
+        _sffi_core_array_ops_array_store_value(array, items, hi, tmp)
         lo = lo + 1
         hi = hi - 1
     return 1
@@ -368,14 +443,14 @@ pub fn rt_array_reversed(array: i64) -> i64:
     if _sffi_core_array_ops_array_is_valid(array) < 1:
         return 0
     val len = _sffi_core_array_ops_array_len_value(array)
-    val result = _sffi_core_array_ops_rt_array_new(len)
+    val result = array_ops_new_like(array, len)
     if result < 1:
         return 0
     val src = _sffi_core_array_ops_array_items(array)
     val dst = _sffi_core_array_ops_array_items(result)
     var i = 0
     while i < len:
-        _sffi_core_array_ops_store_i64(dst, i * 8, _sffi_core_array_ops_load_i64(src, (len - 1 - i) * 8))
+        _sffi_core_array_ops_array_store_value(result, dst, i, _sffi_core_array_ops_array_load_value(array, src, len - 1 - i))
         i = i + 1
     _sffi_core_array_ops_set_array_len(result, len)
     return result
@@ -389,11 +464,11 @@ pub fn rt_array_take(array: i64, n: i64) -> i64:
         take_n = 0
     if take_n > len:
         take_n = len
-    val result = _sffi_core_array_ops_rt_array_new(take_n)
+    val result = array_ops_new_like(array, take_n)
     if result < 1:
         return 0
     if take_n > 0:
-        _sffi_core_array_ops_memcpy(_sffi_core_array_ops_array_items(result), _sffi_core_array_ops_array_items(array), take_n * 8)
+        _sffi_core_array_ops_memcpy(_sffi_core_array_ops_array_items(result), _sffi_core_array_ops_array_items(array), take_n * _sffi_core_array_ops_array_element_size(array))
         _sffi_core_array_ops_set_array_len(result, take_n)
     return result
 
@@ -407,11 +482,11 @@ pub fn rt_array_drop(array: i64, n: i64) -> i64:
     if drop_count > len:
         drop_count = len
     val result_len = len - drop_count
-    val result = _sffi_core_array_ops_rt_array_new(result_len)
+    val result = array_ops_new_like(array, result_len)
     if result < 1:
         return 0
     if result_len > 0:
-        _sffi_core_array_ops_memcpy(_sffi_core_array_ops_array_items(result), _sffi_core_array_ops_array_items(array) + drop_count * 8, result_len * 8)
+        _sffi_core_array_ops_memcpy(_sffi_core_array_ops_array_items(result), _sffi_core_array_ops_array_items(array) + drop_count * _sffi_core_array_ops_array_element_size(array), result_len * _sffi_core_array_ops_array_element_size(array))
         _sffi_core_array_ops_set_array_len(result, result_len)
     return result
 
@@ -422,7 +497,7 @@ pub fn rt_array_fill(array: i64, value: i64) -> i8:
     val items = _sffi_core_array_ops_array_items(array)
     var i = 0
     while i < len:
-        _sffi_core_array_ops_store_i64(items, i * 8, value)
+        _sffi_core_array_ops_array_store_value(array, items, i, value)
         i = i + 1
     return 1
 
@@ -477,35 +552,16 @@ pub fn rt_array_push_no_grow(array: i64, value: i64) -> i8:
     val cap = _sffi_core_array_ops_array_cap(array)
     if len >= cap:
         return 0
-    _sffi_core_array_ops_store_i64(_sffi_core_array_ops_array_items(array), len * 8, value)
+    _sffi_core_array_ops_array_store_value(array, _sffi_core_array_ops_array_items(array), len, value)
     _sffi_core_array_ops_set_array_len(array, len + 1)
     return 1
 
-fn byte_array_reserve(array: i64, needed: i64) -> i8:
-    if _sffi_core_array_ops_array_is_valid(array) < 1:
-        return 0
-    var cap = _sffi_core_array_ops_array_cap(array)
-    if needed <= cap:
-        return 1
-    var new_cap = cap * 2
-    if new_cap < 4:
-        new_cap = 4
-    while new_cap < needed:
-        new_cap = new_cap * 2
-    val new_items = _sffi_core_array_ops_realloc(_sffi_core_array_ops_array_items(array), new_cap)
-    if new_items < 1:
-        _sffi_core_array_ops_set_array_len(array, 0)
-        _sffi_core_array_ops_set_array_cap(array, 0)
-        return 0
-    _sffi_core_array_ops_set_array_items(array, new_items)
-    _sffi_core_array_ops_set_array_cap(array, new_cap)
-    return 1
 
 pub fn rt_bytes_u32_le_at(array: i64, idx: i64) -> i64:
     if _sffi_core_array_ops_array_is_valid(array) < 1:
         return 0
     val actual_idx = _sffi_core_array_ops_normalize_index(array, idx)
-    if actual_idx < 0 or actual_idx + 4 > _sffi_core_array_ops_array_len_value(array):
+    if actual_idx < 0 or actual_idx > _sffi_core_array_ops_array_len_value(array) - 4:
         return 0
     val items = _sffi_core_array_ops_array_items(array)
     return (_sffi_core_array_ops_load_u8(items, actual_idx) & 255) |
@@ -517,7 +573,7 @@ pub fn rt_bytes_u64_le_at(array: i64, idx: i64) -> i64:
     if _sffi_core_array_ops_array_is_valid(array) < 1:
         return 0
     val actual_idx = _sffi_core_array_ops_normalize_index(array, idx)
-    if actual_idx < 0 or actual_idx + 8 > _sffi_core_array_ops_array_len_value(array):
+    if actual_idx < 0 or actual_idx > _sffi_core_array_ops_array_len_value(array) - 8:
         return 0
     val items = _sffi_core_array_ops_array_items(array)
     var out = 0
@@ -530,8 +586,10 @@ pub fn rt_bytes_u64_le_at(array: i64, idx: i64) -> i64:
 pub fn rt_typed_bytes_u8_push(array: i64, value: i64) -> i8:
     if _sffi_core_array_ops_array_is_valid(array) < 1:
         return 0
+    if (_sffi_core_array_ops_array_flags(array) & 8) == 0:
+        return 0
     val len = _sffi_core_array_ops_array_len_value(array)
-    if byte_array_reserve(array, len + 1) < 1:
+    if _sffi_core_array_ops_array_reserve(array, len + 1) < 1:
         return 0
     _sffi_core_array_ops_store_u8(_sffi_core_array_ops_array_items(array), len, value & 255)
     _sffi_core_array_ops_set_array_len(array, len + 1)
@@ -540,22 +598,32 @@ pub fn rt_typed_bytes_u8_push(array: i64, value: i64) -> i8:
 pub fn rt_typed_words_u32_at(array: i64, idx: i64) -> i64:
     if _sffi_core_array_ops_array_is_valid(array) < 1:
         return 0
+    if (_sffi_core_array_ops_array_flags(array) & 8) != 0:
+        return 0
     val actual_idx = if idx < 0: _sffi_core_array_ops_array_len_value(array) + idx else: idx
     if actual_idx < 0 or actual_idx >= _sffi_core_array_ops_array_len_value(array):
         return 0
     return typed_word_decode(array, _sffi_core_array_ops_load_i64(_sffi_core_array_ops_array_items(array), actual_idx * 8)) & 0xffffffff
 
 pub fn rt_typed_words_u32_unchecked(array: i64, idx: i64) -> i64:
+    if (_sffi_core_array_ops_array_flags(array) & 8) != 0:
+        return 0
     return typed_word_decode(array, _sffi_core_array_ops_load_i64(_sffi_core_array_ops_array_items(array), idx * 8)) & 0xffffffff
 
 pub fn rt_typed_words_u32_data_at(items: i64, idx: i64) -> i64:
     return val_as_int(_sffi_core_array_ops_load_i64(items, idx * 8)) & 0xffffffff
 
 pub fn rt_typed_words_u32_push(array: i64, value: i64) -> i8:
+    if _sffi_core_array_ops_array_is_valid(array) < 1:
+        return 0
+    if (_sffi_core_array_ops_array_flags(array) & 8) != 0:
+        return 0
     return _sffi_core_array_ops_rt_array_push(array, typed_word_encode(array, value & 0xffffffff))
 
 pub fn rt_typed_words_u32_push_known_at(array: i64, idx: i64, value: i64) -> i8:
     if _sffi_core_array_ops_array_is_valid(array) < 1:
+        return 0
+    if (_sffi_core_array_ops_array_flags(array) & 8) != 0:
         return 0
     val actual_idx = idx
     if actual_idx < 0 or actual_idx >= _sffi_core_array_ops_array_cap(array):
@@ -567,6 +635,8 @@ pub fn rt_typed_words_u32_push_known_at(array: i64, idx: i64, value: i64) -> i8:
 
 pub fn rt_typed_words_u32_push_known_data_at(array: i64, items: i64, idx: i64, value: i64) -> i8:
     if _sffi_core_array_ops_array_is_valid(array) < 1:
+        return 0
+    if (_sffi_core_array_ops_array_flags(array) & 8) != 0:
         return 0
     val actual_idx = idx
     if actual_idx < 0 or actual_idx >= _sffi_core_array_ops_array_cap(array):
@@ -640,10 +710,16 @@ pub fn rt_write_u32s_strided_to_raw(data_ptr: i64, capacity_bytes: i64,
     return width * height
 
 pub fn rt_typed_words_u32_store_known_data_at(array: i64, items: i64, idx: i64, value: i64) -> i8:
+    if _sffi_core_array_ops_array_is_valid(array) < 1:
+        return 0
+    if (_sffi_core_array_ops_array_flags(array) & 8) != 0:
+        return 0
     return rt_typed_words_u32_push_known_data_at(array, items, idx, value)
 
 pub fn rt_typed_words_u32_set(array: i64, idx: i64, value: i64) -> i8:
     if _sffi_core_array_ops_array_is_valid(array) < 1:
+        return 0
+    if (_sffi_core_array_ops_array_flags(array) & 8) != 0:
         return 0
     val actual_idx = if idx < 0: _sffi_core_array_ops_array_len_value(array) + idx else: idx
     if actual_idx < 0 or actual_idx >= _sffi_core_array_ops_array_len_value(array):
@@ -654,12 +730,16 @@ pub fn rt_typed_words_u32_set(array: i64, idx: i64, value: i64) -> i8:
 pub fn rt_typed_words_u64_at(array: i64, idx: i64) -> i64:
     if _sffi_core_array_ops_array_is_valid(array) < 1:
         return 0
+    if (_sffi_core_array_ops_array_flags(array) & 8) != 0:
+        return 0
     val actual_idx = if idx < 0: _sffi_core_array_ops_array_len_value(array) + idx else: idx
     if actual_idx < 0 or actual_idx >= _sffi_core_array_ops_array_len_value(array):
         return 0
     return typed_word_decode(array, _sffi_core_array_ops_load_i64(_sffi_core_array_ops_array_items(array), actual_idx * 8))
 
 pub fn rt_typed_words_u64_unchecked(array: i64, idx: i64) -> i64:
+    if (_sffi_core_array_ops_array_flags(array) & 8) != 0:
+        return 0
     return typed_word_decode(array, _sffi_core_array_ops_load_i64(_sffi_core_array_ops_array_items(array), idx * 8))
 
 pub fn rt_typed_words_u64_data_at(items: i64, idx: i64) -> i64:
@@ -667,6 +747,8 @@ pub fn rt_typed_words_u64_data_at(items: i64, idx: i64) -> i64:
 
 pub fn rt_typed_words_u64_data_at_checked(array: i64, items: i64, idx: i64) -> i64:
     if _sffi_core_array_ops_array_is_valid(array) < 1:
+        return 0
+    if (_sffi_core_array_ops_array_flags(array) & 8) != 0:
         return 0
     val actual_idx = if idx < 0: _sffi_core_array_ops_array_len_value(array) + idx else: idx
     if actual_idx < 0 or actual_idx >= _sffi_core_array_ops_array_len_value(array):
@@ -766,6 +848,8 @@ pub fn rt_numeric_xor_sum_u64(array: i64, xor_value: i64) -> i64:
         return 0
     if _sffi_core_array_ops_load_u8(ptr, 0) != 2:
         return 0
+    if (_sffi_core_array_ops_load_u8(ptr, 1) & 8) != 0:
+        return 0
     val length = _sffi_core_array_ops_load_i64(ptr, 8)
     if length < 0:
         return 0
@@ -805,6 +889,8 @@ pub fn rt_numeric_contains_u64(array: i64, value: i64) -> i8:
     if (ptr & 7) > 0:
         return 0
     if _sffi_core_array_ops_load_u8(ptr, 0) != 2:
+        return 0
+    if (_sffi_core_array_ops_load_u8(ptr, 1) & 8) != 0:
         return 0
     val length = _sffi_core_array_ops_load_i64(ptr, 8)
     if length < 0:
@@ -858,10 +944,16 @@ pub fn rt_numeric_contains_u64(array: i64, value: i64) -> i8:
     return found
 
 pub fn rt_typed_words_u64_push(array: i64, value: i64) -> i8:
+    if _sffi_core_array_ops_array_is_valid(array) < 1:
+        return 0
+    if (_sffi_core_array_ops_array_flags(array) & 8) != 0:
+        return 0
     return _sffi_core_array_ops_rt_array_push(array, typed_word_encode(array, value))
 
 pub fn rt_typed_words_u64_push_known_at(array: i64, idx: i64, value: i64) -> i8:
     if _sffi_core_array_ops_array_is_valid(array) < 1:
+        return 0
+    if (_sffi_core_array_ops_array_flags(array) & 8) != 0:
         return 0
     val actual_idx = idx
     if actual_idx < 0 or actual_idx >= _sffi_core_array_ops_array_cap(array):
@@ -874,6 +966,8 @@ pub fn rt_typed_words_u64_push_known_at(array: i64, idx: i64, value: i64) -> i8:
 pub fn rt_typed_words_u64_push_known_data_at(array: i64, items: i64, idx: i64, value: i64) -> i8:
     if _sffi_core_array_ops_array_is_valid(array) < 1:
         return 0
+    if (_sffi_core_array_ops_array_flags(array) & 8) != 0:
+        return 0
     val actual_idx = idx
     if actual_idx < 0 or actual_idx >= _sffi_core_array_ops_array_cap(array):
         return 0
@@ -883,10 +977,16 @@ pub fn rt_typed_words_u64_push_known_data_at(array: i64, items: i64, idx: i64, v
     return 1
 
 pub fn rt_typed_words_u64_store_known_data_at(array: i64, items: i64, idx: i64, value: i64) -> i8:
+    if _sffi_core_array_ops_array_is_valid(array) < 1:
+        return 0
+    if (_sffi_core_array_ops_array_flags(array) & 8) != 0:
+        return 0
     return rt_typed_words_u64_push_known_data_at(array, items, idx, value)
 
 pub fn rt_typed_words_u64_set(array: i64, idx: i64, value: i64) -> i8:
     if _sffi_core_array_ops_array_is_valid(array) < 1:
+        return 0
+    if (_sffi_core_array_ops_array_flags(array) & 8) != 0:
         return 0
     val actual_idx = if idx < 0: _sffi_core_array_ops_array_len_value(array) + idx else: idx
     if actual_idx < 0 or actual_idx >= _sffi_core_array_ops_array_len_value(array):
@@ -899,23 +999,19 @@ pub fn rt_array_extend_i64(dst: i64, src: i64, count: i64) -> i8:
         return 1
     if _sffi_core_array_ops_array_is_valid(dst) < 1 or _sffi_core_array_ops_array_is_valid(src) < 1:
         return 0
+    # This ABI copies word slots; byte spans use the generic array operations.
+    if (_sffi_core_array_ops_array_flags(dst) & 8) != 0 or (_sffi_core_array_ops_array_flags(src) & 8) != 0:
+        return 0
     val src_len = _sffi_core_array_ops_array_len_value(src)
     if count > src_len:
         return 0
     val dst_len = _sffi_core_array_ops_array_len_value(dst)
+    if dst_len > 100000000 - count:
+        return 0
     val needed = dst_len + count
-    var dst_cap = _sffi_core_array_ops_array_cap(dst)
-    if needed > dst_cap:
-        var new_cap = dst_cap * 2
-        if new_cap < needed:
-            new_cap = needed
-        if new_cap < 4:
-            new_cap = 4
-        val new_items = _sffi_core_array_ops_realloc(_sffi_core_array_ops_array_items(dst), new_cap * 8)
-        if new_items < 1:
-            return 0
-        _sffi_core_array_ops_set_array_items(dst, new_items)
-        _sffi_core_array_ops_set_array_cap(dst, new_cap)
+    if _sffi_core_array_ops_array_reserve(dst, needed) < 1:
+        return 0
+    # Resolve both pointers after reserve: self-extension may move the backing.
     _sffi_core_array_ops_memcpy(_sffi_core_array_ops_array_items(dst) + dst_len * 8, _sffi_core_array_ops_array_items(src), count * 8)
-    _sffi_core_array_ops_set_array_len(dst, dst_len + count)
+    _sffi_core_array_ops_set_array_len(dst, needed)
     return 1
