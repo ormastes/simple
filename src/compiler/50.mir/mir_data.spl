@@ -14,6 +14,7 @@
 # - mir_data.spl: MirBuilder API + re-exports (this file)
 
 use compiler.hir.hir_types.{SymbolId, SymbolTable, HirType, hir_type_metadata_symbol_free}
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.hir.hir_definitions.{HirParam, HirConst}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
@@ -37,6 +38,8 @@ use compiler.mir.intrinsics.{MIR_STORAGE_ALLOC_OWNED_RAW_V1}
 # (50.mir/_MirLowering/bootstrap_globals.spl:25). (2026-08-08 stage3)
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.io_runtime.{env_get_opt}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use compiler.mir._MirLowering.transient_owner_sffi.{promote_and_release_transient_owner_roots}
 
 pub fn mir_trace_requested(
     compiler_trace: text,
@@ -925,8 +928,109 @@ export use compiler.mir.mir_instruction_support.{
 # first and registration is Str-returns only.
 var _bootstrap_fn_ret_types: Dict<text, MirType> = {}
 
+# Per-scope delta journal for every `_bootstrap_fn_*` registry in this file.
+# The registries accumulate across all closure modules, and the per-module
+# transient MIR scope used to promote each one WHOLESALE: the runtime walk
+# visits every entry of a persistent dict too, so every module re-walked the
+# whole accumulated registry (Stage 3 closure lowering ~700 -> ~150
+# modules/min after #3919). Promotion only has to adopt what the scope
+# allocated: the dict handles predate the scope and their bucket storage is
+# plain calloc (runtime `rt_core_dict_resize`), so an in-scope write adds only
+# transient KEYS and VALUES. Every write path below journals exactly those
+# while a scope is live, and marks a registry REPLACED when a rebuild/reset
+# assigns it a new (in-scope) handle; `bootstrap_fn_registries_promote`
+# promotes the journal plus only the replaced handles.
+# doc/08_tracking/bug/stage3_bootstrap_closure_promote_walks_full_registry_2026_10_20.md
+var _bootstrap_fn_journal_texts: [text] = []
+var _bootstrap_fn_journal_mir_types: [MirType] = []
+var _bootstrap_fn_journal_hir_types: [HirType] = []
+var _bootstrap_fn_journal_hir_type_lists: [[HirType]] = []
+var _bootstrap_fn_journal_params: [[HirParam]] = []
+var _bootstrap_fn_journal_symbol_tables: [SymbolTable] = []
+var _bootstrap_fn_journal_consts: [[HirConst]] = []
+var _bootstrap_fn_replaced_ret_hir_types = false
+var _bootstrap_fn_replaced_ret_shapes = false
+var _bootstrap_fn_replaced_ret_array_element_shapes = false
+var _bootstrap_fn_replaced_ret_ok_shapes = false
+var _bootstrap_fn_replaced_ret_opt_shapes = false
+var _bootstrap_fn_replaced_param_hir_types = false
+var _bootstrap_fn_replaced_param_defaults = false
+var _bootstrap_fn_replaced_default_rows = false
+# The first promotion in a process adopts every registry wholesale once, so
+# rows written before journaling could see a scope (or a lazily initialised
+# handle) are covered; every later promotion is delta-only.
+var _bootstrap_fn_registries_adopted = false
+
+fn _bootstrap_fn_delta_live() -> bool:
+    transient_array_scope_state_v1() != 0
+
+fn _bootstrap_fn_delta_text(value: text):
+    if _bootstrap_fn_delta_live():
+        _bootstrap_fn_journal_texts = _bootstrap_fn_journal_texts.push(value)
+
+fn _bootstrap_fn_delta_mir_type(value: MirType):
+    if _bootstrap_fn_delta_live():
+        _bootstrap_fn_journal_mir_types = _bootstrap_fn_journal_mir_types.push(value)
+
+fn _bootstrap_fn_delta_hir_type(value: HirType):
+    if _bootstrap_fn_delta_live():
+        _bootstrap_fn_journal_hir_types = _bootstrap_fn_journal_hir_types.push(value)
+
+fn _bootstrap_fn_delta_hir_type_list(value: [HirType]):
+    if _bootstrap_fn_delta_live():
+        _bootstrap_fn_journal_hir_type_lists = _bootstrap_fn_journal_hir_type_lists.push(value)
+
+fn _bootstrap_fn_delta_params(value: [HirParam]):
+    if _bootstrap_fn_delta_live():
+        _bootstrap_fn_journal_params = _bootstrap_fn_journal_params.push(value)
+
+fn _bootstrap_fn_delta_symbol_table(value: SymbolTable):
+    if _bootstrap_fn_delta_live():
+        _bootstrap_fn_journal_symbol_tables = _bootstrap_fn_journal_symbol_tables.push(value)
+
+fn _bootstrap_fn_delta_consts(value: [HirConst]):
+    if _bootstrap_fn_delta_live():
+        _bootstrap_fn_journal_consts = _bootstrap_fn_journal_consts.push(value)
+
+fn _bootstrap_fn_hir_type_lists_equal(left: [HirType], right: [HirType]) -> bool:
+    if left.len() != right.len():
+        return false
+    var index = 0
+    while index < left.len():
+        if not hir_types_equal(left[index], right[index]):
+            return false
+        index = index + 1
+    true
+
+fn bootstrap_fn_registries_discard_delta_v1():
+    """Drop a journal left by a scope that ended without registry promotion
+    (an aborted module). Call only right after a successful scope begin: no
+    live scope can still own those rows then."""
+    _bootstrap_fn_delta_reset()
+
+fn _bootstrap_fn_delta_reset():
+    _bootstrap_fn_journal_texts = []
+    _bootstrap_fn_journal_mir_types = []
+    _bootstrap_fn_journal_hir_types = []
+    _bootstrap_fn_journal_hir_type_lists = []
+    _bootstrap_fn_journal_params = []
+    _bootstrap_fn_journal_symbol_tables = []
+    _bootstrap_fn_journal_consts = []
+    _bootstrap_fn_replaced_ret_hir_types = false
+    _bootstrap_fn_replaced_ret_shapes = false
+    _bootstrap_fn_replaced_ret_array_element_shapes = false
+    _bootstrap_fn_replaced_ret_ok_shapes = false
+    _bootstrap_fn_replaced_ret_opt_shapes = false
+    _bootstrap_fn_replaced_param_hir_types = false
+    _bootstrap_fn_replaced_param_defaults = false
+    _bootstrap_fn_replaced_default_rows = false
+
 fn bootstrap_fn_ret_type_register(name: text, ty: MirType):
+    # An update keeps the stored key; only a new key enters the journal.
+    if not _bootstrap_fn_ret_types.contains_key(name):
+        _bootstrap_fn_delta_text(name)
     _bootstrap_fn_ret_types[name] = ty
+    _bootstrap_fn_delta_mir_type(ty)
 
 fn bootstrap_fn_ret_type_lookup(name: text) -> MirType?:
     # contains_key + [] rather than .get(): Dict.get returns nil on present
@@ -949,11 +1053,13 @@ var _bootstrap_fn_ret_hir_ambig: Dict<text, bool> = {}
 fn bootstrap_fn_ret_hir_type_register(name: text, ty: HirType):
     if not hir_type_metadata_symbol_free(ty):
         _bootstrap_fn_ret_hir_ambig[name] = true
+        _bootstrap_fn_delta_text(name)
         return
     if _bootstrap_fn_ret_hir_ambig.contains_key(name):
         return
     if _bootstrap_fn_ret_hir_types.contains_key(name):
         _bootstrap_fn_ret_hir_ambig[name] = true
+        _bootstrap_fn_delta_text(name)
         # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
         # natively (rt_dict_remove); assigning it back destroys the map on the
         # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
@@ -963,8 +1069,11 @@ fn bootstrap_fn_ret_hir_type_register(name: text, ty: HirType):
             if _k != name:
                 _kept_bootstrap_fn_ret_hir_types[_k] = _bootstrap_fn_ret_hir_types[_k]
         _bootstrap_fn_ret_hir_types = _kept_bootstrap_fn_ret_hir_types
+        _bootstrap_fn_replaced_ret_hir_types = _bootstrap_fn_replaced_ret_hir_types or _bootstrap_fn_delta_live()
         return
     _bootstrap_fn_ret_hir_types[name] = ty
+    _bootstrap_fn_delta_text(name)
+    _bootstrap_fn_delta_hir_type(ty)
 
 fn bootstrap_fn_ret_hir_type_lookup(name: text) -> HirType?:
     if _bootstrap_fn_ret_hir_ambig.contains_key(name):
@@ -984,6 +1093,7 @@ fn bootstrap_fn_ret_shape_register(name: text, shape: text):
     if _bootstrap_fn_ret_shapes.contains_key(name):
         if _bootstrap_fn_ret_shapes[name] != shape:
             _bootstrap_fn_ret_shape_ambig[name] = true
+            _bootstrap_fn_delta_text(name)
             # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
             # natively (rt_dict_remove); assigning it back destroys the map on the
             # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
@@ -993,8 +1103,11 @@ fn bootstrap_fn_ret_shape_register(name: text, shape: text):
                 if _k != name:
                     _kept_bootstrap_fn_ret_shapes[_k] = _bootstrap_fn_ret_shapes[_k]
             _bootstrap_fn_ret_shapes = _kept_bootstrap_fn_ret_shapes
+            _bootstrap_fn_replaced_ret_shapes = _bootstrap_fn_replaced_ret_shapes or _bootstrap_fn_delta_live()
         return
     _bootstrap_fn_ret_shapes[name] = shape
+    _bootstrap_fn_delta_text(name)
+    _bootstrap_fn_delta_text(shape)
 
 fn bootstrap_fn_ret_shape_lookup(name: text) -> text?:
     if _bootstrap_fn_ret_shapes.contains_key(name):
@@ -1012,6 +1125,7 @@ fn bootstrap_fn_ret_array_element_shape_register(name: text, shape: text, identi
     if _bootstrap_fn_ret_array_element_shapes.contains_key(name):
         if _bootstrap_fn_ret_array_element_identities[name] != identity:
             _bootstrap_fn_ret_array_element_shape_ambig[name] = true
+            _bootstrap_fn_delta_text(name)
             # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
             # natively (rt_dict_remove); assigning it back destroys the map on the
             # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
@@ -1021,9 +1135,13 @@ fn bootstrap_fn_ret_array_element_shape_register(name: text, shape: text, identi
                 if _k != name:
                     _kept_bootstrap_fn_ret_array_element_shapes[_k] = _bootstrap_fn_ret_array_element_shapes[_k]
             _bootstrap_fn_ret_array_element_shapes = _kept_bootstrap_fn_ret_array_element_shapes
+            _bootstrap_fn_replaced_ret_array_element_shapes = _bootstrap_fn_replaced_ret_array_element_shapes or _bootstrap_fn_delta_live()
         return
     _bootstrap_fn_ret_array_element_shapes[name] = shape
     _bootstrap_fn_ret_array_element_identities[name] = identity
+    _bootstrap_fn_delta_text(name)
+    _bootstrap_fn_delta_text(shape)
+    _bootstrap_fn_delta_text(identity)
 
 fn bootstrap_fn_ret_array_element_shape_lookup(name: text) -> text?:
     if _bootstrap_fn_ret_array_element_shapes.contains_key(name):
@@ -1051,6 +1169,7 @@ fn bootstrap_fn_ret_ok_shape_register(name: text, shape: text):
     if _bootstrap_fn_ret_ok_shapes.contains_key(name):
         if _bootstrap_fn_ret_ok_shapes[name] != shape:
             _bootstrap_fn_ret_ok_shape_ambig[name] = true
+            _bootstrap_fn_delta_text(name)
             # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
             # natively (rt_dict_remove); assigning it back destroys the map on the
             # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
@@ -1060,8 +1179,11 @@ fn bootstrap_fn_ret_ok_shape_register(name: text, shape: text):
                 if _k != name:
                     _kept_bootstrap_fn_ret_ok_shapes[_k] = _bootstrap_fn_ret_ok_shapes[_k]
             _bootstrap_fn_ret_ok_shapes = _kept_bootstrap_fn_ret_ok_shapes
+            _bootstrap_fn_replaced_ret_ok_shapes = _bootstrap_fn_replaced_ret_ok_shapes or _bootstrap_fn_delta_live()
         return
     _bootstrap_fn_ret_ok_shapes[name] = shape
+    _bootstrap_fn_delta_text(name)
+    _bootstrap_fn_delta_text(shape)
 
 fn bootstrap_fn_ret_ok_shape_lookup(name: text) -> text?:
     if _bootstrap_fn_ret_ok_shapes.contains_key(name):
@@ -1077,9 +1199,14 @@ fn bootstrap_fn_ret_err_shape_register(name: text, shape: text):
     if _bootstrap_fn_ret_err_shapes.contains_key(name):
         if _bootstrap_fn_ret_err_shapes[name] != shape:
             # An empty retained entry is conflicting authority, not a miss.
-            _bootstrap_fn_ret_err_shapes[name] = ""
+            val conflicting_err_shape = ""
+            _bootstrap_fn_ret_err_shapes[name] = conflicting_err_shape
+            _bootstrap_fn_delta_text(name)
+            _bootstrap_fn_delta_text(conflicting_err_shape)
         return
     _bootstrap_fn_ret_err_shapes[name] = shape
+    _bootstrap_fn_delta_text(name)
+    _bootstrap_fn_delta_text(shape)
 
 fn bootstrap_fn_ret_err_shape_lookup(name: text) -> text?:
     if _bootstrap_fn_ret_err_shapes.contains_key(name):
@@ -1112,6 +1239,7 @@ fn bootstrap_fn_ret_opt_shape_register(name: text, shape: text):
     if _bootstrap_fn_ret_opt_shapes.contains_key(name):
         if _bootstrap_fn_ret_opt_shapes[name] != shape:
             _bootstrap_fn_ret_opt_shape_ambig[name] = true
+            _bootstrap_fn_delta_text(name)
             # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
             # natively (rt_dict_remove); assigning it back destroys the map on the
             # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
@@ -1121,8 +1249,11 @@ fn bootstrap_fn_ret_opt_shape_register(name: text, shape: text):
                 if _k != name:
                     _kept_bootstrap_fn_ret_opt_shapes[_k] = _bootstrap_fn_ret_opt_shapes[_k]
             _bootstrap_fn_ret_opt_shapes = _kept_bootstrap_fn_ret_opt_shapes
+            _bootstrap_fn_replaced_ret_opt_shapes = _bootstrap_fn_replaced_ret_opt_shapes or _bootstrap_fn_delta_live()
         return
     _bootstrap_fn_ret_opt_shapes[name] = shape
+    _bootstrap_fn_delta_text(name)
+    _bootstrap_fn_delta_text(shape)
 
 fn bootstrap_fn_ret_opt_shape_lookup(name: text) -> text?:
     if _bootstrap_fn_ret_opt_shapes.contains_key(name):
@@ -1145,6 +1276,7 @@ fn bootstrap_fn_param_hir_types_register(name: text, tys: [HirType]):
     for ty in tys:
         if not hir_type_metadata_symbol_free(ty):
             _bootstrap_fn_param_hir_rejected[name] = true
+            _bootstrap_fn_delta_text(name)
             return
     if _bootstrap_fn_ret_hir_ambig.contains_key(name):
         if _bootstrap_fn_param_hir_types.contains_key(name):
@@ -1157,8 +1289,18 @@ fn bootstrap_fn_param_hir_types_register(name: text, tys: [HirType]):
                 if _k != name:
                     _kept_bootstrap_fn_param_hir_types[_k] = _bootstrap_fn_param_hir_types[_k]
             _bootstrap_fn_param_hir_types = _kept_bootstrap_fn_param_hir_types
+            _bootstrap_fn_replaced_param_hir_types = _bootstrap_fn_replaced_param_hir_types or _bootstrap_fn_delta_live()
         return
+    if _bootstrap_fn_param_hir_types.contains_key(name):
+        # Per-consumer provider prescan re-registers the same declaration:
+        # storing an equal fresh list would promote a copy per module and
+        # orphan the previous one.
+        if _bootstrap_fn_hir_type_lists_equal(_bootstrap_fn_param_hir_types[name], tys):
+            return
+    else:
+        _bootstrap_fn_delta_text(name)
     _bootstrap_fn_param_hir_types[name] = tys
+    _bootstrap_fn_delta_hir_type_list(tys)
 
 fn bootstrap_fn_param_hir_types_lookup(name: text) -> [HirType]?:
     if _bootstrap_fn_param_hir_rejected.contains_key(name):
@@ -1204,8 +1346,20 @@ var _bootstrap_default_provider_symbols: Dict<text, SymbolTable> = {}
 var _bootstrap_default_provider_globals: Dict<text, [HirConst]> = {}
 
 fn bootstrap_default_provider_register(owner: text, symbols: SymbolTable, globals: [HirConst]):
+    # Re-registered for every consumer once providers are passed: the owner's
+    # table and constants come from the same driver HIR module each time, so
+    # the first registration is kept. Re-storing it per consumer would journal
+    # (and, under the memory-owner runtime, re-walk) a whole provider graph
+    # per module. `bootstrap_fn_param_defaults_detach_for_archive_v1` clears
+    # these rows when a new declaration owner is installed.
+    if _bootstrap_default_provider_symbols.contains_key(owner) and
+            _bootstrap_default_provider_globals.contains_key(owner):
+        return
     _bootstrap_default_provider_symbols[owner] = symbols
     _bootstrap_default_provider_globals[owner] = globals
+    _bootstrap_fn_delta_text(owner)
+    _bootstrap_fn_delta_symbol_table(symbols)
+    _bootstrap_fn_delta_consts(globals)
 
 fn bootstrap_default_provider_symbols(owner: text) -> SymbolTable?:
     _bootstrap_default_provider_symbols.get(owner)
@@ -1229,8 +1383,14 @@ fn bootstrap_fn_param_defaults_register(name: text, params: [HirParam], owner: t
     # two providers may both declare f(x = LIMIT) with different LIMIT storage.
     if _bootstrap_fn_param_default_owners.has(name) and _bootstrap_fn_param_default_owners[name] != owner:
         _bootstrap_fn_param_defaults_ambig[name] = true
+        _bootstrap_fn_delta_text(name)
         return
-    _bootstrap_fn_param_default_owners[name] = owner
+    # A present key already holds this same owner (the branch above returned
+    # otherwise); rewriting it would only store a fresh transient copy.
+    if not _bootstrap_fn_param_default_owners.has(name):
+        _bootstrap_fn_param_default_owners[name] = owner
+        _bootstrap_fn_delta_text(name)
+        _bootstrap_fn_delta_text(owner)
     var any_default = false
     for p in params:
         if p.has_default:
@@ -1242,6 +1402,7 @@ fn bootstrap_fn_param_defaults_register(name: text, params: [HirParam], owner: t
         if _bootstrap_fn_param_defaults.contains_key(name):
             if _fn_param_defaults_shape(_bootstrap_fn_param_defaults[name]) != _fn_param_defaults_shape(params):
                 _bootstrap_fn_param_defaults_ambig[name] = true
+                _bootstrap_fn_delta_text(name)
                 # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
                 # natively (rt_dict_remove); assigning it back destroys the map on the
                 # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
@@ -1251,10 +1412,12 @@ fn bootstrap_fn_param_defaults_register(name: text, params: [HirParam], owner: t
                     if _k != name:
                         _kept_bootstrap_fn_param_defaults[_k] = _bootstrap_fn_param_defaults[_k]
                 _bootstrap_fn_param_defaults = _kept_bootstrap_fn_param_defaults
+                _bootstrap_fn_replaced_param_defaults = _bootstrap_fn_replaced_param_defaults or _bootstrap_fn_delta_live()
         return
     if _bootstrap_fn_param_defaults.contains_key(name):
         if _fn_param_defaults_shape(_bootstrap_fn_param_defaults[name]) != _fn_param_defaults_shape(params):
             _bootstrap_fn_param_defaults_ambig[name] = true
+            _bootstrap_fn_delta_text(name)
             # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
             # natively (rt_dict_remove); assigning it back destroys the map on the
             # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
@@ -1264,8 +1427,11 @@ fn bootstrap_fn_param_defaults_register(name: text, params: [HirParam], owner: t
                 if _k != name:
                     _kept_bootstrap_fn_param_defaults_2[_k] = _bootstrap_fn_param_defaults[_k]
             _bootstrap_fn_param_defaults = _kept_bootstrap_fn_param_defaults_2
+            _bootstrap_fn_replaced_param_defaults = _bootstrap_fn_replaced_param_defaults or _bootstrap_fn_delta_live()
         return
     _bootstrap_fn_param_defaults[name] = params
+    _bootstrap_fn_delta_text(name)
+    _bootstrap_fn_delta_params(params)
 
 fn bootstrap_fn_param_defaults_lookup(name: text) -> [HirParam]?:
     if _bootstrap_fn_param_defaults_ambig.contains_key(name):
@@ -1284,6 +1450,7 @@ fn bootstrap_fn_param_defaults_detach_for_archive_v1():
     _bootstrap_fn_param_default_owners = {}
     _bootstrap_default_provider_symbols = {}
     _bootstrap_default_provider_globals = {}
+    _bootstrap_fn_replaced_default_rows = _bootstrap_fn_replaced_default_rows or _bootstrap_fn_delta_live()
 
 # Same declaration shape as the sibling bootstrap module
 # _MirLowering/module_lowering.spl:63 -- avoids an import cycle (mir_data is
@@ -1295,19 +1462,16 @@ fn _promote_bootstrap_registry<T>(value: T) -> bool:
     direct runtime call this file makes for that (the ratchet counts sites)."""
     rt_transient_heap_promote(value)
 
-fn bootstrap_fn_registries_promote() -> bool:
-    """Promote every `_bootstrap_fn_*` Dict out of the active per-module
-    transient scope, mirroring 20.hir's `bootstrap_hir_modules_promote_last`
-    and this file's own sibling `bootstrap_mir_registries_promote`
-    (_MirLowering/bootstrap_globals.spl). These dicts accumulate ACROSS
-    modules by design (see the "Deliberately has NO reset" note above
-    `_bootstrap_fn_ret_types`) -- a LATER module's cross-module call site
-    looks up an EARLIER module's registration -- so a dict written during
-    module i's transient scope must survive into module i+1's scope and
-    beyond. `rt_transient_heap_promote`'s Dict arm walks every bucket's
-    key+value pair (collections.rs `transient_heap_children`), so promoting
-    the dict handle itself adopts both the bucket storage and every stored
-    key/value transitively."""
+var _bootstrap_fn_promote_last_roots: i64 = 0
+
+fn bootstrap_fn_registries_last_promote_roots_v1() -> i64:
+    _bootstrap_fn_promote_last_roots
+
+fn _bootstrap_fn_registries_promote_all() -> bool:
+    """Wholesale adoption of every `_bootstrap_fn_*` Dict: the runtime Dict
+    walk visits every bucket's key+value pair (collections.rs
+    `transient_heap_children`), so this costs the WHOLE accumulated registry.
+    Used once per process (see `_bootstrap_fn_registries_adopted`)."""
     val ret_types_ok = _promote_bootstrap_registry(_bootstrap_fn_ret_types)
     val ret_hir_types_ok = _promote_bootstrap_registry(_bootstrap_fn_ret_hir_types)
     val ret_hir_ambig_ok = _promote_bootstrap_registry(_bootstrap_fn_ret_hir_ambig)
@@ -1335,6 +1499,87 @@ fn bootstrap_fn_registries_promote() -> bool:
         param_hir_types_ok and param_hir_rejected_ok and param_defaults_ok and param_defaults_ambig_ok and
         default_owners_ok and default_symbols_ok and default_globals_ok
 
+fn _bootstrap_fn_registry_rows() -> i64:
+    _bootstrap_fn_ret_types.len() + _bootstrap_fn_ret_hir_types.len() + _bootstrap_fn_ret_hir_ambig.len() +
+        _bootstrap_fn_ret_shapes.len() + _bootstrap_fn_ret_shape_ambig.len() +
+        _bootstrap_fn_ret_array_element_identities.len() + _bootstrap_fn_ret_array_element_shapes.len() +
+        _bootstrap_fn_ret_array_element_shape_ambig.len() + _bootstrap_fn_ret_err_shapes.len() +
+        _bootstrap_fn_ret_ok_shapes.len() + _bootstrap_fn_ret_ok_shape_ambig.len() +
+        _bootstrap_fn_ret_opt_shapes.len() + _bootstrap_fn_ret_opt_shape_ambig.len() +
+        _bootstrap_fn_param_hir_types.len() + _bootstrap_fn_param_hir_rejected.len() +
+        _bootstrap_fn_param_defaults.len() + _bootstrap_fn_param_defaults_ambig.len() +
+        _bootstrap_fn_param_default_owners.len() + _bootstrap_default_provider_symbols.len() +
+        _bootstrap_default_provider_globals.len()
+
+fn bootstrap_fn_registries_promote() -> bool:
+    """Promote what the active per-module transient scope added to the
+    `_bootstrap_fn_*` Dicts, mirroring 20.hir's `bootstrap_hir_modules_promote_last`
+    and this file's own sibling `bootstrap_mir_registries_promote`
+    (_MirLowering/bootstrap_globals.spl). These dicts accumulate ACROSS
+    modules by design (see the "Deliberately has NO reset" note above
+    `_bootstrap_fn_ret_types`) -- a LATER module's cross-module call site
+    looks up an EARLIER module's registration -- so a row written during
+    module i's transient scope must survive into module i+1's scope and
+    beyond.
+
+    Delta, not wholesale: the journal (see `_bootstrap_fn_journal_texts`)
+    holds every key/value an in-scope write stored, and a registry whose
+    handle a rebuild/reset replaced in scope is promoted whole. Everything
+    else in the registries is already persistent and has no transient child,
+    because the bucket storage is not scope-allocated. The promoted-root count
+    is published for the scaling spec
+    (test/01_unit/compiler/mir/bootstrap_fn_registry_delta_promote_spec.spl)."""
+    var roots = _bootstrap_fn_journal_texts.len() + _bootstrap_fn_journal_mir_types.len() +
+        _bootstrap_fn_journal_hir_types.len() + _bootstrap_fn_journal_hir_type_lists.len() +
+        _bootstrap_fn_journal_params.len() + _bootstrap_fn_journal_symbol_tables.len() +
+        _bootstrap_fn_journal_consts.len()
+    var ok = true
+    if not _bootstrap_fn_registries_adopted:
+        roots = roots + _bootstrap_fn_registry_rows()
+        ok = _bootstrap_fn_registries_promote_all()
+        _bootstrap_fn_registries_adopted = ok
+    else:
+        if _bootstrap_fn_replaced_ret_hir_types:
+            roots = roots + _bootstrap_fn_ret_hir_types.len()
+            ok = _promote_bootstrap_registry(_bootstrap_fn_ret_hir_types) and ok
+        if _bootstrap_fn_replaced_ret_shapes:
+            roots = roots + _bootstrap_fn_ret_shapes.len()
+            ok = _promote_bootstrap_registry(_bootstrap_fn_ret_shapes) and ok
+        if _bootstrap_fn_replaced_ret_array_element_shapes:
+            roots = roots + _bootstrap_fn_ret_array_element_shapes.len()
+            ok = _promote_bootstrap_registry(_bootstrap_fn_ret_array_element_shapes) and ok
+        if _bootstrap_fn_replaced_ret_ok_shapes:
+            roots = roots + _bootstrap_fn_ret_ok_shapes.len()
+            ok = _promote_bootstrap_registry(_bootstrap_fn_ret_ok_shapes) and ok
+        if _bootstrap_fn_replaced_ret_opt_shapes:
+            roots = roots + _bootstrap_fn_ret_opt_shapes.len()
+            ok = _promote_bootstrap_registry(_bootstrap_fn_ret_opt_shapes) and ok
+        if _bootstrap_fn_replaced_param_hir_types:
+            roots = roots + _bootstrap_fn_param_hir_types.len()
+            ok = _promote_bootstrap_registry(_bootstrap_fn_param_hir_types) and ok
+        if _bootstrap_fn_replaced_param_defaults or _bootstrap_fn_replaced_default_rows:
+            roots = roots + _bootstrap_fn_param_defaults.len()
+            ok = _promote_bootstrap_registry(_bootstrap_fn_param_defaults) and ok
+        if _bootstrap_fn_replaced_default_rows:
+            roots = roots + _bootstrap_fn_param_defaults_ambig.len() + _bootstrap_fn_param_default_owners.len() +
+                _bootstrap_default_provider_symbols.len() + _bootstrap_default_provider_globals.len()
+            ok = _promote_bootstrap_registry(_bootstrap_fn_param_defaults_ambig) and ok
+            ok = _promote_bootstrap_registry(_bootstrap_fn_param_default_owners) and ok
+            ok = _promote_bootstrap_registry(_bootstrap_default_provider_symbols) and ok
+            ok = _promote_bootstrap_registry(_bootstrap_default_provider_globals) and ok
+    # The journal carriers are released after their elements are adopted; the
+    # fresh empty journals below are allocated while the scope is paused.
+    ok = promote_and_release_transient_owner_roots(_bootstrap_fn_journal_texts) and ok
+    ok = promote_and_release_transient_owner_roots(_bootstrap_fn_journal_mir_types) and ok
+    ok = promote_and_release_transient_owner_roots(_bootstrap_fn_journal_hir_types) and ok
+    ok = promote_and_release_transient_owner_roots(_bootstrap_fn_journal_hir_type_lists) and ok
+    ok = promote_and_release_transient_owner_roots(_bootstrap_fn_journal_params) and ok
+    ok = promote_and_release_transient_owner_roots(_bootstrap_fn_journal_symbol_tables) and ok
+    ok = promote_and_release_transient_owner_roots(_bootstrap_fn_journal_consts) and ok
+    _bootstrap_fn_delta_reset()
+    _bootstrap_fn_promote_last_roots = roots
+    ok
+
 export use compiler.mir.mir_instruction_support.{BlockId}
 export use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}
 export MirBuilder, MirOwnedRawAllocationFactV1
@@ -1346,7 +1591,8 @@ export bootstrap_fn_param_defaults_register, bootstrap_fn_param_defaults_lookup
 export bootstrap_fn_param_default_owner, bootstrap_default_provider_register
 export bootstrap_default_provider_symbols, bootstrap_default_provider_globals
 export bootstrap_fn_param_defaults_detach_for_archive_v1
-export bootstrap_fn_registries_promote
+export bootstrap_fn_registries_promote, bootstrap_fn_registries_last_promote_roots_v1
+export bootstrap_fn_registries_discard_delta_v1
 
 export bootstrap_fn_ret_array_element_shape_register, bootstrap_fn_ret_array_element_shape_lookup
 
