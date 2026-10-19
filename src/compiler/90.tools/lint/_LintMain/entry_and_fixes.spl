@@ -21,6 +21,7 @@ use std.log.{error, info}
 
 # Import EasyFix data types from stdlib
 use std.tooling.easy_fix.*
+use compiler.tools.fix.source_edits.{validated_fix_sources}
 use common.text.{escape_json}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debuggability}
@@ -698,9 +699,11 @@ fn _run_lint_with_linter_source(
                 case _:
                     val _ = 0
 
+    var analyzed_source: String? = nil
     var lint_result = LintFileResult.LintFileErr("Failed to read file: {file_path}")
     match content:
         case Some(source):
+            analyzed_source = Some(source)
             lint_result = LintFileResult.LintFileOk(
                 lint_cli_source(linter, file_path, source))
         case nil:
@@ -708,6 +711,7 @@ fn _run_lint_with_linter_source(
                 case LintReadFileResult.ReadFileErr(error):
                     lint_result = LintFileResult.LintFileErr(error)
                 case LintReadFileResult.ReadFileOk(source):
+                    analyzed_source = Some(source)
                     lint_result = LintFileResult.LintFileOk(
                         lint_cli_source(linter, file_path, source))
     match lint_result:
@@ -772,10 +776,10 @@ fn _run_lint_with_linter_source(
                     print("Found {error_count} error(s), {warning_count} warning(s), {fix_count} auto-fix(es) available")
 
                 # Apply fixes if requested
-                if (fix_mode or fix_all or fix_dry_run) and fix_count > 0:
+                if (fix_mode or fix_all or fix_dry_run) and fix_count > 0 and not not_linted:
                     val fixes_to_apply = collect_easy_fixes(results, fix_all)
                     if not fixes_to_apply.is_empty():
-                        if not apply_collected_fixes(file_path, fixes_to_apply, fix_dry_run, json_output):
+                        if not apply_collected_fixes(file_path, fixes_to_apply, fix_dry_run, json_output, analyzed_source):
                             return 1
 
                 # 3 = NOT LINTED. A distinct code so the CLI summary can COUNT
@@ -803,6 +807,7 @@ fn _run_lint_with_linter_source(
 fn collect_easy_fixes(results: [LintRunResult], include_all: Bool) -> [EasyFix]:
     var fixes: [EasyFix] = []
     for result in results:
+        if result.lint.level == LintLevel.Allow: continue
         match result.lint.easy_fix:
             case Some(fix):
                 if include_all or fix.is_safe():
@@ -811,23 +816,26 @@ fn collect_easy_fixes(results: [LintRunResult], include_all: Bool) -> [EasyFix]:
                 val _ = 0
     fixes
 
-fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: Bool, json_output: Bool) -> Bool:
-    val source = file_read(file_path)
-    if source == "":
-        if json_output:
-            print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"reading file for fix failed\"}")
-        else:
-            error("lint", "reading file for fix failed: {file_path}")
-        return false
+fn lint_fix_refused(file_path: String, message: String, json_output: Bool) -> Bool:
+    if json_output:
+        print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"{escape_json(message)}\"}")
+    else:
+        error("lint", message)
+    false
 
-    # Sort replacements by position descending and apply
-    var all_replacements: [Replacement] = []
-    for fix in fixes:
-        for rep in easyfix_replacements(fix):
-            all_replacements.push(rep)
-
-    all_replacements = easyfix_sort_replacements_descending(all_replacements)
-    val new_source = easyfix_apply_sorted_replacements(source, all_replacements)
+fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: Bool, json_output: Bool, analyzed_source: String? = nil) -> Bool:
+    if analyzed_source == nil:
+        return lint_fix_refused(file_path, "{file_path}:1:1: missing analyzed source revision; rerun lint before applying fixes", json_output)
+    val source: String = analyzed_source.unwrap()
+    var sources: Dict<text, text> = {}
+    sources[file_path] = source
+    val new_source = match validated_fix_sources(fixes, sources):
+        case Ok(updated):
+            if not updated.has(file_path): return true
+            updated[file_path]
+        case Err(message): return lint_fix_refused(file_path, message, json_output)
+    if not file_exists(file_path) or file_read(file_path) != source:
+        return lint_fix_refused(file_path, "{file_path}:1:1: source changed since analysis; no fixes applied; rerun lint", json_output)
 
     if dry_run:
         if json_output:
@@ -837,6 +845,8 @@ fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: Bool, jso
             for fix in fixes:
                 print("  [{easyfix_id(fix)}] {easyfix_description(fix)}")
     else:
+        if not file_exists(file_path) or file_read(file_path) != source:
+            return lint_fix_refused(file_path, "{file_path}:1:1: source changed before fix write; rerun lint", json_output)
         if not file_atomic_write(file_path, new_source):
             if json_output:
                 print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"atomic fix write failed\"}")
