@@ -41,6 +41,7 @@ struct SmfManifestEntry:
     abi_digest: text
     provided_ifaces: [text]
     required_ifaces: [text]
+    native_target: text = ""
 
 struct SmfManifest:
     version: i64
@@ -74,9 +75,10 @@ fn smf_manifest_entry_new(
     debug_info: bool,
     gc_off: bool,
     profile: text,
-    allowed_families: [text]
+    allowed_families: [text],
+    native_target: text = ""
 ) -> SmfManifestEntry:
-    smf_manifest_entry_new_with_iface(source_path, smf_path, source_hash, backend, opt_level, release, debug_info, gc_off, profile, allowed_families, "")
+    smf_manifest_entry_new_with_iface(source_path, smf_path, source_hash, backend, opt_level, release, debug_info, gc_off, profile, allowed_families, "", native_target)
 
 fn smf_manifest_entry_new_with_iface(
     source_path: text,
@@ -89,12 +91,13 @@ fn smf_manifest_entry_new_with_iface(
     gc_off: bool,
     profile: text,
     allowed_families: [text],
-    iface_digest: text
+    iface_digest: text,
+    native_target: text = ""
 ) -> SmfManifestEntry:
     smf_manifest_entry_new_with_identity(
         source_path, smf_path, source_hash, backend, opt_level, release,
         debug_info, gc_off, profile, allowed_families, iface_digest,
-        smf_manifest_host_abi_digest(), [], []
+        smf_manifest_host_abi_digest(), [], [], native_target
     )
 
 fn smf_manifest_entry_new_with_identity(
@@ -111,7 +114,8 @@ fn smf_manifest_entry_new_with_identity(
     iface_digest: text,
     abi_digest: text,
     provided_ifaces: [text],
-    required_ifaces: [text]
+    required_ifaces: [text],
+    native_target: text = ""
 ) -> SmfManifestEntry:
     SmfManifestEntry(
         source_path: source_path,
@@ -128,7 +132,8 @@ fn smf_manifest_entry_new_with_identity(
         iface_digest: iface_digest,
         abi_digest: abi_digest,
         provided_ifaces: provided_ifaces,
-        required_ifaces: required_ifaces
+        required_ifaces: required_ifaces,
+        native_target: native_target
     )
 
 fn smf_manifest_host_abi_digest() -> text:
@@ -268,11 +273,16 @@ fn smf_manifest_to_sdn(manifest: SmfManifest) -> text:
         ""
     ]
 
-    if manifest.entries.keys().len() > 0:
-        lines.push("entries |source_path, smf_path, source_hash, compiled_at, backend, opt_level, release, debug_info, gc_off, profile, allowed_families, iface_digest, abi_digest, provides, requires|")
-        for key in action_key_sort_texts(manifest.entries.keys()):
+    val keys = action_key_sort_texts(manifest.entries.keys())
+    var has_target = false
+    for key in keys:
+        if manifest.entries[key].native_target != "": has_target = true
+    if keys.len() > 0:
+        val target_column = if has_target: ", native_target" else: ""
+        lines.push("entries |source_path, smf_path, source_hash, compiled_at, backend, opt_level, release, debug_info, gc_off, profile, allowed_families, iface_digest, abi_digest, provides, requires{target_column}|")
+        for key in keys:
             val e = manifest.entries[key]
-            val cells: [SdnValue] = [
+            var cells: [SdnValue] = [
                 SdnValue.String(e.source_path), SdnValue.String(e.smf_path),
                 SdnValue.Int(e.source_hash), SdnValue.Int(e.compiled_at),
                 SdnValue.String(e.backend), SdnValue.Int(e.opt_level),
@@ -283,6 +293,7 @@ fn smf_manifest_to_sdn(manifest: SmfManifest) -> text:
                 _smf_text_array(action_key_sort_texts(e.provided_ifaces)),
                 _smf_text_array(action_key_sort_texts(e.required_ifaces))
             ]
+            if has_target: cells.push(SdnValue.String(e.native_target))
             var encoded: [text] = []
             for cell in cells:
                 encoded.push(sdn_encode_canonical(cell))
@@ -330,12 +341,14 @@ fn _smf_row_texts(row: [SdnValue], index: i64, field: text) -> Result<[text], te
             if legacy == "": Ok([]) else: Ok(legacy.split(";"))
         case _: Err("SMF-E-MANIFEST: `" + field + "` must be a text array")
 
-fn _smf_manifest_entry_from_row(row: [SdnValue]) -> Result<SmfManifestEntry, text>:
-    if row.len() != 15:
-        return Err("SMF-E-MANIFEST: entry row must contain exactly 15 columns")
+fn _smf_manifest_entry_from_row(row: [SdnValue], has_target: bool) -> Result<SmfManifestEntry, text>:
+    val column_count = if has_target: 16 else: 15
+    if row.len() != column_count:
+        return Err("SMF-E-MANIFEST: entry row must contain exactly {column_count} columns")
     val source_path = _smf_row_text(row, 0, "source_path")?
     if source_path == "":
         return Err("SMF-E-MANIFEST: source_path must not be empty")
+    val native_target = if has_target: _smf_row_text(row, 15, "native_target")? else: ""
     Ok(SmfManifestEntry(
         source_path: source_path,
         smf_path: _smf_row_text(row, 1, "smf_path")?,
@@ -351,7 +364,8 @@ fn _smf_manifest_entry_from_row(row: [SdnValue]) -> Result<SmfManifestEntry, tex
         iface_digest: _smf_row_text(row, 11, "iface_digest")?,
         abi_digest: _smf_row_text(row, 12, "abi_digest")?,
         provided_ifaces: _smf_row_texts(row, 13, "provides")?,
-        required_ifaces: _smf_row_texts(row, 14, "requires")?
+        required_ifaces: _smf_row_texts(row, 14, "requires")?,
+        native_target: native_target
     ))
 
 fn smf_manifest_from_sdn_checked(content: text) -> Result<SmfManifest, text>:
@@ -376,10 +390,11 @@ fn smf_manifest_from_sdn_checked(content: text) -> Result<SmfManifest, text>:
                     val expected = ["source_path", "smf_path", "source_hash", "compiled_at",
                         "backend", "opt_level", "release", "debug_info", "gc_off", "profile",
                         "allowed_families", "iface_digest", "abi_digest", "provides", "requires"]
-                    if headers != expected:
+                    val has_target = headers == expected + ["native_target"]
+                    if headers != expected and not has_target:
                         return Err("SMF-E-MANIFEST: entries header is not canonical")
                     for row in rows:
-                        val entry = _smf_manifest_entry_from_row(row)?
+                        val entry = _smf_manifest_entry_from_row(row, has_target)?
                         if entries.has(entry.source_path):
                             return Err("SMF-E-MANIFEST: duplicate source_path `" + entry.source_path + "`")
                         entries[entry.source_path] = entry
@@ -452,7 +467,8 @@ fn update_smf_manifest_entry(
     debug_info: bool,
     gc_off: bool,
     profile: text,
-    allowed_families: [text]
+    allowed_families: [text],
+    native_target: text = ""
 ) -> bool:
     """Load manifest, update entry, save. Convenience for single-entry updates."""
     val manifest_path = smf_manifest_path_for_smf(smf_path)
@@ -476,7 +492,8 @@ fn update_smf_manifest_entry(
         gc_off,
         profile,
         allowed_families,
-        iface
+        iface,
+        native_target
     )
     manifest = smf_manifest_update(manifest, entry)
     save_smf_manifest(manifest, manifest_path)

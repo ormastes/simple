@@ -36,6 +36,9 @@ use std.daemon_sdk.types.{DaemonConfig, DaemonRequest, DaemonResponse, daemon_re
 # See doc/08_tracking/bug/block_scoped_use_no_op_symbol_resolution_2026-08-18.md
 use compiler.driver.driver_api_compile_single.{compile_to_smf_with_options}
 use compiler.driver.cache.cache_validator.{source_to_cache_path}
+use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute}
+use compiler.driver.watcher.watcher_client.{watcher_validate_generated_smf}
+use compiler.driver.watcher.smf_manifest.{SmfManifestEntry}
 use compiler.driver.watcher.smf_manifest.{update_smf_manifest_entry, load_smf_manifest_default, smf_manifest_find}
 
 use std.io_runtime.{mkdir_p, time_now_unix_micros, hash_text}
@@ -156,7 +159,8 @@ impl WatcherDaemon:
             req.debug_info,
             req.gc_off,
             req.profile,
-            req.allowed_families
+            req.allowed_families,
+            req.native_target
         )
         if result.is_err():
             self.state.errors_count = self.state.errors_count + 1
@@ -165,6 +169,13 @@ impl WatcherDaemon:
                     return cache_check_result_error("SMF generation failed for {req.source_path}: {err}")
                 case Ok(_):
                     pass
+        val expected = compile_options_hash_compute(req.backend, req.opt_level,
+            req.release, req.debug_info, req.gc_off, req.profile, req.allowed_families,
+            [], [], [], "moderate", -1, req.native_target)
+        val checked = watcher_validate_generated_smf(req.source_path, smf_path, expected)
+        if checked.is_err():
+            self.state.errors_count = self.state.errors_count + 1
+            return cache_check_result_error(checked.unwrap_err())
         val source_text = rt_file_read_text(req.source_path) ?? ""
         val source_hash = if source_text == "": 0 else: hash_text(source_text)
         val _ = update_smf_manifest_entry(
@@ -177,7 +188,8 @@ impl WatcherDaemon:
             req.debug_info,
             req.gc_off,
             req.profile,
-            req.allowed_families
+            req.allowed_families,
+            req.native_target
         )
         cache_check_result_fresh(0)
 
@@ -193,15 +205,7 @@ impl WatcherDaemon:
                 value
             case nil:
                 return watcher_request_for_config(source_path, WatcherRequestKind.Smf, self.config)
-        var req = watcher_request_new(source_path, WatcherRequestKind.Smf)
-        req.backend = entry.backend
-        req.opt_level = entry.opt_level
-        req.release = entry.release
-        req.debug_info = entry.debug_info
-        req.gc_off = entry.gc_off
-        req.profile = entry.profile
-        req.allowed_families = entry.allowed_families
-        req
+        watcher_request_from_manifest_entry(source_path, entry)
 
     me shutdown():
         self.running = false
@@ -237,3 +241,17 @@ fn watcher_daemon_start(config: WatcherConfig) -> WatcherDaemon:
 
 fn watcher_daemon_shutdown(daemon: WatcherDaemon):
     daemon.shutdown()
+
+fn watcher_request_from_manifest_entry(source_path: text, entry: SmfManifestEntry) -> WatcherRequest:
+    var req = watcher_request_new(source_path, WatcherRequestKind.Smf)
+    req.backend = entry.backend
+    req.opt_level = entry.opt_level
+    req.release = entry.release
+    req.debug_info = entry.debug_info
+    req.gc_off = entry.gc_off
+    req.profile = entry.profile
+    req.allowed_families = entry.allowed_families
+    req.native_target = entry.native_target
+    req
+
+export watcher_request_from_manifest_entry

@@ -15,7 +15,7 @@ use compiler.driver.cache.cache_validator.{
 use compiler.driver.cache.compile_options_hash.{
     CompileOptionsHash, compile_options_hash_zero
 }
-use compiler.driver.driver_api_compile_single.{compile_to_smf_with_options}
+use compiler.driver.driver_api_compile_single.{compile_to_smf_with_options, smf_native_target_wire_valid}
 use compiler.driver.watcher.watcher_types.{
     WatcherConfig, WatcherRequest, WatcherRequestKind,
     watcher_config_default, watcher_request_new,
@@ -91,8 +91,16 @@ fn request_smf(
     gc_off: bool,
     profile: text,
     allowed_families: [text],
-    config: WatcherConfig
+    config: WatcherConfig,
+    native_target: text = ""
 ) -> Result<text, text>:
+    val target = if native_target == "": config.native_target else: native_target
+    if not smf_native_target_wire_valid(target):
+        return Err("SMF native target cannot contain line breaks or surrounding whitespace")
+    val expected = compile_options_hash_compute(backend, opt_level, release, debug_info,
+        gc_off, profile, allowed_families, [], [], [], "moderate", -1, target)
+    if expected.hash != options_hash:
+        return Err("SMF watcher request options identity mismatch")
     if not is_watcher_running(config.lock_path):
         return Err("watcher not running")
 
@@ -105,6 +113,7 @@ fn request_smf(
     wr.gc_off = gc_off
     wr.profile = profile
     wr.allowed_families = allowed_families
+    wr.native_target = target
     val dreq = watcher_request_to_daemon(wr)
     val dconfig = watcher_config_to_daemon(config)
 
@@ -113,10 +122,15 @@ fn request_smf(
         return Err("timeout waiting for SMF: {source_path}")
 
     val smf_path = source_to_cache_path(source_path, config.smf_dir, ".smf")
-    if file_exists(smf_path):
-        return Ok(smf_path)
+    return watcher_validate_generated_smf(source_path, smf_path, expected)
 
-    Err("SMF not ready after watcher response: {source_path}")
+fn watcher_validate_generated_smf(source_path: text, smf_path: text, expected: CompileOptionsHash) -> Result<text, text>:
+    # A daemon response or file existence is not artifact authority. Validate
+    # the actual returned file, including source and dependency identities.
+    val checked = validate_smf(source_path, smf_path, expected)
+    if checked.status != CACHE_FRESH:
+        return Err("SMF regenerated artifact mismatch: {checked.detail}")
+    Ok(smf_path)
 
 # ============================================================================
 # Get-or-Generate (with inline fallback)
@@ -153,9 +167,11 @@ fn get_or_generate_shb(source_path: text, config: WatcherConfig) -> ShbModuleInt
 
     iface
 
-fn get_or_generate_smf(source_path: text, output: text, backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text]) -> Result<text, text>:
+fn get_or_generate_smf(source_path: text, output: text, backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text], native_target: text = "") -> Result<text, text>:
 
-    val options_hash = compile_options_hash_compute(backend, opt_level, release, debug_info, gc_off, profile, allowed_families)
+    if not smf_native_target_wire_valid(native_target):
+        return Err("SMF native target cannot contain line breaks or surrounding whitespace")
+    val options_hash = compile_options_hash_compute(backend, opt_level, release, debug_info, gc_off, profile, allowed_families, [], [], [], "moderate", -1, native_target)
     val config = watcher_config_default()
 
     val check = check_smf_freshness(source_path, config.smf_dir, options_hash)
@@ -174,14 +190,16 @@ fn get_or_generate_smf(source_path: text, output: text, backend: text, opt_level
             gc_off,
             profile,
             allowed_families,
-            config
+            config,
+            native_target
         )
         if result.is_ok():
             return result
 
     # Inline fallback
     val smf_output = if output != "": output else: source_to_cache_path(source_path, config.smf_dir, ".smf")
-    compile_to_smf_with_options(source_path, smf_output, backend, opt_level, release, debug_info, gc_off, profile, allowed_families)
+    val generated = compile_to_smf_with_options(source_path, smf_output, backend, opt_level, release, debug_info, gc_off, profile, allowed_families, native_target)?
+    watcher_validate_generated_smf(source_path, generated, options_hash)
 
 # ============================================================================
 # Watcher Lifecycle
@@ -191,3 +209,5 @@ fn ensure_watcher_started(config: WatcherConfig) -> bool:
     if is_watcher_running(config.lock_path):
         return true
     false
+
+export watcher_validate_generated_smf

@@ -52,7 +52,12 @@ pub fn compile_to_smf(path: text, output: text) -> Result<text, text>:
                 "Compilation failed"
             Err(error_msg)
 
-pub fn compile_to_smf_with_options(
+# Existing daemon fields are line-based. Reject lossy values, never trim or
+# infer a host target. Backend target recognition remains the backend's job.
+pub fn smf_native_target_wire_valid(target: text) -> bool:
+    target == target.trim() and not target.contains("\n") and not target.contains("\r")
+
+pub fn smf_compile_options(
     path: text,
     output: text,
     backend: text,
@@ -61,8 +66,11 @@ pub fn compile_to_smf_with_options(
     debug_info: bool,
     gc_off: bool,
     profile: text,
-    allowed_families: [text]
-) -> Result<text, text>:
+    allowed_families: [text],
+    native_target: text = ""
+) -> Result<CompileOptions, text>:
+    if not smf_native_target_wire_valid(native_target):
+        return Err("SMF native target cannot contain line breaks or surrounding whitespace")
     var options = driver_core_compile_options_default()
     options.input_files = [path]
     options.output_file = output
@@ -75,7 +83,24 @@ pub fn compile_to_smf_with_options(
     options.gc_off = gc_off
     options.profile = profile
     options.allowed_families = allowed_families
-    val options = compileoptions_normalize_mir_optimization(options)
+    options.native_target = native_target
+    Ok(compileoptions_normalize_mir_optimization(options))
+
+
+pub fn compile_to_smf_with_options(
+    path: text,
+    output: text,
+    backend: text,
+    opt_level: i64,
+    release: bool,
+    debug_info: bool,
+    gc_off: bool,
+    profile: text,
+    allowed_families: [text],
+    native_target: text = ""
+) -> Result<text, text>:
+    val options = smf_compile_options(path, output, backend, opt_level, release,
+        debug_info, gc_off, profile, allowed_families, native_target)?
 
     val driver = compiler_driver_create(options)
     val result = compiler_driver_run_compile(driver)
