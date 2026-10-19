@@ -234,6 +234,20 @@ mod tests {
     }
 
     #[test]
+    fn secure_temp_dir_split_setters_take_one_boxed_text_value() {
+        // Seed-vintage independent ABI: no (ptr, len) expansion row, so the
+        // boxed RuntimeValue crosses as one word in every seed.
+        for name in [
+            "rt_secure_temp_dir_set_parent",
+            "rt_secure_temp_dir_set_prefix",
+            "rt_secure_temp_dir_make",
+        ] {
+            assert_eq!(text_arg_indices(name), None, "{name}");
+            assert_eq!(boxed_text_arg_indices(name), None, "{name}");
+        }
+    }
+
+    #[test]
     fn real_directory_probe_expands_text_to_path_pointer_and_length() {
         assert_eq!(text_arg_indices("rt_dir_is_real_no_follow"), Some(&[0][..]));
     }
@@ -2905,11 +2919,11 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // (ptr, len) pair instead of passing boxed RuntimeValue payloads.
         "rt_secure_temp_dir" | "rt_file_publish_noreplace" => Some(&[0, 1]),
 
-        // Cycle-170 split crossing (runtime_native.c): the two-argument
-        // rt_secure_temp_dir call draws corrupted words on candidate-seednew,
-        // so SCV/AOT staging crosses the parent and prefix as single-argument
-        // calls through thread-local slots, then a zero-argument make.
-        "rt_secure_temp_dir_set_parent" | "rt_secure_temp_dir_set_prefix" => Some(&[0]),
+        // NOT listed: rt_secure_temp_dir_set_parent / _set_prefix take ONE
+        // boxed text RuntimeValue (runtime_native.c), the generic crossing
+        // every seed emits. A (ptr, len) row here made the ABI depend on the
+        // seed's table vintage; see doc/08_tracking/bug/
+        // tracked_seed_cranelift_split_secure_temp_dir_refuses_20261019.md
 
         // Package SFFI (runtime/src/value/sffi/package.rs). Every text param is
         // a (ptr, len) pair — the family was converted off `*const c_char`

@@ -2230,9 +2230,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Cycle-170 split crossing: rt_secure_temp_dir's two-argument text-ABI
     // marshalling draws erased on candidate-seednew, so Simple crosses the
     // staging parent and prefix as two single-argument calls (thread-local
-    // slot in the C runtime). Same (ptr, len) expansion for each text arg.
-    RuntimeFuncSpec::new("rt_secure_temp_dir_set_parent", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_secure_temp_dir_set_prefix", &[I64, I64], &[I64]),
+    // slot in the C runtime). Each setter takes ONE boxed text RuntimeValue
+    // (no text_arg_indices row), so every seed vintage emits the same ABI.
+    RuntimeFuncSpec::new("rt_secure_temp_dir_set_parent", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_secure_temp_dir_set_prefix", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_secure_temp_dir_make", &[], &[I64]),
     RuntimeFuncSpec::new("rt_file_read_lines", &[I64, I64], &[I64]), // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_file_append_text", &[I64, I64, I64, I64], &[I8]), // path_ptr, path_len, content_ptr, content_len -> bool
