@@ -1,6 +1,11 @@
 # Coherence suggestion loses optional payload metadata
 
 Status: consumer mitigation authored; execution UNRUN.
+Tracking: this dated report exists, but the workaround marker is not yet
+reconciled with the authoritative `doc/08_tracking/bug/bug_db.sdn` through the
+canonical bug-link workflow. DB registration and workaround retirement remain
+pending; this report does not claim either. The author has not invoked the
+runtime-dependent bug CLI under the current no-compiler-launch restriction.
 Requirement: REQ-ENUM-COHERENCE-PAYLOAD in
 `doc/03_plan/sys_test/robust_any_enum_extension_2026-10-14.md`.
 
