@@ -1498,6 +1498,8 @@ impl HirLowering:
 
         var bounds: [HirType] = []
         for b in tp.bounds:
+            if self.bound_is_undeclared_builtin_trait(b):
+                continue
             bounds = bounds.push(self.lower_type(b))
 
         # Parser/HIR defaults are desugared payloads, not Optional values.
@@ -1514,6 +1516,32 @@ impl HirLowering:
             default: default_,
             span: tp.span
         )
+
+    me bound_is_undeclared_builtin_trait(bound: Type) -> bool:
+        """A bare builtin trait bound (`where K: Ord + Eq`) with no source
+        declaration in scope. The builtin set is the trait solver's own
+        (25.traits/trait_validation.spl create_builtin_traits); those traits
+        have no HIR symbol, so lowering them as a type-position name hard-
+        errored `unresolved type: Eq` once 5b649fb61fe started transporting
+        where bounds. They stay erased (as before that commit); a declared or
+        imported trait of the same name still wins and lowers normally.
+        LIMITATION: an erased bound produces no type_infer obligation
+        (30.types/type_infer/traits.spl collect_function_bounds_from_module),
+        so `where K: Ord` on a non-Ord type is not rejected. Resolving to
+        builtin_trait_symbol(id, name) needs builtin primitive impls the solver
+        does not have yet, and would reject every call without them.
+        doc/08_tracking/bug/eq_ord_where_bound_unresolved_hir_2026_10_19.md
+        doc/08_tracking/bug/builtin_trait_where_bounds_erased_unchecked_2026_10_19.md"""
+        val bound_kind: TypeKind = bound.kind
+        if hir_type_kind_disc(bound_kind) != hir_type_kind_disc(TypeKind.Named("", [])):
+            return false
+        val name: text = parser_type_kind_named_name(bound_kind)
+        if parser_type_kind_named_args(bound_kind).len() != 0:
+            return false
+        match name:
+            case "Clone" | "Copy" | "Debug" | "Default" | "Drop" | "Eq" | "Ord": ()
+            case _: return false
+        not self.symbols.lookup(name).?
 
     me lower_trait_bound(bound: TraitBound) -> HirTraitBound:
         # Lookup the type parameter symbol
