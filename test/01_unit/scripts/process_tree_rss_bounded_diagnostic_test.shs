@@ -1,0 +1,189 @@
+#!/bin/sh
+# Short real children; faults/proof stand-ins exist only in a private copy.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+[ "$(uname -s)" = Linux ] || { echo 'SKIP: Linux bounded diagnostics'; exit 0; }
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+python3 - "$root" "$tmp" <<'PY'
+import importlib.util
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+root, tmp = map(Path, sys.argv[1:])
+guard = root / 'scripts/resource/process-tree-rss-watchdog.pl'
+source = guard.read_text()
+group = '/sys/fs/cgroup/simple-bootstrap-stage3.' + 'a' * 32
+env = os.environ.copy()
+for key in ('SIMPLE_PROCESS_TREE_OBSERVER', 'SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS',
+            'SIMPLE_BOOTSTRAP_SESSION_ID', 'SIMPLE_BOOTSTRAP_SESSION_EXEC'):
+    env.pop(key, None)
+env['SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE'] = str(tmp / 'helper-cache')
+
+# Production refusal must happen before any child exists: no environment-only
+# claim, uncapped ordinary session, worker-only scope, monitor mode or no timer.
+base = ['perl', str(guard), '--observation-failure-mode=diagnostic']
+for name, opts in (
+    ('no-proof', ['--timeout-seconds=5']),
+    ('wrong-scope', ['--timeout-seconds=5', '--independent-cgroup=' + group + '/worker']),
+    ('unbounded-host', ['--timeout-seconds=5', '--independent-cgroup=' + group]),
+    ('monitor', ['--timeout-seconds=5', '--rss-cap-mode=monitor', '--independent-cgroup=' + group]),
+    ('no-timeout', ['--independent-cgroup=' + group]),
+):
+    marker = tmp / (name + '.started')
+    proc = subprocess.run(base + opts + ['--receipt=' + str(tmp / (name + '.env')),
+        '--', 'sh', '-c', 'touch "$1"', 'sh', str(marker)], env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+    assert proc.returncode == 125 and not marker.exists(), (name, proc.returncode, proc.stderr)
+print('PASS: production diagnostic admission refuses absent, wrong-scope and unsupported proof')
+
+# Exercise the actual proof decisions with only filesystem reads/identities
+# replaced. These are contract fixtures, not claims of real kernel admission.
+prefix = source.split('\n# Workload startup boundary')[0]
+probe = r'''
+$opt{'observation-failure-mode'} = 'diagnostic';
+$opt{'independent-cgroup'} = '/sys/fs/cgroup/simple-bootstrap-stage3.' . ('a' x 32);
+$opt{'timeout-seconds'} = 5;
+my $parent_path = $opt{'independent-cgroup'};
+my $relative_path = $parent_path; $relative_path =~ s{^/sys/fs/cgroup}{};
+my %fixture = (
+ '/proc/self/mountinfo' => '1 2 0:3 / /sys/fs/cgroup rw - cgroup2 cgroup rw',
+ '/sys/fs/cgroup/cgroup.procs' => '',
+ '/proc/self/status' => "CapEff:\t0000000000000000\nCapPrm:\t0000000000000000",
+ "/proc/$$/cgroup" => "0::$relative_path/supervisor",
+ "$parent_path/cgroup.subtree_control" => 'memory',
+ "$parent_path/memory.oom.group" => '1',
+ "$parent_path/memory.max" => '536870912',
+ "$parent_path/memory.events" => "oom 0\noom_kill 0\noom_group_kill 0",
+);
+for my $path ($parent_path, "$parent_path/supervisor", "$parent_path/worker") {
+ $fixture{"$path/cgroup.type"} = 'domain';
+}
+my $directory_identity = '10:100';
+{
+ no warnings 'redefine';
+ *bounded_read = sub { exists($fixture{$_[0]}) or die "missing fixture $_[0]"; return $fixture{$_[0]} };
+ *protected_cgroup_directory = sub { return $directory_identity };
+}
+verify_independent_cgroup();
+$independent_checks == 1 && $independent_max_bytes == 536870912 or die 'valid parent refused';
+my @bad = (
+ ["$parent_path/memory.max", 'max'],
+ ["$parent_path/memory.max", '536870913'],
+ ["$parent_path/memory.oom.group", '0'],
+ ["$parent_path/cgroup.subtree_control", 'cpu'],
+ ["$parent_path/cgroup.type", 'threaded'],
+ ["/proc/$$/cgroup", '0::/unbounded/supervisor'],
+ ['/proc/self/mountinfo', '1 2 0:3 /other /sys/fs/cgroup rw - cgroup2 cgroup rw'],
+ ['/proc/self/status', "CapEff:\t0000000000000001\nCapPrm:\t0000000000000000"],
+ ["$parent_path/memory.events", 'oom 0'],
+);
+for my $case (@bad) {
+ local $fixture{$case->[0]} = $case->[1];
+ eval { verify_independent_cgroup(); 1 } and die "unsafe proof accepted: $case->[0]";
+}
+$directory_identity = '10:101';
+eval { verify_independent_cgroup(); 1 } and die 'replaced parent accepted';
+print "PASS: real proof policy rejects limit, identity, domain, controller, OOM, mount and membership mutations\n";
+'''
+program = tmp / 'proof.pl'
+program.write_text(prefix + probe)
+subprocess.run(['perl', str(program), '--', 'unused'], env=env, check=True, timeout=10)
+
+# Private, explicit injection. The production file exposes no fixture switch.
+(tmp / 'resource').mkdir()
+(tmp / 'bootstrap').mkdir()
+for item in (root / 'scripts/resource').glob('*.c'):
+    shutil.copy(item, tmp / 'resource' / item.name)
+shutil.copy(root / 'scripts/bootstrap/bootstrap-session-exec.c', tmp / 'bootstrap')
+fixture = r'''
+my $fixture_delayed = 0;
+sub fixture_delay {
+ return if $fixture_delayed || !-e $ENV{RSS_TEST_MARKER};
+ $fixture_delayed = 1;
+ die "fixture incomplete process snapshot\n" if $ENV{RSS_TEST_CASE} eq 'partial';
+ sleep 1.1;
+}
+'''
+private = source.replace('sub snapshot_body {', fixture + '\nsub snapshot_body {\n    fixture_delay();')
+private = private.replace('sub verify_independent_cgroup {', r'''sub verify_independent_cgroup {
+    die "fixture parent proof changed\n" if $ENV{RSS_TEST_CASE} eq 'proof-mutation' && -e $ENV{RSS_TEST_MARKER};
+    ++$independent_checks; $independent_max_bytes = 536870912; return;
+''')
+private = private.replace('sub independent_oom_count {', r'''sub independent_oom_count {
+    return $ENV{RSS_TEST_CASE} eq 'oom' ? 1 : 0;
+''')
+private_guard = tmp / 'resource/guard.pl'
+private_guard.write_text(private)
+cases = (
+    ('default', 'exec sleep 4', 89, 'rss-measurement-failed'),
+    ('complete', 'exec sleep 1.6', 0, 'diagnostic-incomplete'),
+    ('nonzero', 'sleep 1.6; exit 7', 7, 'diagnostic-incomplete'),
+    ('signal', 'sleep .2; kill -SEGV $$', 139, 'diagnostic-incomplete'),
+    ('timeout', 'exec sleep 4', 124, 'timeout'),
+    ('partial', 'exec sleep 4', 89, 'rss-measurement-failed'),
+    ('proof-mutation', 'exec sleep 4', 89, 'rss-measurement-failed'),
+    ('escape', 'setsid sleep 4 & wait', 90, 'bootstrap-session-escaped'),
+    ('cap', 'exec python3 -c "import time; x=bytearray(64*1024*1024); time.sleep(4)"', 88, 'rss-cap-exceeded'),
+    ('oom', 'exec sleep 1.6', 137, 'independent-memory-oom'),
+)
+for name, command, expected, expected_status in cases:
+    marker = tmp / (name + '.pid')
+    case_env = dict(env, RSS_TEST_CASE=name, RSS_TEST_MARKER=str(marker))
+    opts = ['--timeout-seconds=' + ('1' if name == 'timeout' else '8'),
+            '--term-grace-seconds=0', '--max-rss-kib=' + ('32768' if name == 'cap' else '5859375')]
+    if name != 'default':
+        opts += ['--observation-failure-mode=diagnostic', '--independent-cgroup=' + group]
+    receipt = tmp / (name + '.receipt')
+    with (tmp / (name + '.log')).open('w') as log:
+        proc = subprocess.run(['perl', str(private_guard)] + opts + ['--receipt=' + str(receipt),
+            '--', 'sh', '-c', 'ulimit -c 0; echo $$ > "$RSS_TEST_MARKER"; ' + command],
+            env=case_env, stdout=log, stderr=log, timeout=12)
+    data = dict(line.split('=', 1) for line in receipt.read_text().splitlines())
+    assert (proc.returncode, data['status']) == (expected, expected_status), (name, proc.returncode, data)
+    assert data['rss_cap_enforced'] == '1' and data['hard_memory_limit'] == '0', (name, data)
+    assert data['quiescent'] == '1', (name, data)
+    if name != 'partial':
+        assert data['measurement_budget_complete'] == '0', (name, data)
+        assert float(data['sample_duration_max_ms']) >= 1000, (name, data)
+    if name in ('partial', 'default', 'proof-mutation'):
+        assert data['observation_complete'] == '0', (name, data)
+    else:
+        assert data['observation_complete'] == '1', (name, data)
+    try:
+        os.kill(int(marker.read_text()), 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError('workload survived: ' + name)
+    print(f'PASS: {name}: real child exit={proc.returncode}, status={data["status"]}')
+
+# The root helper's actual evidence parser/result reducer, without privileged
+# provisioning, prevents a zero leader status concealing another member's OOM.
+spec = importlib.util.spec_from_file_location('cgroup_helper', root / 'scripts/bootstrap/lib/stage3-cgroupfs.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+events = tmp / 'events'
+events.mkdir()
+(events / 'memory.events').write_text('oom 2\noom_kill 1\noom_group_kill 1\n')
+fd = os.open(events, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    for child in (0, 7, -9):
+        outcome = {'exit_code': child, 'child_wait_status': child}
+        module.record_parent_oom(outcome, 0, module.oom_kills(fd))
+        assert outcome['exit_code'] == (137 if child == 0 else child)
+        assert outcome['child_wait_status'] == child and outcome['parent_oom_kills_delta'] == 1
+    try:
+        module.record_parent_oom({'exit_code': 0}, 2, 1)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('decreased OOM counter accepted')
+finally:
+    os.close(fd)
+print('PASS: parent OOM evidence preserves real child status and defeats false success')
+print('UNRUN: privileged parent cgroup provisioning and real kernel OOM qualification')
+PY

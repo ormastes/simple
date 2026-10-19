@@ -29,11 +29,12 @@ $SIG{PIPE} = 'IGNORE';
 my %opt = ( 'max-rss-kib' => 5859375, 'interval-ms' => 100,
             'timeout-seconds' => 0, 'term-grace-seconds' => 1, 'session-mode' => 'new',
             'rss-cap-mode' => ($ENV{SIMPLE_BOOTSTRAP_RSS_CAP_MODE} // 'enforce'),
-            'budget-scope' => 'compiler', 'scope-group' => 0 );
+            'budget-scope' => 'compiler', 'scope-group' => 0,
+            'observation-failure-mode' => 'enforce' );
 my %explicit;
 while (@ARGV && $ARGV[0] ne '--') {
     my $arg = shift @ARGV;
-    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode|budget-scope|aggregate-workers|compiler-jobs|compiler-ceiling-kib|cap-source|cap-bound|scope-group)=(.+)$/
+    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode|budget-scope|aggregate-workers|compiler-jobs|compiler-ceiling-kib|cap-source|cap-bound|scope-group|observation-failure-mode|independent-cgroup)=(.+)$/
         or die "rss-guard: invalid option\n";
     my ($key, $value) = ($1, $2);
     $explicit{$key}++ and die "rss-guard: duplicate $key\n";
@@ -43,6 +44,8 @@ while (@ARGV && $ARGV[0] ne '--') {
 $opt{'session-mode'} =~ /\A(?:new|inherit)\z/ or die "rss-guard: invalid session mode\n";
 $opt{'rss-cap-mode'} =~ /\A(?:enforce|monitor)\z/ or die "rss-guard: invalid RSS cap mode\n";
 $opt{'scope-group'} =~ /\A[01]\z/ or die "rss-guard: invalid scope-group\n";
+$opt{'observation-failure-mode'} =~ /\A(?:enforce|diagnostic)\z/
+    or die "rss-guard: invalid observation failure mode\n";
 for my $key (qw(max-rss-kib interval-ms timeout-seconds term-grace-seconds)) {
     $opt{$key} =~ /^\d+$/ or die "rss-guard: invalid $key\n";
 }
@@ -328,6 +331,103 @@ my $containment_scope = $windows ? 'win32-job-object-no-breakaway' :
     'observed-descendants-and-process-groups';
 my $extra_receipt = '';
 my $session_dir;
+my ($independent_cgroup_identity, $independent_max_bytes);
+my ($independent_checks, $independent_oom_kills) = (0, 0);
+
+# This narrow opt-in accepts only the root-provisioned common parent. A worker
+# leaf alone does not bound the outer supervisor. No configurable filesystem or
+# proof fixture is accepted by production; tests inject into a private copy.
+sub bounded_read {
+    my ($path, $protected) = @_;
+    sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or die "cannot read $path";
+    my @info = stat($fh);
+    @info && (!$protected || ($info[4] == 0 && !($info[2] & 0022)))
+        or die "unprotected cgroup control: $path";
+    my $text = '';
+    while (1) {
+        my $n = sysread($fh, my $chunk, 4096);
+        defined($n) or die "cannot read $path";
+        last unless $n;
+        $text .= $chunk;
+        length($text) <= 262144 or die "oversized proof: $path";
+    }
+    close($fh) or die "cannot close $path";
+    $text =~ s/\s+\z//;
+    return $text;
+}
+
+sub independent_oom_count {
+    my $events = bounded_read("$opt{'independent-cgroup'}/memory.events", 1);
+    my @counts = $events =~ /^oom_kill ([0-9]+)$/mg;
+    @counts == 1 or die "missing cgroup oom_kill counter";
+    return $counts[0] + 0;
+}
+
+sub protected_cgroup_directory {
+    my ($path) = @_;
+    my @info = lstat($path);
+    @info && -d _ && !-l _ && $info[4] == 0 && !($info[2] & 0022)
+        or die "unprotected cgroup directory: $path";
+    return "$info[0]:$info[1]";
+}
+
+sub verify_independent_cgroup {
+    my ($all) = @_;
+    my $path = $opt{'independent-cgroup'} // '';
+    $^O eq 'linux' && $observer_backend eq 'linux-proc' && $> != 0 &&
+        $opt{'rss-cap-mode'} eq 'enforce' && $opt{'timeout-seconds'} > 0
+        or die "diagnostic observations require nonroot Linux /proc, enforced RSS and a timeout";
+    $path =~ m{\A/sys/fs/cgroup/(simple-bootstrap-stage3\.[0-9a-f]{32})\z}
+        or die "diagnostic observations require a private bounded parent cgroup";
+    my $relative = "/$1";
+    my $mounts = bounded_read('/proc/self/mountinfo', 0);
+    $mounts =~ m{^\d+ \d+ \d+:\d+ / /sys/fs/cgroup [^\n]+ - cgroup2 [^\n]+$}m
+        or die "independent guard is not the real cgroup2 root mount";
+    for my $directory ('/sys', '/sys/fs', '/sys/fs/cgroup', $path,
+                       "$path/supervisor", "$path/worker") {
+        protected_cgroup_directory($directory);
+    }
+    my $identity = protected_cgroup_directory($path);
+    !defined($independent_cgroup_identity) || $identity eq $independent_cgroup_identity
+        or die "independent cgroup identity changed";
+    # Moving outside this direct child requires write access to the common
+    # ancestor's cgroup.procs. That root control must not be delegated. Domain
+    # cgroups exclude threaded migration. No workload-owned child directories.
+    bounded_read('/sys/fs/cgroup/cgroup.procs', 1);
+    # cgroup.type exists only on non-root cgroups. The real mount root was
+    # verified above; its protected cgroup.procs is the migration boundary.
+    for my $directory ($path, "$path/supervisor", "$path/worker") {
+        bounded_read("$directory/cgroup.type", 1) eq 'domain'
+            or die "independent containment requires domain cgroups";
+    }
+    bounded_read("$path/cgroup.subtree_control", 1) =~ /(?:\A|\s)memory(?:\s|\z)/
+        or die "independent parent memory controller disabled";
+    bounded_read("$path/memory.oom.group", 1) eq '1'
+        or die "independent parent requires OOM group enforcement";
+    my $maximum = bounded_read("$path/memory.max", 1);
+    $maximum =~ /\A[1-9][0-9]{0,14}\z/ && $maximum <= $opt{'max-rss-kib'} * 1024
+        or die "independent parent limit is absent or exceeds RSS policy";
+    !defined($independent_max_bytes) || $maximum == $independent_max_bytes
+        or die "independent parent limit changed";
+    my $credentials = bounded_read('/proc/self/status', 0);
+    for my $kind ('CapEff', 'CapPrm') {
+        $credentials =~ /^\Q$kind\E:\s+0+$/m
+            or die "diagnostic supervisor must have no retained capabilities";
+    }
+    my @pids = ($$);
+    push @pids, members($all) if $all;
+    for my $pid (@pids) {
+        my $membership = bounded_read("/proc/$pid/cgroup", 0);
+        $membership =~ /\A0::\Q$relative\E\/(?:supervisor|worker)\z/
+            or die "process $pid is outside the independent parent";
+    }
+    $independent_oom_kills = independent_oom_count();
+    $independent_checks || !$independent_oom_kills
+        or die "independent parent already has OOM kills";
+    $independent_cgroup_identity = $identity;
+    $independent_max_bytes = $maximum;
+    ++$independent_checks;
+}
 
 sub verify_observer {
     my @path = lstat($observer_path);
@@ -985,11 +1085,18 @@ sub parse_proc_stat_record {
 # records the measurement gap without converting telemetry into cancellation.
 # Broken/incomplete observations still fail at their original validation sites.
 sub record_sample_duration {
-    my ($duration_ms, $failure) = @_;
+    my ($duration_ms, $failure, $all) = @_;
     $sample_duration_max_ms = $duration_ms if $duration_ms > $sample_duration_max_ms;
     ++$sample_overruns if $duration_ms > $opt{'interval-ms'};
     if ($duration_ms > $observation_budget_ms) {
         ++$sample_budget_exceeded;
+        if ($opt{'observation-failure-mode'} eq 'diagnostic') {
+            $all or die "diagnostic waiver requires a complete process snapshot";
+            verify_independent_cgroup($all);
+            warn "rss-guard: $failure; bounded diagnostic measurement incomplete, workload continues\n"
+                if $sample_budget_exceeded == 1;
+            return;
+        }
         die $failure unless $opt{'rss-cap-mode'} eq 'monitor';
         warn "rss-guard: $failure; monitor measurement incomplete, workload continues\n"
             if $sample_budget_exceeded == 1;
@@ -1139,7 +1246,7 @@ sub finish_snapshot {
     }
     observation_phase('budget_check');
     my $duration_ms = (monotonic_time() - $sample_started_at) * 1000;
-    record_sample_duration($duration_ms, "process observation exceeded observation budget");
+    record_sample_duration($duration_ms, "process observation exceeded observation budget", $all);
     return $all;
 }
 
@@ -1291,6 +1398,11 @@ sub receipt {
         "sample_duration_max_ms=$sample_duration_max_ms\nsample_overruns=$sample_overruns\n" .
         "sample_budget_exceeded=$sample_budget_exceeded\nmeasurement_budget_complete=" .
         ($sample_budget_exceeded ? 0 : 1) . "\n" .
+        "observation_failure_mode=$opt{'observation-failure-mode'}\n" .
+        "independent_cgroup=" . ($opt{'independent-cgroup'} // '') . "\n" .
+        "independent_cgroup_checks=$independent_checks\n" .
+        "independent_memory_max_bytes=" . ($independent_max_bytes // 'unavailable') . "\n" .
+        "independent_oom_kills=$independent_oom_kills\n" .
         observation_receipt() .
         "observer_backend=$observer_backend\nobserver_path=" . ($observer_path // '') . "\n" .
         "observer_sha256=" . ($observer_sha // '') . "\n" .
@@ -1323,6 +1435,15 @@ sub receipt {
 }
 
 # Workload startup boundary (identity unit tests exercise functions above it).
+if ($opt{'observation-failure-mode'} eq 'diagnostic') {
+    if (!eval { verify_independent_cgroup(); 1 }) {
+        my $failure = $@;
+        $failure =~ s/\s+/ /g;
+        refuse_policy($failure);
+    }
+} elsif ($explicit{'independent-cgroup'}) {
+    refuse_policy('independent cgroup requires explicit diagnostic observation mode');
+}
 if (!eval { install_session_helper(); install_observer(); 1 }) {
     alarm 0;
     stop_observer();
@@ -1401,6 +1522,7 @@ while (1) {
         ($status, $code) = ($helper_failed ? 'session-helper-invalid' : 'rss-measurement-failed', 89); last;
     }
     $last = $all;
+    if ($independent_oom_kills) { ($status, $code) = ('independent-memory-oom', 137); last }
     if (%unexpected_sid) { ($status, $code) = ('bootstrap-session-escaped', 90); last }
     my @live = members($all);
     my $rss = 0; $rss += $all->{$_}{rss} for @live;
@@ -1473,5 +1595,11 @@ if ($status eq 'complete' && defined $child_status) {
 }
 $quiet = 0 unless defined $child_status;
 if (!$quiet && $code != 89) { ($status, $code) = ('rss-containment-unverified', 89) }
+if ($opt{'observation-failure-mode'} eq 'diagnostic') {
+    my $checked = eval { $independent_oom_kills = independent_oom_count(); 1 };
+    if (!$checked) { ($status, $code) = ('independent-guard-unverified', 89) }
+    elsif ($independent_oom_kills && !$code) { ($status, $code) = ('independent-memory-oom', 137) }
+    elsif ($status eq 'complete' && $sample_budget_exceeded) { $status = 'diagnostic-incomplete' }
+}
 receipt($status, $code, $quiet);
 exit $code;
