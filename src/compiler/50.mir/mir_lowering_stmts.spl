@@ -4209,8 +4209,13 @@ impl MirLowering:
         self.builder = b_cond
 
         # Element: x = rt_array_get(arr, i)
+        # A `[u8]` element reads through rt_bytes_u8_at, the accessor the
+        # index read `arr[i]` uses (expr_dispatch.spl typed_u8_runtime_read):
+        # rt_array_get hands back the RAW byte of a packed array, so the
+        # decode below turned 56 into 7.
+        val for_typed_u8 = rt_enum_discriminant(element_type.kind) == rt_enum_discriminant(MirTypeKind.U8)
         val get_func = MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Str("rt_array_get"),
+            MirConstValue.Str(if for_typed_u8: "rt_bytes_u8_at" else: "rt_array_get"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
         ))
         var b_get = self.builder
@@ -4256,7 +4261,13 @@ impl MirLowering:
             element_type
         if for_has_real_struct_name:
             self.mark_runtime_value_local(elem_local.id)
-        val decoded_elem = self.decode_runtime_value(elem_local, decode_elem_type)
+        var decoded_elem = elem_local
+        if for_typed_u8:
+            var b_byte = self.builder
+            decoded_elem = b_byte.emit_cast(mir_operand_copy(elem_local), element_type)
+            self.builder = b_byte
+        else:
+            decoded_elem = self.decode_runtime_value(elem_local, decode_elem_type)
 
         # Bind loop variable to the (decoded) element
         var binding_element_type = element_type
