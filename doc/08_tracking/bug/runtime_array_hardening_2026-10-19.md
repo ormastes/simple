@@ -97,8 +97,14 @@ box (`rt_value_u64`, Rust `HeapUInt`).
   `all_truthy`/`any_truthy`, `zip` and `rt_contains` all used `as_slice()`
   on packed arrays. That reads past a `[u8]` buffer and misreads words. The
   JIT printed heap addresses for `sorted` and 231 for `max`.
-- Fix: `RuntimeArray::tagged_elements()` returns a borrowed slice for generic
-  arrays and a tagged copy for packed ones. `reversed`/`sorted` copy and keep
+- Fix: `RuntimeArray::element_at(i)` / `elements()` (a lazy per-index
+  iterator, with early exit and nothing materialised) read packed elements
+  at their own width. `index_of`/`last_index_of`/`count`/`contains`/`sum`/
+  `all_truthy`/`any_truthy` scan the raw slots of a packed array: the needle
+  is decoded once, so no element is boxed. A first draft collected a tagged
+  copy per call, which cost 395 MB RSS / 4.0 s on the contains/index_of
+  probe; the lazy version costs 44.7 MB / 0.17 s. Base was 42 MB / 1.9 s
+  and gave wrong answers. `reversed`/`sorted` copy and keep
   the packed layout. `reverse` reverses the raw buffer at element width.
   `min`/`max` compare packed elements unsigned and order heap ints by value.
 - Interpreter (`interpreter_method/collections.rs`): `sort`, `sort_desc`,
@@ -163,10 +169,29 @@ box (`rt_value_u64`, Rust `HeapUInt`).
   (`spl_core_packed_element_arg`) also decodes u64 boxes. That is a known
   write-side divergence.
 
+## Follow-ups (pre-existing, not changed here)
+
+- C hashes a small (< 2^60) u64 box as `value ^ 0x55494e545f553634`, but an
+  equal inline int hashes as its raw word. Dict paths canonicalise a small u64
+  box to an inline int first (`rt_core_dict_canon`), so dict lookups agree.
+  Any other caller of `rt_core_dict_hash` on an uncanonicalised key would
+  not. Rust normalises inside `value_hash` (`equality.rs` UInt arm).
+- `data.any(\x: x)` / an Option-returning predicate on an untyped receiver
+  is wrong in JIT and native, on base (non-bool garbage) and here (a bool
+  that does not track truthiness). The closure returns a raw value, and the
+  runtime tests RuntimeValue truthiness on it.
+- With a user class that defines `any`, an untyped `data.any(\x: ...)` on an
+  ARRAY in the same program dispatches to the user method in the JIT
+  (name-based recovery). That is why `user_method_named_any_all.spl` is a
+  separate fixture.
+- `collection_req002_any_all_shortcircuit.spl`: the interpreter returns 1
+  (base and here). JIT and native now return 0 and print the OK line (they
+  returned 1 on base).
+
 ## Tests
 
-- `src/runtime/test/rt_array_hardening_selfcheck.c` covers 1, 2 and 4 (65
-  checks). It is red on base: ASan heap-buffer-overflow in `rt_string_join`.
+- `src/runtime/test/rt_array_hardening_selfcheck.c` covers 1, 2 and 4 (53
+  `CHECK` sites, 65 evaluations). It is red on base: ASan heap-buffer-overflow in `rt_string_join`.
 - `runtime/src/value/collection_tests.rs` `packed_array_hardening` covers 4,
   6 and 7 (3 tests, all red on base).
 - `test/fixtures/engine_differential/packed_array_hardening.spl` plus the
