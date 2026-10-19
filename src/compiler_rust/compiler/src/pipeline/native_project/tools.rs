@@ -2614,6 +2614,180 @@ mod bootstrap_capsule_ownership_tests {
     }
 }
 
+/// Whether a `-Wl,--version` banner names mold.
+fn linker_banner_is_mold(banner: &str) -> bool {
+    banner.trim_start().starts_with("mold ")
+}
+
+/// `-Wl,--gc-sections` is safe for a relocatable (`-r`) closure link unless
+/// the driver's effective linker is mold. mold (measured 2.42.0) does not
+/// garbage-collect sections in `-r` mode -- every `.text.*` of every pulled
+/// member survives -- yet it still drops the SHF_MERGE|SHF_STRINGS literal
+/// sections (`.rodata.str1.1`) and rewrites each kept reference to them as a
+/// symbol-0 relocation with addend -1. The final link then resolves every
+/// string literal of the closure to address -1 (the 2026-10-19 Stage 2 SEGV
+/// in `rt_secure_temp_dir_make`). Since mold keeps the same `.text.*` sections
+/// and defined symbols with or without the flag (pinned by
+/// `string_literal_closure_keeps_its_literals`), omitting it under mold
+/// changes nothing but the literals.
+///
+/// A probe that cannot run keeps the previous command line (gc allowed):
+/// `reject_partial_link_tombstones` still refuses a closure that lost its
+/// literals, so a failed probe cannot ship the defect.
+///
+/// The Stage4 live projection in `linker.rs` (`stage4_live_entry.o`) is a
+/// third `-r --gc-sections` site; it is only read for its symbol sets and is
+/// never linked into an artifact, so it is left unchanged.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn partial_link_gc_sections_allowed(cc: &str, fuse_ld: Option<&str>) -> bool {
+    let mut probe = std::process::Command::new(cc);
+    if let Some(linker) = fuse_ld {
+        probe.arg(format!("-fuse-ld={linker}"));
+    }
+    match probe.arg("-Wl,--version").output() {
+        Ok(output) if output.status.success() => {
+            !linker_banner_is_mold(&String::from_utf8_lossy(&output.stdout))
+        }
+        _ => true,
+    }
+}
+
+/// Relocations in allocated sections that a partial link left pointing at
+/// the discarded-section tombstone (absolute symbol 0, addend -1). Each is a
+/// reference that the final link would resolve to address -1.
+pub(crate) fn partial_link_tombstone_relocations(path: &Path) -> Result<Vec<String>, String> {
+    use object::{Object, ObjectSection, RelocationFlags, RelocationTarget, SectionFlags};
+    let bytes = std::fs::read(path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let file = object::File::parse(&*bytes).map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
+    let mut found = Vec::new();
+    for section in file.sections() {
+        let allocated = match section.flags() {
+            SectionFlags::Elf { sh_flags } => sh_flags & u64::from(object::elf::SHF_ALLOC) != 0,
+            _ => false,
+        };
+        if !allocated {
+            continue;
+        }
+        let name = section.name().unwrap_or("<unnamed>");
+        for (offset, relocation) in section.relocations() {
+            // r_type 0 is R_<arch>_NONE on every ELF machine.
+            let is_none = matches!(relocation.flags(), RelocationFlags::Elf { r_type: 0 });
+            if !is_none
+                && relocation.target() == RelocationTarget::Absolute
+                && relocation.addend() == -1
+            {
+                found.push(format!("{name}+{offset:#x}"));
+            }
+        }
+    }
+    Ok(found)
+}
+
+fn reject_partial_link_tombstones(path: &Path, what: &str) -> Result<(), String> {
+    let found = partial_link_tombstone_relocations(path)?;
+    if found.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{what} closure link left {} relocation(s) resolved to the discarded-section tombstone (-1): {}",
+        found.len(),
+        found.iter().take(16).cloned().collect::<Vec<_>>().join(", ")
+    ))
+}
+
+#[cfg(test)]
+mod partial_link_tombstone_tests {
+    use super::{linker_banner_is_mold, partial_link_tombstone_relocations};
+
+    #[test]
+    fn mold_banner_is_recognised_and_others_are_not() {
+        assert!(linker_banner_is_mold("mold 2.42.0 (441dc1d; compatible with GNU ld)\n"));
+        assert!(!linker_banner_is_mold("LLD 23.1.0 (compatible with GNU linkers)"));
+        assert!(!linker_banner_is_mold("GNU ld (GNU Binutils for Ubuntu) 2.42"));
+    }
+
+    /// Replays the 2026-10-19 Stage 2 shape: a `-r --gc-sections` closure of
+    /// function-sectioned members whose string literals live in
+    /// `.rodata.str1.1`. Under mold that closure carried symbol-0/addend -1
+    /// relocations; the projection must now refuse such a closure and must
+    /// not build one in the first place.
+    #[test]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    fn string_literal_closure_keeps_its_literals() {
+        let directory = std::env::temp_dir().join(format!("partial-link-tombstone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let cc = super::find_c_compiler();
+        let mut objects = Vec::new();
+        for (stem, source) in [
+            ("a", "int snprintf(char*, unsigned long, const char*, ...);\nint rt_fix_root(char *b, const char *s) { return snprintf(b, 64, \"%s-root\", s); }\nint rt_fix_other(char *b) { return snprintf(b, 64, \"other %s\", \"x\"); }\n"),
+            ("b", "int snprintf(char*, unsigned long, const char*, ...);\nint rt_fix_helper(char *b) { return snprintf(b, 64, \"%s\", \"helper\"); }\nint rt_fix_root2(char *b) { return rt_fix_helper(b) + snprintf(b, 64, \"%s\", \"r2\"); }\n"),
+        ] {
+            let c = directory.join(format!("{stem}.c"));
+            let o = directory.join(format!("{stem}.o"));
+            std::fs::write(&c, source).unwrap();
+            let status = std::process::Command::new(&cc)
+                .args(["-O2", "-c", "-ffunction-sections", "-fdata-sections"]).arg(&c).arg("-o").arg(&o).status().unwrap();
+            assert!(status.success());
+            objects.push(o);
+        }
+        let archive = directory.join("libfix.a");
+        let ar = super::find_archive_tool().unwrap();
+        assert!(super::archive_create_command(&ar, &archive, &objects, false, true).status().unwrap().success());
+
+        let mold_present = std::process::Command::new("mold").arg("--version").output().is_ok_and(|o| o.status.success());
+        if mold_present {
+            assert!(!super::partial_link_gc_sections_allowed(&cc, Some("mold")));
+            let bad = directory.join("mold_gc_closure.o");
+            let status = std::process::Command::new(&cc)
+                .args(["-fuse-ld=mold", "-nostdlib", "-Wl,-r", "-no-pie", "-Wl,--gc-sections",
+                    "-Wl,--undefined=rt_fix_root", "-Wl,--undefined=rt_fix_root2"])
+                .arg(&archive).arg("-o").arg(&bad).status().unwrap();
+            assert!(status.success());
+            let found = partial_link_tombstone_relocations(&bad).unwrap();
+            assert!(!found.is_empty(), "mold -r --gc-sections no longer tombstones literals; re-check the probe");
+            assert!(found.iter().any(|site| site.starts_with(".text.rt_fix_root")), "{found:?}");
+
+            // Dropping --gc-sections under mold must be lossless: the same
+            // .text.* sections and defined symbols either way.
+            let kept = directory.join("mold_nogc_closure.o");
+            let status = std::process::Command::new(&cc)
+                .args(["-fuse-ld=mold", "-nostdlib", "-Wl,-r", "-no-pie",
+                    "-Wl,--undefined=rt_fix_root", "-Wl,--undefined=rt_fix_root2"])
+                .arg(&archive).arg("-o").arg(&kept).status().unwrap();
+            assert!(status.success());
+            assert!(partial_link_tombstone_relocations(&kept).unwrap().is_empty());
+            let shape = |path: &std::path::Path| {
+                use object::{Object, ObjectSection, ObjectSymbol};
+                let bytes = std::fs::read(path).unwrap();
+                let file = object::File::parse(&*bytes).unwrap();
+                let text: std::collections::BTreeSet<String> = file.sections()
+                    .filter_map(|section| section.name().ok().map(str::to_string))
+                    .filter(|name| name.starts_with(".text"))
+                    .collect();
+                let defined: std::collections::BTreeSet<String> = file.symbols()
+                    .filter(|symbol| symbol.is_global() && !symbol.is_undefined())
+                    .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+                    .collect();
+                (text, defined)
+            };
+            assert_eq!(shape(&bad), shape(&kept), "mold -r kept different sections/symbols with --gc-sections");
+        } else {
+            eprintln!("SKIP mold replay: mold is not on PATH");
+        }
+
+        let roots = ["rt_fix_root".to_string(), "rt_fix_root2".to_string()];
+        let capsule = super::project_stage4_archive_closure(&[archive.as_path()], &roots, &[], &directory.join("capsule"), "fixture")
+            .expect("projection must succeed without tombstoned literals");
+        assert!(capsule.exists());
+        let closure = directory.join("capsule").join("fixture_closure.o");
+        if closure.exists() {
+            assert!(partial_link_tombstone_relocations(&closure).unwrap().is_empty());
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+}
+
 fn project_stage4_archive_closure(
     inputs: &[&Path],
     requested_symbols: &[String],
@@ -2692,12 +2866,18 @@ fn project_stage4_archive_closure(
         // A relocatable closure made by GNU ld can carry misaligned AArch64
         // LDST relocations into an lld final link. Use the selected linker
         // for both steps so the capsule has the same relocation semantics.
-        if let Some(linker) = super::linker::requested_linker_driver_name()? {
+        let fuse_ld = super::linker::requested_linker_driver_name()?;
+        if let Some(linker) = fuse_ld {
             closure_cmd.arg(format!("-fuse-ld={linker}"));
         }
         closure_cmd.arg("-nostdlib").arg("-Wl,-r");
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        closure_cmd.arg("-no-pie").arg("-Wl,--gc-sections");
+        {
+            closure_cmd.arg("-no-pie");
+            if partial_link_gc_sections_allowed(&cc, fuse_ld) {
+                closure_cmd.arg("-Wl,--gc-sections");
+            }
+        }
         for symbol in &requested {
             #[cfg(target_os = "macos")]
             closure_cmd.arg(format!("-Wl,-u,_{symbol}"));
@@ -2757,6 +2937,7 @@ fn project_stage4_archive_closure(
             ));
         }
 
+        reject_partial_link_tombstones(&closure_object, "Stage4 runtime capsule")?;
         let (closure_defined, closure_undefined) = archive_global_symbols(&closure_object)?;
         for symbol in &requested {
             let count: usize = closure_defined
@@ -3057,12 +3238,18 @@ pub(crate) fn build_compiler_backfill_archive(
         // Match the final linker's relocation handling. GNU ld's partial
         // AArch64 closure can leave misaligned LDST128 relocations that lld
         // rejects when the localized backfill reaches the final link.
-        if let Some(linker) = super::linker::requested_linker_driver_name()? {
+        let fuse_ld = super::linker::requested_linker_driver_name()?;
+        if let Some(linker) = fuse_ld {
             closure_cmd.arg(format!("-fuse-ld={linker}"));
         }
         closure_cmd.arg("-nostdlib").arg("-Wl,-r");
         #[cfg(target_os = "linux")]
-        closure_cmd.arg("-no-pie").arg("-Wl,--gc-sections");
+        {
+            closure_cmd.arg("-no-pie");
+            if partial_link_gc_sections_allowed(&cc, fuse_ld) {
+                closure_cmd.arg("-Wl,--gc-sections");
+            }
+        }
         for export in &manifest {
             #[cfg(target_os = "macos")]
             closure_cmd.arg(format!("-Wl,-u,_{export}"));
@@ -3082,6 +3269,7 @@ pub(crate) fn build_compiler_backfill_archive(
             ));
         }
 
+        reject_partial_link_tombstones(&closure_object, "compiler backfill")?;
         let (closure_defined, closure_undefined) = archive_global_symbols(&closure_object)?;
         for export in &manifest {
             let count: usize = closure_defined
