@@ -126,3 +126,12 @@ modulus (ciphertext == padded block, no RSA-2048 modexp). Spec:
   is the predefined tables and would otherwise decode silently wrong.
 - Real fixtures: `test/01_unit/lib/common/zstd_predefined_repeat_modes_spec.spl`
   (host `zstd` 1.5.5; repeat frame needs `--zstd=wlog=10` for small blocks, `-19`).
+- JIT demotion (fixed 2026-10-19): two structs named `ZstdFrameHeader` (common/compress/zstd_types.spl and
+  nogc_sync_mut/compression/zstd/frame.spl) made the seed HIR field-type lookup (bare struct name) fail with
+  "Cannot infer field type ... `dict_id`" and drop any zstd-importing spec to the interpreter. The nogc one is now
+  `ZstdLegacyFrameHeader`; the `[jit-fallback] HIR lowering error` line is gone. Specs still print
+  `jit-bail:no-main-fn` (true for every spec run via `run`, e.g. cbor specs) - that is not zstd-specific.
+  Compiler defect: doc/08_tracking/bug/jit_field_type_inference_same_name_struct_2026-10-19.md.
+- `zstd_compressed_block_spec.spl` 14/14: the 7 former failures were stale expectations ("UnsupportedFeature:
+  fresh-table compressed literals"); the decoder now decodes fresh-table Huffman literals and these malformed
+  frames fail with CorruptStream/TruncatedInput. Host `zstd -d` 1.5.5 rejects all 7 frames too.
