@@ -18,6 +18,7 @@ use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{dir_create, file_copy, file_exists, file_write_exact, file_read_nullable}
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
 use std.platform.{get_host_os}
+use std.simd.{has_avx2}
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use compiler.backend.backend_helpers.{get_effective_backend_name}
 use compiler.driver.driver_backend_plugin_selection.{driver_aot_uses_versioned_backend}
@@ -97,7 +98,12 @@ fn driver_native_prelower_producer_identity_v1(ctx: CompileContext) -> text:
         config_rows.push("{config_key.len()}:{config_key}={config_value}")
     val config_digest = sha256_text(canonical_identity_sort_texts(config_rows).join("\n"))
     val effective_backend = get_effective_backend_name(backend_name, is_release)
-    "compiler={compiler_identity}|target={native_target}|cpu={native_cpu}|backend={effective_backend}|opt={opt_level}|release={is_release}|symbols={symbol_mode}|environment={environment.digest}|emitter={NATIVE_CACHE_EMITTER_SCHEME_V1}|config={config_digest}"
+    # Same host-capability term as the MIR-keyed cache scope
+    # (driver_native_build_cache_scope): a host-native build's objects depend
+    # on the host's AVX2 policy, and this store is not partitioned by that
+    # scope directory, so the key must carry it itself.
+    val host_avx2 = native_target == "" and has_avx2()
+    "compiler={compiler_identity}|target={native_target}|cpu={native_cpu}|avx2={host_avx2}|backend={effective_backend}|opt={opt_level}|release={is_release}|symbols={symbol_mode}|environment={environment.digest}|emitter={NATIVE_CACHE_EMITTER_SCHEME_V1}|config={config_digest}"
 
 # Post-mono specialization names this module emits (functions and nominal
 # types whose name carries the mono `$` separator).
