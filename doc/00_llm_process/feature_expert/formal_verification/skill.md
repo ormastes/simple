@@ -47,3 +47,8 @@ and is not injective for arbitrary names. The executable candidate has focused
 delimiter and constructor-collision regressions; require an admitted runtime
 test result before accepting it. Model substitution proofs alone do not prove
 key-encoding correctness or exact production/model key-string agreement.
+
+`MonoBoundaryModel` is a further manual default target: a variant never
+displaces a same-named type binding, specialized calls have type-owner
+arguments, and a module published to MIR has no generic call given complete
+mono diagnostics. Source-coded, not yet kernel-built; see plan §12.

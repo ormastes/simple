@@ -1,7 +1,7 @@
 # Generic formal verification hardening plan
 
 <!-- codex-architecture -->
-Date: 2026-10-18. Status: implementation and qualification plan; production refinement NOT PROVEN.
+Date: 2026-10-18 (status updated 2026-10-19, see §12). Status: implementation and qualification plan; production refinement NOT PROVEN.
 Destination: `doc/03_plan/generic_formal_verification_hardening_plan.md` on `release_phase3`.
 
 ## 1. Scope and current authority
@@ -181,3 +181,40 @@ No aggregate percentage, model count or successful bootstrap replaces a missing 
 - Model receipts: retained `generic-formal-replay-20261018/` and `proof-constraint-models-root-20261018/verification-cycle1/`; no reruns required for unchanged green inputs.
 - Reviewed unlanded bridges: retained `lean-type-declarations-20261018/revision2/`, `lean-nominal-body-20261018/revision2/` and `lean-nominal-scalar-body-20261018/`.
 - At landing, root attaches portable receipt/manifests or stable artifact links and records the actual merge commit; developer-local paths alone are not release authority.
+
+## 12. Status update 2026-10-19 (mono changes of the day)
+
+Baseline: `origin/release_phase3` at `2d4f8a1b72c`. New manual Lean target
+`src/verification/type_inference_compile/src/MonoBoundaryModel.lean`
+(registered as a default target in that package's `lakefile.toml`).
+**Kernel status: NOT BUILT** — no Lean/Lake toolchain was available on the
+authoring host (Windows, no `lake`/`lean`/`~/.elan`); the file is source-coded
+and source-reviewed only. Run `lake build MonoBoundaryModel` and retain the
+`#print axioms` output before citing any theorem below as kernel-checked.
+No `sorry`/`admit`/`axiom` was added.
+
+| Change | Modeled as | Status |
+|---|---|---|
+| PR #3807 / `9697890ad02` — a variant does not rebind a bare name already bound to a struct/class/enum/trait/alias | `defineVariant_preserves_type_binding`, `resolveOwner_stable_under_variant`; bug replay `unconditional_variant_binding_loses_owner`; non-blanket guard `variant_without_type_is_bound` | source-coded, unbuilt |
+| E-MONO-041 — nominal type args need a proven declaration owner, else no specialization | `resolveOwner_ok`, `resolveArgs_ok_all_types`, `rewriteCall_concrete_has_owners` | source-coded, unbuilt |
+| E-MONO-033 — no non-monomorphic generic call reaches MIR | `publish_refuses_with_diagnostics`, `mono_boundary_sound` (under `DiagComplete`), `monoPass_diag_complete`, `monoPass_publish_monomorphic`; `undiagnosed_generic_call_published` shows coverage is necessary | source-coded, unbuilt; previously unstated in any model |
+
+Open obligations (not discharged by this model):
+
+- O-12.1 `DiagComplete` refinement: the real mono pass must diagnose every
+  surviving generic call (prior misses: generic calls inside string
+  interpolation, E-MONO-034 misattributed as E-MONO-033). G7
+  `post_mono_verify` recount is the intended production witness; no
+  correspondence proof exists.
+- O-12.2 Symbol-table refinement: `Scope` is a newest-first association list;
+  production `local_type_binding_raw`/`define_with_binding`, glob imports and
+  the variant's reachability through its enum are unmodeled.
+- O-12.3 Specialization identity: `rewriteCall` abstracts the specialized
+  target to the template name; owner/argument identity (§6) is not bound.
+- TODO (class-static templates, `origin/work/mono-class-static-owner-port-20261019`,
+  under revision): the rule "a static fn on a generic class is templated only
+  when some owner type param occurs in its params/return type; otherwise it
+  stays on the erased route" is NOT modeled — no current model covers class
+  statics or template creation. Once the branch lands, encode "template only
+  when its type params are inferable from the signature" against the landed
+  rule rather than the in-flight one.
