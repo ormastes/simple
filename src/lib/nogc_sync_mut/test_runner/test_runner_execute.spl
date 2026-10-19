@@ -47,7 +47,7 @@ use std.test_runner.test_executor_parsing.{
     coverage_wrapper_suffix, build_coverage_wrapper,
     extract_coverage_sdn, strip_coverage_blocks,
     COVERAGE_BEGIN, COVERAGE_END,
-    extract_compiler_mcdc_obligation_manifest,
+    extract_compiler_mcdc_obligation_manifest, mcdc_obligation_manifest_absent,
     list_tests_static, extract_static_test_name,
     _tp_get_temp_dir
 }
@@ -971,6 +971,10 @@ pub fn scoped_limit_exceeded_result(file_path: text, scoped_child: ScopedChildRu
 pub fn coverage_interpreter_fallback_opted_in(env_value: text) -> bool:
     env_value == "interpreter"
 
+# Same discipline for an absent MC/DC obligation manifest: only "degrade".
+pub fn mcdc_manifest_absent_degrade_opted_in(env_value: text) -> bool:
+    env_value == "degrade"
+
 pub fn coverage_wrapper_abort_error(diagnostic: text) -> text:
     "ABORTED BEFORE EXECUTION — coverage instrumentation wrapper failed to compile; the spec was NEVER run under the requested coverage path, so this is NOT a test result. Compiler diagnostic: " + diagnostic + " (set SIMPLE_COVERAGE_FALLBACK=interpreter to explicitly accept an UNINSTRUMENTED interpreter run instead)"
 
@@ -1349,11 +1353,21 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         if not mcdc_manifest_valid:
             cleanup_native_generated_files(smf_path, source_path, wrapped_path,
                 cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
+            # Only the pure-Simple compiler driver emits the manifest. Under that
+            # compiler an absent manifest is a regression, so this fails closed by
+            # default. A toolchain that cannot produce one (the Rust seed) may opt
+            # in explicitly with SIMPLE_MCDC_MANIFEST_ABSENT=degrade to run the
+            # spec on the interpreter. A present but malformed manifest always fails.
+            val manifest_absent = mcdc_obligation_manifest_absent(compile_output)
+            if manifest_absent and not options.coverage and mcdc_manifest_absent_degrade_opted_in(env_get("SIMPLE_MCDC_MANIFEST_ABSENT") ?? ""):
+                val absent_reason = "MC/DC instrumentation skipped (explicit SIMPLE_MCDC_MANIFEST_ABSENT=degrade opt-in): compiler emitted no MC/DC obligation manifest; degraded to plain interpreter execution, which reports this file's REAL pass/fail."
+                return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "mcdc-fallback", absent_reason,
+                    "mcdc-obligation-manifest-absent")
             return TestFileResult(
                 path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
                 duration_ms: (time_now_unix_micros() - start) / 1000,
                 setup_ms: 0,
-                error: "test-runner: missing or malformed MC/DC obligation manifest",
+                error: if manifest_absent: "test-runner: missing MC/DC obligation manifest (compiler emitted none; a toolchain that cannot produce one may set SIMPLE_MCDC_MANIFEST_ABSENT=degrade)" else: "test-runner: missing or malformed MC/DC obligation manifest",
                 timed_out: false, cached: false
             )
         mcdc_manifest = extracted_mcdc_manifest
@@ -1515,7 +1529,7 @@ export use std.test_runner.test_executor_parsing.{find_simple_binary, find_simpl
 # Exports from this file
 export run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe, preprocess_spipe_file
 export mcdc_manifest_transport_args
-export smf_compile_degrade_token, scoped_limit_exceeded_result
+export smf_compile_degrade_token, scoped_limit_exceeded_result, mcdc_manifest_absent_degrade_opted_in
 export native_test_request_error, native_test_compile_threads, native_test_compile_args
 export native_test_compile_args_with_threads, native_test_invocation_receipt
 export cleanup_native_generated_files
