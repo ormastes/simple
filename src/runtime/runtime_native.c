@@ -12148,7 +12148,8 @@ static int rt_read_regular_no_follow_buffer(const uint8_t* path_ptr,
     }
     capacity = (size_t)size.QuadPart + 1;
 #else
-    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    /* Reach same-fd admission even for a FIFO with no writer. */
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
     if (fd < 0) return 4;
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||

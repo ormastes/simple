@@ -408,7 +408,8 @@ unsafe fn rt_read_regular_no_follow_buffer(
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    // Reach same-handle admission even for a FIFO with no writer.
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
     #[cfg(windows)]
     options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
     #[cfg(not(any(unix, windows)))]
