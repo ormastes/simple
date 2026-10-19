@@ -1,0 +1,135 @@
+"""
+PassScope owner projection through the real registry and checked dispatch.
+Inactive passes remain inactive; this spec does not manufacture active scope
+coverage by changing descriptor status or bypassing verification.
+"""
+# @req REQ-ENUM-PASS-SCOPE
+# @cover src/compiler/60.mir_opt/mir_opt/mod.spl
+
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir.mir_json.{serialize_mir_function}
+use compiler.mir_opt.mod.{
+    PassScope, PassStatus, PassRunDisposition,
+    mir_pass_descriptor_for_name, mir_module_structural_verification_receipt,
+    run_named_pass_with_record, run_pass_on_module_checked
+}
+
+fn scope_leaf_function(valid: bool) -> MirFunction:
+    val blocks: [MirBlock] = if valid: [MirBlock(BlockId(id: 0), nil, [], MirTerminator.Ret(nil))] else: []
+    MirFunction(
+        SymbolId(id: 193), "pass_scope_leaf", MirSignature([], MirType.unit(), false),
+        [], blocks, BlockId(id: 0), Span(0, 0, 1, 1), [], false, nil, {}, nil,
+        false, false, "", false,
+        DriverManifestAttr(DriverManifestAttrKind.Driver, 0, 0, [], "", ""),
+        false, vhdl_hardware_metadata_default(), false
+    )
+
+fn scope_leaf_module(function: MirFunction) -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[function.symbol] = function
+    MirModule("pass_scope_fixture", functions, {}, {}, {})
+
+fn expect_scope_module_unchanged(module: MirModule, original: MirFunction):
+    val receipt = mir_module_structural_verification_receipt(module)
+    expect(receipt.valid).to_equal(true)
+    expect(receipt.function_count).to_equal(1)
+    expect(module.functions.len()).to_equal(1)
+    expect(serialize_mir_function(module.functions[original.symbol])).to_equal(serialize_mir_function(original))
+
+describe "PassScope retains the registry's declared enum owner":
+    it "resolves all three scope owners and a canonical module alias":
+        step("Read real descriptors rather than a synthetic scope table")
+        expect(mir_pass_descriptor_for_name("dead_code_elimination").unwrap().scope).to_equal(PassScope.Function)
+        expect(mir_pass_descriptor_for_name("write_coalesce").unwrap().scope).to_equal(PassScope.FsDriver)
+        val canonical = mir_pass_descriptor_for_name("auto_vectorize").unwrap()
+        val alias = mir_pass_descriptor_for_name("vectorization").unwrap()
+        expect(canonical.scope).to_equal(PassScope.Module)
+        expect(canonical.status).to_equal(PassStatus.Active)
+        expect(alias.scope).to_equal(canonical.scope)
+        expect(alias.kind).to_equal(canonical.kind)
+        expect(alias.stable_name).to_equal("auto_vectorize")
+
+    it "skips an active module pass at the function-only boundary":
+        step("Dispatch a real active module descriptor through a function request")
+        val original = scope_leaf_function(true)
+        val result = run_named_pass_with_record("vectorization", original)
+        expect(result.is_ok()).to_equal(true)
+        val outcome = result.ok().unwrap()
+        expect(outcome.verifier.valid).to_equal(true)
+        expect(outcome.record.scope).to_equal(PassScope.Module)
+        expect(outcome.record.status).to_equal(PassStatus.Active)
+        expect(outcome.record.requested_name).to_equal("vectorization")
+        expect(outcome.record.effective_name).to_equal("auto_vectorize")
+        expect(outcome.record.disposition).to_equal(PassRunDisposition.Skipped)
+        expect(outcome.record.functions_seen).to_equal(0)
+        expect(outcome.record.transformed).to_equal(0)
+        expect(outcome.record.reasons.len()).to_equal(1)
+        expect(outcome.record.reasons[0].code).to_equal("module_scope")
+        expect(serialize_mir_function(outcome.function)).to_equal(serialize_mir_function(original))
+
+    it "runs the active module dispatcher with an honest no-op leaf":
+        step("Run AutoVectorize on a valid module with no loop candidate")
+        val original = scope_leaf_function(true)
+        val result = run_pass_on_module_checked("vectorization", scope_leaf_module(original))
+        expect(result.is_ok()).to_equal(true)
+        expect_scope_module_unchanged(result.ok().unwrap(), original)
+
+    it "preserves inactive Function and FsDriver statuses without claiming execution":
+        step("Keep skeleton and analysis-only passes behind their existing status gate")
+        val original = scope_leaf_function(true)
+        for pass_name in ["dead_code_elimination", "write_coalesce"]:
+            val descriptor = mir_pass_descriptor_for_name(pass_name).unwrap()
+            val result = run_named_pass_with_record(pass_name, original)
+            expect(result.is_ok()).to_equal(true)
+            val outcome = result.ok().unwrap()
+            expect(outcome.record.scope).to_equal(descriptor.scope)
+            expect(outcome.record.status).to_equal(descriptor.status)
+            expect(outcome.record.disposition).to_equal(PassRunDisposition.Skipped)
+            expect(outcome.record.functions_seen).to_equal(0)
+            expect(outcome.record.candidates).to_equal(0)
+            expect(outcome.record.transformed).to_equal(0)
+            expect(outcome.record.reasons.len()).to_equal(1)
+            if pass_name == "dead_code_elimination":
+                expect(outcome.record.status).to_equal(PassStatus.Skeleton)
+                expect(outcome.record.reasons[0].code).to_equal("inactive_status")
+            else:
+                expect(outcome.record.status).to_equal(PassStatus.AnalysisOnly)
+                expect(outcome.record.reasons[0].code).to_equal("analysis_only")
+            expect(serialize_mir_function(outcome.function)).to_equal(serialize_mir_function(original))
+            val module_result = run_pass_on_module_checked(pass_name, scope_leaf_module(original))
+            expect(module_result.is_ok()).to_equal(true)
+            expect_scope_module_unchanged(module_result.ok().unwrap(), original)
+
+    it "records an unknown function request and preserves the checked module":
+        step("Keep unknown-pass behavior distinct from a successful transformation")
+        val original = scope_leaf_function(true)
+        val name = "missing_pass_scope_fixture"
+        expect(mir_pass_descriptor_for_name(name).?).to_equal(false)
+        val result = run_named_pass_with_record(name, original)
+        expect(result.is_ok()).to_equal(true)
+        val outcome = result.ok().unwrap()
+        expect(outcome.record.disposition).to_equal(PassRunDisposition.Failed)
+        expect(outcome.record.status).to_equal(PassStatus.Disabled("unknown pass"))
+        expect(outcome.record.effective_name).to_equal("")
+        expect(outcome.record.transformed).to_equal(0)
+        expect(outcome.record.reasons.len()).to_equal(1)
+        expect(outcome.record.reasons[0].code).to_equal("unknown_pass")
+        expect(serialize_mir_function(outcome.function)).to_equal(serialize_mir_function(original))
+        val module_result = run_pass_on_module_checked(name, scope_leaf_module(original))
+        expect(module_result.is_ok()).to_equal(true)
+        expect_scope_module_unchanged(module_result.ok().unwrap(), original)
+
+    it "rejects malformed input before active inactive or unknown dispatch":
+        step("Reject a missing entry block before any descriptor can skip verification")
+        for pass_name in ["auto_vectorize", "dead_code_elimination", "write_coalesce", "missing_pass_scope_fixture"]:
+            val malformed = scope_leaf_function(false)
+            val function_result = run_named_pass_with_record(pass_name, malformed)
+            expect(function_result.is_err()).to_equal(true)
+            expect(function_result.err().unwrap()).to_contain("invalid MIR before pass")
+            val module_result = run_pass_on_module_checked(pass_name, scope_leaf_module(malformed))
+            expect(module_result.is_err()).to_equal(true)
+            expect(module_result.err().unwrap()).to_contain("MIRV011")
