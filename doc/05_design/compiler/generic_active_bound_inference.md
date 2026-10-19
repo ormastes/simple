@@ -18,7 +18,7 @@ Function environments restore after each body and both function/parameter symbol
 
 ## Boundaries and next required work
 
-The current flat bridge drops function and impl binder bounds/defaults. Tests attach bounds/defaults to actual parsed HIR binders; they do not manually install solver declarations. Source syntax admission remains OPEN. Next owner work is the existing AST/Core declaration bound transport through `_FlatAstBridge/convert_nodes` and `module_assembly`, then source-only positive/negative infer_module scenarios without injected bounds.
+Ordinary generic function bounds now survive declaration parsing and flat AST conversion through the landed bound-transport fix (PR #3763). This packet includes three actual parsed-source infer_module scenarios without injected bounds, alongside direct HIR-binder fixtures. Source integration is implemented; all executable qualification remains UNRUN. Impl-bound/default transport, generic extern transport, and complete source grammar/default semantics remain OPEN.
 
 Full method/static/indirect-function bound propagation, richer generic forwarding proofs, parameterized traits, associated-type normalization, generic trait where clauses, cross-module/imported symbol authority, complete default semantics, declaration conformance, and compiler publication severity remain OPEN. The driver policy is unchanged: Critical/Deny, Robust/Warn, and advisory tiers are separate from this HM error collection. No mono-to-HM sibling-private dependency is introduced.
 
