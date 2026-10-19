@@ -1,0 +1,116 @@
+# Driver half of MIR shard export summaries (driver_build/native_mir_shard_export_v1.spl).
+#
+# driver_mir_shard_export_write_v1: the single summary process, after mono,
+# projects each source module's post-mono HIR into MirHirModuleDeclarationsV1
+# and writes the bundle. driver_mir_shard_export_admit_v1: a MIR shard worker
+# proves the bundle covers its build before lowering. Both run every module
+# inside its own transient scratch scope and promote only a small Result, so
+# neither adds a promoted root or a resident cache.
+# Design: doc/05_design/compiler/incremental_build/mir_shard_export_summaries.md
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_context_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1,
+    hir_cache_clear_last_warnings}
+use compiler.driver.driver_build.native_mir_shard_export_v1.{
+    native_mir_shard_export_write_dir_v1, native_mir_shard_export_dir_v1,
+    native_mir_shard_export_authority_v1, native_mir_shard_export_module_key_v1,
+    native_mir_shard_export_write_module_v1, native_mir_shard_export_write_manifest_v1,
+    native_mir_shard_export_admit_v1}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.mir.hir_declaration_summary_v1.{mir_hir_project_module_in_owned_scope_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+
+# The modules a summary must cover: every source module with HIR, once, in
+# source order. Producer and worker use this same rule.
+fn driver_mir_shard_export_modules_v1(driver: CompilerDriver) -> [text]:
+    var names: [text] = []
+    var seen: Dict<text, bool> = {}
+    var index = 0
+    while index < driver.ctx.sources.len():
+        val name: text = driver.ctx.sources[index].module_name
+        if name != "" and not seen.has(name) and driver.ctx.hir_modules.has(name):
+            seen[name] = true
+            names.push(name)
+        index = index + 1
+    names
+
+# Project + write one module inside a scratch scope; promote only the digest.
+fn driver_mir_shard_export_write_one_v1(driver: CompilerDriver, dir: text, identity: text,
+        name: text) -> Result<text, text>:
+    val context = hir_owned_artifact_context_v1()
+    if not context.enabled:
+        return Err("MIR shard export needs the owned HIR artifact cache")
+    if not transient_scope_begin():
+        return Err("MIR shard export scope unavailable")
+    var written: Result<text, text> = Err("MIR shard export module has no HIR: {name}")
+    val held = driver.ctx.hir_modules[name]
+    if val module = held:
+        val complete = hir_module_encode(module)
+        if complete == "":
+            written = Err("MIR shard export HIR codec refused module: {name}")
+        else:
+            val projected = mir_hir_project_module_in_owned_scope_v1(context, module,
+                native_mir_shard_export_authority_v1(identity),
+                native_mir_shard_export_module_key_v1(identity, name), sha256_text(complete))
+            if projected.is_err():
+                written = Err("{projected.unwrap_err()}: {name}")
+            else:
+                written = native_mir_shard_export_write_module_v1(dir, identity, name,
+                    projected.unwrap())
+    val paused = transient_scope_pause()
+    var owned = false
+    if paused:
+        owned = transient_promote(written) and hir_cache_promote_diagnostic_owner_v1()
+        hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended:
+        return Err("MIR shard export ownership failed: {name}")
+    written
+
+# Returns the number of modules written. The manifest is written only after
+# every record, so any Err leaves no admissible bundle.
+fn driver_mir_shard_export_write_v1(driver: CompilerDriver) -> Result<i64, text>:
+    val dir = native_mir_shard_export_write_dir_v1()
+    val identity = driver.ctx.native_sources_fingerprint
+    if dir == "" or identity == "":
+        return Err("MIR shard export has no directory or build identity")
+    if transient_array_scope_state_v1() != 0:
+        return Err("MIR shard export requires an unoccupied owned boundary")
+    val names = driver_mir_shard_export_modules_v1(driver)
+    if names.len() == 0:
+        return Err("MIR shard export found no module with HIR")
+    var digests: [text] = []
+    for name in names:
+        val written = driver_mir_shard_export_write_one_v1(driver, dir, identity, name)
+        if written.is_err():
+            return Err(written.unwrap_err())
+        digests.push(written.unwrap())
+    if not native_mir_shard_export_write_manifest_v1(dir, identity, names, digests):
+        return Err("MIR shard export manifest could not be published")
+    Ok(names.len())
+
+# Worker admission in a scratch scope: decoded declarations are discarded,
+# only the verdict survives. Err means "use today's full load".
+fn driver_mir_shard_export_admit_v1(driver: CompilerDriver) -> Result<i64, text>:
+    val dir = native_mir_shard_export_dir_v1()
+    if dir == "":
+        return Err("no MIR shard export bundle was published for this build")
+    if transient_array_scope_state_v1() != 0:
+        return Err("MIR shard export admission requires an unoccupied owned boundary")
+    val required = driver_mir_shard_export_modules_v1(driver)
+    if not transient_scope_begin():
+        return Err("MIR shard export admission scope unavailable")
+    val admitted = native_mir_shard_export_admit_v1(dir, driver.ctx.native_sources_fingerprint, required)
+    val paused = transient_scope_pause()
+    var owned = false
+    if paused:
+        owned = transient_promote(admitted) and hir_cache_promote_diagnostic_owner_v1()
+        hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended:
+        return Err("MIR shard export admission ownership failed")
+    admitted

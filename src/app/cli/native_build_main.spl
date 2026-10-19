@@ -1001,10 +1001,41 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
         return ""
     val count = native_build_mir_shard_count(parallel)
     print "[mir-shard] shards={count} parallel={parallel} ledger={queue_dir}"
+    val old_export_dir = env_get("SIMPLE_MIR_SHARD_EXPORT_DIR") ?? ""
+    env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", run_mir_shard_export_summaries(base, queue_dir, simple_bin, timeout_ms))
     val code = run_ledger_shards("mir-shard", "--mir-shard", "SIMPLE_MIR_SHARD_QUEUE",
         "SIMPLE_MIR_SHARD_OWNER", base, queue_dir, args, count, parallel,
         simple_bin, timeout_ms)
+    env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", old_export_dir)
     if code != 0: "" else: queue_dir
+
+# Opt-in SIMPLE_MIR_SHARD_EXPORT_SUMMARIES=1: one process runs through mono and
+# writes per-module declaration summaries
+# (compiler/80.driver/driver_build/native_mir_shard_export_v1.spl). Returns the
+# bundle directory for workers, or "" -- every failure is a worker-side
+# fallback to the full HIR load, never a build failure.
+fn run_mir_shard_export_summaries(base: [text], queue_dir: text, simple_bin: text,
+        timeout_ms: i64) -> text:
+    if (env_get("SIMPLE_MIR_SHARD_EXPORT_SUMMARIES") ?? "") != "1":
+        return ""
+    val export_dir = "{queue_dir}.export"
+    # A bundle from an earlier invocation must never be admitted by this one.
+    if file_exists("{export_dir}/manifest") and not file_delete("{export_dir}/manifest"):
+        eprint "[mir-shard-export] stale manifest could not be removed; workers use full HIR"
+        return ""
+    val old_write = env_get("SIMPLE_MIR_SHARD_EXPORT_WRITE") ?? ""
+    env_set("SIMPLE_MIR_SHARD_EXPORT_WRITE", export_dir)
+    val pid = process_spawn_async(simple_bin, base)
+    env_set("SIMPLE_MIR_SHARD_EXPORT_WRITE", old_write)
+    val code = if pid > 0: native_build_normalize_exit_code(process_wait(pid, timeout_ms)) else: -1
+    if pid > 0 and process_is_running(pid):
+        val _killed = process_kill(pid)
+        val _reaped = process_wait(pid, 5000)
+    if code != 0 or not file_exists("{export_dir}/manifest"):
+        eprint "[mir-shard-export] summary step exit={code}; workers use full HIR"
+        return ""
+    print "[mir-shard-export] bundle={export_dir}"
+    export_dir
 
 struct NativeBuildAuthorityRequestV1:
     args: [text]
