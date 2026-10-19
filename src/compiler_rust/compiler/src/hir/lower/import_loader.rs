@@ -318,9 +318,20 @@ impl Lowerer {
                 .any(|item| Self::item_defines_type_like_symbol(item, &original_name));
             if is_type_like {
                 if let Some(type_id) = self.module.types.lookup(&original_name) {
+                    // The type-level alias is what lets a dependency's own
+                    // signatures (`fn make() -> Alias`) resolve, so it is
+                    // registered at every depth.
                     self.module.types.register_alias(alias_name.clone(), type_id);
                     self.register_type_alias_mapping(alias_name.clone(), original_name.clone());
-                    self.globals.insert(alias_name.clone(), type_id);
+                    // A module global, however, becomes a per-module symbol
+                    // (`<importer>__Alias`) at native codegen. A dependency's
+                    // private alias published here left every TRANSITIVE
+                    // importer referencing an undefined `<importer>__Alias`
+                    // (79 such symbols from builtin_blocks_helpers'
+                    // `JsonValue as BlockJsonValue` in the core-C Stage 2 link).
+                    if self.dependency_import_depth == 0 {
+                        self.globals.insert(alias_name.clone(), type_id);
+                    }
                 }
 
                 // Trait parameters retain their authored name as a MIR hint
@@ -338,8 +349,10 @@ impl Lowerer {
                 }
             }
 
-            if let Some(symbol_ty) = self.globals.get(&original_name).copied() {
-                self.globals.insert(alias_name.clone(), symbol_ty);
+            if self.dependency_import_depth == 0 {
+                if let Some(symbol_ty) = self.globals.get(&original_name).copied() {
+                    self.globals.insert(alias_name.clone(), symbol_ty);
+                }
             }
             if let Some(return_ty) = self.method_return_types.get(&original_name).copied() {
                 self.method_return_types.insert(alias_name.clone(), return_ty);
@@ -980,6 +993,19 @@ impl Lowerer {
         if self.loaded_import_targets.contains(&import_key) {
             self.bind_imported_defaults(&unit_key, &caller_key, target);
             self.bind_imported_trait_declarations(&unit_key, &caller_key, target);
+            // The cached load may have been a dependency-only load, which keeps
+            // aliases private. A load on behalf of the module being lowered
+            // (its own `use`, or a facade re-export it requested) must still
+            // bind them. Idempotent when the cached load already did.
+            if self.dependency_import_depth == 0 {
+                let mut aliases = Vec::new();
+                Self::aliased_import_pairs(target, &mut aliases);
+                if !aliases.is_empty() {
+                    if let Some(imported_module) = parsed_imported_module(&resolved.path) {
+                        self.materialize_import_aliases(&imported_module.items, target);
+                    }
+                }
+            }
             return Ok(());
         }
 
@@ -1047,11 +1073,16 @@ impl Lowerer {
             // Cycle-guarded by `loaded_modules`/`loaded_import_targets` above,
             // and failures stay non-fatal here exactly as they are for the
             // entry module.
+            //
+            // These are the imported module's OWN imports: loaded only so its
+            // signatures resolve, never as names of the module being lowered.
+            self.dependency_import_depth += 1;
             for item in &imported_module.items {
                 if let Node::UseStmt(use_stmt) = item {
                     let _ = self.load_imported_types(&use_stmt.path, &use_stmt.target);
                 }
             }
+            self.dependency_import_depth -= 1;
 
             let imported_count = self.register_imported_symbols_from_items(&imported_module.items, target, &resolved.path)?;
             let prefix = module_path.segments.join(".");
@@ -1392,6 +1423,67 @@ fn read_hardware(addr: u64) -> u64:
 
         assert!(body.contains("Global(\"mmio_read64\")"), "body: {body}");
         assert!(!body.contains("Global(\"hardware_mmio_read64\")"), "body: {body}");
+    }
+
+    /// A type alias a dependency declares for itself (`use owner.{Thing as
+    /// Renamed}` in `middle`) is private to that dependency. Before the fix the
+    /// transitive signature load published it as a module global of every
+    /// importer of `middle`, which native codegen turned into an undefined
+    /// `<importer>__Renamed` data import (core-C Stage 2: 79 undefined
+    /// `<module>__BlockJsonValue`).
+    #[test]
+    fn transitive_type_import_alias_stays_private_to_its_module() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let chain = src.join("chain");
+        fs::create_dir_all(&chain).unwrap();
+        fs::write(chain.join("owner.spl"), "struct Thing:\n    n: i64\n").unwrap();
+        let middle_path = chain.join("middle.spl");
+        fs::write(
+            &middle_path,
+            "use chain.owner.{Thing as Renamed}\n\nfn make_renamed(n: i64) -> Renamed:\n    Renamed(n: n)\n",
+        )
+        .unwrap();
+        let consumer_path = chain.join("consumer.spl");
+        fs::write(
+            &consumer_path,
+            "use chain.middle.{make_renamed}\n\nfn total() -> i64:\n    make_renamed(41).n\n",
+        )
+        .unwrap();
+        // Imports the alias itself AND reaches the same `owner` target through
+        // `middle` first, so its own binding is served from the loader cache.
+        let both_path = chain.join("both.spl");
+        fs::write(
+            &both_path,
+            "use chain.middle.{make_renamed}\nuse chain.owner.{Thing as Renamed}\n\nfn build() -> Renamed:\n    Renamed(n: make_renamed(1).n)\n",
+        )
+        .unwrap();
+
+        let lower = |path: &std::path::Path| {
+            let source = crate::read_trace::rts(file!(), line!(), path).unwrap();
+            let ast = Parser::new(&source).parse().expect("parse failed");
+            let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+            Lowerer::with_module_resolver(resolver, path.to_path_buf())
+                .lower_module(&ast)
+                .unwrap_or_else(|e| panic!("lowering {} failed: {e:?}", path.display()))
+        };
+        let has_global = |module: &crate::hir::HirModule, name: &str| module.globals.iter().any(|(n, _)| n == name);
+
+        let consumer = lower(&consumer_path);
+        assert!(
+            !has_global(&consumer, "Renamed"),
+            "dependency-private alias leaked as an importer global: {:?}",
+            consumer.globals
+        );
+        let total = consumer.functions.iter().find(|f| f.name == "total").expect("total function");
+        let body = format!("{:?}", total.body);
+        assert!(body.contains("FieldAccess"), "field access through the aliased return type must resolve: {body}");
+
+        let middle = lower(&middle_path);
+        assert!(has_global(&middle, "Renamed"), "the declaring module keeps its alias: {:?}", middle.globals);
+
+        let both = lower(&both_path);
+        assert!(has_global(&both, "Renamed"), "an importer's own alias is bound even on a cache hit: {:?}", both.globals);
     }
 
     #[test]

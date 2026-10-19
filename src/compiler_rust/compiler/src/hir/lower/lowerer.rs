@@ -76,6 +76,11 @@ pub struct Lowerer {
     /// imported multiple times with different grouped symbols; path-only
     /// de-duplication skips later function imports.
     pub(super) loaded_import_targets: HashSet<(PathBuf, String)>,
+    /// Nesting depth of dependency-only import loads: an imported module's own
+    /// `use` statements, followed so its signatures resolve. Aliases those
+    /// statements declare are private to that module and must not become
+    /// names of the module being lowered (see `materialize_import_aliases`).
+    pub(super) dependency_import_depth: usize,
     /// Memory safety warning collector
     pub(super) memory_warnings: MemoryWarningCollector,
     /// Lifetime inference context for tracking reference lifetimes
@@ -261,6 +266,7 @@ impl Lowerer {
             import_stack: Vec::new(),
             import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
+            dependency_import_depth: 0,
             memory_warnings: MemoryWarningCollector::strict(), // STRICT mode for Rust-level safety
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
@@ -327,6 +333,7 @@ impl Lowerer {
             import_stack: Vec::new(),
             import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
+            dependency_import_depth: 0,
             memory_warnings: MemoryWarningCollector::strict(), // STRICT by default
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
@@ -416,6 +423,7 @@ impl Lowerer {
             import_stack: Vec::new(),
             import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
+            dependency_import_depth: 0,
             memory_warnings: MemoryWarningCollector::new(), // Lenient mode (warnings only)
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
