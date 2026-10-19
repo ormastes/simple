@@ -1,0 +1,198 @@
+# @req REQ-HM-CONDITIONAL-IMPL-CLOSURE
+# Actual solver API; source-predicted RED, runtime UNRUN.
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirSymbol, HirType, HirTypeKind, SymbolTable, SymbolKind, Effect, EffectKind}
+use compiler.traits.trait_def.{SolverTraitBound}
+use compiler.traits.trait_impl.{ImplBlock}
+use compiler.traits.trait_solver.{TraitSolver, Obligation, ObligationCause}
+use compiler.traits.trait_validation.{TraitError}
+
+fn conditional_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn conditional_symbol(table: SymbolTable, name: text, kind: SymbolKind) -> HirSymbol:
+    val id = table.define(name, kind, nil, Span.empty(), Visibility.Public, false, Some("conditional"))
+    table.get_symbol_raw(id.id).unwrap()
+
+class ConditionalFixture:
+    solver: TraitSolver
+    parent: HirSymbol
+    child: HirSymbol
+    parameter: HirSymbol
+    owner: HirSymbol
+    unrelated: HirSymbol
+
+fn conditional_fixture() -> ConditionalFixture:
+    val table = SymbolTable.new()
+    val parent = conditional_symbol(table, "Parent", SymbolKind.Trait)
+    val child = conditional_symbol(table, "Child", SymbolKind.Trait)
+    val parameter = conditional_symbol(table, "T", SymbolKind.TypeParam)
+    val unrelated = conditional_symbol(table, "U", SymbolKind.TypeParam)
+    val owner = conditional_symbol(table, "Box", SymbolKind.Struct)
+    ConditionalFixture(solver: TraitSolver.create_with_symbols(table), parent: parent, child: child, parameter: parameter, owner: owner, unrelated: unrelated)
+
+fn conditional_box(fixture: ConditionalFixture, inner: HirType) -> HirType:
+    conditional_type(HirTypeKind.Named(fixture.owner.id, [inner]))
+
+fn conditional_impl(fixture: ConditionalFixture, legacy_name: bool = false) -> ImplBlock:
+    val variable = conditional_type(if legacy_name: HirTypeKind.TypeParam(fixture.parameter.name, []) else: HirTypeKind.Named(fixture.parameter.id, []))
+    var block = ImplBlock.create(fixture.parent, conditional_box(fixture, variable), Span.empty())
+    block.type_params = [fixture.parameter]
+    block.where_clause = [SolverTraitBound.create(fixture.parameter, fixture.child, Span.empty())]
+    block
+
+fn conditional_obligation(type_: HirType, trait_: HirSymbol) -> Obligation:
+    Obligation.create(type_, trait_, ObligationCause.BuiltIn, Span.empty())
+
+fn conditional_error(result: Result<(), TraitError>) -> text:
+    match result:
+        case Ok(_): "ok"
+        case Err(error):
+            match error:
+                case TraitError.Unsatisfied(_): "unsatisfied"
+                case TraitError.Ambiguous(_, _, _): "ambiguous"
+                case TraitError.CyclicBound(_, _): "cyclic"
+                case _: "other"
+
+describe "conditional trait proofs close before success":
+    it "substitutes actual Named binder IDs and legacy unique names":
+        for legacy in [false, true]:
+            val f = conditional_fixture()
+            val integer = conditional_type(HirTypeKind.Int(64, true))
+            f.solver.add_impl(conditional_impl(f, legacy))
+            f.solver.add_impl(ImplBlock.create(f.child, integer, Span.empty()))
+            expect(conditional_error(f.solver.solve_obligation(conditional_obligation(conditional_box(f, integer), f.parent)))).to_equal("ok")
+            expect(f.solver.has_obligations()).to_equal(false)
+
+    it "returns the missing concrete child rather than queueing a success":
+        val f = conditional_fixture()
+        val integer = conditional_type(HirTypeKind.Int(64, true))
+        f.solver.add_impl(conditional_impl(f))
+        val result = f.solver.solve_obligation(conditional_obligation(conditional_box(f, integer), f.parent))
+        match result:
+            case Err(TraitError.Unsatisfied(child)):
+                expect(child.type_.kind == integer.kind).to_equal(true)
+                expect(child.trait_.id.id).to_equal(f.child.id.id)
+            case _: fail("missing concrete where-clause proof was accepted")
+        expect(f.solver.has_obligations()).to_equal(false)
+        f.solver.add_impl(ImplBlock.create(f.child, integer, Span.empty()))
+        expect(conditional_error(f.solver.solve_obligation(conditional_obligation(conditional_box(f, integer), f.parent)))).to_equal("ok")
+
+    it "solve_all reports conditional failures and leaves no discarded child queue":
+        val f = conditional_fixture()
+        val integer = conditional_type(HirTypeKind.Int(64, true))
+        f.solver.add_impl(conditional_impl(f))
+        f.solver.add_obligation(conditional_box(f, integer), f.parent, ObligationCause.BuiltIn, Span.empty())
+        val result = f.solver.solve_all()
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().len()).to_equal(1)
+        expect(f.solver.has_obligations()).to_equal(false)
+        expect(f.solver.solve_all().is_ok()).to_equal(true)
+
+    it "retains child ambiguity on repeated queries instead of caching a boolean":
+        val f = conditional_fixture()
+        val integer = conditional_type(HirTypeKind.Int(64, true))
+        f.solver.add_impl(conditional_impl(f))
+        f.solver.add_impl(ImplBlock.create(f.child, integer, Span.empty()))
+        f.solver.add_impl(ImplBlock.create(f.child, integer, Span.new(1, 2, 1, 2)))
+        for repeat in 0..2:
+            val result = f.solver.solve_obligation(conditional_obligation(conditional_box(f, integer), f.parent))
+            match result:
+                case Err(TraitError.Ambiguous(_, trait_, candidates)):
+                    expect(trait_.id.id).to_equal(f.child.id.id)
+                    expect(candidates.len()).to_equal(2)
+                case _: fail("conditional ambiguity erased")
+
+    it "rejects a real cyclic conditional proof and clears active scratch":
+        val f = conditional_fixture()
+        val integer = conditional_type(HirTypeKind.Int(64, true))
+        var block = ImplBlock.create(f.parent, conditional_type(HirTypeKind.Named(f.parameter.id, [])), Span.empty())
+        block.type_params = [f.parameter]
+        block.where_clause = [SolverTraitBound.create(f.parameter, f.parent, Span.empty())]
+        f.solver.add_impl(block)
+        for repeat in 0..2:
+            expect(conditional_error(f.solver.solve_obligation(conditional_obligation(integer, f.parent)))).to_equal("cyclic")
+            expect(f.solver.active_count).to_equal(0)
+            expect(f.solver.active.keys().len()).to_equal(0)
+        f.solver.add_impl(ImplBlock.create(f.child, integer, Span.empty()))
+        expect(conditional_error(f.solver.solve_obligation(conditional_obligation(integer, f.child)))).to_equal("ok")
+
+    it "requires repeated binder assignments to agree":
+        val f = conditional_fixture()
+        val integer = conditional_type(HirTypeKind.Int(64, true))
+        val variable = conditional_type(HirTypeKind.Named(f.parameter.id, []))
+        var block = ImplBlock.create(f.parent, conditional_type(HirTypeKind.Tuple([variable, variable])), Span.empty())
+        block.type_params = [f.parameter]
+        block.where_clause = [SolverTraitBound.create(f.parameter, f.child, Span.empty())]
+        f.solver.add_impl(block)
+        f.solver.add_impl(ImplBlock.create(f.child, integer, Span.empty()))
+        expect(conditional_error(f.solver.solve_obligation(conditional_obligation(conditional_type(HirTypeKind.Tuple([integer, integer])), f.parent)))).to_equal("ok")
+        expect(conditional_error(f.solver.solve_obligation(conditional_obligation(conditional_type(HirTypeKind.Tuple([integer, conditional_type(HirTypeKind.Bool)])), f.parent)))).to_equal("unsatisfied")
+
+    it "isolates associated predicates from the unconstrained cache in both orders":
+        val f = conditional_fixture()
+        val integer = conditional_type(HirTypeKind.Int(64, true))
+        var block = ImplBlock.create(f.parent, integer, Span.empty())
+        block.add_assoc_type_impl("Item", integer)
+        f.solver.add_impl(block)
+        val wrong = Obligation.with_assoc_constraints(integer, f.parent, ObligationCause.BuiltIn, Span.empty(), {"Item": conditional_type(HirTypeKind.Bool)})
+        val right = Obligation.with_assoc_constraints(integer, f.parent, ObligationCause.BuiltIn, Span.empty(), {"Item": integer})
+        expect(conditional_error(f.solver.solve_obligation(wrong))).to_equal("unsatisfied")
+        expect(conditional_error(f.solver.solve_obligation(conditional_obligation(integer, f.parent)))).to_equal("ok")
+        expect(conditional_error(f.solver.solve_obligation(wrong))).to_equal("unsatisfied")
+        expect(conditional_error(f.solver.solve_obligation(right))).to_equal("ok")
+
+    it "does not erase function effects while matching conditional patterns":
+        val f = conditional_fixture()
+        val integer = conditional_type(HirTypeKind.Int(64, true))
+        val variable = conditional_type(HirTypeKind.Named(f.parameter.id, []))
+        val pattern = conditional_type(HirTypeKind.Function([variable], variable, [Effect(kind: EffectKind.Pure, span: Span.empty())]))
+        var block = ImplBlock.create(f.parent, pattern, Span.empty())
+        block.type_params = [f.parameter]
+        block.where_clause = [SolverTraitBound.create(f.parameter, f.child, Span.empty())]
+        f.solver.add_impl(block)
+        f.solver.add_impl(ImplBlock.create(f.child, integer, Span.empty()))
+        val pure = conditional_type(HirTypeKind.Function([integer], integer, [Effect(kind: EffectKind.Pure, span: Span.empty())]))
+        val impure = conditional_type(HirTypeKind.Function([integer], integer, [Effect(kind: EffectKind.IO, span: Span.empty())]))
+        expect(conditional_error(f.solver.solve_obligation(conditional_obligation(pure, f.parent)))).to_equal("ok")
+        expect(conditional_error(f.solver.solve_obligation(conditional_obligation(impure, f.parent)))).to_equal("unsatisfied")
+
+    it "proves a finite nested conditional chain synchronously":
+        val f = conditional_fixture()
+        val integer = conditional_type(HirTypeKind.Int(64, true))
+        var nested = conditional_impl(f)
+        nested.trait_name = f.child
+        f.solver.add_impl(nested)
+        f.solver.add_impl(conditional_impl(f))
+        f.solver.add_impl(ImplBlock.create(f.child, integer, Span.empty()))
+        val deep = conditional_box(f, conditional_box(f, conditional_box(f, integer)))
+        expect(conditional_error(f.solver.solve_obligation(conditional_obligation(deep, f.parent)))).to_equal("ok")
+        expect(f.solver.has_obligations()).to_equal(false)
+        expect(f.solver.active_count).to_equal(0)
+
+    it "rejects nested current and unrelated Named parameters under blanket conditions":
+        val f = conditional_fixture()
+        var parent = ImplBlock.create(f.parent, conditional_type(HirTypeKind.Named(f.parameter.id, [])), Span.empty())
+        parent.type_params = [f.parameter]
+        parent.where_clause = [SolverTraitBound.create(f.parameter, f.child, Span.empty())]
+        var child = ImplBlock.create(f.child, conditional_type(HirTypeKind.Named(f.unrelated.id, [])), Span.empty())
+        child.type_params = [f.unrelated]
+        f.solver.add_impl(parent)
+        f.solver.add_impl(child)
+        for parameter in [f.parameter, f.unrelated]:
+            val unresolved = conditional_box(f, conditional_type(HirTypeKind.Named(parameter.id, [])))
+            expect(conditional_error(f.solver.solve_obligation(conditional_obligation(unresolved, f.parent)))).to_equal("unsatisfied")
+        val concrete = conditional_box(f, conditional_type(HirTypeKind.Int(64, true)))
+        expect(conditional_error(f.solver.solve_obligation(conditional_obligation(concrete, f.parent)))).to_equal("ok")
+
+    it "requires nominal table authority without rejecting primitive-only solvers":
+        val f = conditional_fixture()
+        val solver = TraitSolver.create()
+        val concrete = conditional_box(f, conditional_type(HirTypeKind.Int(64, true)))
+        solver.add_impl(ImplBlock.create(f.parent, concrete, Span.empty()))
+        expect(conditional_error(solver.solve_obligation(conditional_obligation(concrete, f.parent)))).to_equal("unsatisfied")
+        val integer = conditional_type(HirTypeKind.Int(64, true))
+        solver.add_impl(ImplBlock.create(f.child, integer, Span.empty()))
+        expect(conditional_error(solver.solve_obligation(conditional_obligation(integer, f.child)))).to_equal("ok")
