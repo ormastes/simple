@@ -3083,12 +3083,20 @@ impl Lowerer {
             ty: payload_ty,
         };
 
-        // Present Ok/Some payload. An `ANY` subject that is a bare non-enum
-        // value also lands here and reads as nil; the interpreter rejects `?`
-        // on such a value outright, so there is no defined result to match.
+        // Present Ok/Some payload. A statically Result/Option subject reads it
+        // with `rt_enum_payload`. An unresolved subject (`ANY`, an imported
+        // Result alias the lowerer did not resolve) may also hold a bare
+        // present value, for which `rt_enum_payload` answers nil and execution
+        // silently continued; `rt_unwrap_or_trap` gives the Ok/Some payload
+        // and the value itself otherwise (None/Err already returned above).
         let unwrap_ok = HirExpr {
             kind: HirExprKind::BuiltinCall {
-                name: "rt_enum_payload".to_string(),
+                name: if self.result_like_payload_type(subject_ty).is_some() {
+                    "rt_enum_payload"
+                } else {
+                    "rt_unwrap_or_trap"
+                }
+                .to_string(),
                 args: vec![subject_ref.clone()],
             },
             ty: payload_ty,
@@ -3115,7 +3123,13 @@ impl Lowerer {
             ty: TypeId::BOOL,
         };
 
-        let body = if propagate_absence {
+        // A plain `Result` subject cannot be None, so it keeps the original
+        // Err-only lowering (no extra runtime call per `?`).
+        let is_plain_result = matches!(
+            self.module.types.get(subject_ty),
+            Some(HirType::Enum { name, .. }) if name == "Result"
+        );
+        let body = if propagate_absence && !is_plain_result {
             HirExpr {
                 kind: HirExprKind::If {
                     condition: Box::new(is_none),

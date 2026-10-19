@@ -1410,6 +1410,12 @@ mod tests {
     /// output (`SIMPLE_EXECUTION_MODE=interpret simple run`). Before the
     /// lower_try fix the native build continued past nil `[T]?`/`{K:V}?`/
     /// tuple?/`Option` None and lost present collections.
+    ///
+    /// Exception, `N1` (`any_try(true)`): `?` on a bare PRESENT value held as
+    /// untyped/`ANY` is rejected by the interpreter at run time ("? operator
+    /// requires Result or Option type"). Natively it is the identity (the
+    /// value continues, `N1 3`) via `rt_unwrap_or_trap`; it must never read
+    /// as nil and continue silently, which is what `rt_enum_payload` did.
     const TRY_FORMS_SRC: &str = r#"fn arr_opt(flag: bool) -> [u8]?:
     if flag:
         return [7u8, 8u8, 9u8]
@@ -1505,6 +1511,7 @@ fn main():
     match enum_try(false):
         case Some(v): print "E2 {v}"
         case None: print "E2 none"
+    print "N1 {show_i(any_try(true))}"
     print "N2 {show_i(any_try(false))}"
     match res_try(5):
         case Ok(v): print "R1 {v}"
@@ -1520,7 +1527,7 @@ fn main():
         case Err(e): print "L2 err {e}"
 "#;
 
-    const TRY_FORMS_EXPECTED: &str = "arr_try continued len=3\nA1 arr[7,9]\nA2 nil\ndict_try continued\nD1 6\nD2 nil\ntup_try continued\nT1 34\nT2 nil\nenum_try continued\nE1 42\nE2 none\nN2 nil\nres_try continued\nR1 11\nR2 err neg\nL1 2\nL2 err neg\n";
+    const TRY_FORMS_EXPECTED: &str = "arr_try continued len=3\nA1 arr[7,9]\nA2 nil\ndict_try continued\nD1 6\nD2 nil\ntup_try continued\nT1 34\nT2 nil\nenum_try continued\nE1 42\nE2 none\nany_try continued\nN1 3\nN2 nil\nres_try continued\nR1 11\nR2 err neg\nL1 2\nL2 err neg\n";
 
     #[test]
     fn native_try_operator_matches_interpreter_on_every_subject_shape() {
