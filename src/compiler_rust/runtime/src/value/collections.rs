@@ -909,6 +909,34 @@ pub unsafe extern "C" fn rt_array_bytes_copy_checked(raw: i64, out: *mut u8, cap
     length
 }
 
+/// Bytes-basis length (Rust twin of runtime_native.c): the logical byte count
+/// of a byte-packed `[u8]`, or -1 when the backing is not a contiguous byte span.
+#[no_mangle]
+pub extern "C" fn rt_array_bytes_basis_len(raw: i64) -> i64 {
+    let Some(array) = get_typed_ptr::<RuntimeArray>(RuntimeValue(raw as u64), HeapObjectType::Array) else {
+        return -1;
+    };
+    let array = unsafe { &*array };
+    if !array.is_byte_packed() || array.len > i64::MAX as u64 {
+        return -1;
+    }
+    array.len as i64
+}
+
+/// Bytes-basis address (Rust twin of runtime_native.c): the data pointer of a
+/// byte-packed `[u8]`, or 0 for non-packed or unallocated storage.
+#[no_mangle]
+pub extern "C" fn rt_array_bytes_basis_ptr(raw: i64) -> i64 {
+    let Some(array) = get_typed_ptr::<RuntimeArray>(RuntimeValue(raw as u64), HeapObjectType::Array) else {
+        return 0;
+    };
+    let array = unsafe { &*array };
+    if !array.is_byte_packed() || array.data.is_null() {
+        return 0;
+    }
+    array.data as i64
+}
+
 /// Layout used for the element storage of a `RuntimeArray` with the given
 /// capacity. Capacity 0 is treated as 1 to satisfy the allocator's min-size
 /// requirement.
