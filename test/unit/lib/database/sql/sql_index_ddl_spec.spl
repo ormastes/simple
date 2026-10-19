@@ -10,6 +10,7 @@ interpreter's rt_sqlite emulation (sffi_db.rs).
 use std.spec.step
 use std.database.sql.types.{DbValue, DbRow, DbError}
 use std.database.sql.connection.{Database}
+use std.io_runtime.{file_delete}
 
 fn _db_with_table() -> Database:
     var db = Database.memory().unwrap()
@@ -76,3 +77,18 @@ describe "Index DDL":
             var db = _db_with_table()
             expect(db.exec_sql("DROP INDEX IF EXISTS nope").is_ok()).to_equal(true)
             db.close().unwrap()  # frees the connection slot
+
+    context "file-backed database":
+        it "remembers index names across close and reopen":
+            step("persist")
+            val path = "/tmp/simple_sql_index_persist_spec.db"
+            file_delete(path)
+            var db = Database.open(path).unwrap()
+            db.exec_sql("CREATE TABLE ix (id INTEGER, a TEXT)").unwrap()
+            db.exec_sql("CREATE INDEX i1 ON ix(a)").unwrap()
+            db.close().unwrap()
+            var db2 = Database.open(path).unwrap()
+            expect(db2.exec_sql("CREATE INDEX i1 ON ix(a)").is_err()).to_equal(true)
+            expect(db2.exec_sql("CREATE INDEX IF NOT EXISTS i1 ON ix(a)").is_ok()).to_equal(true)
+            db2.close().unwrap()
+            file_delete(path)

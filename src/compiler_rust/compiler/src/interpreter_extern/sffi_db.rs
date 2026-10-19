@@ -264,6 +264,8 @@ fn sqlite_load_file(path: &str) -> Option<SqlDatabase> {
                     unique_cols: Vec::new(),
                 },
             );
+        } else if parts[0] == "index" && parts.len() >= 3 {
+            db.indexes.insert(sqlite_unescape(parts[1]), sqlite_unescape(parts[2]));
         } else if parts[0] == "row" && parts.len() >= 4 {
             let name = sqlite_unescape(parts[1]);
             let value_count = parts[2].parse::<usize>().unwrap_or(0);
@@ -317,6 +319,15 @@ fn sqlite_store_file(path: &str, db: &SqlDatabase) {
         if !parent.as_os_str().is_empty() {
             let _ = fs::create_dir_all(parent);
         }
+    }
+    let mut index_names: Vec<&String> = db.indexes.keys().collect();
+    index_names.sort();
+    for name in index_names {
+        out.push_str(&format!(
+            "index\t{}\t{}\n",
+            sqlite_escape(name),
+            sqlite_escape(&db.indexes[name])
+        ));
     }
     let _ = fs::write(path, out);
 }
@@ -1159,7 +1170,6 @@ fn sqlite_value_cmp(a: &SqlValue, b: &SqlValue) -> std::cmp::Ordering {
         (SqlValue::Null, _) => Ordering::Less,
         (_, SqlValue::Null) => Ordering::Greater,
         (SqlValue::Int(x), SqlValue::Int(y)) => x.cmp(y),
-        (SqlValue::Text(x), SqlValue::Text(y)) => x.cmp(y),
         _ => match (a.as_text().parse::<f64>(), b.as_text().parse::<f64>()) {
             (Ok(x), Ok(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
             _ => a.as_text().cmp(&b.as_text()),
