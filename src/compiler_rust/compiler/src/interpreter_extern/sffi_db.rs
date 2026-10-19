@@ -894,11 +894,17 @@ fn arg_float(args: &[Value], idx: usize, fn_name: &str) -> Result<f64, CompileEr
         .as_float()
 }
 
+/// Handles are `slot index + SQLITE_HANDLE_BASE`. Small integers are reserved:
+/// 0 is failure and 3 is the runtime's tagged nil, which the Simple-side
+/// `sqlite_handle_valid` rejects, so a dense 1-based scheme made the third
+/// live connection or statement look failed.
+const SQLITE_HANDLE_BASE: i64 = 16;
+
 fn sqlite_handle_to_index(handle: i64) -> Option<usize> {
-    if handle <= 0 {
+    if handle < SQLITE_HANDLE_BASE {
         None
     } else {
-        Some((handle - 1) as usize)
+        Some((handle - SQLITE_HANDLE_BASE) as usize)
     }
 }
 
@@ -907,11 +913,11 @@ fn sqlite_alloc_conn(conn: SqlConn) -> i64 {
     for (idx, slot) in conns.iter_mut().enumerate() {
         if slot.is_none() {
             *slot = Some(conn);
-            return (idx + 1) as i64;
+            return idx as i64 + SQLITE_HANDLE_BASE;
         }
     }
     conns.push(Some(conn));
-    conns.len() as i64
+    conns.len() as i64 - 1 + SQLITE_HANDLE_BASE
 }
 
 fn sqlite_alloc_stmt(stmt: SqlStmt) -> i64 {
@@ -919,11 +925,11 @@ fn sqlite_alloc_stmt(stmt: SqlStmt) -> i64 {
     for (idx, slot) in stmts.iter_mut().enumerate() {
         if slot.is_none() {
             *slot = Some(stmt);
-            return (idx + 1) as i64;
+            return idx as i64 + SQLITE_HANDLE_BASE;
         }
     }
     stmts.push(Some(stmt));
-    stmts.len() as i64
+    stmts.len() as i64 - 1 + SQLITE_HANDLE_BASE
 }
 
 fn sqlite_set_error(conn: &mut SqlConn, message: impl Into<String>) -> i64 {
