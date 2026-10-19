@@ -1,0 +1,56 @@
+# Test-child working directory: source-contract specs read `src/...` paths
+# relative to the cwd, while their imports resolve from the spec's project.
+# A runner launched from a subdirectory (or from outside the checkout) handed
+# the child its own cwd, so `file_read("src/...")` came back empty. The child
+# must run from the spec's project root.
+use std.spec
+use std.io_runtime.{mkdir_p, file_write, getpid}
+use std.test_runner.child_cwd.{spec_project_root, spec_child_launch_plan, child_cwd_absolute, child_cwd_anchor_path}
+
+fn fixture_root() -> text:
+    "/tmp/simple_child_cwd_spec_{getpid()}"
+
+fn make_fixture() -> text:
+    val root = fixture_root()
+    val _ = mkdir_p("{root}/src/lib")
+    val _ = mkdir_p("{root}/test/01_unit/deep")
+    val _ = file_write("{root}/test/01_unit/deep/x_spec.spl", "")
+    root
+
+describe "test child cwd":
+    it "finds the project root that owns an absolute spec path":
+        val root = make_fixture()
+        expect(spec_project_root("{root}/test/01_unit/deep/x_spec.spl", "/")).to_equal(root)
+
+    it "resolves a relative spec path against the runner cwd":
+        val root = make_fixture()
+        expect(spec_project_root("01_unit/deep/x_spec.spl", "{root}/test")).to_equal(root)
+
+    it "returns empty when no ancestor has both src/ and test/":
+        expect(spec_project_root("/x_spec.spl", "/")).to_equal("")
+
+    it "plans a chdir and an absolute spec path when cwd is not the root":
+        val root = make_fixture()
+        val (dir, path) = spec_child_launch_plan("01_unit/deep/x_spec.spl", "{root}/test")
+        expect(dir).to_equal(root)
+        expect(path).to_equal("{root}/test/01_unit/deep/x_spec.spl")
+
+    it "plans no chdir when the runner already sits at the root":
+        val root = make_fixture()
+        val (dir, path) = spec_child_launch_plan("test/01_unit/deep/x_spec.spl", root)
+        expect(dir).to_equal("")
+        expect(path).to_equal("test/01_unit/deep/x_spec.spl")
+
+    it "anchors a relative runner binary but leaves a PATH name alone":
+        expect(child_cwd_absolute("../bin/simple", "/r/test")).to_equal("/r/test/../bin/simple")
+        expect(child_cwd_absolute("/opt/simple", "/r/test")).to_equal("/opt/simple")
+        expect(child_cwd_absolute("simple", "/r/test")).to_equal("simple")
+
+    it "anchors a relative evidence file path, bare name included, to the runner cwd":
+        # SIMPLE_COVERAGE_OUTPUT=cov.sdn names a FILE, not a PATH-lookup binary:
+        # once the child runs from the project root it must still land where
+        # the runner's caller expects it.
+        expect(child_cwd_anchor_path("cov.sdn", "/r/test")).to_equal("/r/test/cov.sdn")
+        expect(child_cwd_anchor_path("out/cov.sdn", "/r/test/")).to_equal("/r/test/out/cov.sdn")
+        expect(child_cwd_anchor_path("/abs/cov.sdn", "/r/test")).to_equal("/abs/cov.sdn")
+        expect(child_cwd_anchor_path("cov.sdn", "")).to_equal("cov.sdn")
