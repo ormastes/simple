@@ -448,3 +448,25 @@ candidate today (c167/c168/oldtree) crashed in HIR
 `module_declarations_bootstrap`, this one gets through HIR and dies one
 phase later. That MIR-lower_module fault is the next row; it is downstream
 of and unrelated to the RT-blob gate fix.
+
+## 2026-10-19 (later) — cycle-170: SCV snapshot-staging refusal is a compiled-marshalling draw, not a source-level read
+
+Follow-up to the seednew10 wall (commit c6a4eba8539, PARTIAL). Full evidence
+chain: (1) both linked `rt_secure_temp_dir` implementations (fresh C
+`runtime_native.o`, authority-archive `runtime_secure_staging.o`) are
+byte-logical twins (text_arg_to_path 4096 → snprintf → mkdtemp → chmod 0700);
+(2) mkdtemp succeeds from the shell against the same parent/template; (3)
+string-literal text args cross the text-ABI extern boundary as (NULL, len)
+BY DESIGN (runtime_native.c `rt_string_data`, values < 0x10000; pinned by
+check-text-literal-extern-abi.shs) — literal probes always refuse, a trap;
+(4) a heap-string micro-probe still refused inside the candidate only; (5)
+annotated binds AND single-element array transport of the crossing words
+both failed to cure it, while single-argument crossings (dir_create) draw
+clean in the same binary. Conclusion: candidate-seednew's COMPILED
+marshalling of this two-argument text-ABI extern call draws erased — below
+source-level reach. Latent footprint: the candidate's own AOT "diagnostic
+staging unavailable" on every candidate native-build (invisible unless
+diagnostics stage). Next levers: two single-arg-shaped crossings via a shim,
+candidate-side codegen fix for multi-arg text-ABI externs (root cause), or
+SCV staging via file_create_excl only with explicit review of the 0700→0755
+privacy delta. Cycle-169's lower_module fix remains parked behind this wall.
