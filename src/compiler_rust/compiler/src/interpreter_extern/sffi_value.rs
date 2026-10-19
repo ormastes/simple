@@ -389,3 +389,31 @@ pub fn rt_heap_ref_wellformed_fn(args: &[Value]) -> Result<Value, CompileError> 
 
     Ok(Value::Bool(is_heap_formed))
 }
+
+/// Interpreter adapter for `extern fn rt_heap_ref_registered(value: Any) -> bool`.
+///
+/// The compiled probe (`simple_runtime::value::objects::rt_heap_ref_registered`)
+/// asks whether a tagged word points at an allocator-registered block; the
+/// generated HIR codec (`src/compiler/20.hir/generated/hir_codec.spl`) calls
+/// it right after `rt_heap_ref_wellformed` on every node and REFUSES the encode
+/// when it answers false. Same gap as the probe above: defined in both
+/// runtimes, absent from this third registry, so every codec caller under the
+/// seed interpreter died with `semantic: unknown extern function:
+/// rt_heap_ref_registered` (every `hir_module_encode` spec, 2026-10-19). The
+/// interpreter has no allocator registry; a composite `Value` is registered by
+/// construction, so the answer is the formation answer.
+pub fn rt_heap_ref_registered_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let value = args.first().ok_or_else(|| {
+        CompileError::semantic_with_context(
+            "rt_heap_ref_registered expects 1 argument".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })?;
+
+    let is_registered = !matches!(
+        value,
+        Value::Nil | Value::Int(_) | Value::UInt { .. } | Value::Float(_) | Value::Float32(_) | Value::Bool(_)
+    );
+
+    Ok(Value::Bool(is_registered))
+}
