@@ -242,3 +242,24 @@ fn user_method_named_any_all_keeps_its_result_across_engines() {
     assert_eq!(run_jit(&source), interp, "JIT output must match the interpreter");
     assert_eq!(run_native(&source, dir.path()), interp, "native output must match the interpreter");
 }
+
+/// Untyped `any`/`all` with a named-function or placeholder predicate, and
+/// untyped `index_of`, convert the runtime's raw result in every engine.
+#[test]
+fn untyped_any_all_named_and_placeholder_predicates_agree_across_engines() {
+    let source = project_root()
+        .parent()
+        .expect("repo root")
+        .join("test/fixtures/engine_differential/untyped_any_all_predicates.spl");
+    let dir = tempdir().expect("tempdir");
+    let interp = run_interpreter(&source);
+    for expected in [
+        "named any=true all=false ph=true idx=2",
+        "named any=false all=true ph=false idx=-1",
+        "u8 any=true all=false ph=true idx=2",
+    ] {
+        assert!(interp.contains(expected), "interpreter output {interp:?} lacks {expected:?}");
+    }
+    assert_eq!(run_jit(&source), interp, "JIT output must match the interpreter");
+    assert_eq!(run_native(&source, dir.path()), interp, "native output must match the interpreter");
+}

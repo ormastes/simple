@@ -6170,8 +6170,11 @@ pub extern "C" fn rt_array_sum(array: RuntimeValue) -> RuntimeValue {
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
         if let Some(words) = (*arr).packed_words() {
-            // Same wrapping i64 total the tagged path produced, without
-            // boxing each element.
+            // Raw elements, summed with wrapping i64 arithmetic and without
+            // boxing any of them. This is a fix, not a re-spelling: the
+            // tagged view of a [u64] silently dropped words >= 2^60 (they
+            // are heap-boxed, so `is_int()` is false) and used a
+            // non-wrapping `+=`.
             return RuntimeValue::from_int(words.sum());
         }
         let slice = (*arr).as_slice();

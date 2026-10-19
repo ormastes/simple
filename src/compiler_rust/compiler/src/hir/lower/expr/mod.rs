@@ -1156,6 +1156,12 @@ impl Lowerer {
     /// (with a non-ANY, non-VOID return) agrees on that type. Trait-typed
     /// receivers are ANY in HIR, so this is the only authoritative source for
     /// their result type.
+    /// True when `arg` is a lambda or has a function/closure type.
+    fn is_callable_arg(&self, arg: &HirExpr) -> bool {
+        matches!(arg.kind, HirExprKind::Lambda { .. })
+            || matches!(self.module.types.get(arg.ty), Some(HirType::Function { .. }))
+    }
+
     fn agreed_trait_method_return_type(&self, method: &str) -> Option<TypeId> {
         let mut trait_return: Option<TypeId> = None;
         for (lookup_name, trait_info) in &self.module.trait_infos {
@@ -2146,14 +2152,11 @@ impl Lowerer {
                 // return a raw 0/1 and `index_of` (rt_index_of, array or text)
                 // a raw i64 position, so they need the BOOL / BoxInt
                 // conversion. Left ANY, `<value:0x1>` / nil reached `print`.
-                // `any`/`all` only in the builtin shape (one lambda predicate):
+                // `any`/`all` only in the builtin shape (one callable
+                // predicate: a lambda, a named function or a closure value):
                 // a user class method named `any()` / `all(3)` reached through
                 // an untyped receiver keeps its own (dynamic) result.
-                "any" | "all"
-                    if hir_args.len() == 1 && matches!(hir_args[0].kind, HirExprKind::Lambda { .. }) =>
-                {
-                    Some(TypeId::BOOL)
-                }
+                "any" | "all" if hir_args.len() == 1 && self.is_callable_arg(&hir_args[0]) => Some(TypeId::BOOL),
                 "index_of" => Some(TypeId::I64),
                 // "length" synonym — see the string-methods comment above.
                 "len" | "length" | "size" => Some(TypeId::I64),
