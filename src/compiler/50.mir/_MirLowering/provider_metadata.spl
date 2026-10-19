@@ -31,6 +31,17 @@ fn mir_nominal_owner_matches(name: text, defining_module: text, ownership_key: t
     val actual = mir_layout_canonical_module_name(defining_module)
     expected != "" and actual == expected
 
+fn mir_provider_layout_leaf_v1(name: text) -> text:
+    """Unqualified declaration leaf of a type spelling (`a.b::C` -> `C`)."""
+    var start = 0
+    val colon_at = name.rfind("::")
+    if colon_at >= 0:
+        start = colon_at + 2
+    val dot_at = name.rfind(".")
+    if dot_at + 1 > start:
+        start = dot_at + 1
+    if start <= 0: name else: name.substring(start)
+
 fn mir_provider_callable_key(owner: text, name: text) -> text:
     val module_name = _hir_symbol_owner_module(owner)
     var member = name.replace("::", ".")
@@ -333,6 +344,9 @@ impl MirLowering:
             val owner = _hir_symbol_owner_module(source.defining_module ?? "")
             val existing = self.symbols.lookup_qualified_type_raw(owner, source.name)
             if existing >= 0:
+                # A provider type now reachable from this consumer needs its
+                # layout rows in this consumer's table (no-op when eager).
+                self.provider_layout_demand_v1(source.name)
                 return SymbolId(id: existing)
             match source.kind:
                 case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum | SymbolKind.Trait: ()
@@ -352,6 +366,7 @@ impl MirLowering:
                 copied.name = source.name
                 self.symbols.symbols[relocated.id] = copied
             self.symbols.bind_qualified_type(owner, source.name, relocated)
+            self.provider_layout_demand_v1(source.name)
             relocated
         else:
             SymbolId(id: -1)
@@ -1036,6 +1051,303 @@ impl MirLowering:
         self.provider_method_row_kind = row_kind
         self.provider_method_row_symbol = row_symbol
         self.provider_method_row_class_symbol = row_class_symbol
+        self.build_provider_layout_index_v1(providers)
+
+    me build_provider_layout_index_v1(providers: [HirModule]):
+        """Session index of every provider struct/class declaration, filed by
+        leaf name in the eager registration order (per provider: structs,
+        then classes, each in key order), plus the provider enum rows that
+        register_provider_enums_v1 replays. class_type_names needs no session
+        row: the all-module prescan already publishes every class identity."""
+        var rows_by_name: Dict<text, [i64]> = {}
+        var row_provider: [i64] = []
+        var row_kind: [i64] = []
+        var row_position: [i64] = []
+        var enum_start: [i64] = []
+        var enum_count: [i64] = []
+        var enum_name: [text] = []
+        var enum_runtime_name: [text] = []
+        var enum_eligible: [bool] = []
+        var enum_variants: [[text]] = []
+        var enum_fact: [i64] = []
+        var fact_ids: Dict<text, i64> = {}
+        var provider_i = 0
+        while provider_i < providers.len():
+            val provider_module: HirModule = providers[provider_i]
+            val enum_values = provider_module.enums.values()
+            enum_start.push(enum_name.len())
+            enum_count.push(enum_values.len())
+            var enum_i = 0
+            while enum_i < enum_values.len():
+                # Annotated rebind (cycle-171 bind-once family).
+                val enum_def: HirEnum = enum_values[enum_i]
+                enum_i = enum_i + 1
+                # Static half of enum_registration_is_current_v1 (the lane
+                # check is the caller's): a row is ever skippable only when
+                # these hold.
+                var eligible = enum_def.runtime_name != "" and enum_def.name != "Option" and
+                    enum_def.name != "Result" and enum_def.type_params.len() == 0 and
+                    not enum_def.is_generic_template
+                var variant_names: [text] = []
+                var variant_i = 0
+                while variant_i < enum_def.variants.len():
+                    val variant: HirVariant = enum_def.variants[variant_i]
+                    if variant.has_discriminant:
+                        eligible = false
+                    variant_names.push(variant.name)
+                    variant_i = variant_i + 1
+                enum_name.push(enum_def.name)
+                enum_runtime_name.push(enum_def.runtime_name)
+                enum_eligible.push(eligible)
+                enum_variants.push(variant_names)
+                val eligible_text = if eligible: "1" else: "0"
+                val fact_key = enum_def.name + "|" + enum_def.runtime_name + "|" + eligible_text + "|" + variant_names.join(",")
+                if not fact_ids.has(fact_key):
+                    fact_ids[fact_key] = fact_ids.len()
+                enum_fact.push(fact_ids[fact_key])
+            val struct_keys: [SymbolId] = provider_module.structs.keys()
+            var position = 0
+            while position < struct_keys.len():
+                # workaround(p2_add cycles 91-105): per-read draw corruption -- bind once, guard the local.
+                val struct_def: HirStruct = provider_module.structs[struct_keys[position]]
+                if struct_def != nil:
+                    val leaf = mir_provider_layout_leaf_v1(struct_def.name)
+                    var rows: [i64] = rows_by_name.get(leaf) ?? []
+                    rows.push(row_provider.len())
+                    rows_by_name[leaf] = rows
+                    row_provider.push(provider_i)
+                    row_kind.push(0)
+                    row_position.push(position)
+                position = position + 1
+            val class_keys: [SymbolId] = provider_module.classes.keys()
+            position = 0
+            while position < class_keys.len():
+                # workaround(p2_add cycles 91-105): per-read draw corruption -- bind once, guard the local.
+                val class_def: HirClass = provider_module.classes[class_keys[position]]
+                if class_def != nil:
+                    val leaf = mir_provider_layout_leaf_v1(class_def.name)
+                    var rows: [i64] = rows_by_name.get(leaf) ?? []
+                    rows.push(row_provider.len())
+                    rows_by_name[leaf] = rows
+                    row_provider.push(provider_i)
+                    row_kind.push(1)
+                    row_position.push(position)
+                position = position + 1
+            provider_i = provider_i + 1
+        self.provider_layout_rows_by_name = rows_by_name
+        self.provider_layout_row_provider = row_provider
+        self.provider_layout_row_kind = row_kind
+        self.provider_layout_row_position = row_position
+        self.provider_enum_row_start = enum_start
+        self.provider_enum_row_count = enum_count
+        self.provider_enum_row_name = enum_name
+        self.provider_enum_row_runtime_name = enum_runtime_name
+        self.provider_enum_row_eligible = enum_eligible
+        self.provider_enum_row_variants = enum_variants
+        self.provider_enum_row_fact = enum_fact
+
+    me provider_enum_row_current_v1(row: i64) -> bool:
+        """enum_registration_is_current_v1 for session enum row `row`, from
+        its recorded facts (default store_payload_types, HIR lane)."""
+        if not self.provider_enum_row_eligible[row]:
+            return false
+        val name: text = self.provider_enum_row_name[row]
+        if not self.enum_registration_current.has(name):
+            return false
+        if self.enum_registration_current[name] != self.provider_enum_row_runtime_name[row]:
+            return false
+        if not self.enum_variant_index.has(name):
+            return false
+        val installed_names: [text] = self.enum_variant_index[name]
+        val variant_names: [text] = self.provider_enum_row_variants[row]
+        if installed_names.len() != variant_names.len():
+            return false
+        var vi = 0
+        while vi < variant_names.len():
+            if installed_names[vi] != variant_names[vi]:
+                return false
+            vi = vi + 1
+        true
+
+    me register_provider_enums_v1(provider_index: i64, provider_module: HirModule):
+        """The eager pass's `for e in provider.enums.values():
+        register_enum_variants(e)`, minus the HirEnum reads of calls that
+        would return at the is-current check before writing anything."""
+        val start: i64 = self.provider_enum_row_start[provider_index]
+        val count: i64 = self.provider_enum_row_count[provider_index]
+        if provider_module.enums.len() != count:
+            for changed_enum in provider_module.enums.values():
+                self.register_enum_variants(changed_enum)
+            self.provider_enum_epoch = self.provider_enum_epoch + 1
+            return
+        var enum_values: [HirEnum] = []
+        var fetched = false
+        var position = 0
+        while position < count:
+            val row = start + position
+            val fact: i64 = self.provider_enum_row_fact[row]
+            if self.provider_enum_fact_current.has(fact) and self.provider_enum_fact_current[fact] == self.provider_enum_epoch:
+                position = position + 1
+                continue
+            if self.provider_enum_row_current_v1(row):
+                self.provider_enum_fact_current[fact] = self.provider_enum_epoch
+                position = position + 1
+                continue
+            if not fetched:
+                enum_values = provider_module.enums.values()
+                fetched = true
+            if position >= enum_values.len():
+                return
+            # Annotated rebind (cycle-171 bind-once family).
+            val provider_enum: HirEnum = enum_values[position]
+            if provider_enum.name != self.provider_enum_row_name[row]:
+                # The declaration list moved under the session index: finish
+                # this provider exactly as the eager loop would.
+                while position < enum_values.len():
+                    val remaining_enum: HirEnum = enum_values[position]
+                    self.register_enum_variants(remaining_enum)
+                    position = position + 1
+                self.provider_enum_epoch = self.provider_enum_epoch + 1
+                return
+            self.register_enum_variants(provider_enum)
+            # Any registration may move a current mark or a variant list.
+            self.provider_enum_epoch = self.provider_enum_epoch + 1
+            position = position + 1
+
+    # Demand registration of provider struct/class layout rows.
+    #
+    # The eager provider pass relocated EVERY struct/class of the closure into
+    # EVERY consumer (field types, field defaults, ~10 composite metadata rows
+    # per key): O(modules x program) time, and each consumer's rows overwrote
+    # the previous consumer's promoted copies, which then leaked
+    # (doc/08_tracking/bug/mir_in_process_per_consumer_provider_rebuild_quadratic_2026-10-20.md).
+    #
+    # A layout row is read by key, and every key a consumer can compute
+    # derives from a type symbol in its own table: its HIR symbols, or a
+    # provider type relocated into it (relocate_provider_type_symbol, which is
+    # also how a registered row's field/default types, a materialized method's
+    # return type, or an imported global's type become visible). So a
+    # consumer registers a declaration's rows when the first such symbol with
+    # the declaration's leaf name appears -- seeded from the whole table in
+    # the prologue, then from every relocation -- through the same
+    # register_provider_struct/_class calls, in the same per-leaf row order.
+    # Distinct leaves write disjoint keys, so cross-leaf order is free.
+    # Over-registration (homonym leaves) is harmless: it is what eager did.
+    me provider_layout_demand_v1(name: text):
+        if not self.provider_layout_demand_active:
+            return
+        val leaf = mir_provider_layout_leaf_v1(name)
+        if self.provider_layout_materialized.has(leaf):
+            return
+        if not self.provider_layout_rows_by_name.has(leaf):
+            return
+        self.provider_layout_materialized[leaf] = true
+        var pending = self.provider_layout_pending
+        pending.push(leaf)
+        self.provider_layout_pending = pending
+        # Registration relocates field/default types, which re-enters here;
+        # the outermost call drains the queue instead of recursing.
+        if self.provider_layout_draining:
+            return
+        self.provider_layout_draining = true
+        var pending_i = 0
+        while pending_i < self.provider_layout_pending.len():
+            val pending_leaf: text = self.provider_layout_pending[pending_i]
+            pending_i = pending_i + 1
+            self.provider_layout_register_leaf_v1(pending_leaf)
+        self.provider_layout_pending = []
+        self.provider_layout_draining = false
+
+    me provider_layout_demand_symbols_since_v1(first_symbol_id: i64):
+        """Demand the leaves of every symbol defined in the active table at or
+        after `first_symbol_id` (a lifted lambda relocates into the shared
+        table through its own lowering)."""
+        if not self.provider_layout_demand_active:
+            return
+        var symbol_id = first_symbol_id
+        while symbol_id < self.symbols.next_symbol_id:
+            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+            val optional_symbol: HirSymbol? = self.symbols.get_symbol_raw(symbol_id)
+            if val present_symbol = optional_symbol:
+                val symbol: HirSymbol = present_symbol
+                self.provider_layout_demand_v1(symbol.name)
+            symbol_id = symbol_id + 1
+
+    me provider_layout_keys_v1(provider_index: i64, provider_module: HirModule, classes: bool) -> [SymbolId]:
+        if classes:
+            if self.provider_layout_class_keys.has(provider_index):
+                return self.provider_layout_class_keys[provider_index]
+            val class_keys: [SymbolId] = provider_module.classes.keys()
+            var class_cache = self.provider_layout_class_keys
+            class_cache[provider_index] = class_keys
+            self.provider_layout_class_keys = class_cache
+            return class_keys
+        if self.provider_layout_struct_keys.has(provider_index):
+            return self.provider_layout_struct_keys[provider_index]
+        val struct_keys: [SymbolId] = provider_module.structs.keys()
+        var struct_cache = self.provider_layout_struct_keys
+        struct_cache[provider_index] = struct_keys
+        self.provider_layout_struct_keys = struct_cache
+        struct_keys
+
+    me provider_layout_register_leaf_v1(leaf: text):
+        """Run the eager provider pass's register_provider_struct /
+        register_provider_class for every declaration filed under `leaf`."""
+        val rows: [i64] = self.provider_layout_rows_by_name[leaf]
+        var ri = 0
+        while ri < rows.len():
+            val row: i64 = rows[ri]
+            ri = ri + 1
+            if row < 0 or row >= self.provider_layout_row_provider.len():
+                continue
+            val provider_index: i64 = self.provider_layout_row_provider[row]
+            if provider_index < 0 or provider_index >= self.provider_method_modules.len():
+                continue
+            val provider_module: HirModule = self.provider_method_modules[provider_index]
+            # The eager pass never registered a module as its own provider.
+            if provider_module.name == self.provider_method_consumer:
+                continue
+            val position: i64 = self.provider_layout_row_position[row]
+            val is_class = self.provider_layout_row_kind[row] == 1
+            val keys = self.provider_layout_keys_v1(provider_index, provider_module, is_class)
+            if position < 0 or position >= keys.len():
+                self.error_fatal("provider layout index is stale for {provider_module.name}: {leaf}", nil)
+                continue
+            if is_class:
+                # workaround(p2_add cycles 91-105): per-read draw corruption -- bind once, guard the local.
+                val class_def: HirClass = provider_module.classes[keys[position]]
+                if class_def == nil:
+                    continue
+                if mir_provider_layout_leaf_v1(class_def.name) != leaf:
+                    self.error_fatal("provider layout index is stale for {provider_module.name}: {leaf}", Some(class_def.span))
+                    continue
+                var links: Dict<i64, text> = {}
+                if provider_index < self.provider_session_links_ready.len() and self.provider_session_links_ready[provider_index]:
+                    links = self.provider_session_links[provider_index]
+                # Demand mode implies lazy provider methods (register_methods false).
+                self.register_provider_class(class_def, provider_module.symbols, links, false, false)
+            else:
+                # workaround(p2_add cycles 91-105): per-read draw corruption -- bind once, guard the local.
+                val struct_def: HirStruct = provider_module.structs[keys[position]]
+                if struct_def == nil:
+                    continue
+                if mir_provider_layout_leaf_v1(struct_def.name) != leaf:
+                    self.error_fatal("provider layout index is stale for {provider_module.name}: {leaf}", Some(struct_def.span))
+                    continue
+                self.register_provider_struct(struct_def, provider_module.symbols,
+                    self.provider_layout_consumer_names.has(struct_def.name))
+
+    me provider_layout_demand_end_v1():
+        """Close this module's layout demand state (no promotion roots)."""
+        self.provider_layout_demand_active = false
+        self.provider_layout_draining = false
+        self.provider_layout_materialized = {}
+        self.provider_layout_pending = []
+        self.provider_layout_consumer_names = {}
+        self.provider_layout_struct_keys = {}
+        self.provider_layout_class_keys = {}
+        self.provider_enum_fact_current = {}
+        self.provider_enum_epoch = 0
 
     me provider_method_file_row_v1(key: text, row: i64):
         if self.provider_method_row_keys.has(key):

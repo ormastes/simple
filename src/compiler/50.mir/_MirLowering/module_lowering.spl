@@ -83,6 +83,37 @@ use std.io_runtime.{env_get_opt}
 fn mir_lower_env_get(key: text) -> text?:
     env_get_opt(key)
 
+# SIMPLE_MIR_SECTION_PROFILE_FILE=<path>: one durable mem-snapshot row
+# (monotonic_ms + rss_kib) per lower_module section boundary, so the fixed
+# per-module provider-registration cost and the promotion walk can be
+# measured separately from body lowering. Unset = one env read per module.
+extern fn rt_mem_snapshot_open(path: text) -> i64
+extern fn rt_mem_snapshot_record(
+    fd: i64, seq: i64, event: text, phase: text, source_index: i64,
+    source_path: text,
+    retained_modules: i64, validation_keys: i64,
+    validation_values: i64, shared_traits: i64, hir_names: i64,
+    hir_symbols: i64, hir_functions: i64, hir_constants: i64,
+    hir_enums: i64, hir_structs: i64, hir_classes: i64
+) -> bool
+var _mir_section_profile_fd: i64 = -2
+var _mir_section_profile_seq: i64 = 0
+
+fn mir_section_profile_enabled() -> bool:
+    if _mir_section_profile_fd == -2:
+        val sink = mir_lower_env_get("SIMPLE_MIR_SECTION_PROFILE_FILE") ?? ""
+        _mir_section_profile_fd = if sink != "": rt_mem_snapshot_open(sink) else: -1
+    _mir_section_profile_fd >= 0
+
+fn mir_section_profile_mark(section: text, module_name: text):
+    if not mir_section_profile_enabled():
+        return
+    if rt_mem_snapshot_record(_mir_section_profile_fd, _mir_section_profile_seq,
+            "mir_section", section, -1, module_name, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0):
+        _mir_section_profile_seq = _mir_section_profile_seq + 1
+    else:
+        _mir_section_profile_fd = -1
+
 fn _text_list_eq(a: [text], b: [text]) -> bool:
     """Order-sensitive equality for two variant-name lists.
 
@@ -2205,6 +2236,7 @@ impl MirLowering:
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 1))
             return Err("transient MIR scope reverse-reference owner unavailable for {module.name}")
         val lowered: MirModule = self.lower_module(module, providers, is_entry_module)
+        mir_section_profile_mark("s1_lowered", module.name)
         # Function-local lookup tables are scratch. The completed MIR owns its
         # locals/blocks, while cross-module declaration/default/layout facts
         # have separate retained roots. Clear these before promotion so the
@@ -2261,6 +2293,7 @@ impl MirLowering:
         # were just retired above. The provider session index itself stays.
         self.provider_method_modules = []
         self.provider_method_materialized = {}
+        self.provider_layout_demand_end_v1()
         # From here every exit path must close the scope. `end` frees the
         # arena, so any path that ends WITHOUT a successful promotion must
         # also refuse to hand `lowered` back.
@@ -2274,6 +2307,7 @@ impl MirLowering:
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 3))
             return Err("MIR module ownership promotion failed for {module.name}")
         scope_decisions = scope_decisions | 4
+        mir_section_profile_mark("s2_promote_mir", module.name)
         # The owner's field roots overlap heavily (builder.*, symbols.*). One
         # share window over the straight-line promote sequence walks the
         # common graph once instead of once per root; it only promotes and
@@ -2286,6 +2320,7 @@ impl MirLowering:
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 4))
             return Err("MIR lowering owner promotion failed for {module.name}")
         scope_decisions = scope_decisions | 8
+        mir_section_profile_mark("s3_promote_owner", module.name)
         if not bootstrap_mir_registries_promote():
             val _ended_mir_registries = mir_abort_reverse_reference_scope_v1(reverse_token)
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 5))
@@ -2301,16 +2336,19 @@ impl MirLowering:
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 7))
             return Err("reverse-reference ownership promotion failed for {module.name}")
         scope_decisions = scope_decisions | 64
+        mir_section_profile_mark("s4_promote_registries", module.name)
         if not transient_array_scope_end_v1():
             val _aborted = reverse_reference_module_abort_v1(reverse_token)
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 8))
             return Err("transient MIR scope end failed for {module.name}")
         scope_decisions = scope_decisions | 128
+        mir_section_profile_mark("s4b_scope_end_only", module.name)
         if not reverse_reference_module_publish_v1(reverse_token):
             val _aborted = reverse_reference_module_abort_v1(reverse_token)
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 9))
             return Err("reverse-reference publication failed for {module.name}")
         scope_decisions = scope_decisions | 256
+        mir_section_profile_mark("s5_scope_end", module.name)
         if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 10))
         Ok(lowered)
 
@@ -2339,12 +2377,15 @@ impl MirLowering:
             archive_function_symbols: [i64]? = nil, archive_primary_globals: MirModule? = nil,
             archive_trait_thunks: [MirFunction] = []) -> MirModule:
         """Lower HIR module to MIR."""
+        mir_section_profile_mark("p0_start", module.name)
         self.unsafe_depth = 0
         # Demand rows never cross a module boundary: no provider list is
         # installed until this module's provider pass below.
         self.provider_method_modules = []
         self.provider_method_consumer = module.name
         self.provider_method_materialized = {}
+        # Layout demand likewise starts only at this module's provider pass.
+        self.provider_layout_demand_end_v1()
         self.current_module_id = mir_layout_canonical_module_name(module.name)
         # SIMPLE_ENUM_REG_TRACE=1 progression receipt (cycle-54/55 MIR livelock
         # localization): brackets every module's lowering so the next failing
@@ -2394,6 +2435,7 @@ impl MirLowering:
                 self.register_native_trait_implementations(trait_provider)
         if self.declaration_repository != nil:
             self.register_declaration_provider_traits_v1(module, true)
+        mir_section_profile_mark("p1_native_traits", module.name)
         self.exact_extern_signatures = {}
         # E-MIR-TYPE-Error rate limit is per module (see lower_type).
         self.mir_type_error_reports = {}
@@ -2402,6 +2444,7 @@ impl MirLowering:
             val declaration: HirFunction = raw_declaration
             self.record_exact_extern_declaration_v1(declaration)
         self.record_imported_exact_extern_modules_v1(module.name, providers)
+        mir_section_profile_mark("p2_exact_externs", module.name)
         self.lowering_entry_module = is_entry_module
         var function_names: [text] = []
         val function_keys_36_values: [HirFunction] = module.functions.values()
@@ -2413,6 +2456,7 @@ impl MirLowering:
                 func.is_static, func.has_export_attr, func.func_attr, is_entry_module)
             function_names.push(mir_provider_function_name(module.name, module.symbols, func, is_entry_module))
         self.current_function_names = function_names
+        mir_section_profile_mark("p3_links", module.name)
         # Cross-module prescans keep the first definition. The module being
         # lowered is authoritative for its own same-name struct/class.
         val local_struct_values = module.structs.values()
@@ -2455,6 +2499,7 @@ impl MirLowering:
                 if canonical_class_key != class_def.name:
                     self.register_composite_field_metadata(canonical_class_key, class_def.fields, module.symbols, true)
             local_meta_i = local_meta_i + 1
+        mir_section_profile_mark("p4_local_layouts", module.name)
         # Entry-closure lowering reuses one MirLowering while replacing its
         # active SymbolTable for every module. Method SymbolIds are therefore
         # module-local state and must not survive that boundary.
@@ -2491,12 +2536,23 @@ impl MirLowering:
         if lazy_provider_methods:
             # Borrowed for this module only; emptied before promotion.
             self.provider_method_modules = providers
+        # Provider struct/class layout rows follow the same session/demand
+        # split (provider_layout_demand_v1): registered when this consumer can
+        # name the declaration, not for the whole closure up front. The
+        # ambient bootstrap and declaration-repository lanes keep the eager
+        # pass, as does SIMPLE_MIR_EAGER_PROVIDER_LAYOUTS=1 (A/B checks).
+        val layout_demand = lazy_provider_methods and not self.ambient_bootstrap_enabled() and
+            self.declaration_repository == nil and
+            (mir_lower_env_get("SIMPLE_MIR_EAGER_PROVIDER_LAYOUTS") ?? "") != "1"
         # Index-aligned with `providers` and reused by
         # register_trait_receiver_impls. The local arrays only hold references
         # to session tables (or this consumer's own fallback tables).
         var provider_links_by_index: [Dict<i64, text>] = []
         var provider_links_ready: [bool] = []
         var provider_loop_i = 0
+        val enum_rows_ready = provider_session_valid and self.declaration_repository == nil and
+            self.provider_enum_row_start.len() == providers.len() and
+            (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") != "1"
         for raw_provider_module in providers:
             val provider_module: HirModule = raw_provider_module
             val provider_index = provider_loop_i
@@ -2506,7 +2562,7 @@ impl MirLowering:
             if provider_session_valid and self.provider_session_links_ready[provider_index]:
                 provider_links = self.provider_session_links[provider_index]
                 provider_links_built = true
-            if provider_module.name != module.name:
+            if provider_module.name != module.name and not layout_demand:
                 val provider_struct_keys: [SymbolId] = provider_module.structs.keys()
                 for dk_35 in provider_struct_keys:
                     # workaround(p2_add cycles 91-105): per-read draw corruption — bind once, guard the local.
@@ -2539,6 +2595,8 @@ impl MirLowering:
                     provider_links_built = true
                 val provider_class_keys: [SymbolId] = provider_module.classes.keys()
                 for dk_33 in provider_class_keys:
+                    if layout_demand:
+                        break
                     # workaround(p2_add cycles 91-105): per-read draw corruption — bind once, guard the local.
                     val provider_class: HirClass = provider_module.classes[dk_33]
                     if provider_class == nil:
@@ -2550,8 +2608,18 @@ impl MirLowering:
                 # (measured B5b, lib.common.sdn.value.SdnValue.is_null,
                 # site-19 fifth layer). register_enum_variants is the same
                 # registration the enum's own module pass runs.
-                for provider_enum in provider_module.enums.values():
-                    self.register_enum_variants(provider_enum)
+                # Provider HIR re-lowers every enum it imports, so this visits
+                # each closure enum once per importing provider (~11k calls
+                # per consumer on a 418-module closure), and nearly all of
+                # them are register_enum_variants' "already current" no-op.
+                # The session enum rows answer that exact predicate from
+                # scalar facts; only a row that would really register reads
+                # its HirEnum, in the same order.
+                if enum_rows_ready:
+                    self.register_provider_enums_v1(provider_index, provider_module)
+                else:
+                    for provider_enum in provider_module.enums.values():
+                        self.register_enum_variants(provider_enum)
                 var provider_func_i = 0
                 while not lazy_provider_methods and provider_func_i < provider_funcs.len():
                     # Annotated rebind of the already nil-guarded element.
@@ -2560,6 +2628,20 @@ impl MirLowering:
                     provider_func_i = provider_func_i + 1
             provider_links_by_index.push(provider_links)
             provider_links_ready.push(provider_links_built)
+        mir_section_profile_mark("p5a_provider_loop", module.name)
+        if layout_demand:
+            # Seed from every symbol this consumer's table can already name:
+            # its own HIR symbols and whatever the trait passes above
+            # relocated. Later relocations demand the rest as they happen.
+            self.provider_layout_consumer_names = consumer_composite_names
+            self.provider_layout_demand_active = true
+            val consumer_symbol_values: [HirSymbol] = self.symbols.symbols.values()
+            var consumer_symbol_i = 0
+            while consumer_symbol_i < consumer_symbol_values.len():
+                val consumer_symbol: HirSymbol = consumer_symbol_values[consumer_symbol_i]
+                self.provider_layout_demand_v1(consumer_symbol.name)
+                consumer_symbol_i = consumer_symbol_i + 1
+        mir_section_profile_mark("p5_provider_layouts", module.name)
         # Before the ambient-bootstrap early return below: the stage3
         # bootstrap-fixed lane lowers through that branch too.
         if self.declaration_repository != nil:
@@ -2570,6 +2652,7 @@ impl MirLowering:
         else:
             self.register_trait_receiver_impls(module, providers,
                 provider_links_by_index, provider_links_ready)
+        mir_section_profile_mark("p6_trait_impls", module.name)
         self.global_symbol_ids = {}
         self.imported_global_initializers = {}
         # These mirrors contain module-local SymbolIds just like the owner
@@ -2636,6 +2719,7 @@ impl MirLowering:
             self.register_declaration_provider_globals_v1(module)
         else:
             self.register_imported_global_bindings(module, providers)
+        mir_section_profile_mark("p7_globals", module.name)
 
         if bootstrap_mode:
             if bootstrap_trace:
