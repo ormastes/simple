@@ -27,6 +27,8 @@ use compiler.mir.mir_types.{LocalId, mir_type_probe_text}  # explicit: a glob is
 use std.common.mcdc.model.{mcdc_authored_path_v1, mcdc_runtime_decision_id_v1, mcdc_path_in_instrumentation_scope}
 use compiler.semantics.rt_hal_tag.{rt_hal_compilation_requires_finalize}
 use std.io_runtime.{env_get_opt}
+use compiler.mir.array_move.mir_array_move.{am_var_symbol, am_field_base_symbol, am_field_name, am_hir_type_is_array, am_default_is_fresh,
+    am_hir_slot_kind, am_call_name_intercepted, am_collect_ctor_refs, ArrayMoveCtorInfo, ArrayMoveCtorTables}
 
 # std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
 # cannot resolve it — declare the runtime extern directly.
@@ -753,6 +755,116 @@ impl MirLowering:
                 self.array_element_struct_syms[result_arr.id] = ael_name
         Some(result_arr)
 
+    me array_move_ctor_tables(body: HirBlock) -> ArrayMoveCtorTables:
+        """Constructor tables for mir_array_move.spl: only symbols whose
+        construction reaches lower_struct_construct (the one construction path
+        the analysis models field by field) are listed, keyed exactly as the two callers
+        resolve them -- lower_call (switch_operators_calls.spl) by the symbol
+        name after its bitfield and builtin-name intercepts, the StructLit arm
+        (expr_dispatch.spl) by declared layout key. Classes and anything else
+        are absent and therefore never fresh."""
+        val refs = am_collect_ctor_refs(body)
+        var calls: Dict<i64, ArrayMoveCtorInfo> = {}
+        var lits: Dict<i64, ArrayMoveCtorInfo> = {}
+        for id in refs.calls:
+            if not calls.contains(id) and not self.bitfield_map.has(id):
+                val name = self.array_move_ctor_name(id, false)
+                if name != "" and not am_call_name_intercepted(name):
+                    calls[id] = self.array_move_ctor_info(name, self.array_move_symbol_name(id))
+        for id in refs.lits:
+            if not lits.contains(id):
+                val name = self.array_move_ctor_name(id, true)
+                if name != "":
+                    lits[id] = self.array_move_ctor_info(name, "")
+        ArrayMoveCtorTables(calls: calls, lits: lits)
+
+    me array_move_ctor_name(id: i64, literal: bool) -> text:
+        if val present = self.symbols.get_symbol_raw(id):
+            val owner: HirSymbol = present
+            var name = ""
+            # Classes are reference types and may run user construction
+            # code that stashes `self`: never treated as fresh.
+            if owner.kind == SymbolKind.Struct:
+                name = if literal: self.declared_struct_layout_key(self.composite_layout_key(owner)) else: owner.name
+            if name != "" and self.struct_field_order.has(name):
+                return name
+        ""
+
+    fn array_move_symbol_name(id: i64) -> text:
+        if val present = self.symbols.get_symbol_raw(id):
+            val owner: HirSymbol = present
+            return owner.name
+        ""
+
+    me array_move_ctor_info(name: text, call_name: text) -> ArrayMoveCtorInfo:
+        val names = self.struct_field_order[name]
+        val types = self.struct_field_hir_type.get(name) ?? []
+        val defaults = self.struct_field_has_default.get(name) ?? []
+        var kinds: [i64] = []
+        var omit_ok: [bool] = []
+        var fi = 0
+        while fi < names.len():
+            val kind = if fi < types.len(): am_hir_slot_kind(types[fi]) else: 2
+            kinds.push(kind)
+            var ok = true
+            if kind != 0 and fi < defaults.len() and defaults[fi]:
+                ok = self.array_move_default_is_fresh(name, fi)
+            omit_ok.push(ok)
+            fi = fi + 1
+        ArrayMoveCtorInfo(names: names, kinds: kinds, omit_ok: omit_ok, call_name: call_name)
+
+    me array_move_let_skips_copy(symbol_id: i64, init: HirExpr) -> bool:
+        """Site A of mir_array_move.spl: `var o = s` / `var o = s.f` whose
+        source the analysis proved owned and dead after this binding moves
+        instead of copying. A field source additionally needs its declared
+        field type to be an array/slice whose default (if any) is an array
+        literal or nil, so the buffer can only have come from a constructor
+        arg the analysis accounted for. Anything unresolved keeps the copy."""
+        if not self.array_move_let_symbols.contains(symbol_id):
+            return false
+        if am_var_symbol(init) >= 0:
+            return true
+        val base_symbol = am_field_base_symbol(init)
+        if base_symbol < 0:
+            return false
+        val base_local = self.find_local(base_symbol)
+        if base_local.id < 0:
+            return false
+        val struct_name = self.struct_value_syms.get(base_local.id) ?? ""
+        if struct_name == "" or not self.struct_field_order.has(struct_name):
+            return false
+        val field_names = self.struct_field_order[struct_name]
+        val field_name = am_field_name(init)
+        var field_index = -1
+        var fi = 0
+        while fi < field_names.len():
+            if field_names[fi] == field_name:
+                field_index = fi
+            fi = fi + 1
+        if field_index < 0:
+            return false
+        val field_types = self.struct_field_hir_type.get(struct_name) ?? []
+        if field_index >= field_types.len():
+            return false
+        if not am_hir_type_is_array(field_types[field_index]):
+            return false
+        val default_flags = self.struct_field_has_default.get(struct_name) ?? []
+        if field_index < default_flags.len() and default_flags[field_index]:
+            return self.array_move_default_is_fresh(struct_name, field_index)
+        true
+
+    fn array_move_default_is_fresh(struct_name: text, field_index: i64) -> bool:
+        """Read only the in-memory `struct_field_default_expr`: never decode a
+        declaration-repository default here (that path is reserved for an
+        omitted field at a construction site and can raise fatal errors).
+        Not in memory -> not proven fresh."""
+        if not self.struct_field_default_expr.has(struct_name):
+            return false
+        val expressions: [HirExpr] = self.struct_field_default_expr[struct_name]
+        if field_index < 0 or field_index >= expressions.len():
+            return false
+        am_default_is_fresh(expressions[field_index])
+
     me lower_stmt(stmt: HirStmt):
         """Lower HIR statement to MIR.
 
@@ -1276,7 +1388,10 @@ impl MirLowering:
                             # EXISTING runtime-array binding; a fresh array
                             # literal/call-result initializer falls through to
                             # the unchanged new_local+emit_copy path below.
-                            val array_copy = self.maybe_copy_array_value(init_local, effective_type, mir_expr_kind_is_place(let_init.kind))
+                            # A place read proven owned and dead afterwards
+                            # (mir_array_move.spl, Site A) takes that same
+                            # path: the handle moves instead of being copied.
+                            val array_copy = self.maybe_copy_array_value(init_local, effective_type, mir_expr_kind_is_place(let_init.kind) and not self.array_move_let_skips_copy(symbol_value_id, let_init))
                             if val array_copy_local = array_copy:
                                 self.bind_local(symbol_value_id, array_copy_local)
                             else:

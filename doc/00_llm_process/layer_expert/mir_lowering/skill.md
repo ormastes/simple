@@ -430,3 +430,23 @@ in MIR to "fix" a dropped write. Escape: `SIMPLE_CAPTURE_WRITE_CHECK=warning|off
 - So the JIT keeps base aliasing at literals (a known bug, DEFERRED). Any argument that
   is not handed over makes the struct non-unique, and so do `@inject`-constructor types.
 - Bug record: `doc/08_tracking/bug/seed_jit_array_copy_never_freed_2026-10-19.md`.
+||||||| parent of c3b03b5c78c (docs(llm-wiki): mir_lowering note for the array move-vs-copy pass)
+
+
+## 2026-10-19 — array move instead of copy (`mir_array_move.spl`)
+
+`var o = s` / `var o = s.f` of a runtime array normally copies
+(`maybe_copy_array_value`, an `arrcopy_cond` loop). `mir_array_move.spl` (port
+of the seed's `array_move.rs`) proves per function which of those may move the
+handle: `s` a non-param local with one Let, owned (fresh writes, no escaping
+reads, no lambda mention) and dead after the binding (same-list forward scan).
+Struct construction NEVER copies an array arg; a `var` local handed into a
+declared array slot leaves the struct owned only when every such use is dead.
+Fail-closed rules worth knowing before editing: unknown HIR kinds, `yield`,
+`await` poison the function; only constructors that reach
+`lower_struct_construct` (struct, not class; table from
+`array_move_ctor_tables`) are fresh; every non-primitive slot must get a
+private buffer (generic/Any/nested struct slots disqualify). Known, NOT fixed:
+`St(output: o); o.push(4)` is visible through `st.output` (pinned by
+`test/01_unit/compiler/50.mir/array_move_lowering_spec.spl`). Trap: under the
+seed interpreter `Dict<i64,_>.keys()` yields text keys — keep key lists.

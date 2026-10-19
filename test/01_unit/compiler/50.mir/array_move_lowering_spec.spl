@@ -1,0 +1,936 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: array move instead of copy (self-hosted port)
+
+`var o = s` / `var o = s.field` of a runtime array copies the array
+(`maybe_copy_array_value`, an `arrcopy_cond` loop). The copy is skipped -- the
+handle is MOVED -- only when the analysis in `src/compiler/50.mir/array_move/mir_array_move.spl`
+proves the source is OWNED (nothing else can alias its buffer) and DEAD after
+the binding (no read before it is overwritten or goes out of scope).
+
+Struct construction never copies an array arg; a `var` local handed into an
+array field leaves the struct uniquely owned only when the local is dead at
+that use. The pre-existing aliasing `St(output: o); o.push(4)` (visible in
+`st.output`) is NOT fixed in either compiler and is pinned below.
+
+Every example counts `arrcopy_cond` blocks (one per materialized copy) in the
+lowered module. Positive examples must lose the copy; every disqualifier has a
+negative example that must keep it.
+"""
+
+# @tag: unit, compiler, mir, arrays
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_data.*
+
+struct MoveLowered:
+    errors: text
+    copies: i64
+    array_news: i64
+    insts: i64
+
+fn src_of(lines: [text]) -> text:
+    var out = ""
+    for line in lines:
+        out = out + line + "\n"
+    out
+
+fn move_lower(src: text) -> MoveLowered:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var hir_modules: Dict<text, HirModule> = {}
+    hir_modules["app.main"] = hir
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.prescan_module_struct_names(hir_modules, "app.main")
+    val mir = mir_lowering.lower_module(hir)
+    var errs = ""
+    for e in lowering.errors:
+        errs = errs + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        errs = errs + "mir: " + e.message + "\n"
+    var copies = 0
+    var news = 0
+    var insts = 0
+    for function in mir.functions.values():
+        for block in function.blocks:
+            if (block.label ?? "") == "arrcopy_cond":
+                copies = copies + 1
+            for instruction in block.instructions:
+                insts = insts + 1
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                if name == "rt_array_new":
+                                    news = news + 1
+                            case _: pass
+                    case _: pass
+    MoveLowered(errors: errs, copies: copies, array_news: news, insts: insts)
+
+fn copies_of(lines: [text]) -> i64:
+    val low = move_lower(src_of(lines))
+    print "errors: [{low.errors}] copies={low.copies} news={low.array_news} insts={low.insts}"
+    expect(low.errors).to_equal("")
+    low.copies
+
+val ST = [
+    "struct St:",
+    "    output: [i64]",
+    "    count: i64",
+    ""
+]
+
+fn with_st(lines: [text]) -> [text]:
+    var out: [text] = []
+    for l in ST:
+        out.push(l)
+    for l in lines:
+        out.push(l)
+    out
+
+describe "array move lowering: copy removed (positive)":
+    it "the leak repro: var o = st.output; o.push; st = St(output: o) in a loop":
+        val n = copies_of(with_st([
+            "fn run(n: i64) -> i64:",
+            "    var st = St(output: [], count: 0)",
+            "    var i = 0",
+            "    while i < n:",
+            "        var o = st.output",
+            "        o.push(i)",
+            "        st = St(output: o, count: st.count + 1)",
+            "        i = i + 1",
+            "    st.output.len()"
+        ]))
+        expect(n).to_equal(0)
+
+    it "var o = local_arr where local_arr is overwritten next":
+        val n = copies_of([
+            "fn run() -> i64:",
+            "    var a = [1, 2, 3]",
+            "    var o = a",
+            "    a = [9]",
+            "    o.push(4)",
+            "    o.len() + a.len()"
+        ])
+        expect(n).to_equal(0)
+
+    it "the source's own list ends right after the binding":
+        val n = copies_of([
+            "fn run() -> i64:",
+            "    var a = [1, 2]",
+            "    a.push(3)",
+            "    var o = a",
+            "    o.push(4)",
+            "    o.len()"
+        ])
+        expect(n).to_equal(0)
+
+    it "move and overwrite inside one if body":
+        val n = copies_of(with_st([
+            "fn run(n: i64) -> i64:",
+            "    var st = St(output: [1], count: 0)",
+            "    if n > 0:",
+            "        var o = st.output",
+            "        o.push(n)",
+            "        st = St(output: o, count: 1)",
+            "    st.output.len()"
+        ]))
+        expect(n).to_equal(0)
+
+    it "move and overwrite inside a while nested in an if":
+        val n = copies_of(with_st([
+            "fn run(n: i64) -> i64:",
+            "    var st = St(output: [], count: 0)",
+            "    if n > 0:",
+            "        var i = 0",
+            "        while i < n:",
+            "            var o = st.output",
+            "            o.push(i)",
+            "            st = St(output: o, count: i)",
+            "            i = i + 1",
+            "    st.output.len()"
+        ]))
+        expect(n).to_equal(0)
+
+    it "a read of a DIFFERENT field between binding and overwrite stays a move":
+        val n = copies_of(with_st([
+            "fn run() -> i64:",
+            "    var st = St(output: [1], count: 7)",
+            "    var o = st.output",
+            "    val c = st.count + 1",
+            "    o.push(c)",
+            "    st = St(output: o, count: st.count + c)",
+            "    st.output.len()"
+        ]))
+        expect(n).to_equal(0)
+
+    it "a struct whose array field defaults to a literal still moves":
+        val n = copies_of([
+            "struct Acc:",
+            "    items: [i64] = []",
+            "    count: i64",
+            "",
+            "fn run(n: i64) -> i64:",
+            "    var acc = Acc(count: 0)",
+            "    var i = 0",
+            "    while i < n:",
+            "        var o = acc.items",
+            "        o.push(i)",
+            "        acc = Acc(items: o, count: i)",
+            "        i = i + 1",
+            "    acc.items.len()"
+        ])
+        expect(n).to_equal(0)
+
+describe "array move lowering: copy kept (negative)":
+    it "a param source keeps its copy":
+        expect(copies_of(["fn f(a: [i64]) -> [i64]:", "    var c = a", "    c.push(1)", "    c"])).to_equal(1)
+
+    it "a param struct field source keeps its copy":
+        expect(copies_of(with_st(["fn run(p: St) -> i64:", "    var o = p.output", "    o.push(1)", "    o.len()"]))).to_equal(1)
+
+    it "val saved = st before the binding keeps the copy":
+        val n = copies_of(with_st([
+            "fn run() -> i64:",
+            "    var st = St(output: [1], count: 0)",
+            "    val saved = st",
+            "    var o = st.output",
+            "    o.push(2)",
+            "    st = St(output: o, count: 1)",
+            "    saved.output.len()"
+        ]))
+        expect(n).to_equal(1)
+
+    it "a struct place-init source (var st = p) keeps the copy":
+        val n = copies_of(with_st([
+            "fn run(p: St) -> i64:",
+            "    var st = p",
+            "    var o = st.output",
+            "    o.push(2)",
+            "    st = St(output: o, count: 1)",
+            "    st.output.len() + p.output.len()"
+        ]))
+        expect(n).to_equal(1)
+
+    it "a source built by a call keeps the copy":
+        val n = copies_of(with_st([
+            "fn mk() -> St:",
+            "    St(output: [1], count: 0)",
+            "",
+            "fn run() -> i64:",
+            "    var st = mk()",
+            "    var o = st.output",
+            "    o.push(2)",
+            "    st = St(output: o, count: 1)",
+            "    st.output.len()"
+        ]))
+        expect(n).to_equal(1)
+
+    it "an array overwritten from a call keeps the copy":
+        val n = copies_of([
+            "fn mk() -> [i64]:",
+            "    [1]",
+            "",
+            "fn run() -> i64:",
+            "    var a = [0]",
+            "    a = mk()",
+            "    var o = a",
+            "    a = [2]",
+            "    o.push(3)",
+            "    o.len()"
+        ])
+        expect(n).to_equal(1)
+
+    it "break between binding and overwrite keeps the copy":
+        val n = copies_of(with_st([
+            "fn run(n: i64) -> i64:",
+            "    var st = St(output: [], count: 0)",
+            "    var i = 0",
+            "    while i < n:",
+            "        var o = st.output",
+            "        o.push(i)",
+            "        if i == 3:",
+            "            break",
+            "        st = St(output: o, count: 1)",
+            "        i = i + 1",
+            "    st.output.len()"
+        ]))
+        expect(n).to_equal(1)
+
+    it "continue between binding and overwrite keeps the copy":
+        val n = copies_of(with_st([
+            "fn run(n: i64) -> i64:",
+            "    var st = St(output: [], count: 0)",
+            "    var i = 0",
+            "    while i < n:",
+            "        i = i + 1",
+            "        var o = st.output",
+            "        o.push(i)",
+            "        if i == 3:",
+            "            continue",
+            "        st = St(output: o, count: 1)",
+            "    st.output.len()"
+        ]))
+        expect(n).to_equal(1)
+
+    it "a lambda capturing the source keeps the copy":
+        val n = copies_of(with_st([
+            "fn run() -> i64:",
+            "    var st = St(output: [1], count: 0)",
+            "    val f = \\x: st.output.len() + x",
+            "    var o = st.output",
+            "    o.push(2)",
+            "    st = St(output: o, count: 1)",
+            "    f(0)"
+        ]))
+        expect(n).to_equal(1)
+
+    it "a source returned on another path keeps the copy":
+        val n = copies_of([
+            "fn run(c: bool) -> [i64]:",
+            "    var a = [1]",
+            "    if c:",
+            "        return a",
+            "    var o = a",
+            "    a = [5]",
+            "    o.push(2)",
+            "    o"
+        ])
+        expect(n).to_equal(1)
+
+    it "a source passed as a call arg keeps the copy":
+        val n = copies_of([
+            "fn keep(x: [i64]) -> i64:",
+            "    x.len()",
+            "",
+            "fn run() -> i64:",
+            "    var a = [1]",
+            "    val k = keep(a)",
+            "    var o = a",
+            "    a = [2]",
+            "    o.push(3)",
+            "    o.len() + k"
+        ])
+        expect(n).to_equal(1)
+
+    it "a source read in a nested block after the binding keeps the copy":
+        val n = copies_of([
+            "fn run(c: bool) -> i64:",
+            "    var a = [1]",
+            "    var o = a",
+            "    var k = 0",
+            "    if c:",
+            "        k = a.len()",
+            "    a = [2]",
+            "    o.push(3)",
+            "    o.len() + k"
+        ])
+        expect(n).to_equal(1)
+
+    it "a source still live at the end of a nested list keeps the copy":
+        val n = copies_of([
+            "fn run(c: bool) -> i64:",
+            "    var a = [1]",
+            "    if c:",
+            "        var o = a",
+            "        o.push(3)",
+            "    a.len()"
+        ])
+        expect(n).to_equal(1)
+
+    it "an overwrite whose RHS reads the moved field keeps the copy":
+        val n = copies_of(with_st([
+            "fn run() -> i64:",
+            "    var st = St(output: [1], count: 0)",
+            "    var o = st.output",
+            "    o.push(2)",
+            "    st = St(output: o + st.output, count: 1)",
+            "    st.output.len()"
+        ]))
+        expect(n).to_equal(1)
+
+    it "a FieldSet storing an array place into the source keeps the copy":
+        val n = copies_of(with_st([
+            "fn run() -> i64:",
+            "    var st = St(output: [1], count: 0)",
+            "    var other = [5]",
+            "    st.output = other",
+            "    var o = st.output",
+            "    o.push(1)",
+            "    st = St(output: o, count: 0)",
+            "    st.output.len() + other.len()"
+        ]))
+        expect(n).to_equal(1)
+
+    it "an Index source keeps the copy":
+        val n = copies_of([
+            "fn run() -> i64:",
+            "    var arrs = [[1], [2]]",
+            "    var o = arrs[0]",
+            "    arrs = [[3]]",
+            "    o.push(5)",
+            "    o.len()"
+        ])
+        expect(n).to_equal(1)
+
+    it "a for-loop variable source keeps the copy":
+        val n = copies_of([
+            "fn run(rows: [[i64]]) -> i64:",
+            "    var total = 0",
+            "    for row in rows:",
+            "        var o = row",
+            "        o.push(1)",
+            "        total = total + o.len()",
+            "    total"
+        ])
+        expect(n).to_equal(1)
+
+    it "a source iterated by an enclosing for keeps the copy":
+        val n = copies_of(with_st([
+            "fn run() -> i64:",
+            "    var st = St(output: [1, 2], count: 0)",
+            "    for x in st.output:",
+            "        var o = st.output",
+            "        o.push(x)",
+            "        st = St(output: o, count: 0)",
+            "    st.output.len()"
+        ]))
+        expect(n).to_equal(1)
+
+    it "two bindings from the same source keep the first copy":
+        val n = copies_of([
+            "fn run() -> i64:",
+            "    var a = [1]",
+            "    var x = a",
+            "    var y = a",
+            "    a = [2]",
+            "    x.push(1)",
+            "    y.push(2)",
+            "    x.len() + y.len()"
+        ])
+        expect(n).to_equal(1)
+
+    it "a field of the source passed as a method arg keeps the copy (element aliasing is not type-checked)":
+        val n = copies_of(with_st([
+            "fn run() -> i64:",
+            "    var st = St(output: [1], count: 7)",
+            "    var o = st.output",
+            "    o.push(st.count)",
+            "    st = St(output: o, count: 0)",
+            "    st.output.len()"
+        ]))
+        expect(n).to_equal(1)
+
+    it "a user method called on the source keeps the copy":
+        val n = copies_of(with_st([
+            "impl St:",
+            "    fn out() -> [i64]:",
+            "        self.output",
+            "",
+            "fn run() -> i64:",
+            "    var st = St(output: [1], count: 0)",
+            "    val held = st.out()",
+            "    var o = st.output",
+            "    o.push(2)",
+            "    st = St(output: o, count: 1)",
+            "    st.output.len() + held.len()"
+        ]))
+        expect(n).to_equal(1)
+
+    it "a source used as a match scrutinee keeps the copy":
+        val n = copies_of([
+            "fn run(c: i64) -> i64:",
+            "    var a = [1]",
+            "    val k = match a:",
+            "        case _: c",
+            "    var o = a",
+            "    a = [2]",
+            "    o.push(3)",
+            "    o.len() + k"
+        ])
+        expect(n).to_equal(1)
+
+    it "a struct whose array field default is not a literal keeps the copy":
+        val n = copies_of([
+            "fn seed_items() -> [i64]:",
+            "    [5]",
+            "",
+            "struct Acc:",
+            "    items: [i64] = seed_items()",
+            "    count: i64",
+            "",
+            "fn run() -> i64:",
+            "    var acc = Acc(count: 0)",
+            "    var o = acc.items",
+            "    o.push(1)",
+            "    acc = Acc(items: o, count: 1)",
+            "    acc.items.len()"
+        ])
+        expect(n).to_equal(1)
+
+    it "a top-level defer replayed before an early return keeps the copy":
+        # The frontend replays a top-level defer before every return and at
+        # the end of the body; the replay before `return` reads `a` before
+        # the overwrite, so `a` is live after the binding.
+        val n = copies_of([
+            "fn run(c: bool) -> i64:",
+            "    var a = [1]",
+            "    defer print(a.len())",
+            "    var o = a",
+            "    o.push(3)",
+            "    if c:",
+            "        return o.len()",
+            "    a = [2]",
+            "    o.len()"
+        ])
+        expect(n).to_equal(1)
+
+    it "a top-level defer that only runs after the overwrite still moves":
+        val n = copies_of([
+            "fn run() -> i64:",
+            "    var a = [1]",
+            "    defer print(a.len())",
+            "    var o = a",
+            "    a = [2]",
+            "    o.push(3)",
+            "    o.len()"
+        ])
+        expect(n).to_equal(0)
+
+    it "a struct built by spread is not owned (copy kept)":
+        val n = copies_of(with_st([
+            "fn run(base: St) -> i64:",
+            "    var st = St(..base, count: 1)",
+            "    var o = st.output",
+            "    o.push(2)",
+            "    st = St(output: o, count: 1)",
+            "    st.output.len() + base.output.len()"
+        ]))
+        expect(n).to_equal(1)
+
+    it "a struct with a generic slot holding a param array is not owned (copy kept)":
+        val n = copies_of([
+            "struct Box<T>:",
+            "    item: T",
+            "    data: [i64]",
+            "",
+            "fn run(p: [i64]) -> i64:",
+            "    var b = Box(item: p, data: [2])",
+            "    var o = b.data",
+            "    o.push(1)",
+            "    b = Box(item: p, data: o)",
+            "    b.data.len() + p.len()"
+        ])
+        expect(n).to_equal(1)
+
+    it "a var array passed into a generic slot is not a move source (copy kept)":
+        val n = copies_of([
+            "struct Box<T>:",
+            "    item: T",
+            "    data: [i64]",
+            "",
+            "fn run() -> i64:",
+            "    var o = [1]",
+            "    val b = Box(item: o, data: [2])",
+            "    var p = o",
+            "    o = [3]",
+            "    p.push(4)",
+            "    p.len() + o.len()"
+        ])
+        # Construction does not copy; the `var p = o` copy must stay.
+        expect(n).to_equal(1)
+
+    it "a struct with an Any slot holding a param array is not owned (copy kept)":
+        val n = copies_of([
+            "struct Dyn:",
+            "    item: Any",
+            "    data: [i64]",
+            "",
+            "fn run(p: [i64]) -> i64:",
+            "    var d = Dyn(item: p, data: [2])",
+            "    var o = d.data",
+            "    o.push(1)",
+            "    d = Dyn(item: p, data: o)",
+            "    d.data.len() + p.len()"
+        ])
+        expect(n).to_equal(1)
+
+    it "a nested value struct slot disqualifies ownership (copy kept)":
+        val n = copies_of([
+            "struct In:",
+            "    n: i64",
+            "",
+            "struct Out:",
+            "    inner: In",
+            "    data: [i64]",
+            "",
+            "fn run() -> i64:",
+            "    var w = Out(inner: In(n: 1), data: [1])",
+            "    var o = w.data",
+            "    o.push(2)",
+            "    w = Out(inner: In(n: 2), data: o)",
+            "    w.data.len()"
+        ])
+        expect(n).to_equal(1)
+
+    it "a generator body (yield) keeps the copy":
+        val n = copies_of([
+            "fn gen() -> i64:",
+            "    var a = [1]",
+            "    var o = a",
+            "    yield 1",
+            "    a = [2]",
+            "    o.push(3)",
+            "    o.len()"
+        ])
+        expect(n).to_equal(1)
+
+    it "a class constructor result is never owned (copy kept)":
+        val n = copies_of([
+            "class Holder:",
+            "    items: [i64]",
+            "",
+            "fn run() -> i64:",
+            "    var h = Holder(items: [1])",
+            "    var o = h.items",
+            "    o.push(2)",
+            "    h = Holder(items: o)",
+            "    h.items.len()"
+        ])
+        expect(n).to_equal(1)
+
+    it "a user method named push on the source keeps the copy":
+        # The method aliases self.items into self.other; HIR leaves the call
+        # Unresolved like a builtin, so only a statically-array receiver may
+        # be treated as non-escaping.
+        val n = copies_of([
+            "struct Keep:",
+            "    items: [i64]",
+            "    other: [i64]",
+            "",
+            "impl Keep:",
+            "    me push(x: i64):",
+            "        self.other = self.items",
+            "",
+            "fn run() -> i64:",
+            "    var k = Keep(items: [1], other: [])",
+            "    k.push(2)",
+            "    var o = k.items",
+            "    o.push(3)",
+            "    k = Keep(items: o, other: [])",
+            "    k.items.len()"
+        ])
+        expect(n).to_equal(1)
+
+    it "a user method named len on the source keeps the copy":
+        val n = copies_of([
+            "struct Keep:",
+            "    items: [i64]",
+            "    other: [i64]",
+            "",
+            "impl Keep:",
+            "    me len() -> i64:",
+            "        self.other = self.items",
+            "        0",
+            "",
+            "fn run() -> i64:",
+            "    var k = Keep(items: [1], other: [])",
+            "    val z = k.len()",
+            "    var o = k.items",
+            "    o.push(3)",
+            "    k = Keep(items: o, other: [])",
+            "    k.items.len() + z"
+        ])
+        expect(n).to_equal(1)
+
+    it "a struct operand of + (user __add__ sharing self.data) keeps the copy":
+        val n = copies_of([
+            "struct V:",
+            "    data: [i64]",
+            "    n: i64",
+            "",
+            "impl V:",
+            "    fn __add__(other: i64) -> V:",
+            "        V(data: self.data, n: self.n + other)",
+            "",
+            "fn run() -> i64:",
+            "    var st = V(data: [1], n: 0)",
+            "    val r = st + 1",
+            "    var o = st.data",
+            "    o.push(2)",
+            "    st = V(data: o, n: 1)",
+            "    r.data.len()"
+        ])
+        expect(n).to_equal(1)
+
+    it "a struct operand of == (user __eq__ storing self) keeps the copy":
+        val n = copies_of([
+            "struct V:",
+            "    data: [i64]",
+            "    n: i64",
+            "",
+            "class Keeper:",
+            "    kept: [i64]",
+            "",
+            "impl V:",
+            "    fn __eq__(other: Keeper) -> bool:",
+            "        other.kept = self.data",
+            "        true",
+            "",
+            "fn run(k: Keeper) -> i64:",
+            "    var st = V(data: [1], n: 0)",
+            "    val same = st == k",
+            "    var o = st.data",
+            "    o.push(2)",
+            "    st = V(data: o, n: 1)",
+            "    if same:",
+            "        return k.kept.len()",
+            "    0"
+        ])
+        expect(n).to_equal(1)
+
+    it "a source whose result of push is kept keeps the copy":
+        val n = copies_of([
+            "fn run() -> i64:",
+            "    var a = [1]",
+            "    val b = a.push(2)",
+            "    var o = a",
+            "    a = [3]",
+            "    o.push(4)",
+            "    o.len() + b.len()"
+        ])
+        expect(n).to_equal(1)
+
+describe "array move lowering: struct-construction field args":
+    # Struct construction never copies an array arg (seed decision: copying
+    # a live `var` arg re-created the leak). The analysis only decides whether
+    # the constructed struct is uniquely owned, which is observed through a
+    # later `var p = st.f` Site A move.
+    it "pins the pre-existing aliasing: St(output: o); o.push(4) adds no copy":
+        # KNOWN BUG, NOT FIXED in either compiler: st.output aliases o, so the
+        # push is visible through st. Pinned so a fix is a deliberate change.
+        val n = copies_of(with_st([
+            "fn run() -> i64:",
+            "    var o = [1, 2, 3]",
+            "    val st = St(output: o, count: 0)",
+            "    o.push(4)",
+            "    st.output.len()"
+        ]))
+        expect(n).to_equal(0)
+
+    it "a loop rebuilding a struct from a live var arg adds no copy":
+        val n = copies_of([
+            "struct S:",
+            "    buf: [i64]",
+            "    n: i64",
+            "",
+            "fn run(n: i64) -> i64:",
+            "    var b: [i64] = []",
+            "    var st = S(buf: b, n: 0)",
+            "    var i = 0",
+            "    while i < n:",
+            "        b.push(i)",
+            "        st = S(buf: b, n: i)",
+            "        i = i + 1",
+            "    st.buf.len() + b.len()"
+        ])
+        expect(n).to_equal(0)
+
+    it "param, val and projection args add no copy":
+        expect(copies_of(with_st(["fn run(p: [i64]) -> i64:", "    val st = St(output: p, count: 0)", "    st.output.len()"]))).to_equal(0)
+        expect(copies_of(with_st(["fn run() -> i64:", "    val v = [1, 2]", "    val st = St(output: v, count: 0)", "    st.output.len() + v.len()"]))).to_equal(0)
+        expect(copies_of(with_st(["fn run(p: St) -> i64:", "    val st = St(output: p.output, count: 0)", "    st.output.len()"]))).to_equal(0)
+
+    it "the functional-update idiom S(data: st.data, ...) adds no copy":
+        val n = copies_of([
+            "struct Bits:",
+            "    data: [i64]",
+            "    pos: i64",
+            "",
+            "fn advance(st: Bits, n: i64) -> Bits:",
+            "    var cur = st",
+            "    var i = 0",
+            "    while i < n:",
+            "        cur = Bits(data: cur.data, pos: cur.pos + 1)",
+            "        i = i + 1",
+            "    cur"
+        ])
+        expect(n).to_equal(0)
+
+    it "a struct built from a dead var arg is owned (later field move)":
+        val n = copies_of(with_st([
+            "fn run() -> i64:",
+            "    var o = [1]",
+            "    o.push(2)",
+            "    var st = St(output: o, count: 0)",
+            "    var p = st.output",
+            "    st = St(output: [], count: 0)",
+            "    p.push(3)",
+            "    p.len() + st.output.len()"
+        ]))
+        expect(n).to_equal(0)
+
+    it "a struct built from a live var arg is not owned (copy kept)":
+        val n = copies_of(with_st([
+            "fn run() -> i64:",
+            "    var o = [1]",
+            "    var st = St(output: o, count: 0)",
+            "    o.push(2)",
+            "    var p = st.output",
+            "    st = St(output: [], count: 0)",
+            "    p.push(3)",
+            "    p.len() + o.len()"
+        ]))
+        expect(n).to_equal(1)
+
+    it "a live var arg is itself no longer a move source (copy kept)":
+        val n = copies_of(with_st([
+            "fn run() -> i64:",
+            "    var o = [1]",
+            "    val st = St(output: o, count: 0)",
+            "    var p = o",
+            "    o = [5]",
+            "    p.push(3)",
+            "    p.len() + st.output.len()"
+        ]))
+        expect(n).to_equal(1)
+
+    it "a struct built from a shared projection is not owned (copy kept)":
+        val n = copies_of(with_st([
+            "fn run(p: St) -> i64:",
+            "    var st = St(output: p.output, count: 0)",
+            "    var o = st.output",
+            "    o.push(2)",
+            "    st = St(output: o, count: 1)",
+            "    st.output.len() + p.output.len()"
+        ]))
+        expect(n).to_equal(1)
+
+    it "a struct built from a val local is not owned (copy kept)":
+        val n = copies_of(with_st([
+            "fn run() -> i64:",
+            "    val v = [1]",
+            "    var st = St(output: v, count: 0)",
+            "    var o = st.output",
+            "    o.push(2)",
+            "    st = St(output: o, count: 1)",
+            "    st.output.len() + v.len()"
+        ]))
+        expect(n).to_equal(1)
+
+    it "the same var in two fields leaves the struct not owned (copy kept)":
+        val n = copies_of([
+            "struct Pair:",
+            "    a: [i64]",
+            "    b: [i64]",
+            "",
+            "fn run() -> i64:",
+            "    var o = [1]",
+            "    var pr = Pair(a: o, b: o)",
+            "    var p = pr.a",
+            "    pr = Pair(a: [], b: [])",
+            "    p.push(2)",
+            "    p.len()"
+        ])
+        expect(n).to_equal(1)
+
+    it "a constructor in a loop over an outer var leaves the struct not owned (copy kept)":
+        val n = copies_of(with_st([
+            "fn run() -> i64:",
+            "    var o = [1]",
+            "    var st = St(output: [], count: 0)",
+            "    var i = 0",
+            "    while i < 3:",
+            "        st = St(output: o, count: i)",
+            "        i = i + 1",
+            "    var p = st.output",
+            "    st = St(output: [], count: 0)",
+            "    p.push(2)",
+            "    p.len() + o.len()"
+        ]))
+        expect(n).to_equal(1)
+
+    it "one dead and one live use of the same var leave the struct not owned (copy kept)":
+        # Moving b.exprs would also mutate a.exprs, which aliases exprs.
+        val n = copies_of([
+            "struct Kids:",
+            "    exprs: [i64]",
+            "    n: i64",
+            "",
+            "fn build() -> i64:",
+            "    var exprs: [i64] = [1]",
+            "    val a = Kids(exprs: exprs, n: 1)",
+            "    exprs.push(2)",
+            "    var b = Kids(exprs: exprs, n: 2)",
+            "    var p = b.exprs",
+            "    b = Kids(exprs: [], n: 0)",
+            "    p.push(3)",
+            "    a.exprs.len() + p.len()"
+        ])
+        expect(n).to_equal(1)
+
+    it "tail and return constructors from a dead var add no copy":
+        val n = copies_of([
+            "struct Kids:",
+            "    exprs: [i64]",
+            "    n: i64",
+            "",
+            "fn build(c: bool) -> Kids:",
+            "    var exprs: [i64] = []",
+            "    if c:",
+            "        exprs.push(1)",
+            "        return Kids(exprs: exprs, n: 1)",
+            "    exprs.push(2)",
+            "    Kids(exprs: exprs, n: 2)"
+        ])
+        expect(n).to_equal(0)
+
+    it "an array-of-structs field moves and keeps its element typing":
+        val low = move_lower(src_of([
+            "struct Row:",
+            "    x: i64",
+            "",
+            "struct Tab:",
+            "    rows: [Row]",
+            "",
+            "fn run(n: i64) -> i64:",
+            "    var t = Tab(rows: [Row(x: 1)])",
+            "    var i = 0",
+            "    while i < n:",
+            "        var o = t.rows",
+            "        o.push(Row(x: i))",
+            "        val k = o[0].x",
+            "        t = Tab(rows: o)",
+            "        i = i + k",
+            "    t.rows[0].x"
+        ]))
+        print "errors: [{low.errors}] copies={low.copies} insts={low.insts}"
+        expect(low.errors).to_equal("")
+        expect(low.copies).to_equal(0)
+
+    it "an array literal arg is never copied":
+        expect(copies_of(with_st(["fn run() -> i64:", "    val st = St(output: [1, 2], count: 0)", "    st.output.len()"]))).to_equal(0)
+
+    it "the spread path is unchanged (shares fields like a struct copy)":
+        val n = copies_of(with_st([
+            "fn run(base: St) -> i64:",
+            "    val st = St(..base, count: 1)",
+            "    st.output.len()"
+        ]))
+        expect(n).to_equal(0)
