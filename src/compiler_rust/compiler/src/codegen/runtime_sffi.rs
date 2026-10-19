@@ -2473,6 +2473,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_write_span", &[I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_reverse", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_reverse_mut", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_sha384_digest", &[I64], &[I64]), // [u8] -> 48-byte [u8]
+    RuntimeFuncSpec::new("rt_sha512_digest", &[I64], &[I64]), // [u8] -> 64-byte [u8]
     RuntimeFuncSpec::new("rt_sort", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_capitalize", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_center", &[I64, I64, I64], &[I64]),
@@ -2504,8 +2506,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_take", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_terminal_stdout_is_tty", &[], &[I64]), // () -> RuntimeValue (bool)
     RuntimeFuncSpec::new("rt_tls13_sha256", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_sha512_digest", &[I64], &[I64]), // [u8] -> 64-byte [u8]
-    RuntimeFuncSpec::new("rt_sha384_digest", &[I64], &[I64]), // [u8] -> 48-byte [u8]
     RuntimeFuncSpec::new("rt_value_unbox_int", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_xxh3_128_text", &[I64], &[I64]), // text -> 32-hex XXH3-128
 ];
