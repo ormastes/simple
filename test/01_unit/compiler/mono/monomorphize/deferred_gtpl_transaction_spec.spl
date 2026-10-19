@@ -1,0 +1,142 @@
+# @req REQ-GENERIC-GTPL-TRANSACTION
+# Actual writer/reader API regression. RED source-predicted; execution UNRUN.
+use std.spec.{describe, it, expect, step, fail}
+use compiler.frontend.ast.FunctionDef
+use compiler.mono.monomorphize.partition.GenericTemplates
+use compiler.driver.smf_serialization.{serialize_templates, serialize_function_placeholder}
+use compiler.mono.monomorphize.deferred_deserialize.{read_text_field, read_generic_params, read_text_list}
+use compiler.mono.monomorphize.deferred.{DeferredMonomorphizer, GenericTemplate}
+use compiler.mono.monomorphize.deferred_subst.{InstantiationMode, deferred_last_error, deferred_set_error}
+
+fn transaction_function(name: text, body: text) -> FunctionDef:
+    FunctionDef(name: name, generic_params: ["T"], params: ["value: T"],
+        has_return_type: true, return_type: "T", body: [body], is_generic_template: true,
+        has_specialization_of: false, specialization_of: "", type_bindings: {})
+
+fn transaction_section(functions: [FunctionDef]) -> [u8]:
+    serialize_templates(GenericTemplates(functions: functions, structs: [], classes: [], enums: [], traits: []))
+
+fn transaction_prefix(bytes: [u8], length: i64) -> [u8]:
+    # Malformed-input construction, not a substitute decoder or range provider.
+    var result: [u8] = []
+    for index in 0..length: result = result.push(bytes[index])
+    result
+
+fn transaction_expect_body(mono: DeferredMonomorphizer, name: text, body: text):
+    expect(mono.has_template(name)).to_be(true)
+    val template: GenericTemplate = mono.template_cache[name]
+    match template:
+        case GenericTemplate.Function(function):
+            expect(function.name).to_equal(name)
+            expect(function.generic_params.len()).to_equal(1)
+            expect(function.generic_params[0]).to_equal("T")
+            expect(function.params.len()).to_equal(1)
+            expect(function.params[0]).to_equal("value: T")
+            expect(function.has_return_type).to_be(true)
+            expect(function.return_type).to_equal("T")
+            expect(function.has_specialization_of).to_be(false)
+            expect(function.specialization_of).to_equal("")
+            expect(function.body.len()).to_equal(1)
+            expect(function.body[0]).to_equal(body)
+        case _: fail("writer/reader changed template owner")
+
+fn transaction_seeded() -> DeferredMonomorphizer:
+    var mono = DeferredMonomorphizer.new(InstantiationMode.LinkTime)
+    mono.register_template(GenericTemplate.Function(transaction_function("existing", "original")))
+    mono.register_template(GenericTemplate.Function(transaction_function("untouched", "keep")))
+    mono
+
+describe "deferred GTPL sections publish complete transactions":
+    it "roundtrips the canonical writer and preserves successful duplicate replacement":
+        step("Serialize actual FunctionDef records with the production GTPL writer")
+        var mono = transaction_seeded()
+        val bytes = transaction_section([transaction_function("existing", "first"), transaction_function("new", "new body"), transaction_function("existing", "last")])
+        deferred_set_error("previous failure")
+        expect(mono.deserialize_templates(bytes)).to_be(true)
+        expect(deferred_last_error).to_equal("")
+        expect(mono.template_cache.keys().len()).to_equal(3)
+        transaction_expect_body(mono, "existing", "last")
+        transaction_expect_body(mono, "new", "new body")
+        transaction_expect_body(mono, "untouched", "keep")
+
+    it "rejects EOF before the advertised next record without replacing earlier cache rows":
+        var mono = transaction_seeded()
+        var bytes = transaction_section([transaction_function("existing", "replacement")])
+        bytes[6] = 2u8
+        step("Require the advertised second record before any publication")
+        expect(mono.deserialize_templates(bytes)).to_be(false)
+        expect(deferred_last_error).to_equal("Unexpected end of template section before record 1")
+        expect(mono.template_cache.keys().len()).to_equal(2)
+        transaction_expect_body(mono, "existing", "original")
+        transaction_expect_body(mono, "untouched", "keep")
+
+    it "rejects a truncated second record without admitting the complete first record":
+        var mono = transaction_seeded()
+        val complete = transaction_section([transaction_function("new", "new body"), transaction_function("existing", "replacement")])
+        val truncated = transaction_prefix(complete, complete.len() - 1)
+        expect(mono.deserialize_templates(truncated)).to_be(false)
+        expect(deferred_last_error.len()).to_be_greater_than(0)
+        expect(mono.has_template("new")).to_be(false)
+        expect(mono.template_cache.keys().len()).to_equal(2)
+        transaction_expect_body(mono, "existing", "original")
+        transaction_expect_body(mono, "untouched", "keep")
+
+    it "preserves the actual decoder error and rejects an invalid later record kind":
+        var mono = transaction_seeded()
+        val first = transaction_function("existing", "replacement")
+        val first_section = transaction_section([first])
+        var bytes = transaction_section([first, transaction_function("new", "body")])
+        bytes[first_section.len()] = 99u8
+        expect(mono.deserialize_templates(bytes)).to_be(false)
+        expect(deferred_last_error).to_equal("Unknown template kind: 99")
+        expect(mono.template_cache.keys().len()).to_equal(2)
+        expect(mono.has_template("new")).to_be(false)
+        transaction_expect_body(mono, "existing", "original")
+
+    it "accepts a valid zero-count section but rejects missing records and trailing bytes":
+        var mono = transaction_seeded()
+        val empty = transaction_section([])
+        expect(empty.len()).to_equal(10)
+        deferred_set_error("previous failure")
+        expect(mono.deserialize_templates(empty)).to_be(true)
+        expect(deferred_last_error).to_equal("")
+        expect(mono.template_cache.keys().len()).to_equal(2)
+        var missing = transaction_section([])
+        missing[6] = 1u8
+        expect(mono.deserialize_templates(missing)).to_be(false)
+        expect(deferred_last_error).to_equal("Unexpected end of template section before record 0")
+        val extra = empty.push(0u8)
+        expect(mono.deserialize_templates(extra)).to_be(false)
+        expect(deferred_last_error).to_equal("Trailing data after template section")
+        transaction_expect_body(mono, "existing", "original")
+
+    it "keeps version refusal and a failed transaction from affecting a later valid load":
+        var mono = transaction_seeded()
+        var wrong_version = transaction_section([transaction_function("new", "body")])
+        wrong_version[4] = 3u8
+        expect(mono.deserialize_templates(wrong_version)).to_be(false)
+        expect(deferred_last_error).to_contain("version 3")
+        expect(mono.has_template("new")).to_be(false)
+        val valid = transaction_section([transaction_function("new", "body")])
+        expect(mono.deserialize_templates(valid)).to_be(true)
+        expect(deferred_last_error).to_equal("")
+        transaction_expect_body(mono, "new", "body")
+        transaction_expect_body(mono, "existing", "original")
+
+    it "rejects an invalid optional marker in a later record without publishing":
+        step("Locate the second return marker with actual field readers and corrupt it")
+        val first = transaction_function("existing", "replacement")
+        val second = transaction_function("new", "value")
+        var bytes = transaction_section([first, second])
+        val second_start = 10 + 1 + serialize_function_placeholder(first).len() + 1
+        val name = read_text_field(bytes, second_start).unwrap()
+        val params = read_generic_params(bytes, name.1).unwrap()
+        val arguments = read_text_list(bytes, params.1).unwrap()
+        bytes[arguments.1] = 2u8
+        var mono = transaction_seeded()
+        expect(mono.deserialize_templates(bytes)).to_be(false)
+        expect(deferred_last_error).to_equal("Invalid optional text tag at offset {arguments.1}: 2")
+        expect(mono.template_cache.keys().len()).to_equal(2)
+        transaction_expect_body(mono, "existing", "original")
+        transaction_expect_body(mono, "untouched", "keep")
+        expect(mono.has_template("new")).to_be(false)
