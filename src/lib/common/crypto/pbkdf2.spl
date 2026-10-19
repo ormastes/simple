@@ -7,6 +7,7 @@
 #   pbkdf2_sha256_bytes(password, salt, iterations, dk_len) -> [i64]
 #   pbkdf2_sha384_bytes(password, salt, iterations, dk_len) -> [i64]
 #   pbkdf2_sha512_bytes(password, salt, iterations, dk_len) -> [i64]
+#   pbkdf2_sha384_bytes_fast / pbkdf2_sha512_bytes_fast — runtime-hash fast path (opt-in)
 #
 # All inputs and outputs use [i64] byte lists (values 0-255).
 #
@@ -30,6 +31,7 @@
 #   draft-josefsson-pbkdf2-test-vectors-00 — reference test vectors
 
 use std.common.crypto.hmac.{hmac_sha1_bytes, hmac_sha256_bytes, hmac_sha384_bytes, hmac_sha512_bytes}
+use std.nogc_sync_mut.sffi.host.{sha384_digest, sha512_digest}
 
 # ============================================================================
 # Internal helpers
@@ -103,10 +105,10 @@ fn _pbkdf2_block_sha256(password: [i64], salt: [i64], iterations: i64,
     t
 
 # ============================================================================
-# Runtime SHA-256 fast path (PBKDF2-HMAC-SHA-256 only)
+# Runtime SHA-256 fast path (PBKDF2-HMAC-SHA-256)
 #
-# The runtime exposes one SHA-256 primitive (rt_tls13_sha256); there is no
-# runtime SHA-384/512, so those variants stay pure Simple. HMAC is built on
+# The runtime SHA-256 primitive is rt_tls13_sha256 (SHA-384/512 use
+# rt_sha384_digest / rt_sha512_digest, see the next section). HMAC is built on
 # it per RFC 2104: HMAC(K, m) = H((K' ^ opad) || H((K' ^ ipad) || m)), where
 # K' is K zero-padded to the 64-byte block (K is hashed first if longer).
 # ipad/opad are computed once per block, not once per iteration.
@@ -180,6 +182,93 @@ fn _pbkdf2_block_sha256_fast(password: [i64], salt: [i64], iterations: i64,
             x = x + 1
         j = j + 1
     t
+
+# ============================================================================
+# Runtime SHA-384/512 fast path (PBKDF2-HMAC-SHA-384/512)
+#
+# Same RFC 2104 construction as the SHA-256 path over the runtime
+# rt_sha384_digest / rt_sha512_digest (through their typed sffi.host
+# wrappers), with the 128-byte SHA-512-family block (FIPS 180-4) for K', ipad
+# and opad. h_len selects the hash: 48 → SHA-384, 64 → SHA-512.
+# Any digest that is not exactly h_len bytes makes the fast path return []
+# and the caller uses the pure path.
+# ============================================================================
+
+fn _pbkdf2_rt_sha2_512_family(data: [u8], h_len: i64) -> [u8]:
+    if h_len == 48:
+        return sha384_digest(data)
+    sha512_digest(data)
+
+fn _pbkdf2_block_sha2_512_family_fast(password: [i64], salt: [i64], iterations: i64,
+                                      block_i: i64, h_len: i64) -> [i64]:
+    """Same result as _pbkdf2_block_sha384/512 via the runtime hash; [] if unavailable."""
+    var key: [u8] = []
+    var ki: i64 = 0
+    while ki < password.len():
+        key.push((password[ki] & 255) as u8)
+        ki = ki + 1
+    if key.len() > 128:
+        key = _pbkdf2_rt_sha2_512_family(key, h_len)
+        if key.len() != h_len:
+            return []
+    var ipad: [u8] = []
+    var opad: [u8] = []
+    var pi: i64 = 0
+    while pi < 128:
+        val kb: i64 = if pi < key.len(): key[pi] as i64 else: 0
+        ipad.push((kb ^ 0x36) as u8)
+        opad.push((kb ^ 0x5c) as u8)
+        pi = pi + 1
+    var msg: [u8] = []
+    var si: i64 = 0
+    while si < salt.len():
+        msg.push((salt[si] & 255) as u8)
+        si = si + 1
+    val ctr = _pbkdf2_int4(block_i)
+    var ci: i64 = 0
+    while ci < 4:
+        msg.push(ctr[ci] as u8)
+        ci = ci + 1
+    var u = _pbkdf2_rt_sha2_512_family(_pbkdf2_cat_u8(opad, _pbkdf2_rt_sha2_512_family(_pbkdf2_cat_u8(ipad, msg), h_len)), h_len)
+    if u.len() != h_len:
+        return []
+    var t: [i64] = []
+    var ti: i64 = 0
+    while ti < h_len:
+        t.push(u[ti] as i64)
+        ti = ti + 1
+    var j: i64 = 2
+    while j <= iterations:
+        u = _pbkdf2_rt_sha2_512_family(_pbkdf2_cat_u8(opad, _pbkdf2_rt_sha2_512_family(_pbkdf2_cat_u8(ipad, u), h_len)), h_len)
+        if u.len() != h_len:
+            return []
+        var x: i64 = 0
+        while x < h_len:
+            t[x] = t[x] ^ (u[x] as i64)
+            x = x + 1
+        j = j + 1
+    t
+
+fn _pbkdf2_sha2_512_family_bytes(password: [i64], salt: [i64], iterations: i64,
+                                 dk_len: i64, h_len: i64) -> [i64]:
+    """PBKDF2 over the runtime SHA-384/512 fast path, per block falling back to
+    the pure-Simple block when the runtime digest is unavailable."""
+    val num_blocks: i64 = (dk_len + h_len - 1) / h_len
+    var dk: [i64] = []
+    var bi: i64 = 1
+    while bi <= num_blocks:
+        var t = _pbkdf2_block_sha2_512_family_fast(password, salt, iterations, bi, h_len)
+        if t.len() != h_len:
+            if h_len == 48:
+                t = _pbkdf2_block_sha384(password, salt, iterations, bi)
+            else:
+                t = _pbkdf2_block_sha512(password, salt, iterations, bi)
+        var ki: i64 = 0
+        while ki < t.len():
+            dk.push(t[ki])
+            ki = ki + 1
+        bi = bi + 1
+    _pbkdf2_slice(dk, 0, dk_len)
 
 fn _pbkdf2_block_sha1(password: [i64], salt: [i64], iterations: i64,
                       block_i: i64) -> [i64]:
@@ -302,7 +391,7 @@ fn pbkdf2_sha256_bytes(password: [i64], salt: [i64], iterations: i64,
 
 fn pbkdf2_sha384_bytes(password: [i64], salt: [i64], iterations: i64,
                        dk_len: i64) -> [i64]:
-    """PBKDF2-HMAC-SHA-384 key derivation (RFC 2898 §5.2).
+    """PBKDF2-HMAC-SHA-384 key derivation (RFC 2898 §5.2), pure Simple.
 
     Args:
       password   — secret octet string
@@ -327,7 +416,7 @@ fn pbkdf2_sha384_bytes(password: [i64], salt: [i64], iterations: i64,
 
 fn pbkdf2_sha512_bytes(password: [i64], salt: [i64], iterations: i64,
                        dk_len: i64) -> [i64]:
-    """PBKDF2-HMAC-SHA-512 key derivation (RFC 2898 §5.2).
+    """PBKDF2-HMAC-SHA-512 key derivation (RFC 2898 §5.2), pure Simple.
 
     Args:
       password   — secret octet string
@@ -349,3 +438,20 @@ fn pbkdf2_sha512_bytes(password: [i64], salt: [i64], iterations: i64,
             ki = ki + 1
         bi = bi + 1
     _pbkdf2_slice(dk, 0, dk_len)
+
+# Opt-in until every deployed binary registers rt_sha384/512_digest: a binary
+# without the extern fails hard (unknown extern), it does not fall back. Then
+# pbkdf2_sha384/512_bytes switch to these (see the 2026-10-19 bug record).
+fn pbkdf2_sha384_bytes_fast(password: [i64], salt: [i64], iterations: i64,
+                            dk_len: i64) -> [i64]:
+    """PBKDF2-HMAC-SHA-384 (RFC 2898 §5.2 / RFC 8018) using the runtime SHA-384
+    when it returns full 48-byte digests, else the pure-Simple path.
+    Output is byte-identical either way for byte-valued (0-255) inputs."""
+    _pbkdf2_sha2_512_family_bytes(password, salt, iterations, dk_len, 48)
+
+fn pbkdf2_sha512_bytes_fast(password: [i64], salt: [i64], iterations: i64,
+                            dk_len: i64) -> [i64]:
+    """PBKDF2-HMAC-SHA-512 (RFC 2898 §5.2 / RFC 8018) using the runtime SHA-512
+    when it returns full 64-byte digests, else the pure-Simple path.
+    Output is byte-identical either way for byte-valued (0-255) inputs."""
+    _pbkdf2_sha2_512_family_bytes(password, salt, iterations, dk_len, 64)

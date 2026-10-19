@@ -616,6 +616,8 @@ int64_t   rt_random_bytes_c(uint64_t count);
 double    rt_random_random(void);
 SplArray* rt_bytes_alloc(int64_t len);
 int64_t  rt_tls13_sha256(int64_t data);
+int64_t  rt_sha512_digest(int64_t data);
+int64_t  rt_sha384_digest(int64_t data);
 int64_t  rt_array_len(SplArray* array);
 int64_t  rt_array_len_safe(int64_t value);
 int64_t  rt_array_get(SplArray* array, int64_t idx);

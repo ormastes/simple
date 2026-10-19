@@ -8818,6 +8818,151 @@ int64_t rt_tls13_sha256(int64_t data_value) {
     return (int64_t)(uintptr_t)digest;
 }
 
+/* One-shot SHA-512 / SHA-384 (FIPS 180-4 §6.4 / §6.5) for the native core-C
+ * lane, same tagged [u8] ABI as rt_tls13_sha256:
+ *   extern fn rt_sha512_digest(data: [u8]) -> [u8]   (64 bytes)
+ *   extern fn rt_sha384_digest(data: [u8]) -> [u8]   (48 bytes)
+ * Words are assembled from bytes explicitly big-endian, so the result does not
+ * depend on host byte order. Static helpers carry no rt_ prefix on purpose:
+ * they are not runtime API and must not register as single-lane rt_ symbols. */
+static uint64_t spl_sha512_rotr(uint64_t value, unsigned shift) {
+    return (value >> shift) | (value << (64u - shift));
+}
+
+static void spl_sha512_compress(uint64_t state[8], const uint8_t block[128]) {
+    static const uint64_t k[80] = {
+        0x428a2f98d728ae22ull, 0x7137449123ef65cdull, 0xb5c0fbcfec4d3b2full, 0xe9b5dba58189dbbcull,
+        0x3956c25bf348b538ull, 0x59f111f1b605d019ull, 0x923f82a4af194f9bull, 0xab1c5ed5da6d8118ull,
+        0xd807aa98a3030242ull, 0x12835b0145706fbeull, 0x243185be4ee4b28cull, 0x550c7dc3d5ffb4e2ull,
+        0x72be5d74f27b896full, 0x80deb1fe3b1696b1ull, 0x9bdc06a725c71235ull, 0xc19bf174cf692694ull,
+        0xe49b69c19ef14ad2ull, 0xefbe4786384f25e3ull, 0x0fc19dc68b8cd5b5ull, 0x240ca1cc77ac9c65ull,
+        0x2de92c6f592b0275ull, 0x4a7484aa6ea6e483ull, 0x5cb0a9dcbd41fbd4ull, 0x76f988da831153b5ull,
+        0x983e5152ee66dfabull, 0xa831c66d2db43210ull, 0xb00327c898fb213full, 0xbf597fc7beef0ee4ull,
+        0xc6e00bf33da88fc2ull, 0xd5a79147930aa725ull, 0x06ca6351e003826full, 0x142929670a0e6e70ull,
+        0x27b70a8546d22ffcull, 0x2e1b21385c26c926ull, 0x4d2c6dfc5ac42aedull, 0x53380d139d95b3dfull,
+        0x650a73548baf63deull, 0x766a0abb3c77b2a8ull, 0x81c2c92e47edaee6ull, 0x92722c851482353bull,
+        0xa2bfe8a14cf10364ull, 0xa81a664bbc423001ull, 0xc24b8b70d0f89791ull, 0xc76c51a30654be30ull,
+        0xd192e819d6ef5218ull, 0xd69906245565a910ull, 0xf40e35855771202aull, 0x106aa07032bbd1b8ull,
+        0x19a4c116b8d2d0c8ull, 0x1e376c085141ab53ull, 0x2748774cdf8eeb99ull, 0x34b0bcb5e19b48a8ull,
+        0x391c0cb3c5c95a63ull, 0x4ed8aa4ae3418acbull, 0x5b9cca4f7763e373ull, 0x682e6ff3d6b2b8a3ull,
+        0x748f82ee5defb2fcull, 0x78a5636f43172f60ull, 0x84c87814a1f0ab72ull, 0x8cc702081a6439ecull,
+        0x90befffa23631e28ull, 0xa4506cebde82bde9ull, 0xbef9a3f7b2c67915ull, 0xc67178f2e372532bull,
+        0xca273eceea26619cull, 0xd186b8c721c0c207ull, 0xeada7dd6cde0eb1eull, 0xf57d4f7fee6ed178ull,
+        0x06f067aa72176fbaull, 0x0a637dc5a2c898a6ull, 0x113f9804bef90daeull, 0x1b710b35131c471bull,
+        0x28db77f523047d84ull, 0x32caab7b40c72493ull, 0x3c9ebe0a15c9bebcull, 0x431d67c49c100d4cull,
+        0x4cc5d4becb3e42b6ull, 0x597f299cfc657e2aull, 0x5fcb6fab3ad6faecull, 0x6c44198c4a475817ull
+    };
+    uint64_t w[80];
+    for (int i = 0; i < 16; i++) {
+        uint64_t word = 0;
+        for (int j = 0; j < 8; j++) {
+            word = (word << 8) | (uint64_t)block[(size_t)i * 8u + (size_t)j];
+        }
+        w[i] = word;
+    }
+    for (int i = 16; i < 80; i++) {
+        uint64_t s0 = spl_sha512_rotr(w[i - 15], 1) ^
+                      spl_sha512_rotr(w[i - 15], 8) ^ (w[i - 15] >> 7);
+        uint64_t s1 = spl_sha512_rotr(w[i - 2], 19) ^
+                      spl_sha512_rotr(w[i - 2], 61) ^ (w[i - 2] >> 6);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+
+    uint64_t a = state[0], b = state[1], c = state[2], d = state[3];
+    uint64_t e = state[4], f = state[5], g = state[6], h = state[7];
+    for (int i = 0; i < 80; i++) {
+        uint64_t s1 = spl_sha512_rotr(e, 14) ^ spl_sha512_rotr(e, 18) ^
+                      spl_sha512_rotr(e, 41);
+        uint64_t choice = (e & f) ^ ((~e) & g);
+        uint64_t t1 = h + s1 + choice + k[i] + w[i];
+        uint64_t s0 = spl_sha512_rotr(a, 28) ^ spl_sha512_rotr(a, 34) ^
+                      spl_sha512_rotr(a, 39);
+        uint64_t majority = (a & b) ^ (a & c) ^ (b & c);
+        uint64_t t2 = s0 + majority;
+        h = g; g = f; f = e; e = d + t1;
+        d = c; c = b; b = a; a = t1 + t2;
+    }
+    state[0] += a; state[1] += b; state[2] += c; state[3] += d;
+    state[4] += e; state[5] += f; state[6] += g; state[7] += h;
+}
+
+static int64_t spl_sha2_512_family_digest(int64_t data_value, const uint64_t iv[8],
+                                          size_t out_len) {
+    RtCoreArray* input = rt_core_as_registered_array(data_value);
+    if (!input || input->len < 0 || (input->len > 0 && !input->data)) {
+        return rt_core_nil();
+    }
+    uint64_t state[8];
+    for (int i = 0; i < 8; i++) state[i] = iv[i];
+    uint8_t block[256];
+    uint64_t length = (uint64_t)input->len;
+    uint64_t offset = 0;
+    int packed_bytes = (input->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+
+    while (length - offset >= 128u) {
+        if (packed_bytes) {
+            memcpy(block, (const uint8_t*)input->data + offset, 128u);
+        } else {
+            const int64_t* values = (const int64_t*)input->data;
+            for (uint64_t i = 0; i < 128u; i++) {
+                block[i] = (uint8_t)(rt_core_numeric_arg(values[offset + i]) & 0xff);
+            }
+        }
+        spl_sha512_compress(state, block);
+        offset += 128u;
+    }
+
+    size_t remaining = (size_t)(length - offset);
+    memset(block, 0, sizeof(block));
+    if (packed_bytes) {
+        if (remaining > 0) {
+            memcpy(block, (const uint8_t*)input->data + offset, remaining);
+        }
+    } else {
+        const int64_t* values = (const int64_t*)input->data;
+        for (size_t i = 0; i < remaining; i++) {
+            block[i] = (uint8_t)(rt_core_numeric_arg(values[offset + i]) & 0xff);
+        }
+    }
+    block[remaining] = 0x80u;
+    /* 128-bit big-endian bit length: the low 64 bits are length << 3 and the
+     * 3 bits shifted out (length >> 61) go in the lowest byte of the high
+     * 64-bit half; every other byte of the high half stays zero. */
+    size_t final_bytes = remaining < 112u ? 128u : 256u;
+    uint64_t bit_length = length << 3;
+    for (int i = 0; i < 8; i++) {
+        block[final_bytes - 1u - (size_t)i] = (uint8_t)(bit_length >> (i * 8));
+    }
+    block[final_bytes - 9u] = (uint8_t)(length >> 61);
+    spl_sha512_compress(state, block);
+    if (final_bytes == 256u) spl_sha512_compress(state, block + 128);
+
+    SplArray* digest = rt_byte_array_new_len((uint64_t)out_len);
+    RtCoreArray* output = rt_core_array_ptr(digest);
+    if (!output || !output->data) return rt_core_nil();
+    uint8_t* out = (uint8_t*)output->data;
+    for (size_t i = 0; i < out_len; i++) {
+        out[i] = (uint8_t)(state[i / 8u] >> (56u - 8u * (unsigned)(i % 8u)));
+    }
+    return (int64_t)(uintptr_t)digest;
+}
+
+int64_t rt_sha512_digest(int64_t data_value) {
+    static const uint64_t iv[8] = {
+        0x6a09e667f3bcc908ull, 0xbb67ae8584caa73bull, 0x3c6ef372fe94f82bull, 0xa54ff53a5f1d36f1ull,
+        0x510e527fade682d1ull, 0x9b05688c2b3e6c1full, 0x1f83d9abfb41bd6bull, 0x5be0cd19137e2179ull
+    };
+    return spl_sha2_512_family_digest(data_value, iv, 64u);
+}
+
+int64_t rt_sha384_digest(int64_t data_value) {
+    static const uint64_t iv[8] = {
+        0xcbbb9d5dc1059ed8ull, 0x629a292a367cd507ull, 0x9159015a3070dd17ull, 0x152fecd8f70e5939ull,
+        0x67332667ffc00b31ull, 0x8eb44a8768581511ull, 0xdb0c2e0d64f98fa7ull, 0x47b5481dbefa4fa4ull
+    };
+    return spl_sha2_512_family_digest(data_value, iv, 48u);
+}
+
 /* `[u8]` -> text, bytes copied verbatim (the interpreter's
  * Value::text_from_bytes; also the native lowering of `text.from_bytes`).
  * A `[u8]` arrives in one of two layouts: byte-packed
