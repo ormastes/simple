@@ -300,8 +300,13 @@ static int rt_hsa_sync(int fd, int data_only) {
     unsigned int attempts = 0;
     int result;
     do {
+#if defined(__APPLE__)
+        /* fdatasync(2) is Linux-only; fsync covers the hosted macOS path. */
+        result = rt_hsa_fault(data_only ? "fdatasync" : "fsync", fd) ? -1 : fsync(fd);
+#else
         result = rt_hsa_fault(data_only ? "fdatasync" : "fsync", fd) ? -1 :
             (data_only ? fdatasync(fd) : fsync(fd));
+#endif
     } while (result < 0 && errno == EINTR && ++attempts < 32);
     return result;
 }
