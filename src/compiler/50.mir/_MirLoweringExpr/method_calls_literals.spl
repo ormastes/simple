@@ -520,38 +520,48 @@ impl MirLowering:
                 case _: ()
         false
 
-    me lower_text_data_ptr_v1(text_local: LocalId) -> LocalId:
+    me lower_text_data_ptr_v1(text_local: LocalId, span: Span) -> LocalId:
         """`text.ptr()`: raw address of the text's byte buffer as i64, via
-        rt_string_data (tagged heap text or raw literal word)."""
-        val data_op = MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Str("rt_string_data"),
-            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
-                params: [MirType.i64()],
-                return_type: MirType.i64(),
-                is_variadic: false
-            )))
-        ))
+        the shared rt_string_data text-ABI helper (tagged heap text or raw
+        literal word)."""
         var data_builder = self.builder
-        val data_result = data_builder.emit_call(data_op, [mir_operand_copy(text_local)], MirType.i64())
+        val data_result = data_builder.emit_call(self.text_extern_abi_helper_operand("rt_string_data"), [mir_operand_copy(text_local)], MirType.i64())
         self.builder = data_builder
         if val data_local = data_result:
             return data_local
+        # Never hand back a silent NULL pointer.
+        self.error_fatal("text.ptr(): rt_string_data call produced no result", Some(span))
         var zero_builder = self.builder
         val zero = zero_builder.emit_const_int(0)
         self.builder = zero_builder
         zero
 
+    me hir_place_is_pure_v1(expr: HirExpr) -> bool:
+        """True for a side-effect-free place chain: a variable, or field
+        reads whose whole base chain is itself pure (`a.b.c`, never
+        `make().b`)."""
+        match expr.kind:
+            case HirExprKind.Var(_) | HirExprKind.NamedVar(_, _): true
+            case HirExprKind.Field(field_base, _, _): self.hir_place_is_pure_v1(field_base)
+            case _: false
+
     me try_lower_tuple_get_v1(receiver: HirExpr, receiver_local: LocalId, index: HirExpr) -> LocalId?:
         """`t.get(N)` on a tuple with a literal N lowers exactly like `t[N]`.
         Returns nil (caller keeps its loud unresolved path) unless the
-        receiver is a proven tuple, N is a literal, and the receiver is a
-        pure place expression that the Index lowering may re-read."""
-        if self.tuple_index_literal(index) < 0:
+        receiver is a proven tuple and N is a literal. A pure place receiver
+        goes through the shared Index lowering (which re-reads it); any other
+        receiver (`make().pair`) reads the already-lowered local directly so
+        it is never evaluated twice."""
+        val literal_index = self.tuple_index_literal(index)
+        if literal_index < 0:
             return nil
         var receiver_is_tuple = false
+        var tuple_field_types: [MirType] = []
         if val receiver_mir_type = self.local_mir_type_of(receiver_local):
             match receiver_mir_type.kind:
-                case MirTypeKind.Tuple(_): receiver_is_tuple = true
+                case MirTypeKind.Tuple(field_types):
+                    receiver_is_tuple = true
+                    tuple_field_types = field_types
                 case _: ()
         if not receiver_is_tuple:
             if val receiver_hir_type = self.find_local_hir_type(receiver_local.id):
@@ -560,11 +570,12 @@ impl MirLowering:
                     case _: ()
         if not receiver_is_tuple:
             return nil
-        match receiver.kind:
-            case HirExprKind.Var(_) | HirExprKind.NamedVar(_, _) | HirExprKind.Field(_, _, _):
-                return Some(self.lower_index_expr(receiver, index, false, HirType(kind: HirTypeKind.Error, span: receiver.span)))
-            case _: ()
-        nil
+        if not self.hir_place_is_pure_v1(receiver):
+            # Impure receiver: only the MIR field layout can type the slot.
+            if literal_index >= tuple_field_types.len():
+                return nil
+            return Some(self.lower_tuple_field_raw(receiver_local, tuple_field_types[literal_index], literal_index))
+        Some(self.lower_index_expr(receiver, index, false, HirType(kind: HirTypeKind.Error, span: receiver.span)))
 
     me try_lower_unresolved_ufcs_v1(receiver_local: LocalId, owner_name: text, method: text, args: [HirCallArg], wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64) -> LocalId?:
         """Lower an Unresolved `x.f(args)` as the free call `f(x, args)`.
@@ -586,7 +597,7 @@ impl MirLowering:
                 if val first_param_owner = self.symbols.get_symbol_raw(first_param_symbol.id):
                     match first_param_owner.kind:
                         case Struct | Class:
-                            first_param_is_owner = mir_class_identity(first_param_owner) == owner_name or first_param_owner.name == owner_name
+                            first_param_is_owner = mir_class_identity(first_param_owner) == owner_name
                         case _: ()
             case _: ()
         if not first_param_is_owner:
@@ -608,14 +619,21 @@ impl MirLowering:
         Some(unit_local)
 
     me method_receiver_is_option(receiver: HirExpr, local: LocalId) -> bool:
-        # A declared/retained Optional type wins over the runtime-array flag:
-        # `d.get(k)` with an array value decodes to an array-handle local
-        # that is still the `[T]?` the source declared.
-        if self.option_inner_hir_type_for_local(receiver, local) != nil:
-            return true
         if self.local_is_runtime_array(local):
             return false
+        if self.option_inner_hir_type_for_local(receiver, local) != nil:
+            return true
         self.nil_locals.contains(local.id)
+
+    me method_receiver_is_option_for_v1(receiver: HirExpr, local: LocalId, method: text) -> bool:
+        """`unwrap` / `is_some` / `is_none` have no Array meaning, so a
+        retained Optional type (`d.get(k)` over `[T]` values decodes to an
+        array-handle local typed `[T]?`) may win over the runtime-array flag
+        for them only. `map` / `unwrap_or` keep the array short-circuit."""
+        if method == "unwrap" or method == "is_some" or method == "is_none":
+            if self.option_inner_hir_type_for_local(receiver, local) != nil:
+                return true
+        self.method_receiver_is_option(receiver, local)
 
     fn mir_type_is_scalar_numeric(type_: MirType?) -> bool:
         """True for a registered MIR scalar numeric type (I8..U64, F32, F64).
@@ -2039,7 +2057,7 @@ impl MirLowering:
         if probe_option_receiver:
             prelowered_method_receiver = self.lower_expr(receiver)
             has_prelowered_method_receiver = true
-            option_method_receiver = self.method_receiver_is_option(receiver, prelowered_method_receiver)
+            option_method_receiver = self.method_receiver_is_option_for_v1(receiver, prelowered_method_receiver, method)
         if mir_mc_trace_state == 1:
             eprint("[mir-method-call] option-probe method={method}\n")
 
@@ -4323,7 +4341,7 @@ impl MirLowering:
                 # literal word. Custom owners resolved above keep priority.
                 if method == "ptr" and args.len() == 0:
                     if self.unresolved_receiver_is_text_v1(receiver, unresolved_receiver_local, declared_text_receiver):
-                        return self.lower_text_data_ptr_v1(unresolved_receiver_local)
+                        return self.lower_text_data_ptr_v1(unresolved_receiver_local, receiver.span)
 
                 # `tuple.get(N)` with a literal N is the tuple index `t[N]`;
                 # flat HIR leaves it Unresolved (tuples have no method
