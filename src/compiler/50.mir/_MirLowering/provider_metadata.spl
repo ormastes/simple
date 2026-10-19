@@ -865,7 +865,18 @@ impl MirLowering:
 
     me declared_field_hir_type(base: HirExpr, field_name: text) -> HirType?:
         """Declared HirType of `base.field_name` when `base` is a typed binding
-        of a struct/class registered in this lowering (active-table ids)."""
+        of a struct/class registered in this lowering, rebound into the
+        active table.
+
+        The bare-name layout rows are filled by the prescan from the
+        DEFINING module's SymbolTable, so a `Named(sym)` field type read back
+        raw names an unrelated consumer symbol. Returning it made
+        `self.ctx.add_error(..)` on an imported class (impl in another
+        module) dispatch against the wrong owner -- "unresolved method call"
+        -- and shadowed the correctly rebound field-load local type. Prefer
+        the module-qualified identity row, rebind like the field-load path
+        (declared_field_type_in_current_table), and answer nil instead of an
+        unknown (`Error`) type so callers fall back to the lowered local."""
         val base_type = self.receiver_declared_type(base)
         if base_type == nil:
             return nil
@@ -880,14 +891,18 @@ impl MirLowering:
                     return nil
                 if val present_owner_symbol = optional_owner_symbol:
                     val owner_symbol: HirSymbol = present_owner_symbol
-                    for owner_key in [owner_symbol.name, mir_class_identity(owner_symbol)]:
+                    for owner_key in [mir_class_identity(owner_symbol), owner_symbol.name]:
                         if self.struct_field_order.has(owner_key) and self.struct_field_hir_type.has(owner_key):
                             val names = self.struct_field_order[owner_key]
                             val types = self.struct_field_hir_type[owner_key]
                             var fi = 0
                             while fi < names.len() and fi < types.len():
                                 if names[fi] == field_name:
-                                    return Some(types[fi])
+                                    val raw_field_type: HirType = types[fi]
+                                    val field_type: HirType = self.declared_field_type_in_current_table(owner_key, fi, raw_field_type)
+                                    match field_type.kind:
+                                        case HirTypeKind.Error: return nil
+                                        case _: return Some(field_type)
                                 fi = fi + 1
             case _: ()
         nil
