@@ -1719,6 +1719,9 @@ mod tests {
         assert!(matches!(exports.get("dir_walk"), Some(Value::Function { .. })));
     }
 
+    /// Generalization: aliases in a bare export list resolve each local name
+    /// independently, keep unaliased names, and never invent the alias as a
+    /// symbol to search for (the alias names nothing locally).
     #[test]
     fn bare_export_source_names_ignore_aliases() {
         let target = ImportTarget::Group(vec![
