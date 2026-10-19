@@ -369,3 +369,24 @@ fn mem_snapshot_enabled() -> bool:
 pub fn log_mem_snapshot(phase: text):
     if mem_snapshot_enabled():
         eprint("[MEM-SNAPSHOT] phase={phase} t_ms={_phase_elapsed_ms()} heap_live_bytes={rt_heap_live_bytes()} heap_peak_bytes={rt_heap_peak_bytes()}")
+
+# --- In-process MIR liveness line ---------------------------------------------
+# Unsharded MIR lowering is a single long loop (phase 3: ~1350 modules, hours)
+# that printed nothing between the HIR summary and the end of MIR, so a stalled
+# worker and a slowly growing one looked identical. One line every
+# MIR_PROGRESS_INTERVAL modules (and at the end): position, the process's own
+# resident set and wall time since the loop began. stdout is the stream the
+# parent relays; the same line also goes to SIMPLE_COMPILER_PHASE_PROFILE_FILE
+# when set, which is the only live channel on Windows, where the parent
+# captures the worker's stdout until it exits.
+extern fn rt_process_rss_kib() -> i64
+
+pub const MIR_PROGRESS_INTERVAL: i64 = 50
+
+pub fn mir_progress_due(done: i64, total: i64) -> bool:
+    done > 0 and (done % MIR_PROGRESS_INTERVAL == 0 or done == total)
+
+pub fn log_mir_progress(done: i64, total: i64, started_ms: i64, module_name: text):
+    val line = "[mir] {done}/{total} rss_mib={rt_process_rss_kib() / 1024} elapsed_s={(time_now_monotonic_ms() - started_ms) / 1000} module={module_name}"
+    print line
+    _append_phase_profile(line)
