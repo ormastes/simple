@@ -260,7 +260,7 @@ Remaining, recorded rather than done:
 
 - No pure-Simple zstd entropy encoder (lib emits raw/RLE blocks only); nvfs
   Zstd3/Zstd19 stay tagged-copy (TODO FR-NVFS-N7a-003).
-- Brotli: the decoder is now a full RFC 7932 decoder (block switching, complex
+- Brotli: the decoder is now an RFC 7932 decoder WITHOUT the static dictionary (block switching, complex
   prefix codes, context maps, distance ring) and decodes 7 of 9 official
   google/brotli vectors (`test/fixtures/compress/brotli/`,
   `brotli_official_vectors_spec.spl`). Remaining: `monkey` and `cp852-utf8`

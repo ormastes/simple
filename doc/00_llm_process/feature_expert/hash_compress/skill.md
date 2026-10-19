@@ -162,7 +162,7 @@ modulus (ciphertext == padded block, no RSA-2048 modexp). Spec:
 
 ## Brotli decoder (2026-10-19)
 
-`src/lib/nogc_sync_mut/compression/brotli/decoder.spl` is a full RFC 7932 decoder
+`src/lib/nogc_sync_mut/compression/brotli/decoder.spl` is an RFC 7932 decoder without the static dictionary
 (single mutable `BrotliDec`, canonical-count prefix decode, tables built per
 call, amortised push output). `std.common.compress.brotli.try_brotli_decompress`
 returns `Result` (`brotli_decompress` still maps errors to `[]`).
@@ -175,7 +175,8 @@ Traps found: the old decoder AND encoder shared non-RFC conventions (HSKIP=3 for
 simple codes instead of 1, NTREESD after the literal/command trees, ICP cell
 numbering, insert/copy sub-code bit order, copy-code 18/19 extras, WBITS map).
 Any hand-built brotli stream in a spec must follow RFC 7932 order, not the old
-encoder's. `decoder_block.spl`/`decoder_huffman.spl`/`decoder_tables.spl` are
-now unused by the decoder (only `brotli_ring_guard_spec` still reads source text).
+encoder's. The old `decoder_block/huffman/tables.spl` modules were dead after the
+rewrite and are deleted. A stream that references the static dictionary fails with
+`UnsupportedFeature` (monkey vector), never wrong output.
 Context modes (LSB6/MSB6/UTF8/Signed) have no passing official vector yet.
 
