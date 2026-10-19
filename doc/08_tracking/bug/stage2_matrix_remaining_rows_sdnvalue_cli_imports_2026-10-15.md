@@ -542,3 +542,28 @@ UNMEASURED. Control numbers this cycle: same wt tree measured 56,801
 (seednew18) and 113,663 (seednew20) on different builder binaries --
 final confirmation that the count is builder-binary-dependent (draw lottery),
 not tree-determined.
+
+## 2026-10-19 (cycle-173) -- workaround-load chase: parsed tables are EMPTY under the candidate; five bind-once layers applied; still one draw deep
+
+A wa-diag round (env SIMPLE_WORKAROUND_DIAG=1, commit 1ccbe18fec9) proved the
+'unknown canonical bug ID' failure is EMPTY PARSED TABLES, not a lookup miss:
+bugs_active rows=0 / bugs rows=0 under candidate-seednew where the seed engine
+parses 149/1436 rows from the same CRC-verified bytes (header parses fine, so
+every table keeps its name but loses all rows -- sections degrade to
+header-only). Bind-once treatments applied and seed-verified: SdnTable.get_row
+(for-in/key/pk), SdnDatabase.get_table (name/dict), SdnTable.parse row loop
+(lines[i]/columns[j]/parts[j] -- the silent row-skip), the section for-in and
+match-case table crossing in workaround_bug_snapshot. The validation itself
+now re-derives membership from the RAW DB BYTES (CRC-verified) via a byte
+substring scan instead of the parsed-table lookup. MEASURED: the refresh STILL
+fails at the same id -- with 0-row tables persisting, the surviving draw sits
+at/below content.split / bytes_to_text / section materialization. The
+workaround-load master experiment remains UNMEASURED after three cycles; the
+per-build draw lottery (cycle-171 lesson) makes each additional bind-once a
+stochastic step. RECOMMENDED PIVOT for the next row: stop curing individual
+read sites in the refresh path and instead measure whether the SEED-BUILT
+compiler (Rust seed as builder, which parses correctly) can produce the
+workaround index ONCE (simple check-dbs --fullscan bugs equivalent under the
+seed) and ship it as .simple/workarounds.sdn in wt -- the refresh then takes
+the identical-payload early-Ok path and NO candidate-side parse of the bug DB
+is needed at all.
