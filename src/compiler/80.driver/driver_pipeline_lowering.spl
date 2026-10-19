@@ -979,8 +979,17 @@ impl CompilerDriver:
                         not self.ctx.mir_modules.contains_key(bootstrap_closure_name):
                     val bootstrap_closure_hir = self.ctx.hir_modules[bootstrap_closure_name]
                     if bootstrap_closure_hir != nil:
-                        val bootstrap_closure_mir = bootstrap_lowering.lower_module(
-                            bootstrap_closure_hir, [], false)
+                        val bootstrap_closure_scoped = bootstrap_lowering.lower_bootstrap_closure_module(
+                            bootstrap_closure_hir)
+                        if bootstrap_closure_scoped.is_err():
+                            # Fail closed like the direct lane: the scope has
+                            # already ended, so the half-reclaimed lowering is
+                            # never used.
+                            _driver_collect_mir_errors(self.ctx, bootstrap_lowering.errors)
+                            self.ctx.add_error("MIR lowering transient scope failed for {bootstrap_closure_name}: {bootstrap_closure_scoped.unwrap_err()}")
+                            log_phase("aot:bootstrap_fixed:transient_scope_failed module={bootstrap_closure_name}")
+                            return false
+                        var bootstrap_closure_mir = bootstrap_closure_scoped.unwrap()
                         bootstrap_closure_mir.name = bootstrap_closure_name
                         self.ctx.mir_modules[bootstrap_closure_name] = bootstrap_closure_mir
                         log_phase("aot:bootstrap_fixed:closure_module module={bootstrap_closure_name} functions={bootstrap_closure_mir.functions.len()}")
@@ -1291,7 +1300,7 @@ impl CompilerDriver:
                         # every intermediate stays registered for the life of the
                         # process (the compiler's own immortal heap). See
                         # lower_module_transient_scoped for the enumerated escape
-                        # set and why ambient bootstrap is excluded.
+                        # set, including the ambient-bootstrap flat registries.
                         # Bind concrete for the concrete HirModule param; the ICE
                         # gate guarantees presence (dead Err arm mirrors it).
                         val scoped_entry = if val scoped_hir = direct_hir:
@@ -1433,7 +1442,7 @@ impl CompilerDriver:
                     continue
                 val fallback_devirt_before: i64 = lowering.devirtualized_calls
                 val module_errors_before = lowering.errors.len()
-                val scoped_fallback = lowering.lower_module_transient_scoped(hir_module, self.ctx.mir_feed_modules)
+                val scoped_fallback = lowering.lower_module_transient_scoped(hir_module, self.ctx.mir_feed_modules, true)
                 driver_trace_module_mir_errors(name, typed_hir_module.path,
                     lowering.errors, module_errors_before)
                 if scoped_fallback.is_err():

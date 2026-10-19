@@ -2129,7 +2129,33 @@ impl MirLowering:
         argument explicitly, the call shape the direct lane already proves.
         doc/08_tracking/bug/stage3_bootstrap_fixed_lower_module_segv_2026-10-11.md"""
         val no_providers: [HirModule] = []
-        self.lower_module(module, no_providers, true)
+        val no_archive_symbols: [i64]? = nil
+        val no_archive_globals: MirModule? = nil
+        val no_archive_thunks: [MirFunction] = []
+        self.lower_module(module, no_providers, true, no_archive_symbols,
+            no_archive_globals, no_archive_thunks)
+
+    me lower_bootstrap_closure_module(module: HirModule) -> Result<MirModule, text>:
+        """Lower one non-entry module of the stage3 bootstrap-fixed closure.
+
+        Same call-shape rule as `lower_bootstrap_entry_module`: the driver's
+        closure loop called `lower_module(hir, [], false)` from another module,
+        omitting the three trailing defaulted archive parameters. The
+        seed-compiled stage2 then read `archive_trait_thunks` as garbage
+        (0xfffffffffffffff0) and SIGSEGVed in lower_module's first `for` over
+        it (core: lower_module+804, rt_for_iterable). The call is made from
+        this class with every argument explicit.
+        doc/08_tracking/bug/stage3_bootstrap_closure_lower_module_default_args_segv_2026_10_19.md
+
+        It goes through `lower_module_transient_scoped`: lowering 1100
+        closure modules unscoped on this one instance retained ~36 MB each
+        (13.2 GB -> 52.9 GB). The scoped path reclaims the per-module arena
+        and promotes exactly the escape set the bootstrap lane needs (the
+        returned MirModule, the lowering's cross-module owners and the
+        `_bootstrap_mir_*` / `_bootstrap_fn_*` flat registries).
+        doc/08_tracking/bug/stage3_bootstrap_closure_mir_lowering_retention_2026_10_20.md"""
+        val no_closure_providers: [HirModule] = []
+        self.lower_module_transient_scoped(module, no_closure_providers, false)
 
     me lower_module_transient_scoped(module: HirModule, providers: [HirModule] = [], is_entry_module: bool = true) -> Result<MirModule, text>:
         """`lower_module` with the per-module lowering arena reclaimed.
@@ -2196,16 +2222,26 @@ impl MirLowering:
         # falls back to exactly today's unscoped behaviour.
         val scope_trace = mir_scope_trace_selected_v1(mir_lower_env_get("SIMPLE_MIR_SCOPE_TRACE_MODULE") ?? "", module.name)
         var scope_decisions: i64 = 0
+        # Every lower_module parameter is passed explicitly: the three archive
+        # parameters were added after this path's last native proof, and an
+        # omitted defaulted argument reached the callee as garbage on the
+        # stage3 closure lane
+        # (doc/08_tracking/bug/stage3_bootstrap_closure_lower_module_default_args_segv_2026_10_19.md).
+        val scoped_archive_symbols: [i64]? = nil
+        val scoped_archive_globals: MirModule? = nil
+        val scoped_archive_thunks: [MirFunction] = []
         if not transient_array_scope_begin_v1():
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 0))
-            return Ok(self.lower_module(module, providers, is_entry_module))
+            return Ok(self.lower_module(module, providers, is_entry_module, scoped_archive_symbols,
+                scoped_archive_globals, scoped_archive_thunks))
         scope_decisions = scope_decisions | 1
         val reverse_token = reverse_reference_module_begin_v1()
         if reverse_token < 0:
             val _ended = transient_array_scope_end_v1()
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 1))
             return Err("transient MIR scope reverse-reference owner unavailable for {module.name}")
-        val lowered: MirModule = self.lower_module(module, providers, is_entry_module)
+        val lowered: MirModule = self.lower_module(module, providers, is_entry_module, scoped_archive_symbols,
+            scoped_archive_globals, scoped_archive_thunks)
         mir_section_profile_mark("s1_lowered", module.name)
         # Function-local lookup tables are scratch. The completed MIR owns its
         # locals/blocks, while cross-module declaration/default/layout facts
