@@ -520,8 +520,8 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         # hc_enc_hir_type. Same defect class the scalar note above records as
         # already hit once and fixed by inlining; the node/opaque case was left
         # unmitigated. The statement form assigns the bare value without
-        # boxing -- which is exactly why the `opt` branch below must write
-        # `Some(...)` explicitly. Wire format is unchanged.
+        # boxing; the `opt` branch below keeps that bare value for node/opaque
+        # inners (see its note). Wire format is unchanged.
         var out = indent + "var " + target + ": " + decl_type + "? = nil\n"
         out = out + indent + "if r.next_i64() == 1:\n"
         out = out + indent + "    " + target + " = " + callee + "(r)\n"
@@ -534,7 +534,20 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         var out = indent + "var " + target + ": " + decl_type + " = nil\n"
         out = out + indent + "if r.next_i64() == 1:\n"
         out = out + _emit_dec(u, s.a, "ov{k}", indent + "    ", c)
-        out = out + indent + "    " + target + " = Some(ov{k})\n"
+        # A node/opaque inner value is already decoded into a `T?` local
+        # (statement form above). Wrapping it again as `Some(ov)` stores an
+        # Option box in the field, while fresh HIR lowering stores the bare
+        # node (expression_core.spl Range: "bare-lift"). A consumer that passes
+        # the field through unwrapped -- `struct_construct_spread_base` returns
+        # Range.end straight into lower_expr -- then reads the box as a HirExpr
+        # and MIR reports a garbage expression handle on warm (decoded) builds
+        # only (bug hir_cache_warm_decode_mir_divergence_core_c_2026-10-19).
+        # Assign the bare value so decoded and lowered HIR share one shape.
+        val inner = u.classify(s.a)
+        if inner.cat == "node" or inner.cat == "opaque":
+            out = out + indent + "    " + target + " = ov{k}\n"
+        else:
+            out = out + indent + "    " + target + " = Some(ov{k})\n"
         return out
     if s.cat == "list":
         var out = indent + "var " + target + ": " + decl_type + " = []\n"
