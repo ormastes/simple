@@ -23,7 +23,7 @@ use std.spec.skip_governance.{
 }
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
-use std.io_runtime.{file_append_text, file_exists, file_read}
+use std.io_runtime.{exit, file_append_text, file_exists, file_read}
 use std.nogc_sync_mut.fs.host_path.{host_path_is_absolute}
 use std.nogc_sync_mut.spec.trace_events.{emit_trace_case_event}
 
@@ -74,6 +74,10 @@ var _aggregate_owner_count: [i64] = []
 var _aggregate_seen_owner_paths: [text] = []
 var _aggregate_in_test: [i64] = []
 var _aggregate_in_hook: [i64] = []
+# Depth of running examples (hooks + body) outside aggregate mode. An array,
+# like the aggregate markers above, so nested-call global writeback cannot
+# restore a stale scalar. Empty means no case can consume a failure.
+var _case_depth: [i64] = []
 var _aggregate_failed_cases: [i64] = []
 var _aggregate_selected_case: [text] = []
 var _aggregate_selected_results: [text] = []
@@ -378,6 +382,7 @@ fn _execute_it(name: text, block: fn()) -> text:
     current_test_errors.clear()
     _expect_provisional_len = -1
     val pending_before = test_pending
+    _case_depth.push(1)
     if _aggregate_active():
         _aggregate_in_test.push(1)
 
@@ -397,6 +402,7 @@ fn _execute_it(name: text, block: fn()) -> text:
         if _aggregate_active():
             _aggregate_hook_callback_marks.push(1)
         hook()
+    val _ = _case_depth.pop()
     if _aggregate_active():
         val _ = _aggregate_in_test.pop()
 
@@ -1557,6 +1563,15 @@ pub fn note_expectation():
 pub fn fail_assertion(message: text):
     if _aggregate_active() and _aggregate_in_test.len() == 0:
         _aggregate_errors.push("assertion outside a case")
+    elif not _aggregate_active() and _case_depth.len() == 0:
+        # Outside aggregate mode nothing consumes current_test_errors unless an
+        # example is running, so a top-level failure (a comment doctest, a
+        # `simple run` script, a describe-level or before_all body) used to
+        # exit 0. With no harness to record it the failure is fatal, matching
+        # the seed's matcher/assert_* rule. bug_db:
+        # bdd_assert_outside_it_silent_false_green_2026_10_19.
+        print "assertion failed outside an `it` block: {message}"
+        exit(1)
     current_test_errors.push(message)
 
 pub fn fail_test(message: text):
