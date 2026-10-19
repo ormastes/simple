@@ -2242,7 +2242,18 @@ impl MirLowering:
         self.native_trait_layouts = []
         self.native_trait_implementations = []
         var retained_thunks: [MirFunction] = []
-        for thunk in archive_trait_thunks: retained_thunks.push(thunk)
+        # Cycle-169 (candidate-seednew 2026-10-19): the bare for-in read of the
+        # defaulted `archive_trait_thunks` parameter drew erased on the first
+        # bootstrap-fixed closure module (SIGSEGV in _rt_for_iterable's length
+        # load, lower_module+804, deterministic per binary). Bind the parameter
+        # ONCE into an annotated local -- the rebind restores the value (the
+        # cycle-71 ANY-transport pattern used throughout this file) -- and
+        # iterate the local, exactly the p2_add cycles 91-105 "bind once, guard
+        # the local" treatment for per-read draw corruption.
+        val archived_thunks_in: [MirFunction] = archive_trait_thunks
+        for raw_thunk in archived_thunks_in:
+            val thunk: MirFunction = raw_thunk
+            retained_thunks.push(thunk)
         self.native_trait_thunks = retained_thunks
         self.register_native_trait_declarations(module)
         for raw_trait_provider in providers:
