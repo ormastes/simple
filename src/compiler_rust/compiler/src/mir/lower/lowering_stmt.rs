@@ -1500,8 +1500,11 @@ impl<'a> MirLowerer<'a> {
                         });
                         // `[u8]` reads use a layout-tagged pointer, decided once
                         // here: bit 0 set = slot layout (8-byte tagged elements),
-                        // clear = byte-packed. Data pointers are 8-aligned, so
-                        // bit 0 is free. Bug:
+                        // clear = byte-packed. Bit 0 is free by contract: slot
+                        // buffers are `RuntimeValue`-aligned and packed byte
+                        // buffers are allocated 8-aligned (Rust runtime
+                        // `BYTE_ARRAY_DATA_ALIGN` in value/collections.rs; the C
+                        // runtime uses malloc, >= 8). Bug:
                         // jit_hoisted_u8_data_ptr_ignores_slot_layout_2026-10-19.
                         block.instructions.push(MirInst::Call {
                             dest: Some(packed),

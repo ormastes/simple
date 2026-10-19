@@ -2907,3 +2907,18 @@ fn hoisted_u8_read_follows_the_layout_tag() {
     rt_array_free(packed);
     rt_array_free(slot);
 }
+
+/// Contract behind the bit-0 layout tag: packed byte buffers stay 8-aligned
+/// across creation and growth (realloc keeps the helper's layout).
+#[test]
+fn packed_byte_data_pointers_are_8_aligned() {
+    for cap in [1u64, 3, 7, 9, 31] {
+        let array = rt_byte_array_new(cap);
+        assert_eq!(rt_array_data_ptr(array) % 8, 0, "cap {cap}");
+        for v in 0..200i64 {
+            assert!(rt_typed_bytes_u8_push(array, v & 0xff));
+            assert_eq!(rt_array_data_ptr(array) % 8, 0, "cap {cap} after {v} pushes");
+        }
+        rt_array_free(array);
+    }
+}

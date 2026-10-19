@@ -773,9 +773,15 @@ fn array_data_layout(capacity: u64) -> std::alloc::Layout {
     .expect("valid array data layout")
 }
 
+/// Byte-packed element buffers are 8-aligned by contract: the hoisted-loop
+/// `[u8]` read tags bit 0 of the data pointer with the slot layout (see
+/// `rt_typed_bytes_u8_data_at`), so bit 0 of a real data pointer must be 0.
+/// Every alloc/realloc/dealloc of a packed buffer goes through this layout.
+const BYTE_ARRAY_DATA_ALIGN: usize = 8;
+
 fn byte_array_data_layout(capacity: u64) -> std::alloc::Layout {
     let cap = capacity.max(1) as usize;
-    std::alloc::Layout::from_size_align(cap, 1).expect("valid byte array data layout")
+    std::alloc::Layout::from_size_align(cap, BYTE_ARRAY_DATA_ALIGN).expect("valid byte array data layout")
 }
 
 /// Aux-byte accounting for an array element-buffer replacement (grow path).
@@ -910,6 +916,7 @@ pub extern "C" fn rt_byte_array_new(capacity: u64) -> RuntimeValue {
             std::alloc::dealloc(ptr as *mut u8, header_layout);
             return RuntimeValue::NIL;
         }
+        debug_assert_eq!(data as usize % BYTE_ARRAY_DATA_ALIGN, 0, "packed byte data must be 8-aligned");
         note_aux_alloc(HeapObjectType::Array as u8, data_layout.size() as u64);
 
         (*ptr).header = HeapHeader::new(HeapObjectType::Array, header_size as u32);

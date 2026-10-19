@@ -106,7 +106,7 @@ interpreter (shift loop) readers were already explicit LE.
 Tests: `src/compiler_rust/compiler/tests/jit_hoisted_u8_read_slot_layout.rs`
 (u64 index sum 815 -> 1515, mid-array tail 4294967295 -> 3012, hoisted MIR shape:
 one layout check + one tagged read + no unchecked read, LE pinned values
-0x04030201 / 0x0807060504030201 on packed and slot arrays for Cranelift and an LLVM native build);
+0x04030201 / 0x0807060504030201 on packed and slot arrays for Cranelift and an LLVM native build in `tests/llvm_typed_bytes_le_native.rs`);
 runtime `hoisted_u8_read_follows_the_layout_tag`; C
 `rt_bootstrap_c_lane_bucket2_misc_selfcheck.c` tagged-slot cases.
 
