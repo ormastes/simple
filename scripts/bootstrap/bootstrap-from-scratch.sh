@@ -326,6 +326,10 @@ Options:
   --full-cli         Relink the full CLI after the staged pure-Simple build
                      (supported on native Linux and macOS hosts).
                      Implied by --deploy and one-binary mode.
+                     Stage 4c (crypto/compress dynSMF bundles, after the full
+                     CLI relink) is opt-in: env SIMPLE_BOOTSTRAP_STAGE4C_DYNSMF=1.
+                     Default 0 skips it with one log line; opted in, a missing
+                     src/lib/common/{crypto,compress}/dynsmf_entry.spl exits 1.
   --clean-rebuild    Explicitly clear caches for the build phases requested
   --invalidate-cache=<phase>
                      Explicitly invalidate only PHASE's selected entry cache
@@ -596,6 +600,10 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 # -- argv-parse end
+case "${SIMPLE_BOOTSTRAP_STAGE4C_DYNSMF:-0}" in
+  0|1) ;;
+  *) echo "error: SIMPLE_BOOTSTRAP_STAGE4C_DYNSMF must be 0 or 1 (got '${SIMPLE_BOOTSTRAP_STAGE4C_DYNSMF}')" >&2; exit 64 ;;
+esac
 
 if [ "${stop_after_seed}" -eq 1 ]; then
   [ "${full_bootstrap}" -eq 1 ] && [ "${stop_after_stage2}" -eq 0 ] &&
@@ -5834,24 +5842,34 @@ run_logged stage4b-ui-backend env RUST_LOG="${RUST_LOG:-error}" \
 [ -x "${ui_backend_bin}" ] || { echo "error: failed to compile cached UI backend" >&2; exit 1; }
 echo "Full CLI binary: ${full_bin}"
 
+# -- stage4c-dynsmf begin
 # Stage 4c: crypto/compress default to dynload, so the full CLI emits their
 # dynSMF bundles. SMF emit needs no linker; Windows inherits ${exe_suffix}
 # through ${full_bin}. No trust-registry hash generator exists yet, so the
 # artifact digests are printed as dynsmf_artifact_sha256=<id>:<sha> lines.
-echo "Stage 4c: compiling crypto/compress dynSMF bundles..."
-bootstrap_progress_mark stage4c "$(absolute_path "${log_dir}/stage4c-dynsmf-crypto.log")"
-mkdir -p build/dynsmf
-for dynsmf_id in crypto compress; do
-  dynsmf_entry="src/lib/common/${dynsmf_id}/dynsmf_entry.spl"
-  dynsmf_out="build/dynsmf/${dynsmf_id}.smf"
-  [ -f "${dynsmf_entry}" ] || { echo "error: Stage 4c dynSMF entry missing: ${dynsmf_entry}" >&2; exit 1; }
-  rm -f "${dynsmf_out}"
-  run_logged "stage4c-dynsmf-${dynsmf_id}" run_timeout 120 "${full_bin}" compile --format=smf \
-    "${dynsmf_entry}" -o "${dynsmf_out}"
-  [ -s "${dynsmf_out}" ] || { echo "error: Stage 4c failed to emit ${dynsmf_out}" >&2; exit 1; }
-  dynsmf_sha=$(hash_file "${dynsmf_out}") || exit 1
-  echo "dynsmf_artifact_sha256=${dynsmf_id}:${dynsmf_sha}"
-done
+# OPT-IN (SIMPLE_BOOTSTRAP_STAGE4C_DYNSMF=1): off by default so an ordinary
+# full bootstrap is unchanged. An env var, not a flag, because the strategy
+# supervisor rebuilds the Stage 4 continuation argv and drops unknown flags;
+# the environment reaches that child unchanged. Opted in, it stays fail-closed.
+if [ "${SIMPLE_BOOTSTRAP_STAGE4C_DYNSMF:-0}" != 1 ]; then
+  echo "Stage 4c: skipped (crypto/compress dynSMF bundles; set SIMPLE_BOOTSTRAP_STAGE4C_DYNSMF=1 to build them)"
+else
+  echo "Stage 4c: compiling crypto/compress dynSMF bundles..."
+  bootstrap_progress_mark stage4c "$(absolute_path "${log_dir}/stage4c-dynsmf-crypto.log")"
+  mkdir -p build/dynsmf
+  for dynsmf_id in crypto compress; do
+    dynsmf_entry="src/lib/common/${dynsmf_id}/dynsmf_entry.spl"
+    dynsmf_out="build/dynsmf/${dynsmf_id}.smf"
+    [ -f "${dynsmf_entry}" ] || { echo "error: Stage 4c dynSMF entry missing: ${dynsmf_entry}" >&2; exit 1; }
+    rm -f "${dynsmf_out}"
+    run_logged "stage4c-dynsmf-${dynsmf_id}" run_timeout 120 "${full_bin}" compile --format=smf \
+      "${dynsmf_entry}" -o "${dynsmf_out}"
+    [ -s "${dynsmf_out}" ] || { echo "error: Stage 4c failed to emit ${dynsmf_out}" >&2; exit 1; }
+    dynsmf_sha=$(hash_file "${dynsmf_out}") || exit 1
+    echo "dynsmf_artifact_sha256=${dynsmf_id}:${dynsmf_sha}"
+  done
+fi
+# -- stage4c-dynsmf end
 
 # ===========================================================================
 # Stage 5: Compile MCP servers (optional, skip with --no-mcp)
