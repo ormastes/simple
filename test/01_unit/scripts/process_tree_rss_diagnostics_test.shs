@@ -1,0 +1,119 @@
+#!/bin/sh
+# Real /proc observations and cleanup; fault injection only into a private copy.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+[ "$(uname -s)" = Linux ] || { echo 'SKIP: Linux diagnostics'; exit 0; }
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/resource" "$tmp/bootstrap"
+cp "$root"/scripts/resource/*.c "$tmp/resource/"
+cp "$root/scripts/bootstrap/bootstrap-session-exec.c" "$tmp/bootstrap/"
+python3 - "$root/scripts/resource/process-tree-rss-watchdog.pl" "$tmp/resource/guard.pl" <<'PY'
+import sys
+from pathlib import Path
+s = Path(sys.argv[1]).read_text()
+fixture = '''
+my $fixture_injected = 0;
+sub fixture_observation_delay {
+    my ($phase) = @_;
+    return if $fixture_injected || !-e $ENV{RSS_TEST_MARKER};
+    return unless $phase eq ($ENV{RSS_TEST_PHASE} // '');
+    $fixture_injected = 1;
+    die "fixture incomplete helper\\n" if $ENV{RSS_TEST_BROKEN};
+    if ($ENV{RSS_TEST_CPU}) {
+        my $until = monotonic_time() + .15;
+        1 while monotonic_time() < $until;
+    } else { sleep 1.1; }
+}
+'''
+assert s.count('sub observation_phase {') == 1
+s = s.replace('sub observation_phase {', fixture + '\nsub observation_phase {')
+needle = '    $observation_phase = $next;'
+assert s.count(needle) == 1
+s = s.replace(needle, needle + '\n    fixture_observation_delay($next);')
+needle = "        opendir(my $proc, '/proc')"
+assert s.count(needle) == 1
+s = s.replace(needle, "        fixture_observation_delay('proc');\n" + needle)
+Path(sys.argv[2]).write_text(s)
+PY
+unset SIMPLE_PROCESS_TREE_OBSERVER SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS
+export RSS_TEST_MARKER RSS_TEST_PHASE RSS_TEST_BROKEN RSS_TEST_CPU
+RSS_TEST_MARKER=$tmp/started
+for kind in normal proc membership helper broken cpu; do
+    rm -f "$RSS_TEST_MARKER"
+    RSS_TEST_PHASE=$kind RSS_TEST_BROKEN= RSS_TEST_CPU=
+    [ "$kind" != broken ] || { RSS_TEST_PHASE=helper; RSS_TEST_BROKEN=1; }
+    [ "$kind" != cpu ] || { RSS_TEST_PHASE=helper; RSS_TEST_CPU=1; }
+    duration=5
+    case "$kind" in normal|cpu) duration=.6 ;; esac
+    status=0
+    perl "$tmp/resource/guard.pl" --rss-cap-mode=enforce --max-rss-kib=5859375 \
+        --term-grace-seconds=0 --timeout-seconds=8 --receipt="$tmp/$kind.env" -- \
+        /bin/sh -c 'echo $$ > "$1"; exec sleep "$2"' sh "$RSS_TEST_MARKER" "$duration" \
+        >"$tmp/$kind.log" 2>&1 || status=$?
+    python3 - "$tmp/$kind.env" "$kind" "$status" <<'PY'
+import sys
+from pathlib import Path
+d = dict(line.split('=', 1) for line in Path(sys.argv[1]).read_text().splitlines())
+kind, status = sys.argv[2], int(sys.argv[3])
+ok = kind in ('normal', 'cpu')
+assert status == (0 if ok else 89), (kind, status, d)
+assert d['status'] == ('complete' if ok else 'rss-measurement-failed')
+assert d['quiescent'] == '1', (kind, d)
+assert d['observation_diagnostics'] == 'linux-proc-v1'
+assert d['observation_complete'] == ('1' if ok else '0')
+assert int(d['observation_process_count']) > 0, d
+assert int(d['observation_retained_group_count']) >= 0, d
+assert d['observation_budget_ms'] == '1000', d
+assert d['rss_cap_enforced'] == '1' and d['max_rss_kib'] == '5859375', d
+assert d['session_helper_integrity'] == 'verified'
+elapsed = float(d['observation_elapsed_ms'])
+cpu = float(d['observation_cpu_ms'])
+phases = ['proc', 'membership', 'helper', 'sessions', 'budget_check']
+total = sum(float(d[f'observation_{p}_ms']) for p in phases)
+assert abs(total - elapsed) < .01, (total, elapsed)
+assert cpu >= 0
+if kind in ('proc', 'membership', 'helper'):
+    assert float(d[f'observation_{kind}_ms']) >= 1000, d
+    assert d['observation_last_phase'] == 'budget_check'
+    assert 'budget_check,' not in d['observation_phases_completed']
+    assert d['sample_budget_exceeded'] == '1'
+    assert d['measurement_budget_complete'] == '0'
+elif kind == 'broken':
+    assert d['observation_last_phase'] == 'helper', d
+    assert d['observation_phases_completed'] == 'proc,membership,', d
+elif kind == 'cpu':
+    assert cpu >= 50 and float(d['observation_helper_ms']) >= 100, d
+if ok:
+    assert d['measurement_budget_complete'] == '1'
+    assert d['observation_last_phase'] == 'budget_check'
+    assert d['observation_phases_completed'].endswith('budget_check,')
+print(f'PASS: {kind}: exit={status}, elapsed={elapsed:.1f}ms, cpu={cpu:.1f}ms, cleanup verified')
+PY
+    if kill -0 "$(cat "$RSS_TEST_MARKER")" 2>/dev/null; then
+        echo "FAIL: $kind workload survived" >&2; exit 1
+    fi
+done
+perl - "$root/scripts/resource/process-tree-rss-watchdog.pl" <<'PERL'
+use strict;
+use warnings;
+open my $fh, '<', $ARGV[0] or die $!;
+my $source = do { local $/; <$fh> };
+$source =~ s/\n# Workload startup boundary.*\z//s or die 'startup boundary missing';
+local @ARGV = ('--', 'unused');
+my $probe = <<'PROBE';
+observation_receipt() eq "observation_diagnostics=unavailable\n" or die 'false default telemetry';
+$observer_backend = 'linux-proc';
+{
+    no warnings 'redefine';
+    *observation_cpu_time = sub { return undef };
+}
+snapshot();
+$observation_report{cpu_ms} eq 'unavailable' or die 'unavailable CPU reported as zero';
+$observation_report{selected_count} eq 'unavailable' or die 'absent membership reported as zero';
+$observation_report{process_count_complete} == 1 or die 'proc scan not complete';
+print "PASS: absent diagnostics and unavailable CPU/membership remain explicit\n";
+PROBE
+eval $source . $probe;
+die $@ if $@;
+PERL

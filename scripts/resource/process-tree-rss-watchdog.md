@@ -1,5 +1,37 @@
 # Sampled bootstrap RSS guard
 
+## Linux observation diagnostics
+
+Linux `/proc` receipts add `observation_diagnostics=linux-proc-v1` and retain
+the slowest completed observation, or the **first failed observation**, which
+cleanup samples cannot replace. `observation_complete=0` identifies failure;
+`observation_last_phase` names the phase active at that boundary. Other backends
+and runs without an observation report `observation_diagnostics=unavailable`.
+
+`observation_{proc,membership,helper,sessions,budget_check}_ms` are monotonic
+elapsed durations for the retained sample. `observation_phases_completed` lists
+completed phases in order; zero time in an unlisted phase means unobserved,
+not a measured zero. `observation_elapsed_ms` is their sum. The original
+`observation_budget_ms` remains the enforcement limit, with its existing policy.
+`proc` includes enumeration, reads and parsing; `membership` includes selecting
+live members; `helper` includes existing pinned helper integrity verification;
+`sessions` validates session membership; `budget_check` checks elapsed policy.
+
+`observation_cpu_ms` is the supervisor's user plus system CPU delta from Perl
+`times`, excluding child CPU, at the host's accounting tick resolution. Zero
+can mean less than one tick; unavailable readings use `unavailable`. Elapsed
+minus CPU does not distinguish descheduling from blocked I/O or prove a cause.
+`observation_process_count` counts accepted host `/proc` records; its
+`observation_process_count_complete` flag distinguishes partial scans.
+`observation_selected_count` counts existing live membership results, or is
+`unavailable` when selection did not run. `observation_retained_group_count`
+counts tracked groups at sample entry. No extra scans, shell-outs, or hashes
+are performed. Diagnostics never relax observation or memory enforcement.
+
+Run `sh test/01_unit/scripts/process_tree_rss_diagnostics_test.shs` for private
+fixture delays, partial failure, CPU accounting, first-failure retention and
+real workload cleanup. No compiler/bootstrap workload is involved.
+
 `perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib=5859375
 --interval-ms=100 --timeout-seconds=660 --receipt=/absolute/run.rss.env
 -- COMMAND ARGS...` supervises one command on macOS/Linux. The production
