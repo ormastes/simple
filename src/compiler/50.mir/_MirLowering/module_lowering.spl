@@ -700,7 +700,7 @@ impl MirLowering:
             return self.struct_identity_layout_key[identity]
         shape
 
-    fn struct_owner_method_key(owner: text, method: text) -> text:
+    me struct_owner_method_key(owner: text, method: text) -> text:
         """`{owner}::{method}` dispatch-row key for a receiver's recorded owner.
 
         A struct value is recorded under its qualified LAYOUT key
@@ -710,13 +710,13 @@ impl MirLowering:
         direct spelling has none; the module qualifier keeps a same-named
         struct of another module out."""
         val direct = "{owner}::{method}"
-        if self.struct_method_syms.has(direct):
+        if self.struct_method_key_present_v1(direct):
             return direct
         val separator = owner.rfind("::")
         if separator > 0:
             val identity_owner = mir_layout_canonical_module_name(owner.substring(0, separator))
             val identity_key = "{identity_owner}.{owner.substring(separator + 2)}::{method}"
-            if self.struct_method_syms.has(identity_key):
+            if self.struct_method_key_present_v1(identity_key):
                 return identity_key
         direct
 
@@ -962,6 +962,13 @@ impl MirLowering:
         # is_unit=false asymmetry.
         if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1" and enum_def_r.name == "SdnValue":
             eprint("[enum-reg] register-enum module={self.current_module_id} name='{enum_def_r.name}' runtime_name='{enum_def_r.runtime_name}' variants={enum_def_r.variants.len()}")
+        # Every consumer module re-registers every provider enum. When this
+        # exact declaration is the one currently installed under its bare
+        # name, every write below would store a value-equal fresh copy over
+        # the retained one (orphaning the old copy as an immortal) and change
+        # nothing a reader can observe, so skip it.
+        if self.enum_registration_is_current_v1(enum_def_r, store_payload_types):
+            return
         val generic_constructor = enum_def_r.type_params.len() > 0 or enum_def_r.is_generic_template
         self.generic_enum_constructor_owners[enum_def_r.name] = generic_constructor
         if enum_def_r.runtime_name != "":
@@ -1059,6 +1066,51 @@ impl MirLowering:
         self.enum_variant_index[enum_def_r.name] = names
         self.reindex_enum_variant_owners(enum_def_r.name, prior_variant_names, names)
         self.enum_variant_discriminants[enum_def_r.name] = discriminants
+        if self.declaration_repository == nil:
+            # A names-only registration (store_payload_types=false) did not
+            # install payload types, so it never counts as current.
+            self.enum_registration_current[enum_def_r.name] = if store_payload_types: enum_def_r.runtime_name else: ""
+
+    fn enum_registration_is_current_v1(enum_def: HirEnum, store_payload_types: bool) -> bool:
+        """True when re-running register_enum_variants for `enum_def` would
+        rewrite every registry row with a value-equal copy of what is already
+        installed. Holds only for the exact declaration (runtime_name) that
+        the last full registration under this bare name installed, with no
+        explicit discriminants (those fold through lower_const_expr, which can
+        diagnose and read per-module constant state), not generic, not the
+        builtin Option/Result names (seeded outside this method), and only
+        outside the declaration-repository lane (it resets payload maps per
+        module and relies on re-registration). Payload rows hold the provider
+        HirTypes themselves, never consumer-relocated ones, so they do not
+        depend on which consumer module is being lowered."""
+        # Cycle-171: same annotated rebind as register_enum_variants -- bare
+        # field reads of a by-value HirEnum parameter drew erased on
+        # candidate-seednew.
+        val enum_def_r: HirEnum = enum_def
+        if not store_payload_types or self.declaration_repository != nil:
+            return false
+        if enum_def_r.runtime_name == "" or enum_def_r.name == "Option" or enum_def_r.name == "Result":
+            return false
+        if enum_def_r.type_params.len() > 0 or enum_def_r.is_generic_template:
+            return false
+        if not self.enum_registration_current.has(enum_def_r.name):
+            return false
+        if self.enum_registration_current[enum_def_r.name] != enum_def_r.runtime_name:
+            return false
+        if not self.enum_variant_index.has(enum_def_r.name):
+            return false
+        val installed_names: [text] = self.enum_variant_index[enum_def_r.name]
+        if installed_names.len() != enum_def_r.variants.len():
+            return false
+        var vi = 0
+        while vi < enum_def_r.variants.len():
+            val variant: HirVariant = enum_def_r.variants[vi]
+            if variant.has_discriminant:
+                return false
+            if installed_names[vi] != variant.name:
+                return false
+            vi = vi + 1
+        true
 
     me register_enum_payload_metadata_v1(enum_name: text, runtime_name: text, variant: text,
             types: [HirType], names: [text], kind: text, store_types: bool = true, write_bare: bool = true):
@@ -2173,6 +2225,12 @@ impl MirLowering:
         # .values() scratch array. Do not promote a second owner of HIR bodies.
         # The input HIR and returned MIR keep their own retained roots.
         self.lower_emit_fn_values = []
+        # Demand-materialization scratch: the borrowed provider HIR list must
+        # not become a promotion root (it would walk the whole driver HIR),
+        # and the materialized-key set describes struct_method_* rows that
+        # were just retired above. The provider session index itself stays.
+        self.provider_method_modules = []
+        self.provider_method_materialized = {}
         # From here every exit path must close the scope. `end` frees the
         # arena, so any path that ends WITHOUT a successful promotion must
         # also refuse to hand `lowered` back.
@@ -2252,6 +2310,11 @@ impl MirLowering:
             archive_trait_thunks: [MirFunction] = []) -> MirModule:
         """Lower HIR module to MIR."""
         self.unsafe_depth = 0
+        # Demand rows never cross a module boundary: no provider list is
+        # installed until this module's provider pass below.
+        self.provider_method_modules = []
+        self.provider_method_consumer = module.name
+        self.provider_method_materialized = {}
         self.current_module_id = mir_layout_canonical_module_name(module.name)
         # SIMPLE_ENUM_REG_TRACE=1 progression receipt (cycle-54/55 MIR livelock
         # localization): brackets every module's lowering so the next failing
@@ -2381,17 +2444,38 @@ impl MirLowering:
         for raw_local_class_value in local_class_values:
             val local_class_value: HirClass = raw_local_class_value
             consumer_composite_names[local_class_value.name] = true
-        # Per-provider link tables built below are reused by
-        # register_trait_receiver_impls for the same consumer instead of being
-        # rebuilt from every provider's whole function list a second time.
-        # Index-aligned with `providers`; consumer-call scratch only (never
-        # stored on self), so it dies with this module's transient scope.
+        # Provider link tables are a pure function of the provider HIR, so the
+        # session index (ensure_provider_session_v1) builds them ONCE for the
+        # whole provider list and every consumer reuses them; only a list the
+        # session does not cover falls back to the per-consumer build below.
+        # The same session index holds the provider method dispatch rows: by
+        # default they are no longer relocated into every consumer's table up
+        # front but materialized per key on first lookup
+        # (provider_method_materialize_v1). provider_methods_eager /
+        # SIMPLE_MIR_EAGER_PROVIDER_METHODS=1 restores the eager relocation.
+        val eager_provider_methods = self.provider_methods_eager or (mir_lower_env_get("SIMPLE_MIR_EAGER_PROVIDER_METHODS") ?? "") == "1"
+        if providers.len() > 0:
+            self.ensure_provider_session_v1(providers)
+        val provider_session_valid = providers.len() > 0 and self.provider_session_names.len() == providers.len() and self.provider_session_links_ready.len() == providers.len()
+        val lazy_provider_methods = provider_session_valid and not eager_provider_methods
+        if lazy_provider_methods:
+            # Borrowed for this module only; emptied before promotion.
+            self.provider_method_modules = providers
+        # Index-aligned with `providers` and reused by
+        # register_trait_receiver_impls. The local arrays only hold references
+        # to session tables (or this consumer's own fallback tables).
         var provider_links_by_index: [Dict<i64, text>] = []
         var provider_links_ready: [bool] = []
+        var provider_loop_i = 0
         for raw_provider_module in providers:
             val provider_module: HirModule = raw_provider_module
+            val provider_index = provider_loop_i
+            provider_loop_i = provider_loop_i + 1
             var provider_links_built = false
             var provider_links: Dict<i64, text> = {}
+            if provider_session_valid and self.provider_session_links_ready[provider_index]:
+                provider_links = self.provider_session_links[provider_index]
+                provider_links_built = true
             if provider_module.name != module.name:
                 val provider_struct_keys: [SymbolId] = provider_module.structs.keys()
                 for dk_35 in provider_struct_keys:
@@ -2410,22 +2494,26 @@ impl MirLowering:
                 # table and the method pass below (both used to walk
                 # functions.keys() separately on every consumer module).
                 var provider_funcs: [HirFunction] = []
-                val provider_function_keys_34: [SymbolId] = provider_module.functions.keys()
-                for dk_34 in provider_function_keys_34:
-                    # workaround(p2_add cycles 91-105): per-read draw corruption — bind once, guard the local.
-                    val provider_func: HirFunction = provider_module.functions[dk_34]
-                    if provider_func == nil:
-                        continue
-                    provider_links[provider_func.symbol.id] = mir_provider_function_name(provider_module.name, provider_module.symbols, provider_func)
-                    provider_funcs.push(provider_func)
-                provider_links_built = true
+                # Lazy rows need neither the function list nor a link table
+                # rebuild: both come from the session index.
+                if not lazy_provider_methods or not provider_links_built:
+                    val provider_function_keys_34: [SymbolId] = provider_module.functions.keys()
+                    for dk_34 in provider_function_keys_34:
+                        # workaround(p2_add cycles 91-105): per-read draw corruption — bind once, guard the local.
+                        val provider_func: HirFunction = provider_module.functions[dk_34]
+                        if provider_func == nil:
+                            continue
+                        if not provider_links_built:
+                            provider_links[provider_func.symbol.id] = mir_provider_function_name(provider_module.name, provider_module.symbols, provider_func)
+                        provider_funcs.push(provider_func)
+                    provider_links_built = true
                 val provider_class_keys: [SymbolId] = provider_module.classes.keys()
                 for dk_33 in provider_class_keys:
                     # workaround(p2_add cycles 91-105): per-read draw corruption — bind once, guard the local.
                     val provider_class: HirClass = provider_module.classes[dk_33]
                     if provider_class == nil:
                         continue
-                    self.register_provider_class(provider_class, provider_module.symbols, provider_links, false)
+                    self.register_provider_class(provider_class, provider_module.symbols, provider_links, false, not lazy_provider_methods)
                 # Provider enums were gated-in by the condition above but
                 # never registered: a consumer module's match arms on a
                 # provider enum's variants found an empty registry
@@ -2435,7 +2523,7 @@ impl MirLowering:
                 for provider_enum in provider_module.enums.values():
                     self.register_enum_variants(provider_enum)
                 var provider_func_i = 0
-                while provider_func_i < provider_funcs.len():
+                while not lazy_provider_methods and provider_func_i < provider_funcs.len():
                     # Annotated rebind of the already nil-guarded element.
                     val provider_method_func: HirFunction = provider_funcs[provider_func_i]
                     self.register_provider_method(provider_method_func, provider_module.symbols, provider_links)

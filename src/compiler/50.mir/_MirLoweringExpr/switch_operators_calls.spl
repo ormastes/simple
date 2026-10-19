@@ -2459,7 +2459,7 @@ impl MirLowering:
                         case _: ()
                     if struct_name != "":
                         val method_key = "{struct_name}::{method}"
-                        if self.struct_method_syms != nil and self.struct_method_syms.has(method_key):
+                        if self.struct_method_syms != nil and self.struct_method_key_present_v1(method_key):
                             return self.resolved_call_hir_return_type(self.struct_method_syms[method_key])
                 # Static-receiver symbol-table fallback (cross-module inline
                 # class methods -- native_build_cross_module_result_payload_
@@ -2689,7 +2689,7 @@ impl MirLowering:
                         case _: ""
                     if struct_name != "":
                         val method_key = "{struct_name}::{method}"
-                        if self.struct_method_syms != nil and self.struct_method_syms.has(method_key):
+                        if self.struct_method_syms != nil and self.struct_method_key_present_v1(method_key):
                             return self.resolved_call_payload_shape(self.struct_method_syms[method_key], variant)
                 val static_recv_sym: SymbolId? = match receiver.kind:
                     case Var(recv_sym): Some(recv_sym)
@@ -6429,6 +6429,25 @@ impl MirLowering:
                 lw.struct_method_return_names = self.struct_method_return_names
                 lw.struct_method_return_is_array = self.struct_method_return_is_array
                 lw.struct_method_return_is_optional = self.struct_method_return_is_optional
+                # Provider method rows are materialized on demand: the lifted
+                # body must see every row the eager pass used to install, so
+                # it carries the same read-only session index and borrowed
+                # provider list. Its materialized-key set starts empty (a
+                # parent re-materialization is idempotent). Without the
+                # parent's ambiguity table it must not start recording one.
+                lw.provider_session_names = self.provider_session_names
+                lw.provider_session_links = self.provider_session_links
+                lw.provider_session_links_ready = self.provider_session_links_ready
+                lw.provider_method_row_keys = self.provider_method_row_keys
+                lw.provider_method_row_provider = self.provider_method_row_provider
+                lw.provider_method_row_kind = self.provider_method_row_kind
+                lw.provider_method_row_symbol = self.provider_method_row_symbol
+                lw.provider_method_row_class_symbol = self.provider_method_row_class_symbol
+                lw.provider_method_row_return_type = self.provider_method_row_return_type
+                lw.provider_method_modules = self.provider_method_modules
+                lw.provider_method_consumer = self.provider_method_consumer
+                lw.provider_methods_eager = self.provider_methods_eager
+                lw.provider_method_record_ambiguity = self.declaration_repository != nil and self.provider_method_record_ambiguity
                 lw.enum_payload_struct_names = self.enum_payload_struct_names
                 lw.enum_single_payload_types = self.enum_single_payload_types
                 lw.enum_variant_payload_types = self.enum_variant_payload_types
@@ -6577,6 +6596,16 @@ impl MirLowering:
                     return nil
                 self.canonical_type_symbols = lw.canonical_type_symbols
                 self.next_canonical_type_symbol = lw.next_canonical_type_symbol
+                if self.provider_method_modules.len() > 0:
+                    # Rows the lifted body materialized relocated provider
+                    # symbols into lw's table; adopt that table and the rows
+                    # so the lambda's SymbolIds stay valid in this module
+                    # whether or not the runtime shares these carriers.
+                    self.symbols = lw.symbols
+                    self.struct_method_syms = lw.struct_method_syms
+                    self.struct_method_return_names = lw.struct_method_return_names
+                    self.struct_method_return_is_array = lw.struct_method_return_is_array
+                    self.struct_method_return_is_optional = lw.struct_method_return_is_optional
                 if self.declaration_repository != nil:
                     # Defaults first demanded inside the lift can add genuine
                     # global bindings. Preserve their owner/projection tables
