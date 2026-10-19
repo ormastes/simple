@@ -8,7 +8,9 @@
 # symbols) and only breaks later, in the lexer or a `sh` shebang line.
 #
 # MECHANISM: committed blob content only (git diff --raw -z + git cat-file
-# --batch, never the working tree). Scope: *.spl *.sdn *.shs *.sdl (the
+# --batch, never the working tree), diffed from the MERGE-BASE of BASE and
+# NEW so an unrebased branch is judged on its own changes, not on files a
+# sibling PR touched since. Scope: *.spl *.sdn *.shs *.sdl (the
 # .gitattributes `text eol=lf` rows plus .sdl); added, modified and
 # type-changed (symlink -> file) paths. Exempt: src/compiler_rust/vendor/**,
 # src/runtime/vendor/** (`-text -eol` in .gitattributes); .bat/.cmd/.sh are not
@@ -17,7 +19,7 @@
 # truncated sequences) and a CR byte scan; only on failure is each file
 # re-checked to name the offenders.
 #
-# SELFTEST: fatal; runs (6 in-process fixtures asserting verdict AND exit code)
+# SELFTEST: fatal; runs (8 in-process fixtures asserting verdict AND exit code)
 # on the first scan after any change to this script, then its PASS is cached
 # (see the bottom of the file); `--selftest` always runs it.
 #
@@ -52,11 +54,22 @@ run_scan() {
     _ncommits=$(git rev-list --count "$_range" 2>/dev/null) || { echo "ERROR — nothing was checked (cannot resolve range $_range)"; return 2; }
     [ "${_ncommits:-0}" -gt 0 ] || { echo "ERROR — nothing was checked (range $_range resolves to 0 commits)"; return 2; }
     _base=${_range%%..*}; _new=${_range##*..}
+    # Judge the branch's OWN changes: diff from the merge-base, never tip-vs-tip.
+    # The required CI job passes the base-branch tip AT EVENT TIME as BASE, so
+    # on an unrebased branch a tip-vs-tip diff lists every file a sibling PR
+    # touched since, at the branch's STALE content: PR #3877 (2 clean files)
+    # was blocked on a CR in a file it never touched, one that #3869's own
+    # follow-up had already fixed on the base. `rev-list --count BASE..NEW`
+    # above already counts merge-base-relative commits, so the diff base must
+    # match it. Unrelated histories have no merge-base; tip-vs-tip is then the
+    # only diff there is.
+    _mb=$(git merge-base "$_base" "$_new" 2>/dev/null) || _mb=""
+    [ -n "$_mb" ] || _mb=$_base
     _tmp=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
     _list="$_tmp/list"; _all="$_tmp/all"
     # -z: NUL-separated records, so odd path bytes cannot be quoted/mis-split.
     # Fields: ":<m1> <m2> <o1> <o2> <status>" NUL "<path>" NUL
-    git diff --raw -z --no-renames --no-abbrev --diff-filter=AMT "$_base" "$_new" > "$_tmp/rawz" 2>/dev/null \
+    git diff --raw -z --no-renames --no-abbrev --diff-filter=AMT "$_mb" "$_new" > "$_tmp/rawz" 2>/dev/null \
         || { rm -rf "$_tmp"; echo "ERROR — nothing was checked (git diff failed for $_range)"; return 2; }
     tr '\000' '\n' < "$_tmp/rawz" > "$_tmp/raw"
     _n=0; : > "$_list"
@@ -127,16 +140,36 @@ selftest() {
         _fi_file d.md 'doc\n'
     } | git fast-import --quiet || { cd "$_here"; echo "ERROR — nothing was checked (selftest fast-import failed)"; return 2; }
     B4=$(git rev-parse main); B3=$(git rev-parse main~1); B2=$(git rev-parse main~2); B1=$(git rev-parse main~3); B0=$(git rev-parse main~4)
+    # Unrebased-branch fixtures: main goes on to FIX crlf.spl (c5 -> B5) while
+    # two branches fork at B2, where crlf.spl still carries CR. `side` adds one
+    # clean file; `side_bad` adds its own CRLF file. Judged against B5 (the
+    # base tip at event time), only the branch's own change may count: a
+    # tip-vs-tip diff would list crlf.spl at its stale CR content for both.
+    git update-ref refs/heads/side "$B2" && git update-ref refs/heads/side_bad "$B2" || { cd "$_here"; echo "ERROR — nothing was checked (selftest update-ref failed)"; return 2; }
+    # A second fast-import stream must name the parent sha in `from`, or it
+    # starts a new root and refuses the non-fast-forward update.
+    _fi_commit_on() { printf 'commit refs/heads/%s\ncommitter t <t@t> 0 +0000\ndata 2\n%s\nfrom %s\n' "$1" "$2" "$3"; }
+    {
+        _fi_commit_on main c5 "$B4"
+        _fi_file crlf.spl 'x\ny\n'
+        _fi_commit_on side s1 "$B2"
+        _fi_file side.spl 'fn side() -> i64: 1\n'
+        _fi_commit_on side_bad s2 "$B2"
+        _fi_file crlf2.spl 'p\r\nq\n'
+    } | git fast-import --quiet || { cd "$_here"; echo "ERROR — nothing was checked (selftest fast-import 2 failed)"; return 2; }
+    B5=$(git rev-parse main); SIDE=$(git rev-parse side); SIDE_BAD=$(git rev-parse side_bad)
     _stcheck "clean multibyte utf8 + exempt bat/vendor" "$B0..$B1" 0 "PASS — 1 file(s) checked"
     _stcheck "CRLF in .spl" "$B1..$B2" 1 "crlf.spl(CR)"
     _stcheck "truncated utf8 + surrogate" "$B2..$B3" 1 "bad.sdn(invalid-utf8) sur.shs(invalid-utf8)"
     _stcheck "no in-scope file changed" "$B3..$B4" 0 "PASS — 0 file(s) checked"
     _stcheck "empty range" "$B4..$B4" 2 "0 commits"
     _stcheck "bare rev rejected" "$B4" 2 "must contain"
+    _stcheck "unrebased branch judged from merge-base, not base tip" "$B5..$SIDE" 0 "PASS — 1 file(s) checked"
+    _stcheck "unrebased branch's own CRLF still fails, sibling's stale file not named" "$B5..$SIDE_BAD" 1 "1 offender(s): crlf2.spl(CR)"
     cd "$_here" || return 2
     rm -rf "$_st"
     [ "$_stfail" -eq 0 ] || { echo "ERROR — nothing was checked (selftest failed)"; return 2; }
-    echo "selftest: all 6 fixtures passed"
+    echo "selftest: all 8 fixtures passed"
     return 0
 }
 
@@ -154,6 +187,6 @@ if [ "${1:-}" = --selftest ] || [ -z "$_marker" ] || [ ! -f "$_marker" ]; then
     selftest || exit 2
     [ -z "$_marker" ] || : > "$_marker" 2>/dev/null || :
 fi
-[ "${1:-}" = --selftest ] && { echo "PASS — selftest only, 6 fixtures"; exit 0; }
+[ "${1:-}" = --selftest ] && { echo "PASS — selftest only, 8 fixtures"; exit 0; }
 run_scan "${1:-origin/main..HEAD}"
 exit $?
