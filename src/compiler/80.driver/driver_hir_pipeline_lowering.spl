@@ -95,6 +95,7 @@ use compiler.hir.hir_codec.{hir_module_functions_at_v1, hir_fn_scalars_at_v1, hi
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_hits, hir_cache_last_warnings, hir_cache_parser_binding_v1, hir_cache_last_parser_objectless, hir_cache_load_parsed_v1, hir_cache_last_refusal_is_io_v1, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_in_owned_scope, hir_cache_clear_last_warnings}
+use compiler.driver.driver_hir_cache.{hir_cache_misses, hir_cache_adoption_receipt_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1}
 use compiler.driver.driver_hir_cache.{hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block, hir_shard_inventory}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
@@ -1176,9 +1177,11 @@ impl CompilerDriver:
                     shard_completed_surfaces[surface_index] = true
                     progress_hir_done = progress_hir_done + 1
                     if shard_status == 1 or shard_status == 3: hir_shard_lowered = hir_shard_lowered + 1
+                # Poisoned modules are this row's failures; before 2026-10-19
+                # the count sat in the `cached` slot and `failed` was 0.
                 log_build_progress("hir", "modules", progress_hir_done,
-                    surfaces.surfaces.len(), source.module_name, 2, 6, 0,
-                    self.ctx.poisoned_module_count_value, "running")
+                    surfaces.surfaces.len(), source.module_name, 2, 6,
+                    self.ctx.poisoned_module_count_value, hir_cache_hits(), "running")
                 hir_loop_pos = hir_loop_pos + 1
                 continue
             val hir_stream_cached: HirModule? = if hir_stream_key != "":
@@ -1202,9 +1205,13 @@ impl CompilerDriver:
             # is the phase that actually breaks (stack-exhaustion SIGSEGV,
             # 2026-08-17), so the module being lowered must be named BEFORE the
             # work starts or a hang here is unattributable.
+            # `cached` is the HIR cache hit count: until 2026-10-19 this was a
+            # literal 0, so a main build that adopted every shard entry
+            # (`[hir-cache] hits=2702 misses=0`) still logged `cached=0` on
+            # every row and was read as re-lowering serially.
             log_build_progress("hir", "modules", progress_hir_done,
                 surfaces.surfaces.len(), source.module_name,
-                2, 6, 0, 0, "running")
+                2, 6, 0, hir_cache_hits(), "running")
             var hir_module: HirModule = nil
             var hir_cache_stored: bool = hir_stream_cached != nil
             if hir_stream_cached != nil:
@@ -1390,7 +1397,7 @@ impl CompilerDriver:
             # multi-minute phase costs nothing measurable.
             log_build_progress("hir", "modules", progress_hir_done,
                 surfaces.surfaces.len(), source.module_name,
-                2, 6, 0, 0, "running")
+                2, 6, 0, hir_cache_hits(), "running")
             hir_loop_pos = hir_loop_pos + 1
 
         # Post-loop receipts (2026-09-05). The Stage-3 worker SEGV'd four times
@@ -1400,6 +1407,10 @@ impl CompilerDriver:
         log_phase("phase3:hir:loop:done modules={progress_hir_done}")
         # Always printed (task 8a): a disabled cache prints
         # `[hir-cache] disabled reason=...`, so no build log is silent about it.
+        # The main build (not a shard) first says how much of the shard
+        # pre-pass it adopted; the summary stays the LAST `[hir-cache]` line.
+        if not hir_shard_mode:
+            print hir_cache_adoption_receipt_v1(hir_cache_hits(), hir_cache_misses())
         print hir_cache_summary()
         if hir_shard_mode:
             print hir_shard_summary(hir_level_count, hir_shard_lowered)
@@ -2147,6 +2158,8 @@ impl CompilerDriver:
 
         # Always printed (task 8a): a disabled cache prints
         # `[hir-cache] disabled reason=...`, so no build log is silent about it.
+        if not hir_shard_mode:
+            print hir_cache_adoption_receipt_v1(hir_cache_hits(), hir_cache_misses())
         print hir_cache_summary()
         if hir_shard_mode:
             # Shard children exist only to fill the HIR cache. Everything after

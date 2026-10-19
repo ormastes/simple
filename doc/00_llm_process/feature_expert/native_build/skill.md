@@ -108,6 +108,22 @@ Host-runtime parity is a real, currently-latent gap: `src/runtime/runtime_native
 the Rust runtime still lack these three, so the same erased-receiver path would fail to
 link hosted. Precedent for doing it in both: `rt_text_cmp_any`.
 
+## HIR shard adoption and streaming parse receipts (2026-10-19)
+
+- Read `[hir-cache] hits= misses=` (and now `[hir-cache] adopted= lowered=`,
+  printed by the main build before the summary) to judge whether the shard
+  pre-pass was adopted. The `[build] phase=hir ... cached=` field was a literal
+  0 on the streaming route until 2026-10-19 and misread as "re-lowered".
+- `phase2:surface:file:parse-start` is emitted BEFORE the front-end cache is
+  consulted: it is not a cold-parse count. Use `[frontend-cache] hits= misses=
+  parses=` (now printed by every process on the streaming route too) and
+  `[parse-shard] done ... parses= claimed=`; `claimed=0` on every shard means
+  the shards did not partition.
+- Hit cost matters at scale: 2702 HIR hits cost ~196 ms each (decode + a
+  redundant full re-encode) = 9 min serial. A hit now decodes once; the
+  store-side stability gate plus the checksum carry the admission.
+- Record: `doc/08_tracking/bug/phase4_hir_adoption_reported_cached0_and_parse_shards_unpartitioned_2026-10-19.md`.
+
 ## Update Rule
 After native-build defects, closure-discovery changes, or cache logic shifts, refresh
 this skill with new open-bug links and concrete gotchas.
