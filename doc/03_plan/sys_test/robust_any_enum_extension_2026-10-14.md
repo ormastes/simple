@@ -108,3 +108,36 @@ the patch does not enable them. Exact stale adjacent test cases are tracked in
 Additional sidecars: N/A. Root owns independent exact-head review and runtime
 qualification. No compiler, tests, native builds, or doc generation were
 launched for this port; the existing six-total attempt accounting is unchanged.
+
+## 2026-10-19 remaining coherence payload follow-up
+
+Base `7ac25381e98545e7ad57503428094d1b1e3811ba` contains collector PR 3762 and
+PassScope PR 3765. Their source fixes are retained; their presence alone does
+not discharge runtime qualification or the remaining historical audit groups.
+
+REQ-ENUM-COHERENCE-PAYLOAD: preserve `Some(text)`/nil suggestion metadata at
+`CoherenceError.OrphanImpl`, exact diagnostic payload ordering and ownership,
+and fail-closed behavior for unknown variants/unsupported payload kinds.
+The selected repair annotates the suggestion `text?` and qualifies the four
+diagnostic variants. It preserves the O(1) local-type presence query, existing
+orphan rules, and exact strings. No fallback/default enum behavior is added.
+
+| Boundary | Executable regression | Evidence |
+|---|---|---|
+| Optional suggestion, local/foreign rules, four diagnostic variants | `test/01_unit/compiler/traits/trait_coherence_optional_payload_spec.spl` | Seven scenarios authored; UNRUN |
+| Typed optional text merge / wrong optional primitive rejection | `test/01_unit/compiler/mir/optional_enum_payload_owner_spec.spl` | Two added scenarios; UNRUN |
+| Unsupported payload kind, unknown variant, wrong arity | `test/01_unit/compiler/mir/enum_payload_extension_boundary_spec.spl` | Two scenarios through production boundary methods; UNRUN |
+| Registry nonmutation with 128 local types | Coherence spec above | Behavioral oracle only; no time/RSS/allocation measurement |
+
+Historical group 155 gains a consumer source mitigation, not a general
+branch-join inference repair or runtime closure. Groups 99/104/108/111/116/117/120
+remain unresolved; no result-payload support was widened without exact
+receiver evidence. The tracking record is
+`doc/08_tracking/bug/coherence_optional_payload_owner_2026_10_19.md`.
+
+Author: dedicated isolated enum agent. Independent review: Astra peer assigned
+by root. Merge/runtime owner: root. Additional sidecars: N/A. Use the existing
+SSpec/native test workflow from
+`doc/07_guide/infra/testing/native_test_binary_workflow.md`; no new test toolchain
+or runner is introduced. Compiler/native execution, formal and performance
+qualification remain UNRUN. No retry budget is reset by this new worktree.
