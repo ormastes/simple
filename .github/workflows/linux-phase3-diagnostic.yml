@@ -1,0 +1,126 @@
+name: Linux Phase 3 diagnostic (draft-only, never merge)
+
+# Diagnostic-only: runs the candidate.yml Stage 2 -> Stage 3 bootstrap path on
+# Linux x86_64 (hosted) and Linux ARM64 (self-hosted devbox) from a draft PR,
+# without candidate identity/convergence gates, and uploads every bootstrap log.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/linux-phase3-diagnostic.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-phase3-diagnostic-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  phase3:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64
+            runs_on: '["ubuntu-24.04"]'
+            llvm_asset: LLVM-23.1.1-Linux-X64.tar.xz
+            jobs: 4
+          - name: aarch64
+            runs_on: '["self-hosted", "Linux", "ARM64"]'
+            llvm_asset: LLVM-23.1.1-Linux-ARM64.tar.xz
+            jobs: 16
+    name: Linux ${{ matrix.name }} Stage 2 -> Stage 3
+    runs-on: ${{ fromJSON(matrix.runs_on) }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Host facts
+        run: uname -a; nproc; free -g || true; df -h . || true
+
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install nightly-2026-09-15 --component rustfmt --component clippy
+          rustup default nightly-2026-09-15
+          rustc --version
+
+      - name: Install LLVM 23.1.1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+            sudo apt-get update && sudo apt-get install -y libfreetype6-dev libunwind-dev || true
+          fi
+          llvm_prefix="$RUNNER_TEMP/llvm-23.1.1"
+          if [ ! -x "$llvm_prefix/bin/llvm-config" ]; then
+            gh release download llvmorg-23.1.1 --repo llvm/llvm-project \
+              --pattern '${{ matrix.llvm_asset }}' --dir "$RUNNER_TEMP" --clobber
+            mkdir -p "$llvm_prefix"
+            tar -xJf "$RUNNER_TEMP/${{ matrix.llvm_asset }}" -C "$llvm_prefix" --strip-components=1
+            rm -f "$RUNNER_TEMP/${{ matrix.llvm_asset }}"
+          fi
+          test "$("$llvm_prefix/bin/llvm-config" --version)" = '23.1.1'
+          compiled_prefix=$("$llvm_prefix/bin/llvm-config" --prefix)
+          if [ "$compiled_prefix" != "$llvm_prefix" ]; then
+            if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+              sudo mkdir -p "$(dirname "$compiled_prefix")"; sudo ln -sfn "$llvm_prefix" "$compiled_prefix"
+            else
+              mkdir -p "$(dirname "$compiled_prefix")" 2>/dev/null && ln -sfn "$llvm_prefix" "$compiled_prefix" || true
+            fi
+          fi
+          echo "$llvm_prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_231_PREFIX=$llvm_prefix" >> "$GITHUB_ENV"
+
+      - name: Stage 2 trust root
+        env:
+          SIMPLE_NO_STUB_FALLBACK: '1'
+          BOOTSTRAP_STAGE3_FINGERPRINT_TRACE: '1'
+          BOOTSTRAP_STAGE2_TEST_DELEGATE: '1'
+          SIMPLE_COMPILE_FAIL_FAST: '0'
+          SIMPLE_MCDC_OFF_WAIVER_REASON: 'interim-delegated-seed-2026-09-26 stage2 spec rows delegate run to the frozen authority seed which cannot execute MC/DC probes'
+          SIMPLE_MCDC_OFF_WAIVER_REVIEWER: 'ormastes'
+          SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID: 'owner-interim-2026-09-26-delegated-seed'
+          SIMPLE_MCDC_OFF_WAIVER_VERSION: '1'
+        run: |
+          set -uo pipefail
+          sh scripts/bootstrap/bootstrap-from-scratch.sh \
+            --backend=llvm --mode=dynload --full-bootstrap \
+            --stop-after-stage2 --no-mcp --jobs=${{ matrix.jobs }}
+          status=$?
+          echo "stage2 status=$status"
+          find .simple/storage/build/bootstrap \( -name 'stage2-compiler-tests*.log' -o -name summary.env -o -name rejection.env \) 2>/dev/null | head -20 | while read -r f; do echo "=== $f"; tail -n 300 "$f"; done || true
+          exit $status
+
+      - name: Stage 3 from admitted Stage 2
+        if: always()
+        env:
+          SIMPLE_NO_STUB_FALLBACK: '1'
+          SIMPLE_COMPILE_FAIL_FAST: '0'
+        run: |
+          set -euo pipefail
+          stage2=$(find build/bootstrap/stage2 -type f -name simple -print -quit)
+          test -n "$stage2"
+          receipt="$PWD/build/bootstrap/diag-stage3-planner-admission-v2.env"
+          sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
+            --target=//bootstrap:stage3 --reason=verify-landed-compiler-fix \
+            --parent-compiler="$stage2" --out="$receipt"
+          sh scripts/bootstrap/bootstrap-from-scratch.sh \
+            --bootstrap-receipt="$receipt" --resume-stage3-from-admitted=build/bootstrap
+
+      - name: Upload bootstrap logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-phase3-diag-${{ matrix.name }}
+          path: |
+            .simple/storage/build/bootstrap/logs/**
+            build/bootstrap/logs/**
+            build/bootstrap/**/*.log
+            build/bootstrap/**/*.env
+          if-no-files-found: warn
+          retention-days: 7
