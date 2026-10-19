@@ -1,3 +1,6 @@
+use std.common.crypto.xxh3.{xxh3_128_hex}
+use std.common.text_bytes.{text_to_utf8_bytes}
+
 # SFFI - Runtime Operations
 # Centralized RuntimeValue and GC SFFI wrappers
 
@@ -129,3 +132,31 @@ fn value_as_float(value: RuntimeValuePtr) -> f64:
 # ============================================================================
 # Value Operations
 # ============================================================================
+
+# ============================================================================
+# Hashing accelerator
+# ============================================================================
+# Lives here, not in sffi.crypto: the compiler frontend keys its parse cache
+# with it, and sffi.crypto also wraps rt_base64url_encode, which only the
+# ordinary runtime.c defines -- importing it broke the core-C Stage 2 link.
+
+@unsafe(reason: "raw runtime ABI for rt_xxh3_128_text; empty text is the unsupported/provider-failure sentinel", capabilities: [ffi])
+extern fn rt_xxh3_128_text(data: text) -> text
+
+# Set when the runtime digest was unavailable and the pure-Simple fallback ran.
+var _xxh3_128_text_fallback_used: bool = false
+
+fn xxh3_128_text_fallback_used() -> bool:
+    _xxh3_128_text_fallback_used
+
+# XXH3-128 of the text's UTF-8 bytes as 32 lowercase hex (canonical: high64
+# then low64), through the C/Rust runtime accelerator. Anything but a full
+# 32-hex answer falls back to the pure-Simple std.common.crypto.xxh3, which is
+# the oracle. NOT collision-resistant: local cache indexing only.
+fn xxh3_128_text(data: text) -> text:
+    val hex = unsafe(capabilities: [ffi]):
+        rt_xxh3_128_text(data)
+    if hex.len() == 32:
+        return hex
+    _xxh3_128_text_fallback_used = true
+    xxh3_128_hex(text_to_utf8_bytes(data))
