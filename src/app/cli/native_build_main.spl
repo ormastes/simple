@@ -45,7 +45,8 @@ use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_sha
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory}
 use compiler.driver.driver_ice_boundary.{
     ice_boundary_begin_run, ice_boundary_claim_run, ice_boundary_release_run,
-    ice_boundary_dead_worker_modules, ice_boundary_attribute_dead_worker,
+    ice_boundary_dead_worker_modules, ice_boundary_attribute_dead_worker_with_stderr,
+    ice_runtime_trap_symbol,
     ice_boundary_merge_receipt,
     ice_skip_list_extend, ice_crash_retry_budget,
     ice_crash_retry_allowed}
@@ -440,6 +441,7 @@ fn native_build_range_is_diagnostic(
         or native_build_range_contains(output, "MIR error", line_start, line_end)
         or native_build_range_contains(output, "MIR lowering error", line_start, line_end)
         or native_build_range_contains(output, "panic", line_start, line_end)
+        or native_build_range_contains(output, "unimplemented runtime entrypoint", line_start, line_end)
         or native_build_range_contains(output, "Traceback", line_start, line_end)
         or native_build_range_contains(output, "unresolved", line_start, line_end)
         or native_build_range_contains(output, "unsupported", line_start, line_end)
@@ -1080,6 +1082,11 @@ pub fn native_build_relaunch_past_ice_crashes(worker_bin: text, relaunch_args: [
     if not ice_crash_retry_allowed(worker_status, native_build_posix_signal(worker_status),
             stderr.contains("[TIMEOUT:"), retries_left):
         return (stdout, stderr, code_raw)
+    # A runtime NAMED TRAP is a producer capability gap: every module that
+    # reaches the trapped entrypoint dies the same way, so stepping past the
+    # one in flight only burns the retry budget.
+    if ice_runtime_trap_symbol(stderr) != "":
+        return (stdout, stderr, code_raw)
     val dead = ice_boundary_dead_worker_modules()
     if dead.len() == 0:
         return (stdout, stderr, code_raw)
@@ -1340,7 +1347,7 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     var ice_dead_lines: [text] = []
     var ice_dead_summary = ""
     if code != 0:
-        ice_dead_lines = ice_boundary_attribute_dead_worker(code as i64)
+        ice_dead_lines = ice_boundary_attribute_dead_worker_with_stderr(code as i64, stderr)
     # Merge every writer's rows into ice_receipt.tsv while the directory is ours.
     val ice_merged_summary = ice_boundary_merge_receipt(ice_owned)
     if ice_dead_lines.len() > 0:
@@ -1390,6 +1397,11 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
             stderr_write("error: {ice_line}\n")
         if ice_dead_summary != "":
             stderr_write("error: {ice_dead_summary}\n")
+        val trap_symbol = ice_runtime_trap_symbol(stderr)
+        if trap_symbol != "":
+            stderr_write("error: worker hit runtime NAMED TRAP `{trap_symbol}`; the producer binary does not implement it.\n")
+            if trap_symbol.contains("cranelift"):
+                stderr_write("  hint: this producer links the core-c-bootstrap Cranelift trap stubs (src/runtime/runtime_cranelift_bridge_stub.c); use --backend llvm, or a producer linked with the Rust Cranelift bridge (hosted / native_all lane).\n")
         if ice_relaunched:
             stderr_write("error: native-build was re-launched past module(s) the worker died in ({ice_skip_now}); the build fails regardless of the last worker's status.\n")
         if last_diag != "":
