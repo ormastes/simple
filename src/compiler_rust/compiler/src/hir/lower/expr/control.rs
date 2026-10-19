@@ -2242,7 +2242,7 @@ impl Lowerer {
     /// Box a raw-scalar expression when it must flow out through a slot whose
     /// runtime representation is a tagged `RuntimeValue` (a nullable `T?`, or
     /// `Any`). Returns the expression unchanged in every other case.
-    fn box_scalar_into_tagged_result(&self, result_ty: TypeId, value: HirExpr) -> HirExpr {
+    pub(super) fn box_scalar_into_tagged_result(&self, result_ty: TypeId, value: HirExpr) -> HirExpr {
         let tagged_slot =
             result_ty == TypeId::ANY || matches!(self.module.types.get(result_ty), Some(HirType::Pointer { .. }));
         if !tagged_slot {

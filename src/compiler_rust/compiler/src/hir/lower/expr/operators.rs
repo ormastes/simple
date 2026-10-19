@@ -19,6 +19,16 @@ impl Lowerer {
         matches!(ty, TypeId::F32 | TypeId::F64)
     }
 
+    /// `Some(x)` as lowered by the short enum-constructor grammar
+    /// (`Call { func: Global("Some"), args: [x] }`, hir/lower/expr/calls.rs).
+    fn is_some_constructor(e: &HirExpr) -> bool {
+        matches!(
+            &e.kind,
+            HirExprKind::Call { func, args }
+                if args.len() == 1 && matches!(&func.kind, HirExprKind::Global(name) if name == "Some")
+        )
+    }
+
     fn is_int_scalar(ty: TypeId) -> bool {
         matches!(
             ty,
@@ -73,6 +83,42 @@ impl Lowerer {
                  `x.unwrap()`, or `if val v = x:` first",
                 op
             )));
+        }
+
+        // `x == Some(y)` / `x != Some(y)` where exactly one side is a
+        // payload-carrying `Some(...)` constructor. `Some(y)` builds a boxed
+        // Option enum, but a `T?` produced by returning the bare value is the
+        // FLAT tagged payload, so rt_native_eq compared a string (or int)
+        // against an enum and answered false under the JIT while the
+        // interpreter answered true. That made storage_roots/path_policy
+        // validate_storage_containment (`_canonical_lexical(r) != Some(v)`)
+        // report SymlinkEscape for every real root, failing every MCP caret_*
+        // tool. Normalize both operands with `rt_unwrap_or_self` (payload for
+        // the reserved Option enum id, identity otherwise) and compare as ANY,
+        // so both sides take the same tagged rt_native_eq path. A nil left
+        // side stays nil and stays unequal to any `Some`. A RAW scalar operand
+        // (`n == Some(5)` with `n: i64`) is boxed first so the comparison sees
+        // two tagged words.
+        if matches!(op, ast::BinOp::Eq | ast::BinOp::NotEq)
+            && Self::is_some_constructor(&left_hir) != Self::is_some_constructor(&right_hir)
+        {
+            let normalize = |e: HirExpr| HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_unwrap_or_self".to_string(),
+                    args: vec![e],
+                },
+                ty: TypeId::ANY,
+            };
+            let left_tagged = self.box_scalar_into_tagged_result(TypeId::ANY, *left_hir);
+            let right_tagged = self.box_scalar_into_tagged_result(TypeId::ANY, *right_hir);
+            return Ok(HirExpr {
+                kind: HirExprKind::Binary {
+                    op: (*op).into(),
+                    left: Box::new(normalize(left_tagged)),
+                    right: Box::new(normalize(right_tagged)),
+                },
+                ty: TypeId::BOOL,
+            });
         }
 
         // Type is determined by operands
