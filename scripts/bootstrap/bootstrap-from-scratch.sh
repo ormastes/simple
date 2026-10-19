@@ -5846,10 +5846,11 @@ for dynsmf_id in crypto compress; do
   dynsmf_out="build/dynsmf/${dynsmf_id}.smf"
   [ -f "${dynsmf_entry}" ] || { echo "error: Stage 4c dynSMF entry missing: ${dynsmf_entry}" >&2; exit 1; }
   rm -f "${dynsmf_out}"
-  run_logged "stage4c-dynsmf-${dynsmf_id}" run_timeout 120 "${full_bin}" compile \
+  run_logged "stage4c-dynsmf-${dynsmf_id}" run_timeout 120 "${full_bin}" compile --format=smf \
     "${dynsmf_entry}" -o "${dynsmf_out}"
   [ -s "${dynsmf_out}" ] || { echo "error: Stage 4c failed to emit ${dynsmf_out}" >&2; exit 1; }
-  echo "dynsmf_artifact_sha256=${dynsmf_id}:$(hash_file "${dynsmf_out}")"
+  dynsmf_sha=$(hash_file "${dynsmf_out}") || exit 1
+  echo "dynsmf_artifact_sha256=${dynsmf_id}:${dynsmf_sha}"
 done
 
 # ===========================================================================
