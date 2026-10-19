@@ -1668,10 +1668,17 @@ impl CompilerDriver:
             hir_order_names.push(hir_order_src.module_name)
         val hir_visit_order: [i64] = hir_shard_visit_order(hir_order_names, retained_module_surfaces, hir_levels)
         var hir_loop_pos: i64 = 0
-        if mem_snapshot_begin() < 0:
-            hir_shard_guard_block("durable memory snapshot initialization failed")
-            self.ctx.add_error("SIMPLE_MEM_SNAPSHOT_FILE could not be established safely")
-            return false
+        # Same contract as the streaming path above: shard children inherit
+        # the parent's SIMPLE_MEM_SNAPSHOT_FILE and must not open its O_EXCL
+        # evidence descriptor. Unguarded, every worker of an 8-way Stage 3
+        # failed here, blocked the ledger, and the next claim reported "HIR
+        # shard ledger claim failed" (bug
+        # stage3_hir_shard_workers_collide_on_mem_snapshot_file_2026_10_19).
+        if not hir_shard_mode:
+            if mem_snapshot_begin() < 0:
+                hir_shard_guard_block("durable memory snapshot initialization failed")
+                self.ctx.add_error("SIMPLE_MEM_SNAPSHOT_FILE could not be established safely")
+                return false
         if hir_shard_mode:
             var inventory_paths: [text] = []
             for inventory_source in self.ctx.sources:
