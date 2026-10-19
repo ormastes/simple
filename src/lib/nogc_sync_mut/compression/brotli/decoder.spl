@@ -1,245 +1,732 @@
-# brotli/decoder.spl — RFC 7932 brotli decoder (literal-only compressed tier)
+# brotli/decoder.spl — RFC 7932 brotli decoder.
 #
-# Supported:
-#   - WBITS = 16 (default, bit0 = 0 in stream header)
-#   - WBITS = 9..15 (bit0=1, then N=1..7)
-#   - Empty stream (ISLAST=1, ISLASTEMPTY=1)
-#   - Uncompressed meta blocks (ISLAST=0, ISUNCOMPRESSED=1)
-#   - Chained meta blocks
-#   - Compressed meta blocks at the LITERAL-ONLY tier (RFC 7932 §9.2)
+# Supported: WBITS 10..24, empty / metadata / uncompressed / compressed
+# meta-blocks, block-type switching (literal, command, distance), simple and
+# complex prefix codes, context maps (with RLE and inverse move-to-front),
+# literal context modes (LSB6, MSB6, UTF8, Signed), NPOSTFIX / NDIRECT,
+# the distance ring buffer with its 16 special codes, and overlapping copies.
 #
-# Not supported (returns Err(UnsupportedFeature)):
-#   - LZ77 copy commands, block-type switching, complex prefix codes,
-#     NPOSTFIX > 0, NDIRECT > 0, context modes != 0, NTREESL/NTREESD > 1,
-#     metadata meta blocks
+# Not supported: the 122,784-byte static dictionary (not in-tree). A copy whose
+# distance exceeds the window returns Err(UnsupportedFeature).
 #
-# Split into subsystem files:
-#   decoder_tables.spl  — ILC/CLC length tables, _IcpDecomp, _decompose_icp
-#   decoder_huffman.spl — simple prefix code parsing, _decode_symbol
-#   decoder_block.spl   — VarLenUint8, distance decode, _decode_compressed_block
+# Design: one mutable BrotliDec carries the bit reader and the output buffer.
+# A failure records the first error in `errm` and every reader returns 0 from
+# then on; callers check `errm` at loop boundaries. Tables are built once per
+# call; output grows by amortised push (never rebuilt per byte).
 
 use std.common.compress.types.{CompressionError}
-use std.nogc_sync_mut.compression.brotli.bit_reader.{
-    BrotliBitReader,
-    BrotliBitsResult,
-    BrotliBytesResult,
-    brotli_bits_init,
-    brotli_bits_read,
-    brotli_bits_align_to_byte,
-    brotli_bits_read_bytes
-}
-use std.nogc_sync_mut.compression.brotli.decoder_block.{
-    _MetaBlockResult, _decode_compressed_block
-}
 
-# Zero-filled `[u8]` of `len` bytes, built with ordinary Simple pushes.
-#
-# The former `rt_bytes_alloc` extern hands back a raw runtime buffer that the
-# interpreter refuses to index-assign into ("invalid assignment: cannot index
-# assign value of type array"), so every brotli encode/decode path that filled
-# such a buffer slot-by-slot failed there.
-fn _brotli_alloc_bytes(len: i64) -> [u8]:
-    var buf: [u8] = []
+class BrotliDec:
+    data: [u8]
+    pos: i64
+    acc: i64
+    nbits: i64
+    errk: i64
+    errm: text
+    out: [u8]
+    ring: [i64]
+
+# Canonical prefix code. `single` >= 0 means a one-symbol (zero-bit) code.
+class BrotliHuff:
+    count: [i64]
+    syms: [i64]
+    single: i64
+
+fn _bd_fail(d: BrotliDec, kind: i64, msg: text):
+    if d.errk == 0:
+        d.errk = kind
+        d.errm = msg
+
+fn _bd_read(d: BrotliDec, n: i64) -> i64:
+    if n == 0:
+        return 0
+    while d.nbits < n:
+        if d.pos >= d.data.len():
+            _bd_fail(d, 1, "brotli bit stream truncated")
+            return 0
+        d.acc = d.acc | (d.data[d.pos].to_i64() << d.nbits)
+        d.pos = d.pos + 1
+        d.nbits = d.nbits + 8
+    val v = d.acc & ((1 << n) - 1)
+    d.acc = d.acc >> n
+    d.nbits = d.nbits - n
+    v
+
+# Build a canonical code from per-symbol lengths (0 = unused).
+fn _huff_build(d: BrotliDec, lens: [i64]) -> BrotliHuff:
+    var count: [i64] = []
     var i = 0
-    while i < len:
-        buf.push(0u8)
+    while i < 16:
+        count.push(0)
         i = i + 1
-    buf
+    var used = 0
+    var last_sym = 0
+    i = 0
+    while i < lens.len():
+        if lens[i] > 0:
+            count[lens[i]] = count[lens[i]] + 1
+            used = used + 1
+            last_sym = i
+        i = i + 1
+    var syms: [i64] = []
+    if used == 0:
+        _bd_fail(d, 2, "brotli prefix code has no symbols")
+        return BrotliHuff(count: count, syms: syms, single: -1)
+    if used == 1:
+        return BrotliHuff(count: count, syms: syms, single: last_sym)
+    var offs: [i64] = []
+    var acc = 0
+    var l = 0
+    while l < 16:
+        offs.push(acc)
+        if l > 0:
+            acc = acc + count[l]
+        l = l + 1
+    i = 0
+    while i < used:
+        syms.push(0)
+        i = i + 1
+    i = 0
+    while i < lens.len():
+        val ln = lens[i]
+        if ln > 0:
+            syms[offs[ln]] = i
+            offs[ln] = offs[ln] + 1
+        i = i + 1
+    BrotliHuff(count: count, syms: syms, single: -1)
 
-# Decode a brotli-compressed byte stream.
-# Returns Ok(decompressed_bytes) or Err(CompressionError).
+fn _huff_decode(d: BrotliDec, h: BrotliHuff) -> i64:
+    if h.single >= 0:
+        return h.single
+    var code = 0
+    var first = 0
+    var index = 0
+    var len = 1
+    while len < 16:
+        code = code | _bd_read(d, 1)
+        if d.errk != 0:
+            return 0
+        val c = h.count[len]
+        if code - c < first:
+            return h.syms[index + (code - first)]
+        index = index + c
+        first = (first + c) << 1
+        code = code << 1
+        len = len + 1
+    _bd_fail(d, 2, "brotli invalid prefix code")
+    0
+
+fn _bits_for(alpha: i64) -> i64:
+    var n = 0
+    while (1 << n) < alpha:
+        n = n + 1
+    n
+
+fn _sort_range(a0: [i64], lo: i64, hi: i64) -> [i64]:
+    var a = a0
+    var i = lo
+    while i < hi:
+        var j = i + 1
+        while j < hi:
+            if a[j] < a[i]:
+                val t = a[i]
+                a[i] = a[j]
+                a[j] = t
+            j = j + 1
+        i = i + 1
+    a
+
+fn _zeros(n: i64) -> [i64]:
+    var a: [i64] = []
+    var i = 0
+    while i < n:
+        a.push(0)
+        i = i + 1
+    a
+
+# RFC 7932 section 3.4 / 3.5: read one prefix code over `alpha` symbols.
+fn _read_prefix(d: BrotliDec, alpha: i64) -> BrotliHuff:
+    val hskip = _bd_read(d, 2)
+    var lens = _zeros(alpha)
+    if d.errk != 0:
+        return _huff_build(d, lens)
+    if hskip == 1:
+        val nsym = _bd_read(d, 2) + 1
+        val sbits = _bits_for(alpha)
+        var s: [i64] = []
+        var i = 0
+        while i < nsym:
+            val v = _bd_read(d, sbits)
+            if v >= alpha:
+                _bd_fail(d, 2, "brotli simple prefix symbol out of range")
+                return _huff_build(d, lens)
+            s.push(v)
+            i = i + 1
+        if d.errk != 0:
+            return _huff_build(d, lens)
+        i = 0
+        while i < nsym:
+            var j = i + 1
+            while j < nsym:
+                if s[i] == s[j]:
+                    _bd_fail(d, 2, "brotli duplicate simple prefix symbol")
+                    return _huff_build(d, lens)
+                j = j + 1
+            i = i + 1
+        if nsym == 1:
+            lens[s[0]] = 1
+        elif nsym == 2:
+            s = _sort_range(s, 0, 2)
+            lens[s[0]] = 1
+            lens[s[1]] = 1
+        elif nsym == 3:
+            s = _sort_range(s, 1, 3)
+            lens[s[0]] = 1
+            lens[s[1]] = 2
+            lens[s[2]] = 2
+        else:
+            if _bd_read(d, 1) == 0:
+                s = _sort_range(s, 0, 4)
+                lens[s[0]] = 2
+                lens[s[1]] = 2
+                lens[s[2]] = 2
+                lens[s[3]] = 2
+            else:
+                s = _sort_range(s, 2, 4)
+                lens[s[0]] = 1
+                lens[s[1]] = 2
+                lens[s[2]] = 3
+                lens[s[3]] = 3
+        return _huff_build(d, lens)
+    # Complex prefix code: code-length code first.
+    val order = [1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    val pfx_len = [2, 2, 2, 3, 2, 2, 2, 4, 2, 2, 2, 3, 2, 2, 2, 4]
+    val pfx_val = [0, 4, 3, 2, 0, 4, 3, 1, 0, 4, 3, 2, 0, 4, 3, 5]
+    var cl = _zeros(18)
+    var space = 32
+    var ncodes = 0
+    var i = hskip
+    while i < 18:
+        var peek = 0
+        var k = 0
+        while k < 4:
+            peek = peek | (_bd_peek_bit(d, k) << k)
+            k = k + 1
+        val used = pfx_len[peek]
+        _bd_read(d, used)
+        val v = pfx_val[peek]
+        if d.errk != 0:
+            return _huff_build(d, lens)
+        cl[order[i]] = v
+        if v != 0:
+            space = space - (32 >> v)
+            ncodes = ncodes + 1
+            if space <= 0:
+                i = 18
+        i = i + 1
+    if ncodes != 1 and space != 0:
+        _bd_fail(d, 2, "brotli invalid code-length code")
+        return _huff_build(d, lens)
+    val clh = _huff_build(d, cl)
+    if d.errk != 0:
+        return clh
+    var sym = 0
+    var prev = 8
+    var repeat = 0
+    var repeat_len = 0
+    var sp = 32768
+    while sym < alpha and sp > 0:
+        val c = _huff_decode(d, clh)
+        if d.errk != 0:
+            return _huff_build(d, lens)
+        if c < 16:
+            repeat = 0
+            lens[sym] = c
+            sym = sym + 1
+            if c != 0:
+                prev = c
+                sp = sp - (32768 >> c)
+        else:
+            var ebits = 3
+            var newlen = 0
+            if c == 16:
+                ebits = 2
+                newlen = prev
+            if repeat_len != newlen:
+                repeat = 0
+                repeat_len = newlen
+            val old = repeat
+            if repeat > 0:
+                repeat = (repeat - 2) << ebits
+            repeat = repeat + _bd_read(d, ebits) + 3
+            val delta = repeat - old
+            if sym + delta > alpha:
+                _bd_fail(d, 2, "brotli code length repeat overflow")
+                return _huff_build(d, lens)
+            var q = 0
+            while q < delta:
+                lens[sym + q] = repeat_len
+                q = q + 1
+            if repeat_len != 0:
+                sp = sp - (delta << (15 - repeat_len))
+            sym = sym + delta
+    if sp != 0:
+        _bd_fail(d, 2, "brotli prefix code is not complete")
+        return _huff_build(d, lens)
+    _huff_build(d, lens)
+
+# Look at bit `k` ahead of the current position without consuming.
+fn _bd_peek_bit(d: BrotliDec, k: i64) -> i64:
+    var have = d.nbits
+    var acc = d.acc
+    var p = d.pos
+    while have <= k:
+        if p >= d.data.len():
+            return 0
+        acc = acc | (d.data[p].to_i64() << have)
+        p = p + 1
+        have = have + 8
+    (acc >> k) & 1
+
+# VarLenUint8 + 1 style count (NBLTYPES / NTREES): value >= 1.
+fn _read_varlen(d: BrotliDec) -> i64:
+    if _bd_read(d, 1) == 0:
+        return 1
+    val n = _bd_read(d, 3)
+    1 + (1 << n) + _bd_read(d, n)
+
+fn _read_cmap(d: BrotliDec, size: i64, ntrees: i64) -> [i64]:
+    var cmap = _zeros(size)
+    if ntrees <= 1:
+        return cmap
+    var rlemax = 0
+    if _bd_read(d, 1) == 1:
+        rlemax = _bd_read(d, 4) + 1
+    val h = _read_prefix(d, ntrees + rlemax)
+    var i = 0
+    while i < size and d.errk == 0:
+        val s = _huff_decode(d, h)
+        if s == 0:
+            i = i + 1
+        elif s <= rlemax:
+            val run = (1 << s) + _bd_read(d, s)
+            if i + run > size:
+                _bd_fail(d, 2, "brotli context map run overflow")
+                return cmap
+            i = i + run
+        else:
+            cmap[i] = s - rlemax
+            i = i + 1
+    if _bd_read(d, 1) == 1:
+        var mtf: [i64] = []
+        var m = 0
+        while m < 256:
+            mtf.push(m)
+            m = m + 1
+        i = 0
+        while i < size:
+            val idx = cmap[i]
+            val v = mtf[idx]
+            cmap[i] = v
+            var j = idx
+            while j > 0:
+                mtf[j] = mtf[j - 1]
+                j = j - 1
+            mtf[0] = v
+            i = i + 1
+    cmap
+
+fn _blen_base() -> [i64]:
+    [1, 5, 9, 13, 17, 25, 33, 41, 49, 65, 81, 97, 113, 145, 177, 209, 241, 305, 369, 497, 753, 1265, 2289, 4337, 8433, 16625]
+
+fn _blen_extra() -> [i64]:
+    [2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 7, 8, 9, 10, 11, 12, 13, 24]
+
+# Per-category block-switching state (category 0 = literal, 1 = command, 2 = distance).
+class BrotliBlocks:
+    nbl: [i64]
+    btype: [i64]
+    bprev: [i64]
+    bleft: [i64]
+    bt_code: [BrotliHuff]
+    bl_code: [BrotliHuff]
+    base: [i64]
+    extra: [i64]
+
+fn _read_block_count(d: BrotliDec, bk: BrotliBlocks, c: i64) -> i64:
+    val s = _huff_decode(d, bk.bl_code[c])
+    if s >= 26:
+        _bd_fail(d, 2, "brotli block count symbol out of range")
+        return 0
+    bk.base[s] + _bd_read(d, bk.extra[s])
+
+fn _switch_block(d: BrotliDec, bk: BrotliBlocks, c: i64):
+    val s = _huff_decode(d, bk.bt_code[c])
+    var t = 0
+    if s == 0:
+        t = bk.bprev[c]
+    elif s == 1:
+        t = (bk.btype[c] + 1) % bk.nbl[c]
+    else:
+        t = s - 2
+    if t >= bk.nbl[c]:
+        _bd_fail(d, 2, "brotli block type out of range")
+        return
+    bk.bprev[c] = bk.btype[c]
+    bk.btype[c] = t
+    bk.bleft[c] = _read_block_count(d, bk, c)
+
+fn _push_n(a0: [i64], v: i64, n: i64) -> [i64]:
+    var a = a0
+    var i = 0
+    while i < n:
+        a.push(v)
+        i = i + 1
+    a
+
+fn _lut0() -> [i64]:
+    var a: [i64] = []
+    val r0 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 0, 0, 4, 0, 0]
+    val r2 = [8, 12, 16, 12, 12, 20, 12, 16, 24, 28, 12, 12, 32, 12, 36, 12]
+    val r3 = [44, 44, 44, 44, 44, 44, 44, 44, 44, 44, 32, 32, 24, 40, 28, 12]
+    val r4 = [12, 48, 52, 52, 52, 48, 52, 52, 52, 48, 52, 52, 52, 52, 52, 48]
+    val r5 = [52, 52, 52, 52, 52, 48, 52, 52, 52, 52, 52, 24, 12, 28, 12, 12]
+    val r6 = [12, 56, 60, 60, 60, 56, 60, 60, 60, 56, 60, 60, 60, 60, 60, 56]
+    val r7 = [60, 60, 60, 60, 60, 56, 60, 60, 60, 60, 60, 24, 12, 28, 12, 0]
+    for v in r0: a.push(v)
+    a = _push_n(a, 0, 16)
+    for v in r2: a.push(v)
+    for v in r3: a.push(v)
+    for v in r4: a.push(v)
+    for v in r5: a.push(v)
+    for v in r6: a.push(v)
+    for v in r7: a.push(v)
+    var k = 0
+    while k < 32:
+        a.push(0)
+        a.push(1)
+        k = k + 1
+    k = 0
+    while k < 32:
+        a.push(2)
+        a.push(3)
+        k = k + 1
+    a
+
+fn _lut1() -> [i64]:
+    var a: [i64] = []
+    a = _push_n(a, 0, 32)
+    a.push(0)
+    a = _push_n(a, 1, 15)
+    a = _push_n(a, 2, 10)
+    a = _push_n(a, 1, 6)
+    a.push(1)
+    a = _push_n(a, 2, 15)
+    a = _push_n(a, 2, 11)
+    a = _push_n(a, 1, 5)
+    a.push(1)
+    a = _push_n(a, 3, 15)
+    a = _push_n(a, 3, 11)
+    a = _push_n(a, 1, 4)
+    a.push(0)
+    a = _push_n(a, 0, 64)
+    a = _push_n(a, 2, 64)
+    a
+
+fn _lut2() -> [i64]:
+    var a: [i64] = []
+    a.push(0)
+    a = _push_n(a, 1, 15)
+    a = _push_n(a, 2, 48)
+    a = _push_n(a, 3, 64)
+    a = _push_n(a, 4, 64)
+    a = _push_n(a, 5, 48)
+    a = _push_n(a, 6, 15)
+    a.push(7)
+    a
+
+fn _ins_base() -> [i64]:
+    [0, 1, 2, 3, 4, 5, 6, 8, 10, 14, 18, 26, 34, 50, 66, 98, 130, 194, 322, 578, 1090, 2114, 6210, 22594]
+
+fn _ins_extra() -> [i64]:
+    [0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 7, 8, 9, 10, 12, 14, 24]
+
+fn _cp_base() -> [i64]:
+    [2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 18, 22, 30, 38, 54, 70, 102, 134, 198, 326, 582, 1094, 2118]
+
+fn _cp_extra() -> [i64]:
+    [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 7, 8, 9, 10, 24]
+
+fn _literal_context(mode: i64, p1: i64, p2: i64, l0: [i64], l1: [i64], l2: [i64]) -> i64:
+    if mode == 0:
+        return p1 & 63
+    if mode == 1:
+        return p1 >> 2
+    if mode == 2:
+        return l0[p1] | l1[p2]
+    (l2[p1] << 3) | l2[p2]
+
+# Decode one compressed meta-block of `mlen` bytes into d.out.
+fn _decode_compressed(d: BrotliDec, mlen: i64, win_max: i64):
+    val bk = BrotliBlocks(nbl: [], btype: [], bprev: [], bleft: [], bt_code: [], bl_code: [], base: _blen_base(), extra: _blen_extra())
+    var c = 0
+    while c < 3:
+        val n = _read_varlen(d)
+        bk.nbl.push(n)
+        bk.btype.push(0)
+        bk.bprev.push(1)
+        if n >= 2:
+            bk.bt_code.push(_read_prefix(d, n + 2))
+            bk.bl_code.push(_read_prefix(d, 26))
+            bk.bleft.push(_read_block_count(d, bk, c))
+        else:
+            bk.bt_code.push(BrotliHuff(count: [], syms: [], single: 0))
+            bk.bl_code.push(BrotliHuff(count: [], syms: [], single: 0))
+            bk.bleft.push(1 << 40)
+        if d.errk != 0:
+            return
+        c = c + 1
+    val npostfix = _bd_read(d, 2)
+    val ndirect = _bd_read(d, 4) << npostfix
+    var cmode: [i64] = []
+    var t = 0
+    while t < bk.nbl[0]:
+        cmode.push(_bd_read(d, 2))
+        t = t + 1
+    val ntrees_l = _read_varlen(d)
+    val cmap_l = _read_cmap(d, 64 * bk.nbl[0], ntrees_l)
+    val ntrees_d = _read_varlen(d)
+    val cmap_d = _read_cmap(d, 4 * bk.nbl[2], ntrees_d)
+    if d.errk != 0:
+        return
+    var lit_codes: [BrotliHuff] = []
+    t = 0
+    while t < ntrees_l and d.errk == 0:
+        lit_codes.push(_read_prefix(d, 256))
+        t = t + 1
+    var cmd_codes: [BrotliHuff] = []
+    t = 0
+    while t < bk.nbl[1] and d.errk == 0:
+        cmd_codes.push(_read_prefix(d, 704))
+        t = t + 1
+    val dist_alpha = 16 + ndirect + (48 << npostfix)
+    var dist_codes: [BrotliHuff] = []
+    t = 0
+    while t < ntrees_d and d.errk == 0:
+        dist_codes.push(_read_prefix(d, dist_alpha))
+        t = t + 1
+    if d.errk != 0:
+        return
+    val l0 = _lut0()
+    val l1 = _lut1()
+    val l2 = _lut2()
+    val ib = _ins_base()
+    val ie = _ins_extra()
+    val cb = _cp_base()
+    val ce = _cp_extra()
+    val cell_ins = [0, 0, 0, 0, 8, 8, 0, 16, 8, 16, 16]
+    val cell_cp = [0, 8, 0, 8, 0, 8, 16, 0, 16, 8, 16]
+    val pmask = (1 << npostfix) - 1
+    var left = mlen
+    while left > 0:
+        if bk.bleft[1] == 0:
+            _switch_block(d, bk, 1)
+        bk.bleft[1] = bk.bleft[1] - 1
+        val cmd = _huff_decode(d, cmd_codes[bk.btype[1]])
+        if d.errk != 0:
+            return
+        val cell = cmd >> 6
+        if cell > 10:
+            _bd_fail(d, 2, "brotli command symbol out of range")
+            return
+        val icode = cell_ins[cell] + ((cmd >> 3) & 7)
+        val ccode = cell_cp[cell] + (cmd & 7)
+        val ins_len = ib[icode] + _bd_read(d, ie[icode])
+        val cp_len = cb[ccode] + _bd_read(d, ce[ccode])
+        if d.errk != 0:
+            return
+        if ins_len > left:
+            _bd_fail(d, 2, "brotli insert length exceeds meta-block")
+            return
+        var k = 0
+        while k < ins_len:
+            if bk.bleft[0] == 0:
+                _switch_block(d, bk, 0)
+                if d.errk != 0:
+                    return
+            bk.bleft[0] = bk.bleft[0] - 1
+            val n = d.out.len()
+            var p1 = 0
+            var p2 = 0
+            if n > 0:
+                p1 = d.out[n - 1].to_i64()
+            if n > 1:
+                p2 = d.out[n - 2].to_i64()
+            val ctx = _literal_context(cmode[bk.btype[0]], p1, p2, l0, l1, l2)
+            val tree = cmap_l[bk.btype[0] * 64 + ctx]
+            val s = _huff_decode(d, lit_codes[tree])
+            if d.errk != 0:
+                return
+            d.out.push(s.to_u8())
+            k = k + 1
+        left = left - ins_len
+        if left == 0:
+            return
+        var dist = 0
+        var push_ring = true
+        if cell < 2:
+            dist = d.ring[0]
+            push_ring = false
+        else:
+            if bk.bleft[2] == 0:
+                _switch_block(d, bk, 2)
+                if d.errk != 0:
+                    return
+            bk.bleft[2] = bk.bleft[2] - 1
+            var dctx = 3
+            if cp_len < 5:
+                dctx = cp_len - 2
+            val tree = cmap_d[bk.btype[2] * 4 + dctx]
+            val dcode = _huff_decode(d, dist_codes[tree])
+            if d.errk != 0:
+                return
+            if dcode < 16:
+                if dcode == 0:
+                    dist = d.ring[0]
+                    push_ring = false
+                elif dcode < 4:
+                    dist = d.ring[dcode]
+                else:
+                    var base = d.ring[0]
+                    var kk = dcode - 4
+                    if dcode >= 10:
+                        base = d.ring[1]
+                        kk = dcode - 10
+                    val mag = (kk >> 1) + 1
+                    if (kk & 1) == 0:
+                        dist = base - mag
+                    else:
+                        dist = base + mag
+            elif dcode < 16 + ndirect:
+                dist = dcode - 15
+            else:
+                val x = dcode - ndirect - 16
+                val nb = 1 + (x >> (npostfix + 1))
+                val hcode = x >> npostfix
+                val lcode = x & pmask
+                val off = ((2 + (hcode & 1)) << nb) - 4
+                val ex = _bd_read(d, nb)
+                dist = ((off + ex) << npostfix) + lcode + ndirect + 1
+            if d.errk != 0:
+                return
+        if dist <= 0:
+            _bd_fail(d, 2, "brotli non-positive distance")
+            return
+        var maxd = d.out.len()
+        if win_max < maxd:
+            maxd = win_max
+        if dist > maxd:
+            _bd_fail(d, 3, "brotli static dictionary reference (dictionary not available)")
+            return
+        if cp_len > left:
+            _bd_fail(d, 2, "brotli copy length exceeds meta-block")
+            return
+        if push_ring:
+            d.ring[3] = d.ring[2]
+            d.ring[2] = d.ring[1]
+            d.ring[1] = d.ring[0]
+            d.ring[0] = dist
+        var src = d.out.len() - dist
+        var q = 0
+        while q < cp_len:
+            d.out.push(d.out[src])
+            src = src + 1
+            q = q + 1
+        left = left - cp_len
+
+fn _bd_error(d: BrotliDec) -> CompressionError:
+    if d.errk == 1:
+        return CompressionError.TruncatedInput(d.errm)
+    if d.errk == 3:
+        return CompressionError.UnsupportedFeature(d.errm)
+    CompressionError.CorruptStream(d.errm)
+
+# Decode a brotli stream. Err on any malformed, truncated or unsupported input.
 fn brotli_decode(input: [u8]) -> Result<[u8], CompressionError>:
     if input.len() == 0:
         return Err(CompressionError.TruncatedInput("brotli empty input"))
-
-    var r = brotli_bits_init(input)
-
-    # --- Stream header: WBITS ---
-    val wbits_res = _brotli_read_wbits(r)
-    if wbits_res.is_err():
-        match wbits_res:
-            Ok(_): return Err(CompressionError.CorruptStream("brotli WBITS read failed without error"))
-            Err(err): return Err(err)
-    val wbits_pair = match wbits_res:
-        Ok(value): value
-        Err(err): return Err(err)
-    r = wbits_pair.reader
-    # wbits_pair.value is WBITS (10..24); we accept any valid value.
-
-    var output: [u8] = []
-
-    # --- Meta-block loop ---
-    while true:
-        val block_res = _brotli_read_meta_block(r, output)
-        if block_res.is_err():
-            match block_res:
-                Ok(_): return Err(CompressionError.CorruptStream("brotli meta-block read failed without error"))
-                Err(err): return Err(err)
-        val block_result = match block_res:
-            Ok(value): value
-            Err(err): return Err(err)
-        r = block_result.reader
-        output = block_result.output
-        if block_result.is_last:
-            break
-
-    Ok(output)
-
-# -------------------------------------------------------------------------
-# Internal: WBITS prefix code (RFC 7932 §9.1)
-# -------------------------------------------------------------------------
-struct _WbitsResult:
-    value: i64
-    reader: BrotliBitReader
-
-fn _brotli_read_wbits(r: BrotliBitReader) -> Result<_WbitsResult, CompressionError>:
-    val b0_res = brotli_bits_read(r, 1)
-    if b0_res.is_err():
-        match b0_res:
-            Ok(_): return Err(CompressionError.CorruptStream("brotli WBITS first bit failed without error"))
-            Err(err): return Err(err)
-    val b0 = match b0_res:
-        Ok(value): value
-        Err(err): return Err(err)
-    if b0.value == 0:
-        return Ok(_WbitsResult(value: 16, reader: b0.reader))
-    # bit0=1: read 3 more bits N
-    val n_res = brotli_bits_read(b0.reader, 3)
-    if n_res.is_err():
-        match n_res:
-            Ok(_): return Err(CompressionError.CorruptStream("brotli WBITS N read failed without error"))
-            Err(err): return Err(err)
-    val n = match n_res:
-        Ok(value): value
-        Err(err): return Err(err)
-    if n.value != 0:
-        val wbits = 8 + n.value
-        return Ok(_WbitsResult(value: wbits, reader: n.reader))
-    # N=0: read 3 more bits M
-    val m_res = brotli_bits_read(n.reader, 3)
-    if m_res.is_err():
-        match m_res:
-            Ok(_): return Err(CompressionError.CorruptStream("brotli WBITS M read failed without error"))
-            Err(err): return Err(err)
-    val m = match m_res:
-        Ok(value): value
-        Err(err): return Err(err)
-    if m.value == 0:
-        return Err(CompressionError.InvalidHeader("brotli reserved WBITS code (all zero extended)"))
-    val wbits = 17 + m.value
-    Ok(_WbitsResult(value: wbits, reader: m.reader))
-
-# -------------------------------------------------------------------------
-# Internal: one meta-block
-# -------------------------------------------------------------------------
-fn _brotli_read_meta_block(r: BrotliBitReader, output: [u8]) -> Result<_MetaBlockResult, CompressionError>:
-    # ISLAST: 1 bit
-    val islast_res = brotli_bits_read(r, 1)
-    if islast_res.is_err():
-        match islast_res:
-            Ok(_): return Err(CompressionError.CorruptStream("brotli ISLAST read failed without error"))
-            Err(err): return Err(err)
-    val islast_pair = match islast_res:
-        Ok(value): value
-        Err(err): return Err(err)
-    val islast = islast_pair.value
-    var r2 = islast_pair.reader
-
+    val d = BrotliDec(data: input, pos: 0, acc: 0, nbits: 0, errk: 0, errm: "", out: [], ring: [4, 11, 15, 16])
+    var wbits = 16
+    if _bd_read(d, 1) == 1:
+        val n = _bd_read(d, 3)
+        if n != 0:
+            wbits = 17 + n
+        else:
+            val m = _bd_read(d, 3)
+            if m == 0:
+                wbits = 17
+            elif m == 1:
+                _bd_fail(d, 3, "brotli large-window stream")
+            else:
+                wbits = 8 + m
+    if d.errk != 0:
+        return Err(_bd_error(d))
+    val win_max = (1 << wbits) - 16
     var is_last = false
-    if islast == 1:
-        # ISLASTEMPTY: 1 bit
-        val ile_res = brotli_bits_read(r2, 1)
-        if ile_res.is_err():
-            match ile_res:
-                Ok(_): return Err(CompressionError.CorruptStream("brotli ISLASTEMPTY read failed without error"))
-                Err(err): return Err(err)
-        val ile_pair = match ile_res:
-            Ok(value): value
-            Err(err): return Err(err)
-        val ile = ile_pair.value
-        r2 = ile_pair.reader
-        if ile == 1:
-            # Empty last block — stream ends
-            return Ok(_MetaBlockResult(output: output, reader: r2, is_last: true))
-        # Non-empty last block
-        is_last = true
-
-    # Read MNIBBLES (2 bits)
-    val mnib_res = brotli_bits_read(r2, 2)
-    if mnib_res.is_err():
-        match mnib_res:
-            Ok(_): return Err(CompressionError.CorruptStream("brotli MNIBBLES read failed without error"))
-            Err(err): return Err(err)
-    val mnib_pair = match mnib_res:
-        Ok(value): value
-        Err(err): return Err(err)
-    val mnibbles_code = mnib_pair.value
-    r2 = mnib_pair.reader
-
-    if mnibbles_code == 3:
-        # Metadata meta-block
-        if is_last:
-            return Err(CompressionError.UnsupportedFeature("brotli metadata meta block in last position"))
-        return Err(CompressionError.UnsupportedFeature("brotli metadata meta block"))
-
-    # MNIBBLES = 4 + mnibbles_code (yields 4, 5, or 6 nibbles)
-    val mnibbles = 4 + mnibbles_code
-    val mlen_bits = mnibbles * 4
-    val mlen_m1_res = brotli_bits_read(r2, mlen_bits)
-    if mlen_m1_res.is_err():
-        match mlen_m1_res:
-            Ok(_): return Err(CompressionError.CorruptStream("brotli MLEN read failed without error"))
-            Err(err): return Err(err)
-    val mlen_m1_pair = match mlen_m1_res:
-        Ok(value): value
-        Err(err): return Err(err)
-    val mlen_m1 = mlen_m1_pair.value
-    r2 = mlen_m1_pair.reader
-    val mlen = mlen_m1 + 1
-
-    if mlen <= 0:
-        return Err(CompressionError.CorruptStream("brotli MLEN zero after decode"))
-
-    # ISUNCOMPRESSED: 1 bit (only present when ISLAST=0)
-    var isuncompressed = 0
-    if not is_last:
-        val isu_res = brotli_bits_read(r2, 1)
-        if isu_res.is_err():
-            match isu_res:
-                Ok(_): return Err(CompressionError.CorruptStream("brotli ISUNCOMPRESSED read failed without error"))
-                Err(err): return Err(err)
-        val isu_pair = match isu_res:
-            Ok(value): value
-            Err(err): return Err(err)
-        isuncompressed = isu_pair.value
-        r2 = isu_pair.reader
-
-    if isuncompressed == 1:
-        # Align to byte boundary, then read mlen raw bytes
-        r2 = brotli_bits_align_to_byte(r2)
-        val raw_res = brotli_bits_read_bytes(r2, mlen)
-        if raw_res.is_err():
-            match raw_res:
-                Ok(_): return Err(CompressionError.CorruptStream("brotli raw bytes read failed without error"))
-                Err(err): return Err(err)
-        val raw = match raw_res:
-            Ok(value): value
-            Err(err): return Err(err)
-        r2 = raw.reader
-
-        # Preallocate merged output in one shot to avoid per-byte push overhead.
-        val old_len = output.len()
-        val new_len = old_len + raw.bytes.len()
-        var new_output = _brotli_alloc_bytes(new_len)
-        var i = 0
-        while i < old_len:
-            new_output[i] = output[i]
-            i = i + 1
-        var j = 0
-        while j < raw.bytes.len():
-            new_output[old_len + j] = raw.bytes[j]
-            j = j + 1
-        return Ok(_MetaBlockResult(output: new_output, reader: r2, is_last: is_last))
-
-    # Compressed meta block
-    return _decode_compressed_block(r2, output, mlen, is_last)
+    while not is_last:
+        is_last = _bd_read(d, 1) == 1
+        if is_last and _bd_read(d, 1) == 1:
+            break
+        val mn = _bd_read(d, 2)
+        if d.errk != 0:
+            return Err(_bd_error(d))
+        if mn == 3:
+            if is_last:
+                return Err(CompressionError.CorruptStream("brotli metadata meta-block marked last"))
+            if _bd_read(d, 1) != 0:
+                return Err(CompressionError.CorruptStream("brotli reserved bit set"))
+            val sb = _bd_read(d, 2)
+            var skip = 0
+            var b = 0
+            while b < sb:
+                skip = skip | (_bd_read(d, 8) << (8 * b))
+                b = b + 1
+            if sb > 0:
+                skip = skip + 1
+            d.acc = 0
+            d.nbits = 0
+            if d.pos + skip > d.data.len():
+                return Err(CompressionError.TruncatedInput("brotli metadata truncated"))
+            d.pos = d.pos + skip
+        else:
+            val nibbles = 4 + mn
+            var mlen = 0
+            var nb = 0
+            while nb < nibbles:
+                mlen = mlen | (_bd_read(d, 4) << (4 * nb))
+                nb = nb + 1
+            mlen = mlen + 1
+            var uncompressed = false
+            if not is_last:
+                uncompressed = _bd_read(d, 1) == 1
+            if d.errk != 0:
+                return Err(_bd_error(d))
+            if uncompressed:
+                if d.acc != 0:
+                    return Err(CompressionError.CorruptStream("brotli nonzero padding bits"))
+                d.acc = 0
+                d.nbits = 0
+                if d.pos + mlen > d.data.len():
+                    return Err(CompressionError.TruncatedInput("brotli uncompressed block truncated"))
+                var i = 0
+                while i < mlen:
+                    d.out.push(d.data[d.pos + i])
+                    i = i + 1
+                d.pos = d.pos + mlen
+            else:
+                _decode_compressed(d, mlen, win_max)
+        if d.errk != 0:
+            return Err(_bd_error(d))
+    if d.errk != 0:
+        return Err(_bd_error(d))
+    Ok(d.out)

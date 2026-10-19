@@ -59,7 +59,7 @@ fn _brotli_reserved_wbits_stream() -> [u8]:
     var w = brotli_bits_writer_init()
     w = brotli_bits_write(w, 1, 1)
     w = brotli_bits_write(w, 0, 3)
-    w = brotli_bits_write(w, 0, 3)
+    w = brotli_bits_write(w, 1, 3)
     brotli_bits_writer_finish(w)
 
 fn _brotli_last_metadata_stream() -> [u8]:
@@ -100,21 +100,25 @@ fn _brotli_static_dictionary_distance_stream() -> [u8]:
     w = brotli_bits_write(w, 0, 2)
     w = brotli_bits_write(w, 0, 4)
     w = brotli_bits_write(w, 0, 2)
+    # NTREESL = NTREESD = 1 precede all prefix codes (RFC 7932 section 9.2).
+    w = brotli_bits_write_varlen_uint8(w, 0)
     w = brotli_bits_write_varlen_uint8(w, 0)
     w = brotli_bits_write_simple_prefix(w, 8, [0x41])
-    w = brotli_bits_write_simple_prefix(w, 10, [257])
-    w = brotli_bits_write_varlen_uint8(w, 0)
-    w = brotli_bits_write_simple_prefix(w, 6, [0])
+    # Command 136: insert code 1 (one literal), copy code 0 (length 2), explicit distance.
+    w = brotli_bits_write_simple_prefix(w, 10, [136])
+    # Distance code 18: two extra bits, base distance 5 > the 1 byte produced so far.
+    w = brotli_bits_write_simple_prefix(w, 6, [18])
+    w = brotli_bits_write(w, 0, 2)
     brotli_bits_writer_finish(w)
 
 describe("brotli_decode — malformed stream guards"):
 
-    it("rejects the reserved all-zero extended WBITS code"):
+    it("rejects the reserved large-window WBITS code"):
         # @req REQ-SSPEC-UNIT
         # @req REQ-SSPEC-UNIT
         val decoded = brotli_decode(_brotli_reserved_wbits_stream())
         expect(decoded.is_err()).to_equal(true)
-        _expect_compression_error(decoded.unwrap_err(), "InvalidHeader", "reserved WBITS code")
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "large-window")
 
     it "rejects metadata meta blocks in the last-block position":
         # @req: REQ-LIB-BROTLI_BROTLI_NEGATIVE_LARGE-001
@@ -122,15 +126,15 @@ describe("brotli_decode — malformed stream guards"):
         # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
         val decoded = brotli_decode(_brotli_last_metadata_stream())
         expect(decoded.is_err()).to_equal(true)
-        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "metadata meta block in last position")
+        _expect_compression_error(decoded.unwrap_err(), "CorruptStream", "marked last")
 
-    it "rejects compressed blocks that use a complex literal prefix code":
+    it "rejects a compressed block whose complex literal prefix code is truncated":
         # @req: REQ-LIB-BROTLI_BROTLI_NEGATIVE_LARGE-001
-        step("Verify: rejects compressed blocks that use a complex literal prefix code")
+        step("Verify: rejects a compressed block whose complex literal prefix code is truncated")
         # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
         val decoded = brotli_decode(_brotli_complex_literal_prefix_stream())
         expect(decoded.is_err()).to_equal(true)
-        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "complex prefix code")
+        _expect_compression_error(decoded.unwrap_err(), "TruncatedInput", "truncated")
 
     it "rejects copies that would fall into the unsupported static dictionary tier":
         # @req: REQ-LIB-BROTLI_BROTLI_NEGATIVE_LARGE-001
@@ -138,7 +142,7 @@ describe("brotli_decode — malformed stream guards"):
         # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
         val decoded = brotli_decode(_brotli_static_dictionary_distance_stream())
         expect(decoded.is_err()).to_equal(true)
-        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "static dictionary distance")
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "static dictionary")
 
 describe "brotli_encode_uncompressed — large boundaries":
     it "round-trips a 65536-byte payload in a single maximum uncompressed meta block":

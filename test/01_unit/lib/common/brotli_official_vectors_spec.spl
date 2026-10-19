@@ -1,0 +1,105 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+
+"""
+## Purpose and audience
+
+Official google/brotli test vectors (tests/testdata, MIT) are the absolute
+oracle for the pure-Simple RFC 7932 decoder. Audience: compression library
+maintainers. Fixtures live in test/fixtures/compress/brotli (README lists blob shas).
+
+# @manual_section: brotli-decoder
+"""
+
+use std.spec.step
+use std.spec.*
+use std.io_runtime.{file_read_bytes}
+use std.common.compress.brotli.{try_brotli_decompress}
+use std.common.compress.types.{CompressionError}
+
+val FX = "test/fixtures/compress/brotli/"
+
+fn _decodes_exactly(name: text) -> bool:
+    val want = file_read_bytes(FX + name)
+    val comp = file_read_bytes(FX + name + ".compressed")
+    match try_brotli_decompress(comp):
+        case Ok(got):
+            if got.len() != want.len():
+                return false
+            var i = 0
+            while i < want.len():
+                if got[i] != want[i]:
+                    return false
+                i = i + 1
+            true
+        case _: false
+
+fn _needs_dictionary(name: text) -> bool:
+    val comp = file_read_bytes(FX + name + ".compressed")
+    match try_brotli_decompress(comp):
+        case Err(CompressionError.UnsupportedFeature(_)): true
+        case _: false
+
+describe "Brotli decoder official test vectors":
+    it "decodes the empty vector to the exact 0-byte plaintext":
+        step("decode empty.compressed and compare with empty")
+        # @req REQ-BROTLI-001
+        # @capture(kat): empty blob e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+        expect(_decodes_exactly("empty")).to_equal(true)
+
+    it "decodes the x vector to the exact 1-byte plaintext":
+        step("decode x.compressed and compare with x")
+        # @req REQ-BROTLI-001
+        # @capture(kat): x blob 500c0709ca24338426091ca19777e13a1920ebdf
+        expect(_decodes_exactly("x")).to_equal(true)
+
+    it "decodes the xyzzy vector to the exact 5-byte plaintext":
+        step("decode xyzzy.compressed and compare with xyzzy")
+        # @req REQ-BROTLI-001
+        # @capture(kat): xyzzy blob fbfb23d1efdb5ce7f2f24518ee1bd718a037a17d
+        expect(_decodes_exactly("xyzzy")).to_equal(true)
+
+    it "decodes the quickfox vector to the exact 43-byte plaintext":
+        step("decode quickfox.compressed and compare with quickfox")
+        # @req REQ-BROTLI-001
+        # @capture(kat): quickfox blob ff3bb63948b4b24796d2acd259915f2a9d972638
+        expect(_decodes_exactly("quickfox")).to_equal(true)
+
+    it "decodes the 10x10y vector to the exact 20-byte plaintext":
+        step("decode 10x10y.compressed and compare with 10x10y")
+        # @req REQ-BROTLI-001
+        # @capture(kat): 10x10y blob 3f9cf8651c95f006109c6d04e15fe3e26e477fe1
+        expect(_decodes_exactly("10x10y")).to_equal(true)
+
+    it "decodes the 64x vector to the exact 64-byte plaintext":
+        step("decode 64x.compressed and compare with 64x")
+        # @req REQ-BROTLI-001
+        # @capture(kat): 64x blob caa41718cb20530713fa29098bed86e019eebd32
+        expect(_decodes_exactly("64x")).to_equal(true)
+
+    it "decodes the ukkonooa vector to the exact 119-byte plaintext":
+        step("decode ukkonooa.compressed and compare with ukkonooa")
+        # @req REQ-BROTLI-001
+        # @capture(kat): ukkonooa blob 1072b69b4fa079b36330958f87f0bc15c343db65
+        expect(_decodes_exactly("ukkonooa")).to_equal(true)
+
+    it "reports the monkey vector (843-byte plaintext) as needing the static dictionary instead of returning empty output":
+        step("decode monkey.compressed and compare with monkey")
+        # @req REQ-BROTLI-001
+        # @capture(kat): monkey blob 47408cd685dc7256fa95f1abdb47a072138a041d
+        expect(_needs_dictionary("monkey")).to_equal(true)
+
+    it "reports the cp852-utf8 vector (706-byte plaintext) as needing the static dictionary instead of returning empty output":
+        step("decode cp852-utf8.compressed and compare with cp852-utf8")
+        # @req REQ-BROTLI-001
+        # @capture(kat): cp852-utf8 blob fa14705c156df0227e5847800c93cb233063741e
+        expect(_needs_dictionary("cp852-utf8")).to_equal(true)
+
+    it "rejects a truncated stream with an error instead of empty output":
+        step("truncate monkey.compressed and decode")
+        # @req REQ-BROTLI-002
+        # @capture(kat): monkey truncated to 100 bytes
+        val comp = file_read_bytes(FX + "monkey.compressed")
+        val cut = comp[0:100]
+        val res = try_brotli_decompress(cut)
+        expect(res.is_err()).to_equal(true)

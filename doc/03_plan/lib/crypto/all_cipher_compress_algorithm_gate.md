@@ -260,9 +260,15 @@ Remaining, recorded rather than done:
 
 - No pure-Simple zstd entropy encoder (lib emits raw/RLE blocks only); nvfs
   Zstd3/Zstd19 stay tagged-copy (TODO FR-NVFS-N7a-003).
-- Brotli: no known-answer decode spec against real encoder output (no
-  `brotli` tool on the measuring host), so the browser does not advertise
-  `br`; the brotli encoder only compresses inputs with <=4 distinct bytes.
+- Brotli: the decoder is now a full RFC 7932 decoder (block switching, complex
+  prefix codes, context maps, distance ring) and decodes 7 of 9 official
+  google/brotli vectors (`test/fixtures/compress/brotli/`,
+  `brotli_official_vectors_spec.spl`). Remaining: `monkey` and `cp852-utf8`
+  need the 122,784-byte static dictionary + 121 transforms (not in-tree; adding
+  the data file awaits owner approval) and return UnsupportedFeature meanwhile;
+  literal context modes have no passing official vector yet; the browser still
+  does not advertise `br`; the brotli encoder only compresses inputs with <=4
+  distinct bytes (its streams are now RFC-conformant).
 - TLS on the browser (rustls via `rt_tls_*`) and SimpleOS (`rt_tls13_*`,
   `rt_ssh_*`) is not on the pure-Simple crypto modules; browser
   `default_cipher` reports a fixed label, not the negotiated suite.
