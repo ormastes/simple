@@ -25,6 +25,7 @@ use compiler.common.assurance.warning_phase.{warning_phase_enabled_for_value,
 use compiler.common.assurance.mc_exceptions.{McException, parse_mc_exceptions,
     mc_exception_reason_for}
 use compiler.semantics.lint.option_me_call.{OptionMeCallWarning}
+use compiler.semantics.lint.raw_rt_access.{RawRtLexState}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -507,6 +508,11 @@ impl LintCliPolicy:
 
 # LintDiag configuration — overrides for lint levels.
 # Loaded from the simple.sdn `lints:` section and/or file-level attributes.
+struct LintSuppressionIssue:
+    line: i64
+    column: i64
+    message: text
+
 class LintConfig:
     levels: Dict<String, String>
     # Immutable effective defaults for this selected profile. Built once when
@@ -530,6 +536,7 @@ class LintConfig:
     # `mc_exceptions:` key under `lints:`; see
     # compiler.common.assurance.mc_exceptions for the grammar.
     mc_exceptions: [McException]
+    suppression_issues: [LintSuppressionIssue] = []
 
     # Create a default config (all defaults, no overrides).
 impl LintConfig:
@@ -720,8 +727,15 @@ impl LintConfig:
         self.apply_file_attributes_lines(content.split("\n"))
 
     me apply_file_attributes_lines(lines: [String]):
+        self.suppression_issues = []
+        var lexical = RawRtLexState.new()
+        var line_number = 0
         for line in lines:
-            val trimmed = line.trim()
+            line_number = line_number + 1
+            # Reuse the existing incremental string/comment scanner in this
+            # header walk. Attribute-like text in comments/docstrings is inert.
+            val code_line = lexical.scan_line(line)
+            val trimmed = code_line.trim()
 
             # Stop scanning at the first definition (fn, class, enum, struct, trait, etc.)
             if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("class ") or trimmed.starts_with("enum ") or trimmed.starts_with("struct ") or trimmed.starts_with("trait "):
@@ -772,6 +786,21 @@ impl LintConfig:
                         continue
                     val lint_list_str = attr_line.slice(inner_start, close_paren)
                     val lint_names = lint_list_str.split(",")
+                    if level == LintLevel.Allow:
+                        val suffix = line.trim().slice(close_paren + 1).trim()
+                        var has_reason = false
+                        if suffix.starts_with("# reason:"):
+                            has_reason = suffix.slice(9).trim() != ""
+                        var blanket = false
+                        for name in lint_names:
+                            val target = name.trim()
+                            if target == "all" or target == "warnings" or target == "*": blanket = true
+                        if not has_reason or blanket:
+                            val problem = if blanket: "blanket warning suppression is not supported" else: "named warning suppression is missing its description"
+                            self.suppression_issues.push(LintSuppressionIssue(
+                                line: line_number, column: code_line.find("@") + 1,
+                                message: "{problem}; prefer a safe idiom, or use @allow(rule) # reason: <why this warning is intentional>; the warning remains enabled"))
+                            continue
                     for name in lint_names:
                         val clean_name = name.trim()
                         if clean_name == "":
@@ -1204,7 +1233,9 @@ impl LintRunResult:
             case Some(fix):
                 lines.push("  fix: available [{fix.id}] ({fix.confidence_str()})")
             case nil:
-                val _ = 0
+                val rule_name = map_lint_code_to_config_name(self.lint.code)
+                if rule_name != "" and self.lint.level != LintLevel.Allow:
+                    lines.push("  fix: no machine-applicable rewrite; prefer a safe idiom. If intentional, scope @allow({rule_name}) with # reason: <description>. Mark an operation unsafe only when its contract actually requires it.")
 
         for evidence_line in self.lint.evidence:
             lines.push("  evidence: " + evidence_line)
