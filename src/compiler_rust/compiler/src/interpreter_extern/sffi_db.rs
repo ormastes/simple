@@ -1179,6 +1179,10 @@ fn sqlite_value_cmp(a: &SqlValue, b: &SqlValue) -> std::cmp::Ordering {
             },
         }
     }
+    // Exact for integers: folding to f64 would tie distinct values above 2^53.
+    if let (SqlValue::Int(x), SqlValue::Int(y)) = (a, b) {
+        return x.cmp(y);
+    }
     let (ca, na) = class(a);
     let (cb, nb) = class(b);
     ca.cmp(&cb).then_with(|| match ca {
