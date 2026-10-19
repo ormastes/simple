@@ -7,7 +7,7 @@ are authored UNRUN until a newly admitted self-hosted runtime is available.
 use std.spec.*
 use std.spec.step
 use std.io.types.{Shutdown}
-use std.common.encoding.external_text.{Encoding, ByteOrder, BomPolicy, CodecErrorKind}
+use std.common.encoding.external_text.{Encoding, TextByteOrder, BomPolicy, CodecErrorKind}
 use std.common.text_bytes.{text_byte_buffer, bytes_to_text, text_to_utf8_bytes}
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 use std.nogc_sync_mut.io.udp.{UdpSocket}
@@ -58,7 +58,7 @@ fn network_session_pair(left: TextSessionCodec, right: TextSessionCodec) -> (Tcp
     listener.close().unwrap()
     (first, second)
 
-fn network_codec(encoding: Encoding, order: ByteOrder, bom: BomPolicy, limit: i64) -> TextSessionCodec:
+fn network_codec(encoding: Encoding, order: TextByteOrder, bom: BomPolicy, limit: i64) -> TextSessionCodec:
     text_session_codec(encoding, order, bom, encoding, order, bom, limit, limit).unwrap()
 
 fn expect_network_codec_error(result: Result<text?, TextIoError>, kind: CodecErrorKind):
@@ -86,7 +86,7 @@ describe "TCP text sessions over real loopback streams":
         peer.close().unwrap()
 
     it "handles split required BOM and UTF16 surrogate pairs for both byte orders":
-        for order in [ByteOrder.LittleEndian, ByteOrder.BigEndian]:
+        for order in [TextByteOrder.LittleEndian, TextByteOrder.BigEndian]:
             step("Read an encoded BOM and supplementary scalar one byte at a time")
             val codec = network_codec(Encoding.Utf16, order, BomPolicy.Require, 32)
             val pair = network_session_pair(codec, codec)
@@ -123,7 +123,7 @@ describe "TCP text sessions over real loopback streams":
         peer.close().unwrap()
 
     it "enforces forbidden BOM at stream start across split reads":
-        val pair = network_receiver_pair(network_codec(Encoding.Utf8, ByteOrder.NotApplicable, BomPolicy.Forbid, 16))
+        val pair = network_receiver_pair(network_codec(Encoding.Utf8, TextByteOrder.NotApplicable, BomPolicy.Forbid, 16))
         var peer = pair.0
         var session = pair.1
         peer.write_all(network_packed([0xEF, 0xBB, 0xBF])).unwrap()
@@ -134,7 +134,7 @@ describe "TCP text sessions over real loopback streams":
         peer.close().unwrap()
 
     it "rejects oversized writes before bytes or BOM are committed and permits corrected input":
-        val pair = network_writer_pair(network_codec(Encoding.Utf8, ByteOrder.NotApplicable, BomPolicy.Require, 16))
+        val pair = network_writer_pair(network_codec(Encoding.Utf8, TextByteOrder.NotApplicable, BomPolicy.Require, 16))
         var session = pair.0
         var peer = pair.1
         expect(session.write_text("01234567890123456789").is_err()).to_equal(true)
@@ -145,7 +145,7 @@ describe "TCP text sessions over real loopback streams":
         peer.close().unwrap()
 
     it "allows exact UTF16 byte limits without conservatively rejecting multibyte UTF8":
-        val pair = network_writer_pair(network_codec(Encoding.Utf16, ByteOrder.BigEndian, BomPolicy.Preserve, 2))
+        val pair = network_writer_pair(network_codec(Encoding.Utf16, TextByteOrder.BigEndian, BomPolicy.Preserve, 2))
         var session = pair.0
         var peer = pair.1
         session.write_text("€").unwrap()
@@ -180,10 +180,10 @@ describe "TCP text sessions over real loopback streams":
         peer.close().unwrap()
 
     it "keeps simultaneous session encodings isolated":
-        val left = text_session_codec(Encoding.Utf16, ByteOrder.BigEndian, BomPolicy.Preserve,
-            Encoding.Utf8, ByteOrder.NotApplicable, BomPolicy.Preserve, 32, 32).unwrap()
-        val right = text_session_codec(Encoding.Utf8, ByteOrder.NotApplicable, BomPolicy.Preserve,
-            Encoding.Utf16, ByteOrder.BigEndian, BomPolicy.Preserve, 32, 32).unwrap()
+        val left = text_session_codec(Encoding.Utf16, TextByteOrder.BigEndian, BomPolicy.Preserve,
+            Encoding.Utf8, TextByteOrder.NotApplicable, BomPolicy.Preserve, 32, 32).unwrap()
+        val right = text_session_codec(Encoding.Utf8, TextByteOrder.NotApplicable, BomPolicy.Preserve,
+            Encoding.Utf16, TextByteOrder.BigEndian, BomPolicy.Preserve, 32, 32).unwrap()
         val pair = network_session_pair(left, right)
         var first = pair.0
         var second = pair.1
@@ -240,7 +240,7 @@ describe "TCP text sessions over real loopback streams":
         receiver.close().unwrap()
 
     it "emits a required BOM once even when the first write is empty":
-        val pair = network_writer_pair(network_codec(Encoding.Utf8, ByteOrder.NotApplicable, BomPolicy.Require, 16))
+        val pair = network_writer_pair(network_codec(Encoding.Utf8, TextByteOrder.NotApplicable, BomPolicy.Require, 16))
         var sender = pair.0
         var receiver = pair.1
         sender.write_text("").unwrap()
@@ -252,7 +252,7 @@ describe "TCP text sessions over real loopback streams":
         receiver.close().unwrap()
 
     it "keeps a forbidden BOM policy after empty writes and rejects malformed output before commit":
-        val pair = network_writer_pair(network_codec(Encoding.Utf8, ByteOrder.NotApplicable, BomPolicy.Forbid, 16))
+        val pair = network_writer_pair(network_codec(Encoding.Utf8, TextByteOrder.NotApplicable, BomPolicy.Forbid, 16))
         var sender = pair.0
         var receiver = pair.1
         sender.write_text("").unwrap()
@@ -272,7 +272,7 @@ describe "TCP text sessions over real loopback streams":
 
 describe "UDP text sessions preserve datagram boundaries":
     it "applies BOM and UTF16 policies independently to every datagram":
-        val codec = network_codec(Encoding.Utf16, ByteOrder.BigEndian, BomPolicy.Require, 64)
+        val codec = network_codec(Encoding.Utf16, TextByteOrder.BigEndian, BomPolicy.Require, 64)
         var sender = UdpTextSession.bind("127.0.0.1:0", codec, 1000).unwrap()
         var receiver = UdpTextSession.bind("127.0.0.1:0", codec, 1000).unwrap()
         val address = receiver.local_addr().unwrap()

@@ -5,7 +5,7 @@ Selection provenance: the user explicitly requested the full abstraction, separa
 | ID | Selected behavior | Foundation evidence |
 |---|---|---|
 | REQ-001 | AbstractChar/AbstractText are trait contracts; Char/Text alias the existing primitives; their traits provide typed strict conversions without changing physical layout. | Generic internal/external text and char SSpec scenarios; native fixture. |
-| REQ-002 | Typed Encoding, ByteOrder and BOM policy admit supported combinations; unknown/ambiguous metadata fails before payload decoding. | Metadata admission/label scenarios. |
+| REQ-002 | Typed Encoding, TextByteOrder and BOM policy admit supported combinations; unknown/ambiguous metadata fails before payload decoding. | Metadata admission/label scenarios. |
 | REQ-003 | ExternalChar represents exactly one encoded Unicode scalar, excluding an explicitly required transport signature. | Single/empty/multiple/surrogate/BOM character scenarios. |
 | REQ-004 | ExternalText retains owned encoded bytes; internal conversion strictly produces UTF-8 or an error with input-byte provenance. | Invalid UTF-8/UTF-16/truncation and BOM-offset scenarios. |
 | REQ-005 | Output explicitly transcodes to the destination encoding and symmetric BOM policy; embedded NUL survives. | UTF-16 roundtrip, Char egress, BOM policy scenarios. |
