@@ -63,10 +63,12 @@ same passing `bin/simple test`/`check` 30–40× each). That is the #1 cause of 
 - **Convergence = stop.** When the requested step's artifacts exist and its
   checks pass, the step is **done**. Report and stop — do not "double-check",
   re-scan the repo, or re-count files (`find … | wc -l`, `jj status`) on a loop.
-- **Default iteration limit:** allow up to **5** verify/fix cycles for one feature.
-  Continue beyond five when the user authorizes more attempts and each cycle
-  changes the implementation or produces new evidence. Report the remaining
-  failure when progress stalls; do not repeat unchanged failures or passing checks.
+- **Hard iteration cap:** allow at most **6** verify/fix cycles for one feature.
+  Count all prior attempts toward this limit; changing sessions, worktrees, or
+  output directories does not reset it. Each retry must change the implementation
+  or produce new evidence. After the sixth cycle, stop and report any remaining
+  failure instead of retrying. Stop earlier when progress stalls; do not repeat
+  unchanged failures or passing checks.
 - **Repeated-identical-command = abort.** If you are about to issue a command you
   already ran this session with the same result, that is a loop. Stop.
 - **Budget ceiling:** if context approaches large size or wall-clock runs long
