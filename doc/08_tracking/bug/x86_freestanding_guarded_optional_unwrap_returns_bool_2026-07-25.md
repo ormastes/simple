@@ -1,12 +1,12 @@
 # x86 freestanding guarded optional unwrap returns the guard boolean
-## Open 2026-09-16 — needs owner triage
+## Fixed 2026-10-19 — codegen verified on freestanding x86_64 ELF
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
-Open compiler defect; the SimpleOS Draw IR call site uses a source workaround.
+Fixed in the compiler (2026-10-19 note below). The SimpleOS Draw IR call site still carries the source workaround, which is harmless.
 
 2026-10-18: does not reproduce on hosted x86_64 Windows. The Stage 2
 self-hosted compiler (release_phase3 e77412a8eef, LLVM backend, core-C
@@ -16,6 +16,15 @@ the absent case takes the nil branch. The MIR `.?` value-position arm now
 yields the payload (`_MirLoweringExpr/expr_dispatch.spl` `case ExistsCheck`).
 The freestanding QEMU lane where the original failure occurred has not been
 re-run.
+
+2026-10-19: fixed in codegen for freestanding x86_64. Stage 2 (release_phase3,
+LLVM backend) `native-build --entry <repro> --target x86_64-unknown-none
+--emit-object` produces an ELF64 x86-64 object whose `__simple_main` guards
+with `rt_is_some` and lowers `evidence.?` to `rt_is_some` ->
+`rt_unwrap_or_self`. The field load reads through the unwrapped pointer
+(nil arm stores 0x3); `rt_native_neq` is not called and no comparison
+boolean is used as the payload. QEMU image boot of the production call site
+not re-run.
 
 ## Reproducer
 
