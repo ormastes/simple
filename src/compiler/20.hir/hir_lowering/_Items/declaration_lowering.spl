@@ -782,8 +782,27 @@ impl HirLowering:
         else:
             self.lower_type(type_)
 
+    fn scope_binds_type_symbol(name: text) -> bool:
+        """The current scope binds `name` to a type declaration."""
+        val bound = self.symbols.local_type_binding_raw(name)
+        if bound < 0: return false
+        if val symbol = self.symbols.get_symbol_raw(bound):
+            match symbol.kind:
+                case SymbolKind.Struct | SymbolKind.Class | SymbolKind.Enum | SymbolKind.Trait | SymbolKind.TypeAlias: return true
+                case _: return false
+        false
+
     me lower_variant(v: Variant, owner_module: text, project_imported_payloads: bool) -> HirVariant:
-        val symbol = self.symbols.define(v.name, SymbolKind.EnumVariant, nil, v.span, Visibility.Public, false, nil)
+        # A variant name never displaces a type binding in the same scope.
+        # `ExprKind.Block(Block)` / `StmtKind.Expr(Expr)` (lowered here for
+        # local AND imported enums) used to rebind bare `Block`/`Expr` to an
+        # untyped EnumVariant symbol, so a later `val b: Block` or
+        # `f<Block>(..)` lowered to Named(<variant>) and 40.mono refused it
+        # with E-MONO-041 (no proven declaration owner). Variants stay
+        # reachable through their enum; only the bare spelling is kept.
+        # bug: mono_tuple_get_nominal_owner_e_mono_041_2026_10_19
+        val bind_variant_name = not self.scope_binds_type_symbol(v.name)
+        val symbol = self.symbols.define_with_binding(v.name, SymbolKind.EnumVariant, nil, v.span, Visibility.Public, false, nil, bind_variant_name)
 
         # QUALIFIED patterns in a statement match, not `val kind = match` over
         # bare `Tuple(types)` arms: on the seed the bare arm bound `types` to a
