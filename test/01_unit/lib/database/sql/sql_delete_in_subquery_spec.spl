@@ -36,6 +36,17 @@ fn _ids(db: Database) -> [i64]:
             out.push(r.get_text("id").unwrap().to_int())
     out
 
+fn _mx_ids(db: Database) -> [i64]:
+    var d = db
+    var out: [i64] = []
+    for r in d.query("SELECT id FROM mx", []).unwrap():
+        val as_int = r.get_int("id")
+        if as_int.?:
+            out.push(as_int.unwrap())
+        else:
+            out.push(r.get_text("id").unwrap().to_int())
+    out
+
 describe "DELETE with IN subquery":
     it "NOT IN keeps the top-N rows by ORDER BY ... DESC LIMIT":
         step("retention")
@@ -74,4 +85,19 @@ describe "DELETE with IN subquery":
         var db = _seeded()
         expect(db.exec_sql("DELETE FROM ev WHERE id IN (SELECT id FROM nope)").is_err()).to_equal(true)
         expect(_ids(db).len()).to_equal(5)
+        db.close().unwrap()
+
+    it "orders mixed numeric and non-numeric text totally: 9, 10, 10a":
+        step("mixed text")
+        var db = Database.memory().unwrap()
+        db.exec_sql("CREATE TABLE mx (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)").unwrap()
+        db.exec_sql("INSERT INTO mx (v) VALUES ('10a')").unwrap()
+        db.exec_sql("INSERT INTO mx (v) VALUES ('9')").unwrap()
+        db.exec_sql("INSERT INTO mx (v) VALUES ('10')").unwrap()
+        # ascending: 9 (id 2), 10 (id 3), 10a (id 1); keep the first two
+        db.exec_sql("DELETE FROM mx WHERE id NOT IN (SELECT id FROM mx ORDER BY v ASC LIMIT 2)").unwrap()
+        expect(_mx_ids(db)).to_equal([2, 3])
+        # descending: 10 (id 3) is the largest of the remaining {9, 10}
+        db.exec_sql("DELETE FROM mx WHERE id NOT IN (SELECT id FROM mx ORDER BY v DESC LIMIT 1)").unwrap()
+        expect(_mx_ids(db)).to_equal([3])
         db.close().unwrap()

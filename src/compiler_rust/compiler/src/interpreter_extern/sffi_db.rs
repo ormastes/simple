@@ -1163,18 +1163,29 @@ fn sqlite_parse_in_subquery(clause: &str) -> Option<(String, bool, String)> {
     Some((col.trim_matches('"').to_string(), negate, sub.to_string()))
 }
 
+/// Total order matching SQLite: NULL < numeric < non-numeric text. Numeric means
+/// Int, Float, or text that parses as a finite number (literal INSERTs store
+/// text). Compared within a class: numeric as f64, text lexicographically.
 fn sqlite_value_cmp(a: &SqlValue, b: &SqlValue) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    match (a, b) {
-        (SqlValue::Null, SqlValue::Null) => Ordering::Equal,
-        (SqlValue::Null, _) => Ordering::Less,
-        (_, SqlValue::Null) => Ordering::Greater,
-        (SqlValue::Int(x), SqlValue::Int(y)) => x.cmp(y),
-        _ => match (a.as_text().parse::<f64>(), b.as_text().parse::<f64>()) {
-            (Ok(x), Ok(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
-            _ => a.as_text().cmp(&b.as_text()),
-        },
+    fn class(v: &SqlValue) -> (u8, f64) {
+        match v {
+            SqlValue::Null => (0, 0.0),
+            SqlValue::Int(i) => (1, *i as f64),
+            SqlValue::Float(f) if f.is_finite() => (1, *f),
+            SqlValue::Float(_) => (2, 0.0),
+            SqlValue::Text(t) => match t.trim().parse::<f64>() {
+                Ok(f) if f.is_finite() => (1, f),
+                _ => (2, 0.0),
+            },
+        }
     }
+    let (ca, na) = class(a);
+    let (cb, nb) = class(b);
+    ca.cmp(&cb).then_with(|| match ca {
+        1 => na.total_cmp(&nb),
+        2 => a.as_text().cmp(&b.as_text()),
+        _ => std::cmp::Ordering::Equal,
+    })
 }
 
 /// Evaluate `SELECT col FROM t [ORDER BY c [ASC|DESC], ...] [LIMIT n]`.
