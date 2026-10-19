@@ -1060,6 +1060,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_aes128_encrypt_block_pure",
     "rt_aes128_decrypt_block_pure",
     "rt_tls13_sha256",
+    "rt_sha512_digest",
+    "rt_sha384_digest",
     "rt_tls13_hkdf_extract",
     "rt_tls13_hkdf_extract_into",
     "rt_tls13_hkdf_expand_into",

@@ -2978,6 +2978,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_sha512_byte", sha512::rt_sha512_byte);
     insert_simple!("rt_sha512_K", sha512::rt_sha512_k);
     insert_simple!("rt_sha512_H", sha512::rt_sha512_h);
+    insert_simple!("rt_sha512_digest", sha512::rt_sha512_digest);
+    insert_simple!("rt_sha384_digest", sha512::rt_sha384_digest);
     insert_simple!("rt_tls13_sha256", tls13::rt_tls13_sha256);
     insert_simple!("rt_tls13_hkdf_extract", tls13::rt_tls13_hkdf_extract);
     insert_simple!("rt_tls13_hkdf_extract_into", tls13::rt_tls13_hkdf_extract_into);

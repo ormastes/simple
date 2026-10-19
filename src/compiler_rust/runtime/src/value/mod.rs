@@ -499,8 +499,8 @@ pub use sffi::{
 pub use sffi::{
     rt_sha1_finish, rt_sha1_finish_base64, rt_sha1_finish_bytes, rt_sha1_free, rt_sha1_new, rt_sha1_reset,
     rt_sha1_write, rt_sha256_finish, rt_sha256_finish_bytes, rt_sha256_free, rt_sha256_new, rt_sha256_reset,
-    rt_sha256_write, rt_tls13_sha256, rt_xxhash_finish, rt_xxhash_free, rt_xxhash_new, rt_xxhash_new_with_seed,
-    rt_xxhash_reset, rt_xxhash_write, rt_xxh3_128_text,
+    rt_sha256_write, rt_sha384_digest, rt_sha512_digest, rt_tls13_sha256, rt_xxhash_finish, rt_xxhash_free,
+    rt_xxhash_new, rt_xxhash_new_with_seed, rt_xxhash_reset, rt_xxhash_write, rt_xxh3_128_text,
 };
 
 // Re-export atomic operations SFFI functions
