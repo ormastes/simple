@@ -615,6 +615,20 @@ pub fn runtime_core_c_sources_v1() -> [text]:
     """
     ["runtime_native", "runtime_core_intrinsics", "runtime_file_view", "runtime_cache_host_authority_v1", "runtime_framebuffer", "runtime_directx_core", "runtime_legacy_core", "runtime_core_io_exports", "runtime_core_host_services", "runtime_fork", "runtime_memtrack", "runtime_process", "runtime_memory", "runtime_process_owned", "runtime_coverage_core", "runtime_contracts", "runtime_font", "runtime_thread", "runtime_simd_utf8", "runtime_simd_case", "runtime_simd_search", "runtime_simd_dispatch", "runtime_packed_span", "runtime_terminal", "runtime_prof_sample", "runtime_core_exports", "runtime_backend_plugin", "runtime_rocm", "runtime_renderdoc", "runtime_timestamp", "runtime_glfw", "runtime_sdl2", "runtime_sdl3", "runtime_audio", "runtime_image", "runtime_socket_nonblock", "counterpart_abi_runtime"]
 
+pub fn runtime_thread_rust_owner_v1(include_dynload: bool, core_c_profile: bool,
+        coff_host: bool, target: text) -> bool:
+    """Select the Rust owner of the rt_thread_* handle family for native-all.
+
+    The sole caller passes include_dynload=false exactly when the link also
+    takes simple_native_all. On COFF, rustc's merged-function aliases put
+    rt_thread_id_limited / rt_thread_is_done_limited in the same COMDAT as
+    Rust's rt_thread_id / rt_thread_is_done; if this C copy wins those names
+    lld-link discards the section and the aliases with it. ELF never discards
+    the losing definition's section, so other targets keep their composition.
+    """
+    if include_dynload or core_c_profile: return false
+    coff_host or target.contains("-windows-")
+
 pub fn runtime_object_paths_v1(sources: [text], prefix: text, ext: text) -> [text]:
     """Keep each object basename paired with the source that produced it."""
     var objects: [text] = []
@@ -762,6 +776,8 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             # runtime_memory.c is always in this bundle and canonically owns
             # the overlapping allocator/pointer ABI, including native-all.
             comp_args.push("/DSIMPLE_RUNTIME_MEMORY_OWNER=1")
+            if runtime_thread_rust_owner_v1(include_dynload, core_c_profile, true, target):
+                comp_args.push("/DSIMPLE_RUNTIME_THREAD_RUST_OWNER=1")
             if include_dynload or core_c_profile:
                 # Only the standalone core-C composition may suppress hosted
                 # providers. native-all needs runtime_native/thread/process
@@ -803,6 +819,8 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             # Keep runtime_memory.c as the sole allocator/pointer ABI owner in
             # both dynload and native-all/non-dynload compositions.
             comp_args.push("-DSIMPLE_RUNTIME_MEMORY_OWNER=1")
+            if runtime_thread_rust_owner_v1(include_dynload, core_c_profile, _is_windows(), target):
+                comp_args.push("-DSIMPLE_RUNTIME_THREAD_RUST_OWNER=1")
             if core_c_profile:
                 comp_args.push("-DSIMPLE_RUNTIME_TIMESTAMP_OWNER=1")
             if include_dynload or core_c_profile:
