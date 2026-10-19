@@ -15,3 +15,12 @@ Recovery reference: `50c8c89f6e476d1e0f3e7b2e1512e7db57a6bd06`, original nested 
 Permanent repair must register nested extern declarations at their intended lexical scope in pure-Simple HIR lowering. Check the Rust seed for the same behavior. Add prevention cases for nested extern calls in static methods and ordinary functions, identical declarations in separate scopes, and conflicting signatures. Before removal, apply the permanent repair, verify the original nested reproducer and these scope cases, then restore only this tagged declaration move. Fetching a purported repair alone does not authorize recovery.
 
 This object check does not qualify runtime CPU discovery, linking, compiler-wide behavior, memory/performance, or full Phase3. No native codegen behavior changed in the workaround; its scope remains declaration registration only.
+
+## release_phase3 port linkage (2026-10-19)
+
+The original recovery reference `50c8c89f6e4` and workaround commit `0a9ecc244a6`
+exist only in a local worktree. On the release_phase3 port (PR #3803) the
+workaround commit is `657ca5c5fb55ec59f146a8946d710c79d1276def`, and the source tag
+now uses `recover=0f7368cd97dca86e99379c5173a4c530d1d6f2c2`, its parent on that
+branch, which still has the original nested declaration. A row was added to
+`bug_db.sdn` by hand; qualified bug-database reconciliation remains pending.
