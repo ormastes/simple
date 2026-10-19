@@ -1,0 +1,85 @@
+"""
+Orphan diagnostics retain their optional text payload and exact enum owner.
+These scenarios call the production coherence checker and message renderer.
+"""
+# @req REQ-ENUM-COHERENCE-PAYLOAD
+# @cover src/compiler/25.traits/trait_coherence.spl
+
+use std.spec.*
+use compiler.traits.trait_coherence.{CoherenceChecker, CoherenceError, ImplInfo}
+
+fn coherence_foreign_impl(target: text, trait_name: text?) -> ImplInfo:
+    ImplInfo(target_type: target, trait_name: trait_name, generic_params: [],
+        is_blanket: false, is_default: false, associated_types: {})
+
+describe "orphan error optional payload ownership":
+    it "retains nil when no local type can anchor a wrapper suggestion":
+        step("Check a foreign trait on a foreign type without local declarations")
+        var checker = CoherenceChecker.create()
+        checker.register_impl(coherence_foreign_impl("RemoteType", Some("RemoteTrait")))
+        val errors = checker.check_orphan_rules()
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_equal(CoherenceError.OrphanImpl(
+            trait_name: "RemoteTrait", target_type: "RemoteType", suggestion: nil))
+        expect(errors[0].message()).to_equal("Cannot implement foreign trait 'RemoteTrait' for foreign type 'RemoteType'")
+
+    it "retains Some text when an unrelated local type exists":
+        step("Keep a foreign implementation illegal while preserving its actionable suggestion")
+        var checker = CoherenceChecker.create()
+        checker.register_type("LocalWrapper")
+        checker.register_impl(coherence_foreign_impl("RemoteType", Some("RemoteTrait")))
+        val errors = checker.check_orphan_rules()
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_equal(CoherenceError.OrphanImpl(
+            trait_name: "RemoteTrait", target_type: "RemoteType",
+            suggestion: Some("Create a newtype wrapper in your module")))
+        expect(errors[0].message()).to_equal("Cannot implement foreign trait 'RemoteTrait' for foreign type 'RemoteType'\n\nSuggestion: Create a newtype wrapper in your module")
+
+    it "accepts a local trait on a foreign type":
+        step("Preserve trait ownership as one valid orphan-rule boundary")
+        var checker = CoherenceChecker.create()
+        checker.register_trait("LocalTrait")
+        checker.register_impl(coherence_foreign_impl("RemoteType", Some("LocalTrait")))
+        expect(checker.check_orphan_rules().len()).to_equal(0)
+
+    it "accepts a foreign trait on a local type":
+        step("Preserve type ownership as the other valid orphan-rule boundary")
+        var checker = CoherenceChecker.create()
+        checker.register_type("LocalType")
+        checker.register_impl(coherence_foreign_impl("LocalType", Some("RemoteTrait")))
+        expect(checker.check_orphan_rules().len()).to_equal(0)
+
+    it "keeps inherent implementations out of trait orphan diagnostics":
+        step("Register a no-trait implementation without inventing a trait owner")
+        var checker = CoherenceChecker.create()
+        checker.register_impl(coherence_foreign_impl("RemoteType", nil))
+        expect(checker.check_orphan_rules().len()).to_equal(0)
+
+    it "preserves every current diagnostic variant and its payload order":
+        step("Render overlap associated-type and blanket errors through their exact variants")
+        expect(CoherenceError.OverlappingImpl(
+            trait_name: "Render", type1: "Left", type2: "Right").message())
+            .to_equal("Overlapping implementations of trait 'Render' for types 'Left' and 'Right'")
+        expect(CoherenceError.ConflictingAssociatedType(
+            trait_name: "Iterable", target_type: "Rows", type_name: "Item").message())
+            .to_equal("Conflicting associated type 'Item' in trait 'Iterable' for type 'Rows'")
+        expect(CoherenceError.BlanketImplConflict(
+            trait_name: "Show", general: "AnyValue", specific: "OneValue").message())
+            .to_equal("Blanket implementation 'AnyValue' for trait 'Show' conflicts with specific implementation 'OneValue'")
+
+    it "retains registry contents and one diagnostic per foreign implementation on a bounded fixture":
+        step("Check many local types without changing registry ownership or suppressing foreign errors")
+        var checker = CoherenceChecker.create()
+        for index in 0..128:
+            checker.register_type("Local{index}")
+        checker.register_impl(coherence_foreign_impl("RemoteA", Some("RemoteTrait")))
+        checker.register_impl(coherence_foreign_impl("RemoteB", Some("RemoteTrait")))
+        val errors = checker.check_orphan_rules()
+        expect(errors.len()).to_equal(2)
+        expect(errors[0]).to_equal(CoherenceError.OrphanImpl("RemoteTrait", "RemoteA",
+            Some("Create a newtype wrapper in your module")))
+        expect(errors[1]).to_equal(CoherenceError.OrphanImpl("RemoteTrait", "RemoteB",
+            Some("Create a newtype wrapper in your module")))
+        expect(checker.local_types.len()).to_equal(128)
+        expect(checker.local_traits.len()).to_equal(0)
+        expect(checker.impls["RemoteTrait"].len()).to_equal(2)
