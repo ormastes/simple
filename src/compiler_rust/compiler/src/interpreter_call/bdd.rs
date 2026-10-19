@@ -44,6 +44,24 @@ fn record_assertion_failure(msg: String) -> Result<(), CompileError> {
     Ok(())
 }
 
+/// Final step of every `expect(..).to_*` matcher: same rule as
+/// `record_assertion_failure`, for the matcher path. Inside an `it` the arm has
+/// already parked its failure in `BDD_EXPECT_FAILED`; outside any `it` nothing
+/// reads that flag, so a mismatch (`Bool(false)`) is fatal instead of a silent
+/// exit 0. A passing matcher outside an `it` is unchanged.
+pub(crate) fn finish_bdd_matcher(result: Value) -> Result<Value, CompileError> {
+    if matches!(result, Value::Bool(false)) && !BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
+        let msg = BDD_FAILURE_MSG
+            .with(|cell| cell.borrow_mut().take())
+            .unwrap_or_else(|| "expectation failed".to_string());
+        BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
+        return Err(CompileError::semantic(format!(
+            "{msg} (expectation outside an `it` block has no spec harness to record it)"
+        )));
+    }
+    Ok(result)
+}
+
 thread_local! {
     // Current indentation level for nested describe/context blocks
     pub(crate) static BDD_INDENT: RefCell<usize> = const { RefCell::new(0) };
