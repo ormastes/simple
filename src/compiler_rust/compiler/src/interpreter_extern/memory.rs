@@ -483,6 +483,17 @@ pub fn rt_transient_heap_promote_share_end(args: &[Value]) -> Result<Value, Comp
     Ok(Value::Bool(simple_runtime::value::rt_transient_heap_promote_share_end()))
 }
 
+/// Observe this thread's transient parser-array scope without mutating it:
+/// 0 = no scope, 1 = active, 2 = paused (the Rust runtime's own state).
+pub fn rt_transient_array_scope_state_v1(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_transient_array_scope_state_v1 requires 0 arguments",
+        ));
+    }
+    Ok(Value::Int(simple_runtime::value::rt_transient_array_scope_state_v1()))
+}
+
 pub fn rt_transient_array_scope_end(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
         return Err(CompileError::runtime(
@@ -2171,6 +2182,19 @@ mod tests {
         assert_eq!(promote(&Value::Nil), Value::Bool(false), "nil never promotes");
         assert_eq!(rt_transient_array_scope_end(&[]).unwrap(), Value::Bool(true));
         assert_eq!(promote(&composite), Value::Bool(false), "scope ended");
+    }
+
+    #[test]
+    fn transient_array_scope_state_v1_tracks_begin_pause_end() {
+        let state = || rt_transient_array_scope_state_v1(&[]).unwrap();
+        assert_eq!(state(), Value::Int(0), "no scope open");
+        assert_eq!(rt_transient_array_scope_begin(&[]).unwrap(), Value::Bool(true));
+        assert_eq!(state(), Value::Int(1), "active");
+        assert_eq!(rt_transient_array_scope_pause(&[]).unwrap(), Value::Bool(true));
+        assert_eq!(state(), Value::Int(2), "paused");
+        assert_eq!(rt_transient_array_scope_end(&[]).unwrap(), Value::Bool(true));
+        assert_eq!(state(), Value::Int(0), "ended");
+        assert!(rt_transient_array_scope_state_v1(&[Value::Int(1)]).is_err());
     }
 
     #[test]

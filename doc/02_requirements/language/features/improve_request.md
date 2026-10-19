@@ -889,3 +889,35 @@ print("Call references: {stats.get('call_refs')}")
 - Foundation for LSP implementation
 - Call graph visualization
 - Impact analysis
+
+---
+
+### [Core] Array Repetition Operator (`[T] * i64`)
+
+**Type:** Improvement
+**Category:** Feature
+**Priority:** Low
+**Proposed:** 2026-10-19
+**Status:** Requested
+
+**Problem:**
+`[7u8] * 64` (Python-style list repetition) is not part of the language: both
+the seed interpreter and the JIT reject it with
+`semantic: type mismatch: cannot convert array to int`. Thirteen loader /
+installer specs under `test/01_unit/os/` were written with it and failed in the
+2026-10-19 full sweep; they now use the documented fill literal.
+
+**Current form (works in both engines):**
+```simple
+val sig: [u8] = [7u8; 64]
+val oversized = [0u8; MAX_WIRE_BYTES + 1]
+```
+
+**Proposed Solution:**
+Either accept `[x] * n` as sugar for `[x; n]` (single-element literal only),
+or reject it with a diagnostic that names the fill literal instead of the
+misleading array-to-int conversion error.
+
+**Impact:**
+- Breaking changes: No
+- Implementation: binary-op lowering in the interpreter, JIT and self-hosted HIR
