@@ -1688,9 +1688,16 @@ pub(crate) fn evaluate_call(
                     .iter()
                     .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                     .collect::<Result<Vec<_>, _>>()?;
+                // `as_int` admits every integer carrier (a `u8` from `x as u8`
+                // is `Value::UInt`). Matching only `Value::Int` silently turned
+                // those into code point 0.
                 let code = match evaluated_args.first() {
-                    Some(Value::Int(i)) => *i,
-                    _ => 0,
+                    Some(v) => v.as_int()?,
+                    None => {
+                        return Err(CompileError::semantic(
+                            "text.from_char_code expects one integer code point",
+                        ))
+                    }
                 };
                 let ch = char::from_u32(code as u32).unwrap_or('\0');
                 return Ok(Value::text(ch.to_string()));
