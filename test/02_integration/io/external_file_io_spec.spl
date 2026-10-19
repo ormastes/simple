@@ -1,0 +1,191 @@
+"""External text I/O preserves wire bytes until explicit UTF-8 conversion.
+
+REQ-EXTERNAL-IO-001 files;
+REQ-EXTERNAL-IO-003 symmetric output; REQ-EXTERNAL-IO-004 strict failure.
+Authored integration scenarios; execution and docgen require admitted runtime.
+"""
+use std.spec.*
+use std.common.encoding.external_text.{Encoding, ByteOrder, BomPolicy, ExternalFormat, utf8_format}
+use std.common.string_core.{text_to_bytes}
+use std.nogc_sync_mut.io_runtime.{file_write_bytes, file_read_bytes_result, file_read_result, file_delete, getpid, time_now_unix_micros}
+use std.io.types.{IoErrorKind, FileMode}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read_text_at, file_write_text_at, file_append}
+use std.nogc_sync_mut.io.external_file.{file_read_external_text_at, file_write_encoded_text_at, file_append_encoded_text}
+use std.nogc_sync_mut.package_sffi.{create_symlink, set_permissions}
+use std.nogc_sync_mut.sffi.fs.{file_mode, file_exists_str}
+use std.nogc_sync_mut.io.file.{FileHandle, File}
+use std.nogc_sync_mut.io.text_session.{text_session_codec}
+use std.nogc_sync_mut.io.file_external_compat.{file_read_external_text, file_read_external_char, file_write_encoded_text, file_atomic_write_encoded_text, file_create_encoded_text_exclusive}
+use std.env.platform.{get_temp_dir}
+
+fn external_io_utf16le() -> ExternalFormat:
+    ExternalFormat(encoding: Encoding.Utf16, byte_order: ByteOrder.LittleEndian, bom: BomPolicy.Preserve)
+
+fn external_io_scratch() -> text:
+    get_temp_dir() + "/external-text-io-{getpid()}-{time_now_unix_micros()}.bin"
+
+describe "Declared external text on actual files":
+    it "retains UTF-16 file bytes before decoding a non-BMP scalar and NUL":
+        # @req: REQ-EXTERNAL-IO-001
+        step("Write UTF-16LE A, NUL, and a surrogate pair as binary bytes")
+        val path = external_io_scratch()
+        val wire: [u8] = [65, 0, 0, 0, 61, 216, 0, 222]
+        expect(file_write_bytes(path, wire)).to_equal(true)
+        step("Read typed external text with an explicit UTF-16LE declaration")
+        val external = file_read_external_text(path, external_io_utf16le()).unwrap()
+        expect(external.encoded_bytes().unwrap()).to_equal(wire)
+        expect(external.external_format().encoding).to_equal(Encoding.Utf16)
+        expect(external.external_format().byte_order).to_equal(ByteOrder.LittleEndian)
+        step("Convert to internal UTF-8 before processing")
+        val internal = external.to_internal_text().unwrap()
+        expect(text_to_bytes(internal)).to_equal([65u8, 0u8, 240u8, 159u8, 152u8, 128u8])
+        expect(file_read_bytes_result(path).unwrap()).to_equal(wire)
+        step("Encode the internal text back to the same declared format, including NUL")
+        expect(file_write_encoded_text(path, internal, external_io_utf16le()).is_ok()).to_equal(true)
+        expect(file_read_bytes_result(path).unwrap()).to_equal(wire)
+        expect(file_delete(path)).to_equal(true)
+
+    it "rejects malformed UTF-8 in the migrated legacy file API":
+        # @req: REQ-EXTERNAL-IO-004
+        step("Store an overlong UTF-8 NUL sequence without decoding binary data")
+        val path = external_io_scratch()
+        expect(file_write_bytes(path, [192u8, 128u8])).to_equal(true)
+        val raw = file_read_external_text(path, utf8_format()).unwrap()
+        expect(raw.encoded_bytes().unwrap()).to_equal([192u8, 128u8])
+        step("Both explicit conversion and the compatibility text read reject it")
+        expect(raw.to_internal_text().is_err()).to_equal(true)
+        expect(file_read_result(path).is_err()).to_equal(true)
+        expect(file_delete(path)).to_equal(true)
+
+    it "encodes outbound file text in the requested byte order":
+        # @req: REQ-EXTERNAL-IO-003
+        step("Write internal non-BMP text using explicit UTF-16 big endian")
+        val path = external_io_scratch()
+        val format = ExternalFormat(encoding: Encoding.Utf16, byte_order: ByteOrder.BigEndian, bom: BomPolicy.Require)
+        expect(file_write_encoded_text(path, "A😀", format).is_ok()).to_equal(true)
+        step("Inspect actual output bytes including the required BOM")
+        expect(file_read_bytes_result(path).unwrap()).to_equal([254u8, 255u8, 0u8, 65u8, 216u8, 61u8, 222u8, 0u8])
+        expect(file_read_external_text(path, format).unwrap().to_internal_text().unwrap()).to_equal("A😀")
+        expect(file_delete(path)).to_equal(true)
+
+    it "returns exactly one external character from a file and rejects multiple scalars":
+        # @req: REQ-EXTERNAL-IO-001
+        step("Store one supplementary character as UTF-16LE")
+        val path = external_io_scratch()
+        expect(file_write_bytes(path, [61u8, 216u8, 0u8, 222u8])).to_equal(true)
+        val character = file_read_external_char(path, external_io_utf16le()).unwrap()
+        expect(character.encoded_bytes().unwrap()).to_equal([61u8, 216u8, 0u8, 222u8])
+        expect(character.to_internal_char().is_ok()).to_equal(true)
+        step("Reject two scalars at the character boundary")
+        expect(file_write_bytes(path, [65u8, 66u8])).to_equal(true)
+        expect(file_read_external_char(path, utf8_format()).is_err()).to_equal(true)
+        expect(file_delete(path)).to_equal(true)
+
+    it "retains file facade replacement semantics for a symbolic link":
+        # @req: REQ-EXTERNAL-IO-003
+        step("Create a real symbolic link to an existing file")
+        val target = external_io_scratch()
+        val link = target + ".link"
+        expect(file_write_bytes(target, [79u8, 76u8, 68u8])).to_equal(true)
+        expect(create_symlink(target, link)).to_equal(true)
+        step("The legacy facade replaces the link entry and leaves its target unchanged")
+        expect(file_write(link, "NEW")).to_equal(true)
+        expect(file_read_bytes_result(target).unwrap()).to_equal([79u8, 76u8, 68u8])
+        expect(file_read_bytes_result(link).unwrap()).to_equal([78u8, 69u8, 87u8])
+        expect(file_delete(link)).to_equal(true)
+        expect(file_delete(target)).to_equal(true)
+
+    it "reads and writes declared positional text without changing neighboring bytes":
+        # @req: REQ-EXTERNAL-IO-001
+        # @req: REQ-EXTERNAL-IO-003
+        step("Write a binary envelope around a UTF-16LE non-BMP scalar")
+        val path = external_io_scratch()
+        expect(file_write_bytes(path, [255u8, 61u8, 216u8, 0u8, 222u8, 254u8])).to_equal(true)
+        val external = file_read_external_text_at(path, 1, 4, external_io_utf16le()).unwrap()
+        expect(external.encoded_bytes().unwrap()).to_equal([61u8, 216u8, 0u8, 222u8])
+        expect(external.to_internal_text().unwrap()).to_equal("😀")
+        step("Overwrite only the selected byte range with declared UTF-16LE text")
+        expect(file_write_encoded_text_at(path, 1, "AB", external_io_utf16le()).unwrap()).to_equal(4)
+        expect(file_read_bytes_result(path).unwrap()).to_equal([255u8, 65u8, 0u8, 66u8, 0u8, 254u8])
+        expect(file_read_text_at(path, 0, 1).is_err()).to_equal(true)
+        expect(file_write_text_at(path, 1, "CD")).to_equal(2)
+        expect(file_read_text_at(path, 1, 2).unwrap()).to_equal("CD")
+        expect(file_delete(path)).to_equal(true)
+
+    it "appends destination-encoded bytes through the real append descriptor":
+        # @req: REQ-EXTERNAL-IO-003
+        step("Append two separately declared UTF-16LE records")
+        val path = external_io_scratch()
+        expect(file_append_encoded_text(path, "A", external_io_utf16le()).is_ok()).to_equal(true)
+        expect(file_append_encoded_text(path, "😀", external_io_utf16le()).is_ok()).to_equal(true)
+        expect(file_read_bytes_result(path).unwrap()).to_equal([65u8, 0u8, 61u8, 216u8, 0u8, 222u8])
+        step("Legacy append explicitly encodes UTF-8 and preserves the existing prefix")
+        expect(file_append(path, "Z")).to_equal(true)
+        expect(file_read_bytes_result(path).unwrap()).to_equal([65u8, 0u8, 61u8, 216u8, 0u8, 222u8, 90u8])
+        expect(file_delete(path)).to_equal(true)
+
+    it "uses the shared codec for actual FileHandle text operations":
+        # @req: REQ-EXTERNAL-IO-001
+        # @req: REQ-EXTERNAL-IO-003
+        step("Read a multibyte scalar through the legacy file-handle text method")
+        val path = external_io_scratch()
+        expect(file_write_bytes(path, [240u8, 159u8, 152u8, 128u8, 10u8])).to_equal(true)
+        var reader = FileHandle.read_file(path).unwrap()
+        expect(reader.read_line().unwrap()).to_equal("😀\n")
+        expect(reader.close().is_ok()).to_equal(true)
+        var all_reader = FileHandle.read_file(path).unwrap()
+        expect(all_reader.read_text().unwrap()).to_equal("😀\n")
+        expect(all_reader.close().is_ok()).to_equal(true)
+        step("Encode UTF-16LE through a file handle and inspect actual wire bytes")
+        val codec = text_session_codec(Encoding.Utf16, ByteOrder.LittleEndian, BomPolicy.Preserve, Encoding.Utf16, ByteOrder.LittleEndian, BomPolicy.Preserve, 1024, 1024).unwrap()
+        var writer = File.open_text(path, FileMode.WriteOnly, codec).unwrap()
+        expect(writer.write("😀").is_ok()).to_equal(true)
+        expect(writer.close().is_ok()).to_equal(true)
+        expect(file_read_bytes_result(path).unwrap()).to_equal([61u8, 216u8, 0u8, 222u8])
+        expect(file_delete(path)).to_equal(true)
+
+    it "preserves atomic and exclusive UTF-8 providers and rejects unadmitted output formats":
+        # @req: REQ-EXTERNAL-IO-003
+        # @req: REQ-EXTERNAL-IO-004
+        step("Atomically write UTF-8 and inspect non-BMP output bytes")
+        val path = external_io_scratch()
+        expect(file_atomic_write_encoded_text(path, "😀", utf8_format()).is_ok()).to_equal(true)
+        expect(file_read_bytes_result(path).unwrap()).to_equal([240u8, 159u8, 152u8, 128u8])
+        step("Non-UTF-8 atomic output is explicitly unsupported and leaves the file untouched")
+        expect(file_atomic_write_encoded_text(path, "changed", external_io_utf16le()).is_err()).to_equal(true)
+        expect(file_read_bytes_result(path).unwrap()).to_equal([240u8, 159u8, 152u8, 128u8])
+        step("Exclusive creation refuses an existing path and preserves its contents")
+        expect(file_create_encoded_text_exclusive(path, "changed", utf8_format()).is_err()).to_equal(true)
+        expect(file_read_bytes_result(path).unwrap()).to_equal([240u8, 159u8, 152u8, 128u8])
+        expect(file_delete(path)).to_equal(true)
+
+    it "keeps legacy positional writes write-only and does not widen creation mode":
+        # @req: REQ-EXTERNAL-IO-003
+        step("Create a real file and restrict its mode to owner-write only")
+        val path = external_io_scratch()
+        expect(file_write_bytes(path, [65u8, 66u8, 67u8])).to_equal(true)
+        expect(set_permissions(path, 128)).to_equal(true)
+        expect(file_mode(path) & 511).to_equal(128)
+        step("Write through the legacy positional API without requiring read permission")
+        expect(file_write_text_at(path, 1, "Z")).to_equal(1)
+        expect(file_mode(path) & 511).to_equal(128)
+        expect(set_permissions(path, 384)).to_equal(true)
+        expect(file_read_bytes_result(path).unwrap()).to_equal([65u8, 90u8, 67u8])
+        expect(file_delete(path)).to_equal(true)
+        step("A newly created legacy positional file never grants group or other write")
+        expect(file_write_text_at(path, 0, "A")).to_equal(1)
+        expect(file_mode(path) & 18).to_equal(0)
+        expect(file_delete(path)).to_equal(true)
+
+    it "keeps empty legacy appends successful without creating files or parents":
+        # @req: REQ-EXTERNAL-IO-003
+        step("Append empty text to an absent path")
+        val path = external_io_scratch()
+        expect(file_exists_str(path)).to_equal(false)
+        expect(file_append(path, "")).to_equal(true)
+        expect(file_exists_str(path)).to_equal(false)
+        step("Append empty text under a missing parent without creating either entry")
+        val nested = path + "/missing-parent/file"
+        expect(file_append(nested, "")).to_equal(true)
+        expect(file_exists_str(path)).to_equal(false)
+        expect(file_exists_str(nested)).to_equal(false)
