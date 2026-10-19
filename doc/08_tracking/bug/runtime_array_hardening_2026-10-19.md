@@ -180,6 +180,28 @@ box (`rt_value_u64`, Rust `HeapUInt`).
   is wrong in JIT and native, on base (non-bool garbage) and here (a bool
   that does not track truthiness). The closure returns a raw value, and the
   runtime tests RuntimeValue truthiness on it.
+- Untyped `any`/`all` are typed BOOL only when their one argument is
+  callable: a lambda, a placeholder, or an expression of `HirType::Function`
+  type such as a named function. A closure held in a variable
+  (`val p = \x: x > 0; data.all(p)`) is still HIR-typed ANY, so JIT/native
+  print `nil` / `<value:0x1>` (same as base). Boxing the raw result at the
+  codegen dispatch sites (`codegen/instr/calls.rs`,
+  `closures_structs.rs`, `llvm/emitter.rs`, `llvm/functions.rs`) is NOT safe
+  as things stand. `MethodCallStatic` carries no result type and
+  `build_vreg_types` assigns it none, so codegen cannot tell a BOOL-typed
+  call from an ANY-typed one. When the call is BOOL-typed, MIR already
+  applies `rt_value_bool` to the raw word, and a tagged false (19) is
+  nonzero, so it would read as true. The fix is to carry the result type on
+  `MethodCallStatic` (or type the closure local as `Function`), then box at
+  dispatch.
+- A user method `fn any(f)` that takes a callable argument and returns a
+  non-bool is forced to BOOL when reached through an untyped receiver. This
+  is the remaining cost of the gate.
+- Typed `[i64].any/.all` in a loop (JIT) now gives the right count (400 vs 0
+  on base) at the same time (0.29-0.32 s), but max RSS is a constant
+  ~2-3 MB higher (42.0 -> 44.6-45.0 MB). It does not grow with the iteration
+  count (200 vs 2000 rounds), so it is not a per-call leak. Native: 0.94 s,
+  3224 vs 3236 KB.
 - With a user class that defines `any`, an untyped `data.any(\x: ...)` on an
   ARRAY in the same program dispatches to the user method in the JIT
   (name-based recovery). That is why `user_method_named_any_all.spl` is a
