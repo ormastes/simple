@@ -208,6 +208,21 @@ fn parse_full_frontend_with_scope(source: text, file_path: text, module_name: te
         case Ok(parsed): Ok(parsed[0])
         case Err(error): Err(error)
 
+pub fn frontend_prepare_preprocessed_source_v1(
+    preprocessed: text, advisory_policy: FrontendAdvisoryPreprocessPolicyV1,
+    advisory_owner_id: u64, advisory_session_id: u64, advisory_generation: u64
+) -> Result<(text, [DomainBlock]), FrontendAdvisoryPreprocessDispatchErrorV1>:
+    var domain_blocks: [DomainBlock] = []
+    var parse_source = preprocessed
+    if frontend_may_have_domain_block(preprocessed):
+        val (found_blocks, stripped_source) = frontend_extract_domain_blocks(preprocessed)
+        domain_blocks = found_blocks
+        parse_source = stripped_source
+    val advisory = frontend_advisory_preprocess_dispatch_checked_scoped_v1(
+        parse_source, advisory_policy, advisory_owner_id, advisory_session_id,
+        advisory_generation)?
+    Ok((advisory.parse_source, domain_blocks))
+
 fn parse_full_frontend_preprocessed_with_scope(
     preprocessed: text, file_path: text, module_name: text,
     log: Logger, streaming_scope: bool, borrowed_scope: bool,
@@ -217,19 +232,13 @@ fn parse_full_frontend_preprocessed_with_scope(
     shared_target_identity: text, private_source_key: text, raw_source_sha: text,
     allow_cached_parse: bool = true
 ) -> Result<(ParserModule, text), FrontendAdvisoryPreprocessDispatchErrorV1>:
-    var domain_blocks: [DomainBlock] = []
-    var parse_source = preprocessed
-    if frontend_may_have_domain_block(preprocessed):
-        val (found_blocks, stripped_source) = frontend_extract_domain_blocks(preprocessed)
-        domain_blocks = found_blocks
-        parse_source = stripped_source
-
     # Advisory classification is identity-only. A required provider failure is
     # returned to the driver before the reference parser result can be admitted.
-    val advisory = frontend_advisory_preprocess_dispatch_checked_scoped_v1(
-        parse_source, advisory_policy, advisory_owner_id, advisory_session_id,
+    val prepared = frontend_prepare_preprocessed_source_v1(
+        preprocessed, advisory_policy, advisory_owner_id, advisory_session_id,
         advisory_generation)?
-    parse_source = advisory.parse_source
+    val parse_source = prepared[0]
+    val domain_blocks = prepared[1]
 
     frontend_log_trace(log, "2: core parser bridge...")
     if frontend_phase_trace_enabled():

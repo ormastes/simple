@@ -1,0 +1,94 @@
+# @req REQ-IM-007
+# Production bridge transitions. This is sequential admission evidence, not
+# process-crash recovery or real concurrent same-key qualification.
+use std.spec.*
+use compiler.driver.action_graph.build_action_v1.{BuildActionV1, BuildActionResultV1, BuildActionPoolV1, BuildActionStateV1}
+use compiler.driver.action_graph.persisted_graph.{PersistedBuildGraphV1}
+use compiler.driver.action_graph.coordinator.{BuildPoolBudgetV1, coordinator_new_v1}
+use compiler.driver.action_graph.demand_compile_integration.{DemandCompileExecutionV1}
+use compiler.driver.action_graph.artifact_service_bridge.{DemandArtifactRouteV1, demand_artifact_route_v1, demand_artifact_claim_owned_v1, demand_artifact_commit_owned_v1}
+use compiler.driver.backend.native_promotion_queue.{NativePromotionQueueV1}
+use compiler.driver.perf.demand_compile_counters.{demand_compile_counters_empty_v1}
+use lib.compiler_artifact_service.profile.{artifact_service_profile_v1}
+use lib.compiler_artifact_service.service.{ArtifactRequestStateV1, artifact_service_claim_v1}
+
+fn atomic_claim_route(dependent: bool, memory_bytes: i64) -> DemandArtifactRouteV1:
+    val first = BuildActionV1("action-a", "compile-a", ["source-a"], [], ["object-a"], BuildActionPoolV1.parse, 1, "snapshot-a", 1024, "")
+    val second = BuildActionV1("action-b", "compile-b", ["source-b"], if dependent: ["action-a"] else: [], ["object-b"], BuildActionPoolV1.parse, 1, "snapshot-a", 1024, "")
+    val graph = PersistedBuildGraphV1("graph-a", "", "snapshot-a", [first, second])
+    val coordinator = coordinator_new_v1(graph, [BuildPoolBudgetV1(BuildActionPoolV1.parse, 2, memory_bytes)])
+    val execution = DemandCompileExecutionV1(true, "ok", Some(coordinator), None, NativePromotionQueueV1([]), "action-b", demand_compile_counters_empty_v1(), None, None, 0, "", 0, 0)
+    demand_artifact_route_v1(execution, artifact_service_profile_v1("atomic-claim", "compiler-a", ["parse"], 0, true), true, "owner-a", 7)
+
+fn atomic_claim_finish_first(route: DemandArtifactRouteV1) -> DemandArtifactRouteV1:
+    val finished = demand_artifact_commit_owned_v1(route, BuildActionResultV1("action-a", "snapshot-a", true, false, "object-a", "", [], 512))
+    expect(finished.accepted).to_be(true)
+    finished.route
+
+describe "REQ-IM-007: atomic artifact-service claim admission":
+    it "should leave a dependency-blocked action unleased and retry with the new token":
+        step("Request action B before its dependency A has completed")
+        val initial = atomic_claim_route(true, 4096)
+        expect(initial.valid).to_be(true)
+        val blocked = demand_artifact_claim_owned_v1(initial, "action-b", "blocked-lease", 4096)
+        expect(blocked.claim.valid).to_be(false)
+        expect(blocked.claim.reason).to_equal("not-ready")
+        expect(blocked.route.service.entries[1].state).to_equal(ArtifactRequestStateV1.queued)
+        expect(blocked.route.service.entries[1].lease).to_be_nil()
+        expect(blocked.route.execution.coordinator.unwrap().runtime[1].state).to_equal(BuildActionStateV1.pending)
+        expect(blocked.route.execution.coordinator.unwrap().runtime[1].memory_reserved_bytes).to_equal(0)
+
+        step("Complete A and admit B under the retry token")
+        val first = demand_artifact_claim_owned_v1(blocked.route, "action-a", "first-lease", 4096)
+        expect(first.claim.valid).to_be(true)
+        val ready = atomic_claim_finish_first(first.route)
+        val retry = demand_artifact_claim_owned_v1(ready, "action-b", "retry-lease", 4096)
+        expect(retry.claim.valid).to_be(true)
+        expect(retry.claim.owner_token).to_equal("retry-lease")
+        expect(retry.route.service.entries[1].lease.unwrap().lease_id).to_equal("retry-lease")
+        expect(retry.route.execution.coordinator.unwrap().runtime[1].owner_token).to_equal("retry-lease")
+        expect(initial.service.entries[0].state).to_equal(ArtifactRequestStateV1.queued)
+        expect(initial.service.entries[1].state).to_equal(ArtifactRequestStateV1.queued)
+
+    it "should preserve queued state when the coordinator memory pool is occupied":
+        step("Occupy the parse pool and request an independent action")
+        val first = demand_artifact_claim_owned_v1(atomic_claim_route(false, 1024), "action-a", "first-lease", 4096)
+        expect(first.claim.valid).to_be(true)
+        val blocked = demand_artifact_claim_owned_v1(first.route, "action-b", "blocked-lease", 4096)
+        expect(blocked.claim.valid).to_be(false)
+        expect(blocked.claim.reason).to_equal("not-ready")
+        expect(blocked.route.service.entries[1].lease).to_be_nil()
+        expect(blocked.route.service.entries[0].lease.unwrap().lease_id).to_equal("first-lease")
+        step("Release the pool reservation and retry B with a fresh lease")
+        val retry = demand_artifact_claim_owned_v1(atomic_claim_finish_first(blocked.route), "action-b", "retry-lease", 4096)
+        expect(retry.claim.valid).to_be(true)
+        expect(retry.claim.owner_token).to_equal("retry-lease")
+
+    it "should refuse an existing lease whose owner, token, or generation differs":
+        for mismatch in 0..3:
+            step("Seed a pending coordinator action with a service lease from a different caller")
+            var initial = atomic_claim_route(false, 4096)
+            initial.service = artifact_service_claim_v1(initial.service,
+                if mismatch == 0: "foreign-owner" else: "owner-a",
+                if mismatch == 1: "foreign-lease" else: "current-lease",
+                if mismatch == 2: 6 else: 7, 4096, -1)
+            val rejected = demand_artifact_claim_owned_v1(initial, "action-a", "current-lease", 4096)
+            expect(rejected.claim.valid).to_be(false)
+            expect(rejected.claim.reason).to_equal("artifact-service-owner-mismatch")
+            expect(rejected.route.execution.coordinator.unwrap().runtime[0].state).to_equal(BuildActionStateV1.pending)
+            expect(rejected.route.execution.coordinator.unwrap().runtime[0].memory_reserved_bytes).to_equal(0)
+            expect(rejected.route.service.entries[0].lease).to_equal(initial.service.entries[0].lease)
+
+    it "should keep the accepted owner when a duplicate claim is rejected":
+        step("Claim A and attempt the same claim again")
+        val first = demand_artifact_claim_owned_v1(atomic_claim_route(false, 4096), "action-a", "first-lease", 4096)
+        expect(first.claim.valid).to_be(true)
+        val duplicate = demand_artifact_claim_owned_v1(first.route, "action-a", "first-lease", 4096)
+        expect(duplicate.claim.valid).to_be(false)
+        expect(duplicate.claim.reason).to_equal("single-flight")
+        expect(duplicate.route.service.entries[0].lease.unwrap().lease_id).to_equal("first-lease")
+        expect(duplicate.route.execution.coordinator.unwrap().runtime[0].owner_token).to_equal("first-lease")
+        step("Complete the originally admitted action")
+        val finished = atomic_claim_finish_first(duplicate.route)
+        expect(finished.service.entries[0].state).to_equal(ArtifactRequestStateV1.completed)
+        expect(finished.service.entries[0].cas_artifact_digest).to_equal("object-a")
