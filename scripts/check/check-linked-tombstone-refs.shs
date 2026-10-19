@@ -18,8 +18,16 @@
 # disassembly shapes a reference into a discarded section takes. mold's -r
 # leaves symbol 0 with addend -1 on aarch64 and addend 0 on x86_64:
 #   aarch64: adrp xN, 0xfffffffffffff000                   (page of -1)
-#   x86_64 : <insn> ...(%rip)  # 0xffffffffffffffff or a null-page target
-#            (< 0x1000; mold's x86_64 shape resolves to 0x4)
+#   x86_64 : <insn> ...(%rip)  # 0xffffffffffffffff, or a target the image
+#            cannot legitimately address (mold's x86_64 shape resolves to 0x4):
+#              non-PIE (lowest PT_LOAD vaddr != 0): anything in the null page
+#                (< 0x1000) -- a fixed-address userland image never maps it;
+#              PIE (lowest PT_LOAD vaddr == 0): only 0x1..0x3f, the ELF
+#                identification bytes past __ehdr_start. A PIE's unrelocated
+#                addresses START at 0, so its .rodata can legitimately sit
+#                below 0x1000 (measured 0x28d for a small lld PIE); treating
+#                the whole null page as a tombstone there was a false
+#                positive, now a selftest fixture.
 #
 # Scope:
 #   enforced (fail closed): Linux on x86_64 / aarch64. A missing
@@ -110,6 +118,23 @@ if ! OBJDUMP=$(find_objdump); then
 fi
 CC_BIN=${CC:-clang}
 
+# image_is_pie <path>: prints 1 when the lowest PT_LOAD vaddr is 0 (an ET_DYN /
+# PIE image whose unrelocated addresses start at the ELF header), 0 when every
+# PT_LOAD sits at a fixed non-zero address, 2 when no PT_LOAD was reported.
+# Read from the program-header listing (text), not from e_type bytes, so no
+# byte-order handling is involved.
+image_is_pie() {
+    "$OBJDUMP" -p "$1" 2>/dev/null | awk '
+        /^[[:space:]]*LOAD[[:space:]]/ {
+            found = 1
+            for (i = 1; i < NF; i++) if ($i == "vaddr") {
+                v = $(i + 1); sub(/^0x/, "", v)
+                if (v ~ /^0+$/) pie = 1
+            }
+        }
+        END { if (!found) print 2; else print pie + 0 }'
+}
+
 # scan_binary <path> <report-file>: writes "<function> <count>" lines for every
 # tombstone reference; returns 0 when the disassembly ran, 2 otherwise.
 scan_binary() {
@@ -122,10 +147,17 @@ scan_binary() {
     if [ ! -s "$scan_dis" ]; then
         return 2
     fi
-    awk '
+    scan_pie=$(image_is_pie "$1")
+    case "$scan_pie" in
+        0|1) ;;
+        *) echo "no PT_LOAD in the program headers of $1" > "$scan_tmp/dis.err"; return 2 ;;
+    esac
+    awk -v pie="$scan_pie" '
         /^[0-9a-f]+ <.*>:$/ { fn = $2; sub(/^</, "", fn); sub(/>:$/, "", fn); next }
         /[[:space:]]adrp[[:space:]]+[xw][0-9]+, (0x)?fffffffffffff000/ { hits[fn]++; next }
-        /\(%rip\)/ && /#[[:space:]]*(0x)?(ffffffffffffffff|[0-9a-f]|[0-9a-f][0-9a-f]|[0-9a-f][0-9a-f][0-9a-f])([[:space:]]|$)/ { hits[fn]++; next }
+        /\(%rip\)/ && /#[[:space:]]*(0x)?ffffffffffffffff([[:space:]]|$)/ { hits[fn]++; next }
+        pie == 0 && /\(%rip\)/ && /#[[:space:]]*(0x)?[0-9a-f][0-9a-f]?[0-9a-f]?([[:space:]]|$)/ { hits[fn]++; next }
+        pie == 1 && /\(%rip\)/ && /#[[:space:]]*(0x)?([1-9a-f]|[1-3][0-9a-f])([[:space:]]|$)/ { hits[fn]++; next }
         END { for (f in hits) print f, hits[f] }
     ' "$scan_dis" > "$2"
     return 0
@@ -184,8 +216,21 @@ selftest_arch() {
         die_error "selftest failed ($sa_arch defsym -1 fixture not detected in pick)"
     fi
     SELFTEST_DONE="$SELFTEST_DONE $sa_arch:defsym-1"
+    # A clean PIE: its literal sits in the first page of the unrelocated image
+    # (x86_64 `lea ...(%rip)  # 0x28d <real_literal>`), which the non-PIE
+    # null-page rule would misreport. Must scan 0.
+    sa_pie_link="-nostdlib -pie -fuse-ld=lld"
+    # shellcheck disable=SC2086
+    "$CC_BIN" $sa_t -O2 -fPIC $sa_pie_link -Wl,-e,pick "$st/good.c" -o "$sa_dir/good_pie" 2>"$sa_dir/err" || return 3
+    run_scan "$sa_dir/r1pie" "$sa_dir/good_pie"
+    if [ "$SCAN_CHECKED" -ne 1 ] || [ "$SCAN_TOTAL" -ne 0 ]; then
+        die_error "selftest failed ($sa_arch clean PIE fixture reported $SCAN_TOTAL reference(s))"
+    fi
+    SELFTEST_DONE="$SELFTEST_DONE $sa_arch:pie-clean"
     # The incident's real shape: a mold `-r --gc-sections` closure of a
-    # function-sectioned member with a string literal, then a final link.
+    # function-sectioned member with a string literal, then a final link --
+    # once as a fixed-address image, once as a PIE (x86_64: target 0x4, inside
+    # the ELF header; aarch64: adrp page -1 either way).
     if command -v mold >/dev/null 2>&1; then
         # shellcheck disable=SC2086
         "$CC_BIN" $sa_t -O2 -fPIC -c -ffunction-sections -fdata-sections "$st/lit.c" -o "$sa_dir/lit.o" 2>"$sa_dir/err" \
@@ -203,6 +248,15 @@ selftest_arch() {
             die_error "selftest failed ($sa_arch mold -r --gc-sections closure not detected; did mold change its tombstone?)"
         fi
         SELFTEST_DONE="$SELFTEST_DONE $sa_arch:mold-r"
+        # shellcheck disable=SC2086
+        "$CC_BIN" $sa_t $sa_pie_link -Wl,-e,lit_root -Wl,--defsym=snprintf=0x401000 \
+            "$sa_dir/closure.o" -o "$sa_dir/mold_pie" 2>"$sa_dir/err" \
+            || die_error "selftest: $sa_arch mold fixture PIE final link failed: $(head -c 300 "$sa_dir/err")"
+        run_scan "$sa_dir/r3pie" "$sa_dir/mold_pie"
+        if [ "$SCAN_TOTAL" -lt 1 ] || ! grep -q 'lit_root(' "$sa_dir/r3pie"; then
+            die_error "selftest failed ($sa_arch mold -r --gc-sections closure not detected in a PIE)"
+        fi
+        SELFTEST_DONE="$SELFTEST_DONE $sa_arch:mold-r-pie"
     fi
     return 0
 }
