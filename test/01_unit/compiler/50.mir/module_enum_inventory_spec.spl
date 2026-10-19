@@ -107,7 +107,7 @@ describe "module enum inventory registration":
         for e in lowering.errors:
             messages = messages.push(e.message)
         val all = inventory_joined(messages)
-        print "errors: [{all}]"
+        expect(all).to_equal("")
         expect(all.contains("B5b")).to_equal(false)
         expect(all.contains("multiple wildcard")).to_equal(false)
         var found_level = false
@@ -115,3 +115,25 @@ describe "module enum inventory registration":
             if function.name.ends_with(".level"):
                 found_level = true
         assert_true(found_level)
+
+    it "a module's own enum payload types win over an inventory row from another symbol table":
+        # Regression (phase-3 2026-10-20, 2781 "enum construction ...: payload
+        # type mismatch at N" errors): the dedup in register_enum_variants kept
+        # the payload HirTypes of whichever module registered the enum FIRST,
+        # and lower_module then compared those foreign SymbolIds inside its own
+        # table. Same declaration, shifted IDs: the padded copy registers first.
+        val padded = "struct Pad1:\n    a: i64\n\nstruct Pad2:\n    b: i64\n\nstruct Ty:\n    width: i64\n\nenum Op:\n    Copy(local: i64)\n    Const(type_: Ty)\n"
+        val real = "struct Ty:\n    width: i64\n\nenum Op:\n    Copy(local: i64)\n    Const(type_: Ty)\n\nfn make() -> Op:\n    Op.Const(Ty(width: 8))\n"
+        val file = "testdata/fixture_enum_inventory_payload_owner.spl"
+        val foreign = inventory_hir(padded, file)
+        val hir = inventory_hir(real, file)
+        val target_context = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+        lowering.register_module_enum_inventory_v1([foreign, hir])
+        lowering.lower_module(hir)
+        var messages: [text] = []
+        for e in lowering.errors:
+            messages = messages.push(e.message)
+        val all = inventory_joined(messages)
+        expect(all).to_equal("")
+        expect(lowering.errors.len()).to_equal(0)

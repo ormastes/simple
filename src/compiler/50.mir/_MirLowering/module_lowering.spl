@@ -1080,9 +1080,12 @@ impl MirLowering:
         diagnose and read per-module constant state), not generic, not the
         builtin Option/Result names (seeded outside this method), and only
         outside the declaration-repository lane (it resets payload maps per
-        module and relies on re-registration). Payload rows hold the provider
-        HirTypes themselves, never consumer-relocated ones, so they do not
-        depend on which consumer module is being lowered."""
+        module and relies on re-registration). Payload rows hold HirTypes
+        whose SymbolIds belong to the registering module's table, so
+        lower_module's own-enum pass clears the current mark first: only
+        provider/inventory re-registrations are skipped. The own pass covers
+        every enum in module.enums, imported ones included (HIR re-lowers them
+        with consumer-local IDs), so its cost is O(len(module.enums)) per module."""
         # Cycle-171: same annotated rebind as register_enum_variants -- bare
         # field reads of a by-value HirEnum parameter drew erased on
         # candidate-seednew.
@@ -2749,6 +2752,14 @@ impl MirLowering:
         var ei = 0
         while ei < enum_values.len():
             val enum_def: HirEnum = enum_values[ei]
+            # Payload HirTypes carry SymbolIds of the table they were lowered
+            # in, and payload checks read them through self.symbols (this
+            # module's table). An installation made by another module (the
+            # entry, the up-front inventory, a provider pass) must therefore
+            # never count as current here, or its foreign IDs survive the
+            # dedup and every nominal payload compares against the wrong row
+            # ("payload type mismatch at N"). ""-current never matches.
+            self.enum_registration_current[enum_def.name] = ""
             self.register_enum_variants(enum_def)
             self.register_enum_runtime_id(enum_def)
             ei = ei + 1
