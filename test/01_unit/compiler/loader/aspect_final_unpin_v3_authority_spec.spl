@@ -28,6 +28,8 @@ use std.common.aspect_pack.{
     APK_ACT_LAZY_FACET,
     ApkCatalogEntryV2,
     apk_build_catalog_v2,
+    apk_facet_refcount_v1,
+    apk_loader_unloads,
 }
 use std.io_runtime.{mkdir_p, file_write_bytes}
 use os.smf.dynsmf_session.{dynsmf_policy_default}
@@ -242,6 +244,98 @@ describe "L6 final-unpin V3 release authority":
         expect(native_exec_memory_count()).to_equal(before)
         val replay = moduleloader_retry_final_unpin_v3(loader, operation)
         expect(replay.native_attempted).to_equal(false)
+
+    it "retains both pins when another bound reference still executes":
+        val before = native_exec_memory_count()
+        val suffix = "cross_reference_execution"
+        val fixture = v3_fixture(suffix)
+        val owner = v3_owner(suffix)
+        _ = mkdir_p("build/dynsmf")
+        expect(file_write_bytes(
+            fixture.manifest[0].path, fixture.artifact_bytes)).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(fixture.manifest[0].path):
+            case LoadResult.Success(_): pass
+            case _: panic("V3 cross-reference pack admission failed")
+        expect(moduleloader_install_aspect_catalog(
+            loader, v3_loader_catalog(suffix)).is_ok()).to_equal(true)
+        val catalog_ref = ModuleDynSmfCatalogRefV3(
+            dynsmf_owner: owner, library_id: "v3_" + suffix)
+        val facet_key = "startup/v3_" + suffix
+        val executing_pin = moduleloader_load_bound_facet_v3(
+            loader, catalog_ref, facet_key)
+        val final_pin = moduleloader_load_bound_facet_v3(
+            loader, catalog_ref, facet_key)
+        expect(executing_pin.active).to_equal(true)
+        expect(final_pin.active).to_equal(true)
+        val execution = moduleloader_begin_bound_execution_v3(
+            loader, executing_pin).unwrap()
+        val execution_second = moduleloader_begin_bound_execution_v3(
+            loader, executing_pin).unwrap()
+        val aspect_owner = executing_pin.owner_handle
+        val unloads_before = apk_loader_unloads(aspect_owner)
+        expect(apk_facet_refcount_v1(aspect_owner, facet_key)).to_equal(2)
+        expect(native_exec_memory_count()).to_equal(before + 1)
+
+        step("Reject ordinary release without draining the executing reference")
+        expect(moduleloader_release_bound_facet_v3(
+            loader, executing_pin)).to_equal(false)
+        expect(executing_pin.active).to_equal(true)
+        expect(apk_facet_refcount_v1(aspect_owner, facet_key)).to_equal(2)
+        expect(apk_loader_unloads(aspect_owner)).to_equal(unloads_before)
+        expect(native_exec_memory_count()).to_equal(before + 1)
+
+        step("The other reference cannot acquire final release while A executes")
+        val pending = moduleloader_associate_final_unpin_v3(loader, final_pin)
+        expect(pending.is_err()).to_equal(true)
+        expect(pending.unwrap_err()).to_equal(
+            "dynsmf-owned-library-query-drain-pending")
+        expect(final_pin.active).to_equal(true)
+        expect(moduleloader_release_bound_facet_v3(
+            loader, executing_pin)).to_equal(false)
+        expect(executing_pin.active).to_equal(true)
+        expect(apk_facet_refcount_v1(aspect_owner, facet_key)).to_equal(2)
+        expect(apk_loader_unloads(aspect_owner)).to_equal(unloads_before)
+        expect(native_exec_memory_count()).to_equal(before + 1)
+
+        step("Complete A before releasing its pins and finally unmapping through B")
+        expect(moduleloader_complete_bound_execution_v3(
+            loader, execution)).to_equal(true)
+        expect(moduleloader_complete_bound_execution_v3(
+            loader, execution)).to_equal(false)
+        expect(moduleloader_release_bound_facet_v3(
+            loader, executing_pin)).to_equal(false)
+        expect(executing_pin.active).to_equal(true)
+        expect(apk_facet_refcount_v1(aspect_owner, facet_key)).to_equal(2)
+        expect(native_exec_memory_count()).to_equal(before + 1)
+        expect(moduleloader_complete_bound_execution_v3(
+            loader, execution_second)).to_equal(true)
+        expect(moduleloader_release_bound_facet_v3(
+            loader, executing_pin)).to_equal(true)
+        expect(executing_pin.active).to_equal(false)
+        expect(moduleloader_release_bound_facet_v3(
+            loader, executing_pin)).to_equal(false)
+        expect(moduleloader_begin_bound_execution_v3(
+            loader, executing_pin).is_err()).to_equal(true)
+        expect(apk_facet_refcount_v1(aspect_owner, facet_key)).to_equal(1)
+        expect(apk_loader_unloads(aspect_owner)).to_equal(unloads_before)
+        expect(native_exec_memory_count()).to_equal(before + 1)
+        val operation = moduleloader_associate_final_unpin_v3(
+            loader, final_pin).unwrap()
+        val released = moduleloader_release_final_unpin_v3(loader, operation)
+        expect(released.ok).to_equal(true)
+        expect(released.released).to_equal(true)
+        expect(released.native_attempted).to_equal(true)
+        expect(released.acknowledged).to_equal(true)
+        expect(apk_facet_refcount_v1(aspect_owner, facet_key)).to_equal(-1)
+        expect(apk_loader_unloads(aspect_owner)).to_equal(unloads_before + 1)
+        expect(native_exec_memory_count()).to_equal(before)
+
+        val replay = moduleloader_retry_final_unpin_v3(loader, operation)
+        expect(replay.ok).to_equal(true)
+        expect(replay.native_attempted).to_equal(false)
+        expect(apk_loader_unloads(aspect_owner)).to_equal(unloads_before + 1)
+        expect(native_exec_memory_count()).to_equal(before)
 
     it "publishes Closing before drain and still releases existing bound pins":
         val fixture = v3_fixture("drain-paired")
