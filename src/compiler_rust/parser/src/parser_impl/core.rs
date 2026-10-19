@@ -750,7 +750,33 @@ impl<'a> Parser<'a> {
                     self.parse_var() // parse as var
                 }
             }
-            TokenKind::Unit => self.parse_unit(),
+            // `unit`/`newunit` declarations are always `unit <Name> ...`; a
+            // statement like `unit = x`, `unit += 1`, `unit.f = x` or
+            // `unit[i] = x` is an assignment to a variable named `unit`
+            // (expression position already reads it via
+            // `parse_keyword_identifier("unit")`).
+            TokenKind::Unit => {
+                if matches!(
+                    self.peek_next().kind,
+                    TokenKind::Assign
+                        | TokenKind::PlusAssign
+                        | TokenKind::MinusAssign
+                        | TokenKind::StarAssign
+                        | TokenKind::SlashAssign
+                        | TokenKind::PercentAssign
+                        | TokenKind::TildeAssign
+                        | TokenKind::TildePlusAssign
+                        | TokenKind::TildeMinusAssign
+                        | TokenKind::TildeStarAssign
+                        | TokenKind::TildeSlashAssign
+                        | TokenKind::Dot
+                        | TokenKind::LBracket
+                ) {
+                    self.parse_expression_or_assignment()
+                } else {
+                    self.parse_unit()
+                }
+            }
             TokenKind::HandlePool => self.parse_handle_pool(),
             TokenKind::Extern => self.parse_extern(),
             TokenKind::Macro => self.parse_macro_def(),
