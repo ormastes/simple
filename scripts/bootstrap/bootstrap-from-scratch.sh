@@ -2234,7 +2234,17 @@ bootstrap_stage_sanity() (
   # where hello-world-positional scans the whole import graph and exceeds
   # 180s) can raise it; without this the scrub always restored the 180s
   # default and the probe timed out with raw_status=124.
-  sanity_build_timeout=${COMPILER_BUILD_TIMEOUT_SECONDS:-}
+  # Admission was sourced before this function. Preserve its initialized
+  # control family, including exported caller overrides: unset below removes
+  # exported shell variables as well as their environment entries. Export all
+  # restored controls because Darwin's pinned smoke starts a fresh shell.
+  sanity_build_timeout=${COMPILER_BUILD_TIMEOUT_SECONDS}
+  sanity_exec_timeout=${COMPILER_EXEC_TIMEOUT_SECONDS}
+  sanity_scv_prime_timeout=${COMPILER_SCV_PRIME_TIMEOUT_SECONDS}
+  sanity_probe_timeout=${COMPILER_PROBE_TIMEOUT_SECONDS}
+  sanity_kill_grace=${COMPILER_CHECK_KILL_GRACE_SECONDS}
+  sanity_max_log_bytes=${CANDIDATE_FRONTEND_MAX_LOG_BYTES}
+  sanity_frontend_root=${CANDIDATE_FRONTEND_ROOT}
   # The outer guard owns these values. Scrubbing them makes the bounded-log
   # collector create a new session, escaping the still-active outer monitor.
   # Validate before any candidate execution, and preserve presence (including
@@ -2275,10 +2285,16 @@ bootstrap_stage_sanity() (
     LLVM_SYS_231_PREFIX=${sanity_llvm_prefix}
     export LLVM_SYS_231_PREFIX
   fi
-  if [ -n "${sanity_build_timeout}" ]; then
-    COMPILER_BUILD_TIMEOUT_SECONDS=${sanity_build_timeout}
-    export COMPILER_BUILD_TIMEOUT_SECONDS
-  fi
+  COMPILER_BUILD_TIMEOUT_SECONDS=${sanity_build_timeout}
+  COMPILER_EXEC_TIMEOUT_SECONDS=${sanity_exec_timeout}
+  COMPILER_SCV_PRIME_TIMEOUT_SECONDS=${sanity_scv_prime_timeout}
+  COMPILER_PROBE_TIMEOUT_SECONDS=${sanity_probe_timeout}
+  COMPILER_CHECK_KILL_GRACE_SECONDS=${sanity_kill_grace}
+  CANDIDATE_FRONTEND_MAX_LOG_BYTES=${sanity_max_log_bytes}
+  CANDIDATE_FRONTEND_ROOT=${sanity_frontend_root}
+  export COMPILER_BUILD_TIMEOUT_SECONDS COMPILER_EXEC_TIMEOUT_SECONDS
+  export COMPILER_SCV_PRIME_TIMEOUT_SECONDS COMPILER_PROBE_TIMEOUT_SECONDS
+  export COMPILER_CHECK_KILL_GRACE_SECONDS CANDIDATE_FRONTEND_MAX_LOG_BYTES CANDIDATE_FRONTEND_ROOT
   if [ -n "${sanity_sdkroot}" ]; then
     SDKROOT=${sanity_sdkroot}
     export SDKROOT

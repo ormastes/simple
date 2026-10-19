@@ -1,0 +1,101 @@
+#!/bin/sh
+# Shell-boundary regression, not candidate compiler qualification. Exercise the
+# shipped scrub, pinned capture, bounded collector, and a fresh admission shell.
+set -eu
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' 0
+src=$repo_root/scripts/bootstrap/bootstrap-from-scratch.sh
+for function_name in bootstrap_stage_sanity bootstrap_stage2_sanity_output_preflight; do
+  awk -v name="$function_name" '$0 == name "() (" {f=1} f {print} f && /^\)$/ {exit}' "$src" >"$work/$function_name.sh"
+  grep -q '^)$' "$work/$function_name.sh"
+done
+mkdir "$work/home" "$work/tmp"
+version=$(sed -n '1p' "$repo_root/VERSION")
+cat >"$work/candidate" <<EOF
+#!/bin/sh
+case "\$1" in
+  --version) echo 'simple-bootstrap $version'; exit 0 ;;
+  run) echo "error: unknown command 'run'"; exit 1 ;;
+esac
+exit 99
+EOF
+chmod +x "$work/candidate"
+cat >"$work/child.sh" <<'EOF'
+#!/bin/sh
+set -eu
+check_controls() {
+  [ "$COMPILER_BUILD_TIMEOUT_SECONDS" = 11 ] &&
+  [ "$COMPILER_EXEC_TIMEOUT_SECONDS" = 13 ] &&
+  [ "$COMPILER_SCV_PRIME_TIMEOUT_SECONDS" = 17 ] &&
+  [ "$COMPILER_PROBE_TIMEOUT_SECONDS" = 19 ] &&
+  [ "$COMPILER_CHECK_KILL_GRACE_SECONDS" = 2 ] &&
+  [ "$CANDIDATE_FRONTEND_MAX_LOG_BYTES" = 4096 ] &&
+  [ "$CANDIDATE_FRONTEND_ROOT" = "$1" ]
+}
+check_controls "$1" || exit 98
+. "$CANDIDATE_FRONTEND_ROOT/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
+check_controls "$1" || exit 97
+echo controls-preserved-before-and-after-child-source
+exit 37
+EOF
+drive() (
+  . "$repo_root/scripts/check/lib/bootstrap-stage3/authority.shs"
+  . "$repo_root/scripts/check/lib/bootstrap-stage3/sanity.shs"
+  . "$repo_root/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
+  . "$work/bootstrap_stage2_sanity_output_preflight.sh"
+  . "$work/bootstrap_stage_sanity.sh"
+  backend=llvm llvm_features=llvm os=linux
+  run_timeout() { timeout "$@"; }
+  # Replace only the compiler workload. Capture, pinned smoke dispatch,
+  # environment scrub and collector are the production implementations.
+  candidate_frontend_smoke() {
+    build_log=$CANDIDATE_FRONTEND_LOG_PATH
+    candidate_frontend_bounded_build p2_add /bin/sh "$work/child.sh" "$repo_root"
+  }
+  COMPILER_BUILD_TIMEOUT_SECONDS=11
+  COMPILER_EXEC_TIMEOUT_SECONDS=13
+  COMPILER_SCV_PRIME_TIMEOUT_SECONDS=17
+  COMPILER_PROBE_TIMEOUT_SECONDS=19
+  COMPILER_CHECK_KILL_GRACE_SECONDS=2
+  CANDIDATE_FRONTEND_MAX_LOG_BYTES=$2
+  CANDIDATE_FRONTEND_ROOT=$repo_root
+  if [ "$1" = exported ]; then
+    export COMPILER_BUILD_TIMEOUT_SECONDS COMPILER_EXEC_TIMEOUT_SECONDS
+    export COMPILER_SCV_PRIME_TIMEOUT_SECONDS COMPILER_PROBE_TIMEOUT_SECONDS
+    export COMPILER_CHECK_KILL_GRACE_SECONDS CANDIDATE_FRONTEND_MAX_LOG_BYTES CANDIDATE_FRONTEND_ROOT
+  fi
+  bootstrap_stage_sanity "$work/candidate" "$3" "$work/home" "$work/tmp" "$PATH"
+)
+cases=0
+for kind in exported shell-local invalid; do
+  evidence=$work/$kind.env
+  cap=4096
+  [ "$kind" != invalid ] || cap=bad
+  status=0
+  drive "$kind" "$cap" "$evidence" >"$work/$kind.log" 2>&1 || status=$?
+  if [ "$status" != 1 ] || ! grep -q '^status=fail$' "$evidence"; then
+    cat "$work/$kind.log" >&2
+    echo "FAIL: $kind did not retain a failed gate receipt" >&2
+    exit 1
+  fi
+  if [ "$kind" = invalid ]; then
+    grep -q 'bounded-log-error: invalid max-bytes' "$evidence.frontend-driver.log"
+    ! grep -q controls-preserved "$evidence.frontend-driver.log"
+    [ ! -e "$evidence.frontend-bootstrap-0.log.bounded.env" ]
+  else
+    grep -q '^frontend_smoke_status=37$' "$evidence"
+    grep -q '^frontend_smoke_bootstrap0_raw_status=37$' "$evidence"
+    grep -q '^frontend_smoke_bootstrap1_ran=false$' "$evidence"
+    grep -q '^sha_stable_status=0$' "$evidence"
+    grep -q controls-preserved-before-and-after-child-source "$evidence.frontend-bootstrap-0.log"
+    receipt=$evidence.frontend-bootstrap-0.log.bounded.env
+    for expected in raw_status=37 timeout_seconds=11 term_grace_seconds=2 max_bytes=4096; do
+      grep -q "^$expected$" "$receipt"
+    done
+  fi
+  cases=$((cases + 1))
+  echo "PASS: $kind controls, child boundary and failure evidence"
+done
+[ "$cases" = 3 ]
+echo 'PASS: 3 production-boundary environment cases'
