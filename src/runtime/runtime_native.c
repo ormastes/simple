@@ -10575,7 +10575,16 @@ int64_t rt_index_get(int64_t collection, int64_t idx) {
     RtCoreArray* a = rt_core_as_array(collection);
     if (a) {
         if ((idx & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_INT) return rt_core_nil();
-        return rt_array_get((SplArray*)a, idx >> 3);
+        int64_t raw_idx = idx >> 3;
+        /* rt_array_get hands back the RAW slot of a packed array; this
+         * RuntimeValue entry must tag it, like the Rust twin (from_int).
+         * Forwarding the raw byte made 56 decode as tagged 7 natively. */
+        if (a->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) {
+            if (raw_idx < 0) raw_idx += a->len;
+            if (raw_idx < 0 || raw_idx >= a->len) return rt_core_nil();
+            return rt_value_int(rt_array_get((SplArray*)a, raw_idx));
+        }
+        return rt_array_get((SplArray*)a, raw_idx);
     }
     if (rt_core_as_string(collection)) {
         if ((idx & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_INT) return rt_core_nil();
