@@ -41,9 +41,24 @@ describe "builtin trait where bounds in HIR lowering":
         val function = builtin_bound_function(module, "g")
         expect(function.type_params[0].bounds.len()).to_equal(1)
 
-    it "still reports an unknown non-builtin trait bound":
+    it "lowers a user-declared trait Ord to its symbol instead of erasing it":
+        step("A declared trait named like a builtin shadows the builtin")
+        val parsed = builtin_bound_parse("trait Ord:\n    fn rank(self) -> i64:\n        0\nfn s<K>(key: K) -> K where K: Ord:\n    key\n")
+        var lowering = HirLowering.with_filename("builtin_bound.spl")
+        val module = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        val function = builtin_bound_function(module, "s")
+        expect(function.type_params[0].bounds.len()).to_equal(1)
+
+    it "still reports an unknown non-builtin trait bound, and only that one":
         step("Only the trait solver's builtin set is exempt")
         val parsed = builtin_bound_parse("fn h<K>(key: K) -> K where K: Ord + MissingTrait:\n    key\n")
         var lowering = HirLowering.with_filename("builtin_bound.spl")
         val module = lowering.lower_module(parsed)
         expect(lowering.errors.len()).to_be_greater_than(0)
+        var messages: [text] = []
+        for error in lowering.errors:
+            messages.push(error.message)
+        val joined = messages.join("\n")
+        expect(joined).to_contain("unresolved type: MissingTrait")
+        expect(joined.contains("unresolved type: Ord")).to_be(false)

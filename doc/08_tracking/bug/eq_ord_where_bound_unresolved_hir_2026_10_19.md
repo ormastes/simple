@@ -36,17 +36,30 @@ passing producer2 base `d54d221ee124`).
 
 ## Workaround
 
-Commit on `work/eq-ord-hir-workaround-20261019`: drop the `Eq`/`Ord` where
-bounds (keep `Hash`), tagged `@workaround bug=eq_ord_where_bound_unresolved_hir_2026_10_19
+Workaround commit `d28b2b8eeb9` (PR #3886, merged as `9c9a48ac254`): drop the
+`Eq`/`Ord` where bounds (keep `Hash`), tagged `@workaround bug=eq_ord_where_bound_unresolved_hir_2026_10_19
 recover=b73c24d606e`. Semantics-neutral for native output: bounds are erased,
 and every producer before `5b649fb61fe` dropped them anyway. Recover the intended
 code from `b73c24d606e` once the root fix is in the deployed producer.
 
 ## Fix owner / prevention
 
-Root fix: HIR resolves builtin trait bounds without a type-position error
-(branch `work/hir-builtin-trait-bound-20261019`), with a spec reproducing
-`fn f<K>(k: K) -> bool where K: Ord + Eq`. Remove the workaround in a separate
-linked change after the fixed producer passes Phase 3.
+Root fix: PR #3887 (branch `work/hir-builtin-trait-bound-20261019`).
+`HirLowering.bound_is_undeclared_builtin_trait`
+(`src/compiler/20.hir/hir_lowering/types.spl`) erases a bare builtin solver
+trait bound (Clone, Copy, Debug, Default, Drop, Eq, Ord) when no symbol of that
+name is in scope; declared/imported traits and unknown names are unchanged.
+Builtin bounds are erased rather than resolved to `builtin_trait_symbol(id, name)`
+because the solver has no builtin impls for primitives, so resolving them would
+reject every call. Unchecked obligations are filed as
+`doc/08_tracking/bug/builtin_trait_where_bounds_erased_unchecked_2026_10_19.md`.
+
+Prevention spec: `test/01_unit/compiler/20.hir/builtin_trait_where_bound_spec.spl`
+(`where K: Ord + Eq`; `Hash + Eq + Ord` with declared Hash; user-declared
+`trait Ord` shadowing; `Ord + MissingTrait` erroring on MissingTrait only).
+Not yet executed: this Windows host has no full-CLI pure-Simple binary (the
+seed fails to parse `windows_redirected_process.spl`).
+Remove the workaround in a separate linked change after the fixed producer
+passes Phase 3.
 
 DB reconciliation pending (`simple check-dbs` not run on this host).
