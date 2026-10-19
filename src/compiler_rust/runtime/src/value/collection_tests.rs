@@ -2993,6 +2993,17 @@ mod packed_array_hardening {
         assert_eq!(rt_array_index_of(a, RuntimeValue::from_int(8)), 2);
         assert_eq!(rt_array_last_index_of(a, RuntimeValue::from_int(255)), 4);
         assert_eq!(rt_array_count(a, RuntimeValue::from_int(64)), 1);
+        assert_eq!(rt_contains(a, RuntimeValue::from_int(255)), 1);
+        assert_eq!(rt_contains(a, RuntimeValue::from_int(256)), 0);
+        assert_eq!(rt_contains(a, RuntimeValue::from_int(-1)), 0);
+        assert_eq!(rt_array_all_truthy(a), 0);
+        assert_eq!(rt_array_any_truthy(a), 1);
+        let wide = words(&[5, BIG as u64, u64::MAX]);
+        assert_eq!(rt_array_index_of(wide, RuntimeValue::from_int(BIG)), 1);
+        assert_eq!(rt_array_index_of(wide, RuntimeValue::from_u64(BIG as u64)), 1);
+        assert_eq!(rt_array_index_of(wide, RuntimeValue::from_int(-1)), 2);
+        assert_eq!(rt_contains(wide, RuntimeValue::from_int(6)), 0);
+        assert_eq!(rt_array_sum(words(&[BIG as u64, 5])).as_int(), BIG + 5);
         assert_eq!(text(rt_array_join(bytes(&[65, 66, 67]), rt_string_new(",".as_ptr(), 1))), "65,66,67");
         let w = words(&[BIG as u64, BIGGER as u64, 5]);
         assert_eq!(rt_array_max(w).as_int(), BIGGER);
