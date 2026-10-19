@@ -34,6 +34,10 @@ use compiler.driver.driver_build.native_mir_shard.{NATIVE_MIR_SHARD_QUEUE_ENV_V1
     native_mir_shard_spec_v1, native_mir_shard_queue_v1, native_mir_shard_owner_v1,
     native_mir_shard_link_ledger_v1, native_mir_shard_publish_pass_v1,
     native_mir_shard_link_inputs_v1}
+use compiler.driver.driver_build.native_mir_shard_export_v1.{
+    native_mir_shard_export_enabled_v1, native_mir_shard_export_write_dir_v1}
+use compiler.driver.driver_mir_shard_export_v1.{driver_mir_shard_export_write_v1,
+    driver_mir_shard_export_admit_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_seal,
     hir_shard_recovery_complete, hir_shard_recovery_block}
 use compiler.driver.driver_build.build_outcome.{BuildUnitOutcome}
@@ -85,6 +89,10 @@ fn _driver_entry_source_input(input_files: [text]) -> text:
 impl CompilerDriver:
     me aot_compile() -> CompileResult:
         val log = self.ctx.logger
+        # MIR shard export summary step (driver_build/native_mir_shard_export_v1.spl):
+        # write the post-mono declaration bundle and exit before lowering.
+        if native_mir_shard_export_write_dir_v1() != "":
+            return self.aot_write_mir_shard_exports_v1()
         # Process-level MIR sharding (driver_build/native_mir_shard.spl).
         if native_mir_shard_spec_v1() != "":
             return self.aot_compile_mir_shard_v1()
@@ -443,6 +451,14 @@ impl CompilerDriver:
         shard_state.shard_queue = queue
         self.native_staged_codegen = shard_state
         log_phase("aot:mir_shard:start owner={owner}")
+        # Export summaries (opt-in): admission only. Lowering still reads the
+        # full post-mono HIR; a refusal is reported and changes nothing.
+        if native_mir_shard_export_enabled_v1():
+            val export_admitted = driver_mir_shard_export_admit_v1(self)
+            if export_admitted.is_ok():
+                print "[mir-shard] export summaries admitted owner={owner} records={export_admitted.unwrap()} lowering=full-hir"
+            else:
+                print "[mir-shard] export summaries refused owner={owner} fallback=full-hir reason={export_admitted.unwrap_err()}"
         var codegen_ok = false
         var module_functions: {text: i64} = {}
         var module_statics: {text: i64} = {}
@@ -512,6 +528,20 @@ impl CompilerDriver:
         # here is what returns this worker's MIR to the OS.
         rt_stdout_flush()
         exit(if shard_failed: 1 else: 0)
+        CompileResult.Success(nil)
+
+    me aot_write_mir_shard_exports_v1() -> CompileResult:
+        """MIR shard export summary step: this process ran the pipeline
+        through mono; write every source module's declaration summary and
+        exit. It lowers nothing, so its MIR-phase memory is never allocated."""
+        val written = driver_mir_shard_export_write_v1(self)
+        if written.is_err():
+            log_error("MIR shard export: {written.unwrap_err()}")
+            print "[mir-shard-export] FAIL reason={written.unwrap_err()}"
+        else:
+            print "[mir-shard-export] PASS modules={written.unwrap()} dir={native_mir_shard_export_write_dir_v1()}"
+        rt_stdout_flush()
+        exit(if written.is_err(): 1 else: 0)
         CompileResult.Success(nil)
 
     me aot_link_mir_shards_v1() -> CompileResult:
