@@ -10,6 +10,35 @@ fn transport_warning_source() -> text:
     "fn main() -> i64:\n    var total = 0\n    val x = 2\n    val hook = fn() -> i64:\n        total = total + x\n        total\n    hook()\n"
 
 describe "REQ-IM-006: parser-owned warning transport without ordinary cache publication":
+    it "should retain current-module warnings even when an independent syntax error prevents an artifact":
+        val previous = env_get("SIMPLE_CAPTURE_WRITE_CHECK")
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", "warning")).to_be(true)
+        flat_pool_transport_capture_arm_v1()
+        val _parsed = parse_and_build_module_scoped(transport_warning_source() + "\nfn broken():\n    val = 1\n", "src/mixed.spl", false)
+        val failed = parser_has_errors()
+        val packet = flat_pool_transport_capture_take_v1()
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", previous)).to_be(true)
+        expect(failed).to_be(true)
+        expect(packet.blob).to_equal("")
+        expect(packet.warning == "").to_be(false)
+        expect(packet.warning_line).to_equal(6)
+        expect(packet.reusable).to_be(false)
+
+    it "should retain transport strings after the parser-owned streaming scope closes":
+        val previous = env_get("SIMPLE_CAPTURE_WRITE_CHECK")
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", "warning")).to_be(true)
+        flat_pool_transport_capture_arm_v1()
+        val parsed = parse_and_build_module_scoped(transport_warning_source(), "src/streaming.spl", true)
+        val failed = parser_has_errors()
+        val packet = flat_pool_transport_capture_take_v1()
+        val restored = build_module_from_flat_pool_blob(packet.blob, transport_warning_source(), "src/streaming.spl")
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", previous)).to_be(true)
+        expect(failed).to_be(false)
+        expect(parsed.functions.contains_key("main")).to_be(true)
+        expect(restored.unwrap().functions.contains_key("main")).to_be(true)
+        expect(packet.warning == "").to_be(false)
+        expect(packet.warning_line).to_equal(6)
+
     it "should preserve warning-success AST while ordinary cache capture stays suppressed":
         val previous = env_get("SIMPLE_CAPTURE_WRITE_CHECK")
         expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", "warning")).to_be(true)

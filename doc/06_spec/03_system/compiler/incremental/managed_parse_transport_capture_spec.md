@@ -11,6 +11,11 @@ REQ-IM-006/007/016, NFR-IM-004. Status: authored, runtime/docgen UNRUN.
    source after an untaken warning capture and verify that prior state is lost.
    A later clean module can produce a reusable payload without inherited warning.
 3. Attempt ordinary take of a transport capture; require empty output and reset.
+4. Parse a single module containing both a captured-write warning and an
+   independent syntax error. Retain its current warning despite an empty blob.
+5. Close a parser-owned streaming scope, then consume both warning text and
+   the restorable payload. Both transport strings are explicitly promoted as
+   separate roots before scope closure; borrowed scopes remain caller-owned.
 
 Transport is an explicit serialized parser-owner operation. This spec does not
 enable worker warning admission or qualify the pending V2 parent/worker path.
