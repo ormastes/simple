@@ -79,7 +79,16 @@ added to the sparse set), and add `--source src/os`:
 
 ## Verification
 
-`check-one-os.shs`-equivalent run (`--threads 1`, one HIR worker): the HIR
-worker gets past phase 1 and lowers modules (more than 1,077 claims/terminals in
-`queue-43340-0`, compared with 0 before). The final aggregate line is in
-`p4check-20261019/repro/full-cli-fixed.log`.
+`check-one-os.shs`-equivalent run (`--threads 1`, `--timeout 3600`, one HIR
+worker): the worker gets past phase 1 and claims 2516 of the 2694 inventory rows
+(0 before). Of 2516 terminals, 2514 are PASS. The other two are separate, later
+defects, not this root cause:
+
+- `src/app/cli/_CliMain/main_and_help.spl`: HIR lowering FAILED (keep-going).
+  This is a real front-end error that still needs its own diagnosis.
+- `src/compiler/70.backend/gpu_intrinsics.spl`: CRASH. This was just the module
+  in flight when the parent hit its 3600 s per-worker wait (`exit=-2`). A
+  replacement owner then finished the inventory (`unfinished=0`).
+
+Final line: `completed_workers=1 failed_workers=1 failed_modules=2 unfinished=0`.
+Log: `p4check-20261019/repro/full-cli-fixed.log`.
