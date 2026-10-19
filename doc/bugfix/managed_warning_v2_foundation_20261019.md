@@ -12,11 +12,14 @@ The new sibling `managed_parse_diagnostic_v2.spl` uses actual DiagnosticV1,
 Severity and admitted ManagedParseModuleV1. It accepts a deliberately bounded
 parser profile, rejects unsupported details rather than discarding them, and
 recomputes stable IDs from original source digest, logical path, severity, code
-and message. No JSON parser or ad hoc SDN serializer is introduced.
+and message plus module ID and occurrence ordinal. No JSON parser or ad hoc SDN serializer is introduced.
 
-Canonical SDN is a fixed 12-element typed profile: version, severity, code,
+Canonical SDN is a fixed 13-element typed profile: version, severity, code,
 message, file, absent span, empty labels, identity note array, empty help,
-empty children, empty macro trace, absent fix. It is not the existing escaped
+empty children, empty macro trace, absent fix, occurrence ordinal. Aggregate
+validation independently derives ordinals from array order and caps 64 records
+and 48 KiB per module; equal messages remain distinct while replay preserves IDs.
+It is not the existing escaped
 line protocol and is not claimed to implement binary events. Individual field
 bounds imply a worst-case escaped record under 32 KiB; strict decoding caps
 source bytes, nesting and total nodes before constructing DiagnosticV1.
