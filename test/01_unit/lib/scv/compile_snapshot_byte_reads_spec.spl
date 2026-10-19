@@ -17,9 +17,10 @@ extern fn rt_getpid() -> i64
 fn snapshot_bytes_root(label: text) -> text:
     path_absolute("build/test-artifacts/snapshot-bytes-{rt_getpid()}-{label}").replace("\\", "/")
 
-# The UTF-8 sanity check keys off the repo's build-profile switch
-# (SIMPLE_BUILD_PROFILE, which outranks SIMPLE_DEBUG). Pin the profile for a
-# case and restore whatever the runner had.
+# The UTF-8 refusal must NOT depend on the build-profile switch
+# (SIMPLE_BUILD_PROFILE, which outranks SIMPLE_DEBUG): a release producer must
+# refuse exactly what a debug one does. Pin the profile for a case and restore
+# whatever the runner had.
 fn snapshot_bytes_profile_set(profile: text) -> text?:
     val previous = env_get("SIMPLE_BUILD_PROFILE")
     env_set("SIMPLE_BUILD_PROFILE", profile)
@@ -96,7 +97,7 @@ describe "SCV snapshot materializes sources by raw-byte digest":
             root, root + "/build/scv", root + "/staging", snapshot_bytes_entry(relative, "# absent\n"))
         expect(result.reason).to_equal("snapshot-read-failed:{relative}")
 
-    it "default mode snapshots a non-UTF-8 .spl byte-exact with no validation":
+    it "release profile refuses a non-UTF-8 .spl even when its digest matches":
         val previous = snapshot_bytes_profile_set("release")
         val root = snapshot_bytes_root("invalid-utf8-release")
         val relative = "src/bytes/invalid.spl"
@@ -105,11 +106,10 @@ describe "SCV snapshot materializes sources by raw-byte digest":
         val result = scv_compile_snapshot_materialize_source_v1(
             root, root + "/build/scv", root + "/staging", snapshot_bytes_raw_entry(relative, raw))
         snapshot_bytes_profile_restore(previous)
-        val digest = sha256_u8_fast_hex(raw)
-        expect(result.reason).to_equal("ok")
-        expect(result.row).to_equal("{relative}|sha256_{digest}|4")
-        expect(file_hash_sha256(root + "/staging/" + relative)).to_equal(digest)
-        expect(file_hash_sha256(root + "/build/scv/objects/chunks/sha256_{digest}.blob")).to_equal(digest)
+        expect(result.reason).to_equal("snapshot-source-not-utf8:{relative}")
+        expect(result.row).to_equal("")
+        expect(file_exists(root + "/staging/" + relative)).to_equal(false)
+        expect(file_exists(root + "/build/scv/objects/chunks/sha256_{sha256_u8_fast_hex(raw)}.blob")).to_equal(false)
 
     it "keeps a BOM and CRLF line endings byte-exact":
         val previous = snapshot_bytes_profile_set("release")
@@ -125,7 +125,7 @@ describe "SCV snapshot materializes sources by raw-byte digest":
         expect(file_hash_sha256(root + "/staging/" + relative)).to_equal(digest)
         expect(file_hash_sha256(root + "/build/scv/objects/chunks/sha256_{digest}.blob")).to_equal(digest)
 
-    it "debug mode refuses a non-UTF-8 .spl even when its digest matches":
+    it "debug profile refuses a non-UTF-8 .spl even when its digest matches":
         val previous = snapshot_bytes_profile_set("debug")
         val root = snapshot_bytes_root("invalid-utf8-debug")
         val relative = "src/bytes/invalid.spl"
@@ -139,7 +139,7 @@ describe "SCV snapshot materializes sources by raw-byte digest":
         expect(file_exists(root + "/staging/" + relative)).to_equal(false)
         expect(file_exists(root + "/build/scv/objects/chunks/sha256_{sha256_u8_fast_hex(raw)}.blob")).to_equal(false)
 
-    it "debug mode snapshots a non-UTF-8 .bat byte-exact; only Simple text formats must be UTF-8":
+    it "snapshots a non-UTF-8 .bat byte-exact; only Simple text formats must be UTF-8":
         val previous = snapshot_bytes_profile_set("debug")
         val root = snapshot_bytes_root("invalid-utf8-bat")
         val relative = "src/bytes/build.bat"
@@ -152,7 +152,7 @@ describe "SCV snapshot materializes sources by raw-byte digest":
         expect(result.reason).to_equal("ok")
         expect(file_hash_sha256(root + "/staging/" + relative)).to_equal(digest)
 
-    it "debug mode admits valid multibyte UTF-8 in a .spl":
+    it "admits valid multibyte UTF-8 in a .spl":
         val previous = snapshot_bytes_profile_set("debug")
         val root = snapshot_bytes_root("valid-utf8-debug")
         val relative = "src/bytes/valid.spl"
