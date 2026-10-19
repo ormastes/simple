@@ -18,3 +18,9 @@ REQ-ENUM-FRAME-OWNER adds three record-field projection scenarios:
 
 These checks preserve the payload boundary; they do not grant compatibility
 from equal record layout or optional carrier representation.
+
+The 2026-10-19 coherence follow-up adds two branch-merge cases for
+REQ-ENUM-COHERENCE-PAYLOAD. A named `text?` payload accepts a local explicitly
+typed `text?` whose branches are Some(text) and nil. The same slot must reject
+a `bool?` local formed by Some(bool)/nil with a payload mismatch. These invoke
+the existing real frontend/HIR/MIR diagnostic helper. Execution is UNRUN.
