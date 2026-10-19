@@ -1999,6 +1999,49 @@ pub fn rt_secure_temp_dir(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::text(path.to_string_lossy().to_string()))
 }
 
+const SECURE_TEMP_DIR_PARENT_SLOT_BYTES: usize = 4096;
+
+thread_local! {
+    static SECURE_TEMP_DIR_PARENT_SLOT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static SECURE_TEMP_DIR_PREFIX_SLOT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Interpreter twin of `rt_secure_temp_dir_set_parent` (runtime_native.c):
+/// slot the staging parent for the paired make. 1 = slotted, 0 = refused.
+pub fn rt_secure_temp_dir_set_parent(args: &[Value]) -> Result<Value, CompileError> {
+    let parent = extract_path(args, 0)?;
+    // runtime_native.c copies the parent into a RT_TEXT_PATH_MAX (4096) byte
+    // slot through rt_text_arg_to_path, refusing len >= the slot size.
+    if !secure_path_ok(&parent) || parent.len() >= SECURE_TEMP_DIR_PARENT_SLOT_BYTES {
+        return Ok(Value::Int(0));
+    }
+    SECURE_TEMP_DIR_PARENT_SLOT.with(|slot| *slot.borrow_mut() = Some(parent));
+    Ok(Value::Int(1))
+}
+
+/// Interpreter twin of `rt_secure_temp_dir_set_prefix`: a non-empty leaf
+/// prefix without separators that fits the C lane's 128-byte slot.
+pub fn rt_secure_temp_dir_set_prefix(args: &[Value]) -> Result<Value, CompileError> {
+    let prefix = extract_path(args, 0)?;
+    if !secure_path_ok(&prefix) || prefix.len() >= 128 || prefix.contains('/') || prefix.contains('\\') {
+        return Ok(Value::Int(0));
+    }
+    SECURE_TEMP_DIR_PREFIX_SLOT.with(|slot| *slot.borrow_mut() = Some(prefix));
+    Ok(Value::Int(1))
+}
+
+/// Interpreter twin of `rt_secure_temp_dir_make`: consumes BOTH slots (as the
+/// C lane does, success or refusal) and creates the directory through the
+/// same handler as the two-argument `rt_secure_temp_dir`.
+pub fn rt_secure_temp_dir_make(_args: &[Value]) -> Result<Value, CompileError> {
+    let parent = SECURE_TEMP_DIR_PARENT_SLOT.with(|slot| slot.borrow_mut().take());
+    let prefix = SECURE_TEMP_DIR_PREFIX_SLOT.with(|slot| slot.borrow_mut().take());
+    match (parent, prefix) {
+        (Some(parent), Some(prefix)) => rt_secure_temp_dir(&[Value::text(parent), Value::text(prefix)]),
+        _ => Ok(Value::text(String::new())),
+    }
+}
+
 /// Publish `staged` to `destination` atomically, REFUSING to replace an
 /// existing destination.
 ///
@@ -2076,6 +2119,48 @@ pub fn rt_file_publish_noreplace(args: &[Value]) -> Result<Value, CompileError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Interpreter twin of the cycle-170 split crossing
+    /// (runtime_native.c rt_secure_temp_dir_set_parent/_set_prefix/_make):
+    /// make consumes both slots, refuses when either is missing, and yields a
+    /// fresh private directory per call.
+    #[cfg(unix)]
+    #[test]
+    fn secure_temp_dir_split_crossing_slots_are_consumed_by_make() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = tempfile::tempdir().expect("parent temp dir");
+        let parent_path = parent.path().to_string_lossy().to_string();
+        let text = |s: &str| Value::text(s.to_string());
+        let as_text = |v: Value| match v {
+            Value::Str(s) => s.as_ref().clone(),
+            other => panic!("expected text, got {other:?}"),
+        };
+
+        assert_eq!(as_text(rt_secure_temp_dir_make(&[]).unwrap()), "", "no slots set");
+        assert_eq!(rt_secure_temp_dir_set_prefix(&[text("bad/prefix")]).unwrap(), Value::Int(0));
+        assert_eq!(rt_secure_temp_dir_set_prefix(&[text("")]).unwrap(), Value::Int(0));
+        let oversized = format!("/{}", "p".repeat(SECURE_TEMP_DIR_PARENT_SLOT_BYTES - 1));
+        assert_eq!(rt_secure_temp_dir_set_parent(&[text(&oversized)]).unwrap(), Value::Int(0), "parent must fit the C slot");
+
+        let mut made = Vec::new();
+        for _ in 0..2 {
+            assert_eq!(rt_secure_temp_dir_set_parent(&[text(&parent_path)]).unwrap(), Value::Int(1));
+            assert_eq!(rt_secure_temp_dir_set_prefix(&[text("split")]).unwrap(), Value::Int(1));
+            let path = as_text(rt_secure_temp_dir_make(&[]).unwrap());
+            assert!(path.starts_with(&parent_path), "{path}");
+            let meta = fs::metadata(&path).expect("made dir exists");
+            assert!(meta.is_dir());
+            assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+            made.push(path);
+        }
+        assert_ne!(made[0], made[1], "each make creates a fresh directory");
+        assert_eq!(as_text(rt_secure_temp_dir_make(&[]).unwrap()), "", "make consumed both slots");
+
+        assert_eq!(rt_secure_temp_dir_set_parent(&[text(&parent_path)]).unwrap(), Value::Int(1));
+        assert_eq!(as_text(rt_secure_temp_dir_make(&[]).unwrap()), "", "missing prefix refuses");
+        assert_eq!(rt_secure_temp_dir_set_prefix(&[text("split")]).unwrap(), Value::Int(1));
+        assert_eq!(as_text(rt_secure_temp_dir_make(&[]).unwrap()), "", "a refused make cleared the parent");
+    }
 
     /// The no-replace guarantee, exercised against the INTERPRETER lane.
     ///
