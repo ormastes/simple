@@ -2450,6 +2450,12 @@ pub(super) fn bootstrap_mutex_runtime_requested_symbols() -> Vec<String> {
         "rt_simple_abi_version",
         "rt_simple_abi_version_deferred",
         "rt_sosix_directory_pair_check_v1",
+        // Cycle-170: the secure_temp_dir split-crossing pair (runtime_native.c)
+        // must survive capsule retention -- otherwise the stub generator
+        // fabricates weak return-3 stubs for them and SCV snapshot staging
+        // refuses every snapshot CREATE under candidate-seednew.
+        "rt_secure_temp_dir_set_parent",
+        "rt_secure_temp_dir_make",
     ]
     .into_iter()
     .map(str::to_string)
