@@ -2135,7 +2135,7 @@ impl MirLowering:
         self.lower_module(module, no_providers, true, no_archive_symbols,
             no_archive_globals, no_archive_thunks)
 
-    me lower_bootstrap_closure_module(module: HirModule) -> MirModule:
+    me lower_bootstrap_closure_module(module: HirModule) -> Result<MirModule, text>:
         """Lower one non-entry module of the stage3 bootstrap-fixed closure.
 
         Same call-shape rule as `lower_bootstrap_entry_module`: the driver's
@@ -2143,15 +2143,19 @@ impl MirLowering:
         omitting the three trailing defaulted archive parameters. The
         seed-compiled stage2 then read `archive_trait_thunks` as garbage
         (0xfffffffffffffff0) and SIGSEGVed in lower_module's first `for` over
-        it (core: lower_module+804, rt_for_iterable). Every argument is
-        forwarded explicitly from this class.
-        doc/08_tracking/bug/stage3_bootstrap_closure_lower_module_default_args_segv_2026_10_19.md"""
-        val no_providers: [HirModule] = []
-        val no_archive_symbols: [i64]? = nil
-        val no_archive_globals: MirModule? = nil
-        val no_archive_thunks: [MirFunction] = []
-        self.lower_module(module, no_providers, false, no_archive_symbols,
-            no_archive_globals, no_archive_thunks)
+        it (core: lower_module+804, rt_for_iterable). The call is made from
+        this class with every argument explicit.
+        doc/08_tracking/bug/stage3_bootstrap_closure_lower_module_default_args_segv_2026_10_19.md
+
+        It goes through `lower_module_transient_scoped`: lowering 1100
+        closure modules unscoped on this one instance retained ~36 MB each
+        (13.2 GB -> 52.9 GB). The scoped path reclaims the per-module arena
+        and promotes exactly the escape set the bootstrap lane needs (the
+        returned MirModule, the lowering's cross-module owners and the
+        `_bootstrap_mir_*` / `_bootstrap_fn_*` flat registries).
+        doc/08_tracking/bug/stage3_bootstrap_closure_mir_lowering_retention_2026_10_20.md"""
+        val no_closure_providers: [HirModule] = []
+        self.lower_module_transient_scoped(module, no_closure_providers, false)
 
     me lower_module_transient_scoped(module: HirModule, providers: [HirModule] = [], is_entry_module: bool = true) -> Result<MirModule, text>:
         """`lower_module` with the per-module lowering arena reclaimed.
