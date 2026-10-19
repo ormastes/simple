@@ -82,3 +82,29 @@ attempts remain consumed; root controls the user-authorized six-attempt cap.
 Source/whitespace review is separate from runtime, formal, and performance
 qualification. The mandatory compiler/lib/MCP checks and focused regressions
 remain pending with root; no STATUS: PASS or release qualification is claimed.
+
+## 2026-10-19 PassScope follow-up
+
+REQ-ENUM-PASS-SCOPE: retain the declared descriptor and enum subject across
+optional unwrap/field projection in the two checked pass dispatch functions.
+Port the donor's typed `MirPassDescriptor`, typed `PassScope` local, and fully
+qualified Module/Function/FsDriver arms. Preserve all status and structural
+guards, unknown/no-op contracts, and module iteration ordering.
+
+Source scope is only `src/compiler/60.mir_opt/mir_opt/mod.spl`, functions
+`run_named_pass_with_record` and `run_pass_on_module_checked`. The dedicated
+`test/01_unit/compiler/mir_opt/pass_scope_enum_owner_spec.spl` and its mirrored
+authored manual exercise real registry lookup, alias identity, active Module
+dispatch boundaries, inactive Function/FsDriver skips, unknown requests, and
+malformed-input rejection. Tests were authored before the production edits.
+
+Historical groups 35/36/38 now have an authored source mitigation, pending
+independent review and actual compiler evidence. They are not runtime-closed.
+All other prior matrix rows retain their boundaries. Active Function/FsDriver
+branches are unreachable under current pass statuses and remain uncovered;
+the patch does not enable them. Exact stale adjacent test cases are tracked in
+`doc/08_tracking/bug/pass_scope_enum_owner_projection_2026_10_19.md`.
+
+Additional sidecars: N/A. Root owns independent exact-head review and runtime
+qualification. No compiler, tests, native builds, or doc generation were
+launched for this port; the existing six-total attempt accounting is unchanged.
