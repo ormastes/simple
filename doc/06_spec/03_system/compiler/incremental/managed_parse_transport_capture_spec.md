@@ -7,6 +7,9 @@ REQ-IM-006/007/016, NFR-IM-004. Status: authored, runtime/docgen UNRUN.
    Both rich ASTs contain main, neither reports a parse error, ordinary cache
    capture stays empty, and transport yields a restorable nonreusable payload
    with the pre-desugar warning at the independently expected source line.
+   The fixture assignment is line 5; line 6 reads the captured local. The
+   checker uses the LHS identifier's saved one-based line when the assignment
+   span is empty. This expectation is source-derived, not executed evidence.
 2. Take twice and verify no stale payload or warning escapes. Parse malformed
    source after an untaken warning capture and verify that prior state is lost.
    A later clean module can produce a reusable payload without inherited warning.
