@@ -1,0 +1,129 @@
+#!/bin/sh
+# check-text-encoding-push.shs — Simple text files added/modified in a push
+# range must be valid UTF-8 and contain no CR bytes (CRLF).
+#
+# WHY: .gitattributes pins *.spl/*.shs/*.sdn to `text eol=lf` and the toolchain
+# reads them as UTF-8, but a blob committed from a Windows editor with CRLF or a
+# legacy codepage is well-formed to every other push guard (tree, markers, size,
+# symbols) and only breaks later, in the lexer or a `sh` shebang line.
+#
+# MECHANISM: committed blob content only (git diff --raw + git cat-file blob,
+# never the working tree). Scope: *.spl *.sdn *.shs *.sdl (the .gitattributes
+# `text eol=lf` rows plus .sdl). Exempt: src/compiler_rust/vendor/**,
+# src/runtime/vendor/** (`-text -eol` in .gitattributes); .bat/.cmd/.sh are
+# not in scope (CRLF is intended for .bat/.cmd). Files are validated as one
+# concatenated stream with `iconv -f UTF-8 -t UTF-8` (rejects overlongs,
+# surrogates, truncated sequences) and a CR byte scan; only on failure is each
+# file re-checked to name the offenders. Typical cost ~1s.
+#
+# Verdict, last line of stdout:
+#   PASS  — <n> file(s) checked ...      exit 0  (n=0 only when the range
+#           changed no in-scope file; the verdict says so explicitly)
+#   FAIL  — ...                          exit 1
+#   ERROR — nothing was checked (...)    exit 2
+# Usage: check-text-encoding-push.shs [<BASE>..<NEW>]   (default origin/main..HEAD)
+#        check-text-encoding-push.shs --selftest
+set -u
+
+in_scope() {
+    case "$1" in
+        src/compiler_rust/vendor/*|src/runtime/vendor/*) return 1 ;;
+        *.spl|*.sdn|*.shs|*.sdl) return 0 ;;
+    esac
+    return 1
+}
+
+# bad_reason <file>: prints reason(s) for a file, empty when clean.
+bad_reason() {
+    _r=""
+    iconv -f UTF-8 -t UTF-8 < "$1" > /dev/null 2>&1 || _r="invalid-utf8"
+    if ! tr -d '\015' < "$1" | cmp -s - "$1"; then _r="${_r:+$_r+}CR"; fi
+    printf '%s' "$_r"
+}
+
+run_scan() {
+    _range=$1
+    case "$_range" in *..*) ;; *) echo "ERROR — nothing was checked (range '$_range' must contain '..')"; return 2 ;; esac
+    _ncommits=$(git rev-list --count "$_range" 2>/dev/null) || { echo "ERROR — nothing was checked (cannot resolve range $_range)"; return 2; }
+    [ "${_ncommits:-0}" -gt 0 ] || { echo "ERROR — nothing was checked (range $_range resolves to 0 commits)"; return 2; }
+    _base=${_range%%..*}; _new=${_range##*..}
+    _tmp=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    _list="$_tmp/list"; _all="$_tmp/all"; : > "$_all"
+    git -c core.quotepath=off diff --raw --no-renames --no-abbrev --diff-filter=AM "$_base" "$_new" > "$_tmp/raw" 2>/dev/null \
+        || { rm -rf "$_tmp"; echo "ERROR — nothing was checked (git diff failed for $_range)"; return 2; }
+    _n=0; : > "$_list"
+    while IFS=' 	' read -r _m1 _m2 _o1 _o2 _st _path; do
+        [ "$_m2" = 120000 ] && continue
+        in_scope "$_path" || continue
+        printf '%s\t%s\n' "$_o2" "$_path" >> "$_list"
+        _n=$((_n + 1))
+    done < "$_tmp/raw"
+    # One git process for all blobs; the `<oid> blob <size>` header lines are ASCII,
+    # so they cannot turn a clean stream into a failing one.
+    cut -f1 "$_list" | git cat-file --batch > "$_all" 2>/dev/null || { rm -rf "$_tmp"; echo "ERROR — nothing was checked (git cat-file --batch failed)"; return 2; }
+    if [ "$_n" -eq 0 ]; then
+        rm -rf "$_tmp"
+        echo "PASS — 0 file(s) checked in $_range ($_ncommits commit(s)): no in-scope (*.spl *.sdn *.shs *.sdl) file added or modified, nothing to validate"
+        return 0
+    fi
+    if [ -z "$(bad_reason "$_all")" ]; then
+        rm -rf "$_tmp"
+        echo "PASS — $_n file(s) checked in $_range ($_ncommits commit(s)), all valid UTF-8 with LF line endings"
+        return 0
+    fi
+    _off=""; _k=0
+    while IFS='	' read -r _oid _path; do
+        git cat-file blob "$_oid" > "$_tmp/blob"
+        _why=$(bad_reason "$_tmp/blob")
+        if [ -n "$_why" ]; then _off="$_off $_path($_why)"; _k=$((_k + 1)); fi
+    done < "$_list"
+    rm -rf "$_tmp"
+    echo "FAIL — $_n file(s) checked in $_range, $_k offender(s):$_off"
+    return 1
+}
+
+# Selftest runs before every scan, but its ~7s (Windows process spawn cost) result is
+# cached per exact script content: a green marker keyed on this file's blob id.
+_marker="${TMPDIR:-/tmp}/text-encoding-selftest-green-$(git hash-object "$0" 2>/dev/null)"
+if [ "${1:-}" = --selftest ] || { [ "${TEXT_ENC_NO_SELFTEST:-0}" != 1 ] && [ ! -f "$_marker" ]; }; then
+    _self=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")
+    _st=$(mktemp -d) || { echo "ERROR — nothing was checked (selftest mktemp failed)"; exit 2; }
+    (
+        cd "$_st" || exit 2
+        git init -q . && git config user.email t@t && git config user.name t && git config core.autocrlf false
+        mkdir -p src/runtime/vendor
+        echo base > README.md; git add -A; git commit -qm base
+        B0=$(git rev-parse HEAD)
+        printf 'fn caf\303\251() -> text: "\342\202\254 \360\237\230\200"\n' > ok.spl
+        printf 'a\r\n' > crlf.bat; printf 'v\r\n' > src/runtime/vendor/x.spl
+        git add -A; git commit -qm ok; B1=$(git rev-parse HEAD)
+        printf 'x\r\ny\n' > crlf.spl; git add -A; git commit -qm crlf; B2=$(git rev-parse HEAD)
+        printf 'bad \303\n' > bad.sdn; printf 'sur \355\240\200\n' > sur.shs; git add -A; git commit -qm bad; B3=$(git rev-parse HEAD)
+        echo doc > d.md; git add -A; git commit -qm doc; B4=$(git rev-parse HEAD)
+        fail=0
+        expect() { # name range want-rc want-substr
+            out=$(TEXT_ENC_NO_SELFTEST=1 sh "$_self" "$2" | tail -n 1); rc=$?
+            case "$out" in *"$4"*) ok=1 ;; *) ok=0 ;; esac
+            if [ "$ok" = 1 ] && [ "$3" = "$(printf '%s' "$out" | awk '{print ($1=="PASS")?0:(($1=="FAIL")?1:2)}')" ]; then
+                echo "selftest ok: $1 -> $out"
+            else echo "selftest BAD: $1 -> $out"; fail=1; fi
+        }
+        expect "clean multibyte utf8 + exempt bat/vendor" "$B0..$B1" 0 "1 file(s) checked"
+        expect "CRLF in .spl" "$B1..$B2" 1 "crlf.spl(CR)"
+        expect "truncated utf8 + surrogate" "$B2..$B3" 1 "bad.sdn(invalid-utf8) sur.shs(invalid-utf8)"
+        expect "no in-scope file changed" "$B3..$B4" 0 "0 file(s) checked"
+        expect "empty range" "$B4..$B4" 2 "0 commits"
+        expect "bare rev rejected" "$B4" 2 "must contain"
+        exit $fail
+    ) > "$_st.out" 2>&1
+    _rc=$?
+    cat "$_st.out"; rm -rf "$_st" "$_st.out"
+    [ "$_rc" -eq 0 ] || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+    echo "selftest: all fixtures passed"
+    : > "$_marker" 2>/dev/null || :
+    [ "${1:-}" = --selftest ] && { echo "PASS — selftest only, 6 fixtures"; exit 0; }
+fi
+
+RANGE=${1:-origin/main..HEAD}
+run_scan "$RANGE"
+exit $?
