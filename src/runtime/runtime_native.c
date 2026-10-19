@@ -4020,7 +4020,8 @@ static int64_t rt_core_format_array_like(RtCoreArray* array, int is_tuple) {
             int rl = snprintf(raw_buf, sizeof(raw_buf), "%d", (int)((uint8_t*)array->data)[i]);
             elem_str = rt_string_new((const uint8_t*)raw_buf, rl > 0 ? (uint64_t)rl : 0);
         } else if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
-            int rl = snprintf(raw_buf, sizeof(raw_buf), "%lld", (long long)((int64_t*)array->data)[i]);
+            /* Unsigned, like the interpreter: a word >= 2^63 is not -1. */
+            int rl = snprintf(raw_buf, sizeof(raw_buf), "%llu", (unsigned long long)((uint64_t*)array->data)[i]);
             elem_str = rt_string_new((const uint8_t*)raw_buf, rl > 0 ? (uint64_t)rl : 0);
         } else {
             elem_str = rt_to_string(((int64_t*)array->data)[i]);
@@ -5203,14 +5204,16 @@ int64_t rt_array_join_any(int64_t array_value, int64_t separator) {
     return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
 }
 
+int64_t rt_array_index_of(SplArray* array, int64_t value);
 int8_t rt_contains(int64_t collection, int64_t value) {
     RtCoreArray* array = rt_core_as_array(collection);
     if (array) {
+        if (array->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) {
+            /* Same numeric needle match as rt_array_index_of's packed arm. */
+            return rt_array_index_of((SplArray*)(uintptr_t)collection, value) >= 0;
+        }
         for (int64_t i = 0; i < array->len; i++) {
-            int64_t item = (array->flags & RT_CORE_ARRAY_FLAG_BYTES)
-                ? (int64_t)((uint8_t*)array->data)[i]
-                : ((int64_t*)array->data)[i];
-            if (rt_native_eq(item, value)) return 1;
+            if (rt_native_eq(((int64_t*)array->data)[i], value)) return 1;
         }
         return 0;
     }
@@ -5882,6 +5885,27 @@ static void rt_refuse_non_text_receiver(const char* method, int64_t receiver) {
     exit(70);
 }
 
+/* Element `idx` (normalized like rt_array_get) as a RuntimeValue: nil when out
+ * of range. rt_array_get hands back the RAW slot of a BYTES / U64_PACKED array
+ * (the C-internal contract its selfcheck pins); every accessor that gives an
+ * element to Simple code must tag it, exactly as the Rust twin does with
+ * RuntimeValue::from_int: a packed u64 word that does not fit the tagged
+ * immediate becomes a lossless signed wide box (rt_value_int), which both
+ * UnboxInt (rt_value_unbox_int) and the u64 unbox (rt_value_as_u64) decode. */
+static int64_t rt_core_array_value_at(SplArray* a, int64_t idx) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return rt_core_nil();
+    if (idx < 0) idx += array->len;
+    if (idx < 0 || idx >= array->len) return rt_core_nil();
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        return rt_value_int((int64_t)((uint8_t*)array->data)[idx]);
+    }
+    if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
+        return rt_value_int(((int64_t*)array->data)[idx]);
+    }
+    return ((int64_t*)array->data)[idx];
+}
+
 /* Reverse the CHARACTERS of a runtime string (helper, no receiver check). */
 static int64_t rt_string_reverse_chars(RtCoreString* s) {
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
@@ -5974,6 +5998,18 @@ int64_t rt_reverse_mut(int64_t receiver) {
     SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
     if (arr) {
         int64_t n = rt_array_len(arr);
+        RtCoreArray* packed = rt_core_array_ptr(arr);
+        if (packed && (packed->flags & RT_CORE_ARRAY_FLAG_BYTES)) {
+            /* Swap raw slots: rt_array_set would re-decode a raw byte that is
+             * a multiple of 8 as a tagged int (56 -> 7). */
+            uint8_t* bytes = (uint8_t*)packed->data;
+            for (int64_t i = 0, j = n - 1; i < j; i++, j--) {
+                uint8_t tmp = bytes[i];
+                bytes[i] = bytes[j];
+                bytes[j] = tmp;
+            }
+            return receiver;
+        }
         for (int64_t i = 0, j = n - 1; i < j; i++, j--) {
             int64_t tmp = rt_array_get(arr, i);
             rt_array_set(arr, i, rt_array_get(arr, j));
@@ -6054,12 +6090,27 @@ static int rt_sort_cmp(int64_t a, int64_t b) {
  * Insertion sort, because it is STABLE (matching Rust's sort_by) and the
  * comparator is a plain function; array sizes here are the same ones the rest
  * of this file already handles element-at-a-time. */
+static int rt_sorted_byte_cmp(const void* lhs, const void* rhs);
+static int rt_sorted_u64_cmp(const void* lhs, const void* rhs);
 int64_t rt_sort(int64_t receiver) {
     SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
     if (!arr) rt_refuse_non_array_sort_receiver();
     int64_t n = rt_array_len(arr);
     if (n < 0) n = 0;
     if (n < 2) return receiver;
+    RtCoreArray* packed = rt_core_array_ptr(arr);
+    if (packed && (packed->flags & RT_CORE_ARRAY_FLAG_BYTES)) {
+        /* Raw slots, sorted in place like rt_array_sorted: the buffer + set
+         * path below re-decoded a raw byte that is a multiple of 8 as tagged
+         * (56 -> 7) and compared raw bytes as tagged words. Equal integers
+         * are indistinguishable, so qsort's instability is unobservable. */
+        qsort(packed->data, (size_t)n, sizeof(uint8_t), rt_sorted_byte_cmp);
+        return receiver;
+    }
+    if (packed && (packed->flags & RT_CORE_ARRAY_FLAG_U64_PACKED)) {
+        qsort(packed->data, (size_t)n, sizeof(uint64_t), rt_sorted_u64_cmp);
+        return receiver;
+    }
     int64_t* buf = (int64_t*)malloc((size_t)n * sizeof(int64_t));
     if (!buf) return receiver;
     for (int64_t i = 0; i < n; i++) buf[i] = rt_array_get(arr, i);
@@ -6208,10 +6259,10 @@ int64_t rt_array_sorted(int64_t receiver) {
 int64_t rt_array_max(int64_t receiver) {
     SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
     if (!arr || rt_array_len(arr) <= 0) return rt_core_nil();
-    int64_t result = rt_array_get(arr, 0);
+    int64_t result = rt_core_array_value_at(arr, 0);
     int64_t count = rt_array_len(arr);
     for (int64_t index = 1; index < count; index++) {
-        int64_t candidate = rt_array_get(arr, index);
+        int64_t candidate = rt_core_array_value_at(arr, index);
         if (rt_sort_cmp(result, candidate) < 0) result = candidate;
     }
     return result;
@@ -6229,7 +6280,7 @@ int64_t rt_take(int64_t receiver, int64_t n) {
         int64_t take = n < len ? n : len;
         SplArray* out = rt_array_new(take > 0 ? take : 0);
         if (!out) return rt_core_nil();
-        for (int64_t i = 0; i < take; i++) rt_array_push(out, rt_array_get(arr, i));
+        for (int64_t i = 0; i < take; i++) rt_array_push(out, rt_core_array_value_at(arr, i));
         return (int64_t)(uintptr_t)out;
     }
     RtCoreString* s = rt_core_as_string(receiver);
@@ -6251,7 +6302,7 @@ int64_t rt_drop(int64_t receiver, int64_t n) {
         int64_t start = n < len ? n : len;
         SplArray* out = rt_array_new(len - start > 0 ? len - start : 0);
         if (!out) return rt_core_nil();
-        for (int64_t i = start; i < len; i++) rt_array_push(out, rt_array_get(arr, i));
+        for (int64_t i = start; i < len; i++) rt_array_push(out, rt_core_array_value_at(arr, i));
         return (int64_t)(uintptr_t)out;
     }
     RtCoreString* s = rt_core_as_string(receiver);
@@ -8681,7 +8732,7 @@ int64_t rt_array_get_text(SplArray* a, int64_t idx) {
 }
 
 int64_t rt_array_last(SplArray* a) {
-    return rt_array_get(a, -1);
+    return rt_core_array_value_at(a, -1);
 }
 
 /* Returns 1 when the element was written, 0 when the array was null or the
@@ -9717,13 +9768,7 @@ int64_t rt_array_at(SplArray* a, int64_t idx) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return rt_enum_new(1, 1, rt_core_nil());
     if (idx < 0 || idx >= array->len) return rt_enum_new(1, 1, rt_core_nil());
-    int64_t elem;
-    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
-        elem = (int64_t)((uint8_t*)array->data)[idx];
-    } else {
-        elem = ((int64_t*)array->data)[idx];
-    }
-    return rt_enum_new(1, 0, elem);
+    return rt_enum_new(1, 0, rt_core_array_value_at(a, idx));
 }
 
 /* Receiver-dispatching `at`.
@@ -9811,7 +9856,7 @@ int64_t rt_array_map(SplArray* array, int64_t closure_value) {
     if (!func_ptr) return (int64_t)(uintptr_t)result;
     RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
     for (int64_t i = 0; i < rt_array_len(array); i++) {
-        rt_array_push(result, func(closure_value, rt_array_get(array, i)));
+        rt_array_push(result, func(closure_value, rt_core_array_value_at(array, i)));
     }
     return (int64_t)(uintptr_t)result;
 }
@@ -9825,7 +9870,7 @@ int64_t rt_array_each(SplArray* array, int64_t closure_value) {
     if (!func_ptr) return receiver;
     RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
     for (int64_t i = 0; i < rt_array_len(array); i++) {
-        func(closure_value, rt_array_get(array, i));
+        func(closure_value, rt_core_array_value_at(array, i));
     }
     return receiver;
 }
@@ -9841,7 +9886,7 @@ int64_t rt_array_reduce(SplArray* array, int64_t init, int64_t closure_value) {
     RtArrayFoldFn func = (RtArrayFoldFn)(uintptr_t)func_ptr;
     int64_t acc = init;
     for (int64_t i = 0; i < rt_array_len(array); i++) {
-        acc = func(closure_value, acc, rt_array_get(array, i));
+        acc = func(closure_value, acc, rt_core_array_value_at(array, i));
     }
     return acc;
 }
@@ -9924,7 +9969,7 @@ int64_t rt_array_filter(SplArray* array, int64_t closure_value) {
     if (!func_ptr) return (int64_t)(uintptr_t)result;
     RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
     for (int64_t i = 0; i < rt_array_len(array); i++) {
-        int64_t item = rt_array_get(array, i);
+        int64_t item = rt_core_array_value_at(array, i);
         if (rt_core_value_truthy(func(closure_value, item))) {
             rt_array_push(result, item);
         }
@@ -9938,7 +9983,7 @@ int64_t rt_array_find(SplArray* array, int64_t closure_value) {
     if (!func_ptr) return rt_core_nil();
     RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
     for (int64_t i = 0; i < rt_array_len(array); i++) {
-        int64_t item = rt_array_get(array, i);
+        int64_t item = rt_core_array_value_at(array, i);
         if (rt_core_value_truthy(func(closure_value, item))) return item;
     }
     return rt_core_nil();
@@ -9951,7 +9996,7 @@ int64_t rt_array_find(SplArray* array, int64_t closure_value) {
 int64_t rt_array_all_truthy(SplArray* array) {
     if (!rt_core_array_ptr(array)) return 0;
     for (int64_t i = 0; i < rt_array_len(array); i++) {
-        if (!rt_core_value_truthy(rt_array_get(array, i))) return 0;
+        if (!rt_core_value_truthy(rt_core_array_value_at(array, i))) return 0;
     }
     return 1;
 }
@@ -9959,7 +10004,7 @@ int64_t rt_array_all_truthy(SplArray* array) {
 int64_t rt_array_any_truthy(SplArray* array) {
     if (!rt_core_array_ptr(array)) return 0;
     for (int64_t i = 0; i < rt_array_len(array); i++) {
-        if (rt_core_value_truthy(rt_array_get(array, i))) return 1;
+        if (rt_core_value_truthy(rt_core_array_value_at(array, i))) return 1;
     }
     return 0;
 }
@@ -9970,7 +10015,7 @@ int64_t rt_array_all(SplArray* array, int64_t closure_value) {
     if (!func_ptr) return rt_array_all_truthy(array);
     RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
     for (int64_t i = 0; i < rt_array_len(array); i++) {
-        if (!rt_core_value_truthy(func(closure_value, rt_array_get(array, i)))) return 0;
+        if (!rt_core_value_truthy(func(closure_value, rt_core_array_value_at(array, i)))) return 0;
     }
     return 1;
 }
@@ -9981,7 +10026,7 @@ int64_t rt_array_any(SplArray* array, int64_t closure_value) {
     if (!func_ptr) return rt_array_any_truthy(array);
     RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
     for (int64_t i = 0; i < rt_array_len(array); i++) {
-        if (rt_core_value_truthy(func(closure_value, rt_array_get(array, i)))) return 1;
+        if (rt_core_value_truthy(func(closure_value, rt_core_array_value_at(array, i)))) return 1;
     }
     return 0;
 }
@@ -10021,17 +10066,22 @@ int64_t rt_array_index_of(SplArray* array, int64_t value) {
          * element). Decode the needle once and compare numerically; a needle
          * that is not a non-negative integer cannot be an element. */
         uint64_t want;
+        int is_bytes = (packed->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
         RtCoreUInt* boxed = rt_core_as_heap_uint(value);
+        RtCoreWideInt* wide = rt_core_as_heap_int(value);
+        int64_t signed_want;
         if (boxed) {
             want = boxed->value;
-        } else if (rt_core_is_int(value)) {
-            int64_t signed_want = rt_core_as_int(value);
-            if (signed_want < 0) return -1;
+        } else if (wide || rt_core_is_int(value)) {
+            /* A packed u64 word is handed out as rt_value_int of its bits
+             * (rt_core_array_value_at), so words >= 2^63 arrive here negative
+             * and words >= 2^60 as a signed wide box; both name that word. */
+            signed_want = wide ? wide->value : rt_core_as_int(value);
+            if (signed_want < 0 && is_bytes) return -1;
             want = (uint64_t)signed_want;
         } else {
             return -1;
         }
-        int is_bytes = (packed->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
         for (int64_t i = 0; i < packed->len; i++) {
             uint64_t slot = is_bytes ? (uint64_t)((uint8_t*)packed->data)[i]
                                      : ((uint64_t*)packed->data)[i];
@@ -10201,10 +10251,13 @@ int64_t rt_hash_text(int64_t value) {
 int64_t rt_array_pop(SplArray* a) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array || array->len <= 0 || !array->data) return 3;
-    int64_t idx = --array->len;
-    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
-        return (int64_t)((uint8_t*)array->data)[idx];
+    int64_t idx = array->len - 1;
+    if (array->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) {
+        int64_t value = rt_core_array_value_at(a, idx);
+        array->len = idx;
+        return value;
     }
+    array->len = idx;
     int64_t* data = (int64_t*)array->data;
     int64_t value = data[idx];
     data[idx] = 3;
@@ -10575,16 +10628,9 @@ int64_t rt_index_get(int64_t collection, int64_t idx) {
     RtCoreArray* a = rt_core_as_array(collection);
     if (a) {
         if ((idx & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_INT) return rt_core_nil();
-        int64_t raw_idx = idx >> 3;
-        /* rt_array_get hands back the RAW slot of a packed array; this
-         * RuntimeValue entry must tag it, like the Rust twin (from_int).
-         * Forwarding the raw byte made 56 decode as tagged 7 natively. */
-        if (a->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) {
-            if (raw_idx < 0) raw_idx += a->len;
-            if (raw_idx < 0 || raw_idx >= a->len) return rt_core_nil();
-            return rt_value_int(rt_array_get((SplArray*)a, raw_idx));
-        }
-        return rt_array_get((SplArray*)a, raw_idx);
+        /* RuntimeValue entry: packed slots must be tagged, never forwarded raw
+         * (a raw byte 56 decoded as tagged 7 natively). */
+        return rt_core_array_value_at((SplArray*)a, idx >> 3);
     }
     if (rt_core_as_string(collection)) {
         if ((idx & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_INT) return rt_core_nil();
@@ -17621,7 +17667,7 @@ int64_t rt_array_first(int64_t array) {
     SplArray* a = (SplArray*)(intptr_t)array;
     if (a == NULL) return 0;
     if (rt_array_len(a) <= 0) return 0;
-    return rt_array_get(a, 0);
+    return rt_core_array_value_at(a, 0);
 }
 
 /* collections.rs:5963 -- [(i, elem), ...]: one 2-TUPLE per entry, with the
@@ -17642,7 +17688,7 @@ int64_t rt_array_enumerate(int64_t array) {
         int64_t pair = rt_tuple_new(2);
         if (pair == rt_core_nil()) return rt_core_nil();
         rt_tuple_set(pair, 0, rt_value_int(i));
-        rt_tuple_set(pair, 1, rt_array_get(a, i));
+        rt_tuple_set(pair, 1, rt_core_array_value_at(a, i));
         rt_array_push(out, pair);
     }
     return (int64_t)(uintptr_t)out;

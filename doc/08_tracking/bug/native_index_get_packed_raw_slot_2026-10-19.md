@@ -1,6 +1,6 @@
 # Native `rt_index_get` returned the raw slot of packed `[u8]`/`[u64]` arrays
 
-**Status:** RESOLVED 2026-10-19 (branch `work/native-u8-untyped-boxing`).
+**Status:** RESOLVED 2026-10-19 (branch `work/native-u8-untyped-boxing`, two commits).
 **Supersedes the root-cause section of:**
 `seed_native_gzip_deflate_miscompile_2026-10-19.md` (commit `35b0151d441` on
 `work/smf-standalone-bundles`). With this fix, `gzip_*` / `deflate_*` can be
@@ -32,35 +32,63 @@ verbatim. The JIT runs the same MIR against the Rust runtime and is correct.
 
 ## Fix
 
-`rt_index_get` now tags the slot with `rt_value_int` when the array is
-BYTES or U64_PACKED. `rt_array_get`'s raw contract is unchanged. Typed `[u8]`
-and `[u64]` reads never reach this function, because they inline
-`rt_typed_bytes_u8_*` / `rt_typed_words_u64_*`. A typed 64 KB zstd + lz4 +
-`[u8]` loop program links to a byte-identical binary before and after.
+Every C accessor that hands a packed element to Simple code now goes
+through `rt_core_array_value_at`. That helper returns `rt_value_int(byte)` for
+BYTES and `rt_value_int(word)` for U64_PACKED, the exact twin of Rust's
+`RuntimeValue::from_int`. A word of 2^60 or more becomes a lossless signed
+wide box, which `UnboxInt` (`rt_value_unbox_int`) and `rt_value_as_u64` both
+decode. `rt_array_get` keeps its raw-slot contract, which C internals use and
+`rt_array_packed_reverse_index_enumerate_selfcheck.c` pins.
+
+The second commit covers:
+- now tagged: `rt_index_get`, `first`, `last`, `at`, `pop`,
+  `map`/`each`/`reduce`/`filter`/`find`/`all`/`any`(`_truthy`),
+  `enumerate`, `take`/`drop`, `max`;
+- now matched numerically like `index_of`'s packed arm: `contains`;
+- now raw in-place swap or qsort instead of a `rt_array_set` round trip that
+  re-decoded 56 as 7: `reverse` (in place) and `sort` (in place);
+- now unsigned: packed `[u64]` to_text;
+- now also matches wide or negative needles on `[u64]`: `index_of`.
+
+These were already correct: `sum`, `remove`, `slice`, `sorted`/`rev` (copy
+keeps the layout), `rt_array_take`, `for` iteration, and `concat`/`copy`.
+
+`test/01_unit/runtime/runtime_native_focus_test.c:144` asserted the old raw
+`rt_array_last` result for a byte array (`== 255`). It now asserts
+`rt_value_int(255)`, because that line was pinning the bug.
+`rt_core_exports_behaviour_selfcheck.c` failed at base and passes now.
+
+Typed hot paths are unchanged. No compiler source changed, so MIR is
+identical, and typed `[u8]`/`[u64]` reads inline `rt_typed_bytes_u8_*` /
+`rt_typed_words_u64_*`. A typed `[u8]`/`[u64]` loop program's unstripped
+binary differs from base in exactly one instruction: an `add` immediate that
+addresses `.rodata` (string layout). `spl_main` disassembles identically.
+
+## u64 >= 2^60 semantics
+
+Interpreter, JIT and native now agree on the values (`first`, `last`, `[0]`,
+`pop` of `[2^60+5, 8, u64::MAX]`). Native and the interpreter print the
+array as `18446744073709551615`. The JIT prints `-1`; that is Rust-runtime
+array formatting and is not fixed here.
 
 ## Tests
 
-- `src/runtime/test/rt_index_get_packed_tagged_selfcheck.c`
+- `src/runtime/test/rt_index_get_packed_tagged_selfcheck.c` (105 checks:
+  0, 7, 8, 56, 64, 255, and u64 2^60+5 and u64::MAX)
 - `src/compiler_rust/driver/tests/native_untyped_packed_index_parity.rs`
+  (3 tests, native == interpreter)
 
-## Still open
+## Still open (not packed-slot defects)
 
-- C method wrappers that forward `rt_array_get` on packed arrays leak raw
-  slots in the same way. This is measured: on an untyped `[56u8, 64u8]`
-  receiver, native gives `first()=7`, `last()=8`, `map(\x: x)[0]=7`, while
-  the interpreter gives 56/64/56. `for b in data` is correct. The functions
-  involved are `rt_array_first`/`rt_array_last`/`rt_array_map`
-  (`runtime_native.c:17604`/`8680`/`9791`) and the closure helpers next to
-  them. They are not fixed here. This is not limited to the untyped
-  boundary: typed `val a: [u8] = [56u8, 64u8]; a.first()` / `a.last()` is
-  also 7/8 natively and 56/64 in the interpreter.
-- Packed `[u64]` words of 2^60 or more are now heap-boxed (lossless) by
-  `rt_value_int`. The Rust twin's `from_int` truncates them instead. Small
-  values are bit-identical in both.
-- Floats are wrong in all three modes (interpreter, JIT and native) when
-  they come back from an untyped array element into a typed `f32`/`f64`
-  binding (interpreter: `f32=0.0`). That is why the parity test leaves out
-  floats.
+- `any`/`all` return a raw bool, and an untyped `index_of(8)` misses. This
+  happens on generic `[i64]` too, in both native and JIT.
+- The interpreter gets `[u8].max()`/`sorted()` wrong (64 and 255 for
+  `[56,7,8,0,255,64]`) and wraps a `for` sum over `[u8]` at 256. The JIT
+  gives 231/117. Native gives 255/64/390, which are correct.
+- The JIT corrupts a `[u8]` after untyped `reverse()`/`pop()` on a
+  `.copy()`; the probe printed `[8, 47, 7, 202, ...]`.
+- Floats are wrong in all three modes when read from an untyped array
+  element into a typed `f32`/`f64` binding (interpreter: `f32=0.0`).
 - An accumulator `sum = sum * 31 % 1000000007 + v` over 42 bytes printed
   `199` in the interpreter and a large value natively. Not investigated.
 - Standalone native still refuses `?` (`gzip_decompress`, zstd decoders).

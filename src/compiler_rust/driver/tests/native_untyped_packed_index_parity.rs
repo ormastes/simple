@@ -116,3 +116,73 @@ fn main():
 ";
     assert_native_matches_interpreter("native_deflate_parity.spl", program, "roundtrip=true");
 }
+
+/// Every element accessor on a packed `[u8]` / `[u64]` array (typed and
+/// untyped receiver) must hand back the tagged element. That includes `[u64]`
+/// words beyond the 61-bit tagged immediate, which are wide-boxed losslessly
+/// like the Rust runtime's `from_int`. Values 0, 7, 8, 56, 64 and 255 cover
+/// the multiple-of-8 bytes that used to decode as `v >> 3`.
+///
+/// Left out on purpose because the interpreter or the generic-array native
+/// dispatch disagrees for reasons unrelated to packed slots (see the bug note):
+/// `max`/`sorted` on `[u8]`, `for` sums over `[u8]`, `any`/`all`, untyped
+/// `index_of`, and float elements.
+#[test]
+fn packed_array_element_accessors_match_interpreter() {
+    let program = "\
+fn untyped(name, data, scratch):
+    val f: i64 = data.first()
+    val l: i64 = data.last()
+    val i2: i64 = data[2]
+    val m3: i64 = data.map(\\x: x + 1)[3]
+    val fl = data.filter(\\x: x == 56)
+    val fd: i64 = data.find(\\x: x == 8)
+    val e3 = data.enumerate()[3]
+    val c56 = data.contains(56)
+    val tk1: i64 = data.take(2)[1]
+    val dr0: i64 = data.drop(3)[0]
+    val rv0: i64 = data.rev()[0]
+    scratch.reverse()
+    val mr0: i64 = scratch[0]
+    val p: i64 = scratch.pop()
+    print \"{name} first={f} last={l} i2={i2} map3={m3} filter={fl.len()} find={fd} enum3={e3} c56={c56} take1={tk1} drop0={dr0} rev0={rv0} reverse0={mr0} pop={p} text={data}\"
+
+fn typed_u8(data: [u8]):
+    val f: i64 = data.first()
+    val l: i64 = data.last()
+    val m3: i64 = data.map(\\x: x + 1)[3]
+    val tk1: i64 = data.take(2)[1]
+    var c = data.copy()
+    val p: i64 = c.pop()
+    print \"typed-u8 first={f} last={l} map3={m3} take1={tk1} pop={p} c56={data.contains(56u8)} c9={data.contains(9u8)} text={data}\"
+
+fn typed_u64(data: [u64]):
+    val f: u64 = data.first()
+    val l: u64 = data.last()
+    var c = data.copy()
+    val p: u64 = c.pop()
+    print \"typed-u64 first={f} last={l} pop={p} text={data}\"
+
+fn untyped_wide(data):
+    val x: u64 = data[0]
+    val y: u64 = data.first()
+    val z: u64 = data.last()
+    print \"wide untyped idx0={x} first={y} last={z} text={data}\"
+
+fn main():
+    val a: [u8] = [56u8, 0u8, 7u8, 8u8, 255u8, 64u8]
+    untyped(\"u8\", a, a.copy())
+    typed_u8(a)
+    val g: [u64] = [56u64, 0u64, 7u64, 8u64, 255u64, 64u64]
+    untyped(\"u64\", g, g.copy())
+    typed_u64(g)
+    val w: [u64] = [1152921504606846981u64, 8u64, 18446744073709551615u64]
+    typed_u64(w)
+    untyped_wide(w)
+";
+    assert_native_matches_interpreter(
+        "packed_array_accessors.spl",
+        program,
+        "wide untyped idx0=1152921504606846981 first=1152921504606846981 last=18446744073709551615",
+    );
+}
