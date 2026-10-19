@@ -1,0 +1,74 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: Result.unwrap() enum payloads and runtime-array range slices
+
+`r.unwrap()` with an enum Ok payload failed "unsupported Result unwrap payload
+type" although `r?` already decodes the same enum handle word, and `xs[a..b]` /
+`xs[a..]` on a runtime array failed "unsupported range index" although
+`xs.slice(a, b)` already lowers through rt_slice. Both now share those
+owners.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn range_unwrap_messages(src: text) -> [text]:
+    val file = "testdata/fixture_range_unwrap.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_range_unwrap", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push("hir: " + e.message)
+    for e in lowering.errors:
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        messages = messages.push("mir: " + e.message)
+    messages
+
+val unwrap_enum_src = "enum Shape:\n" +
+    "    Dot\n" +
+    "    Line(i64)\n" +
+    "\n" +
+    "fn shape(n: i64) -> Result<Shape, text>:\n" +
+    "    if n < 0: return Err(\"neg\")\n" +
+    "    Ok(Shape.Line(n))\n" +
+    "\n" +
+    "fn width(n: i64) -> i64:\n" +
+    "    val s: Shape = shape(n).unwrap()\n" +
+    "    match s:\n" +
+    "        case Shape.Dot: 0\n" +
+    "        case Shape.Line(v): v\n"
+
+val range_slice_src = "fn heads() -> i64:\n" +
+    "    var xs: [i64] = [1, 2, 3, 4]\n" +
+    "    val a = xs[1..3]\n" +
+    "    val b = xs[2..]\n" +
+    "    a.len() + b.len()\n"
+
+fn expect_no_messages(src: text):
+    val messages = range_unwrap_messages(src)
+    var all = ""
+    for m in messages:
+        all = all + m + "\n"
+    print "diagnostics: [{all}]"
+    expect(messages.len()).to_equal(0)
+
+describe "MIR lowering: unwrap enum payload and array range slice":
+    it "unwraps a Result whose Ok payload is an enum":
+        expect_no_messages(unwrap_enum_src)
+
+    it "slices a runtime array with range index forms":
+        expect_no_messages(range_slice_src)
