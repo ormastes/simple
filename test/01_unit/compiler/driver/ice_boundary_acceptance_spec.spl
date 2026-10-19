@@ -338,6 +338,39 @@ describe "dead-worker attribution":
         # Attribution closes the breadcrumb, so it is not reported twice.
         expect(ice_boundary_attribute_dead_worker(-1073741819).len()).to_equal(0)
 
+    it "names a runtime NAMED TRAP instead of blaming the module in flight":
+        # Replays the 2026-10-19 lsp --backend cranelift failure: the producer
+        # links runtime_cranelift_bridge_stub.c, the first codegen module traps
+        # in spl_cranelift_new_aot_module_config_v2 and the worker fail-fasts.
+        val trap_err = "[NATIVE] codegen: 12 uncached module(s)\nsimple runtime: unimplemented runtime entrypoint `spl_cranelift_new_aot_module_config_v2` was called.\n  This is a NAMED TRAP stub, not an implementation.\n"
+        expect(ice_runtime_trap_symbol(trap_err)).to_equal("spl_cranelift_new_aot_module_config_v2")
+        expect(ice_runtime_trap_symbol("error: worker died\n")).to_equal("")
+        expect(ice_runtime_trap_symbol("unimplemented runtime entrypoint `")).to_equal("")
+        expect(ice_runtime_trap_detail("")).to_equal("")
+        expect(ice_runtime_trap_detail("rt_x")).to_contain("not a defect in this module")
+
+    it "records the trapped entrypoint on the attributed ICE of the module in flight":
+        val trap_err = "simple runtime: unimplemented runtime entrypoint `spl_cranelift_new_aot_module_config_v2` was called.\n"
+        ice_spec_env("trap", "", "", "")
+        expect(ice_boundary_module_start("mod.consumer", "fixture/consumer.spl", "codegen", "cranelift")).to_equal("")
+        val lines = ice_boundary_attribute_dead_worker_with_stderr(-1073740791, trap_err)
+        expect(lines.len()).to_equal(1)
+        expect(lines[0]).to_contain("module mod.consumer (attributed)")
+        expect(lines[0]).to_contain("-1073740791")
+        expect(lines[0]).to_contain("runtime NAMED TRAP `spl_cranelift_new_aot_module_config_v2`")
+        expect(lines[0]).to_contain("not a defect in this module")
+        expect(ice_records_read()[0].kind).to_equal("attributed")
+
+    it "never re-launches past a runtime NAMED TRAP":
+        ice_spec_env("trap_retry", "", "", "")
+        expect(ice_boundary_module_start("mod.consumer", "fixture/consumer.spl", "codegen", "cranelift")).to_equal("")
+        val trap_err = "simple runtime: unimplemented runtime entrypoint `rt_cranelift_new_module` was called.\n"
+        val (kept_out, kept_err, kept_code) = native_build_relaunch_past_ice_crashes(
+            "no-such-worker-binary", [], 1000, 5, "first out", trap_err, -1073740791)
+        expect(kept_out).to_equal("first out")
+        expect(kept_code == -1073740791).to_equal(true)
+        expect(env_get_opt("SIMPLE_ICE_SKIP_MODULES") ?? "").to_equal("")
+
     it "a retry steps over the module the worker died in and still compiles the rest":
         val dead = ice_breadcrumbs_open("start\tmir_lower\tmod.bad\tfixture/bad.spl\t\n")
         val skip_list = ice_skip_list_extend("", dead)
@@ -504,7 +537,7 @@ describe "ICE boundary wiring":
         expect(codegen).to_contain("ice_boundary_fail(name, capsule.cache_source, \"codegen\", backend_name, error)")
         expect(codegen).to_contain("ice_boundary_module_done(name, \"codegen\")")
         val parent = file_read("src/app/cli/native_build_main.spl")
-        expect(parent).to_contain("ice_boundary_attribute_dead_worker(code as i64)")
+        expect(parent).to_contain("ice_boundary_attribute_dead_worker_with_stderr(code as i64, stderr)")
         expect(parent).to_contain("native_build_relaunch_past_ice_crashes(")
         expect(parent).to_contain("ice_boundary_claim_run(requested_output)")
         expect(parent).to_contain("ice_boundary_release_run(ice_owned)")
