@@ -153,6 +153,9 @@ pub(super) fn register_definitions(
     // module path is unavailable — those functions simply get no owner entry
     // and fall back to the pre-existing first-registered tie-break.
     let module_ident = module_owner(module_path);
+    if crate::interpreter::is_coverage_enabled() {
+        crate::interpreter::register_module_sites(items, module_ident.as_deref());
+    }
 
     for item in items.iter() {
         match item {

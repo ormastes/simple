@@ -93,9 +93,12 @@ mod error_macros;
 // Coverage instrumentation helpers
 mod coverage_helpers;
 pub(crate) use coverage_helpers::{
-    current_coverage_file, extract_node_location, record_node_coverage, record_decision_coverage_sffi,
-    record_decision_coverage_here, record_condition_coverage, decision_id_from_span, is_coverage_enabled,
+    current_coverage_file, extract_node_location, record_node_coverage, is_coverage_enabled, eval_and_or_decision,
+    eval_decision_cond, if_expr_site, record_decision_site, sub_elif, swap_fn_anchor, SUB_GUARD, SUB_STMT,
 };
+// Static enumeration of decision/condition sites for coverage denominators.
+mod coverage_sites;
+pub(crate) use coverage_sites::register_module_sites;
 
 // Place (lvalue) model: identifier root + arbitrary field/index projections.
 // Backs both deep field assignment and mutating-method receivers.

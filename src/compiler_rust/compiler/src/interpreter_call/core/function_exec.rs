@@ -709,6 +709,17 @@ pub(crate) fn execute_function_body(
         }
         saved
     });
+    // COVERAGE: expression-level decision sites (if-expressions, standalone
+    // `and`/`or`) anchor on the function that owns them; follows the same
+    // owner rule as CURRENT_EXEC_MODULE (lambdas inherit). Off: no work.
+    let saved_cov_anchor = if func_owner_module.is_some() && crate::interpreter::is_coverage_enabled() {
+        Some(crate::interpreter::swap_fn_anchor((
+            func.span.line as u32,
+            func.span.column as u32,
+        )))
+    } else {
+        None
+    };
     if simple_runtime::value::heap::rt_mem_attr_enabled() != 0 {
         if let Some(owner) = &func_owner_module {
             simple_runtime::value::heap::set_current_owner(owner.as_ref());
@@ -768,6 +779,9 @@ pub(crate) fn execute_function_body(
         }
     }
     CURRENT_EXEC_MODULE.with(|cell| *cell.borrow_mut() = saved_exec_module);
+    if let Some(anchor) = saved_cov_anchor {
+        crate::interpreter::swap_fn_anchor(anchor);
+    }
 
     // Generator function: collect yields and return GeneratorValue
     if func.is_generator {
