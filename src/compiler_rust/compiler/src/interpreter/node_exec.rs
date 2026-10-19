@@ -2373,6 +2373,16 @@ pub(crate) fn exec_augmented_assignment(
             rhs_value
         };
 
+        // A non-local name that lives in MODULE_GLOBALS (every top-level `var`)
+        // is read back from there (expr/literals.rs), so sync it like the plain
+        // `=` path does; an env-only write made top-level `i += 1` a no-op.
+        if !env.is_local(name) {
+            MODULE_GLOBALS.with(|cell| {
+                if cell.borrow().contains_key(name) {
+                    cell.borrow_mut().insert(name.clone(), new_value.clone());
+                }
+            });
+        }
         env.insert(name.clone(), new_value);
         Ok(Control::Next)
     }
