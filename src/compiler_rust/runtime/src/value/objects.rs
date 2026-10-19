@@ -544,6 +544,28 @@ pub extern "C" fn rt_expect_or_trap(value: RuntimeValue, msg: RuntimeValue) -> R
     value
 }
 
+/// `?` absence test in one enum lookup: exactly
+/// `rt_is_none(value) || rt_enum_check_variant(value, expected_enum_id, err_discriminant)`.
+/// Twin of `rt_try_is_absent` in `src/runtime/runtime_native.c`.
+#[no_mangle]
+pub extern "C" fn rt_try_is_absent(value: RuntimeValue, expected_enum_id: i64, err_discriminant: i64) -> bool {
+    if value.is_nil() {
+        return true;
+    }
+    static NONE_DISC: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum).is_some_and(|p| unsafe {
+        let enum_id = (*p).enum_id;
+        let discriminant = (*p).discriminant;
+        if enum_id == OPTION_ENUM_ID
+            && (discriminant == 1 || discriminant == *NONE_DISC.get_or_init(|| hash_variant_discriminant("None")))
+        {
+            return true;
+        }
+        discriminant as i64 == err_discriminant
+            && (expected_enum_id == 0 || enum_id == 0 || enum_id as i64 == expected_enum_id)
+    })
+}
+
 /// Get the payload of an enum value
 #[no_mangle]
 pub extern "C" fn rt_enum_payload(value: RuntimeValue) -> RuntimeValue {
@@ -577,9 +599,13 @@ pub extern "C" fn rt_is_none(value: RuntimeValue) -> bool {
     if value.is_nil() {
         return true;
     }
-    let none_disc = hash_variant_discriminant("None");
+    // `?` calls this on every nullable subject: hash "None" once, not per call
+    // (DefaultHasher::new() is fixed-key, so the value is a constant).
+    static NONE_DISC: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum).is_some_and(|p| unsafe {
-        (*p).enum_id == OPTION_ENUM_ID && ((*p).discriminant == 1 || (*p).discriminant == none_disc)
+        (*p).enum_id == OPTION_ENUM_ID
+            && ((*p).discriminant == 1
+                || (*p).discriminant == *NONE_DISC.get_or_init(|| hash_variant_discriminant("None")))
     })
 }
 
