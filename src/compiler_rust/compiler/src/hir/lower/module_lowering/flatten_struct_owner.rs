@@ -14,7 +14,7 @@
 //! `flatten_fn_owners` scheme (functions):
 //!
 //! * Census: a struct/class name declared by two or more distinct owners with
-//!   differing field layouts is a collision. Identical layouts are left alone
+//!   differing field layouts (names or types) is a collision. Identical layouts are left alone
 //!   (bare-name sharing is already correct for them).
 //! * Declarations: on a clone of the module (only when a collision exists),
 //!   each colliding declaration is renamed to [`flattened_global_symbol`] --
@@ -75,18 +75,18 @@ fn declaration_owner(
     })
 }
 
-/// `(name, owner, field names)` of a struct/class declaration.
-fn struct_declaration(node: &Node) -> Option<(&str, Option<String>, Vec<&str>)> {
+/// `(name, owner, field layout)` of a struct/class declaration.
+fn struct_declaration(node: &Node) -> Option<(&str, Option<String>, Vec<(&str, &Type)>)> {
     match node {
         Node::Struct(s) => Some((
             s.name.as_str(),
             declaration_owner(&s.attributes, &s.methods),
-            s.fields.iter().map(|f| f.name.as_str()).collect(),
+            s.fields.iter().map(|f| (f.name.as_str(), &f.ty)).collect(),
         )),
         Node::Class(c) => Some((
             c.name.as_str(),
             declaration_owner(&c.attributes, &c.methods),
-            c.fields.iter().map(|f| f.name.as_str()).collect(),
+            c.fields.iter().map(|f| (f.name.as_str(), &f.ty)).collect(),
         )),
         _ => None,
     }
@@ -94,7 +94,7 @@ fn struct_declaration(node: &Node) -> Option<(&str, Option<String>, Vec<&str>)> 
 
 fn census(items: &[Node]) -> FlattenStructOwners {
     let mut owners: FlattenStructOwners = HashMap::new();
-    let mut layouts: HashMap<&str, Vec<Vec<&str>>> = HashMap::new();
+    let mut layouts: HashMap<&str, Vec<Vec<(&str, &Type)>>> = HashMap::new();
     for item in items {
         if let Some((name, owner, fields)) = struct_declaration(item) {
             owners.entry(name.to_string()).or_default().push(owner);
@@ -230,13 +230,16 @@ fn rewrite_signature(function: &mut simple_parser::ast::FunctionDef, scope: &Fla
 /// rewrite declaration signatures through each declaring owner's scope.
 ///
 /// Returns `None` when no struct/class name collides.
+///
+/// `Err(alias)` when a type alias names a colliding struct (no owner to
+/// resolve it through).
 pub(crate) fn module_with_owner_qualified_structs(
     ast_module: &Module,
     bindings: &FlattenImportBindings,
-) -> Option<(Module, FlattenStructOwners)> {
+) -> Result<Option<(Module, FlattenStructOwners)>, String> {
     let owners = census(&ast_module.items);
     if owners.is_empty() {
-        return None;
+        return Ok(None);
     }
     let mut scopes: HashMap<Option<String>, FlattenStructScope> = HashMap::new();
     let mut scope_of = |owner: &Option<String>| -> FlattenStructScope {
@@ -299,8 +302,39 @@ pub(crate) fn module_with_owner_qualified_structs(
                     rewrite_type(ty, &scope_of(&global_owner));
                 }
             }
+            Node::Enum(e) => {
+                let scope = scope_of(&declaration_owner(&e.attributes, &e.methods));
+                for variant in &mut e.variants {
+                    if let Some(fields) = &mut variant.fields {
+                        fields.iter_mut().for_each(|field| rewrite_type(&mut field.ty, &scope));
+                    }
+                }
+                e.methods.iter_mut().for_each(|method| rewrite_signature(method, &scope));
+            }
+            Node::Trait(t) => {
+                let owner = Lowerer::flatten_owner_of(
+                    t.methods.iter().flat_map(|m| m.attributes.iter().map(|a| a.name.as_str())),
+                );
+                let scope = scope_of(&owner);
+                t.methods.iter_mut().for_each(|method| rewrite_signature(method, &scope));
+            }
+            // A type alias carries no owner, so a target naming a colliding
+            // struct cannot be attributed. Refuse it (the caller fails the
+            // lowering, i.e. the old fail-closed de-JIT) rather than bind
+            // the default owner's layout silently.
+            Node::TypeAlias(alias) if type_names_any(&alias.ty, &owners) => {
+                return Err(alias.name.clone());
+            }
             _ => {}
         }
     }
-    Some((module, owners))
+    Ok(Some((module, owners)))
+}
+
+/// Whether `ty` names any colliding struct/class (directly or nested).
+fn type_names_any(ty: &Type, owners: &FlattenStructOwners) -> bool {
+    let mut probe = ty.clone();
+    let marker: FlattenStructScope = owners.keys().map(|name| (name.clone(), String::new())).collect();
+    rewrite_type(&mut probe, &marker);
+    probe != *ty
 }

@@ -302,3 +302,89 @@ fn main() -> i64:
     );
     assert_eq!(code, 0);
 }
+
+#[test]
+fn enum_payload_in_non_default_owner_uses_its_own_struct_layout() {
+    // `b` loads first, so `a` (loaded last) keeps the bare name and `b`'s
+    // TextSpan is the renamed one: the enum payload must follow `b`.
+    let code = jit_run_pkg(
+        &[
+            ("a", SPAN_A),
+            (
+                "b",
+                r#"struct TextSpan:
+    value: text
+    start: i64
+    len: i64
+
+enum Tok:
+    Word(TextSpan)
+    Eof
+
+fn b_tok() -> Tok:
+    Tok.Word(TextSpan(value: "w", start: 3, len: 40))
+
+fn b_read(t: Tok) -> i64:
+    match t:
+        Tok.Word(s):
+            return s.len + s.start
+        Tok.Eof:
+            return -1
+"#,
+            ),
+        ],
+        r#"use pkg.b.{b_tok, b_read}
+use pkg.a.{make_a}
+
+fn main() -> i64:
+    if b_read(b_tok()) != 43:
+        return 1
+    if make_a().end != 5:
+        return 2
+    0
+"#,
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn impl_block_in_importing_module_extends_the_imported_struct() {
+    let code = jit_run_pkg(
+        &[
+            ("a", SPAN_A),
+            ("b", SPAN_B),
+            (
+                "c",
+                r#"use pkg.a.{TextSpan}
+
+impl TextSpan:
+    fn width() -> i64:
+        self.end - self.start
+
+fn c_width() -> i64:
+    TextSpan(start: 2, end: 9).width()
+"#,
+            ),
+        ],
+        r#"use pkg.c.{c_width}
+use pkg.b.{width_b, make_b}
+
+fn main() -> i64:
+    if c_width() != 7:
+        return 1
+    if width_b(make_b()) != 9:
+        return 2
+    0
+"#,
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
+#[should_panic(expected = "type alias `Spanish`")]
+fn type_alias_of_a_colliding_struct_fails_closed() {
+    jit_run_pkg(
+        &[("a", SPAN_A), ("b", SPAN_B), ("c", "use pkg.b.{TextSpan}\n\ntype Spanish = TextSpan\n\nfn c_len(s: Spanish) -> i64:\n    s.len\n")],
+        "use pkg.a.{make_a}\nuse pkg.c.{c_len}\n\nfn main() -> i64:\n    make_a().end\n",
+    );
+}

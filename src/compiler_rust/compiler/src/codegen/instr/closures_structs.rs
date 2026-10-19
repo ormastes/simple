@@ -173,8 +173,13 @@ fn qualified_method_owner_matches(owner: &str, candidate: &str, method: &str) ->
     let Some((candidate_owner, candidate_method)) = normalized.rsplit_once('.') else {
         return false;
     };
+    // A flatten-owner identity (`__spl_flat_<owner>__Type`) is a DIFFERENT
+    // type from the bare `Type` of a flattened unit, never a module qualifier.
+    let flatten_identity = |name: &str| name.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX);
     candidate_method == method
-        && (candidate_owner == owner || candidate_owner.ends_with(&format!("__{owner}")))
+        && (candidate_owner == owner
+            || (candidate_owner.ends_with(&format!("__{owner}"))
+                && flatten_identity(candidate_owner) == flatten_identity(owner)))
 }
 
 // `pub(crate)` so `mir/lower/lowering_expr_method.rs` can reuse the exact

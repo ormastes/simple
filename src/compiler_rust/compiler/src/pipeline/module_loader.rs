@@ -621,10 +621,12 @@ fn tag_node_function_owners(node: &mut Node, owner: &str) {
     // Empty declarations still need identity: methods cannot carry their owner.
     let declaration = match &mut *node {
         Node::Struct(definition) => Some((&mut definition.attributes, definition.span)),
-        // Classes need it too: a methodless class has no other carrier, and
-        // HIR lowering keys same-named struct/class layouts by owner
+        // Classes and enums need it too: a methodless declaration has no
+        // other carrier, and HIR lowering resolves same-named struct/class
+        // layouts per owner, including enum payload types
         // (`hir/lower/module_lowering/flatten_struct_owner.rs`).
         Node::Class(definition) => Some((&mut definition.attributes, definition.span)),
+        Node::Enum(definition) => Some((&mut definition.attributes, definition.span)),
         Node::Impl(definition) => Some((&mut definition.attributes, definition.span)),
         _ => None,
     };

@@ -291,10 +291,12 @@ attribute is ignored by it). `SIMPLE_JIT_DUP_STRUCT_FEED` stays default-OFF —
 the consensus fallback is still unsound — but these collisions no longer reach
 it.
 
-Evidence (seed `f177131df057…`, aarch64, `--profile bootstrap --features llvm`):
+Evidence (seed `318b2bb22e88…`, aarch64, `--profile bootstrap --features llvm`):
 - `compiler/tests/jit_same_name_struct_module_qualified.rs`: 6 core cases RED
   before (`Cannot infer field type: struct 'TextSpan' field 'end'`, the
-  production message), 8/8 GREEN after (adds re-export facade and generic).
+  production message), 11/11 GREEN after (adds re-export facade, generic,
+  enum payload in the non-default owner, cross-module impl, and a type alias
+  of a colliding struct, which fails closed: an alias carries no owner).
 - `scripts/check/check-dup-struct-name-jit-soundness.shs` (rewritten to require
   JIT code emission, no `[jit-fallback]`, and interpreter-equal output on both
   the default and forced-feed arms): deployed seed `FAIL` on 7/10 arms, fixed
@@ -306,3 +308,8 @@ Still open: Cause 1 (lint pinned to the interpreter by text-grep); glob imports
 (`use m.*`) carry no per-name marker and keep the bare-name meaning; enum
 payload types naming a colliding struct are not owner-rewritten; the
 function-side `join_path` co-compiled signature warning is a separate class.
+A `type` alias naming a colliding struct fails the lowering (old de-JIT) on
+purpose. Fable review (round 1) also hardened: enum payload/trait signature
+rewrite, layout census compares field types, and
+`qualified_method_owner_matches` no longer equates `Type` with
+`__spl_flat_<owner>__Type`.

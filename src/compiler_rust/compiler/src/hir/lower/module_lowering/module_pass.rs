@@ -1509,15 +1509,24 @@ impl Lowerer {
     /// Rename colliding flattened struct/class declarations to owner-exact
     /// symbols and record the census the type-scope overlay consults;
     /// `None` = no collision.
-    fn qualify_flattened_structs(&mut self, ast_module: &Module) -> Option<Module> {
+    fn qualify_flattened_structs(&mut self, ast_module: &Module) -> LowerResult<Option<Module>> {
         self.flatten_struct_owners.clear();
         self.flatten_struct_scopes.clear();
-        let (module, owners) = super::flatten_struct_owner::module_with_owner_qualified_structs(
+        let qualified = super::flatten_struct_owner::module_with_owner_qualified_structs(
             ast_module,
             &self.flatten_owner_import_bindings,
-        )?;
+        )
+        .map_err(|alias| {
+            LowerError::Unsupported(format!(
+                "type alias `{alias}` names a struct/class declared with different layouts by several \
+                 flattened modules; the alias has no owner to resolve it through"
+            ))
+        })?;
+        let Some((module, owners)) = qualified else {
+            return Ok(None);
+        };
         self.flatten_struct_owners = owners;
-        Some(module)
+        Ok(Some(module))
     }
 
     /// Number of dynamic global initializers lowered into one init function.
@@ -1701,7 +1710,7 @@ impl Lowerer {
         self.collect_flattened_import_aliases(ast_module);
         // Same-named structs/classes of different flattened modules get
         // owner-exact identities (needs the import bindings collected above).
-        let qualified_structs = self.qualify_flattened_structs(ast_module);
+        let qualified_structs = self.qualify_flattened_structs(ast_module)?;
         let ast_module: &Module = qualified_structs.as_ref().unwrap_or(ast_module);
         self.collect_fn_param_defaults(ast_module);
         self.collect_own_declared_function_names(ast_module);
@@ -2345,7 +2354,7 @@ impl Lowerer {
         self.collect_flattened_import_aliases(ast_module);
         // Same-named structs/classes of different flattened modules get
         // owner-exact identities (needs the import bindings collected above).
-        let qualified_structs = self.qualify_flattened_structs(ast_module);
+        let qualified_structs = self.qualify_flattened_structs(ast_module)?;
         let ast_module: &Module = qualified_structs.as_ref().unwrap_or(ast_module);
         self.collect_fn_param_defaults(ast_module);
         self.collect_own_declared_function_names(ast_module);
