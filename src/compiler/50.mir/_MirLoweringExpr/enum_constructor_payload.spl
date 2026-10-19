@@ -335,6 +335,20 @@ impl MirLowering:
                 self.runtime_dict_locals[value.id] = true
                 self.mark_runtime_value_local(value.id)
                 self.runtime_elem_value_type[value.id] = self.lower_type(element)
+            case HirTypeKind.Named(symbol, _):
+                # Field access resolves its owner through struct_value_syms
+                # (resolve_base_struct_name), not the remembered HIR type.
+                # Without this, `val f = make()?; f.names` lost the record
+                # owner, the field read degraded to I64 and `for x in f.names`
+                # failed #143. Mirrors lower_result_unwrap_core's tagging.
+                if val present_type_symbol = self.symbols.get_symbol_raw(symbol.id):
+                    val type_symbol: HirSymbol = present_type_symbol
+                    match type_symbol.kind:
+                        case Struct:
+                            self.struct_value_syms[value.id] = type_symbol.name
+                        case Class:
+                            self.struct_value_syms[value.id] = mir_class_identity(type_symbol)
+                        case _: ()
             case _: ()
         self.remember_local_hir_type(value.id, expected, 0, 0)
         value
