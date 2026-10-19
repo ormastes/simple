@@ -2,6 +2,26 @@
 
 extern fn rt_text_to_bytes(s: text) -> [u8]
 extern fn rt_bytes_to_text(bytes: [u8]) -> text
+extern fn rt_byte_array_new(capacity: i64) -> [u8]
+extern fn rt_array_data_ptr(bytes: [u8]) -> i64
+
+pub enum TextByteBufferError:
+    NegativeCapacity
+    CapacityOverflow
+    AllocationFailed
+
+pub fn text_byte_buffer(capacity: i64) -> Result<[u8], TextByteBufferError>:
+    """Allocate empty packed byte storage through the existing runtime owner.
+
+    Capacity is nonnegative and leaves room for the existing 40-byte header in
+    signed address-size arithmetic. The provider may round small capacity up;
+    logical length remains zero. No allocation or coercion occurs on rejection.
+    """
+    if capacity < 0: return Err(TextByteBufferError.NegativeCapacity)
+    if capacity > 9223372036854775767: return Err(TextByteBufferError.CapacityOverflow)
+    val bytes = rt_byte_array_new(capacity)
+    if rt_array_data_ptr(bytes) == 0: return Err(TextByteBufferError.AllocationFailed)
+    Ok(bytes)
 
 # Provider wrappers for the raw text<->bytes boundary (binary_runtime_hardening:
 # product code must not call rt_* directly; this module is the sanctioned
@@ -18,4 +38,32 @@ pub fn bytes_to_text(bytes: [u8]) -> text:
 pub fn text_to_utf8_bytes(s: text) -> [u8]:
     rt_text_to_bytes(s)
 
-export text_to_bytes, bytes_to_text, text_to_utf8_bytes
+export text_to_bytes, bytes_to_text, text_to_utf8_bytes, text_byte_buffer, TextByteBufferError
+
+
+# Checked byte-carrier extraction is encoding-neutral. The caller owns charset
+# admission; UTF-16 and malformed bytes are valid external payloads here.
+use std.common.string_core.{str_len}
+
+pub fn text_byte_extraction_checked(expected_length: i64, bytes: [u8]) -> Result<[u8], TextByteBufferError>:
+    """Validate the exact extraction result, including a genuine empty array.
+
+    This deterministic guard is also the mismatch-test seam. It does not
+    simulate allocator failure and does not validate an encoding.
+    """
+    if expected_length < 0: return Err(TextByteBufferError.NegativeCapacity)
+    if expected_length > 9223372036854775767: return Err(TextByteBufferError.CapacityOverflow)
+    if rt_array_data_ptr(bytes) == 0 or bytes.len() != expected_length:
+        return Err(TextByteBufferError.AllocationFailed)
+    Ok(bytes)
+
+pub fn boxed_text_bytes_checked(value: text) -> Result<[u8], TextByteBufferError>:
+    # Native rt_string_len reads boxed byte length, including internal NUL.
+    # No Unicode traversal or decoded-character count is involved.
+    val expected = str_len(value)
+    if expected < 0: return Err(TextByteBufferError.NegativeCapacity)
+    if expected > 9223372036854775767: return Err(TextByteBufferError.CapacityOverflow)
+    val bytes = rt_text_to_bytes(value)
+    text_byte_extraction_checked(expected, bytes)
+
+export boxed_text_bytes_checked, text_byte_extraction_checked
