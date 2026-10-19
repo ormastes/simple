@@ -102,3 +102,44 @@ fn main() -> i64:
     let got = unsafe { jit.call_i64_void("main").expect("main must execute") };
     assert_eq!(got, 223 * 1000000 + 342 * 1000 + 42);
 }
+
+/// Hole A1: `S(data: o)` for a type with an `@inject` `new` lowers to a
+/// constructor CALL that stores `o` uncopied (base behaviour, kept). The later
+/// `var p = s.data` must still copy: moving it would alias `o`, so `p.push`
+/// would also grow `o` (33 instead of the base answer 32).
+#[test]
+fn inject_constructor_struct_field_read_still_copies() {
+    let src = "struct S:
+    data: [u8]
+
+impl S:
+    static fn new(data: [u8], @inject tag: i64) -> S:
+        S(data: data)
+
+fn make_tag() -> i64:
+    7
+
+fn main() -> i64:
+    var o: [u8] = [1 as u8]
+    var s = S(data: o)
+    o.push(2 as u8)
+    var p = s.data
+    p.push(3 as u8)
+    s = S(data: [9 as u8])
+    p.len() * 10 + o.len()
+";
+    let di_toml: toml::Value = "[di]\nmode = \"hybrid\"\n\n[di.profiles.default]\nbindings = [\n  { on = \"pc{ type(i64) }\", impl = \"make_tag\", scope = \"Transient\", priority = 10 }\n]\n"
+        .parse()
+        .expect("di toml");
+    let config = simple_compiler::di::parse_di_config(&di_toml)
+        .expect("di config parse")
+        .expect("di config present");
+    let ast = Parser::new(src).parse().expect("source must parse");
+    let hir_module = hir::lower(&ast).expect("source must lower to HIR");
+    let mir_module = mir::lower_to_mir_with_mode_and_di(&hir_module, mir::ContractMode::All, Some(config))
+        .expect("source must lower to MIR");
+    let mut jit = JitCompiler::new_static().expect("static Cranelift JIT");
+    jit.compile_module(&mir_module).expect("module must JIT-compile");
+    let got = unsafe { jit.call_i64_void("main").expect("main must execute") };
+    assert_eq!(got, 32);
+}

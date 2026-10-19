@@ -182,11 +182,12 @@ impl<'a> MirLowerer<'a> {
         // params, `val`s) keep the base aliasing on purpose -- see
         // `array_move::struct_arg_gets_private_buffer`.
         for (i, field) in fields.iter().enumerate() {
-            if i >= field_regs.len() || !super::array_move::struct_arg_needs_copy(&field.kind, &self.array_move_sites) {
+            if i >= field_regs.len() {
                 continue;
             }
             let is_array = |t: TypeId| self.type_registry.and_then(|tr| tr.get_array_element(t)).is_some();
-            if !(is_array(field.ty) || field_types.get(i).is_some_and(|t| is_array(*t))) {
+            let array_slot = is_array(field.ty) || field_types.get(i).is_some_and(|t| is_array(*t));
+            if !super::array_move::struct_arg_needs_copy(&field.kind, array_slot, &self.array_move_sites) {
                 continue;
             }
             let src = field_regs[i];

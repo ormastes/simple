@@ -2180,7 +2180,12 @@ impl<'a> MirLowerer<'a> {
         // as another's.
         self.erased_local_class_types = compute_single_assignment_class_types(func, self.type_registry);
         self.array_move_sites =
-            super::array_move::compute_array_move_sites(func, self.type_registry, &self.type_value_kinds);
+            super::array_move::compute_array_move_sites(
+                func,
+                self.type_registry,
+                &self.type_value_kinds,
+                &self.inject_functions,
+            );
         self.local_type_name_hints = func
             .params
             .iter()

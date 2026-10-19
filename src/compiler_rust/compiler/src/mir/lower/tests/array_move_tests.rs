@@ -366,3 +366,119 @@ fn struct_literal_with_one_live_use_keeps_copy() {
     );
     assert!(copies_in(&src, "f") >= 1);
 }
+
+/// Hole A1: a type with an `@inject` constructor lowers `S(data: o)` to a
+/// constructor CALL (no struct-literal copy), so `s.data` shares the live `o`.
+/// The analysis must not treat `s` as uniquely owned: base shape is kept.
+#[test]
+fn inject_constructor_struct_keeps_let_copy() {
+    let src = "struct S:
+    data: [u8]
+
+impl S:
+    static fn new(data: [u8], @inject tag: i64) -> S:
+        S(data: data)
+
+fn make_tag() -> i64:
+    7
+
+fn f() -> i64:
+    var o: [u8] = [1 as u8]
+    var s = S(data: o)
+    o.push(2 as u8)
+    var p = s.data
+    p.push(3 as u8)
+    s = S(data: [9 as u8])
+    p.len() * 10 + o.len()
+";
+    let di_toml = r#"
+[di]
+mode = "hybrid"
+
+[di.profiles.default]
+bindings = [
+  { on = "pc{ type(i64) }", impl = "make_tag", scope = "Transient", priority = 10 }
+]
+"#;
+    let mir = compile_to_mir_with_di(src, di_toml).expect("DI lowering");
+    let f = mir.functions.iter().find(|f| f.name == "f").expect("f");
+    let calls_ctor = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("S.new")));
+    assert!(
+        calls_ctor,
+        "precondition: `S(data: o)` must lower to the @inject constructor call"
+    );
+    let copies = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .filter(|i| matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_array_copy")))
+        .count();
+    assert!(copies >= 1, "the `var p = s.data` copy must be kept:\n{src}");
+}
+
+/// Hole A2: an `Any`-typed slot holding an array is not copied at the struct
+/// literal, so the struct shares the argument's buffer and is not unique.
+#[test]
+fn any_typed_slot_keeps_let_copy() {
+    let src = "struct Holder:
+    value: Any
+
+fn f() -> i64:
+    var p: Any = [1 as u8]
+    var s = Holder(value: p)
+    var o: [u8] = s.value
+    o.push(3 as u8)
+    s = Holder(value: 0)
+    o.len()
+";
+    assert!(
+        copies_in(src, "f") >= 1,
+        "the `var o = s.value` copy must be kept:\n{src}"
+    );
+}
+
+/// Hole A2: a generic `T` slot holding an array keeps a copy somewhere.
+#[test]
+fn generic_slot_keeps_copy() {
+    let src = "struct Box<T>:
+    value: T
+
+fn f() -> i64:
+    var p: [u8] = [1 as u8]
+    var s = Box(value: p)
+    p.push(2 as u8)
+    var o: [u8] = s.value
+    o.push(3 as u8)
+    s = Box(value: [9 as u8])
+    o.len() * 10 + p.len()
+";
+    assert!(copies_in(src, "f") >= 1, "a copy must be kept:\n{src}");
+}
+
+/// Every non-primitive slot needs a private buffer, so a nested value-struct
+/// argument disqualifies the outer struct (accepted loss; pins the rule).
+#[test]
+fn nested_value_struct_arg_keeps_let_copy() {
+    let src = "struct Inner:
+    v: i64
+
+struct Outer:
+    data: [u8]
+    inner: Inner
+
+fn f() -> i64:
+    var st = Outer(data: [1 as u8], inner: Inner(v: 1))
+    var o = st.data
+    o.push(2 as u8)
+    st = Outer(data: [9 as u8], inner: Inner(v: 2))
+    o.len()
+";
+    assert!(
+        copies_in(src, "f") >= 1,
+        "the `var o = st.data` copy must be kept:\n{src}"
+    );
+}

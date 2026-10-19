@@ -55,19 +55,25 @@ pub(crate) struct ArrayMoveSites {
 /// the leak this pass removes (measured: 128 KiB zstd decode 280 MB -> 2.0 GB).
 /// Such arguments keep the base behaviour (the struct field shares the
 /// buffer), so they make the struct NOT uniquely owned.
-pub(crate) fn struct_arg_gets_private_buffer(kind: &HirExprKind, sites: &ArrayMoveSites) -> bool {
+///
+/// `array_slot` is the caller's "argument type or declared field type is an
+/// array" test; a `var` local only gets a copy in such a slot, so in any other
+/// slot (`Any`, generic `T`) it shares its buffer.
+pub(crate) fn struct_arg_gets_private_buffer(kind: &HirExprKind, array_slot: bool, sites: &ArrayMoveSites) -> bool {
     match kind {
         HirExprKind::Array(_) | HirExprKind::ArrayRepeat { .. } | HirExprKind::VecLiteral(_) => true,
-        HirExprKind::Local(idx) => sites.var_locals.contains(idx),
+        HirExprKind::Local(idx) => array_slot && sites.var_locals.contains(idx),
         _ => false,
     }
 }
 
-/// True when lowering must emit `rt_array_copy` for this struct-literal array
-/// argument: a `var` local that is not a proven-dead move source.
-pub(crate) fn struct_arg_needs_copy(kind: &HirExprKind, sites: &ArrayMoveSites) -> bool {
-    matches!(kind, HirExprKind::Local(idx)
-        if sites.var_locals.contains(idx) && !sites.struct_field_locals.contains(idx))
+/// True when lowering must emit `rt_array_copy` for this struct-literal
+/// argument: a `var` local in an array slot that is not a proven-dead move
+/// source. Must stay the copy half of `struct_arg_gets_private_buffer`.
+pub(crate) fn struct_arg_needs_copy(kind: &HirExprKind, array_slot: bool, sites: &ArrayMoveSites) -> bool {
+    array_slot
+        && matches!(kind, HirExprKind::Local(idx)
+            if sites.var_locals.contains(idx) && !sites.struct_field_locals.contains(idx))
 }
 
 /// Builtin array methods that neither store nor return their receiver.
@@ -97,6 +103,10 @@ enum Ctx {
 
 struct Analysis<'a> {
     registry: &'a TypeRegistry,
+    /// `@inject` functions: a struct literal of a type with an `@inject`
+    /// `new` lowers to a constructor CALL (`lowering_expr_struct.rs`), which
+    /// skips the struct-literal copy entirely.
+    inject_functions: &'a HashMap<String, Vec<(TypeId, Option<String>, bool)>>,
     type_value_kinds: &'a HashMap<String, bool>,
     nparams: usize,
     local_tys: Vec<TypeId>,
@@ -114,6 +124,7 @@ pub(crate) fn compute_array_move_sites(
     func: &HirFunction,
     registry: Option<&TypeRegistry>,
     type_value_kinds: &HashMap<String, bool>,
+    inject_functions: &HashMap<String, Vec<(TypeId, Option<String>, bool)>>,
 ) -> ArrayMoveSites {
     let Some(registry) = registry else {
         // No registry: lowering cannot type the arguments either; still
@@ -125,6 +136,7 @@ pub(crate) fn compute_array_move_sites(
     };
     let mut a = Analysis {
         registry,
+        inject_functions,
         type_value_kinds,
         nparams: func.params.len(),
         local_tys: func.params.iter().chain(func.locals.iter()).map(|l| l.ty).collect(),
@@ -223,6 +235,23 @@ impl<'a> Analysis<'a> {
         self.type_value_kinds.get(name) == Some(&true) && matches!(self.registry.get(ty), Some(HirType::Struct { .. }))
     }
 
+    /// A literal of this type may lower to an `@inject` constructor call that
+    /// stores its arguments uncopied; treat its arguments as escaping.
+    fn has_inject_ctor(&self, ty: TypeId) -> bool {
+        self.registry
+            .get_type_name(ty)
+            .is_some_and(|name| self.inject_functions.contains_key(&format!("{name}.new")))
+    }
+
+    fn array_slot(&self, struct_ty: TypeId, index: usize, arg: &HirExpr) -> bool {
+        self.is_array(arg.ty) || self.struct_field_ty(struct_ty, index).is_some_and(|t| self.is_array(t))
+    }
+
+    /// Primitive argument into a primitive (or undeclared) slot: no buffer.
+    fn primitive_slot(&self, struct_ty: TypeId, index: usize, arg: &HirExpr) -> bool {
+        is_primitive(arg.ty) && self.struct_field_ty(struct_ty, index).map_or(true, is_primitive)
+    }
+
     fn struct_field_ty(&self, struct_ty: TypeId, index: usize) -> Option<TypeId> {
         match self.registry.get(struct_ty) {
             Some(HirType::Struct { fields, .. }) => fields.get(index).map(|(_, t)| *t),
@@ -255,11 +284,14 @@ impl<'a> Analysis<'a> {
         let local_is_array = self.is_array(self.local_ty(idx));
         match &value.kind {
             HirExprKind::StructInit { ty, fields } => {
+                // Every non-primitive slot must get a private buffer: an
+                // `Any`/generic slot can hold an array the literal does not
+                // copy, and a nested aggregate is not tracked (accepted loss).
                 self.is_value_struct(*ty)
+                    && !self.has_inject_ctor(*ty)
                     && fields.iter().enumerate().all(|(i, f)| {
-                        let array_slot =
-                            self.is_array(f.ty) || self.struct_field_ty(*ty, i).is_some_and(|t| self.is_array(t));
-                        !array_slot || struct_arg_gets_private_buffer(&f.kind, &self.var_sites)
+                        self.primitive_slot(*ty, i, f)
+                            || struct_arg_gets_private_buffer(&f.kind, self.array_slot(*ty, i, f), &self.var_sites)
                     })
             }
             HirExprKind::Array(_) | HirExprKind::ArrayRepeat { .. } | HirExprKind::VecLiteral(_) => local_is_array,
@@ -388,6 +420,11 @@ impl<'a> Analysis<'a> {
             HirExprKind::MethodCall {
                 receiver, method, args, ..
             } => {
+                // `Ctx::Stmt` also reaches the trailing expression statement of
+                // a `Block` expression, whose value is NOT discarded. That is
+                // safe only because no NON_ESCAPING_ARRAY_METHODS entry returns
+                // its receiver; adding one that does (e.g. a chaining `push`)
+                // would let `val x = { o.m() }` alias `o` here.
                 let non_escaping = self.is_array(receiver.ty)
                     && NON_ESCAPING_ARRAY_METHODS.contains(&method.as_str())
                     && (ctx == Ctx::Stmt || is_primitive(e.ty));
@@ -397,12 +434,16 @@ impl<'a> Analysis<'a> {
                 }
             }
             HirExprKind::StructInit { ty, fields } => {
+                let inject_ctor = self.has_inject_ctor(*ty);
                 for (i, f) in fields.iter().enumerate() {
-                    let array_slot =
-                        self.is_array(f.ty) || self.struct_field_ty(*ty, i).is_some_and(|t| self.is_array(t));
+                    let array_slot = self.array_slot(*ty, i, f);
                     // Only an argument that gets a private buffer is a
                     // non-escaping read; an uncopied place shares its buffer.
-                    if array_slot && struct_arg_gets_private_buffer(&f.kind, &self.var_sites) {
+                    if !inject_ctor
+                        && array_slot
+                        && matches!(f.kind, HirExprKind::Local(_))
+                        && struct_arg_gets_private_buffer(&f.kind, array_slot, &self.var_sites)
+                    {
                         if let HirExprKind::Local(idx) = &f.kind {
                             *self.struct_arg_counts.entry(*idx).or_insert(0) += 1;
                         }
@@ -554,10 +595,10 @@ fn struct_arg_locals(a: &Analysis<'_>, e: &HirExpr, out: &mut Vec<usize>) {
     match &e.kind {
         HirExprKind::Block(_) | HirExprKind::UnsafeBlock { .. } | HirExprKind::Lambda { .. } => {}
         HirExprKind::StructInit { ty, fields } => {
+            let inject_ctor = a.has_inject_ctor(*ty);
             for (i, f) in fields.iter().enumerate() {
                 if let HirExprKind::Local(o) = &f.kind {
-                    let array_slot = a.is_array(f.ty) || a.struct_field_ty(*ty, i).is_some_and(|t| a.is_array(t));
-                    if array_slot && a.var_sites.var_locals.contains(o) {
+                    if !inject_ctor && struct_arg_gets_private_buffer(&f.kind, a.array_slot(*ty, i, f), &a.var_sites) {
                         out.push(*o);
                     }
                 } else {

@@ -81,6 +81,40 @@ host shared.
     the struct literal.
   - Nothing else changed.
 
+## BLOCKER: new leak shape from the struct-literal copy (found in review, 2026-10-19)
+
+A `var` array that is still LIVE after a struct literal is now copied, and the JIT
+never frees that copy. Base aliased it instead (no copy, wrong value semantics). Reusing
+the buffer in a loop therefore keeps one growing copy per iteration:
+
+```
+var b: [u8] = []
+while i < n:
+    b.push(x)
+    st = S(buf: b, n: i)
+```
+
+| n | base JIT | fix JIT (`2731e01c…`) | base interp | fix interp |
+|---|---|---|---|---|
+| 16384 | 38 MB, 0.07 s | 185 MB, 0.06 s | 39 MB, 0.78 s | 40 MB, 0.77 s |
+| 65536 | 39 MB, 0.05 s | **2.46 GB**, 0.17 s | 57 MB, 15.5 s | 58 MB, 17.3 s |
+
+- Value semantics make this pattern O(n²) copies on every engine: the interpreter takes
+  15 s and survives only because it frees.
+- So the copy is semantically right but cannot ship on a lane with no reclamation.
+- Option A: never copy at struct literals. A proven-dead `var` still moves; a live one
+  aliases exactly as base and makes the receiving struct non-unique.
+- Option B: keep the copy and accept this shape until reclamation lands.
+- Decision pending.
+
+Review hardening, also in this lane:
+
+- A type with an `@inject` `new` lowers its literal to a constructor call, which skips
+  the copy. Its literals are now never uniquely owned, and their arguments count as
+  escaping (same behaviour as base).
+- Every non-primitive struct slot must get a private buffer, so an `Any` or generic slot
+  holding an array, or a nested aggregate argument, makes the struct non-unique.
+
 ## DEFERRED
 
 - **Refcount or ownership reclamation on the JIT lane.** `out = f(out)` across a call is
