@@ -32,6 +32,25 @@ val DEP_FIELD_EDIT: text = "use std.text\n\nstruct Point:\n    x: i64\n    y: i3
 val GENERIC_V1: text = "fn first<T>(xs: [T]) -> T:\n    xs[0]\n"
 val GENERIC_BODY_EDIT: text = "fn first<T>(xs: [T]) -> T:\n    val v = xs[0]\n    v\n"
 
+val PUB_V1: text = "pub struct Length:\n    value: f64\n    unit: text\n\npub fn scale(l: Length) -> f64:\n    l.value\n"
+val PUB_FIELD_RETYPE: text = "pub struct Length:\n    value: f32\n    unit: text\n\npub fn scale(l: Length) -> f64:\n    l.value\n"
+val PUB_FIELD_REORDER: text = "pub struct Length:\n    unit: text\n    value: f64\n\npub fn scale(l: Length) -> f64:\n    l.value\n"
+val PUB_BODY_EDIT: text = "pub struct Length:\n    value: f64\n    unit: text\n\npub fn scale(l: Length) -> f64:\n    val v = l.value\n    v\n"
+val PUB_TRAIT_V1: text = "pub trait Shape:\n    fn area() -> i64:\n        1\n"
+val PUB_TRAIT_BODY_EDIT: text = "pub trait Shape:\n    fn area() -> i64:\n        2\n"
+val PUB_GENERIC_CLASS_V1: text = "pub class Box<T>:\n    item: T\n    fn get() -> T:\n        self.item\n"
+val PUB_GENERIC_CLASS_BODY_EDIT: text = "pub class Box<T>:\n    item: T\n    fn get() -> T:\n        val v = self.item\n        v\n"
+val GENERIC_IMPL_V1: text = "impl Poll<T>:\n    fn ready() -> bool:\n        true\n"
+val GENERIC_IMPL_BODY_EDIT: text = "impl Poll<T>:\n    fn ready() -> bool:\n        false\n"
+val NESTED_V1: text = "class Holder:\n    enum Mode:\n        A\n        B\n    static val TABLE = [\n        1,\n        2]\n    async fn run() -> i64:\n        0\n"
+val NESTED_VARIANT_EDIT: text = "class Holder:\n    enum Mode:\n        A\n        C\n    static val TABLE = [\n        1,\n        2]\n    async fn run() -> i64:\n        0\n"
+val NESTED_TABLE_EDIT: text = "class Holder:\n    enum Mode:\n        A\n        B\n    static val TABLE = [\n        1,\n        3]\n    async fn run() -> i64:\n        0\n"
+val NESTED_ASYNC_SIG_EDIT: text = "class Holder:\n    enum Mode:\n        A\n        B\n    static val TABLE = [\n        1,\n        2]\n    async fn run(x: i64) -> i64:\n        0\n"
+val NESTED_ASYNC_BODY_EDIT: text = "class Holder:\n    enum Mode:\n        A\n        B\n    static val TABLE = [\n        1,\n        2]\n    async fn run() -> i64:\n        7\n"
+
+fn dep_key(source: text) -> text:
+    key_of(inputs_with_dep(source))
+
 fn inputs_with_dep(dep_source: text) -> NativePrelowerKeyInputsV1:
     NativePrelowerKeyInputsV1(
         module_name: "app.main",
@@ -88,3 +107,33 @@ describe "Native pre-lowering object key":
         foreign_mono.mono_instances = ["first$app.model.User"]
         expect(key_of(foreign_mono)).to_equal("")
         expect(native_prelower_mono_instance_admissible_v1("first$i64")).to_be(true)
+
+describe "Native pre-lowering object key: visibility, generics and nesting":
+    it "keys pub declarations exactly like bare ones":
+        # @req REQ-SSPEC-UNIT
+        step("a pub struct field retype changes the pre-key")
+        expect(dep_key(PUB_V1) == dep_key(PUB_FIELD_RETYPE)).to_be(false)
+        step("a pub struct field reorder changes the pre-key")
+        expect(dep_key(PUB_V1) == dep_key(PUB_FIELD_REORDER)).to_be(false)
+        step("a pub fn body-only edit keeps the pre-key")
+        expect(dep_key(PUB_V1)).to_equal(dep_key(PUB_BODY_EDIT))
+
+    it "treats pub trait, pub generic class and generic impl as body-visible":
+        # @req REQ-SSPEC-UNIT
+        step("pub trait default body edit changes the pre-key")
+        expect(dep_key(PUB_TRAIT_V1) == dep_key(PUB_TRAIT_BODY_EDIT)).to_be(false)
+        step("pub class Box<T> method body edit changes the pre-key")
+        expect(dep_key(PUB_GENERIC_CLASS_V1) == dep_key(PUB_GENERIC_CLASS_BODY_EDIT)).to_be(false)
+        step("impl Poll<T> method body edit changes the pre-key")
+        expect(dep_key(GENERIC_IMPL_V1) == dep_key(GENERIC_IMPL_BODY_EDIT)).to_be(false)
+
+    it "captures nested variants, class static initializers and async fn headers":
+        # @req REQ-SSPEC-UNIT
+        step("nested enum variant edit changes the pre-key")
+        expect(dep_key(NESTED_V1) == dep_key(NESTED_VARIANT_EDIT)).to_be(false)
+        step("multi-line class static val initializer edit changes the pre-key")
+        expect(dep_key(NESTED_V1) == dep_key(NESTED_TABLE_EDIT)).to_be(false)
+        step("async fn signature edit changes the pre-key")
+        expect(dep_key(NESTED_V1) == dep_key(NESTED_ASYNC_SIG_EDIT)).to_be(false)
+        step("async fn body-only edit keeps the pre-key")
+        expect(dep_key(NESTED_V1)).to_equal(dep_key(NESTED_ASYNC_BODY_EDIT))
