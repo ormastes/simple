@@ -89,8 +89,9 @@ seen both ways. Tail expressions and continuation lines are never recorded.
 ## Block-size limits (frame encoders)
 
 - Zstd: Block_Maximum_Size is 128 KiB and the block header size field is 21 bits.
-  `zstd_compress_frame` splits input into <=128 KiB raw/RLE blocks (RLE per block when
-  its bytes are identical); Last_Block=1 only on the final block.
+  `zstd_compress_frame` splits input into <=128 KiB blocks, each RLE (identical bytes),
+  a real Compressed_Block (type 2, `zstd_enc.spl`) when strictly smaller, else Raw;
+  Last_Block=1 only on the final block.
 - LZ4: the frame BD byte declares a 64 KiB max block, and the decoder rejects larger
   blocks. `lz4_compress_frame` emits independent <=64 KiB blocks (each compressed or
   stored raw, with a per-block checksum when enabled).
@@ -180,3 +181,25 @@ rewrite and are deleted. A stream that references the static dictionary fails wi
 `UnsupportedFeature` (monkey vector), never wrong output.
 Context modes (LSB6/MSB6/UTF8/Signed) have no passing official vector yet.
 
+
+## zstd encoder: Block_Type=2 with predefined FSE sequences (2026-10-19)
+- `src/lib/common/compress/zstd_enc.spl`: hash-chain LZ77 (4-byte min match; chain depth
+  by level: 1->1, 2->4, 3-5->8, 6-9->16, 10-18->32, 19+->64; greedy, no lazy), matches
+  never cross a 128 KiB block end, history spans blocks, offset <= position (single-segment
+  Window_Size == content size). Sequences use Predefined_Mode for LL/ML/OF (modes byte 0),
+  FSE encode tables built per call from `ZSTD_*_DEFAULT_DISTRIBUTION` (logs 6/6/5, same
+  spread as the decoder), LL/ML base+extra-bit tables derived from the decoder's own
+  `_zstd_decode_*`/`_zstd_*_extra_bits`, offsets coded as `offset + 3` (never a repeat
+  code), backward bitstream with the 1-bit end marker. Per block: RLE if identical, else
+  compressed if strictly smaller, else Raw.
+- Limits (v1): literals are Raw or RLE only (no Huffman literal coding); no repeat
+  offsets; no custom/RLE/Repeat sequence tables; no lazy matching; no dictionary use.
+  Ratio vs `zstd -3` is ~1.2x worse on source text, throughput ~0.1 MB/s under the seed.
+- Oracle: every generated frame must pass `zstd -d -c | cmp` (host zstd 1.5.5); our own
+  decoder round trip is secondary. Sabotage (`offset + 2`, spread step `+2`) is rejected by
+  `zstd -d` ("Data corruption detected" / checksum).
+- nvfs `compression.spl`: algo 2/3 = `[u32 len | zstd frame]` (levels 3/19), raw fallback
+  when not strictly smaller, legacy tagged-copy (len+4) still decodes.
+- Specs: `zstd_compress_sequences_spec.spl`, `nvfs_compression_spec.spl`. The old
+  "raw-block path" pins in `zstd_single_sequence_compress_spec.spl` / `zstd_frame_variants_spec.spl`
+  were updated to the compressed-block frames (the 12-byte `abc` x4 frame is host-verified).

@@ -146,33 +146,33 @@ fn _expect_compression_error(err: CompressionError, kind: text, message_part: te
             expect(kind).to_equal("SizeLimitExceeded")
             expect(limit >= 0).to_equal(true)
 
-describe "zstd repeated-tail encoder fallback":
+describe "zstd repeated-tail compressed-block encoder":
     # @manual scenario evidence
-    it "keeps the host-rejected direct-weight single-stream candidate on the raw-block path":
+    it "compresses the fresh-table payload into a compressed block":
         # @req REQ-SSPEC-LIB
-        step("keeps the host-rejected direct-weight single-stream candidate on the raw-block path")
+        step("compresses the fresh-table payload into a compressed block")
         val payload = _fresh_table_payload()
         val encoded = zstd_compress_frame(payload, default_compression_options(CompressionCodec.zstd))
-        expect((encoded[6] & 0x07u8)).to_equal(0x01u8)
-        expect(encoded.len()).to_equal(6 + 3 + payload.len())
+        expect((encoded[6] & 0x07u8)).to_equal(0x05u8)
+        expect(encoded.len() < 6 + 3 + payload.len()).to_equal(true)
         expect(zstd_decompress_frame(encoded).unwrap()).to_equal(payload)
 
-    it "keeps level 1 on the raw-block path for the bounded fresh-table lane":
+    it "compresses the fresh-table payload into a compressed block at level 1":
         # @req REQ-SSPEC-LIB
-        step("keeps level 1 on the raw-block path for the bounded fresh-table lane")
+        step("compresses the fresh-table payload into a compressed block at level 1")
         val payload = _fresh_table_payload()
         val options = _with_level(default_compression_options(CompressionCodec.zstd), 1)
         val encoded = zstd_compress_frame(payload, options)
-        expect((encoded[6] & 0x07u8)).to_equal(0x01u8)
+        expect((encoded[6] & 0x07u8)).to_equal(0x05u8)
         expect(zstd_decompress_frame(encoded).unwrap()).to_equal(payload)
 
-    it "keeps repeated tails on the raw-block path until a host-valid sequence encoder exists":
+    it "compresses repeated tails into a compressed block":
         # @req REQ-SSPEC-LIB
-        step("keeps repeated tails on the raw-block path until a host-valid sequence encoder exists")
+        step("compresses repeated tails into a compressed block")
         val payload = _repeated_tail_payload()
         val encoded = zstd_compress_frame(payload, default_compression_options(CompressionCodec.zstd))
-        expect((encoded[6] & 0x07u8)).to_equal(0x01u8)
-        expect(encoded.len()).to_equal(6 + 3 + payload.len())
+        expect((encoded[6] & 0x07u8)).to_equal(0x05u8)
+        expect(encoded.len() < 6 + 3 + payload.len()).to_equal(true)
         expect(zstd_decompress_frame(encoded).unwrap()).to_equal(payload)
 
     it "decodes an exact host-zstd fresh-table single-stream frame with one predefined-table sequence":
@@ -187,38 +187,37 @@ describe "zstd repeated-tail encoder fallback":
         expect(out.len()).to_equal(134)
         expect(out.slice(0, 4)).to_equal([0x54u8, 0x68u8, 0x69u8, 0x73u8])
 
-    it "emits the exact raw-block frame bytes for repeated tails":
+    it "emits the exact host-valid compressed-block frame bytes for repeated tails":
         # @req REQ-SSPEC-LIB
-        step("emits the exact raw-block frame bytes for repeated tails")
+        step("emits the exact host-valid compressed-block frame bytes for repeated tails")
         val payload = _repeated_tail_payload()
         val encoded = zstd_compress_frame(payload, default_compression_options(CompressionCodec.zstd))
+        # Verified with the reference `zstd -d` 1.5.5: decodes to "abcabcabcabc".
         expect(encoded).to_equal([
             0x28u8, 0xB5u8, 0x2Fu8, 0xFDu8,
             0x20u8,
             0x0Cu8,
-            0x61u8, 0x00u8, 0x00u8,
-            0x61u8, 0x62u8, 0x63u8,
-            0x61u8, 0x62u8, 0x63u8,
-            0x61u8, 0x62u8, 0x63u8,
-            0x61u8, 0x62u8, 0x63u8
+            0x4Du8, 0x00u8, 0x00u8,
+            0x18u8, 0x61u8, 0x62u8, 0x63u8,
+            0x01u8, 0x00u8, 0x16u8, 0x6Eu8, 0x08u8
         ])
 
-    it "keeps level 1 on the raw-block fallback":
+    it "compresses repeated tails into a compressed block at level 1":
         # @req REQ-SSPEC-LIB
-        step("keeps level 1 on the raw-block fallback")
+        step("compresses repeated tails into a compressed block at level 1")
         val payload = _repeated_tail_payload()
         val options = _with_level(default_compression_options(CompressionCodec.zstd), 1)
         val encoded = zstd_compress_frame(payload, options)
-        expect((encoded[6] & 0x07u8)).to_equal(0x01u8)
+        expect((encoded[6] & 0x07u8)).to_equal(0x05u8)
         expect(zstd_decompress_frame(encoded).unwrap()).to_equal(payload)
 
-    it "preserves checksum on the repeated-tail raw-block fallback":
+    it "preserves checksum on the repeated-tail compressed block":
         # @req REQ-SSPEC-LIB
-        step("preserves checksum on the repeated-tail raw-block fallback")
+        step("preserves checksum on the repeated-tail compressed block")
         val payload = _repeated_tail_payload()
         val options = _with_checksum(default_compression_options(CompressionCodec.zstd), true)
         val encoded = zstd_compress_frame(payload, options)
-        expect((encoded[6] & 0x07u8)).to_equal(0x01u8)
+        expect((encoded[6] & 0x07u8)).to_equal(0x05u8)
         expect(zstd_decompress_frame(encoded).unwrap()).to_equal(payload)
 
     it "fails closed on the host-rejected direct-weight single-stream candidate":
