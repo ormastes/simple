@@ -27,7 +27,8 @@ use std.nogc_sync_mut.io_runtime.{env_set, dir_create_all, dir_remove_all, file_
 use compiler.driver.driver_build.native_mir_shard.{
     native_mir_shard_count_of_v1, native_mir_shard_claim_cap_v1,
     native_mir_shard_claim_v1, native_mir_shard_publish_pass_v1,
-    native_mir_shard_link_inputs_v1, native_mir_shard_lpt_order_v1}
+    native_mir_shard_link_inputs_v1, native_mir_shard_lpt_order_v1,
+    native_mir_shard_outcome_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory}
 
 fn fresh_ledger(tag: text) -> text:
@@ -116,3 +117,25 @@ describe "MIR shard link admission":
         assert_true(native_mir_shard_publish_pass_v1(queue, "mod.a", "", 0, 0))
         assert_false(native_mir_shard_link_inputs_v1(queue, "other-id").is_ok())
         val _cleanup = dir_remove_all(queue)
+
+describe "MIR shard coordinator outcome":
+    it "links an aggregate PASS and stops on a real module failure":
+        # @req REQ-SSPEC-COMPILER
+        step("links an aggregate PASS and stops on a real module failure")
+        assert_equal(native_mir_shard_outcome_v1(0, 0, 4, true), "link")
+        assert_equal(native_mir_shard_outcome_v1(1, 2, 4, true), "fail")
+
+    it "falls back to in-process MIR only when no worker claimed anything":
+        # @req REQ-SSPEC-COMPILER
+        step("falls back to in-process MIR only when no worker claimed anything")
+        # Phase 3 2026-10-19: every worker BLOCKED with claimed=0 and no
+        # module failed, so the build continues unsharded.
+        assert_equal(native_mir_shard_outcome_v1(1, 0, 0, true), "fallback")
+
+    it "fails on an unreadable ledger, a claim without a verdict, or an unreaped worker":
+        # @req REQ-SSPEC-COMPILER
+        step("fails on an unreadable ledger, a claim without a verdict, or an unreaped worker")
+        assert_equal(native_mir_shard_outcome_v1(1, -1, 0, true), "fail")
+        assert_equal(native_mir_shard_outcome_v1(1, 0, 3, true), "fail")
+        assert_equal(native_mir_shard_outcome_v1(1, 0, -1, true), "fail")
+        assert_equal(native_mir_shard_outcome_v1(1, 0, 0, false), "fail")
