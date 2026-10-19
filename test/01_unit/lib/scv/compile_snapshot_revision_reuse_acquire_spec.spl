@@ -1,0 +1,104 @@
+# Acquire-level revision reuse: a new revision reuses the verified objects of
+# the published revision for every inventory row it shares, so its cost
+# follows the CHANGED files. Needs the self-hosted binary: under the 2026-10-18
+# tracked seed (a) the test lane refuses the text writes the inventory
+# publisher performs (same cause as app.io.mod.file_write returning false
+# there) and (b) acquire_v1 needs rt_secure_temp_dir_set_parent (4fafccac766),
+# which that seed does not back -- the same state as the existing
+# package_index_acceptance_snapshot_spec. The per-file mechanism is pinned
+# seed-runnably in compile_snapshot_revision_reuse_spec.spl.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1, scv_compile_snapshot_acquire_v1}
+use std.scv.compile_source_inventory.{
+    compile_source_inventory_filesystem_event_v1,
+    compile_source_inventory_apply_and_publish_v1
+}
+use app.io.mod.{dir_create, file_hash_sha256}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io_runtime.{getpid}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.common.text_bytes.{text_to_utf8_bytes}
+
+fn reuse_root(label: text) -> text:
+    path_absolute("build/test-artifacts/snapshot-reuse-acquire-{getpid()}-{label}").replace("\\", "/")
+
+fn reuse_publish(root: text, relative: text, content: text, operation: text) -> bool:
+    file_write_bytes("{root}/{relative}", text_to_utf8_bytes(content)) and
+        compile_source_inventory_apply_and_publish_v1("{root}/build/scv",
+            [compile_source_inventory_filesystem_event_v1(operation, relative, content)]).valid
+
+val REUSE_KEPT: text = "# kept across revisions\nfn kept() -> i64:\n    1\n"
+# Same byte length as REUSE_KEPT: an unpublished edit the inventory does not
+# know about and the size guard cannot see.
+val REUSE_KEPT_EDITED: text = "# kept across revisions\nfn kept() -> i64:\n    2\n"
+val REUSE_FIRST: text = "fn changing() -> i64:\n    1\n"
+val REUSE_SECOND: text = "fn changing() -> i64:\n    2\n"
+
+fn reuse_seed(root: text) -> ScvCompileSnapshotV1:
+    if (not dir_create("{root}/src", true) or
+            not reuse_publish(root, "src/kept.spl", REUSE_KEPT, "create") or
+            not reuse_publish(root, "src/changing.spl", REUSE_FIRST, "create")):
+        return scv_compile_snapshot_acquire_v1("", "", [])
+    scv_compile_snapshot_acquire_v1(root, "{root}/build/scv", ["src"])
+
+fn reuse_second(root: text) -> ScvCompileSnapshotV1:
+    if not reuse_publish(root, "src/changing.spl", REUSE_SECOND, "modify"):
+        return scv_compile_snapshot_acquire_v1("", "", [])
+    scv_compile_snapshot_acquire_v1(root, "{root}/build/scv", ["src"])
+
+describe "SCV snapshot revision reuse":
+    it "copies an unchanged row from the published revision without re-reading its source":
+        val root = reuse_root("unchanged")
+        val first = reuse_seed(root)
+        expect(first.valid).to_equal(true)
+        expect(file_hash_sha256("{first.snapshot_root}/src/kept.spl")).to_equal(sha256_text(REUSE_KEPT))
+        # The full path would refuse this same-length unpublished edit as
+        # snapshot-index-drift; a valid second revision carrying the admitted
+        # bytes proves the row was reused, not re-read.
+        expect(file_write_bytes("{root}/src/kept.spl", text_to_utf8_bytes(REUSE_KEPT_EDITED))).to_equal(true)
+        val second = reuse_second(root)
+        expect(second.valid).to_equal(true)
+        expect(second.revision_id == first.revision_id).to_equal(false)
+        expect(file_hash_sha256("{second.snapshot_root}/src/kept.spl")).to_equal(sha256_text(REUSE_KEPT))
+        expect(file_hash_sha256("{second.snapshot_root}/src/changing.spl")).to_equal(sha256_text(REUSE_SECOND))
+        # The published revision is immutable and untouched.
+        expect(file_hash_sha256("{first.snapshot_root}/src/kept.spl")).to_equal(sha256_text(REUSE_KEPT))
+
+    it "routes a length-changing unpublished edit to the full path, which refuses it":
+        val root = reuse_root("size-guard")
+        val first = reuse_seed(root)
+        expect(first.valid).to_equal(true)
+        expect(file_write_bytes("{root}/src/kept.spl", text_to_utf8_bytes(REUSE_KEPT + "# longer\n"))).to_equal(true)
+        val second = reuse_second(root)
+        expect(second.valid).to_equal(false)
+        expect(second.reason).to_equal("snapshot-index-drift:src/kept.spl")
+        expect(second.snapshot_root).to_equal("")
+
+    it "never trusts a tampered published copy: falls back to the verified source path":
+        val root = reuse_root("tampered")
+        val first = reuse_seed(root)
+        expect(first.valid).to_equal(true)
+        expect(file_write_bytes("{first.snapshot_root}/src/kept.spl", text_to_utf8_bytes("# tampered\n"))).to_equal(true)
+        val second = reuse_second(root)
+        expect(second.valid).to_equal(true)
+        expect(file_hash_sha256("{second.snapshot_root}/src/kept.spl")).to_equal(sha256_text(REUSE_KEPT))
+
+    it "fails closed when a tampered copy's fallback finds a drifted source":
+        val root = reuse_root("tampered-drift")
+        val first = reuse_seed(root)
+        expect(first.valid).to_equal(true)
+        expect(file_write_bytes("{first.snapshot_root}/src/kept.spl", text_to_utf8_bytes("# tampered\n"))).to_equal(true)
+        expect(file_write_bytes("{root}/src/kept.spl", text_to_utf8_bytes(REUSE_KEPT_EDITED))).to_equal(true)
+        val second = reuse_second(root)
+        expect(second.valid).to_equal(false)
+        expect(second.reason).to_equal("snapshot-index-drift:src/kept.spl")
+
+    it "republishes the identical inventory as the same revision without materializing":
+        val root = reuse_root("identical")
+        val first = reuse_seed(root)
+        expect(first.valid).to_equal(true)
+        expect(file_write_bytes("{root}/src/kept.spl", text_to_utf8_bytes(REUSE_KEPT_EDITED))).to_equal(true)
+        val again = scv_compile_snapshot_acquire_v1(root, "{root}/build/scv", ["src"])
+        expect(again.valid).to_equal(true)
+        expect(again.revision_id).to_equal(first.revision_id)
