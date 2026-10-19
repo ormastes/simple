@@ -272,6 +272,19 @@ fn is_simple_name_pattern(pattern: &simple_parser::Pattern) -> bool {
     }
 }
 
+/// `use m.{f as g}` import-binding marker emitted by flattening. It is module
+/// metadata, not a statement: HIR alias resolution
+/// (`Lowerer::collect_flattened_import_aliases`) scans only top-level items, so
+/// burying it in a synthesized `main` left every alias unresolved
+/// (`Undefined("undefined identifier: g")`) whenever the entry had no `fn main`.
+/// Position-independent (it names importer, alias and source), unlike the
+/// global-owner marker, which tags the declaration that follows it and so must
+/// stay where it is.
+fn is_import_binding_marker(node: &Node) -> bool {
+    matches!(node, Node::Const(decl)
+        if decl.name.starts_with(crate::interpreter::FLATTEN_IMPORT_BINDING_MARKER_PREFIX))
+}
+
 fn is_liftable_global_decl(node: &Node) -> bool {
     match node {
         Node::Const(decl) => is_const_global_initializer(&decl.value),
@@ -358,7 +371,11 @@ pub(crate) fn wrap_entry_script_as_main(
             && module_level_decl_name(&item)
                 .map(|name| sibling_reads.contains(&name))
                 .unwrap_or(false);
-        if is_liftable_global_decl(&item) || is_read_by_sibling || (is_freestanding && is_module_level_decl) {
+        if is_liftable_global_decl(&item)
+            || is_read_by_sibling
+            || (is_freestanding && is_module_level_decl)
+            || is_import_binding_marker(&item)
+        {
             lifted.push(item);
         } else if is_script_statement(&item) {
             script_body.push(item);

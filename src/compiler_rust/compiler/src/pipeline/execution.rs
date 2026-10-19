@@ -583,7 +583,21 @@ impl CompilerPipeline {
         // HIR registration, but do not evaluate them again in this fallback.
         let has_main_function = mir_module.functions.iter().any(|f| f.name == FUNC_MAIN);
 
-        if !has_main_function {
+        // A file-backed library module (no `fn main`, no legacy `main = <expr>`,
+        // and no script body for `wrap_entry_script_as_main` to wrap) is
+        // compiled to real code like the target lane above already does.
+        // Evaluating it instead produced the 219-byte constant stub with no
+        // exported functions -- exactly the hollow artifact dynSMF's export
+        // witness rejects -- and a library carrying a liftable module global
+        // was refused outright by the branch below.
+        let is_library_module = source_file.is_some()
+            && !assigns_to_main(&ast_module.items)
+            && !ast_module
+                .items
+                .iter()
+                .any(|item| matches!(item, Node::Function(f) if f.name == FUNC_MAIN));
+
+        if !has_main_function && !is_library_module {
             if wraps_script_entry {
                 // We already synthesized a `main` from the script body above
                 // (bug seed_compile_smf_stub_fail_open_2026-07-17) and it
@@ -1312,5 +1326,46 @@ mod tests {
 
         assert!(filtered.libraries.iter().any(|lib| lib == "simple_runtime"));
         assert!(!filtered.libraries.iter().any(|lib| lib == "simple_native_all"));
+    }
+
+    /// Compile a `main`-less library entry to SMF and return its bytes.
+    fn compile_library_smf(files: &[(&str, &str)]) -> Vec<u8> {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.path().join(name), body).unwrap();
+        }
+        let out = dir.path().join("lib.smf");
+        let mut compiler = crate::CompilerPipeline::new().unwrap();
+        compiler
+            .compile(&dir.path().join("lib.spl"), &out)
+            .expect("library entry must compile to SMF");
+        std::fs::read(&out).unwrap()
+    }
+
+    fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// dynSMF bundle shape: no `fn main`, reaching a `use m.{f as g}` alias.
+    /// The alias used to be buried in a synthesized `main` (undefined
+    /// identifier), and a `main`-less entry used to become the 219-byte stub.
+    #[test]
+    fn library_smf_resolves_aliased_import_and_emits_real_code() {
+        let bytes = compile_library_smf(&[
+            ("a.spl", "fn upd(x: i64) -> i64:\n    x + 1\n"),
+            ("b.spl", "use a.{upd as _shared_upd}\n\nfn upd(x: i64) -> i64:\n    _shared_upd(x) * 2\n"),
+            ("lib.spl", "use b.{upd}\n\nfn entry_ready() -> i64:\n    upd(20)\n"),
+        ]);
+        assert!(bytes.len() > 219, "got the {}-byte stub, not real code", bytes.len());
+        assert!(contains_bytes(&bytes, b"entry_ready"), "exported function missing from SMF");
+    }
+
+    /// A library with a liftable module global has no script body to wrap and
+    /// was refused with "could not be lowered to a real `main`".
+    #[test]
+    fn library_smf_with_module_global_emits_real_code() {
+        let bytes = compile_library_smf(&[("lib.spl", "val K = 5\n\nfn add_k(x: i64) -> i64:\n    x + K\n")]);
+        assert!(bytes.len() > 219, "got the {}-byte stub, not real code", bytes.len());
+        assert!(contains_bytes(&bytes, b"add_k"), "exported function missing from SMF");
     }
 }
