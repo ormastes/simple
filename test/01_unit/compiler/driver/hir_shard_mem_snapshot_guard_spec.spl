@@ -1,0 +1,36 @@
+"""HIR shard children never open the parent's SIMPLE_MEM_SNAPSHOT_FILE.
+
+Bug stage3_hir_shard_workers_collide_on_mem_snapshot_file_2026_10_19: with
+SIMPLE_NATIVE_BUILD_THREADS=8 every HIR shard worker inherits the parent's
+SIMPLE_MEM_SNAPSHOT_FILE, and the retained lowering path called
+mem_snapshot_begin() unconditionally. The runtime opens that path O_EXCL, so
+every worker failed with "SIMPLE_MEM_SNAPSHOT_FILE could not be established
+safely", blocked the shard ledger, and the next claim failed with "HIR shard
+ledger claim failed". The streaming path already guarded the call with
+`if not hir_shard_mode:`; both call sites must carry that guard.
+"""
+
+use std.spec.*
+use std.io.{file_read}
+
+val HIR_LOWERING = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
+val BEGIN_CALL = "if mem_snapshot_begin() < 0:"
+val GUARD = "if not hir_shard_mode:"
+
+describe "HIR shard memory snapshot guard":
+    it "guards every mem_snapshot_begin() call site with the shard-mode check":
+        val source = file_read(HIR_LOWERING)
+        # Every text before a call site ends with the statement that encloses
+        # the call: the guard must sit within the preceding 64 bytes.
+        val parts = source.split(BEGIN_CALL)
+        val sites = parts.len() - 1
+        var guarded = 0
+        var index = 0
+        while index < sites:
+            val before: text = parts[index]
+            val window_start = if before.len() > 64: before.len() - 64 else: 0
+            val window = before.substring(window_start, before.len())
+            if window.contains(GUARD): guarded = guarded + 1
+            index = index + 1
+        expect(sites).to_equal(2)
+        expect(guarded).to_equal(sites)
