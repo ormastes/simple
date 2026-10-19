@@ -2175,6 +2175,19 @@ impl Lowerer {
                 inner,
                 ..
             }) if matches!(*inner, TypeId::BOOL | TypeId::F32 | TypeId::F64) => *inner,
+            // `text?` coalesces to plain text. Left as the `text?` pointer the
+            // receiver was neither `is_string` nor `is_any` in the method
+            // result-type tables (hir/lower/expr/mod.rs), so `(o ?? d)
+            // .starts_with(p)` printed `nil` and `.len()` answered 1 under
+            // the JIT. A STRING value is the tagged heap word itself, so the
+            // narrowing changes no representation (rt_unwrap_or_self is not
+            // unboxed for STRING in mir lowering_expr_builtin.rs). Bug row:
+            // interp_option_unwrapped_text_starts_with_nil_2026_10_19.
+            Some(HirType::Pointer {
+                kind: PointerKind::Shared,
+                inner,
+                ..
+            }) if *inner == TypeId::STRING && default_hir.ty == TypeId::STRING => TypeId::STRING,
             _ => result_ty,
         };
 
@@ -2229,7 +2242,7 @@ impl Lowerer {
     /// Box a raw-scalar expression when it must flow out through a slot whose
     /// runtime representation is a tagged `RuntimeValue` (a nullable `T?`, or
     /// `Any`). Returns the expression unchanged in every other case.
-    fn box_scalar_into_tagged_result(&self, result_ty: TypeId, value: HirExpr) -> HirExpr {
+    pub(super) fn box_scalar_into_tagged_result(&self, result_ty: TypeId, value: HirExpr) -> HirExpr {
         let tagged_slot =
             result_ty == TypeId::ANY || matches!(self.module.types.get(result_ty), Some(HirType::Pointer { .. }));
         if !tagged_slot {
@@ -2913,7 +2926,23 @@ impl Lowerer {
                     // reserved OPTION_ENUM_ID (runtime/src/value/objects.rs:326).
                     // So a genuinely-flat nullable keeps its previous behaviour
                     // bit for bit, and a boxed `Some(x)` is flattened to `x`.
-                    let payload_ty = TypeId::ANY;
+                    //
+                    // `text?` is the exception to "type it ANY": a STRING
+                    // value IS the tagged heap word (there is no raw form to
+                    // misread), and typing it ANY sent `.starts_with` /
+                    // `.ends_with` / `.find` / `.rfind` through the generic
+                    // dynamic fallback with no result type, so their RAW
+                    // bool/i64 results were never boxed — `true` printed
+                    // `nil`, `false` printed `0`, `if b.starts_with(p)` took
+                    // the false branch. That broke storage containment
+                    // (storage_roots/path_policy.spl is_strict_storage_descendant)
+                    // and every MCP caret_* tool. Bug row:
+                    // interp_option_unwrapped_text_starts_with_nil_2026_10_19.
+                    let payload_ty = if pointee == TypeId::STRING {
+                        TypeId::STRING
+                    } else {
+                        TypeId::ANY
+                    };
                     let present = HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_unwrap_or_self".to_string(),
