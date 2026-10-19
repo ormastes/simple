@@ -213,8 +213,9 @@ Context modes (LSB6/MSB6/UTF8/Signed) have no passing official vector yet.
 - A len-bounded `while i < len: data[i]` loop over `[u8]` is lowered by the seed JIT to a
   hoisted raw-byte load that misreads slot-layout arrays (`[]` in a struct field builds one;
   `var x: [u8] = []` builds the packed one). It broke XXH64 tails, so zstd frames with
-  len % 4 != 0 failed with ChecksumMismatch under JIT only. `xxhash64` now reads its tail
-  via `rt_typed_bytes_u8_at`. Bug: doc/08_tracking/bug/jit_hoisted_u8_data_ptr_ignores_slot_layout_2026-10-19.md.
+  len % 4 != 0 failed with ChecksumMismatch under JIT only. Fixed in the seed JIT (branch
+  work/jit-u8-hoisted-read-layout), not in the library: do not add direct `rt_*` reads to
+  `xxhash.spl` to dodge it (no-direct-rt ratchet). Bug: doc/08_tracking/bug/jit_hoisted_u8_data_ptr_ignores_slot_layout_2026-10-19.md.
   Specs run in the interpreter, so check JIT with `bin/simple run <probe>`.
 - `std.nogc_sync_mut.compression.zstd` (`zstd_decode`): Raw/RLE literal Size_Format 01/11
   are 12/20-bit, and FCS flag 2 is 4 bytes; both were wrong before 2026-10-19.
