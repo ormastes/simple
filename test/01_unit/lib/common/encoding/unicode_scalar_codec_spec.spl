@@ -1,0 +1,43 @@
+# Strict scalar adapters used by ExternalChar; no physical character layout assumptions.
+use std.spec.{describe, it, expect, fail}
+use std.common.encoding.unicode_scalar.{unicode_scalar_from_utf8, unicode_scalar_to_utf8}
+
+fn expect_scalar_bytes(value: i64, bytes: [i64]):
+    match unicode_scalar_to_utf8(value):
+        case Some(actual): expect(actual).to_equal(bytes)
+        case nil: fail("valid scalar rejected by encoder")
+    match unicode_scalar_from_utf8(bytes):
+        case Some(actual): expect(actual).to_equal(value)
+        case nil: fail("valid scalar bytes rejected by decoder")
+
+fn expect_invalid_scalar_bytes(bytes: [i64]):
+    expect(unicode_scalar_from_utf8(bytes)).to_equal(nil)
+
+describe "strict one-scalar UTF-8 adapters":
+    it "encodes exact boundary bytes and decodes them symmetrically":
+        expect_scalar_bytes(0, [0])
+        expect_scalar_bytes(8, [8])
+        expect_scalar_bytes(127, [127])
+        expect_scalar_bytes(128, [194, 128])
+        expect_scalar_bytes(0x7FF, [223, 191])
+        expect_scalar_bytes(0x800, [224, 160, 128])
+        expect_scalar_bytes(0xD7FF, [237, 159, 191])
+        expect_scalar_bytes(0xE000, [238, 128, 128])
+        expect_scalar_bytes(0xFFFF, [239, 191, 191])
+        expect_scalar_bytes(0x10000, [240, 144, 128, 128])
+        expect_scalar_bytes(0x1F642, [240, 159, 153, 130])
+        expect_scalar_bytes(0x10FFFF, [244, 143, 191, 191])
+
+    it "rejects missing bytes, extra scalars and out-of-byte integers":
+        for bytes in [[], [65, 66], [65, 66, 67, 68, 69], [-1], [256], [194, 256]]:
+            expect_invalid_scalar_bytes(bytes)
+
+    it "rejects invalid leads, continuations, truncation and overlong forms":
+        for bytes in [[128], [255], [194], [194, 65], [192, 128], [224, 128, 128], [240, 128, 128, 128], [240, 159, 153], [248, 128, 128, 128]]:
+            expect_invalid_scalar_bytes(bytes)
+
+    it "rejects surrogate encodings and values beyond U+10FFFF":
+        for bytes in [[237, 160, 128], [237, 191, 191], [244, 144, 128, 128], [245, 128, 128, 128]]:
+            expect_invalid_scalar_bytes(bytes)
+        for value in [-1, 0xD800, 0xDFFF, 0x110000, 4294967361, 9223372036854775807]:
+            expect(unicode_scalar_to_utf8(value)).to_equal(nil)
