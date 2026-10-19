@@ -36,7 +36,7 @@ use compiler.driver.cache.native_prelower_object_key.{
 use compiler.driver.driver_build.native_group_request.{native_group_request_path_v1}
 use compiler.hir.hir_types.{HirModule}
 use driver_types.{CompileContext}
-use compiler.common.driver_core_types.{SourceFile}
+use common.plugin.aspect_params.{AspectParamsV1}
 
 val DRIVER_NATIVE_PRELOWER_ENTRY_HEADER_V1: text = "simple-native-prelower-entry-v1"
 
@@ -70,6 +70,20 @@ fn driver_native_prelower_build_admissible_v1(
     if (sosix_env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1": return false
     if (sosix_env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1": return false
     true
+
+# Canonical text of the AOP parameters (they select instrumentation that is
+# woven into module code, so they are object-affecting).
+fn driver_native_prelower_aspect_identity_v1(params: AspectParamsV1) -> text:
+    var rows: [text] = []
+    rows.push("hdr={params.hdr.schema_name.len()}:{params.hdr.schema_name}:{params.hdr.schema_major}:{params.hdr.schema_minor}:{params.hdr.present}")
+    rows.push("calls={params.log_calls}|assign={params.log_assignments}|compile_log={params.compile_log_level}|runtime_log={params.runtime_log_level}|mcdc={params.mcdc_mode}|manifest={params.mcdc_manifest_sha256}")
+    for ext in params.ext:
+        var payload_rows: [text] = []
+        for b in ext.payload:
+            payload_rows.push("{b}")
+        val payload_digest = sha256_text(payload_rows.join(","))
+        rows.push("ext={ext.ext_name.len()}:{ext.ext_name}:{ext.ext_major}:{ext.payload_schema_hash}:{payload_digest}")
+    sha256_text(rows.join("\n"))
 
 # Producer identity available before lowering. "" = refused.
 fn driver_native_prelower_producer_identity_v1(ctx: CompileContext) -> text:
@@ -114,7 +128,7 @@ fn driver_native_prelower_producer_identity_v1(ctx: CompileContext) -> text:
     for family in opts.allowed_families:
         family_rows.push(family)
     val families = canonical_identity_sort_texts(family_rows).join(",")
-    val option_identity = "debug={opts.debug_info}|strip={opts.strip_output}|gc_off={opts.gc_off}|profile={opts.profile}|no_borrow={opts.no_borrow_check}|trace={opts.debug_trace_level}|coverage={opts.coverage_enabled}|mcdc={opts.mcdc_mode_text}:{opts.mcdc_owner_bytes}:{opts.mcdc_global_bytes}|collection={opts.collection_policy}|families={families}|build_mode={opts.build_mode}"
+    val option_identity = "debug={opts.debug_info}|strip={opts.strip_output}|gc_off={opts.gc_off}|profile={opts.profile}|no_borrow={opts.no_borrow_check}|trace={opts.debug_trace_level}|coverage={opts.coverage_enabled}|mcdc={opts.mcdc_mode_text}:{opts.mcdc_owner_bytes}:{opts.mcdc_global_bytes}|collection={opts.collection_policy}|families={families}|build_mode={opts.build_mode}|aspect={driver_native_prelower_aspect_identity_v1(opts.aspect_params)}"
     "compiler={compiler_identity}|target={native_target}|cpu={native_cpu}|avx2={host_avx2}|backend={effective_backend}|opt={opt_level}|release={is_release}|symbols={symbol_mode}|environment={environment.digest}|emitter={NATIVE_CACHE_EMITTER_SCHEME_V1}|config={config_digest}|options={sha256_text(option_identity)}"
 
 # Post-mono specialization names this module emits (functions and nominal
@@ -156,14 +170,12 @@ fn driver_native_prelower_module_keys_v1(
     while i < names.len():
         # The parsed text must still be what is on disk; otherwise the parsed
         # module is not the module a later build would see under this key.
-        # Re-read through SourceFile.load -- the loader that produced
-        # ctx.sources -- so both sides carry the same normalisation (marker
-        # line stripping, the same rt_file_read_text decode incl. CRLF/BOM
-        # handling) instead of comparing raw disk bytes to parsed text.
+        # Re-read with file_read_nullable, the reader the source loader itself
+        # uses for ctx.sources (driver_source_loading.spl:835, :1608, :1671), so
+        # both sides share its decode and path handling. SCV epoch snapshots and
+        # spec-prelude substitution make disk != parsed and refuse (fail-closed).
         val parsed = source_texts[i]
-        val disk = match SourceFile.load(source_paths[i]):
-            case Ok(reloaded): reloaded.content
-            case Err(_): ""
+        val disk = file_read_nullable(source_paths[i]) ?? ""
         val source_digest = if parsed != "" and disk == parsed: sha256_text(parsed) else: ""
         source_digests.push(source_digest)
         # A missing digest yields "name=" which the key builder refuses.
@@ -255,7 +267,10 @@ fn driver_native_prelower_record_v1(
         val digest = source_fp.unwrap().content_hash
         if digest == "": return false
         val staged_object = stage_prefix + ".o"
-        if not file_copy(object_path, staged_object): return false
+        if not file_copy(object_path, staged_object):
+            if file_exists(staged_object):
+                val _drop_partial = file_delete(staged_object)
+            return false
         val staged_fp = FileFingerprint.from_file(staged_object)
         if not staged_fp.? or staged_fp.unwrap().content_hash != digest:
             val _drop_bad = file_delete(staged_object)
