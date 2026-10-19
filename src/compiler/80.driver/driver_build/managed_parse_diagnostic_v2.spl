@@ -1,0 +1,149 @@
+# Bounded typed diagnostic foundation for managed parser result V2.
+# This does not admit a worker or enable warning-result transport.
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use compiler.common.diagnostics.severity.{Severity}
+use compiler.driver.driver_build.managed_parse_group_contract.{ManagedParseModuleV1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_relative_path_valid_v1, builder_identifier_valid_v1}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.strict_v1.{sdn_parse_strict_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+
+fn managed_parse_diagnostic_fields_valid_v2(value: DiagnosticV1, module: ManagedParseModuleV1) -> text:
+    if not builder_identifier_valid_v1(module.module_id) or not builder_digest_valid_v1(module.source_digest) or
+            not builder_relative_path_valid_v1(module.source_path): return "invalid diagnostic source authority"
+    if value.severity != Severity.Warning and value.severity != Severity.Error: return "unsupported diagnostic severity"
+    if value.code == "" or text_byte_len(value.code) > 128 or value.code.contains("\0"):
+        return "invalid diagnostic code"
+    if value.message == "" or text_byte_len(value.message) > 8192 or value.message.contains("\0"):
+        return "invalid diagnostic message"
+    if text_byte_len(module.source_path) > 4096: return "diagnostic path exceeds bound"
+    match value.file:
+        Some(path):
+            if path != module.source_path: return "diagnostic path differs"
+        _: return "diagnostic path absent"
+    match value.span:
+        Some(_span): return "unsupported diagnostic span"
+        _: ()
+    match value.fix:
+        Some(_fix): return "unsupported diagnostic fix"
+        _: ()
+    if value.labels.len() != 0 or value.help.len() != 0 or value.children.len() != 0 or
+            value.macro_trace.len() != 0: return "unsupported diagnostic detail"
+    ""
+
+fn managed_parse_diagnostic_id_v2(value: DiagnosticV1, module: ManagedParseModuleV1, ordinal: i64) -> text:
+    if ordinal < 0 or ordinal >= 4096: return ""
+    if managed_parse_diagnostic_fields_valid_v2(value, module) != "": return ""
+    val identity: [SdnValue] = [SdnValue.String("managed-parse-diagnostic-id-2"),
+        SdnValue.String(value.severity.name()), SdnValue.String(value.code),
+        SdnValue.String(module.module_id), SdnValue.String(module.source_path), SdnValue.String(module.source_digest),
+        SdnValue.String(value.message), SdnValue.Int(ordinal)]
+    sha256_text(sdn_encode_canonical(SdnValue.Array(identity)))
+
+fn managed_parse_diagnostic_validate_v2(value: DiagnosticV1, module: ManagedParseModuleV1, ordinal: i64) -> text:
+    if ordinal < 0 or ordinal >= 4096: return "diagnostic ordinal exceeds bound"
+    val invalid = managed_parse_diagnostic_fields_valid_v2(value, module)
+    if invalid != "": return invalid
+    if value.notes.len() != 1: return "diagnostic identity note absent or duplicated"
+    if value.notes[0] != "diagnostic-id:" + managed_parse_diagnostic_id_v2(value, module, ordinal):
+        return "diagnostic identity differs"
+    ""
+
+fn managed_parse_diagnostic_to_sdn_v2(value: DiagnosticV1, module: ManagedParseModuleV1, ordinal: i64) -> Result<SdnValue, text>:
+    val invalid = managed_parse_diagnostic_validate_v2(value, module, ordinal)
+    if invalid != "": return Err(invalid)
+    # The profile excludes recursive/nested payloads before constructing SDN.
+    # Enforce the encoded byte limit explicitly after the bounded shared writer.
+    val empty: [SdnValue] = []
+    val notes: [SdnValue] = [SdnValue.String(value.notes[0])]
+    val fields: [SdnValue] = [SdnValue.String("managed-parse-diagnostic-2"),
+        SdnValue.String(value.severity.name()), SdnValue.String(value.code),
+        SdnValue.String(value.message), SdnValue.String(module.source_path),
+        SdnValue.Null, SdnValue.Array(empty), SdnValue.Array(notes),
+        SdnValue.Array(empty), SdnValue.Array(empty), SdnValue.Array(empty), SdnValue.Null, SdnValue.Int(ordinal)]
+    Ok(SdnValue.Array(fields))
+
+fn managed_parse_diagnostic_encode_v2(value: DiagnosticV1, module: ManagedParseModuleV1, ordinal: i64) -> text:
+    val encoded_value = match managed_parse_diagnostic_to_sdn_v2(value, module, ordinal):
+        Ok(content): content
+        Err(_reason): return ""
+    val encoded = sdn_encode_canonical(encoded_value)
+    if text_byte_len(encoded) > 32768: return ""
+    encoded
+
+fn managed_parse_diagnostic_text_v2(value: SdnValue) -> Result<text, text>:
+    match value:
+        SdnValue.String(content): Ok(content)
+        _: Err("diagnostic field must be text")
+
+fn managed_parse_diagnostic_decode_v2(payload: text, module: ManagedParseModuleV1, ordinal: i64) -> Result<DiagnosticV1, text>:
+    if ordinal < 0 or ordinal >= 4096: return Err("diagnostic ordinal exceeds bound")
+    if text_byte_len(payload) > 32768: return Err("diagnostic record exceeds bound")
+    val limits = SdnStrictLimitsV1(max_source_bytes: 32768, max_depth: 3,
+        max_nodes: 16, max_rows: 0, max_cells: 0, max_columns: 0)
+    val document = match sdn_parse_strict_v1(payload, limits):
+        Ok(value): value
+        Err(_issue): return Err("invalid bounded diagnostic SDN")
+    val value = managed_parse_diagnostic_from_sdn_v2(document.value, module, ordinal)?
+    if managed_parse_diagnostic_encode_v2(value, module, ordinal) != payload:
+        return Err("noncanonical diagnostic SDN")
+    Ok(value)
+
+fn managed_parse_diagnostic_from_sdn_v2(encoded: SdnValue, module: ManagedParseModuleV1, ordinal: i64) -> Result<DiagnosticV1, text>:
+    val fields = match encoded:
+        SdnValue.Array(values): values
+        _: return Err("diagnostic record must be an array")
+    if fields.len() != 13: return Err("diagnostic field count differs")
+    match fields[12]:
+        SdnValue.Int(observed):
+            if observed != ordinal: return Err("diagnostic ordinal differs")
+        _: return Err("diagnostic ordinal must be an integer")
+    if managed_parse_diagnostic_text_v2(fields[0])? != "managed-parse-diagnostic-2":
+        return Err("unsupported diagnostic version")
+    val severity = match managed_parse_diagnostic_text_v2(fields[1])?:
+        "warning": Severity.Warning
+        "error": Severity.Error
+        _: return Err("unsupported diagnostic severity")
+    val code = managed_parse_diagnostic_text_v2(fields[2])?
+    val message = managed_parse_diagnostic_text_v2(fields[3])?
+    val path = managed_parse_diagnostic_text_v2(fields[4])?
+    for index in [5, 11]:
+        match fields[index]:
+            SdnValue.Null: ()
+            _: return Err("unsupported diagnostic optional payload")
+    for index in [6, 8, 9, 10]:
+        match fields[index]:
+            SdnValue.Array(values):
+                if values.len() != 0: return Err("unsupported diagnostic detail")
+            _: return Err("diagnostic detail must be an array")
+    val notes = match fields[7]:
+        SdnValue.Array(values): values
+        _: return Err("diagnostic notes must be an array")
+    if notes.len() != 1: return Err("diagnostic identity note absent or duplicated")
+    val note = managed_parse_diagnostic_text_v2(notes[0])?
+    val value = DiagnosticV1(severity, code, message, Some(path), None,
+        [], [note], [], [], [], None)
+    val invalid = managed_parse_diagnostic_validate_v2(value, module, ordinal)
+    if invalid != "": return Err(invalid)
+    Ok(value)
+
+fn managed_parse_diagnostics_validate_v2(values: [DiagnosticV1], module: ManagedParseModuleV1) -> text:
+    if values.len() > 4096: return "too many module diagnostics"
+    var total: i64 = 0
+    for ordinal in 0..values.len():
+        # The aggregate owns occurrence order; a caller-provided ordinal in an
+        # individual record cannot authorize a reorder or duplicate emission.
+        val invalid = managed_parse_diagnostic_validate_v2(values[ordinal], module, ordinal)
+        if invalid != "": return invalid
+        val encoded = managed_parse_diagnostic_encode_v2(values[ordinal], module, ordinal)
+        if encoded == "": return "invalid encoded diagnostic"
+        total = total + text_byte_len(encoded)
+        if total > 49152: return "module diagnostic bytes exceed bound"
+    ""
+
+export managed_parse_diagnostic_id_v2, managed_parse_diagnostic_validate_v2, managed_parse_diagnostics_validate_v2
+export managed_parse_diagnostic_encode_v2, managed_parse_diagnostic_decode_v2
+export managed_parse_diagnostic_to_sdn_v2, managed_parse_diagnostic_from_sdn_v2
