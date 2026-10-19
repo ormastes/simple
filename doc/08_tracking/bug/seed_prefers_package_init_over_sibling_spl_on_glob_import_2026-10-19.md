@@ -1,6 +1,6 @@
 # Seed resolves `use X.*` / `use X.{...}` to `X/__init__.spl` when `X.spl` also exists
 
-**Status:** OPEN — one instance removed (`src/compiler/50.mir/mir/__init__.spl`, 386762657a9); 43 pairs remain
+**Status:** OPEN — one instance removed (`src/compiler/50.mir/mir/__init__.spl`, 386762657a9); 44 pairs remain
 **Filed:** 2026-10-19
 **Severity:** P1 — silently loads a different module than the self-hosted compiler does; the symptom is a late "unknown static method" / missing impl, never a resolution error
 
@@ -45,11 +45,10 @@ file exists. The `foo.spl + foo/__init__.spl` pair is itself the ambiguity the
 resolver contract forbids (`src/compiler_rust/compiler/src/module_resolver/mod.rs:11`),
 so the end state is zero pairs — but each pair needs a consumer audit first
 (which file do its importers actually depend on under each toolchain?).
-**Do not mass-delete.** `use_target_resolves_baseline.txt` and the
-`check-guard-wiring` ratchet count filename mentions, so each removal is its own
-reviewed change.
+**Do not mass-delete.** `use_target_resolves_baseline.txt` names these files,
+so each removal is its own reviewed change.
 
-## Remaining pairs (44 measured 2026-10-19 in `src/`, one since removed)
+## Remaining pairs (44 measured 2026-10-19 in `src/`, after that removal)
 
 - `src/app/cli/dispatch.spl + src/app/cli/dispatch/__init__.spl`
 - `src/compiler/10.frontend/treesitter.spl + src/compiler/10.frontend/treesitter/__init__.spl`
@@ -100,7 +99,7 @@ reviewed change.
 
 1. Align the seed: drop `prefer_package_init_for_member_import` so Glob/Group
    resolve like a plain member import (`<name>.spl` first). Requires a seed
-   rebuild + redeploy; the 43 pairs must be audited for files whose glob
+   rebuild + redeploy; the 44 pairs must be audited for files whose glob
    importers currently rely on the `__init__.spl` exports under the seed.
 2. Until then, resolve pairs one at a time, as 386762657a9 did, with a
    zero-consumer proof for the losing file.
