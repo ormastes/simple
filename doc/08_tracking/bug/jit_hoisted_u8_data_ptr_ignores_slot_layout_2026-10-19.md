@@ -72,38 +72,51 @@ tail was wrong.
 
 ## Fix
 
-`mir/lower/lowering_expr_struct.rs` (u8 index arm): a `[u8]` read never goes
-through the hoisted data pointer. Inside a len-bounded loop it lowers to
-`rt_typed_bytes_u8_unchecked(array, i)`: still no bounds check, but the inline
-read branches on the packed flag (`hosted_bytes_le_load`). The `[u32]`/`[u64]`
-hoisted reads are unchanged (they already decode tagged slots).
-`rt_typed_bytes_u8_data_at` (codegen `calls.rs` and runtime `collections.rs:1219`)
-is no longer emitted by the seed's MIR for `[u8]`; neither file's byte-read logic
-changed. It is not dead: the self-hosted twin (`collection_opt_core.spl:714`) still
-emits it.
+Step 1 (c7156d92707) routed hoisted `[u8]` reads through the header-checking
+`rt_typed_bytes_u8_unchecked`: correct, but ~20% slower on the hoisted loop.
+Step 2 replaces it with a loop-invariant layout check:
 
-Perf (JIT, typed packed `[u8]` sum, 10.5M reads per loop, 5 runs, seeds
-82f595a9 base / 4a91eea4 fix): `val n = data.len(); while i < n` (hoisted) 14-15 ms
--> 17-18 ms (~20%, ~0.3 ns/read); `while i < data.len()` (not hoisted) 22 -> 22 ms;
-RSS ~166-171 MB both. zstd 16/64 KiB levels 1/3/19 decode: within noise. A
-per-loop hoisted packed flag would recover the hoisted case but needs a new runtime
-symbol (C + Rust twins); not done here.
+- `mir/lower/lowering_stmt.rs` (hoisted-loop preheader): besides `rt_array_data_ptr`,
+  call `rt_array_is_byte_packed(array)` once and build a layout-tagged pointer
+  `data_ptr | (1 - (packed & 1))` (bit 0 set = slot layout; data pointers are
+  8-aligned). The `& 1` masks the C twin's `int` return.
+- `mir/lower/lowering_expr_struct.rs` (u8 index arm): hoisted reads use
+  `rt_typed_bytes_u8_data_at(tagged_ptr, i)`.
+- Cranelift (`codegen/instr/calls.rs`): `rt_array_is_byte_packed` is inlined (flag
+  load; 0 on FAM/freestanding); `rt_typed_bytes_u8_data_at` branches on bit 0 of
+  the pointer register (packed byte load vs slot decode). No per-read header load.
+- `rt_typed_bytes_u8_data_at` runtime twins (Rust `collections.rs`, C
+  `runtime_native.c`) honour the same bit-0 tag; an untagged aligned pointer reads
+  packed bytes exactly as before. `rt_array_is_byte_packed` already existed in C;
+  this adds the Rust twin (`collections.rs`) and registers it (`runtime_sffi.rs`,
+  `elf_utils.rs`, runtime `lib.rs`/`value/mod.rs`).
 
-Byte order: the packed 4/8-byte loads in `hosted_bytes_le_load` now carry an
-explicit little-endian `MemFlags` (no-op on LE hosts). The slot arm composes bytes
-with shifts from the decoded value. The C (`runtime_native.c rt_bytes_u64_le_at`),
-Rust runtime (`from_le_bytes`) and interpreter (shift loop) readers were already
-explicit LE.
+Perf (JIT, typed packed `[u8]` sum, 10.5M reads per loop, 7 runs, seed 82f595a9 base
+/ e09aa1f2 fix): hoisted `val n = data.len(); while i < n` 14-15 -> 13-15 ms;
+non-hoisted `while i < data.len()` 21-22 -> 21-22 ms; RSS 158-173 MB both. zstd JIT
+16/64 KiB levels 1/3/19 decode: within noise.
 
-Test: `src/compiler_rust/compiler/tests/jit_hoisted_u8_read_slot_layout.rs`
-(u64 index sum 815 -> 1515, mid-array tail 4294967295 -> 3012; i64 index already green).
+Byte order: the Cranelift packed 4/8-byte loads in `hosted_bytes_le_load` carry an
+explicit little-endian `MemFlags`; the LLVM typed-bytes 4/8-byte arms
+(`compile_inline_typed_bytes_le_unchecked`, the checked `typed_bytes_le` arm) now
+compose bytes with shifts (`build_le_bytes_compose`). Slot arms compose from the
+decoded value. The C (`rt_bytes_u64_le_at`), Rust runtime (`from_le_bytes`) and
+interpreter (shift loop) readers were already explicit LE.
+
+Tests: `src/compiler_rust/compiler/tests/jit_hoisted_u8_read_slot_layout.rs`
+(u64 index sum 815 -> 1515, mid-array tail 4294967295 -> 3012, hoisted MIR shape:
+one layout check + one tagged read + no unchecked read, LE pinned values
+0x04030201 / 0x0807060504030201 on packed and slot arrays for Cranelift and LLVM);
+runtime `hoisted_u8_read_follows_the_layout_tag`; C
+`rt_bootstrap_c_lane_bucket2_misc_selfcheck.c` tagged-slot cases.
 
 ## Still open
 
 - Pure-Simple twin: `src/compiler/60.mir_opt/mir_opt/collection_opt_core.spl:712-714`
-  maps the same names; it needs the same review before the self-hosted JIT is default.
-- LLVM backend packed 4/8-byte LE loads (`codegen/llvm/functions/calls.rs`, typed-bytes
-  arms) still use host byte order.
+  maps the same names; it needs the same review before the self-hosted JIT is default
+  (an untagged pointer keeps the old packed-only behaviour there).
+- LLVM `rt_typed_bytes_u8_unchecked` arm reads packed bytes without the flag check
+  (pre-existing; not reached by hoisted loops any more).
 
 ## Library sites
 

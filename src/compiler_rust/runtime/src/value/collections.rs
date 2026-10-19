@@ -1215,9 +1215,27 @@ pub extern "C" fn rt_array_set_len_known_text(header_ptr: i64, len: i64) -> bool
     rt_array_set_len_known(header_ptr, len)
 }
 
+/// Twin of `rt_array_is_byte_packed` in `src/runtime/runtime_native.c`:
+/// 1 when the array stores packed bytes, else 0 (also for non-arrays).
+#[no_mangle]
+pub extern "C" fn rt_array_is_byte_packed(array: RuntimeValue) -> i64 {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    unsafe { (*arr).is_byte_packed() as i64 }
+}
+
+/// `data_ptr` bit 0 is the layout tag set by the hoisted-loop preheader:
+/// set = slot layout (8-byte tagged elements), clear = byte-packed.
 #[no_mangle]
 pub extern "C" fn rt_typed_bytes_u8_data_at(data_ptr: i64, index: i64) -> i64 {
-    unsafe { *((data_ptr as *const u8).add(index as usize)) as i64 }
+    let base = data_ptr & !1;
+    if data_ptr & 1 != 0 {
+        let raw = unsafe { *((base as *const RuntimeValue).add(index as usize)) };
+        if raw.is_int() {
+            return raw.as_int() & 0xFF;
+        }
+        return (raw.to_raw() as i64) & 0xFF;
+    }
+    unsafe { *((base as *const u8).add(index as usize)) as i64 }
 }
 
 #[no_mangle]

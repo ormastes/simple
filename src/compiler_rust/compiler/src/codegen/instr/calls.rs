@@ -864,6 +864,34 @@ fn compile_inline_typed_bytes_le_unchecked<M: Module>(
     Ok(true)
 }
 
+/// `rt_array_is_byte_packed(array)` -> 1 when the hosted array stores packed
+/// bytes (gc_flags bit 3), else 0. FAM/freestanding arrays never byte-pack.
+fn compile_inline_array_is_byte_packed<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+) -> InstrResult<bool> {
+    if args.len() != 1 {
+        return Ok(false);
+    }
+    let Some(dest) = dest else {
+        return Ok(true);
+    };
+    let value = if ctx.fam_arrays || ctx.baremetal {
+        builder.ins().iconst(types::I64, 0)
+    } else {
+        let array = coerce_vreg_to_i64(ctx, builder, args[0]);
+        let ptr_bits = builder.ins().band_imm(array, !7i64);
+        let gc_flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
+        let packed = builder.ins().band_imm(gc_flags, 8);
+        let is_packed = builder.ins().icmp_imm(IntCC::NotEqual, packed, 0);
+        builder.ins().uextend(types::I64, is_packed)
+    };
+    ctx.vreg_values.insert(*dest, value);
+    Ok(true)
+}
+
 fn compile_inline_array_data_ptr<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -1803,8 +1831,11 @@ fn compile_inline_typed_bytes_data_at<M: Module>(
         // Pure read with an unused result: nothing to emit.
         return Ok(true);
     };
-    let data_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let tagged_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    // Bit 0 of the pointer is the layout tag computed once per loop by the MIR
+    // preheader: set = slot layout (8-byte tagged elements), clear = byte-packed.
+    let data_ptr = builder.ins().band_imm(tagged_ptr, !1i64);
     let widened = if ctx.fam_arrays || ctx.baremetal {
         // The hoisted data pointer is the items base (FAM: header+16; non-FAM
         // freestanding: the items pointer); elements are tagged slots on every
@@ -1814,9 +1845,31 @@ fn compile_inline_typed_bytes_data_at<M: Module>(
         let slot = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
         decode_byte_from_slot(builder, slot)
     } else {
+        let packed_block = builder.create_block();
+        let slot_block = builder.create_block();
+        let join_block = builder.create_block();
+        builder.append_block_param(join_block, types::I64);
+        let is_slot = builder.ins().band_imm(tagged_ptr, 1);
+        builder.ins().brif(is_slot, slot_block, &[], packed_block, &[]);
+
+        builder.switch_to_block(packed_block);
         let byte_ptr = builder.ins().iadd(data_ptr, index);
         let loaded = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
-        builder.ins().uextend(types::I64, loaded)
+        let packed_value = builder.ins().uextend(types::I64, loaded);
+        builder.ins().jump(join_block, &[packed_value]);
+        builder.seal_block(packed_block);
+
+        builder.switch_to_block(slot_block);
+        let slot_off = builder.ins().imul_imm(index, 8);
+        let slot_ptr = builder.ins().iadd(data_ptr, slot_off);
+        let slot = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
+        let slot_value = decode_byte_from_slot(builder, slot);
+        builder.ins().jump(join_block, &[slot_value]);
+        builder.seal_block(slot_block);
+
+        builder.switch_to_block(join_block);
+        builder.seal_block(join_block);
+        builder.block_params(join_block)[0]
     };
     ctx.vreg_values.insert(*dest, widened);
     Ok(true)
@@ -3551,6 +3604,9 @@ pub fn compile_call<M: Module>(
         return Ok(());
     }
     if compile_inline_ctype_call(ctx, builder, dest, func_name, sffi_name, args)? {
+        return Ok(());
+    }
+    if sffi_name == "rt_array_is_byte_packed" && compile_inline_array_is_byte_packed(ctx, builder, dest, args)? {
         return Ok(());
     }
     if sffi_name == "rt_array_data_ptr" && compile_inline_array_data_ptr(ctx, builder, dest, args)? {

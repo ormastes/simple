@@ -45,3 +45,55 @@ fn hoisted_tail_loop_from_mid_array_reads_slot_layout_bytes() {
     );
     assert_eq!(run(&src), (3 * 31 + 4) * 31 + 5);
 }
+
+fn call_count(mir_module: &mir::MirModule, name: &str) -> usize {
+    mir_module
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flat_map(|b| b.instructions.iter())
+        .filter(|i| matches!(i, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name(name)))
+        .count()
+}
+
+/// The u64-index loop takes the hoisted path: one layout check per loop entry
+/// and the layout-tagged pointer read (fast packed body / slot body), never the
+/// per-read header-checking accessor.
+#[test]
+fn hoisted_u8_loop_uses_one_layout_check_and_the_tagged_read() {
+    let src = format!(
+        "{PRELUDE}fn tail_sum(data: [u8]) -> u64:\n    val total_len: u64 = data.len().to_u64()\n    var pos: u64 = 0\n    var s: u64 = 0\n    while pos < total_len:\n        s = s + data[pos].to_u64()\n        pos = pos + 1\n    s\n\nfn main() -> i64:\n    tail_sum(slot_bytes()).to_i64() * 100 + tail_sum(packed_bytes()).to_i64()\n"
+    );
+    let ast = Parser::new(&src).parse().expect("source must parse");
+    let hir_module = hir::lower(&ast).expect("source must lower to HIR");
+    let mir_module = mir::lower_to_mir(&hir_module).expect("source must lower to MIR");
+    assert_eq!(call_count(&mir_module, "rt_array_is_byte_packed"), 1);
+    assert_eq!(call_count(&mir_module, "rt_typed_bytes_u8_data_at"), 1);
+    assert_eq!(call_count(&mir_module, "rt_typed_bytes_u8_unchecked"), 0);
+    assert_eq!(run(&src), 15 * 100 + 15);
+}
+
+/// Little-endian `[u8]` word reads are byte-order independent: pinned values
+/// for bytes 01..08 (u32 at 0 = 0x04030201, u64 at 0 = 0x0807060504030201),
+/// on both the packed and the slot layout.
+const LE_SRC: &str = "extern fn rt_typed_bytes_u32_le_at(buf: [u8], off: u64) -> u64\nextern fn rt_typed_bytes_u64_le_at(buf: [u8], off: u64) -> u64\n\nstruct Holder:\n    bytes: [u8]\n\nfn fill(out: [u8]) -> [u8]:\n    var o = out\n    var i = 0\n    while i < 8:\n        o.push((i + 1).to_u8())\n        i = i + 1\n    o\n\nfn check(data: [u8]) -> i64:\n    var r = 0\n    if rt_typed_bytes_u32_le_at(data, 0u64) == 0x04030201u64:\n        r = r + 1\n    if rt_typed_bytes_u64_le_at(data, 0u64) == 0x0807060504030201u64:\n        r = r + 2\n    r\n\nfn main() -> i64:\n    var packed: [u8] = []\n    check(fill(packed)) * 10 + check(fill(Holder(bytes: []).bytes))\n";
+
+#[test]
+fn le_word_reads_are_pinned_on_cranelift() {
+    assert_eq!(run(LE_SRC), 33);
+}
+
+#[cfg(feature = "llvm")]
+#[test]
+fn le_word_reads_are_pinned_on_llvm() {
+    use simple_compiler::codegen::{
+        local_execution::{JitBackend, LocalExecutionManager},
+        ExecutionManager,
+    };
+    let ast = Parser::new(LE_SRC).parse().expect("source must parse");
+    let hir_module = hir::lower(&ast).expect("source must lower to HIR");
+    let mir_module = mir::lower_to_mir(&hir_module).expect("source must lower to MIR");
+    let mut em = LocalExecutionManager::new(JitBackend::Llvm).expect("llvm init");
+    em.compile_module(&mir_module).expect("compile");
+    assert_eq!(em.execute("main", &[]).expect("execute"), 33);
+}

@@ -1478,6 +1478,11 @@ impl<'a> MirLowerer<'a> {
                         let addr = func.new_vreg();
                         let array = func.new_vreg();
                         let data_ptr = func.new_vreg();
+                        let packed = func.new_vreg();
+                        let one = func.new_vreg();
+                        let packed_bit = func.new_vreg();
+                        let slot_bit = func.new_vreg();
+                        let u8_ptr = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
                         block.instructions.push(MirInst::LocalAddr {
                             dest: addr,
@@ -1493,7 +1498,37 @@ impl<'a> MirLowerer<'a> {
                             target: CallTarget::from_name("rt_array_data_ptr"),
                             args: vec![array],
                         });
-                        data_ptr
+                        // `[u8]` reads use a layout-tagged pointer, decided once
+                        // here: bit 0 set = slot layout (8-byte tagged elements),
+                        // clear = byte-packed. Data pointers are 8-aligned, so
+                        // bit 0 is free. Bug:
+                        // jit_hoisted_u8_data_ptr_ignores_slot_layout_2026-10-19.
+                        block.instructions.push(MirInst::Call {
+                            dest: Some(packed),
+                            target: CallTarget::from_name("rt_array_is_byte_packed"),
+                            args: vec![array],
+                        });
+                        block.instructions.push(MirInst::ConstInt { dest: one, value: 1 });
+                        // Mask: the C twin returns a C `int`.
+                        block.instructions.push(MirInst::BinOp {
+                            dest: packed_bit,
+                            op: BinOp::BitAnd,
+                            left: packed,
+                            right: one,
+                        });
+                        block.instructions.push(MirInst::BinOp {
+                            dest: slot_bit,
+                            op: BinOp::BitXor,
+                            left: packed_bit,
+                            right: one,
+                        });
+                        block.instructions.push(MirInst::BinOp {
+                            dest: u8_ptr,
+                            op: BinOp::BitOr,
+                            left: data_ptr,
+                            right: slot_bit,
+                        });
+                        (data_ptr, u8_ptr)
                     })?)
                 } else {
                     None
@@ -1572,8 +1607,9 @@ impl<'a> MirLowerer<'a> {
                 self.emit_runtime_pool_safepoint()?;
                 if let Some(proof) = bound_proof {
                     self.active_array_len_bounds.push(proof);
-                    if let Some(data_ptr) = hoisted_data_ptr {
+                    if let Some((data_ptr, u8_ptr)) = hoisted_data_ptr {
                         self.active_array_data_ptrs.push((proof.array_local_index, data_ptr));
+                        self.active_array_u8_data_ptrs.push((proof.array_local_index, u8_ptr));
                     }
                 }
                 if let Some(proof) = append_bound_proof {
@@ -1595,6 +1631,7 @@ impl<'a> MirLowerer<'a> {
                     self.active_array_len_bounds.pop();
                     if hoisted_data_ptr.is_some() {
                         self.active_array_data_ptrs.pop();
+                        self.active_array_u8_data_ptrs.pop();
                     }
                 }
                 self.finalize_block_jump(cond_id)?;

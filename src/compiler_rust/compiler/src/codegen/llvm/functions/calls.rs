@@ -824,6 +824,49 @@ impl LlvmBackend {
         Ok(true)
     }
 
+    /// Little-endian `width`-byte value at `ptr`, composed from byte loads with
+    /// shifts so the result does not depend on the target's byte order (LLVM
+    /// folds this into one load on little-endian targets).
+    #[cfg(feature = "llvm")]
+    fn build_le_bytes_compose(
+        &self,
+        builder: &Builder<'static>,
+        ptr: inkwell::values::PointerValue<'static>,
+        width: u64,
+    ) -> Result<inkwell::values::IntValue<'static>, CompileError> {
+        let i64_type = self.runtime_int_type();
+        let i8_type = self.context_ref().i8_type();
+        let mut acc = i64_type.const_zero();
+        // Never wider than the runtime int (i32 on 32-bit targets), matching
+        // the width of the single load this replaces.
+        let bytes = width.min(u64::from(i64_type.get_bit_width() / 8));
+        for offset in 0..bytes {
+            let byte_ptr = unsafe {
+                builder
+                    .build_gep(i8_type, ptr, &[i64_type.const_int(offset, false)], "le_compose_gep")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("le compose gep", &e))?
+            };
+            let byte = builder
+                .build_load(i8_type, byte_ptr, "le_compose_byte")
+                .map_err(|e| crate::error::factory::llvm_build_failed("le compose load", &e))?
+                .into_int_value();
+            let wide = builder
+                .build_int_z_extend(byte, i64_type, "le_compose_wide")
+                .map_err(|e| crate::error::factory::llvm_build_failed("le compose zext", &e))?;
+            let shifted = if offset == 0 {
+                wide
+            } else {
+                builder
+                    .build_left_shift(wide, i64_type.const_int(offset * 8, false), "le_compose_shift")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("le compose shift", &e))?
+            };
+            acc = builder
+                .build_or(acc, shifted, "le_compose_or")
+                .map_err(|e| crate::error::factory::llvm_build_failed("le compose or", &e))?;
+        }
+        Ok(acc)
+    }
+
     #[cfg(feature = "llvm")]
     fn compile_inline_typed_bytes_le_unchecked(
         &self,
@@ -878,16 +921,7 @@ impl LlvmBackend {
                 .build_gep(i8_type, data_ptr, &[index], "typed_bytes_unchecked_elem")
                 .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked gep", &e))?
         };
-        let value = if width == 8 {
-            let loaded = builder
-                .build_load(i64_type, ptr, "typed_bytes_unchecked_u64")
-                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u64 load", &e))?;
-            if let Some(inst) = loaded.as_instruction_value() {
-                inst.set_alignment(1)
-                    .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u64 align", &e))?;
-            }
-            loaded.into_int_value()
-        } else if width == 1 {
+        let value = if width == 1 {
             let i8_type = self.context_ref().i8_type();
             let loaded = builder
                 .build_load(i8_type, ptr, "typed_bytes_unchecked_u8")
@@ -896,17 +930,7 @@ impl LlvmBackend {
                 .build_int_z_extend(loaded.into_int_value(), i64_type, "typed_bytes_unchecked_u8_wide")
                 .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u8 zext", &e))?
         } else {
-            let i32_type = self.context_ref().i32_type();
-            let loaded = builder
-                .build_load(i32_type, ptr, "typed_bytes_unchecked_u32")
-                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u32 load", &e))?;
-            if let Some(inst) = loaded.as_instruction_value() {
-                inst.set_alignment(1)
-                    .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u32 align", &e))?;
-            }
-            builder
-                .build_int_z_extend(loaded.into_int_value(), i64_type, "typed_bytes_unchecked_u32_wide")
-                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u32 zext", &e))?
+            self.build_le_bytes_compose(builder, ptr, width)?
         };
         vreg_map.insert(dest, value.into());
         Ok(true)
@@ -1277,28 +1301,7 @@ impl LlvmBackend {
                 .build_gep(i8_type, data_ptr, &[index], "typed_bytes_le_elem")
                 .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le gep", &e))?
         };
-        let value = if width == 8 {
-            let loaded = builder
-                .build_load(i64_type, ptr, "typed_bytes_le_u64")
-                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le u64 load", &e))?;
-            if let Some(inst) = loaded.as_instruction_value() {
-                inst.set_alignment(1)
-                    .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le u64 align", &e))?;
-            }
-            loaded.into_int_value()
-        } else {
-            let i32_type = self.context_ref().i32_type();
-            let loaded = builder
-                .build_load(i32_type, ptr, "typed_bytes_le_u32")
-                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le u32 load", &e))?;
-            if let Some(inst) = loaded.as_instruction_value() {
-                inst.set_alignment(1)
-                    .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le u32 align", &e))?;
-            }
-            builder
-                .build_int_z_extend(loaded.into_int_value(), i64_type, "typed_bytes_le_u32_wide")
-                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le u32 zext", &e))?
-        };
+        let value = self.build_le_bytes_compose(builder, ptr, width)?;
         builder
             .build_unconditional_branch(done_block)
             .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le done branch", &e))?;

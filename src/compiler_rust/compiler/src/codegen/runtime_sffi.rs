@@ -876,6 +876,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_set_len_known_text", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_typed_bytes_u8_unchecked", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_typed_bytes_u8_data_at", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_array_is_byte_packed", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_typed_bytes_u64_le_unchecked", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_bytes_u8_at", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_bytes_u32_le_at", &[I64, I64], &[I64]),

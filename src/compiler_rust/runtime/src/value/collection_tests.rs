@@ -2,6 +2,9 @@
 
 use super::{
     active_collection_simd_tier,
+    rt_array_data_ptr,
+    rt_array_is_byte_packed,
+    rt_typed_bytes_u8_data_at,
     rt_array_clear,
     rt_array_extend_i64,
     rt_array_free,
@@ -2885,4 +2888,22 @@ fn test_rt_heap_ref_registered_accepts_live_collection_objects() {
         "untagged by-value copy passes the node probe");
     assert_eq!(rt_heap_ref_registered(RuntimeValue(0x999u64)), 0,
         "zero-page tagged value is refused");
+}
+
+/// The hoisted-loop `[u8]` read: one layout check, then a pointer whose bit 0
+/// says slot layout. Bug: jit_hoisted_u8_data_ptr_ignores_slot_layout_2026-10-19.
+#[test]
+fn hoisted_u8_read_follows_the_layout_tag() {
+    let packed = rt_byte_array_new(4);
+    let slot = rt_array_new(4);
+    for v in [7i64, 9] {
+        assert!(rt_typed_bytes_u8_push(packed, v));
+        assert!(rt_array_push(slot, RuntimeValue::from_int(v)));
+    }
+    assert_eq!(rt_array_is_byte_packed(packed), 1);
+    assert_eq!(rt_array_is_byte_packed(slot), 0);
+    assert_eq!(rt_typed_bytes_u8_data_at(rt_array_data_ptr(packed), 1), 9);
+    assert_eq!(rt_typed_bytes_u8_data_at(rt_array_data_ptr(slot) | 1, 1), 9);
+    rt_array_free(packed);
+    rt_array_free(slot);
 }
