@@ -1,6 +1,6 @@
 # Array semantics hardening across interpreter, JIT and native
 
-**Status:** 7 FIXED, 1 RECORDED (branch `work/runtime-array-hardening`, base
+**Status:** 7 FIXED, 2 RECORDED (branch `work/runtime-array-hardening`, base
 `origin/release_phase3` @ `ea83abd9595`, which includes PR #3779).
 **Found while fixing:** `native_index_get_packed_raw_slot_2026-10-19.md`
 ("Still open" list) and the review of PR #3779.
@@ -131,6 +131,19 @@ box (`rt_value_u64`, Rust `HeapUInt`).
   handle bits. The fix is element-type unification for mixed numeric
   literals (or ANY). That changes type inference for every literal, which is
   beyond this lane.
+
+## 9. Untyped `push` of a typed int is not boxed (JIT + native) — RECORDED (found while measuring)
+
+- `fn fill(data, n): ... data.push(i % 251)` (`i` is an inferred i64) lowers
+  to `MethodCallStatic push args: [raw i64]` with no `BoxInt`. The raw word is
+  stored as if it were a RuntimeValue, so an element whose low 3 bits are 0
+  decodes `>> 3`, and others print `<value:0xf6>`. For 1000 pushes the
+  interpreter sums 124506, while JIT and native sum 110719. The same push on a
+  local `var h = []` is correct. It is identical on base. Fix site: argument
+  boxing for dynamic (ANY-receiver) builtin method calls in the seed MIR
+  method lowering (`mir/lower/lowering_expr_method.rs`), like
+  `box_arg_for_any_param` already does for dict keys. Not changed here,
+  because it affects every untyped method call.
 
 ## Tests
 
